@@ -5,6 +5,7 @@ use serde_json::json;
 
 use super::{Page, Params, ReadResult, bad, cursor_int, iso, page};
 use crate::derive::search::{MARK_END, MARK_START, SID_MASK, SID_SHIFT};
+use crate::redact::Scope;
 use crate::util::escape_html;
 
 pub const SEARCH_LIMIT: i64 = 50;
@@ -199,9 +200,13 @@ pub fn search(conn: &Connection, p: &Params) -> ReadResult<Page<Hit>> {
     search_scoped(conn, p, false)
 }
 
-/// `search`, in the public namespace only over published sessions. Run it in one snapshot: publication is read with
-/// the matches.
+/// `search`, in the public namespace only over published sessions, and only once the index's text is scrubbed under
+/// the current rules (see `store::SEARCH_RULES`): until then it finds nothing. Run it in one snapshot: publication
+/// and the rules' version are read with the matches.
 pub fn search_scoped(conn: &Connection, p: &Params, public: bool) -> ReadResult<Page<Hit>> {
+    if public && !crate::store::search_rules_current(conn)? {
+        return Ok(Page { items: Vec::new(), next_cursor: None });
+    }
     let (any, wide_sids) = sessions_for_filters(conn, p, public)?;
     match statement(p, wide_sids, public)? {
         Some(statement) if any => run(conn, statement),
@@ -214,7 +219,7 @@ fn run(conn: &Connection, Statement { sql, args, limit, relevance }: Statement) 
     let rows = stmt.query_map(params_from_iter(args), |r| {
         Ok(Hit {
             rowid: r.get(0)?,
-            snippet: render_snippet(&r.get::<_, String>(1)?),
+            snippet: r.get(1)?,
             seq: r.get(2)?,
             kind: r.get(3)?,
             at: iso(r.get(4)?),
@@ -229,11 +234,34 @@ fn run(conn: &Connection, Statement { sql, args, limit, relevance }: Statement) 
         Err(rusqlite::Error::SqliteFailure(_, Some(message))) if message.starts_with("fts5:") => Vec::new(),
         Err(e) => return Err(e.into()),
     };
-    Ok(if relevance {
+    let mut response = if relevance {
         Page { items, next_cursor: None }
     } else {
         page(items, limit, |h| vec![json!(h.rowid)])
-    })
+    };
+    // Titles can be cut first prompts. Read all response text in one scope so credentials learned in a title
+    // also disappear from snippets, including while the owner searches an index whose rewrite is pending.
+    let marked: Vec<String> = response.items.iter_mut().map(|hit| {
+        let raw = std::mem::take(&mut hit.snippet);
+        // FTS marks may split a credential or a learned phrase; discovery must see the original text.
+        hit.snippet = raw.replace([MARK_START, MARK_END], "");
+        raw
+    }).collect();
+    let mut scope = Scope::new();
+    for hit in &mut response.items {
+        scope.cut_text(&mut hit.session_title, 120);
+        scope.text(&mut hit.snippet);
+    }
+    scope.finish();
+    for (hit, marked) in response.items.iter_mut().zip(marked) {
+        hit.snippet = if hit.snippet == marked.replace([MARK_START, MARK_END], "") {
+            render_snippet(&marked)
+        } else {
+            // Replacement changes offsets. Keep the scrubbed text escaped rather than highlighting a secret.
+            escape_html(&hit.snippet)
+        };
+    }
+    Ok(response)
 }
 
 #[cfg(test)]

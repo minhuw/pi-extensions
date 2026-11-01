@@ -23,6 +23,13 @@ const REINDEX_BELOW: usize = 3;
 pub const NEEDS_REINDEX: &str = "needs_reindex";
 /// Random bytes that every reindex replaces, so caches of derived data (the trace's `ETag`) change with it.
 pub const DERIVED_GENERATION: &str = "derived_generation";
+/// The redaction rules version (`crate::redact::RULES_VERSION`, in decimal) the search index's text was scrubbed
+/// with. A database without it, or with an older one, has text that a pika before redaction or under older rules
+/// indexed: public search finds nothing until `serve`'s background rewrite (`reindex::rescrub_search`) brings it
+/// current. A setting rather than a migration, so the schema stays one a 0.6 pika opens after a rollback.
+pub const SEARCH_RULES: &str = "search_rules";
+/// JSON containing the rewrite's target rules version and last scrubbed document id; only that target resumes.
+pub const RESCRUB_AFTER: &str = "search_rescrub_after";
 const MAX_IDLE_READERS: usize = 16;
 
 /// Tables rebuilt by `pika reindex`, in the order they are cleared.
@@ -43,6 +50,22 @@ pub const DERIVED_TABLES: &[&str] = &[
 /// Empties the full-text index; its content table `search_docs` is cleared with the other derived tables.
 pub fn clear_search_index(tx: &Transaction) -> rusqlite::Result<()> {
     tx.execute("INSERT INTO search_fts (search_fts) VALUES ('delete-all')", [])?;
+    Ok(())
+}
+
+/// Whether the search index's text was scrubbed under the current rules, or newer ones.
+pub fn search_rules_current(conn: &Connection) -> rusqlite::Result<bool> {
+    let value: Option<Vec<u8>> =
+        conn.query_row("SELECT value FROM settings WHERE key = ?1", [SEARCH_RULES], |row| row.get(0)).optional()?;
+    let version = value.and_then(|v| String::from_utf8(v).ok()).and_then(|v| v.parse::<u32>().ok());
+    Ok(version.is_some_and(|v| v >= crate::redact::RULES_VERSION))
+}
+
+/// Records that every document in the search index is scrubbed under the current rules.
+pub fn set_search_rules_current(tx: &Transaction) -> rusqlite::Result<()> {
+    let version = crate::redact::RULES_VERSION.to_string().into_bytes();
+    tx.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", params![SEARCH_RULES, version])?;
+    tx.execute("DELETE FROM settings WHERE key = ?1", [RESCRUB_AFTER])?;
     Ok(())
 }
 
@@ -75,6 +98,10 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         tx.execute_batch(sql).with_context(|| format!("applying migration {}", index + 1))?;
         if version > 0 && version < REINDEX_BELOW && index + 1 >= REINDEX_BELOW {
             tx.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, x'01')", [NEEDS_REINDEX])?;
+        }
+        // A new database's index starts empty, so scrubbed under the current rules.
+        if version == 0 && index + 1 == MIGRATIONS.len() {
+            set_search_rules_current(&tx)?;
         }
         tx.pragma_update(None, "user_version", (index + 1) as i64)?;
         tx.commit()?;

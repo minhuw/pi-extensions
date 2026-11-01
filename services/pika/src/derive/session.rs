@@ -202,7 +202,7 @@ fn session_id_from_file(path: &str) -> Option<String> {
 }
 
 /// Text of a `content` field: the string itself, or its text blocks joined by newlines.
-fn content_text(content: Option<&Value>) -> String {
+pub(super) fn content_text(content: Option<&Value>) -> String {
     match content {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Array(blocks)) => blocks
@@ -213,30 +213,6 @@ fn content_text(content: Option<&Value>) -> String {
             .join("\n"),
         _ => String::new(),
     }
-}
-
-/// A tool call's searchable text: its name, then each argument as `key: value`, strings unquoted.
-fn tool_call_text(block: &Value) -> String {
-    let mut text = str_field(block, "name").unwrap_or("").to_owned();
-    match block.get("arguments") {
-        Some(Value::Object(args)) => {
-            for (key, value) in args {
-                text.push('\n');
-                text.push_str(key);
-                text.push_str(": ");
-                match value {
-                    Value::String(s) => text.push_str(s),
-                    other => text.push_str(&other.to_string()),
-                }
-            }
-        }
-        Some(Value::Null) | None => {}
-        Some(other) => {
-            text.push('\n');
-            text.push_str(&other.to_string());
-        }
-    }
-    text
 }
 
 fn content_size(content: Option<&Value>) -> i64 {
@@ -557,11 +533,7 @@ impl Deriver<'_> {
                 match str_field(message, "role") {
                     Some("user") => search::index(self.tx, sid, seq, 0, at, Kind::User, &content_text(content))?,
                     Some("assistant") => {
-                        search::index(self.tx, sid, seq, 0, at, Kind::Assistant, &content_text(content))?;
-                        let blocks = content.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
-                        for (part, block) in blocks.iter().filter(|b| str_field(b, "type") == Some("toolCall")).enumerate() {
-                            search::index(self.tx, sid, seq, part as i64 + 1, at, Kind::ToolCall, &tool_call_text(block))?;
-                        }
+                        search::index_assistant(self.tx, sid, seq, at, content)?;
                     }
                     Some("toolResult") => {
                         search::index(self.tx, sid, seq, 0, at, Kind::ToolResult, &content_text(content))?

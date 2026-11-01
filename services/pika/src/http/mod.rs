@@ -146,6 +146,8 @@ pub fn router(state: AppState) -> Router {
 
 pub async fn serve(config: ServerConfig) -> Result<()> {
     let store = Store::open(&config.data_dir)?;
+    // Not awaited: the server answers while search text indexed before redaction is rewritten.
+    crate::reindex::rescrub_in_background(&store)?;
     let state = AppState::new(store, config.clone())?;
     let listener = tokio::net::TcpListener::bind(&config.bind).await?;
     tracing::info!(

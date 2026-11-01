@@ -148,6 +148,11 @@ pub fn list_scoped(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str,
 /// The verbatim line of entry `seq`.
 pub fn raw(conn: &Connection, blobs: &BlobStore, id: &str, seq: i64) -> ReadResult<String> {
     let sid = session_sid(conn, id)?;
+    raw_by_sid(conn, blobs, sid, seq)
+}
+
+/// The verbatim line by derived session id, shared with the search rewrite so blob-backed entries read the same way.
+pub(crate) fn raw_by_sid(conn: &Connection, blobs: &BlobStore, sid: i64, seq: i64) -> ReadResult<String> {
     let (data, blob) = conn
         .prepare_cached(
             "SELECT l.data, l.blob FROM entries e JOIN lines l ON l.stream_id = e.sid AND l.offset = e.offset

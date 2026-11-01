@@ -28,6 +28,41 @@ fn params(pairs: &[(&str, &str)]) -> Params {
     Params(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
 }
 
+/// Rewrite source resolution reads a single second/sid block through the primary key. Rows elsewhere must not
+/// add VM steps to a lookup; a sid/seq predicate without this bound would scan all of them on schema 6.
+#[test]
+fn rewrite_probes_are_bounded_to_one_id_block() {
+    use crate::derive::search::PROBE_BLOCK_SQL;
+    use rusqlite::{StatementStatus, params};
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(dir.path()).unwrap();
+    store.write(|tx| {
+        assert_eq!(plan(tx, PROBE_BLOCK_SQL, None), ["SEARCH search_docs USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)"]);
+        let base = (100_i64 << 32) | (7 << 12);
+        for i in 0..16 {
+            tx.execute("INSERT INTO search_docs (id, sid, seq, kind, at, text) VALUES (?1, 7, 1, 'tool-call', 100000, 'fake')", [base + i])?;
+        }
+        // Keep a row beyond the upper bound in both runs, so both execute SQLite's range-end check.
+        tx.execute("INSERT INTO search_docs (id, sid, seq, kind, at, text) VALUES (?1, 8, 1, 'tool-call', 100000, 'fake')", [base + 4096])?;
+        let measure = || -> rusqlite::Result<i32> {
+            let mut stmt = tx.prepare(PROBE_BLOCK_SQL)?;
+            let rows = stmt.query_map(params![base, base + 4095], |r| r.get::<_, i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            assert_eq!(rows.len(), 16);
+            assert_eq!(stmt.get_status(StatementStatus::FullscanStep), 0);
+            Ok(stmt.get_status(StatementStatus::VmStep))
+        };
+        let before = measure()?;
+        for i in 0..20_000_i64 {
+            // Both unrelated sessions within this second and unrelated seconds with the same session bits.
+            for id in [(100 << 32) | ((i + 100) << 12), ((i + 200) << 32) | (7 << 12)] {
+                tx.execute("INSERT INTO search_docs (id, sid, seq, kind, at, text) VALUES (?1, 7, 1, 'tool-call', 100000, 'fake')", [id])?;
+            }
+        }
+        assert_eq!(measure()?, before, "unrelated rows must not enlarge a source lookup");
+        Ok::<_, rusqlite::Error>(())
+    }).unwrap();
+}
+
 #[test]
 fn session_lookups_use_the_id_index() {
     with_conn(|conn| {
