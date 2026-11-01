@@ -7,7 +7,7 @@ import { useApi } from "../lib/api";
 import { formatCount, formatTime } from "../lib/format";
 import { useViewState } from "../lib/viewState";
 import { formatFineCost, formatSpan } from "../trace/format";
-import { firstStringArg, recordBadge, showsToolName, toolFamily } from "../trace/kinds";
+import { firstStringArg, recordBadge, showsToolName, toolFamily, toolGlyph } from "../trace/kinds";
 import { CostDot, KindBadge } from "../trace/parts";
 import type { Entry, ToolCall, ToolResultMessage } from "../lib/types";
 import { useSessionSlots, useSessionView } from "./context";
@@ -65,7 +65,7 @@ export function ToolView({
 				onClick={() => setOpen(!open)}
 				className="-mx-1.5 flex h-7 w-[calc(100%+0.75rem)] min-w-0 items-center gap-2 rounded-sm px-1.5 text-left text-[13px] hover:bg-hover"
 			>
-				<KindBadge family={family} label={badge} error={error} />
+				<KindBadge family={family} glyph={toolGlyph(call.name)} label={badge} error={error} />
 				{showsToolName(record) && <span className="shrink-0 font-medium">{call.name}</span>}
 				{summary && <span className="mono min-w-0 flex-1 truncate text-[12px] text-ink/75">{summary}</span>}
 				<span className="ml-auto flex shrink-0 items-center gap-2">
@@ -110,7 +110,7 @@ function ModelCall({ item }: { item: Extract<TimelineItem, { kind: "model-call" 
 	const error = message.stopReason === "error" || message.stopReason === "aborted" || Boolean(message.errorMessage);
 	return (
 		<div className="flex h-7 items-center gap-2 text-[12px] text-muted" data-model-call="">
-			<KindBadge family="llm" label="LLM" error={error} />
+			<KindBadge family="llm" model={message.model} label="LLM" error={error} />
 			<span className="min-w-0 truncate text-ink/80">{message.model}</span>
 			{message.thinkingLevel && message.thinkingLevel !== "off" && <span className="shrink-0">thinking {message.thinkingLevel}</span>}
 			<span className="ml-auto flex shrink-0 items-center gap-2.5">

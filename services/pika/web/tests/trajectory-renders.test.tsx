@@ -1,5 +1,6 @@
-// How much of the ledger a replay frame re-renders. `recordIcon` runs once per render of a record row, and nowhere
-// else in the trajectory, so its calls count row renders.
+// How much of the ledger a replay frame re-renders. `recordGlyph` runs once per render of a record's badge: in each
+// record row, and otherwise only in the inspector, which shows the record the replay selects. Its calls count row
+// renders, plus the selected record's inspector.
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TraceRecord } from "../src/lib/types";
@@ -12,9 +13,9 @@ vi.mock("../src/trace/kinds", async (importOriginal) => {
 	const kinds = await importOriginal<typeof import("../src/trace/kinds")>();
 	return {
 		...kinds,
-		recordIcon: (record: TraceRecord) => {
+		recordGlyph: (record: TraceRecord) => {
 			rendered.push(record.kind === "tool" ? record.callId : `${record.kind}:${record.seq}`);
-			return kinds.recordIcon(record);
+			return kinds.recordGlyph(record);
 		},
 	};
 });

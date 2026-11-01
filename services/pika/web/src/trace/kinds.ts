@@ -1,4 +1,4 @@
-import type { IconName } from "../components/icons";
+import type { GlyphName } from "../components/glyphs";
 import type { SessionTrace, TraceChild, TraceLlmRecord, TraceRecord, TraceToolRecord, TraceTurn } from "../lib/types";
 import { parseToolName } from "../session/tools/registry";
 
@@ -18,16 +18,16 @@ export const FAMILY_LABELS: Record<Family, string> = {
 	compaction: "Compaction",
 };
 
-/** The letter in each family's round bullet, as on a subway route sign. */
-export const FAMILY_LETTERS: Record<Family, string> = {
-	user: "P",
-	llm: "M",
-	shell: "S",
-	read: "R",
-	write: "W",
-	other: "O",
-	agent: "A",
-	compaction: "C",
+/** The glyph in each family's round bullet, as on a subway route sign; records may show a more specific one. */
+export const FAMILY_GLYPHS: Record<Family, GlyphName> = {
+	user: "prompt",
+	llm: "model",
+	shell: "shell",
+	read: "read",
+	write: "edit",
+	other: "tool",
+	agent: "agent",
+	compaction: "compaction",
 };
 
 /**
@@ -138,23 +138,31 @@ export function recordBadge(record: TraceRecord): string {
 	return BADGES[parsed.base.toLowerCase()] ?? "TOOL";
 }
 
-export function recordIcon(record: TraceRecord): IconName {
-	if (record.kind === "llm") return "sparkle";
-	if (record.kind === "compaction") return "compress";
-	if (record.kind === "branch-summary") return "branch";
-	const parsed = parseToolName(toolName(record));
+/** The glyph for a tool: what it does, so a read, a grep, and an ls differ within their family. */
+export function toolGlyph(name: string): GlyphName {
+	const parsed = parseToolName(name);
 	const base = parsed.base.toLowerCase();
-	if (parsed.server !== undefined) return toolFamily(toolName(record)) === "read" ? "globe" : "tool";
-	if (SHELL.has(base)) return "terminal";
-	if (base === "read") return "file";
-	if (base === "ls") return "folder";
+	if (parsed.server !== undefined) return toolFamily(name) === "read" ? "web" : "mcp";
+	if (SHELL.has(base)) return "shell";
+	if (base === "read") return "read";
+	if (base === "ls") return "list";
 	if (base === "grep" || base === "find" || base === "glob" || base === "rg" || base === "search") return "search";
-	if (base.startsWith("web") || base === "fetch_content") return "globe";
+	if (base.startsWith("web") || base === "fetch_content") return "web";
+	if (base === "write") return "write";
+	if (base === "apply_patch") return "patch";
 	if (base === "codemode") return "code";
-	if (base === "subagentworkflow") return "branch";
+	if (base === "subagentworkflow") return "workflow";
 	if (AGENT.has(base)) return "agent";
-	if (WRITE.has(base)) return "pencil";
+	if (WRITE.has(base)) return "edit";
 	return "tool";
+}
+
+/** The glyph in a record's bullet; a model call whose maker pika knows shows the maker's mark instead. */
+export function recordGlyph(record: TraceRecord): GlyphName {
+	if (record.kind === "llm") return "model";
+	if (record.kind === "compaction") return "compaction";
+	if (record.kind === "branch-summary") return "branch";
+	return toolGlyph(toolName(record));
 }
 
 /** The record's display name: the tool, the model, or the kind. */
@@ -315,10 +323,10 @@ export function isSubagentTool(record: TraceRecord): record is TraceToolRecord {
 }
 
 /** How a turn started: a user prompt, a relay message, or another extension's message. */
-export function turnStart(turn: Pick<TraceTurn, "customType" | "index">): { icon: IconName; label: string } {
-	if (turn.customType === undefined) return { icon: "user", label: `Prompt ${turn.index + 1}` };
-	if (turn.customType === "relay-message") return { icon: "message", label: "Relay message" };
-	return { icon: "message", label: "Extension message" };
+export function turnStart(turn: Pick<TraceTurn, "customType" | "index">): { glyph: GlyphName; label: string } {
+	if (turn.customType === undefined) return { glyph: "prompt", label: `Prompt ${turn.index + 1}` };
+	if (turn.customType === "relay-message") return { glyph: "relay", label: "Relay message" };
+	return { glyph: "extension", label: "Extension message" };
 }
 
 const EXTENSION_COLORS: Record<string, string> = {

@@ -104,10 +104,9 @@ describe("session view", () => {
 		expect(label(2).getAttribute("title")).toBe("herder:prompt");
 		// The text is unchanged.
 		expect(within(head(1)).getByText(relayText)).toBeTruthy();
-		// The icon is the message icon, not the person icon user prompts get.
-		const icon = (index: number) => label(index).previousElementSibling?.outerHTML;
-		expect(icon(1)).toBe(icon(2));
-		expect(icon(1)).not.toBe(icon(0));
+		// The bullet's glyph says where the turn came from, not the person glyph user prompts get.
+		const glyph = (index: number) => head(index).querySelector("[data-bullet] [data-glyph]")?.getAttribute("data-glyph");
+		expect([glyph(0), glyph(1), glyph(2)]).toEqual(["prompt", "relay", "extension"]);
 	});
 
 	it("shows the title, chips, and key numbers instead of a property table", async () => {

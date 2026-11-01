@@ -17,7 +17,6 @@ import {
 	FAMILY_LABELS,
 	recordDuration,
 	recordFamily,
-	recordIcon,
 	recordIsError,
 	recordName,
 	recordSpan,
@@ -268,12 +267,8 @@ const RecordRow = memo(function RecordRow({
 			<KindBadge record={record} family={family} error={error} />
 			<span className="relative flex h-full min-w-0 items-center gap-1.5" style={{ paddingLeft: depth * INDENT }}>
 				<Rails depth={depth} />
-				{subagent ? (
-					<Chevron open={row.expanded} onClick={() => onToggle(row.key)} label={row.expanded ? "Collapse subagent" : "Expand subagent"} />
-				) : (
-					// Muted: the bullet carries the kind; the icon tells a read from a grep or an ls.
-					<Icon name={recordIcon(record)} size={13} className={cx("shrink-0", error ? "text-red" : "text-muted")} />
-				)}
+				{/* The bullet's glyph tells a read from a grep or an ls, so only subagents, which expand, lead with a mark. */}
+				{subagent && <Chevron open={row.expanded} onClick={() => onToggle(row.key)} label={row.expanded ? "Collapse subagent" : "Expand subagent"} />}
 				{subagent && record.kind === "tool" && record.summary?.includes(":") ? (
 					<>
 						<span className="shrink-0 font-medium">{record.summary.split(":")[0]}</span>

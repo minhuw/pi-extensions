@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import { Glyph, type GlyphName } from "../components/glyphs";
+import { ModelMark, modelMaker } from "../components/ModelName";
 import { cx } from "../components/ui";
 import { unifiedDiff } from "../lib/diff";
 import { COST_DIAMETERS, costStep, formatCost, type CostScale } from "../lib/format";
@@ -6,37 +8,85 @@ import type { Entry, ToolCall, TraceRecord } from "../lib/types";
 import { editPairs } from "../session/tools/files";
 import { argString } from "../session/tools/shared";
 import type { Interval } from "./axis";
-import { extensionColor, FAMILY_CLASSES, FAMILY_LETTERS, FAMILY_LABELS, recordBadge, recordFamily, recordIsError, recordSpan, type Family } from "./kinds";
+import {
+	extensionColor,
+	FAMILY_CLASSES,
+	FAMILY_GLYPHS,
+	FAMILY_LABELS,
+	recordBadge,
+	recordFamily,
+	recordGlyph,
+	recordIsError,
+	recordSpan,
+	type Family,
+} from "./kinds";
 
-/** A family's round bullet with its letter, as on a subway route sign; red when the record failed. */
-export function KindBullet({ family, error = false, size = 16, className }: { family: Family; error?: boolean; size?: number; className?: string }) {
+/**
+ * A family's round bullet with its glyph, as on a subway route sign: the family's own glyph, or a more specific one
+ * such as the tool's. Red when the record failed. A model call whose `model` pika knows shows its maker's own logo, in
+ * the maker's colours, in place of the bullet; failed, it keeps the red bullet with the logo in it.
+ */
+export function KindBullet({
+	family,
+	glyph,
+	model,
+	error = false,
+	size = 16,
+	className,
+}: {
+	family: Family;
+	glyph?: GlyphName;
+	model?: string;
+	error?: boolean;
+	size?: number;
+	className?: string;
+}) {
+	const mark = model !== undefined && modelMaker(model) !== undefined;
+	if (mark && !error) {
+		return (
+			<span
+				aria-hidden="true"
+				className={cx("inline-flex shrink-0 items-center justify-center text-ink", className)}
+				style={{ width: size, height: size }}
+				data-bullet={family}
+				title={FAMILY_LABELS[family]}
+			>
+				<ModelMark model={model} size={Math.round(size * 0.88)} />
+			</span>
+		);
+	}
+	// Lucide's glyphs keep a margin inside their square and the makers' marks fill theirs, so the marks are set smaller.
 	return (
 		<span
 			aria-hidden="true"
 			className={cx(
-				"inline-flex shrink-0 items-center justify-center rounded-full leading-none font-semibold",
+				"inline-flex shrink-0 items-center justify-center rounded-full",
 				error ? "bg-k-error text-k-error-ink" : FAMILY_CLASSES[family].badge,
 				className,
 			)}
-			style={{ width: size, height: size, fontSize: Math.round(size * 0.62) }}
+			style={{ width: size, height: size }}
 			data-bullet={family}
 			title={FAMILY_LABELS[family]}
 		>
-			{FAMILY_LETTERS[family]}
+			{mark ? <ModelMark model={model} mono size={Math.round(size * 0.56)} /> : <Glyph name={glyph ?? FAMILY_GLYPHS[family]} size={Math.round(size * 0.66)} />}
 		</span>
 	);
 }
 
-/** The kind of a record: its family's bullet and a short type label such as `BASH`, `READ`, or `LLM`. */
+/** The kind of a record: its bullet and a short type label such as `BASH`, `READ`, or `LLM`. */
 export function KindBadge({
 	record,
 	family,
+	glyph,
+	model,
 	label,
 	error,
 	className,
 }: {
 	record?: TraceRecord;
 	family?: Family;
+	glyph?: GlyphName;
+	model?: string;
 	label?: string;
 	error?: boolean;
 	className?: string;
@@ -46,7 +96,12 @@ export function KindBadge({
 	const failed = error ?? (record ? recordIsError(record) : false);
 	return (
 		<span className={cx("inline-flex w-[64px] shrink-0 items-center gap-1.5", className)}>
-			<KindBullet family={kind} error={failed} />
+			<KindBullet
+				family={kind}
+				glyph={glyph ?? (record ? recordGlyph(record) : undefined)}
+				model={model ?? (record?.kind === "llm" ? record.model : undefined)}
+				error={failed}
+			/>
 			{/* The bullet names the kind; the text beside it is the stop's own name (the tool), so it is set as a quiet label. */}
 			<span className={cx("mono min-w-0 truncate text-[11px] leading-none lowercase", failed ? "text-red" : "text-muted")} data-badge={kind}>
 				{text}

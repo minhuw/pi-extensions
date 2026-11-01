@@ -1,6 +1,8 @@
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ModelName, modelMaker } from "../src/components/ModelName";
+import type { TraceRecord } from "../src/lib/types";
+import { KindBadge, KindBullet } from "../src/trace/parts";
 
 describe("model names", () => {
 	it.each([
@@ -56,5 +58,63 @@ describe("model names", () => {
 		const name = screen.getByText("mock-model");
 		expect(name.querySelector("svg")).toBeNull();
 		expect(name.title).toBe("");
+	});
+});
+
+describe("kind bullets", () => {
+	const llm = (model?: string): TraceRecord => ({ kind: "llm", seq: 1, model, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }) as TraceRecord;
+	const tool = (name: string): TraceRecord => ({ kind: "tool", seq: 1, callId: "c1", name, isError: false }) as TraceRecord;
+	const bullet = () => document.querySelector<HTMLElement>("[data-bullet]")!;
+
+	it("shows a model call as its maker's own logo in the maker's colours, and one pika doesn't know as a sparkle bullet", () => {
+		render(<KindBadge record={llm("claude-opus-5-5")} />);
+		expect(bullet().dataset.bullet).toBe("llm");
+		expect(bullet().className).not.toContain("bg-k-llm");
+		expect(bullet().querySelector("[data-model-mark='claude'] path")?.getAttribute("fill")).toBe("#D97757");
+		cleanup();
+
+		render(<KindBadge record={llm("deepseek-flash")} />);
+		expect(bullet().querySelector("[data-model-mark='deepseek'] path")?.getAttribute("fill")).toBe("#4D6BFE");
+		cleanup();
+		// OpenAI's mark is black and white: it takes the ink colour, so it turns white in the dark theme.
+		render(<KindBadge record={llm("codex/gpt-6-luna")} />);
+		expect(bullet().className).toContain("text-ink");
+		expect(bullet().querySelector("[data-model-mark='openai'] path")?.getAttribute("fill")).toBe("currentColor");
+		cleanup();
+
+		render(<KindBadge record={llm("mock-model")} />);
+		expect(bullet().className).toContain("bg-k-llm");
+		expect(bullet().querySelector("[data-model-mark]")).toBeNull();
+		expect(bullet().querySelector("[data-glyph]")?.getAttribute("data-glyph")).toBe("model");
+	});
+
+	it("keeps a failed model call's red bullet, with the maker's logo in its ink", () => {
+		render(<KindBadge record={{ ...llm("claude-opus-5-5"), error: "overloaded" } as TraceRecord} />);
+		expect(bullet().className).toContain("bg-k-error");
+		expect(bullet().querySelector("[data-model-mark='claude'] path")?.getAttribute("fill")).toBe("currentColor");
+	});
+
+	it.each([
+		["bash", "shell"],
+		["read", "read"],
+		["grep", "search"],
+		["ls", "list"],
+		["web_fetch", "web"],
+		["edit", "edit"],
+		["write", "write"],
+		["Agent", "agent"],
+		["SubagentWorkflow", "workflow"],
+		["mcp__github__create_issue", "mcp"],
+		["todo_write", "tool"],
+	])("gives a %s call the %s glyph", (name, glyph) => {
+		render(<KindBadge record={tool(name)} />);
+		expect(bullet().querySelector("[data-glyph]")?.getAttribute("data-glyph")).toBe(glyph);
+	});
+
+	it("shows a family's own glyph without a record, and keeps it red when the record failed", () => {
+		render(<KindBullet family="agent" error />);
+		expect(bullet().querySelector("[data-glyph]")?.getAttribute("data-glyph")).toBe("agent");
+		expect(bullet().className).toContain("bg-k-error");
+		expect(bullet().title).toBe("Subagent");
 	});
 });

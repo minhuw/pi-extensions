@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { drawGlyph, type GlyphName } from "../components/glyphs";
 import { cx } from "../components/ui";
 import { COST_DIAMETERS, costStep, formatCost, formatCount, plural } from "../lib/format";
 import type { SessionTrace } from "../lib/types";
@@ -27,7 +28,7 @@ import {
 	type Scale,
 } from "./axis";
 import { formatClockTime, formatElapsed, formatGap, formatPhase, formatSpan, formatTick, plainLine } from "./format";
-import { hasProviderTiming, recordDuration, recordKey, recordName, recordSpan, recordSummary, type Family } from "./kinds";
+import { hasProviderTiming, recordDuration, recordKey, recordName, recordSpan, recordSummary, turnStart, type Family } from "./kinds";
 import { KindBadge, KindBullet } from "./parts";
 
 const FAMILY_VARS: Record<Family | "turn" | "error" | "thinking", string> = {
@@ -127,8 +128,8 @@ function sizeCanvas(canvas: HTMLCanvasElement, width: number, height: number): n
 	return dpr;
 }
 
-/** A round bullet with its letter, the strip map's mark for compactions and branch lines. */
-function bullet(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, fill: string, ink: string, letter: string, page: string) {
+/** A round bullet with its glyph, the strip map's mark for compactions and branch lines. */
+function bullet(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, fill: string, ink: string, glyph: GlyphName, page: string) {
 	ctx.beginPath();
 	ctx.arc(x, y, r + 1.5, 0, Math.PI * 2);
 	ctx.fillStyle = page;
@@ -137,12 +138,7 @@ function bullet(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, 
 	ctx.arc(x, y, r, 0, Math.PI * 2);
 	ctx.fillStyle = fill;
 	ctx.fill();
-	ctx.fillStyle = ink;
-	ctx.font = `600 ${Math.round(r * 1.25)}px ${CANVAS_FONT}`;
-	ctx.textAlign = "center";
-	ctx.textBaseline = "middle";
-	ctx.fillText(letter, x, y + 0.5);
-	ctx.textAlign = "left";
+	drawGlyph(ctx, glyph, x, y, r * 1.32, ink);
 }
 
 /** A model call's bar thickness: its cost on the fixed four-step magnitude ramp, a pixel thinner in compact mode. */
@@ -477,7 +473,7 @@ function drawBase(
 	for (const item of marks) {
 		const x = item.x0 + 1;
 		if (!crowded && x - lastBullet >= 24) {
-			bullet(ctx, x, trunk, cr, palette.compaction, palette.compactionInk, "C", palette.page);
+			bullet(ctx, x, trunk, cr, palette.compaction, palette.compactionInk, "compaction", palette.page);
 			lastBullet = x;
 		} else {
 			ctx.fillStyle = palette.page;
@@ -501,7 +497,7 @@ function drawBase(
 			ctx.strokeStyle = palette.ink;
 			ctx.lineWidth = 2;
 			ctx.stroke();
-		} else bullet(ctx, item.x0, branchY, r, palette.agent, palette.agentInk, "A", palette.page);
+		} else bullet(ctx, item.x0, branchY, r, palette.agent, palette.agentInk, "agent", palette.page);
 		if (compact || !item.childId) continue;
 		const child = children.get(item.childId);
 		const next = branches[i + 1];
@@ -1129,7 +1125,7 @@ function OverviewTooltip({ item, x, y, width, origin, trace }: { item: OverviewI
 			) : item.lane === "turns" ? (
 				<>
 					<div className="flex min-w-0 items-center gap-2">
-						<KindBadge family="user" label={`#${(item.turnIndex ?? 0) + 1}`} />
+						<KindBadge family="user" glyph={turn ? turnStart(turn).glyph : undefined} label={`#${(item.turnIndex ?? 0) + 1}`} />
 						<span className="min-w-0 truncate font-medium">{turn ? plainLine(turn.userText) : "Turn"}</span>
 					</div>
 					<div className="tnum mt-1 flex flex-wrap gap-x-3 text-muted">

@@ -1,7 +1,6 @@
 import { useInfiniteQuery, useQueries, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Icon, type IconName } from "../components/icons";
 import { useScrollRoot } from "../components/Layout";
 import { Markdown } from "../components/Markdown";
 import { cx, EmptyState, ErrorState, Pill, Skeleton, SkeletonLines } from "../components/ui";
@@ -11,6 +10,7 @@ import { useShortcuts } from "../lib/keyboard";
 import type { Entry, Turn } from "../lib/types";
 import { useViewState } from "../lib/viewState";
 import { useScrollMargin } from "../lib/virtual";
+import { turnStart } from "../trace/kinds";
 import { KindBullet } from "../trace/parts";
 import { buildTimeline, type TimelineItem } from "./timeline";
 import { TimelineItemView } from "./TimelineItemView";
@@ -77,13 +77,6 @@ function WorkStrip({ turn, expanded, onToggle }: { turn: Turn; expanded: boolean
 	);
 }
 
-/** How a turn started: a user prompt, a relay message, or another extension's message. */
-function turnStart(turn: Turn): { icon: IconName; label: string } {
-	if (turn.customType === undefined) return { icon: "user", label: `Prompt ${turn.index + 1}` };
-	if (turn.customType === "relay-message") return { icon: "message", label: "Relay message" };
-	return { icon: "message", label: "Extension message" };
-}
-
 function TurnHead({
 	row,
 	active,
@@ -109,9 +102,8 @@ function TurnHead({
 			data-highlighted={highlighted || undefined}
 		>
 			<div className="mb-1.5 flex items-center gap-2 text-[12px] text-muted">
-				<KindBullet family="user" />
+				<KindBullet family="user" glyph={start.glyph} />
 				<span className="tnum font-semibold text-ink">#{turn.index + 1}</span>
-				<Icon name={start.icon} size={13} className="text-muted" />
 				<span title={turn.customType} data-turn-start={turn.customType ?? "prompt"}>
 					{start.label}
 				</span>

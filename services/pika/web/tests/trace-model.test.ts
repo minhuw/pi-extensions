@@ -21,7 +21,7 @@ import {
 	zoomWindow,
 } from "../src/trace/axis";
 import { formatClock, formatElapsed, formatFineCost, formatGap, formatPhase, formatSpan, formatTick, middleTruncate } from "../src/trace/format";
-import { cacheHit, childSpan, hasProviderTiming, llmPhases, recordBadge, recordFamily, recordIcon, recordKey, recordName, recordSummary, showsToolName, toolFamily, toolName } from "../src/trace/kinds";
+import { cacheHit, childSpan, hasProviderTiming, llmPhases, recordBadge, recordFamily, recordGlyph, recordKey, recordName, recordSummary, showsToolName, toolFamily, toolName } from "../src/trace/kinds";
 import { currentStop, initialReplay, replayReducer, type ReplayState } from "../src/trace/replay";
 import { buildLedger, defaultTurnExpanded, matchesFilter, NO_FILTER, rowForSeq, type LedgerInput } from "../src/trace/rows";
 import { assistantMessage, entry, header, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
@@ -450,7 +450,9 @@ describe("record kinds", () => {
 		}
 		expect(toolFamily("Bash")).toBe("shell");
 		expect(recordBadge(llm(1, T, T + 1))).toBe("LLM");
-		expect(recordIcon(tool(1, "grep", T, T))).toBe("search");
+		expect(recordGlyph(tool(1, "grep", T, T))).toBe("search");
+		expect(recordGlyph(tool(1, "mcp__github__create_issue", T, T))).toBe("mcp");
+		expect(recordGlyph(llm(1, T, T))).toBe("model");
 		expect(showsToolName(tool(1, "read", T, T))).toBe(false);
 		expect(showsToolName(tool(1, "mcp__github__create_issue", T, T))).toBe(true);
 		expect(cacheHit(llm(1, T, T))).toBeCloseTo(0.75);
