@@ -436,3 +436,138 @@ fn displayed_custom_messages_during_recovery_stay_in_the_turn() {
     ]));
     assert_eq!(turns, vec![(json!(1), json!(5), json!("go"), json!("done"))]);
 }
+
+const REPO_URL: &str = "https://github.com/me/widgets";
+
+/// A session started in `cwd`, with one prompt.
+fn cwd_session(id: &str, cwd: &str) -> Vec<String> {
+    [
+        json!({ "type": "session", "version": 3, "id": id, "timestamp": "2026-10-24T10:00:00.000Z", "cwd": cwd }),
+        json!({ "type": "message", "id": "w0000001", "parentId": null, "timestamp": "2026-10-24T10:00:01.000Z",
+                "message": { "role": "user", "content": "Ship it", "timestamp": 1 } }),
+    ]
+    .iter()
+    .map(Value::to_string)
+    .collect()
+}
+
+/// Uploads a whole stream in one batch with `meta`.
+fn upload_meta(store: &pika::store::Store, key: &str, kind: &str, lines: &[String], meta: Value) {
+    let mut part = stream(key, kind, 0, lines);
+    part["meta"] = meta;
+    ingest(store, json!({ "streams": [part] })).unwrap();
+}
+
+fn session_row(store: &pika::store::Store, id: &str) -> (Value, Value) {
+    let row = one(store, &format!("SELECT project, repository FROM sessions WHERE id = '{id}'"));
+    (row["project"].clone(), row["repository"].clone())
+}
+
+/// Uploads sessions and Herder runs whose stream `meta` names their repository, validly or not.
+fn load_repositories(env: &Env) {
+    let store = &env.store;
+    // A linked worktree, a Subagents worktree copy, and a Herder step (whose link names another repository).
+    let meta = json!({ "sessionId": "wt-1", "project": "widgets", "repository": REPO_URL });
+    upload_meta(store, "session:wt-1", "session", &cwd_session("wt-1", "/home/me/code/widgets-feature"), meta);
+    let meta = json!({ "project": "widgets", "repository": "http://10.0.0.2:3000/me/widgets" });
+    upload_meta(store, "session:copy-1", "session", &cwd_session("copy-1", "/tmp/pi-agent-1234-abcd"), meta);
+    upload_meta(store, &format!("session:{STEP_SESSION}"), "session", &step_session(), json!({ "project": "widgets-main" }));
+    // Invalid values fall back: the cwd's basename and no repository.
+    for (id, project, repository) in [
+        ("bad-1", json!("a/b"), json!("https://x-token:hunter2@github.com/me/widgets")),
+        ("bad-2", json!(".."), json!("javascript:alert(1)")),
+        ("bad-3", json!(""), json!("https://github.com/me/wid gets")),
+        ("bad-4", json!(42), json!(format!("https://github.com/{}", "a".repeat(2048)))),
+    ] {
+        let meta = json!({ "project": project, "repository": repository });
+        upload_meta(store, &format!("session:{id}"), "session", &cwd_session(id, &format!("/home/me/code/{id}")), meta);
+    }
+    upload(store, "session:plain-1", "session", &cwd_session("plain-1", "/home/me/code/plain"), 10);
+    upload_meta(store, &format!("herder:{RUN_ID}"), "herder-journal", &fixture("herder-journal.jsonl"), json!({ "repo": "widgets-main" }));
+    let journal = [json!({ "v": 1, "t": "run.started", "at": "2026-10-22T09:00:00.000Z", "runId": "r2", "title": "T", "base": "b1", "repo": "/srv/gadgets-wt" }).to_string()];
+    upload_meta(store, "herder:r2", "herder-journal", &journal, json!({ "repo": ".." }));
+}
+
+/// A session's project is the repository name in its stream's `meta` when valid, before a Herder step's repository
+/// and the cwd's basename, and its repository is the valid web URL there. Herder runs prefer the announced name.
+#[test]
+fn sessions_take_project_and_repository_from_stream_meta() {
+    let env = env();
+    load_repositories(&env);
+    let store = &env.store;
+    assert_eq!(session_row(store, "wt-1"), (json!("widgets"), json!(REPO_URL)));
+    assert_eq!(session_row(store, "copy-1"), (json!("widgets"), json!("http://10.0.0.2:3000/me/widgets")));
+    assert_eq!(session_row(store, STEP_SESSION), (json!("widgets-main"), Value::Null));
+    for id in ["bad-1", "bad-2", "bad-3", "bad-4"] {
+        assert_eq!(session_row(store, id), (json!(id), Value::Null), "{id}");
+    }
+    assert_eq!(session_row(store, "plain-1"), (json!("plain"), Value::Null));
+
+    let runs = query(store, "SELECT run_id, repo, repo_path FROM herder_runs ORDER BY run_id");
+    assert_eq!((&runs[0]["repo"], &runs[0]["repo_path"]), (&json!("widgets-main"), &json!("/home/me/code/widgets")));
+    assert_eq!((&runs[1]["repo"], &runs[1]["repo_path"]), (&json!("gadgets-wt"), &json!("/srv/gadgets-wt")));
+}
+
+/// A batch that changes `meta` without adding lines re-derives what the row takes from it; one that repeats it, or
+/// sends none, changes nothing.
+#[test]
+fn meta_only_batches_rederive_the_repository() {
+    let env = env();
+    let store = &env.store;
+    let lines = cwd_session("late-1", "/home/me/code/late-wt");
+    upload(store, "session:late-1", "session", &lines, 10);
+    assert_eq!(session_row(store, "late-1"), (json!("late-wt"), Value::Null));
+    let mut part = stream("session:late-1", "session", byte_len(&lines), &[]);
+    part["meta"] = json!({ "project": "late", "repository": "https://gitlab.example.com/team/late" });
+    ingest(store, json!({ "streams": [part] })).unwrap();
+    assert_eq!(session_row(store, "late-1"), (json!("late"), json!("https://gitlab.example.com/team/late")));
+    let derived = dump_derived(store);
+    ingest(store, json!({ "streams": [part] })).unwrap();
+    ingest(store, json!({ "streams": [stream("session:late-1", "session", byte_len(&lines), &[])] })).unwrap();
+    assert_eq!(dump_derived(store), derived);
+
+    let journal = fixture("herder-journal.jsonl");
+    upload(store, &format!("herder:{RUN_ID}"), "herder-journal", &journal, 100);
+    let mut part = stream(&format!("herder:{RUN_ID}"), "herder-journal", byte_len(&journal), &[]);
+    part["meta"] = json!({ "repo": "widgets-main" });
+    ingest(store, json!({ "streams": [part] })).unwrap();
+    assert_eq!(one(store, "SELECT repo FROM herder_runs")["repo"], "widgets-main");
+}
+
+#[test]
+fn reindex_reproduces_projects_and_repositories() {
+    let env = env();
+    load_repositories(&env);
+    let incremental = dump_derived(&env.store);
+    pika::reindex::reindex(&env.store).unwrap();
+    assert_eq!(dump_derived(&env.store), incremental);
+    assert_eq!(session_row(&env.store, "wt-1"), (json!("widgets"), json!(REPO_URL)));
+}
+
+/// A version 7 server stored `meta` it did not derive from, as a newer client sent it. Opening the database with
+/// version 8 re-derives those sessions, and only those, without a reindex.
+#[test]
+fn opening_a_version_7_database_derives_repositories_from_stored_meta() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let derived = {
+        let store = pika::store::Store::open(&data).unwrap();
+        upload_meta(&store, "session:wt-1", "session", &cwd_session("wt-1", "/home/me/code/widgets-feature"), json!({ "project": "widgets", "repository": REPO_URL }));
+        upload(&store, "session:plain-1", "session", &cwd_session("plain-1", "/home/me/code/plain"), 10);
+        dump_derived(&store)
+    };
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    conn.execute_batch(&format!(
+        "UPDATE sessions SET project = 'widgets-feature' WHERE id = 'wt-1'; {UNDO_V8} PRAGMA user_version = 7;"
+    ))
+    .unwrap();
+    drop(conn);
+
+    let store = pika::store::Store::open(&data).unwrap();
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(8));
+    assert_eq!(store.setting("needs_reindex").unwrap(), None);
+    assert_eq!(store.setting("derived_generation").unwrap(), None);
+    assert_eq!(dump_derived(&store), derived);
+    assert_eq!(session_row(&store, "wt-1"), (json!("widgets"), json!(REPO_URL)));
+    assert_eq!(session_row(&store, "plain-1"), (json!("plain"), Value::Null));
+}

@@ -432,7 +432,7 @@ async fn stored_json_prefixes_protect_titles_replies_children_and_search() {
             assert_eq!(app.owner(&format!("sessions/{id}/entries/{seq}/raw")).await.text(), *line);
         }
     }
-    assert_current_at_version_7(&app.env.store);
+    assert_current_at_version_8(&app.env.store);
 }
 
 /// The trace cuts `userText` to 200 characters and `text` and `summary` to 160; a credential across the cut is
@@ -744,11 +744,11 @@ fn indexed_with(store: &Store, credentials: &[&str]) -> Vec<String> {
 }
 
 /// Asserts the index is recorded as scrubbed under the current rules, with no rewrite left to resume, and the schema
-/// remains version 7, introduced by CJK/prefix search; redaction adds no migration.
-fn assert_current_at_version_7(store: &Store) {
+/// is version 8, the latest; redaction adds no migration.
+fn assert_current_at_version_8(store: &Store) {
     let settings = query(store, "SELECT key, CAST(value AS TEXT) AS value FROM settings WHERE key LIKE 'search%'");
     assert_eq!(settings, query(store, &format!("SELECT '{}' AS key, '{}' AS value", store::SEARCH_RULES, pika::redact::RULES_VERSION)));
-    assert_eq!(one(store, "PRAGMA user_version")["user_version"], json!(7));
+    assert_eq!(one(store, "PRAGMA user_version")["user_version"], json!(8));
 }
 
 #[tokio::test]
@@ -852,7 +852,7 @@ async fn an_index_written_before_redaction_is_rewritten_in_the_background() {
     assert_eq!(items(&search(&app, true, "note").await).len(), 50);
     let rotate = search(&app, true, "Rotate").await;
     assert_eq!(items(&rotate)[0]["snippet"], "<mark>Rotate</mark> [REDACTED:API_KEY] tonight");
-    assert_current_at_version_7(&store);
+    assert_current_at_version_8(&store);
     assert!(pika::reindex::rescrub_in_background(&store).unwrap().is_none(), "a current index needs no rewrite");
 }
 
@@ -879,13 +879,13 @@ fn the_rewrite_resumes_where_it_stopped_and_reindex_sets_the_version() {
     assert!(text(ids[299]).contains(OPENAI_KEY), "documents before the resume point are as they were");
     assert_eq!(text(ids[300]), "note 300: export OPENAI_API_KEY=[REDACTED:API_KEY]");
     assert_eq!(indexed_with(&env.store, &[OPENAI_KEY]).len(), 300);
-    assert_current_at_version_7(&env.store);
+    assert_current_at_version_8(&env.store);
 
     env.store.write(|tx| tx.execute("DELETE FROM settings WHERE key = ?1", [store::SEARCH_RULES])).unwrap();
     pika::reindex::reindex(&env.store).unwrap();
     assert!(indexed_with(&env.store, &[GITHUB_TOKEN, AWS_KEY, OPENAI_KEY, URL_PASSWORD, FIELD_KEY]).is_empty());
     assert_eq!(query(&env.store, "SELECT COUNT(*) AS n FROM search_docs")[0]["n"].as_i64().unwrap() as u64, derived - 600);
-    assert_current_at_version_7(&env.store);
+    assert_current_at_version_8(&env.store);
 }
 
 const KEYS_SESSION: &str = "5ec2e7a0-0000-4000-8000-000000000005";
@@ -1065,7 +1065,7 @@ async fn the_rewrite_leaves_new_documents_with_older_dates_byte_identical() {
         assert_eq!(items(&search(&app, public, "FAKEpa").await).len(), 1);
     }
     assert_unsearchable(&app, &[GITHUB_TOKEN, OPENAI_KEY]).await;
-    assert_current_at_version_7(store);
+    assert_current_at_version_8(store);
 }
 
 /// Capped old documents are rebuilt from every supported source kind, including multiple tool calls in one
@@ -1132,7 +1132,7 @@ async fn capped_documents_are_rebuilt_from_their_whole_source_lines() {
     store.write(|tx| tx.execute("DELETE FROM settings WHERE key = ?1", [store::SEARCH_RULES])).unwrap();
     pika::reindex::rescrub_search(store).unwrap();
     assert_eq!(query(store, "SELECT id, kind, seq, text FROM search_docs ORDER BY id"), indexed);
-    assert_current_at_version_7(store);
+    assert_current_at_version_8(store);
 }
 
 /// AC-3/6 require shared discoveries within one entry, including a secret named beyond the cap. Identical old
@@ -1208,7 +1208,7 @@ async fn capped_tool_calls_with_shared_prefixes_keep_their_own_sources() {
         store.write(|tx| tx.execute("DELETE FROM settings WHERE key = ?1", [store::SEARCH_RULES])).unwrap();
         pika::reindex::rescrub_search(store).unwrap();
         assert_eq!(query(store, sql), indexed, "current documents stay byte-identical: {collisions}");
-        assert_current_at_version_7(store);
+        assert_current_at_version_8(store);
     }
 }
 
@@ -1297,7 +1297,7 @@ async fn assistant_entry_discoveries_cross_documents_before_capping_and_during_r
                 pika::reindex::rescrub_search(store).unwrap();
                 assert_eq!(query(store, sql), expected);
                 assert_unsearchable(&app, &credentials).await;
-                assert_current_at_version_7(store);
+                assert_current_at_version_8(store);
             }
         }
     }
@@ -1375,7 +1375,7 @@ async fn structured_arguments_are_unsearchable_and_rebuilt_at_every_size() {
         pika::reindex::rescrub_search(store).unwrap();
         assert_eq!(query(store, sql), expected, "blob source: {blob}");
         assert_unsearchable(&app, &credentials).await;
-        assert_current_at_version_7(store);
+        assert_current_at_version_8(store);
     }
 }
 
@@ -1612,7 +1612,7 @@ async fn grouped_prefix_search_preserves_redaction_and_rewrite_gating() {
             assert!(reply.text().contains("&lt;b&gt;widgets&lt;/b&gt;"));
         }
     }
-    assert_current_at_version_7(&app.env.store);
+    assert_current_at_version_8(&app.env.store);
 }
 
 /// Missing entries, unreadable blobs and invalid JSON all keep the capped ordinary text through the fallback.
@@ -1637,7 +1637,7 @@ fn capped_documents_with_unreadable_sources_stay_nonempty() {
         }).unwrap();
         pika::reindex::rescrub_search(&env.store).unwrap();
         assert_eq!(one(&env.store, &format!("SELECT text FROM search_docs WHERE id = {id}"))["text"], text.replace("FAKEpass0", "[REDACTED:PASSWORD]"), "{damage}");
-        assert_current_at_version_7(&env.store);
+        assert_current_at_version_8(&env.store);
     }
 }
 
@@ -1662,7 +1662,7 @@ fn unknown_rewrite_positions_restart_from_the_beginning() {
         env.store.write(|tx| tx.execute("INSERT INTO settings (key, value) VALUES (?1, ?2)", rusqlite::params![store::RESCRUB_AFTER, value])).unwrap();
         pika::reindex::rescrub_search(&env.store).unwrap();
         assert!(indexed_with(&env.store, &[GITHUB_TOKEN]).is_empty());
-        assert_current_at_version_7(&env.store);
+        assert_current_at_version_8(&env.store);
     }
 }
 
@@ -1735,5 +1735,5 @@ async fn the_rewrite_keeps_ordinary_text_at_the_cap_and_leaves_new_documents_alo
             assert_eq!(items(&search(&app, public, q).await).len(), n, "public {public}: {q}");
         }
     }
-    assert_current_at_version_7(&store);
+    assert_current_at_version_8(&store);
 }

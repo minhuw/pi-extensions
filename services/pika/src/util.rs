@@ -193,6 +193,29 @@ pub fn basename(path: &str) -> &str {
     trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
 }
 
+/// Whether `name` can name a project: nonempty and not blank, at most 1024 bytes, without control characters or path
+/// separators, and other than `.` or `..`.
+pub fn valid_project(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name.len() <= 1024
+        && !name.chars().any(|c| c.is_control() || c == '/' || c == '\\')
+        && !matches!(name, "." | "..")
+}
+
+/// Whether `url` can be a session's repository link: `https://` or `http://`, a host name or IPv4 address with an
+/// optional port, no user info, no whitespace, control characters, or backslashes, and at most 2048 bytes.
+pub fn valid_repository(url: &str) -> bool {
+    if url.len() > 2048 || url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '\\') {
+        return false;
+    }
+    let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) else { return false };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let (host, port) = authority.split_once(':').unwrap_or((authority, ""));
+    !host.is_empty()
+        && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        && (authority.len() == host.len() || (!port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit())))
+}
+
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
@@ -284,6 +307,39 @@ mod tests {
         assert_eq!(parse_iso_ms("2024-12-03T14:00:01"), Some(1733234401000));
         assert_eq!(parse_iso_ms("1969-12-31T23:59:59.999Z"), Some(-1));
         assert_eq!(parse_iso_ms("garbage"), None);
+    }
+
+    #[test]
+    fn project_names_and_repository_links() {
+        for name in ["widgets", "my repo", "仓库", "a.b"] {
+            assert!(valid_project(name), "{name}");
+        }
+        for name in ["", "  ", ".", "..", "a/b", "a\\b", "a\nb", &"x".repeat(1025)] {
+            assert!(!valid_project(name), "{name}");
+        }
+        for url in ["https://github.com/minhuw/pi-extensions", "http://10.0.0.2:3000/team/proj", "https://git.example.com"] {
+            assert!(valid_repository(url), "{url}");
+        }
+        let long = format!("https://github.com/{}", "a".repeat(2048));
+        for url in [
+            "javascript:alert(1)",
+            "ftp://github.com/a/b",
+            "https://",
+            "https:///a/b",
+            "https://user:pw@github.com/a/b",
+            "https://token@github.com/a/b",
+            "https://github.com/a b",
+            "https://github.com/a\tb",
+            "https://github.com/a\u{85}b",
+            "https://evil.com\\github.com/a",
+            "https://[::1]/a",
+            "https://github.com:/a",
+            "https://github.com:99999x/a",
+            "HTTPS://github.com/a/b",
+            long.as_str(),
+        ] {
+            assert!(!valid_repository(url), "{url}");
+        }
     }
 
     #[test]

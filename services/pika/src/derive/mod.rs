@@ -6,7 +6,7 @@ pub mod search;
 mod session;
 
 use anyhow::Result;
-use rusqlite::Transaction;
+use rusqlite::{OptionalExtension, Transaction};
 use serde_json::Value;
 
 pub use session::LINK_CUSTOM_TYPE;
@@ -72,6 +72,37 @@ pub fn apply_lines(tx: &Transaction, info: &StreamInfo, lines: &[Line]) -> Resul
         StreamKind::Session => session::apply(tx, info, lines),
         StreamKind::HerderJournal => herder::apply(tx, info, lines),
     }
+}
+
+/// Re-derives what the stream's row takes from its `meta`, for a batch that changed `meta` without adding lines.
+pub fn refresh(tx: &Transaction, info: &StreamInfo) -> Result<()> {
+    match info.kind {
+        StreamKind::Session => session::refresh(tx, info.id),
+        StreamKind::HerderJournal => herder::refresh(tx, info.id),
+    }
+}
+
+/// Re-derives the sessions whose stream `meta` names a repository; see `store::migrate`.
+pub fn refresh_repositories(tx: &Transaction) -> Result<()> {
+    let sids: Vec<i64> = tx
+        .prepare(
+            "SELECT s.sid FROM sessions s JOIN streams t ON t.id = s.sid
+             WHERE json_valid(t.meta) AND (json_type(t.meta, '$.project') IS NOT NULL
+                 OR json_type(t.meta, '$.repository') IS NOT NULL)",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for sid in sids {
+        session::refresh(tx, sid)?;
+    }
+    Ok(())
+}
+
+/// The stream's `meta` object, or `Null` when it has none or it is not JSON.
+fn stream_meta(tx: &Transaction, id: i64) -> Result<Value> {
+    let meta: Option<String> =
+        tx.prepare_cached("SELECT meta FROM streams WHERE id = ?1")?.query_row([id], |r| r.get(0)).optional()?.flatten();
+    Ok(meta.and_then(|m| serde_json::from_str(&m).ok()).unwrap_or(Value::Null))
 }
 
 /// Points the model calls with this assistant timestamp at their best matching request (latest `at`, then id).

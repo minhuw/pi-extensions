@@ -997,7 +997,7 @@ fn opening_a_version_1_database_builds_the_search_index() {
     pika::tokenizer::register(&conn).unwrap();
     conn.execute_batch(&format!(
         "DROP TABLE search_fts; DROP TABLE search_docs; DROP INDEX sessions_device_project; DROP INDEX sessions_root_device;
-         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V6} {UNDO_V5} {UNDO_V4} PRAGMA user_version = 1;"
+         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V8} {UNDO_V6} {UNDO_V5} {UNDO_V4} PRAGMA user_version = 1;"
     ))
     .unwrap();
     drop(conn);
@@ -1064,7 +1064,7 @@ fn opening_a_version_6_database_rebuilds_the_search_index() {
     };
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
     pika::tokenizer::register(&conn).unwrap();
-    conn.execute_batch(&format!("{UNDO_V7} PRAGMA user_version = 6;")).unwrap();
+    conn.execute_batch(&format!("{UNDO_V8} {UNDO_V7} PRAGMA user_version = 6;")).unwrap();
     let count = |q: &str| conn.query_row("SELECT count(*) FROM search_fts WHERE search_fts MATCH ?1", [q], |r| r.get::<_, i64>(0)).unwrap();
     assert_eq!((count("\"缓存\""), count("\"spin\"")), (0, before[1].len() as i64));
     drop(conn);
@@ -1157,7 +1157,7 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
     pika::tokenizer::register(&conn).unwrap();
     conn.execute_batch(&format!(
         "DROP TABLE search_fts; DROP TABLE search_docs; DROP INDEX sessions_device_project; DROP INDEX sessions_root_device;
-         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V6} {UNDO_V5} {UNDO_V4} PRAGMA user_version = 1;"
+         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V8} {UNDO_V6} {UNDO_V5} {UNDO_V4} PRAGMA user_version = 1;"
     ))
     .unwrap();
     drop(conn);
@@ -2129,4 +2129,38 @@ async fn public_tree_includes_only_published_sessions() {
     assert_eq!(tree["rootId"], "grand-b1");
     assert!(tree["nodes"][0].get("parentSessionId").is_none() && tree["nodes"][0].get("parentToolCallId").is_none());
     assert_eq!(public(&app, "sessions/child-b/tree").await.status, StatusCode::NOT_FOUND);
+}
+
+/// A session's repository link appears in every summary that lists it, owner's and public alike, and is absent for
+/// sessions without one.
+#[tokio::test]
+async fn summaries_carry_the_repository() {
+    let app = world().await;
+    const COPY: &str = "c0py0000-0000-0000-0000-000000000001";
+    const URL: &str = "https://github.com/me/widgets";
+    let session = lines(&[
+        json!({ "type": "session", "version": 3, "id": COPY, "timestamp": "2026-10-20T09:00:07.000Z", "cwd": "/tmp/pi-agent-1234-abcd" }),
+        json!({ "type": "custom", "id": "k0000001", "parentId": null, "timestamp": "2026-10-20T09:00:07.100Z",
+                "customType": "pi-extensions.session-link",
+                "data": { "kind": "subagent", "parentSessionId": SESSION_ID, "parentToolCallId": "call_1", "agentId": "agent-4" } }),
+    ]);
+    let meta = json!({ "sessionId": COPY, "cwd": "/tmp/pi-agent-1234-abcd", "project": "widgets", "repository": URL });
+    app.ingest(DEVICE, json!({ "streams": [{ "key": skey(COPY), "kind": "session", "offset": 0, "lines": session, "meta": meta }] })).await;
+
+    let repository_of = |items: &[Value], id: &str| items.iter().find(|i| i["id"] == id).unwrap().get("repository").cloned();
+    let listed = app.json("sessions?project=widgets").await;
+    let items = listed["items"].as_array().unwrap();
+    assert_eq!((repository_of(items, COPY), repository_of(items, SESSION_ID)), (Some(json!(URL)), None));
+    let detail = app.json(&format!("sessions/{COPY}")).await;
+    assert_eq!((&detail["project"], &detail["cwd"], &detail["repository"]), (&json!("widgets"), &json!("/tmp/pi-agent-1234-abcd"), &json!(URL)));
+    let parent = app.json(&format!("sessions/{SESSION_ID}")).await;
+    assert!(parent.get("repository").is_none());
+    assert_eq!(repository_of(parent["children"].as_array().unwrap(), COPY), Some(json!(URL)));
+    let tree = app.json(&format!("sessions/{COPY}/tree")).await;
+    assert_eq!(repository_of(tree["nodes"].as_array().unwrap(), COPY), Some(json!(URL)));
+
+    assert_eq!(publish(&app, "widgets", true, None).await.status, StatusCode::OK);
+    assert_eq!(public_json(&app, &format!("sessions/{COPY}")).await["repository"], URL);
+    let public_items = public_json(&app, "sessions").await;
+    assert_eq!(repository_of(public_items["items"].as_array().unwrap(), COPY), Some(json!(URL)));
 }

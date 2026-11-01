@@ -3,7 +3,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::Value;
 
 use super::{Line, StreamInfo, int_field, str_field, string_field, time_field};
-use crate::util::{basename, parse_json_lenient};
+use crate::util::{basename, parse_json_lenient, valid_project};
 
 struct RunRow {
     rid: i64,
@@ -84,6 +84,10 @@ fn save_run(tx: &Transaction, run: &RunRow) -> Result<()> {
     } else {
         "drafting"
     });
+    // The repository name Herder announced (its main checkout's, even from a linked worktree), else the folder the
+    // run started in.
+    let meta = super::stream_meta(tx, run.rid)?;
+    let repo = str_field(&meta, "repo").filter(|r| valid_project(r)).or(run.repo_path.as_deref().map(basename));
     tx.prepare_cached(
         "UPDATE herder_runs SET repo = ?2, repo_path = ?3, title = ?4, base = ?5, session_id = ?6, status = ?7,
              verdict = ?8, goal_sha256 = ?9, plan_sha256 = ?10, goal_approved = ?11, delivered = ?12,
@@ -92,7 +96,7 @@ fn save_run(tx: &Transaction, run: &RunRow) -> Result<()> {
     )?
     .execute(params![
         run.rid,
-        run.repo_path.as_deref().map(basename),
+        repo,
         run.repo_path,
         run.title,
         run.base,
@@ -213,6 +217,11 @@ fn step_event(tx: &Transaction, run: &mut RunRow, seq: i64, at: Option<i64>, t: 
         }
     }
     save_step(tx, run.rid, key, &step)
+}
+
+/// Saves the run again, so what it takes from its stream's `meta` is current.
+pub fn refresh(tx: &Transaction, rid: i64) -> Result<()> {
+    save_run(tx, &load_run(tx, rid)?)
 }
 
 pub fn apply(tx: &Transaction, info: &StreamInfo, lines: &[Line]) -> Result<()> {

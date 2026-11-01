@@ -65,6 +65,9 @@ pub struct SessionSummary {
     pub child_count: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub herder_run_id: Option<String>,
+    /// The web URL of the session's git repository, as its client resolved it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     /// The raw sort key, for cursors.
     #[serde(skip)]
     last_at_ms: i64,
@@ -142,7 +145,9 @@ pub struct Updates {
 
 const SUMMARY_COLUMNS: &str = "s.id, s.device, s.project, s.cwd, s.title, s.started_at, s.last_at, s.entry_count, \
      s.models, s.input, s.output, s.cache_read, s.cache_write, s.cost, s.parent_session_id, s.link, s.child_count, \
-     s.herder_run_id";
+     s.herder_run_id, s.repository";
+/// The index of the first column a query selects after `SUMMARY_COLUMNS`.
+const AFTER_SUMMARY: usize = 19;
 
 fn summary(r: &Row) -> rusqlite::Result<SessionSummary> {
     let entry_count: i64 = r.get(7)?;
@@ -169,6 +174,7 @@ fn summary(r: &Row) -> rusqlite::Result<SessionSummary> {
         link: r.get::<_, Option<String>>(15)?.and_then(|s| serde_json::from_str(&s).ok()),
         child_count: r.get(16)?,
         herder_run_id: r.get(17)?,
+        repository: r.get(18)?,
         last_at_ms: last_at,
     })
 }
@@ -351,7 +357,7 @@ pub fn detail(conn: &Connection, id: &str) -> ReadResult<SessionDetail> {
     let children = conn
         .prepare_cached(&children_sql())?
         .query_map([id], |r| {
-            Ok(ChildSession { summary: summary(r)?.named(&names), parent_tool_call_id: r.get(18)? })
+            Ok(ChildSession { summary: summary(r)?.named(&names), parent_tool_call_id: r.get(AFTER_SUMMARY)? })
         })?
         .collect::<rusqlite::Result<_>>()?;
     Ok(SessionDetail { summary: session.named(&names), children })
@@ -379,7 +385,7 @@ fn tree_children_sql(public: bool) -> String {
 }
 
 fn tree_node(r: &Row, depth: usize) -> rusqlite::Result<TreeNode> {
-    Ok(TreeNode { summary: summary(r)?, parent_tool_call_id: r.get(18)?, depth })
+    Ok(TreeNode { summary: summary(r)?, parent_tool_call_id: r.get(AFTER_SUMMARY)?, depth })
 }
 
 pub fn tree(conn: &Connection, id: &str) -> ReadResult<SessionTree> {
@@ -499,7 +505,7 @@ pub fn updates(conn: &Connection, id: &str, p: &Params) -> ReadResult<Updates> {
     let tx = conn;
     let (session, sid) = tx
         .prepare_cached(&format!("SELECT {SUMMARY_COLUMNS}, s.sid FROM sessions s WHERE s.id = ?1"))?
-        .query_row([id], |r| Ok((summary(r)?, r.get::<_, i64>(18)?)))
+        .query_row([id], |r| Ok((summary(r)?, r.get::<_, i64>(AFTER_SUMMARY)?)))
         .map_err(not_found)?;
     let session = session.named(&DeviceNames::load(tx)?);
     let last_seq = session.entry_count - 1;

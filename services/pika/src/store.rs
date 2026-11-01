@@ -15,7 +15,10 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_v5.sql"),
     include_str!("schema_v6.sql"),
     include_str!("schema_v7.sql"),
+    include_str!("schema_v8.sql"),
 ];
+/// The schema version that derives `sessions.project` and `sessions.repository` from the stream's `meta`.
+const REPOSITORY_VERSION: usize = 8;
 /// The first schema version whose derived tables an older database lacks or derives differently; opening such a
 /// database reindexes it.
 const REINDEX_BELOW: usize = 3;
@@ -110,6 +113,13 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             set_search_rules_current(&tx)?;
         }
         tx.pragma_update(None, "user_version", (index + 1) as i64)?;
+        tx.commit()?;
+    }
+    // A database written before `meta` named the repository may still hold such `meta`, from clients newer than the
+    // server; re-deriving those sessions is enough, as every other row derives as before.
+    if version > 0 && version < REPOSITORY_VERSION {
+        let tx = conn.transaction()?;
+        crate::derive::refresh_repositories(&tx).context("deriving session repositories")?;
         tx.commit()?;
     }
     Ok(())

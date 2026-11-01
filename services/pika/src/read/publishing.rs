@@ -57,12 +57,7 @@ pub fn settings(conn: &Connection) -> ReadResult<Publishing> {
 pub fn update(conn: &Connection, project: &str, published: bool) -> ReadResult<Publishing> {
     let mut selections = selected(conn)?;
     if published {
-        if project.is_empty()
-            || project.len() > 1024
-            || project.trim().is_empty()
-            || project.chars().any(|c| c.is_control() || c == '/' || c == '\\')
-            || matches!(project, "." | "..")
-        {
+        if !crate::util::valid_project(project) {
             return Err(bad("invalid project"));
         }
         let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE project = ?1)", [project], |r| r.get(0))?;

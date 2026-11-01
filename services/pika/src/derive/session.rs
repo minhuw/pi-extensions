@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::search::{self, Kind};
 use super::{Line, StreamInfo, Usage, int_field, str_field, string_field, time_field};
-use crate::util::{basename, cut_chars, parse_json_lenient};
+use crate::util::{basename, cut_chars, parse_json_lenient, valid_project, valid_repository};
 
 pub const LINK_CUSTOM_TYPE: &str = "pi-extensions.session-link";
 const TITLE_CHARS: usize = 120;
@@ -91,19 +91,20 @@ fn load_session(tx: &Transaction, sid: i64) -> Result<SessionRow> {
 }
 
 fn save_session(tx: &Transaction, s: &SessionRow) -> Result<()> {
-    let project = s
-        .link
-        .as_ref()
-        .and_then(|l| l.get("herder"))
-        .and_then(|h| str_field(h, "repo"))
+    // The repository name the client resolved for the session's cwd, then a Herder step's repository, then the cwd.
+    let meta = super::stream_meta(tx, s.sid)?;
+    let project = str_field(&meta, "project")
+        .filter(|p| valid_project(p))
+        .or_else(|| s.link.as_ref().and_then(|l| l.get("herder")).and_then(|h| str_field(h, "repo")))
         .or(s.cwd.as_deref())
         .map(|p| basename(p).to_owned());
+    let repository = str_field(&meta, "repository").filter(|r| valid_repository(r));
     let title = s.name.clone().filter(|n| !n.trim().is_empty()).or_else(|| s.first_prompt.clone());
     tx.prepare_cached(
         "UPDATE sessions SET cwd = ?2, project = ?3, title = ?4, name = ?5, first_prompt = ?6, version = ?7,
              started_at = ?8, last_at = ?9, entry_count = ?10, turn_count = ?11, models = ?12, input = ?13,
              output = ?14, cache_read = ?15, cache_write = ?16, cost = ?17, header_parent = ?18,
-             parent_session_id = ?19, link = ?20, herder_run_id = ?21
+             parent_session_id = ?19, link = ?20, herder_run_id = ?21, repository = ?22
          WHERE sid = ?1",
     )?
     .execute(params![
@@ -128,8 +129,14 @@ fn save_session(tx: &Transaction, s: &SessionRow) -> Result<()> {
         s.parent_session_id,
         s.link.as_ref().map(Value::to_string),
         s.herder_run_id,
+        repository,
     ])?;
     Ok(())
+}
+
+/// Saves the session again, so what it takes from its stream's `meta` is current.
+pub fn refresh(tx: &Transaction, sid: i64) -> Result<()> {
+    save_session(tx, &load_session(tx, sid)?)
 }
 
 fn turn_from_row(r: &Row) -> rusqlite::Result<TurnRow> {

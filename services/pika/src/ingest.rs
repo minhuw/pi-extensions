@@ -253,16 +253,19 @@ fn append_stream(
     lines: &[Stored],
     now: i64,
 ) -> Result<u64, IngestError> {
-    let existing: Option<(i64, String, String, i64, i64)> = tx
-        .prepare_cached("SELECT id, kind, device, length, line_count FROM streams WHERE key = ?1")?
-        .query_row([&stream.key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+    let existing: Option<(i64, String, String, i64, i64, Option<String>)> = tx
+        .prepare_cached("SELECT id, kind, device, length, line_count, meta FROM streams WHERE key = ?1")?
+        .query_row([&stream.key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
         .optional()?;
     let name = stream.key[kind.key_prefix().len()..].to_owned();
+    let meta = stream.meta.as_ref().map(Value::to_string);
+    let mut meta_changed = false;
     let (info, length, mut line_count) = match existing {
-        Some((id, existing_kind, device, length, line_count)) => {
+        Some((id, existing_kind, device, length, line_count, old_meta)) => {
             if existing_kind != kind.as_str() {
                 return Err(bad(format!("stream {} is a {existing_kind} stream", stream.key)));
             }
+            meta_changed = meta.is_some() && meta != old_meta;
             (StreamInfo { id, kind, name, device }, length as u64, line_count)
         }
         None => {
@@ -324,13 +327,16 @@ fn append_stream(
         line_count,
         now,
         stream.path,
-        stream.meta.as_ref().map(Value::to_string),
+        meta,
     ])?;
     let lines: Vec<Line> = appended
         .iter()
         .map(|(seq, offset, text)| Line { seq: *seq, offset: *offset as i64, text })
         .collect();
     derive::apply_lines(tx, &info, &lines)?;
+    if lines.is_empty() && meta_changed {
+        derive::refresh(tx, &info)?;
+    }
     Ok(new_length)
 }
 
