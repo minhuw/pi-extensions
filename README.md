@@ -1,25 +1,49 @@
 # Pi extensions
 
-A collection of extensions for [Pi](https://github.com/earendil-works/pi-coding-agent).
+Extensions, prompts, skills, and a theme for the [Pi](https://github.com/earendil-works/pi-coding-agent) coding agent.
 
 ## Extensions
 
-| Extension | Description |
+| Extension | What it does |
 | --- | --- |
-| [Commit](extensions/commit/README.md) | A lightweight native prompt for committing current changes as a self-contained patch series. |
-| [Quality](extensions/quality/README.md) | Native `/simplify`, `/review`, `/verify`, and `/deslop` prompts for cleanup, bug review, evidence-based verification, and AI-slop removal. |
-| [Writer](extensions/writer/README.md) | Eight native academic writing prompt templates for top-tier CS conference papers, ported from claude-writer. |
-| [Impeccable](extensions/impeccable/README.md) | Complete design skill, `/impeccable`, `/design` and 24 `/design-*` prompts for new visual systems, refinement and critique, with managed native engine, opt-in checks and session-owned live browser work. |
-| [Subagents](extensions/subagents/README.md) | Vendored autonomous subagents (`@tintinweb/pi-subagents` v0.22.0), with a local fleet and integrations; scripted workflows are disabled by default pending reliability fixes. |
-| [Herder](extensions/herder/README.md) | `/herder <goal>` runs coding work to delivery as a durable, verified run: an approved goal with checks, agent steps in disposable git worktrees, runtime verification, and delivery after your confirmation. `/herder-improve` and `/herder-simplify` audit the repository read-only and start a run for the findings you pick. |
-| [Orca Bridge](extensions/orca-bridge/README.md) | Orca pane activity, prompt-aware titles, background-work tracking, file/diff navigation, and `/orca-status` diagnostics. |
-| [Autoresearch](extensions/autoresearch/README.md) | Main-session baseline design and measurement, explicit user approval, bounded optimization passes, and integrated metric reporting. |
-| [Loop](extensions/loop/README.md) | Session-owned recurring prompts with fixed, cron, or model-paced scheduling, bounded execution, and footer status. |
-| [Molt](extensions/molt/README.md) | `/molt` starts a new session that keeps the current model and thinking level. |
-| [Statusline Footer](extensions/statusline-footer/README.md) | A rich, theme-aware footer for model, context, performance, cost, and Git telemetry. |
-| [pika](extensions/pika/README.md) | Uploads every session entry, exact model request, subagent and Herder step session, and Herder journal to a self-hosted [pika server](services/pika/README.md) for search and reading; offline spool, exclude list, and `/pika` status. |
-| [Relay](extensions/relay/README.md) | Text messages between running pi sessions on all your machines through your pika server, with `relay_list`, `relay_send`, and `relay_status` tools and `/relay`; needs the pika extension logged in and a pika server 0.3.0 or newer. |
-| [Magpie Provider](extensions/magpie-provider/README.md) | Live gateway model discovery, native Pi streaming APIs, and automatic native-compaction attempts for OpenAI/Codex Responses models; Magpie manages upstream accounts and routing. |
+| [Commit](extensions/commit/README.md) | `/commit` commits your current changes as a series of self-contained patches. |
+| [Quality](extensions/quality/README.md) | `/simplify` cleans up code, `/review` reports bugs without fixing them, `/verify` runs checks without repairing anything, and `/deslop` removes AI slop. |
+| [Writer](extensions/writer/README.md) | Eight prompts for writing CS conference papers, ported from [claude-writer](https://github.com/minhuw/claude-writer). |
+| [Impeccable](extensions/impeccable/README.md) | The Impeccable design skill, with `/impeccable`, `/design`, and 24 `/design-*` prompts for building, refining, and critiquing interfaces. |
+| [Subagents](extensions/subagents/README.md) | A vendored copy of `@tintinweb/pi-subagents` v0.22.0, plus a local agent fleet (`recon`, `worker`, `reviewer`, `expert`). |
+| [Herder](extensions/herder/README.md) | `/herder <goal>` runs a coding task in disposable git worktrees, checks the result against the goal, and delivers it to your branch after you confirm. `/herder-improve` and `/herder-simplify` audit the repository and start a run for the findings you pick. |
+| [Orca Bridge](extensions/orca-bridge/README.md) | Shows Pi activity in Orca panes, titles panes from your prompts, and opens files and diffs in Orca. |
+| [Autoresearch](extensions/autoresearch/README.md) | `/autoresearch <target>` measures a baseline, waits for your approval, then runs a bounded number of optimization passes. |
+| [Loop](extensions/loop/README.md) | Repeats a prompt on a fixed interval, a cron schedule, or a delay the model picks. |
+| [Molt](extensions/molt/README.md) | `/molt` starts a new session with the current model and thinking level. |
+| [Statusline Footer](extensions/statusline-footer/README.md) | A footer for model, context, performance, cost, and Git status. |
+| [pika](extensions/pika/README.md) | Uploads sessions, model requests, subagent sessions, and Herder journals to a self-hosted [pika server](services/pika/README.md), where you can search and read them. |
+| [Relay](extensions/relay/README.md) | Lets Pi sessions on your machines send messages to each other through your pika server. |
+| [Magpie Provider](extensions/magpie-provider/README.md) | Adds the models of a Magpie gateway, with native compaction for OpenAI/Codex Responses models. |
+
+## Install
+
+You need Node 22.19.0 or newer and Pi 1.3.0 or newer. Herder also needs git 2.38 or newer.
+
+```bash
+pi install git:github.com/minhuw/pi-extensions
+
+# or from a local checkout
+pi install /absolute/path/to/pi-extensions
+```
+
+This installs everything listed above and the theme. Some extensions need a few more steps:
+
+- **Subagents:** don't also install `@tintinweb/pi-subagents` from npm in the same Pi profile. Scripted workflows (`SubagentWorkflow`) are off by default; set `workflowsEnabled: true` to turn them on.
+- **Autoresearch:** remove `npm:pi-autoresearch` if you have it, because both register `/autoresearch`. Existing `.auto/` data is kept.
+- **Impeccable:** the design engine (0.1.18) is downloaded and verified the first time it is needed. Live browser work needs an app it can run. Writer keeps `/polish` for prose; use `/design-polish` for UI.
+- **Herder:** run state lives in the git directory (`<git-common-dir>/herder/` and `refs/herder/`), not in the working tree. Approving a goal and confirming delivery need an interactive session (TUI or RPC).
+- **Orca Bridge:** activates only inside Orca panes. Background activity is tracked in Orca's terminal view, not its native chat. `/orca-status` shows what it sees.
+- **Magpie Provider:** needs a running Magpie gateway (default `http://127.0.0.1:3425`). `/login magpie` saves its URL and key.
+- **pika:** does nothing until `/pika login` connects it to a server. Uploads include file contents and command output, so use only a server you control.
+- **Relay:** needs pika logged in and a pika server 0.3.0 or newer.
+
+The CLIProxyAPI provider and native-compaction extensions are no longer included. If your Pi settings point to their old paths, remove those entries. Saved credentials and old config files are not touched.
 
 ## Themes
 
@@ -27,56 +51,24 @@ A collection of extensions for [Pi](https://github.com/earendil-works/pi-coding-
 | --- | --- |
 | `material-bloom` | Material You light palette: cream surfaces, rose primary, teal secondary, lilac tertiary. |
 
-Select it with `/settings` or `"theme": "material-bloom"` in `~/.pi/agent/settings.json`. Best on a light terminal background.
-
-## Install
-
-Node >=22.19.0 and Pi >=1.3.0 are required; Herder also needs git >=2.38. With Pi already installed, install the collection:
-
-```bash
-pi install git:github.com/minhuw/pi-extensions
-```
-
-- Subagents inherit `npm:@ff-labs/pi-fff` when it is installed in the Pi profile; explicit agent extension/tool exclusions and isolation still apply.
-
-For a local checkout:
-
-```bash
-pi install /absolute/path/to/pi-extensions
-```
-
-Installing the collection loads all registered extensions, the Impeccable skill and its `/impeccable`, `/design` and 24 `/design-*` prompts, `/commit`, the Quality prompts (`/simplify`, `/review`, `/verify`, `/deslop`), the eight Writer prompts, Herder's `/herder` command and `herder` skill, its `/herder-improve` and `/herder-simplify` audits, and themes. Quality commands run independently: `/simplify` applies bounded cleanup, `/review` reports bugs without fixes, `/verify` executes checks without repairs, and `/deslop` removes AI code slop with evidence-gated fixes. Subagents exposes its `Agent` tools; scripted workflows (`SubagentWorkflow`) are disabled by default pending reliability fixes. An existing explicit `workflowsEnabled: true` setting still enables them; set it to `false` and reload to disable that opt-in. Subagents is a vendored pin of `@tintinweb/pi-subagents` — do not also install the npm package in the same Pi profile. See each extension's README for setup, activation conditions, and usage.
-
-Impeccable supports freeform design requests and named playbooks: try `/impeccable redesign this app with a replacement visual identity`, `/design-shape onboarding`, or `/design-critique src/settings.tsx`. Writer retains `/polish`; use `/design-polish` for UI work. Engine 0.1.18 is downloaded and verified lazily when needed; automatic detector hooks default off and live browser work needs a runnable app/browser. Activation and safe tests download no engine/browser. See the [install/use/configuration guide](extensions/impeccable/README.md) and [complete feature/prerequisite/evidence map](extensions/impeccable/FEATURES.md).
-
-The CLIProxyAPI provider and native-compaction extensions are no longer bundled. Remove any explicit references to their old paths from your Pi settings; this change does not remove saved credentials or legacy configuration files.
-
-Orca Bridge activates inside Orca panes and combines the main Pi turn with agents and workflows. It cooperates with Orca's installed status extension when available and provides standalone hook delivery otherwise. Use `/orca-status` to inspect activity and delivery, `/orca-open <path> --line <n>` to open a file or review report, and `/orca-diff <path> --staged` for a staged diff; add `--focus` to switch view. Background tracking currently applies to Orca's terminal view; stock Orca's native-chat adapter does not expose the corresponding extension activity integration. See its [setup and compatibility guide](extensions/orca-bridge/README.md).
-
-The native `/autoresearch <target>` workflow prepares and measures a baseline, then waits for `/autoresearch approve` before optimizing. Disable `npm:pi-autoresearch` when loading this collection to avoid duplicate `/autoresearch` commands. Existing `.auto/` data is preserved. See [Autoresearch](extensions/autoresearch/README.md).
-
-Herder keeps run state under the repository's git directory (`<git-common-dir>/herder/` and `refs/herder/`), never in the working tree. Approving a goal and confirming delivery need an interactive session (TUI or RPC). See [Herder](extensions/herder/README.md).
-
-Magpie Provider connects to a separately running Magpie gateway (default `http://127.0.0.1:3425`). Use `/login magpie` to save its URL and gateway key and automatically expose its search/fetch MCP tools, or configure model access through environment variables. It does not install Magpie or change your selected model. See its [setup guide](extensions/magpie-provider/README.md) for remote keys, model discovery, and coexistence with Magpie's built-in Pi configuration adapter.
-
-pika does nothing until `~/.pi/agent/pika.json` names a server URL and device token; `/pika login` writes both, after you approve the machine on the server's web UI. The server is a separate Rust binary in `services/pika/`, with an embedded web UI, a Dockerfile, and reverse-proxy examples; see its [README](services/pika/README.md). Trajectories include file contents and command output, so point pika only at a server you control. See [pika](extensions/pika/README.md).
+Select it with `/settings` or set `"theme": "material-bloom"` in `~/.pi/agent/settings.json`. It works best on a light terminal background.
 
 ## Development
 
-Development uses Node >=22.19.0 for supported Pi versions, built-in `node:sqlite`, and native TypeScript execution. Development dependencies and the lockfile target Pi SDK 1.4.0; the supported runtime minimum remains Pi 1.3.0. Run the offline suite after upgrading the host to check its extension loader, provider delegates, and session/tool lifecycle.
-
 ```bash
 npm ci
-npm test        # safe offline collection suite, including Impeccable
-npm run typecheck  # separate strict TypeScript check
+npm test           # offline tests for every extension
+npm run typecheck
 ```
 
-Impeccable's offline checks are `npm run test:impeccable:contracts`, `npm run test:impeccable` and `npm run test:impeccable:package`. Explicit network/native checks use `npm run test:impeccable:engine`; actual Chromium/detector/direction/live coverage uses `npm run test:impeccable:e2e` (or the narrower `npm run test:impeccable:visual-foundations`). These opt-in commands may download the pinned engine/browser and require host prerequisites; they do not make paid model/image calls. See [checks and evidence](extensions/impeccable/README.md#checks-and-evidence) for simulated catalog/model boundaries and tested scope.
+Development dependencies target Pi SDK 1.4.0. The extensions still support Pi 1.3.0. [AGENTS.md](AGENTS.md) lists the test command for each extension.
 
-For editable provider development, install the local checkout as above and edit `extensions/magpie-provider/`, not `node_modules`. Pi loads the local TypeScript on extension load; current sessions are not automatically reloaded after edits. Run `npm run test:magpie-provider` for the offline provider and native-compaction checks.
+To work on an extension, install your local checkout as shown above and edit it in place. Pi loads the TypeScript directly; run `/reload` to pick up changes.
 
-The pika server and web UI have their own toolchains (stable Rust and the web package's npm dependencies); see [Development](services/pika/README.md#development) in its README. `npm test` covers the extension only.
+Impeccable has opt-in checks that download its engine and Chromium: `npm run test:impeccable:engine`, `npm run test:impeccable:visual-foundations`, and `npm run test:impeccable:e2e`. They make no paid model calls. See [checks and evidence](extensions/impeccable/README.md#checks-and-evidence).
+
+The pika server (Rust) and its web UI have their own toolchains, and `npm test` doesn't cover them. See [Development](services/pika/README.md#development) in the pika server README.
 
 ## License
 
-[MIT](LICENSE) for this collection's original code. Vendored Impeccable skill/resources retain their [Apache-2.0 license](extensions/impeccable/LICENSE) and [notice](extensions/impeccable/NOTICE.md); see its [provenance and patch ledger](extensions/impeccable/LOCAL-PATCHES.md).
+[MIT](LICENSE) for this collection's own code. The vendored Impeccable skill keeps its [Apache-2.0 license](extensions/impeccable/LICENSE) and [notice](extensions/impeccable/NOTICE.md); its changes are listed in [LOCAL-PATCHES.md](extensions/impeccable/LOCAL-PATCHES.md).
