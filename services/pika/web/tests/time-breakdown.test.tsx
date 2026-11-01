@@ -1,4 +1,4 @@
-import { fireEvent, screen, within } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { SessionTrace, TraceRecord } from "../src/lib/types";
 import { BREAKDOWN_OPEN_KEY, TimeBreakdown } from "../src/trace/TimeBreakdown";
@@ -18,29 +18,29 @@ function trace(): SessionTrace {
 }
 
 describe("time breakdown details", () => {
-	it("draws each kind as a line with its models and tools as stations, longest first, filled by their share", () => {
+	it("lists each kind's models and tools in a table, longest first, and sums up the rest", () => {
 		localStorage.setItem(BREAKDOWN_OPEN_KEY, "open");
 		renderWithApi(<TimeBreakdown trace={trace()} live={false} />, (async () => new Response("{}")) as typeof fetch);
-		const stations = (region: HTMLElement) => [...region.querySelectorAll<HTMLElement>("[data-breakdown-item]")];
+		const rows = (region: HTMLElement) => [...region.querySelectorAll<HTMLElement>("[data-breakdown-item]")];
 
+		// The model by its name, which stays visible on phones here, and its maker's mark.
 		const model = screen.getByRole("region", { name: "Model call" });
-		const [gpt] = stations(model);
+		const [gpt] = rows(model);
 		expect(gpt.querySelector("[data-model-mark]")?.getAttribute("data-model-mark")).toBe("openai");
-		expect(gpt.dataset.share).toBe("100");
-		expect(within(model).getByRole("list", { name: "Model call by model" })).toBeTruthy();
+		expect(within(gpt).getByText("gpt-6-astra").className).not.toContain("sr-only");
+		expect(gpt.textContent).toContain("1×");
 
-		// Twelve stations, then a button for the rest. The tracker's tools take 10.5 s, the first 1.4 s of it; with the
-		// GPT call's 4 s and 0.6 s between calls, the whole breakdown is 15.1 s.
+		// Eight rows, then the rest summed. The tracker's tools take 10.5 s, the first 1.4 s of it; with the GPT call's
+		// 4 s and 0.6 s between calls, the whole breakdown is 15.1 s, which the shares are of.
 		const tools = screen.getByRole("region", { name: "Other tool" });
-		expect(stations(tools).map((station) => station.dataset.breakdownItem)).toEqual(Array.from({ length: 12 }, (_, i) => `mcp__tracker__step_${i}`));
-		expect(stations(tools)[0].textContent).toContain("tracker · step_0");
-		expect(stations(tools)[0].textContent).toContain("1.4s");
-		expect(stations(tools)[0].dataset.share).toBe("13.3");
-		expect(stations(tools)[0].getAttribute("title")).toBe("tracker · step_0: 1.4s in 1 call, 13% of Other tool, 9% of all");
-		const more = within(tools).getByRole("button", { name: "2 more" });
-		expect(more.getAttribute("title")).toBe("300ms in all");
-		fireEvent.click(more);
-		expect(stations(tools)).toHaveLength(14);
-		expect(within(tools).queryByRole("button", { name: /more/ })).toBeNull();
+		expect(rows(tools).map((row) => row.dataset.breakdownItem)).toEqual(Array.from({ length: 8 }, (_, i) => `mcp__tracker__step_${i}`));
+		expect(rows(tools)[0].textContent).toContain("tracker · step_0");
+		expect(rows(tools)[0].textContent).toContain("1.4s");
+		expect(rows(tools)[0].textContent).toContain("9%");
+		expect(rows(tools)[0].getAttribute("title")).toBe("tracker · step_0: 1 call, 1.4s");
+		expect(rows(tools)[0].querySelector("[data-glyph]")?.getAttribute("data-glyph")).toBe("mcp");
+		const rest = tools.querySelector<HTMLElement>("[data-breakdown-rest]")!;
+		expect(rest.textContent).toContain("6 more");
+		expect(rest.textContent).toContain("2.1s");
 	});
 });

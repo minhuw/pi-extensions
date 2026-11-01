@@ -125,9 +125,9 @@ export function modelTextClass(model: string): string | undefined {
 /**
  * A model's name with its maker's mark after it, the name in the maker's colour. The name truncates first, so the mark
  * stays; phones, where only a letter or two of the name would fit, keep only the mark and leave the name to assistive
- * technology. A model pika doesn't know is plain text.
+ * technology, unless `keepName` says the name has room. A model pika doesn't know is plain text.
  */
-export function ModelName({ model, className }: { model: string; className?: string }) {
+export function ModelName({ model, keepName = false, className }: { model: string; keepName?: boolean; className?: string }) {
 	// Gradient ids must be unique on the page and plain enough for `url(#…)`.
 	const id = `model-${useId().replace(/[^\w-]/g, "")}`;
 	const known = modelMaker(model);
@@ -135,7 +135,7 @@ export function ModelName({ model, className }: { model: string; className?: str
 	const { maker, text, mark } = MAKERS[known];
 	return (
 		<span className={cx("flex min-w-0 shrink items-center gap-1", text, className)} title={`${model}, by ${maker}`}>
-			<span className="min-w-0 truncate max-sm:sr-only">{model}</span>
+			<span className={cx("min-w-0 truncate", !keepName && "max-sm:sr-only")}>{model}</span>
 			<svg viewBox="0 0 24 24" width="12" height="12" className="shrink-0" aria-hidden="true" data-model-mark={known}>
 				{mark(id, false)}
 			</svg>

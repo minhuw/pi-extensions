@@ -1,5 +1,5 @@
 import { memo, useId, useMemo, useState } from "react";
-import { ModelMark } from "../components/ModelName";
+import { ModelName } from "../components/ModelName";
 import { cx } from "../components/ui";
 import { plural } from "../lib/format";
 import type { SessionTrace } from "../lib/types";
@@ -7,13 +7,13 @@ import type { Interval } from "./axis";
 import { buildBreakdown, type Breakdown, type BreakdownFamily, type BreakdownItem, type SubagentMode } from "./breakdown";
 import { MAX_DESCENDANTS, useDescendantTraces } from "./data";
 import { formatSpan } from "./format";
-import { FAMILY_CLASSES, FAMILY_LABELS, familyColor, toolGlyph } from "./kinds";
+import { FAMILY_CLASSES, FAMILY_LABELS, toolGlyph } from "./kinds";
 import { KindBullet, RunningDot } from "./parts";
 
 export const BREAKDOWN_MODE_KEY = "pika-breakdown-subagents";
 export const BREAKDOWN_OPEN_KEY = "pika-breakdown-details";
-/** Stations a kind's line shows before a button offers the rest. */
-const ITEMS_SHOWN = 12;
+/** Lines a kind lists in the details before the rest are summed up. */
+const ITEMS_SHOWN = 8;
 
 function stored<T extends string>(key: string, values: readonly T[], fallback: T): T {
 	try {
@@ -254,57 +254,41 @@ function SplitStatus({ pending, wanted, failed, capped }: { pending: number; wan
 	return null;
 }
 
-/**
- * The kinds as lines of a subway map: each kind's line in its colour, with its models, tools, or agent types as
- * stations on it, longest first.
- */
+/** Each kind's models, tools, or agent types, longest first. */
 function BreakdownDetails({ id, breakdown }: { id: string; breakdown: Breakdown }) {
 	return (
-		<div id={id} className="mt-3 flex max-h-[320px] flex-col gap-2.5 overflow-y-auto pr-1 pb-1" data-breakdown-details="">
+		<div
+			id={id}
+			className="mt-2 grid max-h-[280px] grid-cols-[repeat(auto-fill,minmax(232px,1fr))] gap-x-8 gap-y-3 overflow-y-auto pb-1"
+			data-breakdown-details=""
+		>
 			{breakdown.families.map((family) => (
-				<FamilyLine key={family.family} family={family} total={breakdown.ms} />
+				<FamilyDetails key={family.family} family={family} total={breakdown.ms} />
 			))}
 		</div>
 	);
 }
 
-/**
- * One kind: its name and time, then its line. The line runs through every row of stations, as the tags wrap, so a kind
- * with many tools still reads as one line.
- */
-function FamilyLine({ family, total }: { family: BreakdownFamily; total: number }) {
-	const [all, setAll] = useState(false);
-	const shown = all ? family.items : family.items.slice(0, ITEMS_SHOWN);
-	const hidden = family.items.slice(shown.length);
-	const color = familyColor(family.family);
+function FamilyDetails({ family, total }: { family: BreakdownFamily; total: number }) {
+	const shown = family.items.slice(0, ITEMS_SHOWN);
+	const rest = family.items.slice(ITEMS_SHOWN);
 	return (
-		<section aria-label={FAMILY_LABELS[family.family]} className="flex min-w-0 flex-col gap-1.5 md:flex-row md:gap-4" data-breakdown-group={family.family}>
-			<div className="flex h-6 shrink-0 items-center gap-1.5 text-[12px] md:w-[224px]">
-				<KindBullet family={family.family} size={16} />
-				<span className="min-w-0 truncate font-semibold">{FAMILY_LABELS[family.family]}</span>
-				<span className="tnum ml-auto font-medium">{formatSpan(family.ms)}</span>
-				<span className="tnum w-9 text-right text-muted">{percent(share(family.ms, total))}</span>
+		<section aria-label={FAMILY_LABELS[family.family]} data-breakdown-group={family.family}>
+			<div className="flex h-6 items-center gap-1.5 border-b border-ink text-[12px] font-semibold">
+				<KindBullet family={family.family} size={13} />
+				<span className="min-w-0 truncate">{FAMILY_LABELS[family.family]}</span>
+				<span className="tnum ml-auto">{formatSpan(family.ms)}</span>
+				<span className="tnum w-9 text-right font-normal text-muted">{percent(share(family.ms, total))}</span>
 			</div>
-			{/* Rows of 24 px stations 8 px apart: the line is drawn through the middle of each row. */}
-			<ul
-				className="flex min-w-0 flex-1 flex-wrap gap-x-3 gap-y-2"
-				style={{ backgroundImage: `repeating-linear-gradient(to bottom, transparent 0 11px, ${color} 11px 13px, transparent 13px 32px)` }}
-				aria-label={`${FAMILY_LABELS[family.family]} by ${family.family === "llm" ? "model" : family.family === "agent" ? "subagent" : "tool"}`}
-			>
+			<ul className="text-[12px]">
 				{shown.map((item) => (
-					<ItemTag key={item.key} item={item} familyMs={family.ms} total={total} />
+					<ItemRow key={item.key} item={item} total={total} />
 				))}
-				{hidden.length > 0 && (
-					<li>
-						<button
-							type="button"
-							onClick={() => setAll(true)}
-							className="tnum flex h-6 items-center rounded-full border-[1.5px] border-dashed bg-page px-2.5 text-[12px] text-muted hover:text-ink"
-							style={{ borderColor: color }}
-							title={`${formatSpan(hidden.reduce((sum, item) => sum + item.ms, 0))} in all`}
-						>
-							{hidden.length} more
-						</button>
+				{rest.length > 0 && (
+					<li className="tnum flex h-6 items-center gap-2 text-muted" data-breakdown-rest="">
+						<span className="min-w-0 flex-1 truncate">{rest.length} more</span>
+						<span>{formatSpan(rest.reduce((sum, item) => sum + item.ms, 0))}</span>
+						<span className="w-9" />
 					</li>
 				)}
 			</ul>
@@ -312,39 +296,18 @@ function FamilyLine({ family, total }: { family: BreakdownFamily; total: number 
 	);
 }
 
-/**
- * A station: a capsule outlined in its kind's colour, filled from the left by its share of the kind's time, with the
- * model's maker's mark or the tool's glyph, its name, its time, and how many calls it made.
- */
-function ItemTag({ item, familyMs, total }: { item: BreakdownItem; familyMs: number; total: number }) {
-	const color = familyColor(item.family);
-	const fill = Math.round(share(item.ms, familyMs) * 1000) / 10;
-	let mark;
-	if (item.kind === "model") mark = item.name ? <ModelMark model={item.name} size={13} /> : null;
-	else mark = <KindBullet family={item.family} glyph={item.kind === "tool" ? toolGlyph(item.name) : undefined} size={16} />;
-	const name = item.label || "Unknown model";
+function ItemRow({ item, total }: { item: BreakdownItem; total: number }) {
+	let name;
+	if (item.kind === "model") name = item.name ? <ModelName model={item.name} keepName /> : <span className="min-w-0 truncate text-muted italic">Unknown model</span>;
+	else if (item.kind === "tool") name = <span className="mono min-w-0 truncate text-[11.5px]">{item.label}</span>;
+	else name = <span className="min-w-0 truncate">{item.label}</span>;
 	return (
-		<li
-			className="flex h-6 max-w-full min-w-0 items-center gap-1.5 rounded-full border-[1.5px] pr-2.5 pl-[3px] text-[12px] leading-none"
-			style={{
-				borderColor: color,
-				background: `linear-gradient(to right, color-mix(in srgb, ${color} 26%, var(--color-page)) ${fill}%, var(--color-page) ${fill}%)`,
-			}}
-			title={`${name}: ${formatSpan(item.ms)} in ${plural(item.count, "call")}, ${percent(share(item.ms, familyMs))} of ${FAMILY_LABELS[item.family]}, ${percent(share(item.ms, total))} of all`}
-			data-breakdown-item={item.name}
-			data-share={fill}
-		>
-			{/* Marks share the bullets' 16 px box, so names line up from station to station. */}
-			<span className="flex size-4 shrink-0 items-center justify-center" aria-hidden="true">
-				{mark ?? <KindBullet family="llm" size={16} />}
-			</span>
-			<span className={cx("min-w-0 truncate", item.kind === "tool" && "mono text-[11.5px]", !item.label && "text-muted italic")}>{name}</span>
-			<span className="tnum shrink-0 font-semibold">{formatSpan(item.ms)}</span>
-			<span className="tnum shrink-0 text-[11px] text-muted">
-				<span aria-hidden="true">×</span>
-				{item.count}
-				<span className="sr-only"> {item.count === 1 ? "call" : "calls"}</span>
-			</span>
+		<li className="flex h-6 min-w-0 items-center gap-2 border-b border-line" title={`${item.label || "Unknown model"}: ${plural(item.count, "call")}, ${formatSpan(item.ms)}`} data-breakdown-item={item.name}>
+			{item.kind !== "model" && <KindBullet family={item.family} glyph={item.kind === "tool" ? toolGlyph(item.name) : undefined} size={13} />}
+			{name}
+			<span className="tnum ml-auto shrink-0 text-muted">{item.count}×</span>
+			<span className="tnum w-[52px] shrink-0 text-right">{formatSpan(item.ms)}</span>
+			<span className="tnum w-9 shrink-0 text-right text-muted">{percent(share(item.ms, total))}</span>
 		</li>
 	);
 }
