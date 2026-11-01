@@ -9,6 +9,7 @@ use serde_json::json;
 use super::sessions::MAX_TREE_DEPTH;
 use super::{Page, Params, ReadResult, bad, cursor_int, iso, page};
 use crate::derive::search::{MARK_END, MARK_START, SID_MASK, SID_SHIFT};
+use crate::redact::Scope;
 use crate::util::escape_html;
 
 pub const SEARCH_LIMIT: i64 = 50;
@@ -225,7 +226,7 @@ fn hit_columns() -> String {
 fn hit(r: &rusqlite::Row) -> rusqlite::Result<Hit> {
     Ok(Hit {
         rowid: r.get(0)?,
-        snippet: render_snippet(&r.get::<_, String>(1)?),
+        snippet: r.get(1)?,
         seq: r.get(2)?,
         kind: r.get(3)?,
         at: iso(r.get(4)?),
@@ -253,11 +254,15 @@ pub fn search(conn: &Connection, p: &Params) -> ReadResult<Page<Hit>> {
     search_scoped(conn, p, false)
 }
 
-/// `search`, in the public namespace only over published sessions. Run it in one snapshot: publication is read with
-/// the matches.
+/// `search`, in the public namespace only over published sessions, and only once the index's text is scrubbed under
+/// the current rules (see `store::SEARCH_RULES`): until then it finds nothing. Run it in one snapshot: publication
+/// and the rules' version are read with the matches.
 pub fn search_scoped(conn: &Connection, p: &Params, public: bool) -> ReadResult<Page<Hit>> {
     // Relevance looks its hits up in a second statement. The public HTTP scope may already hold a snapshot.
     let _tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    if public && !crate::store::search_rules_current(conn)? {
+        return Ok(Page { items: Vec::new(), next_cursor: None });
+    }
     let (any, wide_sids) = sessions_for_filters(conn, p, public)?;
     match statement(p, wide_sids, public)? {
         Some(statement) if any => run(conn, statement),
@@ -276,13 +281,43 @@ fn unless_rejected<T: Default>(rows: rusqlite::Result<T>) -> ReadResult<T> {
 
 fn run(conn: &Connection, Statement { sql, args, limit, lookup }: Statement) -> ReadResult<Page<Hit>> {
     let mut stmt = conn.prepare_cached(&sql)?;
-    let Some(lookup) = lookup else {
+    let mut response = if let Some(lookup) = lookup {
+        let ids: Vec<i64> = unless_rejected(stmt.query_map(params_from_iter(args), |r| r.get(0)).and_then(|rows| rows.collect()))?;
+        let mut hits = lookup.hits(conn, &ids)?;
+        Page { items: ids.iter().filter_map(|id| hits.remove(id)).collect(), next_cursor: None }
+    } else {
         let items = unless_rejected(stmt.query_map(params_from_iter(args), hit).and_then(|rows| rows.collect()))?;
-        return Ok(page(items, limit, |h| vec![json!(h.rowid)]));
+        page(items, limit, |h| vec![json!(h.rowid)])
     };
-    let ids: Vec<i64> = unless_rejected(stmt.query_map(params_from_iter(args), |r| r.get(0)).and_then(|rows| rows.collect()))?;
-    let mut hits = lookup.hits(conn, &ids)?;
-    Ok(Page { items: ids.iter().filter_map(|id| hits.remove(id)).collect(), next_cursor: None })
+    scrub_response(std::iter::empty(), response.items.iter_mut());
+    Ok(response)
+}
+
+/// Scrub every displayed title and snippet in one scope, for grouped and flat search alike. FTS marks may split
+/// a credential, so discovery sees unmarked text; unchanged snippets regain their escaped highlighting afterwards.
+fn scrub_response<'a>(titles: impl IntoIterator<Item = &'a mut String>, hits: impl IntoIterator<Item = &'a mut Hit>) {
+    let mut hits: Vec<_> = hits.into_iter().collect();
+    let marked: Vec<String> = hits.iter_mut().map(|hit| {
+        let raw = std::mem::take(&mut hit.snippet);
+        hit.snippet = raw.replace([MARK_START, MARK_END], "");
+        raw
+    }).collect();
+    let mut scope = Scope::new();
+    for title in titles {
+        scope.cut_text(title, 120);
+    }
+    for hit in &mut hits {
+        scope.cut_text(&mut hit.session_title, 120);
+        scope.text(&mut hit.snippet);
+    }
+    scope.finish();
+    for (hit, marked) in hits.into_iter().zip(marked) {
+        hit.snippet = if hit.snippet == marked.replace([MARK_START, MARK_END], "") {
+            render_snippet(&marked)
+        } else {
+            escape_html(&hit.snippet)
+        };
+    }
 }
 
 /// Looks hits up by document id, each only if it passes the exact filters.
@@ -402,6 +437,9 @@ pub fn sessions_at(conn: &Connection, p: &Params, public: bool, now: i64) -> Rea
     let Some(grouped) = Grouped::new(p)? else { return Ok(empty) };
     // One snapshot for every statement. The public HTTP scope may already hold one for authorization.
     let _tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    if public && !crate::store::search_rules_current(conn)? {
+        return Ok(empty);
+    }
     let (any, wide_sids) = sessions_for_filters(conn, p, public)?;
     if !any {
         return Ok(empty);
@@ -524,6 +562,13 @@ impl Grouped {
                 });
             }
         }
+        let mut titles = Vec::new();
+        let mut hits = Vec::new();
+        for group in &mut items {
+            titles.push(&mut group.session_title);
+            hits.extend(group.hits.iter_mut());
+        }
+        scrub_response(titles, hits);
         Ok(Page { items, next_cursor: None })
     }
 }

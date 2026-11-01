@@ -217,7 +217,14 @@ async fn facets(State(state): State<AppState>, Extension(scope): Extension<Scope
 }
 
 async fn sessions(State(state): State<AppState>, Extension(scope): Extension<Scope>, Query(params): QueryParams) -> Response {
-    scoped_json(&state, scope, None, move |_, conn| read::sessions::list_scoped(conn, &Params(params), scope.public)).await
+    scoped_json(&state, scope, None, move |_, conn| {
+        let mut page = read::sessions::list_scoped(conn, &Params(params), scope.public)?;
+        if scope.public {
+            read::redaction::sessions(&mut page);
+        }
+        Ok(page)
+    })
+    .await
 }
 
 async fn session(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>) -> Response {
@@ -225,6 +232,7 @@ async fn session(State(state): State<AppState>, Extension(scope): Extension<Scop
         let mut detail = read::sessions::detail(conn, &id)?;
         if scope.public {
             read::publishing::detail(conn, &mut detail)?;
+            read::redaction::detail(&mut detail);
         }
         Ok(detail)
     })
@@ -232,11 +240,25 @@ async fn session(State(state): State<AppState>, Extension(scope): Extension<Scop
 }
 
 async fn tree(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>) -> Response {
-    scoped_json(&state, scope, Some(id.clone()), move |_, conn| read::sessions::tree_scoped(conn, &id, scope.public)).await
+    scoped_json(&state, scope, Some(id.clone()), move |_, conn| {
+        let mut tree = read::sessions::tree_scoped(conn, &id, scope.public)?;
+        if scope.public {
+            read::redaction::tree(&mut tree);
+        }
+        Ok(tree)
+    })
+    .await
 }
 
 async fn turns(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>, Query(params): QueryParams) -> Response {
-    scoped_json(&state, scope, Some(id.clone()), move |_, conn| read::sessions::turns(conn, &id, &Params(params))).await
+    scoped_json(&state, scope, Some(id.clone()), move |_, conn| {
+        let mut turns = read::sessions::turns(conn, &id, &Params(params))?;
+        if scope.public {
+            read::redaction::turns(&mut turns);
+        }
+        Ok(turns)
+    })
+    .await
 }
 
 async fn updates(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>, Query(params): QueryParams) -> Response {
@@ -246,6 +268,7 @@ async fn updates(State(state): State<AppState>, Extension(scope): Extension<Scop
             if let Some(session) = &mut updates.session {
                 read::publishing::summary(conn, session)?;
             }
+            read::redaction::updates(&mut updates);
         }
         Ok(updates)
     })
@@ -257,8 +280,9 @@ async fn trace(State(state): State<AppState>, Extension(scope): Extension<Scope>
     let gzip = accepts_gzip(&headers);
     if scope.public {
         let trace = match scoped_query(&state, scope, Some(id.clone()), move |store, conn| {
-            let mut trace = read::trace::trace(conn, &store.blobs, &id)?;
+            let mut trace = read::trace::trace_scoped(conn, &store.blobs, &id, true)?;
             read::publishing::trace(conn, &mut trace)?;
+            read::redaction::trace(&mut trace);
             Ok(trace)
         }).await {
             Ok(trace) => trace,
@@ -299,7 +323,12 @@ async fn raw_entry(State(state): State<AppState>, Extension(scope): Extension<Sc
         Ok(seq) => seq,
         Err(e) => return read_error(e),
     };
-    match scoped_query(&state, scope, Some(id.clone()), move |store, conn| read::entries::raw(conn, &store.blobs, &id, seq)).await {
+    match scoped_query(&state, scope, Some(id.clone()), move |store, conn| {
+        let line = read::entries::raw(conn, &store.blobs, &id, seq)?;
+        Ok(if scope.public { read::redaction::raw(line) } else { line })
+    })
+    .await
+    {
         Ok(line) => (
             [(header::CONTENT_TYPE, "application/json; charset=utf-8"), (header::X_CONTENT_TYPE_OPTIONS, "nosniff")],
             line,

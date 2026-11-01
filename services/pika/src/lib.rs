@@ -11,6 +11,7 @@ pub mod ingest;
 pub mod pairing;
 pub mod ratelimit;
 pub mod read;
+pub mod redact;
 pub mod reindex;
 pub mod relay;
 pub mod requests;

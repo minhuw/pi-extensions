@@ -119,11 +119,27 @@ The protocol and the read API are specified in [`docs/SPEC.md`](docs/SPEC.md).
 
 Open **Settings → Published projects** and publish the projects you want to share. Every project starts private. Publishing includes all existing and future trajectories with that project name, across machines and directories; pika currently identifies projects by the repository or working directory basename.
 
-The public gallery is at `<url>/public`, a project's gallery at `<url>/public?project=<name>`, and an individual trajectory at `<url>/public/s/<sessionId>`. Visitors need no login and can search published trajectories (`<url>/public/search`), replay them, inspect model and tool records, and read transcripts. Publishing exposes the session's prompts, responses, thinking, tool inputs and outputs, images, raw entries, and metadata without automatic redaction. Captured provider request payloads remain private, and the public UI has no relay or management controls.
+The public gallery is at `<url>/public`, a project's gallery at `<url>/public?project=<name>`, and an individual trajectory at `<url>/public/s/<sessionId>`. Visitors need no login and can search published trajectories (`<url>/public/search`), replay them, inspect model and tool records, and read transcripts. Publishing exposes the session's prompts, responses, thinking, tool inputs and outputs, images, raw entries, and metadata, with credentials scrubbed (see [Redaction](#redaction)). Captured provider request payloads remain private, and the public UI has no relay or management controls.
 
 With pika's built-in password, visitors who aren't signed in find the gallery on their own: the server's address opens it once any project is published, a link to a published trajectory (`<url>/s/<sessionId>`) opens its public page, and the login page links to it. Everything else still asks for the password. **Sign in** in the public pages' top band opens the same page in your own view. Signed in, **View as guest** in the top band opens the page you're on as a visitor sees it, and **Exit guest view** brings you back.
 
 **Unpublish** removes access on subsequent requests, including direct image and raw-entry links. Public API responses disable caching; copies already saved by visitors cannot be recalled. Settings survive server restarts and `pika reindex`.
+
+#### Redaction
+
+The server scrubs credentials from everything the public pages and `api/public/v1/` return: titles, prompts, replies, tool summaries, entries, raw lines, and trace texts. A credential becomes `[REDACTED:<KIND>]`, where the kind is `PRIVATE_KEY`, `API_KEY`, `TOKEN`, `PASSWORD`, or `SECRET`, and the whole string value of a field in session content named for a secret (`password`, `api_key`, `token`, `authorization`, `cookie`, `key`, …) becomes `[REDACTED]`. Short or word values under exactly `key`, such as `"key": "value"` or `"key": "settings"`, stay unchanged. Nothing is kept that could put a value back. It covers:
+
+- PEM private keys;
+- provider and service API keys by their prefixes: OpenAI and Anthropic `sk-…`, GitHub and GitLab tokens, Google `AIza…`, Slack `xox…`, Stripe live keys, AWS access key ids, Hugging Face, Groq, xAI, npm, PyPI, DigitalOcean, and SendGrid keys;
+- JSON Web Tokens and the credential of an `Authorization: Bearer` or `Basic` header;
+- the password in a URL's `user:password@`;
+- values assigned to a secret-named field, as `.env` files, configs, and logs write them (`DB_PASSWORD=…`, `"api_key": "…"`), and passwords, keys, and tokens named in Chinese, Japanese, or Korean.
+
+A credential of at least eight characters found once in a response is also replaced wherever else it appears in that response, so a key read from `.env` and later echoed in prose is scrubbed in both places.
+
+The rules are ported from [magpie](https://github.com/yetone/magpie) (MIT License, Copyright (c) 2026 yetone). They are rule-based: they can miss a secret with no recognisable form, such as a bare password in a sentence, and occasionally redact something harmless. Personal data such as emails and phone numbers, and text inside images, are not redacted; images are served unchanged. Non-image `data:` URLs are scrubbed as text. Review a project before you publish it.
+
+The owner's view under `api/v1/`, the stored lines, entries, and blobs, and what devices upload are unchanged. The one exception is search: its index holds scrubbed text, so search, the owner's included, cannot find a credential by its value, and its snippets and session titles show the markers instead.
 
 With proxy authentication, leave `/public`, `/public/*`, `/api/public/*`, and `/assets/*` open (including your base path), while keeping `/api/v1/*` and owner pages authenticated. The [deployment examples](deploy/) include these rules. With pika's built-in password, no proxy changes are needed.
 
@@ -143,6 +159,10 @@ Relay lets a running Pi session send a text message to any other running Pi sess
 - Search finds words inside Chinese, Japanese, and Korean text, which is written without spaces and so was found only where punctuation happened to set a word apart. The web UI's search groups results by session, with each session's match count, and matches the word being typed as a prefix.
 - The database migrates to schema version 7 when the server opens it, which rebuilds the full-text index (without a full reindex), so the server starts listening only after the rebuild: on the 20%-scale benchmark dataset (half a million entries) it took 84 seconds, and a year of data from five machines takes several minutes. The database grows by about an eighth, and its WAL grows by about a third of the database's size until the next checkpoint, so leave free disk space of about half the database's size. The migration is one-way: a 0.6 binary refuses the migrated database (`database schema version 7 is newer than this pika (6)`), so to go back to 0.6, restore a [backup](#backup) taken before upgrading.
 - The index uses pika's own tokenizer, so other SQLite tools, such as the `sqlite3` shell, can read every table except `search_fts`, which they reject with `no such tokenizer: pika_cjk`. Backups with `.backup` are unaffected.
+- Public pages and public search now scrub credentials (see [Redaction](#redaction)). Redaction itself adds no schema migration.
+- After the schema upgrade finishes, the server starts listening while it rewrites existing search text in the background, a few hundred documents per transaction; a restart resumes where it stopped. Health and owner reads remain available during this rewrite. Until it is done, public search returns no results, and the owner's search may still find text not yet rewritten. The log says when the rewrite starts and finishes.
+- Afterwards the owner's search can no longer find a credential by its value.
+- If you downgrade to an older binary that can open the database and later upgrade again, run `pika reindex` to scrub any text it indexed in between.
 
 ### Upgrading from 0.5
 
@@ -205,7 +225,7 @@ Devices that uploaded after the backup get a gap answer and resend from the serv
 pika reindex
 ```
 
-`pika reindex` rebuilds every derived table from the verbatim lines in one transaction; the read API returns the same output before and after. The server also reindexes on its own when it starts after a schema upgrade. Uploads wait while `reindex` holds the write lock and fail after 10 s, and devices retry them, so on a large database stop the server first or expect a short pause in ingest.
+`pika reindex` rebuilds every derived table from the verbatim lines in one transaction; the read API returns the same output before and after. It indexes search text scrubbed under the current rules, so it also rescrubs documents an older pika indexed. The server also reindexes on its own when it starts after a schema upgrade. Uploads wait while `reindex` holds the write lock and fail after 10 s, and devices retry them, so on a large database stop the server first or expect a short pause in ingest.
 
 ## Docker
 

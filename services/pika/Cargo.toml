@@ -15,6 +15,7 @@ flate2 = "1.1.10"
 futures-util = "0.3.34"
 getrandom = "0.4.3"
 hex = "0.4.3"
+regex = "1"
 rpassword = "7.5.4"
 rusqlite = { version = "0.41.0", features = ["bundled"] }
 rust-embed = "8.13.0"

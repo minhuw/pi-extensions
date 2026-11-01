@@ -65,6 +65,17 @@ fn truncate_strings(v: &mut Value) -> bool {
     }
 }
 
+/// Whether the served original contains a string above the cap, after images have been replaced by URLs. Public
+/// redaction may shorten such a string, but must not change pika's `truncated` metadata.
+fn oversized_strings(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s.len() > MAX_STRING_CHARS && s.chars().nth(MAX_STRING_CHARS).is_some(),
+        Value::Array(items) => items.iter().any(oversized_strings),
+        Value::Object(obj) => obj.values().any(oversized_strings),
+        _ => false,
+    }
+}
+
 /// The parsed line, or the line as a JSON string when it is not JSON.
 fn parse(text: String) -> Value {
     parse_json_lenient(&text).unwrap_or(Value::String(text))
@@ -117,12 +128,19 @@ pub fn list_scoped(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str,
             image.insert("data".into(), Value::String(String::new()));
             image.insert("src".into(), Value::String(format!("{images}/{seq}/image/{index}")));
         });
-        entry.truncated = truncate_strings(&mut raw);
+        entry.truncated = if public { oversized_strings(&raw) } else { truncate_strings(&mut raw) };
         entry.raw = raw;
         if public {
             entry.request_id = None;
         }
         items.push(entry);
+    }
+    if public {
+        // Scrubbed before the cut, which could leave too little of a credential for its rule to recognise.
+        super::redaction::entries(&mut items);
+        for entry in &mut items {
+            truncate_strings(&mut entry.raw);
+        }
     }
     Ok(Entries { items })
 }
@@ -130,6 +148,11 @@ pub fn list_scoped(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str,
 /// The verbatim line of entry `seq`.
 pub fn raw(conn: &Connection, blobs: &BlobStore, id: &str, seq: i64) -> ReadResult<String> {
     let sid = session_sid(conn, id)?;
+    raw_by_sid(conn, blobs, sid, seq)
+}
+
+/// The verbatim line by derived session id, shared with the search rewrite so blob-backed entries read the same way.
+pub(crate) fn raw_by_sid(conn: &Connection, blobs: &BlobStore, sid: i64, seq: i64) -> ReadResult<String> {
     let (data, blob) = conn
         .prepare_cached(
             "SELECT l.data, l.blob FROM entries e JOIN lines l ON l.stream_id = e.sid AND l.offset = e.offset
