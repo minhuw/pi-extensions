@@ -40,6 +40,7 @@ let calls = [];
 let discoveryData = [];
 // Reject inference locally: no gateway, provider credits, or credentials.
 globalThis.fetch = async (url, init) => {
+ if (String(url) === "https://models.dev/api.json") return new Response(null, { status: 503 });
  if (new URL(String(url)).pathname === "/v1/models") return Response.json({ data: discoveryData });
  calls.push({ url: new URL(String(url)), headers: new Headers(init.headers), body: JSON.parse(init.body) });
  return Response.json({ error: { message: "bundled fixture rejection" } }, { status: 400 });

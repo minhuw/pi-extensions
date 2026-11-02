@@ -5,6 +5,7 @@ import {
 	type ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
 import { getAgentDir, readStoredCredential, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { loadModelsDevPricing } from "./catalog-pricing.ts";
 import { emptyMagpieCatalog, sharedMagpieCatalogs, type MagpieCatalogs } from "./catalog.ts";
 import { registerMagpieCompaction } from "./compaction.ts";
 import { addMagpieModelAliases, assertMagpieAliasRoute, magpieRequestContext, resolveMagpieAlias, type MagpieModel } from "./model-aliases.ts";
@@ -41,10 +42,9 @@ function limit(value: unknown, fallback: number): number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
-export function parseModels(value: unknown, origin: string): MagpieModel[] {
+export function parseModels(value: unknown, origin: string, resolvePricing = createMagpiePricingResolver()): MagpieModel[] {
 	if (!object(value) || !Array.isArray(value.data)) throw new Error("Magpie returned an invalid model catalog.");
 	const models: Model<MagpieApi>[] = [];
-	const resolvePricing = createMagpiePricingResolver();
 	const seen = new Set<string>();
 	for (const entry of value.data) {
 		if (!object(entry) || typeof entry.id !== "string" || !entry.id.trim() || seen.has(entry.id)) continue;
@@ -114,7 +114,13 @@ export async function discoverModels(config: Config, signal?: AbortSignal, allow
 		throw new Error("Magpie model discovery failed; check gateway availability, credentials, and /v1/models response.");
 	}
 	if (allowEmpty && object(body) && Array.isArray(body.data) && body.data.length === 0) return [];
-	return parseModels(body, config.origin);
+	const models = parseModels(body, config.origin);
+	if (allowEmpty) return models;
+	const catalogPricing = await loadModelsDevPricing(signal);
+	signal?.throwIfAborted();
+	if (!catalogPricing) return models;
+	const bundled = createMagpiePricingResolver();
+	return parseModels(body, config.origin, id => catalogPricing(id) ?? bundled(id));
 }
 
 export function createMagpieProvider(

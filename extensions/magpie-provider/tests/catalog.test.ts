@@ -2,6 +2,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+
+vi.mock("../catalog-pricing.ts", async importOriginal => ({ ...await importOriginal<object>(), loadModelsDevPricing: async () => undefined }));
 import { normalizeContext, type ModelsPublication, type RefreshModelsContext } from "@earendil-works/pi-ai";
 import { sharedMagpieCatalogs } from "../catalog.ts";
 import { createMagpieProvider } from "../index.ts";

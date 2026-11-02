@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { InMemoryCredentialStore, type Provider } from "@earendil-works/pi-ai";
 import { ModelRegistry, ModelRuntime, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+
+vi.mock("../catalog-pricing.ts", async importOriginal => ({ ...await importOriginal<object>(), loadModelsDevPricing: async () => undefined }));
 import magpie from "../index.ts";
 
 type Command = Parameters<ExtensionAPI["registerCommand"]>[1];

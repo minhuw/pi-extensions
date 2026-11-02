@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { createAgentSession, createMcpExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it, vi } from "vitest";
+
+vi.mock("../catalog-pricing.ts", async importOriginal => ({ ...await importOriginal<object>(), loadModelsDevPricing: async () => undefined }));
 import { parseModels } from "../index.ts";
 
 const extension = join(dirname(fileURLToPath(import.meta.url)), "..", "index.ts");
@@ -55,6 +57,7 @@ it.each(["healthy", "unavailable", "offline", "saved-unavailable", "saved-offlin
 		const requests: Record<string, unknown>[] = [];
 		vi.stubGlobal("fetch", vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
 			const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+			if (url.href === "https://models.dev/api.json") return new Response(null, { status: 503 });
 			if (url.origin !== origin) throw new Error("Unexpected network request");
 			const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
 			const apiKey = saved ? credential.key : "fixture-key";

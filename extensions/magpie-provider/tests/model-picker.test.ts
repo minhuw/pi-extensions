@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { createModels, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime, resolveModelScopeWithDiagnostics } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../catalog-pricing.ts", async importOriginal => ({ ...await importOriginal<object>(), loadModelsDevPricing: async () => undefined }));
 import { createMagpieProvider, parseModels } from "../index.ts";
 import { selectMagpiePickerModels } from "../model-picker.ts";
 

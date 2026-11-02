@@ -1,6 +1,8 @@
 import { calculateCost, createAssistantMessageEventStream, type AssistantMessage, type Model, type ModelCost, type Provider, type Usage } from "@earendil-works/pi-ai";
 import { createExtensionRuntime } from "@earendil-works/pi-coding-agent";
 import { expect, it, vi } from "vitest";
+
+vi.mock("../catalog-pricing.ts", async importOriginal => ({ ...await importOriginal<object>(), loadModelsDevPricing: async () => undefined }));
 import { parseModels } from "../index.ts";
 import { magpieModelName } from "../model-identity.ts";
 import { createMagpiePricingResolver, withMagpiePricing } from "../pricing.ts";

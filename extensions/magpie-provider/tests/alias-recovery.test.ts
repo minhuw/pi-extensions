@@ -5,6 +5,8 @@ import { Agent } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, InMemoryCredentialStore, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it, vi } from "vitest";
+
+vi.mock("../catalog-pricing.ts", async importOriginal => ({ ...await importOriginal<object>(), loadModelsDevPricing: async () => undefined }));
 import { createMagpieProvider } from "../index.ts";
 
 const delegates = vi.hoisted(() => ({ stream: vi.fn(), streamSimple: vi.fn() }));
