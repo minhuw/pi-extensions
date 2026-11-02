@@ -434,6 +434,26 @@ export function createFakeServer({
 		state.browserSessions = state.browserSessions.filter((item) => !item.current);
 	};
 
+	/** `ids` and every recorded descendant, as the server's deletion finds them; cycle-safe. */
+	const descendants = (ids: string[]): string[] => {
+		const found = new Set<string>();
+		const stack = [...ids];
+		while (stack.length) {
+			const id = stack.pop()!;
+			if (found.has(id)) continue;
+			found.add(id);
+			for (const s of sessions) if (s.detail.parentSessionId === id) stack.push(s.detail.id);
+		}
+		return [...found];
+	};
+	const remove = (ids: string[]) => {
+		for (const id of ids) {
+			byId.delete(id);
+			const index = sessions.findIndex((s) => s.detail.id === id);
+			if (index >= 0) sessions.splice(index, 1);
+		}
+	};
+
 	const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
 		const url = new URL(String(input), "http://localhost");
 		calls.push(`${url.pathname}${url.search}`);
@@ -643,9 +663,32 @@ export function createFakeServer({
 			if (model) list = list.filter((s) => s.models.includes(bareModel(model)));
 			return json(200, page(list.map(withoutChildren), params, 50));
 		}
+		if (parts[0] === "projects" && parts.length >= 2) {
+			const family = descendants(sessions.filter((s) => s.detail.project === parts[1]).map((s) => s.detail.id));
+			if (family.length === 0) return json(404, { error: "not_found" });
+			const counts = { deletedSessions: family.length, deletedHerderRuns: runs.filter((r) => r.run.repo === parts[1]).length };
+			if (parts[2] === "deletion") return json(200, counts);
+			if (method === "DELETE") {
+				remove(family);
+				return json(200, counts);
+			}
+			return json(405, { error: "method not allowed" });
+		}
 		if (parts[0] === "sessions") {
 			const session = byId.get(parts[1]);
 			if (!session) return json(404, { error: "not found" });
+			if (parts[2] === "deletion") return json(200, { deletedSessions: descendants([session.detail.id]).length, deletedHerderRuns: 0 });
+			if (parts.length === 2 && method === "DELETE") {
+				const family = descendants([session.detail.id]);
+				remove(family);
+				return json(200, { deletedSessions: family.length, deletedHerderRuns: 0 });
+			}
+			if (parts.length === 2 && method === "PATCH") {
+				const hidden = (body as { hidden?: unknown }).hidden;
+				if (typeof hidden !== "boolean") return json(400, { error: "invalid_body" });
+				session.detail = { ...session.detail, hidden, ...(hidden ? { hiddenBy: session.detail.id } : { hiddenBy: undefined }) };
+				return json(200, withoutChildren(session.detail));
+			}
 			if (parts.length === 2) return json(200, session.detail);
 			if (parts[2] === "turns") return json(200, page(session.turns, params, 100));
 			if (parts[2] === "tree" && tree) return json(200, trees?.[session.detail.id] ?? treeOf(sessions, session.detail.id));

@@ -68,6 +68,13 @@ pub struct SessionSummary {
     /// The web URL of the session's git repository, as its client resolved it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    /// Owner responses only (`crate::hidden::Marks`): whether the session or a recorded ancestor is hidden from the
+    /// public view. Public responses never set it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    /// Owner responses only: the hidden session that hides this one, its own id when the owner hid it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden_by: Option<String>,
     /// The raw sort key, for cursors.
     #[serde(skip)]
     last_at_ms: i64,
@@ -175,6 +182,8 @@ fn summary(r: &Row) -> rusqlite::Result<SessionSummary> {
         child_count: r.get(16)?,
         herder_run_id: r.get(17)?,
         repository: r.get(18)?,
+        hidden: None,
+        hidden_by: None,
         last_at_ms: last_at,
     })
 }
@@ -272,7 +281,11 @@ fn list_query_scoped(p: &Params, limit: i64, public: bool) -> ReadResult<(String
     if root {
         sql.push_str(" AND NOT EXISTS (SELECT 1 FROM sessions parent WHERE parent.id = s.parent_session_id");
         if public {
-            sql.push_str(&format!(" AND parent.project IN ({})", super::publishing::PROJECTS_SQL));
+            // A hidden parent counts as unpublished; its children are hidden with it anyway.
+            sql.push_str(&format!(
+                " AND parent.project IN ({}) AND parent.sid NOT IN (SELECT sid FROM session_hidden)",
+                super::publishing::PROJECTS_SQL
+            ));
         }
         sql.push(')');
     }

@@ -464,13 +464,13 @@ async fn unidentified_buckets_obey_the_daily_row_limit() {
 #[test]
 fn upgrade_from_eight_preserves_existing_settings() {
     let env = env();
-    env.store.write(|tx| tx.execute_batch("INSERT INTO settings VALUES('visitor_test',x'1234'); DROP TABLE visitor_views; DROP TABLE visitor_day_key; PRAGMA user_version=8;")).unwrap();
+    env.store.write(|tx| tx.execute_batch(&format!("{} INSERT INTO settings VALUES('visitor_test',x'1234'); DROP TABLE visitor_views; DROP TABLE visitor_day_key; PRAGMA user_version=8;", common::UNDO_V10))).unwrap();
     let reopened = pika::store::Store::open(env.dir.path().join("data")).unwrap();
     assert_eq!(
         reopened.setting("visitor_test").unwrap(),
         Some(vec![0x12, 0x34])
     );
-    assert_eq!(one(&reopened, "PRAGMA user_version")["user_version"], 9);
+    assert_eq!(one(&reopened, "PRAGMA user_version")["user_version"], 10);
     assert_eq!(
         one(&reopened, "SELECT COUNT(*) AS n FROM visitor_views")["n"],
         0

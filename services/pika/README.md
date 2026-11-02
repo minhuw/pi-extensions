@@ -33,6 +33,8 @@ pika token revoke <device>
 pika token rename <device> <name>
 pika reindex
 pika export <sessionId>
+pika delete session <sessionId> [--yes]
+pika delete project <name> [--yes]
 ```
 
 | Command | What it does |
@@ -46,10 +48,12 @@ pika export <sessionId>
 | `token rename <device> <name>` | Renames a device, with or without a token, and prints `renamed <id> to <name>`. Its id, and everything recorded under it, stay. |
 | `reindex` | Rebuilds every derived table (sessions, entries, turns, model and tool calls, links, Herder runs, search index) from the stored verbatim lines. |
 | `export <sessionId>` | Writes a session's JSONL to stdout, byte-identical to the original file. |
+| `delete session <sessionId>` | Deletes a session and every session it started (subagents, Herder steps, tickets), for good; see [Deleting and hiding](#deleting-and-hiding). Says what it will delete and asks `Delete? [y/N]` on a terminal; `--yes` (`-y`) skips the question. Without a terminal and without `--yes` it refuses. Prints the counts afterwards. |
+| `delete project <name>` | Deletes every session of a project, the sessions they started, and the project's Herder runs, and unpublishes it, asking as `delete session` does. |
 
 `<device>` is a device id, or a name that exactly one device has; when several share it, the command fails and lists their ids, so use one of those. `revoke` considers only devices that have a token.
 
-Every command opens the data directory and creates it if needed. `password`, `token`, `reindex`, and `export` can run while the server is running; a new stored password and revoked tokens apply at once.
+Every command opens the data directory and creates it if needed. `password`, `token`, `reindex`, `export`, and `delete` can run while the server is running; a new stored password, revoked tokens, and deletions apply at once.
 
 | Flag | Environment variable | Default | Meaning |
 | --- | --- | --- | --- |
@@ -126,6 +130,13 @@ With pika's built-in password, visitors who aren't signed in find the gallery on
 
 **Unpublish** removes access on subsequent requests, including direct image and raw-entry links. Public API responses disable caching; copies already saved by visitors cannot be recalled. Settings survive server restarts and `pika reindex`.
 
+### Deleting and hiding
+
+- **Hide from public:** a session's page has **Hide from public**, which keeps the session, and every session it started, away from visitors even though its project is published: the public gallery, search, trees, and child counts leave them out, and their public links answer 404 as an unpublished session's do. Sessions the hidden one starts later are hidden too. You still see them everywhere, marked **Hidden from public**; a session hidden with the one that started it says so and links there, where **Show in public** reverses it. A project whose sessions are all hidden leaves the gallery. Settings counts the hidden sessions of each project. Hiding survives restarts and `pika reindex`.
+- **Delete a session:** **Delete…** on a session's page deletes the session and every session it started, after a confirmation that says how many go. A child's deletion keeps its parent, unless their links form a cycle: then every session on the cycle goes. Everything recorded for them goes: their lines, derived rows, search entries, captured requests, and the stored blocks nothing else uses. Blocks other sessions share stay.
+- **Delete a project:** **Delete project…** in **Settings → Published projects** deletes every session of the project, the sessions they started (also those filed under another project), and the project's Herder runs with their goals, plans, and step sessions, after you type the project's name. The project is also unpublished, so a later project of the same name starts private.
+- **For good:** deletion cannot be undone; restore a [backup](#backup) to get data back. A Pi that is still running a deleted session keeps working, and pika accepts and discards what it uploads, so the session does not come back, not even after `pika reindex`. Sessions it starts afterwards (subagents, tickets, and children still waiting in an upload queue) are deleted as they arrive, as are new steps of a deleted project's Herder runs, so they never show up, not even in public as sessions without a parent. `pika delete session` and `pika delete project` do the same from the command line.
+
 #### Redaction
 
 The server scrubs credentials from everything the public pages and `api/public/v1/` return: titles, prompts, replies, tool summaries, entries, raw lines, and trace texts. A credential becomes `[REDACTED:<KIND>]`, where the kind is `PRIVATE_KEY`, `API_KEY`, `TOKEN`, `PASSWORD`, or `SECRET`, and the whole string value of a field in session content named for a secret (`password`, `api_key`, `token`, `authorization`, `cookie`, `key`, …) becomes `[REDACTED]`. Short or word values under exactly `key`, such as `"key": "value"` or `"key": "settings"`, stay unchanged. Nothing is kept that could put a value back. It covers:
@@ -176,6 +187,7 @@ Relay lets a running Pi session send a text message to any other running Pi sess
 - Update the Pi extensions alongside the server to receive models.dev pricing estimates. The Magpie provider matches model names and caches public prices for 24 hours; pika stores the per-call costs uploaded by Pi. Upgrading the server alone does not change client pricing or recalculate historical costs.
 - pika names models by their bare name everywhere: the part of Pi's model id after the last `/`, without an `@` suffix, so `codex/gpt-6.1-sol`, `auto/gpt-6.1-sol`, and `gpt-6.1-sol@1m` are all `gpt-6.1-sol`, and the Model filter has one option per model. Older `?model=` links that name a route still work. The provider is no longer shown in the UI or returned by the read API; the stored lines, raw entries, exports, and captured request payloads keep the ids and provider as Pi wrote them. The first start rewrites the model names of existing sessions once, in one transaction, without a reindex.
 - The server includes the repository and ticket display improvements made since 0.7.0. The database upgrades to schema version 9; a 0.7.0 binary cannot open the upgraded database, so keep a [backup](#backup) if you may need to roll back.
+- Sessions and projects can be deleted and sessions hidden from the public view (see [Deleting and hiding](#deleting-and-hiding)). The database upgrades to schema version 10 when the server opens it, without a reindex: it adds the tables of deleted streams and hidden sessions and three indexes, which take a moment to build on a large database. Older binaries cannot open it, so keep a [backup](#backup). No extension update is needed: current extensions treat a deleted session's acknowledgement like any other.
 
 ### Upgrading from 0.6
 

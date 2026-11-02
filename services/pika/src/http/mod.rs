@@ -1,6 +1,7 @@
 mod auth;
 mod devices;
 mod ingest;
+mod manage;
 mod read;
 mod relay;
 mod ui;
@@ -14,7 +15,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde_json::json;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -123,6 +124,10 @@ pub fn router(state: AppState) -> Router {
     // Browser sessions sit under `auth/` because `sessions` is the pi session list.
     let protected = read::routes()
         .route("/visitor-origins", get(visitor::origins))
+        .route("/sessions/{id}", patch(manage::update_session).delete(manage::delete_session))
+        .route("/sessions/{id}/deletion", get(manage::session_deletion))
+        .route("/projects/{name}", delete(manage::delete_project))
+        .route("/projects/{name}/deletion", get(manage::project_deletion))
         .route("/logout", post(auth::logout))
         .route("/auth/sessions", get(auth::sessions))
         .route("/auth/sessions/revoke-all", post(auth::revoke_all))

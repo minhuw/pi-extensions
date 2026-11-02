@@ -10,7 +10,8 @@ pub const KEY: &str = "published_projects";
 /// JSON arrays are stored as BLOBs in settings; cast explicitly for SQLite JSON functions.
 pub const PROJECTS_SQL: &str =
     "SELECT value FROM json_each(CAST(COALESCE((SELECT value FROM settings WHERE key = 'published_projects'), x'5b5d') AS TEXT))";
-pub const SESSION_FILTER: &str = "s.project IN (SELECT value FROM json_each(CAST(COALESCE((SELECT value FROM settings WHERE key = 'published_projects'), x'5b5d') AS TEXT)))";
+/// A session is public when its project is selected and neither it nor a recorded ancestor is hidden (`crate::hidden`).
+pub const SESSION_FILTER: &str = "s.project IN (SELECT value FROM json_each(CAST(COALESCE((SELECT value FROM settings WHERE key = 'published_projects'), x'5b5d') AS TEXT))) AND s.sid NOT IN (SELECT sid FROM session_hidden)";
 
 #[derive(Serialize)]
 pub struct Publishing {
@@ -22,7 +23,14 @@ pub struct Publishing {
 pub struct Project {
     pub project: String,
     pub session_count: i64,
+    /// How many of `session_count` are hidden from the public view, themselves or through an ancestor.
+    pub hidden_count: i64,
     pub published: bool,
+}
+
+/// Whether `project` is in the publishing selection.
+pub fn is_selected(conn: &Connection, project: &str) -> ReadResult<bool> {
+    Ok(selected(conn)?.contains(project))
 }
 
 fn selected(conn: &Connection) -> ReadResult<BTreeSet<String>> {
@@ -42,12 +50,20 @@ pub fn settings(conn: &Connection) -> ReadResult<Publishing> {
     for project in &selected {
         counts.entry(project.clone()).or_default();
     }
+    let hidden: BTreeMap<String, i64> = conn
+        .prepare_cached(
+            "SELECT s.project, COUNT(*) FROM session_hidden h JOIN sessions s USING (sid)
+             WHERE s.project IS NOT NULL AND s.project <> '' GROUP BY s.project",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
     Ok(Publishing {
         projects: counts
             .into_iter()
             .map(|(project, session_count)| {
                 let published = selected.contains(&project);
-                Project { project, session_count, published }
+                let hidden_count = hidden.get(&project).copied().unwrap_or(0);
+                Project { project, session_count, hidden_count, published }
             })
             .collect(),
     })
@@ -89,6 +105,8 @@ pub fn summary(conn: &Connection, summary: &mut super::sessions::SessionSummary)
     }
     summary.link = None;
     summary.herder_run_id = None;
+    summary.hidden = None;
+    summary.hidden_by = None;
     summary.child_count = conn.query_row(
         &format!("SELECT COUNT(*) FROM sessions s WHERE s.parent_session_id = ?1 AND {SESSION_FILTER}"),
         [&summary.id],

@@ -220,22 +220,28 @@ export const BUTTON = {
 	quiet: `${BUTTON_BASE} text-muted hover:bg-hover hover:text-ink`,
 };
 
-/** A modal dialog frame: Escape or the backdrop cancels. The caller focuses what should have focus first. */
+/**
+ * A modal dialog frame: Escape or the backdrop cancels, except while `locked`. The caller focuses what should have
+ * focus first.
+ */
 export function Dialog({
 	title,
 	children,
 	onCancel,
 	label,
+	locked = false,
 }: {
 	title: string;
 	children: ReactNode;
 	onCancel: () => void;
 	/** `data-dialog` value, for tests and e2e. */
 	label?: string;
+	/** An action that closing would not stop is in flight: Escape and the backdrop do nothing. */
+	locked?: boolean;
 }) {
 	const titleId = useId();
 	const cancel = useRef(onCancel);
-	cancel.current = onCancel;
+	cancel.current = locked ? () => {} : onCancel;
 	useEffect(() => {
 		const onKeyDown = (event: KeyboardEvent) => {
 			if (event.key !== "Escape") return;
@@ -246,7 +252,7 @@ export function Dialog({
 		return () => window.removeEventListener("keydown", onKeyDown);
 	}, []);
 	return (
-		<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-6 dark:bg-black/50" onClick={onCancel}>
+		<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-6 dark:bg-black/50" onClick={() => cancel.current()}>
 			<div
 				role="dialog"
 				aria-modal="true"
@@ -264,12 +270,16 @@ export function Dialog({
 	);
 }
 
-/** A modal confirmation; Escape or the backdrop cancels, and Cancel has focus first. */
+/**
+ * A modal confirmation; Escape or the backdrop cancels, and Cancel has focus first. `busy` disables the confirmation;
+ * `locked` also disables Cancel, Escape, and the backdrop while the confirmed action runs.
+ */
 export function ConfirmDialog({
 	title,
 	children,
 	confirmLabel,
 	busy = false,
+	locked = false,
 	onConfirm,
 	onCancel,
 }: {
@@ -277,6 +287,7 @@ export function ConfirmDialog({
 	children: ReactNode;
 	confirmLabel: string;
 	busy?: boolean;
+	locked?: boolean;
 	onConfirm: () => void;
 	onCancel: () => void;
 }) {
@@ -285,13 +296,13 @@ export function ConfirmDialog({
 		cancelRef.current?.focus();
 	}, []);
 	return (
-		<Dialog title={title} onCancel={onCancel}>
+		<Dialog title={title} onCancel={onCancel} locked={locked}>
 			<div className="mt-2 text-[14px] text-muted">{children}</div>
 			<div className="mt-5 flex justify-end gap-2">
-				<button ref={cancelRef} type="button" onClick={onCancel} className={BUTTON.secondary}>
+				<button ref={cancelRef} type="button" onClick={onCancel} disabled={locked} className={BUTTON.secondary}>
 					Cancel
 				</button>
-				<button type="button" onClick={onConfirm} disabled={busy} className={BUTTON.danger}>
+				<button type="button" onClick={onConfirm} disabled={busy || locked} className={BUTTON.danger}>
 					{confirmLabel}
 				</button>
 			</div>

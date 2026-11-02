@@ -72,7 +72,14 @@ export interface VisitorOrigins {
 }
 
 export interface PublishingSettings {
-	projects: { project: string; sessionCount: number; published: boolean }[];
+	/** `hiddenCount` counts the sessions hidden from the public view; missing from servers before deletion and hiding. */
+	projects: { project: string; sessionCount: number; hiddenCount?: number; published: boolean }[];
+}
+
+/** What a deletion removed, or would remove. */
+export interface Deletion {
+	deletedSessions: number;
+	deletedHerderRuns: number;
 }
 
 export interface SessionFilters {
@@ -176,6 +183,31 @@ export class PikaApi {
 
 	setPublished(project: string, published: boolean): Promise<PublishingSettings> {
 		return this.send("settings/publishing", "PATCH", { project, published });
+	}
+
+	/** Counts what deleting the session (with its recorded descendants) would delete. */
+	sessionDeletion(id: string): Promise<Deletion> {
+		return this.request(`sessions/${encodeURIComponent(id)}/deletion`);
+	}
+
+	/** Deletes the session and its recorded descendants for good. */
+	deleteSession(id: string): Promise<Deletion> {
+		return this.send(`sessions/${encodeURIComponent(id)}`, "DELETE");
+	}
+
+	/** Hides the session, and so its descendants, from the public view, or shows it again. */
+	setSessionHidden(id: string, hidden: boolean): Promise<SessionSummary> {
+		return this.send(`sessions/${encodeURIComponent(id)}`, "PATCH", { hidden });
+	}
+
+	/** Counts what deleting the project would delete. */
+	projectDeletion(project: string): Promise<Deletion> {
+		return this.request(`projects/${encodeURIComponent(project)}/deletion`);
+	}
+
+	/** Deletes the project's sessions, their descendants, and its Herder runs, and unpublishes it. */
+	deleteProject(project: string): Promise<Deletion> {
+		return this.send(`projects/${encodeURIComponent(project)}`, "DELETE");
 	}
 
 	facets(): Promise<Facets> {

@@ -197,7 +197,8 @@ async fn world() -> App {
 }
 
 /// Fields the public routes leave out of a published session, whatever its content.
-const UNPUBLISHED_FIELDS: [&str; 3] = ["requestId", "link", "herderRunId"];
+/// `hidden` and `hiddenBy` mark sessions for the owner only.
+const UNPUBLISHED_FIELDS: [&str; 5] = ["requestId", "link", "herderRunId", "hidden", "hiddenBy"];
 
 /// Asserts that `public` is `owner` with only credentials replaced: the same keys (bar those publication leaves
 /// out), the same numbers, booleans and ids, and strings that differ only where `public` has a marker.
@@ -748,7 +749,7 @@ fn indexed_with(store: &Store, credentials: &[&str]) -> Vec<String> {
 fn assert_current_at_version_8(store: &Store) {
     let settings = query(store, "SELECT key, CAST(value AS TEXT) AS value FROM settings WHERE key LIKE 'search%'");
     assert_eq!(settings, query(store, &format!("SELECT '{}' AS key, '{}' AS value", store::SEARCH_RULES, pika::redact::RULES_VERSION)));
-    assert_eq!(one(store, "PRAGMA user_version")["user_version"], json!(9));
+    assert_eq!(one(store, "PRAGMA user_version")["user_version"], json!(10));
 }
 
 #[tokio::test]

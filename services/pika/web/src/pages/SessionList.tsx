@@ -21,6 +21,7 @@ import { useScrollMargin } from "../lib/virtual";
 import { useFamily } from "../tree/data";
 import { continuesAt, defaultExpanded, visibleRows, type FamilyNode } from "../tree/model";
 import { CostDot } from "../trace/parts";
+import { HiddenBadge } from "../session/manage";
 import { Caret, KindIcon, KindPill, lineTones, sessionLabel, TreeLines, TreeStub, type LineTone } from "../tree/parts";
 
 const PAGE_SIZE = 50;
@@ -168,6 +169,7 @@ function SessionCard({ session, depth = 0, lines, tones, parent, tree, toggle, s
 							<Pill tone="green">Live</Pill>
 						</span>
 					)}
+					<HiddenBadge session={session} />
 					{(tree || orphan) && <KindPill kind={kind}>{type}</KindPill>}
 					<TicketBadge ticket={linkTicket(session.link)} />
 					{orphan && (

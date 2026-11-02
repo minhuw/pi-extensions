@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -146,9 +146,44 @@ enum Stored<'a> {
     Blob(String),
 }
 
+/// The stream keys of a batch's streams, requests' sessions, and documents' Herder runs that were deleted
+/// (`crate::delete`): ingest accepts and discards what it sends for them.
+fn tombstones(conn: &rusqlite::Connection, batch: &Batch) -> rusqlite::Result<HashSet<String>> {
+    let keys = batch
+        .streams
+        .iter()
+        .map(|s| s.key.clone())
+        .chain(batch.requests.iter().map(|r| crate::delete::session_key(&r.session_id)))
+        .chain(batch.documents.iter().filter_map(document_run).map(|run| crate::delete::run_key(&run)));
+    let mut dead = HashSet::new();
+    for key in keys {
+        if !dead.contains(&key) && crate::delete::tombstoned(conn, &key)? {
+            dead.insert(key);
+        }
+    }
+    Ok(dead)
+}
+
+/// The blocks that only discarded requests reference, so the batch need not store them.
+fn discarded_blocks<'a>(batch: &'a Batch, dead: &HashSet<String>) -> HashSet<&'a str> {
+    let discarded = |r: &Request| dead.contains(&crate::delete::session_key(&r.session_id));
+    let kept: HashSet<&str> =
+        batch.requests.iter().filter(|r| !discarded(r)).flat_map(|r| r.blocks.iter().map(String::as_str)).collect();
+    batch
+        .requests
+        .iter()
+        .filter(|r| discarded(r))
+        .flat_map(|r| r.blocks.iter().map(String::as_str))
+        .filter(|hash| !kept.contains(hash))
+        .collect()
+}
+
 /// Validates the batch and writes blob files outside the write lock; the database work runs in one transaction.
+/// Lines of deleted streams, requests of deleted sessions, and documents of deleted Herder runs are accepted and
+/// discarded: a deleted stream's `length` is the end of the lines sent, so its client moves on without resending it.
+/// A session whose recorded parent or Herder run was deleted is deleted with its descendants once the batch is
+/// derived (`crate::delete::delete_orphans`); its `length` is the one it reached, and later batches are discarded.
 pub fn apply(store: &Store, device: &str, batch: &Batch) -> Result<BatchResponse, IngestError> {
-    let mut blob_rows = Vec::new();
     for blob in &batch.blobs {
         if !is_hash(&blob.hash) {
             return Err(bad(format!("invalid blob hash {:?}", blob.hash)));
@@ -156,8 +191,6 @@ pub fn apply(store: &Store, device: &str, batch: &Batch) -> Result<BatchResponse
         if sha256_hex(blob.data.as_bytes()) != blob.hash {
             return Err(bad(format!("blob {} does not match its hash", blob.hash)));
         }
-        let stored = store.blobs.put(&blob.hash, blob.data.as_bytes())?;
-        blob_rows.push((blob.hash.clone(), blob.data.len() as i64, stored as i64));
     }
     let mut kinds = Vec::new();
     let mut stored_lines: Vec<Vec<Stored>> = Vec::new();
@@ -173,10 +206,7 @@ pub fn apply(store: &Store, device: &str, batch: &Batch) -> Result<BatchResponse
                 return Err(bad(format!("a line of {} contains a newline", stream.key)));
             }
             if line.len() > LINE_BLOB_THRESHOLD {
-                let hash = sha256_hex(line.as_bytes());
-                let stored = store.blobs.put(&hash, line.as_bytes())?;
-                blob_rows.push((hash.clone(), line.len() as i64, stored as i64));
-                lines.push(Stored::Blob(hash));
+                lines.push(Stored::Blob(sha256_hex(line.as_bytes())));
             } else {
                 lines.push(Stored::Inline(line));
             }
@@ -200,25 +230,70 @@ pub fn apply(store: &Store, device: &str, batch: &Batch) -> Result<BatchResponse
             return Err(bad("document without key or kind"));
         }
     }
+    // Compress and write blob files before taking the write lock, except those only discarded data needs. The
+    // transaction checks the tombstones again and writes any file it needs that is missing, also one a concurrent
+    // deletion removed.
+    let dead = store.read(|conn| tombstones(conn, batch))?;
+    let discarded = discarded_blocks(batch, &dead);
+    for blob in batch.blobs.iter().filter(|b| !discarded.contains(b.hash.as_str())) {
+        store.blobs.put(&blob.hash, blob.data.as_bytes())?;
+    }
+    for ((stream, lines), stored) in batch.streams.iter().map(|s| (s, &s.lines)).zip(&stored_lines) {
+        if dead.contains(&stream.key) {
+            continue;
+        }
+        for (line, stored) in lines.iter().zip(stored) {
+            if let Stored::Blob(hash) = stored {
+                store.blobs.put(hash, line.as_bytes())?;
+            }
+        }
+    }
 
-    store.write(|tx| {
+    let (response, collected) = store.write(|tx| {
         let now = now_ms();
+        let dead = tombstones(tx, batch)?;
+        let discarded = discarded_blocks(batch, &dead);
         let mut new_blob = tx.prepare_cached("INSERT OR IGNORE INTO blobs (hash, size, stored) VALUES (?1, ?2, ?3)")?;
-        for (hash, size, stored) in &blob_rows {
-            if new_blob.execute(params![hash, size, stored])? > 0 {
-                crate::requests::blob_arrived(tx, hash)?;
+        let mut awaited = tx.prepare_cached("SELECT 1 FROM request_missing WHERE hash = ?1 LIMIT 1")?;
+        for blob in &batch.blobs {
+            if discarded.contains(blob.hash.as_str()) && awaited.query_row([&blob.hash], |_| Ok(())).optional()?.is_none() {
+                continue;
+            }
+            // A stat when the file exists; it may not, after a deletion removed it (see `crate::delete`).
+            let stored = store.blobs.put(&blob.hash, blob.data.as_bytes())?;
+            if new_blob.execute(params![blob.hash, blob.data.len() as i64, stored as i64])? > 0 {
+                crate::requests::blob_arrived(tx, &blob.hash)?;
             }
         }
         let mut lengths = BTreeMap::new();
         for ((stream, kind), lines) in batch.streams.iter().zip(&kinds).zip(&stored_lines) {
+            if dead.contains(&stream.key) {
+                let length = stream.offset + stream.lines.iter().map(|l| l.len() as u64 + 1).sum::<u64>();
+                lengths.insert(stream.key.clone(), StreamLength { length });
+                continue;
+            }
+            for (line, stored) in stream.lines.iter().zip(lines) {
+                if let Stored::Blob(hash) = stored {
+                    let size = store.blobs.put(hash, line.as_bytes())?;
+                    if new_blob.execute(params![hash, line.len() as i64, size as i64])? > 0 {
+                        crate::requests::blob_arrived(tx, hash)?;
+                    }
+                }
+            }
             let length = append_stream(tx, device, stream, *kind, lines, now)?;
             lengths.insert(stream.key.clone(), StreamLength { length });
         }
         for document in &batch.documents {
+            if document_run(document).is_some_and(|run| dead.contains(&crate::delete::run_key(&run))) {
+                continue;
+            }
             upsert_document(tx, device, document, now)?;
         }
         let mut missing = BTreeSet::new();
         for r in &batch.requests {
+            if dead.contains(&crate::delete::session_key(&r.session_id)) {
+                continue;
+            }
             let timing = r.timing.as_ref().and_then(crate::requests::timing);
             let new = crate::requests::NewRequest {
                 id: &r.id,
@@ -241,8 +316,32 @@ pub fn apply(store: &Store, device: &str, batch: &Batch) -> Result<BatchResponse
             })?;
             missing.extend(lacking);
         }
-        Ok(BatchResponse { streams: lengths, missing_blobs: missing.into_iter().collect() })
-    })
+        // A session whose recorded parent or Herder run was deleted goes too, now that its lines are derived and its
+        // requests stored: from then on it is tombstoned, and its client moves on past the lengths reported above.
+        let sessions = batch
+            .streams
+            .iter()
+            .zip(&kinds)
+            .filter(|(s, kind)| **kind == StreamKind::Session && !dead.contains(&s.key))
+            .map(|(s, kind)| &s.key[kind.key_prefix().len()..]);
+        let collected = crate::delete::delete_orphans(tx, sessions)?;
+        if !collected.is_empty() {
+            // Only the requests that remain still await their blocks.
+            let mut still = BTreeSet::new();
+            for hash in missing {
+                if awaited.query_row([&hash], |_| Ok(())).optional()?.is_some() {
+                    still.insert(hash);
+                }
+            }
+            missing = still;
+        }
+        Ok::<_, IngestError>((BatchResponse { streams: lengths, missing_blobs: missing.into_iter().collect() }, collected))
+    })?;
+    // As a deletion does, after the commit (see `crate::delete`). The batch is stored either way.
+    if let Err(e) = crate::delete::remove_blob_files(store, collected) {
+        tracing::warn!("removing the blob files of deleted sessions: {e:#}");
+    }
+    Ok(response)
 }
 
 fn append_stream(
@@ -340,11 +439,16 @@ fn append_stream(
     Ok(new_length)
 }
 
+/// The Herder run a document belongs to: its `runId`, else the run its key names.
+fn document_run(d: &Document) -> Option<String> {
+    d.run_id.clone().or_else(|| {
+        d.key.strip_prefix("herder:").and_then(|rest| rest.split_once(':')).map(|(run, _)| run.to_owned())
+    })
+}
+
 fn upsert_document(tx: &Transaction, device: &str, d: &Document, now: i64) -> Result<(), IngestError> {
     let sha256 = d.sha256.clone().unwrap_or_else(|| sha256_hex(d.content.as_bytes()));
-    let run_id = d.run_id.clone().or_else(|| {
-        d.key.strip_prefix("herder:").and_then(|rest| rest.split_once(':')).map(|(run, _)| run.to_owned())
-    });
+    let run_id = document_run(d);
     tx.prepare_cached(
         "INSERT INTO documents (key, kind, run_id, content, sha256, device, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)

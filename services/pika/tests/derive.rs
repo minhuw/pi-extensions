@@ -600,7 +600,7 @@ fn opening_a_version_7_database_derives_repositories_from_stored_meta() {
     drop(conn);
 
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(9));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(10));
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     assert_eq!(store.setting("derived_generation").unwrap(), None);
     assert_eq!(dump_derived(&store), derived);

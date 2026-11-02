@@ -23,11 +23,13 @@ pub struct ReindexStats {
 
 /// Rebuilds every derived table from the verbatim lines in one transaction, streaming each stream in chunks.
 pub fn reindex(store: &Store) -> Result<ReindexStats> {
-    store.write(|tx| {
+    let (stats, collected) = store.write(|tx| {
         for table in DERIVED_TABLES {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
         store::clear_search_index(tx)?;
+        // Derived from the owner's flags (`crate::hidden`), rebuilt below once every session is recorded.
+        tx.execute("DELETE FROM session_hidden", [])?;
         // Every document is indexed again below, scrubbed.
         store::set_search_rules_current(tx)?;
         tx.execute("DELETE FROM settings WHERE key = ?1", [store::NEEDS_REINDEX])?;
@@ -77,8 +79,15 @@ pub fn reindex(store: &Store) -> Result<ReindexStats> {
                 derive::apply_lines(tx, &info, &lines)?;
             }
         }
-        Ok(stats)
-    })
+        // Ingest deletes a session whose parent or Herder run was deleted (`crate::delete::delete_orphans`); any such
+        // session that remains goes now, so the replay ends as ingest does.
+        let collected = crate::delete::delete_all_orphans(tx)?;
+        // Derivation kept it current as sessions were recorded; rebuilding it from the flags settles any order.
+        crate::hidden::rebuild(tx)?;
+        Ok::<_, anyhow::Error>((stats, collected))
+    })?;
+    crate::delete::remove_blob_files(store, collected)?;
+    Ok(stats)
 }
 
 /// A cursor is valid only for the rules it was written under. Legacy, damaged, or older-rule progress restarts

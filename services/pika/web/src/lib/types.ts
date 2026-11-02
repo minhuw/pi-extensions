@@ -72,6 +72,13 @@ export interface SessionSummary {
 	 * git or without a usable remote, and when the client did not send it.
 	 */
 	repository?: string;
+	/**
+	 * Owner views only: whether the session, or a recorded ancestor, is hidden from the public view. Public responses
+	 * never have it.
+	 */
+	hidden?: boolean;
+	/** Owner views only: the hidden session that hides this one; its own id when it is hidden itself. */
+	hiddenBy?: string;
 }
 
 export type ChildSession = SessionSummary & { parentToolCallId?: string };

@@ -346,7 +346,7 @@ async fn session_summary_detail_and_children() {
             "title": "Fix flaky widget test", "startedAt": "2026-10-20T09:00:00.000Z", "lastAt": "2026-10-20T09:02:11.000Z",
             "durationMs": 131_000, "entryCount": 16, "models": ["claude-sonnet-4-5", "gpt-5"],
             "tokens": { "input": 8300, "output": 730, "cacheRead": 9900, "cacheWrite": 100 },
-            "parentSessionId": "parent-0001", "link": link["data"], "childCount": 2,
+            "parentSessionId": "parent-0001", "link": link["data"], "childCount": 2, "hidden": false,
         })
     );
     // The list item is the same summary.
@@ -1811,8 +1811,8 @@ async fn publication_is_opt_in_and_settings_require_login() {
     assert_eq!(
         settings.json(),
         json!({ "projects": [
-        { "project": "gadgets", "sessionCount": 1, "published": false },
-        { "project": "widgets", "sessionCount": 5, "published": false }
+        { "project": "gadgets", "sessionCount": 1, "hiddenCount": 0, "published": false },
+        { "project": "widgets", "sessionCount": 5, "hiddenCount": 0, "published": false }
     ] })
     );
     let private_model = lines(&[json!({ "type": "message", "id": "private-model", "parentId": "d0000004",
@@ -2006,7 +2006,7 @@ async fn publishing_settings_are_atomic_persistent_and_keep_missing_selections()
     assert_eq!(public(&app, &format!("sessions/{SESSION_ID}")).await.status, StatusCode::OK);
     // A selection remains manageable after all its current derived sessions disappear.
     app.env.store.write(|tx| tx.execute("DELETE FROM sessions WHERE project = 'gadgets'", [])).unwrap();
-    assert_eq!(app.json("settings/publishing").await["projects"][0], json!({ "project": "gadgets", "sessionCount": 0, "published": true }));
+    assert_eq!(app.json("settings/publishing").await["projects"][0], json!({ "project": "gadgets", "sessionCount": 0, "hiddenCount": 0, "published": true }));
     assert_eq!(publish(&app, "gadgets", false, None).await.status, StatusCode::OK);
     assert_eq!(app.json("settings/publishing").await["projects"].as_array().unwrap().len(), 1);
     let (a, b) = tokio::join!(publish(&app, "widgets", false, None), publish(&app, "widgets", false, None));

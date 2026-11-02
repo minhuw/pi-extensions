@@ -182,7 +182,7 @@ fn newest_first_search_filters_before_joining() {
 }
 
 /// Public search builds the published sessions' sid bits once from the project index and checks each hit's session
-/// against publication; it still reads the index newest first, with no sort.
+/// against publication and the hidden sessions' primary key; it still reads the index newest first, with no sort.
 #[test]
 fn public_search_checks_publication_without_sorting() {
     with_conn(|conn| {
@@ -191,20 +191,23 @@ fn public_search_checks_publication_without_sorting() {
             plan(conn, &statement.sql, Some(statement.args)),
             [
                 "SCAN search_fts VIRTUAL TABLE INDEX 192:M1",
-                "LIST SUBQUERY 3",
+                "LIST SUBQUERY 4",
                 "SEARCH s USING COVERING INDEX sessions_project (project=?)",
                 "LIST SUBQUERY 2",
                 "SCAN json_each VIRTUAL TABLE INDEX 1:",
                 "SCALAR SUBQUERY 1",
                 "SEARCH settings USING PRIMARY KEY (key=?)",
+                // Hidden sessions (`crate::hidden`): one primary-key probe of the small table per session.
+                "USING ROWID SEARCH ON TABLE session_hidden FOR IN-OPERATOR",
                 "CREATE BLOOM FILTER",
                 "SEARCH d USING INTEGER PRIMARY KEY (rowid=?)",
                 "SEARCH s USING INTEGER PRIMARY KEY (rowid=?)",
-                "LIST SUBQUERY 5",
+                "LIST SUBQUERY 6",
                 "SCAN json_each VIRTUAL TABLE INDEX 1:",
-                "SCALAR SUBQUERY 4",
+                "SCALAR SUBQUERY 5",
                 "SEARCH settings USING PRIMARY KEY (key=?)",
                 "CREATE BLOOM FILTER",
+                "USING ROWID SEARCH ON TABLE session_hidden FOR IN-OPERATOR",
                 "SEARCH e USING PRIMARY KEY (sid=? AND seq=?) LEFT-JOIN",
             ]
         );
@@ -297,6 +300,7 @@ fn grouped_search_reads_the_window_without_joins() {
             [
                 "SEARCH c USING INTEGER PRIMARY KEY (rowid=?)",
                 "SEARCH s USING INDEX sqlite_autoindex_sessions_1 (id=?)",
+                "USING ROWID SEARCH ON TABLE session_hidden FOR IN-OPERATOR",
                 "LIST SUBQUERY 2",
                 "SCAN json_each VIRTUAL TABLE INDEX 1:",
                 "SCALAR SUBQUERY 1",

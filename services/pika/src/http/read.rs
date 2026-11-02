@@ -13,6 +13,7 @@ use serde_json::json;
 
 use super::{AppState, blocking, error, internal_error};
 use crate::export;
+use crate::hidden::Marks;
 use crate::read::{self, Params, ReadError, ReadResult};
 use crate::store::Store;
 
@@ -222,6 +223,11 @@ async fn sessions(State(state): State<AppState>, Extension(scope): Extension<Sco
         let mut page = read::sessions::list_scoped(conn, &Params(params), scope.public)?;
         if scope.public {
             read::redaction::sessions(&mut page);
+        } else {
+            let mut marks = Marks::load(conn)?;
+            for session in &mut page.items {
+                marks.mark(conn, session)?;
+            }
         }
         Ok(page)
     })
@@ -234,6 +240,12 @@ async fn session(State(state): State<AppState>, Extension(scope): Extension<Scop
         if scope.public {
             read::publishing::detail(conn, &mut detail)?;
             read::redaction::detail(&mut detail);
+        } else {
+            let mut marks = Marks::load(conn)?;
+            marks.mark(conn, &mut detail.summary)?;
+            for child in &mut detail.children {
+                marks.mark(conn, &mut child.summary)?;
+            }
         }
         Ok(detail)
     })
@@ -245,6 +257,11 @@ async fn tree(State(state): State<AppState>, Extension(scope): Extension<Scope>,
         let mut tree = read::sessions::tree_scoped(conn, &id, scope.public)?;
         if scope.public {
             read::redaction::tree(&mut tree);
+        } else {
+            let mut marks = Marks::load(conn)?;
+            for node in &mut tree.nodes {
+                marks.mark(conn, &mut node.summary)?;
+            }
         }
         Ok(tree)
     })
@@ -270,6 +287,8 @@ async fn updates(State(state): State<AppState>, Extension(scope): Extension<Scop
                 read::publishing::summary(conn, session)?;
             }
             read::redaction::updates(&mut updates);
+        } else if let Some(session) = &mut updates.session {
+            Marks::load(conn)?.mark(conn, session)?;
         }
         Ok(updates)
     })

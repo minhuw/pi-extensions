@@ -50,7 +50,8 @@ pub fn create(tx: &Transaction, info: &StreamInfo) -> Result<()> {
          VALUES (?1, ?2, ?3, (SELECT COUNT(*) FROM sessions WHERE parent_session_id = ?2))",
     )?
     .execute(params![info.id, info.name, info.device])?;
-    Ok(())
+    // Its recorded children, or a flag kept through `pika reindex`, may already hide it.
+    crate::hidden::refresh(tx, &info.name)
 }
 
 fn load_session(tx: &Transaction, sid: i64) -> Result<SessionRow> {
@@ -639,6 +640,7 @@ impl Deriver<'_> {
 
 pub fn apply(tx: &Transaction, info: &StreamInfo, lines: &[Line]) -> Result<()> {
     let s = load_session(tx, info.id)?;
+    let parent = s.parent_session_id.clone();
     let turn = if s.turn_count > 0 { load_turn(tx, info.id, s.turn_count - 1)? } else { None };
     let mut deriver = Deriver { tx, s, turn };
     for line in lines {
@@ -647,7 +649,12 @@ pub fn apply(tx: &Transaction, info: &StreamInfo, lines: &[Line]) -> Result<()> 
     if let Some(turn) = &deriver.turn {
         save_turn(tx, info.id, turn)?;
     }
-    save_session(tx, &deriver.s)
+    save_session(tx, &deriver.s)?;
+    // A new parent may hide the session and its subtree, or stop hiding them.
+    if deriver.s.parent_session_id != parent {
+        crate::hidden::refresh(tx, &deriver.s.id)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

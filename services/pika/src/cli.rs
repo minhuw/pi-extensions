@@ -74,6 +74,29 @@ enum Command {
     Reindex,
     /// Write a session's verbatim JSONL to stdout.
     Export { session_id: String },
+    /// Delete a session or a project for good, with everything recorded under it.
+    Delete {
+        #[command(subcommand)]
+        what: DeleteAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DeleteAction {
+    /// Delete a session and every recorded descendant (subagents, Herder steps, tickets).
+    Session {
+        id: String,
+        /// Do not ask for confirmation.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Delete every session of a project, their descendants, and the project's Herder runs, and unpublish it.
+    Project {
+        name: String,
+        /// Do not ask for confirmation.
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -227,6 +250,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let stats = crate::reindex::reindex(&store)?;
             eprintln!("reindexed {} streams, {} lines", stats.streams, stats.lines);
         }
+        Command::Delete { what } => {
+            let store = Store::open(&cli.data_dir)?;
+            return delete(&store, what);
+        }
         Command::Export { session_id } => {
             let store = Store::open(&cli.data_dir)?;
             let stdout = std::io::stdout();
@@ -238,6 +265,88 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `pika delete`: says what will be deleted, asks unless `--yes`, deletes, and prints the counts. Safe while `pika
+/// serve` runs on the same data dir: the deletion is one SQLite write transaction, which waits for the server's.
+fn delete(store: &Store, what: DeleteAction) -> Result<ExitCode> {
+    use crate::delete::{delete_project, delete_session, plan_project, plan_session};
+    type Run<'a> = Box<dyn FnOnce() -> Result<Option<crate::delete::Deleted>> + 'a>;
+    let (yes, description, run): (bool, String, Run) = match what {
+        DeleteAction::Session { id, yes } => {
+            let Some(plan) = store.read(|conn| plan_session(conn, &id))? else {
+                eprintln!("pika: no session {id:?}");
+                return Ok(ExitCode::FAILURE);
+            };
+            let n = plan.sessions.len();
+            let what = if n == 1 { format!("session {id}") } else { format!("session {id} and its {} descendants", n - 1) };
+            (yes, what, Box::new(move || delete_session(store, &id)))
+        }
+        DeleteAction::Project { name, yes } => {
+            if !crate::util::valid_project(&name) {
+                bail!("{name:?} is not a project name");
+            }
+            let (plan, selected) = store.read(|conn| -> Result<_> {
+                let plan = plan_project(conn, &name)?;
+                Ok((plan, crate::read::publishing::is_selected(conn, &name).map_err(|e| anyhow::anyhow!("{e}"))?))
+            })?;
+            if plan.sessions.is_empty() && plan.herder_runs.is_empty() && !selected {
+                eprintln!("pika: no project {name:?}");
+                return Ok(ExitCode::FAILURE);
+            }
+            let what = format!(
+                "project {name:?}: {}, {}{}",
+                plural(plan.sessions.len(), "session"),
+                plural(plan.herder_runs.len(), "Herder run"),
+                if selected { ", and its publication" } else { "" },
+            );
+            (yes, what, Box::new(move || delete_project(store, &name)))
+        }
+    };
+    eprintln!("This permanently deletes {description}. It cannot be undone.");
+    let stdin = std::io::stdin();
+    if !confirmed(yes, stdin.is_terminal(), &mut stdin.lock(), &mut std::io::stderr())? {
+        return Ok(ExitCode::FAILURE);
+    }
+    match run()? {
+        Some(d) => {
+            eprintln!(
+                "deleted {} and {}",
+                plural(d.deleted_sessions as usize, "session"),
+                plural(d.deleted_herder_runs as usize, "Herder run")
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        None => {
+            eprintln!("pika: nothing to delete any more");
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
+}
+
+/// Whether to go ahead with a deletion: at once with `--yes`; on a terminal when the answer is `y` or `yes`; never
+/// when stdin is not a terminal without `--yes`, so a script cannot delete by piping an answer in by mistake.
+fn confirmed(yes: bool, terminal: bool, input: &mut impl std::io::BufRead, out: &mut impl std::io::Write) -> Result<bool> {
+    if yes {
+        return Ok(true);
+    }
+    if !terminal {
+        writeln!(out, "pika: refusing to delete without --yes when stdin is not a terminal")?;
+        return Ok(false);
+    }
+    write!(out, "Delete? [y/N] ")?;
+    out.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer).context("reading the answer")?;
+    let go = matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+    if !go {
+        writeln!(out, "nothing deleted")?;
+    }
+    Ok(go)
 }
 
 /// Reads a new password twice without echo from the terminal, or once from stdin with one trailing newline removed.
@@ -260,4 +369,38 @@ fn read_new_password() -> Result<String> {
         bail!("the passwords differ");
     }
     Ok(first)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ask(yes: bool, terminal: bool, input: &str) -> (bool, String) {
+        let mut out = Vec::new();
+        let go = confirmed(yes, terminal, &mut input.as_bytes(), &mut out).unwrap();
+        (go, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn deletion_asks_on_a_terminal_and_refuses_without_one() {
+        assert_eq!(ask(true, false, ""), (true, String::new()));
+        assert_eq!(ask(true, true, "n\n"), (true, String::new()));
+        for answer in ["y\n", "YES\n", " yes \n"] {
+            assert_eq!(ask(false, true, answer), (true, "Delete? [y/N] ".into()), "{answer:?}");
+        }
+        for answer in ["\n", "n\n", "no\n", "yeah\n", ""] {
+            assert_eq!(ask(false, true, answer), (false, "Delete? [y/N] nothing deleted\n".into()), "{answer:?}");
+        }
+        // A piped "y" does not count.
+        let (go, out) = ask(false, false, "y\n");
+        assert!(!go && out.contains("--yes"), "{out}");
+    }
+
+    #[test]
+    fn delete_subcommands_parse() {
+        let cli = Cli::try_parse_from(["pika", "delete", "session", "abc", "--yes"]).unwrap();
+        assert!(matches!(cli.command, Command::Delete { what: DeleteAction::Session { ref id, yes: true } } if id == "abc"));
+        let cli = Cli::try_parse_from(["pika", "delete", "project", "my widgets"]).unwrap();
+        assert!(matches!(cli.command, Command::Delete { what: DeleteAction::Project { ref name, yes: false } } if name == "my widgets"));
+    }
 }

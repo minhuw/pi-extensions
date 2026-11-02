@@ -14,6 +14,7 @@ import type { OnlineSession, SessionDetail } from "../lib/types";
 import { ViewStateProvider } from "../lib/viewState";
 import { SessionSlotsContext, SessionViewContext, type SessionSlots } from "../session/context";
 import { isLive, useLiveUpdates } from "../session/live";
+import { HiddenBadge, SessionManageActions } from "../session/manage";
 import { InlineAgentChild, sessionContextFor } from "../session/subagents";
 import { TurnList } from "../session/TurnList";
 import { useTrace } from "../trace/data";
@@ -237,7 +238,7 @@ function SessionPage({ id }: { id: string }) {
 						>
 							{session.data.title || "Untitled session"}
 						</h1>
-						{(live || online) && (
+						{(live || online || session.data.hidden) && (
 							<span className="mt-[7px] inline-flex shrink-0 gap-1.5 text-[12px] leading-5" data-title-badges="">
 								{live && (
 									<span data-live="">
@@ -252,6 +253,7 @@ function SessionPage({ id }: { id: string }) {
 										<Pill tone="green">Online</Pill>
 									</span>
 								)}
+								<HiddenBadge session={session.data} />
 							</span>
 						)}
 					</div>
@@ -274,6 +276,7 @@ function SessionPage({ id }: { id: string }) {
 						<Icon name="download" size={13} />
 						Export JSONL
 					</a>}
+					<SessionManageActions session={session.data} />
 					{online && (
 						<ActionButton onClick={() => setMessaging(online)} aria-label="Message this session">
 							<Icon name="message" size={13} />
