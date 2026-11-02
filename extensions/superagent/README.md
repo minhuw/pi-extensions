@@ -96,6 +96,10 @@ Start a message with `#N` to send it straight to ticket N, without a turn of the
 
 ## Merging
 
+Bare `/merge` takes a snapshot of all current open tickets and requests each in ascending ticket-id order. Ready, idle tickets merge immediately (shared: are marked done); every other ticket is scheduled to merge when it reports `ready` and its run ends. New tickets created after the snapshot are not included. Blocked, failed, waiting, question, and interrupted tickets still need attention: scheduling leaves their state unchanged and does not resume their agents. Each result is reported; an error, including a ticket held by another live Pi session, does not stop the remaining requests. With no open tickets it says so.
+
+All merges in one Pi session run one at a time, including automatic retries. Scheduled attempts recheck that the ticket is ready and idle at the head of the queue, after any pending start finishes. If a follow-up changes that, the attempt is skipped and stays scheduled for the next ready run end. Explicit `/merge N` keeps its immediate behavior for idle tickets in other states. A conflict handoff releases the merge queue while the agent works, so other tickets can merge. Tickets that are not ready complete as they become ready; their completion order can differ from the initial requests. If a scheduled merge finds uncommitted changes in its worktree, its agent is asked to commit or discard them and the merge retries after its next ready report.
+
 In shared mode `/merge N` marks a ticket done; it runs no git command. In worktree mode `/merge N` (or `ticket_merge` when you ask the model) merges a ticket into the branch the main checkout is on:
 
 1. It refuses while the agent is running, while the worktree has uncommitted changes (the agent is asked to commit them), when the branch has no commits, or when the main checkout is on a detached HEAD.
@@ -111,7 +115,8 @@ In shared mode `/merge N` marks a ticket done; it runs no git command. In worktr
 | `/tickets N` | Show one ticket: state, title, branch, worktree, commits ahead, changed files, last report or text, and question; for a shared ticket the files it touched instead of a branch diff. |
 | `/tickets resume N` | Take over a ticket in this session and continue an interrupted one. |
 | `/tickets close N [reason]` | Stop the agent, remove the worktree, keep the branch (shared: stop the agent; its changes stay). |
-| `/merge N` | Merge a ticket, or mark a shared one done, as above. |
+| `/merge` | Request a merge for the current open-ticket snapshot, in ascending id order: ready, idle tickets merge now; others merge when ready (shared: mark done). Reports each outcome and continues after errors. |
+| `/merge N` | Merge one ticket immediately, or mark a shared one done, as above. |
 | `/superagent [on\|off\|status]` | Switch the session's mode, or show it with the workspace mode and the router tools. |
 | `/superagent workspace [shared\|worktree]` | Show or switch the repository's workspace mode; refused while tickets are open. |
 

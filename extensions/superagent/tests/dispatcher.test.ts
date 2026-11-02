@@ -1,5 +1,9 @@
 // The dispatcher's state machine against in-memory fakes of the types.ts interfaces (no git, no Pi sessions).
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
+import { registerCommands } from "../src/commands.ts";
+import { DIRTY_WORKTREE_PROMPT, rebasePrompt } from "../src/merge.ts";
+import type { Router } from "../src/router.ts";
 import { memoryWorkspace, type WorkspaceSetting } from "../src/workspace.ts";
 import { createDispatcher, DirtyWorkspaceError, DispatchError, DIRTY_SWITCH_WARNING, dirtyWorkspaceText, NO_TOOL_ERROR, switchRefusal, type DispatcherDeps, type NotifyExtra, type NotifyKind } from "../src/dispatcher.ts";
 import {
@@ -406,6 +410,51 @@ describe("run outcomes", () => {
 });
 
 describe("merge", () => {
+	it("serializes concurrent calls, tracks them for idle, recovers from rejection, and revalidates duplicate attempts", async () => {
+		let finish!: () => void;
+		const gate = new Promise<void>((resolve) => { finish = resolve; });
+		const t = setup({ merge: async (deps, id) => {
+			if (id === 1) { await gate; throw new Error("merge failed"); }
+			return mergedBy(deps, id);
+		} });
+		for (const title of ["One", "Two"]) {
+			const ticket = await create(t.dispatcher, title);
+			t.host.report(ticket.id, "ready", "done");
+			t.host.end(ticket.id);
+		}
+		await t.dispatcher.idle();
+		const results = Promise.allSettled([t.dispatcher.merge(1), t.dispatcher.merge(2), t.dispatcher.merge(2)]);
+		let idle = false;
+		const pending = t.dispatcher.idle().then(() => { idle = true; });
+		await expect.poll(() => t.merges).toEqual([1]);
+		expect(idle).toBe(false);
+		expect(t.store.get(2)!.state).toBe("ready");
+		finish();
+		const [failed, merged, duplicate] = await results;
+		expect(failed).toMatchObject({ status: "rejected", reason: new Error("merge failed") });
+		expect(merged).toMatchObject({ status: "fulfilled", value: { kind: "merged" } });
+		expect(duplicate).toMatchObject({ status: "rejected", reason: expect.objectContaining({ message: expect.stringContaining("Ticket #2 is merged") }) });
+		await pending;
+		expect(idle).toBe(true);
+		expect(t.merges).toEqual([1, 2]);
+	});
+
+	it("refuses queued merges after shutdown without waiting for an in-flight merge", async () => {
+		let finish!: () => void;
+		const gate = new Promise<void>((resolve) => { finish = resolve; });
+		const t = setup({ merge: async () => { await gate; return { kind: "refused", reason: "test handoff" }; } });
+		await create(t.dispatcher, "One");
+		await create(t.dispatcher, "Two");
+		const results = Promise.allSettled([t.dispatcher.merge(1), t.dispatcher.merge(2)]);
+		await expect.poll(() => t.merges).toEqual([1]);
+		await t.dispatcher.shutdown();
+		finish();
+		const [, queued] = await results;
+		expect(queued).toMatchObject({ status: "rejected", reason: new DispatchError("This session is shutting down.") });
+		await t.dispatcher.idle();
+		expect(t.merges).toEqual([1]);
+	});
+
 	it("merges, releases the lock, and reports", async () => {
 		const t = setup();
 		await create(t.dispatcher);
@@ -559,6 +608,165 @@ describe("summary", () => {
 });
 
 describe("after and mergeWhenReady", () => {
+	for (const workspace of ["worktree", "shared"] as const) {
+		for (const request of ["immediate", "scheduled run end", "conflict retry"] as const) {
+			it.each(["failed", "still running"] as const)(`${workspace}: revalidates ${request} at the queue head after a follow-up is %s`, async (followUp) => {
+				const t = setup({ workspace: memoryWorkspace(() => workspace) });
+				for (const title of ["One", "Two"]) {
+					const ticket = await create(t.dispatcher, title);
+					t.host.report(ticket.id, "ready", "done");
+					t.host.end(ticket.id);
+				}
+				await t.dispatcher.idle();
+				let finish!: () => void;
+				const gate = new Promise<void>((resolve) => { finish = resolve; });
+				let entered = false;
+				const stop = t.host.stop.bind(t.host);
+				t.host.stop = async (id) => {
+					if (id === 1) { entered = true; await gate; }
+					await stop(id);
+				};
+				const first = t.dispatcher.merge(1);
+				let attempt: ReturnType<typeof t.dispatcher.mergeWhenReady> | undefined;
+				try {
+					await expect.poll(() => entered).toBe(true);
+					if (request === "immediate") {
+						attempt = t.dispatcher.mergeWhenReady(2);
+						await expect.poll(() => t.store.get(2)!.mergeWhenReady).toBe(true);
+					} else {
+						t.store.update(2, request === "conflict retry" ? { mergeRequested: true } : { mergeWhenReady: true });
+						await t.dispatcher.send(2, "Prepare another ready run");
+						t.host.report(2, "ready", "ready to retry");
+						t.host.end(2);
+					}
+					await t.dispatcher.send(2, "Follow-up before the queued merge");
+					t.host.report(2, followUp === "failed" ? "failed" : "ready", "follow-up result");
+					if (followUp === "failed") t.host.end(2);
+				} finally { finish(); }
+				await first;
+				if (attempt) {
+					const result = await attempt;
+					expect(result.outcome).toBeUndefined();
+					expect(result.ticket.state).toBe(followUp === "failed" ? "failed" : "ready");
+				}
+				await t.dispatcher.idle();
+				expect(t.store.get(2)!.state).toBe(followUp === "failed" ? "failed" : "ready");
+				expect(t.store.get(2)![request === "conflict retry" ? "mergeRequested" : "mergeWhenReady"]).toBe(true);
+				expect(t.dispatcher.isRunning(2)).toBe(followUp === "still running");
+				expect(t.merges).toEqual(workspace === "worktree" ? [1] : []);
+				expect(t.host.stopped).not.toContain(2);
+				expect(t.store.types(2)).not.toContain(workspace === "worktree" ? "merged" : "done");
+				expect(t.kinds()).not.toContain("2:merge-refused");
+
+				if (followUp === "failed") {
+					await t.dispatcher.send(2, "Fix the failure");
+					t.host.report(2, "ready", "fixed");
+				}
+				t.host.end(2);
+				await t.dispatcher.idle();
+				expect(t.store.get(2)!.state).toBe(workspace === "worktree" ? "merged" : "done");
+				expect(t.merges).toEqual(workspace === "worktree" ? [1, 2] : []);
+			});
+		}
+
+		it(`${workspace}: explicit merge still accepts an idle non-ready ticket`, async () => {
+			const t = setup({ workspace: memoryWorkspace(() => workspace) });
+			await create(t.dispatcher);
+			t.host.report(1, "failed", "needs attention");
+			t.host.end(1);
+			await t.dispatcher.idle();
+			expect(await t.dispatcher.merge(1)).toMatchObject({ kind: workspace === "worktree" ? "merged" : "done" });
+		});
+	}
+
+	it("serializes scheduled working tickets whose ready runs finish together", async () => {
+		let finish!: () => void;
+		const gate = new Promise<void>((resolve) => { finish = resolve; });
+		const t = setup({ merge: async (deps, id) => {
+			if (id === 1) await gate;
+			return mergedBy(deps, id);
+		} });
+		await create(t.dispatcher, "One");
+		await create(t.dispatcher, "Two");
+		await t.dispatcher.mergeWhenReady(1);
+		await t.dispatcher.mergeWhenReady(2);
+		t.host.report(1, "ready", "done");
+		t.host.report(2, "ready", "done");
+		t.host.end(1);
+		t.host.end(2);
+		await expect.poll(() => t.merges).toEqual([1]);
+		expect(t.store.get(2)!.state).toBe("ready");
+		finish();
+		await t.dispatcher.idle();
+		expect(t.merges).toEqual([1, 2]);
+		expect(t.dispatcher.list()).toEqual([]);
+		expect(t.kinds()).toEqual(["1:merged", "2:merged"]);
+	});
+
+	it.each(["blocked", "failed", "interrupted"] as const)("schedules a %s ticket without resuming it", async (state) => {
+		const t = setup();
+		await create(t.dispatcher);
+		t.host.end(1);
+		await t.dispatcher.idle();
+		t.store.update(1, { state });
+		const result = await t.dispatcher.mergeWhenReady(1);
+		expect(result).toMatchObject({ ticket: { state, mergeWhenReady: true } });
+		expect(result.outcome).toBeUndefined();
+		expect(t.merges).toEqual([]);
+		expect(t.host.starts).toHaveLength(1);
+		expect(t.host.sends).toEqual([]);
+		expect(t.dispatcher.isRunning(1)).toBe(false);
+	});
+
+	it.each(["conflict", "dirty worktree"])("bare /merge continues after a %s handoff and retries automatically", async (handoff) => {
+		let handed = false;
+		const prompt = handoff === "conflict" ? rebasePrompt("main", BASE) : DIRTY_WORKTREE_PROMPT;
+		const t = setup({ merge: async (deps, id) => {
+			if (id !== 1 || handed) return mergedBy(deps, id);
+			handed = true;
+			if (handoff === "conflict") deps.store.update(id, { mergeRequested: true });
+			await deps.send(id, prompt);
+			return handoff === "conflict" ? { kind: "handed-to-worker", reason: "conflicts in a.ts" } : { kind: "refused", reason: "worker asked to commit" };
+		} });
+		for (const title of ["One", "Two"]) {
+			const ticket = await create(t.dispatcher, title);
+			t.host.report(ticket.id, "ready", "done");
+			t.host.end(ticket.id);
+		}
+		await t.dispatcher.idle();
+		let command!: Parameters<ExtensionAPI["registerCommand"]>[1];
+		registerCommands({ registerCommand: (name, options) => { if (name === "merge") command = options; } } as ExtensionAPI,
+			{ dispatcher: () => t.dispatcher, router: {} as Router, changed: () => {} });
+		await command.handler("", { ui: { notify: () => {} } } as unknown as ExtensionCommandContext);
+		expect(t.merges).toEqual([1, 2]);
+		expect(t.store.get(1)).toMatchObject({ state: "working", mergeWhenReady: true });
+		expect(t.store.get(2)!.state).toBe("merged");
+		expect(t.host.sends).toEqual([{ id: 1, text: prompt, result: "prompted" }]);
+		t.host.report(1, "ready", "rebased or committed");
+		t.host.end(1);
+		await t.dispatcher.idle();
+		expect(t.merges).toEqual([1, 2, 1]);
+		expect(t.dispatcher.list()).toEqual([]);
+	});
+
+	it("explicit merge keeps dirty-worktree handoffs manual", async () => {
+		const t = setup({ merge: async (deps, id) => {
+			await deps.send(id, DIRTY_WORKTREE_PROMPT);
+			return { kind: "refused", reason: "worker asked to commit" };
+		} });
+		await create(t.dispatcher);
+		t.host.report(1, "ready", "done");
+		t.host.end(1);
+		await t.dispatcher.idle();
+		await t.dispatcher.merge(1);
+		expect(t.store.get(1)!.mergeWhenReady).toBeUndefined();
+		t.host.report(1, "ready", "committed");
+		t.host.end(1);
+		await t.dispatcher.idle();
+		expect(t.merges).toEqual([1]);
+		expect(t.store.get(1)!.state).toBe("ready");
+	});
+
 	const after = (d: ReturnType<typeof setup>["dispatcher"], title: string, deps: number[], extra: { mergeWhenReady?: boolean } = {}) =>
 		d.create({ title, request: title, source: title, after: deps, ...extra });
 

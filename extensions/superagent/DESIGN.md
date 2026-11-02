@@ -415,9 +415,30 @@ shared ticket changed. It is hidden when no ticket is open and refreshed on ever
 - `ticket_create({ ..., mergeWhenReady: true })` and `ticket_merge({ id, whenReady: true })` set `mergeWhenReady`: the
   ticket's `ready` report produces no `ready` message; when that run ends the merge runs, as for a re-run after a
   hand-off, and its outcome (`merged`, `merge-handed`, `merge-refused`) is the report. `ticket_merge` with `whenReady`
-  on a ticket that is `ready` and idle merges at once.
+  on a ticket that is `ready` and idle merges at once. `mergeWhenReady` is persisted before that attempt too, so a dirty
+  worktree hand-off retries after the agent commits or discards its changes and reports ready again. The immediate
+  result includes the current ticket after the attempt.
+- Bare `/merge` snapshots `dispatcher.list()` (open tickets only), sorts by ascending id, and sequentially requests
+  `mergeWhenReady` for each. Ready, idle tickets merge immediately (shared: become done); all others keep their state
+  and are scheduled for their next ready run end. Scheduling does not resume blocked, failed, or interrupted agents;
+  these and other attention states are shown in the response. New tickets are outside the snapshot. Each immediate
+  outcome uses the same response as `/merge N`; scheduled responses say merge (shared: done) when ready. Per-ticket
+  errors, including foreign live ownership, are reported and processing continues. Refresh the host after the batch,
+  even if some requests failed. With no open tickets, report `No open tickets.`.
 
 ## Merging
+
+All dispatcher merge calls, including explicit requests and run-end retries, share a per-dispatcher promise queue.
+Only one merge mutates the main checkout at a time within a Pi session. Each queued attempt revalidates that the ticket
+is open, takes ownership, and checks shutdown when it starts; a rejected attempt does not poison the queue. After
+awaiting any pending start, automatic attempts from `mergeWhenReady` and run-end retries also recheck `ready` and
+`!running` immediately before merging or marking done. A stale attempt skips without an outcome or `merge-refused`
+report and preserves `mergeRequested`/`mergeWhenReady` for the next ready run end; `mergeWhenReady` returns the current
+ticket so callers report its scheduled state. Explicit `/merge N` can still merge an idle ticket in another state. Queued
+merges are tracked by `idle()`, while shutdown sets the closing guard without waiting for the merge queue. The queue
+is released when `mergeTicket` returns, including a hand-off to a worker; it never waits for the worker's whole
+conflict-resolution run. Initial batch requests are ascending by id, but tickets that are not ready finish as their
+agents report ready; there is no strict batch completion order or cross-session merge queue.
 
 `/merge N` or `ticket_merge({ id })`, only on the user's request. For a **shared ticket** it runs no git command at all:
 it is refused while the agent runs; otherwise the ticket becomes `done` (with a `done` event), its agent is stopped and
@@ -446,7 +467,9 @@ marks a shared ticket done once it reports ready. For a **worktree ticket**:
   (state, title, branch, worktree, commits ahead, changed files, last report or text, question; for a shared ticket the
   main checkout and `touched` instead of a branch diff).
 - `/tickets resume N`, `/tickets close N`.
-- `/merge N`.
+- `/merge [N]`: without an id, request the current open-ticket snapshot in ascending id order, merging ready idle
+  tickets now and scheduling the rest for ready. With an id, keep the immediate single-ticket merge behavior.
+  Malformed explicit arguments report `Usage: /merge [N]`.
 - `/superagent [on|off|status]`, `/superagent workspace [shared|worktree]`.
 
 ## Settings

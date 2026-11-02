@@ -1,7 +1,7 @@
 // `/tickets`, `/merge`, and `/superagent`; see DESIGN.md "Commands".
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { DispatchError, isShared, type Dispatcher } from "./dispatcher.ts";
-import { WORKSPACE_MODES, type WorkspaceMode } from "./types.ts";
+import { ATTENTION_STATES, WORKSPACE_MODES, type MergeOutcome, type WorkspaceMode } from "./types.ts";
 import { describeTicket, footerText, ticketLine } from "./render.ts";
 import type { Router } from "./router.ts";
 
@@ -12,7 +12,7 @@ export interface CommandsHost {
 }
 
 export const TICKETS_USAGE = "Usage: /tickets [all|N|resume N|close N [reason]]";
-export const MERGE_USAGE = "Usage: /merge N";
+export const MERGE_USAGE = "Usage: /merge [N]";
 export const SUPERAGENT_USAGE = "Usage: /superagent [on|off|status|workspace [shared|worktree]]";
 
 const WORKSPACE_TEXT: Record<WorkspaceMode, string> = {
@@ -81,17 +81,38 @@ export function registerCommands(pi: ExtensionAPI, host: CommandsHost): void {
 	});
 
 	pi.registerCommand("merge", {
-		description: "Merge a ready ticket into the current branch (shared workspace: mark it done): /merge N",
+		description: "Merge open tickets when ready, or merge one now: /merge [N] (shared workspace: mark done)",
 		handler: run(async (args, ctx) => {
+			const report = (id: number, outcome: MergeOutcome) => {
+				if (outcome.kind === "done") ctx.ui.notify(`#${id} is done; its changes stay uncommitted in your working tree.`, "info");
+				else if (outcome.kind === "merged") ctx.ui.notify(`Merged #${id} into ${outcome.into} (${outcome.commits} commit${outcome.commits === 1 ? "" : "s"}).`, "info");
+				else if (outcome.kind === "handed-to-worker") ctx.ui.notify(`#${id} needs a rebase: ${outcome.reason} The merge runs again when it reports ready.`, "warning");
+				else ctx.ui.notify(`#${id} was not merged: ${outcome.reason}`, "error");
+			};
+			if (!args) {
+				const dispatcher = need();
+				const tickets = dispatcher.list().sort((a, b) => a.id - b.id);
+				if (!tickets.length) { ctx.ui.notify("No open tickets.", "info"); return; }
+				try {
+					for (const { id } of tickets) {
+						try {
+							const { ticket, outcome } = await dispatcher.mergeWhenReady(id);
+							if (outcome) report(id, outcome);
+							else {
+								const attention = ATTENTION_STATES.has(ticket.state) && ticket.state !== "ready";
+								ctx.ui.notify(`#${id} [${ticket.state}] ${isShared(ticket) ? "will be marked done" : "will merge"} when it reports ready and its run ends.${attention ? " It still needs attention." : ""}`, attention ? "warning" : "info");
+							}
+						} catch (error) { ctx.ui.notify(`#${id} was not merged: ${errorText(error)}`, "error"); }
+					}
+				} finally { host.changed(); }
+				return;
+			}
 			const words = args.split(/\s+/).filter(Boolean);
 			const id = ticketId(words[0]);
 			if (id === undefined || words.length !== 1) throw new DispatchError(MERGE_USAGE);
 			const outcome = await need().merge(id);
 			host.changed();
-			if (outcome.kind === "done") ctx.ui.notify(`#${id} is done; its changes stay uncommitted in your working tree.`, "info");
-			else if (outcome.kind === "merged") ctx.ui.notify(`Merged #${id} into ${outcome.into} (${outcome.commits} commit${outcome.commits === 1 ? "" : "s"}).`, "info");
-			else if (outcome.kind === "handed-to-worker") ctx.ui.notify(`#${id} needs a rebase: ${outcome.reason} The merge runs again when it reports ready.`, "warning");
-			else ctx.ui.notify(`#${id} was not merged: ${outcome.reason}`, "error");
+			report(id, outcome);
 		}),
 	});
 

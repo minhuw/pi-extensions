@@ -169,6 +169,8 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 	/** `ticket_create` tool call ids of tickets not started yet. */
 	const toolCalls = new Map<number, string>();
 	const work = new Set<Promise<unknown>>();
+	/** One merge at a time may mutate the main checkout; worker hand-offs release the queue. */
+	let mergeQueue: Promise<void> = Promise.resolve();
 	let host: WorkerHost | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let closing = false;
@@ -484,8 +486,8 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 	}
 
 	async function rerunMerge(ticket: Ticket): Promise<void> {
-		const outcome = await merge(ticket.id).catch((error): MergeOutcome => ({ kind: "refused", reason: errorText(error) }));
-		if (outcome.kind === "refused") {
+		const outcome = await enqueueMerge(() => performMerge(ticket.id, true)).catch((error): MergeOutcome => ({ kind: "refused", reason: errorText(error) }));
+		if (outcome?.kind === "refused") {
 			const after = update(ticket.id, { mergeRequested: undefined }, { type: "merge", outcome: "refused", reason: outcome.reason });
 			deps.notify(after, "merge-refused", { reason: outcome.reason, ...await compare(after) });
 		}
@@ -511,9 +513,26 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 		return { kind: "done" };
 	}
 
-	async function merge(id: number): Promise<MergeOutcome> {
-		const current = own(require(id));
+	function merge(id: number): Promise<MergeOutcome> {
+		return enqueueMerge(() => performMerge(id));
+	}
+
+	function enqueueMerge<T>(attempt: () => Promise<T>): Promise<T> {
+		const result = mergeQueue.then(attempt);
+		// A refusal or error must not prevent the next ticket from being attempted.
+		mergeQueue = result.then(() => {}, () => {});
+		return track(result);
+	}
+
+	function performMerge(id: number): Promise<MergeOutcome>;
+	function performMerge(id: number, readyOnly: true): Promise<MergeOutcome | undefined>;
+	async function performMerge(id: number, readyOnly = false): Promise<MergeOutcome | undefined> {
+		own(require(id));
 		await starts.get(id);
+		// Revalidate inside the queue, including shutdown and changes while a start was pending.
+		const current = own(require(id));
+		// Follow-ups may change readiness while queued; retain automatic scheduling for the next ready run.
+		if (readyOnly && (current.state !== "ready" || running(id))) return undefined;
 		if (isShared(current)) return markDone(id);
 		const outcome = await deps.mergeTicket(mergeDeps(), id);
 		let ticket = store.get(id)!;
@@ -533,9 +552,13 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 	async function mergeWhenReady(id: number): Promise<MergeWhenReadyResult> {
 		own(require(id));
 		await starts.get(id);
-		let ticket = store.get(id)!;
-		if (ticket.state === "ready" && !running(id)) return { ticket, outcome: await merge(id) };
+		let ticket = own(require(id));
+		// Persist before merging too: a dirty worktree asks its worker to commit and report ready again.
 		if (!ticket.mergeWhenReady) ticket = update(id, { mergeWhenReady: true }, { type: "merge-when-ready" });
+		if (ticket.state === "ready" && !running(id)) {
+			const outcome = await enqueueMerge(() => performMerge(id, true));
+			return { ticket: store.get(id)!, outcome };
+		}
 		return { ticket };
 	}
 
