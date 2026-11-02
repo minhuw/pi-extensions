@@ -8,6 +8,9 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseAgentDefinition, parseAgentFrontmatter } from "../src/agent-definitions.js";
 import { serializeAgentFile } from "../src/agent-file-toggle.js";
@@ -97,6 +100,32 @@ describe("ticket agent and context_files (real runner)", () => {
     return session;
   }
 
+  /**
+   * Pi's own default preamble, from a bare SDK session (no extensions, context
+   * files, skills, or prompt overrides): the text before its `<tools>` section.
+   * Derived rather than hard-coded, so Pi rewording its prompt breaks nothing.
+   */
+  async function piDefaultPreamble(): Promise<string> {
+    const settingsManager = SettingsManager.inMemory();
+    const resourceLoader = new DefaultResourceLoader({
+      cwd, agentDir, settingsManager, noExtensions: true, noSkills: true,
+      noPromptTemplates: true, noThemes: true, noContextFiles: true,
+    });
+    await resourceLoader.reload();
+    const { session } = await createAgentSession({
+      cwd, agentDir, model: faux.getModel(), settingsManager, resourceLoader,
+      sessionManager: SessionManager.inMemory(cwd),
+    });
+    try {
+      const prompt = session.systemPrompt;
+      const end = prompt.indexOf("\n\n<tools>");
+      expect(end).toBeGreaterThan(0);
+      return prompt.slice(0, end);
+    } finally {
+      session.dispose();
+    }
+  }
+
   it("is configured as the contract describes", () => {
     expect(getAgentConfig("ticket")).toMatchObject({
       displayName: "Ticket",
@@ -120,7 +149,10 @@ describe("ticket agent and context_files (real runner)", () => {
   it("gets Pi's own prompt with its context files, then its text; not the parent's", async () => {
     const session = await construct("ticket");
     const prompt: string = session.systemPrompt;
-    expect(prompt).toContain("You are an expert coding assistant operating inside pi");
+    // Pi's own default prompt: its preamble first, then its tool and rule sections.
+    expect(prompt.startsWith(await piDefaultPreamble())).toBe(true);
+    expect(prompt).toContain("<tools>");
+    expect(prompt).toContain("<rules>");
     for (const text of ["GLOBAL_CTX", "WORKTREE_CTX", "PKG_CTX"]) expect(prompt).toContain(text);
     expect(prompt).not.toContain("ROOT_CTX");
     expect(prompt).not.toContain("ABOVE_REPO_CTX");
@@ -129,8 +161,8 @@ describe("ticket agent and context_files (real runner)", () => {
     expect(prompt).toContain("You own one long-running task. Where you work, whether you commit, and how you report come from the extension that started you");
     // Mode-neutral: the worktree specifics belong to the extension that started it.
     expect(prompt).not.toContain("own git branch");
-    // Its text is appended after Pi's preamble and tool list.
-    expect(prompt.indexOf("You own one long-running task")).toBeGreaterThan(prompt.indexOf("operating inside pi"));
+    // Its text is appended after Pi's preamble, tool list and rules.
+    expect(prompt.indexOf("You own one long-running task")).toBeGreaterThan(prompt.indexOf("</rules>"));
   });
 
   it("has every built-in and extension tool, and nested Agent limited to its allowlist", async () => {

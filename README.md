@@ -63,7 +63,7 @@ npm test           # offline tests for every extension
 npm run typecheck
 ```
 
-Development dependencies target Pi SDK 1.4.0. The extensions still support Pi 1.3.0. [AGENTS.md](AGENTS.md) lists the test command for each extension.
+Development dependencies target Pi SDK 1.5.0. The extensions still support Pi 1.3.0. [AGENTS.md](AGENTS.md) lists the test command for each extension.
 
 To work on an extension, install your local checkout as shown above and edit it in place. Pi loads the TypeScript directly; run `/reload` to pick up changes.
 

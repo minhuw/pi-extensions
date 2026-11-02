@@ -5,7 +5,7 @@ import { registerNavigationCommands } from "../navigation.ts";
 
 type Command = Parameters<ExtensionAPI["registerCommand"]>[1];
 const paneId = "repo-full-id::/Workspace/Project";
-const json = (value: unknown, code = 0): ExecResult => ({ stdout: JSON.stringify(value), stderr: "private-stderr-token", code, killed: false });
+const json = (value: unknown, code = 0): ExecResult => ({ stdout: JSON.stringify(value), stderr: "private-stderr-token", code, killed: false, truncated: false });
 const current = (id = paneId) => json({ ok: true, result: { worktree: { id, path: "/Workspace/Project" } } });
 const opened = (relativePath = "src/Result.ts") => json({ ok: true, result: { opened: true, relativePath } });
 const failed = (code: string, exit = 0) => json({ ok: false, error: { code, message: "private-error-token", data: { token: "private-data-token" } } }, exit);
@@ -343,8 +343,8 @@ describe("CLI responses and redacted diagnostics", () => {
 		json({ ok: true, result: { opened: true, error: { code: "renderer_unavailable" } } }),
 		json({ ok: true, result: { opened: false } }), json({ opened: "true" }), json({}), json(null),
 		json({ ok: "true", result: { opened: true } }), json({ ok: true }), { ...opened("file.md"), code: 1 },
-		{ stdout: "private-malformed-token", stderr: "private-stderr-token", code: 0, killed: false },
-		{ stdout: "private-malformed-token", stderr: "private-stderr-token", code: 127, killed: false },
+		{ stdout: "private-malformed-token", stderr: "private-stderr-token", code: 0, killed: false, truncated: false },
+		{ stdout: "private-malformed-token", stderr: "private-stderr-token", code: 127, killed: false, truncated: false },
 	])("never reports success for errors, malformed results or nonzero status: %#", async response => {
 		const h = harness();
 		h.exec.mockResolvedValueOnce(current()).mockResolvedValueOnce(response);
@@ -360,6 +360,15 @@ describe("CLI responses and redacted diagnostics", () => {
 		await h.run("file.md");
 		h.error();
 		expect(h.notify.mock.lastCall?.[0]).toContain("timed out or was cancelled");
+	});
+
+	it("never parses output that Pi truncated at maxBuffer", async () => {
+		// Pi 1.5 terminates the command on overflow: killed, nonzero code, and incomplete output.
+		const h = harness();
+		h.exec.mockResolvedValueOnce(current()).mockResolvedValueOnce({ ...opened(), code: 1, killed: true, truncated: true });
+		await h.run("file.md");
+		h.error();
+		expect(h.exec).toHaveBeenCalledTimes(2);
 	});
 
 	it("contains exceptions without leaking their text", async () => {

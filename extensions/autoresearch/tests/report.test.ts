@@ -164,24 +164,50 @@ it("does not publish failed persistence or invalid updates", async () => {
 	await h.command("status"); expect(h.displays[0].content).toContain("Testing cached lookups.");
 });
 
-it.each(["update", "clear"])("rolls back a failed %s after real Pi has already advanced its in-memory branch", async action => {
-	const h = harness();
+function failedWrite(action: string, h: ReturnType<typeof harness>) {
+	return action === "clear" ? h.command("clear") : h.update({ phase: "checking", message: "Unsaved result", metrics: [{ name: "lookup", value: 1 }] });
+}
+async function expectPreviousReportSurvives(h: ReturnType<typeof harness>) {
+	await h.emit("session_start", { reason: "reload" });
+	expect(h.statuses.get("autoresearch")).toContain("Lookup 182 ms");
+	await h.command("results");
+	expect(h.displays.at(-1).content).toContain("Testing cached lookups.");
+	await expect(h.update({ phase: "planning", message: "Changed objective", metrics: [{ name: "other", direction: "higher" }] })).rejects.toThrow("Unknown metric");
+}
+function realManager(h: ReturnType<typeof harness>) {
 	const manager = SessionManager.inMemory(process.cwd());
 	Object.assign(h.ctx, { sessionManager: manager });
 	vi.mocked(h.pi.appendEntry).mockImplementation((type, data) => { manager.appendCustomEntry(type, data); });
+	return manager;
+}
+
+// Pi >=1.5 drops an entry whose write failed, so the leaf and the earlier saved snapshot stay untouched.
+it.each(["update", "clear"])("rejects a failed %s without disturbing the previously saved entry when real Pi keeps its leaf", async action => {
+	const h = harness(); const manager = realManager(h);
 	await h.emit("session_start"); await h.update(baseline);
-	const previousLeaf = manager.getLeafId();
+	const previousLeaf = manager.getLeafId(); const previousEntry = structuredClone(manager.getEntry(previousLeaf!));
 	const persist = vi.spyOn(manager as unknown as { _persist(entry: unknown): void }, "_persist");
 	try {
 		persist.mockImplementationOnce(() => { throw new Error("disk full"); });
-		await expect(action === "clear" ? h.command("clear") : h.update({ phase: "checking", message: "Unsaved result", metrics: [{ name: "lookup", value: 1 }] })).rejects.toThrow("disk full");
-		expect(manager.getLeafId()).not.toBe(previousLeaf);
-		await h.emit("session_start", { reason: "reload" });
-		expect(h.statuses.get("autoresearch")).toContain("Lookup 182 ms");
-		await h.command("results");
-		expect(h.displays.at(-1).content).toContain("Testing cached lookups.");
-		await expect(h.update({ phase: "planning", message: "Changed objective", metrics: [{ name: "other", direction: "higher" }] })).rejects.toThrow("Unknown metric");
+		await expect(failedWrite(action, h)).rejects.toThrow("disk full");
+		expect(manager.getLeafId()).toBe(previousLeaf);
+		expect(manager.getEntry(previousLeaf!)).toEqual(previousEntry);
+		await expectPreviousReportSurvives(h);
 	} finally { persist.mockRestore(); }
+});
+
+// Pi <1.5 advanced its in-memory branch and kept the payload by reference although the write failed.
+it.each(["update", "clear"])("rolls back a failed %s when Pi <1.5 has already advanced its in-memory branch", async action => {
+	const h = harness(); const manager = realManager(h);
+	await h.emit("session_start"); await h.update(baseline);
+	const previousLeaf = manager.getLeafId();
+	vi.mocked(h.pi.appendEntry).mockImplementationOnce((type, data) => {
+		manager.appendCustomEntry(type, data);
+		throw new Error("disk full");
+	});
+	await expect(failedWrite(action, h)).rejects.toThrow("disk full");
+	expect(manager.getLeafId()).not.toBe(previousLeaf);
+	await expectPreviousReportSurvives(h);
 });
 
 it("isolates child sessions and supports headless reporting without changing the parent's UI", async () => {

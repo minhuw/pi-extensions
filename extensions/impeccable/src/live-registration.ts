@@ -1,8 +1,15 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { LiveOwner, LIVE_MESSAGE, LIVE_SNAPSHOT, type LiveReply, type LiveSaved } from "./live.ts";
+import { LiveOwner, LIVE_MESSAGE, LIVE_SNAPSHOT, type LiveSaved } from "./live.ts";
 import { object } from "./project.ts";
+
+/**
+ * A provider-portable string enum, `{ type: "string", enum }` (no `anyOf`), static type the values' union. Built with
+ * TypeBox alone: pi-ai's `StringEnum` is a pi-schema schema since SDK 1.5, which types as `unknown` in a `Type.Object`.
+ */
+function stringEnum<const T extends readonly string[]>(values: T) {
+	return Type.Unsafe<T[number]>({ type: "string", enum: values });
+}
 
 /** Registers lazily: loading the extension never resolves an engine or touches native state. */
 export function registerLive(pi: ExtensionAPI) {
@@ -111,10 +118,10 @@ export function registerLive(pi: ExtensionAPI) {
 		name: "impeccable_live", label: "Impeccable Live", executionMode: "sequential",
 		description: "Own the native Impeccable overlay/helper and recovery journal in this Pi session. start/generate return immediately; native CLI waits in background. status inspects, reply acknowledges exactly one owned event, resume explicitly recovers this branch, stop releases owned resources while preserving work. Native instructions that say poll/reply/complete must use this owner. Never run a second poller. Accept verification is separate from native transport acknowledgement; verified requires evidence, carbonize requires complete after cleanup.",
 		parameters: Type.Object({
-			action: StringEnum(["start", "generate", "status", "reply", "resume", "stop"] as const),
+			action: stringEnum(["start", "generate", "status", "reply", "resume", "stop"]),
 			argv: Type.Optional(Type.Array(Type.String(), { maxItems: 256 })), cwd: Type.Optional(Type.String()),
 			id: Type.Optional(Type.String()), eventToken: Type.Optional(Type.String()),
-			status: Type.Optional(StringEnum(["done", "steer_done", "error", "complete", "verified", "read"] as const)),
+			status: Type.Optional(stringEnum(["done", "steer_done", "error", "complete", "verified", "read"])),
 			file: Type.Optional(Type.String()), data: Type.Optional(Type.Any()), message: Type.Optional(Type.String()),
 		}),
 		outputSchema: Type.Any(),
@@ -127,7 +134,7 @@ export function registerLive(pi: ExtensionAPI) {
 			else if (params.action === "stop") { await pause("Explicit live stop", true); view = live.view(); }
 			else if (params.action === "reply") {
 				if (!params.id || !params.eventToken || !params.status) throw new Error("reply requires id, eventToken and status");
-				view = await live.reply(params as LiveReply);
+				view = await live.reply({ ...params, id: params.id, eventToken: params.eventToken, status: params.status });
 			} else view = await live.status();
 			return { content: [{ type: "text", text: JSON.stringify(view) }], details: view, structuredContent: JSON.parse(JSON.stringify(view)), isError: !view.ok };
 		},

@@ -32,8 +32,9 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 		const snapshot = structuredClone(next);
 		try { pi.appendEntry(SNAPSHOT, snapshot); }
 		catch (error) {
-			// Pi 1.3 advances its branch before I/O and holds this payload by reference.
-			// A failed append must restore the prior payload in that in-memory entry.
+			// Pi before 1.5 advances its branch before I/O and holds this payload by reference,
+			// so a failed append must restore the prior payload in that in-memory entry. Pi >=1.5
+			// drops the unsaved entry; this clone is then unreferenced and the rewrite is a no-op.
 			Object.assign(snapshot, r.invalid ? { ...emptyState(), version: 0 } : structuredClone(r.state));
 			throw error;
 		}

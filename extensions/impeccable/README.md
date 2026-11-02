@@ -6,7 +6,7 @@ The [feature and evidence map](FEATURES.md) covers every command, role and nativ
 
 ## Install and start
 
-Use Node >=22.19.0 and Pi >=1.3.0. Development and real-session tests use SDK 1.4.0.
+Use Node >=22.19.0 and Pi >=1.3.0. Development and real-session tests use SDK 1.5.0.
 
 ```bash
 pi install git:github.com/minhuw/pi-extensions
@@ -86,7 +86,7 @@ Upstream catalog telemetry defaults on. Opt out with `DO_NOT_TRACK=1` or `IMPECC
 
 Role ceilings are 24/30/30/12 turns; assessments use 30. Agent's own `max_turns` is soft; the adapter cancels foreground progress at its ceiling before another tool turn. A boundary answer may conservatively remain partial. `wrapped-up` means soft-limit steering ended the child and still requires evidence inspection; executed errors/policy substitutions are partial, never permission to replay a whole role inline. `active` background work must be retrieved or managed through `get_subagent_result` or `/agents`; unresolved outcomes require establishing termination before dependent or duplicate work. A user-stopped child stays cancelled. Missing callable Agent, nested child-safe APIs and unguardable continuations return a main-session handoff. Only established no-child unavailability permits the named upstream degraded fallback; inline review is disclosed and never called independent.
 
-SDK 1.4 is tested. Pi >=1.3 remains supported through capability checks: missing callable Agent yields handoff, missing native mutation queue refuses management writes, and missing actionable boundaries requires manual detector/live controls. These fallbacks do not promise the newer API's automation.
+SDK 1.5 is tested. Pi >=1.3 remains supported through capability checks: missing callable Agent yields handoff, missing native mutation queue refuses management writes, and missing actionable boundaries requires manual detector/live controls. These fallbacks do not promise the newer API's automation.
 
 ## Live ownership, stop and recovery
 

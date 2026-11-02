@@ -3,7 +3,6 @@
 // is a ticket agent's whose ticket a live superagent instance of this process runs, or (shared workspace) a nested
 // agent such a ticket agent started.
 import { statSync } from "node:fs";
-import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { createGit } from "./git.ts";
@@ -130,8 +129,16 @@ export function ticketLink(ctx: Pick<ExtensionContext, "sessionManager">): { tic
 	return undefined;
 }
 
+/**
+ * A provider-portable string enum, `{ type: "string", enum }` (no `anyOf`), static type the values' union. Built with
+ * TypeBox alone: pi-ai's `StringEnum` is a pi-schema schema since SDK 1.5, which types as `unknown` in a `Type.Object`.
+ */
+function stringEnum<const T extends readonly string[]>(values: T, options: { description?: string } = {}) {
+	return Type.Unsafe<T[number]>({ type: "string", enum: values, ...options });
+}
+
 const ReportParameters = Type.Object({
-	state: StringEnum(["progress", "ready", "blocked", "failed", "dropped"] as const, {
+	state: stringEnum(["progress", "ready", "blocked", "failed", "dropped"], {
 		description: "ready: committed and verified; progress: a note, or a question with `question`; blocked: cannot continue without the user; failed: cannot be done; dropped: nothing to do.",
 	}),
 	summary: Type.String({ description: "What changed or what happened, for the user." }),
