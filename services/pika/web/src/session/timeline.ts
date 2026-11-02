@@ -8,6 +8,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../lib/types";
+import { bareModelOf } from "../lib/model";
 
 interface Base {
 	key: string;
@@ -153,16 +154,19 @@ export function buildTimeline(entries: Entry[], promptSeq?: number): TimelineIte
 				}
 				break;
 			}
-			case "model_change":
+			case "model_change": {
+				// pika names models by their bare name and leaves the provider out.
+				const modelId = bareModelOf(raw.modelId);
 				items.push({
 					kind: "note",
 					key,
 					seq,
 					entry,
 					icon: "model",
-					text: `Switched model to ${[str(raw.provider), str(raw.modelId)].filter(Boolean).join("/")}`,
+					text: modelId ? `Switched model to ${modelId}` : "Switched model",
 				});
 				break;
+			}
 			case "thinking_level_change":
 				items.push({ kind: "note", key, seq, entry, icon: "sparkle", text: `Thinking level set to ${str(raw.thinkingLevel) ?? "default"}` });
 				break;

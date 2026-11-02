@@ -193,6 +193,16 @@ pub fn basename(path: &str) -> &str {
     trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
 }
 
+/// The bare name of a model id, as pika shows it: the part after the last `/` (a router or provider prefix such as
+/// `codex/` or `google/`), without an `@` and what follows it (a parameter such as `@500k`), trimmed. An id that would
+/// leave nothing stays as it is, trimmed.
+pub fn bare_model(id: &str) -> &str {
+    let id = id.trim();
+    let name = id.rsplit('/').next().unwrap_or(id);
+    let name = name.split('@').next().unwrap_or(name).trim();
+    if name.is_empty() { id } else { name }
+}
+
 /// The repository visible in a managed worktree path, for uploads that predate client-side Git discovery.
 /// Only the known layouts inside `.git` carry enough information; arbitrary sibling worktrees do not.
 pub fn worktree_project(path: &str) -> Option<&str> {
@@ -381,6 +391,37 @@ mod tests {
             long.as_str(),
         ] {
             assert!(!valid_repository(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn bare_model_names() {
+        for (id, bare) in [
+            ("codex/gpt-6.1-sol", "gpt-6.1-sol"),
+            ("auto/claude-opus-5-5", "claude-opus-5-5"),
+            ("mercerrouter/claude-opus-5-5", "claude-opus-5-5"),
+            ("claude/claude-opus-5-5", "claude-opus-5-5"),
+            ("deepseek/deepseek-flash", "deepseek-flash"),
+            ("kimi/k3.1-pro", "k3.1-pro"),
+            ("grok/grok-4.7", "grok-4.7"),
+            ("grok-4.7@500k", "grok-4.7"),
+            ("grok/grok-4.7@500k", "grok-4.7"),
+            ("google/gemini-3.5-flash", "gemini-3.5-flash"),
+            ("magpie/codex/gpt-6-luna", "gpt-6-luna"),
+            ("gpt-6.1-sol", "gpt-6.1-sol"),
+            ("  codex/ gpt-6.1-sol  ", "gpt-6.1-sol"),
+            ("model@a@b", "model"),
+            ("仓库/模型", "模型"),
+            // Nothing would be left: the id stays, trimmed.
+            ("codex/", "codex/"),
+            (" @500k ", "@500k"),
+            ("a/@x", "a/@x"),
+            ("/", "/"),
+            ("", ""),
+            ("   ", ""),
+        ] {
+            assert_eq!(bare_model(id), bare, "{id:?}");
+            assert_eq!(bare_model(bare_model(id)), bare_model(id), "idempotent for {id:?}");
         }
     }
 

@@ -26,24 +26,24 @@
  * SOFTWARE.
  */
 import { useId, type ReactNode } from "react";
+import { bareModel } from "../lib/model";
 import { cx } from "./ui";
 
 export type ModelMaker = "openai" | "claude" | "gemini" | "grok" | "deepseek" | "kimi";
 
 /**
- * Which maker's model an id names. Ids may carry a router's prefix, such as `codex/gpt-6-luna` or
- * `mercerrouter/claude-opus-5-5`: a family's name counts anywhere in the id, and OpenAI's and Kimi's bare model names
- * (`gpt-…`, `o3-…`, `k3.1-pro`) only as its last part.
+ * Which maker's model an id names, by its bare name (`bareModel`): pika reports bare names, and a routed id such as
+ * `codex/gpt-6-luna` or `grok-4.7@500k` counts as its model. A family's name counts anywhere in the name, and OpenAI's
+ * and Kimi's model names (`gpt-…`, `o3-…`, `k3.1-pro`) only at its start.
  */
 export function modelMaker(model: string): ModelMaker | undefined {
-	const id = model.toLowerCase();
-	const name = id.slice(id.lastIndexOf("/") + 1);
-	if (id.includes("claude")) return "claude";
-	if (id.includes("gemini")) return "gemini";
-	if (id.includes("grok")) return "grok";
-	if (id.includes("deepseek")) return "deepseek";
-	if (id.includes("kimi") || id.includes("moonshot") || /^k\d+(\.\d+)?(-|$)/.test(name)) return "kimi";
-	if (/^(gpt|chatgpt|codex)|^o\d+(-|$)/.test(name) || id.startsWith("openai/")) return "openai";
+	const name = bareModel(model).toLowerCase();
+	if (name.includes("claude")) return "claude";
+	if (name.includes("gemini")) return "gemini";
+	if (name.includes("grok")) return "grok";
+	if (name.includes("deepseek")) return "deepseek";
+	if (name.includes("kimi") || name.includes("moonshot") || /^k\d+(\.\d+)?(-|$)/.test(name)) return "kimi";
+	if (/^(gpt|chatgpt|codex)|^o\d+(-|$)/.test(name)) return "openai";
 	return undefined;
 }
 

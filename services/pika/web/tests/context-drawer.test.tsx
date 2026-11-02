@@ -67,7 +67,8 @@ describe("what the model saw", () => {
 		const panel = await screen.findByRole("dialog", { name: "What the model saw" });
 		expect(await within(panel).findByText("Anthropic messages")).toBeTruthy();
 		expect(within(panel).getByText("payload")).toBeTruthy();
-		expect(within(panel).getByText("anthropic")).toBeTruthy();
+		// The provider is pika's internal detail: the drawer names the API and the model, not the provider.
+		expect(within(panel).queryByText("Provider")).toBeNull();
 		expect(within(panel).getByText("anthropic-messages")).toBeTruthy();
 		expect(within(panel).getAllByText("claude-sonnet-4-5").length).toBeGreaterThan(0);
 		expect(server.calls).toContain("/api/v1/requests/r2");
@@ -132,19 +133,19 @@ describe("what the model saw", () => {
 		["Anthropic messages", modelRequest("ra", anthropicPayload), "anthropic-messages", ["user", "assistant", "user"]],
 		[
 			"OpenAI chat completions",
-			modelRequest("rc", openAiChatPayload, { provider: "openai", api: "openai-completions", model: "gpt-5" }),
+			modelRequest("rc", openAiChatPayload, { api: "openai-completions", model: "gpt-5" }),
 			"openai-chat",
 			["user", "assistant", "tool"],
 		],
 		[
 			"OpenAI responses",
-			modelRequest("rr", openAiResponsesPayload, { provider: "openai", api: "openai-responses", model: "gpt-5-codex" }),
+			modelRequest("rr", openAiResponsesPayload, { api: "openai-responses", model: "gpt-5-codex" }),
 			"openai-responses",
 			["user", "assistant", "assistant", "tool"],
 		],
 		[
 			"Google contents",
-			modelRequest("rg", googlePayload, { provider: "google", api: "google-generative-ai", model: "gemini-2.5-pro" }),
+			modelRequest("rg", googlePayload, { api: "google-generative-ai", model: "gemini-2.5-pro" }),
 			"google",
 			["user", "model", "user"],
 		],
@@ -167,7 +168,7 @@ describe("what the model saw", () => {
 	});
 
 	it("marks pi context captures", async () => {
-		renderDrawer(modelRequest("rp", piContextPayload, { fidelity: "context", provider: "openai", api: "openai-responses" }));
+		renderDrawer(modelRequest("rp", piContextPayload, { fidelity: "context", api: "openai-responses" }));
 		const panel = drawer();
 		expect(await within(panel).findByText("pi context")).toBeTruthy();
 		expect(within(panel).getByText("context", { selector: "span" })).toBeTruthy();

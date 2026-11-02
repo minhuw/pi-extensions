@@ -320,8 +320,8 @@ pub struct StoredRequest {
     #[serde(rename = "sessionId")]
     pub session_id: String,
     pub fidelity: String,
-    pub provider: Option<String>,
     pub api: Option<String>,
+    /// The model's bare name (`crate::util::bare_model`); the stored request and its payload keep the id as sent.
     pub model: Option<String>,
     pub at: Option<String>,
     pub complete: bool,
@@ -333,7 +333,7 @@ pub struct StoredRequest {
 pub fn load(conn: &Connection, blobs: &BlobStore, id: &str) -> Result<Option<StoredRequest>> {
     let row = conn
         .prepare_cached(
-            "SELECT session_id, rs, fidelity, provider, api, model, at, complete, skeleton FROM requests WHERE id = ?1",
+            "SELECT session_id, rs, fidelity, api, model, at, complete, skeleton FROM requests WHERE id = ?1",
         )?
         .query_row([id], |r| {
             Ok((
@@ -343,13 +343,13 @@ pub fn load(conn: &Connection, blobs: &BlobStore, id: &str) -> Result<Option<Sto
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, Option<String>>(5)?,
-                r.get::<_, Option<String>>(6)?,
-                r.get::<_, bool>(7)?,
-                r.get::<_, String>(8)?,
+                r.get::<_, bool>(6)?,
+                r.get::<_, String>(7)?,
             ))
         })
         .optional()?;
-    let Some((session_id, rs, fidelity, provider, api, model, at, complete, skeleton)) = row else { return Ok(None) };
+    let Some((session_id, rs, fidelity, api, model, at, complete, skeleton)) = row else { return Ok(None) };
+    let model = model.map(|m| crate::util::bare_model(&m).to_owned());
     let skeleton: Value = serde_json::from_str(&skeleton).context("stored skeleton")?;
     let mut hashes: BTreeMap<i64, String> = BTreeMap::new();
     let mut ranges = Vec::new();
@@ -382,7 +382,7 @@ pub fn load(conn: &Connection, blobs: &BlobStore, id: &str) -> Result<Option<Sto
         Ok(())
     })?;
     let payload = RawValue::from_string(payload).context("reconstructed payload")?;
-    Ok(Some(StoredRequest { id: id.to_owned(), session_id, fidelity, provider, api, model, at, complete, payload }))
+    Ok(Some(StoredRequest { id: id.to_owned(), session_id, fidelity, api, model, at, complete, payload }))
 }
 
 #[cfg(test)]

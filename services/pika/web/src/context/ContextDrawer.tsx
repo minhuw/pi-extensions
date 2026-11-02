@@ -374,7 +374,6 @@ function RequestBody({
 			<dl className="mt-3 grid grid-cols-[96px_1fr] gap-y-1 text-[13.5px]">
 				{(
 					[
-						["Provider", request.provider],
 						["API", request.api],
 						["Model", request.model],
 						["Captured", formatDateTime(request.at)],

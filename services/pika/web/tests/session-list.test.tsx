@@ -348,6 +348,16 @@ describe("session list", () => {
 		expect(within(browse).getByRole("link", { name: "mini" }).getAttribute("href")).toBe("/?device=mini");
 	});
 
+	it("filters an older link's routed model by its bare name", async () => {
+		const server = createFakeServer({ sessions });
+		renderApp(`/?model=${encodeURIComponent("codex/gpt-5@400k")}`, server.fetch);
+		expect(await screen.findByText("Refactor auth")).toBeTruthy();
+		expect(server.calls).toContain("/api/v1/sessions?model=gpt-5&root=true&limit=50");
+		expect(screen.getByRole("button", { name: "Model: gpt-5" })).toBeTruthy();
+		fireEvent.click(screen.getByRole("button", { name: "Model: gpt-5" }));
+		expect((await screen.findByRole("menuitemradio", { name: /gpt-5$/ })).getAttribute("aria-checked")).toBe("true");
+	});
+
 	it("shows a device filter's id until the facets name it", async () => {
 		renderApp("/?device=gone-device", createFakeServer({ sessions }).fetch);
 		expect(await screen.findByRole("button", { name: "Device: gone-device" })).toBeTruthy();

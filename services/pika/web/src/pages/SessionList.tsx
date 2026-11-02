@@ -7,6 +7,7 @@ import { FilterChip, MenuOption, optionLabel, plainOptions, type FilterOption } 
 import { Icon, PikaLogo } from "../components/icons";
 import { useScrollRoot } from "../components/Layout";
 import { ModelName } from "../components/ModelName";
+import { bareModelOf } from "../lib/model";
 import { cx, EmptyState, ErrorState, Page, PageTitle, Pill, Skeleton } from "../components/ui";
 import { ApiError, useApi, type SessionFilters } from "../lib/api";
 import { deviceLabel, deviceOptions } from "../lib/devices";
@@ -64,7 +65,8 @@ export function filtersFromParams(params: URLSearchParams): SessionFilters {
 	return {
 		device: params.get("device") ?? undefined,
 		project: params.get("project") ?? undefined,
-		model: params.get("model") ?? undefined,
+		// Models go by their bare name; an older link may name a route.
+		model: bareModelOf(params.get("model")),
 		from: dayStart(params.get("from")),
 		to: dayEnd(params.get("to")),
 		// Subagents and steps show inside their session's family, never as rows of their own.
@@ -409,8 +411,9 @@ function Filters() {
 		setParams(next, { replace: true });
 	};
 
+	const current = (key: "device" | "project" | "model") => (key === "model" ? bareModelOf(params.get(key)) : params.get(key));
 	const facet = (key: "device" | "project" | "model", label: string, icon: "device" | "folder" | "model", options: FilterOption[]) => (
-		<FilterChip key={key} icon={icon} label={label} value={optionLabel(options, params.get(key))}>
+		<FilterChip key={key} icon={icon} label={label} value={optionLabel(options, current(key))}>
 			{(close) => (
 				<>
 					<MenuOption
@@ -425,7 +428,7 @@ function Filters() {
 					{options.map((option) => (
 						<MenuOption
 							key={option.value}
-							selected={params.get(key) === option.value}
+							selected={current(key) === option.value}
 							onSelect={() => {
 								set(key, option.value);
 								close();

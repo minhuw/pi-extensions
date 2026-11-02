@@ -1,8 +1,52 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ModelName, modelMaker } from "../src/components/ModelName";
+import { bareModel, bareModelOf } from "../src/lib/model";
+import { buildTimeline } from "../src/session/timeline";
 import type { TraceRecord } from "../src/lib/types";
 import { KindBadge, KindBullet } from "../src/trace/parts";
+
+describe("bare model names", () => {
+	it.each([
+		["codex/gpt-6.1-sol", "gpt-6.1-sol"],
+		["auto/claude-opus-5-5", "claude-opus-5-5"],
+		["mercerrouter/claude-opus-5-5", "claude-opus-5-5"],
+		["claude/claude-opus-5-5", "claude-opus-5-5"],
+		["deepseek/deepseek-flash", "deepseek-flash"],
+		["kimi/k3.1-pro", "k3.1-pro"],
+		["grok/grok-4.7", "grok-4.7"],
+		["grok-4.7@500k", "grok-4.7"],
+		["google/gemini-3.5-flash", "gemini-3.5-flash"],
+		["magpie/codex/gpt-6-luna", "gpt-6-luna"],
+		["gpt-6.1-sol", "gpt-6.1-sol"],
+		["  codex/ gpt-6.1-sol  ", "gpt-6.1-sol"],
+		["model@a@b", "model"],
+		// Nothing would be left: the id stays, trimmed.
+		["codex/", "codex/"],
+		[" @500k ", "@500k"],
+		["a/@x", "a/@x"],
+		["", ""],
+	])("names %j %j, as the server does", (id, bare) => {
+		expect(bareModel(id)).toBe(bare);
+		expect(bareModel(bareModel(id))).toBe(bare);
+	});
+
+	it("treats a missing or blank id as no model", () => {
+		expect(bareModelOf(undefined)).toBeUndefined();
+		expect(bareModelOf(42)).toBeUndefined();
+		expect(bareModelOf("  ")).toBeUndefined();
+		expect(bareModelOf("auto/claude-opus-5-5")).toBe("claude-opus-5-5");
+	});
+
+	it("notes a model switch by the bare model, without the provider", () => {
+		const raw = (modelId?: string) => ({ type: "model_change", id: "m", parentId: null, timestamp: "2026-10-20T09:00:00.000Z", provider: "magpie", modelId });
+		const notes = buildTimeline([
+			{ seq: 1, offset: 0, id: "m", type: "model_change", timestamp: "2026-10-20T09:00:00.000Z", raw: raw("codex/gpt-6.1-sol@1m") },
+			{ seq: 2, offset: 1, id: "n", type: "model_change", timestamp: "2026-10-20T09:00:00.000Z", raw: raw() },
+		] as never).map((item) => (item.kind === "note" ? item.text : item.kind));
+		expect(notes).toEqual(["Switched model to gpt-6.1-sol", "Switched model"]);
+	});
+});
 
 describe("model names", () => {
 	it.each([
@@ -27,7 +71,7 @@ describe("model names", () => {
 		expect(modelMaker(model)).toBe(maker);
 	});
 
-	it.each(["test", "mock-model", "local", "openrouter/auto", "kilo-7b", "omni"])("leaves %s without a maker", (model) => {
+	it.each(["test", "mock-model", "local", "openrouter/auto", "kilo-7b", "omni", "claude/omni", "gpt/local"])("leaves %s without a maker", (model) => {
 		expect(modelMaker(model)).toBeUndefined();
 	});
 

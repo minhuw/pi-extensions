@@ -11,6 +11,7 @@ import { traceTicket, turnReports } from "../lib/tickets";
 import { ContextView } from "../context/ContextDrawer";
 import { useApi } from "../lib/api";
 import { formatCount, formatDateTime, plural } from "../lib/format";
+import { bareModelOf } from "../lib/model";
 import type { AssistantMessage, ContentBlock, Entry, SessionTrace, ToolResultMessage, TraceChild, TraceRecord, TraceTurn } from "../lib/types";
 import { SessionSlotsContext, SessionViewContext, useSessionView } from "../session/context";
 import { contentText } from "../session/timeline";
@@ -583,7 +584,7 @@ export const Inspector = forwardRef<HTMLDivElement, InspectorProps>(function Ins
 			else if (current === "input") {
 				const message = entry.data?.raw.message as AssistantMessage | undefined;
 				content = (
-					<JsonTree value={{ model: message?.model, provider: message?.provider, api: message?.api, thinkingLevel: message?.thinkingLevel, usage: message?.usage }} />
+					<JsonTree value={{ model: bareModelOf(message?.model), api: message?.api, thinkingLevel: message?.thinkingLevel, usage: message?.usage }} />
 				);
 			} else content = <JsonTree value={blocksOf(entry.data)} />;
 		} else if (record.kind === "tool") {

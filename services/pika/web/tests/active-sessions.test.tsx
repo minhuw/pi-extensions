@@ -81,7 +81,7 @@ describe("active sessions page", () => {
 	it("groups online sessions by device, oldest connection first", async () => {
 		const server = createFakeServer({
 			online: [
-				onlineSession("aaaa1111-0000", { name: "Refactor the parser", state: "busy", onlineMs: 2 * 3_600_000 + 5 * 60_000, model: "gpt-5" }),
+				onlineSession("aaaa1111-0000", { name: "Refactor the parser", state: "busy", onlineMs: 2 * 3_600_000 + 5 * 60_000, model: "codex/gpt-5@200k" }),
 				onlineSession("bbbb2222-0000", { name: undefined, title: "Fix the flaky test", onlineMs: 10 * 60_000, recorded: false, stateMs: 30_000 }),
 				onlineSession(BARE_ID, {
 					device: "laptop",
@@ -112,7 +112,9 @@ describe("active sessions page", () => {
 		expect(link.getAttribute("href")).toBe("/s/aaaa1111-0000");
 		expect(busy.querySelector("[data-session-state]")?.getAttribute("data-session-state")).toBe("busy");
 		expect(within(busy).getByText("Busy")).toBeTruthy();
+		// Relay reports the model as pi has it; the page shows its bare name.
 		expect(within(busy).getByText("gpt-5")).toBeTruthy();
+		expect(within(busy).queryByText("codex/gpt-5@200k")).toBeNull();
 		expect(within(busy).getByText("pika")).toBeTruthy();
 		expect(within(busy).getByText("/home/me/code/pika")).toBeTruthy();
 		expect(within(busy).getByText("Online 2h 5m")).toBeTruthy();

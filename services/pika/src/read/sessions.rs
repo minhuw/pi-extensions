@@ -286,7 +286,8 @@ fn list_query_scoped(p: &Params, limit: i64, public: bool) -> ReadResult<(String
     }
     if let Some(model) = p.get("model") {
         sql.push_str(" AND EXISTS (SELECT 1 FROM session_models m WHERE m.model = ? AND m.sid = s.sid)");
-        args.push(Sql::Text(model.to_owned()));
+        // Models are stored by bare name; a filter naming a route, as older links do, means its model.
+        args.push(Sql::Text(crate::util::bare_model(model).to_owned()));
     }
     if let Some(from) = p.time("from")? {
         sql.push_str(" AND s.last_at >= ?");

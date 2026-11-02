@@ -37,6 +37,8 @@ pub const SEARCH_RULES: &str = "search_rules";
 pub const RESCRUB_AFTER: &str = "search_rescrub_after";
 /// Marks the completed repair of cwd-based project names from uploads without Git metadata.
 const WORKTREE_PROJECTS_REPAIRED: &str = "worktree_projects_repaired";
+/// Marks the completed rewrite of derived model ids to bare model names (`crate::derive::normalize_models`).
+const BARE_MODELS_REPAIRED: &str = "bare_models_repaired";
 const MAX_IDLE_READERS: usize = 16;
 
 /// Tables rebuilt by `pika reindex`, in the order they are cleared.
@@ -136,6 +138,21 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     if !repaired {
         crate::derive::refresh_worktree_projects(&tx).context("repairing managed worktree projects")?;
         tx.execute("INSERT INTO settings (key, value) VALUES (?1, x'01')", [WORKTREE_PROJECTS_REPAIRED])?;
+    }
+    tx.commit()?;
+    // Bare model names are also a derivation change: rewrite the stored ids once, in Rust, atomically with the marker.
+    // A rewrite that changed rows replaces `derived_generation`, as a reindex does, so no cached trace survives it.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let repaired =
+        tx.query_row("SELECT EXISTS(SELECT 1 FROM settings WHERE key = ?1)", [BARE_MODELS_REPAIRED], |r| r.get::<_, bool>(0))?;
+    if !repaired {
+        if crate::derive::normalize_models(&tx).context("rewriting model ids to bare names")? {
+            tx.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                params![DERIVED_GENERATION, crate::util::random_bytes::<8>()],
+            )?;
+        }
+        tx.execute("INSERT INTO settings (key, value) VALUES (?1, x'01')", [BARE_MODELS_REPAIRED])?;
     }
     tx.commit()?;
     Ok(())

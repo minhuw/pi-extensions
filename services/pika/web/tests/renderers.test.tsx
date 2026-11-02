@@ -209,7 +209,9 @@ describe("tool renderers", () => {
 		const card = container.querySelector<HTMLElement>("[data-agent-card]")!;
 		expect(within(card).getByText("recon")).toBeTruthy();
 		expect(within(card).getByText("Map the ingest code")).toBeTruthy();
-		expect(within(card).getByText("anthropic/claude-haiku-4-5")).toBeTruthy();
+		// A routed id shows as its bare name.
+		expect(within(card).getByText("claude-haiku-4-5")).toBeTruthy();
+		expect(within(card).queryByText("anthropic/claude-haiku-4-5")).toBeNull();
 		expect(within(card).getByText("completed")).toBeTruthy();
 		expect(within(card).getByText("48.2k tokens")).toBeTruthy();
 		expect(within(card).getByText("1m 35s")).toBeTruthy();

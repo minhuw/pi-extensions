@@ -141,7 +141,6 @@ export interface ModelRequest {
 	id: string;
 	sessionId: string;
 	fidelity: "payload" | "context";
-	provider?: string;
 	api?: string;
 	model?: string;
 	at: string;
@@ -239,7 +238,6 @@ export interface TraceLlmRecord {
 	start?: number;
 	end?: number;
 	model?: string;
-	provider?: string;
 	stopReason?: string;
 	error?: string;
 	input: number;

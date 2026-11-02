@@ -170,8 +170,6 @@ pub struct LlmRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -298,7 +296,7 @@ pub(crate) const TURNS_SQL: &str = "SELECT t.idx, t.start_seq, t.end_seq,
      FROM turns t LEFT JOIN entries e ON e.sid = t.sid AND e.seq = t.start_seq AND e.type = 'custom_message'
      WHERE t.sid = ?1 ORDER BY t.idx";
 
-pub(crate) const MODEL_CALLS_SQL: &str = "SELECT m.seq, m.turn, m.ts, m.at, m.model, m.provider, m.stop_reason, m.error_message,
+pub(crate) const MODEL_CALLS_SQL: &str = "SELECT m.seq, m.turn, m.ts, m.at, m.model, m.stop_reason, m.error_message,
          m.input, m.output, m.cache_read, m.cache_write, m.cost, m.request_id, l.data, l.blob, e.tool_call_ids, r.timing
      FROM model_calls m
      LEFT JOIN entries e ON e.sid = m.sid AND e.seq = m.seq
@@ -849,13 +847,13 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str, public: bool) -> ReadResu
     let mut rows = stmt.query([sid])?;
     while let Some(r) = rows.next()? {
         let seq: i64 = r.get(0)?;
-        if let Some(ids) = r.get::<_, Option<String>>(16)? {
+        if let Some(ids) = r.get::<_, Option<String>>(15)? {
             let ids: Vec<String> = serde_json::from_str(&ids).unwrap_or_default();
             position.extend(ids.into_iter().enumerate().map(|(i, id)| (id, i + 1)));
         }
-        let facts = line_text(r, 14, blobs, &mut failed)?.map(|line| assistant_facts(&line, public)).unwrap_or_default();
+        let facts = line_text(r, 13, blobs, &mut failed)?.map(|line| assistant_facts(&line, public)).unwrap_or_default();
         let (start, end) = llm_times(r.get(2)?, r.get(3)?, facts.duration_ms);
-        let timing = llm_timing(text_ref(r, 17)?, start, end);
+        let timing = llm_timing(text_ref(r, 16)?, start, end);
         records.push(Record::Llm(LlmRecord {
             seq,
             turn: r.get(1)?,
@@ -866,15 +864,14 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str, public: bool) -> ReadResu
             first_token_at: timing.first_token_at,
             first_token: timing.first_token,
             model: r.get(4)?,
-            provider: r.get(5)?,
-            stop_reason: r.get(6)?,
-            error: r.get(7)?,
-            input: r.get(8)?,
-            output: r.get(9)?,
-            cache_read: r.get(10)?,
-            cache_write: r.get(11)?,
-            cost: r.get(12)?,
-            request_id: r.get(13)?,
+            stop_reason: r.get(5)?,
+            error: r.get(6)?,
+            input: r.get(7)?,
+            output: r.get(8)?,
+            cache_read: r.get(9)?,
+            cache_write: r.get(10)?,
+            cost: r.get(11)?,
+            request_id: r.get(12)?,
             text: facts.text,
             thinking: facts.thinking.then_some(true),
             tool_calls: calls_per_seq.get(&seq).copied().unwrap_or(0),

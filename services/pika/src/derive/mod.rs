@@ -112,6 +112,66 @@ pub fn refresh_worktree_projects(tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
+/// Rewrites the model ids of sessions derived before pika showed bare model names (`crate::util::bare_model`): each
+/// session's `models`, in first-seen order without repeats, `session_models`, and `model_calls.model`. Rows derived
+/// since already hold bare names, as do the rows `pika reindex` derives. Returns whether any row changed; see
+/// `store::migrate`.
+pub fn normalize_models(tx: &Transaction) -> Result<bool> {
+    let mut changed = false;
+    let sessions: Vec<(i64, String)> = tx
+        .prepare("SELECT sid, models FROM sessions WHERE models <> '[]'")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (sid, models) in sessions {
+        let Ok(models) = serde_json::from_str::<Vec<String>>(&models) else { continue };
+        let mut bare: Vec<String> = Vec::with_capacity(models.len());
+        for model in &models {
+            let name = crate::util::bare_model(model);
+            if !bare.iter().any(|b| b == name) {
+                bare.push(name.to_owned());
+            }
+        }
+        if bare != models {
+            tx.prepare_cached("UPDATE sessions SET models = ?1 WHERE sid = ?2")?
+                .execute(rusqlite::params![serde_json::to_string(&bare)?, sid])?;
+            changed = true;
+        }
+    }
+    let renames = |sql: &str| -> Result<Vec<(String, String)>> {
+        let models: Vec<String> = tx.prepare(sql)?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok(models
+            .into_iter()
+            .filter_map(|m| {
+                let bare = crate::util::bare_model(&m);
+                (bare != m).then(|| (m.clone(), bare.to_owned()))
+            })
+            .collect())
+    };
+    // Routes of one model merge into one row per session.
+    for (old, new) in renames("SELECT DISTINCT model FROM session_models")? {
+        tx.execute(
+            "INSERT OR IGNORE INTO session_models (model, sid) SELECT ?2, sid FROM session_models WHERE model = ?1",
+            rusqlite::params![old, new],
+        )?;
+        tx.execute("DELETE FROM session_models WHERE model = ?1", [&old])?;
+        changed = true;
+    }
+    // One pass over the model calls, renaming by a JSON object of old to new ids.
+    let calls: serde_json::Map<String, Value> = renames("SELECT DISTINCT model FROM model_calls WHERE model IS NOT NULL")?
+        .into_iter()
+        .map(|(old, new)| (old, Value::String(new)))
+        .collect();
+    if !calls.is_empty() {
+        tx.execute(
+            "UPDATE model_calls SET model = (SELECT value FROM json_each(?1) WHERE key = model_calls.model)
+             WHERE model IN (SELECT key FROM json_each(?1))",
+            [Value::Object(calls).to_string()],
+        )?;
+        changed = true;
+    }
+    Ok(changed)
+}
+
 /// The stream's `meta` object, or `Null` when it has none or it is not JSON.
 fn stream_meta(tx: &Transaction, id: i64) -> Result<Value> {
     let meta: Option<String> =

@@ -174,6 +174,7 @@ Relay lets a running Pi session send a text message to any other running Pi sess
 ### Upgrading from 0.7.0
 
 - Update the Pi extensions alongside the server to receive models.dev pricing estimates. The Magpie provider matches model names and caches public prices for 24 hours; pika stores the per-call costs uploaded by Pi. Upgrading the server alone does not change client pricing or recalculate historical costs.
+- pika names models by their bare name everywhere: the part of Pi's model id after the last `/`, without an `@` suffix, so `codex/gpt-6.1-sol`, `auto/gpt-6.1-sol`, and `gpt-6.1-sol@1m` are all `gpt-6.1-sol`, and the Model filter has one option per model. Older `?model=` links that name a route still work. The provider is no longer shown in the UI or returned by the read API; the stored lines, raw entries, exports, and captured request payloads keep the ids and provider as Pi wrote them. The first start rewrites the model names of existing sessions once, in one transaction, without a reindex.
 - The server includes the repository and ticket display improvements made since 0.7.0. The database upgrades to schema version 9; a 0.7.0 binary cannot open the upgraded database, so keep a [backup](#backup) if you may need to roll back.
 
 ### Upgrading from 0.6

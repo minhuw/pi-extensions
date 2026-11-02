@@ -1,5 +1,5 @@
 import type { TraceLlmRecord } from "../lib/types";
-import { formatPhase, middleTruncate } from "./format";
+import { formatPhase } from "./format";
 import { llmPhases } from "./kinds";
 
 const WIDTH = 272;
@@ -61,7 +61,6 @@ export function Ladder({ record }: { record: TraceLlmRecord }) {
 	const done = arrows[arrows.length - 1];
 	const height = done.y + SLANT + 8;
 	const color = record.error ? "var(--color-k-error)" : "var(--color-k-llm)";
-	const provider = record.provider ? middleTruncate(record.provider, 18) : "Provider";
 	const rate = streaming > 0 && record.output > 0 ? record.output / (streaming / 1000) : undefined;
 	const label = `Request sent; ${headers !== undefined ? `headers after ${formatPhase(headers - request)}; ` : ""}first token after ${formatPhase(
 		ttft,
@@ -74,7 +73,7 @@ export function Ladder({ record }: { record: TraceLlmRecord }) {
 						pi
 					</text>
 					<text x={PROVIDER_X} y={12} fill="currentColor" fontWeight={600}>
-						{provider}
+						Provider
 					</text>
 				</g>
 				<line x1={PI_X} x2={PI_X} y1={18} y2={height - 2} stroke="var(--color-muted)" strokeWidth={1} />

@@ -97,7 +97,7 @@ export function turnExpanded(trace: SessionTrace, overrides: ReadonlyMap<number,
 export function recordHaystack(record: TraceRecord): string {
 	const parts = [recordBadge(record), recordName(record), recordSummary(record), record.kind];
 	if (record.kind === "tool") parts.push(toolName(record));
-	if (record.kind === "llm") parts.push(record.provider ?? "", record.stopReason ?? "");
+	if (record.kind === "llm") parts.push(record.stopReason ?? "");
 	return parts.join(" ").toLowerCase();
 }
 

@@ -3,6 +3,7 @@ import { CodeBlock, OutputBlock } from "../../components/code";
 import { Markdown } from "../../components/Markdown";
 import { Pill, Toggle } from "../../components/ui";
 import { formatCount, formatDuration, totalTokens } from "../../lib/format";
+import { bareModelOf } from "../../lib/model";
 import { KindBullet } from "../../trace/parts";
 import { useSessionSlots, useSessionView } from "../context";
 import { argString, okResult, resultText, type ToolRenderProps } from "./shared";
@@ -41,7 +42,8 @@ export function AgentTool({ call, result }: ToolRenderProps) {
 	const type = argString(call, "subagent_type") ?? details.subagentType ?? child?.link?.agentType ?? "agent";
 	const description = argString(call, "description") ?? details.description ?? child?.link?.description;
 	const prompt = argString(call, "prompt");
-	const model = details.modelName ?? argString(call, "model") ?? child?.models[0];
+	// The child's models are bare names already; the tool's own may name a route.
+	const model = bareModelOf(details.modelName ?? argString(call, "model")) ?? child?.models[0];
 	const status = details.status ?? (result ? (result.isError ? "error" : "completed") : "unknown");
 	// Subagents formats the count with its unit, such as "48.2k token".
 	const tokens = details.tokens?.replace(/\s*tokens?$/i, "") || (child ? formatCount(totalTokens(child.tokens)) : undefined);

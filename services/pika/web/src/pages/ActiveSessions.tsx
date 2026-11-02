@@ -7,6 +7,7 @@ import { MessageDialog } from "../components/MessageDialog";
 import { BUTTON, Callout, cx, EmptyState, ErrorState, Page, PageTitle, Pill, SkeletonLines } from "../components/ui";
 import { useApi } from "../lib/api";
 import { formatDateTime, formatRelative, plural } from "../lib/format";
+import { bareModelOf } from "../lib/model";
 import { LAYOUT_GUARD_MS, useNow, useSettling } from "../lib/hooks";
 import {
 	formatSince,
@@ -76,6 +77,8 @@ function SessionRow({
 }) {
 	const label = sessionLabel(session);
 	const named = Boolean(session.name || session.title);
+	// Relay reports the model id as pi has it; pika shows its bare name.
+	const model = bareModelOf(session.model);
 	const labelClass = cx("min-w-0 truncate font-medium", !named && "mono");
 	return (
 		<li
@@ -107,9 +110,9 @@ function SessionRow({
 					<span className="mono min-w-0 truncate !text-[11.5px]" title={session.cwd} data-cwd="">
 						{session.cwd}
 					</span>
-					{session.model && (
+					{model && (
 						<span className="flex min-w-0 items-center gap-1" data-model="">
-							<span className="mono truncate text-[11.5px]">{session.model}</span>
+							<span className="mono truncate text-[11.5px]">{model}</span>
 						</span>
 					)}
 					<span className="tnum whitespace-nowrap" title={`Connected ${formatDateTime(session.connectedAt)}`} data-online-for="">

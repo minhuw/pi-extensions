@@ -17,7 +17,6 @@ export function modelRequest(id: string, payload: unknown, extra: Partial<ModelR
 		id,
 		sessionId: "s1",
 		fidelity: "payload",
-		provider: "anthropic",
 		api: "anthropic-messages",
 		model: "claude-sonnet-4-5",
 		at: "2026-10-20T09:00:02.000Z",

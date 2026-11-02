@@ -607,3 +607,102 @@ fn opening_a_version_7_database_derives_repositories_from_stored_meta() {
     assert_eq!(session_row(&store, "wt-1"), (json!("widgets"), json!(REPO_URL)));
     assert_eq!(session_row(&store, "plain-1"), (json!("plain"), Value::Null));
 }
+
+/// A session whose model calls name routed model ids, as Magpie's routes do, with one route repeated.
+fn routed_session(id: &str) -> Vec<String> {
+    let at = "2026-10-23T08:00:00.000Z";
+    let mut values = vec![
+        json!({ "type": "session", "version": 3, "id": id, "timestamp": at, "cwd": "/home/me/code/routes" }),
+        json!({ "type": "message", "id": "r0", "parentId": null, "timestamp": at, "message": { "role": "user", "content": "Go", "timestamp": 1 } }),
+    ];
+    let models = ["codex/gpt-6.1-sol", "auto/claude-opus-5-5", "mercerrouter/claude-opus-5-5", "claude/claude-opus-5-5",
+                  "grok-4.7@500k", "grok/grok-4.7", "google/gemini-3.5-flash", "gpt-6.1-sol"];
+    for (i, model) in models.iter().enumerate() {
+        values.push(json!({ "type": "message", "id": format!("r{}", i + 1), "parentId": format!("r{i}"), "timestamp": at,
+                            "message": { "role": "assistant", "content": [{ "type": "text", "text": "ok" }], "provider": "magpie",
+                                         "model": model, "stopReason": "stop", "timestamp": 1_000 + i as i64 } }));
+    }
+    values.iter().map(Value::to_string).collect()
+}
+
+const ROUTED_BARE: [&str; 4] = ["gpt-6.1-sol", "claude-opus-5-5", "grok-4.7", "gemini-3.5-flash"];
+
+/// Derivation stores bare model names, one `session_models` row per model however many routes reached it; the
+/// provider column and the stored line keep what pi wrote. A reindex derives the same rows.
+#[test]
+fn derivation_stores_bare_model_names() {
+    let env = env();
+    let store = &env.store;
+    upload(store, "session:routed-1", "session", &routed_session("routed-1"), 3);
+    let s = one(store, "SELECT models FROM sessions WHERE id = 'routed-1'");
+    assert_eq!(serde_json::from_str::<Value>(s["models"].as_str().unwrap()).unwrap(), json!(ROUTED_BARE));
+    let mut sorted = ROUTED_BARE.to_vec();
+    sorted.sort();
+    let rows: Vec<Value> = query(store, "SELECT model FROM session_models ORDER BY model").into_iter().map(|r| r["model"].clone()).collect();
+    assert_eq!(rows, sorted.iter().map(|m| json!(m)).collect::<Vec<_>>());
+    let calls: Vec<Value> = query(store, "SELECT model, provider FROM model_calls ORDER BY seq").into_iter().map(|r| json!([r["model"], r["provider"]])).collect();
+    assert_eq!(calls[0], json!(["gpt-6.1-sol", "magpie"]));
+    assert_eq!(calls.iter().map(|c| c[0].clone()).collect::<Vec<_>>(), json!(["gpt-6.1-sol", "claude-opus-5-5", "claude-opus-5-5",
+        "claude-opus-5-5", "grok-4.7", "grok-4.7", "gemini-3.5-flash", "gpt-6.1-sol"]).as_array().unwrap().clone());
+    let line = one(store, "SELECT data FROM lines l JOIN streams t ON t.id = l.stream_id WHERE t.key = 'session:routed-1' AND l.offset > 0 AND instr(l.data, 'codex/') > 0");
+    assert!(line["data"].as_str().unwrap().contains(r#""model":"codex/gpt-6.1-sol""#));
+
+    let derived = dump_derived(store);
+    pika::reindex::reindex(store).unwrap();
+    assert_eq!(dump_derived(store), derived);
+}
+
+/// A database derived before bare model names is rewritten once when it is opened, without a reindex: the rows match
+/// a fresh derivation, and the trace's fingerprint changes so no cached trace is served. Later opens change nothing.
+#[test]
+fn opening_a_database_rewrites_model_ids_to_bare_names_once() {
+    let env = env();
+    let data = env.dir.path().join("data");
+    load_all(&env, 5);
+    upload(&env.store, "session:routed-1", "session", &routed_session("routed-1"), 3);
+    let expected = dump_derived(&env.store);
+    let fingerprint = |store: &pika::store::Store| store.read(|conn| pika::read::trace::fingerprint(conn, "routed-1")).unwrap();
+    let before = fingerprint(&env.store);
+    assert_eq!(env.store.setting("bare_models_repaired").unwrap(), Some(vec![1]));
+    drop(env.store);
+
+    // What an older pika derived: the ids as pi wrote them, one row per route.
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    conn.execute_batch(
+        r#"UPDATE sessions SET models = '["codex/gpt-6.1-sol","auto/claude-opus-5-5","mercerrouter/claude-opus-5-5","claude/claude-opus-5-5","grok-4.7@500k","grok/grok-4.7","google/gemini-3.5-flash","gpt-6.1-sol"]'
+               WHERE id = 'routed-1';
+           DELETE FROM session_models WHERE sid = (SELECT sid FROM sessions WHERE id = 'routed-1');
+           INSERT INTO session_models (model, sid) SELECT value, (SELECT sid FROM sessions WHERE id = 'routed-1')
+               FROM json_each((SELECT models FROM sessions WHERE id = 'routed-1'));
+           UPDATE model_calls SET model = json_extract(l.data, '$.message.model')
+               FROM entries e, lines l WHERE e.sid = model_calls.sid AND e.seq = model_calls.seq
+               AND l.stream_id = e.sid AND l.offset = e.offset AND model_calls.sid = (SELECT sid FROM sessions WHERE id = 'routed-1');
+           DELETE FROM settings WHERE key = 'bare_models_repaired';"#,
+    )
+    .unwrap();
+    let legacy: i64 = conn.query_row("SELECT COUNT(*) FROM model_calls WHERE instr(model, '/') > 0 OR instr(model, '@') > 0", [], |r| r.get(0)).unwrap();
+    assert_eq!(legacy, 7);
+    let routes: i64 = conn.query_row("SELECT COUNT(*) FROM session_models", [], |r| r.get(0)).unwrap();
+    assert_eq!(routes, 2 + 8);
+    drop(conn);
+
+    let store = pika::store::Store::open(&data).unwrap();
+    assert_eq!(dump_derived(&store), expected);
+    assert_eq!(store.setting("bare_models_repaired").unwrap(), Some(vec![1]));
+    assert_eq!(store.setting("needs_reindex").unwrap(), None);
+    let generation = store.setting("derived_generation").unwrap();
+    assert!(generation.is_some());
+    assert_ne!(fingerprint(&store), before);
+    // The rewrite runs once.
+    store.write(|tx| tx.execute_batch(
+        "CREATE TRIGGER no_repeated_model_rewrite BEFORE UPDATE ON model_calls
+         BEGIN SELECT RAISE(ABORT, 'model rewrite ran twice'); END;"
+    )).unwrap();
+    drop(store);
+    let store = pika::store::Store::open(&data).unwrap();
+    assert_eq!(dump_derived(&store), expected);
+    assert_eq!(store.setting("derived_generation").unwrap(), generation);
+    store.write(|tx| tx.execute_batch("DROP TRIGGER no_repeated_model_rewrite")).unwrap();
+    pika::reindex::reindex(&store).unwrap();
+    assert_eq!(dump_derived(&store), expected);
+}

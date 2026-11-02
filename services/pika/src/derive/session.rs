@@ -418,7 +418,8 @@ impl Deriver<'_> {
         let usage = Usage::parse(message.get("usage")).unwrap_or_default();
         self.add_usage(&usage);
         let turn_idx = self.turn.as_ref().map(|t| t.idx);
-        let model = string_field(message, "model");
+        // pika shows bare model names; the stored line keeps the id as pi wrote it.
+        let model = str_field(message, "model").map(|m| crate::util::bare_model(m).to_owned());
         if let Some(model) = &model
             && !self.s.models.contains(model)
         {

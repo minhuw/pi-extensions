@@ -1,6 +1,7 @@
 // An in-memory implementation of the read API for tests, served through a mocked fetch.
 import { withBase } from "../../src/lib/base";
 import { normalizePairingCode } from "../../src/lib/devices";
+import { bareModel, bareModelOf } from "../../src/lib/model";
 import type {
 	AuthMode,
 	BrowserSession,
@@ -179,8 +180,8 @@ export function traceOf(session: FakeSession): SessionTrace {
 			turn,
 			...(start !== undefined ? { start } : {}),
 			...(end !== undefined ? { end } : {}),
-			model: typeof message.model === "string" ? message.model : undefined,
-			provider: typeof message.provider === "string" ? message.provider : undefined,
+			// As the server derives it: the bare name, and no provider.
+			model: bareModelOf(message.model),
 			stopReason: typeof message.stopReason === "string" ? message.stopReason : undefined,
 			...(typeof message.errorMessage === "string" ? { error: message.errorMessage } : {}),
 			input: Number(usage.input ?? 0),
@@ -639,7 +640,7 @@ export function createFakeServer({
 				if (value) list = list.filter((s) => s[key] === value);
 			}
 			const model = params.get("model");
-			if (model) list = list.filter((s) => s.models.includes(model));
+			if (model) list = list.filter((s) => s.models.includes(bareModel(model)));
 			return json(200, page(list.map(withoutChildren), params, 50));
 		}
 		if (parts[0] === "sessions") {

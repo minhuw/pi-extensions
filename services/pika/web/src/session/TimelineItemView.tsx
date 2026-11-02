@@ -7,6 +7,7 @@ import { Callout, cx, Pill, Toggle } from "../components/ui";
 import { useApi } from "../lib/api";
 import { messageReports, REPORT_TYPE, reportsLabel } from "../lib/tickets";
 import { formatCount, formatTime } from "../lib/format";
+import { bareModelOf } from "../lib/model";
 import { useViewState } from "../lib/viewState";
 import { formatFineCost, formatSpan } from "../trace/format";
 import { firstStringArg, recordBadge, showsToolName, toolFamily, toolGlyph } from "../trace/kinds";
@@ -106,14 +107,15 @@ function ModelCall({ item }: { item: Extract<TimelineItem, { kind: "model-call" 
 	const { sessionId } = useSessionView();
 	const { ModelCallExtra } = useSessionSlots();
 	const { message } = item;
+	const model = bareModelOf(message.model);
 	const usage = message.usage;
 	const prompt = usage ? usage.input + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0) : 0;
 	const hit = usage && prompt > 0 ? (usage.cacheRead ?? 0) / prompt : undefined;
 	const error = message.stopReason === "error" || message.stopReason === "aborted" || Boolean(message.errorMessage);
 	return (
 		<div className="flex h-7 items-center gap-2 text-[12px] text-muted" data-model-call="">
-			<KindBadge family="llm" model={message.model} label="LLM" error={error} />
-			<span className="min-w-0 truncate text-ink/80">{message.model}</span>
+			<KindBadge family="llm" model={model} label="LLM" error={error} />
+			<span className="min-w-0 truncate text-ink/80">{model}</span>
 			{message.thinkingLevel && message.thinkingLevel !== "off" && <span className="shrink-0">thinking {message.thinkingLevel}</span>}
 			<span className="ml-auto flex shrink-0 items-center gap-2.5">
 				{usage && (

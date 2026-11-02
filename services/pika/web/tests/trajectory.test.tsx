@@ -126,6 +126,32 @@ describe("trajectory ledger", () => {
 		expect(pane.dataset.inspectorPane).toBe("shown");
 	});
 
+	it("names a model call by its bare model and leaves the provider out of its input", async () => {
+		const call = toolCall("c_ls", "ls", { path: "." });
+		const routed = { model: "codex/gpt-6.1-sol@1m", provider: "magpie-internal", api: "openai-responses" };
+		const entries: Entry[] = [
+			entry(0, header("m1")),
+			entry(1, userMessage("List")),
+			entry(2, assistantMessage([call], 1200, routed)),
+			entry(3, toolResultMessage(call.id, call.name, "ok", { at: 1300 })),
+		];
+		const server = createFakeServer({ sessions: [{ detail: summary("m1", { title: "List" }), entries, turns: [turn(0, 1, 3, { userText: "List", modelCalls: 1, toolCalls: 1 })] }] });
+		renderApp("/s/m1", server.fetch);
+		fireEvent.click(await waitFor(() => row("[data-seq='2'][data-kind='llm']")));
+		await waitFor(() => expect(inspector().textContent).toContain("gpt-6.1-sol"));
+		fireEvent.click(within(inspector()).getByRole("tab", { name: "Input" }));
+		const input = await waitFor(() => inspector().querySelector("[data-json-tree]")!);
+		expect(input.textContent).toContain("gpt-6.1-sol");
+		expect(input.textContent).toContain("openai-responses");
+		expect(input.textContent).not.toContain("codex/");
+		expect(input.textContent).not.toContain("@1m");
+		expect(input.textContent).not.toContain("provider");
+		expect(input.textContent).not.toContain("magpie-internal");
+		// The raw entry stays as pi wrote it.
+		fireEvent.click(within(inspector()).getByRole("tab", { name: "Raw" }));
+		expect(inspector().textContent).toContain('"model": "codex/gpt-6.1-sol@1m"');
+	});
+
 	it("inspects a record, loading only its entries, with Rendered, Input, Output, and Raw tabs", async () => {
 		const server = createFakeServer({ sessions: [session()] });
 		renderApp("/s/t1", server.fetch);

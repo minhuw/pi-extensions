@@ -677,7 +677,7 @@ async fn requests_reconstruct_and_complete_when_blobs_arrive() {
     let r = app.json("requests/req-1").await;
     assert_eq!(
         r,
-        json!({ "id": "req-1", "sessionId": SESSION_ID, "fidelity": "payload", "provider": "anthropic",
+        json!({ "id": "req-1", "sessionId": SESSION_ID, "fidelity": "payload",
                 "api": "anthropic-messages", "model": "claude-sonnet-4-5", "at": "2026-10-20T09:00:02.400Z",
                 "complete": true, "payload": payload() })
     );
@@ -1257,7 +1257,7 @@ async fn trace_of_a_session_with_children() {
     assert_eq!(
         records[0],
         json!({ "kind": "llm", "seq": 6, "turn": 0, "start": 1792486802500_i64, "end": ms("2026-10-20T09:00:05Z"),
-                "model": "claude-sonnet-4-5", "provider": "anthropic", "stopReason": "toolUse",
+                "model": "claude-sonnet-4-5", "stopReason": "toolUse",
                 "input": 1200, "output": 150, "cacheRead": 800, "cacheWrite": 100, "cost": 0.0123, "requestId": "req-1",
                 "text": "Let me run it.", "thinking": true, "toolCalls": 1 })
     );
@@ -1314,7 +1314,7 @@ async fn trace_records_summaries_order_and_missing_times() {
                 "message": { "role": "user", "content": "Do the things", "timestamp": 1 } }),
         // Calls in message order, which is not the order of their ids.
         json!({ "type": "message", "id": "a1", "parentId": "u1", "timestamp": "2026-10-23T08:00:05.000Z",
-                "message": { "role": "assistant", "api": "anthropic-messages", "provider": "anthropic", "model": "m1",
+                "message": { "role": "assistant", "api": "anthropic-messages", "provider": "anthropic", "model": "auto/m1@500k",
                              "stopReason": "toolUse", "timestamp": 1792742402000_i64, "durationMs": 2500.4,
                              "usage": { "input": 1, "output": 2, "cacheRead": 3, "cacheWrite": 4, "totalTokens": 10, "cost": { "total": 0.5 } },
                              "content": [
@@ -1369,7 +1369,7 @@ async fn trace_records_summaries_order_and_missing_times() {
     assert_eq!(
         records[0],
         json!({ "kind": "llm", "seq": 2, "turn": 0, "start": 1792742402000_i64, "end": 1792742404500_i64, "model": "m1",
-                "provider": "anthropic", "stopReason": "toolUse", "input": 1, "output": 2, "cacheRead": 3, "cacheWrite": 4,
+                "stopReason": "toolUse", "input": 1, "output": 2, "cacheRead": 3, "cacheWrite": 4,
                 "cost": 0.5, "text": "Working on it", "toolCalls": 12 })
     );
     let summaries: Vec<&str> = records[1..13].iter().map(|r| r["summary"].as_str().unwrap()).collect();
@@ -1644,7 +1644,7 @@ async fn trace_reads_blob_lines_and_survives_missing_blobs() {
     assert_eq!((&r[0]["text"], &r[0]["end"]), (&json!("Big one"), &json!(ms(2) + 1000)));
     assert_eq!(
         r[1],
-        json!({ "kind": "llm", "seq": 3, "turn": 0, "start": ms(6), "end": ms(9), "model": "m", "provider": "p", "stopReason": "stop",
+        json!({ "kind": "llm", "seq": 3, "turn": 0, "start": ms(6), "end": ms(9), "model": "m", "stopReason": "stop",
                 "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": 0.0, "toolCalls": 0 })
     );
     let times: Vec<(Option<i64>, Option<i64>)> = r[2..6].iter().map(|r| (r["start"].as_i64(), r["end"].as_i64())).collect();
@@ -2279,4 +2279,85 @@ async fn summaries_carry_the_repository() {
     assert_eq!(public_json(&app, &format!("sessions/{COPY}")).await["repository"], URL);
     let public_items = public_json(&app, "sessions").await;
     assert_eq!(repository_of(public_items["items"].as_array().unwrap(), COPY), Some(json!(URL)));
+}
+
+/// A session whose model calls name routed model ids, as Magpie's routes do.
+fn routed_session(id: &str, at: &str, models: &[&str]) -> Vec<String> {
+    let mut values = vec![
+        json!({ "type": "session", "version": 3, "id": id, "timestamp": at, "cwd": "/home/me/code/routes" }),
+        json!({ "type": "message", "id": "r0", "parentId": null, "timestamp": at, "message": { "role": "user", "content": "Go", "timestamp": 1 } }),
+    ];
+    for (i, model) in models.iter().enumerate() {
+        let mut message = assistant(&format!("Reply {i}"), model, 1_000 + i as i64);
+        message["provider"] = json!("magpie-internal");
+        values.push(json!({ "type": "message", "id": format!("r{}", i + 1), "parentId": format!("r{i}"), "timestamp": at, "message": message }));
+    }
+    lines(&values)
+}
+
+/// Every model the read API reports is a bare name, in the owner's and the public namespaces, and no response names
+/// the provider; the stored lines and the captured payload keep the ids as pi sent them.
+#[tokio::test]
+async fn models_read_as_bare_names_without_providers() {
+    let app = app(None);
+    const ROUTED: &str = "routed-1";
+    const PLAIN: &str = "routed-2";
+    let routed = ["codex/gpt-6.1-sol", "auto/claude-opus-5-5", "mercerrouter/claude-opus-5-5", "grok-4.7@500k", "kimi/k3.1-pro"];
+    app.upload(DEVICE, &skey(ROUTED), "session", &routed_session(ROUTED, "2026-10-23T08:00:00.000Z", &routed)).await;
+    let plain = ["gpt-6.1-sol", "google/gemini-3.5-flash"];
+    app.upload(DESKTOP, &skey(PLAIN), "session", &routed_session(PLAIN, "2026-10-24T08:00:00.000Z", &plain)).await;
+    let (skeleton, blocks) = pika::requests::split(&json!({ "model": "codex/gpt-6.1-sol", "input": [] }));
+    app.ingest(DEVICE, json!({
+        "blobs": blocks.iter().map(|(hash, data)| json!({ "hash": hash, "data": data })).collect::<Vec<_>>(),
+        "requests": [{ "id": "req-routed", "sessionId": ROUTED, "seq": 2, "at": "2026-10-23T08:00:00.000Z", "fidelity": "payload",
+                       "provider": "magpie-internal", "api": "openai-responses", "model": "codex/gpt-6.1-sol",
+                       "assistant": { "timestamp": 1_000 }, "skeleton": skeleton,
+                       "blocks": blocks.iter().map(|(h, _)| h.clone()).collect::<Vec<_>>() }],
+    })).await;
+
+    let bare = json!(["gpt-6.1-sol", "claude-opus-5-5", "grok-4.7", "k3.1-pro"]);
+    let merged = json!(["claude-opus-5-5", "gemini-3.5-flash", "gpt-6.1-sol", "grok-4.7", "k3.1-pro"]);
+    assert_eq!(app.json("facets").await["models"], merged);
+    assert_eq!(app.json(&format!("sessions/{ROUTED}")).await["models"], bare);
+    let listed = app.json("sessions").await;
+    assert_eq!(listed["items"][1]["models"], bare);
+    assert_eq!(listed["items"][0]["models"], json!(["gpt-6.1-sol", "gemini-3.5-flash"]));
+    // A filter by a route, as older links have, means the route's model.
+    for model in ["gpt-6.1-sol", "codex/gpt-6.1-sol", "magpie/codex/gpt-6.1-sol", " gpt-6.1-sol@1m "] {
+        assert_eq!(session_ids(&app, &format!("?model={}", q(model))).await, [PLAIN, ROUTED], "{model}");
+    }
+    assert_eq!(session_ids(&app, &format!("?model={}", q("auto/claude-opus-5-5"))).await, [ROUTED]);
+    assert_eq!(session_ids(&app, &format!("?model={}", q("grok-4.7@500k"))).await, [ROUTED]);
+    assert_eq!(session_ids(&app, &format!("?model={}", q("google/gemini-3.5-flash"))).await, [PLAIN]);
+
+    let trace = app.json(&format!("sessions/{ROUTED}/trace")).await;
+    let models: Vec<&str> = trace["records"].as_array().unwrap().iter().filter(|r| r["kind"] == "llm").map(|r| r["model"].as_str().unwrap()).collect();
+    assert_eq!(models, ["gpt-6.1-sol", "claude-opus-5-5", "claude-opus-5-5", "grok-4.7", "k3.1-pro"]);
+    assert_eq!(trace["records"][0]["requestId"], "req-routed");
+
+    let request = app.json("requests/req-routed").await;
+    assert_eq!((request.get("provider"), &request["model"], &request["api"]), (None, &json!("gpt-6.1-sol"), &json!("openai-responses")));
+    assert_eq!(request["payload"], json!({ "model": "codex/gpt-6.1-sol", "input": [] }));
+
+    // The stored lines are verbatim.
+    let entries = app.json(&format!("sessions/{ROUTED}/entries")).await;
+    assert_eq!(entries["items"][2]["raw"]["message"]["model"], "codex/gpt-6.1-sol");
+    assert_eq!(entries["items"][2]["raw"]["message"]["provider"], "magpie-internal");
+    let raw = app.get(&format!("sessions/{ROUTED}/entries/2/raw")).await.text();
+    assert!(raw.contains(r#""model":"codex/gpt-6.1-sol""#) && raw.contains("magpie-internal"), "{raw}");
+
+    // The derived responses name no provider.
+    for path in ["facets".to_owned(), "sessions".into(), format!("sessions/{ROUTED}"), format!("sessions/{ROUTED}/trace"),
+                 format!("sessions/{ROUTED}/tree"), format!("sessions/{ROUTED}/turns"), "requests/req-routed".into()] {
+        let text = app.get(&path).await.text();
+        assert!(!text.contains("magpie-internal") && !text.contains("\"provider\""), "{path}: {text}");
+    }
+
+    assert_eq!(publish(&app, "routes", true, None).await.status, StatusCode::OK);
+    assert_eq!(public_json(&app, "facets").await["models"], merged);
+    assert_eq!(public_json(&app, &format!("sessions/{ROUTED}")).await["models"], bare);
+    let public_ids = |v: Value| ids(v["items"].as_array().unwrap(), "id");
+    assert_eq!(public_ids(public_json(&app, &format!("sessions?model={}", q("codex/gpt-6.1-sol"))).await), [PLAIN, ROUTED]);
+    let trace = public(&app, &format!("sessions/{ROUTED}/trace")).await.text();
+    assert!(trace.contains(r#""model":"gpt-6.1-sol""#) && !trace.contains("codex/") && !trace.contains("\"provider\""), "{trace}");
 }
