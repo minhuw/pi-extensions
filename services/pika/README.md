@@ -171,6 +171,11 @@ Relay lets a running Pi session send a text message to any other running Pi sess
 
 `PIKA_RELAY_TTL_SECS` and `PIKA_RELAY_HEARTBEAT_SECS` shorten the message lifetime and the heartbeat. They exist for tests and the end-to-end script only; do not set them in production.
 
+### Upgrading from 0.7.0
+
+- Update the Pi extensions alongside the server to receive models.dev pricing estimates. The Magpie provider matches model names and caches public prices for 24 hours; pika stores the per-call costs uploaded by Pi. Upgrading the server alone does not change client pricing or recalculate historical costs.
+- The server includes the repository and ticket display improvements made since 0.7.0. The database upgrades to schema version 9; a 0.7.0 binary cannot open the upgraded database, so keep a [backup](#backup) if you may need to roll back.
+
 ### Upgrading from 0.6
 
 - Search finds words inside Chinese, Japanese, and Korean text, which is written without spaces and so was found only where punctuation happened to set a word apart. The web UI's search groups results by session, with each session's match count, and matches the word being typed as a prefix.
@@ -252,7 +257,7 @@ The [`pika image`](../../.github/workflows/pika-image.yml) workflow publishes a 
 
 | Tag | Source |
 | --- | --- |
-| `latest`, `0.7.0`, `0.7` | a `pika-v0.7.0` release tag |
+| `latest`, `0.7.1`, `0.7` | a `pika-v0.7.1` release tag |
 | `edge` | the newest `master` commit that changed `services/pika/` |
 | `sha-<commit>` | that commit |
 
@@ -261,7 +266,7 @@ Prefer a version tag in production and `edge` to follow `master`.
 To release, set `version` in `Cargo.toml`, commit, then push a matching tag; the workflow refuses a tag that disagrees with `Cargo.toml`:
 
 ```bash
-git tag pika-v0.7.0 && git push origin pika-v0.7.0
+git tag pika-v0.7.1 && git push origin pika-v0.7.1
 ```
 
 Published from this public repository, the package is public, so servers pull it without logging in. A fork or a private copy of the repository may publish it as private; then make it public under the package's **Package settings → Change visibility**, or log in on the server with `docker login ghcr.io` and a token that has `read:packages`.
