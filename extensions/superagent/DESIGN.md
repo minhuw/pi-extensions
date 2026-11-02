@@ -23,8 +23,8 @@ sessions as Subagents children; their session link carries `superagent: { ticket
 
 A session is in **superagent mode** or **direct mode**.
 
-- Superagent mode is the default for a top-level session (`ctx.mode` is `tui` or `rpc`) whose cwd is inside a git
-  repository with at least one commit, unless settings disable it. Child sessions (Subagents agents, ticket agents
+- Direct mode is the default. Superagent mode is opt-in with `/superagent on` or `enabled: true` in settings for a
+  top-level session (`ctx.mode` is `tui` or `rpc`) whose cwd is inside a git repository with at least one commit. Child sessions (Subagents agents, ticket agents
   included, and Herder steps), `print`/`json` modes, and directories outside git are always direct. Superagent itself
   loads in child sessions through normal extension discovery and stays inert there; the ticket-session hook (below) is
   the only ticket-session behaviour.
@@ -477,11 +477,12 @@ marks a shared ticket done once it reports ready. For a **worktree ticket**:
 `<agentDir>/superagent.json`, read at `session_start`; invalid values are reported once and ignored:
 
 ```json
-{ "enabled": true, "maxWorkers": 4, "routerTools": [], "routerAgents": ["recon", "reviewer", "expert"], "react": "attention", "workspace": "worktree" }
+{ "enabled": false, "maxWorkers": 4, "routerTools": [], "routerAgents": ["recon", "reviewer", "expert"], "react": "attention", "workspace": "worktree" }
 ```
 
 `workspace` (`"worktree"` or `"shared"`) is the workspace mode of repositories without a `workspace.json`.
-`enabled: false` (or `PI_SUPERAGENT_DISABLED=1`) makes every session start in direct mode. `maxWorkers` (1–16, default
+`enabled` defaults to `false`; `enabled: true` starts new eligible sessions in superagent mode. A saved session choice
+takes precedence over settings; `PI_SUPERAGENT_DISABLED=1` forces direct mode even for a saved opt-in. `maxWorkers` (1–16, default
 4) bounds running ticket agents per session; further tickets stay `queued` and start in creation order. `routerTools`
 adds tool names to the router set; `routerAgents` lists the Subagents types the router may run with `Agent` (`[]`
 removes `Agent`); `react` is `attention` (default) or `none` (see "Reports to the main session").

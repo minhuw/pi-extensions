@@ -42,6 +42,7 @@ describe.skipIf(!protocol3)("superagent on Subagents", () => {
 
 	beforeEach(async () => {
 		workspace = await Workspace.create();
+		await workspace.settings({ enabled: true });
 		home = process.env.HOME;
 		process.env.HOME = workspace.root;
 		subagents = (await import("../../subagents/src/index.ts")).default as ExtensionFactory;

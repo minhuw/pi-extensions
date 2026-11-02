@@ -1,10 +1,11 @@
 # Superagent
 
-Turn a top-level Pi session into a router. The main session talks with you and answers questions from read-only tools. Every change becomes a **ticket**: a long-lived Subagents agent of the `ticket` type that keeps its conversation across Pi restarts and reports back as a message. Depending on the repository's [workspace mode](#workspace-modes), a ticket runs in its own git worktree and branch (`worktree`, the default) or directly in your working tree (`shared`). Tickets run in parallel. One is merged into your branch (in shared mode: marked done) only when you ask, or when you asked up front. The collection loads this extension automatically; use `/reload` after installing or updating it.
+Turn a top-level Pi session into a router. The main session talks with you and answers questions from read-only tools. Every change becomes a **ticket**: a long-lived Subagents agent of the `ticket` type that keeps its conversation across Pi restarts and reports back as a message. Depending on the repository's [workspace mode](#workspace-modes), a ticket runs in its own git worktree and branch (`worktree`, the default) or directly in your working tree (`shared`). Tickets run in parallel. One is merged into your branch (in shared mode: marked done) only when you ask, or when you asked up front. The collection loads this extension automatically, but sessions start in direct mode by default. Run `/superagent on` to enable ticket routing; use `/reload` after installing or updating it.
 
 Superagent needs the **Subagents** extension of this collection (cross-extension RPC protocol 3 with the embedded `ticket` agent type). Without it, tickets fail with "Subagents with RPC protocol 3 is required to run tickets".
 
 ```text
+/superagent on
 fix the flaky login test, and add a --json flag to the export command
 #2 use snake_case for the field names
 /tickets
@@ -20,8 +21,8 @@ The design and its contracts are in [DESIGN.md](DESIGN.md).
 
 A session is in **superagent mode** or **direct mode**.
 
-- **Superagent mode** is the default for a top-level TUI or RPC session whose working directory is in a git repository with at least one commit. The session keeps only read-only tools (`read`, `grep`, `find`, `ls`, `ffgrep`/`fffind` when installed, tools annotated read-only that do not call other tools, and `git_read`), plus the ticket tools, Relay's tools, Herder's `herder_*` tools, `loop_schedule`/`loop_stop`, Subagents' `get_subagent_result`/`steer_subagent`, and `Agent` for the types in `routerAgents` (default `recon`, `reviewer`, `expert`). `edit`, `write`, `bash`, `codemode`, and every other tool are deactivated. A model-issued call to one of them is blocked with `"<tool> is not available in superagent mode: create a ticket with ticket_create for changes, or switch to direct mode with /superagent off."`; an `Agent` call naming another type, or resuming a ticket's agent, is blocked with its own reason. Your own `!` shell commands still work.
-- **Direct mode** gives the session back the tools it had before. Ticket commands and `#N` keep working.
+- **Superagent mode** is opt-in with `/superagent on` or `"enabled": true` in settings, for a top-level TUI or RPC session whose working directory is in a git repository with at least one commit. The session keeps only read-only tools (`read`, `grep`, `find`, `ls`, `ffgrep`/`fffind` when installed, tools annotated read-only that do not call other tools, and `git_read`), plus the ticket tools, Relay's tools, Herder's `herder_*` tools, `loop_schedule`/`loop_stop`, Subagents' `get_subagent_result`/`steer_subagent`, and `Agent` for the types in `routerAgents` (default `recon`, `reviewer`, `expert`). `edit`, `write`, `bash`, `codemode`, and every other tool are deactivated. A model-issued call to one of them is blocked with `"<tool> is not available in superagent mode: create a ticket with ticket_create for changes, or switch to direct mode with /superagent off."`; an `Agent` call naming another type, or resuming a ticket's agent, is blocked with its own reason. Your own `!` shell commands still work.
+- **Direct mode** is the default and keeps the usual tools available. Switching back from superagent mode restores the tools the session had before. Ticket commands and `#N` keep working.
 - Child sessions (Subagents agents, ticket agents included, and Herder steps), `print`/`json` runs, and directories outside git are always direct, and get no ticket tools.
 
 `/superagent off` and `/superagent on` switch modes. The choice is recorded in the session and survives `/reload` and `/resume`.
@@ -129,12 +130,12 @@ Each ticket has a lock that its session refreshes every 30 seconds. A lock goes 
 `<agentDir>/superagent.json` (normally `~/.pi/agent/superagent.json`) is read when a session starts. Invalid values are reported once and ignored.
 
 ```json
-{ "enabled": true, "maxWorkers": 4, "routerTools": [], "routerAgents": ["recon", "reviewer", "expert"], "react": "attention", "workspace": "worktree" }
+{ "enabled": false, "maxWorkers": 4, "routerTools": [], "routerAgents": ["recon", "reviewer", "expert"], "react": "attention", "workspace": "worktree" }
 ```
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `true` | `false` starts sessions in direct mode; `/superagent on` still switches one. `PI_SUPERAGENT_DISABLED=1` keeps every session direct. |
+| `enabled` | `false` | `true` starts new eligible sessions in superagent mode; `/superagent on` enables it for one session. Saved session choices take precedence. `PI_SUPERAGENT_DISABLED=1` keeps every session direct. |
 | `maxWorkers` | `4` | Running ticket agents per session, 1–16. Further tickets stay `queued` and start in creation order. Follow-ups to existing agents are not limited. |
 | `routerTools` | `[]` | More tool names to keep active in superagent mode. |
 | `routerAgents` | `["recon", "reviewer", "expert"]` | Subagents types the router may run with `Agent`; `[]` removes `Agent`. |
@@ -146,7 +147,7 @@ Each ticket has a lock that its session refreshes every 30 seconds. A lock goes 
 ## How it relates to the other extensions
 
 - **Subagents** runs every ticket agent: superagent spawns, messages, reopens, and stops them over Subagents' `subagents:rpc:*` bus verbs and follows their runs through `subagents:started`/`completed`/`failed`. It imports nothing from Subagents.
-- **Herder** runs one planned, verified, multi-step orchestration with its own worktrees and delivery confirmation. Its tools stay available to the router, so the main session can start a Herder run when you ask for one; ticket agents cannot.
+- **Herder** runs one planned, verified, multi-step orchestration with its own worktrees and delivery confirmation. Its tools stay available to the router, but the router blocks the file and shell tools needed to prepare goals, plans, and workflow scripts. Use direct mode (the default, or `/superagent off`) for Herder. Ticket agents cannot call Herder tools.
 - **pika** uploads ticket sessions as children of the main session, nested under the `ticket_create` call that created them. Superagent imports neither pika nor Relay.
 
 ## Development

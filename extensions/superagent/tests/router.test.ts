@@ -34,7 +34,21 @@ describe.skipIf(!modulesExist)("superagent router", () => {
 		return seen;
 	}
 
-	it("applies the router tool set in a git repository and runs git_read", async () => {
+	it("starts direct by default without router instructions", async () => {
+		const h = await start();
+		expect(h.session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "bash", "edit", "write", ...TICKET_TOOLS]));
+		expect(h.notes.statuses.get(STATUS_KEY)).toBe("superagent: direct · worktree");
+		const seen = script(h, (_text, call) => call === 1
+			? fauxAssistantMessage([fauxToolCall("bash", { command: "true" })], { stopReason: "toolUse" })
+			: fauxAssistantMessage("done"));
+		await h.session.prompt("go");
+		expect(toolResults(h.session).find((result) => result.name === "bash")?.isError).toBe(false);
+		expect(seen[0]).not.toContain("You are the router of this repository.");
+		expect(customMessages(h.session, TICKETS_MESSAGE)).toEqual([]);
+	});
+
+	it("applies the router tool set when settings enable it and runs git_read", async () => {
+		await workspace.settings({ enabled: true });
 		const h = await start();
 		const active = h.session.getActiveToolNames();
 		for (const name of [...READ_ONLY, ...TICKET_TOOLS]) expect(active).toContain(name);
@@ -58,6 +72,7 @@ describe.skipIf(!modulesExist)("superagent router", () => {
 	});
 
 	it("re-applies the router set when another extension changes the active tools", async () => {
+		await workspace.settings({ enabled: true });
 		const atStart: string[][] = [];
 		const h = await start({ extensions: [(pi) => {
 			pi.on("agent_start", () => { atStart.push(pi.getActiveTools()); });
@@ -72,6 +87,7 @@ describe.skipIf(!modulesExist)("superagent router", () => {
 	});
 
 	it("blocks model-issued calls to active tools outside the router set with the reason", async () => {
+		await workspace.settings({ enabled: true });
 		const h = await start({ extensions: [(pi) => {
 			// Loaded after superagent: re-activates tools once superagent applied its set.
 			pi.on("before_agent_start", () => { pi.setActiveTools([...pi.getActiveTools(), "bash", "edit"]); return undefined; });
@@ -86,6 +102,7 @@ describe.skipIf(!modulesExist)("superagent router", () => {
 	});
 
 	it("stays direct outside git, in child sessions, and in print mode", async () => {
+		await workspace.settings({ enabled: true });
 		const outside = await start({ cwd: workspace.plain });
 		expect(outside.session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "bash", "edit", "write"]));
 		expect(outside.session.getActiveToolNames()).not.toContain("ticket_create");
@@ -126,7 +143,7 @@ describe.skipIf(!modulesExist)("superagent router", () => {
 		await h.session.prompt("/superagent off");
 		expect(h.session.getActiveToolNames().sort()).toEqual([...direct].sort());
 		const modes = h.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom" && entry.customType === MODE_ENTRY ? [(entry.data as { mode: string }).mode] : []);
-		expect(modes).toEqual(["direct", "superagent", "direct"]);
+		expect(modes).toEqual(["superagent", "direct"]);
 	});
 
 	it("handles #N input without a model turn, refuses closed tickets, and passes other numbers to the model", async () => {
@@ -150,6 +167,7 @@ describe.skipIf(!modulesExist)("superagent router", () => {
 	});
 
 	it("gives the tickets message only when the summary changed", async () => {
+		await workspace.settings({ enabled: true });
 		const tickets = await store();
 		tickets.create({ title: "Pending job", request: "x", source: "x", createdBy: "elsewhere", base: workspace.git("rev-parse", "HEAD").trim(), target: "main" }, "elsewhere");
 		const h = await start();

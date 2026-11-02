@@ -71,8 +71,13 @@ describe("settings", () => {
 		return loadSettings(dir);
 	};
 
-	it("defaults", () => {
-		expect(DEFAULT_SETTINGS).toEqual({ enabled: true, maxWorkers: 4, routerTools: [], routerAgents: ["recon", "reviewer", "expert"], react: "attention", workspace: "worktree" });
+	it("defaults to direct mode without a settings file", () => {
+		dir = mkdtempSync(join(tmpdir(), "superagent-settings-"));
+		expect(loadSettings(dir)).toEqual({ settings: DEFAULT_SETTINGS, problems: [] });
+		expect(DEFAULT_SETTINGS).toEqual({ enabled: false, maxWorkers: 4, routerTools: [], routerAgents: ["recon", "reviewer", "expert"], react: "attention", workspace: "worktree" });
+	});
+	it("allows explicit opt-in", () => {
+		expect(load({ enabled: true }).settings.enabled).toBe(true);
 	});
 	it("reads and validates workspace", () => {
 		expect(load({ workspace: "shared" }).settings.workspace).toBe("shared");
@@ -91,7 +96,7 @@ describe("settings", () => {
 	});
 	it("refuses invalid values and honours PI_SUPERAGENT_DISABLED", () => {
 		process.env.PI_SUPERAGENT_DISABLED = "1";
-		const { settings, problems } = load({ routerAgents: "recon", react: "always" });
+		const { settings, problems } = load({ enabled: true, routerAgents: "recon", react: "always" });
 		expect(settings).toMatchObject({ enabled: false, routerAgents: ["recon", "reviewer", "expert"], react: "attention" });
 		expect(problems).toHaveLength(2);
 	});

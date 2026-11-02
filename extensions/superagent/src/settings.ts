@@ -5,7 +5,7 @@ import type { DispatchSettings } from "./types.ts";
 export const SETTINGS_FILE = "superagent.json";
 export const DISABLED_ENV = "PI_SUPERAGENT_DISABLED";
 export const DEFAULT_ROUTER_AGENTS: readonly string[] = ["recon", "reviewer", "expert"];
-export const DEFAULT_SETTINGS: DispatchSettings = { enabled: true, maxWorkers: 4, routerTools: [], routerAgents: [...DEFAULT_ROUTER_AGENTS], react: "attention", workspace: "worktree" };
+export const DEFAULT_SETTINGS: DispatchSettings = { enabled: false, maxWorkers: 4, routerTools: [], routerAgents: [...DEFAULT_ROUTER_AGENTS], react: "attention", workspace: "worktree" };
 const KNOWN = new Set(["enabled", "maxWorkers", "routerTools", "routerAgents", "react", "workspace"]);
 /** Settings of earlier versions: the `ticket` agent type's frontmatter decides the model and thinking now. */
 const RETIRED: Record<string, string> = {
