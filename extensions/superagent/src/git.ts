@@ -144,6 +144,8 @@ export function createGit(): Git {
 		},
 
 		async removeWorktree(repo: Repo, path: string): Promise<void> {
+			// Never the main checkout (a shared ticket's "worktree").
+			if (samePath(path, repo.topLevel)) throw new Error(`superagent: refusing to remove the main checkout ${path}`);
 			try {
 				await run(repo.topLevel, ["worktree", "remove", "--force", "--force", arg(path, "path")], { timeout: GIT_LONG_TIMEOUT_MS });
 			} catch (error) {
@@ -156,12 +158,19 @@ export function createGit(): Git {
 
 		async deleteBranch(repo: Repo, branch: string, force = false): Promise<void> {
 			if (!(await branchExists(repo, branch))) return;
+			const current = await run(repo.topLevel, ["symbolic-ref", "--quiet", "--short", "HEAD"], { ok: [1] });
+			if (current.code === 0 && current.stdout.trim() === branch) throw new Error(`superagent: refusing to delete ${branch}, the main checkout's branch`);
 			await run(repo.topLevel, ["branch", force ? "-D" : "-d", branch]);
 		},
 
 		async isClean(cwd: string): Promise<boolean> {
 			const result = await run(cwd, ["status", "--porcelain"]);
 			return result.stdout.trim() === "";
+		},
+
+		async status(cwd: string): Promise<string[]> {
+			const result = await run(cwd, ["-c", "core.quotePath=false", "status", "--porcelain"]);
+			return lines(result.stdout);
 		},
 
 		async aheadBehind(repo: Repo, branch: string, target: string): Promise<{ ahead: number; behind: number }> {

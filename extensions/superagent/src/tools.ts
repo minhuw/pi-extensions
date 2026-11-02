@@ -1,8 +1,7 @@
 // The router tools of superagent mode; see DESIGN.md "Tools in superagent mode", "Follow-ups", and "Merging".
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { Dispatcher } from "./dispatcher.ts";
-import { createGit } from "./git.ts";
+import { DirtyWorkspaceError, isShared, type Dispatcher } from "./dispatcher.ts";
 import { checkGitReadArgs, runGitRead } from "./git-read.ts";
 import { describeTicket, ticketLine } from "./render.ts";
 import type { Repo } from "./types.ts";
@@ -39,12 +38,12 @@ export function registerTools(pi: ExtensionAPI, host: ToolsHost): void {
 
 	pi.registerTool({
 		name: "ticket_create", label: "Create Ticket",
-		description: "Turn one independent piece of work into a ticket: a ticket agent makes the change in its own git worktree and branch, runs the checks, commits, and reports back as a message later. "
+		description: "Turn one independent piece of work into a ticket: a ticket agent makes the change (worktree mode: in its own git worktree and branch, committed; shared mode: directly in the user's working tree, uncommitted), runs the checks, and reports back as a message later. "
 			+ "Use it for anything that changes files or needs builds, tests, or other commands. One ticket per independent piece of work; split a message holding several. "
 			+ "`request` is the user's words verbatim, never a plan or a checklist of yours. `note` (at most 30 words) carries routing facts only, such as a constraint the user stated earlier. "
-			+ "`after` lists tickets that must be merged before this one starts; `mergeWhenReady` merges it as soon as it reports ready (only when the user asked for that). "
+			+ "`after` lists tickets that must be merged (or done) before this one starts; `mergeWhenReady` merges it as soon as it reports ready (only when the user asked for that). "
 			+ "It returns at once; never wait or poll for the result.",
-		promptSnippet: "Create a ticket: a ticket agent makes a change in its own worktree and reports back",
+		promptSnippet: "Create a ticket: a ticket agent makes a change and reports back",
 		parameters: Type.Object({
 			title: Type.String({ minLength: 1, maxLength: 120, description: "A short title, a few words" }),
 			request: Type.String({ minLength: 1, description: "The user's request, verbatim" }),
@@ -55,21 +54,25 @@ export function registerTools(pi: ExtensionAPI, host: ToolsHost): void {
 		async execute(toolCallId, params, _signal, _onUpdate, ctx) {
 			const note = params.note?.trim();
 			if (note && note.split(/\s+/).length > 30) throw new Error("note has more than 30 words: keep only routing facts, and put the user's words in request.");
-			const ticket = await dispatcher().create({
-				title: params.title, request: params.request, source: latestUserText(ctx) ?? params.request, ...(note ? { note } : {}),
-				...(params.after?.length ? { after: params.after } : {}), ...(params.mergeWhenReady ? { mergeWhenReady: true } : {}),
-				parentToolCallId: toolCallId,
-			});
+			let ticket;
+			try {
+				ticket = await dispatcher().create({
+					title: params.title, request: params.request, source: latestUserText(ctx) ?? params.request, ...(note ? { note } : {}),
+					...(params.after?.length ? { after: params.after } : {}), ...(params.mergeWhenReady ? { mergeWhenReady: true } : {}),
+					parentToolCallId: toolCallId,
+				});
+			} catch (error) {
+				// The user hears it directly too: the router may not repeat a tool error.
+				if (error instanceof DirtyWorkspaceError) { try { ctx.ui.notify(error.message, "warning"); } catch {} }
+				throw error;
+			}
 			host.changed();
-			const waits = ticket.after?.length ? `queued until ${ticket.after.map((dep) => `#${dep}`).join(", ")} ${ticket.after.length === 1 ? "is" : "are"} merged` : undefined;
-			const where = ticket.state === "queued" ? waits ?? "queued until an agent slot is free" : ticket.state === "failed" ? `failed: ${ticket.error ?? "see its report"}` : `${ticket.state} on branch ${ticket.branch}`;
-			// Worktrees start from the last commit, so the user's uncommitted edits are not in them.
-			const repo = host.repo();
-			const dirty = repo ? !await createGit().isClean(repo.topLevel).catch(() => true) : false;
-			const warning = dirty
-				? ` Tell the user: the main checkout has uncommitted changes, and the ticket started from the last commit (${ticket.base.slice(0, 12)}), so it does not see them.`
-				: "";
-			return reply(`Created ticket #${ticket.id} "${ticket.title}": ${where}. Its report arrives as a message; end your turn after confirming it to the user.${warning}`, { ticket, uncommitted: dirty });
+			const shared = isShared(ticket);
+			const waits = ticket.after?.length ? `queued until ${ticket.after.map((dep) => `#${dep}`).join(", ")} ${ticket.after.length === 1 ? "is" : "are"} ${shared ? "done" : "merged"}` : undefined;
+			const where = ticket.state === "queued" ? waits ?? "queued until an agent slot is free"
+				: ticket.state === "failed" ? `failed: ${ticket.error ?? "see its report"}`
+				: shared ? `${ticket.state} in the shared working tree` : `${ticket.state} on branch ${ticket.branch}`;
+			return reply(`Created ticket #${ticket.id} "${ticket.title}": ${where}. Its report arrives as a message; end your turn after confirming it to the user.`, { ticket });
 		},
 	});
 
@@ -88,7 +91,7 @@ export function registerTools(pi: ExtensionAPI, host: ToolsHost): void {
 
 	pi.registerTool({
 		name: "ticket_status", label: "Ticket Status",
-		description: "Show the repository's open tickets, one line each, or one ticket in detail (`id`): state, branch, worktree, commits ahead, changed files, last report, and pending question. "
+		description: "Show the repository's open tickets, one line each, or one ticket in detail (`id`): state, branch, worktree (or, in shared mode, the files it touched), commits ahead, changed files, last report, and pending question. "
 			+ "Reports arrive as messages on their own: do not call this to wait for one.",
 		parameters: Type.Object({ id: Type.Optional(ID), all: Type.Optional(Type.Boolean({ description: "Include merged and closed tickets" })) }),
 		annotations: { readOnlyHint: true },
@@ -106,7 +109,8 @@ export function registerTools(pi: ExtensionAPI, host: ToolsHost): void {
 
 	pi.registerTool({
 		name: "ticket_merge", label: "Merge Ticket",
-		description: "Fast-forward a ready ticket's branch into the main checkout's current branch, rebasing it first when needed (conflicts go back to the ticket agent). "
+		description: "Worktree mode: fast-forward a ready ticket's branch into the main checkout's current branch, rebasing it first when needed (conflicts go back to the ticket agent). "
+			+ "Shared mode: mark the ticket done; its changes stay uncommitted in the working tree, and nothing is merged. Refused while its agent runs. "
 			+ "`whenReady: true` merges a ticket that is not ready yet as soon as it reports ready. "
 			+ "Call it only when the user explicitly asks to merge that ticket; never on your own after a report.",
 		parameters: Type.Object({ id: ID, whenReady: Type.Optional(Type.Boolean({ description: "Merge once it reports ready, if it is not ready now" })) }),
@@ -122,6 +126,7 @@ export function registerTools(pi: ExtensionAPI, host: ToolsHost): void {
 				host.changed();
 			}
 			const text = outcome.kind === "merged" ? `Merged ticket #${params.id} into ${outcome.into} (${outcome.commits} commit${outcome.commits === 1 ? "" : "s"}).`
+				: outcome.kind === "done" ? `Ticket #${params.id} is done; its changes stay uncommitted in the user's working tree.`
 				: outcome.kind === "handed-to-worker" ? `Ticket #${params.id} needs a rebase first: ${outcome.reason} Its agent resolves it, and the merge runs again when it reports ready.`
 				: `Ticket #${params.id} was not merged: ${outcome.reason}`;
 			if (outcome.kind === "refused") throw new Error(text);
@@ -131,12 +136,14 @@ export function registerTools(pi: ExtensionAPI, host: ToolsHost): void {
 
 	pi.registerTool({
 		name: "ticket_close", label: "Close Ticket",
-		description: "Abandon a ticket: stop its agent and remove its worktree; the branch is kept. Call it only when the user explicitly asks to close or abandon that ticket.",
+		description: "Abandon a ticket: stop its agent. Worktree mode: its worktree is removed and its branch kept. Shared mode: its changes stay in the working tree. Call it only when the user explicitly asks to close or abandon that ticket.",
 		parameters: Type.Object({ id: ID, reason: Type.String({ minLength: 1, description: "Why, in the user's words" }) }),
 		async execute(_id, params) {
 			const ticket = await dispatcher().close(params.id, params.reason);
 			host.changed();
-			return reply(`Closed ticket #${ticket.id}; its branch ${ticket.branch} is kept.`, { ticket });
+			return reply(isShared(ticket)
+				? `Closed ticket #${ticket.id}; its agent is stopped, and its changes stay in the working tree.`
+				: `Closed ticket #${ticket.id}; its branch ${ticket.branch} is kept.`, { ticket });
 		},
 	});
 

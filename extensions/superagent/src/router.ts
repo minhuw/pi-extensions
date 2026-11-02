@@ -129,9 +129,10 @@ export class Router {
 			event.systemPromptOptions.sections.superagent = ROUTER_PROMPT;
 			const dispatcher = this.host.dispatcher();
 			if (!dispatcher) return undefined;
-			const content = ticketsContent(dispatcher.summary().text);
+			const summary = dispatcher.summary();
+			const content = ticketsContent(summary.text, summary.workspace);
 			// Nothing to say until a ticket exists; afterwards every change, including the last one closing.
-			if (content === this.given || (this.given === undefined && !dispatcher.summary().open.length)) return undefined;
+			if (content === this.given || (this.given === undefined && !summary.open.length)) return undefined;
 			this.given = content;
 			return { message: { customType: TICKETS_MESSAGE, content, display: false } };
 		});
@@ -153,7 +154,7 @@ export class Router {
 			void dispatcher.inspect(id).then((info) => ctx.ui.notify(describeTicket(info), "info"), (error) => ctx.ui.notify(String(error instanceof Error ? error.message : error), "error"));
 			return;
 		}
-		if (ticket.state === "merged" || ticket.state === "closed") { ctx.ui.notify(`Ticket #${id} is ${ticket.state}; it takes no more messages.`, "error"); return; }
+		if (ticket.state === "merged" || ticket.state === "done" || ticket.state === "closed") { ctx.ui.notify(`Ticket #${id} is ${ticket.state}; it takes no more messages.`, "error"); return; }
 		void dispatcher.send(id, text).then(({ delivery }) => {
 			ctx.ui.notify(`Sent to #${id} ${ticket.title}: ${DELIVERY_TEXT[delivery]}.`, "info");
 			this.host.changed();

@@ -1,6 +1,7 @@
 // The dispatcher's state machine against in-memory fakes of the types.ts interfaces (no git, no Pi sessions).
 import { afterEach, describe, expect, it } from "vitest";
-import { createDispatcher, DispatchError, NO_TOOL_ERROR, type DispatcherDeps, type NotifyExtra, type NotifyKind } from "../src/dispatcher.ts";
+import { memoryWorkspace, type WorkspaceSetting } from "../src/workspace.ts";
+import { createDispatcher, DirtyWorkspaceError, DispatchError, DIRTY_SWITCH_WARNING, dirtyWorkspaceText, NO_TOOL_ERROR, switchRefusal, type DispatcherDeps, type NotifyExtra, type NotifyKind } from "../src/dispatcher.ts";
 import {
 	LAST_TEXT_CHARS, LOCK_STALE_MS, type FastForwardOutcome, type Git, type LockOwner, type MergeDeps, type MergeOutcome, type NewTicket,
 	type RebaseOutcome, type ReportState, type Repo, type Ticket, type TicketEvent, type TicketReport, type TicketStore, type WorkerEvent,
@@ -28,7 +29,8 @@ class FakeStore implements TicketStore {
 		const ticket: Ticket = {
 			version: 1, id, slug, title: init.title, request: init.request, source: init.source, ...(init.note ? { note: init.note } : {}),
 			createdAt: this.clock, updatedAt: this.clock, createdBy: init.createdBy, owner, base: init.base, ...(init.target ? { target: init.target } : {}),
-			branch: `pi/${id}-${slug}`, worktree: `/repo/.git/superagent/worktrees/${id}-${slug}`, state: "queued",
+			...(init.workspace === "shared" ? { workspace: "shared" as const } : {}),
+			branch: init.branch ?? `pi/${id}-${slug}`, worktree: init.worktree ?? `/repo/.git/superagent/worktrees/${id}-${slug}`, state: "queued",
 		};
 		this.tickets.set(id, ticket);
 		this.log.set(id, [{ at: this.clock, type: "created" }]);
@@ -79,24 +81,30 @@ class FakeGit implements Git {
 	readonly worktrees = new Set<string>();
 	readonly removed: string[] = [];
 	failWorktree = false;
+	/** `git status --porcelain` of the main checkout. */
+	dirty: string[] = [];
+	/** Every call that changes git state, in order. */
+	readonly mutations: string[] = [];
 	async open() { return REPO; }
 	async branch(cwd: string) { return cwd === REPO.topLevel ? "main" : undefined; }
 	async revParse() { return BASE; }
 	async branchExists(_repo: Repo, branch: string) { return this.branches.has(branch); }
 	async addWorktree(_repo: Repo, path: string, branch: string, base: string) {
+		this.mutations.push(`worktree add ${path}`);
 		if (this.failWorktree) throw new Error("worktree add failed");
 		expect(base).toBe(BASE);
 		this.branches.add(branch);
 		this.worktrees.add(path);
 	}
-	async removeWorktree(_repo: Repo, path: string) { this.worktrees.delete(path); this.removed.push(path); }
-	async deleteBranch(_repo: Repo, branch: string) { this.branches.delete(branch); }
+	async removeWorktree(_repo: Repo, path: string) { this.mutations.push(`worktree remove ${path}`); this.worktrees.delete(path); this.removed.push(path); }
+	async deleteBranch(_repo: Repo, branch: string) { this.mutations.push(`branch -d ${branch}`); this.branches.delete(branch); }
 	async isClean() { return true; }
+	async status() { return [...this.dirty]; }
 	async aheadBehind() { return { ahead: 2, behind: 0 }; }
 	async isAncestor() { return true; }
 	async changedFiles() { return ["M\tsrc/a.ts", "A\tsrc/b.ts"]; }
-	async rebase(): Promise<RebaseOutcome> { return { ok: true, rebased: false }; }
-	async fastForward(): Promise<FastForwardOutcome> { return { ok: true }; }
+	async rebase(): Promise<RebaseOutcome> { this.mutations.push("rebase"); return { ok: true, rebased: false }; }
+	async fastForward(): Promise<FastForwardOutcome> { this.mutations.push("fast-forward"); return { ok: true }; }
 }
 
 class FakeHost implements WorkerHost {
@@ -142,7 +150,7 @@ class FakeHost implements WorkerHost {
 
 interface Note { ticket: Ticket; kind: NotifyKind; extra?: NotifyExtra }
 
-function setup(options: { maxWorkers?: number; merge?: (deps: MergeDeps, id: number) => Promise<MergeOutcome>; pid?: number; sessionId?: string; store?: FakeStore; git?: FakeGit; heartbeatMs?: number; failStart?: boolean } = {}) {
+function setup(options: { workspace?: WorkspaceSetting; maxWorkers?: number; merge?: (deps: MergeDeps, id: number) => Promise<MergeOutcome>; pid?: number; sessionId?: string; store?: FakeStore; git?: FakeGit; heartbeatMs?: number; failStart?: boolean } = {}) {
 	const store = options.store ?? new FakeStore();
 	const git = options.git ?? new FakeGit();
 	const notes: Note[] = [];
@@ -158,7 +166,8 @@ function setup(options: { maxWorkers?: number; merge?: (deps: MergeDeps, id: num
 		branchCandidates: function* (id, slug) { yield `pi/${id}-${slug}`; for (let n = 2; n < 10; n++) yield `pi/${id}-${slug}-${n}`; },
 		requestPrompt: (ticket) => `REQUEST #${ticket.id}: ${ticket.request}`,
 		recoveryNote: RECOVERY,
-		settings: { enabled: true, maxWorkers: options.maxWorkers ?? 4, routerTools: [], routerAgents: [], react: "attention" },
+		...(options.workspace ? { workspace: options.workspace } : {}),
+		settings: { enabled: true, maxWorkers: options.maxWorkers ?? 4, routerTools: [], routerAgents: [], react: "attention", workspace: "worktree" },
 		sessionId: options.sessionId ?? SESSION, pid: options.pid ?? 100,
 		heartbeatMs: options.heartbeatMs ?? 60_000,
 		notify: (ticket, kind, extra) => notes.push({ ticket, kind, ...(extra ? { extra } : {}) }),
@@ -544,7 +553,7 @@ describe("summary", () => {
 		await t.dispatcher.idle();
 		await t.dispatcher.close(1, "dup");
 		const summary = t.dispatcher.summary();
-		expect(summary.text).toBe("Open tickets:\n#2 [question] Two — branch pi/2-two\n  question: A or B?\n#3 [ready] Three — branch pi/3-three");
+		expect(summary.text).toBe("Workspace mode: worktree.\nOpen tickets:\n#2 [question] Two — branch pi/2-two\n  question: A or B?\n#3 [ready] Three — branch pi/3-three");
 		expect(summary).toMatchObject({ working: 1, attention: 2, queued: 0 });
 	});
 });
@@ -645,5 +654,156 @@ describe("after and mergeWhenReady", () => {
 		t.host.end(2);
 		await t.dispatcher.idle();
 		expect((await t.dispatcher.mergeWhenReady(2)).outcome).toEqual({ kind: "merged", into: "main", commits: 2 });
+	});
+});
+
+describe("workspace mode", () => {
+	it("worktree mode refuses a dirty main checkout before allocating anything", async () => {
+		const t = setup();
+		t.git.dirty = [" M src/a.ts", "?? notes.txt", " M b", " M c", " M d", " M e", " M f"];
+		const error = await create(t.dispatcher).catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(DirtyWorkspaceError);
+		expect(error).toBeInstanceOf(DispatchError);
+		expect((error as Error).message).toBe("Ticket not created: the workspace has uncommitted changes (M src/a.ts, ?? notes.txt, M b, M c, M d, and 2 more). In worktree mode tickets start from the last commit, so commit or stash these first, or switch with /superagent workspace shared.");
+		expect(t.store.list()).toEqual([]);
+		expect(t.git.mutations).toEqual([]);
+		expect(t.git.branches).toEqual(new Set(["main"]));
+		expect(t.dispatcher.held()).toEqual([]);
+		expect(dirtyWorkspaceText(["?? x"])).toContain("(?? x)");
+	});
+
+	it("shared mode creates a ticket in the main checkout with no worktree or branch, the branch informational", async () => {
+		const workspace = memoryWorkspace();
+		workspace.set("shared", "someone");
+		const t = setup({ workspace });
+		t.git.dirty = [" M src/a.ts", "?? notes.txt"];
+		const ticket = await create(t.dispatcher);
+		expect(ticket).toMatchObject({ id: 1, state: "working", workspace: "shared", worktree: REPO.topLevel, branch: "main", base: BASE, target: "main" });
+		expect(t.git.mutations).toEqual([]);
+		expect(t.git.branches).toEqual(new Set(["main"]));
+		expect(t.host.starts[0]!.ticket).toMatchObject({ worktree: REPO.topLevel, workspace: "shared" });
+		expect(t.dispatcher.summary()).toMatchObject({ workspace: "shared" });
+		expect(t.dispatcher.summary().text).toContain("Workspace mode: shared.");
+		expect(t.dispatcher.summary().text).toContain("#1 [working] Fix login — shared working tree");
+	});
+
+	it("shared mode: merge marks a ticket done (refused while running), without any git operation, and reports done", async () => {
+		const workspace = memoryWorkspace(() => "shared");
+		const t = setup({ workspace });
+		await create(t.dispatcher);
+		expect(await t.dispatcher.merge(1)).toMatchObject({ kind: "refused", reason: expect.stringContaining("still running") });
+		t.host.report(1, "ready", "done it");
+		t.host.end(1);
+		await t.dispatcher.idle();
+		expect(t.kinds()).toEqual(["1:ready"]);
+		expect(await t.dispatcher.merge(1)).toEqual({ kind: "done" });
+		expect(t.store.get(1)).toMatchObject({ state: "done" });
+		expect(t.store.types(1)).toContain("done");
+		expect(t.kinds()).toEqual(["1:ready", "1:done"]);
+		expect(t.merges).toEqual([]);
+		expect(t.git.mutations).toEqual([]);
+		expect(t.store.holder(1)).toBeUndefined();
+		await expect(t.dispatcher.send(1, "more")).rejects.toThrow("Ticket #1 is done; it takes no more work.");
+	});
+
+	it("shared mode: mergeWhenReady marks the ticket done once it reports ready, without a ready report", async () => {
+		const t = setup({ workspace: memoryWorkspace(() => "shared") });
+		await t.dispatcher.create({ title: "Fix", request: "fix", source: "fix", mergeWhenReady: true });
+		t.host.report(1, "ready", "fixed");
+		t.host.end(1);
+		await t.dispatcher.idle();
+		expect(t.store.get(1)!.state).toBe("done");
+		expect(t.kinds()).toEqual(["1:done"]);
+		expect(t.git.mutations).toEqual([]);
+		// ticket_merge whenReady on a ready idle ticket: done at once.
+		await create(t.dispatcher, "Two");
+		t.host.report(2, "ready", "ok");
+		t.host.end(2);
+		await t.dispatcher.idle();
+		expect(await t.dispatcher.mergeWhenReady(2)).toMatchObject({ outcome: { kind: "done" } });
+	});
+
+	it("after is satisfied by a done ticket", async () => {
+		const t = setup({ workspace: memoryWorkspace(() => "shared") });
+		await create(t.dispatcher, "One");
+		const second = await t.dispatcher.create({ title: "Two", request: "two", source: "two", after: [1] });
+		expect(second).toMatchObject({ state: "queued", after: [1] });
+		t.host.report(1, "ready", "ok");
+		t.host.end(1);
+		await t.dispatcher.idle();
+		await t.dispatcher.merge(1);
+		await t.dispatcher.idle();
+		expect(t.store.get(2)!.state).toBe("working");
+		// A done ticket in `after` at creation is dropped from the list.
+		expect((await t.dispatcher.create({ title: "Three", request: "three", source: "three", after: [1] })).after).toBeUndefined();
+	});
+
+	it("shared mode: close and dropped leave the main checkout and its branch alone", async () => {
+		const t = setup({ workspace: memoryWorkspace(() => "shared") });
+		await create(t.dispatcher, "One");
+		await create(t.dispatcher, "Two");
+		const closed = await t.dispatcher.close(1, "not needed");
+		expect(closed).toMatchObject({ state: "closed", worktree: REPO.topLevel });
+		t.host.report(2, "dropped", "already done");
+		t.host.end(2);
+		await t.dispatcher.idle();
+		expect(t.store.get(2)).toMatchObject({ state: "closed", closedReason: "nothing to do: already done" });
+		expect(t.git.mutations).toEqual([]);
+		expect(t.git.removed).toEqual([]);
+		expect(t.git.branches).toEqual(new Set(["main"]));
+	});
+
+	it("records touched files of shared tickets and names the other open shared tickets that touched them", async () => {
+		const t = setup({ workspace: memoryWorkspace(() => "shared") });
+		await create(t.dispatcher, "One");
+		await create(t.dispatcher, "Two");
+		expect(t.dispatcher.touch(1, "src/a.ts")).toEqual([]);
+		expect(t.dispatcher.touch(1, "src/a.ts")).toEqual([]);
+		expect(t.dispatcher.touch(2, "src/a.ts")).toEqual([1]);
+		expect(t.dispatcher.touch(2, "src/b.ts")).toEqual([]);
+		expect(t.store.get(1)!.touched).toEqual(["src/a.ts"]);
+		expect(t.store.get(2)!.touched).toEqual(["src/a.ts", "src/b.ts"]);
+		expect(t.store.types(1).filter((type) => type === "touched")).toHaveLength(1);
+		expect(t.dispatcher.summary().overlaps).toEqual([{ path: "src/a.ts", tickets: [1, 2] }]);
+		expect(t.dispatcher.summary().text).toContain("overlap: src/a.ts changed by #1, #2");
+		const info = await t.dispatcher.inspect(2);
+		expect(info.files).toEqual(["src/a.ts", "src/b.ts"]);
+		expect(info.ahead).toBeUndefined();
+		await t.dispatcher.close(1, "x");
+		expect(t.dispatcher.touch(2, "src/a.ts")).toEqual([]);
+		// A worktree ticket records nothing.
+		const w = setup();
+		await create(w.dispatcher);
+		expect(w.dispatcher.touch(1, "x")).toEqual([]);
+		expect(w.store.get(1)!.touched).toBeUndefined();
+	});
+
+	it("reports ready for a shared ticket with its touched files and no branch comparison", async () => {
+		const t = setup({ workspace: memoryWorkspace(() => "shared") });
+		await create(t.dispatcher);
+		t.dispatcher.touch(1, "README.md");
+		t.host.report(1, "ready", "ok");
+		await t.dispatcher.idle();
+		expect(t.notes.at(-1)).toMatchObject({ kind: "ready", extra: { files: ["README.md"] } });
+		expect(t.notes.at(-1)!.extra!.ahead).toBeUndefined();
+	});
+
+	it("switches the mode only while no ticket is open, from any session, and warns on a dirty switch to worktree", async () => {
+		const workspace = memoryWorkspace();
+		const t = setup({ workspace });
+		const other = setup({ workspace, store: t.store, git: t.git, sessionId: "session-2", pid: 200 });
+		await create(t.dispatcher, "Open one");
+		const refusal = switchRefusal([t.store.get(1)!]);
+		expect(refusal).toBe("The workspace mode cannot be switched while tickets are open:\n#1 [working] Open one\nMerge or close them first (/merge N, /tickets close N).");
+		await expect(other.dispatcher.setWorkspace("shared")).rejects.toThrow(refusal);
+		await expect(t.dispatcher.setWorkspace("shared")).rejects.toThrow(refusal);
+		expect(workspace.mode()).toBe("worktree");
+		await t.dispatcher.close(1, "x");
+		expect(await other.dispatcher.setWorkspace("shared")).toMatchObject({ previous: "worktree", changed: true, record: { mode: "shared", changedBy: "session-2" } });
+		expect(t.dispatcher.workspace()).toBe("shared");
+		t.git.dirty = [" M x"];
+		expect(await t.dispatcher.setWorkspace("worktree")).toMatchObject({ changed: true, warning: DIRTY_SWITCH_WARNING });
+		expect(DIRTY_SWITCH_WARNING).toBe("The main checkout has uncommitted changes: new tickets will be refused until they are committed or stashed.");
+		await expect(create(t.dispatcher)).rejects.toBeInstanceOf(DirtyWorkspaceError);
 	});
 });

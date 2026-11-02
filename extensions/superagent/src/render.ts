@@ -1,8 +1,8 @@
 // The `superagent-report` message (text and renderer), ticket descriptions, the footer status, and the board widget.
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import type { DispatchSummary, NotifyExtra, NotifyKind, TicketInfo } from "./dispatcher.ts";
-import { ATTENTION_STATES, REPORT_MESSAGE, type Ticket, type TicketState } from "./types.ts";
+import type { DispatchSummary, NotifyExtra, NotifyKind, Overlap, TicketInfo } from "./dispatcher.ts";
+import { ATTENTION_STATES, REPORT_MESSAGE, type Ticket, type TicketState, type WorkspaceMode } from "./types.ts";
 import type { Mode } from "./router.ts";
 
 export interface ReportDetails {
@@ -11,6 +11,8 @@ export interface ReportDetails {
 	state: TicketState;
 	title: string;
 	branch: string;
+	/** Set for a shared-workspace ticket: `files` are the paths it touched, `branch` the main checkout's. */
+	workspace?: "shared";
 	summary?: string;
 	question?: string;
 	tests?: string;
@@ -36,6 +38,7 @@ export function reportDetails(ticket: Ticket, kind: NotifyKind, extra: NotifyExt
 		: ticket.report?.summary;
 	return {
 		ticketId: ticket.id, kind, state: ticket.state, title: ticket.title, branch: ticket.branch,
+		...(ticket.workspace === "shared" ? { workspace: "shared" as const } : {}),
 		...(summary ? { summary } : {}),
 		...(ticket.question && (kind === "question" || kind === "blocked") ? { question: ticket.question } : {}),
 		...(ticket.report?.tests && kind === "ready" ? { tests: ticket.report.tests } : {}),
@@ -56,7 +59,15 @@ export function reportLines(details: ReportDetails): string[] {
 	if (details.summary) lines.push(`${details.kind === "waiting" ? "Last text" : "Summary"}: ${details.summary}`);
 	if (details.tests) lines.push(`Checks: ${details.tests}`);
 	if (details.kind === "merged") lines.push(`Merged into ${details.target ?? "the target"}${details.ahead !== undefined ? ` (${details.ahead} commit${details.ahead === 1 ? "" : "s"})` : ""}; worktree and branch removed.`);
-	else {
+	else if (details.kind === "done") lines.push(doneText(details.ticketId));
+	else if (details.workspace === "shared") {
+		lines.push(`Workspace: shared working tree (${details.branch})`);
+		if (details.files?.length) {
+			lines.push(`Touched (${details.files.length}):`);
+			lines.push(...details.files.slice(0, FILES_SHOWN).map((file) => `  ${file}`));
+			if (details.files.length > FILES_SHOWN) lines.push(`  … ${details.files.length - FILES_SHOWN} more`);
+		}
+	} else {
 		lines.push(`Branch: ${details.branch}`);
 		if (details.ahead !== undefined) lines.push(`Ahead of ${details.target ?? "the target"}: ${details.ahead} commit${details.ahead === 1 ? "" : "s"}`);
 		if (details.files?.length) {
@@ -67,6 +78,9 @@ export function reportLines(details: ReportDetails): string[] {
 	}
 	return lines;
 }
+
+/** The `done` report's line. */
+export const doneText = (id: number) => `Ticket #${id} is done; its changes stay uncommitted in your working tree.`;
 
 export function reportContent(details: ReportDetails): string {
 	return reportLines(details).join("\n");
@@ -81,7 +95,7 @@ export function reportMessage(reports: readonly ReportDetails[]): { customType: 
 const isDetails = (value: unknown): value is ReportDetails => typeof (value as ReportDetails | undefined)?.ticketId === "number";
 
 const COLOR: Partial<Record<TicketState, "success" | "warning" | "error" | "accent" | "dim">> = {
-	ready: "success", merged: "success", question: "warning", blocked: "warning", waiting: "warning", interrupted: "warning",
+	ready: "success", merged: "success", done: "success", question: "warning", blocked: "warning", waiting: "warning", interrupted: "warning",
 	failed: "error", working: "accent", queued: "dim", closed: "dim",
 };
 const COLLAPSED = 4;
@@ -119,14 +133,20 @@ export function ticketLine(ticket: Ticket, sessionId?: string): string {
 /** `/tickets N`, `#N`, and `ticket_status({ id })`. */
 export function describeTicket(info: TicketInfo): string {
 	const { ticket } = info;
+	const shared = ticket.workspace === "shared";
 	const lines = [
 		`#${ticket.id} ${ticket.title}`,
 		`State: ${ticket.state}${info.running ? " (running)" : ""}${ticket.mergeRequested ? ", merge requested" : ""}${info.mine ? "" : `, owned by session ${ticket.owner}`}`,
-		`Branch: ${ticket.branch}${ticket.state === "merged" ? ` (merged into ${ticket.mergedInto ?? "the target"})` : ""}`,
-		`Worktree: ${ticket.worktree}`,
+		...(shared ? [
+			`Workspace: shared, in the main checkout ${ticket.worktree} (branch ${ticket.branch} at creation)`,
+			`Touched: ${ticket.touched?.length ? `${ticket.touched.slice(0, FILES_SHOWN).join(", ")}${ticket.touched.length > FILES_SHOWN ? `, … ${ticket.touched.length - FILES_SHOWN} more` : ""}` : "nothing yet"}`,
+		] : [
+			`Branch: ${ticket.branch}${ticket.state === "merged" ? ` (merged into ${ticket.mergedInto ?? "the target"})` : ""}`,
+			`Worktree: ${ticket.worktree}`,
+		]),
 	];
 	if (info.ahead !== undefined) lines.push(`Ahead of ${info.target ?? "the target"}: ${info.ahead}${info.behind ? `, behind ${info.behind}` : ""}`);
-	if (info.files?.length) lines.push(`Files: ${info.files.slice(0, FILES_SHOWN).join(", ")}${info.files.length > FILES_SHOWN ? `, … ${info.files.length - FILES_SHOWN} more` : ""}`);
+	if (!shared && info.files?.length) lines.push(`Files: ${info.files.slice(0, FILES_SHOWN).join(", ")}${info.files.length > FILES_SHOWN ? `, … ${info.files.length - FILES_SHOWN} more` : ""}`);
 	if (ticket.question) lines.push(`Question: ${ticket.question}`);
 	if (ticket.report) lines.push(`Last report (${ticket.report.state}): ${ticket.report.summary}${ticket.report.tests ? `\nChecks: ${ticket.report.tests}` : ""}`);
 	else if (ticket.lastText) lines.push(`Last text: ${clip(ticket.lastText, 600)}`);
@@ -136,9 +156,10 @@ export function describeTicket(info: TicketInfo): string {
 	return lines.map(sanitize).join("\n");
 }
 
-/** The footer: the mode and counts of working tickets and tickets waiting for the user. */
-export function footerText(mode: Mode, summary?: Pick<DispatchSummary, "working" | "attention" | "queued">): string {
+/** The footer: the session mode, the workspace mode, and counts of working tickets and tickets waiting for the user. */
+export function footerText(mode: Mode, summary?: Pick<DispatchSummary, "working" | "attention" | "queued"> & Partial<Pick<DispatchSummary, "workspace">>): string {
 	const parts = [`superagent: ${mode === "superagent" ? "on" : "direct"}`];
+	if (summary?.workspace) parts.push(summary.workspace);
 	if (summary?.working) parts.push(`${summary.working} working`);
 	if (summary?.queued) parts.push(`${summary.queued} queued`);
 	if (summary?.attention) parts.push(`${summary.attention} for you`);
@@ -147,26 +168,40 @@ export function footerText(mode: Mode, summary?: Pick<DispatchSummary, "working"
 
 const GROUPS: { label: string; matches(ticket: Ticket): boolean }[] = [
 	{ label: "needs you", matches: (ticket) => ATTENTION_STATES.has(ticket.state) && ticket.state !== "ready" },
-	{ label: "ready to merge", matches: (ticket) => ticket.state === "ready" },
+	{ label: "ready to merge", matches: (ticket) => ticket.state === "ready" && ticket.workspace !== "shared" },
+	{ label: "ready", matches: (ticket) => ticket.state === "ready" && ticket.workspace === "shared" },
 	{ label: "working", matches: (ticket) => ticket.state === "working" },
 	{ label: "queued", matches: (ticket) => ticket.state === "queued" },
 ];
 
+export interface BoardOptions {
+	/** Shown as the header line `tickets · <mode> workspace`. */
+	workspace?: WorkspaceMode;
+	/** Paths more than one open shared ticket changed. */
+	overlaps?: readonly Overlap[];
+}
+
 /**
- * The board widget: open tickets grouped by what they wait for, one line per non-empty group; empty without open
- * tickets. `waitsOn` gives the `after` tickets a queued one still waits for.
+ * The board widget: open tickets grouped by what they wait for, one line per non-empty group, then the files several
+ * shared tickets changed; empty without open tickets. `waitsOn` gives the `after` tickets a queued one still waits for.
  */
-export function boardLines(open: readonly Ticket[], waitsOn: (ticket: Ticket) => number[] = (ticket) => ticket.after ?? []): string[] {
+export function boardLines(open: readonly Ticket[], waitsOn: (ticket: Ticket) => number[] = (ticket) => ticket.after ?? [], options: BoardOptions = {}): string[] {
 	const lines: string[] = [];
 	for (const group of GROUPS) {
 		const items = open.filter((ticket) => group.matches(ticket)).map((ticket) => {
 			const title = clip(one(sanitize(ticket.title)), 40);
 			const detail = group.label === "needs you" ? ` (${ticket.state})`
 				: group.label === "queued" && waitsOn(ticket).length ? ` (after ${waitsOn(ticket).map((dep) => `#${dep}`).join(", ")})`
-				: group.label === "ready to merge" && ticket.mergeWhenReady ? " (merging)" : "";
+				: group.label === "ready to merge" && ticket.mergeWhenReady ? " (merging)"
+				: group.label === "ready" && ticket.mergeWhenReady ? " (done when ready)" : "";
 			return `#${ticket.id} ${title}${detail}`;
 		});
 		if (items.length) lines.push(`${group.label}: ${items.join(" · ")}`);
 	}
+	if (!lines.length) return lines;
+	for (const overlap of options.overlaps ?? []) {
+		lines.push(`overlap: ${clip(sanitize(overlap.path), 80)} (${overlap.tickets.map((id) => `#${id}`).join(", ")})`);
+	}
+	if (options.workspace) lines.unshift(`tickets · ${options.workspace} workspace`);
 	return lines;
 }

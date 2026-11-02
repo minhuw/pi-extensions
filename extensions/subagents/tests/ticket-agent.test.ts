@@ -100,7 +100,7 @@ describe("ticket agent and context_files (real runner)", () => {
   it("is configured as the contract describes", () => {
     expect(getAgentConfig("ticket")).toMatchObject({
       displayName: "Ticket",
-      description: "Long-running agent for one superagent ticket, in its own git worktree. Spawned by the superagent extension only.",
+      description: "Long-running agent for one superagent ticket. Spawned by the superagent extension only.",
       modelVisible: false, extensions: true, skills: true, contextFiles: true, isolation: "off",
       allowedSubagents: ["recon", "worker", "reviewer", "expert"], requireToolUse: true, promptMode: "append",
     });
@@ -126,7 +126,9 @@ describe("ticket agent and context_files (real runner)", () => {
     expect(prompt).not.toContain("ABOVE_REPO_CTX");
     expect(prompt).not.toContain("PARENT_PROMPT");
     expect(prompt).toContain('<active_agent name="ticket"/>');
-    expect(prompt).toContain("You own one long-running task on your own git branch");
+    expect(prompt).toContain("You own one long-running task. Where you work, whether you commit, and how you report come from the extension that started you");
+    // Mode-neutral: the worktree specifics belong to the extension that started it.
+    expect(prompt).not.toContain("own git branch");
     // Its text is appended after Pi's preamble and tool list.
     expect(prompt.indexOf("You own one long-running task")).toBeGreaterThan(prompt.indexOf("operating inside pi"));
   });

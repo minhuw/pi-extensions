@@ -17,6 +17,8 @@ export interface SubagentsHostOptions {
 	/** The ticket as it is now. */
 	ticket(ticketId: number): Ticket | undefined;
 	onEvent(event: WorkerEvent): void;
+	/** A shared ticket's session changed a file: record it; returns the other open shared tickets that changed it. */
+	touch?(ticketId: number, path: string): number[];
 	/** Reply timeout of ping, send, and stop (default 10 s). */
 	timeoutMs?: number;
 	/** Reply timeout of spawn and reopen, which wait for the agent to start (default 60 s). */
@@ -142,6 +144,7 @@ export function createSubagentsHost(options: SubagentsHostOptions): WorkerHost {
 			ticket: () => options.ticket(ticketId),
 			report: (report) => emit({ type: "report", ticketId, report }),
 			session: (sessionFile) => emit({ type: "session", ticketId, ...(sessionFile !== undefined ? { sessionFile } : {}) }),
+			touch: (path) => options.touch?.(ticketId, path) ?? [],
 		};
 	}
 

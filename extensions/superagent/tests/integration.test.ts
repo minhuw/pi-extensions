@@ -1,12 +1,15 @@
 // Superagent on the real Subagents extension (extensions/subagents/src/index.ts), in real Pi sessions on the faux provider,
 // in a real git repository: ticket agents spawned, steered, resumed, and reopened over Subagents' RPC.
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { dirtyWorkspaceText } from "../src/dispatcher.ts";
 import { ticketBlockReason } from "../src/hook.ts";
+import { gitBlockReason, writeBlockReason } from "../src/shared-guard.ts";
 import { openStore } from "../src/store.ts";
 import { CHILD_SESSION_HOOKS, REPORT_MESSAGE, SESSION_LINK_TYPE, type Ticket } from "../src/types.ts";
 import { RECOVERY_NOTE } from "../src/worker-prompt.ts";
@@ -192,5 +195,80 @@ describe.skipIf(!protocol3)("superagent on Subagents", () => {
 		expect(prompt).toContain("first run text");
 		expect(prompt.indexOf(RECOVERY_NOTE.slice(0, 40))).toBeGreaterThan(prompt.indexOf("first run text"));
 		expect(prompt.indexOf("go on")).toBeGreaterThan(prompt.indexOf(RECOVERY_NOTE.slice(0, 40)));
+	});
+
+	it("shared mode: two tickets run in the main checkout on a dirty tree, see the user's change, and leave their edits uncommitted", async () => {
+		const h = await start();
+		await h.session.prompt("/superagent workspace shared");
+		expect(h.notes.last).toMatchObject({ type: "info", message: expect.stringContaining("Workspace mode: shared") });
+		writeFileSync(join(workspace.repo, "README.md"), "# demo\nUSER CHANGE\n");
+		const commits = workspace.git("rev-list", "--count", "HEAD").trim();
+		const byTicket: Record<number, string[]> = { 1: [], 2: [] };
+		const seen = script(h, (role, call, text) => {
+			if (role === "main") {
+				if (call === 1) {
+					return fauxAssistantMessage([
+						fauxToolCall("ticket_create", { title: "Alpha", request: "add alpha" }, { id: "c-a" }),
+						fauxToolCall("ticket_create", { title: "Beta", request: "add beta" }, { id: "c-b" }),
+					], { stopReason: "toolUse" });
+				}
+				return fauxAssistantMessage("ok");
+			}
+			if (role !== "ticket") return fauxAssistantMessage("nested");
+			const id = text.includes("ticket #1") && text.includes("add alpha") ? 1 : 2;
+			byTicket[id]!.push(text);
+			const step = byTicket[id]!.length;
+			const file = id === 1 ? "alpha.txt" : "beta.txt";
+			const calls: Record<number, ReturnType<typeof fauxToolCall>[]> = {
+				1: [fauxToolCall("bash", { command: "pwd && cat README.md" }, { id: `t${id}-1` })],
+				2: [fauxToolCall("bash", { command: "git add -A && git commit -qm sneaky" }, { id: `t${id}-2` })],
+				3: [fauxToolCall("write", { path: "README.md", content: "clobbered\n" }, { id: `t${id}-3` })],
+				4: [fauxToolCall("write", { path: file, content: `${file}\n` }, { id: `t${id}-4` })],
+				5: [fauxToolCall("ticket_report", { state: "ready", summary: `added ${file}` }, { id: `t${id}-5` })],
+			};
+			return calls[step] ? fauxAssistantMessage(calls[step]!, { stopReason: "toolUse" }) : fauxAssistantMessage("ticket done");
+		});
+		await h.session.prompt("add alpha, and add beta");
+		await waitFor(() => ticket(1)?.state === "ready" && ticket(2)?.state === "ready", 30_000, "both tickets ready");
+		for (const id of [1, 2] as const) {
+			const current = ticket(id);
+			expect(current).toMatchObject({ workspace: "shared", worktree: workspace.repo, branch: "main", touched: [id === 1 ? "alpha.txt" : "beta.txt"] });
+			const transcript = byTicket[id]!;
+			// The ticket agent ran in the main checkout and saw the user's uncommitted change.
+			expect(transcript[1]).toContain(workspace.repo);
+			expect(transcript[1]).toContain("USER CHANGE");
+			expect(transcript[2]).toContain(JSON.stringify(gitBlockReason(["git add", "git commit"])).slice(1, -1));
+			expect(transcript[3]).toContain(JSON.stringify(writeBlockReason("README.md")).slice(1, -1));
+			expect(transcript[0]).toContain("You work directly in the user's working tree");
+		}
+		expect(seen.ticket.length).toBeGreaterThanOrEqual(10);
+		// Edits landed uncommitted; no commit, no worktree, no branch; the user's change is intact.
+		expect(readFileSync(join(workspace.repo, "README.md"), "utf8")).toBe("# demo\nUSER CHANGE\n");
+		expect(readFileSync(join(workspace.repo, "alpha.txt"), "utf8")).toBe("alpha.txt\n");
+		expect(readFileSync(join(workspace.repo, "beta.txt"), "utf8")).toBe("beta.txt\n");
+		expect(workspace.git("rev-list", "--count", "HEAD").trim()).toBe(commits);
+		expect(workspace.git("status", "--porcelain").split("\n").filter(Boolean).sort()).toEqual([" M README.md", "?? alpha.txt", "?? beta.txt"]);
+		expect(workspace.git("branch", "--format=%(refname:short)").trim()).toBe("main");
+		expect(workspace.git("worktree", "list").trim().split("\n")).toHaveLength(1);
+		await waitFor(() => customMessages(h.session, REPORT_MESSAGE).length >= 1, 10_000, "ready reports");
+
+		await h.session.prompt("/merge 1");
+		expect(ticket(1).state).toBe("done");
+		await waitFor(() => customMessages(h.session, REPORT_MESSAGE).some((message) => String(message.content).includes("Ticket #1 is done; its changes stay uncommitted in your working tree.")), 5_000, "done report");
+		expect(existsSync(join(workspace.repo, "alpha.txt"))).toBe(true);
+		expect(workspace.git("rev-list", "--count", "HEAD").trim()).toBe(commits);
+		expect(h.errors).toEqual([]);
+	});
+
+	it("worktree mode: a dirty checkout refuses ticket_create and tells the user", async () => {
+		const h = await start();
+		writeFileSync(join(workspace.repo, "README.md"), "# demo\nUSER CHANGE\n");
+		script(h, (role, call) => role === "main" ? (call === 1 ? createCall() : fauxAssistantMessage("Commit first.")) : fauxAssistantMessage("x"));
+		await h.session.prompt("add a note to the README");
+		const refusal = dirtyWorkspaceText([" M README.md"]);
+		expect(toolResults(h.session).find((result) => result.name === "ticket_create")).toMatchObject({ isError: true, text: refusal });
+		expect(h.notes.notes).toContainEqual({ message: refusal, type: "warning" });
+		expect(store().list()).toEqual([]);
+		expect(workspace.git("worktree", "list").trim().split("\n")).toHaveLength(1);
 	});
 });

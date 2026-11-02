@@ -1,20 +1,21 @@
 // The ticket state machine of DESIGN.md: creation, follow-ups, run outcomes, queueing, merge, close, locks, restarts.
 import {
-	ATTENTION_STATES, FINAL_STATES, LAST_TEXT_CHARS, LOCK_HEARTBEAT_MS, type DispatchSettings, type Git, type LockOwner, type MergeDeps,
+	ATTENTION_STATES, COMPLETED_STATES, FINAL_STATES, LAST_TEXT_CHARS, LOCK_HEARTBEAT_MS, type DispatchSettings, type Git, type LockOwner, type MergeDeps,
 	type MergeOutcome, type ReportState, type Repo, type Ticket, type TicketEvent, type TicketReport, type TicketState, type TicketStore,
-	type WorkerEvent, type WorkerHost,
+	type WorkerEvent, type WorkerHost, type WorkspaceMode, type WorkspaceRecord,
 } from "./types.ts";
+import { memoryWorkspace, type WorkspaceSetting } from "./workspace.ts";
 
 /** Why the owner session hears about a ticket; see DESIGN.md "Reports to the main session". */
-export type NotifyKind = "question" | "ready" | "blocked" | "failed" | "waiting" | "dropped" | "merged" | "merge-handed" | "merge-refused";
-export const NOTIFY_KINDS: readonly NotifyKind[] = ["question", "ready", "blocked", "failed", "waiting", "dropped", "merged", "merge-handed", "merge-refused"];
+export type NotifyKind = "question" | "ready" | "blocked" | "failed" | "waiting" | "dropped" | "merged" | "done" | "merge-handed" | "merge-refused";
+export const NOTIFY_KINDS: readonly NotifyKind[] = ["question", "ready", "blocked", "failed", "waiting", "dropped", "merged", "done", "merge-handed", "merge-refused"];
 
 export interface NotifyExtra {
 	/** Merge hand-off or refusal reason. */
 	reason?: string;
 	/** For `ready` and `merged`: commits ahead of the target. */
 	ahead?: number;
-	/** For `ready`: `git diff --name-status` lines against the target. */
+	/** For `ready`: `git diff --name-status` lines against the target; for a shared ticket the paths it touched. */
 	files?: string[];
 	/** The branch compared against. */
 	target?: string;
@@ -31,8 +32,10 @@ export interface DispatcherDeps {
 	branchCandidates(id: number, slug: string): Iterable<string>;
 	/** The first prompt of a ticket (src/worker-prompt.ts `requestPrompt`). */
 	requestPrompt(ticket: Ticket): string;
-	/** Prefix of the first prompt after a restart (src/worker-prompt.ts `RECOVERY_NOTE`). */
-	recoveryNote: string;
+	/** Prefix of the first prompt after a restart (src/worker-prompt.ts `recoveryNote`). */
+	recoveryNote: string | ((ticket: Ticket) => string);
+	/** The repository's workspace mode (src/workspace.ts); default: always `worktree`, in memory. */
+	workspace?: WorkspaceSetting;
 	settings: DispatchSettings | (() => DispatchSettings);
 	sessionId: string;
 	sessionFile?: string;
@@ -59,6 +62,10 @@ export interface SendResult { ticket: Ticket; delivery: Delivery }
 export type ResumeAction = "started" | "queued" | "owned" | "live";
 export interface MergeWhenReadyResult { ticket: Ticket; outcome?: MergeOutcome }
 export interface TicketInfo { ticket: Ticket; target?: string; ahead?: number; behind?: number; files?: string[]; holder?: LockOwner; mine: boolean; live: boolean; running: boolean }
+/** `setWorkspace`: the new record, the mode before, and a warning for the user. */
+export interface WorkspaceSwitch { record: WorkspaceRecord; previous: WorkspaceMode; changed: boolean; warning?: string }
+/** Paths touched by more than one open shared ticket, with those tickets. */
+export interface Overlap { path: string; tickets: number[] }
 
 export interface DispatchSummary {
 	/** Open tickets of the repository, by id. */
@@ -70,10 +77,33 @@ export interface DispatchSummary {
 	/** Own tickets waiting for the user. */
 	attention: number;
 	queued: number;
+	/** The repository's workspace mode. */
+	workspace: WorkspaceMode;
+	/** Paths more than one open shared ticket changed. */
+	overlaps: Overlap[];
 }
 
 /** A refusal shown to the user or model as is. */
 export class DispatchError extends Error {}
+/** `create` in worktree mode with a dirty main checkout; nothing was allocated. */
+export class DirtyWorkspaceError extends DispatchError {}
+
+const DIRTY_SHOWN = 5;
+/** The refusal text for a dirty main checkout in worktree mode, from its `git status --porcelain` lines. */
+export function dirtyWorkspaceText(lines: readonly string[]): string {
+	const shown = lines.slice(0, DIRTY_SHOWN).map((line) => line.trim()).join(", ");
+	const more = lines.length > DIRTY_SHOWN ? `, and ${lines.length - DIRTY_SHOWN} more` : "";
+	return `Ticket not created: the workspace has uncommitted changes (${shown}${more}). In worktree mode tickets start from the last commit, so commit or stash these first, or switch with /superagent workspace shared.`;
+}
+
+/** Why the workspace mode cannot be switched: the open tickets, one `#N [state] title` line each. */
+export function switchRefusal(open: readonly Ticket[]): string {
+	return [`The workspace mode cannot be switched while tickets are open:`, ...open.map((ticket) => `#${ticket.id} [${ticket.state}] ${ticket.title}`), "Merge or close them first (/merge N, /tickets close N)."].join("\n");
+}
+
+export const DIRTY_SWITCH_WARNING = "The main checkout has uncommitted changes: new tickets will be refused until they are committed or stashed.";
+
+export const isShared = (ticket: Pick<Ticket, "workspace">) => ticket.workspace === "shared";
 
 export const NO_TOOL_ERROR = "the worker finished without calling any tool; the model may not have received its tool definitions. Retry with a message, or check the model route.";
 const FINAL_REPORTS: ReadonlySet<ReportState> = new Set(["ready", "blocked", "failed", "dropped"]);
@@ -86,6 +116,7 @@ export interface Dispatcher {
 	readonly sessionId: string;
 	create(input: CreateInput): Promise<Ticket>;
 	send(id: number, text: string): Promise<SendResult>;
+	/** Merges a worktree ticket; marks a shared ticket `done`. */
 	merge(id: number): Promise<MergeOutcome>;
 	/** Merges now when the ticket is ready and idle, else once it reports ready. */
 	mergeWhenReady(id: number): Promise<MergeWhenReadyResult>;
@@ -95,6 +126,16 @@ export interface Dispatcher {
 	list(all?: boolean): Ticket[];
 	inspect(id: number): Promise<TicketInfo>;
 	summary(): DispatchSummary;
+	/** The repository's workspace mode. */
+	workspace(): WorkspaceMode;
+	workspaceRecord(): WorkspaceRecord | undefined;
+	/** Switches the mode; refused while any ticket of the repository is open. */
+	setWorkspace(mode: WorkspaceMode): Promise<WorkspaceSwitch>;
+	/**
+	 * A shared ticket's session changed `path` (repo-relative): records it in `touched`, and returns the other open
+	 * shared tickets that touched it too.
+	 */
+	touch(id: number, path: string): number[];
 	/** Ids whose lock this session holds. */
 	held(): number[];
 	isRunning(id: number): boolean;
@@ -109,6 +150,8 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 	const owner: LockOwner = { pid: deps.pid ?? process.pid, sessionId: deps.sessionId };
 	const settings = () => typeof deps.settings === "function" ? deps.settings() : deps.settings;
 	const now = () => deps.now?.() ?? Date.now();
+	const workspace = deps.workspace ?? memoryWorkspace(() => settings().workspace ?? "worktree");
+	const recovery = (ticket: Ticket) => typeof deps.recoveryNote === "function" ? deps.recoveryNote(ticket) : deps.recoveryNote;
 	/** Tickets whose lock this session holds. */
 	const held = new Set<number>();
 	/** Tickets with a run in progress, from `start` until `run_end`. */
@@ -214,19 +257,19 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 	/** The first prompt of a queued ticket: its request (or the recovery note when its session exists) and its pending messages. */
 	function queuedPrompt(ticket: Ticket): { prompt: string; resume: boolean } {
 		const resume = ticket.sessionFile !== undefined;
-		const head = resume ? deps.recoveryNote : deps.requestPrompt(ticket);
+		const head = resume ? recovery(ticket) : deps.requestPrompt(ticket);
 		const pending = ticket.pending ?? [];
 		return { prompt: pending.length ? `${head}\n\n${messagesBlock(pending)}` : head, resume };
 	}
 
 	/**
-	 * Whether a queued ticket's `after` tickets let it start: all merged. A closed (or missing) one fails it, as it can
-	 * never start; its `after` is cleared, so a message from the user starts it anyway.
+	 * Whether a queued ticket's `after` tickets let it start: all merged (or done, in shared mode). A closed (or missing)
+	 * one fails it, as it can never start; its `after` is cleared, so a message from the user starts it anyway.
 	 */
 	function dependenciesAllow(ticket: Ticket): boolean {
 		for (const dep of ticket.after ?? []) {
 			const other = store.get(dep);
-			if (other?.state === "merged") continue;
+			if (other && COMPLETED_STATES.has(other.state)) continue;
 			if (other && other.state !== "closed") return false;
 			const why = other ? `was closed${other.closedReason ? ` (${other.closedReason})` : ""}` : "does not exist";
 			const error = `ticket #${dep}, which this ticket starts after, ${why}, so it will never be merged. Send a message to start this ticket anyway, or close it.`;
@@ -261,12 +304,32 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 			if (!other) throw new DispatchError(`Ticket #${dep} (in after) does not exist.`);
 			if (other.state === "closed") throw new DispatchError(`Ticket #${dep} (in after) is closed; it will never be merged.`);
 		}
+		const mode = workspace.mode();
+		// Worktree mode: tickets start from the last commit, so a dirty checkout is refused before anything is allocated.
+		if (mode === "worktree") {
+			const dirty = await git.status(repo.topLevel);
+			if (dirty.length) throw new DirtyWorkspaceError(dirtyWorkspaceText(dirty));
+		}
 		const base = await git.revParse(repo.topLevel);
 		const target = await git.branch(repo.topLevel);
-		let ticket = store.create({
+		const init = {
 			title, request: input.request, source: input.source || input.request, ...(input.note?.trim() ? { note: input.note.trim() } : {}),
 			createdBy: owner.sessionId, base, ...(target !== undefined ? { target } : {}),
-		}, owner.sessionId);
+		};
+		if (mode === "shared") {
+			// No worktree and no branch: the agent works in the main checkout; `branch` only names where that is.
+			let ticket = store.create({ ...init, workspace: "shared", branch: target ?? "HEAD", worktree: repo.topLevel }, owner.sessionId);
+			const pending = after.filter((dep) => !COMPLETED_STATES.has(store.get(dep)?.state as TicketState));
+			if (pending.length || input.mergeWhenReady) {
+				ticket = update(ticket.id, { ...(pending.length ? { after: pending } : {}), ...(input.mergeWhenReady ? { mergeWhenReady: true } : {}) },
+					{ type: "options", ...(pending.length ? { after: pending } : {}), ...(input.mergeWhenReady ? { mergeWhenReady: true } : {}) });
+			}
+			ticket = own(ticket);
+			if (input.parentToolCallId !== undefined) toolCalls.set(ticket.id, input.parentToolCallId);
+			await drain();
+			return store.get(ticket.id)!;
+		}
+		let ticket = store.create(init, owner.sessionId);
 		try {
 			let branch: string | undefined;
 			for (const candidate of deps.branchCandidates(ticket.id, ticket.slug)) {
@@ -274,7 +337,7 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 			}
 			if (!branch) throw new Error(`no free branch name for ${ticket.branch}`);
 			if (branch !== ticket.branch) ticket = update(ticket.id, { branch }, { type: "branch", branch });
-			const pending = after.filter((dep) => store.get(dep)?.state !== "merged");
+			const pending = after.filter((dep) => !COMPLETED_STATES.has(store.get(dep)?.state as TicketState));
 			if (pending.length || input.mergeWhenReady) {
 				ticket = update(ticket.id, { ...(pending.length ? { after: pending } : {}), ...(input.mergeWhenReady ? { mergeWhenReady: true } : {}) },
 					{ type: "options", ...(pending.length ? { after: pending } : {}), ...(input.mergeWhenReady ? { mergeWhenReady: true } : {}) });
@@ -322,7 +385,7 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 		}
 		// No live session: reopen it from its file (with the recovery note after an interruption), or start one.
 		if (ticket.sessionFile !== undefined) {
-			const prompt = ticket.state === "interrupted" ? `${deps.recoveryNote}\n\n${text}` : text;
+			const prompt = ticket.state === "interrupted" ? `${recovery(ticket)}\n\n${text}` : text;
 			await start(ticket, prompt, true, "reopened");
 			update(id, {}, { type: "message", delivery: "reopened", text });
 			return { ticket: store.get(id)!, delivery: "reopened" };
@@ -379,6 +442,8 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 	}
 
 	async function compare(ticket: Ticket): Promise<NotifyExtra> {
+		// A shared ticket has no branch of its own: what it changed is what it touched, never a branch diff.
+		if (isShared(ticket)) return { files: [...(ticket.touched ?? [])] };
 		const target = await git.branch(repo.topLevel).catch(() => undefined) ?? ticket.target ?? ticket.base;
 		const extra: NotifyExtra = { target };
 		try { extra.ahead = (await git.aheadBehind(repo, ticket.branch, target)).ahead; } catch {}
@@ -435,9 +500,21 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 		};
 	}
 
+	/** A shared ticket: `done`, its changes left uncommitted in the working tree; no git operation at all. */
+	async function markDone(id: number): Promise<MergeOutcome> {
+		if (running(id)) return { kind: "refused", reason: `Ticket #${id}'s agent is still running; mark it done after it reports.` };
+		const ticket = update(id, { state: "done", mergeRequested: undefined, mergeWhenReady: undefined, question: undefined, pending: undefined }, { type: "done" });
+		if (host?.isLive(id)) await mergeDeps().stop(id).catch(() => {});
+		release(id);
+		deps.notify(ticket, "done");
+		void drain();
+		return { kind: "done" };
+	}
+
 	async function merge(id: number): Promise<MergeOutcome> {
-		own(require(id));
+		const current = own(require(id));
 		await starts.get(id);
+		if (isShared(current)) return markDone(id);
 		const outcome = await deps.mergeTicket(mergeDeps(), id);
 		let ticket = store.get(id)!;
 		if (outcome.kind === "merged") {
@@ -469,7 +546,8 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 			if (host?.isLive(id) || running(id)) await host?.stop(id);
 			runs.delete(id);
 			const ticket = store.get(id)!;
-			await git.removeWorktree(repo, ticket.worktree);
+			// A shared ticket's "worktree" is the main checkout: it is never removed.
+			if (!isShared(ticket)) await git.removeWorktree(repo, ticket.worktree);
 			const closed = update(id, { state: "closed", closedReason: reason, question: undefined, pending: undefined, mergeRequested: undefined, mergeWhenReady: undefined }, { type: "closed", reason });
 			release(id);
 			if (dropped) deps.notify(closed, "dropped");
@@ -506,6 +584,7 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 		const holder = store.holder(id);
 		const info: TicketInfo = { ticket, holder, mine: ticket.owner === owner.sessionId, live: host?.isLive(id) ?? false, running: running(id) };
 		if (ticket.state === "merged") return info;
+		if (isShared(ticket)) { info.files = [...(ticket.touched ?? [])]; return info; }
 		const extra = await compare(ticket);
 		info.target = extra.target;
 		info.ahead = extra.ahead;
@@ -514,19 +593,34 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 		return info;
 	}
 
+	function overlaps(open: readonly Ticket[]): Overlap[] {
+		const byPath = new Map<string, number[]>();
+		for (const ticket of open) {
+			if (!isShared(ticket)) continue;
+			for (const path of ticket.touched ?? []) byPath.set(path, [...(byPath.get(path) ?? []), ticket.id]);
+		}
+		return [...byPath].filter(([, ids]) => ids.length > 1).map(([path, tickets]) => ({ path, tickets })).sort((a, b) => a.path.localeCompare(b.path));
+	}
+
 	function summary(): DispatchSummary {
 		const open = store.list().filter(isOpen);
 		const mine = open.filter((ticket) => ticket.owner === owner.sessionId);
+		const mode = workspace.mode();
 		const lines: string[] = [];
 		for (const ticket of open) {
-			const waits = ticket.state === "queued" && ticket.after?.length ? `, starts after ${ticket.after.map((dep) => `#${dep}`).join(", ")} merge${ticket.after.length === 1 ? "s" : ""}` : "";
-			const merges = ticket.mergeWhenReady ? ", merges when ready" : "";
-			lines.push(`#${ticket.id} [${ticket.state}] ${ticket.title} — branch ${ticket.branch}${waits}${merges}${ticket.owner === owner.sessionId ? "" : " (another session's)"}`);
+			const shared = isShared(ticket);
+			const waits = ticket.state === "queued" && ticket.after?.length
+				? `, starts after ${ticket.after.map((dep) => `#${dep}`).join(", ")} ${shared ? (ticket.after.length === 1 ? "is done" : "are done") : `merge${ticket.after.length === 1 ? "s" : ""}`}` : "";
+			const merges = ticket.mergeWhenReady ? (shared ? ", done when ready" : ", merges when ready") : "";
+			const where = shared ? `shared working tree${ticket.touched?.length ? `, touched ${ticket.touched.length} file${ticket.touched.length === 1 ? "" : "s"}` : ""}` : `branch ${ticket.branch}`;
+			lines.push(`#${ticket.id} [${ticket.state}] ${ticket.title} — ${where}${waits}${merges}${ticket.owner === owner.sessionId ? "" : " (another session's)"}`);
 			if (ticket.question) lines.push(`  question: ${cut(ticket.question.replace(/\s+/g, " "), 300)}`);
 		}
+		const overlapping = overlaps(open);
+		for (const overlap of overlapping) lines.push(`  overlap: ${overlap.path} changed by ${overlap.tickets.map((id) => `#${id}`).join(", ")}`);
 		return {
-			open,
-			text: lines.length ? `Open tickets:\n${lines.join("\n")}` : "",
+			open, workspace: mode, overlaps: overlapping,
+			text: lines.length ? `Workspace mode: ${mode}.\nOpen tickets:\n${lines.join("\n")}` : "",
 			working: mine.filter((ticket) => ticket.state === "working" || (ticket.state === "question" && running(ticket.id))).length,
 			attention: mine.filter((ticket) => ATTENTION_STATES.has(ticket.state)).length,
 			queued: mine.filter((ticket) => ticket.state === "queued").length,
@@ -563,9 +657,31 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
 		})();
 	}
 
+	async function setWorkspace(mode: WorkspaceMode): Promise<WorkspaceSwitch> {
+		const previous = workspace.mode();
+		const open = store.list().filter(isOpen);
+		if (open.length) throw new DispatchError(switchRefusal(open));
+		const record = mode === previous && workspace.record() ? workspace.record()! : workspace.set(mode, owner.sessionId);
+		const result: WorkspaceSwitch = { record, previous, changed: mode !== previous };
+		if (mode === "worktree") {
+			const dirty = await git.status(repo.topLevel).catch(() => []);
+			if (dirty.length) result.warning = DIRTY_SWITCH_WARNING;
+		}
+		return result;
+	}
+
+	function touch(id: number, path: string): number[] {
+		const ticket = store.get(id);
+		if (!ticket || !isOpen(ticket) || !isShared(ticket)) return [];
+		if (!ticket.touched?.includes(path)) update(id, { touched: [...(ticket.touched ?? []), path] }, { type: "touched", path });
+		return store.list().filter((other) => other.id !== id && isOpen(other) && isShared(other) && other.touched?.includes(path)).map((other) => other.id);
+	}
+
 	return {
 		sessionId: owner.sessionId,
-		create, send, merge, mergeWhenReady, close, resume, inspect, summary, startup, shutdown,
+		create, send, merge, mergeWhenReady, close, resume, inspect, summary, startup, shutdown, setWorkspace, touch,
+		workspace: () => workspace.mode(),
+		workspaceRecord: () => workspace.record(),
 		get: (id) => store.get(id),
 		list: (all = false) => store.list().filter((ticket) => all || isOpen(ticket)),
 		held: () => [...held],

@@ -23,8 +23,20 @@ export const LOCK_HEARTBEAT_MS = 30_000;
 export const LOCK_STALE_MS = 120_000;
 
 export type TicketState =
-	| "queued" | "working" | "waiting" | "question" | "ready" | "blocked" | "failed" | "interrupted" | "merged" | "closed";
-export const FINAL_STATES: ReadonlySet<TicketState> = new Set(["merged", "closed"]);
+	| "queued" | "working" | "waiting" | "question" | "ready" | "blocked" | "failed" | "interrupted" | "merged" | "done" | "closed";
+/** `done`: a shared-workspace ticket the user marked finished; its changes stay uncommitted in the working tree. */
+export const FINAL_STATES: ReadonlySet<TicketState> = new Set(["merged", "done", "closed"]);
+/** Final states that satisfy another ticket's `after`. */
+export const COMPLETED_STATES: ReadonlySet<TicketState> = new Set(["merged", "done"]);
+
+/**
+ * The repository-wide workspace mode; see DESIGN.md "Workspace modes". `worktree`: every ticket gets its own worktree
+ * and branch from the last commit. `shared`: tickets work directly in the main checkout's working tree.
+ */
+export type WorkspaceMode = "worktree" | "shared";
+export const WORKSPACE_MODES: readonly WorkspaceMode[] = ["worktree", "shared"];
+/** `<git-common-dir>/superagent/workspace.json`. */
+export interface WorkspaceRecord { mode: WorkspaceMode; changedAt: number; changedBy: string }
 /** States in which a ticket waits for the user. */
 export const ATTENTION_STATES: ReadonlySet<TicketState> = new Set(["question", "ready", "blocked", "failed", "waiting", "interrupted"]);
 
@@ -56,13 +68,18 @@ export interface Ticket {
 	createdBy: string;
 	/** The main session that receives its reports: the creator, or the session that last resumed it. */
 	owner: string;
-	/** Commit the worktree started from. */
+	/** The workspace mode it was created in; absent means `worktree` (tickets from before the mode existed). */
+	workspace?: WorkspaceMode;
+	/** Commit the worktree started from (shared tickets: the main checkout's HEAD at creation). */
 	base: string;
 	/** The main checkout's branch at creation; undefined on a detached HEAD. */
 	target?: string;
+	/** The ticket's branch; for a shared ticket the main checkout's branch at creation, informational only. */
 	branch: string;
-	/** Absolute path. */
+	/** Absolute path; for a shared ticket the main checkout's top level. */
 	worktree: string;
+	/** Shared tickets: repo-relative paths the agent (or its delegates) changed with `edit`/`write`. */
+	touched?: string[];
 	/** The ticket agent's persisted session file, once it exists. */
 	sessionFile?: string;
 	/** The ticket agent's Subagents id (of this or an earlier process), once spawned. */
@@ -98,6 +115,10 @@ export interface NewTicket {
 	createdBy: string;
 	base: string;
 	target?: string;
+	/** Absent means `worktree`. A shared ticket also gives its `branch` and `worktree` (the main checkout). */
+	workspace?: WorkspaceMode;
+	branch?: string;
+	worktree?: string;
 }
 
 export type TicketEvent = { at: number; type: string } & Record<string, unknown>;
@@ -107,7 +128,7 @@ export interface LockOwner { pid: number; sessionId: string }
 /** `<git-common-dir>/superagent/`; see DESIGN.md "Tickets". Implemented in src/store.ts. */
 export interface TicketStore {
 	readonly root: string;
-	/** Allocates the id, slug, branch name, and worktree path; writes ticket.json (state `queued`) and a `created` event. Creates no worktree. */
+	/** Allocates the id, slug, branch name, and worktree path (shared tickets: the given branch and worktree); writes ticket.json (state `queued`) and a `created` event. Creates no worktree. */
 	create(init: NewTicket, owner: string): Ticket;
 	get(id: number): Ticket | undefined;
 	/** Every ticket, by id ascending; unreadable ones are skipped. */
@@ -153,6 +174,8 @@ export interface Git {
 	deleteBranch(repo: Repo, branch: string, force?: boolean): Promise<void>;
 	/** True when `git status --porcelain` in the checkout is empty. */
 	isClean(cwd: string): Promise<boolean>;
+	/** `git status --porcelain` lines (untracked files included, ignored files not). */
+	status(cwd: string): Promise<string[]>;
 	/** Commits on `branch` not on `target`, and the reverse. */
 	aheadBehind(repo: Repo, branch: string, target: string): Promise<{ ahead: number; behind: number }>;
 	isAncestor(repo: Repo, ancestor: string, descendant: string): Promise<boolean>;
@@ -196,6 +219,8 @@ export interface WorkerHost {
 
 export type MergeOutcome =
 	| { kind: "merged"; into: string; commits: number }
+	/** A shared ticket marked finished; nothing was merged. */
+	| { kind: "done" }
 	| { kind: "handed-to-worker"; reason: string }
 	| { kind: "refused"; reason: string };
 
@@ -221,4 +246,6 @@ export interface DispatchSettings {
 	routerAgents: string[];
 	/** `attention`: reports that need the user start a main-session turn; `none`: no report does. */
 	react: React;
+	/** The workspace mode while `<git-common-dir>/superagent/workspace.json` does not exist. */
+	workspace: WorkspaceMode;
 }

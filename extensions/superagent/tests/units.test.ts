@@ -72,7 +72,13 @@ describe("settings", () => {
 	};
 
 	it("defaults", () => {
-		expect(DEFAULT_SETTINGS).toEqual({ enabled: true, maxWorkers: 4, routerTools: [], routerAgents: ["recon", "reviewer", "expert"], react: "attention" });
+		expect(DEFAULT_SETTINGS).toEqual({ enabled: true, maxWorkers: 4, routerTools: [], routerAgents: ["recon", "reviewer", "expert"], react: "attention", workspace: "worktree" });
+	});
+	it("reads and validates workspace", () => {
+		expect(load({ workspace: "shared" }).settings.workspace).toBe("shared");
+		const { settings, problems } = load({ workspace: "both" });
+		expect(settings.workspace).toBe("worktree");
+		expect(problems.map((problem) => problem.replace(/^.*superagent\.json: /, ""))).toEqual(['"workspace" must be "worktree" or "shared", got "both"']);
 	});
 	it("reads routerAgents and react, and names the retired worker settings", () => {
 		const { settings, problems } = load({ routerAgents: ["recon"], react: "none", workerModel: "a/b", workerThinking: "high" });

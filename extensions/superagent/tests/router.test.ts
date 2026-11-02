@@ -39,7 +39,7 @@ describe.skipIf(!modulesExist)("superagent router", () => {
 		const active = h.session.getActiveToolNames();
 		for (const name of [...READ_ONLY, ...TICKET_TOOLS]) expect(active).toContain(name);
 		for (const name of ["edit", "write", "bash"]) expect(active).not.toContain(name);
-		expect(h.notes.statuses.get(STATUS_KEY)).toBe("superagent: on");
+		expect(h.notes.statuses.get(STATUS_KEY)).toBe("superagent: on · worktree");
 		const seen = script(h, (_text, call) => call === 1
 			? fauxAssistantMessage([
 				fauxToolCall("bash", { command: "touch x" }, { id: "c1" }),
@@ -106,7 +106,7 @@ describe.skipIf(!modulesExist)("superagent router", () => {
 		await workspace.settings({ enabled: false, maxWorkers: 99 });
 		const h = await start();
 		expect(h.session.getActiveToolNames()).toEqual(expect.arrayContaining(["bash", "edit", "ticket_create"]));
-		expect(h.notes.statuses.get(STATUS_KEY)).toBe("superagent: direct");
+		expect(h.notes.statuses.get(STATUS_KEY)).toBe("superagent: direct · worktree");
 		expect(h.notes.messages.some((message) => message.includes("\"maxWorkers\" must be an integer from 1 to 16"))).toBe(true);
 	});
 
@@ -115,7 +115,7 @@ describe.skipIf(!modulesExist)("superagent router", () => {
 		await h.session.prompt("/superagent off");
 		const direct = h.session.getActiveToolNames();
 		expect(direct).toEqual(expect.arrayContaining(["read", "bash", "edit", "write", ...TICKET_TOOLS]));
-		expect(h.notes.statuses.get(STATUS_KEY)).toBe("superagent: direct");
+		expect(h.notes.statuses.get(STATUS_KEY)).toBe("superagent: direct · worktree");
 		await h.session.reload();
 		expect(h.session.getActiveToolNames()).toEqual(expect.arrayContaining(["bash", "edit"]));
 		await h.session.prompt("/superagent on");
@@ -162,7 +162,7 @@ describe.skipIf(!modulesExist)("superagent router", () => {
 		tickets.update(1, { state: "closed" });
 		await h.session.prompt("three");
 		messages = customMessages(h.session, TICKETS_MESSAGE);
-		expect(messages.map((message) => message.content)).toEqual([expect.stringContaining("Pending job"), "[superagent] No tickets are open."]);
+		expect(messages.map((message) => message.content)).toEqual([expect.stringContaining("Pending job"), "[superagent] Workspace mode: worktree. No tickets are open."]);
 		await h.session.reload();
 		await h.session.prompt("four");
 		expect(customMessages(h.session, TICKETS_MESSAGE)).toHaveLength(2);
@@ -212,7 +212,7 @@ describe.skipIf(!modulesExist)("superagent router", () => {
 		const tui = await start({ mode: "tui" });
 		await tui.session.prompt("/tickets");
 		// Startup marked the lock-less ticket interrupted: it needs the user.
-		expect(tui.notes.widgets.get(WIDGET_KEY)).toEqual(["needs you: #1 First (interrupted)"]);
+		expect(tui.notes.widgets.get(WIDGET_KEY)).toEqual(["tickets · worktree workspace", "needs you: #1 First (interrupted)"]);
 		await tui.session.prompt("/tickets close 1");
 		expect(tui.notes.widgets.get(WIDGET_KEY)).toBeUndefined();
 	});

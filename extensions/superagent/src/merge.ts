@@ -27,6 +27,8 @@ export async function mergeTicket(deps: MergeDeps, id: number): Promise<MergeOut
 	const ticket = store.get(id);
 	if (!ticket) return refused(`Ticket #${id} does not exist.`);
 	if (FINAL_STATES.has(ticket.state)) return refused(`Ticket #${id} is already ${ticket.state}; only open tickets can be merged.`);
+	// A shared ticket has no branch of its own: nothing is rebased, fast-forwarded, removed, or deleted for it.
+	if (ticket.workspace === "shared") return refused(`Ticket #${id} works in the shared working tree; there is no branch to merge. Mark it done instead.`);
 	if (deps.isRunning(id)) return refused(`Ticket #${id}'s worker is still running; merge it after it reports.`);
 	if (!existsSync(ticket.worktree)) return refused(`Ticket #${id}'s worktree ${ticket.worktree} is missing.`);
 	if (!(await git.isClean(ticket.worktree))) {

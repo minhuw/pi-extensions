@@ -201,14 +201,15 @@ export function openStore(commonDir: string): TicketStore {
 				updatedAt: now,
 				createdBy: init.createdBy,
 				owner,
+				...(init.workspace === "shared" ? { workspace: "shared" as const } : {}),
 				base: init.base,
 				...(init.target !== undefined ? { target: init.target } : {}),
-				branch: `pi/${id}-${slug}`,
-				worktree: join(worktreesDir, `${id}-${slug}`),
+				branch: init.branch ?? `pi/${id}-${slug}`,
+				worktree: init.worktree ?? join(worktreesDir, `${id}-${slug}`),
 				state: "queued",
 			};
 			write(ticket);
-			append(id, { type: "created", title: ticket.title, owner, branch: ticket.branch });
+			append(id, { type: "created", title: ticket.title, owner, branch: ticket.branch, ...(ticket.workspace ? { workspace: ticket.workspace } : {}) });
 			return ticket;
 		},
 

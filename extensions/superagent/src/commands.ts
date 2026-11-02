@@ -1,6 +1,7 @@
 // `/tickets`, `/merge`, and `/superagent`; see DESIGN.md "Commands".
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { DispatchError, type Dispatcher } from "./dispatcher.ts";
+import { DispatchError, isShared, type Dispatcher } from "./dispatcher.ts";
+import { WORKSPACE_MODES, type WorkspaceMode } from "./types.ts";
 import { describeTicket, footerText, ticketLine } from "./render.ts";
 import type { Router } from "./router.ts";
 
@@ -12,7 +13,20 @@ export interface CommandsHost {
 
 export const TICKETS_USAGE = "Usage: /tickets [all|N|resume N|close N [reason]]";
 export const MERGE_USAGE = "Usage: /merge N";
-export const SUPERAGENT_USAGE = "Usage: /superagent [on|off|status]";
+export const SUPERAGENT_USAGE = "Usage: /superagent [on|off|status|workspace [shared|worktree]]";
+
+const WORKSPACE_TEXT: Record<WorkspaceMode, string> = {
+	worktree: "every ticket works in its own git worktree and branch from the last commit; /merge fast-forwards it into your branch",
+	shared: "tickets work directly in your working tree and leave their changes uncommitted; /merge marks one done",
+};
+
+/** `Workspace: <mode> (…)`, with when and by which session it was last switched. */
+export function workspaceLine(dispatcher: Dispatcher): string {
+	const mode = dispatcher.workspace();
+	const record = dispatcher.workspaceRecord();
+	const since = record ? `; switched ${new Date(record.changedAt).toISOString()} by session ${record.changedBy}` : "; from the workspace setting";
+	return `Workspace: ${mode} (${WORKSPACE_TEXT[mode]}${since})`;
+}
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const ticketId = (word: string | undefined) => word !== undefined && /^#?\d+$/.test(word) ? Number(word.replace(/^#/, "")) : undefined;
@@ -57,7 +71,9 @@ export function registerCommands(pi: ExtensionAPI, host: CommandsHost): void {
 			if (first === "close" && id !== undefined) {
 				const ticket = await dispatcher.close(id, rest.join(" ") || "closed with /tickets close");
 				host.changed();
-				ctx.ui.notify(`Closed #${ticket.id} ${ticket.title}; its branch ${ticket.branch} is kept.`, "info");
+				ctx.ui.notify(isShared(ticket)
+					? `Closed #${ticket.id} ${ticket.title}; its agent is stopped, and its changes stay in the working tree.`
+					: `Closed #${ticket.id} ${ticket.title}; its branch ${ticket.branch} is kept.`, "info");
 				return;
 			}
 			throw new DispatchError(TICKETS_USAGE);
@@ -65,24 +81,37 @@ export function registerCommands(pi: ExtensionAPI, host: CommandsHost): void {
 	});
 
 	pi.registerCommand("merge", {
-		description: "Merge a ready ticket into the current branch: /merge N",
+		description: "Merge a ready ticket into the current branch (shared workspace: mark it done): /merge N",
 		handler: run(async (args, ctx) => {
 			const words = args.split(/\s+/).filter(Boolean);
 			const id = ticketId(words[0]);
 			if (id === undefined || words.length !== 1) throw new DispatchError(MERGE_USAGE);
 			const outcome = await need().merge(id);
 			host.changed();
-			if (outcome.kind === "merged") ctx.ui.notify(`Merged #${id} into ${outcome.into} (${outcome.commits} commit${outcome.commits === 1 ? "" : "s"}).`, "info");
+			if (outcome.kind === "done") ctx.ui.notify(`#${id} is done; its changes stay uncommitted in your working tree.`, "info");
+			else if (outcome.kind === "merged") ctx.ui.notify(`Merged #${id} into ${outcome.into} (${outcome.commits} commit${outcome.commits === 1 ? "" : "s"}).`, "info");
 			else if (outcome.kind === "handed-to-worker") ctx.ui.notify(`#${id} needs a rebase: ${outcome.reason} The merge runs again when it reports ready.`, "warning");
 			else ctx.ui.notify(`#${id} was not merged: ${outcome.reason}`, "error");
 		}),
 	});
 
 	pi.registerCommand("superagent", {
-		description: "Show or switch this session's mode: superagent (route work to tickets) or direct (/superagent on|off|status)",
-		getArgumentCompletions: completions(["on", "off", "status"]),
+		description: "Show or switch this session's mode (on|off|status), or the repository's workspace mode (workspace [shared|worktree])",
+		getArgumentCompletions: completions(["on", "off", "status", "workspace", "workspace shared", "workspace worktree"]),
 		handler: run(async (args, ctx) => {
 			const router = host.router;
+			const words = args.split(/\s+/).filter(Boolean);
+			if (words[0] === "workspace") {
+				const dispatcher = need();
+				if (words.length === 1) { ctx.ui.notify(workspaceLine(dispatcher), "info"); return; }
+				const mode = words[1] as WorkspaceMode;
+				if (words.length !== 2 || !WORKSPACE_MODES.includes(mode)) throw new DispatchError(SUPERAGENT_USAGE);
+				const result = await dispatcher.setWorkspace(mode);
+				host.changed();
+				const head = result.changed ? `Workspace mode: ${mode}: ${WORKSPACE_TEXT[mode]}.` : `The workspace mode is already ${mode}.`;
+				ctx.ui.notify(result.warning ? `${head} ${result.warning}` : head, result.warning ? "warning" : "info");
+				return;
+			}
 			if (args === "on" || args === "off") {
 				const mode = args === "on" ? "superagent" : "direct";
 				if (router.mode === mode) { ctx.ui.notify(`This session is already in ${mode} mode.`, "info"); return; }
@@ -94,8 +123,10 @@ export function registerCommands(pi: ExtensionAPI, host: CommandsHost): void {
 			}
 			if (args && args !== "status") throw new DispatchError(SUPERAGENT_USAGE);
 			const summary = host.dispatcher()?.summary();
+			const current = host.dispatcher();
 			const lines = [
 				`Mode: ${router.mode}${router.reason ? ` (${router.reason})` : ""}`,
+				...(current ? [workspaceLine(current)] : []),
 				footerText(router.mode, summary),
 			];
 			if (router.mode === "superagent") lines.push(`Router tools: ${[...router.routerSet()].join(", ")}`);

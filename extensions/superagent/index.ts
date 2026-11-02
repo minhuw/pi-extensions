@@ -12,8 +12,9 @@ import { DEFAULT_SETTINGS, loadSettings } from "./src/settings.ts";
 import { branchCandidates, openStore } from "./src/store.ts";
 import { createSubagentsHost } from "./src/subagents-host.ts";
 import { registerTools } from "./src/tools.ts";
-import { STATUS_KEY, WIDGET_KEY, type DispatchSettings, type Repo, type Ticket, type TicketStore } from "./src/types.ts";
-import { RECOVERY_NOTE, requestPrompt } from "./src/worker-prompt.ts";
+import { COMPLETED_STATES, STATUS_KEY, WIDGET_KEY, type DispatchSettings, type TicketState, type Repo, type Ticket, type TicketStore } from "./src/types.ts";
+import { recoveryNote, requestPrompt } from "./src/worker-prompt.ts";
+import { openWorkspace } from "./src/workspace.ts";
 
 /** Settings problems already shown in this process. */
 const reported = new Set<string>();
@@ -47,7 +48,9 @@ export default function superagentExtension(pi: ExtensionAPI): void {
 		if (context.mode !== "tui") return;
 		const current = dispatcher;
 		const open = current?.list() ?? [];
-		const lines = boardLines(open, (ticket) => (ticket.after ?? []).filter((dep) => current?.get(dep)?.state !== "merged"));
+		const summary = current?.summary();
+		const lines = boardLines(open, (ticket) => (ticket.after ?? []).filter((dep) => !COMPLETED_STATES.has(current?.get(dep)?.state as TicketState)),
+			{ ...(summary ? { workspace: summary.workspace, overlaps: summary.overlaps } : {}) });
 		const key = lines.join("\n");
 		if (key === board) return;
 		board = key;
@@ -109,12 +112,15 @@ export default function superagentExtension(pi: ExtensionAPI): void {
 				const store = observed(openStore(current.commonDir), changed);
 				const sessionId = context.sessionManager.getSessionId();
 				const sessionFile = context.sessionManager.getSessionFile();
-				dispatcher = createDispatcher({
-					store, git: createGit(), repo: current, mergeTicket, branchCandidates, requestPrompt, recoveryNote: RECOVERY_NOTE,
+				let created: Dispatcher | undefined;
+				dispatcher = created = createDispatcher({
+					store, git: createGit(), repo: current, mergeTicket, branchCandidates, requestPrompt, recoveryNote,
+					workspace: openWorkspace(store.root, () => settings.workspace),
 					settings: () => settings, sessionId, ...(sessionFile !== undefined ? { sessionFile } : {}),
 					notify: deliver,
 					createWorkerHost: (onEvent) => createSubagentsHost({
 						events: pi.events, commonDir: current.commonDir, ticket: (id) => store.get(id), onEvent,
+						touch: (id, path) => created?.touch(id, path) ?? [],
 					}),
 				});
 				dispatcher.startup();

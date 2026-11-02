@@ -1,17 +1,20 @@
 // src/hook.ts in real Pi sessions on the faux provider: activation, ticket_report, the prompt section, blocked tools.
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { AGENT_ISOLATION_BLOCK_REASON, gitBlockReason, overlapNote, writeBlockReason } from "../src/shared-guard.ts";
 import { acquireHook, HOOK_NAME, registerTicket, superagentRegistry, ticketBlockReason, ticketKey, ticketSessionExtension, type TicketHookTarget } from "../src/hook.ts";
 import { CHILD_SESSION_HOOKS, SESSION_LINK_TYPE, type Ticket, type TicketReport } from "../src/types.ts";
 import { startSession, toolResults, Workspace, type Harness } from "./support/router-runtime.ts";
 
 /** Stand-ins for Herder's and Impeccable's tools, which a ticket session must not call. */
 const stubs: ExtensionFactory = (pi) => {
-	for (const name of ["herder_status", "impeccable_question", "other_tool"]) {
+	for (const name of ["herder_status", "impeccable_question", "other_tool", "Agent"]) {
 		pi.registerTool({
-			name, label: name, description: `stub ${name}`, parameters: Type.Object({}),
+			name, label: name, description: `stub ${name}`, parameters: Type.Object({}, { additionalProperties: true }),
 			async execute() { return { content: [{ type: "text", text: `${name} ran` }], details: {} }; },
 		});
 	}
@@ -114,5 +117,133 @@ describe("ticket session hook", () => {
 		second();
 		expect([...hooks()!].some((hook) => hook.name === HOOK_NAME)).toBe(false);
 		expect(superagentRegistry().users).toBe(0);
+	});
+
+	describe("shared workspace", () => {
+		const sharedTicket = (): Ticket => ({ ...ticket(), workspace: "shared", branch: "main", worktree: workspace.repo });
+
+		function sharedTarget(others: Record<string, number[]> = {}) {
+			const touched: string[] = [];
+			const value: TicketHookTarget = {
+				ticket: sharedTicket, report: () => {}, session: () => {},
+				touch: (path) => { touched.push(path); return others[path] ?? []; },
+			};
+			return { value, touched };
+		}
+
+		async function session(link: Record<string, unknown>) {
+			const sessionManager = SessionManager.create(workspace.repo, workspace.sessionDir, { parentSession: "/parent.jsonl" });
+			sessionManager.appendCustomEntry(SESSION_LINK_TYPE, { kind: "subagent", ...link });
+			const harness = await startSession({ workspace, sessionManager, extensions: [ticketSessionExtension, stubs] });
+			harnesses.push(harness);
+			harness.session.setActiveToolsByName([...harness.session.getActiveToolNames(), "Agent"]);
+			return harness;
+		}
+
+		/** One assistant message per step: each step's tool calls, or a function run first (to change files between calls). */
+		function steps(h: Harness, list: (ReturnType<typeof fauxToolCall>[] | (() => ReturnType<typeof fauxToolCall>[]))[]): string[] {
+			const prompts: string[] = [];
+			let index = 0;
+			const step: FauxResponseFactory = (context) => {
+				prompts.push(JSON.stringify(context.messages));
+				const next = list[index++];
+				if (!next) return fauxAssistantMessage("done");
+				return fauxAssistantMessage(typeof next === "function" ? next() : next, { stopReason: "toolUse" });
+			};
+			h.faux.setResponses(Array.from({ length: list.length + 1 }, () => step));
+			return prompts;
+		}
+
+		const call = (name: string, input: Parameters<typeof fauxToolCall>[1]) => fauxToolCall(name, input);
+		const result = (h: Harness, index: number) => toolResults(h.session)[index]!;
+
+		it("registers ticket sessions and treats shared descendants (children and grandchildren) as part of the ticket", async () => {
+			const t = sharedTarget();
+			cleanups.push(registerTicket(ticketKey(workspace.commonDir, 1), t.value));
+			const ticketSession = await session({ agentType: "ticket", superagent: { ticketId: 1 } });
+			const ticketId = ticketSession.session.sessionManager.getSessionId();
+			expect(superagentRegistry().sessions.get(ticketId)).toBe(ticketKey(workspace.commonDir, 1));
+			const childSession = await session({ agentType: "worker", parentSessionId: ticketId });
+			const childId = childSession.session.sessionManager.getSessionId();
+			expect(superagentRegistry().sessions.get(childId)).toBe(ticketKey(workspace.commonDir, 1));
+			const grandchild = await session({ agentType: "recon", parentSessionId: childId });
+			const unrelated = await session({ agentType: "worker", parentSessionId: "someone-else" });
+			for (const h of [childSession, grandchild]) {
+				expect(h.session.getAllTools().map((tool) => tool.name)).not.toContain("ticket_report");
+				const prompts = steps(h, [[call("bash", { command: "git commit -qm x" })]]);
+				await h.session.prompt("go");
+				expect(result(h, 0)).toMatchObject({ isError: true, text: gitBlockReason(["git commit"]) });
+				expect(prompts[0]).toContain("# Shared working tree");
+			}
+			const prompts = steps(unrelated, [[call("bash", { command: "git status --short" })], [call("bash", { command: "git commit -qm x --allow-empty" })]]);
+			await unrelated.session.prompt("go");
+			expect(toolResults(unrelated.session).every((r) => !r.isError)).toBe(true);
+			expect(prompts[0]).not.toContain("# Shared working tree");
+			// Shutting a session down removes it from the registry.
+			await grandchild.shutdown();
+			expect([...superagentRegistry().sessions.values()].filter((key) => key === ticketKey(workspace.commonDir, 1))).toHaveLength(2);
+		});
+
+		it("does not extend to descendants of a worktree ticket", async () => {
+			const t = target();
+			cleanups.push(registerTicket(ticketKey(workspace.commonDir, 1), t.value));
+			const ticketSession = await session({ agentType: "ticket", superagent: { ticketId: 1 } });
+			const h = await session({ agentType: "worker", parentSessionId: ticketSession.session.sessionManager.getSessionId() });
+			steps(h, [[call("Agent", { isolation: "worktree" })]]);
+			await h.session.prompt("go");
+			expect(result(h, 0)).toMatchObject({ isError: false });
+		});
+
+		it("blocks git state commands but runs read-only git", async () => {
+			const t = sharedTarget();
+			cleanups.push(registerTicket(ticketKey(workspace.commonDir, 1), t.value));
+			const h = await session({ agentType: "ticket", superagent: { ticketId: 1 } });
+			const blocked = ["git add -A", "git commit -qm x", "git checkout -- README.md", "git switch -c x", "git restore README.md", "git reset --hard", "git stash", "git clean -fd",
+				"git rebase main", "git merge x", "git cherry-pick HEAD", "git revert HEAD", "git am x", "git pull", "git push", "git rm README.md", "git mv README.md R.md",
+				"git worktree add ../x", "git branch x", "git tag v1"];
+			const allowed = ["git status", "git diff", "git log --oneline", "git branch"];
+			steps(h, [...blocked, ...allowed].map((command) => [call("bash", { command })]));
+			await h.session.prompt("go");
+			const results = toolResults(h.session);
+			blocked.forEach((command, index) => expect(results[index]).toMatchObject({ isError: true, text: gitBlockReason([command.split(" ").slice(0, 2).join(" ")]) }));
+			allowed.forEach((_command, index) => expect(results[blocked.length + index]!.isError).toBe(false));
+			expect(results.at(-1)!.text).toContain("main");
+			expect(workspace.git("log", "--oneline").trim().split("\n")).toHaveLength(1);
+		});
+
+		it("guards write: never read, changed since read, then allowed after a re-read; records touched files with overlap notes", async () => {
+			const t = sharedTarget({ "README.md": [7] });
+			cleanups.push(registerTicket(ticketKey(workspace.commonDir, 1), t.value));
+			const h = await session({ agentType: "ticket", superagent: { ticketId: 1 } });
+			const readme = join(workspace.repo, "README.md");
+			steps(h, [
+				[call("write", { path: "README.md", content: "never read\n" })],
+				[call("read", { path: "README.md" })],
+				() => { writeFileSync(readme, "# the user's edit, longer\n"); return [call("write", { path: "README.md", content: "stale\n" })]; },
+				[call("read", { path: "README.md" })],
+				[call("write", { path: "README.md", content: "# fresh\n" })],
+				[call("write", { path: "new.txt", content: "a new file\n" })],
+				[call("edit", { path: "new.txt", edits: [{ oldText: "a new", newText: "an edited" }] })],
+				[call("Agent", { subagent_type: "worker", prompt: "x", isolation: "worktree" })],
+				[call("Agent", { subagent_type: "worker", prompt: "x" })],
+			]);
+			await h.session.prompt("go");
+			const results = toolResults(h.session);
+			expect(results[0]).toMatchObject({ isError: true, text: writeBlockReason("README.md") });
+			expect(results[1]!.isError).toBe(false);
+			expect(results[2]).toMatchObject({ isError: true, text: writeBlockReason("README.md") });
+			expect(results[3]!.isError).toBe(false);
+			expect(results[4]).toMatchObject({ isError: false, text: expect.stringContaining(overlapNote(7, "README.md")) });
+			expect(results[5]).toMatchObject({ isError: false });
+			expect(results[5]!.text).not.toContain("Note:");
+			expect(results[6]).toMatchObject({ isError: false });
+			expect(results[7]).toMatchObject({ isError: true, text: AGENT_ISOLATION_BLOCK_REASON });
+			expect(results[8]).toMatchObject({ isError: false });
+			expect(readFileSync(readme, "utf8")).toBe("# fresh\n");
+			expect(readFileSync(join(workspace.repo, "new.txt"), "utf8")).toBe("an edited file\n");
+			expect(t.touched).toEqual(["README.md", "new.txt", "new.txt"]);
+			// Nothing was committed.
+			expect(workspace.git("status", "--porcelain")).toContain("README.md");
+		});
 	});
 });
