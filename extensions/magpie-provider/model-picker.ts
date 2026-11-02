@@ -21,6 +21,8 @@ function compareRoutes(left: PickerModel, right: PickerModel): number {
 export function selectMagpiePickerModels<T extends PickerModel>(models: readonly T[], preserveScope = false): T[] {
 	// Keep the complete catalog for exact-ID, wildcard and display-name scopes.
 	if (preserveScope) return [...models];
+	const autoNames = new Set(models.filter(model => model.magpieRoute?.group &&
+		model.id === `auto/${magpieModelName(model.id)}`).map(model => magpieModelName(model.id)));
 	const sources = new Map<string, Set<string>>();
 	for (const model of models) {
 		if (model.magpieRoute?.group) continue;
@@ -33,7 +35,8 @@ export function selectMagpiePickerModels<T extends PickerModel>(models: readonly
 	for (const model of models) {
 		const name = magpieModelName(model.id) ?? model.id;
 		const canonicalId = model.magpieRoute?.canonicalId ?? model.id;
-		const qualified = model.magpieRoute?.group || (sources.get(name)?.size ?? 0) > 1;
+		const autoRoute = model.magpieRoute?.group && canonicalId === `auto/${name}`;
+		const qualified = !autoRoute && (model.magpieRoute?.group || autoNames.has(name) || (sources.get(name)?.size ?? 0) > 1);
 		const previous = selected.get(canonicalId);
 		// Preserve explicit source/group IDs when a short name could hide a choice.
 		const canonicalPreference = qualified && previous
@@ -42,6 +45,6 @@ export function selectMagpiePickerModels<T extends PickerModel>(models: readonly
 	}
 	return Array.from(selected.values(), model => {
 		const name = magpieModelName(model.id) ?? model.id;
-		return { ...model, name: model.magpieRoute?.group || (sources.get(name)?.size ?? 0) > 1 ? model.id : name };
+		return { ...model, name: model.magpieRoute?.group || autoNames.has(name) || (sources.get(name)?.size ?? 0) > 1 ? model.id : name };
 	});
 }

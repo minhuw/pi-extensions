@@ -263,46 +263,51 @@ it.each((["/v1/chat/completions", "/v1/responses", "/v1/messages"] as const).fla
 	}
 });
 
-it.each(["stream", "streamSimple"] as const)("dispatches local Claude aliases through %s with recoverable selection IDs and physical provenance", async method => {
-	const name = "claude-opus-5-5";
-	const id = `claude1/${name}`;
-	http({ data: [{ id, owned_by: "claude1", native_endpoints: ["/v1/messages"] }] });
-	const provider = createMagpieProvider({});
-	await provider.refreshModels!(refresh());
-	const alias = provider.getModels().find(model => model.id === name)!;
-	expect(alias).toBeDefined();
-	// Exercise normalization after alias resolution for saved endpoint metadata as well.
-	const selected = { ...alias, baseUrl: `${config.origin}/v1`, cost: { ...alias.cost, input: 7, output: 9 } };
-	const context = normalizeContext({ messages: [] });
-	const options = { apiKey: "secret" };
-	const message: AssistantMessage = { role: "assistant", provider: "magpie", model: id, api: "anthropic-messages",
-		content: [{ type: "thinking", thinking: "fixture reasoning", thinkingSignature: "signed-fixture" }, { type: "text", text: "Physical route response" }], stopReason: "stop", timestamp: 0,
-		usage: { input: 1000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 1100,
-			cost: { input: 0.007, output: 0.0009, cacheRead: 0, cacheWrite: 0, total: 0.0079 } } };
-	const source = createAssistantMessageEventStream();
-	source.push({ type: "start", partial: message });
-	source.push({ type: "done", reason: "stop", message });
-	delegates.messages[method].mockReturnValue(source);
-	const stream = provider[method](selected, context, options);
-	const result = await stream.result();
-	expect(delegates.messages[method]).toHaveBeenLastCalledWith({ ...selected, id, baseUrl: config.origin }, context, options);
-	expect(result).toMatchObject({ model: name, magpiePhysicalModel: id });
-	expect(result.usage.cost).toMatchObject({ total: 0.0079, magpiePricing: "unavailable" });
-	const events = [];
-	for await (const event of stream) events.push(event);
-	expect(events[0]).toMatchObject({ partial: { model: name, magpiePhysicalModel: id } });
-	expect(events[1]).toMatchObject({ message: { model: name, magpiePhysicalModel: id } });
-	expect(selected.id).toBe(name);
-	const persisted = JSON.parse(JSON.stringify(result)) as AssistantMessage;
-	const replay = normalizeContext({ messages: [persisted] });
-	const nextSource = createAssistantMessageEventStream();
-	nextSource.push({ type: "done", reason: "stop", message });
-	delegates.messages[method].mockReturnValue(nextSource);
-	await provider[method](selected, replay, options).result();
-	const replayed = delegates.messages[method].mock.lastCall![1].messages.find((row: { role: string }) => row.role === "assistant");
-	expect(replayed.model).toBe(id);
-	expect(replayed.content).toEqual(message.content);
-	expect(persisted.model).toBe(name);
+describe.each([
+	{ name: "claude-opus-5-5", prefix: "claude1", endpoint: "/v1/messages", key: "messages", api: "anthropic-messages", owned_by: "claude1" },
+	{ name: "gpt-6-astra", prefix: "auto", endpoint: "/v1/responses", key: "responses", api: "openai-responses", owned_by: undefined },
+	{ name: "gpt-6-astra", prefix: "auto", endpoint: undefined, key: "chat", api: "openai-completions", owned_by: undefined },
+] as const)("local $prefix aliases on $api", ({ name, prefix, endpoint, key, api, owned_by }) => {
+	it.each(["stream", "streamSimple"] as const)("dispatches through %s with recoverable selection IDs and physical provenance", async method => {
+		const id = `${prefix}/${name}`;
+		http({ data: [{ id, owned_by, native_endpoints: endpoint ? [endpoint] : undefined }] });
+		const provider = createMagpieProvider({});
+		await provider.refreshModels!(refresh());
+		const alias = provider.getModels().find(model => model.id === name)!;
+		expect(alias).toBeDefined();
+		// Exercise normalization after alias resolution for saved endpoint metadata as well.
+		const selected = { ...alias, baseUrl: `${config.origin}/v1`, cost: { ...alias.cost, input: 7, output: 9 } };
+		const context = normalizeContext({ messages: [] });
+		const options = { apiKey: "secret" };
+		const message: AssistantMessage = { role: "assistant", provider: "magpie", model: id, api,
+			content: [{ type: "thinking", thinking: "fixture reasoning", thinkingSignature: "signed-fixture" }, { type: "text", text: "Physical route response" }], stopReason: "stop", timestamp: 0,
+			usage: { input: 1000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 1100,
+				cost: { input: 0.007, output: 0.0009, cacheRead: 0, cacheWrite: 0, total: 0.0079 } } };
+		const source = createAssistantMessageEventStream();
+		source.push({ type: "start", partial: message });
+		source.push({ type: "done", reason: "stop", message });
+		delegates[key][method].mockReturnValue(source);
+		const stream = provider[method](selected, context, options);
+		const result = await stream.result();
+		expect(delegates[key][method]).toHaveBeenLastCalledWith({ ...selected, id, baseUrl: key === "messages" ? config.origin : `${config.origin}/v1` }, context, options);
+		expect(result).toMatchObject({ model: name, magpiePhysicalModel: id });
+		expect(result.usage.cost).toMatchObject({ total: 0.0079, magpiePricing: "unavailable" });
+		const events = [];
+		for await (const event of stream) events.push(event);
+		expect(events[0]).toMatchObject({ partial: { model: name, magpiePhysicalModel: id } });
+		expect(events[1]).toMatchObject({ message: { model: name, magpiePhysicalModel: id } });
+		expect(selected.id).toBe(name);
+		const persisted = JSON.parse(JSON.stringify(result)) as AssistantMessage;
+		const replay = normalizeContext({ messages: [persisted] });
+		const nextSource = createAssistantMessageEventStream();
+		nextSource.push({ type: "done", reason: "stop", message });
+		delegates[key][method].mockReturnValue(nextSource);
+		await provider[method](selected, replay, options).result();
+		const replayed = delegates[key][method].mock.lastCall![1].messages.find((row: { role: string }) => row.role === "assistant");
+		expect(replayed.model).toBe(id);
+		expect(replayed.content).toEqual(message.content);
+		expect(persisted.model).toBe(name);
+	});
 });
 
 it.each(["stream", "streamSimple"] as const)("rejects disappeared, changed-owner, ambiguous, and historically rebound aliases before %s", async method => {

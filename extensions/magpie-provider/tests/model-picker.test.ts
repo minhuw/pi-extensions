@@ -33,14 +33,37 @@ afterEach(() => {
 });
 
 describe("source-aware picker selection", () => {
-	it("shows a short Claude alias only for one concrete source and keeps groups separate", () => {
+	it("reserves the Claude shortcut for auto and keeps even a sole concrete source qualified", () => {
 		const models = parse([
 			{ ...claude, id: "auto/claude-opus-5-5", native_endpoints: undefined }, ...catalog,
 		]);
 		const selected = selectMagpiePickerModels(models);
-		expect(selected.map(model => model.id)).toEqual(["auto/claude-opus-5-5", "gpt-6-astra", "claude-opus-5-5"]);
+		expect(selected.map(model => model.id)).toEqual(["claude-opus-5-5", "gpt-6-astra", "contabo/claude/claude-opus-5-5"]);
 		expect(selected[0].magpieRoute?.group).toBe(true);
-		expect(selected[2].magpieAliasTarget).toBe("contabo/claude/claude-opus-5-5");
+		expect(selected[0].magpieAliasTarget).toBe("auto/claude-opus-5-5");
+	});
+
+	it.each([false, true])("prefers the auto bare alias (advertised=%s) and retains explicit providers", advertised => {
+		const auto = { ...gpt, id: "auto/gpt-6-astra", native_endpoints: undefined, context_window: 64000 };
+		const rows = [auto, { ...gpt, id: "codex/gpt-6-astra" },
+			{ ...gpt, owned_by: "token-zhang-s-gateway", id: "token-zhang-s-gateway/codex/gpt-6-astra" },
+			...(advertised ? [{ ...auto, id: "gpt-6-astra" }] : [])];
+		const models = parse(rows);
+		const selected = selectMagpiePickerModels(models);
+		expect(selected.map(model => model.id)).toEqual([
+			"gpt-6-astra", "codex/gpt-6-astra", "token-zhang-s-gateway/codex/gpt-6-astra",
+		]);
+		expect(selected[0]).toMatchObject({ api: "openai-completions", contextWindow: 64000 });
+		expect(selected.slice(1).every(model => model.api === "openai-responses")).toBe(true);
+		expect(selectMagpiePickerModels(models, true)).toEqual(models);
+		expect(models.slice(0, rows.length).map(model => model.id)).toEqual(rows.map(row => row.id));
+	});
+
+	it("keeps conflicting bare rows and explicit groups qualified", () => {
+		const models = parse([{ ...gpt, id: "auto/gpt-6-astra" },
+			{ ...gpt, id: "gpt-6-astra", context_window: 999 },
+			{ ...gpt, id: "group/gpt-6-astra" }, { ...gpt, id: "auto/nested/gpt-6-astra" }]);
+		expect(selectMagpiePickerModels(models).map(model => model.id)).toEqual(models.map(model => model.id));
 	});
 
 	it("keeps both providers qualified when claude1 and claude2 serve the same name", () => {
@@ -103,6 +126,23 @@ describe("source-aware picker selection", () => {
 });
 
 describe("native availability integration", () => {
+	it("registers the auto shortcut and every exact route while preserving scoped availability", async () => {
+		const ids = ["auto/gpt-6-astra", "codex/gpt-6-astra", "token-zhang-s-gateway/codex/gpt-6-astra"];
+		vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: ids.map(id => ({ id, native_endpoints: ["/v1/responses"] })) })));
+		const models = createModels({ credentials: new InMemoryCredentialStore(), authContext: {
+			env: async () => undefined, fileExists: async () => false,
+		} });
+		let scoped = false;
+		const provider = createMagpieProvider(env, undefined, undefined, () => scoped);
+		models.setProvider(provider);
+		expect((await models.refresh({ providers: ["magpie"], force: true })).errors.size).toBe(0);
+		for (const id of [...ids, "gpt-6-astra"]) expect(models.getModel("magpie", id)?.id).toBe(id);
+		expect((await models.getAvailable("magpie")).map(model => model.id)).toEqual(["gpt-6-astra", ...ids.slice(1)]);
+		scoped = true;
+		expect((await models.getAvailable("magpie")).map(model => model.id)).toEqual([...ids, "gpt-6-astra"]);
+		expect((await models.getAllAvailable("magpie")).map(model => model.id)).toEqual([...ids, "gpt-6-astra"]);
+	});
+
 	it("registers local short IDs for lookup while hiding only proven aliases in both availability APIs", async () => {
 		vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: catalog })));
 		const models = createModels({ credentials: new InMemoryCredentialStore(), authContext: {

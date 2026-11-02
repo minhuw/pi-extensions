@@ -11,21 +11,21 @@ const single = () => parse([{ ...raw, id: `claude1/${name}` }]);
 const aliasOf = (models: MagpieModel[]) => aliases(models)[0];
 
 describe("source-aware catalog aliases", () => {
-	it("keeps originals, proves a shortened clone, preserves groups, and appends a local Claude alias", () => {
+	it("keeps originals, proves a shortened clone, and reserves the short name for auto", () => {
 		const models = parse([
 			{ ...raw, id: `claude1/${name}` },
 			{ ...raw, id: `claude1/nested/${name}` },
 			{ ...raw, id: `auto/${name}` },
 		]);
 		// Two different concrete routes remain ambiguous even with the same owner and raw metadata.
-		expect(aliases(models)).toEqual([]);
+		expect(aliases(models).map(model => model.magpieAliasTarget)).toEqual([`auto/${name}`]);
 		const entries = [{ ...raw, id: `claude1/nested/${name}` }, { ...raw, id: `nested/${name}` }, { ...raw, id: `auto/${name}` }];
 		const actual = parse(entries);
 		expect(actual.map(model => model.id)).toEqual([...entries.map(row => row.id), name]);
 		expect(actual[0].magpieRoute).toEqual({ canonicalId: entries[0].id, owner: "claude1", group: false });
 		expect(actual[1].magpieRoute).toEqual(actual[0].magpieRoute);
 		expect(actual[2].magpieRoute).toEqual({ canonicalId: entries[2].id, owner: "claude1", group: true });
-		expect(actual[3]).toEqual({ ...actual[0], id: name, name, magpieAliasTarget: entries[0].id });
+		expect(actual[3]).toEqual({ ...actual[2], id: name, name, magpieAliasTarget: entries[2].id });
 		expect(entries[0]).not.toHaveProperty("magpieRoute");
 	});
 
@@ -40,8 +40,8 @@ describe("source-aware catalog aliases", () => {
 
 	it("does not treat a group's first-member owner as a concrete alias source", () => {
 		const models = parse([{ ...raw, id: `auto/${name}` }, { ...raw, id: `group/${name}` }]);
-		expect(models.map(model => model.magpieRoute?.canonicalId)).toEqual([`auto/${name}`, `group/${name}`]);
-		expect(aliases(models)).toEqual([]);
+		expect(models.map(model => model.magpieRoute?.canonicalId)).toEqual([`auto/${name}`, `group/${name}`, `auto/${name}`]);
+		expect(aliasOf(models).magpieRoute?.group).toBe(true);
 	});
 
 	it.each([
@@ -175,6 +175,56 @@ describe("local alias resolution and dispatch guards", () => {
 	it("does not expose route values or transcript text in errors", () => {
 		const models = single();
 		expect(() => assertMagpieAliasRoute(aliasOf(models), models, [{ role: "assistant", provider: "magpie", model: `SECRET/${name}`, content: "SECRET" }]))
-			.toThrow(/^Magpie's short Claude alias conflicts with the physical source recorded in this session\. Start a new session or select the explicit provider route previously used by this session\.$/);
+			.toThrow(/^Magpie's short model alias conflicts with the physical source recorded in this session\. Start a new session or select the explicit provider route previously used by this session\.$/);
+	});
+});
+
+describe("auto group aliases", () => {
+	const name = "gpt-6-astra";
+	const route = { id: `auto/${name}`, native_endpoints: ["/v1/responses"], context_window: 123456, max_output_tokens: 1234 };
+	it("copies only the usable auto route without requiring an owner", () => {
+		const models = parse([route, { ...raw, id: `codex/${name}` }]);
+		expect(aliasOf(models)).toEqual({ ...models[0], id: name, name, magpieAliasTarget: route.id });
+		expect(() => assertMagpieAliasRoute(aliasOf(models), models, [])).not.toThrow();
+	});
+	it.each([`group/${name}`, `auto/nested/${name}`, "auto/bad*name", "auto/bad name"])("does not shorten %s", id => {
+		expect(aliases(parse([{ ...route, id }]))).toEqual([]);
+	});
+	it("preserves advertised bare rows whether proven or conflicting", () => {
+		for (const bare of [{ ...route, id: name }, { ...route, id: name, context_window: 999 }]) {
+			const models = parse([route, bare]);
+			expect(models).toHaveLength(2);
+			expect(models[1].magpieAliasTarget).toBeUndefined();
+			expect(models[1].magpieRoute?.canonicalId).toBe(bare.context_window === route.context_window ? route.id : name);
+		}
+	});
+	it("allows changing first-member owners and additional sources but rejects missing or rebound targets", () => {
+		const models = parse([route]);
+		const alias = aliasOf(models);
+		const next = parse([{ ...route, owned_by: "other" }, { ...raw, id: `codex/${name}` }]);
+		expect(() => assertMagpieAliasRoute(alias, next, [])).not.toThrow();
+		expect(() => assertMagpieAliasRoute(alias, [alias], [])).toThrow(/target is missing/);
+		const rebound = parse([route, { id: name, owned_by: "codex" }, { id: `codex/${name}`, owned_by: "codex" }]);
+		expect(() => assertMagpieAliasRoute(alias, rebound, [])).toThrow(/metadata conflicts/);
+		for (const invalid of [
+			{ ...alias, id: `nested/${name}` },
+			{ ...alias, magpieRoute: { ...alias.magpieRoute!, group: false } },
+			{ ...alias, magpieAliasTarget: `group/${name}` },
+		]) expect(() => assertMagpieAliasRoute(invalid, models, [])).toThrow(/metadata conflicts/);
+		for (const invalid of [
+			{ ...models[0], magpieAliasTarget: route.id },
+			{ ...models[0], magpieRoute: undefined },
+			{ ...models[0], magpieRoute: { ...models[0].magpieRoute!, group: false } },
+		]) expect(() => assertMagpieAliasRoute(alias, [invalid], [])).toThrow(/metadata conflicts/);
+	});
+	it("keeps concrete and auto transcript provenance distinct", () => {
+		const models = parse([route]);
+		const alias = aliasOf(models);
+		const prior = { role: "assistant", provider: "magpie", model: name, magpiePhysicalModel: route.id };
+		expect(() => assertMagpieAliasRoute(alias, models, [prior])).not.toThrow();
+		for (const physical of [`codex/${name}`, name]) {
+			expect(() => assertMagpieAliasRoute(alias, models, [{ ...prior, magpiePhysicalModel: physical }])).toThrow(/physical source/);
+		}
+		expect(() => assertMagpieAliasRoute(alias, models, [{ ...prior, model: `codex/${name}`, magpiePhysicalModel: undefined }])).toThrow(/physical source/);
 	});
 });

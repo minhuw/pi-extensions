@@ -75,6 +75,13 @@ export function addMagpieModelAliases(models: readonly Model<MagpieApi>[], entri
 		}
 		return { ...model, magpieRoute: route };
 	});
+	// Reserve exact auto shortcuts before concrete Claude aliases compete for names.
+	for (const source of [...result]) {
+		const name = magpieModelName(source.id);
+		if (!name || source.id !== `auto/${name}` || advertised.has(name)) continue;
+		result.push({ ...source, id: name, name, magpieRoute: { ...source.magpieRoute! }, magpieAliasTarget: source.id });
+		advertised.add(name);
+	}
 	const families = new Map<string, MagpieModel[]>();
 	for (const model of result) {
 		const name = magpieModelName(model.id);
@@ -104,11 +111,11 @@ export function resolveMagpieAlias<T extends Model<any>>(model: T): T {
 
 export type MagpieAliasFailure = "catalog_unavailable" | "target_missing" | "metadata_conflict" | "ambiguous" | "history_conflict";
 const aliasErrors: Record<MagpieAliasFailure, string> = {
-	catalog_unavailable: "Magpie's model catalog is unavailable, so the short Claude alias cannot be validated. Check the gateway and credentials, then run /magpie-refresh and retry.",
-	target_missing: "Magpie's short Claude alias target is missing from the current model catalog. Run /magpie-refresh; if it remains missing, select an available explicit provider route.",
-	metadata_conflict: "Magpie's short Claude alias route metadata conflicts with the selected source. Run /magpie-refresh and reselect the model, or select an explicit provider route.",
-	ambiguous: "Magpie's short Claude alias has competing sources in the current model catalog. Select an explicit provider route to disambiguate the source.",
-	history_conflict: "Magpie's short Claude alias conflicts with the physical source recorded in this session. Start a new session or select the explicit provider route previously used by this session.",
+	catalog_unavailable: "Magpie's model catalog is unavailable, so the short model alias cannot be validated. Check the gateway and credentials, then run /magpie-refresh and retry.",
+	target_missing: "Magpie's short model alias target is missing from the current model catalog. Run /magpie-refresh; if it remains missing, select an available explicit provider route.",
+	metadata_conflict: "Magpie's short model alias route metadata conflicts with the selected source. Run /magpie-refresh and reselect the model, or select an explicit provider route.",
+	ambiguous: "Magpie's short model alias has competing sources in the current model catalog. Select an explicit provider route to disambiguate the source.",
+	history_conflict: "Magpie's short model alias conflicts with the physical source recorded in this session. Start a new session or select the explicit provider route previously used by this session.",
 };
 export class MagpieAliasRouteError extends Error {
 	readonly code: MagpieAliasFailure;
@@ -126,17 +133,25 @@ export function assertMagpieAliasRoute(model: Model<any>, catalog: readonly Mode
 	const targetId = alias.magpieAliasTarget;
 	const fail: (code: MagpieAliasFailure) => never = code => { throw new MagpieAliasRouteError(code); };
 	const name = magpieModelName(alias.id);
-	if (!name || !alias.magpieRoute || alias.magpieRoute.group || alias.magpieRoute.canonicalId !== targetId ||
-		!owner(alias.magpieRoute.owner)) fail("metadata_conflict");
+	const autoGroup = targetId === `auto/${name}`;
+	if (!name || alias.id !== name || !alias.magpieRoute || alias.magpieRoute.canonicalId !== targetId ||
+		(autoGroup ? alias.magpieRoute.group !== true : alias.magpieRoute.group || !owner(alias.magpieRoute.owner))) fail("metadata_conflict");
 	if (!catalog.length) fail("catalog_unavailable");
 	const target = catalog.find(row => row.id === targetId) as MagpieModel | undefined;
 	if (!target) fail("target_missing");
-	if (target.magpieAliasTarget !== undefined || !target.magpieRoute || target.magpieRoute.group ||
-		target.magpieRoute.canonicalId !== targetId || target.magpieRoute.owner !== alias.magpieRoute!.owner) fail("metadata_conflict");
-	for (const row of catalog as readonly MagpieModel[]) {
-		if (row.magpieAliasTarget !== undefined || magpieModelName(row.id) !== name || row.magpieRoute?.group) continue;
-		if (!row.magpieRoute || !owner(row.magpieRoute.owner)) fail("metadata_conflict");
-		if (row.magpieRoute.canonicalId !== targetId || row.magpieRoute.owner !== alias.magpieRoute!.owner) fail("ambiguous");
+	if (target.magpieAliasTarget !== undefined || !target.magpieRoute ||
+		target.magpieRoute.canonicalId !== targetId || (autoGroup ? target.magpieRoute.group !== true :
+			target.magpieRoute.group || target.magpieRoute.owner !== alias.magpieRoute!.owner)) fail("metadata_conflict");
+	if (autoGroup) {
+		const current = catalog.find(row => row.id === name) as MagpieModel | undefined;
+		if (current && (!current.magpieRoute?.group || current.magpieRoute.canonicalId !== targetId ||
+			(current.magpieAliasTarget !== undefined && current.magpieAliasTarget !== targetId))) fail("metadata_conflict");
+	} else {
+		for (const row of catalog as readonly MagpieModel[]) {
+			if (row.magpieAliasTarget !== undefined || magpieModelName(row.id) !== name || row.magpieRoute?.group) continue;
+			if (!row.magpieRoute || !owner(row.magpieRoute.owner)) fail("metadata_conflict");
+			if (row.magpieRoute.canonicalId !== targetId || row.magpieRoute.owner !== alias.magpieRoute!.owner) fail("ambiguous");
+		}
 	}
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];
