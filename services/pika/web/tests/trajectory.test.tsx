@@ -5,6 +5,7 @@ import { VIEW_STORAGE_KEY } from "../src/pages/SessionView";
 import { LIVE_POLL_MS, TRACE_REFRESH_MS } from "../src/session/live";
 import { foldGaps, layoutOverview, makeScale, overviewLanes, traceIntervals } from "../src/trace/axis";
 import { formatPhase } from "../src/trace/format";
+import { LADDER_OPEN_KEY } from "../src/trace/Ladder";
 import { assistantMessage, entry, header, iso, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
 import { mockLayout, renderApp } from "./support/render";
 import { anthropicPayload, modelRequest } from "./support/requests";
@@ -241,10 +242,33 @@ describe("trajectory ledger", () => {
 		expect(ladder.textContent).toContain("+310 ms");
 		expect(ladder.textContent).toContain("+880 ms");
 		expect(within(ladder).getByRole("img").getAttribute("aria-label")).toContain("first token after 880 ms");
+
+		// Folded, it keeps its figures on one line and leaves the rest of the pane to the tabs.
+		const toggle = within(ladder).getByRole("button", { name: /Timing/ });
+		expect(toggle.getAttribute("aria-expanded")).toBe("true");
+		fireEvent.click(toggle);
+		expect(toggle.getAttribute("aria-expanded")).toBe("false");
+		expect(ladder.dataset.open).toBe("false");
+		expect(ladder.querySelector("svg")).toBeNull();
+		expect(ladder.querySelector("[data-ladder-summary]")?.textContent).toContain("TTFT 880 ms · streamed");
+		expect(localStorage.getItem(LADDER_OPEN_KEY)).toBe("closed");
+
 		// A call without timing shows nothing new.
 		fireEvent.click(row("[data-seq='9']"));
 		await waitFor(() => expect(inspector().textContent).toContain("Fixed the retry count."));
 		expect(inspector().querySelector("[data-ladder]")).toBeNull();
+
+		// Back on the timed call, the ladder is still folded, and opens again.
+		fireEvent.click(row("[data-seq='2'][data-kind='llm']"));
+		const folded = await waitFor(() => {
+			const node = inspector().querySelector<HTMLElement>("[data-ladder]");
+			if (!node) throw new Error("no ladder");
+			return node;
+		});
+		expect(folded.dataset.open).toBe("false");
+		fireEvent.click(within(folded).getByRole("button", { name: /Timing/ }));
+		expect(folded.querySelector("[data-ladder-ttft]")?.textContent).toBe("880 ms");
+		expect(localStorage.getItem(LADDER_OPEN_KEY)).toBe("open");
 	});
 
 	it("keeps the timeline as it was for a session without timing", async () => {
