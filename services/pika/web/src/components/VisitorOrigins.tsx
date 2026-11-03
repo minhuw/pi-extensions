@@ -38,7 +38,7 @@ export function VisitorOriginsSection() {
 function VisitorData({ data }: { data: import("../lib/api").VisitorOrigins }) {
 	return <div className="mt-3">
 		<p className="max-w-[90ch] text-[13px] text-muted">Last 30 UTC dates, including today. Unfiltered gallery views have no project. The visitor figure sums daily estimates, not unique people over 30 days. Estimates use daily rotating IP hashes; people sharing an address count once, and requests without an IP are omitted. If the daily storage limit is reached, views from new groups count under Unknown without a project or visitor estimate.</p>
-		<p className="mt-2 max-w-[90ch] text-[13px] text-muted">The owner's marked guest view is excluded. Direct public visits by the owner may still be counted.</p>
+		<p className="mt-2 max-w-[90ch] text-[13px] text-muted">The owner's marked guest view and views from Tailscale addresses are excluded. Other direct public visits by the owner may still be counted.</p>
 		<dl className="mt-5 flex flex-wrap gap-x-12 gap-y-4"><div><dt className="text-[13px] text-muted">Total views</dt><dd className="tnum text-[22px] font-semibold">{formatCount(data.views)}</dd></div><div><dt className="text-[13px] text-muted">Sum of daily estimated visitors</dt><dd className="tnum text-[22px] font-semibold">{formatCount(data.dailyVisitors)}</dd></div></dl>
 		{data.views === 0 && <EmptyState title="No views yet">Public gallery and trajectory views will appear here after they are recorded.</EmptyState>}
 		<div className="mt-6 grid gap-8 lg:grid-cols-2"><Breakdown title="Countries" rows={data.countries.map((row) => ({ ...row, name: countryName(row.country) }))} /><Breakdown title="Projects" rows={data.projects.map((row) => ({ ...row, name: row.project }))} /></div>

@@ -339,6 +339,37 @@ async fn automatic_source_detects_cloudflare_and_trusted_proxies() {
 }
 
 #[tokio::test]
+async fn tailnet_views_are_ignored() {
+    let env = env();
+    let direct = app(&env, VisitorAnalytics::Direct, AuthMode::None);
+    // More than the per-client limit: ignored views are neither recorded nor rate limited.
+    for _ in 0..61 {
+        assert_eq!(send(&direct, json!({"page":"gallery"}), Some("100.101.102.103:1"), &[]).await, StatusCode::NO_CONTENT);
+    }
+    for peer in ["100.64.0.0:1", "100.127.255.255:1", "[fd7a:115c:a1e0::1]:1", "[::ffff:100.100.1.1]:1"] {
+        assert_eq!(send(&direct, json!({"page":"gallery"}), Some(peer), &[]).await, StatusCode::NO_CONTENT);
+    }
+    // A trusted proxy's tailnet visitor, with or without Cloudflare headers, and a direct one without a forwarded address.
+    let auto = app(&env, VisitorAnalytics::Auto, AuthMode::None);
+    for (peer, headers) in [
+        ("127.0.0.1:1", vec![("x-forwarded-for", "203.0.113.1, 100.101.102.103")]),
+        ("127.0.0.1:1", vec![("x-forwarded-for", "fd7a:115c:a1e0:ab12::1"), ("cf-connecting-ip", "fd7a:115c:a1e0:ab12::1"), ("cf-ipcountry", "US")]),
+        ("100.101.102.103:1", vec![]),
+    ] {
+        assert_eq!(send(&auto, json!({"page":"gallery"}), Some(peer), &headers).await, StatusCode::NO_CONTENT);
+    }
+    assert_eq!(one(&env.store, "SELECT COUNT(*) AS n FROM visitor_views")["n"], 0);
+
+    // Neighbouring ranges, loopback, and LAN addresses still count.
+    for peer in ["100.63.255.255:1", "100.128.0.0:1", "[fd7a:115c:a1e1::1]:1", "127.0.0.1:1", "192.168.1.2:1"] {
+        assert_eq!(send(&direct, json!({"page":"gallery"}), Some(peer), &[]).await, StatusCode::NO_CONTENT);
+    }
+    let data = report(&direct).await;
+    assert_eq!(data["views"], 5);
+    assert_eq!(data["dailyVisitors"], 5);
+}
+
+#[tokio::test]
 async fn forged_cloudflare_ips_cannot_bypass_automatic_rate_limits() {
     let env = env();
     let app = app(&env, VisitorAnalytics::Auto, AuthMode::None);

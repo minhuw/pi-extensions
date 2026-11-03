@@ -78,6 +78,19 @@ fn source(
     (ip, country)
 }
 
+/// Tailscale's (and Headscale's default) addresses: 100.64.0.0/10 and fd7a:115c:a1e0::/48. Views from the owner's
+/// tailnet are not public visitors. Loopback and LAN addresses still count: without `--trust-proxy` they are often
+/// a local proxy's address, which every visitor shares.
+fn tailnet(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, ..] = ip.octets();
+            a == 100 && b & 0xc0 == 64
+        }
+        IpAddr::V6(ip) => ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
+    }
+}
+
 fn clean_for_day(tx: &rusqlite::Transaction<'_>, day: &str) -> rusqlite::Result<()> {
     tx.execute("DELETE FROM visitor_day_key WHERE day <> ?1", [day])?;
     tx.execute(
@@ -139,6 +152,10 @@ pub(super) async fn view(State(state): State<AppState>, request: Request) -> Res
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip());
     let (ip, country) = source(mode, &parts.headers, peer, state.config.trust_proxy);
+    // Ignored outright, before any rate limit or write, as if collection were off.
+    if ip.is_some_and(tailnet) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
     // Analytics is best effort; never allow a backlog of writes to monopolize the shared writer.
     let Ok(permit) = state.limits.visitor_writes.clone().try_acquire_owned() else {
         return error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
