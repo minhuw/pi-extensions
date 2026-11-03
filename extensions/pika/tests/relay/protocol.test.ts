@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { headerField, messageContent, sanitize, targetLabel } from "../protocol.ts";
+import { headerField, messageContent, sanitize, targetLabel } from "../../relay/protocol.ts";
 
 it.each([
 	["CSI", "a\x1b[31mred\x1b[0mb", "aredb"],

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { KeybindingHints, Theme } from "@earendil-works/pi-coding-agent";
-import { MESSAGE_TYPE, NOTICE_TYPE, RECEIVED_TYPE } from "../protocol.ts";
+import { MESSAGE_TYPE, NOTICE_TYPE, RECEIVED_TYPE } from "../../relay/protocol.ts";
 import { FakeRelay } from "./support/relay-server.ts";
 import { setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
 

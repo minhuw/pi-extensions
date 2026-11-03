@@ -18,8 +18,7 @@ Extensions, prompts, skills, and a theme for the [Pi](https://github.com/earendi
 | [Loop](extensions/loop/README.md) | Repeats a prompt on a fixed interval, a cron schedule, or a delay the model picks. |
 | [Molt](extensions/molt/README.md) | `/molt` starts a new session with the current model and thinking level. |
 | [Statusline Footer](extensions/statusline-footer/README.md) | A footer for model, context, performance, cost, and Git status. |
-| [pika](extensions/pika/README.md) | Uploads sessions, model requests, subagent sessions, and Herder journals to a self-hosted [pika server](services/pika/README.md), where you can search and read them. |
-| [Relay](extensions/relay/README.md) | Lets Pi sessions on your machines send messages to each other through your pika server. |
+| [pika](extensions/pika/README.md) | Uploads sessions, model requests, subagent sessions, and Herder journals to a self-hosted [pika server](services/pika/README.md), where you can search and read them. Through the same server, [relay](extensions/pika/README.md#relay) lets Pi sessions on your machines send messages to each other, and [recall](extensions/pika/README.md#recall) lets the agent search and read your past sessions from every machine and project. |
 | [Magpie Provider](extensions/magpie-provider/README.md) | Adds the models of a Magpie gateway, with native compaction for OpenAI/Codex Responses models. |
 
 ## Install
@@ -42,8 +41,7 @@ This installs everything listed above and the theme. Some extensions need a few 
 - **Superagent:** off by default. Enable ticket routing for a session with `/superagent on`, or default new interactive sessions inside a git repository to it with `"enabled": true` in `~/.pi/agent/superagent.json`. In superagent mode the main session loses `edit`, `write`, and `bash` and creates tickets instead. Ticket agents run on Subagents (RPC protocol 3, the embedded `ticket` type), so install both. `/superagent off` returns a session to the usual tools for direct work and Herder planning; `PI_SUPERAGENT_DISABLED=1` forces direct mode everywhere. Tickets live in the git directory (`<git-common-dir>/superagent/`).
 - **Orca Bridge:** activates only inside Orca panes. Background activity is tracked in Orca's terminal view, not its native chat. `/orca-status` shows what it sees.
 - **Magpie Provider:** needs a running Magpie gateway (default `http://127.0.0.1:3425`). `/login magpie` saves its URL and key.
-- **pika:** does nothing until `/pika login` connects it to a server. Uploads include file contents and command output, so use only a server you control.
-- **Relay:** needs pika logged in and a pika server 0.3.0 or newer.
+- **pika:** does nothing until `/pika login` connects it to a server. Uploads include file contents and command output, so use only a server you control. Relay needs a pika server 0.3.0 or newer. Recall needs a pika server with the agent read API and read access granted to the device ("Agents can read" on the server's Devices page, or `pika token read-access <device> on`).
 
 The CLIProxyAPI provider and native-compaction extensions are no longer included. If your Pi settings point to their old paths, remove those entries. Saved credentials and old config files are not touched.
 

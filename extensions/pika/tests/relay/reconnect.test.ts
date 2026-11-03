@@ -2,8 +2,8 @@ import type { Socket } from "node:net";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { RelayConnection } from "../connection.ts";
-import { timing } from "../protocol.ts";
+import { RelayConnection } from "../../relay/connection.ts";
+import { timing } from "../../relay/protocol.ts";
 import { FakeRelay, TOKEN } from "./support/relay-server.ts";
 import { Notes, relayStatus, setCredentials, sleep, startSession, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
 

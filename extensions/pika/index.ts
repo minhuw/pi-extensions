@@ -6,6 +6,8 @@ import { publishCredentials } from "./credentials.ts";
 import { resolveRepository } from "./repository.ts";
 import { abortBinds, bindOnce } from "./device-key.ts";
 import { isPlainRemote, login, type LoginControl, readConfigFile, writeConfigFile } from "./login.ts";
+import recallExtension from "./recall/index.ts";
+import relayExtension from "./relay/index.ts";
 import { acquireUploader, currentUploader, releaseUploader, type Uploader, type UploaderOptions } from "./uploader.ts";
 
 export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
@@ -55,8 +57,15 @@ function modelInfo(ctx: ExtensionContext) {
 	return model ? { provider: model.provider, api: model.api, model: model.id } : {};
 }
 
-/** pika: upload every session entry and model request to a self-hosted pika server. */
+/** pika: upload every session to a self-hosted pika server, relay messages between sessions through it, and recall past sessions from it. */
 export default function pikaExtension(pi: ExtensionAPI): void {
+	captureExtension(pi);
+	relayExtension(pi);
+	recallExtension(pi);
+}
+
+/** Uploads every session entry and model request; the only part child sessions get through the hook. */
+export function captureExtension(pi: ExtensionAPI): void {
 	const self = {};
 	let config: ConfigResult | undefined;
 	let joined = false;
@@ -91,7 +100,7 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		if (!joined) {
 			joined = true;
 			state.members.set(self, detach);
-			state.hook ??= { name: "pika", extensionFactory: (child) => pikaExtension(child) };
+			state.hook ??= { name: "pika", extensionFactory: (child) => captureExtension(child) };
 			hooks().add(state.hook);
 		}
 		return uploader;

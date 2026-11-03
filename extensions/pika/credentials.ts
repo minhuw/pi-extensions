@@ -2,8 +2,8 @@ import { isExcluded, type ConfigResult } from "./config.ts";
 import { resolveRepository, type RepositoryInfo } from "./repository.ts";
 
 /**
- * The process-global registry through which pika shares its active server credentials with other
- * extensions (relay), which never import pika. Either side may create it first.
+ * The process-global registry through which pika shares its active server credentials with its relay
+ * and recall parts, including module copies loaded for other cwds. Either side may create it first.
  */
 export const CREDENTIALS = Symbol.for("pi-extensions.pika.credentials");
 

@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { WebSocket, WebSocketServer } from "ws";
-import type { HelloSession, OnlineSession, Target } from "../../protocol.ts";
+import type { HelloSession, OnlineSession, Target } from "../../../relay/protocol.ts";
 
 export const TOKEN = "relay-test-token";
 

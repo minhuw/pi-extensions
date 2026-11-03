@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { timing } from "../protocol.ts";
-import { CHILD_SESSION_HOOKS, type ChildSessionHook, shared } from "../shared.ts";
+import { timing } from "../../relay/protocol.ts";
+import { CHILD_SESSION_HOOKS, type ChildSessionHook, shared } from "../../relay/shared.ts";
 import { FakeRelay } from "./support/relay-server.ts";
 import { setCredentials, sleep, startSession, texts, waitFor, Workspace, type Harness } from "./support/runtime.ts";
 
@@ -116,10 +116,10 @@ it("disconnects a session the child hook claims after relay already decided", as
 it("keeps a real Subagents child offline while its parent is online", async () => {
 	setCredentials(relay.url);
 	// The child discovers relay from the agent dir, as a child of an installed package would.
-	const relayPath = fileURLToPath(new URL("../index.ts", import.meta.url));
+	const relayPath = fileURLToPath(new URL("../../relay/index.ts", import.meta.url));
 	await mkdir(join(workspace.agentDir, "extensions"), { recursive: true });
 	await writeFile(join(workspace.agentDir, "extensions", "relay.ts"), `export { default } from ${JSON.stringify(relayPath)};\n`);
-	const subagentsPath = fileURLToPath(new URL("../../subagents/src/index.ts", import.meta.url));
+	const subagentsPath = fileURLToPath(new URL("../../../subagents/src/index.ts", import.meta.url));
 	const childIds: string[] = [];
 	const witness = { name: "relay-test-witness", extensionFactory: (pi: ExtensionAPI) => { pi.on("session_start", (_event, ctx) => { childIds.push(ctx.sessionManager.getSessionId()); }); } };
 	const hooks = (globalThis as Record<symbol, Set<unknown>>)[CHILD_SESSION_HOOKS] ??= new Set();
@@ -149,10 +149,10 @@ it("keeps a real Subagents child offline while its parent is online", async () =
 }, 30_000);
 
 it("gives a real Subagents child no relay tools when pika is logged out and no hook marks it", async () => {
-	const relayPath = fileURLToPath(new URL("../index.ts", import.meta.url));
+	const relayPath = fileURLToPath(new URL("../../relay/index.ts", import.meta.url));
 	await mkdir(join(workspace.agentDir, "extensions"), { recursive: true });
 	await writeFile(join(workspace.agentDir, "extensions", "relay.ts"), `export { default } from ${JSON.stringify(relayPath)};\n`);
-	const subagentsPath = fileURLToPath(new URL("../../subagents/src/index.ts", import.meta.url));
+	const subagentsPath = fileURLToPath(new URL("../../../subagents/src/index.ts", import.meta.url));
 	const parent = await open({ extensionPaths: [subagentsPath] });
 	expect(registered()).toEqual([]);
 	// Tool declarations travel in each request's transcript.

@@ -1,4 +1,4 @@
-// pika relay end to end (docs/RELAY.md, "End to end"): two real `pi --mode rpc` processes with relay and pika, each
+// pika relay end to end (docs/RELAY.md, "End to end"): two real `pi --mode rpc` processes with the pika extension, each
 // logged in as its own device, talk through the real server. A asks B with relay_send and B's answer reaches A; a chain
 // between them stops at the hop limit; `/relay off` takes B offline, and a message to it expires after the short test
 // TTL with a notice that starts a turn in A; renaming A's device shows in relay's lists and on the dashboard; messages
@@ -14,8 +14,8 @@ import { agentDirFor, RpcPi, textOf, type SessionEntry } from "./rpc.ts";
 import { check, checkEqual, log, waitFor } from "./util.ts";
 
 const REPO = join(import.meta.dirname, "..", "..", "..");
-/** Relay before pika, as in the repository's `pi.extensions`, and nothing else. */
-const EXTENSIONS = ["extensions/relay/index.ts", "extensions/pika/index.ts"].map((path) => join(REPO, path));
+/** The pika extension, which brings relay and recall, and nothing else. */
+const EXTENSIONS = ["extensions/pika/index.ts"].map((path) => join(REPO, path));
 const PROVIDER = "pika-e2e-relay";
 const MODEL = "mock-model";
 const MAX_HOPS = 8;

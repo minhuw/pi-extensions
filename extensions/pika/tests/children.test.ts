@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import pikaExtension, { CHILD_SESSION_HOOKS, SESSION_LINK_TYPE, type ChildSessionHook } from "../index.ts";
+import pikaExtension, { captureExtension, CHILD_SESSION_HOOKS, SESSION_LINK_TYPE, type ChildSessionHook } from "../index.ts";
 import { MockIngest } from "./support/ingest-server.ts";
 import { MockProvider } from "./support/provider-server.ts";
 import { readText, startSession, waitFor, Workspace } from "./support/runtime.ts";
@@ -21,7 +21,8 @@ it("registers a child-session hook whose factory captures the child as its own s
 	expect(registered()).toEqual([]);
 	const main = await startSession({ workspace, extensions: [pikaExtension] });
 	try {
-		expect(registered().map((hook) => hook.name)).toEqual(["pika"]);
+		// relay, part of pika, registers a hook of its own for an online top-level session.
+		expect(registered().map((hook) => hook.name).sort()).toEqual(["pika", "relay"]);
 		main.faux.setResponses([fauxAssistantMessage("main")]);
 		await main.session.prompt("parent prompt");
 
@@ -46,7 +47,7 @@ it("registers a child-session hook whose factory captures the child as its own s
 		} finally { await child.shutdown(); }
 
 		// The parent is still active, so the hook stays registered.
-		expect(registered().map((hook) => hook.name)).toEqual(["pika"]);
+		expect(registered().map((hook) => hook.name).sort()).toEqual(["pika", "relay"]);
 		await waitFor(async () => ingest.data(`session:${main.session.sessionId}`) === await readText(main.session.sessionFile!), 5_000, "parent upload");
 	} finally { await main.shutdown(); }
 	expect(registered()).toEqual([]);
@@ -58,8 +59,8 @@ it("captures once, with the last-loaded instance, when pika loads twice into one
 	const modify = (pi: ExtensionAPI) => {
 		pi.on("before_provider_request", (event) => ({ ...(event.payload as object), metadata: { between: true } }));
 	};
-	// As in a child that loads pika from the package and again through the hook, which calls the same factory.
-	const h = await startSession({ workspace, extensions: [pikaExtension, modify, pikaExtension], openAiBaseUrl: provider.baseUrl });
+	// As in a child that loads pika from the package and again through the hook, which adds only its capture.
+	const h = await startSession({ workspace, extensions: [pikaExtension, modify, captureExtension], openAiBaseUrl: provider.baseUrl });
 	try {
 		await h.session.prompt("one");
 		await h.session.prompt("two");
@@ -80,7 +81,8 @@ it("captures once when one module copy loads by path and another arrives through
 	await workspace.enable(ingest.url);
 	const main = await startSession({ workspace, extensions: [pikaExtension] });
 	try {
-		const [hook] = registered();
+		// The hook adds only the capture, so relay and recall from the path register their tools once.
+		const hook = registered().find((candidate) => candidate.name === "pika");
 		const path = fileURLToPath(new URL("../index.ts", import.meta.url));
 		const child = await startSession({ workspace, faux: main.faux, extensionPaths: [path], extensions: [hook!.extensionFactory] });
 		try {
@@ -108,7 +110,7 @@ it("registers no hook in an excluded session and skips its children while anothe
 		expect(registered()).toEqual([]);
 		const main = await startSession({ workspace, faux: excluded.faux, extensions: [pikaExtension] });
 		try {
-			expect(registered().map((hook) => hook.name)).toEqual(["pika"]);
+			expect(registered().map((hook) => hook.name).sort()).toEqual(["pika", "relay"]);
 			// A worktree-isolated child runs outside the excluded directory.
 			const manager = SessionManager.create(workspace.cwd, workspace.sessionDir, { parentSession: excluded.session.sessionFile });
 			const child = await startSession({ workspace, sessionManager: manager, faux: excluded.faux, extensions: registered().map((hook) => hook.extensionFactory) });

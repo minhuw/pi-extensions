@@ -1,20 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
-export const PIKA_CREDENTIALS = Symbol.for("pi-extensions.pika.credentials");
 
 export interface ChildSessionHook {
 	name: string;
 	extensionFactory: (pi: ExtensionAPI) => void;
-}
-
-/** pika's credentials registry; relay only reads it and listens. */
-export interface PikaCredentials { url: string; token: string; isExcluded(cwd: string): boolean }
-export interface CredentialsRegistry {
-	current: PikaCredentials | undefined;
-	listeners: Set<() => void>;
-	/** The git repository of a cwd as pika names it; older pika versions lack it. */
-	repository?: (cwd: string) => Promise<{ project?: string; repository?: string }>;
 }
 
 /** What a relay instance lets the child hook do to it. */
@@ -42,10 +32,9 @@ interface Shared {
 	unsupportedNotified: boolean;
 }
 
-const global = globalThis as { [SHARED]?: Shared; [CHILD_SESSION_HOOKS]?: Set<ChildSessionHook>; [PIKA_CREDENTIALS]?: CredentialsRegistry };
+const global = globalThis as { [SHARED]?: Shared; [CHILD_SESSION_HOOKS]?: Set<ChildSessionHook> };
 export const shared = (): Shared => global[SHARED] ??= { children: new Set(), members: new Map(), unsupportedNotified: false };
 const hooks = (): Set<ChildSessionHook> => global[CHILD_SESSION_HOOKS] ??= new Set();
-export const credentials = (): CredentialsRegistry => global[PIKA_CREDENTIALS] ??= { current: undefined, listeners: new Set() };
 
 /**
  * The factory Subagents and Herder append last to every child session. It only records the

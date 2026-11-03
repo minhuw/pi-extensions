@@ -9,9 +9,10 @@ import {
 	type AgentSession, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory, type ExtensionAPI, type ExtensionContext,
 	type ExtensionFactory, type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
-import relayExtension from "../../index.ts";
-import { timing } from "../../protocol.ts";
-import { credentials, type CredentialsRegistry, shared } from "../../shared.ts";
+import relayExtension from "../../../relay/index.ts";
+import { timing } from "../../../relay/protocol.ts";
+import { type CredentialsRegistry, credentialsRegistry } from "../../../credentials.ts";
+import { shared } from "../../../relay/shared.ts";
 import { TOKEN } from "./relay-server.ts";
 
 const DEFAULT_TIMING = { ...timing };
@@ -35,14 +36,14 @@ export class Workspace {
 	get cwd() { return join(this.root, "project"); }
 	async cleanup(): Promise<void> {
 		setCredentials(undefined);
-		credentials().listeners.clear();
+		credentialsRegistry().listeners.clear();
 		await rm(this.root, { recursive: true, force: true });
 	}
 }
 
 /** Publishes credentials as pika would, telling every listener. */
 export function setCredentials(url: string | undefined, options: { token?: string; excluded?: (cwd: string) => boolean } = {}): void {
-	const registry: CredentialsRegistry = credentials();
+	const registry: CredentialsRegistry = credentialsRegistry();
 	registry.current = url === undefined ? undefined : { url, token: options.token ?? TOKEN, isExcluded: options.excluded ?? (() => false) };
 	for (const listener of [...registry.listeners]) listener();
 }

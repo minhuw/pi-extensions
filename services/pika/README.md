@@ -212,7 +212,7 @@ The database stores a keyed digest, view totals, country and published project, 
 
 ### Relay
 
-Relay lets a running Pi session send a text message to any other running Pi session on any machine logged into this server, and the UI's **Active sessions** page lists every online session and lets you message one. The [relay extension](../../extensions/relay/) connects each top-level Pi session over a WebSocket, using the pika extension's existing device token; there is no separate key or login. The protocol is specified in [`docs/RELAY.md`](docs/RELAY.md).
+Relay lets a running Pi session send a text message to any other running Pi session on any machine logged into this server, and the UI's **Active sessions** page lists every online session and lets you message one. The [pika extension](../../extensions/pika/), which includes relay and recall, connects each top-level Pi session over a WebSocket, using its existing device token; there is no separate key or login. The protocol is specified in [`docs/RELAY.md`](docs/RELAY.md).
 
 - **Open by default:** relay is on unless you start the server with `PIKA_RELAY=off`. Any device token may connect, so **a device token now also lets that device see and message every online session**, not only upload. Revoke a device to cut it off; its relay connections close at once.
 - **Messages:** up to 32 KiB of text each, kept in memory until the target session accepts them or 5 minutes pass; a server restart drops queued messages and the dashboard's recent messages. Session transcripts, which pika already stores, are the permanent record. Each sending session may send 60 messages a minute, and the server keeps at most 100 queued messages per target and 10,000 in total.

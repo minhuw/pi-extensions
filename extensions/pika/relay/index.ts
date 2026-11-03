@@ -3,12 +3,13 @@ import { basename } from "node:path";
 import { VERSION, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { credentialsRegistry } from "../credentials.ts";
 import { type ConnectionState, RelayConnection } from "./connection.ts";
 import {
 	cut, deviceLabel, expiredContent, headerField, type HelloSession, MAX_HOPS, MESSAGE_TYPE, type MessageFrame, messageContent, NOTICE_TYPE, type OnlineSession, RECEIVED_TYPE,
 	RELAY_VERSION, sanitize, type SentFrame, type SessionState, since, type StatusFrame, type Target, targetLabel, timing, ttlText,
 } from "./protocol.ts";
-import { credentials, join, leave, shared, syncHook } from "./shared.ts";
+import { join, leave, shared, syncHook } from "./shared.ts";
 
 export { timing } from "./protocol.ts";
 
@@ -104,7 +105,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		if (!supportedMode(ctx)) return `relay connects only in the TUI and RPC modes, and this session runs in ${ctx.mode} mode`;
 		if (!decided && !starting) return "the session is still starting";
 		if (off) return "relay is off for this session (/relay off); /relay on reconnects it";
-		const current = credentials().current;
+		const current = credentialsRegistry().current;
 		if (!current) return "pika is not logged in or is disabled; run /pika login";
 		const cwd = cwdOf(ctx);
 		if (current.isExcluded(cwd)) return `${cwd} is excluded by pika's exclude list`;
@@ -142,7 +143,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		if (cwd === undefined) return Promise.resolve();
 		if (project?.cwd !== cwd) {
 			const entry: NonNullable<typeof project> = { cwd, pending: Promise.resolve() };
-			const resolver = credentials().repository;
+			const resolver = credentialsRegistry().repository;
 			if (resolver) {
 				entry.pending = Promise.resolve().then(() => resolver(cwd)).then((info) => {
 					const name = info?.project;
@@ -311,7 +312,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 
 	function connect(restart: boolean): void {
 		if (blocked() || leaving) { disconnect(); return; }
-		const current = credentials().current!;
+		const current = credentialsRegistry().current!;
 		const same = connection && connection.credentials.url === current.url && connection.credentials.token === current.token;
 		if (same && !restart) return;
 		disconnect();
@@ -348,7 +349,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				status: () => offlineReason() ?? "online",
 				canConnect: () => blocked(true) === undefined,
 			});
-			credentials().listeners.add(onCredentials);
+			credentialsRegistry().listeners.add(onCredentials);
 			// `resources_discover` follows the last `session_start` handler; the timer covers a host that skips it.
 			fallback = setTimeout(() => guard(decide), timing.decideFallbackMs);
 			fallback.unref?.();
@@ -390,14 +391,14 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			clearTimeout(leaveTimer);
 			leaveTimer = undefined;
 			disconnect();
-			credentials().listeners.delete(onCredentials);
+			credentialsRegistry().listeners.delete(onCredentials);
 			leave(self);
 			ctx = undefined;
 		});
 	});
 
 	async function onlineSessions(): Promise<OnlineSession[]> {
-		const current = credentials().current;
+		const current = credentialsRegistry().current;
 		const reason = blocked();
 		if (reason || !current) throw new Error(`relay is offline in this session: ${reason ?? "no credentials"}`);
 		let response: Response;
@@ -570,7 +571,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	});
 
 	async function statusCommand(context: ExtensionCommandContext): Promise<void> {
-		const current = credentials().current;
+		const current = credentialsRegistry().current;
 		const reason = offlineReason();
 		const state = connection?.state;
 		const lines = [

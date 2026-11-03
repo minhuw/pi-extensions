@@ -4,12 +4,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { SessionManager, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { credentials } from "../shared.ts";
+import { credentialsRegistry } from "../../credentials.ts";
 import { FakeRelay, TOKEN } from "./support/relay-server.ts";
 import { Notes, startSession, waitFor, Workspace, type Harness } from "./support/runtime.ts";
 
-// pika loads by path, after relay, as in the collection; relay only reads its credentials registry.
-const pikaPath = fileURLToPath(new URL("../../pika/index.ts", import.meta.url));
+// pika loads by path, as in the collection, and brings relay with it; relay only reads its credentials registry.
+const pikaPath = fileURLToPath(new URL("../../index.ts", import.meta.url));
 
 let workspace: Workspace;
 let relay: FakeRelay;
@@ -36,12 +36,12 @@ it("follows the credentials the pika extension publishes: at its session start, 
 	other.tokens.add("other-token");
 	const notes = new Notes();
 	const h = await startSession({
-		workspace, extensionPaths: [pikaPath], sessionManager: SessionManager.inMemory(workspace.cwd), ui: loginUI(notes, "other-token"),
+		workspace, noRelay: true, extensionPaths: [pikaPath], sessionManager: SessionManager.inMemory(workspace.cwd), ui: loginUI(notes, "other-token"),
 	});
 	harnesses.push(h);
 	const id = h.session.sessionId;
 	await waitFor(() => relay.online(id) !== undefined, 5_000, "the first server");
-	expect(credentials().current?.url).toBe(relay.url);
+	expect(credentialsRegistry().current?.url).toBe(relay.url);
 
 	await h.session.prompt(`/pika login ${other.url}`);
 	expect(notes.messages.some((message) => message.startsWith(`Logged in to ${other.url}`))).toBe(true);
@@ -50,7 +50,7 @@ it("follows the credentials the pika extension publishes: at its session start, 
 
 	await h.session.prompt("/pika logout");
 	await waitFor(() => other.online(id) === undefined, 5_000, "the logout");
-	expect(credentials().current).toBeUndefined();
+	expect(credentialsRegistry().current).toBeUndefined();
 	await h.session.prompt("/relay");
 	expect(notes.last!.message.split("\n")[0]).toBe("Relay is offline: pika is not logged in or is disabled; run /pika login.");
 	expect(h.errors).toEqual([]);
@@ -63,7 +63,7 @@ it("registers the git repository's name pika resolves, from a subdirectory of th
 	const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
 	execFileSync("git", ["-C", repo, "init", "-q"], { env });
 	await writeFile(join(workspace.agentDir, "pika.json"), JSON.stringify({ url: relay.url, token: TOKEN }));
-	const h = await startSession({ workspace, cwd, extensionPaths: [pikaPath], sessionManager: SessionManager.inMemory(cwd) });
+	const h = await startSession({ workspace, cwd, noRelay: true, extensionPaths: [pikaPath], sessionManager: SessionManager.inMemory(cwd) });
 	harnesses.push(h);
 	await waitFor(() => relay.online(h.session.sessionId) !== undefined, 5_000, "welcome");
 	expect(relay.hellos()).toEqual([expect.objectContaining({ cwd, project: "my-repo" })]);

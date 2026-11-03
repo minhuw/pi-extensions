@@ -262,7 +262,7 @@ describe("/pika login", () => {
 			await h.session.prompt("/pika login");
 			// The whole file, from before the login too.
 			await waitFor(async () => ingest.data(key) === await readText(file), 5_000, "upload after login");
-			expect(registered().map((hook) => hook.name)).toEqual(["pika"]);
+			expect(registered().map((hook) => hook.name).sort()).toEqual(["pika", "relay"]);
 			await h.session.prompt("after login");
 			await waitFor(async () => ingest.data(key) === await readText(file) && ingest.sessionRequests(h.session.sessionId).length === 1, 5_000, "next turn");
 

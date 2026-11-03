@@ -3,7 +3,7 @@
 Relay lets a running pi session send text messages to any other running pi session on any machine logged into the same pika server, and shows every active session on a dashboard in the web UI. It is open by default and uses pika's existing device tokens; there is no separate key or login.
 
 - **Server:** `services/pika/` (Rust), a new `relay` module next to ingest. The server is the only route between sessions, including two sessions on the same machine.
-- **Extension:** `extensions/relay/` (TypeScript pi extension). It never imports pika; it reads pika's credentials through a `globalThis` registry that `extensions/pika/` publishes.
+- **Extension:** `extensions/pika/relay/`, part of the pika extension (TypeScript pi extension). It reads pika's credentials through the `globalThis` registry that `extensions/pika/credentials.ts` publishes, so module copies loaded for other cwds share them.
 - **Web:** `services/pika/web/`, an "Active sessions" dashboard.
 
 Deferred, not in v1: addressing subagent and Herder child sessions, a same-machine shortcut, groups or broadcast, attachments, persistent message storage, a blocking ask tool.
@@ -149,7 +149,7 @@ repository?: (cwd: string) => Promise<{ project?: string, repository?: string }>
 - `repository(cwd)` resolves the git repository of `cwd` the way pika names its sessions: `project` is the repository's name and `repository` its web URL without credentials, both absent outside git. It is cached per cwd, never rejects, and settles within a few seconds. pika sets it whether or not it is logged in; pika versions before it lack it, so callers fall back to the basename of `cwd`.
 - Either side may create the registry object first, using `??=`, so load order does not matter.
 
-## Extension (`extensions/relay/`)
+## Extension (`extensions/pika/relay/`)
 
 ### When a session connects
 

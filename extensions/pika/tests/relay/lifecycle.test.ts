@@ -5,7 +5,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { FakeRelay } from "./support/relay-server.ts";
 import { setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
-import { MESSAGE_TYPE, timing } from "../protocol.ts";
+import { MESSAGE_TYPE, timing } from "../../relay/protocol.ts";
 
 let workspace: Workspace;
 let relay: FakeRelay;
