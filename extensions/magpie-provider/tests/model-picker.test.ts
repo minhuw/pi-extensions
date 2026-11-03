@@ -53,7 +53,7 @@ describe("source-aware picker selection", () => {
 		expect(selected.map(model => model.id)).toEqual([
 			"gpt-6-astra", "codex/gpt-6-astra", "token-zhang-s-gateway/codex/gpt-6-astra",
 		]);
-		expect(selected[0]).toMatchObject({ api: "openai-completions", contextWindow: 64000 });
+		expect(selected[0]).toMatchObject({ api: "openai-responses", contextWindow: 64000 });
 		expect(selected.slice(1).every(model => model.api === "openai-responses")).toBe(true);
 		expect(selectMagpiePickerModels(models, true)).toEqual(models);
 		expect(models.slice(0, rows.length).map(model => model.id)).toEqual(rows.map(row => row.id));

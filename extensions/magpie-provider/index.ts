@@ -9,6 +9,7 @@ import { loadModelsDevPricing } from "./catalog-pricing.ts";
 import { emptyMagpieCatalog, sharedMagpieCatalogs, type MagpieCatalogs } from "./catalog.ts";
 import { registerMagpieCompaction } from "./compaction.ts";
 import { addMagpieModelAliases, assertMagpieAliasRoute, magpieRequestContext, resolveMagpieAlias, type MagpieModel } from "./model-aliases.ts";
+import { magpieModelName } from "./model-identity.ts";
 import { assertNativeCatalog } from "./models-config.ts";
 import { selectMagpiePickerModels } from "./model-picker.ts";
 import { hasConfiguredModelScope } from "./picker-scope.ts";
@@ -91,7 +92,26 @@ export function parseModels(value: unknown, origin: string, resolvePricing = cre
 		seen.add(entry.id);
 	}
 	if (!models.length) throw new Error("Magpie returned no usable chat models; keeping the previous catalog.");
-	return addMagpieModelAliases(models, value.data);
+	const routed = addMagpieModelAliases(models, value.data);
+	const advertisedEndpoints = new Set(value.data.flatMap(entry => object(entry) && strings(entry.native_endpoints).length ? [entry.id] : []));
+	const concreteApis = new Map<string, Set<MagpieApi>>();
+	for (const model of routed) {
+		if (model.magpieRoute?.group || model.magpieAliasTarget) continue;
+		const name = magpieModelName(model.id);
+		if (!name) continue;
+		const apis = concreteApis.get(name) ?? new Set<MagpieApi>();
+		apis.add(model.api);
+		concreteApis.set(name, apis);
+	}
+	return routed.map(model => {
+		// Groups omit native_endpoints because members can use different protocols.
+		// Choose the client wire from unanimous same-name concrete routes, without
+		// changing the group target or borrowing its members' limits/capabilities.
+		const apis = concreteApis.get(magpieModelName(model.id) ?? "");
+		if (!model.magpieRoute?.group || advertisedEndpoints.has(model.magpieAliasTarget ?? model.id) ||
+			apis?.size !== 1 || !apis.has("openai-responses")) return model;
+		return { ...model, api: "openai-responses" as const, compat: undefined };
+	});
 }
 
 export async function discoverModels(config: Config, signal?: AbortSignal, allowEmpty = false): Promise<Model<MagpieApi>[]> {
