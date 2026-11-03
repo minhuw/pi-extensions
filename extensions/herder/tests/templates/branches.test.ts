@@ -52,25 +52,61 @@ describe("sequential.js", () => {
 		expect(value).toMatchObject({ status: "gate_failed", attempts: 2, failures: ["unit-tests"] });
 	});
 
-	it("does not integrate when the review step fails", async () => {
-		const bridge = new ScriptedBridge({ "impl-T1": passing, "review-T1": { status: "failed", error: { class: "invalid_output", message: "no structured output" } } });
-		const value = await run("sequential", { ...args, review: true }, bridge);
-		const review = bridge.call("review-T1");
-		expect(review.opts).toMatchObject({ role: "reviewer", base: sha("impl-T1"), schema: expect.objectContaining({ type: "object" }) });
-		expect(review.result.commit).toBeUndefined();
-		expect(bridge.integrations).toEqual([]);
-		expect(value).toMatchObject({ status: "review_failed", attempts: 0, error: { class: "invalid_output" } });
+	it("probes the gated change with a tester and integrates its passing tests with the change", async () => {
+		const bridge = new ScriptedBridge({ "impl-T1": passing, "probe-T1": passing });
+		const value = await run("sequential", { ...args, probe: true }, bridge);
+		expect(bridge.ids()).toEqual(["impl-T1", "probe-T1"]);
+		const probe = bridge.call("probe-T1");
+		expect(probe.opts).toEqual({ id: "probe-T1", role: "tester", base: sha("impl-T1"), task: "T1", gate: "unit-tests" });
+		expect(probe.prompt).toContain(`git diff ${sha("impl-T1")}^ HEAD`);
+		expect(probe.prompt).toContain("The checks unit-tests run your tests");
+		expect(probe.prompt).toContain("Contract:\nAdd the parser.");
+		expect(bridge.integrations.map(call => (call.source as { key: string }).key)).toEqual(["probe-T1-0"]);
+		expect(value).toEqual({ task: "T1", status: "integrated", attempts: 0, probe: "ok", head: bridge.head });
 	});
 
-	it("fixes blocking review findings once and integrates without a second review", async () => {
-		const finding = { severity: "high", file: "src/parser.ts", line: 4, issue: "drops the last line", evidence: "loop bound is length - 1" };
-		const bridge = new ScriptedBridge({ "impl-T1": passing, "review-T1": { status: "ok", data: { findings: [finding, { ...finding, severity: "low", issue: "naming" }] } }, "fix-T1-1": passing });
-		const value = await run("sequential", { ...args, review: true }, bridge);
-		expect(bridge.ids()).toEqual(["impl-T1", "review-T1", "fix-T1-1"]);
-		expect(bridge.call("fix-T1-1").prompt).toContain("drops the last line");
-		expect(bridge.call("fix-T1-1").prompt).not.toContain("naming");
+	it("integrates the gated change as it was when the probe adds no tests", async () => {
+		const bridge = new ScriptedBridge({ "impl-T1": failing("FAIL a.test.ts:1:1"), "fix-T1-1": passing, "probe-T1": { status: "no_changes" } });
+		const value = await run("sequential", { ...args, probe: true }, bridge);
+		expect(bridge.ids()).toEqual(["impl-T1", "fix-T1-1", "probe-T1"]);
+		expect(bridge.call("probe-T1").opts.base).toBe(sha("fix-T1-1"));
 		expect(bridge.integrations.map(call => (call.source as { key: string }).key)).toEqual(["fix-T1-1-0"]);
-		expect(value).toMatchObject({ status: "integrated", attempts: 1 });
+		expect(value).toEqual({ task: "T1", status: "integrated", attempts: 1, probe: "no_changes", head: bridge.head });
+	});
+
+	it("fixes the implementation on top of the tester's failing tests and integrates both without a second probe", async () => {
+		const bridge = new ScriptedBridge({ "impl-T1": passing, "probe-T1": failing("FAIL parser.test.ts:40:5 drops the last line"), "fix-T1-1": passing });
+		const value = await run("sequential", { ...args, probe: true }, bridge);
+		expect(bridge.ids()).toEqual(["impl-T1", "probe-T1", "fix-T1-1"]);
+		const fix = bridge.call("fix-T1-1");
+		expect(fix.opts).toMatchObject({ base: sha("probe-T1"), gate: "unit-tests" });
+		expect(fix.prompt).toContain("FAIL parser.test.ts:40:5 drops the last line");
+		expect(fix.prompt).toContain(`A tester wrote tests for this task from its contract: \`git diff ${sha("impl-T1")} ${sha("probe-T1")}\``);
+		expect(bridge.integrations.map(call => (call.source as { key: string }).key)).toEqual(["fix-T1-1-0"]);
+		expect(value).toEqual({ task: "T1", status: "integrated", attempts: 1, probe: "gate_failed", head: bridge.head });
+	});
+
+	it("reports the tester's failing tests without integrating when the fixes run out", async () => {
+		const bridge = new ScriptedBridge({ "impl-T1": passing, "probe-T1": failing("FAIL a.test.ts:1:1"), "fix-T1-1": failing("FAIL a.test.ts:2:1") });
+		const value = await run("sequential", { ...args, probe: true, maxAttempts: 1 }, bridge);
+		expect(bridge.ids()).toEqual(["impl-T1", "probe-T1", "fix-T1-1"]);
+		expect(bridge.integrations).toEqual([]);
+		expect(value).toEqual({ task: "T1", status: "gate_failed", attempts: 1, probe: "gate_failed", failures: ["unit-tests"] });
+	});
+
+	it("stops without integrating when a fix of the tester's tests changes nothing", async () => {
+		const bridge = new ScriptedBridge({ "impl-T1": passing, "probe-T1": failing("FAIL a.test.ts:1:1"), "fix-T1-1": { status: "no_changes" } });
+		const value = await run("sequential", { ...args, probe: true }, bridge);
+		expect(bridge.integrations).toEqual([]);
+		expect(value).toEqual({ task: "T1", status: "no_changes", attempts: 1, probe: "gate_failed", note: "the fix changed nothing" });
+	});
+
+	it("does not integrate when the probe step fails", async () => {
+		const bridge = new ScriptedBridge({ "impl-T1": passing, "probe-T1": { status: "failed", error: { class: "timeout", message: "t" } } });
+		const value = await run("sequential", { ...args, probe: true }, bridge);
+		expect(bridge.call("probe-T1").result.commit).toBeUndefined();
+		expect(bridge.integrations).toEqual([]);
+		expect(value).toMatchObject({ status: "probe_failed", attempts: 0, probe: "failed", error: { class: "timeout" } });
 	});
 });
 
@@ -138,7 +174,7 @@ describe("explore.js", () => {
 		});
 		const value = await run("explore", args, bridge);
 		const judge = bridge.call("judge-T4");
-		expect(judge.opts.role).toBe("reviewer");
+		expect(judge.opts.role).toBe("explorer");
 		expect(judge.result.commit).toBeUndefined();
 		expect(judge.prompt).toContain(sha("variant-T4-2"));
 		expect(judge.prompt).toContain(sha("variant-T4-3"));

@@ -8,7 +8,7 @@
 //   approaches?: ["…", "…"],       // optional per-variant direction, appended to the prompt
 //   gate?: "unit-tests" | [ … ],   // check ids from goal.md; only variants that pass are candidates
 //   criteria?: "…",                // what the judge should prefer (default: correctness, then simplicity)
-//   judge?: "reviewer",            // read-only role that picks the winner ("reviewer" or "explorer")
+//   judge?: "explorer",            // read-only role that picks the winner
 //   message: "feat(x): …",         // integration commit message
 //   checks?: [ … ]                 // integration checks (default: goal.md checks marked integrate)
 // }
@@ -43,7 +43,7 @@ if (candidates.length > 1) {
 		`Several independent attempts implement the same task. Every one passed its gates. Pick the single best one to keep.\n\nCriteria: ${args.criteria ?? "correct and complete against the contract first, then smallest and simplest, then best tested"}.\n\nCandidates:\n${listing}\n\nTask contract:\n${args.prompt}`,
 		{
 			id: `judge-${task}`,
-			role: args.judge ?? "reviewer",
+			role: args.judge ?? "explorer",
 			task,
 			schema: {
 				type: "object",

@@ -234,7 +234,7 @@ Exceeding a cap throws at the call site. A usage-limit error stops new agents in
 | Role | Writes | Purpose |
 | --- | --- | --- |
 | `worker` | yes | Implements one bounded task (the default role). |
-| `reviewer` | no | Reviews one change against its contract in a clean context. |
+| `tester` | yes | Adds tests from a change's contract, without touching the implementation. |
 | `verifier` | no | Checks a finished run against its criteria; fails closed. |
 | `resolver` | yes | Resolves integration conflicts, preserving both sides. |
 | `curator` | yes | Regroups a commit series with an identical final tree. |
@@ -259,7 +259,7 @@ Agents with `bash` share the repository's refs. The built-in roles forbid comman
 
 `templates/` holds three workflow scripts. The model adapts them, or passes one as `scriptPath`:
 
-- `sequential.js`: one task runs implement, gate, optional review, a capped fix loop, then integration.
+- `sequential.js`: one task runs implement, gate, an optional probe (a `tester` adds tests from the contract, which the gate runs), a capped fix loop, then integration.
 - `disjoint.js`: independent tasks with disjoint file ownership run in a pipeline and are integrated serially in task order. A `resolver` handles conflicts.
 - `explore.js`: several variants of one task. The variants that pass their gates are judged, and exactly one is integrated.
 

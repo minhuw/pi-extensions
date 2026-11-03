@@ -22,7 +22,7 @@ export const LIMITS: Readonly<Limits> = Object.freeze({
 export const DEFAULT_ROLE = "worker";
 /** Thinking levels a role file or `agent()`'s `effort` may name (besides `inherit` in role files). */
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-export const BUILTIN_ROLES = ["worker", "reviewer", "verifier", "resolver", "curator", "explorer"] as const;
+export const BUILTIN_ROLES = ["worker", "tester", "verifier", "resolver", "curator", "explorer"] as const;
 export const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
 export const STRUCTURED_OUTPUT_REJECTIONS = 3;
 

@@ -92,7 +92,7 @@ describe("loadRoles", () => {
 	it.skipIf(!hasBuiltins)("loads the shipped built-in roles", () => {
 		const roles = loadRoles({ overrideDir: join(dir, "absent") });
 		expect([...roles.keys()].sort()).toEqual([...BUILTIN_ROLES].sort());
-		for (const name of ["worker", "resolver", "curator"]) expect(roles.get(name)!.write).toBe(true);
-		for (const name of ["reviewer", "verifier", "explorer"]) expect(roles.get(name)!.write).toBe(false);
+		for (const name of ["worker", "tester", "resolver", "curator"]) expect(roles.get(name)!.write).toBe(true);
+		for (const name of ["verifier", "explorer"]) expect(roles.get(name)!.write).toBe(false);
 	});
 });

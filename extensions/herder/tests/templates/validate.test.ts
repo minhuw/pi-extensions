@@ -7,7 +7,7 @@ import type { TemplateName } from "./support.ts";
 const validate = (name: TemplateName, args: unknown) => validateScript(template(name), { roles: ROLE_NAMES, checks: CHECKS, args });
 const errors = (report: Awaited<ReturnType<typeof validate>>) => report.problems.filter(problem => problem.severity === "error").map(problem => problem.message);
 
-const sequentialArgs = { task: "T1", prompt: "Add the config parser.\nAC-1: …", gate: ["unit-tests", "typecheck"], review: true, maxAttempts: 3, message: "feat(config): add the parser", checks: ["unit-tests"] };
+const sequentialArgs = { task: "T1", prompt: "Add the config parser.\nAC-1: …", gate: ["unit-tests", "typecheck"], probe: true, maxAttempts: 3, message: "feat(config): add the parser", checks: ["unit-tests"] };
 const task = (id: string, owns: string[], extra: object = {}) => ({ id, prompt: `Implement ${id}.`, owns, gate: "unit-tests", message: `feat(${id}): implement`, ...extra });
 const disjointArgs = { tasks: [task("T1", ["src/a/**", "tests/a/**"]), task("T2", ["src/b/**"]), task("T3", ["src/c.ts", "docs/c.md"], { checks: ["typecheck"] })], maxAttempts: 2 };
 const exploreArgs = { task: "T4", prompt: "Make the cache faster.", variants: 3, approaches: ["an LRU map", "a sorted array", "a trie"], gate: "unit-tests", criteria: "fastest correct", judge: "explorer", message: "perf(cache): faster lookups", checks: ["unit-tests", "typecheck"] };
@@ -18,8 +18,8 @@ describe("templates validate against the real runtime", () => {
 	});
 
 	it.each([
-		["sequential with review", "sequential", sequentialArgs, 2, 1],
-		["sequential without review", "sequential", { task: "T1", prompt: "Fix the bug.", gate: "unit-tests", message: "fix: the bug" }, 1, 1],
+		["sequential with a probe", "sequential", sequentialArgs, 2, 1],
+		["sequential without a probe", "sequential", { task: "T1", prompt: "Fix the bug.", gate: "unit-tests", message: "fix: the bug" }, 1, 1],
 		["disjoint with three tasks", "disjoint", disjointArgs, 3, 3],
 		["explore with three variants and a judge", "explore", exploreArgs, 4, 1],
 		["explore with one variant (no judge)", "explore", { ...exploreArgs, variants: 1, approaches: undefined }, 1, 1],
@@ -34,6 +34,8 @@ describe("templates validate against the real runtime", () => {
 			["explore", { task: "T1", variants: 2 }, /args\.prompt is required/],
 			["explore", { ...exploreArgs, variants: 0 }, /args\.variants must be a positive integer/],
 			["sequential", { ...sequentialArgs, maxAttempts: -1 }, /args\.maxAttempts must be a non-negative integer/],
+			["sequential", { ...sequentialArgs, probe: undefined, review: true }, /args\.review was removed: use args\.probe/],
+			["sequential", { ...sequentialArgs, gate: undefined }, /args\.probe needs args\.gate/],
 			["disjoint", {}, /args\.tasks must be a non-empty array/],
 			["disjoint", { tasks: [] }, /args\.tasks must be a non-empty array/],
 			["disjoint", { tasks: [{ id: "T1", prompt: "x", message: "m" }] }, /task T1: owns must be a non-empty array of paths/],
@@ -71,7 +73,7 @@ describe("templates validate against the real runtime", () => {
 
 		it("reports an unknown gate id in each template", async () => {
 			for (const [name, args] of [
-				["sequential", { ...sequentialArgs, gate: ["unit-tests", "lint"] }],
+				["sequential", { ...sequentialArgs, probe: undefined, gate: ["unit-tests", "lint"] }],
 				["disjoint", { tasks: [task("T1", ["src/a/**"], { gate: "lint" })] }],
 				["explore", { ...exploreArgs, gate: "lint" }],
 			] as const) {

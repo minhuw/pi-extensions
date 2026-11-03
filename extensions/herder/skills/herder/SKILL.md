@@ -46,7 +46,7 @@ Start with the cheapest shape that fits; escalate only when it fails or the work
 | Situation | Shape | How |
 | --- | --- | --- |
 | Trivial change (a few lines, one file) | One writing step + checks | `herder_step` with `gate`, then `herder_integrate` |
-| Normal task | One writer + gates, optional clean reviewer, capped fix loop | `sequential.js` |
+| Normal task | One writer + gates, optional probe (a tester adds tests from the contract), capped fix loop | `sequential.js` |
 | Several independent tasks with disjoint files | Partitioned fan-out with explicit file ownership, serial integration, resolver on conflict | `disjoint.js` |
 | Several tasks that touch the same files | Sequential tasks, each integrated before the next starts | `sequential.js` per task, or a script that loops over tasks |
 | Uncertain approach, worth trying several | Generate and filter, then a tournament judge, in separate worktrees | `explore.js` |
@@ -86,7 +86,7 @@ max_fix_attempts: 3
 **Acceptance criteria**
 - Number them `AC-1`, `AC-2`, …. Write each as one observable outcome in EARS style: `WHEN <trigger> THE SYSTEM SHALL <outcome>`, `WHILE <state> …`, `IF <condition> THEN …`, or a plain `THE SYSTEM SHALL …`.
 - Map every criterion to evidence: `verify: check:<id>` (one or more check ids, comma separated) or `verify: judge — rubric: "<statement>"`. Prefer checks: they are deterministic and cheap. Add a test to the plan when no existing check covers a criterion, then map the criterion to the check that runs it.
-- A judge rubric is a binary statement a fresh reviewer can confirm by reading code, such as `"Every public function in src/api.ts validates its input before use"`. Avoid "good", "clean", "robust". The rubric text must not itself contain `verify:`.
+- A judge rubric is the last resort: first try to make the criterion decidable by a command (a focused test, a type-level test, a `! git grep -q <pattern>` check). A rubric is a binary statement a fresh verifier can confirm by reading code, such as `"Every public function in src/api.ts validates its input before use"`. Avoid "good", "clean", "robust". The rubric text must not itself contain `verify:`.
 - Keep criteria about outcomes, not implementation steps. At least one criterion is required.
 
 **Checks**
@@ -116,9 +116,9 @@ A script is the body of an async function: top-level `await` and `return` work. 
 Globals:
 
 - `agent(prompt, opts)` runs one step and resolves to a result. Options (unknown keys throw):
-  - `id` — stable step id. Always set it, derived from the task and the attempt number (`impl-T1`, `fix-T1-2`, `review-T1`), so a relaunch reuses unchanged steps. Never give one id to calls with different prompts or options in the same launch; that throws.
+  - `id` — stable step id. Always set it, derived from the task and the attempt number (`impl-T1`, `fix-T1-2`, `probe-T1`), so a relaunch reuses unchanged steps. Never give one id to calls with different prompts or options in the same launch; that throws.
   - `task` — the plan task id (`"T1"`), for progress per task.
-  - `role` — `worker` (default, writes), `reviewer`, `verifier`, `explorer` (read-only), `resolver`, `curator` (write).
+  - `role` — `worker` (default, writes), `tester` (writes tests only), `verifier`, `explorer` (read-only), `resolver`, `curator` (write).
   - `write` — override the role's default.
   - `base` — commit to start from (default: the launch's integration head). Use a previous step's `commit` to build on it.
   - `gate` — check id or ids from `goal.md`, run in the step's worktree afterwards.
@@ -145,7 +145,7 @@ The runtime caps concurrency, agents per launch and per run, items per call, and
 
 Three templates live in this extension at `../../templates/<name>.js` relative to this skill's directory. Read the one you need, copy it into your script (or pass its path as `scriptPath` when it fits unchanged), and adapt it to the plan. Each documents its `args` in a header comment.
 
-- `sequential.js` — one task: implement, gate, optional read-only review with structured findings, fix loop capped at `maxAttempts` (default 3) that stops when the same gate fails with the same output twice (ignoring durations, times, and hashes), then integrate. A review step that fails or stops returns `review_failed` or `stopped` without integrating. Args: `{ task, prompt, gate?, review?, maxAttempts?, message, checks? }`.
+- `sequential.js` — one task: implement, gate, optional probe, fix loop capped at `maxAttempts` (default 3) that stops when the same gate fails with the same output twice (ignoring durations, times, and hashes), then integrate. The probe (`probe: true`, needs `gate`) runs once the gates pass: a `tester` writes tests from the contract on top of the change, the gate runs them, failing ones go to the fix loop as check output, and the tests are integrated with the change. A probe step that fails or stops returns `probe_failed` or `stopped` without integrating. Args: `{ task, prompt, gate?, probe?, maxAttempts?, message, checks? }`.
 - `disjoint.js` — independent tasks in a `pipeline`, each prompt stating the paths it may edit; refuses duplicate task ids, `..` in `owns`, and overlapping `owns` before any step runs (a glob counts as owning its whole directory); integrates serially in task order; on a conflict runs a `resolver` from the current head that applies the task's whole change (implementation plus fixes, `git diff --binary <first>^ <last> | git apply --3way`), resolves the conflicts, and is integrated in its place; a resolver that cannot keep both sides changes nothing (`no_changes`) and the task is reported as a conflict; reports tasks that still fail. Args: `{ tasks: [{ id, prompt, owns, gate?, message, checks? }], maxAttempts? }`.
 - `explore.js` — N variants of one task (`variants`, default 3, optional `approaches`), keeps those whose gates pass, lets one read-only judge step pick a winner with structured output, and integrates exactly one (none if none passes). Args: `{ task, prompt, variants?, approaches?, gate?, criteria?, judge?, message, checks? }`.
 
@@ -161,10 +161,11 @@ A step sees only its prompt and its worktree, not this conversation. Make every 
 - which checks matter and how to run them, including installing dependencies first (the worktree has none);
 - for fixes, the failing check output or the review findings verbatim.
 
-Use the reviewer for a clean second look at risky changes; give it the contract and the diff range, not the author's summary.
+For risky changes, spend extra agents on evidence, not opinions; see **Evidence over opinion** below.
 
 ## Rules
 
+- **Evidence over opinion.** Read-only review of a diff mostly yields nitpicks and speculative findings; a failing test, a type error, or a counterexample from a tool needs no debate. Make a risky change prove more: a regression test that fails without the change, property-based or table-driven tests over the contract's inputs, and the type checker, static analyzers, and formal tools (model checkers, proof checkers) the repository already uses, run as checks. Use `probe: true` to have a tester write such tests. Do not add read-only steps that hunt for faults in a diff; `explore.js`'s judge only picks among variants that already passed their gates.
 - **Results are values.** Check `status` after every `agent()` and `integrate()` call, and after every tool call. Never assume success, never integrate a step that is not `ok`, and never treat `text` as proof.
 - **Cap fix loops.** At most `max_fix_attempts` (default 3) fix attempts per task. Stop early when the same gate fails with the same output twice; report it instead of retrying.
 - **Partition writers.** Parallel writers only with explicit, disjoint file ownership stated in each prompt; integration is always serial. When in doubt, go sequential.

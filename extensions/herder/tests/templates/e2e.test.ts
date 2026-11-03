@@ -93,6 +93,26 @@ describe("sequential.js end to end", () => {
 		assertClean(env);
 		await assertReplay(env, "sequential", args, first, 2);
 	}));
+
+	const probeArgs = { ...args, gate: "probes", probe: true };
+	const probes = gate("probes", 'for f in probes/*.sh; do [ -e "$f" ] || continue; sh "$f" || exit 1; done');
+	const probeRules: FakeRule[] = [
+		{ match: "Test the change for task T1", role: "tester", files: { "probes/out.sh": "grep -q fixed out.txt\n" } },
+		...rules,
+	];
+
+	it("fixes the change against the tester's failing test and integrates both in one commit", () => withEnv([probes], probeRules, async (env) => {
+		const first = await env.launch("sequential", probeArgs);
+		expect(first).toMatchObject({ launch: 1, status: "completed", new: 3 });
+		expect(first.value).toEqual({ task: "T1", status: "integrated", attempts: 1, probe: "gate_failed", head: head(env) });
+		expect(env.runner.calls.map((call) => call.role)).toEqual(["worker", "tester", "worker"]);
+		expect(env.runner.calls[2]!.prompt).toContain("### probes (exit 1)");
+		expect(commitsAbove(env)).toEqual([head(env)]);
+		expect(show(env, "out.txt")).toBe("fixed");
+		expect(show(env, "probes/out.sh")).toBe("grep -q fixed out.txt");
+		assertClean(env);
+		await assertReplay(env, "sequential", probeArgs, first, 3);
+	}));
 });
 
 /** Does what the resolver prompt asks: runs its apply command with real git, then resolves the conflicted file. */
@@ -179,7 +199,7 @@ describe("explore.js end to end", () => {
 		{ match: "Approach for this attempt: one", files: { "answer.txt": "bad\n" } },
 		{ match: "Approach for this attempt: two", files: { "answer.txt": "good two\n" } },
 		{ match: "Approach for this attempt: three", files: { "answer.txt": "good three\n" } },
-		{ match: "Pick the single best one", role: "reviewer", data: { winner: 3, rationale: "clearer" } },
+		{ match: "Pick the single best one", role: "explorer", data: { winner: 3, rationale: "clearer" } },
 	];
 
 	it("judges the two passing variants, integrates exactly the winner, and replays without agents", () => withEnv([gate("good", "grep -q good answer.txt")], rules, async (env) => {
@@ -188,7 +208,7 @@ describe("explore.js end to end", () => {
 			task: "T4", status: "integrated", winner: 3, head: head(env), rationale: "clearer",
 			candidates: [{ variant: 1, status: "gate_failed" }, { variant: 2, status: "ok" }, { variant: 3, status: "ok" }],
 		});
-		const judge = env.runner.calls.find((call) => call.role === "reviewer")!;
+		const judge = env.runner.calls.find((call) => call.role === "explorer")!;
 		expect(judge.schema).toMatchObject({ properties: { winner: { enum: [2, 3] } } });
 		expect(commitsAbove(env)).toEqual([head(env)]);
 		expect(show(env, "answer.txt")).toBe("good three");
