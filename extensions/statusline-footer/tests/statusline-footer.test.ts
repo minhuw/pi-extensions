@@ -17,7 +17,9 @@ import statuslineFooter, {
 	parseGitShortstat,
 	parseGitStatus,
 	hexFg,
+	modelBrand,
 	rainbow,
+	renderModelMark,
 	renderStatus,
 	renderThinking,
 	statusHue,
@@ -243,6 +245,27 @@ describe("statusline footer visual language", () => {
 		};
 		const theme = { fg: (token: string, text: string) => `${hexFg(colors[token] ?? "#808080", "")}${text}` } as unknown as Parameters<typeof statusPalette>[0];
 		expect(statusPalette(theme)).toEqual(["mdLink", "syntaxVariable", "success", "bashMode"]);
+	});
+
+	it("matches model brands by id before provider and tints the mark", () => {
+		expect(modelBrand("claude-opus-5-5", "google-vertex")?.plain).toBe("✻");
+		expect(modelBrand("codex/gpt-6.1-sol", "magpie")?.plain).toBe("⊛");
+		expect(modelBrand("o3-mini", "openai")?.plain).toBe("⊛");
+		expect(modelBrand("gemini-3-pro", "google")?.plain).toBe("✦");
+		expect(modelBrand("llama-4", "google-vertex")?.plain).toBe("∞");
+		expect(modelBrand("k3", "moonshot")?.plain).toBe("☾");
+		expect(modelBrand("deepseek-v4", "openrouter")?.plain).toBe("≋");
+		expect(modelBrand("qwen3-coder", "")?.plain).toBe("⬡");
+		expect(modelBrand("mystery-1", "local")).toBeUndefined();
+		const theme = { fg: (token: string, text: string) => `<${token}>${text}`, bold: (text: string) => text } as unknown as Parameters<typeof renderModelMark>[0];
+		vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+		expect(renderModelMark(theme, "claude-opus-5-5")).toBe(`${hexFg("#D97757", "✻")} `);
+		expect(renderModelMark(theme, "grok-5")).toBe("<text>⨯ ");
+		expect(renderModelMark(theme, "mystery-1")).toBe("");
+		vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+		expect(renderModelMark(theme, "claude-opus-5-5")).toBe(`${hexFg("#D97757", "\u{EC82}")} `);
+		expect(renderModelMark(theme, "gpt-6")).toBe(`${hexFg("#10A37F", "\u{EC81}")} `);
+		vi.unstubAllEnvs();
 	});
 
 	it("abbreviates the home directory with a portable tilde", () => {

@@ -23,7 +23,7 @@ Full mode is enabled by default when Pi starts.
 Full mode is three content rows plus a hairline under the identity row, and a status row while any extension status is set. Primary facts sit on the left; capacity, cost, and path sit on the right:
 
 ```text
-  ●  k3  HIGH  FAST  (moonshot)              2×  ▉▉▉▉▉▉▉▉░░░░░░░░░░  8.2%  78.9k/1.05M
+  ●  ☾ k3  HIGH  FAST  (moonshot)            2×  ▉▉▉▉▉▉▉▉░░░░░░░░░░  8.2%  78.9k/1.05M
   ────────────────────────────────────────────────────────────────────────────────
   # 13  ⏱ 1h 28m  μ 4.2s ⇄ 1.8s » 28.9 tok/s     $0.75  ↑ 65.2k ↓ 31.4k ⚡120k  12.1k think  96%
   ⎇ main  +42 −17  ↑2 ↓1                              ▤ 5 touched  ⌂ ~/code/my-project
@@ -36,6 +36,8 @@ Full mode is three content rows plus a hairline under the identity row, and a st
 | 2 | Turns, elapsed, TTFT, TTFB, throughput, tool calls, errors | Cost, input / output / cached-input tokens, reasoning tokens, cache hit rate |
 | 3 | Git branch, working-tree diff, ahead/behind | Files touched, current directory |
 | 4 | Extension statuses: research, Herder, Loop, background processes, then the rest; shown only while a status is set | |
+
+The model name starts with its vendor's mark in the vendor's color. These are the OpenAI and Claude logos (Nerd Fonts 3.5 or later), the Google logo for Gemini, and related symbols for Kimi, DeepSeek, Grok, Llama, Mistral, and Qwen; with `STATUSLINE_NERD_FONTS=0`, Unicode marks such as `✻` (Claude), `⊛` (OpenAI), `✦` (Gemini), and `☾` (Kimi) take their place. The model id is matched before the provider, so Claude served through Vertex or Magpie still gets the Claude mark; an unrecognized model has none.
 
 Thinking levels are colored: dim off, amber low, green medium, lilac high, and a rainbow wash at `xhigh`/`max`. The context bar interpolates success → warning → error across its width and uses the same `▉` block for filled and empty cells so the unused portion stays a quiet charcoal instead of a checkerboard. Segments are separated by space, not mid-dots.
 

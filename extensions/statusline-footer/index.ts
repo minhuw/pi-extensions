@@ -8,7 +8,7 @@
  * session cost, and working-tree diff.
  *
  * Full mode:
- *   model  HIGH  (provider)                         ▉▉▉░░░  8.2% / 1.05M
+ *   ✻ model  HIGH  (provider)                       ▉▉▉░░░  8.2% / 1.05M
  *   ────────────────────────────────────────────
  *   μ 4.2s  28.9 tok/s                    $0.75  96% cache  9 turns
  *   main  +42 −17                         5 touched  ~/code/my-project
@@ -279,6 +279,39 @@ export function renderStatus(theme: Theme, text: string, key = "", withIcon = fa
 		if (tone === "attention") return theme.fg("warning", part);
 		return theme.fg(index === 0 ? identity : "muted", part);
 	}).join("");
+}
+
+// ── model marks ─────────────────────────────────────────────────────
+// A brand glyph before the model name: the vendor logo where Nerd Fonts ship
+// one, otherwise a related symbol, tinted with the vendor's color. Model ids
+// are matched before providers, so Claude served by Vertex is still Claude.
+
+type ModelBrand = { pattern: RegExp; nerd: string; plain: string; color?: string };
+
+const MODEL_BRANDS: ModelBrand[] = [
+	{ pattern: /claude|anthropic|\b(?:opus|sonnet|haiku|fable)\b/, nerd: "\u{EC82}", plain: "✻", color: "#D97757" }, // cod-claude
+	{ pattern: /\bgpt|openai|codex|chatgpt|\bo[1-9](?:\b|-)/, nerd: "\u{EC81}", plain: "⊛", color: "#10A37F" }, // cod-openai
+	{ pattern: /gemini|gemma|google/, nerd: "\u{F02AD}", plain: "✦", color: "#4285F4" }, // md-google
+	{ pattern: /kimi|moonshot/, nerd: "\u{F0F65}", plain: "☾", color: "#7C83FD" }, // md-moon-waning-crescent
+	{ pattern: /deepseek/, nerd: "\u{F18B4}", plain: "≋", color: "#4D6BFE" }, // md-dolphin
+	{ pattern: /grok|\bx-?ai\b/, nerd: "\u{F0B05}", plain: "⨯" }, // md-alpha-x
+	{ pattern: /llama|\bmeta\b/, nerd: "\u{F06E4}", plain: "∞", color: "#0866FF" }, // md-infinity
+	{ pattern: /mistral|codestral|devstral|magistral|ministral|pixtral/, nerd: "\u{F059D}", plain: "▚", color: "#FF8205" }, // md-weather-windy
+	{ pattern: /qwen|qwq/, nerd: "\u{F02D8}", plain: "⬡", color: "#615CED" }, // md-hexagon
+];
+
+export function modelBrand(id: string, provider = ""): ModelBrand | undefined {
+	const lowerId = id.toLowerCase();
+	const lowerProvider = provider.toLowerCase();
+	return MODEL_BRANDS.find(brand => brand.pattern.test(lowerId))
+		?? MODEL_BRANDS.find(brand => brand.pattern.test(lowerProvider));
+}
+
+export function renderModelMark(theme: Theme, id: string, provider?: string): string {
+	const brand = modelBrand(id, provider);
+	if (!brand) return "";
+	const glyph = theme.bold(hasNerdFonts() ? brand.nerd : brand.plain);
+	return `${brand.color ? hexFg(brand.color, glyph) : theme.fg("text", glyph)} `;
 }
 
 // ── session stats ───────────────────────────────────────────────────
@@ -723,7 +756,7 @@ function renderModelLabel(
 	const queuedMark = queued ? theme.fg("warning", "queued") + "  " : "";
 	if (!model) return liveMark + queuedMark + theme.fg("accent", theme.bold("no-model"));
 
-	const name = theme.fg("accent", theme.bold(model.id));
+	const name = renderModelMark(theme, model.id, model.provider) + theme.fg("accent", theme.bold(model.id));
 	const thinking = model.reasoning ? `  ${renderThinking(theme, ctx.thinkingLevel ?? "off")}` : "";
 	const tier = displayServiceTier(serviceTier);
 	const tierMark = tier ? `  ${theme.fg("warning", theme.bold(tier))}` : "";
