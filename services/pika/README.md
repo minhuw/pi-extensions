@@ -217,14 +217,12 @@ Relay lets a running Pi session send a text message to any other running Pi sess
 
 `PIKA_RELAY_TTL_SECS` and `PIKA_RELAY_HEARTBEAT_SECS` shorten the message lifetime and the heartbeat. They exist for tests and the end-to-end script only; do not set them in production.
 
-### Upgrading from 0.7.0
+### Upgrading from 0.7
 
-- Usage statistics upgrade the database to schema version 11 and automatically rebuild derived data from stored trajectories before the server starts listening. This backfills historical usage, including compactions and summaries. Large archives may take time to reindex; an interrupted rebuild retries on the next start. Source lines and publication settings are preserved. Older binaries cannot open the upgraded database, so keep a [backup](#backup) if rollback may be needed.
-
-- Update the Pi extensions alongside the server to receive models.dev pricing estimates. The Magpie provider matches model names and caches public prices for 24 hours; pika stores the per-call costs uploaded by Pi. Upgrading the server alone does not change client pricing or recalculate historical costs.
-- pika names models by their bare name everywhere: the part of Pi's model id after the last `/`, without an `@` suffix, so `codex/gpt-6.1-sol`, `auto/gpt-6.1-sol`, and `gpt-6.1-sol@1m` are all `gpt-6.1-sol`, and the Model filter has one option per model. Older `?model=` links that name a route still work. The provider is no longer shown in the UI or returned by the read API; the stored lines, raw entries, exports, and captured request payloads keep the ids and provider as Pi wrote them. The first start rewrites the model names of existing sessions once, in one transaction, without a reindex.
-- The server includes the repository and ticket display improvements made since 0.7.0. The database upgrades to schema version 9; a 0.7.0 binary cannot open the upgraded database, so keep a [backup](#backup) if you may need to roll back.
+- Usage statistics upgrade the database to schema version 11 and automatically rebuild derived data from stored trajectories before the server starts listening. This backfills historical usage, including compactions and summaries. Large archives may take time to reindex; an interrupted rebuild retries on the next start. Source lines and publication settings are preserved. Older binaries cannot open the upgraded database, so keep a [backup](#backup) if rollback may be needed. The new statistics are public: the Statistics tab, `GET /api/public/v1/statistics`, and `GET /api/public/v1/usage` show anonymous aggregates of all activity, including unpublished and hidden trajectories without their project names, to anyone who can reach pika, and other sites may read them; see [Usage API for other sites](#usage-api-for-other-sites).
 - Sessions and projects can be deleted and sessions hidden from the public view (see [Deleting and hiding](#deleting-and-hiding)). The database upgrades to schema version 10 when the server opens it, without a reindex: it adds the tables of deleted streams and hidden sessions and three indexes, which take a moment to build on a large database. Older binaries cannot open it, so keep a [backup](#backup). No extension update is needed: current extensions treat a deleted session's acknowledgement like any other.
+- pika names models by their bare name everywhere: the part of Pi's model id after the last `/`, without an `@` suffix, so `codex/gpt-6.1-sol`, `auto/gpt-6.1-sol`, and `gpt-6.1-sol@1m` are all `gpt-6.1-sol`, and the Model filter has one option per model. Older `?model=` links that name a route still work. The provider is no longer shown in the UI or returned by the read API; the stored lines, raw entries, exports, and captured request payloads keep the ids and provider as Pi wrote them. The first start rewrites the model names of existing sessions once, in one transaction, without a reindex.
+- From 0.7.0, also: update the Pi extensions alongside the server to receive models.dev pricing estimates. The Magpie provider matches model names and caches public prices for 24 hours; pika stores the per-call costs uploaded by Pi. Upgrading the server alone does not change client pricing or recalculate historical costs. The database first upgrades to schema version 9, which a 0.7.0 binary cannot open.
 
 ### Upgrading from 0.6
 
@@ -307,7 +305,7 @@ The [`pika image`](../../.github/workflows/pika-image.yml) workflow publishes a 
 
 | Tag | Source |
 | --- | --- |
-| `latest`, `0.7.1`, `0.7` | a `pika-v0.7.1` release tag |
+| `latest`, `0.8.0`, `0.8` | a `pika-v0.8.0` release tag |
 | `edge` | the newest `master` commit that changed `services/pika/` |
 | `sha-<commit>` | that commit |
 
@@ -316,7 +314,7 @@ Prefer a version tag in production and `edge` to follow `master`.
 To release, set `version` in `Cargo.toml`, commit, then push a matching tag; the workflow refuses a tag that disagrees with `Cargo.toml`:
 
 ```bash
-git tag pika-v0.7.1 && git push origin pika-v0.7.1
+git tag pika-v0.8.0 && git push origin pika-v0.8.0
 ```
 
 Published from this public repository, the package is public, so servers pull it without logging in. A fork or a private copy of the repository may publish it as private; then make it public under the package's **Package settings → Change visibility**, or log in on the server with `docker login ghcr.io` and a token that has `read:packages`.
