@@ -338,7 +338,7 @@ const RecordRow = memo(function RecordRow({
 				</span>
 			)}
 			<Num className="text-ink">{running ? "…" : formatSpan(recordDuration(record)).replace("—", "")}</Num>
-			{columns.performance && <Num title={performance ? `TTFT ${formatSpan(performance.ttftMs)} · ${formatTokenRate(performance.tokensPerSecond)} output tok/s` : undefined} className="text-muted">{performance && <span data-call-performance="">{formatSpan(performance.ttftMs)} · {formatTokenRate(performance.tokensPerSecond)}<span className="text-[11px]">/s</span></span>}</Num>}
+			{columns.performance && <Num title={performance ? `TTFT ${formatSpan(performance.ttftMs)} · ${formatTokenRate(performance.tokensPerSecond)} output tok/s over the whole call` : undefined} className="text-muted">{performance && <span data-call-performance="">{formatSpan(performance.ttftMs)} · {formatTokenRate(performance.tokensPerSecond)}<span className="text-[11px]">/s</span></span>}</Num>}
 			{columns.tokens && (
 				<span className="flex min-w-0 items-center justify-end gap-1.5">
 					{record.kind === "llm" ? (
@@ -794,7 +794,7 @@ function ColumnHeader({ columns }: { columns: Columns }) {
 			<span className={cell}>Record</span>
 			{columns.waterfall && <span className={cx(cell, "px-1")}>Waterfall</span>}
 			<span className={cx(cell, "text-right")}>Duration</span>
-			{columns.performance && <span className={cx(cell, "text-right")} title="TTFT / output tok/s">Performance</span>}
+			{columns.performance && <span className={cx(cell, "text-right")} title="TTFT / output tok/s over the whole call">Performance</span>}
 			{columns.tokens && <span className={cx(cell, "text-right")}>Tokens</span>}
 			{columns.cost && <span className={cx(cell, "text-right")}>Cost</span>}
 		</div>

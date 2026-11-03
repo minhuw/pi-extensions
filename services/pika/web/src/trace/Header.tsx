@@ -370,7 +370,7 @@ export function KpiStrip({ session, trace, onOpenTree }: { session: SessionDetai
 				detail={<FamilyCounts counts={families} />}
 			/>
 			<Tile kpi="tokens" label="Tokens" value={formatCount(total)} detail={<TokenDetail tokens={session.tokens} />} />
-			<Tile kpi="performance" label="Performance" value={performance.tokensPerSecond === undefined ? "—" : `${formatTokenRate(performance.tokensPerSecond)} tok/s`} sub={performance.ttftMs === undefined ? "TTFT unavailable" : `avg TTFT ${formatSpan(performance.ttftMs)}`} detail={performance.ttftCalls > 0 ? `${performance.ttftCalls}/${llm.length} timed` : undefined} title="Average request-to-first-token time (including thinking). Output tok/s uses total output divided by measured streaming time; tool and idle time are excluded. Older calls without timing are omitted." />
+			<Tile kpi="performance" label="Performance" value={performance.tokensPerSecond === undefined ? "—" : `${formatTokenRate(performance.tokensPerSecond)} tok/s`} sub={performance.ttftMs === undefined ? "TTFT unavailable" : `avg TTFT ${formatSpan(performance.ttftMs)}`} detail={performance.ttftCalls > 0 ? `${performance.ttftCalls}/${llm.length} timed` : undefined} title="Average request-to-first-token time (including thinking); calls without captured timing are omitted. Output tok/s is total output over the calls' whole time, from each request to its last token, since many responses arrive in one burst; tool and idle time are excluded." />
 			<Tile kpi="cost" label="Cost" value={formatCost(session.cost)} sub={turns.length > 1 && session.cost > 0 ? `${formatCost(session.cost / turns.length)} / turn` : undefined} />
 			<Tile
 				kpi="subagents"

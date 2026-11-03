@@ -40,7 +40,7 @@ struct Metrics {
     ttft: f64,
     ttft_calls: i64,
     output: f64,
-    streaming: f64,
+    elapsed: f64,
     rate_calls: i64,
 }
 
@@ -79,23 +79,24 @@ impl Metrics {
                     .is_none_or(|start| *at >= start.saturating_sub(60_000))
                 && event.end.is_none_or(|end| *at <= end.saturating_add(1_000))
         };
-        let Some(first) = timing.first_token_at.filter(plausible) else {
-            return;
-        };
         let request = timing.sent_at.filter(plausible).or(event.start);
-        if request.is_some_and(|sent| first < sent) || event.end.is_some_and(|end| end < first) {
-            return;
-        }
-        if let Some(sent) = request {
+        if let (Some(sent), Some(first)) = (request, timing.first_token_at.filter(plausible))
+            && first >= sent
+            && event.end.is_none_or(|end| end >= first)
+        {
             self.ttft += (first - sent) as f64;
             self.ttft_calls += 1;
         }
+        // The rate spans the whole call, from the request to the last token. Many responses arrive in one burst once the
+        // model has finished, and hidden reasoning counts in `output` but streams nothing, so the time after the first
+        // token says nothing about how fast the output was written; the whole call's time always includes it.
         if !failed
             && !aborted
             && event.counts.tokens.output > 0
-            && let Some(end) = event.end.filter(|end| *end > first)
+            && let (Some(sent), Some(end)) = (request, event.end)
+            && end > sent
         {
-            self.streaming += (end - first) as f64;
+            self.elapsed += (end - sent) as f64;
             self.output += event.counts.tokens.output as f64;
             self.rate_calls += 1;
         }
@@ -108,8 +109,7 @@ impl Metrics {
             aborted: self.aborted,
             unknown: self.unknown,
             ttft_ms: (self.ttft_calls > 0).then(|| self.ttft / self.ttft_calls as f64),
-            tokens_per_second: (self.streaming > 0.0)
-                .then(|| self.output * 1000.0 / self.streaming),
+            tokens_per_second: (self.elapsed > 0.0).then(|| self.output * 1000.0 / self.elapsed),
             ttft_calls: self.ttft_calls,
             rate_calls: self.rate_calls,
         }
@@ -307,22 +307,43 @@ mod tests {
     }
 
     #[test]
-    fn timing_is_weighted_and_missing_calls_do_not_supply_a_zero() {
+    fn the_rate_spans_whole_calls_weighted_by_time_and_ttft_needs_a_first_token() {
         let mut totals = Metrics::default();
+        // 100 tokens over 1.4 s, from the request at 1100 to the end at 2500.
         totals.add(&event());
+        // 150 tokens over 3.2 s.
         let mut other = event();
         other.counts.tokens.output = 150;
         other.end = Some(4300);
         other.timing = Some(r#"{"sentAt":1100,"firstTokenAt":1300}"#.into());
         totals.add(&other);
+        // Without captured timing the call's own start begins it: 50 tokens over 3.3 s, and no TTFT rather than zero.
         other.timing = None;
-        other.counts.tokens.output = 999999;
+        other.counts.tokens.output = 50;
         totals.add(&other);
         let result = totals.finish();
         assert_eq!(result.completed, 3);
         assert_eq!(result.ttft_ms, Some(300.0));
-        assert_eq!(result.tokens_per_second, Some(62.5));
-        assert_eq!((result.ttft_calls, result.rate_calls), (2, 2));
+        assert_eq!(result.tokens_per_second, Some(300.0 * 1000.0 / 7900.0));
+        assert_eq!((result.ttft_calls, result.rate_calls), (2, 3));
+    }
+
+    #[test]
+    fn bursts_and_hidden_reasoning_do_not_read_as_fast_streams() {
+        let rate = |output, timing: &str, end| {
+            let mut call = event();
+            call.counts.tokens.output = output;
+            call.timing = Some(timing.into());
+            call.end = Some(end);
+            let mut totals = Metrics::default();
+            totals.add(&call);
+            totals.finish().tokens_per_second
+        };
+        // A finished response delivered in one burst: 1,440 tokens 4 ms after a first token that took 24 s. The time
+        // after the first token gave 360,000 tok/s; the whole call gives 60.
+        assert_eq!(rate(1440, r#"{"sentAt":1000,"firstTokenAt":24996}"#, 25_000), Some(60.0));
+        // 48 s of hidden reasoning counted in the output, then a one-second answer: 50 tok/s, not 2,450.
+        assert_eq!(rate(2450, r#"{"sentAt":1000,"firstTokenAt":49000}"#, 50_000), Some(50.0));
     }
 
     #[test]
@@ -358,11 +379,11 @@ mod tests {
         );
         assert_eq!(result.ttft_calls, 6);
         assert_eq!(result.rate_calls, 4);
-        assert_eq!(result.tokens_per_second, Some(100.0));
+        assert_eq!(result.tokens_per_second, Some(100.0 * 1000.0 / 1400.0));
     }
 
     #[test]
-    fn malformed_out_of_order_and_implausible_timing_stays_unknown() {
+    fn malformed_out_of_order_and_implausible_timing_gives_no_ttft_and_the_rate_falls_back_to_the_call_start() {
         for timing in [
             "not json",
             r#"{"firstTokenAt":500}"#,
@@ -377,7 +398,8 @@ mod tests {
             totals.add(&call);
             let result = totals.finish();
             assert_eq!(result.ttft_ms, None, "{timing}");
-            assert_eq!(result.tokens_per_second, None, "{timing}");
+            let sent = if timing.contains("1600") { 1600.0 } else { 1000.0 };
+            assert_eq!(result.tokens_per_second, Some(100.0 * 1000.0 / (2500.0 - sent)), "{timing}");
         }
         let mut call = event();
         call.end = Some(1500);
@@ -385,7 +407,12 @@ mod tests {
         totals.add(&call);
         let result = totals.finish();
         assert_eq!(result.ttft_ms, Some(400.0));
-        assert_eq!(result.tokens_per_second, None);
+        assert_eq!(result.tokens_per_second, Some(250.0));
+        // A call that ends before its request has no rate.
+        call.end = Some(1100);
+        let mut totals = Metrics::default();
+        totals.add(&call);
+        assert_eq!(totals.finish().tokens_per_second, None);
     }
 
     #[test]
@@ -437,7 +464,7 @@ mod tests {
         assert_eq!(model.counts.sessions, 1);
         assert_eq!(model.metrics.failed, 1);
         assert_eq!(model.metrics.ttft_ms, Some(400.0));
-        assert_eq!(model.metrics.tokens_per_second, Some(100.0));
+        assert_eq!(model.metrics.tokens_per_second, Some(100.0 * 1000.0 / 1400.0));
         let summary = owner
             .models
             .iter()

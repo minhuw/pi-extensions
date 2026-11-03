@@ -129,7 +129,7 @@ export function Ladder({ record }: { record: TraceLlmRecord }) {
 				<dd>{formatPhase(streaming)}</dd>
 				{rate !== undefined && (
 					<>
-						<dt className="text-muted">Output</dt>
+						<dt className="text-muted" title="Output tokens over the whole call, from the request to the last token">Output</dt>
 						<dd>{formatTokenRate(rate)} tok/s</dd>
 					</>
 				)}

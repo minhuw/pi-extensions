@@ -53,7 +53,7 @@ const COLUMNS: { sort: Sort | "share"; label: string; width: string; hide?: stri
 	{ sort: "cache", label: "Cache reads", width: "w-[108px]", hide: "max-lg:hidden", title: "Cache reads / recorded prompt tokens" },
 	{ sort: "failures", label: "Failed / aborted", width: "w-[128px]", hide: "max-md:hidden" },
 	{ sort: "ttft", label: "Avg TTFT", width: "w-[92px]", hide: "max-lg:hidden", title: "Mean time from request to first token" },
-	{ sort: "speed", label: "Tok/s", width: "w-[76px]", hide: "max-lg:hidden", title: "Measured output tokens per streaming second" },
+	{ sort: "speed", label: "Tok/s", width: "w-[76px]", hide: "max-lg:hidden", title: "Output tokens per second over whole calls, from request to last token" },
 ];
 
 function SortArrow({ ascending }: { ascending: boolean }) {
@@ -122,7 +122,7 @@ function GroupDetails({ row }: { row: UsageBreakdown }) {
 						["Average TTFT", formatSpan(m.ttftMs ?? undefined)],
 						["Output rate", m.tokensPerSecond === null ? "—" : `${formatTokenRate(m.tokensPerSecond)} tok/s`],
 						["TTFT timing coverage", `${exact(m.ttftCalls)} / ${exact(row.requests)}`],
-						["Streams measured", exact(m.rateCalls)],
+						["Calls in output rate", exact(m.rateCalls)],
 						["Trajectories", exact(row.sessions)],
 					]}
 				/>
@@ -285,7 +285,7 @@ export function UsageBreakdowns({
 												<span className="text-muted"> / {formatCount(row.metrics.aborted)}</span>
 											</td>
 											<td className="pl-5 max-lg:hidden" title={`${exact(row.metrics.ttftCalls)} requests timed`}>{formatSpan(row.metrics.ttftMs ?? undefined)}</td>
-											<td className="pl-5 max-lg:hidden" title={`${exact(row.metrics.rateCalls)} streams measured`}>{formatTokenRate(row.metrics.tokensPerSecond ?? undefined)}</td>
+											<td className="pl-5 max-lg:hidden" title={`Over ${exact(row.metrics.rateCalls)} calls, from request to last token`}>{formatTokenRate(row.metrics.tokensPerSecond ?? undefined)}</td>
 										</tr>
 										{open && (
 											<tr id={detailId} className="border-b border-line bg-soft">
