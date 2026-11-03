@@ -217,6 +217,10 @@ Relay lets a running Pi session send a text message to any other running Pi sess
 
 `PIKA_RELAY_TTL_SECS` and `PIKA_RELAY_HEARTBEAT_SECS` shorten the message lifetime and the heartbeat. They exist for tests and the end-to-end script only; do not set them in production.
 
+### Upgrading from 0.8.0
+
+- Output rates are measured over whole model calls, from the request to the last token, and read much lower than before: 0.8.0 measured only the time after the first token, which made responses delivered in one burst, and hidden reasoning, read as thousands of tokens per second. Existing data shows the corrected rates at once; the database is unchanged and needs no rebuild. Update the Pi extensions too for the same fix in the statusline footer.
+
 ### Upgrading from 0.7
 
 - Usage statistics upgrade the database to schema version 11 and automatically rebuild derived data from stored trajectories before the server starts listening. This backfills historical usage, including compactions and summaries. Large archives may take time to reindex; an interrupted rebuild retries on the next start. Source lines and publication settings are preserved. Older binaries cannot open the upgraded database, so keep a [backup](#backup) if rollback may be needed. The new statistics are public: the Statistics tab, `GET /api/public/v1/statistics`, and `GET /api/public/v1/usage` show anonymous aggregates of all activity, including unpublished and hidden trajectories without their project names, to anyone who can reach pika, and other sites may read them; see [Usage API for other sites](#usage-api-for-other-sites).
@@ -305,7 +309,7 @@ The [`pika image`](../../.github/workflows/pika-image.yml) workflow publishes a 
 
 | Tag | Source |
 | --- | --- |
-| `latest`, `0.8.0`, `0.8` | a `pika-v0.8.0` release tag |
+| `latest`, `0.8.1`, `0.8` | a `pika-v0.8.1` release tag |
 | `edge` | the newest `master` commit that changed `services/pika/` |
 | `sha-<commit>` | that commit |
 
@@ -314,7 +318,7 @@ Prefer a version tag in production and `edge` to follow `master`.
 To release, set `version` in `Cargo.toml`, commit, then push a matching tag; the workflow refuses a tag that disagrees with `Cargo.toml`:
 
 ```bash
-git tag pika-v0.8.0 && git push origin pika-v0.8.0
+git tag pika-v0.8.1 && git push origin pika-v0.8.1
 ```
 
 Published from this public repository, the package is public, so servers pull it without logging in. A fork or a private copy of the repository may publish it as private; then make it public under the package's **Package settings → Change visibility**, or log in on the server with `docker login ghcr.io` and a token that has `read:packages`.
