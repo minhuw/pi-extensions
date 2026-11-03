@@ -1,6 +1,6 @@
 # Statusline Footer
 
-A rich, theme-aware Pi footer. The metrics come from this extension; the visual language follows [pikit](https://github.com/adrianapan/pikit)'s status bar: left/right justified rows, a positional gradient context bar, per-level thinking color, a hairline rule, and Nerd Font icons, with an ASCII opt-out.
+A rich, theme-aware Pi footer. The metrics come from this extension; the visual language follows [pikit](https://github.com/adrianapan/pikit)'s status bar: left/right justified rows, a positional gradient context bar, per-level thinking color, and Nerd Font icons, with an ASCII opt-out. The identity row is a powerline bar, and the rows below hang from it on a rail.
 
 ## Install
 
@@ -20,42 +20,42 @@ Full mode is enabled by default when Pi starts.
 
 ## Layout
 
-Full mode is three content rows plus a hairline under the identity row, and a status row while any extension status is set. Primary facts sit on the left; capacity, cost, and path sit on the right:
+Full mode is the bar and two rows that hang from it, plus a status row while any extension status is set. Primary facts sit on the left; capacity, cost, and path sit on the right. Shown with ASCII icons; the bar's groups sit on colored bands:
 
 ```text
-  ●  ☾ k3  HIGH  FAST  (moonshot)            2×  ▉▉▉▉▉▉▉▉░░░░░░░░░░  8.2%  78.9k/1.05M
-  ────────────────────────────────────────────────────────────────────────────────
-  # 13  ⏱ 1h 28m  μ 4.2s ⇄ 1.8s » 28.9 tok/s     $0.75  ↑ 65.2k ↓ 31.4k ⚡120k  12.1k think  96%
-  ⎇ main  +42 −17  ↑2 ↓1                              ▤ 5 touched  ⌂ ~/code/my-project
-  herder: T2 integrate · 3/5 tasks  ↻ build · next 4m  bg 1 running
+ ● ☾ k3   HIGH  (moonshot)  ───────────────────────────────────────  × 2×  ▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉  8.2%  79k/1.1M
+ ├ # 13  ⏱ 1h 28m  │  ⏱ 302ms ↺ 301ms  » 92 tok/s ↺ 91 tok/s      $0.750  $0.058/turn  │  ↑ 65k  ↓ 31k  ⚡ 120k 65%
+ ├ ⎇ main  +42 −17  ↑2 ↓1                                                     ▤ 5 touched  │  ⌂ ~/code/my-project
+ ╰ herder: T2 integrate · 3/5 tasks  │  ↻ build · next 4m  │  bg 1 running
 ```
 
 | Row | Left | Right |
 | --- | --- | --- |
 | 1 | Live pulse, queued chip, model, thinking, non-standard service tier, provider | Compactions, gradient bar, percent, used/window |
-| 2 | Turns, elapsed, TTFT, TTFB, throughput, tool calls, errors | Cost, input / output / cached-input tokens, reasoning tokens, cache hit rate |
+| 2 | Turns and elapsed time; TTFT, TTFB, and throughput; tool calls and errors | Cost and cost per turn; input / output / cached-input tokens and cache hit rate; reasoning tokens |
 | 3 | Git branch, working-tree diff, ahead/behind | Files touched, current directory |
 | 4 | Extension statuses: research, Herder, Loop, background processes, then the rest; shown only while a status is set | |
 
 The model name starts with its vendor's mark in the vendor's color. These are the OpenAI and Claude logos (Nerd Fonts 3.5 or later), the Google logo for Gemini, and related symbols for Kimi, DeepSeek, Grok, Llama, Mistral, and Qwen; with `STATUSLINE_NERD_FONTS=0`, Unicode marks such as `✻` (Claude), `⊛` (OpenAI), `✦` (Gemini), and `☾` (Kimi) take their place. The model id is matched before the provider, so Claude served through Vertex or Magpie still gets the Claude mark; an unrecognized model has none.
 
-Thinking levels are colored: dim off, amber low, green medium, lilac high, and a rainbow wash at `xhigh`/`max`. The context bar interpolates success → warning → error across its width and uses the same `▉` block for filled and empty cells so the unused portion stays a quiet charcoal instead of a checkerboard. Segments are separated by space, not mid-dots.
+Thinking levels are colored: dim off, amber low, green medium, lilac high, and a rainbow wash at `xhigh`/`max`. The context bar interpolates success → warning → error across its width and uses the same `▉` block for filled and empty cells so the unused portion stays a quiet charcoal instead of a checkerboard.
 
-Compact mode keeps identity on the left and the bar, cost, and elapsed time on the right. When another extension publishes `ctx.ui.setStatus("autoresearch", ...)`, `ctx.ui.setStatus("herder", ...)`, or `ctx.ui.setStatus("loop", ...)`, compact mode also shows a workflow summary when there is room. Research reports take priority over Herder, and Herder over Loop, because a loop that starts a run is less specific than the run itself; clearing a higher-priority status restores the next one. Full mode shows each once on its own status row below the Git row, in the order research, Herder, Loop, background processes, then other extension statuses; the row disappears when no status is set, and it is truncated at the terminal width. A long directory path yields to the branch and working-tree state. At narrow widths, both layouts prioritize the model and context percentage: workflow summaries and other secondary details drop out and the bar shrinks or disappears before the model is truncated. Clearing a status removes it from the footer.
+Compact mode is the bar alone, with cost and elapsed time added on the right. When another extension publishes `ctx.ui.setStatus("autoresearch", ...)`, `ctx.ui.setStatus("herder", ...)`, or `ctx.ui.setStatus("loop", ...)`, compact mode also shows a workflow summary when there is room. Research reports take priority over Herder, and Herder over Loop, because a loop that starts a run is less specific than the run itself; clearing a higher-priority status restores the next one. Full mode shows each once on its own status row below the Git row, in the order research, Herder, Loop, background processes, then other extension statuses; the row disappears when no status is set. At narrow widths, both layouts prioritize the model and context percentage: workflow summaries and other secondary details drop out and the bar shrinks or disappears before the model is truncated. Clearing a status removes it from the footer.
 
-## Powerline style
-
-`/footer powerline` draws the identity row as a powerline bar; `/footer plain` restores the default. Like the layout, the choice lasts until Pi exits or reloads extensions. The style applies to both layouts, and only to the identity row: the telemetry rows below stay plain, so the bar leads.
-
-```text
- ● ✻ claude-opus-5-5  HIGH  (magpie)  ────────────────   2×  ▉▉▉▉▉▉░░░░░░  38.4%  384k/1.0M 
-```
+### The bar
 
 - The model opens the bar as a chip in its vendor's color (Claude orange, OpenAI green, and so on; the theme accent for other vendors), with near-black or white ink, whichever contrasts more. The chip carries the live dot and the vendor mark.
-- The rest of each group sits on a band of the theme's `toolPendingBg` surface. Bands end in powerline arrows with Nerd Fonts and in square ends without them, and a rule in the theme's `borderMuted` color joins the two bands across the gap. The band replaces the hairline under the row.
+- The rest of each group sits on a band of the theme's `toolPendingBg` surface. Bands end in powerline arrows with Nerd Fonts and in square ends without them, and a rule in the theme's `borderMuted` color joins the two bands across the gap.
 - Theme colors are chosen for the terminal background, so a truecolor color with less than 3:1 contrast against the band is moved toward black or white until it reaches 3:1, keeping its hue; faint text is drawn at full intensity. On a light band, `dim` details darken instead of fading out. Resets inside the band, including those in an extension status that carries its own ANSI colors, reopen the band instead of ending it.
 - In a 256-color theme the bar keeps its bands, caps, and rule but draws the model without a chip, because vendor colors need truecolor. Truecolor details, such as the thinking level and the context gradient, are still lifted against the band's xterm color; the theme's 256-color text is left as the theme set it.
-- A theme whose `toolPendingBg` is the terminal default has no band to draw, so the footer keeps the plain bar. The bar follows `/theme` and theme-file edits on the next render.
+- A theme whose `toolPendingBg` is the terminal default has no band to draw, so the bar's groups sit on the terminal background, without chip or caps, above the same rows. The bar follows `/theme` and theme-file edits on the next render.
+
+### The rows below
+
+- The telemetry, Git, and status rows hang from the bar on a `├`/`╰` rail in the theme's `borderMuted` color, the last row closing it. They are not filled, so the bar leads.
+- Each row's facts come in groups: activity, latency, and tools on the left of the telemetry row, cost, tokens, and reasoning on its right. Thin chevrons in `borderMuted` separate the groups and point the way the bar's arrows do; without Nerd Fonts they are `│`.
+- Icons carry the color and values stay `muted`, with the cost in `text` so it reads first. A value turns colored only to report a state: a first token slower than two seconds, failed tool calls, or the cache hit rate. The cache hit rate sits beside the cached-token count.
+- A row that does not fit drops whole groups, least important first, instead of cutting text: reasoning tokens, then tools, activity, token counts, and latency, keeping the cost. On the Git row the path shortens from the middle (`~/…/project`), keeping as many trailing directories as fit; the touched-file count gives way before the path would drop below twelve columns. The status row drops statuses from the end.
 
 Each extension status keeps one identity color, drawn from the theme's link, syntax, success, and border colors, for its icon and its first segment (split at ` · ` and `, `); the details stay `muted`. The footer never picks a red hue or one close to the theme's error or warning colors, so a routine status cannot look like a failure. Known extensions keep fixed colors; others get a stable color from their key. The status row also gives each status an icon: a flask for research, a sheep for Herder, a console for background processes, a robot for subagents, a ticket for superagent, a palette for Impeccable, and a puzzle piece for other extensions. A status that starts with its own symbol, such as Loop's `↻`, gets no second icon, and compact mode shows no status icons. Only the segments that report a problem stand out, and none of them in red: `failed`, `stuck`, `error`, `blocked`, or `not_met` use bold `warning`, and `paused`, `awaiting`, `stopping`, `killed`, or `for you` use `warning`; for example, in `bg 2 running · 1 failed` only `1 failed` turns amber. Matching is whole-word, so a loop named `fix-errors` stays calm. A status that already contains ANSI colors keeps them.
 
@@ -85,8 +85,6 @@ For a single status display, leave pi-processes' **status widget** disabled in `
 | `/footer full` | Use the multi-line layout. |
 | `/footer compact` | Use the one-row layout. |
 | `/footer off` | Restore Pi's default footer. |
-| `/footer powerline` | Draw the identity row as a powerline bar; turns the footer on if it is off. |
-| `/footer plain` | Restore the plain identity row and its hairline; turns the footer on if it is off. |
 | `/footer debug` | Show metric-collection diagnostics for provider latency. |
 
 ## Features

@@ -3,30 +3,24 @@
  *
  * Visual language is borrowed from pikit's footer: left/right justified rows,
  * a positional RGB gradient context bar, per-level thinking color (rainbow at
- * max/xhigh), a hairline rule, and Nerd Font icons with ASCII fallbacks.
- * Metrics remain ours: TTFT/TTFB, aggregate throughput, cache ratio,
- * session cost, and working-tree diff.
+ * max/xhigh), and Nerd Font icons with ASCII fallbacks; the identity row is
+ * a powerline bar on theme bands. Metrics remain ours: TTFT/TTFB, aggregate
+ * throughput, cache ratio, session cost, and working-tree diff.
  *
- * Full mode:
- *   ✻ model  HIGH  (provider)                       ▉▉▉░░░  8.2% / 1.05M
- *   ────────────────────────────────────────────
- *   μ 4.2s  28.9 tok/s                    $0.75  96% cache  9 turns
- *   main  +42 −17                         5 touched  ~/code/my-project
- *   herder: T2 integrate · 3/5 tasks  ↻ build · next 4m   (while any status is set)
- *
- * Compact mode:
- *   model  HIGH            ▉▉▉░░░  42%  $1.23  12m
- *
- * Powerline style (/footer powerline) sets the identity row on theme bands:
+ * Full mode: the bar, with the telemetry, Git, and status rows on a rail.
  *   ▌✻ model ▶ HIGH  (provider) ▶ ──────── ◀ ▉▉▉░░░  8.2%  78.9k/1.05M ▐
+ *    ├ # 13  ⏱ 1h 28m  ❯  ⏱ 4.2s  » 28.9 tok/s     $0.75  $0.06/turn  ❮  ↑ 65k  ↓ 31k
+ *    ├ ⎇ main  +42 −17                            ▤ 5 touched  ❮  ⌂ ~/…/my-project
+ *    ╰ herder: T2 integrate · 3/5 tasks  ❯  ↻ build · next 4m   (while any status is set)
+ *
+ * Compact mode: the bar alone.
+ *   ▌✻ model ▶ HIGH ▶ ──────── ◀ ▉▉▉░░░  42%  $1.23  12m ▐
  *
  * Usage:
  *   /footer            toggle on/off
  *   /footer full       multi-line layout (default)
  *   /footer compact    1-line layout
  *   /footer off        restore pi's default footer
- *   /footer powerline  identity row as a powerline bar
- *   /footer plain      identity row on the terminal background (default)
  *   /footer debug      show metric-collection internals
  */
 
@@ -184,31 +178,22 @@ export function alignRow(left: string, right: string, width: number): string {
 	return truncateToWidth(` ${leftStr}${" ".repeat(pad)}${right} `, width);
 }
 
-export function hairline(width: number, theme?: Theme): string {
-	const color = (theme && resolveThemeRgb(theme, "borderMuted")) ?? FALLBACK_GRADIENT.unfilled;
-	return `${rgbFg(color)}${"─".repeat(Math.max(0, width))}${RESET}`;
-}
-
 function cluster(parts: Array<string | false | null | undefined>, sep: string): string {
 	return parts.filter((part): part is string => Boolean(part)).join(sep);
 }
 
 // ── skins ──────────────────────────────────────────────────────────
-// A skin draws the identity row, the footer's status bar. The plain skin lays
-// it on the terminal background with a hairline below. The powerline skin
+// A skin draws the identity row, the footer's status bar. The powerline skin
 // sets its groups on bands of the theme's tool surface, capped with powerline
 // arrows (square ends without Nerd Fonts), and opens it with a chip in the
-// model vendor's color; the band separates it, so it draws no hairline. The
-// telemetry rows below stay plain either way, so the bar leads.
-
-export type Style = "plain" | "powerline";
+// model vendor's color. A theme whose surface is the terminal default has no
+// band to draw, so the flat skin lays the same groups on the terminal
+// background. The rows below stay unfilled either way, so the bar leads.
 
 interface Skin {
 	/** Columns the bar spends outside its content: margins, padding, caps, and the minimum gap. */
 	chrome: number;
 	bar(left: string, right: string, width: number): string;
-	/** The rule under the bar, if the skin draws one. */
-	rule(width: number): string | undefined;
 	/** A chip that opens the bar's left group, if the skin draws chips. */
 	chip?(text: string, color: Rgb): string;
 }
@@ -278,9 +263,7 @@ function backgroundRgb(open: string): Rgb | null {
 	return indexed ? xterm256(Number(indexed[1])) : null;
 }
 
-function plainSkin(theme: Theme): Skin {
-	return { chrome: 3, bar: alignRow, rule: width => hairline(width, theme) };
-}
+const FLAT_SKIN: Skin = { chrome: 3, bar: alignRow };
 
 /** The powerline skin on `surface`, a theme background's opening sequence, with `rule` the rule token's sequences. */
 function powerlineSkin(surface: string, [ruleOpen, ruleClose]: [string, string], nerd: boolean): Skin {
@@ -365,7 +348,6 @@ function powerlineSkin(surface: string, [ruleOpen, ruleClose]: [string, string],
 			const fill = gap >= 3 ? ` ${ruleOpen}${"─".repeat(gap - 2)}${ruleClose || RESET} ` : " ".repeat(gap);
 			return truncateToWidth(`${leftBand}${fill}${band(right, "right")}`, width);
 		},
-		rule: () => undefined,
 		// Vendor colors need truecolor; a 256-color bar draws the model as plain text on the band.
 		...(surface.startsWith("\x1b[48;2;") && {
 			chip(text: string, color: Rgb) {
@@ -378,15 +360,14 @@ function powerlineSkin(surface: string, [ruleOpen, ruleClose]: [string, string],
 let cachedSkin: { key: string; skin: Skin } | undefined;
 
 /**
- * The skin for `style`, or the plain skin where the theme cannot carry a band. Pi gives the
+ * The powerline skin, or the flat skin where the theme cannot carry a band. Pi gives the
  * footer one theme object for the whole session and swaps the theme behind it, so the skin
  * is cached by the sequences it draws with, never by the object.
  */
-export function skinFor(theme: Theme, style: Style): Skin {
-	if (style !== "powerline") return plainSkin(theme);
+export function skinFor(theme: Theme): Skin {
 	const [surface] = tokenAnsi(text => theme.bg(BAND_TOKEN, text));
 	// A terminal-default surface leaves no band to draw.
-	if (!surface.startsWith("\x1b[48;")) return plainSkin(theme);
+	if (!surface.startsWith("\x1b[48;")) return FLAT_SKIN;
 	const rule = tokenAnsi(text => theme.fg("borderMuted", text));
 	const nerd = hasNerdFonts();
 	const key = [surface, ...rule, nerd].join("|");
@@ -1027,15 +1008,12 @@ function priceUnavailableForModel(ctx: ExtensionContext): boolean {
 		&& model.cost.cacheRead === 0 && model.cost.cacheWrite === 0;
 }
 
-function renderPrice(ctx: ExtensionContext, s: Stats, theme: Theme, set: IconSet, perTurn = false): string {
+function renderPrice(ctx: ExtensionContext, s: Stats, theme: Theme, set: IconSet): string {
 	const unavailable = s.priceUnavailable || priceUnavailableForModel(ctx);
 	const amount = unavailable ? "price unavailable" : `${s.priceEstimated ? "~" : ""}${fmtCost(s.cost)}`;
 	// The ASCII cost icon is itself a dollar sign; the amount already contains one.
 	const icon = hasNerdFonts() ? `${glyph(theme, set.cost, "warning")} ` : "";
-	return theme.fg("warning", `${icon}${amount}`)
-		+ (!unavailable && perTurn && s.turns > 0
-			? theme.fg("dim", ` (~${fmtCost(s.cost / s.turns)}/turn)`)
-			: "");
+	return theme.fg("warning", `${icon}${amount}`);
 }
 
 function renderIdentityRow(
@@ -1101,6 +1079,17 @@ function renderCompact(
 	], "  "));
 }
 
+/** Cached reads as a share of all input, and the color that rates it. */
+function cacheHit(s: Stats): { pct: number | null; color: ThemeToken } {
+	const totalIn = s.input + s.cacheRead + s.cacheWrite;
+	const pct = totalIn > 0 ? Math.round((s.cacheRead / totalIn) * 100) : null;
+	return { pct, color: pct == null ? "dim" : pct >= 70 ? "success" : pct >= 40 ? "warning" : "dim" };
+}
+
+function gitColor(status: GitStat["status"]): ThemeToken {
+	return status === "clean" ? "success" : status === "dirty" ? "warning" : status === "unavailable" ? "error" : "dim";
+}
+
 function ttftColor(ms: number): "success" | "warning" | "error" {
 	if (ms < 2_000) return "success";
 	if (ms < 8_000) return "warning";
@@ -1115,106 +1104,193 @@ function renderFull(
 	width: number,
 	state: SessionState,
 ): string[] {
-	const set = icons();
 	const s = collectStats(ctx, state);
-	const sep = "  ";
-
 	const line1 = renderIdentityRow(ctx, theme, skin, width, state, s, false);
-
-	const { metrics } = state;
-	const avgTtft = avgTtftMs(metrics);
-	const avg = avgTokPerSec(metrics);
-	const totalIn = s.input + s.cacheRead + s.cacheWrite;
-	const cachePct = totalIn > 0 ? Math.round((s.cacheRead / totalIn) * 100) : null;
-	const cacheColor: ThemeToken = cachePct == null ? "dim" : cachePct >= 70 ? "success" : cachePct >= 40 ? "warning" : "dim";
-
-	const perf = cluster([
-		theme.fg("dim", `${glyph(theme, set.turns)} ${s.turns}  ${glyph(theme, set.elapsed)} ${fmtDuration(s.durationMs)}`),
-		avgTtft != null
-			? theme.fg(ttftColor(avgTtft), `${glyph(theme, set.ttft, ttftColor(avgTtft))} μ ${fmtTtft(avgTtft)}`)
-				+ (metrics.lastTtftMs != null && metrics.ttftCount > 1 ? theme.fg("dim", ` ${glyph(theme, set.last)} ${fmtTtft(metrics.lastTtftMs)}`) : "")
-			: theme.fg("dim", `${glyph(theme, set.ttft)} —`),
-		metrics.lastTtfbMs != null ? theme.fg("dim", `${glyph(theme, set.ttfb)} ${fmtTtft(metrics.lastTtfbMs)}`) : "",
-		avg != null
-			? theme.fg("success", `${glyph(theme, set.speed, "success")} μ ${fmtTokPerSec(avg)}`)
-				+ (metrics.lastTokPerSec != null && metrics.requests > 1 ? theme.fg("dim", ` ${glyph(theme, set.last)} ${fmtTokPerSec(metrics.lastTokPerSec)}`) : "")
-			: theme.fg("dim", `${glyph(theme, set.speed)} —`),
-		s.toolCalls > 0
-			? theme.fg("syntaxFunction", `${glyph(theme, set.calls, "syntaxFunction")} ${s.toolCalls}`)
-			: theme.fg("dim", `${glyph(theme, set.calls)} 0`),
-		s.toolCalls > 0
-			? (s.errors > 0
-				? theme.fg("error", `${glyph(theme, set.err, "error")} ${s.errors} (${((s.errors / s.toolCalls) * 100).toFixed(1)}%)`)
-				: theme.fg("success", `${glyph(theme, set.ok, "success")} 0`))
-			: "",
-	], sep);
-
-	const money = cluster([
-		renderPrice(ctx, s, theme, set, true),
-		theme.fg("toolDiffAdded", `${glyph(theme, set.input, "toolDiffAdded")} ${fmtTokens(s.input)}`)
-			+ " "
-			+ theme.fg("toolDiffRemoved", `${glyph(theme, set.output, "toolDiffRemoved")} ${fmtTokens(s.output)}`)
-			+ (s.cacheRead > 0 ? " " + theme.fg(cacheColor, `${glyph(theme, set.cache, cacheColor)}${fmtTokens(s.cacheRead)}`) : ""),
-		s.reasoning > 0 ? theme.fg("muted", `${fmtTokens(s.reasoning)} think`) : "",
-		cachePct != null ? theme.fg(cacheColor, `${cachePct}%`) : "",
-	], sep);
-
-	const line2 = alignRow(perf, money, width);
-
-	refreshGitStat(ctx.cwd, state);
-	const branch = footerData.getGitBranch();
-	const gitStatus = state.gitStat.status;
-	const gitColor: ThemeToken = gitStatus === "clean"
-		? "success"
-		: gitStatus === "dirty"
-			? "warning"
-			: gitStatus === "unavailable"
-				? "error"
-				: "dim";
-	const gitLabel = gitStatus === "clean"
-		? theme.fg("success", `${glyph(theme, set.ok, "success")} clean`)
-		: gitStatus === "dirty"
-			? state.gitStat.adds || state.gitStat.dels
-				? theme.fg("warning", `${theme.fg("toolDiffAdded", `+${state.gitStat.adds ?? 0}`)} ${theme.fg("toolDiffRemoved", `-${state.gitStat.dels ?? 0}`)}`)
-				: theme.fg("warning", "dirty")
-			: gitStatus === "unavailable"
-				? theme.fg("error", "git ?")
-				: theme.fg("dim", "git …");
-	const gitLeft = cluster([
-		branch
-			? theme.fg(gitColor, `${glyph(theme, set.branch, gitColor)} ${branch}`)
-			: theme.fg("dim", `${glyph(theme, set.branch)} no git`),
-		branch ? gitLabel : "",
-		state.gitStat.ahead > 0 || state.gitStat.behind > 0
-			? theme.fg("success", `↑${state.gitStat.ahead}`) + " " + theme.fg("warning", `↓${state.gitStat.behind}`)
-			: "",
-	], sep);
-	const fileCount = s.files > 0 ? theme.fg("dim", `${glyph(theme, set.file)} ${s.files} touched`) : "";
-	const cwd = theme.fg("dim", `${glyph(theme, set.cwd)} ${formatPath(ctx.cwd)}`);
-	// A long directory path yields to the branch and working-tree state.
-	const gitRight = truncateToWidth(cluster([fileCount, cwd], sep), Math.max(0, width - Math.min(visibleWidth(gitLeft), width - 3) - 3));
-	const line3 = alignRow(gitLeft, gitRight, width);
 
 	// Extension statuses get their own row, present only while one is published:
 	// workflows first (research, Herder, Loop, processes), then the rest.
 	const extensionStatuses = footerData.getExtensionStatuses();
 	const workflowKeys = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY];
-	const statusRow = cluster([
+	const statuses = [
 		...workflowKeys.map((key): [string, string | undefined] => [key, extensionStatuses.get(key)]),
 		...[...extensionStatuses.entries()].filter(([key]) => !workflowKeys.includes(key)),
-	].map(([key, status]) => status && renderStatus(theme, status, key, hasNerdFonts())), sep);
+	].flatMap(([key, status]) => status ? [renderStatus(theme, status, key, hasNerdFonts())] : []);
 
-	const rule = skin.rule(width);
-	const lines = rule ? [line1, rule, line2, line3] : [line1, line2, line3];
-	if (statusRow) lines.push(alignRow(statusRow, "", width));
-	return lines;
+	return [line1, ...renderDetailRows(ctx, theme, footerData, width, state, s, statuses)];
+}
+
+// ── detail rows ────────────────────────────────────────────────────
+// Under the bar, the telemetry, Git, and status rows hang from the
+// chip on a rail. Facts come in groups split by thin chevrons that echo the
+// bar's arrows. Icons carry the hue and values stay muted, unless a value
+// reports a state such as a slow first token or failed tool calls. A row that
+// does not fit drops whole groups, least important first, instead of cutting
+// text, and the path shortens from the middle.
+
+interface Group {
+	text: string;
+	/** Lower ranks drop first when the row is short of space. */
+	rank: number;
+}
+
+/** `display`, shortened from the middle to `max` columns while it keeps its last directories. */
+export function shortenPath(display: string, max: number): string {
+	if (visibleWidth(display) <= max) return display;
+	const parts = display.split("/");
+	for (let keep = parts.length - 2; keep >= 1; keep--) {
+		const candidate = [parts[0], "…", ...parts.slice(-keep)].join("/");
+		if (visibleWidth(candidate) <= max) return candidate;
+	}
+	// Even the last directory is too long: keep its start. Paths are plain text, so no resets are needed.
+	if (max <= 0) return "";
+	let start = "";
+	for (const char of parts.at(-1)!) {
+		if (visibleWidth(start + char) > max - 1) break;
+		start += char;
+	}
+	return `${start}…`;
+}
+
+/** Columns a rail row leaves for its groups: alignRow's margins, the rail and its space, and a three-column gap so the sides read apart. */
+function railRoom(width: number): number {
+	return width - 2 - 2 - 3;
+}
+
+/** Columns the thin chevron between two groups takes, with its spacing. */
+const RAIL_SEP_WIDTH = 5;
+
+function railRow(theme: Theme, branch: string, left: Group[], right: Group[], width: number): string {
+	const nerd = hasNerdFonts();
+	const sep = (side: "left" | "right") =>
+		`  ${theme.fg("borderMuted", nerd ? (side === "left" ? POWERLINE.thinLeft : POWERLINE.thinRight) : "│")}  `;
+	const join = (groups: Group[], side: "left" | "right") => groups.map(group => group.text).join(sep(side));
+	const rail = `${theme.fg("borderMuted", branch)} `;
+	const room = railRoom(width);
+	left = [...left];
+	right = [...right];
+	while (visibleWidth(join(left, "left")) + visibleWidth(join(right, "right")) > room && left.length + right.length > 1) {
+		const weakest = [...left, ...right].reduce((a, b) => (b.rank < a.rank ? b : a));
+		for (const groups of [left, right]) {
+			const index = groups.indexOf(weakest);
+			if (index >= 0) groups.splice(index, 1);
+		}
+	}
+	return alignRow(rail + join(left, "left"), join(right, "right"), width);
+}
+
+function renderDetailRows(
+	ctx: ExtensionContext,
+	theme: Theme,
+	footerData: ReadonlyFooterDataProvider,
+	width: number,
+	state: SessionState,
+	s: Stats,
+	statuses: string[],
+): string[] {
+	const set = icons();
+	const item = (icon: string, hue: ThemeToken, value: string, tone: ThemeToken = "muted") =>
+		`${glyph(theme, icon, hue)} ${theme.fg(tone, value)}`;
+	const { metrics } = state;
+	const avgTtft = avgTtftMs(metrics);
+	const avg = avgTokPerSec(metrics);
+	const { pct: cachePct, color: cacheColor } = cacheHit(s);
+
+	const activity = cluster([
+		item(set.turns, "dim", `${s.turns}`),
+		item(set.elapsed, "dim", fmtDuration(s.durationMs)),
+	], "  ");
+	const latency = cluster([
+		avgTtft != null
+			? item(set.ttft, ttftColor(avgTtft), fmtTtft(avgTtft), avgTtft < 2_000 ? "muted" : ttftColor(avgTtft))
+				+ (metrics.lastTtftMs != null && metrics.ttftCount > 1 ? theme.fg("dim", ` ${set.last} ${fmtTtft(metrics.lastTtftMs)}`) : "")
+			: item(set.ttft, "dim", "—", "dim"),
+		metrics.lastTtfbMs != null && item(set.ttfb, "dim", fmtTtft(metrics.lastTtfbMs), "dim"),
+		avg != null
+			? item(set.speed, "success", fmtTokPerSec(avg))
+				+ (metrics.lastTokPerSec != null && metrics.requests > 1 ? theme.fg("dim", ` ${set.last} ${fmtTokPerSec(metrics.lastTokPerSec)}`) : "")
+			: item(set.speed, "dim", "—", "dim"),
+	], "  ");
+	const tools = s.toolCalls > 0
+		? cluster([
+			item(set.calls, "syntaxFunction", `${s.toolCalls}`),
+			s.errors > 0
+				? item(set.err, "error", `${s.errors} (${((s.errors / s.toolCalls) * 100).toFixed(1)}%)`, "error")
+				: item(set.ok, "success", "0"),
+		], "  ")
+		: item(set.calls, "dim", "0", "dim");
+
+	const unpriced = s.priceUnavailable || priceUnavailableForModel(ctx);
+	// The ASCII cost icon is itself a dollar sign, and the amount already has one.
+	const costIcon = (value: string, tone: ThemeToken) =>
+		hasNerdFonts() ? item(set.cost, "warning", value, tone) : theme.fg(tone, value);
+	const cost = unpriced
+		? costIcon("price unavailable", "warning")
+		: costIcon(`${s.priceEstimated ? "~" : ""}${fmtCost(s.cost)}`, "text")
+			+ (s.turns > 0 ? theme.fg("dim", `  ${fmtCost(s.cost / s.turns)}/turn`) : "");
+	const tokens = cluster([
+		item(set.input, "toolDiffAdded", fmtTokens(s.input)),
+		item(set.output, "toolDiffRemoved", fmtTokens(s.output)),
+		s.cacheRead > 0 && item(set.cache, cacheColor, fmtTokens(s.cacheRead))
+			+ (cachePct != null ? ` ${theme.fg(cacheColor === "dim" ? "muted" : cacheColor, `${cachePct}%`)}` : ""),
+	], "  ");
+	const think = s.reasoning > 0 ? theme.fg("dim", `${fmtTokens(s.reasoning)} think`) : "";
+
+	const statusRail = statuses.length > 0;
+	const row2 = railRow(theme, "├", [
+		{ text: activity, rank: 3 },
+		{ text: latency, rank: 5 },
+		{ text: tools, rank: 2 },
+	], [
+		{ text: cost, rank: 6 },
+		{ text: tokens, rank: 4 },
+		...(think ? [{ text: think, rank: 1 }] : []),
+	], width);
+
+	refreshGitStat(ctx.cwd, state);
+	const branch = footerData.getGitBranch();
+	const { status, adds, dels, ahead, behind } = state.gitStat;
+	const color = gitColor(status);
+	const gitState = status === "clean"
+		? item(set.ok, "success", "clean")
+		: status === "dirty"
+			? adds || dels
+				? `${theme.fg("toolDiffAdded", `+${adds ?? 0}`)} ${theme.fg("toolDiffRemoved", `−${dels ?? 0}`)}`
+				: theme.fg("warning", "dirty")
+			: status === "unavailable"
+				? theme.fg("error", "git ?")
+				: theme.fg("dim", "git …");
+	const git = branch
+		? cluster([
+			`${glyph(theme, set.branch, color)} ${theme.fg("text", branch)}`,
+			gitState,
+			(ahead > 0 || behind > 0) && `${theme.fg("success", `↑${ahead}`)} ${theme.fg("warning", `↓${behind}`)}`,
+		], "  ")
+		: item(set.branch, "dim", "no git", "dim");
+	const touched = s.files > 0 ? item(set.file, "dim", `${s.files} touched`) : "";
+	const rail3 = statusRail ? "├" : "╰";
+	// The path takes the room the branch and the file count leave. The file count
+	// gives way before the path would shrink below twelve columns.
+	const touchedWidth = touched ? visibleWidth(touched) + RAIL_SEP_WIDTH : 0;
+	const pathRoom = railRoom(width) - visibleWidth(git) - visibleWidth(`${set.cwd} `);
+	const minimumPath = 12;
+	const keepTouched = Boolean(touched) && pathRoom - touchedWidth >= minimumPath;
+	const room = keepTouched ? pathRoom - touchedWidth : pathRoom;
+	const cwd = item(set.cwd, "dim", shortenPath(formatPath(ctx.cwd), Math.max(minimumPath, room)));
+	const row3 = railRow(theme, rail3, [{ text: git, rank: 3 }], [
+		...(keepTouched ? [{ text: touched, rank: 1 }] : []),
+		{ text: cwd, rank: 2 },
+	], width);
+
+	if (!statusRail) return [row2, row3];
+	// Statuses come in priority order, so the last ones drop first.
+	const row4 = railRow(theme, "╰", statuses.map((text, index) => ({ text, rank: -index })), [], width);
+	return [row2, row3, row4];
 }
 
 // ── extension ───────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
 	let mode: Mode = "full";
-	let style: Style = "plain";
 	let installedCtx: ExtensionContext | undefined;
 	let stopWatchingProcesses: (() => void) | undefined;
 
@@ -1237,7 +1313,7 @@ export default function (pi: ExtensionAPI) {
 				invalidate() {},
 				render(width: number): string[] {
 					if (mode === "off") return [];
-					const skin = skinFor(theme, style);
+					const skin = skinFor(theme);
 					return mode === "compact"
 						? [renderCompact(ctx, theme, skin, width, state, footerData)]
 						: renderFull(ctx, theme, skin, footerData, width, state);
@@ -1377,7 +1453,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("footer", {
-		description: "Statusline footer: /footer [full|compact|off|plain|powerline|debug]",
+		description: "Statusline footer: /footer [full|compact|off|debug]",
 		handler: async (args, ctx) => {
 			const next = args.trim().toLowerCase();
 			if (next === "debug") {
@@ -1396,15 +1472,11 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (next === "full" || next === "compact" || next === "off") {
 				mode = next;
-			} else if (next === "plain" || next === "powerline") {
-				// A style applies to the current layout, and turns the footer back on.
-				style = next;
-				if (mode === "off") mode = "full";
 			} else if (next === "") {
 				mode = mode === "off" ? "full" : "off";
 			} else {
 				ctx.ui.notify(
-					`Unknown /footer argument '${args.trim()}' — usage: /footer [full|compact|off|plain|powerline|debug]`,
+					`Unknown /footer argument '${args.trim()}' — usage: /footer [full|compact|off|debug]`,
 					"warning",
 				);
 				return;
@@ -1418,7 +1490,7 @@ export default function (pi: ExtensionAPI) {
 			} else if (state) {
 				installedCtx = undefined; // force reinstall
 				install(ctx, state);
-				ctx.ui.notify(`Statusline footer: ${mode} mode, ${style} style`, "info");
+				ctx.ui.notify(`Statusline footer: ${mode} mode`, "info");
 			}
 		},
 	});

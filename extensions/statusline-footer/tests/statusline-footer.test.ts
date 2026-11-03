@@ -25,6 +25,7 @@ import statuslineFooter, {
 	renderModelMark,
 	renderStatus,
 	renderThinking,
+	shortenPath,
 	statusHue,
 	statusPalette,
 	statusTone,
@@ -457,22 +458,22 @@ describe("statusline footer rendering", () => {
 		await harness.emit("session_start", { type: "session_start", reason: "startup" });
 
 		const lines = harness.getFooter()!.render(100);
-		expect(lines).toHaveLength(5);
+		expect(lines).toHaveLength(4);
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(100);
 		expect(lines[0]).toContain("k3");
 		expect(lines[0]).toContain("HIGH");
 		expect(lines[0]).toContain("42.5%");
-		expect(lines[1]).toContain("─");
-		expect(visibleWidth(lines[1]!)).toBe(100);
-		expect(lines[2]).toContain("$1.35");
-		expect(lines[2]).toContain("1.9k");
-		expect(lines[2]).toContain("475");
-		expect(lines[2]).toContain("950");
-		expect(lines[2]).toContain("195 think");
-		expect(lines[3]).toContain("main");
-		expect(lines[3]).toContain("1 touched");
-		expect(lines[3]).not.toContain("READY");
-		expect(lines[4]).toContain("READY");
+		// The telemetry row hangs from the bar on the rail.
+		expect(lines[1]!.startsWith(" ├ ")).toBe(true);
+		expect(lines[1]).toContain("$1.35");
+		expect(lines[1]).not.toContain("think");
+		// With room for every group, the reasoning count, the first to give way, returns.
+		const wide = harness.getFooter()!.render(200)[1]!;
+		for (const fact of ["$1.35", "1.9k", "475", "950", "195 think"]) expect(wide).toContain(fact);
+		expect(lines[2]).toContain("main");
+		expect(lines[2]).toContain("1 touched");
+		expect(lines[2]).not.toContain("READY");
+		expect(lines[3]).toContain("READY");
 		harness.getFooter()?.dispose?.();
 	});
 
@@ -497,7 +498,7 @@ describe("statusline footer rendering", () => {
 		const pending = createHarness("git-pending", "tui");
 		statuslineFooter(pending.pi);
 		await pending.emit("session_start", { type: "session_start", reason: "startup" });
-		expect(pending.getFooter()!.render(120)[3]).toContain("git …");
+		expect(pending.getFooter()!.render(120)[2]).toContain("git …");
 		expect(execFile).toHaveBeenCalledWith(
 			"git", ["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=normal"],
 			expect.objectContaining({ cwd: pending.ctx.cwd }), expect.any(Function),
@@ -509,14 +510,14 @@ describe("statusline footer rendering", () => {
 		const clean = createHarness("git-clean", "tui");
 		statuslineFooter(clean.pi);
 		await clean.emit("session_start", { type: "session_start", reason: "startup" });
-		expect(clean.getFooter()!.render(120)[3]).toContain("clean");
+		expect(clean.getFooter()!.render(120)[2]).toContain("clean");
 		clean.getFooter()?.dispose?.();
 
 		statusOutput = "?? untracked.txt\n";
 		const dirty = createHarness("git-dirty", "tui");
 		statuslineFooter(dirty.pi);
 		await dirty.emit("session_start", { type: "session_start", reason: "startup" });
-		const dirtyLine = dirty.getFooter()!.render(120)[3]!;
+		const dirtyLine = dirty.getFooter()!.render(120)[2]!;
 		expect(dirtyLine).toContain("dirty");
 		expect(dirtyLine).not.toContain("clean");
 		dirty.getFooter()?.dispose?.();
@@ -525,7 +526,7 @@ describe("statusline footer rendering", () => {
 		const unavailable = createHarness("git-unavailable", "tui");
 		statuslineFooter(unavailable.pi);
 		await unavailable.emit("session_start", { type: "session_start", reason: "startup" });
-		const unavailableLine = unavailable.getFooter()!.render(120)[3]!;
+		const unavailableLine = unavailable.getFooter()!.render(120)[2]!;
 		expect(unavailableLine).toContain("git ?");
 		expect(unavailableLine).not.toContain("clean");
 		unavailable.getFooter()?.dispose?.();
@@ -555,8 +556,8 @@ describe("statusline footer rendering", () => {
 		await harness.emit("session_start", { type: "session_start", reason: "startup" });
 
 		const lines = harness.getFooter()!.render(240);
-		const totals = lines[2]!;
-		expect(lines[2]).toContain("$1.12");
+		const totals = lines[1]!;
+		expect(lines[1]).toContain("$1.12");
 		expect(totals).toContain("112");
 		expect(totals).toContain("224");
 		expect(totals).toContain("336");
@@ -579,7 +580,7 @@ describe("statusline footer rendering", () => {
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { type: "session_start", reason: "startup" });
-		const totals = harness.getFooter()!.render(240)[2]!;
+		const totals = harness.getFooter()!.render(240)[1]!;
 		expect(totals).toContain(expected);
 		if (cacheWrite) expect(totals).not.toContain("90%");
 		harness.disposeFooter();
@@ -597,8 +598,8 @@ describe("statusline footer rendering", () => {
 		await harness.emit("session_start", { type: "session_start", reason: "startup" });
 
 		const lines = harness.getFooter()!.render(240);
-		expect(lines[2]).toContain("$0.000");
-		expect(lines[2]).not.toContain("think");
+		expect(lines[1]).toContain("$0.000");
+		expect(lines[1]).not.toContain("think");
 		harness.getFooter()?.dispose?.();
 	});
 
@@ -617,7 +618,7 @@ describe("statusline footer rendering", () => {
 
 		await harness.runCommand("footer", "full");
 		const full = harness.getFooter()!.render(80);
-		expect(full).toHaveLength(5);
+		expect(full).toHaveLength(4);
 		for (const line of full) expect(visibleWidth(line)).toBeLessThanOrEqual(80);
 		harness.getFooter()?.dispose?.();
 	});
@@ -684,20 +685,21 @@ describe("statusline footer rendering", () => {
 		try {
 			for (const width of [55, 80, 120]) {
 				const lines = harness.getFooter()!.render(width);
-				expect(lines).toHaveLength(5);
+				expect(lines).toHaveLength(4);
 				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-				expect(lines[3]).toContain("main");
-				expect(lines[3]).toContain("/tmp/");
-				expect(lines[3]).not.toContain("↻");
-				expect(lines[4]).toContain("↻ build · next 4m");
-				expect(lines[4]!.split("↻ build · next 4m")).toHaveLength(2);
-				expect(lines[4]).toContain("READY");
-				expect(lines[4]).toContain("SYNC");
+				expect(lines[2]).toContain("main");
+				expect(lines[2]).toContain("/…/");
+				expect(lines[2]).toContain("project");
+				expect(lines[2]).not.toContain("↻");
+				expect(lines[3]).toContain("↻ build · next 4m");
+				expect(lines[3]!.split("↻ build · next 4m")).toHaveLength(2);
+				expect(lines[3]).toContain("READY");
+				expect(lines[3]).toContain("SYNC");
 			}
 			harness.setStatus("loop", "↻ wait · next 4m");
-			expect(harness.getFooter()!.render(80)[4]).toContain("↻ wait · next 4m");
+			expect(harness.getFooter()!.render(80)[3]).toContain("↻ wait · next 4m");
 			for (const key of ["loop", "other", "READY"]) harness.setStatus(key);
-			expect(harness.getFooter()!.render(80)).toHaveLength(4);
+			expect(harness.getFooter()!.render(80)).toHaveLength(3);
 		} finally {
 			harness.disposeFooter();
 		}
@@ -710,7 +712,7 @@ describe("statusline footer rendering", () => {
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
-			const line = harness.getFooter()!.render(200)[4]!;
+			const line = harness.getFooter()!.render(200)[3]!;
 			expect(line.split("herder: T2 integrate · 3/5 tasks")).toHaveLength(2);
 			const order = ["research 2/5", "herder: T2", "loop build", "SYNC"].map(text => line.indexOf(text));
 			expect(order.every(index => index >= 0)).toBe(true);
@@ -731,12 +733,13 @@ describe("statusline footer rendering", () => {
 			for (const width of [60, 80, 120]) {
 				const lines = harness.getFooter()!.render(width);
 				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-				expect(lines[4]).toContain("herder: T2 integrate · 3/5 tasks");
-				expect(lines[3]).toContain("main");
-				expect(lines[3]).not.toContain("project");
+				expect(lines[3]).toContain("herder: T2 integrate · 3/5 tasks");
+				expect(lines[2]).toContain("main");
+				expect(lines[2]).toContain("/…/");
+				expect(lines[2]).toContain("project");
 			}
 			harness.setStatus("herder");
-			expect(harness.getFooter()!.render(120)[4]).not.toContain("herder:");
+			expect(harness.getFooter()!.render(120)[3]).not.toContain("herder:");
 		} finally {
 			harness.disposeFooter();
 		}
@@ -786,12 +789,12 @@ describe("statusline footer rendering", () => {
 			// Set after startup: the footer's process watcher publishes its own key then.
 			harness.setStatus(PROCESS_STATUS_KEY, "bg 1 failed");
 			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
-			let full = harness.getFooter()!.render(200)[4]!;
-			expect(full).toMatch(/^ <\w+>herder: T2 integrate/);
+			let full = harness.getFooter()!.render(200)[3]!;
+			expect(full).toMatch(/^ <borderMuted>╰ <\w+>herder: T2 integrate/);
 			expect(full).toContain("<warning>bg 1 failed");
 			expect(full).not.toContain("<error>");
 			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
-			full = harness.getFooter()!.render(200)[4]!;
+			full = harness.getFooter()!.render(200)[3]!;
 			expect(full).toContain("\u{F0CC6} ");
 			expect(full).toContain("\u{F018D} ");
 			expect(full).toContain("\u{F0431} ");
@@ -818,7 +821,7 @@ describe("statusline footer rendering", () => {
 		await harness.emit("session_start", { type: "session_start", reason: "startup" });
 
 		const lines = harness.getFooter()!.render(24);
-		expect(lines).toHaveLength(5);
+		expect(lines).toHaveLength(4);
 		expect(lines[0]).toContain("no-model");
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(24);
 		harness.getFooter()?.dispose?.();
@@ -897,16 +900,14 @@ describe("statusline footer powerline style", () => {
 		expect(legibleOn(readable, hex("#1e1e24"))).toBe(readable);
 	});
 
-	it("draws the bar as a vendor chip on theme bands and leaves telemetry rows plain", async () => {
+	it("draws the bar as a vendor chip on theme bands and leaves the rows below unfilled", async () => {
 		const harness = createHarness("powerline-full", "tui", { model: claude, isIdle: false, branch: [], theme: rgbTheme() });
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
 			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
-			await harness.runCommand("footer", "powerline");
-			expect(harness.notifications.at(-1)).toBe("Statusline footer: full mode, powerline style");
 			const lines = harness.getFooter()!.render(100);
-			// The band replaces the hairline.
+			// The bar, the telemetry and Git rows, and the READY status.
 			expect(lines).toHaveLength(4);
 			const bar = lines[0]!;
 			const chip = `${bgCode(hex("#D97757"))}${fgCode(hex("#1b1b1f"))}\x1b[1m ● \u{EC82} claude-opus-5-5 \x1b[22m`;
@@ -944,7 +945,6 @@ describe("statusline footer powerline style", () => {
 			await harness.emit("session_start", { reason: "startup" });
 			try {
 				await harness.runCommand("footer", mode);
-				await harness.runCommand("footer", "powerline");
 				for (const nerdFonts of ["0", "1"]) {
 					vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
 					for (let width = 1; width <= 160; width++) {
@@ -983,7 +983,6 @@ describe("statusline footer powerline style", () => {
 		await harness.emit("session_start", { reason: "startup" });
 		try {
 			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
-			await harness.runCommand("footer", "powerline");
 			for (const width of [40, 56]) {
 				const bar = harness.getFooter()!.render(width)[0]!;
 				const cut = bar.indexOf("...");
@@ -1007,11 +1006,12 @@ describe("statusline footer powerline style", () => {
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
-			await harness.runCommand("footer", "powerline");
-			// No band in the first theme: the plain bar and its hairline.
-			expect(harness.getFooter()!.render(100)).toHaveLength(5);
-			current = rgbTheme();
+			// No band in the first theme: a flat bar over the same rows.
 			let lines = harness.getFooter()!.render(100);
+			expect(lines).toHaveLength(4);
+			expect(lines[0]).not.toContain("\x1b[48;");
+			current = rgbTheme();
+			lines = harness.getFooter()!.render(100);
 			expect(lines).toHaveLength(4);
 			expect(lines[0]).toContain(bgCode(hex(SURFACE)));
 			current = rgbTheme({ borderMuted: "#aa3355" }, "#20304a");
@@ -1035,7 +1035,6 @@ describe("statusline footer powerline style", () => {
 		await harness.emit("session_start", { reason: "startup" });
 		try {
 			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
-			await harness.runCommand("footer", "powerline");
 			const bar = harness.getFooter()!.render(120)[0]!;
 			expect(bar).toContain("\x1b[48;5;254m");
 			expect(bar).not.toContain("\x1b[48;2;");
@@ -1053,36 +1052,166 @@ describe("statusline footer powerline style", () => {
 		}
 	});
 
-	it("falls back to the plain bar when the theme's band is the terminal default", async () => {
+	describe("detail rows", () => {
+		// Distinct colors for the tokens the rows use, so each assertion can name its token.
+		const colors = { toolDiffAdded: "#2e9e4f", toolDiffRemoved: "#d0453a", syntaxFunction: "#3fa7b5" };
+		const tones: Record<string, string> = {
+			text: "#e0e0e0", muted: "#a0a0a8", dim: DIM, borderMuted: "#5c5d63", success: "#7dcea0", warning: "#f5b041", ...colors,
+		};
+		const tone = (token: string) => fgCode(hex(tones[token]!));
+		const tagged = rgbTheme(colors);
+		const activeBranch = [
+			{ type: "message", message: { role: "user", timestamp: Date.now() - 3_600_000 } },
+			{ type: "message", message: { role: "user", timestamp: Date.now() } },
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					provider: "anthropic",
+					usage: { input: 65_200, output: 31_400, cacheRead: 120_000, cacheWrite: 0, reasoning: 12_100, cost: { total: 0.75 } },
+					content: [{ type: "toolCall", arguments: { path: "src/a.ts" } }, { type: "toolCall", arguments: { path: "src/b.ts" } }],
+				},
+			},
+		];
+		const strip = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
+		// The icon that marks each group, with the groups in the order they give way.
+		const nerd = { think: "think", tools: "\u{F05B7}", activity: "\u{F0368}", tokens: "\u{F005E}", latency: "\u{F051B}", cost: "\u{F01C1}" };
+
+		it("hangs the telemetry, Git, and status rows from the bar on a rail", async () => {
+			const harness = createHarness("detail-rail", "tui", {
+				model: claude,
+				branch: activeBranch,
+				extensionStatuses: [],
+				keyedExtensionStatuses: { herder: "herder: T2 integrate · 3/5 tasks", loop: "↻ build · next 4m" },
+				theme: tagged,
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			try {
+				vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+				let lines = harness.getFooter()!.render(160);
+				expect(lines).toHaveLength(4);
+				expect(lines.slice(1).map(line => strip(line).slice(0, 3))).toEqual([" ├ ", " ├ ", " ╰ "]);
+				const [, telemetry, git, statuses] = lines as [string, string, string, string];
+				// Chevrons point the way the bar's arrows do on each side.
+				expect(telemetry).toContain(`${tone("borderMuted")}\u{E0B1}`);
+				expect(telemetry).toContain(`${tone("borderMuted")}\u{E0B3}`);
+				expect(statuses).toContain(`${tone("borderMuted")}\u{E0B1}`);
+				// Icons carry the hue, values stay quiet, and the cost leads.
+				const item = (hue: string, icon: string, value: string, valueTone = "muted") =>
+					`${tone(hue)}\x1b[1m${icon}\x1b[22m\x1b[39m ${tone(valueTone)}${value}`;
+				expect(telemetry).toContain(item("warning", nerd.cost, "$0.750", "text"));
+				expect(telemetry).toContain(`${tone("dim")}\x1b[2m  $0.375/turn`);
+				expect(telemetry).toContain(item("toolDiffAdded", nerd.tokens, "65k"));
+				expect(telemetry).toContain(item("syntaxFunction", nerd.tools, "2"));
+				// 120k of 185k input tokens were cached: 65%, below the 70% that rates success.
+				expect(telemetry).toContain(`${tone("warning")}65%`);
+				expect(strip(telemetry)).not.toContain("(~");
+				expect(strip(git)).toContain("main");
+				expect(strip(git)).toContain("2 touched");
+				expect(strip(statuses)).toContain("↻ build · next 4m");
+				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(160);
+
+				for (const key of ["herder", "loop"]) harness.setStatus(key);
+				lines = harness.getFooter()!.render(160);
+				expect(lines).toHaveLength(3);
+				expect(strip(lines[2]!).slice(0, 3)).toBe(" ╰ ");
+
+				vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+				const plainFonts = harness.getFooter()!.render(160)[1]!;
+				expect(plainFonts).toContain(`${tone("borderMuted")}│`);
+				expect(plainFonts).not.toMatch(/[\u{E0B1}\u{E0B3}]/u);
+			} finally {
+				vi.unstubAllEnvs();
+				harness.disposeFooter();
+			}
+		});
+
+		it("drops whole groups, least important first, and shortens the path from the middle", async () => {
+			const harness = createHarness("detail-fit", "tui", {
+				model: claude,
+				branch: activeBranch,
+				extensionStatuses: [],
+				cwd: `/tmp/${"deep/".repeat(12)}project`,
+				theme: tagged,
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			try {
+				vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+				const narrowest: Record<string, number> = {};
+				for (let width = 200; width >= 30; width--) {
+					const [, telemetry, git] = harness.getFooter()!.render(width).map(strip) as [string, string, string, string];
+					expect(visibleWidth(telemetry), `${width}`).toBeLessThanOrEqual(width);
+					expect(visibleWidth(git), `${width}`).toBeLessThanOrEqual(width);
+					// Groups give way whole; nothing is cut mid-word.
+					expect(telemetry, `${width}`).not.toContain("...");
+					expect(git, `${width}`).not.toContain("...");
+					// Below 40 columns the path no longer fits beside the branch.
+					if (width >= 40) expect(git.trimEnd().endsWith("/project"), `${width}`).toBe(true);
+					for (const [group, marker] of Object.entries(nerd)) if (telemetry.includes(marker)) narrowest[group] = width;
+				}
+				expect(narrowest.cost).toBe(30);
+				const order = ["think", "tools", "activity", "tokens", "latency", "cost"].map(group => narrowest[group]!);
+				expect(order).toEqual([...order].sort((a, b) => b - a));
+				expect(new Set(order).size).toBe(order.length);
+				// The file count stays while the path keeps twelve columns, then gives way to it.
+				const roomy = strip(harness.getFooter()!.render(80)[2]!);
+				expect(roomy).toContain("/…/");
+				expect(roomy).toContain("2 touched");
+				const narrow = strip(harness.getFooter()!.render(44)[2]!);
+				expect(narrow).toContain(" /…/deep/deep/project");
+				expect(narrow).not.toContain("touched");
+			} finally {
+				vi.unstubAllEnvs();
+				harness.disposeFooter();
+			}
+		});
+
+		it("shortens a path from the middle and keeps its last directory", () => {
+			expect(shortenPath("~/a/b/c/project", 20)).toBe("~/a/b/c/project");
+			expect(shortenPath("~/a/b/c/project", 14)).toBe("~/…/c/project");
+			expect(shortenPath("/tmp/deep/deep/project", 12)).toBe("/…/project");
+			expect(shortenPath("~/深い/階層/プロジェクト", 16)).toBe("~/…/プロジェクト");
+			expect(shortenPath("/tmp/averyverylongprojectname", 8)).toBe("averyve…");
+			expect(shortenPath("~/x/プロジェクト", 6)).toBe("プロ…");
+			for (const max of [1, 4, 9]) expect(visibleWidth(shortenPath("~/x/averyverylongprojectname", max))).toBeLessThanOrEqual(max);
+		});
+	});
+
+	it("keeps the rail rows under a flat bar when the theme's band is the terminal default", async () => {
 		const harness = createHarness("powerline-default-surface", "tui", { model: claude, theme: rgbTheme({}, null) });
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
-			await harness.runCommand("footer", "powerline");
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
 			const lines = harness.getFooter()!.render(100);
-			expect(lines).toHaveLength(5);
-			expect(lines[1]).toContain("─");
+			expect(lines).toHaveLength(4);
 			for (const line of lines) expect(line).not.toContain("\x1b[48;");
+			expect(lines[0]).toContain("claude-opus-5-5");
+			expect(lines[0]).toContain("42.5%");
+			expect(lines[0]).not.toMatch(/[\u{E0B0}\u{E0B2}]/u);
+			const rails = lines.slice(1).map(line => line.replace(/\x1b\[[0-9;]*m/g, "").slice(0, 3));
+			expect(rails).toEqual([" ├ ", " ├ ", " ╰ "]);
 		} finally {
+			vi.unstubAllEnvs();
 			harness.disposeFooter();
 		}
 	});
 
-	it("turns the footer back on with a style and switches styles in place", async () => {
+	it("has one look, so /footer rejects the old style arguments", async () => {
 		const harness = createHarness("powerline-command", "tui", { model: claude, theme: rgbTheme() });
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
-			await harness.runCommand("footer", "off");
-			await harness.runCommand("footer", "powerline");
-			expect(harness.getFooter()!.render(100)).toHaveLength(4);
 			await harness.runCommand("footer", "compact");
+			expect(harness.notifications.at(-1)).toBe("Statusline footer: compact mode");
 			expect(harness.getFooter()!.render(100)[0]).toContain("\x1b[48;");
-			await harness.runCommand("footer", "plain");
-			expect(harness.notifications.at(-1)).toBe("Statusline footer: compact mode, plain style");
-			expect(harness.getFooter()!.render(100)[0]).not.toContain("\x1b[48;");
-			await harness.runCommand("footer", "bands");
-			expect(harness.notifications.at(-1)).toContain("usage: /footer [full|compact|off|plain|powerline|debug]");
+			for (const style of ["plain", "powerline"]) {
+				await harness.runCommand("footer", style);
+				expect(harness.notifications.at(-1)).toBe(`Unknown /footer argument '${style}' — usage: /footer [full|compact|off|debug]`);
+			}
+			expect(harness.getFooter()!.render(100)).toHaveLength(1);
 		} finally {
 			harness.disposeFooter();
 		}
@@ -1140,16 +1269,16 @@ describe("statusline footer pi-processes compatibility", () => {
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
-			expect(harness.getFooter()!.render(240)[4]).toContain("bg 1 running");
+			expect(harness.getFooter()!.render(240)[3]).toContain("bg 1 running");
 			core.update([{ status: "exited", success: false }, { status: "running" }]);
 			expect(harness.ctx.ui.setStatus).toHaveBeenLastCalledWith(PROCESS_STATUS_KEY, "bg 1 running · 1 failed");
-			expect(harness.getFooter()!.render(240)[4]).toContain("bg 1 running · 1 failed");
+			expect(harness.getFooter()!.render(240)[3]).toContain("bg 1 running · 1 failed");
 			core.update([{ status: "exited", success: true }]);
-			expect(harness.getFooter()!.render(240)[4]).toContain("bg 1 done");
+			expect(harness.getFooter()!.render(240)[3]).toContain("bg 1 done");
 			core.update([]);
-			expect(harness.getFooter()!.render(240)[4]).not.toContain("bg ");
+			expect(harness.getFooter()!.render(240)[3]).not.toContain("bg ");
 			core.update({ invalid: true });
-			expect(harness.getFooter()!.render(240)[4]).not.toContain("bg ");
+			expect(harness.getFooter()!.render(240)[3]).not.toContain("bg ");
 		} finally {
 			harness.disposeFooter();
 			await harness.emit("session_shutdown", { reason: "quit" });
@@ -1170,10 +1299,10 @@ describe("statusline footer pi-processes compatibility", () => {
 			expect(harness.ctx.ui.setStatus).toHaveBeenCalledTimes(publications);
 			core.update([{ status: "terminating" }], false);
 			await vi.advanceTimersByTimeAsync(2_000);
-			expect(harness.getFooter()!.render(120)[4]).toContain("bg 1 stopping");
+			expect(harness.getFooter()!.render(120)[3]).toContain("bg 1 stopping");
 			core.update([{ status: "terminate_timeout" }], false);
 			await vi.advanceTimersByTimeAsync(2_000);
-			expect(harness.getFooter()!.render(120)[4]).toContain("bg 1 stuck");
+			expect(harness.getFooter()!.render(120)[3]).toContain("bg 1 stuck");
 			core.update([{ status: "killed" }]);
 			expect(vi.getTimerCount()).toBe(1);
 			core.update([{ status: "running" }]);
@@ -1202,9 +1331,9 @@ describe("statusline footer pi-processes compatibility", () => {
 		await harness.emit("session_start", { reason: "startup" });
 		try {
 			const full = harness.getFooter()!.render(55);
-			expect(full[3]).toContain("main");
-			expect(full[4]).toContain("bg 1 running");
-			expect(full[4]!.split("bg 1 running")).toHaveLength(2);
+			expect(full[2]).toContain("main");
+			expect(full[3]).toContain("bg 1 running");
+			expect(full[3]!.split("bg 1 running")).toHaveLength(2);
 			await harness.runCommand("footer", "compact");
 			for (const width of [0, 1, 12, 24, 40, 80, 120]) {
 				const line = harness.getFooter()!.render(width)[0]!;
@@ -1261,7 +1390,7 @@ describe("statusline footer pi-processes compatibility", () => {
 			await child.emit("session_shutdown", { reason: "quit" });
 			expect(child.ctx.ui.setStatus).not.toHaveBeenCalled();
 			core.update([{ status: "exited", success: true }]);
-			expect(root.getFooter()!.render(120)[4]).toContain("bg 1 done");
+			expect(root.getFooter()!.render(120)[3]).toContain("bg 1 done");
 			root.disposeFooter();
 			await root.emit("session_shutdown", { reason: "reload" });
 			expect(root.ctx.ui.setStatus).toHaveBeenLastCalledWith(PROCESS_STATUS_KEY, undefined);
@@ -1272,7 +1401,7 @@ describe("statusline footer pi-processes compatibility", () => {
 			core.list.mockClear();
 			core.update([{ status: "running" }]);
 			expect(core.list).toHaveBeenCalledTimes(1);
-			expect(root.getFooter()!.render(120)[4]).toContain("bg 1 running");
+			expect(root.getFooter()!.render(120)[3]).toContain("bg 1 running");
 		} finally {
 			root.disposeFooter();
 			await root.emit("session_shutdown", { reason: "quit" });
@@ -1304,7 +1433,7 @@ describe("statusline footer pricing", () => {
 			await harness.emit("session_start", { reason: "startup" });
 			await harness.runCommand("footer", mode);
 			const lines = harness.getFooter()!.render(240);
-			const priceLine = mode === "full" ? lines[2]! : lines[0]!;
+			const priceLine = mode === "full" ? lines[1]! : lines[0]!;
 			expect(priceLine).toContain("price unavailable");
 			expect(priceLine).not.toContain("$1.25");
 			expect(priceLine).not.toContain("/turn");
@@ -1324,7 +1453,7 @@ describe("statusline footer pricing", () => {
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
-		const line = harness.getFooter()!.render(240)[2]!;
+		const line = harness.getFooter()!.render(240)[1]!;
 		expect(line).toContain("price unavailable");
 		expect(line).not.toContain("$2.00");
 		harness.disposeFooter();
@@ -1336,8 +1465,8 @@ describe("statusline footer pricing", () => {
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
-		expect(harness.getFooter()!.render(240)[2]).toContain("$0.000");
-		expect(harness.getFooter()!.render(240)[2]).not.toContain("price unavailable");
+		expect(harness.getFooter()!.render(240)[1]).toContain("$0.000");
+		expect(harness.getFooter()!.render(240)[1]).not.toContain("price unavailable");
 		harness.disposeFooter();
 	});
 
@@ -1353,7 +1482,7 @@ describe("statusline footer pricing", () => {
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
-		const full = harness.getFooter()!.render(240)[2]!;
+		const full = harness.getFooter()!.render(240)[1]!;
 		expect(full).toContain("~$0.750");
 		expect(full).toContain("/turn");
 		await harness.runCommand("footer", "compact");
@@ -1368,7 +1497,7 @@ describe("statusline footer pricing", () => {
 		const harness = createHarness(`pricing-${source}`, "tui", { branch: [entry] });
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
-		expect(harness.getFooter()!.render(240)[2]).toContain("price unavailable");
+		expect(harness.getFooter()!.render(240)[1]).toContain("price unavailable");
 		harness.disposeFooter();
 	});
 
@@ -1379,7 +1508,7 @@ describe("statusline footer pricing", () => {
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
-		expect(harness.getFooter()!.render(240)[2]).toContain("price unavailable");
+		expect(harness.getFooter()!.render(240)[1]).toContain("price unavailable");
 		harness.disposeFooter();
 	});
 
@@ -1389,8 +1518,8 @@ describe("statusline footer pricing", () => {
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
-		expect(harness.getFooter()!.render(240)[2]).toContain("$0.000");
-		expect(harness.getFooter()!.render(240)[2]).not.toContain("price unavailable");
+		expect(harness.getFooter()!.render(240)[1]).toContain("$0.000");
+		expect(harness.getFooter()!.render(240)[1]).not.toContain("price unavailable");
 		harness.disposeFooter();
 	});
 
@@ -1400,7 +1529,7 @@ describe("statusline footer pricing", () => {
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
-		expect(harness.getFooter()!.render(240)[2]).toContain("~$0.000");
+		expect(harness.getFooter()!.render(240)[1]).toContain("~$0.000");
 		harness.disposeFooter();
 	});
 
@@ -1414,7 +1543,7 @@ describe("statusline footer pricing", () => {
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "resume" });
-		const line = harness.getFooter()!.render(240)[2]!;
+		const line = harness.getFooter()!.render(240)[1]!;
 		expect(line).toContain(pricing === "unavailable" ? "price unavailable" : "~$0.250");
 		harness.disposeFooter();
 	});
@@ -1425,7 +1554,7 @@ describe("statusline footer pricing", () => {
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
-		expect(harness.getFooter()!.render(240)[2]).toContain("price unavailable");
+		expect(harness.getFooter()!.render(240)[1]).toContain("price unavailable");
 		await harness.runCommand("footer", "compact");
 		expect(harness.getFooter()!.render(240)[0]).toContain("price unavailable");
 		harness.disposeFooter();
@@ -1435,7 +1564,7 @@ describe("statusline footer pricing", () => {
 		const harness = createHarness("pricing-model-switch", "tui", { model: freeModel, branch: [assistant("other", 1)] });
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
-		const full = () => harness.getFooter()!.render(240)[2]!;
+		const full = () => harness.getFooter()!.render(240)[1]!;
 		expect(full()).toContain("$1.00");
 		harness.ctx.model = { ...freeModel, id: "unpriced", provider: "magpie", magpiePricing: "unavailable" } as unknown as typeof harness.ctx.model;
 		expect(full()).toContain("price unavailable");
@@ -1456,7 +1585,7 @@ describe("statusline footer pricing", () => {
 			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
 			for (const mode of ["full", "compact"]) {
 				await harness.runCommand("footer", mode);
-				const priceLine = harness.getFooter()!.render(240)[mode === "full" ? 2 : 0]!;
+				const priceLine = harness.getFooter()!.render(240)[mode === "full" ? 1 : 0]!;
 				expect(priceLine).toContain("$1.00");
 				expect(priceLine).not.toMatch(/\$\s+\$1\.00/);
 			}
