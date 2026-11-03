@@ -12,6 +12,7 @@
  *   ────────────────────────────────────────────
  *   μ 4.2s  28.9 tok/s                    $0.75  96% cache  9 turns
  *   main  +42 −17                         5 touched  ~/code/my-project
+ *   herder: T2 integrate · 3/5 tasks  ↻ build · next 4m   (while any status is set)
  *
  * Compact mode:
  *   model  HIGH            ▉▉▉░░░  42%  $1.23  12m
@@ -181,6 +182,103 @@ export function hairline(width: number, theme?: Theme): string {
 
 function cluster(parts: Array<string | false | null | undefined>, sep: string): string {
 	return parts.filter((part): part is string => Boolean(part)).join(sep);
+}
+
+// ── extension statuses ─────────────────────────────────────────────
+// Each extension keeps one identity hue for its icon and leading segment;
+// the details stay muted. Hues come from the theme but never sit near its
+// error or warning color, so a routine status cannot read as a failure.
+// Segments that report a problem or wait on the user use the warning color
+// (bold for problems), never red; whole words only, so a loop named
+// "fix-errors" stays calm. A publisher that styles its own text keeps it.
+
+const STATUS_PROBLEM = /(?:^|[\s:])(?:fail(?:ed|ure|s)?|errors?|stuck|blocked|not_met)(?=$|[\s,.;:)])/i;
+const STATUS_ATTENTION = /(?:^|[\s:])(?:paused|awaiting|stopping|killed|for you)(?=$|[\s,.;:)])/i;
+
+export function statusTone(segment: string): "problem" | "attention" | "calm" {
+	if (STATUS_PROBLEM.test(segment)) return "problem";
+	if (STATUS_ATTENTION.test(segment)) return "attention";
+	return "calm";
+}
+
+// Known extensions keep a fixed slot so their color does not move as others come and go.
+const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "superagent", "impeccable-live"];
+const STATUS_ICONS: Record<string, string> = {
+	autoresearch: "\u{F0093}", // md-flask
+	herder: "\u{F0CC6}", // md-sheep
+	loop: "\u{F04E6}", // md-sync
+	[PROCESS_STATUS_KEY]: "\u{F018D}", // md-console
+	subagents: "\u{F06A9}", // md-robot
+	superagent: "\u{F0913}", // md-ticket-outline
+	"impeccable-live": "\u{F03D8}", // md-palette
+};
+const STATUS_DEFAULT_ICON = "\u{F0431}"; // md-puzzle
+const STATUS_HUES: ThemeToken[] = [
+	"mdLink", "syntaxVariable", "success", "syntaxType", "syntaxFunction",
+	"syntaxString", "mdCode", "thinkingLow", "border", "bashMode",
+];
+
+function hue({ r, g, b }: Rgb): number | null {
+	const max = Math.max(r, g, b);
+	const delta = max - Math.min(r, g, b);
+	if (delta < 40) return null; // greys carry no identity
+	const h = max === r ? ((g - b) / delta) % 6 : max === g ? (b - r) / delta + 2 : (r - g) / delta + 4;
+	return (h * 60 + 360) % 360;
+}
+
+function hueDistance(a: number, b: number): number {
+	const d = Math.abs(a - b) % 360;
+	return Math.min(d, 360 - d);
+}
+
+const paletteCache = new WeakMap<Theme, ThemeToken[]>();
+
+/** Distinct theme hues away from red and from the theme's error and warning colors. */
+export function statusPalette(theme: Theme): ThemeToken[] {
+	const cached = paletteCache.get(theme);
+	if (cached) return cached;
+	const avoid = (["error", "warning"] as const)
+		.map(token => resolveThemeRgb(theme, token))
+		.map(rgb => rgb && hue(rgb))
+		.filter((h): h is number => h !== null);
+	const taken: number[] = [];
+	const palette: ThemeToken[] = [];
+	for (const token of STATUS_HUES) {
+		const rgb = resolveThemeRgb(theme, token);
+		// A theme without truecolor cannot be inspected; trust the token's role.
+		if (!rgb) { palette.push(token); continue; }
+		const h = hue(rgb);
+		if (h === null || h >= 330 || h <= 20) continue;
+		if (avoid.some(a => hueDistance(a, h) < 35) || taken.some(t => hueDistance(t, h) < 25)) continue;
+		taken.push(h);
+		palette.push(token);
+	}
+	if (!palette.length) palette.push("muted");
+	paletteCache.set(theme, palette);
+	return palette;
+}
+
+export function statusHue(theme: Theme, key: string): ThemeToken {
+	const palette = statusPalette(theme);
+	let slot = STATUS_ORDER.indexOf(key);
+	if (slot < 0) slot = [...key].reduce((sum, char) => (sum * 31 + char.codePointAt(0)!) >>> 0, 7);
+	return palette[slot % palette.length]!;
+}
+
+export function renderStatus(theme: Theme, text: string, key = "", withIcon = false): string {
+	if (text.includes("\x1b[")) return text;
+	const identity = statusHue(theme, key);
+	// A status that leads with its own symbol (such as Loop's ↻) needs no second icon.
+	const icon = withIcon && /^[\p{L}\p{N}]/u.test(text)
+		? `${theme.fg(identity, STATUS_ICONS[key] ?? STATUS_DEFAULT_ICON)} `
+		: "";
+	return icon + text.split(/( · |, )/).map((part, index) => {
+		if (index % 2) return theme.fg("dim", part);
+		const tone = statusTone(part);
+		if (tone === "problem") return theme.fg("warning", theme.bold(part));
+		if (tone === "attention") return theme.fg("warning", part);
+		return theme.fg(index === 0 ? identity : "muted", part);
+	}).join("");
 }
 
 // ── session stats ───────────────────────────────────────────────────
@@ -704,7 +802,7 @@ function renderIdentityRow(
 	] : [];
 	const context = renderContext(theme, usage, barWidth, s.compactions, set.compact);
 	const right = cluster([context, ...tail], "  ");
-	const loop = compactMode && workflowStatus ? theme.fg("accent", workflowStatus) : "";
+	const loop = compactMode && workflowStatus ? workflowStatus : "";
 	if (loop && visibleWidth(left) + visibleWidth(loop) + visibleWidth(right) + 5 <= width) {
 		return alignRow(cluster([left, loop], "  "), right, width);
 	}
@@ -736,8 +834,11 @@ function renderCompact(
 	footerData: ReadonlyFooterDataProvider,
 ): string {
 	const statuses = footerData.getExtensionStatuses();
-	return renderIdentityRow(ctx, theme, width, state, collectStats(ctx, state), true,
-		cluster([statuses.get("autoresearch") ?? statuses.get("herder") ?? statuses.get("loop"), statuses.get(PROCESS_STATUS_KEY)], "  "));
+	const workflowKey = ["autoresearch", "herder", "loop"].find((key) => statuses.get(key));
+	return renderIdentityRow(ctx, theme, width, state, collectStats(ctx, state), true, cluster([
+		workflowKey && renderStatus(theme, statuses.get(workflowKey)!, workflowKey),
+		statuses.get(PROCESS_STATUS_KEY) && renderStatus(theme, statuses.get(PROCESS_STATUS_KEY)!, PROCESS_STATUS_KEY),
+	], "  "));
 }
 
 function ttftColor(ms: number): "success" | "warning" | "error" {
@@ -818,13 +919,7 @@ function renderFull(
 			: gitStatus === "unavailable"
 				? theme.fg("error", "git ?")
 				: theme.fg("dim", "git …");
-	const extensionStatuses = footerData.getExtensionStatuses();
-	const workflowKeys = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY];
-	const workflowStatuses = workflowKeys.map(key => extensionStatuses.get(key)).filter(Boolean);
-	const statuses = [...extensionStatuses.entries()]
-		.filter(([key, status]) => !workflowKeys.includes(key) && Boolean(status))
-		.map(([, status]) => theme.fg("accent", status));
-	const gitBase = cluster([
+	const gitLeft = cluster([
 		branch
 			? theme.fg(gitColor, `${glyph(theme, set.branch, gitColor)} ${branch}`)
 			: theme.fg("dim", `${glyph(theme, set.branch)} no git`),
@@ -833,18 +928,24 @@ function renderFull(
 			? theme.fg("success", `↑${state.gitStat.ahead}`) + " " + theme.fg("warning", `↓${state.gitStat.behind}`)
 			: "",
 	], sep);
-	const workflow = workflowStatuses.map(status => theme.fg("accent", status!));
-	const gitLeft = cluster([gitBase, ...workflow, ...statuses], sep);
 	const fileCount = s.files > 0 ? theme.fg("dim", `${glyph(theme, set.file)} ${s.files} touched`) : "";
 	const cwd = theme.fg("dim", `${glyph(theme, set.cwd)} ${formatPath(ctx.cwd)}`);
-	// Reserve room for the first workflow status before a long path consumes the Git row.
-	const gitRight = cluster([fileCount, cwd], sep);
-	const workflowFits = workflow.length > 0 && visibleWidth(cluster([gitBase, workflow[0]], sep)) + 3 <= width;
-	const line3 = alignRow(gitLeft, workflowFits
-		? truncateToWidth(gitRight, Math.max(0, width - Math.min(visibleWidth(gitLeft), width - 3) - 3))
-		: gitRight, width);
+	// A long directory path yields to the branch and working-tree state.
+	const gitRight = truncateToWidth(cluster([fileCount, cwd], sep), Math.max(0, width - Math.min(visibleWidth(gitLeft), width - 3) - 3));
+	const line3 = alignRow(gitLeft, gitRight, width);
 
-	return [line1, hairline(width, theme), line2, line3];
+	// Extension statuses get their own row, present only while one is published:
+	// workflows first (research, Herder, Loop, processes), then the rest.
+	const extensionStatuses = footerData.getExtensionStatuses();
+	const workflowKeys = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY];
+	const statusRow = cluster([
+		...workflowKeys.map((key): [string, string | undefined] => [key, extensionStatuses.get(key)]),
+		...[...extensionStatuses.entries()].filter(([key]) => !workflowKeys.includes(key)),
+	].map(([key, status]) => status && renderStatus(theme, status, key, hasNerdFonts())), sep);
+
+	const lines = [line1, hairline(width, theme), line2, line3];
+	if (statusRow) lines.push(alignRow(statusRow, "", width));
+	return lines;
 }
 
 // ── extension ───────────────────────────────────────────────────────

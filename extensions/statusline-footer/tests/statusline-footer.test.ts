@@ -16,8 +16,13 @@ import statuslineFooter, {
 	parseGitAheadBehind,
 	parseGitShortstat,
 	parseGitStatus,
+	hexFg,
 	rainbow,
+	renderStatus,
 	renderThinking,
+	statusHue,
+	statusPalette,
+	statusTone,
 } from "../index.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
@@ -46,6 +51,7 @@ type HarnessOptions = {
 	isIdle?: boolean;
 	hasPendingMessages?: boolean;
 	events?: ExtensionAPI["events"];
+	theme?: { fg: (token: string, text: string) => string; bold: (text: string) => string };
 };
 
 function createHarness(sessionId: string, mode: "tui" | "print", options: HarnessOptions = {}) {
@@ -72,7 +78,7 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 		getGitBranch: () => options.gitBranch ?? "main",
 		getExtensionStatuses: () => extensionStatuses,
 	};
-	const theme = {
+	const theme = options.theme ?? {
 		fg: (_token: string, text: string) => text,
 		bold: (text: string) => text,
 	};
@@ -206,6 +212,37 @@ describe("statusline footer visual language", () => {
 		expect(painted).toContain("\x1b[38;2;");
 		expect(painted.endsWith("\x1b[0m")).toBe(true);
 		expect(visibleWidth(painted)).toBe(3);
+	});
+
+	it("gives statuses an identity hue and marks problems in warning, never red", () => {
+		const theme = { fg: (token: string, text: string) => `<${token}>${text}`, bold: (text: string) => `*${text}*` } as unknown as Parameters<typeof renderStatus>[0];
+		const herder = statusHue(theme, "herder");
+		expect(renderStatus(theme, "herder: T2 integrate · 3/5 tasks", "herder")).toBe(`<${herder}>herder: T2 integrate<dim> · <muted>3/5 tasks`);
+		expect(renderStatus(theme, "bg 2 running · 1 failed", PROCESS_STATUS_KEY))
+			.toBe(`<${statusHue(theme, PROCESS_STATUS_KEY)}>bg 2 running<dim> · <warning>*1 failed*`);
+		expect(renderStatus(theme, "↻ build · paused", "loop")).toBe(`<${statusHue(theme, "loop")}>↻ build<dim> · <warning>paused`);
+		expect(renderStatus(theme, "\x1b[32mpainted\x1b[0m", "x")).toBe("\x1b[32mpainted\x1b[0m");
+		expect(new Set(["autoresearch", "herder", "loop", PROCESS_STATUS_KEY].map(key => statusHue(theme, key))).size).toBe(4);
+		expect(statusHue(theme, "custom")).toBe(statusHue(theme, "custom"));
+		for (const segment of ["1 failed", "1 stuck", "state error", "herder: verified not_met", "verified blocked"]) {
+			expect(statusTone(segment)).toBe("problem");
+		}
+		for (const segment of ["paused", "awaiting approval", "1 for you", "1 stopping", "1 killed"]) {
+			expect(statusTone(segment)).toBe("attention");
+		}
+		for (const segment of ["↻ fix-errors", "herder: verified met", "next 4m", "waiting", "superagent: on", "2 working"]) {
+			expect(statusTone(segment)).toBe("calm");
+		}
+	});
+
+	it("leaves red and warning-like theme hues out of the status palette", () => {
+		const colors: Record<string, string> = {
+			error: "#FF5252", warning: "#FFB300", mdLink: "#00897B", syntaxVariable: "#7E57C2", success: "#00C853",
+			syntaxType: "#E91E63", syntaxFunction: "#00897B", syntaxString: "#FF6F00", mdCode: "#B8B0C0",
+			thinkingLow: "#1DE9B6", border: "#AD1457", bashMode: "#2196F3",
+		};
+		const theme = { fg: (token: string, text: string) => `${hexFg(colors[token] ?? "#808080", "")}${text}` } as unknown as Parameters<typeof statusPalette>[0];
+		expect(statusPalette(theme)).toEqual(["mdLink", "syntaxVariable", "success", "bashMode"]);
 	});
 
 	it("abbreviates the home directory with a portable tilde", () => {
@@ -380,13 +417,13 @@ describe("statusline footer rendering", () => {
 		},
 	];
 
-	it("renders four width-bounded full-mode lines with representative facts", async () => {
+	it("renders width-bounded full-mode lines with representative facts", async () => {
 		const harness = createHarness("render-full-session", "tui", { branch, cwd: "/tmp/project" });
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { type: "session_start", reason: "startup" });
 
 		const lines = harness.getFooter()!.render(100);
-		expect(lines).toHaveLength(4);
+		expect(lines).toHaveLength(5);
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(100);
 		expect(lines[0]).toContain("k3");
 		expect(lines[0]).toContain("HIGH");
@@ -399,8 +436,9 @@ describe("statusline footer rendering", () => {
 		expect(lines[2]).toContain("950");
 		expect(lines[2]).toContain("195 think");
 		expect(lines[3]).toContain("main");
-		expect(lines[3]).toContain("READY");
 		expect(lines[3]).toContain("1 touched");
+		expect(lines[3]).not.toContain("READY");
+		expect(lines[4]).toContain("READY");
 		harness.getFooter()?.dispose?.();
 	});
 
@@ -545,7 +583,7 @@ describe("statusline footer rendering", () => {
 
 		await harness.runCommand("footer", "full");
 		const full = harness.getFooter()!.render(80);
-		expect(full).toHaveLength(4);
+		expect(full).toHaveLength(5);
 		for (const line of full) expect(visibleWidth(line)).toBeLessThanOrEqual(80);
 		harness.getFooter()?.dispose?.();
 	});
@@ -602,7 +640,7 @@ describe("statusline footer rendering", () => {
 		}
 	});
 
-	it("keeps loop and generic statuses visible ahead of a long cwd in full mode", async () => {
+	it("gives loop and generic statuses their own row beside a long cwd in full mode", async () => {
 		const harness = createHarness("full-loop-status", "tui", {
 			cwd: `/tmp/${"深い階層/".repeat(30)}project`,
 			keyedExtensionStatuses: { loop: "↻ build · next 4m", other: "SYNC" },
@@ -612,30 +650,33 @@ describe("statusline footer rendering", () => {
 		try {
 			for (const width of [55, 80, 120]) {
 				const lines = harness.getFooter()!.render(width);
+				expect(lines).toHaveLength(5);
 				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-				expect(lines[3]).toContain("↻ build · next 4m");
-				expect(lines[3]!.split("↻ build · next 4m")).toHaveLength(2);
-				expect(lines[3]).toContain("READY");
-				expect(lines[3]).toContain("SYNC");
 				expect(lines[3]).toContain("main");
-				expect(lines[3]).not.toContain("project");
+				expect(lines[3]).toContain("/tmp/");
+				expect(lines[3]).not.toContain("↻");
+				expect(lines[4]).toContain("↻ build · next 4m");
+				expect(lines[4]!.split("↻ build · next 4m")).toHaveLength(2);
+				expect(lines[4]).toContain("READY");
+				expect(lines[4]).toContain("SYNC");
 			}
-			expect(harness.getFooter()!.render(240)[3]).toContain("/tmp/");
 			harness.setStatus("loop", "↻ wait · next 4m");
-			expect(harness.getFooter()!.render(80)[3]).toContain("↻ wait · next 4m");
+			expect(harness.getFooter()!.render(80)[4]).toContain("↻ wait · next 4m");
+			for (const key of ["loop", "other", "READY"]) harness.setStatus(key);
+			expect(harness.getFooter()!.render(80)).toHaveLength(4);
 		} finally {
 			harness.disposeFooter();
 		}
 	});
 
-	it("shows Herder as a workflow status between research and loop in full mode", async () => {
+	it("orders full-mode statuses research, Herder, loop, then the rest", async () => {
 		const harness = createHarness("full-herder-status", "tui", {
 			keyedExtensionStatuses: { other: "SYNC", loop: "loop build", herder: "herder: T2 integrate · 3/5 tasks", autoresearch: "research 2/5" },
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
-			const line = harness.getFooter()!.render(200)[3]!;
+			const line = harness.getFooter()!.render(200)[4]!;
 			expect(line.split("herder: T2 integrate · 3/5 tasks")).toHaveLength(2);
 			const order = ["research 2/5", "herder: T2", "loop build", "SYNC"].map(text => line.indexOf(text));
 			expect(order.every(index => index >= 0)).toBe(true);
@@ -645,7 +686,7 @@ describe("statusline footer rendering", () => {
 		}
 	});
 
-	it("keeps Herder visible ahead of a long cwd in full mode", async () => {
+	it("keeps Herder and the branch visible beside a long cwd in full mode", async () => {
 		const harness = createHarness("full-herder-cwd", "tui", {
 			cwd: `/tmp/${"深い階層/".repeat(30)}project`,
 			keyedExtensionStatuses: { herder: "herder: T2 integrate · 3/5 tasks" },
@@ -656,12 +697,12 @@ describe("statusline footer rendering", () => {
 			for (const width of [60, 80, 120]) {
 				const lines = harness.getFooter()!.render(width);
 				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-				expect(lines[3]).toContain("herder: T2 integrate · 3/5 tasks");
+				expect(lines[4]).toContain("herder: T2 integrate · 3/5 tasks");
 				expect(lines[3]).toContain("main");
 				expect(lines[3]).not.toContain("project");
 			}
 			harness.setStatus("herder");
-			expect(harness.getFooter()!.render(120)[3]).not.toContain("herder:");
+			expect(harness.getFooter()!.render(120)[4]).not.toContain("herder:");
 		} finally {
 			harness.disposeFooter();
 		}
@@ -700,6 +741,39 @@ describe("statusline footer rendering", () => {
 		}
 	});
 
+	it("paints extension statuses by identity and tone instead of the theme accent", async () => {
+		const harness = createHarness("status-tone", "tui", {
+			keyedExtensionStatuses: { herder: "herder: T2 integrate", loop: "↻ build", other: "SYNC" },
+			theme: { fg: (token, text) => `<${token}>${text}`, bold: (text) => text },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			// Set after startup: the footer's process watcher publishes its own key then.
+			harness.setStatus(PROCESS_STATUS_KEY, "bg 1 failed");
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			let full = harness.getFooter()!.render(200)[4]!;
+			expect(full).toMatch(/^ <\w+>herder: T2 integrate/);
+			expect(full).toContain("<warning>bg 1 failed");
+			expect(full).not.toContain("<error>");
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+			full = harness.getFooter()!.render(200)[4]!;
+			expect(full).toContain("\u{F0CC6} ");
+			expect(full).toContain("\u{F018D} ");
+			expect(full).toContain("\u{F0431} ");
+			expect(full).not.toContain("\u{F04E6}");
+			await harness.runCommand("footer", "compact");
+			const compact = harness.getFooter()!.render(200)[0]!;
+			expect(compact).toMatch(/<\w+>herder: T2 integrate/);
+			expect(compact).toContain("<warning>bg 1 failed");
+			expect(compact).not.toContain("\u{F0CC6}");
+			for (const line of [full, compact]) expect(line).not.toMatch(/<(accent|error)>(herder|bg|SYNC|↻)/);
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
 	it("does not throw or overflow at narrow width with missing model and context", async () => {
 		const harness = createHarness("render-boundary-session", "tui", {
 			model: null,
@@ -710,7 +784,7 @@ describe("statusline footer rendering", () => {
 		await harness.emit("session_start", { type: "session_start", reason: "startup" });
 
 		const lines = harness.getFooter()!.render(24);
-		expect(lines).toHaveLength(4);
+		expect(lines).toHaveLength(5);
 		expect(lines[0]).toContain("no-model");
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(24);
 		harness.getFooter()?.dispose?.();
@@ -768,16 +842,16 @@ describe("statusline footer pi-processes compatibility", () => {
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
-			expect(harness.getFooter()!.render(240)[3]).toContain("bg 1 running");
+			expect(harness.getFooter()!.render(240)[4]).toContain("bg 1 running");
 			core.update([{ status: "exited", success: false }, { status: "running" }]);
 			expect(harness.ctx.ui.setStatus).toHaveBeenLastCalledWith(PROCESS_STATUS_KEY, "bg 1 running · 1 failed");
-			expect(harness.getFooter()!.render(240)[3]).toContain("bg 1 running · 1 failed");
+			expect(harness.getFooter()!.render(240)[4]).toContain("bg 1 running · 1 failed");
 			core.update([{ status: "exited", success: true }]);
-			expect(harness.getFooter()!.render(240)[3]).toContain("bg 1 done");
+			expect(harness.getFooter()!.render(240)[4]).toContain("bg 1 done");
 			core.update([]);
-			expect(harness.getFooter()!.render(240)[3]).not.toContain("bg ");
+			expect(harness.getFooter()!.render(240)[4]).not.toContain("bg ");
 			core.update({ invalid: true });
-			expect(harness.getFooter()!.render(240)[3]).not.toContain("bg ");
+			expect(harness.getFooter()!.render(240)[4]).not.toContain("bg ");
 		} finally {
 			harness.disposeFooter();
 			await harness.emit("session_shutdown", { reason: "quit" });
@@ -798,10 +872,10 @@ describe("statusline footer pi-processes compatibility", () => {
 			expect(harness.ctx.ui.setStatus).toHaveBeenCalledTimes(publications);
 			core.update([{ status: "terminating" }], false);
 			await vi.advanceTimersByTimeAsync(2_000);
-			expect(harness.getFooter()!.render(120)[3]).toContain("bg 1 stopping");
+			expect(harness.getFooter()!.render(120)[4]).toContain("bg 1 stopping");
 			core.update([{ status: "terminate_timeout" }], false);
 			await vi.advanceTimersByTimeAsync(2_000);
-			expect(harness.getFooter()!.render(120)[3]).toContain("bg 1 stuck");
+			expect(harness.getFooter()!.render(120)[4]).toContain("bg 1 stuck");
 			core.update([{ status: "killed" }]);
 			expect(vi.getTimerCount()).toBe(1);
 			core.update([{ status: "running" }]);
@@ -821,7 +895,7 @@ describe("statusline footer pi-processes compatibility", () => {
 		}
 	});
 
-	it("reserves full-mode status space before a long path and bounds compact mode", async () => {
+	it("keeps the full-mode status row apart from a long path and bounds compact mode", async () => {
 		const harness = createHarness("processes-layout", "tui", {
 			cwd: `/tmp/${"very-long/".repeat(30)}project`,
 		});
@@ -830,8 +904,9 @@ describe("statusline footer pi-processes compatibility", () => {
 		await harness.emit("session_start", { reason: "startup" });
 		try {
 			const full = harness.getFooter()!.render(55);
-			expect(full[3]).toContain("bg 1 running");
-			expect(full[3]!.split("bg 1 running")).toHaveLength(2);
+			expect(full[3]).toContain("main");
+			expect(full[4]).toContain("bg 1 running");
+			expect(full[4]!.split("bg 1 running")).toHaveLength(2);
 			await harness.runCommand("footer", "compact");
 			for (const width of [0, 1, 12, 24, 40, 80, 120]) {
 				const line = harness.getFooter()!.render(width)[0]!;
@@ -888,7 +963,7 @@ describe("statusline footer pi-processes compatibility", () => {
 			await child.emit("session_shutdown", { reason: "quit" });
 			expect(child.ctx.ui.setStatus).not.toHaveBeenCalled();
 			core.update([{ status: "exited", success: true }]);
-			expect(root.getFooter()!.render(120)[3]).toContain("bg 1 done");
+			expect(root.getFooter()!.render(120)[4]).toContain("bg 1 done");
 			root.disposeFooter();
 			await root.emit("session_shutdown", { reason: "reload" });
 			expect(root.ctx.ui.setStatus).toHaveBeenLastCalledWith(PROCESS_STATUS_KEY, undefined);
@@ -899,7 +974,7 @@ describe("statusline footer pi-processes compatibility", () => {
 			core.list.mockClear();
 			core.update([{ status: "running" }]);
 			expect(core.list).toHaveBeenCalledTimes(1);
-			expect(root.getFooter()!.render(120)[3]).toContain("bg 1 running");
+			expect(root.getFooter()!.render(120)[4]).toContain("bg 1 running");
 		} finally {
 			root.disposeFooter();
 			await root.emit("session_shutdown", { reason: "quit" });
