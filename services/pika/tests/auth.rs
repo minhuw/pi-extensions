@@ -1233,7 +1233,7 @@ async fn bind_gives_a_device_its_key_once() {
 }
 
 #[test]
-fn upgrading_from_version_3_keeps_tokens_and_does_not_reindex() {
+fn upgrading_from_version_3_keeps_tokens() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
     {
@@ -1249,7 +1249,7 @@ fn upgrading_from_version_3_keeps_tokens_and_does_not_reindex() {
     assert_eq!((&row["name"], &row["created_via"], &row["last_seen_at"]), (&json!(DEVICE), &json!("cli"), &Value::Null));
     assert_eq!(one(&store, "SELECT id, name FROM devices"), one(&store, "SELECT name AS id, name FROM tokens"));
     let version: i64 = store.read(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
 }
 
 #[tokio::test]
@@ -1288,8 +1288,8 @@ async fn upgrading_from_version_4_keeps_device_names_as_ids() {
 
     let env = Env { store: pika::store::Store::open(&data).unwrap(), dir };
     let version: i64 = env.store.read(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
-    assert_eq!(version, 10);
-    // No reindex: the derived tables are untouched.
+    assert_eq!(version, 11);
+    // The v11 backfill reproduces existing derived data.
     assert_eq!(env.store.setting("needs_reindex").unwrap(), None);
     assert_eq!(dump_derived(&env.store), derived);
     let devices = query(&env.store, "SELECT id, name, key_hash, created_at FROM devices ORDER BY id");

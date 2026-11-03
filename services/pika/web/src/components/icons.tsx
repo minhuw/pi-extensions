@@ -35,6 +35,11 @@ export const Icons = {
 			<path d="M3 3.5h10M3 8h10M3 12.5h6" />
 		</Svg>
 	),
+	statistics: (p: IconProps) => (
+		<Svg {...p}>
+			<path d="M2.5 13.5h11M4 11V8M8 11V3M12 11V6" />
+		</Svg>
+	),
 	herder: (p: IconProps) => (
 		<Svg {...p}>
 			<circle cx="4" cy="4" r="1.6" />

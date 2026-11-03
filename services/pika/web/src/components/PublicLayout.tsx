@@ -57,6 +57,7 @@ export function PublicLayout() {
 							<NavItem to="/public" icon="sessions" end within={["/public/s/"]}>
 								Public trajectories
 							</NavItem>
+							<NavItem to="/public/statistics" icon="statistics">Statistics</NavItem>
 							<div className={BAND_NAV_END}>
 								<BandSearch path="/public/search" label="Search published trajectories" inputRef={searchRef} />
 							</div>

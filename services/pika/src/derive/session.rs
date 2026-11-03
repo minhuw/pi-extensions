@@ -246,11 +246,22 @@ struct Deriver<'a> {
 }
 
 impl Deriver<'_> {
-    fn add_usage(&mut self, usage: &Usage) {
+    fn add_usage(&mut self, seq: i64, at: Option<i64>, requests: i64, usage: &Usage) -> Result<()> {
+        // Fall back only to a recorded time, never the ingest clock or the default last_at = 0.
+        let at = at.or_else(|| if self.s.last_at != 0 { Some(self.s.last_at) } else { self.s.started_at });
+        self.tx
+            .prepare_cached(
+                "INSERT OR REPLACE INTO usage_events (sid, seq, at, requests, input, output, cache_read, cache_write, cost)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )?
+            .execute(params![
+                self.s.sid, seq, at, requests, usage.input, usage.output, usage.cache_read, usage.cache_write, usage.cost,
+            ])?;
         self.s.usage.add(usage);
         if let Some(turn) = &mut self.turn {
             turn.usage.add(usage);
         }
+        Ok(())
     }
 
     fn set_parent(&mut self) -> Result<()> {
@@ -417,7 +428,7 @@ impl Deriver<'_> {
 
     fn assistant(&mut self, seq: i64, entry: &Value, ts: Option<i64>, message: &Value) -> Result<Vec<String>> {
         let usage = Usage::parse(message.get("usage")).unwrap_or_default();
-        self.add_usage(&usage);
+        self.add_usage(seq, ts.or_else(|| time_field(message, "timestamp")), 1, &usage)?;
         let turn_idx = self.turn.as_ref().map(|t| t.idx);
         // pika shows bare model names; the stored line keeps the id as pi wrote it.
         let model = str_field(message, "model").map(|m| crate::util::bare_model(m).to_owned());
@@ -584,7 +595,7 @@ impl Deriver<'_> {
             }
             "usage" | "compaction" | "branch_summary" => {
                 if let Some(usage) = Usage::parse(v.get("usage")) {
-                    self.add_usage(&usage);
+                    self.add_usage(line.seq, ts, 0, &usage)?;
                 }
             }
             "session_info" => self.s.name = string_field(v, "name"),

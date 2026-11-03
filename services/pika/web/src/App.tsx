@@ -16,6 +16,7 @@ import { SessionListPage } from "./pages/SessionList";
 import { SettingsPage } from "./pages/Settings";
 
 // The session page, with its trajectory, transcript renderers, and context viewer, loads on demand in its own chunk.
+const StatisticsPage = lazy(() => import("./pages/Statistics").then((module) => ({ default: module.StatisticsPage })));
 const SessionViewPage = lazy(() => import("./pages/SessionView").then((module) => ({ default: module.SessionViewPage })));
 
 function SessionPageLoading() {
@@ -56,6 +57,7 @@ export function AppRoutes() {
 			<Route path="public" element={<PublicLayout />}>
 				<Route index element={<SessionListPage />} />
 				<Route path="s/:id" element={<Suspense fallback={<SessionPageLoading />}><SessionViewPage /></Suspense>} />
+				<Route path="statistics" element={<Suspense fallback={<SessionPageLoading />}><StatisticsPage /></Suspense>} />
 				<Route path="search" element={<SearchPage />} />
 				<Route path="*" element={<NotFoundPage />} />
 			</Route>
@@ -70,6 +72,7 @@ export function AppRoutes() {
 							</Suspense>
 						}
 					/>
+					<Route path="statistics" element={<Suspense fallback={<SessionPageLoading />}><StatisticsPage /></Suspense>} />
 					<Route path="runs" element={<HerderRunsPage />} />
 					<Route path="runs/:id" element={<HerderRunPage />} />
 					<Route path="herder" element={<Navigate to="/runs" replace />} />

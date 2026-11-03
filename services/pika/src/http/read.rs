@@ -22,6 +22,11 @@ struct Scope {
     public: bool,
 }
 
+/// Anonymous aggregates: usage totals without session identifiers or contents.
+fn aggregate_routes() -> Router<AppState> {
+    Router::new().route("/statistics", get(statistics)).route("/usage", get(usage))
+}
+
 fn session_routes() -> Router<AppState> {
     Router::new()
         .route("/facets", get(facets))
@@ -39,6 +44,7 @@ fn session_routes() -> Router<AppState> {
 
 pub fn routes() -> Router<AppState> {
     session_routes()
+        .merge(aggregate_routes())
         .layer(Extension(Scope { public: false }))
         .route("/settings/publishing", get(publishing).patch(publish))
         .route("/sessions/{id}/export", get(export_session))
@@ -50,10 +56,27 @@ pub fn routes() -> Router<AppState> {
 /// An explicit allowlist: unknown public endpoints never reach the SPA fallback.
 pub fn public_routes() -> Router<AppState> {
     session_routes()
+        .merge(aggregate_routes().layer(axum::middleware::from_fn(any_origin)))
         .layer(Extension(Scope { public: true }))
         .route("/visitor-view", post(super::visitor::view))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found") })
         .layer(axum::middleware::from_fn(no_store))
+}
+
+/// Other sites may read the public aggregates from their pages: any origin, no credentials, and a preflight answered
+/// here for clients that send one.
+async fn any_origin(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    use header::{ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, HeaderValue};
+    let preflight = request.method() == axum::http::Method::OPTIONS;
+    let mut response = if preflight { StatusCode::NO_CONTENT.into_response() } else { next.run(request).await };
+    let headers = response.headers_mut();
+    headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    if preflight {
+        headers.insert(ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, OPTIONS"));
+        headers.insert(ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("*"));
+        headers.insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400"));
+    }
+    response
 }
 
 async fn no_store(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
@@ -212,6 +235,16 @@ fn json_maybe_gzip(value: &impl Serialize, gzip: bool) -> Response {
 
 fn seq_param(raw: &str) -> ReadResult<i64> {
     raw.parse().map_err(|_| read::bad("seq must be an integer"))
+}
+
+async fn statistics(State(state): State<AppState>, Extension(scope): Extension<Scope>, Query(params): QueryParams) -> Response {
+    // Totals include private activity by default. Only the owner sees unpublished project names.
+    json(&state, move |_, conn| read::statistics::statistics_scoped(conn, &Params(params), scope.public)).await
+}
+
+async fn usage(State(state): State<AppState>, Extension(scope): Extension<Scope>, Query(params): QueryParams) -> Response {
+    // Like statistics: private activity is counted, and only the owner sees unpublished project names.
+    json(&state, move |_, conn| read::statistics::usage::usage_scoped(conn, &Params(params), scope.public)).await
 }
 
 async fn facets(State(state): State<AppState>, Extension(scope): Extension<Scope>) -> Response {

@@ -470,7 +470,7 @@ fn upgrade_from_eight_preserves_existing_settings() {
         reopened.setting("visitor_test").unwrap(),
         Some(vec![0x12, 0x34])
     );
-    assert_eq!(one(&reopened, "PRAGMA user_version")["user_version"], 10);
+    assert_eq!(one(&reopened, "PRAGMA user_version")["user_version"], 11);
     assert_eq!(
         one(&reopened, "SELECT COUNT(*) AS n FROM visitor_views")["n"],
         0

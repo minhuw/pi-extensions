@@ -209,6 +209,45 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
 	);
 }
 
+/**
+ * One choice of a few, framed like the session view's switch: a black hairline, and black for the choice made. Each
+ * segment is a toggle button with `aria-pressed`, inside a labelled group.
+ */
+export function Segmented<T extends string>({
+	label,
+	value,
+	options,
+	onChange,
+	size = "md",
+}: {
+	label: string;
+	value: T;
+	options: readonly (readonly [T, string])[];
+	onChange: (value: T) => void;
+	size?: "sm" | "md";
+}) {
+	return (
+		<div role="group" aria-label={label} className={cx("flex shrink-0 items-stretch overflow-hidden rounded-sm border border-ink", size === "sm" ? "h-7" : "h-8")}>
+			{options.map(([key, text]) => (
+				<button
+					key={key}
+					type="button"
+					aria-pressed={value === key}
+					onClick={() => onChange(key)}
+					className={cx(
+						// The group clips its corners, so the focus ring sits inside each segment, in the segment's own text colour.
+						"font-medium whitespace-nowrap transition-colors duration-150 not-first:border-l not-first:border-ink focus-visible:outline-current focus-visible:outline-offset-[-4px]",
+						size === "sm" ? "px-2.5 text-[12.5px]" : "px-3 text-[13px]",
+						value === key ? "bg-ink text-page" : "text-ink hover:bg-hover",
+					)}
+				>
+					{text}
+				</button>
+			))}
+		</div>
+	);
+}
+
 const BUTTON_BASE =
 	"inline-flex h-8 items-center gap-1.5 rounded-sm px-3 text-[13px] font-medium whitespace-nowrap transition-colors duration-150 disabled:cursor-default disabled:opacity-45";
 

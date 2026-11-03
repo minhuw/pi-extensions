@@ -51,7 +51,7 @@ function usePublishedSession(id: string | undefined) {
 
 /**
  * Sends a signed-out visitor on: the home page opens the public gallery when a project is published, and a link to a
- * published session opens its public page. Everything else asks for the password.
+ * published session opens its public page. Statistics are always public; everything else asks for the password.
  */
 function GuestRedirect() {
 	const location = useLocation();
@@ -59,6 +59,7 @@ function GuestRedirect() {
 	const sessionId = matchPath("/s/:id", location.pathname)?.params.id;
 	const gallery = useGalleryOpen(home);
 	const published = usePublishedSession(sessionId);
+	if (location.pathname === "/statistics") return <Navigate to={{ pathname: "/public/statistics", search: location.search }} replace />;
 	const probe = home ? gallery : sessionId !== undefined ? published : undefined;
 	if (probe?.isPending) return null;
 	if (probe?.data) {

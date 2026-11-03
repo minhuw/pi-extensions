@@ -7,6 +7,7 @@ pub mod publishing;
 pub mod redaction;
 pub mod search;
 pub mod sessions;
+pub mod statistics;
 pub mod trace;
 
 #[cfg(test)]

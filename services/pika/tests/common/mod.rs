@@ -12,11 +12,13 @@ use tempfile::TempDir;
 pub const DEVICE: &str = "laptop";
 pub const SESSION_ID: &str = "7f3c2a10-5b1e-4c3d-9a8e-1f2e3d4c5b6a";
 pub const RUN_ID: &str = "20261021-100000-abcd";
-/// SQL that removes what schema version 10 added, for tests that rewind `user_version`.
-pub const UNDO_V10: &str = "DROP TABLE deleted_streams; DROP TABLE hidden_sessions; DROP TABLE session_hidden;
+/// SQL that removes schema version 11 for tests that rewind `user_version`.
+pub const UNDO_V11: &str = "DROP TABLE usage_events; DROP INDEX entries_activity;";
+/// Remove versions 11 and 10 for tests that rewind `user_version`.
+pub const UNDO_V10: &str = "DROP TABLE usage_events; DROP INDEX entries_activity; DROP TABLE deleted_streams; DROP TABLE hidden_sessions; DROP TABLE session_hidden;
     DROP INDEX IF EXISTS search_docs_sid; DROP INDEX lines_blob; DROP INDEX request_dict_blob;";
-/// Remove versions 10, 9, and 8 for tests that rewind `user_version`.
-pub const UNDO_V8: &str = "DROP TABLE deleted_streams; DROP TABLE hidden_sessions; DROP TABLE session_hidden;
+/// Remove versions 11, 10, 9, and 8 for tests that rewind `user_version`.
+pub const UNDO_V8: &str = "DROP TABLE usage_events; DROP INDEX entries_activity; DROP TABLE deleted_streams; DROP TABLE hidden_sessions; DROP TABLE session_hidden;
     DROP INDEX IF EXISTS search_docs_sid; DROP INDEX lines_blob; DROP INDEX request_dict_blob;
     DROP TABLE visitor_views; DROP TABLE visitor_day_key; ALTER TABLE sessions DROP COLUMN repository;";
 /// SQL that puts back the full-text index that schema version 7 replaced, for tests that rewind `user_version`. Dropping

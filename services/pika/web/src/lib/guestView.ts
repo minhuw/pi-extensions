@@ -25,6 +25,7 @@ export function setGuestView(on: boolean): void {
 export function guestPath(pathname: string, search: string): string {
 	if (pathname === "/") return `/public${search}`;
 	if (pathname === "/search") return `/public/search${search}`;
+	if (pathname === "/statistics") return `/public/statistics${search}`;
 	const session = /^\/s\/([^/]+)$/.exec(pathname);
 	if (session) return `/public/s/${session[1]}${search}`;
 	return "/public";

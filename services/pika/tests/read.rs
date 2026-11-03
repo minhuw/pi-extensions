@@ -1198,13 +1198,7 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
         upload(&store, &skey(SESSION_ID), "session", &source, 100);
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    // Dropping the full-text index needs its tokenizer.
-    pika::tokenizer::register(&conn).unwrap();
-    conn.execute_batch(&format!(
-        "DROP TABLE search_fts; DROP TABLE search_docs; DROP INDEX sessions_device_project; DROP INDEX sessions_root_device;
-         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V8} {UNDO_V6} {UNDO_V5} {UNDO_V4} PRAGMA user_version = 1;"
-    ))
-    .unwrap();
+    conn.execute_batch(&format!("{UNDO_V11} PRAGMA user_version = 10;")).unwrap();
     drop(conn);
 
     // The large line's blob is unreadable, so the reindex after the upgrade fails.
@@ -1216,6 +1210,11 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
     let aside = dir.path().join("aside.zst");
     std::fs::rename(&blob, &aside).unwrap();
     assert!(pika::store::Store::open(&data).is_err());
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 11);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM settings WHERE key = 'needs_reindex'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    drop(conn);
 
     std::fs::rename(&aside, &blob).unwrap();
     let store = pika::store::Store::open(&data).unwrap();
@@ -1224,6 +1223,7 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
     let hits = store.read(|conn| pika::read::search::search(conn, &params)).unwrap();
     assert_eq!(hits.items.len(), 1);
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
+    assert!(one(&store, "SELECT COUNT(*) AS n FROM usage_events")["n"].as_i64().unwrap() > 0);
 }
 
 /// Removes `key` from `v` and returns it as a float, for comparing sums with a tolerance.
@@ -2360,4 +2360,257 @@ async fn models_read_as_bare_names_without_providers() {
     assert_eq!(public_ids(public_json(&app, &format!("sessions?model={}", q("codex/gpt-6.1-sol"))).await), [PLAIN, ROUTED]);
     let trace = public(&app, &format!("sessions/{ROUTED}/trace")).await.text();
     assert!(trace.contains(r#""model":"gpt-6.1-sol""#) && !trace.contains("codex/") && !trace.contains("\"provider\""), "{trace}");
+}
+
+/// Usage sources share identical arithmetic, but only assistant messages count as requests.
+fn statistics_session(id: &str, project: &str, at: i64, parent: Option<&str>) -> Vec<String> {
+    let mut header = json!({ "type": "session", "id": id, "cwd": format!("/private/{project}"), "timestamp": at });
+    if let Some(parent) = parent {
+        header["parentSession"] = json!(format!("/private/2026-01-01T00-00-00Z_{parent}.jsonl"));
+    }
+    let usage = json!({ "input": 10, "output": 20, "cacheRead": 30, "cacheWrite": 40, "cost": { "total": 0.25 } });
+    lines(&[
+        header,
+        json!({ "type": "message", "timestamp": at, "message": { "role": "user", "content": "private prompt" } }),
+        json!({ "type": "message", "timestamp": at, "message": { "role": "assistant", "model": "private-model",
+            "content": "private reply", "usage": usage } }),
+        json!({ "type": "message", "timestamp": at, "message": { "role": "assistant", "stopReason": "error" } }),
+        json!({ "type": "usage", "timestamp": at, "usage": usage }),
+        json!({ "type": "compaction", "timestamp": at, "usage": usage }),
+        json!({ "type": "branch_summary", "timestamp": at, "usage": usage }),
+        json!({ "type": "compaction", "timestamp": at, "usage": "invalid" }),
+    ])
+}
+
+#[tokio::test]
+async fn statistics_are_anonymous_include_private_and_hidden_and_support_public_exclusion() {
+    let owner = app(None);
+    let app = app(Some("stats-password"));
+    let at = pika::util::now_ms();
+    for (id, project, parent) in [
+        ("private-root", "private-project", None),
+        ("public-root", "public-project", None),
+        ("hidden-root", "public-project", None),
+        ("hidden-child", "public-project", Some("hidden-root")),
+        ("public-child", "public-project", Some("public-root")),
+    ] {
+        let source = statistics_session(id, project, at, parent);
+        app.upload(DEVICE, &skey(id), "session", &source).await;
+        // Repeated delivery does not create extra usage events.
+        app.upload(DEVICE, &skey(id), "session", &source).await;
+    }
+    app.env.store.write(|tx| pika::read::publishing::update(tx, "public-project", true)).unwrap();
+    app.env.store.write(|tx| pika::hidden::set(tx, "hidden-root", true, at)).unwrap();
+    let stats = public_json(&app, "statistics?days=1").await;
+    assert_eq!(stats["excludeUnpublished"], false);
+    assert_eq!(stats["totals"], json!({ "sessions": 5, "requests": 10,
+        "tokens": { "input": 200, "output": 400, "cacheRead": 600, "cacheWrite": 800 }, "cost": 5.0, "activeDays": 1 }));
+    assert_eq!(stats["daily"].as_array().unwrap().len(), 1);
+    assert_eq!(stats["daily"][0]["sessions"], 5);
+    let text = stats.to_string();
+    for secret in ["private-project", "private-root", "hidden-root", "hidden-child", "laptop", DEVICE_NAME, "private prompt", "private reply", "cwd", "device", "sid", "seq"] {
+        assert!(!text.contains(secret), "leaked {secret}: {text}");
+    }
+    // Exact field allowlists prevent future identifier or content additions slipping into this public response.
+    let keys = |v: &Value| -> Vec<String> { let mut k: Vec<_> = v.as_object().unwrap().keys().cloned().collect(); k.sort(); k };
+    assert_eq!(keys(&stats), ["daily", "excludeUnpublished", "from", "models", "projects", "requestMetrics", "to", "totals"]);
+    assert_eq!(stats["projects"].as_array().unwrap().len(), 2);
+    assert_eq!(stats["projects"][0]["kind"], "unpublished");
+    assert_eq!(stats["projects"][0]["name"], Value::Null);
+    assert_eq!(stats["projects"][0]["sessions"], 3);
+    assert_eq!(stats["projects"][1]["name"], "public-project");
+    assert_eq!(stats["requestMetrics"]["failed"], 5);
+    assert_eq!(stats["requestMetrics"]["unknown"], 5);
+    assert_eq!(stats["models"][0]["kind"], "other-usage");
+    assert_eq!(stats["models"][1]["name"], "private-model");
+    for field in ["projects", "models"] {
+        let rows = stats[field].as_array().unwrap();
+        assert_eq!(rows.iter().map(|r| r["requests"].as_i64().unwrap()).sum::<i64>(), 10);
+        assert_eq!(rows.iter().map(|r| r["tokens"]["input"].as_i64().unwrap()).sum::<i64>(), 200);
+        assert_eq!(rows.iter().map(|r| r["cost"].as_f64().unwrap()).sum::<f64>(), 5.0);
+    }
+    assert_eq!(keys(&stats["totals"]), ["activeDays", "cost", "requests", "sessions", "tokens"]);
+    assert_eq!(keys(&stats["daily"][0]), ["cost", "date", "requests", "sessions", "tokens"]);
+    assert_eq!(keys(&stats["totals"]["tokens"]), ["cacheRead", "cacheWrite", "input", "output"]);
+    let excluded = public_json(&app, "statistics?days=1&excludeUnpublished=true").await;
+    assert_eq!(excluded["excludeUnpublished"], true);
+    assert_eq!(excluded["totals"], json!({ "sessions": 2, "requests": 4,
+        "tokens": { "input": 80, "output": 160, "cacheRead": 240, "cacheWrite": 320 }, "cost": 2.0, "activeDays": 1 }));
+    assert_eq!(excluded["daily"][0]["sessions"], 2);
+    assert_eq!(excluded["projects"].as_array().unwrap().len(), 1);
+    assert_eq!(excluded["projects"][0]["name"], "public-project");
+    assert_eq!(excluded["requestMetrics"]["failed"], 2);
+    assert_eq!(public_json(&app, "statistics?days=all&excludeUnpublished=true").await["from"], stats["from"]);
+    for id in ["private-root", "hidden-root", "hidden-child"] {
+        for suffix in ["", "/entries", "/entries/2/raw", "/trace", "/turns", "/updates", "/tree"] {
+            assert_eq!(public(&app, &format!("sessions/{id}{suffix}")).await.status, StatusCode::NOT_FOUND);
+        }
+    }
+    assert_eq!(app.status("statistics").await, StatusCode::UNAUTHORIZED);
+    assert_eq!(public(&app, "settings/publishing").await.status, StatusCode::NOT_FOUND);
+    pika::reindex::reindex(&app.env.store).unwrap();
+    pika::reindex::reindex(&app.env.store).unwrap();
+    assert_eq!(public_json(&app, "statistics?days=1").await, stats);
+    assert_eq!(public_json(&app, "statistics?days=1&excludeUnpublished=true").await, excluded);
+    // Owner routes have the same arithmetic and scope options when accessible.
+    owner.upload(DEVICE, &skey("s"), "session", &statistics_session("s", "p", at, None)).await;
+    let named = owner.json("statistics?days=1").await;
+    let anonymous = public_json(&owner, "statistics?days=1").await;
+    assert_eq!(named["totals"], anonymous["totals"]);
+    assert_eq!(named["models"], anonymous["models"]);
+    assert_eq!(named["projects"][0]["name"], "p");
+    assert_eq!(anonymous["projects"][0]["kind"], "unpublished");
+    assert_eq!(anonymous["projects"][0]["name"], Value::Null);
+    assert_eq!(owner.json("statistics?days=1&excludeUnpublished=true").await["totals"]["sessions"], 0);
+    pika::delete::delete_session(&owner.env.store, "s").unwrap().unwrap();
+    assert_eq!(owner.json("statistics?days=1").await["totals"]["sessions"], 0);
+    assert_eq!(owner.json("statistics?days=1").await["totals"]["requests"], 0);
+    assert_eq!(one(&owner.env.store, "SELECT COUNT(*) AS n FROM usage_events")["n"], 0);
+    pika::reindex::reindex(&owner.env.store).unwrap();
+    assert_eq!(public_json(&owner, "statistics?days=all").await["totals"]["cost"], 0.0);
+}
+
+#[tokio::test]
+async fn usage_api_is_anonymous_cross_origin_and_groups_without_naming_private_projects() {
+    let app = app(Some("usage-password"));
+    let at = pika::util::now_ms();
+    for (id, project) in [("private-root", "private-project"), ("public-root", "public-project")] {
+        app.upload(DEVICE, &skey(id), "session", &statistics_session(id, project, at, None)).await;
+    }
+    app.env.store.write(|tx| pika::read::publishing::update(tx, "public-project", true)).unwrap();
+    let keys = |v: &Value| -> Vec<String> { let mut k: Vec<_> = v.as_object().unwrap().keys().cloned().collect(); k.sort(); k };
+
+    let reply = public(&app, "usage?days=1&by=model").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_eq!(reply.headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+    let models = reply.json();
+    assert_eq!(keys(&models), ["by", "excludeUnpublished", "from", "groups", "interval", "periods", "to", "total"]);
+    assert_eq!(models["total"], json!({ "requests": 4, "tokens": 800, "input": 80, "output": 160, "cacheRead": 240,
+        "cacheWrite": 320, "cost": 2.0 }));
+    // Summaries and the failed call without a model are the unnamed group.
+    let groups: Vec<_> = models["groups"].as_array().unwrap().iter().map(|g| (g["name"].clone(), g["requests"].clone(), g["tokens"].clone())).collect();
+    assert_eq!(groups, [(Value::Null, json!(2), json!(600)), (json!("private-model"), json!(2), json!(200))]);
+    assert_eq!(models["periods"].as_array().unwrap().len(), 1);
+    assert_eq!(keys(&models["periods"][0]), ["cacheRead", "cacheWrite", "cost", "end", "groups", "input", "output", "requests", "start", "tokens"]);
+    assert_eq!(models["periods"][0]["tokens"], 800);
+
+    let projects = public_json(&app, "usage?days=7&by=project&interval=week").await;
+    let text = projects.to_string();
+    for secret in ["private-project", "private-root", "public-root", DEVICE_NAME, "private prompt", "private reply", "cwd", "sid"] {
+        assert!(!text.contains(secret), "leaked {secret}: {text}");
+    }
+    let names: Vec<_> = projects["groups"].as_array().unwrap().iter().map(|g| g["name"].clone()).collect();
+    assert_eq!(names, [json!("public-project"), Value::Null]);
+    let excluded = public_json(&app, "usage?days=1&excludeUnpublished=true").await;
+    assert_eq!(excluded["total"]["tokens"], 400);
+    assert!(excluded.get("groups").is_none());
+
+    // Errors and the other aggregate endpoint are readable across origins too; nothing else public is.
+    let bad = public(&app, "usage?interval=year").await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+    assert_eq!(bad.headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+    assert_eq!(public(&app, "statistics?days=1").await.headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+    for path in ["facets", "sessions", "search?q=prompt"] {
+        assert!(public(&app, path).await.headers.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none(), "{path}");
+    }
+    let preflight = app
+        .send(
+            Request::options(format!("{BASE}/api/public/v1/usage?days=7"))
+                .header(header::ORIGIN, "https://example.com")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(preflight.status, StatusCode::NO_CONTENT);
+    assert_eq!(preflight.headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+    assert_eq!(preflight.headers[header::ACCESS_CONTROL_ALLOW_METHODS], "GET, OPTIONS");
+
+    // The owner's copy names every project, but stays behind the login and same-origin.
+    let owner = app.get("usage?days=1").await;
+    assert_eq!(owner.status, StatusCode::UNAUTHORIZED);
+    assert!(owner.headers.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+}
+
+#[tokio::test]
+async fn statistics_reject_bad_ranges_and_flags_and_do_not_offer_named_filters() {
+    let app = app(None);
+    for query in ["days=0", "days=-1", "days=367", "days=1.5", "days=wat", "days=ALL", "days=", "days=999999999999999999999",
+        "days=%2B1", "excludeUnpublished=yes"] {
+        assert_eq!(app.status(&format!("statistics?{query}")).await, StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(public(&app, &format!("statistics?{query}")).await.status, StatusCode::BAD_REQUEST, "{query}");
+    }
+    let stats = public_json(&app, "statistics").await;
+    assert_eq!(stats["daily"].as_array().unwrap().len(), 30);
+    assert_eq!(stats, public_json(&app, "statistics?project=unknown&model=unknown&device=unknown").await);
+}
+
+#[tokio::test]
+async fn statistics_timestamp_fallbacks_and_incremental_ingest_match_reindex() {
+    let app = app(None);
+    let at = pika::util::now_ms();
+    let source = lines(&[
+        json!({ "type": "session", "id": "fallback", "cwd": "/private/project" }),
+        // No prior time: excluded from dated totals, but retained in the ledger.
+        json!({ "type": "message", "message": { "role": "assistant", "usage": { "input": 99 } } }),
+        // Assistant timestamp fallback, then an entry time establishes the session fallback.
+        json!({ "type": "message", "message": { "role": "assistant", "timestamp": at, "usage": { "input": 1 } } }),
+        json!({ "type": "message", "timestamp": at, "message": { "role": "user", "content": "prompt" } }),
+        json!({ "type": "message", "message": { "role": "assistant", "usage": { "input": 2 } } }),
+        json!({ "type": "compaction", "usage": { "input": 3 } }),
+        json!({ "type": "branch_summary", "usage": {} }),
+        json!({ "type": "usage" }),
+    ]);
+    // One line per batch exercises persisted fallback state.
+    for (offset, line) in source.iter().scan(0, |offset, line| {
+        let out = (*offset, line.clone()); *offset += byte_len(std::slice::from_ref(line)); Some(out)
+    }) {
+        app.append(DEVICE, &skey("fallback"), "session", offset, &[line]).await;
+    }
+    let before = public_json(&app, "statistics?days=1").await;
+    assert_eq!(before["totals"]["requests"], 2);
+    assert_eq!(before["totals"]["tokens"]["input"], 6);
+    assert_eq!(before["totals"]["sessions"], 1);
+    assert_eq!(one(&app.env.store, "SELECT COUNT(*) AS n FROM usage_events")["n"], 5);
+    assert_eq!(one(&app.env.store, "SELECT COUNT(*) AS n FROM usage_events WHERE at IS NULL")["n"], 1);
+    assert_eq!(one(&app.env.store, "SELECT input FROM sessions")["input"], 105);
+    let derived = dump_derived(&app.env.store);
+    pika::reindex::reindex(&app.env.store).unwrap();
+    assert_eq!(dump_derived(&app.env.store), derived);
+    assert_eq!(public_json(&app, "statistics?days=1").await, before);
+}
+
+#[test]
+fn statistics_version_10_upgrade_backfills_ledger_without_changing_source_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let expected = {
+        let store = pika::store::Store::open(&data).unwrap();
+        let source = statistics_session("legacy", "legacy-project", pika::util::now_ms(), None);
+        upload(&store, &skey("legacy"), "session", &source, 2);
+        dump_derived(&store)
+    };
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    conn.execute_batch(&format!("{UNDO_V11} PRAGMA user_version = 10;")).unwrap();
+    // Replaying the source must leave it intact.
+    conn.execute_batch("CREATE TRIGGER no_source_updates BEFORE UPDATE ON lines
+        BEGIN SELECT RAISE(ABORT, 'source modified'); END;
+        CREATE TRIGGER no_source_deletes BEFORE DELETE ON lines
+        BEGIN SELECT RAISE(ABORT, 'source deleted'); END;").unwrap();
+    drop(conn);
+    let store = pika::store::Store::open(&data).unwrap();
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 11);
+    assert_eq!(dump_derived(&store), expected);
+    assert!(store.setting(pika::store::NEEDS_REINDEX).unwrap().is_none());
+    assert!(store.setting(pika::store::DERIVED_GENERATION).unwrap().is_some());
+    let params = pika::read::Params(BTreeMap::from([("days".into(), "1".into())]));
+    let stats = store.read(|c| pika::read::statistics::statistics(c, &params)).unwrap();
+    assert_eq!(stats.totals.counts.requests, 2);
+    assert_eq!(stats.totals.counts.tokens.input, 40);
+    // A later open must not replay the source again.
+    store.write(|tx| tx.execute_batch("CREATE TRIGGER no_repeated_reindex BEFORE DELETE ON usage_events
+        BEGIN SELECT RAISE(ABORT, 'reindexed twice'); END;")).unwrap();
+    drop(store);
+    let store = pika::store::Store::open(&data).unwrap();
+    assert_eq!(dump_derived(&store), expected);
 }

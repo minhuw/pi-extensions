@@ -581,7 +581,7 @@ fn opening_a_database_repairs_legacy_worktree_projects_once() {
 }
 
 /// A version 7 server stored `meta` it did not derive from, as a newer client sent it. Opening the database with
-/// version 8 re-derives those sessions, and only those, without a reindex.
+/// version 11 backfills usage and re-derives repositories from that stored metadata.
 #[test]
 fn opening_a_version_7_database_derives_repositories_from_stored_meta() {
     let dir = tempfile::tempdir().unwrap();
@@ -600,9 +600,9 @@ fn opening_a_version_7_database_derives_repositories_from_stored_meta() {
     drop(conn);
 
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(10));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(11));
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
-    assert_eq!(store.setting("derived_generation").unwrap(), None);
+    assert!(store.setting("derived_generation").unwrap().is_some());
     assert_eq!(dump_derived(&store), derived);
     assert_eq!(session_row(&store, "wt-1"), (json!("widgets"), json!(REPO_URL)));
     assert_eq!(session_row(&store, "plain-1"), (json!("plain"), Value::Null));

@@ -319,6 +319,9 @@ export function Layout({ children }: { children?: ReactNode }) {
 						<NavItem to="/" icon="sessions" end within={["/s/"]}>
 							Sessions
 						</NavItem>
+						<NavItem to="/statistics" icon="statistics">
+							Statistics
+						</NavItem>
 						<NavItem to="/runs" icon="herder">
 							Herder runs
 						</NavItem>

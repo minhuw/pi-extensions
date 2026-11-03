@@ -257,6 +257,7 @@ fn delete_session_rows(
             "DELETE FROM entries WHERE sid = ?1",
             "DELETE FROM turns WHERE sid = ?1",
             "DELETE FROM model_calls WHERE sid = ?1",
+            "DELETE FROM usage_events WHERE sid = ?1",
             "DELETE FROM tool_calls WHERE sid = ?1",
             "DELETE FROM session_links WHERE sid = ?1",
             "DELETE FROM session_hidden WHERE sid = ?1",

@@ -24,6 +24,8 @@ import type {
 	SessionTree,
 	SessionUpdates,
 	Turn,
+	UsageReport,
+	UsageStatistics,
 } from "./types";
 
 export class ApiError extends Error {
@@ -171,6 +173,21 @@ export class PikaApi {
 
 	visitorView(view: VisitorView): Promise<void> {
 		return this.send("visitor-view", "POST", view);
+	}
+
+	statistics(days: number | "all" = 30, excludeUnpublished = false): Promise<UsageStatistics> {
+		return this.request("statistics", { days, excludeUnpublished });
+	}
+
+	usage(params: {
+		days?: number | "all";
+		from?: string;
+		to?: string;
+		interval?: UsageReport["interval"];
+		by?: "model" | "project";
+		excludeUnpublished?: boolean;
+	}): Promise<UsageReport> {
+		return this.request("usage", params);
 	}
 
 	visitorOrigins(): Promise<VisitorOrigins> {

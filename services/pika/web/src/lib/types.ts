@@ -7,6 +7,81 @@ export interface Tokens {
 	cacheWrite: number;
 }
 
+/** Anonymous usage aggregates from GET statistics. Dates are inclusive UTC dates. */
+export interface UsageCounts {
+	sessions: number;
+	requests: number;
+	tokens: Tokens;
+	cost: number;
+}
+
+export interface UsageDay extends UsageCounts {
+	date: string;
+}
+
+export interface UsageRequestMetrics {
+	completed: number;
+	failed: number;
+	aborted: number;
+	unknown: number;
+	ttftMs: number | null;
+	tokensPerSecond: number | null;
+	ttftCalls: number;
+	rateCalls: number;
+}
+
+export interface UsageBreakdown extends UsageCounts {
+	kind: "project" | "unpublished" | "model" | "other-usage";
+	name: string | null;
+	metrics: UsageRequestMetrics;
+}
+
+export interface UsageStatistics {
+	from: string;
+	to: string;
+	excludeUnpublished: boolean;
+	totals: UsageCounts & { activeDays: number };
+	daily: UsageDay[];
+	/** Older servers omit the breakdowns and request metrics. */
+	projects?: UsageBreakdown[];
+	models?: UsageBreakdown[];
+	requestMetrics?: UsageRequestMetrics;
+}
+
+/** GET usage: usage per day, week, or month, optionally split by model or project. Dates are inclusive UTC days. */
+export interface UsageFigures {
+	requests: number;
+	/** Input, output, cache read, and cache write together. */
+	tokens: number;
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+}
+
+export interface UsageGroup extends UsageFigures {
+	/** A bare model name or a project; `null` is usage without a recorded model, or activity outside published projects. */
+	name: string | null;
+}
+
+export interface UsagePeriod extends UsageFigures {
+	start: string;
+	end: string;
+	groups?: UsageGroup[];
+}
+
+export interface UsageReport {
+	from: string;
+	to: string;
+	interval: "day" | "week" | "month" | "total";
+	by: "model" | "project" | null;
+	excludeUnpublished: boolean;
+	total: UsageFigures;
+	groups?: UsageGroup[];
+	periods: UsagePeriod[];
+}
+
 export interface HerderLink {
 	runId: string;
 	stepKey: string;

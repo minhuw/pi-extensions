@@ -18,12 +18,12 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_v8.sql"),
     include_str!("schema_v9.sql"),
     include_str!("schema_v10.sql"),
+    include_str!("schema_v11.sql"),
 ];
 /// The schema version that derives `sessions.project` and `sessions.repository` from the stream's `meta`.
 const REPOSITORY_VERSION: usize = 8;
-/// The first schema version whose derived tables an older database lacks or derives differently; opening such a
-/// database reindexes it.
-const REINDEX_BELOW: usize = 3;
+/// The newest schema version that requires rebuilding derived tables; opening an older database reindexes it.
+const REINDEX_BELOW: usize = 11;
 /// Set in the transaction of a migration that needs a reindex, and cleared by the reindex that follows, so an
 /// interrupted or failed reindex runs again on the next open.
 pub const NEEDS_REINDEX: &str = "needs_reindex";
@@ -50,6 +50,7 @@ pub const DERIVED_TABLES: &[&str] = &[
     "entries",
     "turns",
     "model_calls",
+    "usage_events",
     "tool_calls",
     "herder_runs",
     "herder_events",

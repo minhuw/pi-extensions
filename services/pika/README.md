@@ -80,7 +80,7 @@ Every route is under the base path:
 - `POST api/pair/v1/start` and `poll` let a device ask for a token, without authentication; you approve it in the UI. `POST api/pair/v1/bind` lets a device with a token register its device key.
 - `GET api/relay/v1/connect` (a WebSocket) and `GET api/relay/v1/sessions` are the relay's device routes, with `Authorization: Bearer <token>`.
 - `api/v1/*` is the read API used by the UI, plus login, browser sessions (`auth/sessions`), devices, pairing approval, and the relay dashboard (`relay/sessions`, `relay/messages`, `relay/events`).
-- `api/public/v1/*` provides anonymous read access to published projects only (see [Publishing projects](#publishing-projects)).
+- `api/public/v1/*` provides anonymous read access to published projects only (see [Publishing projects](#publishing-projects)), plus anonymous usage aggregates that any site may query (see [Usage API for other sites](#usage-api-for-other-sites)).
 - Every other path serves the UI. The server injects `<meta name="pika-base">` into `index.html`, so one build works under any base path.
 
 The protocol and the read API are specified in [`docs/SPEC.md`](docs/SPEC.md).
@@ -119,6 +119,41 @@ The protocol and the read API are specified in [`docs/SPEC.md`](docs/SPEC.md).
 - **Rate limits:** after 5 failed logins from one client address in 15 minutes, that address gets `429 Too Many Requests` with `Retry-After` until the oldest failure is 15 minutes old; a successful login clears its count. After 100 failed logins in an hour from all addresses together, every login is refused until the hour frees up. Pairing allows 5 starts per address in 10 minutes and 10 pending pairings at a time. An IPv6 client counts by its /64, since one client usually holds a whole /64. The counts live in memory and reset when the server restarts. Behind a reverse proxy, set `PIKA_TRUST_PROXY=1`, or every client shares the proxy's address and its limits.
 - **If logins are blocked:** because of the global limit, anyone who can reach the login page can block new logins for up to an hour by sending wrong passwords from many addresses. Browsers that are already logged in keep working, and devices keep uploading. To get back in, use a browser that is still logged in, or restart pika (`docker restart pika`, or stop and start `pika serve`), which clears every limit. Then block the offending addresses at the reverse proxy, or put an authenticating proxy in front with `PIKA_AUTH=proxy` if it keeps happening.
 - **Devices:** each device has an id, which never changes and keys everything it uploaded, and a name, a free label of up to 64 characters that you can change at any time; two devices may share a name. The UI's Devices page lists each device with its name and id, how its token was made, when it last uploaded, and from which host (updated at most once a minute), renames devices, and revokes tokens; ingest refuses a revoked token at once, and the device's relay connections close at once. A revoked device keeps its name and history, and a later pairing can continue it. `pika token list`, `pika token rename`, and `pika token revoke` do the same from the command line; a running server notices a token revoked by `pika token revoke` within one relay heartbeat (20 s) and closes that device's relay connections then.
+
+### Usage statistics and performance
+
+The **Statistics** tab at `<url>/statistics` shows total tokens, model requests, trajectories, recorded cost, and active days for 7, 30, or 90 days, or all time. The interactive chart switches between tokens, requests, and cost. By default, token bars stack by type (output, input, cache write, and cache read, darkest to lightest) and request and cost bars are black; **By model** or **By project** splits each bar among the six models or projects with the most tokens, models in their maker's colour (lighter for each smaller model of one maker, black shades for makers without a colour) and projects in shades of black, with the rest together and unnamed usage hatched, and switches the breakdown table below to the same grouping, whose rows carry the matching swatches. The split is kept in the URL (`by=model` or `by=project`). Bars can be selected with the pointer or arrow keys; when split, the legend gives the selected bar's value per layer. Days use UTC; subagent usage counts once, and compaction and summary usage is included. Requests count recorded assistant calls, including failed calls. Costs are the estimates uploaded by Pi, not provider invoices. Records without any known timestamp cannot be placed on a day and are omitted from dated totals.
+
+**These anonymous aggregates are public**, at `<url>/public/statistics`, and include unpublished and hidden trajectories by default, even when no projects are published. **Exclude unpublished trajectories** restricts them to published, visible sessions. The project breakdown shows published project names and one **Unpublished & hidden** bucket for all remaining activity. The owner view names every project; the model breakdown shows bare model names across all included usage. Private project names, session identifiers, paths, prompts, and trajectory contents remain private. The checkbox sits under the chart; it and the range are kept in the URL.
+
+The breakdown, by project unless the chart is split by model, is searchable, sortable, and paginated. Compare token shares, requests, recorded cost, cache-read share, failures and aborts, mean TTFT, and output tok/s; select a row for its exact input/output/cache counts, outcomes, timing coverage, and per-request averages. Compaction and other usage without a recorded model stay in a separate row rather than being assigned to the current model. The figures above the chart add cache-read share and the completion percentage of known outcomes; measured performance is per row in the breakdown. Completion includes tool-use and length-limited responses; unknown outcomes are excluded. Cache share measures recorded prompt tokens, not the percentage of requests that hit a cache. Statistics timing uses captured request timing and recorded call-end timestamps; calls without usable timing stay unavailable.
+
+Session summaries and wide model-call ledgers also show **Performance**: request-to-first-token time (TTFT, including thinking output) and output tokens per second. Session TTFT is the mean of measured calls; throughput is their total output divided by total measured streaming time after the first token, excluding tool execution and idle time. Failed/aborted streams are excluded from throughput, and calls without first-token timing show unavailable values.
+
+### Usage API for other sites
+
+Another website can read the same anonymous aggregates directly from pika, from its server or from visitors' browsers: `GET <url>/api/public/v1/usage` needs no login and allows any origin. It returns tokens, requests, and cost for each day, week, or month, optionally split by model or project.
+
+```sh
+curl '<url>/api/public/v1/usage?days=30&by=model'                          # daily, per model, last 30 days
+curl '<url>/api/public/v1/usage?from=2026-01-01&interval=month'             # monthly since January
+curl '<url>/api/public/v1/usage?days=all&interval=total&by=project'         # all-time totals per project
+```
+
+```js
+const usage = await (await fetch("https://pika.example.com/api/public/v1/usage?days=7&by=model")).json();
+for (const day of usage.periods) console.log(day.start, day.tokens, day.groups.map((m) => `${m.name}: ${m.tokens}`));
+```
+
+| Parameter | Values | Default |
+| --- | --- | --- |
+| `days` | `1`–`3660`, or `all` | `30` |
+| `from`, `to` | `YYYY-MM-DD`, inclusive UTC days, instead of `days`; `to` stops at today | `to` is today, `from` 29 days before `to` |
+| `interval` | `day`, `week` (Monday to Sunday), `month`, or `total` | `day` |
+| `by` | `model` or `project` | no split |
+| `excludeUnpublished` | `true` counts published, visible trajectories only | `false` |
+
+The response has `from`, `to`, `interval`, `by`, `excludeUnpublished`, a `total`, and `periods`: every interval of the range in order, with no gaps, each with its inclusive `start` and `end` day. Usage figures are `requests`, `tokens` (all four kinds together), `input`, `output`, `cacheRead`, `cacheWrite`, and `cost` (recorded USD). With `by`, the response has range-wide `groups` and each period has its own `groups` that had usage, each with a `name` and the same figures, most tokens first. A model `name` of `null` is usage without a recorded model, such as compactions and summaries. A project `name` of `null` is everything outside published projects, as on the public Statistics page: private project names never appear. `<url>/api/public/v1/statistics` is readable from other origins too. An invalid parameter returns 400 with a JSON error.
 
 ### Publishing projects
 
@@ -183,6 +218,8 @@ Relay lets a running Pi session send a text message to any other running Pi sess
 `PIKA_RELAY_TTL_SECS` and `PIKA_RELAY_HEARTBEAT_SECS` shorten the message lifetime and the heartbeat. They exist for tests and the end-to-end script only; do not set them in production.
 
 ### Upgrading from 0.7.0
+
+- Usage statistics upgrade the database to schema version 11 and automatically rebuild derived data from stored trajectories before the server starts listening. This backfills historical usage, including compactions and summaries. Large archives may take time to reindex; an interrupted rebuild retries on the next start. Source lines and publication settings are preserved. Older binaries cannot open the upgraded database, so keep a [backup](#backup) if rollback may be needed.
 
 - Update the Pi extensions alongside the server to receive models.dev pricing estimates. The Magpie provider matches model names and caches public prices for 24 hours; pika stores the per-call costs uploaded by Pi. Upgrading the server alone does not change client pricing or recalculate historical costs.
 - pika names models by their bare name everywhere: the part of Pi's model id after the last `/`, without an `@` suffix, so `codex/gpt-6.1-sol`, `auto/gpt-6.1-sol`, and `gpt-6.1-sol@1m` are all `gpt-6.1-sol`, and the Model filter has one option per model. Older `?model=` links that name a route still work. The provider is no longer shown in the UI or returned by the read API; the stored lines, raw entries, exports, and captured request payloads keep the ids and provider as Pi wrote them. The first start rewrites the model names of existing sessions once, in one transaction, without a reindex.
