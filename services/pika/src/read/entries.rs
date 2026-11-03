@@ -90,10 +90,21 @@ pub(crate) const LIST_SQL: &str = "SELECT e.seq, e.offset, e.entry_id, e.parent_
 
 /// Entries `from..=to` by seq. `prefix` is the base path prefix for image URLs (empty for `/`).
 pub fn list(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str, p: &Params) -> ReadResult<Entries> {
-    list_scoped(conn, blobs, prefix, id, p, false)
+    list_scoped(conn, blobs, prefix, id, p, Some("v1"), false)
 }
 
-pub fn list_scoped(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str, p: &Params, public: bool) -> ReadResult<Entries> {
+/// Entries for a namespace: `images` is the API namespace (`v1`, `public/v1`) whose image route each image's `src`
+/// names, or `None` for one without that route (the agent namespace), whose images have no `src`. A `redact`ed list,
+/// public or agent, is scrubbed and has no `requestId`.
+pub fn list_scoped(
+    conn: &Connection,
+    blobs: &BlobStore,
+    prefix: &str,
+    id: &str,
+    p: &Params,
+    images: Option<&str>,
+    redact: bool,
+) -> ReadResult<Entries> {
     let sid = session_sid(conn, id)?;
     let limit = p.limit(ENTRY_LIMIT, MAX_ENTRY_LIMIT)?;
     let from = p.int("from")?.unwrap_or(0);
@@ -118,24 +129,25 @@ pub fn list_scoped(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let namespace = if public { "public/v1" } else { "v1" };
-    let images = format!("{prefix}/api/{namespace}/sessions/{}/entries", encode_path_segment(id));
+    let images = images.map(|namespace| format!("{prefix}/api/{namespace}/sessions/{}/entries", encode_path_segment(id)));
     let mut items = Vec::with_capacity(rows.len());
     for (mut entry, data, blob) in rows {
         let mut raw = parse(line_text(blobs, data, blob)?);
         let seq = entry.seq;
         for_each_image(&mut raw, &mut 0, &mut |index, image| {
             image.insert("data".into(), Value::String(String::new()));
-            image.insert("src".into(), Value::String(format!("{images}/{seq}/image/{index}")));
+            if let Some(images) = &images {
+                image.insert("src".into(), Value::String(format!("{images}/{seq}/image/{index}")));
+            }
         });
-        entry.truncated = if public { oversized_strings(&raw) } else { truncate_strings(&mut raw) };
+        entry.truncated = if redact { oversized_strings(&raw) } else { truncate_strings(&mut raw) };
         entry.raw = raw;
-        if public {
+        if redact {
             entry.request_id = None;
         }
         items.push(entry);
     }
-    if public {
+    if redact {
         // Scrubbed before the cut, which could leave too little of a credential for its rule to recognise.
         super::redaction::entries(&mut items);
         for entry in &mut items {

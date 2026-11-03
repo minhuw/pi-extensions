@@ -27,10 +27,11 @@ pika serve [--bind ADDR] [--base-path PATH] [--auth password|proxy|none] [--pass
            [--relay on|off] [--visitor-analytics off|auto|direct|proxy|cloudflare]
 pika password set
 pika password clear
-pika token create <name>
+pika token create <name> [--no-read-access]
 pika token list
 pika token revoke <device>
 pika token rename <device> <name>
+pika token read-access <device> on|off
 pika reindex
 pika export <sessionId>
 pika delete session <sessionId> [--yes]
@@ -42,10 +43,11 @@ pika delete project <name> [--yes]
 | `serve` | Serves ingest, pairing, the read API, and the web UI. Stops cleanly on Ctrl-C or SIGTERM. In `password` mode (the default) it exits with status 2 when no password is configured. |
 | `password set` | Stores a new UI password (at least 12 characters) as an argon2id hash and signs every browser out. Reads it twice without echo from the terminal, or once from stdin. |
 | `password clear` | Removes the stored password and signs every browser out. |
-| `token create <name>` | Creates a new device named `<name>` and prints its token once on stdout; stderr says `created device <id> (<name>)`. Only the token's SHA-256 is stored. A name is any text of 1–64 characters without control characters (quote it in the shell); names need not be unique. The device gets a new random id. Pairing (see [First run](#first-run)) is the easier way to add a machine. |
-| `token list` | Lists devices with a token, tab-separated: id, name, creation time, how the token was made (`cli` or `pairing`), last upload (`never`), and the host it came from (`-`), sorted by name. |
+| `token create <name>` | Creates a new device named `<name>` and prints its token once on stdout; stderr says `created device <id> (<name>)`. pi agents on the device may read your trajectories (see [Agent read access](#agent-read-access)); `--no-read-access` creates it without that. Only the token's SHA-256 is stored. A name is any text of 1–64 characters without control characters (quote it in the shell); names need not be unique. The device gets a new random id. Pairing (see [First run](#first-run)) is the easier way to add a machine. |
+| `token list` | Lists devices with a token, tab-separated: id, name, creation time, how the token was made (`cli` or `pairing`), last upload (`never`), the host it came from (`-`), and `read` when the device has agent read access (`-`), sorted by name. |
 | `token revoke <device>` | Revokes a device's token at once and prints `revoked <name> (<id>)`. Its uploaded data, name, and id stay. |
 | `token rename <device> <name>` | Renames a device, with or without a token, and prints `renamed <id> to <name>`. Its id, and everything recorded under it, stay. |
+| `token read-access <device> on\|off` | Turns agent read access on or off for a device (see [Agent read access](#agent-read-access)) and prints `read access on for <name> (<id>)` or `read access off for <name> (<id>)`. |
 | `reindex` | Rebuilds every derived table (sessions, entries, turns, model and tool calls, links, Herder runs, search index) from the stored verbatim lines. |
 | `export <sessionId>` | Writes a session's JSONL to stdout, byte-identical to the original file. |
 | `delete session <sessionId>` | Deletes a session and every session it started (subagents, Herder steps, tickets), for good; see [Deleting and hiding](#deleting-and-hiding). Says what it will delete and asks `Delete? [y/N]` on a terminal; `--yes` (`-y`) skips the question. Without a terminal and without `--yes` it refuses. Prints the counts afterwards. |
@@ -76,10 +78,11 @@ Flags win over environment variables. `PIKA_DEBUG=1` turns on debug logging. In 
 
 Every route is under the base path:
 
-- `GET api/health` returns `{ "ok": true, "version", "basePath", "features", "revision" }`, without authentication. `features` lists `"relay"` when relay is on; `revision` is the commit the server was built from, which the published images record and a plain `cargo build` leaves out (set `PIKA_REVISION` to record one).
+- `GET api/health` returns `{ "ok": true, "version", "basePath", "features", "revision" }`, without authentication. `features` lists `"relay"` when relay is on and `"agent"` always; `revision` is the commit the server was built from, which the published images record and a plain `cargo build` leaves out (set `PIKA_REVISION` to record one).
 - `POST api/ingest/v1/batch` takes uploads from devices with `Authorization: Bearer <token>`.
 - `POST api/pair/v1/start` and `poll` let a device ask for a token, without authentication; you approve it in the UI. `POST api/pair/v1/bind` lets a device with a token register its device key.
 - `GET api/relay/v1/connect` (a WebSocket) and `GET api/relay/v1/sessions` are the relay's device routes, with `Authorization: Bearer <token>`.
+- `api/agent/v1/*` is the read API for pi agents on devices with read access, with `Authorization: Bearer <token>` and credentials scrubbed (see [Agent read access](#agent-read-access)).
 - `api/v1/*` is the read API used by the UI, plus login, browser sessions (`auth/sessions`), devices, pairing approval, and the relay dashboard (`relay/sessions`, `relay/messages`, `relay/events`).
 - `api/public/v1/*` provides anonymous read access to published projects only (see [Publishing projects](#publishing-projects)), plus anonymous usage aggregates that any site may query (see [Usage API for other sites](#usage-api-for-other-sites)).
 - Every other path serves the UI. The server injects `<meta name="pika-base">` into `index.html`, so one build works under any base path.
@@ -119,7 +122,7 @@ The protocol and the read API are specified in [`docs/SPEC.md`](docs/SPEC.md).
 - **`Secure` cookies:** with the default `--cookie-secure auto`, the cookie is `Secure` when a trusted proxy (`PIKA_TRUST_PROXY=1`) reports `X-Forwarded-Proto: https`. Set `PIKA_COOKIE_SECURE=always` if the proxy does not send that header; `never` is for plain-HTTP setups.
 - **Rate limits:** after 5 failed logins from one client address in 15 minutes, that address gets `429 Too Many Requests` with `Retry-After` until the oldest failure is 15 minutes old; a successful login clears its count. After 100 failed logins in an hour from all addresses together, every login is refused until the hour frees up. Pairing allows 5 starts per address in 10 minutes and 10 pending pairings at a time. An IPv6 client counts by its /64, since one client usually holds a whole /64. The counts live in memory and reset when the server restarts. Behind a reverse proxy, set `PIKA_TRUST_PROXY=1`, or every client shares the proxy's address and its limits.
 - **If logins are blocked:** because of the global limit, anyone who can reach the login page can block new logins for up to an hour by sending wrong passwords from many addresses. Browsers that are already logged in keep working, and devices keep uploading. To get back in, use a browser that is still logged in, or restart pika (`docker restart pika`, or stop and start `pika serve`), which clears every limit. Then block the offending addresses at the reverse proxy, or put an authenticating proxy in front with `PIKA_AUTH=proxy` if it keeps happening.
-- **Devices:** each device has an id, which never changes and keys everything it uploaded, and a name, a free label of up to 64 characters that you can change at any time; two devices may share a name. The UI's Devices page lists each device with its name and id, how its token was made, when it last uploaded, and from which host (updated at most once a minute), renames devices, and revokes tokens; ingest refuses a revoked token at once, and the device's relay connections close at once. A revoked device keeps its name and history, and a later pairing can continue it. `pika token list`, `pika token rename`, and `pika token revoke` do the same from the command line; a running server notices a token revoked by `pika token revoke` within one relay heartbeat (20 s) and closes that device's relay connections then.
+- **Devices:** each device has an id, which never changes and keys everything it uploaded, and a name, a free label of up to 64 characters that you can change at any time; two devices may share a name. The UI's Devices page lists each device with its name and id, how its token was made, when it last uploaded, and from which host (updated at most once a minute), renames devices, and revokes tokens; ingest refuses a revoked token at once, and the device's relay connections close at once. A revoked device keeps its name and history, and a later pairing can continue it. The page's **Agents can read** switch, on for every device unless you turn it off, controls agent read access (see [Agent read access](#agent-read-access)). `pika token list`, `pika token rename`, and `pika token revoke` do the same from the command line; a running server notices a token revoked by `pika token revoke` within one relay heartbeat (20 s) and closes that device's relay connections then.
 
 ### Usage statistics and performance
 
@@ -217,6 +220,12 @@ Relay lets a running Pi session send a text message to any other running Pi sess
 - **Behind a proxy:** `/api/relay/` must stay open to devices and needs WebSocket upgrades (see [Reverse proxy](#reverse-proxy)).
 
 `PIKA_RELAY_TTL_SECS` and `PIKA_RELAY_HEARTBEAT_SECS` shorten the message lifetime and the heartbeat. They exist for tests and the end-to-end script only; do not set them in production.
+
+### Agent read access
+
+pi agents can search and read your past trajectories, from every machine and project, to recall how something was done before, earlier decisions, and past errors and their fixes. They use the token pika's extension already has, so every device can read by default, with no extra step. You can turn it off per device: turn off **Agents can read** for the device on the Devices page, or run `pika token read-access <device> off` (`pika token create <name> --no-read-access` creates a device without it). Revoking a device's token stops its agents, as the token is gone, but leaves the switch as it was; a pairing that continues a device keeps it.
+
+Agents read under `api/agent/v1/`: the session list, sessions, their trees, turns, entries, and traces, and search, as the UI reads them under `api/v1/`, unpublished and hidden trajectories included. Every text is scrubbed of credentials as on the public pages (see [Redaction](#redaction)), and images come without their bytes. A device whose read access is off gets 403 `{ "error": "read_access_denied" }`; a missing or revoked token gets 401. These routes always take device tokens, whatever `PIKA_AUTH` says, so an authenticating proxy must leave `/api/agent/` open (see [Reverse proxy](#reverse-proxy)). The switch is stored in schema version 13, which the server adds when it first opens the database, on for every existing device and without a reindex; older binaries cannot open the database afterwards. The API is specified in [`docs/SPEC.md`](docs/SPEC.md#agent-read-api).
 
 ### Upgrading from 0.8.1
 
@@ -443,7 +452,7 @@ homelab.example {
 }
 ```
 
-The proxy may handle authentication instead of the built-in password: basic auth, or forward auth with Authelia, Authentik, or a VPN. Then start pika with `PIKA_AUTH=proxy`, and exempt the following paths from the proxy's login (including your base path, for example `/pika/api/ingest/`): `api/ingest/` and `api/relay/`, because devices send their own `Authorization: Bearer` token there; `api/pair/`, because a device pairing with the server has no login yet; `api/health`, for monitoring; and `public`, `public/*`, `api/public/*`, and `assets/*`, for the public gallery. Everything else, the owner UI and `api/v1/` included, must go through the proxy's login: with `PIKA_AUTH=proxy`, pika itself lets every request in. The examples include commented-out basic-auth lines that do this. Set the devices' `url` to the `https://` address: pika does not follow redirects, so an `http://` URL that the proxy redirects never uploads.
+The proxy may handle authentication instead of the built-in password: basic auth, or forward auth with Authelia, Authentik, or a VPN. Then start pika with `PIKA_AUTH=proxy`, and exempt the following paths from the proxy's login (including your base path, for example `/pika/api/ingest/`): `api/ingest/`, `api/relay/`, and `api/agent/`, because devices send their own `Authorization: Bearer` token there; `api/pair/`, because a device pairing with the server has no login yet; `api/health`, for monitoring; and `public`, `public/*`, `api/public/*`, and `assets/*`, for the public gallery. Everything else, the owner UI and `api/v1/` included, must go through the proxy's login: with `PIKA_AUTH=proxy`, pika itself lets every request in. The examples include commented-out basic-auth lines that do this. Set the devices' `url` to the `https://` address: pika does not follow redirects, so an `http://` URL that the proxy redirects never uploads.
 
 ## Development
 

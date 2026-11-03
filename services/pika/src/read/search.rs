@@ -251,16 +251,17 @@ fn sessions_for_filters(conn: &Connection, p: &Params, public: bool) -> ReadResu
 /// stops at `limit`; `sort=relevance` returns the best `limit` by bm25 of the newest `RELEVANCE_WINDOW` filtered
 /// matches as one page. Relevance does not page because bm25 scores change with every indexed document.
 pub fn search(conn: &Connection, p: &Params) -> ReadResult<Page<Hit>> {
-    search_scoped(conn, p, false)
+    search_scoped(conn, p, false, false)
 }
 
-/// `search`, in the public namespace only over published sessions, and only once the index's text is scrubbed under
-/// the current rules (see `store::SEARCH_RULES`): until then it finds nothing. Run it in one snapshot: publication
-/// and the rules' version are read with the matches.
-pub fn search_scoped(conn: &Connection, p: &Params, public: bool) -> ReadResult<Page<Hit>> {
+/// `search`, in the public namespace only over published sessions, and, where responses are scrubbed (`redact`: the
+/// public and agent namespaces), only once the index's text is scrubbed under the current rules (see
+/// `store::SEARCH_RULES`): until then it finds nothing, as matches and prefixes over unscrubbed text would tell what
+/// scrubbing hides. Run it in one snapshot: publication and the rules' version are read with the matches.
+pub fn search_scoped(conn: &Connection, p: &Params, public: bool, redact: bool) -> ReadResult<Page<Hit>> {
     // Relevance looks its hits up in a second statement. The public HTTP scope may already hold a snapshot.
     let _tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
-    if public && !crate::store::search_rules_current(conn)? {
+    if redact && !crate::store::search_rules_current(conn)? {
         return Ok(Page { items: Vec::new(), next_cursor: None });
     }
     let (any, wide_sids) = sessions_for_filters(conn, p, public)?;
@@ -393,13 +394,14 @@ pub enum Results {
     Sessions(Page<SessionMatches>),
 }
 
-/// `GET search`, by its `group` parameter.
-pub fn results_scoped(conn: &Connection, p: &Params, public: bool) -> ReadResult<Results> {
+/// `GET search`, by its `group` parameter; `public` and `redact` as for [`search_scoped`].
+pub fn results_scoped(conn: &Connection, p: &Params, public: bool, redact: bool) -> ReadResult<Results> {
     match p.get("group") {
-        None | Some("entry") => search_scoped(conn, p, public).map(Results::Entries),
+        None | Some("entry") if p.get("exclude").is_some() => Err(bad("exclude needs group=session")),
+        None | Some("entry") => search_scoped(conn, p, public, redact).map(Results::Entries),
         Some("session") => {
             let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-            sessions_at(conn, p, public, now).map(Results::Sessions)
+            sessions_at(conn, p, public, redact, now).map(Results::Sessions)
         }
         Some(_) => Err(bad("group must be entry or session")),
     }
@@ -411,6 +413,10 @@ pub fn results_scoped(conn: &Connection, p: &Params, public: bool) -> ReadResult
 pub struct SessionMatches {
     pub session_id: String,
     pub session_title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_at: Option<String>,
     /// How many of the ranked matches are in the session or its descendants.
     pub matches: i64,
     /// Up to `GROUP_HITS`: the newest, or by relevance the best. Each names the session it is in.
@@ -428,16 +434,18 @@ struct Group {
 /// `group=session`: the newest `RELEVANCE_WINDOW` filtered matches, grouped by the topmost recorded (and, in public,
 /// published) ancestor of their session, so a subagent's or Herder step's matches count for the session that started
 /// it. `sort=newest` orders sessions by their newest match; `sort=relevance` by their best bm25 divided by
-/// `1 + age / RECENCY_SECS`, with `now` in Unix seconds. One page.
+/// `1 + age / RECENCY_SECS`, with `now` in Unix seconds. With `exclude`, the group of that session's root is left
+/// out, so a pi session searching its own history does not find itself. One page.
 ///
 /// The window reads only document ids (and bm25 scores): while every sid is below 2^20, a match's sid bits are its
-/// session, as the prefilter assumes. Only the hits returned are joined, each passing the exact filters.
-pub fn sessions_at(conn: &Connection, p: &Params, public: bool, now: i64) -> ReadResult<Page<SessionMatches>> {
+/// session, as the prefilter assumes. Only the hits returned are joined, each passing the exact filters. `public` and
+/// `redact` as for [`search_scoped`].
+pub fn sessions_at(conn: &Connection, p: &Params, public: bool, redact: bool, now: i64) -> ReadResult<Page<SessionMatches>> {
     let empty = Page { items: Vec::new(), next_cursor: None };
     let Some(grouped) = Grouped::new(p)? else { return Ok(empty) };
     // One snapshot for every statement. The public HTTP scope may already hold one for authorization.
     let _tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
-    if public && !crate::store::search_rules_current(conn)? {
+    if redact && !crate::store::search_rules_current(conn)? {
         return Ok(empty);
     }
     let (any, wide_sids) = sessions_for_filters(conn, p, public)?;
@@ -452,6 +460,8 @@ pub(crate) struct Grouped {
     query: String,
     relevance: bool,
     limit: i64,
+    /// The session whose root's group is left out.
+    exclude: Option<String>,
 }
 
 impl Grouped {
@@ -462,7 +472,8 @@ impl Grouped {
         if p.cursor()?.is_some() {
             return Err(bad("group=session returns one page"));
         }
-        Ok(query(p)?.map(|query| Grouped { query, relevance, limit }))
+        let exclude = p.get("exclude").map(str::to_owned);
+        Ok(query(p)?.map(|query| Grouped { query, relevance, limit, exclude }))
     }
 
     /// The statement that reads the window: each match's document id, its sid unless `wide_sids` is false (the sid
@@ -523,6 +534,19 @@ impl Grouped {
             group.best = group.best.min(rank);
             group.members.push((id, rank));
         }
+        // Walked as the matches are, from the excluded session itself; in public, only from a published one, so the
+        // answer says nothing about where an unpublished session sits.
+        if let Some(exclude) = &self.exclude {
+            let published = if public { format!(" AND {}", super::publishing::SESSION_FILTER) } else { String::new() };
+            let sid: Option<i64> = conn
+                .prepare_cached(&format!("SELECT s.sid FROM sessions s WHERE s.id = ?1{published}"))?
+                .query_row([exclude], |r| r.get(0))
+                .optional()?;
+            if let Some(sid) = sid {
+                let excluded = root_of(&mut parent, sid, &mut roots)?;
+                groups.retain(|g| g.root != excluded);
+            }
+        }
         // The window is newest first, so the groups already are.
         if self.relevance {
             let score = |g: &Group| g.best / (1.0 + (now - (g.newest >> 32)).max(0) as f64 / RECENCY_SECS);
@@ -533,7 +557,7 @@ impl Grouped {
         }
 
         let lookup = Lookup::new(&self.query, p, public);
-        let mut session = conn.prepare_cached("SELECT id, title FROM sessions WHERE sid = ?1")?;
+        let mut session = conn.prepare_cached("SELECT id, title, project, last_at, entry_count FROM sessions WHERE sid = ?1")?;
         let mut items = Vec::new();
         let mut groups = groups.into_iter().peekable();
         // A session's hits are its first `GROUP_HITS` members, looked up together for as many sessions as are left to
@@ -548,8 +572,9 @@ impl Grouped {
                 if hits.is_empty() {
                     continue;
                 }
-                let Some((session_id, title)) = session
-                    .query_row([group.root], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
+                type Root = (String, Option<String>, Option<String>, i64, i64);
+                let Some((session_id, title, project, last_at, entry_count)) = session
+                    .query_row([group.root], |r| Ok::<Root, _>((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
                     .optional()?
                 else {
                     continue;
@@ -557,6 +582,9 @@ impl Grouped {
                 items.push(SessionMatches {
                     session_id,
                     session_title: title.unwrap_or_default(),
+                    project: project.filter(|p| !p.is_empty()),
+                    // As `GET sessions/:id/updates` gives it: a session without entries or times has none.
+                    last_at: iso((entry_count > 0 && last_at != 0).then_some(last_at)),
                     matches: group.members.len() as i64,
                     hits,
                 });
@@ -841,7 +869,7 @@ mod tests {
             store
                 .read(|conn| match wide_sids {
                     Some(wide_sids) => Ok(run(conn, statement(&p, wide_sids, public)?.unwrap())?.items),
-                    None => Ok::<_, ReadError>(search_scoped(conn, &p, public)?.items),
+                    None => Ok::<_, ReadError>(search_scoped(conn, &p, public, public)?.items),
                 })
                 .unwrap()
                 .into_iter()
@@ -1049,7 +1077,7 @@ mod tests {
         store
             .read(|conn| {
                 let p = params(&[("q", "alpha"), ("group", "session")]);
-                let Results::Sessions(page) = results_scoped(conn, &p, true)? else { panic!("sessions") };
+                let Results::Sessions(page) = results_scoped(conn, &p, true, true)? else { panic!("sessions") };
                 assert_eq!(page.items.iter().map(|g| g.session_id.as_str()).collect::<Vec<_>>(), ["pub", "kid"]);
                 Ok::<_, ReadError>(())
             })
@@ -1103,7 +1131,7 @@ mod tests {
         upload(&store, "a", "s0", family("s0", "/x/p", "2026-10-20T09:00:00Z", None, &["alpha"]));
         store
             .read(|conn| {
-                let results = |pairs: &[(&str, &str)]| results_scoped(conn, &params(pairs), false);
+                let results = |pairs: &[(&str, &str)]| results_scoped(conn, &params(pairs), false, false);
                 let bad = |pairs: &[(&str, &str)]| matches!(results(pairs), Err(ReadError::BadRequest(_)));
                 let cursor = crate::read::encode_cursor(&[json!(5)]);
                 assert!(bad(&[("q", "alpha"), ("group", "session"), ("cursor", &cursor)]));

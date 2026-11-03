@@ -739,7 +739,7 @@ async fn connections_and_online_sessions_are_limited() {
 async fn relay_off_disables_every_route() {
     let s = server().await;
     let health = http(&s.app, get("/api/health", None, None)).await;
-    assert_eq!(health.json()["features"], json!(["relay"]));
+    assert_eq!(health.json()["features"], json!(["relay", "agent"]));
 
     let s = server_with(|c| {
         c.relay.enabled = false;
@@ -750,7 +750,7 @@ async fn relay_off_disables_every_route() {
     let health = http(&s.app, get("/api/health", None, None)).await;
     assert_eq!(
         (health.json()["features"].clone(), health.json()["version"].clone()),
-        (json!([]), json!(env!("CARGO_PKG_VERSION")))
+        (json!(["agent"]), json!(env!("CARGO_PKG_VERSION")))
     );
     let disabled = (404, json!({ "error": "relay_disabled" }));
     assert_eq!(refused(&s, Some(&s.laptop)).await, disabled);
@@ -969,11 +969,11 @@ async fn the_server_reads_relay_settings_from_the_environment() {
     let data = env.dir.path().join("data");
     let token = common::device(&env.store, DEVICE);
     let cases = [
-        ("off", json!([])),
-        ("OFF", json!([])),
-        ("on", json!(["relay"])),
-        ("1", json!(["relay"])),
-        ("", json!(["relay"])),
+        ("off", json!(["agent"])),
+        ("OFF", json!(["agent"])),
+        ("on", json!(["relay", "agent"])),
+        ("1", json!(["relay", "agent"])),
+        ("", json!(["relay", "agent"])),
     ];
     for (value, features) in cases {
         let (mut child, addr) = spawn(&data, &[("PIKA_RELAY", value)]).unwrap();
@@ -987,7 +987,7 @@ async fn the_server_reads_relay_settings_from_the_environment() {
     assert!(e.starts_with("Some(2): "), "{e}");
 
     let (mut child, addr) = spawn(&data, &[("PIKA_RELAY_TTL_SECS", "7"), ("PIKA_RELAY_HEARTBEAT_SECS", "3")]).unwrap();
-    assert_eq!(health_of(&addr)["features"], json!(["relay"]));
+    assert_eq!(health_of(&addr)["features"], json!(["relay", "agent"]));
     let mut request = format!("ws://{addr}/api/relay/v1/connect").into_client_request().unwrap();
     request.headers_mut().insert("authorization", format!("Bearer {token}").parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();

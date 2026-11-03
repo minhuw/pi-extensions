@@ -684,6 +684,133 @@ describe("devices page", () => {
 		if (succeeds) await waitFor(() => expect(document.querySelector('[data-device="mini"]')?.getAttribute("data-device-name")).toBe("mini 2"));
 	});
 
+	function readSwitch(id: string, name = id): HTMLInputElement {
+		const row = document.querySelector<HTMLElement>(`[data-device="${id}"]`);
+		if (!row) throw new Error(`no row for ${id}`);
+		return within(row).getByRole("switch", { name: `Agents can read on ${name}` }) as HTMLInputElement;
+	}
+
+	it("shows an Agents can read switch per device, described and keyboard reachable", async () => {
+		const server = signedIn({ devices: [device("mini"), device("laptop", { readAccess: false })] });
+		renderApp("/devices", server.fetch);
+		await screen.findByRole("button", { name: "Rename mini" });
+		const mini = readSwitch("mini");
+		const laptop = readSwitch("laptop");
+		expect(mini.checked).toBe(true);
+		expect(laptop.checked).toBe(false);
+		// A real checkbox, so Tab reaches it and Space toggles it.
+		expect(mini.tagName).toBe("INPUT");
+		expect(mini.type).toBe("checkbox");
+		expect(mini.disabled).toBe(false);
+		expect(mini.tabIndex).toBe(0);
+		const description = document.getElementById(mini.getAttribute("aria-describedby") ?? "");
+		expect(description?.textContent).toContain("Lets pi agents on this device search and read every trajectory, with credentials scrubbed.");
+		expect(description?.textContent).toContain("On by default; turn it off for a device to stop its agents.");
+		expect(laptop.getAttribute("aria-describedby")).toBe(mini.getAttribute("aria-describedby"));
+		expect(within(deviceTable()).getAllByText("Agents can read")).toHaveLength(2);
+		expect(server.mutations).toEqual([]);
+	});
+
+	it("withdraws and grants read access with PATCH { readAccess } and updates the row", async () => {
+		const server = signedIn({ devices: [device(STUDIO_ID, { name: "Studio Mac" }), device("mini")] });
+		renderApp("/devices", server.fetch);
+		await screen.findByRole("button", { name: "Rename Studio Mac" });
+		expect(readSwitch(STUDIO_ID, "Studio Mac").checked).toBe(true);
+		fireEvent.click(readSwitch(STUDIO_ID, "Studio Mac"));
+		expect(await screen.findByText("Agents on Studio Mac can no longer read trajectories.")).toBeTruthy();
+		expect(server.mutations).toEqual([{ method: "PATCH", path: `/api/v1/devices/${STUDIO_ID}`, body: { readAccess: false }, json: true }]);
+		expect(readSwitch(STUDIO_ID, "Studio Mac").checked).toBe(false);
+		expect(readSwitch("mini").checked).toBe(true);
+		expect(server.state.devices.find((d) => d.id === STUDIO_ID)?.readAccess).toBe(false);
+		expect(document.querySelector(`[data-device="${STUDIO_ID}"] [data-read-access]`)?.getAttribute("data-read-access")).toBe("off");
+
+		fireEvent.click(readSwitch(STUDIO_ID, "Studio Mac"));
+		expect(await screen.findByText("Agents on Studio Mac can now read trajectories.")).toBeTruthy();
+		expect(server.mutations[1]).toEqual({ method: "PATCH", path: `/api/v1/devices/${STUDIO_ID}`, body: { readAccess: true }, json: true });
+		expect(readSwitch(STUDIO_ID, "Studio Mac").checked).toBe(true);
+		expect(server.state.devices.find((d) => d.id === STUDIO_ID)?.readAccess).toBe(true);
+	});
+
+	it("shows the value asked for and stays disabled while the change saves", async () => {
+		const server = signedIn({ devices: [device("mini", { readAccess: false })] });
+		let release = () => {};
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			if (init?.method === "PATCH") await held;
+			return server.fetch(input, init);
+		}) as typeof fetch;
+		renderApp("/devices", fetchImpl);
+		await screen.findByRole("button", { name: "Rename mini" });
+		fireEvent.click(readSwitch("mini"));
+		await waitFor(() => expect(readSwitch("mini").disabled).toBe(true));
+		expect(readSwitch("mini").checked).toBe(true);
+		await act(async () => {
+			release();
+			await held;
+		});
+		expect(await screen.findByText("Agents on mini can now read trajectories.")).toBeTruthy();
+		expect(readSwitch("mini").disabled).toBe(false);
+		expect(readSwitch("mini").checked).toBe(true);
+	});
+
+	it("says so when the device is gone, and refreshes the list", async () => {
+		const server = signedIn({ devices: [device("mini"), device("laptop")] });
+		renderApp("/devices", server.fetch);
+		await screen.findByRole("button", { name: "Rename mini" });
+		server.state.devices = server.state.devices.filter((d) => d.id !== "mini");
+		fireEvent.click(readSwitch("mini"));
+		const notice = await screen.findByText("Could not change read access for mini: it no longer exists.");
+		expect(notice.closest("[data-notice]")?.getAttribute("data-notice")).toBe("red");
+		await waitFor(() => expect(document.querySelector('[data-device="mini"]')).toBeNull());
+		expect(readSwitch("laptop").checked).toBe(true);
+	});
+
+	it.each([
+		["refuses the body", 400, { error: "invalid_body" }, "Could not change read access for mini: the server refused the change. It may need a newer pika."],
+		["fails", 500, { error: "database is locked" }, "Could not change read access for mini: database is locked"],
+	])("shows a failure like other device errors when the server %s, and leaves the switch as it was", async (_label, status, body, text) => {
+		const server = signedIn({ devices: [device("mini")] });
+		const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			if (init?.method === "PATCH") return new Response(JSON.stringify(body), { status });
+			return server.fetch(input, init);
+		}) as typeof fetch;
+		renderApp("/devices", fetchImpl);
+		await screen.findByRole("button", { name: "Rename mini" });
+		fireEvent.click(readSwitch("mini"));
+		const notice = await screen.findByText(text);
+		expect(notice.closest("[data-notice]")?.getAttribute("data-notice")).toBe("red");
+		expect(readSwitch("mini").checked).toBe(true);
+		expect(readSwitch("mini").disabled).toBe(false);
+	});
+
+	it("validates PATCH bodies in the fake like the server", async () => {
+		const server = signedIn({ devices: [device("mini")] });
+		const patch = (body: unknown, id = "mini") =>
+			server.fetch(`/api/v1/devices/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+		expect(await (await patch({ readAccess: "yes" })).json()).toEqual({ error: "invalid_body" });
+		expect(await (await patch({})).json()).toEqual({ error: "invalid_name" });
+		expect(await (await patch({ readAccess: true }, "nope")).json()).toEqual({ error: "unknown_device" });
+		expect(await (await patch({ name: "mini 2", readAccess: true })).json()).toEqual({ id: "mini", name: "mini 2", readAccess: true });
+	});
+
+	it("starts new devices in the fake with read access, and keeps it through revocation and a continued pairing", async () => {
+		const server = signedIn({
+			devices: [device("mini", { readAccess: false })],
+			pairings: [pairing("AAAA-AAAA", "mini"), pairing("BBBB-BBBB", "phone")],
+		});
+		const send = (path: string, method: string, body?: unknown) =>
+			server.fetch(`/api/v1/${path}`, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+		expect((await send("devices/mini", "DELETE")).status).toBe(204);
+		expect(server.state.retiredDevices).toEqual([{ id: "mini", name: "mini", readAccess: false }]);
+		expect(await (await send("pairings/AAAA-AAAA/approve", "POST", { continues: "mini" })).json()).toEqual({ device: "mini", name: "mini", continued: true });
+		expect(server.state.devices.find((d) => d.id === "mini")?.readAccess).toBe(false);
+		const added = await (await send("pairings/BBBB-BBBB/approve", "POST", { continues: null })).json();
+		expect(added.continued).toBe(false);
+		expect(server.state.devices.find((d) => d.id === added.device)?.readAccess).toBe(true);
+	});
+
 	it("closes the confirmation on Escape", async () => {
 		renderApp("/devices", signedIn({ devices: [device("mini")] }).fetch);
 		fireEvent.click(await screen.findByRole("button", { name: "Revoke mini" }));

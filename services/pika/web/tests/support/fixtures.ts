@@ -149,7 +149,7 @@ export function turn(index: number, startSeq: number, endSeq: number, extra: Par
 /** A device with a token; its name defaults to its id, as for a device from before ids. */
 export function device(id: string, extra: Partial<Device> = {}): Device {
 	const name = extra.name ?? id;
-	return { id, name, createdAt: iso(0), createdVia: "cli", lastSeenAt: iso(3_600_000), lastHost: `${name}.lan`, hasKey: false, ...extra };
+	return { id, name, createdAt: iso(0), createdVia: "cli", lastSeenAt: iso(3_600_000), lastHost: `${name}.lan`, hasKey: false, readAccess: true, ...extra };
 }
 
 /** A pending pairing requesting `name`, requested `agoMs` before now; it expires ten minutes after that. */

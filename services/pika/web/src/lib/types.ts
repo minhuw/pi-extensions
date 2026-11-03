@@ -459,6 +459,8 @@ export interface Device {
 	lastHost?: string | null;
 	/** Whether a device key recognizes the machine when it pairs again. */
 	hasKey: boolean;
+	/** Whether pi agents holding this device's token may search and read every trajectory (scrubbed). */
+	readAccess: boolean;
 }
 
 /** The device a pending pairing was recognized as when it started. */

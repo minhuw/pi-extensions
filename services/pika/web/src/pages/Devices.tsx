@@ -495,6 +495,30 @@ async function copyText(text: string): Promise<boolean> {
 	}
 }
 
+const READ_ACCESS_DESCRIPTION_ID = "device-read-access-description";
+
+/** The "Agents can read" switch: checked while the device's agents may search and read every trajectory. */
+function ReadAccessSwitch({ device, saving, onChange }: { device: Device; saving: boolean | undefined; onChange: (readAccess: boolean) => void }) {
+	// While a change is saving, the switch shows the value asked for.
+	const checked = saving ?? device.readAccess === true;
+	return (
+		<label className="flex items-center gap-2 whitespace-nowrap" data-read-access={checked ? "on" : "off"}>
+			<input
+				type="checkbox"
+				role="switch"
+				checked={checked}
+				disabled={saving !== undefined}
+				aria-label={`Agents can read on ${device.name}`}
+				aria-busy={saving !== undefined}
+				aria-describedby={READ_ACCESS_DESCRIPTION_ID}
+				onChange={(event) => onChange(event.target.checked)}
+				className="size-3.5 accent-ink"
+			/>
+			<span className={checked ? undefined : "text-muted"}>Agents can read</span>
+		</label>
+	);
+}
+
 export const DEVICE_ID_SHOWN = 8;
 
 /** A device's id, shortened to its first characters, with the whole id in its title and a button that copies it. */
@@ -531,7 +555,36 @@ function DeviceSection({ devices, onNotice }: { devices: UseQueryResult<{ items:
 	const [revoking, setRevoking] = useState<Device | null>(null);
 	const [renaming, setRenaming] = useState<Device | null>(null);
 	const [busy, setBusy] = useState(false);
+	// Read-access changes in flight, by device id, with the value asked for.
+	const [savingAccess, setSavingAccess] = useState<Readonly<Record<string, boolean>>>({});
 	const items = devices.data?.items ?? [];
+
+	const setReadAccess = async (device: Device, readAccess: boolean) => {
+		setSavingAccess((saving) => ({ ...saving, [device.id]: readAccess }));
+		try {
+			const result = await api.setDeviceReadAccess(device.id, readAccess);
+			const granted = typeof result?.readAccess === "boolean" ? result.readAccess : readAccess;
+			queryClient.setQueryData<{ items: Device[] }>(DEVICES_KEY, (data) =>
+				data && { ...data, items: data.items.map((item) => (item.id === device.id ? { ...item, readAccess: granted } : item)) },
+			);
+			onNotice({
+				tone: "green",
+				text: granted ? `Agents on ${device.name} can now read trajectories.` : `Agents on ${device.name} can no longer read trajectories.`,
+			});
+		} catch (cause) {
+			const gone = cause instanceof ApiError && cause.status === 404;
+			const code = errorCode(cause);
+			const reason = gone
+				? "it no longer exists."
+				: code === "invalid_name" || code === "invalid_body"
+					? "the server refused the change. It may need a newer pika."
+					: messageOf(cause);
+			onNotice({ tone: "red", text: `Could not change read access for ${device.name}: ${reason}` });
+			if (gone) void queryClient.invalidateQueries({ queryKey: DEVICES_KEY });
+		} finally {
+			setSavingAccess(({ [device.id]: _done, ...rest }) => rest);
+		}
+	};
 
 	const revoke = async (device: Device) => {
 		setBusy(true);
@@ -567,63 +620,73 @@ function DeviceSection({ devices, onNotice }: { devices: UseQueryResult<{ items:
 					on the server with <Code>pika token create &lt;name&gt;</Code> and paste it into <Code>/pika login</Code>.
 				</EmptyState>
 			) : (
-				<div className="overflow-x-auto">
-					<table className="w-full border-collapse text-[13px]" data-device-list="">
-						<thead>
-							<tr className="border-b border-ink">
-								<th className={TH}>Name</th>
-								<th className={TH}>Added</th>
-								<th className={TH}>Last seen</th>
-								<th className={TH}>Last host</th>
-								<th className={TH}>
-									<span className="sr-only">Actions</span>
-								</th>
-							</tr>
-						</thead>
-						<tbody>
-							{items.map((device) => (
-								<tr
-									key={device.id}
-									className="border-b border-line hover:bg-hover"
-									data-device={device.id}
-									data-device-name={device.name}
-								>
-									<td className={TD}>
-										<span className="flex min-w-0 items-start gap-2">
-											<span className="min-w-0">
-												<span className="block font-medium break-words" data-device-label="">
-													{device.name}
-												</span>
-												<DeviceId id={device.id} name={device.name} />
-											</span>
-										</span>
-									</td>
-									<td className={cx(TD, "whitespace-nowrap text-muted")}>
-										{formatDateTime(device.createdAt)}{" "}
-										<Pill>
-											{device.createdVia === "pairing" ? "paired" : "CLI"}
-										</Pill>
-									</td>
-									<td className={cx(TD, "tnum whitespace-nowrap text-muted")} title={device.lastSeenAt ? formatDateTime(device.lastSeenAt) : undefined}>
-										{device.lastSeenAt ? formatRelative(device.lastSeenAt) : "never"}
-									</td>
-									{/* Wraps at hyphens and dots first; only a host that does not fit at all breaks inside a word. */}
-									<td className={cx(TD, "min-w-[9rem] text-muted [overflow-wrap:anywhere]")} data-last-host="">
-										{device.lastHost || "—"}
-									</td>
-									<td className={cx(TD, "text-right whitespace-nowrap")}>
-										<button type="button" onClick={() => setRenaming(device)} className={cx(BUTTON.quiet, "!px-2")} aria-label={`Rename ${device.name}`}>
-											Rename
-										</button>
-										<button type="button" onClick={() => setRevoking(device)} className={cx(BUTTON.quiet, "!px-2")} aria-label={`Revoke ${device.name}`}>
-											Revoke
-										</button>
-									</td>
+				<>
+					<p id={READ_ACCESS_DESCRIPTION_ID} className="mb-2 text-[13px] text-muted">
+						<span className="font-medium text-ink">Agents can read:</span> Lets pi agents on this device search and read every
+						trajectory, with credentials scrubbed. On by default; turn it off for a device to stop its agents.
+					</p>
+					<div className="overflow-x-auto">
+						<table className="w-full border-collapse text-[13px]" data-device-list="">
+							<thead>
+								<tr className="border-b border-ink">
+									<th className={TH}>Name</th>
+									<th className={TH}>Added</th>
+									<th className={TH}>Last seen</th>
+									<th className={TH}>Last host</th>
+									<th className={TH}>Agents</th>
+									<th className={TH}>
+										<span className="sr-only">Actions</span>
+									</th>
 								</tr>
-							))}
-						</tbody>
-					</table>
-				</div>
+							</thead>
+							<tbody>
+								{items.map((device) => (
+									<tr
+										key={device.id}
+										className="border-b border-line hover:bg-hover"
+										data-device={device.id}
+										data-device-name={device.name}
+									>
+										<td className={TD}>
+											<span className="flex min-w-0 items-start gap-2">
+												<span className="min-w-0">
+													<span className="block font-medium break-words" data-device-label="">
+														{device.name}
+													</span>
+													<DeviceId id={device.id} name={device.name} />
+												</span>
+											</span>
+										</td>
+										<td className={cx(TD, "whitespace-nowrap text-muted")}>
+											{formatDateTime(device.createdAt)}{" "}
+											<Pill>
+												{device.createdVia === "pairing" ? "paired" : "CLI"}
+											</Pill>
+										</td>
+										<td className={cx(TD, "tnum whitespace-nowrap text-muted")} title={device.lastSeenAt ? formatDateTime(device.lastSeenAt) : undefined}>
+											{device.lastSeenAt ? formatRelative(device.lastSeenAt) : "never"}
+										</td>
+										{/* Wraps at hyphens and dots first; only a host that does not fit at all breaks inside a word. */}
+										<td className={cx(TD, "min-w-[9rem] text-muted [overflow-wrap:anywhere]")} data-last-host="">
+											{device.lastHost || "—"}
+										</td>
+										<td className={TD}>
+											<ReadAccessSwitch device={device} saving={savingAccess[device.id]} onChange={(next) => void setReadAccess(device, next)} />
+										</td>
+										<td className={cx(TD, "text-right whitespace-nowrap")}>
+											<button type="button" onClick={() => setRenaming(device)} className={cx(BUTTON.quiet, "!px-2")} aria-label={`Rename ${device.name}`}>
+												Rename
+											</button>
+											<button type="button" onClick={() => setRevoking(device)} className={cx(BUTTON.quiet, "!px-2")} aria-label={`Revoke ${device.name}`}>
+												Revoke
+											</button>
+										</td>
+									</tr>
+								))}
+							</tbody>
+						</table>
+					</div>
+				</>
 			)}
 			{renaming && (
 				<RenameDialog

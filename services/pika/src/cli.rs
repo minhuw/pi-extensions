@@ -105,13 +105,27 @@ enum DeleteAction {
 #[derive(Subcommand)]
 enum TokenAction {
     /// Create a new device named NAME (1-64 characters; quote it in the shell) and print its token once.
-    Create { name: String },
-    /// List devices with tokens: id, name, creation time, origin, last upload, and last host.
+    Create {
+        name: String,
+        /// Create the device without agents' read access (pi agents on a device may search and read every
+        /// trajectory, with credentials scrubbed, unless it is off).
+        #[arg(long)]
+        no_read_access: bool,
+    },
+    /// List devices with tokens: id, name, creation time, origin, last upload, last host, and read access.
     List,
     /// Revoke a device's token. DEVICE is a device id, or a name that only one device has.
     Revoke { device: String },
     /// Rename a device. DEVICE is a device id, or a name that only one device has.
     Rename { device: String, name: String },
+    /// Grant or withdraw agents' read access on a device. DEVICE is a device id, or a name that only one device has.
+    ReadAccess { device: String, access: Switch },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Switch {
+    On,
+    Off,
 }
 
 #[derive(Subcommand)]
@@ -198,8 +212,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Token { action } => {
             let store = Store::open(&cli.data_dir)?;
             match action {
-                TokenAction::Create { name } => {
-                    let device = crate::auth::create_device(&store, &name)?;
+                TokenAction::Create { name, no_read_access } => {
+                    let device = crate::auth::create_device(&store, &name, !no_read_access)?;
                     println!("{}", device.token);
                     eprintln!("created device {} ({})", device.id, device.name);
                 }
@@ -208,11 +222,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         let seen = d.last_seen_at.map_or_else(|| "never".into(), crate::util::format_iso_ms);
                         let created = crate::util::format_iso_ms(d.created_at);
                         let host = d.last_host.as_deref().unwrap_or("-");
-                        println!("{}\t{}\t{created}\t{}\t{seen}\t{host}", d.id, d.name, d.created_via);
+                        let read = if d.read_access { "read" } else { "-" };
+                        println!("{}\t{}\t{created}\t{}\t{seen}\t{host}\t{read}", d.id, d.name, d.created_via);
                     }
                 }
                 TokenAction::Revoke { device } => {
-                    let id = crate::auth::resolve_device(&store, &device, true)?;
+                    let id = crate::auth::resolve_device(&store, &device, "revoke")?;
                     let name = store.read(|conn| crate::auth::name_of(conn, &id))?.unwrap_or_else(|| id.clone());
                     if !crate::auth::revoke_token(&store, &id)? {
                         bail!("no device {device:?}");
@@ -223,9 +238,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     if crate::auth::device_name(&name).is_none() {
                         bail!("device names use 1-64 characters, without control characters");
                     }
-                    let id = crate::auth::resolve_device(&store, &device, false)?;
+                    let id = crate::auth::resolve_device(&store, &device, "rename")?;
                     match crate::auth::rename_device(&store, &id, &name)? {
                         Some(name) => eprintln!("renamed {id} to {name}"),
+                        None => bail!("no device {device:?}"),
+                    }
+                }
+                TokenAction::ReadAccess { device, access } => {
+                    let id = crate::auth::resolve_device(&store, &device, "read-access")?;
+                    let on = matches!(access, Switch::On);
+                    match crate::auth::update_device(&store, &id, None, Some(on))? {
+                        Some((name, _)) => eprintln!("read access {} for {name} ({id})", if on { "on" } else { "off" }),
                         None => bail!("no device {device:?}"),
                     }
                 }

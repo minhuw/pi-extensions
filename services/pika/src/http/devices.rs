@@ -41,6 +41,7 @@ pub async fn list(State(state): State<AppState>) -> Response {
             put(&mut item, "lastSeenAt", &d.last_seen_at.map(format_iso_ms));
             put(&mut item, "lastHost", &d.last_host);
             item.insert("hasKey".into(), d.has_key.into());
+            item.insert("readAccess".into(), d.read_access.into());
             Value::Object(item)
         })
         .collect();
@@ -62,8 +63,9 @@ pub async fn revoke(State(state): State<AppState>, Path(id): Path<String>) -> Re
     }
 }
 
-/// `PATCH devices/:id` with `{ name }` renames a device, with or without a token.
-pub async fn rename(
+/// `PATCH devices/:id` with `{ name?, readAccess? }` renames a device, with or without a token, and grants or withdraws
+/// its agents' read access, in one transaction.
+pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
     body: Result<Json<Value>, JsonRejection>,
@@ -73,17 +75,32 @@ pub async fn rename(
         Err(rejection @ JsonRejection::MissingJsonContentType(_)) => return rejection.into_response(),
         Err(_) => Value::Null,
     };
-    let Some(name) = body.get("name").and_then(Value::as_str).and_then(device_name).map(str::to_owned) else {
-        return error(StatusCode::BAD_REQUEST, "invalid_name");
+    let name = match body.get("name") {
+        None => None,
+        Some(name) => match name.as_str().and_then(device_name) {
+            Some(name) => Some(name.to_owned()),
+            None => return error(StatusCode::BAD_REQUEST, "invalid_name"),
+        },
     };
+    let read_access = match body.get("readAccess") {
+        None => None,
+        Some(Value::Bool(on)) => Some(*on),
+        Some(_) => return error(StatusCode::BAD_REQUEST, "invalid_body"),
+    };
+    // `{}`, and a body that is not an object, are a missing name, as before read access existed.
+    if name.is_none() && read_access.is_none() {
+        return error(StatusCode::BAD_REQUEST, "invalid_name");
+    }
     if !valid_device_id(&id) {
         return error(StatusCode::NOT_FOUND, "unknown_device");
     }
-    let (store, renamed) = (state.store.clone(), id.clone());
-    match blocking(move || auth::rename_device(&store, &renamed, &name)).await {
-        Ok(Some(name)) => {
-            state.relay.rename(&id, &name);
-            Json(json!({ "id": id, "name": name })).into_response()
+    let (store, updated, renamed) = (state.store.clone(), id.clone(), name.is_some());
+    match blocking(move || auth::update_device(&store, &updated, name.as_deref(), read_access)).await {
+        Ok(Some((name, read_access))) => {
+            if renamed {
+                state.relay.rename(&id, &name);
+            }
+            Json(json!({ "id": id, "name": name, "readAccess": read_access })).into_response()
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_device"),
         Err(e) => internal_error(e),

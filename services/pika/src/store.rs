@@ -20,6 +20,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_v10.sql"),
     include_str!("schema_v11.sql"),
     include_str!("schema_v12.sql"),
+    include_str!("schema_v13.sql"),
 ];
 /// The schema version that derives `sessions.project` and `sessions.repository` from the stream's `meta`.
 const REPOSITORY_VERSION: usize = 8;
@@ -32,8 +33,8 @@ pub const NEEDS_REINDEX: &str = "needs_reindex";
 pub const DERIVED_GENERATION: &str = "derived_generation";
 /// The redaction rules version (`crate::redact::RULES_VERSION`, in decimal) the search index's text was scrubbed
 /// with. A database without it, or with an older one, has text that a pika before redaction or under older rules
-/// indexed: public search finds nothing until `serve`'s background rewrite (`reindex::rescrub_search`) brings it
-/// current. This rewrite uses settings and does not change the database schema.
+/// indexed: public and agent search find nothing until `serve`'s background rewrite (`reindex::rescrub_search`) brings
+/// it current. This rewrite uses settings and does not change the database schema.
 pub const SEARCH_RULES: &str = "search_rules";
 /// JSON containing the rewrite's target rules version and last scrubbed document id; only that target resumes.
 pub const RESCRUB_AFTER: &str = "search_rescrub_after";

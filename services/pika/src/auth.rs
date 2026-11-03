@@ -60,14 +60,18 @@ pub struct NewDevice {
     pub token: String,
 }
 
-/// Creates a device named `name` with a new id and a token; only the token's SHA-256 is stored.
-pub fn create_device(store: &Store, name: &str) -> Result<NewDevice> {
+/// Creates a device named `name` with a new id and a token, with agents' read access unless `read_access` is false;
+/// only the token's SHA-256 is stored.
+pub fn create_device(store: &Store, name: &str, read_access: bool) -> Result<NewDevice> {
     let Some(name) = device_name(name) else {
         bail!("device names use 1-64 characters, without control characters");
     };
     let id = new_device_id();
     let token = store.write(|tx| {
         insert_device(tx, &id, name, now_ms())?;
+        if !read_access {
+            tx.execute("UPDATE devices SET read_access = 0 WHERE id = ?1", [&id])?;
+        }
         insert_token(tx, &id, "cli")
     })?;
     Ok(NewDevice { id, name: name.to_owned(), token })
@@ -97,6 +101,8 @@ pub struct Device {
     pub last_seen_at: Option<i64>,
     pub last_host: Option<String>,
     pub has_key: bool,
+    /// Whether pi agents on the device may use the agent read API.
+    pub read_access: bool,
 }
 
 /// Orders devices by name, case-insensitively, then by id.
@@ -109,7 +115,7 @@ pub fn list_devices(store: &Store) -> Result<Vec<Device>> {
     let mut devices = store.read(|conn| {
         conn.prepare(
             "SELECT t.name, COALESCE(d.name, t.name), t.created_at, t.created_via, t.last_seen_at, t.last_host,
-                    d.key_hash IS NOT NULL
+                    d.key_hash IS NOT NULL, COALESCE(d.read_access, 0)
              FROM tokens t LEFT JOIN devices d ON d.id = t.name",
         )?
         .query_map([], |r| {
@@ -121,6 +127,7 @@ pub fn list_devices(store: &Store) -> Result<Vec<Device>> {
                 last_seen_at: r.get(4)?,
                 last_host: r.get(5)?,
                 has_key: r.get(6)?,
+                read_access: r.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -142,15 +149,32 @@ pub fn name_of(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> 
 /// Renames device `id`, with or without a token, and returns the stored name; `Ok(None)` when there is no such device.
 /// `name` must be valid (see `device_name`).
 pub fn rename_device(store: &Store, id: &str, name: &str) -> Result<Option<String>> {
-    let Some(name) = device_name(name) else { bail!("device names use 1-64 characters, without control characters") };
-    let renamed = store.write(|tx| tx.execute("UPDATE devices SET name = ?2 WHERE id = ?1", params![id, name]))?;
-    Ok((renamed > 0).then(|| name.to_owned()))
+    Ok(update_device(store, id, Some(name), None)?.map(|(name, _)| name))
 }
 
-/// The device id that `given` names for the CLI's `revoke` (only devices with a token count) or `rename`: a device
-/// id, else the name of exactly one device.
-pub fn resolve_device(store: &Store, given: &str, revoking: bool) -> Result<String> {
-    let token = if revoking { " AND EXISTS (SELECT 1 FROM tokens WHERE tokens.name = devices.id)" } else { "" };
+/// Renames device `id` and sets its read access, each when given, in one transaction, and returns its stored name and
+/// read access; `Ok(None)` when there is no such device. A given `name` must be valid (see `device_name`).
+pub fn update_device(store: &Store, id: &str, name: Option<&str>, read_access: Option<bool>) -> Result<Option<(String, bool)>> {
+    let name = match name.map(device_name) {
+        Some(None) => bail!("device names use 1-64 characters, without control characters"),
+        Some(Some(name)) => Some(name),
+        None => None,
+    };
+    Ok(store.write(|tx| {
+        tx.query_row(
+            "UPDATE devices SET name = COALESCE(?2, name), read_access = COALESCE(?3, read_access) WHERE id = ?1
+             RETURNING name, read_access",
+            params![id, name, read_access],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+    })?)
+}
+
+/// The device id that `given` names for the CLI's `action`, `revoke` (only devices with a token count), `rename`, or
+/// `read-access`: a device id, else the name of exactly one device.
+pub fn resolve_device(store: &Store, given: &str, action: &str) -> Result<String> {
+    let token = if action == "revoke" { " AND EXISTS (SELECT 1 FROM tokens WHERE tokens.name = devices.id)" } else { "" };
     let (by_id, mut by_name) = store.read(|conn| {
         let by_id: Option<String> = conn
             .query_row(&format!("SELECT id FROM devices WHERE id = ?1{token}"), [given], |r| r.get(0))
@@ -169,7 +193,6 @@ pub fn resolve_device(store: &Store, given: &str, revoking: bool) -> Result<Stri
         1 => Ok(by_name.remove(0)),
         _ => {
             by_name.sort();
-            let action = if revoking { "revoke" } else { "rename" };
             bail!("several devices are named {given:?}: {}; {action} by id", by_name.join(", "))
         }
     }
@@ -180,7 +203,7 @@ pub fn revoke_token(store: &Store, id: &str) -> Result<bool> {
 }
 
 /// Revokes device `id`'s token and returns the hashes it deleted, so that connections made with them can be closed.
-/// The device's row, with its name and key, stays.
+/// The device's row, with its name, key, and read access, stays.
 pub fn revoke_token_hashes(store: &Store, id: &str) -> Result<Vec<String>> {
     Ok(store.write(|tx| delete_tokens(tx, id))?)
 }
@@ -196,6 +219,18 @@ pub fn device_for_token(store: &Store, token: &str) -> Result<Option<(String, Op
         conn.prepare_cached("SELECT name, last_seen_at FROM tokens WHERE hash = ?1")?
             .query_row([hash], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()
+    })?)
+}
+
+/// Whether the device of a token has read access; `None` for an unknown or revoked token.
+pub fn read_access_for_token(store: &Store, token: &str) -> Result<Option<bool>> {
+    let hash = sha256_hex(token.as_bytes());
+    Ok(store.read(|conn| {
+        conn.prepare_cached(
+            "SELECT COALESCE(d.read_access, 0) FROM tokens t LEFT JOIN devices d ON d.id = t.name WHERE t.hash = ?1",
+        )?
+        .query_row([hash], |r| r.get(0))
+        .optional()
     })?)
 }
 
@@ -392,7 +427,7 @@ impl Auth {
             AuthMode::Proxy => {
                 tracing::warn!(
                     "PIKA_AUTH=proxy: pika does not authenticate viewers; the reverse proxy must authenticate every \
-                     path except api/ingest/, api/pair/, api/relay/, and api/health"
+                     path except api/ingest/, api/pair/, api/relay/, api/agent/, and api/health"
                 );
                 return Ok(Auth { mode: config.auth, password: None, checks: CheckCounters::default() });
             }

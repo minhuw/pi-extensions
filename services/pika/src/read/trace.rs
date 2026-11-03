@@ -763,17 +763,17 @@ pub fn trace(conn: &Connection, blobs: &BlobStore, id: &str) -> ReadResult<Trace
     trace_scoped(conn, blobs, id, false)
 }
 
-/// The trace; a `public` one keeps original text and structured arguments for `redaction::trace` to scrub in one
-/// scope after publication filtering, then select, format and cut summaries.
-pub fn trace_scoped(conn: &Connection, blobs: &BlobStore, id: &str, public: bool) -> ReadResult<Trace> {
+/// The trace; one to `redact` (public or agent) keeps original text and structured arguments for `redaction::trace` to
+/// scrub in one scope after any publication filtering, then select, format and cut summaries, and has no `ticket`.
+pub fn trace_scoped(conn: &Connection, blobs: &BlobStore, id: &str, redact: bool) -> ReadResult<Trace> {
     // One snapshot for every table.
     // Reuse the caller's snapshot when publication was checked in it.
     let _tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
     let tx = conn;
-    build(tx, blobs, id, public)
+    build(tx, blobs, id, redact)
 }
 
-fn build(tx: &Connection, blobs: &BlobStore, id: &str, public: bool) -> ReadResult<Trace> {
+fn build(tx: &Connection, blobs: &BlobStore, id: &str, redact: bool) -> ReadResult<Trace> {
     let (sid, started_at, last_at, entry_count): (i64, Option<i64>, i64, i64) = tx
         .prepare_cached(SESSION_SQL)?
         .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
@@ -783,13 +783,13 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str, public: bool) -> ReadResu
         })?;
     let (started_at, last_at) = times(started_at, last_at, entry_count);
 
-    let user_chars = if public { i64::MAX } else { USER_TEXT_CHARS as i64 };
+    let user_chars = if redact { i64::MAX } else { USER_TEXT_CHARS as i64 };
     let turns =
         tx.prepare_cached(TURNS_SQL)?.query_map((sid, user_chars), turn_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
     let mut children =
         tx.prepare_cached(CHILDREN_SQL)?.query_map([id], child_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
-    if public {
-        // Link data is owner-only, like `SessionSummary.link`.
+    if redact {
+        // A ticket's branch and title are link data, which is not scrubbed: owner-only, like `SessionSummary.link`.
         children.iter_mut().for_each(|child| child.ticket = None);
     }
     // A workflow call can start several children; the tool record names the first.
@@ -815,12 +815,12 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str, public: bool) -> ReadResu
             *calls_per_seq.entry(call_seq).or_default() += 1;
         }
         let arguments = text_ref(r, 2)?;
-        let summary = if public {
+        let summary = if redact {
             String::new()
         } else {
             arguments.map(|args| arguments_summary(name.as_deref().unwrap_or(""), args)).unwrap_or_default()
         };
-        let arguments = if public { arguments.and_then(|args| parse_json_lenient(args).ok()) } else { None };
+        let arguments = if redact { arguments.and_then(|args| parse_json_lenient(args).ok()) } else { None };
         let started: Option<i64> = r.get(7)?;
         records.push(Record::Tool(ToolRecord {
             seq,
@@ -851,7 +851,7 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str, public: bool) -> ReadResu
             let ids: Vec<String> = serde_json::from_str(&ids).unwrap_or_default();
             position.extend(ids.into_iter().enumerate().map(|(i, id)| (id, i + 1)));
         }
-        let facts = line_text(r, 13, blobs, &mut failed)?.map(|line| assistant_facts(&line, public)).unwrap_or_default();
+        let facts = line_text(r, 13, blobs, &mut failed)?.map(|line| assistant_facts(&line, redact)).unwrap_or_default();
         let (start, end) = llm_times(r.get(2)?, r.get(3)?, facts.duration_ms);
         let timing = llm_timing(text_ref(r, 16)?, start, end);
         records.push(Record::Llm(LlmRecord {
@@ -906,7 +906,7 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str, public: bool) -> ReadResu
         (r.seq(), rank)
     });
     let mut trace = Trace { session_id: id.to_owned(), started_at, last_at, turns, records, children };
-    if !public {
+    if !redact {
         cut(&mut trace);
     }
     Ok(trace)

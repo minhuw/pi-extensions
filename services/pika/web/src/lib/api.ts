@@ -325,6 +325,11 @@ export class PikaApi {
 		return this.send(`devices/${encodeURIComponent(id)}`, "PATCH", { name });
 	}
 
+	/** Grants or withdraws the device's agents' read access to every trajectory. */
+	setDeviceReadAccess(id: string, readAccess: boolean): Promise<{ id: string; name: string; readAccess: boolean }> {
+		return this.send(`devices/${encodeURIComponent(id)}`, "PATCH", { readAccess });
+	}
+
 	pairings(): Promise<{ items: Pairing[] }> {
 		return this.request("pairings");
 	}

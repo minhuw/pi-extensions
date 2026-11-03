@@ -1,4 +1,4 @@
-//! Shared read handlers for the authenticated API and the opt-in public session namespace.
+//! Shared read handlers for the authenticated API, the opt-in public session namespace, and the agent read API.
 
 use std::collections::BTreeMap;
 
@@ -6,11 +6,13 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use axum::middleware::{self, Next};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use serde::Serialize;
 use serde_json::json;
 
+use super::ingest::bearer;
 use super::{AppState, blocking, error, internal_error};
 use crate::export;
 use crate::hidden::Marks;
@@ -19,8 +21,18 @@ use crate::store::Store;
 
 #[derive(Clone, Copy)]
 struct Scope {
+    /// Only published sessions, without owner-only metadata.
     public: bool,
+    /// Session text scrubbed of credentials, as "Redaction" in the spec describes: the public and agent namespaces.
+    redact: bool,
+    /// The namespace whose image route entries' images link to; the agent namespace has none.
+    images: Option<&'static str>,
 }
+
+const OWNER: Scope = Scope { public: false, redact: false, images: Some("v1") };
+const PUBLIC: Scope = Scope { public: true, redact: true, images: Some("public/v1") };
+/// The owner's visibility, with the public namespace's scrubbing.
+const AGENT: Scope = Scope { public: false, redact: true, images: None };
 
 /// Anonymous aggregates: usage totals without session identifiers or contents.
 fn aggregate_routes() -> Router<AppState> {
@@ -45,7 +57,7 @@ fn session_routes() -> Router<AppState> {
 pub fn routes() -> Router<AppState> {
     session_routes()
         .merge(aggregate_routes())
-        .layer(Extension(Scope { public: false }))
+        .layer(Extension(OWNER))
         .route("/settings/publishing", get(publishing).patch(publish))
         .route("/sessions/{id}/export", get(export_session))
         .route("/requests/{id}", get(request))
@@ -57,15 +69,48 @@ pub fn routes() -> Router<AppState> {
 pub fn public_routes() -> Router<AppState> {
     session_routes()
         .merge(aggregate_routes().layer(axum::middleware::from_fn(any_origin)))
-        .layer(Extension(Scope { public: true }))
+        .layer(Extension(PUBLIC))
         .route("/visitor-view", post(super::visitor::view))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found") })
-        .layer(axum::middleware::from_fn(no_store))
+        .layer(middleware::from_fn(no_store))
+}
+
+/// `{base}/api/agent/v1/`: every recorded session, scrubbed as public responses are, for pi agents on a device with
+/// read access. An explicit allowlist like the public one; unknown paths are 404 without authentication.
+pub fn agent_routes(state: &AppState) -> Router<AppState> {
+    Router::new()
+        .route("/facets", get(facets))
+        .route("/sessions", get(sessions))
+        .route("/sessions/{id}", get(session))
+        .route("/sessions/{id}/tree", get(tree))
+        .route("/sessions/{id}/turns", get(turns))
+        .route("/sessions/{id}/entries", get(entries))
+        .route("/sessions/{id}/trace", get(trace))
+        .route("/search", get(search))
+        .layer(Extension(AGENT))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_read_access))
+        .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found") })
+        .layer(middleware::from_fn(no_store))
+}
+
+/// A device token in every `--auth` mode, like ingest and relay: 401 `unauthorized` for a missing, unknown, or revoked
+/// token, and 403 `read_access_denied` when its device has no read access.
+async fn require_read_access(State(state): State<AppState>, request: axum::extract::Request, next: Next) -> Response {
+    let Some(token) = bearer(request.headers()).map(str::to_owned) else {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let store = state.store.clone();
+    match blocking(move || crate::auth::read_access_for_token(&store, &token)).await {
+        Ok(Some(true)) => next.run(request).await,
+        Ok(Some(false)) => error(StatusCode::FORBIDDEN, "read_access_denied"),
+        Ok(None) => error(StatusCode::UNAUTHORIZED, "unauthorized"),
+        Err(e) => internal_error(e),
+    }
 }
 
 /// Other sites may read the public aggregates from their pages: any origin, no credentials, and a preflight answered
 /// here for clients that send one.
-async fn any_origin(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+async fn any_origin(request: axum::extract::Request, next: Next) -> Response {
     use header::{ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, HeaderValue};
     let preflight = request.method() == axum::http::Method::OPTIONS;
     let mut response = if preflight { StatusCode::NO_CONTENT.into_response() } else { next.run(request).await };
@@ -79,7 +124,7 @@ async fn any_origin(request: axum::extract::Request, next: axum::middleware::Nex
     response
 }
 
-async fn no_store(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+async fn no_store(request: axum::extract::Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     response.headers_mut().insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
     response
@@ -254,13 +299,14 @@ async fn facets(State(state): State<AppState>, Extension(scope): Extension<Scope
 async fn sessions(State(state): State<AppState>, Extension(scope): Extension<Scope>, Query(params): QueryParams) -> Response {
     scoped_json(&state, scope, None, move |_, conn| {
         let mut page = read::sessions::list_scoped(conn, &Params(params), scope.public)?;
-        if scope.public {
-            read::redaction::sessions(&mut page);
-        } else {
+        if !scope.public {
             let mut marks = Marks::load(conn)?;
             for session in &mut page.items {
                 marks.mark(conn, session)?;
             }
+        }
+        if scope.redact {
+            read::redaction::sessions(&mut page);
         }
         Ok(page)
     })
@@ -272,13 +318,15 @@ async fn session(State(state): State<AppState>, Extension(scope): Extension<Scop
         let mut detail = read::sessions::detail(conn, &id)?;
         if scope.public {
             read::publishing::detail(conn, &mut detail)?;
-            read::redaction::detail(&mut detail);
         } else {
             let mut marks = Marks::load(conn)?;
             marks.mark(conn, &mut detail.summary)?;
             for child in &mut detail.children {
                 marks.mark(conn, &mut child.summary)?;
             }
+        }
+        if scope.redact {
+            read::redaction::detail(&mut detail);
         }
         Ok(detail)
     })
@@ -288,13 +336,14 @@ async fn session(State(state): State<AppState>, Extension(scope): Extension<Scop
 async fn tree(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>) -> Response {
     scoped_json(&state, scope, Some(id.clone()), move |_, conn| {
         let mut tree = read::sessions::tree_scoped(conn, &id, scope.public)?;
-        if scope.public {
-            read::redaction::tree(&mut tree);
-        } else {
+        if !scope.public {
             let mut marks = Marks::load(conn)?;
             for node in &mut tree.nodes {
                 marks.mark(conn, &mut node.summary)?;
             }
+        }
+        if scope.redact {
+            read::redaction::tree(&mut tree);
         }
         Ok(tree)
     })
@@ -304,7 +353,7 @@ async fn tree(State(state): State<AppState>, Extension(scope): Extension<Scope>,
 async fn turns(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>, Query(params): QueryParams) -> Response {
     scoped_json(&state, scope, Some(id.clone()), move |_, conn| {
         let mut turns = read::sessions::turns(conn, &id, &Params(params))?;
-        if scope.public {
+        if scope.redact {
             read::redaction::turns(&mut turns);
         }
         Ok(turns)
@@ -328,13 +377,16 @@ async fn updates(State(state): State<AppState>, Extension(scope): Extension<Scop
     .await
 }
 
-/// Live views poll the trace, so it is revalidated by `ETag` and only built when it changed.
+/// Live views poll the owner's trace, so it is revalidated by `ETag` and only built when it changed. A scrubbed trace,
+/// public or agent, has no `ETag`.
 async fn trace(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>, headers: HeaderMap) -> Response {
     let gzip = accepts_gzip(&headers);
-    if scope.public {
+    if scope.redact {
         let trace = match scoped_query(&state, scope, Some(id.clone()), move |store, conn| {
             let mut trace = read::trace::trace_scoped(conn, &store.blobs, &id, true)?;
-            read::publishing::trace(conn, &mut trace)?;
+            if scope.public {
+                read::publishing::trace(conn, &mut trace)?;
+            }
             read::redaction::trace(&mut trace);
             Ok(trace)
         }).await {
@@ -368,7 +420,7 @@ async fn trace(State(state): State<AppState>, Extension(scope): Extension<Scope>
 
 async fn entries(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>, Query(params): QueryParams) -> Response {
     let prefix = state.config.prefix().to_owned();
-    scoped_json(&state, scope, Some(id.clone()), move |store, conn| read::entries::list_scoped(conn, &store.blobs, &prefix, &id, &Params(params), scope.public)).await
+    scoped_json(&state, scope, Some(id.clone()), move |store, conn| read::entries::list_scoped(conn, &store.blobs, &prefix, &id, &Params(params), scope.images, scope.redact)).await
 }
 
 async fn raw_entry(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path((id, seq)): Path<(String, String)>) -> Response {
@@ -378,7 +430,7 @@ async fn raw_entry(State(state): State<AppState>, Extension(scope): Extension<Sc
     };
     match scoped_query(&state, scope, Some(id.clone()), move |store, conn| {
         let line = read::entries::raw(conn, &store.blobs, &id, seq)?;
-        Ok(if scope.public { read::redaction::raw(line) } else { line })
+        Ok(if scope.redact { read::redaction::raw(line) } else { line })
     })
     .await
     {
@@ -426,7 +478,7 @@ async fn herder_run(State(state): State<AppState>, Path(id): Path<String>) -> Re
 }
 
 async fn search(State(state): State<AppState>, Extension(scope): Extension<Scope>, Query(params): QueryParams) -> Response {
-    scoped_json(&state, scope, None, move |_, conn| read::search::results_scoped(conn, &Params(params), scope.public)).await
+    scoped_json(&state, scope, None, move |_, conn| read::search::results_scoped(conn, &Params(params), scope.public, scope.redact)).await
 }
 
 async fn export_session(State(state): State<AppState>, Path(id): Path<String>) -> Response {

@@ -108,7 +108,7 @@ pub async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 
 }
 
 async fn health(State(state): State<AppState>) -> Response {
-    let features: &[&str] = if state.relay.enabled() { &["relay"] } else { &[] };
+    let features: &[&str] = if state.relay.enabled() { &["relay", "agent"] } else { &["agent"] };
     let (version, base_path) = (env!("CARGO_PKG_VERSION"), &state.config.base_path);
     let mut health = json!({ "ok": true, "version": version, "basePath": base_path, "features": features });
     if !crate::REVISION.is_empty() {
@@ -133,7 +133,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/sessions/revoke-all", post(auth::revoke_all))
         .route("/auth/sessions/{id}", delete(auth::delete_session))
         .route("/devices", get(devices::list))
-        .route("/devices/{id}", delete(devices::revoke).patch(devices::rename))
+        .route("/devices/{id}", delete(devices::revoke).patch(devices::update))
         .route("/pairings", get(devices::pairings))
         .route("/pairings/{code}/approve", post(devices::approve))
         .route("/pairings/{code}/deny", post(devices::deny));
@@ -151,6 +151,7 @@ pub fn router(state: AppState) -> Router {
         .merge(relay::device_routes(&state))
         .nest("/api/v1", v1)
         .nest("/api/public/v1", read::public_routes())
+        .nest("/api/agent/v1", read::agent_routes(&state))
         .fallback(ui::serve)
         .with_state(state.clone());
     if state.config.base_path == "/" {

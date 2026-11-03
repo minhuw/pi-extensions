@@ -404,7 +404,8 @@ export function createFakeServer({
 		authenticated,
 		failedLogins: 0,
 		devices: [...devices],
-		retiredDevices: [...retiredDevices],
+		// A revoked device keeps its read access, which a continued pairing restores.
+		retiredDevices: [...retiredDevices] as (DeviceRef & { readAccess?: boolean })[],
 		pairings: [...pairings],
 		browserSessions: [...browserSessions],
 		relay: relay ?? features?.includes("relay") === true,
@@ -520,16 +521,21 @@ export function createFakeServer({
 				const revoked = state.devices.find((item) => item.id === parts[1]);
 				if (!revoked) return json(404, { error: "unknown_device" });
 				state.devices = state.devices.filter((item) => item !== revoked);
-				state.retiredDevices.push({ id: revoked.id, name: revoked.name });
+				state.retiredDevices.push({ id: revoked.id, name: revoked.name, readAccess: revoked.readAccess });
 				return noContent();
 			}
 			if (parts.length === 2 && method === "PATCH") {
-				const name = (body as { name?: unknown } | undefined)?.name;
-				if (typeof name !== "string" || !validName(name)) return json(400, { error: "invalid_name" });
-				const target = state.devices.find((item) => item.id === parts[1]) ?? state.retiredDevices.find((item) => item.id === parts[1]);
+				const request = (body ?? {}) as { name?: unknown; readAccess?: unknown };
+				const { name, readAccess } = request;
+				if ("name" in request && (typeof name !== "string" || !validName(name))) return json(400, { error: "invalid_name" });
+				if ("readAccess" in request && typeof readAccess !== "boolean") return json(400, { error: "invalid_body" });
+				if (!("name" in request) && !("readAccess" in request)) return json(400, { error: "invalid_name" });
+				const listed = state.devices.find((item) => item.id === parts[1]);
+				const target = listed ?? state.retiredDevices.find((item) => item.id === parts[1]);
 				if (!target) return json(404, { error: "unknown_device" });
-				target.name = name.trim();
-				return json(200, { id: target.id, name: target.name });
+				if (typeof name === "string") target.name = name.trim();
+				if (typeof readAccess === "boolean") target.readAccess = readAccess;
+				return json(200, { id: target.id, name: target.name, readAccess: target.readAccess ?? true });
 			}
 			return json(405, { error: "method not allowed" });
 		}
@@ -568,6 +574,8 @@ export function createFakeServer({
 					lastSeenAt: previous?.lastSeenAt ?? null,
 					lastHost: previous?.lastHost ?? null,
 					hasKey: true,
+					// A new device starts with read access; a continued one, listed or revoked, keeps its own.
+					readAccess: existing?.readAccess ?? true,
 				};
 				if (state.devicesOnPoll) state.unpolled.push(created);
 				else {

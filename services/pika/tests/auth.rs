@@ -755,7 +755,7 @@ async fn devices_can_be_listed_and_revoked() {
     let listed: Vec<(&str, &str)> = items.iter().map(|d| (d["id"].as_str().unwrap(), d["name"].as_str().unwrap())).collect();
     assert_eq!(listed, [("b-id", "Desktop"), ("desktop", "desktop"), (DEVICE, DEVICE)]);
     let keys: Vec<&str> = items[2].as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(keys, ["id", "name", "createdAt", "createdVia", "hasKey"]);
+    assert_eq!(keys, ["id", "name", "createdAt", "createdVia", "hasKey", "readAccess"]);
     assert_eq!((&items[2]["createdVia"], &items[2]["hasKey"]), (&json!("cli"), &json!(false)));
 
     // Ingest records the device's last upload at most once a minute.
@@ -776,16 +776,16 @@ async fn devices_can_be_listed_and_revoked() {
     assert!(row["last_seen_at"].as_i64().unwrap() > stale + 60_000);
     assert_eq!(row["last_host"], "elsewhere");
 
-    // `pika token list` shows it too: id, name, created, via, last upload, host, sorted like the route.
+    // `pika token list` shows it too: id, name, created, via, last upload, host, read access, sorted like the route.
     let out = pika(&env.dir.path().join("data")).args(["token", "list"]).output().unwrap();
     let listing = String::from_utf8(out.stdout).unwrap();
     let ids: Vec<&str> = listing.lines().map(|l| l.split('\t').next().unwrap()).collect();
     assert_eq!(ids, ["b-id", "desktop", DEVICE], "{listing}");
     let line = listing.lines().find(|l| l.starts_with("laptop\t")).unwrap();
     let fields: Vec<&str> = line.split('\t').collect();
-    assert_eq!((fields.len(), fields[1], fields[3], fields[5]), (6, DEVICE, "cli", "elsewhere"), "{line}");
+    assert_eq!((fields.len(), fields[1], fields[3], fields[5], fields[6]), (7, DEVICE, "cli", "elsewhere", "read"), "{line}");
     assert!(fields[2].ends_with('Z') && fields[4].ends_with('Z'), "{line}");
-    assert!(listing.lines().any(|l| l.starts_with("b-id\tDesktop\t") && l.ends_with("\tcli\tnever\t-")), "{listing}");
+    assert!(listing.lines().any(|l| l.starts_with("b-id\tDesktop\t") && l.ends_with("\tcli\tnever\t-\tread")), "{listing}");
 
     // Revoking refuses the token at once and keeps the device's row.
     let r = Req::delete(&format!("/api/v1/devices/{DEVICE}")).cookie(&cookie).send(&a).await;
@@ -811,11 +811,11 @@ async fn devices_can_be_renamed() {
     };
 
     let r = rename(DEVICE, json!({ "name": "  Ana's MacBook Pro  " })).await;
-    assert_eq!((r.status, r.json()), (StatusCode::OK, json!({ "id": DEVICE, "name": "Ana's MacBook Pro" })));
+    assert_eq!((r.status, r.json()), (StatusCode::OK, json!({ "id": DEVICE, "name": "Ana's MacBook Pro", "readAccess": true })));
     let r = Req::get("/api/v1/devices").cookie(&cookie).send(&a).await;
     assert_eq!(r.json()["items"][0]["name"], "Ana's MacBook Pro");
     let r = rename("old-desk", json!({ "name": "Büro" })).await;
-    assert_eq!((r.status, r.json()), (StatusCode::OK, json!({ "id": "old-desk", "name": "Büro" })));
+    assert_eq!((r.status, r.json()), (StatusCode::OK, json!({ "id": "old-desk", "name": "Büro", "readAccess": true })));
     assert_eq!(one(&env.store, "SELECT name FROM devices WHERE id = 'old-desk'")["name"], "Büro");
 
     for body in [json!({}), json!({ "name": "" }), json!({ "name": "   " }), json!({ "name": 7 }), json!({ "name": "a\nb" })] {
@@ -1250,7 +1250,7 @@ fn upgrading_from_version_3_keeps_tokens() {
     assert_eq!((&row["name"], &row["created_via"], &row["last_seen_at"]), (&json!(DEVICE), &json!("cli"), &Value::Null));
     assert_eq!(one(&store, "SELECT id, name FROM devices"), one(&store, "SELECT name AS id, name FROM tokens"));
     let version: i64 = store.read(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
 }
 
 #[tokio::test]
@@ -1289,7 +1289,7 @@ async fn upgrading_from_version_4_keeps_device_names_as_ids() {
 
     let env = Env { store: pika::store::Store::open(&data).unwrap(), dir };
     let version: i64 = env.store.read(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     // The v11 backfill reproduces existing derived data.
     assert_eq!(env.store.setting("needs_reindex").unwrap(), None);
     assert_eq!(dump_derived(&env.store), derived);
@@ -1429,7 +1429,7 @@ fn the_token_cli_names_devices_by_id_or_unique_name() {
     let (_, listing, _) = token_cli(&data, &["list"]);
     let names: Vec<&str> = listing.lines().map(|l| l.split('\t').nth(1).unwrap()).collect();
     assert_eq!(names, ["Ana's laptop", "twin", "twin"], "{listing}");
-    assert!(listing.lines().all(|l| l.split('\t').count() == 6), "{listing}");
+    assert!(listing.lines().all(|l| l.split('\t').count() == 7 && l.ends_with("\tread")), "{listing}");
 
     // Ambiguous names name the ids; unknown ones fail.
     let (ok, _, error) = token_cli(&data, &["revoke", "twin"]);
