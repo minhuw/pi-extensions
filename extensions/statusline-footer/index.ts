@@ -324,10 +324,13 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 //                              Some providers abstract HTTP away and never
 //                              fire this; message_start is the fallback marker.
 //   message_update (*_delta) → first streamed token (text/thinking/toolcall)
-//   message_end (assistant)  → exact usage.output + stream end time
+//   message_end (assistant)  → exact usage.output + call end time
 //
-// Avg tok/s = Σ output tokens / Σ stream durations over completed
-// requests with observed content in this session.
+// Avg tok/s = Σ output tokens / Σ call durations, each from the request to
+// the last token, over completed requests with observed content in this
+// session. The time after the first token is not used: many responses
+// arrive in one burst once the model has finished, and hidden reasoning
+// counts in output without streaming, so it read as thousands of tok/s.
 
 interface StreamMetrics {
 	requestSentAt: number;
@@ -337,7 +340,7 @@ interface StreamMetrics {
 	lastTtfbMs: number | null; // response-headers time, when the provider exposes it
 	lastTokPerSec: number | null;
 	totalOutput: number;
-	totalStreamMs: number;
+	totalCallMs: number;
 	totalTtftMs: number; // Σ TTFT over completed requests (for mean)
 	ttftCount: number;
 	requests: number;
@@ -354,7 +357,7 @@ function freshMetrics(): StreamMetrics {
 		lastTtfbMs: null,
 		lastTokPerSec: null,
 		totalOutput: 0,
-		totalStreamMs: 0,
+		totalCallMs: 0,
 		totalTtftMs: 0,
 		ttftCount: 0,
 		requests: 0,
@@ -364,8 +367,8 @@ function freshMetrics(): StreamMetrics {
 }
 
 function avgTokPerSec(metrics: StreamMetrics): number | null {
-	if (metrics.totalStreamMs <= 0 || metrics.totalOutput <= 0) return null;
-	return metrics.totalOutput / (metrics.totalStreamMs / 1000);
+	if (metrics.totalCallMs <= 0 || metrics.totalOutput <= 0) return null;
+	return metrics.totalOutput / (metrics.totalCallMs / 1000);
 }
 
 function avgTtftMs(metrics: StreamMetrics): number | null {
@@ -966,15 +969,15 @@ export default function (pi: ExtensionAPI) {
 		const state = getSessionState(ctx);
 		if (!state || ctx.mode !== "tui" || event.message.role !== "assistant") return;
 		const { metrics } = state;
-		const usage = (event.message as AssistantMessage).usage;
-		const streamStart = metrics.firstTokenAt;
-		const streamMs = streamStart > 0 ? Date.now() - streamStart : 0;
-		// Ignore degenerate samples (no stream observed, or instant responses
-		// where duration is too small to yield a meaningful rate).
-		if (streamMs >= 50 && usage && usage.output > 0) {
+		const { usage, stopReason } = event.message as AssistantMessage;
+		// The whole call, from the request to the last token, and only once content was observed.
+		const callMs = metrics.requestSentAt > 0 && metrics.firstTokenAt > 0 ? Date.now() - metrics.requestSentAt : 0;
+		// Ignore degenerate samples (no content observed, failed or aborted calls,
+		// or instant responses too short to yield a meaningful rate).
+		if (callMs >= 50 && usage && usage.output > 0 && stopReason !== "error" && stopReason !== "aborted") {
 			metrics.totalOutput += usage.output;
-			metrics.totalStreamMs += streamMs;
-			metrics.lastTokPerSec = usage.output / (streamMs / 1000);
+			metrics.totalCallMs += callMs;
+			metrics.lastTokPerSec = usage.output / (callMs / 1000);
 			metrics.requests++;
 			if (metrics.curTtftMs != null) {
 				metrics.lastTtftMs = metrics.curTtftMs;

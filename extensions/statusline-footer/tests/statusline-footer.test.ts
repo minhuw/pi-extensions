@@ -1132,7 +1132,7 @@ describe("statusline footer degraded stream lifecycle", () => {
 		await harness.emit("message_end", assistantEnd(10));
 		await harness.runCommand("footer", "debug");
 		expect(harness.notifications.at(-1)).toContain("requests=1");
-		expect(harness.notifications.at(-1)).toContain("avgTtft=600 lastTtft=600 lastTok/s=10.0");
+		expect(harness.notifications.at(-1)).toContain("avgTtft=600 lastTtft=600 lastTok/s=6.3");
 		harness.disposeFooter();
 	});
 
@@ -1158,7 +1158,7 @@ describe("statusline footer degraded stream lifecycle", () => {
 		await harness.emit("message_end", assistantEnd(20));
 		await harness.runCommand("footer", "debug");
 		expect(harness.notifications.at(-1)).toContain("requests=1");
-		expect(harness.notifications.at(-1)).toContain("avgTtft=200 lastTtft=200 lastTok/s=20.0");
+		expect(harness.notifications.at(-1)).toContain("avgTtft=200 lastTtft=200 lastTok/s=16.7");
 		harness.disposeFooter();
 	});
 
@@ -1210,7 +1210,7 @@ describe("statusline footer degraded stream lifecycle", () => {
 		expect(debug).toContain("headersSeen=0 responsesSeen=1 requests=1");
 		expect(debug).toContain("lastTtfb=100");
 		expect(debug).toContain("avgTtft=150");
-		expect(debug).toContain("lastTok/s=10.0");
+		expect(debug).toContain("lastTok/s=8.7");
 
 		now = 3_000;
 		await harness.emit("after_provider_response", { type: "after_provider_response" });
@@ -1277,7 +1277,36 @@ describe("statusline footer degraded stream lifecycle", () => {
 		expect(debug).toContain("headersSeen=4 responsesSeen=0 requests=1");
 		expect(debug).toContain("avgTtft=100");
 		expect(debug).toContain("lastTtft=100");
-		expect(debug).toContain("lastTok/s=20.0");
+		expect(debug).toContain("lastTok/s=18.2");
+		harness.disposeFooter();
+	});
+
+	it("measures whole calls, so a burst after a long wait or a failed call does not read as a fast stream", async () => {
+		let now = 0;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const harness = createHarness("burst-streams", "tui");
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+		const call = async (start: number, firstToken: number, end: number, endEvent: any) => {
+			now = start;
+			await harness.emit("before_provider_headers", { type: "before_provider_headers", headers: {} });
+			now = firstToken;
+			await harness.emit("message_update", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "x" } });
+			now = end;
+			await harness.emit("message_end", endEvent);
+		};
+		// 1,440 tokens 100 ms after a first token that took 24 s: 60 tok/s, not the 14,400 the time after the first token gave.
+		await call(1_000, 24_900, 25_000, assistantEnd(1_440));
+		await harness.runCommand("footer", "debug");
+		expect(harness.notifications.at(-1)).toContain("requests=1");
+		expect(harness.notifications.at(-1)).toContain("lastTok/s=60.0");
+		// Failed and aborted calls leave the rate alone.
+		for (const stopReason of ["error", "aborted"]) {
+			await call(30_000, 30_100, 31_100, { message: { role: "assistant", stopReason, usage: { output: 500 } } });
+		}
+		await harness.runCommand("footer", "debug");
+		expect(harness.notifications.at(-1)).toContain("requests=1");
+		expect(harness.notifications.at(-1)).toContain("lastTok/s=60.0");
 		harness.disposeFooter();
 	});
 
@@ -1415,7 +1444,7 @@ describe("statusline footer session isolation", () => {
 		expect(debug).toContain("requests=1");
 		expect(debug).toContain("avgTtft=200");
 		expect(debug).toContain("lastTtft=200");
-		expect(debug).toContain("lastTok/s=10.0");
+		expect(debug).toContain("lastTok/s=8.3");
 		expect(root.requestRender).toHaveBeenCalledTimes(1);
 
 		root.getFooter()?.dispose?.();
@@ -1426,7 +1455,7 @@ describe("statusline footer session isolation", () => {
 		metrics: {
 			requestSentAt: 1_000, firstTokenAt: 1_100, curTtftMs: 100,
 			lastTtftMs: 200, lastTtfbMs: null, lastTokPerSec: 20,
-			totalOutput: 20, totalStreamMs: 1_000, totalTtftMs: 200, ttftCount: 1,
+			totalOutput: 20, totalCallMs: 1_000, totalTtftMs: 200, ttftCount: 1,
 			requests: 1, headersSeen: 1, responsesSeen: 0,
 		},
 		serviceTier: "priority",
@@ -1441,7 +1470,7 @@ describe("statusline footer session isolation", () => {
 		["null required field", { metrics: { ...reloadSnapshot.metrics, totalOutput: null } }],
 		["missing nullable field", { metrics: { ...reloadSnapshot.metrics, lastTtfbMs: undefined } }],
 		["NaN", { metrics: { ...reloadSnapshot.metrics, totalOutput: NaN } }],
-		["infinity", { metrics: { ...reloadSnapshot.metrics, totalStreamMs: Infinity } }],
+		["infinity", { metrics: { ...reloadSnapshot.metrics, totalCallMs: Infinity } }],
 		["negative", { metrics: { ...reloadSnapshot.metrics, headersSeen: -1 } }],
 		["string", { metrics: { ...reloadSnapshot.metrics, curTtftMs: "100" } }],
 		["invalid tier", { ...reloadSnapshot, serviceTier: 123 }],
@@ -1484,7 +1513,7 @@ describe("statusline footer session isolation", () => {
 		await harness.emit("message_end", assistantEnd(10));
 		await harness.runCommand("footer", "debug");
 		expect(harness.notifications.at(-1)).toContain("requests=2");
-		expect(harness.notifications.at(-1)).toContain("avgTtft=200 lastTtft=200 lastTok/s=10.0");
+		expect(harness.notifications.at(-1)).toContain("avgTtft=200 lastTtft=200 lastTok/s=8.3");
 		expect(reloadSnapshot.metrics.requestSentAt).toBe(1_000);
 		harness.disposeFooter();
 	});
@@ -1556,7 +1585,7 @@ describe("statusline footer session isolation", () => {
 				serviceTier: "priority",
 				metrics: {
 					requestSentAt: 0, firstTokenAt: 0, curTtftMs: null,
-					requests: 1, totalOutput: 20, totalStreamMs: 1_000, lastTtftMs: 250,
+					requests: 1, totalOutput: 20, totalCallMs: 1_250, lastTtftMs: 250,
 				},
 			},
 		});
@@ -1579,7 +1608,7 @@ describe("statusline footer session isolation", () => {
 
 		const debug = afterReload.notifications.at(-1);
 		expect(debug).toContain("requests=1");
-		expect(debug).toContain("avgTtft=250 lastTtft=250 lastTok/s=20.0");
+		expect(debug).toContain("avgTtft=250 lastTtft=250 lastTok/s=16.0");
 		expect(afterReload.getFooter()!.render(240)[0]).toContain("FAST");
 		expect(afterReload.ctx.sessionManager.getEntries).toHaveBeenCalledOnce();
 
@@ -1587,7 +1616,7 @@ describe("statusline footer session isolation", () => {
 		await afterReload.emit("message_end", assistantEnd(999));
 		await afterReload.runCommand("footer", "debug");
 		expect(afterReload.notifications.at(-1)).toContain("requests=1");
-		expect(afterReload.notifications.at(-1)).toContain("avgTtft=250 lastTtft=250 lastTok/s=20.0");
+		expect(afterReload.notifications.at(-1)).toContain("avgTtft=250 lastTtft=250 lastTok/s=16.0");
 		now = 11_000;
 		await afterReload.emit("message_start", { message: { role: "assistant" } });
 		now = 11_150;
@@ -1598,7 +1627,7 @@ describe("statusline footer session isolation", () => {
 		await afterReload.emit("message_end", assistantEnd(10));
 		await afterReload.runCommand("footer", "debug");
 		expect(afterReload.notifications.at(-1)).toContain("requests=2");
-		expect(afterReload.notifications.at(-1)).toContain("avgTtft=200 lastTtft=150 lastTok/s=10.0");
+		expect(afterReload.notifications.at(-1)).toContain("avgTtft=200 lastTtft=150 lastTok/s=8.7");
 
 		afterReload.disposeFooter();
 		await afterReload.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
