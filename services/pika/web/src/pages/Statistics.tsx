@@ -1,10 +1,11 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { useId, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useSearchParams } from "react-router";
 import { ModelName, modelMaker, type ModelMaker } from "../components/ModelName";
 import { BUTTON, cx, EmptyState, ErrorState, Page, PageTitle, Segmented, Skeleton } from "../components/ui";
 import { cacheReadShare, completionShare, UsageBreakdowns } from "../components/UsageBreakdowns";
 import { useApi } from "../lib/api";
+import { bareModel } from "../lib/model";
 import { formatCost, formatCount, plural, totalTokens } from "../lib/format";
 import type { Tokens, UsageDay, UsageGroup, UsagePeriod, UsageReport, UsageRequestMetrics, UsageStatistics } from "../lib/types";
 
@@ -98,43 +99,123 @@ export type Split = "total" | "model" | "project";
 const SPLITS = [["total", "Total"], ["model", "By model"], ["project", "By project"]] as const;
 export const OTHER = "\u0000other";
 export const UNNAMED = "\u0000none";
-const LAYER_LIMIT = 6;
+/** Layers before the rest go together: models each have a colour of their own, projects share one ink scale. */
+const LAYER_LIMIT = { model: 10, project: 6 } as const;
 const INK = "var(--color-ink)";
-/** Layers, largest first, step from the black of the unsplit bar toward the page, so a split reads as the total divided. */
+const PAGE = "var(--color-page)";
+/** Project layers, largest first, step from the black of the unsplit bar toward the page, so a split reads as the total divided. */
 const SHADES = [100, 72, 52, 36, 24, 16];
-const tint = (colour: string, percent: number) => (percent >= 100 ? colour : `color-mix(in srgb, ${colour} ${percent}%, var(--color-page))`);
-/** Model makers with coloured marks lend the colour to their models' layers. */
-const MAKER_COLOURS: Partial<Record<ModelMaker, string>> = {
+const tint = (colour: string, percent: number) => (percent >= 100 ? colour : `color-mix(in srgb, ${colour} ${percent}%, ${PAGE})`);
+const mix = (colour: string, percent: number, toward: string) => `color-mix(in oklab, ${colour} ${percent}%, ${toward})`;
+/** A maker's colours for its models: its own, then alternately lighter and darker, so neighbouring layers differ. */
+const MAKER_VARIANTS: ((colour: string) => string)[] = [
+	(c) => c,
+	(c) => mix(c, 66, PAGE),
+	(c) => mix(c, 70, INK),
+	(c) => mix(c, 42, PAGE),
+	(c) => mix(c, 48, INK),
+	(c) => mix(c, 24, PAGE),
+];
+/** Models of makers without a colour step through ink. */
+const INK_VARIANTS = SHADES.map((percent) => (c: string) => tint(c, percent));
+/** Makers pika colours in the chart without a mark of their own, by name as `modelMaker` reads it. */
+type Family = ModelMaker | "qwen" | "minimax" | "mistral" | "zai";
+/**
+ * The colour each maker lends its models' layers: the colours of their names and marks, OpenAI's green, Kimi's blue,
+ * and for the rest, Artificial Analysis's creator colours.
+ */
+const MAKER_COLOURS: Partial<Record<Family, string>> = {
 	claude: "var(--color-model-claude)",
 	gemini: "var(--color-model-gemini)",
 	deepseek: "var(--color-model-deepseek)",
+	openai: "var(--color-model-openai)",
+	kimi: "var(--color-model-kimi)",
+	grok: "var(--color-model-grok)",
+	qwen: "var(--color-model-qwen)",
+	minimax: "var(--color-model-minimax)",
+	mistral: "var(--color-model-mistral)",
+	zai: "var(--color-model-zai)",
 };
+
+/** A model's colour family: its maker as `modelMaker` knows it, else a maker the chart alone colours. */
+export function modelFamily(model: string): Family | undefined {
+	const known = modelMaker(model);
+	if (known) return known;
+	const name = bareModel(model).toLowerCase();
+	if (/qwen|qwq/.test(name)) return "qwen";
+	if (/minimax|^abab/.test(name)) return "minimax";
+	if (/mistral|mixtral|pixtral|(code|dev|magi|mini)stral/.test(name)) return "mistral";
+	if (/^(chat)?glm|zhipu/.test(name)) return "zai";
+	return undefined;
+}
+
+/**
+ * Every model in the order it first used tokens (failed calls alone do not count), by month, then by name: from an
+ * all-time monthly `usage?by=model` report.
+ * A new model joins the end, so the variants `splitSeries` gives earlier models never move.
+ */
+export function modelOrder(report: UsageReport): string[] {
+	const seen = new Set<string>();
+	for (const period of report.periods) {
+		const fresh = (period.groups ?? []).flatMap((group) => (group.name !== null && !seen.has(group.name) && group.tokens > 0 ? [group.name] : []));
+		for (const name of fresh.toSorted()) seen.add(name);
+	}
+	return [...seen];
+}
+
+/**
+ * Each shown model's variant: its place among its maker's models in first-use `order` (models it lacks follow, by
+ * name), cycling through the variants; a model whose variant a model shown before it took takes the next free one.
+ */
+function variantsOf(names: string[], family: string, order: string[], count: number): Map<string, number> {
+	const ranked = order.filter((name) => familyOf(name) === family);
+	const missing = names.filter((name) => !ranked.includes(name)).toSorted();
+	const place = new Map([...ranked, ...missing].map((name, i) => [name, i]));
+	const taken = new Set<number>();
+	const chosen = new Map<string, number>();
+	for (const name of names.toSorted((a, b) => place.get(a)! - place.get(b)!)) {
+		let k = place.get(name)! % count;
+		for (let step = 0; step < count && taken.has(k); step++) k = (k + 1) % count;
+		taken.add(k);
+		chosen.set(name, k);
+	}
+	return chosen;
+}
+
+/** The colour family a model's layer takes: its maker's, or ink. */
+function familyOf(model: string): string {
+	const maker = modelFamily(model);
+	return maker && MAKER_COLOURS[maker] ? maker : "ink";
+}
 const HATCH = `repeating-linear-gradient(135deg, ${tint(INK, 42)} 0 1.5px, ${tint(INK, 8)} 1.5px 4.5px)`;
 
 /**
- * The chart's layers, bottom to top: the six models or projects with the most tokens in shades of ink, the remaining
- * ones together, then usage without a name, hatched: no recorded model, or, by project, no project or (public) activity
- * outside published projects.
+ * The chart's layers, bottom to top: the ten models with the most tokens, each in its own variant of its maker's colour,
+ * or the six projects with the most in shades of ink; the remaining ones together; then usage without a name, hatched:
+ * no recorded model, or, by project, no project or (public) activity outside published projects.
  */
-export function splitSeries(groups: UsageGroup[], by: "model" | "project", publicView = false): Series[] {
+export function splitSeries(groups: UsageGroup[], by: "model" | "project", publicView = false, order: string[] = []): Series[] {
 	const used = (group: UsageGroup) => group.tokens > 0 || group.requests > 0 || group.cost > 0;
 	const named = groups.filter((group) => group.name !== null && used(group)).toSorted((a, b) => b.tokens - a.tokens);
-	// Projects step down one ink scale; models step down their maker's colour, grouped by maker, makers without one in ink.
-	const families = new Map<string, string[]>();
-	for (const { name } of named.slice(0, LAYER_LIMIT)) {
-		const maker = by === "model" ? modelMaker(name!) : undefined;
-		const family = maker && MAKER_COLOURS[maker] ? maker : "ink";
-		families.set(family, [...(families.get(family) ?? []), name!]);
+	const limit = LAYER_LIMIT[by];
+	const shown = named.slice(0, limit).map((group) => group.name!);
+	let series: Series[];
+	if (by === "project") series = shown.map((name, i) => ({ id: name, label: name, fill: tint(INK, SHADES[i]) }));
+	else {
+		// Grouped by maker, in the order of each maker's largest model; makers without a colour in ink.
+		const families = new Map<string, string[]>();
+		for (const name of shown) {
+			const family = familyOf(name);
+			families.set(family, [...(families.get(family) ?? []), name]);
+		}
+		series = [...families].flatMap(([family, names]) => {
+			const variants = family === "ink" ? INK_VARIANTS : MAKER_VARIANTS;
+			const chosen = variantsOf(names, family, order, variants.length);
+			const colour = MAKER_COLOURS[family as Family] ?? INK;
+			return names.map((name) => ({ id: name, label: name, model: name, fill: variants[chosen.get(name)!](colour) }));
+		});
 	}
-	const series: Series[] = [...families].flatMap(([family, names]) =>
-		names.map((name, i) => ({
-			id: name,
-			label: name,
-			model: by === "model" ? name : undefined,
-			fill: tint(MAKER_COLOURS[family as ModelMaker] ?? INK, SHADES[i]),
-		})),
-	);
-	const rest = named.length - LAYER_LIMIT;
+	const rest = named.length - limit;
 	if (rest > 0) series.push({ id: OTHER, label: `${rest} other ${by === "model" ? "model" : "project"}${rest === 1 ? "" : "s"}`, fill: tint(INK, 8) });
 	if (groups.some((group) => group.name === null && used(group))) {
 		const label = by === "model" ? "No model recorded" : publicView ? "Unpublished & hidden" : "No project";
@@ -192,10 +273,16 @@ export function bucketParts(buckets: Bucket[], periods: UsagePeriod[], series: S
 	});
 }
 
+/** The edge on a layer's swatch that keeps the lightest shades visible on the page. */
+const SWATCH = "size-2.5 shrink-0 [box-shadow:inset_0_0_0_1px_color-mix(in_srgb,var(--color-ink)_16%,transparent)]";
+const CARD_WIDTH = 288;
+
 /**
- * Daily usage as black bars on round gridlines, or split by model or project into shades of the same black. The chosen
+ * Daily usage as black bars on round gridlines, or split into layers: models in their makers' colours, projects in
+ * shades of the same black. The chosen
  * bar carries a pin with its date and total, like the session view's "you are here" pin, and when split the legend
- * gives its value per layer; hovering, clicking, or the arrow keys move it.
+ * gives its value per layer; hovering, clicking, or the arrow keys move it. While the pointer or focus is on a stacked
+ * bar, a card beside the pin lists its layers, top first, with their share of the bar.
  */
 function UsageChart({ daily, split, onSplit, report, series }: { daily: UsageDay[]; split: Split; onSplit: (split: Split) => void; report?: UsageReport; series: Series[] }) {
 	const [metric, setMetric] = useState<Metric>("tokens");
@@ -218,8 +305,17 @@ function UsageChart({ daily, split, onSplit, report, series }: { daily: UsageDay
 	const active = buckets[selected];
 	const activeParts = parts[selected];
 	const valueText = (value: number) => (metric === "cost" ? formatCost(value) : formatCount(value));
-	const breakdown = (stack: number[] | undefined) =>
-		stack ? layers.flatMap((s, k) => (stack[k] > 0 ? [`\n${s.label}: ${exactText(stack[k], metric)}`] : [])).join("") : "";
+	// The card follows the pointer or keyboard focus on the bars; a click's lingering focus leaves with the pointer.
+	const [inspecting, setInspecting] = useState(false);
+	const cardId = useId();
+	const activeSum = activeParts?.reduce((total, value) => total + value, 0) ?? 0;
+	const cardRows = inspecting
+		? layers.flatMap((layer, k) => {
+				const value = activeParts?.[k] ?? 0;
+				return value > 0 ? [{ layer, value }] : [];
+			}).reverse()
+		: [];
+	const card = cardRows.length > 0;
 	const peak = buckets.reduce((top, bucket) => Math.max(top, bucket.value), 0);
 	const ticks = axisTicks(peak, metric !== "cost");
 	const top = ticks[ticks.length - 1] || 1;
@@ -272,7 +368,38 @@ function UsageChart({ daily, split, onSplit, report, series }: { daily: UsageDay
 							</span>
 						</>
 					)}
-					<div className={cx("absolute inset-0 flex items-end", gap)} role="group" aria-label={`${METRICS.find(([key]) => key === metric)![1]} by UTC date`}>
+					{card && (
+						<div
+							id={cardId}
+							role="tooltip"
+							className="pointer-events-none absolute top-2 z-[3] max-w-full rounded-sm border border-ink bg-page px-3 py-2 text-[12px] leading-[1.45] shadow-[0_8px_24px_rgba(0,0,0,0.14)]"
+							// Beside the pin, toward the wider side of the plot, and never past its edges.
+							style={{
+								width: CARD_WIDTH,
+								left: `clamp(0px, calc(${at(selected)}% ${at(selected) <= 50 ? "+ 12px" : `- ${CARD_WIDTH + 12}px`}), calc(100% - ${CARD_WIDTH}px))`,
+							}}
+							data-chart-tooltip=""
+						>
+							<ul>
+								{cardRows.map(({ layer, value }) => (
+									<li key={layer.id} className="flex h-5 min-w-0 items-center gap-1.5" data-tooltip-layer={layer.label}>
+										<span className={SWATCH} style={{ background: layer.fill }} aria-hidden="true" />
+										{layer.model ? <ModelName model={layer.model} keepName className="mono flex-1" /> : <span className="min-w-0 flex-1 truncate">{layer.label}</span>}
+										<span className="tnum shrink-0 pl-2 font-semibold">{valueText(value)}</span>
+										<span className="tnum w-11 shrink-0 text-right text-muted">{percent(value / activeSum)}</span>
+									</li>
+								))}
+							</ul>
+						</div>
+					)}
+					<div
+						className={cx("absolute inset-0 flex items-end", gap)}
+						role="group"
+						aria-label={`${METRICS.find(([key]) => key === metric)![1]} by UTC date`}
+						onMouseLeave={() => setInspecting(false)}
+						onFocus={() => setInspecting(true)}
+						onBlur={(event) => setInspecting(event.currentTarget.contains(event.relatedTarget))}
+					>
 						{buckets.map((bucket, i) => (
 							<button
 								key={bucket.from}
@@ -283,11 +410,14 @@ function UsageChart({ daily, split, onSplit, report, series }: { daily: UsageDay
 								tabIndex={i === selected ? 0 : -1}
 								onClick={() => choose(i)}
 								onFocus={() => choose(i)}
-								onMouseEnter={() => choose(i)}
+								onMouseEnter={() => {
+									choose(i);
+									setInspecting(true);
+								}}
 								onKeyDown={(event) => move(event, i)}
 								aria-pressed={i === selected}
 								aria-label={`${bucket.from}${bucket.from !== bucket.to ? ` to ${bucket.to}` : ""}: ${exactText(bucket.value, metric)}`}
-								title={`${label(bucket)} · ${exactText(bucket.value, metric)}${breakdown(parts[i])}`}
+								aria-describedby={card && i === selected ? cardId : undefined}
 								className="group/bar relative z-[1] flex h-full min-w-0 flex-1 items-end justify-center focus-visible:outline-offset-1"
 								data-usage-bar={bucket.from}
 							>
@@ -324,7 +454,7 @@ function UsageChart({ daily, split, onSplit, report, series }: { daily: UsageDay
 				<ul className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 text-[12px]" aria-label={active ? `${label(active)} by ${byType ? "token type" : split}` : "Layers"} data-chart-legend="">
 					{layers.map((s, k) => (
 						<li key={s.id} className={cx("flex min-w-0 items-center gap-1.5 transition-opacity duration-150", activeParts && !activeParts[k] && "opacity-45")} data-legend={s.label}>
-							<span className="size-2.5 shrink-0 [box-shadow:inset_0_0_0_1px_color-mix(in_srgb,var(--color-ink)_16%,transparent)]" style={{ background: s.fill }} aria-hidden="true" />
+							<span className={SWATCH} style={{ background: s.fill }} aria-hidden="true" />
 							{s.model ? <ModelName model={s.model} keepName className="mono" /> : <span className="text-muted">{s.label}</span>}
 							<span className="tnum text-muted">{activeParts ? valueText(activeParts[k]) : "—"}</span>
 						</li>
@@ -379,13 +509,17 @@ function Figures({ data }: { data: UsageStatistics }) {
 	);
 }
 
-function StatisticsData({ data, split, onSplit, report, scope }: { data: UsageStatistics; split: Split; onSplit: (split: Split) => void; report?: UsageReport; scope: ReactNode }) {
+function StatisticsData({ data, split, onSplit, report, order, scope }: { data: UsageStatistics; split: Split; onSplit: (split: Split) => void; report?: UsageReport; order?: string[]; scope: ReactNode }) {
 	const api = useApi();
 	const { totals, daily } = data;
 	const breakdowns = totals.sessions > 0 && data.projects !== undefined && data.models !== undefined;
 	// The report is only used when it answers the current split; a stale one from the other split would mislabel layers.
 	const current = split !== "total" && report?.by === split ? report : undefined;
-	const series = useMemo(() => (current?.groups ? splitSeries(current.groups, current.by!, api.publicView) : []), [current, api.publicView]);
+	// Model layers wait for the first-use order, so their colours never change once shown.
+	const series = useMemo(
+		() => (current?.groups && (current.by !== "model" || order) ? splitSeries(current.groups, current.by!, api.publicView, order) : []),
+		[current, order, api.publicView],
+	);
 	const dimension = split === "model" ? "models" : "projects";
 	const empty = totals.sessions === 0;
 	return (
@@ -452,6 +586,15 @@ export function StatisticsPage() {
 		enabled: split !== "total",
 		refetchInterval: 60_000,
 	});
+	// Every model in first-use order, so each keeps its colour in every range and scope (`modelOrder`). Only a new model
+	// changes it, so it is fetched rarely; without it (an older server) layers take colours in name order.
+	const order = useQuery({
+		queryKey: ["model-order", api.publicView],
+		queryFn: () => api.usage({ days: "all", by: "model", interval: "month", excludeUnpublished: false }),
+		select: modelOrder,
+		enabled: split === "model",
+		staleTime: 10 * 60_000,
+	});
 	const change = (key: string, value: string | undefined) =>
 		setParams((previous) => {
 			const next = new URLSearchParams(previous);
@@ -490,6 +633,7 @@ export function StatisticsPage() {
 							split={split}
 							onSplit={(value) => change("by", value === "total" ? undefined : value)}
 							report={usage.data}
+							order={order.isError ? [] : order.data}
 							scope={
 								<div className="mt-5 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line pt-3 text-[13px]" data-usage-scope="">
 									<label className="flex cursor-pointer items-center gap-2 font-medium">

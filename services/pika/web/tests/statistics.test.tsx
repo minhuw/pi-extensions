@@ -1,10 +1,10 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { PikaApi } from "../src/lib/api";
 import { guestPath } from "../src/lib/guestView";
 import { totalTokens } from "../src/lib/format";
 import type { UsageGroup, UsageReport, UsageStatistics } from "../src/lib/types";
-import { axisTicks, bucketParts, formatDateRange, layerOf, OTHER, splitSeries, tokenParts, UNNAMED, usageBuckets } from "../src/pages/Statistics";
+import { axisTicks, bucketParts, formatDateRange, layerOf, modelFamily, modelOrder, OTHER, splitSeries, tokenParts, UNNAMED, usageBuckets, type Series } from "../src/pages/Statistics";
 import { renderApp } from "./support/render";
 import { createFakeServer } from "./support/server";
 
@@ -134,7 +134,11 @@ describe("Statistics", () => {
 
 		fireEvent.click(split.getByRole("button", { name: "By model" }));
 		await waitFor(() => expect(document.querySelector("[data-usage-stack]")).toBeTruthy());
-		expect(String(api.usageCalls().at(-1)![0])).toBe("/api/public/v1/usage?days=7&by=model&excludeUnpublished=false");
+		// The range split by model, and every model in first-use order for their colours.
+		expect(api.usageCalls().map(([url]) => String(url)).toSorted()).toEqual([
+			"/api/public/v1/usage?days=7&by=model&excludeUnpublished=false",
+			"/api/public/v1/usage?days=all&by=model&interval=month&excludeUnpublished=false",
+		]);
 		expect(screen.getByRole("heading", { name: "Breakdown by model" })).toBeTruthy();
 		await waitFor(() => expect(parts("2026-11-03")).toEqual(["claude-opus-5-5", "No model recorded"]));
 		expect(parts("2026-11-01")).toEqual(["gpt-6-luna"]);
@@ -149,8 +153,23 @@ describe("Statistics", () => {
 		expect(legend("No model recorded")).toContain("80");
 		expect(screen.getByRole("list", { name: "Nov 3 by model" })).toBeTruthy();
 		const last = screen.getByRole("button", { name: "2026-11-03: 380 tokens" });
-		expect(last.getAttribute("title")).toContain("claude-opus-5-5: 300 tokens");
-		last.focus();
+		// Hovering a stacked bar opens a card with its layers, top of the stack first, and each one's share of the bar.
+		const tooltip = () => document.querySelector("[data-chart-tooltip]");
+		const tooltipRows = () => [...document.querySelectorAll("[data-tooltip-layer]")].map((el) => [el.getAttribute("data-tooltip-layer"), el.textContent]);
+		expect(tooltip()).toBeNull();
+		fireEvent.mouseEnter(last);
+		expect(tooltipRows()).toEqual([["No model recorded", "No model recorded8021.1%"], ["claude-opus-5-5", "claude-opus-5-530078.9%"]]);
+		expect(last.getAttribute("aria-describedby")).toBe(tooltip()!.id);
+		fireEvent.mouseEnter(screen.getByRole("button", { name: "2026-11-01: 80 tokens" }));
+		expect(tooltipRows()).toEqual([["gpt-6-luna", "gpt-6-luna80100.0%"]]);
+		// A day without usage has nothing to break down.
+		fireEvent.mouseEnter(screen.getByRole("button", { name: "2026-11-02: 0 tokens" }));
+		expect(tooltip()).toBeNull();
+		fireEvent.mouseLeave(screen.getByRole("group", { name: "Tokens by UTC date" }));
+		expect(tooltip()).toBeNull();
+		// Keyboard focus opens it too.
+		act(() => last.focus());
+		expect(tooltipRows().map(([name]) => name)).toEqual(["No model recorded", "claude-opus-5-5"]);
 		fireEvent.keyDown(last, { key: "ArrowLeft" });
 		fireEvent.keyDown(document.activeElement!, { key: "ArrowLeft" });
 		expect(legend("gpt-6-luna")).toContain("80");
@@ -175,38 +194,72 @@ describe("Statistics", () => {
 		api.state.breakdowns = true;
 		renderApp("/public/statistics?days=7&by=model", api.fetch);
 		await screen.findByRole("heading", { name: "Breakdown by model" });
-		await waitFor(() => expect(api.usageCalls()).toHaveLength(1));
+		await waitFor(() => expect(api.usageCalls()).toHaveLength(2));
 		expect(within(screen.getByRole("group", { name: "Split" })).getByRole("button", { name: "By model" }).getAttribute("aria-pressed")).toBe("true");
 		expect(screen.getByRole("button", { name: "2026-11-03: 380 tokens" })).toBeTruthy();
 		expect(document.querySelector("[data-usage-stack]")).toBeNull();
 		expect(document.querySelector("[data-chart-legend]")).toBeNull();
 	});
 
-	it("layers the six largest groups, models in their makers' colours and projects in ink, then the rest and the unnamed", () => {
+	it("layers ten models, each in its maker's colour by first use, or six projects in ink, then the rest and the unnamed", () => {
 		const groups = [
-			group("claude-opus-5-5", 900), group("gpt-6-luna", 800), group("claude-haiku-5-5", 700), group("gemini-3-pro", 600),
-			group("llama-5", 500), group("gpt-6-mini", 400), group("claude-sonnet-5-5", 300), group("grok-5", 200), group(null, 100), group("idle", 0),
+			group("claude-opus-5-5", 1200), group("gpt-6-luna", 1100), group("claude-haiku-5-5", 1000), group("gemini-3-pro", 900),
+			group("llama-5", 800), group("gpt-6-mini", 700), group("claude-sonnet-5-5", 600), group("grok-5", 500), group("qwen3-coder", 400),
+			group("k3.1-pro", 300), group("gpt-6.1-sol", 200), group("glm-5", 100), group(null, 50), group("idle", 0),
 		];
-		const series = splitSeries(groups, "model");
-		// Grouped by maker in order of each maker's largest model; makers without a colour, and unknown ones, share ink.
-		expect(series.map((s) => s.id)).toEqual(["claude-opus-5-5", "claude-haiku-5-5", "gpt-6-luna", "llama-5", "gpt-6-mini", "gemini-3-pro", OTHER, UNNAMED]);
-		expect(series.slice(0, 6).map((s) => s.fill)).toEqual([
-			"var(--color-model-claude)",
-			"color-mix(in srgb, var(--color-model-claude) 72%, var(--color-page))",
-			"var(--color-ink)",
-			"color-mix(in srgb, var(--color-ink) 72%, var(--color-page))",
-			"color-mix(in srgb, var(--color-ink) 52%, var(--color-page))",
-			"var(--color-model-gemini)",
+		const order = ["gpt-6-luna", "claude-opus-5-5", "gpt-6.1-sol", "claude-haiku-5-5", "gpt-6-mini", "claude-sonnet-5-5"];
+		const series = splitSeries(groups, "model", false, order);
+		// Grouped by maker in order of each maker's largest model; unknown makers share ink.
+		expect(series.map((s) => s.id)).toEqual([
+			"claude-opus-5-5", "claude-haiku-5-5", "claude-sonnet-5-5", "gpt-6-luna", "gpt-6-mini", "gemini-3-pro", "llama-5", "grok-5",
+			"qwen3-coder", "k3.1-pro", OTHER, UNNAMED,
 		]);
-		// Projects named like models are still projects: one ink scale.
-		expect(splitSeries([group("claude-app", 10), group("gpt-tools", 5)], "project").map((s) => s.fill)).toEqual(["var(--color-ink)", "color-mix(in srgb, var(--color-ink) 72%, var(--color-page))"]);
+		const fill = (layers: Series[], id: string) => layers.find((s) => s.id === id)?.fill;
+		// A maker's models take its variants in first-use order: Claude's first three, OpenAI's first and third.
+		expect(series.slice(0, 5).map((s) => s.fill)).toEqual([
+			"var(--color-model-claude)",
+			"color-mix(in oklab, var(--color-model-claude) 66%, var(--color-page))",
+			"color-mix(in oklab, var(--color-model-claude) 70%, var(--color-ink))",
+			"var(--color-model-openai)",
+			"color-mix(in oklab, var(--color-model-openai) 70%, var(--color-ink))",
+		]);
+		expect(series.slice(5, 10).map((s) => s.fill)).toEqual([
+			"var(--color-model-gemini)", "var(--color-ink)", "var(--color-model-grok)", "var(--color-model-qwen)", "var(--color-model-kimi)",
+		]);
 		expect(new Set(series.map((s) => s.fill)).size).toBe(series.length);
-		expect(series[6].label).toBe("2 other models");
-		expect(series[7].label).toBe("No model recorded");
+		// Another range keeps each model's colour.
+		const week = splitSeries([group("gpt-6-mini", 9), group("claude-sonnet-5-5", 5), group("gpt-6.1-sol", 3)], "model", false, order);
+		for (const id of ["gpt-6-mini", "claude-sonnet-5-5"]) expect(fill(week, id)).toBe(fill(series, id));
+		expect(fill(week, "gpt-6.1-sol")).toBe("color-mix(in oklab, var(--color-model-openai) 66%, var(--color-page))");
+		// Without an order, models a maker shares take its variants in name order.
+		expect(splitSeries([group("gpt-6-mini", 9), group("gpt-6-luna", 5)], "model").map((s) => s.fill)).toEqual([
+			"color-mix(in oklab, var(--color-model-openai) 66%, var(--color-page))", "var(--color-model-openai)",
+		]);
+		expect(modelFamily("qwen3-coder")).toBe("qwen");
+		expect(modelFamily("devstral-small")).toBe("mistral");
+		expect(modelFamily("glm-5")).toBe("zai");
+		expect(modelFamily("abab-7")).toBe("minimax");
+		expect(modelFamily("llama-5")).toBeUndefined();
+		// Projects named like models are still projects: one ink scale, six layers.
+		const projects = splitSeries(Array.from({ length: 7 }, (_, i) => group(i ? `p${i}` : "claude-app", 10 - i)), "project");
+		expect(projects.slice(0, 2).map((s) => s.fill)).toEqual(["var(--color-ink)", "color-mix(in srgb, var(--color-ink) 72%, var(--color-page))"]);
+		expect(projects.map((s) => s.id).at(-1)).toBe(OTHER);
+		expect(projects.at(-1)!.label).toBe("1 other project");
+		expect(series[10].label).toBe("2 other models");
+		expect(series[11].label).toBe("No model recorded");
 		expect(splitSeries([group("pika", 10), group(null, 5)], "project", true).map((s) => s.label)).toEqual(["pika", "Unpublished & hidden"]);
 		expect(splitSeries([group("pika", 10), group(null, 5)], "project").map((s) => s.label)).toEqual(["pika", "No project"]);
-		expect(layerOf(series, "grok-5")?.id).toBe(OTHER);
+		expect(layerOf(series, "gpt-6.1-sol")?.id).toBe(OTHER);
 		expect(layerOf(series, null)?.id).toBe(UNNAMED);
+
+		// First use: by month, then by name; idle models, and models with failed calls alone, wait until they use tokens.
+		const period = (start: string, groups: UsageGroup[]) => ({ ...zero, tokens: 0, start, end: start, groups });
+		const monthly = { ...usageFixture("model"), interval: "month" as const, periods: [
+			period("2026-09-01", [group("zeta", 10), group("alpha", 5)]),
+			period("2026-10-01", [group("alpha", 3), group("idle", 0), group("beta", 0, { requests: 2 })]),
+			period("2026-11-01", [group("beta", 2), group("idle", 1), group(null, 4)]),
+		] };
+		expect(modelOrder(monthly)).toEqual(["alpha", "zeta", "beta", "idle"]);
 
 		const report = usageFixture("model");
 		const { buckets } = usageBuckets(fixture().daily, "tokens");
@@ -217,8 +270,8 @@ describe("Statistics", () => {
 		// Days the report does not cover are left unsplit rather than shown as zero.
 		expect(bucketParts(buckets, report.periods.slice(1), layers, "tokens")[0]).toBeUndefined();
 		expect(tokenParts(buckets, fixture().daily)).toEqual([[40, 40, 0, 0], [0, 0, 0, 0], [20, 60, 0, 300]]);
-		const crowded = splitSeries([group("claude-opus-5-5", 300), ...Array.from({ length: 6 }, (_, i) => group(`m${i}`, 200 - i))], "model");
-		expect(bucketParts(buckets, report.periods, crowded, "tokens")[0]).toEqual([0, 0, 0, 0, 0, 0, 80]);
+		const crowded = splitSeries([group("claude-opus-5-5", 300), ...Array.from({ length: 10 }, (_, i) => group(`m${i}`, 200 - i))], "model");
+		expect(bucketParts(buckets, report.periods, crowded, "tokens")[0]).toEqual([...Array(10).fill(0), 80]);
 	});
 
 	it("shows an empty state and lets a failed request retry", async () => {
