@@ -40,7 +40,13 @@ export interface UsageStatistics {
 	from: string;
 	to: string;
 	excludeUnpublished: boolean;
-	totals: UsageCounts & { activeDays: number };
+	totals: UsageCounts & {
+		activeDays: number;
+		/** The part of `cost` pika estimated from model prices for calls that recorded none; older servers omit it. */
+		estimatedCost?: number;
+		/** Calls with tokens but neither a recorded cost nor a known price; older servers omit it. */
+		unpricedRequests?: number;
+	};
 	daily: UsageDay[];
 	/** Older servers omit the breakdowns and request metrics. */
 	projects?: UsageBreakdown[];

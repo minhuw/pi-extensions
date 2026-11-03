@@ -492,10 +492,18 @@ function Figures({ data }: { data: UsageStatistics }) {
 	const tokens = totalTokens(totals.tokens);
 	const cached = cacheReadShare(totals.tokens);
 	const completed = metrics && completionShare(metrics);
+	const estimated = totals.estimatedCost ?? 0;
+	const unpriced = totals.unpricedRequests ?? 0;
+	const costTitle = [
+		"USD, as recorded with each call's usage",
+		estimated > 0 ? `, except ${formatCost(estimated)} pika estimated from models.dev prices for calls that recorded no cost` : "",
+		unpriced > 0 ? `. No price is known for ${plural(unpriced, "call")} that recorded no cost` : "",
+	].join("");
+	const costDetail = estimated > 0 ? `incl. ${formatCost(estimated)} estimated` : totals.activeDays > 0 && totals.cost > 0 ? `${formatCost(totals.cost / totals.activeDays)} / active day` : undefined;
 	return (
 		<dl className={cx("mt-7 grid border-y border-line", FIGURE_GRID)} data-usage-totals="">
 			<Figure kpi="tokens" label="Tokens" value={formatCount(tokens)} detail={cached !== undefined && tokens > 0 ? `${Math.round(cached * 100)}% cache reads` : undefined} title={`${exact(tokens)} tokens: input, output, cache read, and cache write. Cache reads are a share of recorded prompt tokens.`} />
-			<Figure kpi="cost" label="Recorded cost" value={formatCost(totals.cost)} detail={totals.activeDays > 0 && totals.cost > 0 ? `${formatCost(totals.cost / totals.activeDays)} / active day` : undefined} title="USD, as recorded with each call's usage" />
+			<Figure kpi="cost" label={estimated > 0 ? "Cost" : "Recorded cost"} value={formatCost(totals.cost)} detail={costDetail} title={costTitle} />
 			<Figure
 				kpi="requests"
 				label="Model requests"

@@ -167,6 +167,8 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     // Not awaited: the server answers while search text indexed before redaction is rewritten.
     crate::reindex::rescrub_in_background(&store)?;
     let state = AppState::new(store, config.clone())?;
+    // Prices kept from the last fetch apply now; the catalog is fetched in the background.
+    crate::pricing::start(&state.store, config.prices.as_deref())?;
     let listener = tokio::net::TcpListener::bind(&config.bind).await?;
     tracing::info!(
         "pika {} listening on http://{}{} (data {}, auth {}{})",

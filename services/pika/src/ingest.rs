@@ -251,6 +251,8 @@ pub fn apply(store: &Store, device: &str, batch: &Batch) -> Result<BatchResponse
 
     let (response, collected) = store.write(|tx| {
         let now = now_ms();
+        // Taken under the writer, so a price change (`Store::set_prices`) is either all before this batch or all after.
+        let prices = store.prices();
         let dead = tombstones(tx, batch)?;
         let discarded = discarded_blocks(batch, &dead);
         let mut new_blob = tx.prepare_cached("INSERT OR IGNORE INTO blobs (hash, size, stored) VALUES (?1, ?2, ?3)")?;
@@ -280,7 +282,7 @@ pub fn apply(store: &Store, device: &str, batch: &Batch) -> Result<BatchResponse
                     }
                 }
             }
-            let length = append_stream(tx, device, stream, *kind, lines, now)?;
+            let length = append_stream(tx, device, stream, *kind, lines, now, &prices)?;
             lengths.insert(stream.key.clone(), StreamLength { length });
         }
         for document in &batch.documents {
@@ -351,6 +353,7 @@ fn append_stream(
     kind: StreamKind,
     lines: &[Stored],
     now: i64,
+    prices: &crate::pricing::PriceTable,
 ) -> Result<u64, IngestError> {
     let existing: Option<(i64, String, String, i64, i64, Option<String>)> = tx
         .prepare_cached("SELECT id, kind, device, length, line_count, meta FROM streams WHERE key = ?1")?
@@ -433,6 +436,9 @@ fn append_stream(
         .map(|(seq, offset, text)| Line { seq: *seq, offset: *offset as i64, text })
         .collect();
     derive::apply_lines(tx, &info, &lines)?;
+    if info.kind == StreamKind::Session && !lines.is_empty() {
+        crate::pricing::reprice(tx, prices, Some(info.id))?;
+    }
     if lines.is_empty() && meta_changed {
         derive::refresh(tx, &info)?;
     }

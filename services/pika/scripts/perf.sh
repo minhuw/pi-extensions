@@ -58,7 +58,7 @@ step "$perf" load --data-dir "$work/data" --plan "$work/plan.json" --stats "$wor
 step "$perf" check --data-dir "$work/data" --shape "$work/shape.json" ${scale[@]+"${scale[@]}"}
 
 # The benchmark reads the API without a login cookie.
-PIKA_AUTH=none "$pika" serve --data-dir "$work/data" --bind 127.0.0.1:0 >"$work/server.log" 2>&1 &
+PIKA_AUTH=none PIKA_PRICES=off "$pika" serve --data-dir "$work/data" --bind 127.0.0.1:0 >"$work/server.log" 2>&1 &
 server_pid=$!
 addr=""
 for _ in $(seq 1 600); do

@@ -246,16 +246,19 @@ struct Deriver<'a> {
 }
 
 impl Deriver<'_> {
-    fn add_usage(&mut self, seq: i64, at: Option<i64>, requests: i64, usage: &Usage) -> Result<()> {
+    /// `pricing` is `crate::pricing::UNPRICED` for a model call that waits for its model's price, else `RECORDED`.
+    fn add_usage(&mut self, seq: i64, at: Option<i64>, requests: i64, usage: &Usage, pricing: i64) -> Result<()> {
         // Fall back only to a recorded time, never the ingest clock or the default last_at = 0.
         let at = at.or_else(|| if self.s.last_at != 0 { Some(self.s.last_at) } else { self.s.started_at });
         self.tx
             .prepare_cached(
-                "INSERT OR REPLACE INTO usage_events (sid, seq, at, requests, input, output, cache_read, cache_write, cost)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT OR REPLACE INTO usage_events (sid, seq, at, requests, input, output, cache_read, cache_write, cost,
+                     pricing)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?
             .execute(params![
                 self.s.sid, seq, at, requests, usage.input, usage.output, usage.cache_read, usage.cache_write, usage.cost,
+                pricing,
             ])?;
         self.s.usage.add(usage);
         if let Some(turn) = &mut self.turn {
@@ -428,7 +431,12 @@ impl Deriver<'_> {
 
     fn assistant(&mut self, seq: i64, entry: &Value, ts: Option<i64>, message: &Value) -> Result<Vec<String>> {
         let usage = Usage::parse(message.get("usage")).unwrap_or_default();
-        self.add_usage(seq, ts.or_else(|| time_field(message, "timestamp")), 1, &usage)?;
+        // A Magpie call with tokens but no recorded cost waits for its model's price (`crate::pricing::reprice`).
+        let unpriced = crate::pricing::needs_price(
+            str_field(message, "provider"), usage.input, usage.output, usage.cache_read, usage.cache_write, usage.cost,
+        );
+        let pricing = if unpriced { crate::pricing::UNPRICED } else { crate::pricing::RECORDED };
+        self.add_usage(seq, ts.or_else(|| time_field(message, "timestamp")), 1, &usage, pricing)?;
         let turn_idx = self.turn.as_ref().map(|t| t.idx);
         // pika shows bare model names; the stored line keeps the id as pi wrote it.
         let model = str_field(message, "model").map(|m| crate::util::bare_model(m).to_owned());
@@ -595,7 +603,7 @@ impl Deriver<'_> {
             }
             "usage" | "compaction" | "branch_summary" => {
                 if let Some(usage) = Usage::parse(v.get("usage")) {
-                    self.add_usage(line.seq, ts, 0, &usage)?;
+                    self.add_usage(line.seq, ts, 0, &usage, crate::pricing::RECORDED)?;
                 }
             }
             "session_info" => self.s.name = string_field(v, "name"),

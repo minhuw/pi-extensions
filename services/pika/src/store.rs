@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -19,6 +19,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_v9.sql"),
     include_str!("schema_v10.sql"),
     include_str!("schema_v11.sql"),
+    include_str!("schema_v12.sql"),
 ];
 /// The schema version that derives `sessions.project` and `sessions.repository` from the stream's `meta`.
 const REPOSITORY_VERSION: usize = 8;
@@ -86,6 +87,8 @@ pub struct Store {
     db_path: PathBuf,
     writer: Mutex<Connection>,
     readers: Mutex<Vec<Connection>>,
+    /// Prices for model calls that recorded no cost (`crate::pricing`): the kept ones until `serve` installs its own.
+    prices: RwLock<Arc<crate::pricing::PriceTable>>,
     pub blobs: BlobStore,
 }
 
@@ -172,12 +175,14 @@ impl Store {
             .query_row("SELECT 1 FROM settings WHERE key = ?1", [NEEDS_REINDEX], |_| Ok(()))
             .optional()?
             .is_some();
+        let prices = crate::pricing::kept(&data_dir);
         let store = Arc::new(Store {
             blobs: BlobStore::new(data_dir.join("blobs")),
             data_dir,
             db_path,
             writer: Mutex::new(writer),
             readers: Mutex::new(Vec::new()),
+            prices: RwLock::new(Arc::new(prices)),
         });
         if needs_reindex {
             let stats = crate::reindex::reindex(&store).context("reindexing after the schema upgrade")?;
@@ -188,6 +193,32 @@ impl Store {
 
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// The prices that ingest and reindex give model calls without a recorded cost.
+    pub fn prices(&self) -> Arc<crate::pricing::PriceTable> {
+        self.prices.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Replaces the prices and reprices every call without a recorded cost, in one transaction with the swap so ingest
+    /// never prices with the old table after it. A change replaces `derived_generation`, so no cached trace survives
+    /// it. Returns the number of calls whose cost changed.
+    pub fn set_prices(&self, table: crate::pricing::PriceTable) -> Result<usize> {
+        let table = Arc::new(table);
+        let previous = self.prices();
+        self.write(|tx| {
+            let changed = crate::pricing::reprice(tx, &table, None)?;
+            if changed > 0 {
+                tx.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                    params![DERIVED_GENERATION, crate::util::random_bytes::<8>()],
+                )?;
+            }
+            *self.prices.write().unwrap_or_else(|e| e.into_inner()) = table.clone();
+            Ok::<_, anyhow::Error>(changed)
+        })
+        // A failed commit leaves the costs priced by the previous table.
+        .inspect_err(|_| *self.prices.write().unwrap_or_else(|e| e.into_inner()) = previous)
     }
 
     /// Runs `f` in one IMMEDIATE transaction on the writer connection; commits when it returns `Ok`.

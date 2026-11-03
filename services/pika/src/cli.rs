@@ -53,6 +53,9 @@ enum Command {
         /// Relay messages between pi sessions: on or off.
         #[arg(long, env = "PIKA_RELAY", default_value = "on", value_parser = parse_switch_on)]
         relay: bool,
+        /// Prices for Magpie calls that recorded no cost: a models.dev-format catalog URL or file, or off.
+        #[arg(long, env = "PIKA_PRICES", default_value = crate::pricing::DEFAULT_SOURCE)]
+        prices: String,
         /// For tests only: seconds an undelivered relay message is kept (default 300).
         #[arg(long, env = "PIKA_RELAY_TTL_SECS", hide = true, value_parser = clap::value_parser!(u64).range(1..))]
         relay_ttl_secs: Option<u64>,
@@ -163,6 +166,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             visitor_analytics,
             max_body,
             relay,
+            prices,
             relay_ttl_secs,
             relay_heartbeat_secs,
         } => {
@@ -185,6 +189,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 visitor_analytics,
                 max_body: config::parse_size(&max_body)?,
                 relay: relay_config,
+                prices: config::price_source(&prices),
             };
             let level = if std::env::var_os("PIKA_DEBUG").is_some() { tracing::Level::DEBUG } else { tracing::Level::INFO };
             tracing_subscriber::fmt().with_max_level(level).with_target(false).init();

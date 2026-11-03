@@ -1211,7 +1211,7 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
     std::fs::rename(&blob, &aside).unwrap();
     assert!(pika::store::Store::open(&data).is_err());
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 11);
+    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 12);
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM settings WHERE key = 'needs_reindex'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     drop(conn);
@@ -2404,7 +2404,8 @@ async fn statistics_are_anonymous_include_private_and_hidden_and_support_public_
     let stats = public_json(&app, "statistics?days=1").await;
     assert_eq!(stats["excludeUnpublished"], false);
     assert_eq!(stats["totals"], json!({ "sessions": 5, "requests": 10,
-        "tokens": { "input": 200, "output": 400, "cacheRead": 600, "cacheWrite": 800 }, "cost": 5.0, "activeDays": 1 }));
+        "tokens": { "input": 200, "output": 400, "cacheRead": 600, "cacheWrite": 800 }, "cost": 5.0, "activeDays": 1,
+        "estimatedCost": 0.0, "unpricedRequests": 0 }));
     assert_eq!(stats["daily"].as_array().unwrap().len(), 1);
     assert_eq!(stats["daily"][0]["sessions"], 5);
     let text = stats.to_string();
@@ -2429,13 +2430,14 @@ async fn statistics_are_anonymous_include_private_and_hidden_and_support_public_
         assert_eq!(rows.iter().map(|r| r["tokens"]["input"].as_i64().unwrap()).sum::<i64>(), 200);
         assert_eq!(rows.iter().map(|r| r["cost"].as_f64().unwrap()).sum::<f64>(), 5.0);
     }
-    assert_eq!(keys(&stats["totals"]), ["activeDays", "cost", "requests", "sessions", "tokens"]);
+    assert_eq!(keys(&stats["totals"]), ["activeDays", "cost", "estimatedCost", "requests", "sessions", "tokens", "unpricedRequests"]);
     assert_eq!(keys(&stats["daily"][0]), ["cost", "date", "requests", "sessions", "tokens"]);
     assert_eq!(keys(&stats["totals"]["tokens"]), ["cacheRead", "cacheWrite", "input", "output"]);
     let excluded = public_json(&app, "statistics?days=1&excludeUnpublished=true").await;
     assert_eq!(excluded["excludeUnpublished"], true);
     assert_eq!(excluded["totals"], json!({ "sessions": 2, "requests": 4,
-        "tokens": { "input": 80, "output": 160, "cacheRead": 240, "cacheWrite": 320 }, "cost": 2.0, "activeDays": 1 }));
+        "tokens": { "input": 80, "output": 160, "cacheRead": 240, "cacheWrite": 320 }, "cost": 2.0, "activeDays": 1,
+        "estimatedCost": 0.0, "unpricedRequests": 0 }));
     assert_eq!(excluded["daily"][0]["sessions"], 2);
     assert_eq!(excluded["projects"].as_array().unwrap().len(), 1);
     assert_eq!(excluded["projects"][0]["name"], "public-project");
@@ -2599,7 +2601,7 @@ fn statistics_version_10_upgrade_backfills_ledger_without_changing_source_lines(
         BEGIN SELECT RAISE(ABORT, 'source deleted'); END;").unwrap();
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 11);
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 12);
     assert_eq!(dump_derived(&store), expected);
     assert!(store.setting(pika::store::NEEDS_REINDEX).unwrap().is_none());
     assert!(store.setting(pika::store::DERIVED_GENERATION).unwrap().is_some());

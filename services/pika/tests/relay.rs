@@ -938,6 +938,8 @@ fn spawn(data: &std::path::Path, env: &[(&str, &str)]) -> Result<(std::process::
         }
     }
     command.args(["--data-dir", data.to_str().unwrap(), "serve", "--bind", "127.0.0.1:0"]).env("PIKA_AUTH", "none");
+    // Offline: no price catalog fetch.
+    command.env("PIKA_PRICES", "off");
     let mut child = command.envs(env.iter().copied()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let listening =
         BufReader::new(child.stdout.take().unwrap()).lines().map_while(Result::ok).find(|l| l.contains("listening on"));

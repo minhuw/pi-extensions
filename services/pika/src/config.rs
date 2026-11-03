@@ -69,6 +69,18 @@ pub struct ServerConfig {
     pub visitor_analytics: VisitorAnalytics,
     pub max_body: usize,
     pub relay: RelayConfig,
+    /// The models.dev-format catalog that prices Magpie calls without a recorded cost (`crate::pricing`): an http(s)
+    /// URL or a file. `None` counts recorded costs only.
+    pub prices: Option<String>,
+}
+
+/// The price catalog `--prices` names: `off` (or `0`, `false`, `no`) for none, empty for the default.
+pub fn price_source(raw: &str) -> Option<String> {
+    match raw.trim() {
+        "" => Some(crate::pricing::DEFAULT_SOURCE.into()),
+        off if ["off", "0", "false", "no"].contains(&off.to_ascii_lowercase().as_str()) => None,
+        source => Some(source.into()),
+    }
 }
 
 /// Relay settings. Only `enabled`, `ttl`, and `heartbeat` come from the environment, and the last two only for tests
@@ -146,6 +158,7 @@ impl ServerConfig {
             visitor_analytics: VisitorAnalytics::default(),
             max_body: DEFAULT_MAX_BODY,
             relay: RelayConfig::default(),
+            prices: Some(crate::pricing::DEFAULT_SOURCE.into()),
         }
     }
 

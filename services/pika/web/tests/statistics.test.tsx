@@ -328,6 +328,26 @@ describe("Statistics", () => {
 		expect(await screen.findByRole("button", { name: "gpt-6-luna" })).toBeTruthy();
 	});
 
+	it("says how much of the cost pika estimated for calls that recorded none", async () => {
+		const api = server();
+		const data = fixture();
+		const cost = () => totals().querySelector<HTMLElement>('[data-kpi="cost"]')!;
+		let fetched = data;
+		const fetchImpl: typeof fetch = (input, init) => String(input).includes("/statistics") ? Promise.resolve(Response.json(fetched)) : api.fetch(input, init);
+		renderApp("/public/statistics", fetchImpl);
+		await waitFor(() => expect(totals()?.textContent).toContain("460"));
+		// Recorded costs alone: an older server, or nothing to estimate.
+		expect(cost().textContent).toContain("Recorded cost");
+		expect(cost().textContent).toContain("$0.25 / active day");
+		expect(cost().title).toBe("USD, as recorded with each call's usage");
+
+		fetched = { ...data, totals: { ...data.totals, estimatedCost: 0.3, unpricedRequests: 2 } };
+		fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+		await waitFor(() => expect(cost().textContent).toContain("incl. $0.30 estimated"));
+		expect(cost().querySelector("dt")?.textContent).toBe("Cost");
+		expect(cost().title).toBe("USD, as recorded with each call's usage, except $0.30 pika estimated from models.dev prices for calls that recorded no cost. No price is known for 2 calls that recorded no cost");
+	});
+
 	it("keeps a long chart bounded without dropping usage", () => {
 		const daily = Array.from({ length: 366 }, (_, i) => ({ ...fixture().daily[0], date: new Date(Date.UTC(2025, 0, i + 1)).toISOString().slice(0, 10) }));
 		const { buckets, size } = usageBuckets(daily, "tokens");

@@ -37,6 +37,10 @@ pub struct Totals {
     #[serde(flatten)]
     pub counts: Counts,
     pub active_days: i64,
+    /// The part of `cost` that pika estimated for model calls that recorded none (`crate::pricing`).
+    pub estimated_cost: f64,
+    /// Model calls that used tokens without a recorded cost or a known price; they add nothing to `cost`.
+    pub unpriced_requests: i64,
 }
 
 #[derive(Serialize)]
@@ -127,11 +131,14 @@ fn at_time_scoped(conn: &Connection, p: &Params, now: i64, public: bool) -> Read
     let mut totals = Totals {
         counts: Counts::default(),
         active_days: 0,
+        estimated_cost: 0.0,
+        unpriced_requests: 0,
     };
     // Relative offsets stay nonnegative even for dates before the Unix epoch.
     let mut statement = tx.prepare(&format!(
         "SELECT (u.at - ?1) / {DAY_MS}, SUM(u.requests), SUM(u.input), SUM(u.output),
-                SUM(u.cache_read), SUM(u.cache_write), SUM(u.cost)
+                SUM(u.cache_read), SUM(u.cache_write), SUM(u.cost),
+                SUM(CASE WHEN u.pricing = 1 THEN u.cost ELSE 0 END), SUM(u.pricing = 2)
          FROM usage_events u JOIN sessions s ON s.sid = u.sid
          WHERE u.at >= ?1 AND u.at < ?2 AND {filter}
          GROUP BY 1"
@@ -150,11 +157,15 @@ fn at_time_scoped(conn: &Connection, p: &Params, now: i64, public: bool) -> Read
                 cost: r.get(6)?,
                 ..Counts::default()
             },
+            r.get::<_, f64>(7)?,
+            r.get::<_, i64>(8)?,
         ))
     })?;
     for row in rows {
-        let (day, counts) = row?;
+        let (day, counts, estimated, unpriced) = row?;
         daily[day as usize].counts = counts;
+        totals.estimated_cost += estimated;
+        totals.unpriced_requests += unpriced;
     }
     // UNION deduplicates each (day, sid), including entries that also have a usage row. Children are
     // independent sessions, never recursively added to a parent's usage. The total deduplicates across days too.
@@ -229,7 +240,8 @@ mod tests {
         assert_eq!(
             default["totals"],
             json!({ "sessions": 0, "requests": 0,
-            "tokens": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }, "cost": 0.0, "activeDays": 0 })
+            "tokens": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }, "cost": 0.0, "activeDays": 0,
+            "estimatedCost": 0.0, "unpricedRequests": 0 })
         );
         let one = read(&store, Some("1"), now);
         assert_eq!(one, read(&store, Some("all"), now));
@@ -346,7 +358,8 @@ mod tests {
         assert_eq!(
             stats["totals"],
             json!({ "sessions": 2, "requests": 3,
-            "tokens": { "input": 30, "output": 0, "cacheRead": 60, "cacheWrite": 90 }, "cost": 0.75, "activeDays": 3 })
+            "tokens": { "input": 30, "output": 0, "cacheRead": 60, "cacheWrite": 90 }, "cost": 0.75, "activeDays": 3,
+            "estimatedCost": 0.0, "unpricedRequests": 0 })
         );
         let daily = stats["daily"].as_array().unwrap();
         assert_eq!(

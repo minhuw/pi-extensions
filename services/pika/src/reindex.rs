@@ -84,6 +84,8 @@ pub fn reindex(store: &Store) -> Result<ReindexStats> {
         let collected = crate::delete::delete_all_orphans(tx)?;
         // Derivation kept it current as sessions were recorded; rebuilding it from the flags settles any order.
         crate::hidden::rebuild(tx)?;
+        // Ingest prices each session's calls as it derives them; the replay prices them all at once.
+        crate::pricing::reprice(tx, &store.prices(), None)?;
         Ok::<_, anyhow::Error>((stats, collected))
     })?;
     crate::delete::remove_blob_files(store, collected)?;

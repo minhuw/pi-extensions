@@ -11,6 +11,7 @@ pub mod hidden;
 pub mod http;
 pub mod ingest;
 pub mod pairing;
+pub mod pricing;
 pub mod ratelimit;
 pub mod read;
 pub mod redact;
