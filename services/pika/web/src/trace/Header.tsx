@@ -11,6 +11,7 @@ import { childLabel } from "../lib/labels";
 import { formatSpan, middleTruncate } from "./format";
 import { contextTokens, FAMILIES, FAMILY_LABELS, recordDuration, recordFamily, recordIsError, type Family } from "./kinds";
 import { KindBullet } from "./parts";
+import { formatTokenRate, sessionPerformance } from "./performance";
 
 export type SessionViewMode = "trajectory" | "transcript" | "agents";
 
@@ -343,6 +344,7 @@ export function KpiStrip({ session, trace, onOpenTree }: { session: SessionDetai
 	const errors = tools.filter(recordIsError).length;
 	const families = new Map<Family, number>();
 	for (const record of tools) families.set(recordFamily(record), (families.get(recordFamily(record)) ?? 0) + 1);
+	const performance = sessionPerformance(records);
 	const durations = llm.map((record) => recordDuration(record)).filter((d): d is number => d !== undefined);
 	const average = durations.length ? durations.reduce((a, b) => a + b, 0) / durations.length : undefined;
 	const contexts = llm.map(contextTokens);
@@ -355,7 +357,7 @@ export function KpiStrip({ session, trace, onOpenTree }: { session: SessionDetai
 	const children = session.children;
 	return (
 		<div
-			className="mt-4 -mx-6 grid grid-cols-2 divide-line overflow-visible border-y border-line sm:grid-cols-4 sm:divide-x xl:grid-cols-7"
+			className="mt-4 -mx-6 grid grid-cols-2 divide-line overflow-visible border-y border-line sm:grid-cols-4 sm:divide-x xl:grid-cols-8"
 			data-kpi-strip=""
 		>
 			<Tile kpi="turns" label="Turns" value={trace ? formatCount(turns.length) : "—"} detail={turns.length > 1 && longest ? `longest ${formatSpan(longest)}` : undefined} />
@@ -368,6 +370,7 @@ export function KpiStrip({ session, trace, onOpenTree }: { session: SessionDetai
 				detail={<FamilyCounts counts={families} />}
 			/>
 			<Tile kpi="tokens" label="Tokens" value={formatCount(total)} detail={<TokenDetail tokens={session.tokens} />} />
+			<Tile kpi="performance" label="Performance" value={performance.tokensPerSecond === undefined ? "—" : `${formatTokenRate(performance.tokensPerSecond)} tok/s`} sub={performance.ttftMs === undefined ? "TTFT unavailable" : `avg TTFT ${formatSpan(performance.ttftMs)}`} detail={performance.ttftCalls > 0 ? `${performance.ttftCalls}/${llm.length} timed` : undefined} title="Average request-to-first-token time (including thinking). Output tok/s uses total output divided by measured streaming time; tool and idle time are excluded. Older calls without timing are omitted." />
 			<Tile kpi="cost" label="Cost" value={formatCost(session.cost)} sub={turns.length > 1 && session.cost > 0 ? `${formatCost(session.cost / turns.length)} / turn` : undefined} />
 			<Tile
 				kpi="subagents"

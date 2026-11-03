@@ -1,6 +1,7 @@
 import type { TraceLlmRecord } from "../lib/types";
 import { formatPhase } from "./format";
 import { llmPhases } from "./kinds";
+import { callPerformance, formatTokenRate } from "./performance";
 
 const WIDTH = 272;
 const PI_X = 50;
@@ -61,7 +62,7 @@ export function Ladder({ record }: { record: TraceLlmRecord }) {
 	const done = arrows[arrows.length - 1];
 	const height = done.y + SLANT + 8;
 	const color = record.error ? "var(--color-k-error)" : "var(--color-k-llm)";
-	const rate = streaming > 0 && record.output > 0 ? record.output / (streaming / 1000) : undefined;
+	const rate = callPerformance(record).tokensPerSecond;
 	const label = `Request sent; ${headers !== undefined ? `headers after ${formatPhase(headers - request)}; ` : ""}first token after ${formatPhase(
 		ttft,
 	)}; done after ${formatPhase(end - request)}.`;
@@ -129,7 +130,7 @@ export function Ladder({ record }: { record: TraceLlmRecord }) {
 				{rate !== undefined && (
 					<>
 						<dt className="text-muted">Output</dt>
-						<dd>{rate >= 100 ? Math.round(rate) : rate.toFixed(1)} tok/s</dd>
+						<dd>{formatTokenRate(rate)} tok/s</dd>
 					</>
 				)}
 				{phases.kind && (

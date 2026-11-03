@@ -33,6 +33,7 @@ import {
 	type Family,
 } from "./kinds";
 import { filterActive, type LedgerFilter, type LedgerRow } from "./rows";
+import { callPerformance, formatTokenRate } from "./performance";
 import { callIn, Chip, CostDot, diffStatOf, DiffStat, KindBadge, KindBullet, PathChip, RunningDot, WaterfallBar } from "./parts";
 
 export const ROW_HEIGHT = 28;
@@ -50,25 +51,28 @@ const TURN_LABEL_SPAN = "span 2";
 interface Columns {
 	template: string;
 	waterfall: boolean;
+	performance: boolean;
 	tokens: boolean;
 	cost: boolean;
 }
 
 /**
- * Time, Kind, Record, Duration, Tokens, Cost. A wide ledger, with the inspector closed, also gets a waterfall of each
+ * Time, Kind, Record, Duration, Performance, Tokens, Cost. A wide ledger, with the inspector closed, also gets a waterfall of each
  * record on its turn's time scale; the strip map carries the timing otherwise.
  */
 function columnsFor(width: number): Columns {
 	const waterfall = width >= 1100;
 	const tokens = width >= 520;
 	const cost = width >= 580;
+	const performance = width >= 820;
 	const parts = ["64px", "64px", "minmax(0,1fr)"];
 	if (waterfall) parts.push("140px");
 	// Room for a turn's `24m 59s`.
 	parts.push("62px");
+	if (performance) parts.push("132px");
 	if (tokens) parts.push("92px");
 	if (cost) parts.push("74px");
-	return { template: parts.join(" "), waterfall, tokens, cost };
+	return { template: parts.join(" "), waterfall, performance, tokens, cost };
 }
 
 function Num({ children, className, title }: { children: ReactNode; className?: string; title?: string }) {
@@ -244,6 +248,7 @@ const RecordRow = memo(function RecordRow({
 	const { start } = recordSpan(record);
 	const running = live && record.kind === "tool" && record.resultSeq === undefined && record.end === undefined;
 	const hit = cacheHit(record);
+	const performance = record.kind === "llm" ? callPerformance(record) : undefined;
 	const subagent = row.children.length > 0;
 	const firstChild: TraceChild | undefined = row.children[0];
 	const ticket = row.children.length === 1 ? traceTicket(firstChild) : undefined;
@@ -333,6 +338,7 @@ const RecordRow = memo(function RecordRow({
 				</span>
 			)}
 			<Num className="text-ink">{running ? "…" : formatSpan(recordDuration(record)).replace("—", "")}</Num>
+			{columns.performance && <Num title={performance ? `TTFT ${formatSpan(performance.ttftMs)} · ${formatTokenRate(performance.tokensPerSecond)} output tok/s` : undefined} className="text-muted">{performance && <span data-call-performance="">{formatSpan(performance.ttftMs)} · {formatTokenRate(performance.tokensPerSecond)}<span className="text-[11px]">/s</span></span>}</Num>}
 			{columns.tokens && (
 				<span className="flex min-w-0 items-center justify-end gap-1.5">
 					{record.kind === "llm" ? (
@@ -420,6 +426,7 @@ const ChildRow = memo(function ChildRow({
 			</span>
 			{columns.waterfall && <span />}
 			<Num className="text-ink">{formatSpan(spanBetween(child.startedAt, child.lastAt))}</Num>
+			{columns.performance && <span />}
 			{columns.tokens && <Num className="text-ink">{tokens ? formatCount(tokens) : ""}</Num>}
 			{columns.cost && (
 				<span className="flex min-w-0 items-center justify-end gap-1.5">
@@ -502,6 +509,7 @@ const TurnRow = memo(function TurnRow({
 				{turn.toolErrors > 0 && <span className="tnum shrink-0 text-[12px] text-red">{turn.toolErrors} err</span>}
 			</span>
 			<Num className="font-medium text-ink">{formatSpan(turn.durationMs)}</Num>
+			{columns.performance && <span />}
 			{columns.tokens && <Num className="text-muted">{tokens ? formatCount(tokens) : ""}</Num>}
 			{columns.cost && <Num className="text-muted">{formatFineCost(turn.cost)}</Num>}
 		</div>
@@ -786,6 +794,7 @@ function ColumnHeader({ columns }: { columns: Columns }) {
 			<span className={cell}>Record</span>
 			{columns.waterfall && <span className={cx(cell, "px-1")}>Waterfall</span>}
 			<span className={cx(cell, "text-right")}>Duration</span>
+			{columns.performance && <span className={cx(cell, "text-right")} title="TTFT / output tok/s">Performance</span>}
 			{columns.tokens && <span className={cx(cell, "text-right")}>Tokens</span>}
 			{columns.cost && <span className={cx(cell, "text-right")}>Cost</span>}
 		</div>
