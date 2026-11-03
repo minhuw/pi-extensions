@@ -8,6 +8,8 @@ import { execFile } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import statuslineFooter, {
 	alignRow,
+	chipInk,
+	contrastRatio,
 	displayServiceTier,
 	extractServiceTier,
 	formatPath,
@@ -17,6 +19,7 @@ import statuslineFooter, {
 	parseGitShortstat,
 	parseGitStatus,
 	hexFg,
+	legibleOn,
 	modelBrand,
 	rainbow,
 	renderModelMark,
@@ -53,7 +56,7 @@ type HarnessOptions = {
 	isIdle?: boolean;
 	hasPendingMessages?: boolean;
 	events?: ExtensionAPI["events"];
-	theme?: { fg: (token: string, text: string) => string; bold: (text: string) => string };
+	theme?: { fg: (token: string, text: string) => string; bg?: (token: string, text: string) => string; bold: (text: string) => string };
 };
 
 function createHarness(sessionId: string, mode: "tui" | "print", options: HarnessOptions = {}) {
@@ -819,6 +822,270 @@ describe("statusline footer rendering", () => {
 		expect(lines[0]).toContain("no-model");
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(24);
 		harness.getFooter()?.dispose?.();
+	});
+});
+
+describe("statusline footer powerline style", () => {
+	type Rgb = { r: number; g: number; b: number };
+	const hex = (value: string): Rgb => ({
+		r: Number.parseInt(value.slice(1, 3), 16),
+		g: Number.parseInt(value.slice(3, 5), 16),
+		b: Number.parseInt(value.slice(5, 7), 16),
+	});
+	const fgCode = ({ r, g, b }: Rgb) => `\x1b[38;2;${r};${g};${b}m`;
+	const bgCode = ({ r, g, b }: Rgb) => `\x1b[48;2;${r};${g};${b}m`;
+	const SURFACE = "#3a3b40";
+	const SURFACE_SGR = "48;2;58;59;64";
+	const DIM = "#45464b"; // close to the surface on purpose
+	// A truecolor theme like Pi's: tokens open a 24-bit color and close only their own slot,
+	// and faint tokens add SGR 2, which they close with 22.
+	function rgbTheme(colors: Record<string, string> = {}, surface: string | null = SURFACE, faint = ["dim"]) {
+		const palette: Record<string, string> = {
+			accent: "#b48ead", text: "#e0e0e0", muted: "#a0a0a8", dim: DIM, borderMuted: "#5c5d63",
+			success: "#7dcea0", warning: "#f5b041", error: "#e06c5f", ...colors,
+		};
+		return {
+			fg: (token: string, text: string) => faint.includes(token)
+				? `${fgCode(hex(palette[token] ?? "#909090"))}\x1b[2m${text}\x1b[22;39m`
+				: `${fgCode(hex(palette[token] ?? "#909090"))}${text}\x1b[39m`,
+			bg: (_token: string, text: string) => `${surface ? bgCode(hex(surface)) : "\x1b[49m"}${text}\x1b[49m`,
+			bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
+		};
+	}
+	/** Each SGR attribute in an ANSI string with the position of its sequence; colors keep their arguments. */
+	function sgr(line: string): Array<{ index: number; code: string }> {
+		const attributes: Array<{ index: number; code: string }> = [];
+		for (const match of line.matchAll(/\x1b\[([0-9;]*)m/g)) {
+			const codes = match[1] === "" ? ["0"] : match[1]!.split(";");
+			for (let i = 0; i < codes.length; i++) {
+				let code = codes[i] || "0";
+				if ((code === "38" || code === "48") && (codes[i + 1] === "2" || codes[i + 1] === "5")) {
+					const length = codes[i + 1] === "2" ? 5 : 3;
+					code = codes.slice(i, i + length).join(";");
+					i += length - 1;
+				}
+				attributes.push({ index: match.index!, code });
+			}
+		}
+		return attributes;
+	}
+	/** The background set at `at`, as its SGR parameters, or undefined for the terminal default. */
+	function backgroundAt(line: string, at = line.length): string | undefined {
+		let background: string | undefined;
+		for (const { index, code } of sgr(line)) {
+			if (index >= at) break;
+			if (code.startsWith("48;")) background = code;
+			else if (code === "0" || code === "49") background = undefined;
+		}
+		return background;
+	}
+	const claude = { id: "claude-opus-5-5", provider: "anthropic", reasoning: true };
+	const longClaude = { id: "claude-opus-5-5-with-an-unusually-long-model-name", provider: "anthropic", reasoning: true };
+
+	it("chooses chip ink by contrast and lifts faded colors just enough", () => {
+		expect(chipInk(hex("#D97757"))).toEqual(hex("#1b1b1f"));
+		expect(chipInk(hex("#0866FF"))).toEqual(hex("#ffffff"));
+		const surface = hex("#D1C4E9");
+		const faded = hex("#B8B0C0");
+		const lifted = legibleOn(faded, surface);
+		expect(contrastRatio(faded, surface)).toBeLessThan(3);
+		expect(contrastRatio(lifted, surface)).toBeGreaterThanOrEqual(3);
+		// Darkened toward black, not replaced by it.
+		expect(lifted).not.toEqual(hex("#1b1b1f"));
+		expect(lifted.r).toBeLessThan(faded.r);
+		const readable = hex("#1DE9B6");
+		expect(legibleOn(readable, hex("#1e1e24"))).toBe(readable);
+	});
+
+	it("draws the bar as a vendor chip on theme bands and leaves telemetry rows plain", async () => {
+		const harness = createHarness("powerline-full", "tui", { model: claude, isIdle: false, branch: [], theme: rgbTheme() });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+			await harness.runCommand("footer", "powerline");
+			expect(harness.notifications.at(-1)).toBe("Statusline footer: full mode, powerline style");
+			const lines = harness.getFooter()!.render(100);
+			// The band replaces the hairline.
+			expect(lines).toHaveLength(4);
+			const bar = lines[0]!;
+			const chip = `${bgCode(hex("#D97757"))}${fgCode(hex("#1b1b1f"))}\x1b[1m ● \u{EC82} claude-opus-5-5 \x1b[22m`;
+			expect(bar.startsWith(chip)).toBe(true);
+			expect(bar).toContain(`${bgCode(hex(SURFACE))}${fgCode(hex("#D97757"))}\u{E0B0}`);
+			expect(bar).toContain("42.5%");
+			expect(bar).toContain("\u{E0B2}");
+			// Resets inside the band, such as the gradient bar's, reopen the surface.
+			expect(bar).toContain(`\x1b[0m${bgCode(hex(SURFACE))}`);
+			// Text that would fade into the band is lifted and drawn at full intensity; the chip keeps its own ink.
+			const bandText = bar.slice(bar.indexOf("\u{E0B0}"));
+			expect(bandText).toContain("(anthropic)");
+			expect(bandText).not.toContain(fgCode(hex(DIM)));
+			expect(sgr(bandText).map(({ code }) => code)).not.toContain("2");
+			expect(bar.match(/\x1b\[38;2;27;27;31m/g)).toHaveLength(1);
+			for (const line of lines.slice(1)) expect(line).not.toContain("\x1b[48;");
+			expect(lines[3]).toContain("READY");
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it.each(["full", "compact"])("keeps the %s bar within width and closes its bands at every width", async (mode) => {
+		const status = "\x1b[32m↻ build\x1b[m · next\x1b[0;2m soon";
+		for (const [index, model] of [claude, longClaude, { id: "模型模型模型模型", reasoning: true }, null].entries()) {
+			const harness = createHarness(`powerline-sweep-${mode}-${index}`, "tui", {
+				model,
+				isIdle: index !== 0,
+				hasPendingMessages: index === 1,
+				keyedExtensionStatuses: { loop: status },
+				theme: rgbTheme(),
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			try {
+				await harness.runCommand("footer", mode);
+				await harness.runCommand("footer", "powerline");
+				for (const nerdFonts of ["0", "1"]) {
+					vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+					for (let width = 1; width <= 160; width++) {
+						const lines = harness.getFooter()!.render(width);
+						for (const line of lines) {
+							expect(visibleWidth(line), `${model?.id} at ${width}`).toBeLessThanOrEqual(width);
+							expect(backgroundAt(line), `${model?.id} at ${width}`).toBeUndefined();
+						}
+						const bar = lines[0]!;
+						if (width >= 40) expect(bar, `${model?.id} at ${width}`).toContain("42.5%");
+						if (width === 160) expect(visibleWidth(bar)).toBe(160);
+						if (nerdFonts === "0") expect(bar).not.toMatch(/[\u{E0B0}\u{E0B2}]/u);
+						else if (width >= 64) expect(bar).toContain("\u{E0B0}");
+						// A status's own resets, bare or compound, reopen the band, and its faint is dropped.
+						for (const word of ["next", "soon"]) {
+							if (bar.includes(word)) expect(backgroundAt(bar, bar.indexOf(word))).toBe(SURFACE_SGR);
+						}
+					}
+				}
+				vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+				if (mode === "compact") {
+					const bar = harness.getFooter()!.render(160)[0]!;
+					expect(bar).toContain("soon");
+					expect(sgr(bar).map(({ code }) => code)).not.toContain("2");
+				}
+			} finally {
+				vi.unstubAllEnvs();
+				harness.disposeFooter();
+			}
+		}
+	});
+
+	it("keeps a chip that truncation cuts into on its own color and closes it", async () => {
+		const harness = createHarness("powerline-cut-chip", "tui", { model: longClaude, theme: rgbTheme() });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+			await harness.runCommand("footer", "powerline");
+			for (const width of [40, 56]) {
+				const bar = harness.getFooter()!.render(width)[0]!;
+				const cut = bar.indexOf("...");
+				expect(cut, `${width}`).toBeGreaterThan(0);
+				expect(bar.slice(0, cut)).toContain("claude-opus");
+				expect(backgroundAt(bar, cut)).toBe("48;2;217;119;87");
+				expect(bar.slice(cut)).toContain(`${bgCode(hex(SURFACE))}${fgCode(hex("#D97757"))}\u{E0B0}`);
+				expect(bar).toContain("42.5%");
+				expect(visibleWidth(bar)).toBe(width);
+			}
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it("follows a theme that Pi swaps behind the same object", async () => {
+		let current: object = rgbTheme({}, null);
+		const theme = new Proxy({}, { get: (_target, key) => Reflect.get(current, key) });
+		const harness = createHarness("powerline-theme-swap", "tui", { model: claude, theme: theme as ReturnType<typeof rgbTheme> });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			await harness.runCommand("footer", "powerline");
+			// No band in the first theme: the plain bar and its hairline.
+			expect(harness.getFooter()!.render(100)).toHaveLength(5);
+			current = rgbTheme();
+			let lines = harness.getFooter()!.render(100);
+			expect(lines).toHaveLength(4);
+			expect(lines[0]).toContain(bgCode(hex(SURFACE)));
+			current = rgbTheme({ borderMuted: "#aa3355" }, "#20304a");
+			lines = harness.getFooter()!.render(100);
+			expect(lines[0]).toContain(bgCode(hex("#20304a")));
+			expect(lines[0]).not.toContain(bgCode(hex(SURFACE)));
+			expect(lines[0]).toContain(`${fgCode(hex("#aa3355"))}─`);
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it("keeps bands, caps, and the rule on a 256-color theme but draws no truecolor chip", async () => {
+		const theme = {
+			fg: (token: string, text: string) => `\x1b[38;5;${token === "borderMuted" ? 245 : 238}m${text}\x1b[39m`,
+			bg: (_token: string, text: string) => `\x1b[48;5;254m${text}\x1b[49m`,
+			bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
+		};
+		const harness = createHarness("powerline-256", "tui", { model: claude, theme });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+			await harness.runCommand("footer", "powerline");
+			const bar = harness.getFooter()!.render(120)[0]!;
+			expect(bar).toContain("\x1b[48;5;254m");
+			expect(bar).not.toContain("\x1b[48;2;");
+			expect(bar).toContain("\x1b[38;5;254m\u{E0B0}");
+			expect(bar).toContain("\x1b[38;5;245m─");
+			expect(backgroundAt(bar, bar.indexOf("claude-opus-5-5"))).toBe("48;5;254");
+			// HIGH is drawn in truecolor; on the light band (xterm 254) it is lifted to 3:1.
+			const high = /\x1b\[38;2;(\d+);(\d+);(\d+)mHIGH/.exec(bar);
+			expect(high).not.toBeNull();
+			const [r, g, b] = high!.slice(1).map(Number) as [number, number, number];
+			expect(contrastRatio({ r, g, b }, { r: 228, g: 228, b: 228 })).toBeGreaterThanOrEqual(3);
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it("falls back to the plain bar when the theme's band is the terminal default", async () => {
+		const harness = createHarness("powerline-default-surface", "tui", { model: claude, theme: rgbTheme({}, null) });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			await harness.runCommand("footer", "powerline");
+			const lines = harness.getFooter()!.render(100);
+			expect(lines).toHaveLength(5);
+			expect(lines[1]).toContain("─");
+			for (const line of lines) expect(line).not.toContain("\x1b[48;");
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it("turns the footer back on with a style and switches styles in place", async () => {
+		const harness = createHarness("powerline-command", "tui", { model: claude, theme: rgbTheme() });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			await harness.runCommand("footer", "off");
+			await harness.runCommand("footer", "powerline");
+			expect(harness.getFooter()!.render(100)).toHaveLength(4);
+			await harness.runCommand("footer", "compact");
+			expect(harness.getFooter()!.render(100)[0]).toContain("\x1b[48;");
+			await harness.runCommand("footer", "plain");
+			expect(harness.notifications.at(-1)).toBe("Statusline footer: compact mode, plain style");
+			expect(harness.getFooter()!.render(100)[0]).not.toContain("\x1b[48;");
+			await harness.runCommand("footer", "bands");
+			expect(harness.notifications.at(-1)).toContain("usage: /footer [full|compact|off|plain|powerline|debug]");
+		} finally {
+			harness.disposeFooter();
+		}
 	});
 });
 

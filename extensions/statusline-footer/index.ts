@@ -17,11 +17,16 @@
  * Compact mode:
  *   model  HIGH            ▉▉▉░░░  42%  $1.23  12m
  *
+ * Powerline style (/footer powerline) sets the identity row on theme bands:
+ *   ▌✻ model ▶ HIGH  (provider) ▶ ──────── ◀ ▉▉▉░░░  8.2%  78.9k/1.05M ▐
+ *
  * Usage:
  *   /footer            toggle on/off
  *   /footer full       multi-line layout (default)
  *   /footer compact    1-line layout
  *   /footer off        restore pi's default footer
+ *   /footer powerline  identity row as a powerline bar
+ *   /footer plain      identity row on the terminal background (default)
  *   /footer debug      show metric-collection internals
  */
 
@@ -70,6 +75,10 @@ function fmtDuration(ms: number): string {
 
 function rgbFg(color: Rgb): string {
 	return `\x1b[38;2;${color.r};${color.g};${color.b}m`;
+}
+
+function rgbBg(color: Rgb): string {
+	return `\x1b[48;2;${color.r};${color.g};${color.b}m`;
 }
 
 function hexToRgb(hex: string): Rgb | null {
@@ -182,6 +191,207 @@ export function hairline(width: number, theme?: Theme): string {
 
 function cluster(parts: Array<string | false | null | undefined>, sep: string): string {
 	return parts.filter((part): part is string => Boolean(part)).join(sep);
+}
+
+// ── skins ──────────────────────────────────────────────────────────
+// A skin draws the identity row, the footer's status bar. The plain skin lays
+// it on the terminal background with a hairline below. The powerline skin
+// sets its groups on bands of the theme's tool surface, capped with powerline
+// arrows (square ends without Nerd Fonts), and opens it with a chip in the
+// model vendor's color; the band separates it, so it draws no hairline. The
+// telemetry rows below stay plain either way, so the bar leads.
+
+export type Style = "plain" | "powerline";
+
+interface Skin {
+	/** Columns the bar spends outside its content: margins, padding, caps, and the minimum gap. */
+	chrome: number;
+	bar(left: string, right: string, width: number): string;
+	/** The rule under the bar, if the skin draws one. */
+	rule(width: number): string | undefined;
+	/** A chip that opens the bar's left group, if the skin draws chips. */
+	chip?(text: string, color: Rgb): string;
+}
+
+const BAND_TOKEN = "toolPendingBg";
+const POWERLINE = { left: "\u{E0B0}", right: "\u{E0B2}", thinLeft: "\u{E0B1}", thinRight: "\u{E0B3}" };
+
+function luminance({ r, g, b }: Rgb): number {
+	const channel = (value: number) => {
+		const c = value / 255;
+		return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+	};
+	return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+}
+
+export function contrastRatio(a: Rgb, b: Rgb): number {
+	const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
+	return (hi + 0.05) / (lo + 0.05);
+}
+
+const INK_DARK = { r: 0x1b, g: 0x1b, b: 0x1f };
+const INK_LIGHT = { r: 0xff, g: 0xff, b: 0xff };
+
+/** Near-black or white, whichever contrasts more with `color`. */
+export function chipInk(color: Rgb): Rgb {
+	return contrastRatio(INK_DARK, color) >= contrastRatio(INK_LIGHT, color) ? INK_DARK : INK_LIGHT;
+}
+
+/** `color`, moved toward black or white just far enough to reach `min` contrast on `surface`. */
+export function legibleOn(color: Rgb, surface: Rgb, min = 3): Rgb {
+	if (contrastRatio(color, surface) >= min) return color;
+	const ink = chipInk(surface);
+	for (let step = 1; step < 10; step++) {
+		const moved = mix(color, ink, step / 10);
+		if (contrastRatio(moved, surface) >= min) return moved;
+	}
+	return ink;
+}
+
+/** The opening and closing escape sequences of a theme token, or "" for each the theme leaves out. */
+function tokenAnsi(paint: (text: string) => string): [string, string] {
+	try {
+		const [open = "", close = ""] = paint("\0").split("\0");
+		return [open, close];
+	} catch {
+		return ["", ""];
+	}
+}
+
+/** xterm's fixed 256-color palette; the first 16 colors are the terminal's own and cannot be known. */
+function xterm256(index: number): Rgb | null {
+	if (index < 16 || index > 255) return null;
+	if (index >= 232) {
+		const v = 8 + (index - 232) * 10;
+		return { r: v, g: v, b: v };
+	}
+	const steps = [0, 95, 135, 175, 215, 255];
+	const i = index - 16;
+	return { r: steps[Math.floor(i / 36)]!, g: steps[Math.floor(i / 6) % 6]!, b: steps[i % 6]! };
+}
+
+/** The color a `\x1b[48;2;…m` or `\x1b[48;5;…m` sequence opens with. */
+function backgroundRgb(open: string): Rgb | null {
+	const truecolor = /^\x1b\[48;2;(\d+);(\d+);(\d+)m/.exec(open);
+	if (truecolor) return { r: Number(truecolor[1]), g: Number(truecolor[2]), b: Number(truecolor[3]) };
+	const indexed = /^\x1b\[48;5;(\d+)m/.exec(open);
+	return indexed ? xterm256(Number(indexed[1])) : null;
+}
+
+function plainSkin(theme: Theme): Skin {
+	return { chrome: 3, bar: alignRow, rule: width => hairline(width, theme) };
+}
+
+/** The powerline skin on `surface`, a theme background's opening sequence, with `rule` the rule token's sequences. */
+function powerlineSkin(surface: string, [ruleOpen, ruleClose]: [string, string], nerd: boolean): Skin {
+	const capInk = surface.replace("\x1b[48;", "\x1b[38;");
+	const surfaceRgb = backgroundRgb(surface);
+	const lifted = new Map<string, string[]>();
+	// Theme colors are chosen for the terminal background; lift truecolor text that would fade into the band.
+	const lift = (color: string[]): string[] => {
+		if (!surfaceRgb || color[1] !== "2") return color;
+		const key = color.join(";");
+		let legible = lifted.get(key);
+		if (!legible) {
+			const { r, g, b } = legibleOn({ r: Number(color[2]), g: Number(color[3]), b: Number(color[4]) }, surfaceRgb);
+			legible = ["38", "2", `${r}`, `${g}`, `${b}`];
+			lifted.set(key, legible);
+		}
+		return legible;
+	};
+	// Rewrites one SGR sequence for the band: a reset or default background reopens the surface,
+	// faint is dropped because it would fade into the band, and foregrounds are lifted.
+	const reband = (params: string): string => {
+		const codes = params === "" ? ["0"] : params.split(";");
+		const kept: string[] = [];
+		let reopen = false;
+		for (let i = 0; i < codes.length; i++) {
+			const code = codes[i] || "0";
+			if ((code === "38" || code === "48") && (codes[i + 1] === "2" || codes[i + 1] === "5")) {
+				const color = codes.slice(i, i + (codes[i + 1] === "2" ? 5 : 3));
+				i += color.length - 1;
+				if (code === "48") reopen = false;
+				kept.push(...(code === "38" ? lift(color) : color));
+				continue;
+			}
+			if (code === "0" || code === "49") reopen = true;
+			if (code === "2" || code === "49") continue;
+			kept.push(code);
+		}
+		return `${kept.length ? `\x1b[${kept.join(";")}m` : ""}${reopen ? surface : ""}`;
+	};
+	// Padding on both sides of the content, plus the cap.
+	const side = nerd ? 3 : 2;
+	const chipEnd = `${surface}\x1b[39m`;
+	const closeChip = (color: Rgb) => `\x1b[22m${nerd ? `${surface}${rgbFg(color)}${POWERLINE.left}` : ""}${chipEnd}`;
+	const band = (content: string, end: "left" | "right"): string => {
+		// A group can open with a chip, which sets its own colors and needs no padding.
+		let chip = "";
+		let rest = content;
+		if (content.startsWith("\x1b[48;")) {
+			const split = content.indexOf(chipEnd);
+			if (split >= 0) {
+				chip = content.slice(0, split + chipEnd.length);
+				rest = content.slice(chip.length);
+			} else {
+				// Truncation cut into the chip: keep its colors through the ellipsis and close it.
+				// Its arrow takes the column of the padding a chip does not use.
+				const open = /^(?:\x1b\[[0-9;]*m)+/.exec(content)![0];
+				chip = content.replaceAll(RESET, RESET + open);
+				if (chip.endsWith(RESET + open)) chip = chip.slice(0, -open.length);
+				chip += closeChip(backgroundRgb(open) ?? INK_DARK);
+				rest = "";
+			}
+		}
+		const body = rest.replace(/\x1b\[([0-9;]*)m/g, (_, params: string) => reband(params));
+		const fill = `${chip || `${surface} `}${body}${surface} ${RESET}`;
+		if (!nerd) return fill;
+		return end === "left"
+			? `${fill}${capInk}${POWERLINE.left}${RESET}`
+			: `${capInk}${POWERLINE.right}${RESET}${fill}`;
+	};
+	return {
+		chrome: 2 * side + 1,
+		bar(left, right, width) {
+			if (!right) return truncateToWidth(band(truncateToWidth(left, Math.max(0, width - side)), "left"), width);
+			const rightWidth = visibleWidth(right);
+			if (rightWidth + side >= width) {
+				return truncateToWidth(band(truncateToWidth(right, Math.max(0, width - side)), "right"), width);
+			}
+			const leftStr = truncateToWidth(left, Math.max(0, width - rightWidth - 2 * side - 1));
+			const leftBand = visibleWidth(leftStr) > 0 ? band(leftStr, "left") : "";
+			const gap = Math.max(1, width - visibleWidth(leftBand) - rightWidth - side);
+			// A rule across the gap joins the two bands into one bar.
+			const fill = gap >= 3 ? ` ${ruleOpen}${"─".repeat(gap - 2)}${ruleClose || RESET} ` : " ".repeat(gap);
+			return truncateToWidth(`${leftBand}${fill}${band(right, "right")}`, width);
+		},
+		rule: () => undefined,
+		// Vendor colors need truecolor; a 256-color bar draws the model as plain text on the band.
+		...(surface.startsWith("\x1b[48;2;") && {
+			chip(text: string, color: Rgb) {
+				return `${rgbBg(color)}${rgbFg(chipInk(color))}\x1b[1m ${text} ${closeChip(color)}`;
+			},
+		}),
+	};
+}
+
+let cachedSkin: { key: string; skin: Skin } | undefined;
+
+/**
+ * The skin for `style`, or the plain skin where the theme cannot carry a band. Pi gives the
+ * footer one theme object for the whole session and swaps the theme behind it, so the skin
+ * is cached by the sequences it draws with, never by the object.
+ */
+export function skinFor(theme: Theme, style: Style): Skin {
+	if (style !== "powerline") return plainSkin(theme);
+	const [surface] = tokenAnsi(text => theme.bg(BAND_TOKEN, text));
+	// A terminal-default surface leaves no band to draw.
+	if (!surface.startsWith("\x1b[48;")) return plainSkin(theme);
+	const rule = tokenAnsi(text => theme.fg("borderMuted", text));
+	const nerd = hasNerdFonts();
+	const key = [surface, ...rule, nerd].join("|");
+	if (cachedSkin?.key !== key) cachedSkin = { key, skin: powerlineSkin(surface, rule, nerd) };
+	return cachedSkin.skin;
 }
 
 // ── extension statuses ─────────────────────────────────────────────
@@ -738,22 +948,42 @@ export function renderThinking(theme: Theme, level: string): string {
 function renderModelLabel(
 	ctx: ExtensionContext,
 	theme: Theme,
+	skin: Skin,
 	includeProvider: boolean,
 	live = false,
 	queued = false,
 	serviceTier?: string,
 ): string {
 	const model = ctx.model;
-	const liveMark = live ? theme.fg("success", theme.bold("●")) + "  " : "";
-	const queuedMark = queued ? theme.fg("warning", "queued") + "  " : "";
-	if (!model) return liveMark + queuedMark + theme.fg("accent", theme.bold("no-model"));
+	const queuedMark = queued && theme.fg("warning", "queued");
+	const details = model && modelDetails(ctx, theme, includeProvider, serviceTier);
+	const brand = model && modelBrand(model.id, model.provider);
+	// A chip carries the live dot and the vendor mark in its own ink.
+	const chipColor = skin.chip && ((brand?.color && hexToRgb(brand.color)) || resolveThemeRgb(theme, "accent"));
+	if (skin.chip && chipColor) {
+		const mark = brand ? `${hasNerdFonts() ? brand.nerd : brand.plain} ` : "";
+		return cluster([
+			skin.chip(`${live ? "● " : ""}${mark}${model?.id ?? "no-model"}`, chipColor),
+			queuedMark,
+			details,
+		], "  ");
+	}
+	const liveMark = live && theme.fg("success", theme.bold("●"));
+	const name = model
+		? renderModelMark(theme, model.id, model.provider) + theme.fg("accent", theme.bold(model.id))
+		: theme.fg("accent", theme.bold("no-model"));
+	return cluster([liveMark, queuedMark, name, details], "  ");
+}
 
-	const name = renderModelMark(theme, model.id, model.provider) + theme.fg("accent", theme.bold(model.id));
-	const thinking = model.reasoning ? `  ${renderThinking(theme, ctx.thinkingLevel ?? "off")}` : "";
+/** Thinking level, non-standard service tier, and provider, each separated by two spaces. */
+function modelDetails(ctx: ExtensionContext, theme: Theme, includeProvider: boolean, serviceTier?: string): string {
+	const model = ctx.model!;
 	const tier = displayServiceTier(serviceTier);
-	const tierMark = tier ? `  ${theme.fg("warning", theme.bold(tier))}` : "";
-	const provider = includeProvider && model.provider ? theme.fg("dim", `  (${model.provider})`) : "";
-	return liveMark + queuedMark + name + thinking + tierMark + provider;
+	return cluster([
+		model.reasoning && renderThinking(theme, ctx.thinkingLevel ?? "off"),
+		tier && theme.fg("warning", theme.bold(tier)),
+		includeProvider && model.provider && theme.fg("dim", `(${model.provider})`),
+	], "  ");
 }
 
 function renderContext(
@@ -811,6 +1041,7 @@ function renderPrice(ctx: ExtensionContext, s: Stats, theme: Theme, set: IconSet
 function renderIdentityRow(
 	ctx: ExtensionContext,
 	theme: Theme,
+	skin: Skin,
 	width: number,
 	state: SessionState,
 	s: Stats,
@@ -818,9 +1049,13 @@ function renderIdentityRow(
 	workflowStatus?: string,
 ): string {
 	const set = icons();
+	const { chrome } = skin;
 	const usage = ctx.getContextUsage();
 	const barWidth = compactMode ? COMPACT_BAR_WIDTH : BAR_WIDTH;
-	let left = renderModelLabel(ctx, theme, !compactMode, !ctx.isIdle(), ctx.hasPendingMessages(), state.serviceTier);
+	const label = (includeProvider: boolean) => renderModelLabel(
+		ctx, theme, skin, includeProvider, !ctx.isIdle(), ctx.hasPendingMessages(), state.serviceTier,
+	);
+	let left = label(!compactMode);
 	const tail = compactMode ? [
 		renderPrice(ctx, s, theme, set),
 		theme.fg("dim", fmtDuration(s.durationMs)),
@@ -828,24 +1063,23 @@ function renderIdentityRow(
 	const context = renderContext(theme, usage, barWidth, s.compactions, set.compact);
 	const right = cluster([context, ...tail], "  ");
 	const loop = compactMode && workflowStatus ? workflowStatus : "";
-	if (loop && visibleWidth(left) + visibleWidth(loop) + visibleWidth(right) + 5 <= width) {
-		return alignRow(cluster([left, loop], "  "), right, width);
+	if (loop && visibleWidth(left) + visibleWidth(loop) + visibleWidth(right) + chrome + 2 <= width) {
+		return skin.bar(cluster([left, loop], "  "), right, width);
 	}
 	const minimumContext = usage?.percent != null ? visibleWidth(`${usage.percent.toFixed(1)}%`) : 0;
 	// Compact already renders the provider-free label, so it is the fallback identity too.
-	const compactIdentity = compactMode ? left
-		: renderModelLabel(ctx, theme, false, !ctx.isIdle(), ctx.hasPendingMessages(), state.serviceTier);
-	const showLoop = Boolean(loop) && visibleWidth(compactIdentity) + visibleWidth(loop) + minimumContext + 5 <= width;
-	if (!showLoop && visibleWidth(left) + visibleWidth(right) + 3 <= width) return alignRow(left, right, width);
+	const compactIdentity = compactMode ? left : label(false);
+	const showLoop = Boolean(loop) && visibleWidth(compactIdentity) + visibleWidth(loop) + minimumContext + chrome + 2 <= width;
+	if (!showLoop && visibleWidth(left) + visibleWidth(right) + chrome <= width) return skin.bar(left, right, width);
 
 	// Keep identity and context percent; shed provider, token counts, and compact extras first.
 	left = showLoop ? cluster([compactIdentity, loop], "  ") : compactIdentity;
 	// A status is optional: never shorten the model or percent to make space for it.
-	left = truncateToWidth(left, Math.max(0, width - minimumContext - 3));
-	const budget = Math.max(0, width - visibleWidth(left) - 3);
+	left = truncateToWidth(left, Math.max(0, width - minimumContext - chrome));
+	const budget = Math.max(0, width - visibleWidth(left) - chrome);
 	while (tail.length && visibleWidth(cluster(tail, "  ")) + 2 + minimumContext > budget) tail.pop();
 	const contextBudget = Math.max(0, budget - (tail.length ? visibleWidth(cluster(tail, "  ")) + 2 : 0));
-	return alignRow(left, cluster([
+	return skin.bar(left, cluster([
 		renderContext(theme, usage, barWidth, s.compactions, set.compact, contextBudget),
 		...tail,
 	], "  "), width);
@@ -854,13 +1088,14 @@ function renderIdentityRow(
 function renderCompact(
 	ctx: ExtensionContext,
 	theme: Theme,
+	skin: Skin,
 	width: number,
 	state: SessionState,
 	footerData: ReadonlyFooterDataProvider,
 ): string {
 	const statuses = footerData.getExtensionStatuses();
 	const workflowKey = ["autoresearch", "herder", "loop"].find((key) => statuses.get(key));
-	return renderIdentityRow(ctx, theme, width, state, collectStats(ctx, state), true, cluster([
+	return renderIdentityRow(ctx, theme, skin, width, state, collectStats(ctx, state), true, cluster([
 		workflowKey && renderStatus(theme, statuses.get(workflowKey)!, workflowKey),
 		statuses.get(PROCESS_STATUS_KEY) && renderStatus(theme, statuses.get(PROCESS_STATUS_KEY)!, PROCESS_STATUS_KEY),
 	], "  "));
@@ -875,6 +1110,7 @@ function ttftColor(ms: number): "success" | "warning" | "error" {
 function renderFull(
 	ctx: ExtensionContext,
 	theme: Theme,
+	skin: Skin,
 	footerData: ReadonlyFooterDataProvider,
 	width: number,
 	state: SessionState,
@@ -883,7 +1119,7 @@ function renderFull(
 	const s = collectStats(ctx, state);
 	const sep = "  ";
 
-	const line1 = renderIdentityRow(ctx, theme, width, state, s, false);
+	const line1 = renderIdentityRow(ctx, theme, skin, width, state, s, false);
 
 	const { metrics } = state;
 	const avgTtft = avgTtftMs(metrics);
@@ -968,7 +1204,8 @@ function renderFull(
 		...[...extensionStatuses.entries()].filter(([key]) => !workflowKeys.includes(key)),
 	].map(([key, status]) => status && renderStatus(theme, status, key, hasNerdFonts())), sep);
 
-	const lines = [line1, hairline(width, theme), line2, line3];
+	const rule = skin.rule(width);
+	const lines = rule ? [line1, rule, line2, line3] : [line1, line2, line3];
 	if (statusRow) lines.push(alignRow(statusRow, "", width));
 	return lines;
 }
@@ -977,6 +1214,7 @@ function renderFull(
 
 export default function (pi: ExtensionAPI) {
 	let mode: Mode = "full";
+	let style: Style = "plain";
 	let installedCtx: ExtensionContext | undefined;
 	let stopWatchingProcesses: (() => void) | undefined;
 
@@ -999,9 +1237,10 @@ export default function (pi: ExtensionAPI) {
 				invalidate() {},
 				render(width: number): string[] {
 					if (mode === "off") return [];
+					const skin = skinFor(theme, style);
 					return mode === "compact"
-						? [renderCompact(ctx, theme, width, state, footerData)]
-						: renderFull(ctx, theme, footerData, width, state);
+						? [renderCompact(ctx, theme, skin, width, state, footerData)]
+						: renderFull(ctx, theme, skin, footerData, width, state);
 				},
 			};
 		});
@@ -1138,7 +1377,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("footer", {
-		description: "Statusline footer: /footer [full|compact|off|debug]",
+		description: "Statusline footer: /footer [full|compact|off|plain|powerline|debug]",
 		handler: async (args, ctx) => {
 			const next = args.trim().toLowerCase();
 			if (next === "debug") {
@@ -1157,11 +1396,15 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (next === "full" || next === "compact" || next === "off") {
 				mode = next;
+			} else if (next === "plain" || next === "powerline") {
+				// A style applies to the current layout, and turns the footer back on.
+				style = next;
+				if (mode === "off") mode = "full";
 			} else if (next === "") {
 				mode = mode === "off" ? "full" : "off";
 			} else {
 				ctx.ui.notify(
-					`Unknown /footer argument '${args.trim()}' — usage: /footer [full|compact|off|debug]`,
+					`Unknown /footer argument '${args.trim()}' — usage: /footer [full|compact|off|plain|powerline|debug]`,
 					"warning",
 				);
 				return;
@@ -1175,7 +1418,7 @@ export default function (pi: ExtensionAPI) {
 			} else if (state) {
 				installedCtx = undefined; // force reinstall
 				install(ctx, state);
-				ctx.ui.notify(`Statusline footer: ${mode} mode`, "info");
+				ctx.ui.notify(`Statusline footer: ${mode} mode, ${style} style`, "info");
 			}
 		},
 	});
