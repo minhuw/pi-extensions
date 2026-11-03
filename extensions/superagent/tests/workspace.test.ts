@@ -235,6 +235,10 @@ describe("shared-mode rendering and prompts", () => {
 		expect(worktree).toContain("in your own git worktree `/wt/1` on branch `pi/1-t1`");
 		expect(worktree).toContain("commit on your branch with normal `git commit` (hooks on, never `--no-verify`)");
 		expect(worktree).toContain("merge that branch into yours yourself");
+		for (const section of [shared, worktree]) {
+			expect(section).toContain("Prove the change by running it, not by rereading it");
+			expect(section).not.toContain("self-review");
+		}
 		expect(recoveryNote({ workspace: "shared" })).toBe(SHARED_RECOVERY_NOTE);
 		expect(recoveryNote({})).toBe(RECOVERY_NOTE);
 	});

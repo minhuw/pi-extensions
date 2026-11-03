@@ -324,8 +324,12 @@ gives the generic role. In worktree mode it says, with the ticket's values fille
   branches, or remotes, and never push.
 - The user's request, verbatim, is your first message. Derive what to do from it and the repository, not from the
   title. A routing note, when present, carries facts, not requirements.
-- Investigate, implement, run the relevant checks, self-review, and commit on your branch with normal `git commit`
+- Investigate, implement, run the relevant checks, and commit on your branch with normal `git commit`
   (hooks on, never `--no-verify`), following the repository's commit conventions.
+- Prove the change by running it, not by rereading it: add or update tests that exercise it (for a bug, one that
+  fails without the fix) and run them with the repository's type checker and linters. Extra effort goes to stronger
+  tests and static checks, not to reviewing its own diff, and working code is not changed for a problem it cannot
+  demonstrate.
 - You may delegate to recon, worker, reviewer, and expert agents; they work in your worktree. A delegate's
   `isolation: "worktree"` branch must be merged into yours by you.
 - Report with `ticket_report`: `ready` once the change is committed and verified; `progress` with a `question` for one
@@ -344,7 +348,8 @@ In shared mode it says instead:
   have not just read is refused.
 - Do not revert or "fix" changes you did not make. When a check fails in code you did not touch, say so in your report
   instead of fixing it.
-- Investigate, implement, run the relevant checks, and self-review; other tickets' unfinished changes may be in the tree.
+- Investigate, implement, and run the relevant checks; other tickets' unfinished changes may be in the tree.
+- Prove the change by running it, as above.
 - Delegates work in this same tree under the same rules and must not use `isolation: "worktree"`.
 - Report `ready` when your part is done and verified; the other report states, messages, and asking as above.
 
