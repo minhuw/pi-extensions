@@ -15,8 +15,8 @@
 //! `internal/redact` (redact.go, fieldvalue.go, ids.go, known.go, json.go and scrub.go) at
 //! https://github.com/yetone/magpie, commit c30d3b7b63e818d3b7d9c3eb6fcdada4c7d8c5e0. Only its secret kinds are
 //! ported. Its rules have no text rule for `Authorization: Bearer|Basic`, so that rule is pika's, after magpie's
-//! header scrubbing, and so are the rule for a private key whose END line is missing and the rules for what a cut
-//! leaves of a credential at a stored text's end ([`scrub_cut_text`]). magpie is under this license:
+//! header scrubbing, and so are the rule for a private key whose END line is missing, the rule for pika's own device
+//! tokens, and the rules for what a cut leaves of a credential at a stored text's end ([`scrub_cut_text`]). magpie is under this license:
 //!
 //! MIT License
 //!
@@ -49,7 +49,7 @@ use serde_json::{Map, Value};
 
 /// Bumped whenever the rules change what they find, so text scrubbed and stored under older rules (the search
 /// index) is known to need scrubbing again.
-pub const RULES_VERSION: u32 = 12;
+pub const RULES_VERSION: u32 = 13;
 
 /// What the whole string value of a field named for a secret becomes.
 pub const REDACTED: &str = "[REDACTED]";
@@ -510,6 +510,8 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
             bound: TOKEN_CH,
             ..rule("API_KEY", re(r"(?:hf_[A-Za-z0-9]{30,}|gsk_[A-Za-z0-9]{40,}|xai-[A-Za-z0-9]{40,}|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{50,}|dop_v1_[a-f0-9]{64}|SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43})"))
         },
+        // pika's own device tokens (`auth::insert_token`): pika_ and 32 random bytes in lowercase hex
+        Rule { markers: strings(&["pika_"]), bound: TOKEN_CH, ..rule("API_KEY", re(r"pika_[0-9a-f]{64}")) },
         Rule {
             markers: strings(&["eyJ"]),
             bound: TOKEN_CH,
@@ -1117,7 +1119,7 @@ const CUT_CONTEXT: usize = 64;
 
 /// A token's marker, as the rules have them, and its first characters through the text's end.
 static CUT_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:sk-|[a-z]{2,4}_sk_|gh[pousr]_|github_pat_|glpat-|AIza|xox[abposr]-|[sr]k_live_|AKIA|ASIA|hf_|gsk_|xai-|npm_|pypi-|dop_v1_|SG\.|eyJ)([A-Za-z0-9_.\-]+)$").unwrap()
+    Regex::new(r"(?:sk-|[a-z]{2,4}_sk_|gh[pousr]_|github_pat_|glpat-|AIza|xox[abposr]-|[sr]k_live_|AKIA|ASIA|hf_|gsk_|xai-|npm_|pypi-|dop_v1_|SG\.|pika_|eyJ)([A-Za-z0-9_.\-]+)$").unwrap()
 });
 
 /// An Authorization header's scheme and the start of its credential.
@@ -1169,6 +1171,8 @@ fn cut_tail(s: &str) -> Option<Span> {
         let v = caps[1].as_bytes();
         let aws = all.as_str().starts_with("AKIA") || all.as_str().starts_with("ASIA");
         let random = v.iter().any(u8::is_ascii_digit) || !aws && v.iter().any(u8::is_ascii_uppercase);
+        // a pika token is lowercase hex only: pika_v2 and pika_config_1 are names
+        let random = random && (!all.as_str().starts_with("pika_") || v.iter().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')));
         if random && (a == 0 || !TOKEN_CH.contains(&bytes[a - 1])) {
             return Some(span(all, if all.as_str().starts_with("eyJ") { "TOKEN" } else { "API_KEY" }));
         }
