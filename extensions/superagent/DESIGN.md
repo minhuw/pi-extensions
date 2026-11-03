@@ -42,8 +42,9 @@ The main session's active tools become the **router set**:
 - the read-only built-ins `read`, `grep`, `find`, `ls`, and `ffgrep`, `fffind` when registered;
 - every registered tool whose `annotations.readOnlyHint` is `true` and that has no `reachesTools` (so not `codemode`
   or `tool_search`);
-- `git_read` (below), the router ticket tools, `relay_list`, `relay_send`, `relay_status`, every `herder_*` tool
-  (Herder is an explicit orchestration mode with its own worktrees and confirmation), and `loop_schedule`, `loop_stop`;
+- `git_read` (below), the router ticket tools, `relay_list`, `relay_send`, `relay_status`, `recall_search`,
+  `recall_read`, every `herder_*` tool (Herder is an explicit orchestration mode with its own worktrees and
+  confirmation), and `loop_schedule`, `loop_stop`;
 - Subagents' `get_subagent_result` and `steer_subagent`, and `Agent` when the `routerAgents` setting (default
   `["recon", "reviewer", "expert"]`) is not empty;
 - the names in the `routerTools` setting.

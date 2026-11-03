@@ -146,6 +146,23 @@ describe.skipIf(!modulesExist)("superagent router", () => {
 		expect(modes).toEqual(["superagent", "direct"]);
 	});
 
+	it("keeps pika's relay and recall tools, loaded after superagent, in the router set and restores them in direct mode", async () => {
+		await workspace.settings({ enabled: true });
+		// pika loads last in `pi.extensions`; relay registers its tools only after every `session_start` handler.
+		const pika = (await import("../../pika/index.ts")).default;
+		const h = await start({ extensions: [pika] });
+		const pikaTools = ["relay_list", "relay_send", "relay_status", "recall_search", "recall_read"];
+		await waitFor(() => pikaTools.every((name) => h.session.getAllTools().some((tool) => tool.name === name)), 5_000, "relay's tools");
+		const seen = script(h, () => fauxAssistantMessage("done"));
+		await h.session.prompt("what did we do before?");
+		expect(h.session.getActiveToolNames()).toEqual(expect.arrayContaining(pikaTools));
+		expect(h.session.getActiveToolNames()).not.toContain("bash");
+		for (const name of pikaTools) expect(seen[0]).toContain(`"${name}"`);
+		await h.session.prompt("/superagent off");
+		expect(h.session.getActiveToolNames()).toEqual(expect.arrayContaining(["bash", "edit", ...pikaTools]));
+		expect(h.errors).toEqual([]);
+	});
+
 	it("handles #N input without a model turn, refuses closed tickets, and passes other numbers to the model", async () => {
 		const tickets = await store();
 		const ticket = tickets.create({ title: "Old work", request: "do it", source: "do it", createdBy: "elsewhere", base: workspace.git("rev-parse", "HEAD").trim(), target: "main" }, "elsewhere");
