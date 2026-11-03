@@ -644,8 +644,8 @@ function refreshGitStat(cwd: string, state: SessionState) {
 }
 
 // ── icons ──────────────────────────────────────────────────────────
-// Nerd Fonts when the terminal is known to have them; otherwise ASCII.
-// Override with STATUSLINE_NERD_FONTS=1|0 (FOOTER_NERD_FONTS is also accepted).
+// Nerd Fonts are assumed; STATUSLINE_NERD_FONTS=0 (or FOOTER_NERD_FONTS=0)
+// selects the ASCII/Unicode set for a terminal without them.
 
 type IconSet = {
 	compact: string;
@@ -708,15 +708,7 @@ const ASCII_ICONS: IconSet = {
 };
 
 export function hasNerdFonts(): boolean {
-	const override = process.env.STATUSLINE_NERD_FONTS ?? process.env.FOOTER_NERD_FONTS;
-	if (override === "1") return true;
-	if (override === "0") return false;
-	if (process.env.GHOSTTY_RESOURCES_DIR) return true;
-	const termProg = (process.env.TERM_PROGRAM || "").toLowerCase();
-	const nerdTerms = ["iterm", "wezterm", "kitty", "ghostty", "alacritty", "foot", "rio", "contour"];
-	if (nerdTerms.some((name) => termProg.includes(name))) return true;
-	const term = (process.env.TERM || "").toLowerCase();
-	return ["xterm-kitty", "xterm-ghostty", "alacritty", "foot", "rio", "contour"].some((name) => term.includes(name));
+	return (process.env.STATUSLINE_NERD_FONTS ?? process.env.FOOTER_NERD_FONTS) !== "0";
 }
 
 function icons(): IconSet {

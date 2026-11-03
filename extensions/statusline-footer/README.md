@@ -1,6 +1,6 @@
 # Statusline Footer
 
-A rich, theme-aware Pi footer. The metrics come from this extension; the visual language follows [pikit](https://github.com/adrianapan/pikit)'s status bar: left/right justified rows, a positional gradient context bar, per-level thinking color, a hairline rule, and Nerd Font icons with ASCII fallbacks.
+A rich, theme-aware Pi footer. The metrics come from this extension; the visual language follows [pikit](https://github.com/adrianapan/pikit)'s status bar: left/right justified rows, a positional gradient context bar, per-level thinking color, a hairline rule, and Nerd Font icons, with an ASCII opt-out.
 
 ## Install
 
@@ -78,7 +78,7 @@ For a single status display, leave pi-processes' **status widget** disabled in `
 - A live context-window bar uses a positional RGB gradient (theme success/warning/error when the theme is 24-bit, otherwise a warm fallback).
 - Thinking effort is a first-class CAPS label with per-level color, including a rainbow wash at `xhigh` and `max`.
 - Rows are left/right justified so identity stays put while capacity and cost hug the right edge.
-- Nerd Font icons are used on Ghostty, WezTerm, Kitty, iTerm2, Alacritty, Foot, Rio, and Contour. Everything else falls back to ASCII. Override with `STATUSLINE_NERD_FONTS=1` or `0`.
+- Nerd Font icons are assumed in every terminal; the Claude and OpenAI logos need Nerd Fonts 3.5 or later. Orca needs no setup, because its terminal font list falls back to a bundled Nerd Font symbols font and then to an installed `Symbols Nerd Font Mono`. Set `STATUSLINE_NERD_FONTS=0` (or `FOOTER_NERD_FONTS=0`) for ASCII/Unicode icons in a terminal without a Nerd Font.
 - Streaming metrics are measured passively from Pi's provider and message events rather than estimated. Completed samples survive `/reload` through a small session custom entry; a new, resumed, or restarted session starts fresh streaming metrics.
 - Telemetry is scoped to the interactive TUI session, so programmatic child sessions such as `@tintinweb/pi-subagents` cannot reset or contaminate parent TTFT and token-throughput samples.
 - TTFB and TTFT are shown separately to distinguish connection latency from a silent or buffered stream.
@@ -90,7 +90,7 @@ For a single status display, leave pi-processes' **status widget** disabled in `
 ## Requirements
 
 - A current version of Pi.
-- Icons look best with a [Nerd Font](https://www.nerdfonts.com/). Without one, the footer automatically uses ASCII/Unicode fallbacks.
+- Icons need a [Nerd Font](https://www.nerdfonts.com/) as the terminal font or a fallback font, such as the standalone Symbols Nerd Font. Without one, set `STATUSLINE_NERD_FONTS=0`.
 
 ## Metric sources
 

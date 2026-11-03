@@ -298,14 +298,22 @@ describe("statusline footer visual language", () => {
 		expect(displayServiceTier("default")).toBeUndefined();
 	});
 
-	it("honors STATUSLINE_NERD_FONTS over terminal guesses", () => {
-		const previous = process.env.STATUSLINE_NERD_FONTS;
-		process.env.STATUSLINE_NERD_FONTS = "0";
-		expect(hasNerdFonts()).toBe(false);
-		process.env.STATUSLINE_NERD_FONTS = "1";
-		expect(hasNerdFonts()).toBe(true);
-		if (previous === undefined) delete process.env.STATUSLINE_NERD_FONTS;
-		else process.env.STATUSLINE_NERD_FONTS = previous;
+	it("assumes Nerd Fonts unless STATUSLINE_NERD_FONTS=0 opts out", () => {
+		try {
+			vi.stubEnv("TERM_PROGRAM", "Apple_Terminal");
+			vi.stubEnv("STATUSLINE_NERD_FONTS", undefined);
+			vi.stubEnv("FOOTER_NERD_FONTS", undefined);
+			expect(hasNerdFonts()).toBe(true);
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			expect(hasNerdFonts()).toBe(false);
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+			expect(hasNerdFonts()).toBe(true);
+			vi.stubEnv("STATUSLINE_NERD_FONTS", undefined);
+			vi.stubEnv("FOOTER_NERD_FONTS", "0");
+			expect(hasNerdFonts()).toBe(false);
+		} finally {
+			vi.unstubAllEnvs();
+		}
 	});
 });
 
