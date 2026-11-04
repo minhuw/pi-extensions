@@ -15,6 +15,7 @@ Extensions, prompts, skills, and a theme for the [Pi](https://github.com/earendi
 | [Herder](extensions/herder/README.md) | `/herder <goal>` runs a coding task in disposable git worktrees, checks the result against the goal, and delivers it to your branch after you confirm. `/herder-improve` and `/herder-simplify` audit the repository and start a run for the findings you pick. |
 | [Orca Bridge](extensions/orca-bridge/README.md) | Shows Pi activity in Orca panes, titles panes from your prompts, and opens files and diffs in Orca. |
 | [Autoresearch](extensions/autoresearch/README.md) | `/autoresearch <target>` measures a baseline, waits for your approval, then runs a bounded number of optimization passes. |
+| [Benchmark](extensions/benchmark/README.md) | `/benchmark <what>` measures a performance claim. Its `benchmark_compare` tool runs one command, or two alternately, and reports medians, ranges, run counts, and a verdict. |
 | [Loop](extensions/loop/README.md) | Repeats a prompt on a fixed interval, a cron schedule, or a delay the model picks. |
 | [Molt](extensions/molt/README.md) | `/molt` starts a new session with the current model and thinking level. |
 | [Statusline Footer](extensions/statusline-footer/README.md) | A footer for model, context, performance, cost, and Git status. |
