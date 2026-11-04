@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createBashTool, type BashToolInput, type ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { expect, it } from "vitest";
-import { fingerprint, measure, type Benchmark } from "../campaign.ts";
+import { fingerprint, measure, type Harness } from "../core.ts";
 
 it.each([
 	{ limit: "lines", logs: "log\n".repeat(2100) },
@@ -23,10 +23,10 @@ it.each([
 				return { result, isError: result.isError ?? false };
 			},
 		} as unknown as ExtensionToolContext;
-		const benchmark = async (output: string): Promise<Benchmark> => {
+		const benchmark = async (output: string): Promise<Harness> => {
 			await writeFile(join(directory, "measure.mjs"), `process.stdout.write(${JSON.stringify(output)});\n`);
 			return {
-				root: await realpath(directory), methodology: "Fixed verbose output fixture.", command: "node measure.mjs",
+				root: await realpath(directory), command: "node measure.mjs",
 				files: await fingerprint(directory, ["measure.mjs"]), repetitions: 1, timeoutSeconds: 10,
 			};
 		};

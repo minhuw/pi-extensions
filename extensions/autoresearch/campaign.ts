@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import type { HarnessMessages, Measurement } from "../benchmark/core.ts";
 import { Parameters, renderReport, restoreReport, updateReport, type Report } from "./report.ts";
 
 export const ITERATION = "autoresearch:iteration";
@@ -24,7 +23,10 @@ export interface Benchmark {
 	repetitions: number;
 	timeoutSeconds: number;
 }
-export interface Measurement { samples: Record<string, number>[]; values: Record<string, number>; timestamp: number }
+export const HARNESS_MESSAGES: HarnessMessages = {
+	moved: "Research working directory changed. Prepare and approve a new baseline.",
+	changed: "Benchmark harness changed. Prepare a new baseline and obtain approval again.",
+};
 export interface Campaign {
 	id: string;
 	goal: string;
@@ -81,71 +83,6 @@ export function restoreState(data: unknown): State {
 	return state;
 }
 
-/** Fingerprint declared harness files, rejecting escapes through paths and symlinks. */
-export async function fingerprint(cwd: string, files: string[]): Promise<Record<string, string>> {
-	const root = await realpath(cwd);
-	const hashes: Record<string, string> = Object.create(null);
-	for (const file of files) {
-		if (path.isAbsolute(file)) throw new Error("Benchmark files must be relative to the project.");
-		const absolute = await realpath(path.resolve(root, file));
-		const relative = path.relative(root, absolute);
-		if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Benchmark file escapes the project.");
-		if (Object.hasOwn(hashes, file)) throw new Error("Duplicate benchmark file.");
-		const content = await readFile(absolute);
-		if (content.length > 4 * 1024 * 1024) throw new Error("Benchmark harness files must be smaller than 4 MiB.");
-		hashes[file] = hash(content);
-	}
-	return hashes;
-}
-export async function verifyHarness(cwd: string, benchmark: Benchmark): Promise<void> {
-	if (await realpath(cwd) !== benchmark.root) throw new Error("Research working directory changed. Prepare and approve a new baseline.");
-	const actual = await fingerprint(cwd, Object.keys(benchmark.files));
-	if (JSON.stringify(actual) !== JSON.stringify(benchmark.files)) throw new Error("Benchmark harness changed. Prepare a new baseline and obtain approval again.");
-}
-export function parseMetrics(output: string, names: string[]): Record<string, number> {
-	const values: Record<string, number> = Object.create(null);
-	for (const line of output.split(/\r?\n/)) {
-		const match = /^METRIC ([a-zA-Z][a-zA-Z0-9_]*)=(\S+)\s*$/.exec(line);
-		if (!match || !names.includes(match[1]!)) continue;
-		if (Object.hasOwn(values, match[1]!)) throw new Error(`Duplicate metric '${match[1]}'.`);
-		const value = Number(match[2]);
-		if (!Number.isFinite(value)) throw new Error(`Non-finite metric '${match[1]}'.`);
-		values[match[1]!] = value;
-	}
-	if (names.some(name => !Object.hasOwn(values, name))) throw new Error(`Benchmark must print one METRIC name=value line for every metric: ${names.join(", ")}`);
-	return values;
-}
-export async function measure(ctx: ExtensionToolContext, benchmark: Benchmark, names: string[], signal: AbortSignal | undefined, assertOwner: () => void): Promise<Measurement> {
-	const samples: Record<string, number>[] = [];
-	const run = async (command: string): Promise<string> => {
-		assertOwner(); signal?.throwIfAborted();
-		const result = await ctx.executeTool("bash", { command, timeout: benchmark.timeoutSeconds }, { signal });
-		assertOwner(); signal?.throwIfAborted();
-		const text = result.result.content.filter(part => part.type === "text").map(part => part.text).join("\n");
-		if (result.isError) throw new Error(`Benchmark/check command failed: ${text.slice(-1500)}`);
-		const details: unknown = result.result.details;
-		if (record(details) && record(details.truncation) && details.truncation.truncated === true) {
-			// Bash's display tail can omit metrics or hide duplicates; parse the saved full output.
-			if (!bounded(details.fullOutputPath, 4096)) throw new Error("Benchmark/check output was truncated without a full output file.");
-			const output = await readFile(details.fullOutputPath, { encoding: "utf8", signal });
-			assertOwner(); signal?.throwIfAborted();
-			return output;
-		}
-		return text;
-	};
-	await verifyHarness(ctx.cwd, benchmark);
-	for (let index = 0; index < benchmark.repetitions; index++) samples.push(parseMetrics(await run(benchmark.command), names));
-	if (benchmark.checkCommand) await run(benchmark.checkCommand);
-	await verifyHarness(ctx.cwd, benchmark);
-	assertOwner();
-	const values: Record<string, number> = Object.create(null);
-	for (const name of names) {
-		const sorted = samples.map(sample => sample[name]!).sort((a, b) => a - b);
-		const middle = Math.floor(sorted.length / 2);
-		values[name] = sorted.length % 2 ? sorted[middle]! : sorted[middle - 1]! / 2 + sorted[middle]! / 2;
-	}
-	return { samples, values, timestamp: Date.now() };
-}
 export function measuredReport(report: Report, measurement: Measurement, baseline: boolean): Report {
 	const next = baseline ? updateReport(null, {
 		phase: "checking", message: "Baseline measured; waiting for your approval.",

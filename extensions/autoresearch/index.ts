@@ -4,7 +4,8 @@ import { Type } from "typebox";
 import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
 import { Parameters, renderReport, SNAPSHOT, STATUS_KEY, summary, updateReport } from "./report.ts";
-import { approvalKey, BaselineParameters, emptyState, fingerprint, ITERATION, measure, measuredReport, prompt, proposal, restoreState, terminal, verifyHarness, type Benchmark, type State } from "./campaign.ts";
+import { fingerprint, measure, verifyHarness } from "../benchmark/core.ts";
+import { approvalKey, BaselineParameters, emptyState, HARNESS_MESSAGES, ITERATION, measuredReport, prompt, proposal, restoreState, terminal, type Benchmark, type State } from "./campaign.ts";
 
 const DISPLAY = "autoresearch:display";
 const HELP = "/autoresearch <target> [--max 25] prepares and measures a baseline. /autoresearch approve starts iterations after review. Other commands: status, revise <feedback>, pause, resume, stop. Limits: 25 iterations by default, six hours after approval, 15 minutes per iteration (30 minutes for setup).";
@@ -199,7 +200,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 			const benchmark: Benchmark = { root: await realpath(ctx.cwd), methodology: params.methodology, command: params.command, checkCommand: params.checkCommand,
 				files: await fingerprint(ctx.cwd, params.files), repetitions: params.repetitions ?? 3, timeoutSeconds: params.timeoutSeconds ?? 120 };
 			assert();
-			const baseline = await measure(ctx, benchmark, definitions.metrics.map(metric => metric.name), signal, assert);
+			const baseline = await measure(ctx, benchmark, definitions.metrics.map(metric => metric.name), signal, assert, HARNESS_MESSAGES);
 			const next = structuredClone(r.state);
 			next.report = measuredReport(definitions, baseline, true);
 			Object.assign(next.campaign!, { state: "awaiting_approval", benchmark, baseline, latest: baseline, approved: undefined, reason: undefined });
@@ -215,7 +216,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 			const { r, active, assert } = owner(ctx, "iterate");
 			// Continuation requires the latest attempt to succeed, including its checks.
 			active.measured = false;
-			const measurement = await measure(ctx, r.state.campaign!.benchmark!, r.state.report!.metrics.map(metric => metric.name), signal, assert);
+			const measurement = await measure(ctx, r.state.campaign!.benchmark!, r.state.report!.metrics.map(metric => metric.name), signal, assert, HARNESS_MESSAGES);
 			const next = structuredClone(r.state); next.campaign!.latest = measurement;
 			next.report = measuredReport(next.report!, measurement, false);
 			save(r, next); active.measured = true;
@@ -274,7 +275,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 			if (action === "approve") {
 				if (!c || c.state !== "awaiting_approval" || !c.benchmark || !c.baseline) throw new Error("A measured baseline must be awaiting approval first.");
 				if (r.active || !ctx.isIdle() || ctx.hasPendingMessages()) throw new Error("Wait for the baseline explanation to finish before approving.");
-				await verifyHarness(ctx.cwd, c.benchmark);
+				await verifyHarness(ctx.cwd, c.benchmark, HARNESS_MESSAGES);
 				if (get(ctx) !== r || r.state.campaign !== c || c.state !== "awaiting_approval") throw new Error("Research proposal changed while approving.");
 				const next = structuredClone(r.state); next.campaign!.approved = approvalKey(next); next.campaign!.state = "running"; next.campaign!.deadline = Date.now() + 6 * 60 * 60_000;
 				save(r, next); r.pending = "iterate"; arm(r); return;

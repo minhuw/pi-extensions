@@ -4,7 +4,8 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it, vi } from "vitest";
 import extension from "../index.ts";
-import { approvalKey, ITERATION, parseMetrics, restoreState, type State } from "../campaign.ts";
+import { parseMetrics } from "../../benchmark/core.ts";
+import { approvalKey, ITERATION, restoreState, type State } from "../campaign.ts";
 import { SNAPSHOT } from "../report.ts";
 
 async function fixture(mode: "tui" | "rpc" | "print" = "tui") {
@@ -292,4 +293,48 @@ it("validates the approval record and finite, complete metric output", async () 
 		expect(() => restoreState(unmeasured)).toThrow("Missing baseline proposal");
 		for (const text of ["", "METRIC compile_ms=NaN", "METRIC compile_ms=1\nMETRIC compile_ms=2"]) expect(() => parseMetrics(text, ["compile_ms"])).toThrow();
 	} finally { await h.cleanup(); }
+});
+
+it("keeps the exact harness error messages for approval and measurement", async () => {
+	vi.useFakeTimers(); const h = await fixture();
+	const message = (work: Promise<unknown>) => work.then(() => "", (error: Error) => error.message);
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter(); await h.baseline(); await h.settle();
+		await writeFile(join(h.directory, "measure.sh"), "echo changed\n");
+		expect(await message(h.command("approve"))).toBe("Benchmark harness changed. Prepare a new baseline and obtain approval again.");
+		await writeFile(join(h.directory, "measure.sh"), "printf 'METRIC compile_ms=100\\n'\n");
+		await h.command("approve"); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		const moved = await mkdtemp(join(tmpdir(), "pi-autoresearch-other-project-"));
+		try {
+			Object.assign(h.ctx, { cwd: moved });
+			expect(await message(h.tool("autoresearch_measure", {}))).toBe("Research working directory changed. Prepare and approve a new baseline.");
+		} finally { Object.assign(h.ctx, { cwd: h.directory }); await rm(moved, { recursive: true, force: true }); }
+		await writeFile(join(h.directory, "measure.sh"), "echo changed again\n");
+		expect(await message(h.tool("autoresearch_measure", {}))).toBe("Benchmark harness changed. Prepare a new baseline and obtain approval again.");
+	} finally { await h.cleanup(); }
+});
+
+it("restores a pinned version-2 running campaign with an unchanged approval key", () => {
+	const pinned: State = {
+		version: 2,
+		report: {
+			id: "pinned-report", phase: "checking", message: "Candidate measured with the approved methodology.",
+			metrics: [{ name: "compile_ms", label: "Compile", unit: "ms", direction: "lower", role: "objective", baseline: 100, value: 80 }],
+			updatedAt: 1_760_000_600_000, provenance: "tool-measured",
+		},
+		campaign: {
+			id: "pinned-campaign", goal: "optimize compilation speed", state: "running",
+			benchmark: {
+				root: "/project", methodology: "Clean compilation of the fixed project inputs; wall time in milliseconds; median of three runs.",
+				command: "bash measure.sh", checkCommand: "npm test",
+				files: { "measure.sh": "faa261f4dd84ddd7d35e3e76a35ceeac2046006d5a17a60a7c0b00381ba97a60" }, repetitions: 3, timeoutSeconds: 120,
+			},
+			baseline: { samples: [{ compile_ms: 100 }, { compile_ms: 110 }, { compile_ms: 90 }], values: { compile_ms: 100 }, timestamp: 1_760_000_000_000 },
+			latest: { samples: [{ compile_ms: 80 }, { compile_ms: 85 }, { compile_ms: 75 }], values: { compile_ms: 80 }, timestamp: 1_760_000_600_000 },
+			approved: "6a5dd77b70acaad762d724e90e7017834f4d02186e76892d3c672f10137cae29",
+			iterations: 1, maxIterations: 25, deadline: 1_760_021_700_000,
+		},
+	};
+	expect(approvalKey(pinned)).toBe("6a5dd77b70acaad762d724e90e7017834f4d02186e76892d3c672f10137cae29");
+	expect(() => restoreState(pinned)).not.toThrow();
 });

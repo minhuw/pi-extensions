@@ -12,6 +12,7 @@ The published extension table and installation details live in the root [README]
 - `extensions/quality/` — native `/simplify`, `/review`, `/verify`, and `/deslop` prompt templates for bounded cleanup, read-only bug review, evidence-based verification, and AI-slop removal, with shared loading/contract tests.
 - `extensions/orca-bridge/` — Orca hook delivery, background activity aggregation in terminal panes, prompt-aware titles, file/diff navigation, and stock Orca compatibility checks; Subagents publishes snapshots through Pi's event bus. Integrations must use released Orca interfaces without modifying Orca.
 - `extensions/autoresearch/` — native main-session optimization: baseline harness design and repeated measurement, explicit user approval before bounded iterations, pinned methodology/harness files, session-owned continuation, durable reports, and footer integration. It owns `/autoresearch`; do not also load `npm:pi-autoresearch`.
+- `extensions/benchmark/` — the shared benchmark measurement module: running a harness command through Pi's bash tool, parsing `METRIC name=value` lines, pinning harness files by SHA-256, and aggregating samples. Autoresearch imports it; it registers nothing with Pi.
 - `extensions/loop/` — session-owned recurring prompts, fixed/cron/model-paced scheduling, completion and lifetime limits, and footer integration.
 - `extensions/molt/` — `/molt`, which starts a new session that keeps the current model and thinking level.
 - `extensions/statusline-footer/` — a theme-aware Pi statusline footer and its tests.
@@ -33,7 +34,7 @@ Run commands from the repository root with Node `>=22.19.0`. The development SDK
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `npm ci`                            | Install the locked dependencies.                                                                                                        |
 | `npm run typecheck`                 | Run strict, no-emit TypeScript checking for the collection and Subagents' dedicated source configuration.                              |
-| `npm test`                          | Run the safe collection suite: Orca Bridge, Magpie Provider, Commit, Quality, Statusline Footer, Autoresearch, Loop, Molt, Subagents, native compaction, Herder, Writer, pika extension (with relay and recall), Superagent, and Impeccable tests. |
+| `npm test`                          | Run the safe collection suite: Orca Bridge, Magpie Provider, Commit, Quality, Statusline Footer, Benchmark, Autoresearch, Loop, Molt, Subagents, native compaction, Herder, Writer, pika extension (with relay and recall), Superagent, and Impeccable tests. |
 | `npm run test:orca-bridge` | Run Orca Bridge's offline activity, lifecycle, navigation, release compatibility, real Pi RPC, title, and transport tests. |
 | `npm run test:magpie-provider` | Run Magpie's offline provider/lifecycle tests and its native-compaction suite. |
 | `npm run test:commit`               | Run Commit's strict TypeScript `node --test` suite.                                                                                     |
@@ -41,6 +42,7 @@ Run commands from the repository root with Node `>=22.19.0`. The development SDK
 | `npm run test:simplify`           | Compatibility alias for `npm run test:quality`.                                                                                        |
 | `npm run test:writer`               | Run Writer's strict TypeScript `node --test` suite.                                                                                     |
 | `npm run test:statusline`           | Run Statusline Footer's Vitest suite.                                                                                                   |
+| `npm run test:benchmark` | Run the shared benchmark module's offline harness fingerprinting, METRIC parsing, median, and real Pi bash truncation tests. |
 | `npm run test:autoresearch` | Run Autoresearch's offline approval, measurement, scheduling, persistence, footer, and real Pi/bash integration tests. |
 | `npm run test:loop` | Run Loop's offline scheduling, command, lifecycle, persistence, and Pi integration tests. |
 | `npm run test:molt` | Run Molt's offline session-replacement tests against a real Pi runtime. |
