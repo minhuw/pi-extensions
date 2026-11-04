@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { Type } from "typebox";
-import type { HarnessMessages, Measurement } from "../benchmark/core.ts";
-import { Parameters, renderReport, restoreReport, updateReport, type Report } from "./report.ts";
+import { noise, summarize, type HarnessMessages, type Measurement } from "../benchmark/core.ts";
+import { number, Parameters, quantity, renderReport, restoreReport, updateReport, type Metric, type Report } from "./report.ts";
 
 export const ITERATION = "autoresearch:iteration";
 export const BaselineParameters = Type.Object({
@@ -94,6 +94,19 @@ export function measuredReport(report: Report, measurement: Measurement, baselin
 	next.provenance = "tool-measured";
 	return next;
 }
+const column = (metric: Metric, measurement: Measurement) => measurement.samples.map(sample => sample[metric.name]!);
+function spread(metric: Metric, measurement: Measurement): string {
+	const s = summarize(column(metric, measurement));
+	return `${quantity(s.median, metric.unit)} (range ${number(s.min)}–${quantity(s.max, metric.unit)}, n=${s.count})`;
+}
+/** Per-metric baseline lines, with the latest measurement and the objective's noise verdict when `latest` is set. */
+export function ranges(state: State, latest = false): string {
+	const c = state.campaign!; const metrics = state.report!.metrics;
+	const lines = metrics.map(metric => `${metric.label}: baseline ${spread(metric, c.baseline!)}${latest ? `; latest ${spread(metric, c.latest!)}` : ""}`);
+	const objective = metrics.find(metric => metric.role === "objective")!;
+	if (latest) lines.push(`Noise check for ${objective.label} (objective): ${noise(column(objective, c.baseline!), column(objective, c.latest!))}.`);
+	return lines.join("\n");
+}
 export function proposal(state: State, requestApproval = state.campaign?.state === "awaiting_approval"): string {
 	const c = state.campaign!; const b = c.benchmark!;
 	return [
@@ -101,7 +114,7 @@ export function proposal(state: State, requestApproval = state.campaign?.state =
 		`Working directory: ${b.root}`, `Benchmark command: ${b.command}`, `Correctness check: ${b.checkCommand ?? "none configured"}`,
 		`Repetitions: ${b.repetitions}; aggregation: median; timeout per command: ${b.timeoutSeconds}s`,
 		`Pinned harness files: ${Object.keys(b.files).join(", ")}`, "",
-		`Baseline samples: ${JSON.stringify(c.baseline!.samples)}`, "", renderReport(state.report!), "",
+		`Baseline samples: ${JSON.stringify(c.baseline!.samples)}`, ranges(state), "", renderReport(state.report!), "",
 		`Campaign limit: ${c.maxIterations} iterations, up to six hours after approval.`,
 		requestApproval ? "Review whether the target, workload, methodology, and baseline are correct. To start optimization, run /autoresearch approve. To revise, run /autoresearch revise <feedback>." : "",
 	].filter(Boolean).join("\n");
@@ -120,6 +133,7 @@ export function prompt(state: State, kind: "prepare" | "iterate"): string {
 	return [
 		`Autoresearch iteration ${c.iterations}/${c.maxIterations}: ${c.goal}`,
 		"Perform one bounded optimization experiment in this main session: choose a hypothesis, make a focused change, call autoresearch_measure, inspect the objective and constraints, and retain or undo only changes you own as justified by the evidence. Preserve unrelated changes. Do not use repository-wide reset/clean or change the benchmark to improve the score.",
+		"Each autoresearch_measure result gives a noise verdict for the objective. \"within noise\" (the baseline and latest ranges overlap) is no measurable difference, not an improvement. With fewer than 2 repetitions noise cannot be estimated (\"noise unknown\"); say so when reporting a change.",
 		"Use autoresearch_update to explain the hypothesis and outcome. Metrics come from autoresearch_measure; do not supply your own numeric replacements. Mark phase complete if no useful experiment remains, or paused if you need a user decision. The extension schedules the next pass after this run settles; do not sleep or create a separate loop.",
 		proposal(state, false),
 		"The baseline above was approved by the user. Benchmark commands, metric definitions, and declared harness files are fixed. A methodology change requires /autoresearch revise and a fresh approval.",

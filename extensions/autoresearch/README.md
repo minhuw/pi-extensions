@@ -45,7 +45,7 @@ After approval, the extension schedules bounded experiment passes in the same Pi
 | `/autoresearch <target> [--max N]` | Understand the target, implement the harness, measure the baseline, and request review. |
 | `/autoresearch approve` | Approve the pending measured baseline and start optimization. |
 | `/autoresearch revise <feedback>` | Return to setup with feedback; discard the previous approval and require a new one. |
-| `/autoresearch status` | Show the methodology, samples, metric table, and campaign state. |
+| `/autoresearch status` | Show the methodology, samples, per-metric ranges, metric table, and campaign state. |
 | `/autoresearch pause` | Pause scheduling and abort an owned active pass. |
 | `/autoresearch resume` | Resume a paused campaign. An unapproved baseline still needs approval. |
 | `/autoresearch stop` | Stop the campaign and abort an owned active pass. Preserve reports and working files. |
@@ -112,6 +112,21 @@ research · run 3/20 · measured · Compile 182 ms (-14.554%)
 
 The tool response and report command display the agent's message and all metrics. Negative change means the number decreased; direction determines whether that is desirable. The extension computes arithmetic and distinguishes tool-measured numbers from standalone model-reported numbers. Parsing a measurement does not establish that the methodology is appropriate or that an improvement is statistically significant; reviewing the baseline is part of the workflow.
 
+The baseline proposal and `/autoresearch status` show each metric's baseline median, min–max range, and sample count:
+
+```text
+Compile: baseline 100 ms (range 90–110 ms, n=3)
+```
+
+Each `autoresearch_measure` result adds the latest median, range, and count for every metric, and a noise verdict for the objective:
+
+```text
+Compile: baseline 100 ms (range 90–110 ms, n=3); latest 80 ms (range 75–85 ms, n=3)
+Noise check for Compile (objective): outside noise.
+```
+
+The verdict is `within noise` when the baseline and latest ranges overlap, including ranges that only touch; that is no measurable difference. It is `outside noise` when the ranges do not overlap, and `noise unknown` when either side has fewer than 2 samples. The iteration prompt tells the agent that a result within noise is not an improvement. This is a coarse check, not a significance test: with 3 independent samples per side, two identical versions produce non-overlapping ranges by chance about 1 time in 10.
+
 [Statusline Footer](../statusline-footer/README.md) displays research status on the Git row in full mode and prioritizes it over Loop in compact mode. Clearing the report restores Loop's summary. Model identity and context percentage take priority at narrow widths. Pi's default footer can also display the status.
 
 ## Session lifecycle
@@ -142,9 +157,10 @@ pi -e ./extensions/autoresearch/index.ts
 
 ```sh
 npm run test:autoresearch
+npm run test:benchmark
 npm run test:statusline
 npm run test:loop
 npm run typecheck
 ```
 
-Offline tests cover baseline approval, revisions, pinned harnesses, median metrics and checks, interruption and late results, limits, persistence failure, branch/reload recovery, child isolation, footer coexistence, and a real Pi session using a local faux model plus the real `bash` tool. No provider credentials are required.
+Offline tests cover baseline approval, revisions, pinned harnesses, median metrics and checks, ranges and noise verdicts, interruption and late results, limits, persistence failure, branch/reload recovery, child isolation, footer coexistence, and a real Pi session using a local faux model plus the real `bash` tool. No provider credentials are required.

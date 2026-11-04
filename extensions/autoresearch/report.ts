@@ -113,7 +113,7 @@ export function restoreReport(data: unknown): Report | null {
 export function number(value: number): string {
 	return new Intl.NumberFormat("en-US", { maximumSignificantDigits: 6 }).format(value);
 }
-function quantity(value: number | undefined, unit: string): string {
+export function quantity(value: number | undefined, unit: string): string {
 	return value === undefined ? "—" : `${number(value)}${unit ? ` ${unit}` : ""}`;
 }
 export function change(metric: Metric): string {

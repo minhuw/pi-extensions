@@ -53,14 +53,29 @@ export function parseMetrics(output: string, names: string[]): Record<string, nu
 	if (names.some(name => !Object.hasOwn(values, name))) throw new Error(`Benchmark must print one METRIC name=value line for every metric: ${names.join(", ")}`);
 	return values;
 }
+const ascending = (values: number[]) => [...values].sort((a, b) => a - b);
+function middle(sorted: number[]): number {
+	const index = Math.floor(sorted.length / 2);
+	return sorted.length % 2 ? sorted[index]! : sorted[index - 1]! / 2 + sorted[index]! / 2;
+}
 export function median(samples: Record<string, number>[], names: string[]): Record<string, number> {
 	const values: Record<string, number> = Object.create(null);
-	for (const name of names) {
-		const sorted = samples.map(sample => sample[name]!).sort((a, b) => a - b);
-		const middle = Math.floor(sorted.length / 2);
-		values[name] = sorted.length % 2 ? sorted[middle]! : sorted[middle - 1]! / 2 + sorted[middle]! / 2;
-	}
+	for (const name of names) values[name] = middle(ascending(samples.map(sample => sample[name]!)));
 	return values;
+}
+export interface Summary { median: number; min: number; max: number; count: number }
+export type Noise = "within noise" | "outside noise" | "noise unknown";
+export function summarize(samples: number[]): Summary {
+	if (!samples.length) throw new Error("A benchmark summary needs at least one sample.");
+	if (!samples.every(Number.isFinite)) throw new Error("Benchmark samples must be finite numbers.");
+	const sorted = ascending(samples);
+	return { median: middle(sorted), min: sorted[0]!, max: sorted.at(-1)!, count: sorted.length };
+}
+/** A coarse check: inclusive min–max ranges that overlap or touch are within noise. */
+export function noise(a: number[], b: number[]): Noise {
+	const x = summarize(a), y = summarize(b);
+	if (x.count < 2 || y.count < 2) return "noise unknown";
+	return x.min <= y.max && y.min <= x.max ? "within noise" : "outside noise";
 }
 export async function measure(ctx: ExtensionToolContext, harness: Harness, names: string[], signal: AbortSignal | undefined, assertOwner: () => void, messages = PINNED): Promise<Measurement> {
 	const samples: Record<string, number>[] = [];

@@ -5,7 +5,7 @@ import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@ear
 import { Markdown } from "@earendil-works/pi-tui";
 import { Parameters, renderReport, SNAPSHOT, STATUS_KEY, summary, updateReport } from "./report.ts";
 import { fingerprint, measure, verifyHarness } from "../benchmark/core.ts";
-import { approvalKey, BaselineParameters, emptyState, HARNESS_MESSAGES, ITERATION, measuredReport, prompt, proposal, restoreState, terminal, type Benchmark, type State } from "./campaign.ts";
+import { approvalKey, BaselineParameters, emptyState, HARNESS_MESSAGES, ITERATION, measuredReport, prompt, proposal, ranges, restoreState, terminal, type Benchmark, type State } from "./campaign.ts";
 
 const DISPLAY = "autoresearch:display";
 const HELP = "/autoresearch <target> [--max 25] prepares and measures a baseline. /autoresearch approve starts iterations after review. Other commands: status, revise <feedback>, pause, resume, stop. Limits: 25 iterations by default, six hours after approval, 15 minutes per iteration (30 minutes for setup).";
@@ -220,7 +220,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 			const next = structuredClone(r.state); next.campaign!.latest = measurement;
 			next.report = measuredReport(next.report!, measurement, false);
 			save(r, next); active.measured = true;
-			return { content: [{ type: "text", text: renderReport(next.report) }], details: { report: next.report, measurement } };
+			return { content: [{ type: "text", text: `${renderReport(next.report)}\n\n${ranges(next, true)}` }], details: { report: next.report, measurement } };
 		},
 	});
 	pi.registerMessageRenderer(ITERATION, (message, { expanded }) => {

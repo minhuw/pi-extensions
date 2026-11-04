@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import extension from "../index.ts";
 import { parseMetrics } from "../../benchmark/core.ts";
 import { approvalKey, ITERATION, restoreState, type State } from "../campaign.ts";
-import { SNAPSHOT } from "../report.ts";
+import { renderReport, SNAPSHOT } from "../report.ts";
 
 async function fixture(mode: "tui" | "rpc" | "print" = "tui") {
 	const directory = await mkdtemp(join(tmpdir(), "pi-autoresearch-campaign-"));
@@ -39,10 +39,10 @@ async function fixture(mode: "tui" | "rpc" | "print" = "tui") {
 	await emit("session_start", { reason: "startup" });
 	const state = () => entries.findLast(entry => entry.type === "custom" && entry.customType === SNAPSHOT)?.data as State | undefined;
 	const tool = (name: string, args: unknown) => tools.get(name).execute("call", args, undefined, undefined, ctx);
-	const baseline = () => tool("autoresearch_baseline", {
+	const baseline = (overrides: object = {}) => tool("autoresearch_baseline", {
 		methodology: "Clean compilation of the fixed project inputs. Clear build outputs before each run; measure wall time in milliseconds. Three repetitions, median. Keep correctness checks unchanged.",
 		command: "bash measure.sh", checkCommand: "check", files: ["measure.sh"], repetitions: 3,
-		metrics: [{ name: "compile_ms", label: "Compile", unit: "ms", direction: "lower" }],
+		metrics: [{ name: "compile_ms", label: "Compile", unit: "ms", direction: "lower" }], ...overrides,
 	});
 	const enter = async () => {
 		const message = messages.findLast(message => message.customType === ITERATION);
@@ -86,6 +86,100 @@ it("prepares a real baseline proposal and never dispatches optimization until an
 		expect(h.state()?.campaign).toMatchObject({ state: "complete", iterations: 2 });
 		expect(h.messages.filter(message => message.customType === ITERATION)).toHaveLength(3);
 	} finally { await h.cleanup(); expect(vi.getTimerCount()).toBe(0); }
+});
+
+it("shows each metric's median, range, and sample count, and the objective's noise verdict", async () => {
+	vi.useFakeTimers(); const h = await fixture();
+	const text = async (work: Promise<{ content: { text: string }[] }>) => (await work).content[0]!.text;
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		const proposed = await text(h.baseline());
+		expect(proposed).toContain("Baseline samples: [{\"compile_ms\":100},{\"compile_ms\":110},{\"compile_ms\":90}]\nCompile: baseline 100 ms (range 90–110 ms, n=3)\n");
+		await h.settle(); await h.command("status");
+		expect(h.messages.at(-1).content).toContain("Compile: baseline 100 ms (range 90–110 ms, n=3)");
+		await h.command("approve"); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		const iteration = h.messages.findLast(message => message.customType === ITERATION).content;
+		expect(iteration).toContain("\"within noise\" (the baseline and latest ranges overlap) is no measurable difference, not an improvement. With fewer than 2 repetitions noise cannot be estimated (\"noise unknown\"); say so when reporting a change.");
+		expect(iteration).toContain("Compile: baseline 100 ms (range 90–110 ms, n=3)");
+		h.values([80, 85, 75]); const outside = await text(h.tool("autoresearch_measure", {}));
+		expect(outside).toContain("| Compile | objective | lower | 100 ms | 80 ms | -20% |");
+		expect(outside).toContain("\n\nCompile: baseline 100 ms (range 90–110 ms, n=3); latest 80 ms (range 75–85 ms, n=3)\nNoise check for Compile (objective): outside noise.");
+		h.values([95, 100, 105]); const within = await text(h.tool("autoresearch_measure", {}));
+		expect(within).toContain("Compile: baseline 100 ms (range 90–110 ms, n=3); latest 100 ms (range 95–105 ms, n=3)\nNoise check for Compile (objective): within noise.");
+		await h.settle();
+	} finally { await h.cleanup(); }
+	const once = await fixture();
+	try {
+		await once.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await once.enter();
+		expect(await text(once.baseline({ repetitions: 1 }))).toContain("Compile: baseline 100 ms (range 100–100 ms, n=1)");
+		await once.settle(); await once.command("approve"); await vi.advanceTimersByTimeAsync(1); await once.enter();
+		once.values([80]);
+		expect(await text(once.tool("autoresearch_measure", {})))
+			.toContain("Compile: baseline 100 ms (range 100–100 ms, n=1); latest 80 ms (range 80–80 ms, n=1)\nNoise check for Compile (objective): noise unknown.");
+		await once.settle();
+	} finally { await once.cleanup(); }
+});
+
+it("shows every metric's range with its own label and unit and judges noise on the objective only", async () => {
+	vi.useFakeTimers(); const h = await fixture();
+	const text = async (work: Promise<{ content: { text: string }[] }>) => (await work).content[0]!.text;
+	let runs: string[] = [];
+	const outputs = (rows: [number, number, number][]) => { runs = rows.map(([size, compile, ratio]) => `METRIC size_b=${size}\nMETRIC compile_ms=${compile}\nMETRIC ratio=${ratio}`); };
+	vi.mocked(h.ctx.executeTool).mockImplementation(async (_name, input) => ({
+		isError: false, result: { content: [{ type: "text", text: (input as { command: string }).command === "check" ? "checks passed" : runs.shift()! }], details: undefined },
+	}) as any);
+	const verdicts = (result: string) => result.split("\n").filter(line => /noise/.test(line));
+	const baseline = [
+		"Bundle size: baseline 1,234,560 B (range 1,234,500–1,234,600 B, n=4)",
+		"Compile: baseline 105 ms (range 90–120 ms, n=4)",
+		"Hit ratio: baseline 0.25 (range 0.123457–0.5, n=4)",
+	];
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		outputs([[1234567.891, 100, 0.123456789], [1234600, 110, 0.5], [1234500, 90, 0.25], [1234550, 120, 0.25]]);
+		const proposed = await text(h.baseline({ repetitions: 4, metrics: [
+			{ name: "size_b", label: "Bundle size", unit: "B", direction: "lower", role: "constraint" },
+			{ name: "compile_ms", label: "Compile", unit: "ms", direction: "lower", role: "objective" },
+			{ name: "ratio", label: "Hit ratio", direction: "higher" },
+		] }));
+		expect(proposed).toContain(baseline.join("\n"));
+		expect(verdicts(proposed)).toEqual([]);
+		await h.settle(); await h.command("status");
+		expect(h.messages.at(-1).content).toContain(baseline.join("\n"));
+		await h.emit("session_start", { reason: "reload" }); await h.command("status");
+		expect(h.messages.at(-1).content).toContain(baseline.join("\n"));
+		await h.command("approve"); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		expect(h.messages.findLast(message => message.customType === ITERATION).content).toContain(baseline.join("\n"));
+
+		outputs([[2000, 100, 0.9], [2100, 104, 0.9], [2200, 106, 0.9], [2300, 118, 0.9]]);
+		const within = await text(h.tool("autoresearch_measure", {}));
+		expect(within.startsWith(`${renderReport(h.state()!.report!)}\n\n`)).toBe(true);
+		expect(within).toContain([
+			"Bundle size: baseline 1,234,560 B (range 1,234,500–1,234,600 B, n=4); latest 2,150 B (range 2,000–2,300 B, n=4)",
+			"Compile: baseline 105 ms (range 90–120 ms, n=4); latest 105 ms (range 100–118 ms, n=4)",
+			"Hit ratio: baseline 0.25 (range 0.123457–0.5, n=4); latest 0.9 (range 0.9–0.9, n=4)",
+		].join("\n"));
+		expect(verdicts(within)).toEqual(["Noise check for Compile (objective): within noise."]);
+
+		outputs([[1234567.891, 50, 0.25], [1234600, 60, 0.25], [1234500, 70, 0.25], [1234550, 80, 0.25]]);
+		const outside = await text(h.tool("autoresearch_measure", {}));
+		expect(outside).toContain("Bundle size: baseline 1,234,560 B (range 1,234,500–1,234,600 B, n=4); latest 1,234,560 B (range 1,234,500–1,234,600 B, n=4)\nCompile: baseline 105 ms (range 90–120 ms, n=4); latest 65 ms (range 50–80 ms, n=4)\n");
+		expect(verdicts(outside)).toEqual(["Noise check for Compile (objective): outside noise."]);
+
+		const stored = h.state()!;
+		expect(stored.version).toBe(2);
+		expect(Object.keys(stored.campaign!.latest!).sort()).toEqual(["samples", "timestamp", "values"]);
+		expect(stored.campaign!.latest!.samples).toEqual([50, 60, 70, 80].map((compile_ms, index) => ({ size_b: [1234567.891, 1234600, 1234500, 1234550][index], compile_ms, ratio: 0.25 })));
+		expect(() => restoreState(stored)).not.toThrow();
+		await h.settle();
+	} finally { await h.cleanup(); }
+});
+
+it("describes the range and noise output in the README", async () => {
+	const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+	for (const phrase of ["within noise", "outside noise", "noise unknown", "autoresearch_measure", "/autoresearch status", "not a significance test", "1 time in 10"]) expect(readme).toContain(phrase);
+	expect(readme).toMatch(/min–max range, and sample count/);
+	expect(readme).toMatch(/fewer than 2 samples/);
 });
 
 it("rejects approval before a baseline, pins the harness, and requires fresh review after revision", async () => {
