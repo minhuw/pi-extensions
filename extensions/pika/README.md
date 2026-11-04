@@ -318,7 +318,7 @@ It reads through the server's agent read API (`{base}/api/agent/v1/`, "Agent rea
 
 - pika logged in with `/pika login`. recall uses pika's server URL and device token; there is no separate key or login. It reads them from the [credentials registry](#credentials-registry), so it follows `/pika login` and `/pika logout` at once.
 - A pika server with the agent read API (its `/api/health` lists the `agent` feature).
-- Read access for the device, which is off by default: turn on "Agents can read" for the device on the server's Devices page, or run `pika token read-access <device> on` on the server. `pika token create <name> --read-access` grants it when creating a token. Revoking the device's token takes it away.
+- Read access for the device, which every device has by default. To stop a device's agents, turn off "Agents can read" for it on the server's Devices page, or run `pika token read-access <device> off` on the server; `pika token create <name> --no-read-access` creates a device without it. Revoking the device's token leaves the switch as it was, and a pairing that continues the device keeps it.
 
 ### Tools
 
@@ -335,7 +335,7 @@ A call fails, and the model reads why, when:
 
 - pika is not logged in: run `/pika login`;
 - the server rejects the device token (HTTP 401): run `/pika login` to pair the device again;
-- the device has no read access (HTTP 403 `read_access_denied`): grant it as above;
+- the device's read access is off (HTTP 403 `read_access_denied`): turn "Agents can read" back on for it, or run `pika token read-access <device> on`;
 - the server has no agent read API (HTTP 404, and `/api/health` does not list `agent`): upgrade the server;
 - the session id is unknown;
 - the server cannot be reached, or does not answer within 15 s; aborting the tool call stops the request.

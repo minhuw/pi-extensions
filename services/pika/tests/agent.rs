@@ -21,7 +21,7 @@ const SESSION: &str = "a9e47000-0000-4000-8000-000000000001";
 const CHILD: &str = "a9e47000-0000-4000-8000-0000000000c1";
 const OTHER: &str = "a9e47000-0000-4000-8000-000000000002";
 
-const GITHUB_TOKEN: &str = "ghp_Zq7mX2vK9pL4wR8tY3nB6cD1fG5hJ0aS2eUi";
+const GITHUB_TOKEN: &str = "ghp_FAKEagentFAKEagentFAKEagentFAKEagent";
 const ENV_SECRET: &str = "s3cr3t-Value-91827364";
 const CREDENTIALS: [&str; 2] = [GITHUB_TOKEN, ENV_SECRET];
 /// In the child's session link: its description assigns one, and its spawner's data names the other a token and
