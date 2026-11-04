@@ -12,6 +12,8 @@ import { acquireUploader, currentUploader, releaseUploader, type Uploader, type 
 
 export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
 export const SHUTDOWN_FLUSH_MS = 2_000;
+/** How long the last session's shutdown waits for the binds it aborted. */
+const SHUTDOWN_BIND_MS = 1_000;
 export const SESSION_LINK_TYPE = "pi-extensions.session-link";
 
 export interface ChildSessionHook {
@@ -250,9 +252,14 @@ export function captureExtension(pi: ExtensionAPI): void {
 		ended = true;
 		const pending = shared().login;
 		if (pending?.owner === self) pending.cancel("the session ended");
-		// A bind still running must not keep a short-lived process, such as `pi -p`, alive after its last session.
+		// A bind still running must not keep a short-lived process, such as `pi -p`, alive after its last
+		// session, nor write its key file once the session is gone; one that is slow to settle is left behind.
 		shared().open.delete(self);
-		if (shared().open.size === 0) abortBinds();
+		if (shared().open.size === 0) {
+			let timer: NodeJS.Timeout | undefined;
+			await Promise.race([abortBinds(), new Promise<void>((resolve) => { timer = setTimeout(resolve, SHUTDOWN_BIND_MS); })]);
+			clearTimeout(timer);
+		}
 		// A stream still waiting for its repository opens before it closes and the uploader drains.
 		const opening = owned(ctx)?.opened;
 		if (opening) await opening;

@@ -85,6 +85,8 @@ export class MockIngest {
 	/** The uncompressed size of each body in `bodies`. */
 	readonly sizes: number[] = [];
 	readonly responses: number[] = [];
+	/** How many requests reached the batch endpoint, whatever their answer. */
+	batchRequests = 0;
 	readonly gaps: string[] = [];
 	readonly conflicts: string[] = [];
 	readonly headers: IncomingMessage["headers"][] = [];
@@ -357,6 +359,7 @@ export class MockIngest {
 			return this.pair(path.slice("/pika/api/pair/v1/".length), body as Record<string, unknown>, request.socket.remoteAddress, request.headers.authorization, response);
 		}
 		if (request.method !== "POST" || path !== "/pika/api/ingest/v1/batch") return this.reply(response, 404, { error: "not found" });
+		this.batchRequests++;
 		const bearer = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice("Bearer ".length) : undefined;
 		if (this.mode === "unauthorized" || bearer === undefined || !this.tokens.has(bearer)) return this.reply(response, 401, { error: "unauthorized" });
 		this.headers.push(request.headers);

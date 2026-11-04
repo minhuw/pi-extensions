@@ -64,14 +64,15 @@ async function writeKey(file: string, dir: string, fields: Record<string, unknow
  * key is kept and a new file records no fingerprint; a later process that has the OS's id adopts
  * such a file by recording its fingerprint, keeping the key. After writing, the file is read
  * back, so of two processes that raced, both use the one that won. Undefined when no key file can
- * be made. The key is never shown.
+ * be made, or when `signal` aborted before the write began. The key is never shown.
  */
-export async function deviceKey(dir: string): Promise<string | undefined> {
+export async function deviceKey(dir: string, signal?: AbortSignal): Promise<string | undefined> {
 	try {
 		const file = deviceKeyFile(dir);
 		const machine = await fingerprint();
 		const existing = await readKey(file);
 		if (existing && (machine === null || existing.machine === machine)) return existing.key;
+		if (signal?.aborted) return undefined;
 		const copied = existing && existing.machine !== null;
 		await writeKey(file, dir, { v: 1, key: existing && !copied ? existing.key : randomBytes(32).toString("hex"), machine });
 		await deviceKeyHooks.afterWrite?.(file);
@@ -83,11 +84,11 @@ export async function deviceKey(dir: string): Promise<string | undefined> {
 
 const BOUND = Symbol.for("pi-extensions.pika.bound");
 const PENDING = Symbol.for("pi-extensions.pika.binds");
-const shared = globalThis as { [BOUND]?: Set<string>; [PENDING]?: Set<AbortController> };
+const shared = globalThis as { [BOUND]?: Set<string>; [PENDING]?: Map<AbortController, Promise<void>> };
 /** Hashes of the `[url, token]` pairs bound in this process, shared by module copies. */
 const bound = (): Set<string> => shared[BOUND] ??= new Set();
-/** What aborts each bind still running in this process. */
-const pending = (): Set<AbortController> => shared[PENDING] ??= new Set();
+/** Each bind still running in this process: what aborts it, and what settles when it ends. */
+const pending = (): Map<AbortController, Promise<void>> => shared[PENDING] ??= new Map();
 const boundKey = (url: string, token: string) => {
 	let normalized = url;
 	try { normalized = normalizeUrl(url); } catch { /* compared as given */ }
@@ -98,15 +99,17 @@ const boundKey = (url: string, token: string) => {
  * Tells the server this install's key belongs to the device of `token` (`POST api/pair/v1/bind`),
  * so a later pairing from here continues that device. Every failure (an older server's 404, a
  * 409 for a key another device holds, the network) is ignored; it never throws. `abortBinds()`
- * ends it at once; a bind ended that way counts as not done, so a later session binds again.
+ * ends it without starting a key write or a request; a bind ended that way counts as not done, so
+ * a later session binds again.
  */
 export async function bindDeviceKey(url: string, token: string, dir: string): Promise<void> {
 	const id = boundKey(url, token);
 	bound().add(id);
 	const controller = new AbortController();
-	pending().add(controller);
+	let settle!: () => void;
+	pending().set(controller, new Promise((resolve) => { settle = resolve; }));
 	try {
-		const key = await deviceKey(dir);
+		const key = await deviceKey(dir, controller.signal);
 		if (!key || controller.signal.aborted) return;
 		const response = await fetch(`${url}/api/pair/v1/bind`, {
 			method: "POST",
@@ -119,6 +122,7 @@ export async function bindDeviceKey(url: string, token: string, dir: string): Pr
 	} catch { /* ignored */ } finally {
 		pending().delete(controller);
 		if (controller.signal.aborted) bound().delete(id);
+		settle();
 	}
 }
 
@@ -128,7 +132,12 @@ export function bindOnce(url: string, token: string, dir: string): void {
 	void bindDeviceKey(url, token, dir);
 }
 
-/** Aborts every bind still running in this process, so none keeps it alive after its last session. */
-export function abortBinds(): void {
-	for (const controller of pending()) controller.abort();
+/**
+ * Aborts every bind still running in this process, so none keeps it alive after its last session;
+ * resolves, never rejects, once all of them have settled.
+ */
+export async function abortBinds(): Promise<void> {
+	const binds = [...pending()];
+	for (const [controller] of binds) controller.abort();
+	await Promise.allSettled(binds.map(([, bind]) => bind));
 }

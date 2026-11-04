@@ -80,11 +80,11 @@ it("parks a block and a line the server keeps refusing as too large, reports the
 		for (const request of later) expect(request.blocks.filter((hash) => !ingest.blobs.has(hash))).toHaveLength(1);
 		for (const size of ingest.sizes) expect(size).toBeLessThanOrEqual(MAX_BATCH_BYTES);
 
-		// Nothing else is retried.
+		// Nothing else is retried. Only batch requests count: relay retries its health check, which this server answers with 404, on its own schedule.
 		await new Promise((resolve) => setTimeout(resolve, 1_000));
-		const sent = ingest.responses.length;
+		const sent = ingest.batchRequests;
 		await new Promise((resolve) => setTimeout(resolve, 1_500));
-		expect(ingest.responses.length).toBe(sent);
+		expect(ingest.batchRequests).toBe(sent);
 		expect(ingest.responses.filter((code) => code === 413)).toHaveLength(6);
 	} finally { await h.shutdown(); }
 }, 40_000);
