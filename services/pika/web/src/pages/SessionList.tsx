@@ -6,7 +6,7 @@ import { PikaLink as Link } from "../components/PikaLink";
 import { FilterChip, MenuOption, optionLabel, plainOptions, type FilterOption } from "../components/FilterChip";
 import { Icon, PikaLogo } from "../components/icons";
 import { useScrollRoot } from "../components/Layout";
-import { ModelName } from "../components/ModelName";
+import { ModelMark, ModelName } from "../components/ModelName";
 import { bareModelOf } from "../lib/model";
 import { cx, EmptyState, ErrorState, Page, PageTitle, Pill, Skeleton } from "../components/ui";
 import { ApiError, useApi, type SessionFilters } from "../lib/api";
@@ -415,7 +415,13 @@ function Filters() {
 
 	const current = (key: "device" | "project" | "model") => (key === "model" ? bareModelOf(params.get(key)) : params.get(key));
 	const facet = (key: "device" | "project" | "model", label: string, icon: "device" | "folder" | "model", options: FilterOption[]) => (
-		<FilterChip key={key} icon={icon} label={label} value={optionLabel(options, current(key))}>
+		<FilterChip
+			key={key}
+			icon={icon}
+			label={label}
+			value={optionLabel(options, current(key))}
+			mark={key === "model" && current("model") ? <ModelMark model={current("model")!} size={13} /> : undefined}
+		>
 			{(close) => (
 				<>
 					<MenuOption
@@ -436,7 +442,14 @@ function Filters() {
 								close();
 							}}
 						>
-							{option.label}
+							{key === "model" ? (
+								<span className="inline-flex min-w-0 items-center gap-1.5">
+									<span className="truncate">{option.label}</span>
+									<ModelMark model={option.value} size={13} />
+								</span>
+							) : (
+								option.label
+							)}
 						</MenuOption>
 					))}
 					{facets.isLoading && <div className="px-2 py-1 text-[13px] text-muted">Loading…</div>}

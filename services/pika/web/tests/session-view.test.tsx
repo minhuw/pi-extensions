@@ -124,6 +124,7 @@ describe("session view", () => {
 		expect(chips.querySelector("[data-cwd]")?.getAttribute("title")).toBe("/home/me/code/pika");
 		expect(chips.textContent).toContain("10m");
 		expect(chips.textContent).toContain("claude-sonnet-4-5");
+		expect(chips.querySelector("[data-model-mark]")?.getAttribute("data-model-mark")).toBe("claude");
 		expect(within(chips).getByRole("link", { name: /Parent session/ }).getAttribute("href")).toBe("/s/parent-1");
 		const kpi = (name: string) => document.querySelector<HTMLElement>(`[data-kpi="${name}"] [data-kpi-value]`)?.textContent;
 		await waitFor(() => expect(kpi("turns")).toBe("1"));

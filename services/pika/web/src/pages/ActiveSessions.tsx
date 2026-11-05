@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { Icon } from "../components/icons";
+import { ModelMark } from "../components/ModelName";
 import { useSigningOut } from "../components/Layout";
 import { MessageDialog } from "../components/MessageDialog";
 import { BUTTON, Callout, cx, EmptyState, ErrorState, Page, PageTitle, Pill, SkeletonLines } from "../components/ui";
@@ -111,8 +112,9 @@ function SessionRow({
 						{session.cwd}
 					</span>
 					{model && (
-						<span className="flex min-w-0 items-center gap-1" data-model="">
+						<span className="inline-flex min-w-0 items-center gap-1" data-model="">
 							<span className="mono truncate text-[11.5px]">{model}</span>
+							<ModelMark model={model} size={12} className="shrink-0" />
 						</span>
 					)}
 					<span className="tnum whitespace-nowrap" title={`Connected ${formatDateTime(session.connectedAt)}`} data-online-for="">

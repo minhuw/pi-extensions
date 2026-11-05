@@ -1,5 +1,6 @@
 import { PikaLink as Link } from "../../components/PikaLink";
 import { Markdown } from "../../components/Markdown";
+import { ModelMark } from "../../components/ModelName";
 import { TicketBadge } from "../../components/Ticket";
 import { Pill, Toggle } from "../../components/ui";
 import { formatCount, formatDuration, totalTokens } from "../../lib/format";
@@ -45,7 +46,12 @@ export function TicketCreateTool({ call, result, resultEntry }: ToolRenderProps)
 						{ticket.branch}
 					</span>
 				)}
-				{child?.models[0] && <span title="Model">{child.models[0]}</span>}
+				{child?.models[0] && (
+					<span title="Model" className="inline-flex items-center gap-1">
+						{child.models[0]}
+						<ModelMark model={child.models[0]} size={12} />
+					</span>
+				)}
 				{tokens && <span>{tokens} tokens</span>}
 				{child && <span>{formatDuration(child.durationMs)}</span>}
 				{ranPast !== undefined && <span data-ran-past={ranPast}>{backgroundLabel(ranPast)}</span>}

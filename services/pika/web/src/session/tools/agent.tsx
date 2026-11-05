@@ -1,6 +1,7 @@
 import { PikaLink as Link } from "../../components/PikaLink";
 import { CodeBlock, OutputBlock } from "../../components/code";
 import { Markdown } from "../../components/Markdown";
+import { ModelMark } from "../../components/ModelName";
 import { Pill, Toggle } from "../../components/ui";
 import { formatCount, formatDuration, totalTokens } from "../../lib/format";
 import { bareModelOf } from "../../lib/model";
@@ -60,7 +61,12 @@ export function AgentTool({ call, result }: ToolRenderProps) {
 				<Pill tone={statusTone(status)}>{status}</Pill>
 			</div>
 			<div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-muted">
-				{model && <span title="Model">{model}</span>}
+				{model && (
+					<span title="Model" className="inline-flex items-center gap-1">
+						{model}
+						<ModelMark model={model} size={12} />
+					</span>
+				)}
 				{tokens && <span>{tokens} tokens</span>}
 				{durationMs !== undefined && <span>{formatDuration(durationMs)}</span>}
 				{details.toolUses !== undefined && <span>{details.toolUses} tool uses</span>}

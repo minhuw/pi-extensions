@@ -14,12 +14,15 @@ export function FilterChip({
 	icon,
 	label,
 	value,
+	mark,
 	glyph,
 	children,
 }: {
 	icon?: IconName;
 	label: string;
 	value?: string;
+	/** A mark after the value, such as a model's logo. It is hidden from the button's name. */
+	mark?: ReactNode;
 	glyph?: ReactNode;
 	children: (close: () => void) => ReactNode;
 }) {
@@ -93,9 +96,14 @@ export function FilterChip({
 				)}
 			>
 				{icon && <Icon name={icon} size={14} className={value ? undefined : "text-muted"} />}
-				<span className="flex min-w-0">
+				<span className="flex min-w-0 items-center">
 					{label}
-					{value && <span className={glyph ? "sr-only" : "max-w-[180px] truncate font-medium"}>: {value}</span>}
+					{value && (
+						<span className={cx("font-medium", glyph ? "sr-only" : "inline-flex max-w-[180px] min-w-0 items-center gap-1")}>
+							<span className="truncate">: {value}</span>
+							{mark}
+						</span>
+					)}
 				</span>
 				{glyph && (
 					<span aria-hidden="true" className="flex items-center">

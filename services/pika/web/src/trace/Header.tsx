@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { PikaLink as Link } from "../components/PikaLink";
 import { Icon, type IconName } from "../components/icons";
+import { ModelMark } from "../components/ModelName";
 import { TicketBadge } from "../components/Ticket";
 import { cx } from "../components/ui";
 import { linkTicket } from "../lib/tickets";
@@ -121,8 +122,9 @@ export function SessionChips({ session }: { session: SessionDetail }) {
 				<span className="tnum">{formatDuration(session.durationMs)}</span>
 			</Chip>
 			{session.models.map((model) => (
-				<span key={model} className="mono mx-0.5 inline-flex h-5 items-center rounded-[3px] bg-hover px-1.5 text-[11.5px] text-ink/80" title="Model">
+				<span key={model} className="mono mx-0.5 inline-flex h-5 items-center gap-1 rounded-[3px] bg-hover px-1.5 text-[11.5px] text-ink/80" title="Model">
 					{model}
+					<ModelMark model={model} size={12} />
 				</span>
 			))}
 			{session.parentSessionId && (

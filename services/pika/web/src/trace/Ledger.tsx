@@ -1,6 +1,7 @@
 import { defaultRangeExtractor, useVirtualizer, type Range } from "@tanstack/react-virtual";
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { FilterChip, MenuCheck } from "../components/FilterChip";
+import { ModelMark } from "../components/ModelName";
 import { PikaLink as Link } from "../components/PikaLink";
 import { Icon } from "../components/icons";
 import { ReportTag, TicketBadge } from "../components/Ticket";
@@ -310,7 +311,10 @@ const RecordRow = memo(function RecordRow({
 							<Status record={record} sessionId={row.sessionId} running={running} />
 						</span>
 						{record.kind === "llm" && record.model && record.model !== primaryModel && (
-							<span className="mono ml-auto shrink-0 truncate pl-1 text-[11.5px] font-normal text-muted">{record.model}</span>
+							<span className="mono ml-auto inline-flex shrink-0 items-center gap-1 pl-1 text-[11.5px] font-normal text-muted">
+								<span className="max-w-[16ch] truncate">{record.model}</span>
+								<ModelMark model={record.model} size={12} />
+							</span>
 						)}
 					</>
 				)}
