@@ -67,7 +67,7 @@ describe("agent type registry", () => {
     it("case-insensitive lookup works for getAgentConfig", () => {
       const config = getAgentConfig("recon");
       expect(config?.name).toBe("recon");
-      expect(config?.model).toBe("openai/gpt-6-luna");
+      expect(config?.model).toBe("claude-haiku-5-5");
     });
 
     it("resolveType returns canonical key or undefined", () => {
@@ -91,11 +91,11 @@ describe("agent type registry", () => {
       expect(config.builtinToolNames).not.toContain("write");
     });
 
-    it("recon uses GPT-6 Luna with max thinking and fast tier", () => {
+    it("recon uses Claude Haiku 5.5 with max thinking and no tier override", () => {
       const cfg = getAgentConfig("recon");
-      expect(cfg?.model).toBe("openai/gpt-6-luna");
+      expect(cfg?.model).toBe("claude-haiku-5-5");
       expect(cfg?.thinking).toBe("max");
-      expect(cfg?.serviceTier).toBe("fast");
+      expect(cfg?.serviceTier).toBeUndefined();
     });
 
     it("expert pins Astra with xhigh thinking and read-only built-ins", () => {

@@ -61,7 +61,7 @@ Select an existing agent type with `subagent_type` (`agentType` in workflows). I
 
 | Type | Job | Tools | Model defaults |
 | --- | --- | --- | --- |
-| `recon` | Read-only reconnaissance; compressed handoff | read-only; must call a tool | `openai/gpt-6-luna`, thinking `max`, fast tier |
+| `recon` | Read-only reconnaissance; compressed handoff | read-only; must call a tool | `claude-haiku-5-5` from any provider with credentials, thinking `max`, no tier override |
 | `worker` | Bounded implementation and verification | coding tools; must call a tool | inherit parent |
 | `reviewer` | Read-only severity-ranked review | read-only; must call a tool | inherit parent |
 | `ticket` | Hidden (`model_visible: false`); one superagent ticket in its own worktree, spawned over RPC only | all built-ins and extensions; nested recon/worker/reviewer/expert; must call a tool | inherit parent |
@@ -73,7 +73,7 @@ The embedded fleet keeps Pi's built-in `grep`/`find` and inherits installed sear
 
 ### Service tier
 
-Recon defaults to fast tier, which requests OpenAI priority service. Agent frontmatter is authoritative when set; for example:
+No embedded agent sets a service tier. Agent frontmatter is authoritative when set; for example, an OpenAI agent can request priority service with:
 
 ```yaml
 model: openai/gpt-6-luna
