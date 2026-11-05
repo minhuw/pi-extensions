@@ -383,7 +383,8 @@ describe("/pika login", () => {
 			await waitFor(async () => ingest.data(key) === await readText(file) && ingest.sessionRequests(h.session.sessionId).length === 2, 5_000, "uploads after the login");
 			await h.session.prompt("/pika");
 			expect(ui.last?.message).toMatch(/^Last error: none$/m);
-			expect(ui.last?.message).not.toMatch(/Stopped|401/);
+			// pika's own wording: a bare 401 also matches the upload time's milliseconds, the session id, or the port.
+			expect(ui.last?.message).not.toMatch(/^Stopped:|\(401\)/m);
 
 			// A healthy uploader is replaced too, so a login also ends a long backoff.
 			const healthy = currentUploader();
