@@ -108,13 +108,7 @@ export function SessionChips({ session }: { session: SessionDetail }) {
 					{deviceLabel(session)}
 				</span>
 			</Chip>
-			<Link to={`/?project=${encodeURIComponent(session.project)}`} className="rounded-sm hover:bg-hover">
-				<Chip icon="folder">
-					<span className="truncate text-ink/80">{session.project || "—"}</span>
-				</Chip>
-			</Link>
-			<RepositoryLink url={session.repository} />
-			<CopyPath path={session.cwd} />
+			{repositoryLink(session.repository) ? <RepositoryLink url={session.repository} /> : <CopyPath path={session.cwd} />}
 			<Chip icon="calendar" title={formatDateTime(session.startedAt)}>
 				<span data-started="">{formatRelative(session.startedAt)}</span>
 			</Chip>

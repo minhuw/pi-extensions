@@ -183,6 +183,8 @@ describe("session view", () => {
 		]);
 		expect(link.textContent).toBe("minhuw/pi-extensions");
 		expect(link.querySelector("svg")?.getAttribute("data-icon")).toBe("github");
+		// The repository stands in for the working directory.
+		expect(document.querySelector("[data-session-chips] [data-cwd]")).toBeNull();
 		github.unmount();
 
 		const other = renderApp("/s/s1", withRepository("https://gitlab.example.com/team/proj"));
@@ -195,6 +197,7 @@ describe("session view", () => {
 			const view = renderApp("/s/s1", withRepository(repository));
 			await screen.findByRole("heading", { name: "Fix the failing test" });
 			expect(repositoryLink()).toBeNull();
+			expect(document.querySelector("[data-session-chips] [data-cwd]")?.getAttribute("title")).toBe("/home/me/code/pika");
 			view.unmount();
 		}
 	});
