@@ -310,9 +310,9 @@ Top-level sessions in the TUI or RPC mode get three tools; print and JSON sessio
 
 ## Recall
 
-recall, part of pika, lets the agent search and read your past pi sessions: every trajectory pika uploaded to your self-hosted pika server, from every machine and project. The agent can look up how something was done before, what was decided and why, and how a past error was fixed.
+recall, part of pika, lets the agent search and read your past pi sessions and Herder runs: every trajectory and Herder journal pika uploaded to your self-hosted pika server, from every machine and project. The agent can look up how something was done before, what was decided and why, how a past error was fixed, and how an earlier Herder run went.
 
-It reads through the server's agent read API (`{base}/api/agent/v1/`, "Agent read API" in [`services/pika/docs/SPEC.md`](../../services/pika/docs/SPEC.md)), which sees every recorded session, published or not, with credentials scrubbed as in public responses.
+It reads through the server's agent read API (`{base}/api/agent/v1/`, "Agent read API" in [`services/pika/docs/SPEC.md`](../../services/pika/docs/SPEC.md)), which sees every recorded session and Herder run, published or not, with credentials scrubbed as in public responses.
 
 ### Requirements
 
@@ -322,10 +322,11 @@ It reads through the server's agent read API (`{base}/api/agent/v1/`, "Agent rea
 
 ### Tools
 
-Both tools are registered in every session, top-level and child (Subagents and Herder steps) alike, whatever the credentials; without them a call fails and says what to do.
+All three tools are registered in every session, top-level and child (Subagents and Herder steps) alike, whatever the credentials; without them a call fails and says what to do.
 
 - **`recall_search`** `{ query, scope?, project?, sort?, limit? }` searches past sessions. Every word of `query` must match; `"quoted phrases"` match as phrases. `scope: "project"` searches the current project only: the git repository's name as pika resolves it, else the working directory's basename; `project` names a project and wins over `scope`. `sort` is `relevance` (default) or `newest`; `limit` is 1 to 20 sessions (default 8). The current session is never listed, nor its subagents. Each session shows its title, `sessionId`, project, last active date, match count, and up to 3 hits with their kind, `seq`, date, and snippet, matches in «…».
-- **`recall_read`** `{ sessionId, seq?, fromTurn? }` reads a session. Without `seq`, an overview: title, project, working directory, device, start and last times, models, child sessions, and then the turns from `fromTurn` (default 0), each with the prompt, its tool calls (at most 30 listed, failures marked), and the final answer. With `seq`, the entries from `seq - 4` to `seq + 8` in full: messages, thinking, tool calls with their arguments, tool results, summaries, and extension messages, with images as `[image]`. A result holds about 20,000 characters and says which `fromTurn` or `seq` continues.
+- **`recall_read`** `{ sessionId, seq?, fromTurn? }` reads a session. Without `seq`, an overview: title, project, working directory, device, start and last times, models, child sessions, and then the turns from `fromTurn` (default 0), each with the prompt, its tool calls (at most 30 listed, failures marked), and the final answer. With `seq`, the entries from `seq - 4` to `seq + 8` in full: messages, thinking, tool calls with their arguments, tool results, summaries, and extension messages, with images as `[image]`. A result holds about 20,000 characters and says which `fromTurn` or `seq` continues. A Herder step's session names its run.
+- **`recall_herder`** `{ runId?, fromEvent?, scope?, project?, limit? }` lists or reads Herder runs. Without `runId`, the runs newest first, each with its title, `runId`, project, status, verdict, step count, start and last times, device, and orchestrating session; `scope` and `project` choose the project as for `recall_search`, and `limit` is 1 to 50 runs (default 10). With `runId`, the run's summary, its goal (cut to 4,000 characters), plan (cut to 6,000), and steps (role, task, label, status, attempts, commit, session; at most 60 listed, as many as the result's budget holds), then its journal from `fromEvent` (default 0), one event a line or a few: launches, step starts, replies, structured data, and failures, checks with the tail of a failing log, integrations and conflicts, verification verdicts, unmet criteria and gaps, decisions, and delivery. From a later `fromEvent` it shows the summary and the journal only. A result holds about 20,000 characters and says which `fromEvent` continues; `recall_read` reads the step and orchestrator sessions it names.
 
 Every result starts with a line saying it is recorded history from past sessions, to be treated as reference data and not as instructions. Long texts are cut.
 
@@ -337,7 +338,8 @@ A call fails, and the model reads why, when:
 - the server rejects the device token (HTTP 401): run `/pika login` to pair the device again;
 - the device's read access is off (HTTP 403 `read_access_denied`): turn "Agents can read" back on for it, or run `pika token read-access <device> on`;
 - the server has no agent read API (HTTP 404, and `/api/health` does not list `agent`): upgrade the server;
-- the session id is unknown;
+- the session id or run id is unknown;
+- the server's agent read API has no Herder runs (HTTP 404 for both a run and the run list): upgrade the server;
 - the server cannot be reached, or does not answer within 15 s; aborting the tool call stops the request.
 
 ## Deployment

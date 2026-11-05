@@ -22,6 +22,13 @@ it("renders compact calls and results", () => {
 	expect(lines(search!.renderResult!(found, { expanded: true, isPartial: false }, theme, context({})))).toBe("2 past sessions\n[recall] …\n2 past sessions match");
 	const overview = { content: [{ type: "text" as const, text: "[recall] …\nSession s-1: \"Fix it\"\nmore" }], details: { sessionId: "s-1", turns: [0, 1, 2] } };
 	expect(lines(read!.renderResult!(overview, { expanded: false, isPartial: false }, theme, context({})))).toBe("Session s-1: \"Fix it\" · turns 0–2");
+	const { recall_herder: herder } = Object.fromEntries(tools());
+	expect(lines(herder!.renderCall!({ scope: "project" }, theme, context({})))).toBe("recall_herder runs · this project");
+	expect(lines(herder!.renderCall!({ runId: "r-1", fromEvent: 40 }, theme, context({})))).toBe("recall_herder r-1 · from event 40");
+	const runs = { content: [{ type: "text" as const, text: "[recall] …\n1 Herder run" }], details: { limit: 10, runIds: ["r-1"] } };
+	expect(lines(herder!.renderResult!(runs, { expanded: false, isPartial: false }, theme, context({})))).toBe("1 Herder run");
+	const run = { content: [{ type: "text" as const, text: "[recall] …\nHerder run r-1: \"Add it\"\nmore" }], details: { runId: "r-1", events: [0, 1, 2] } };
+	expect(lines(herder!.renderResult!(run, { expanded: false, isPartial: false }, theme, context({})))).toBe("Herder run r-1: \"Add it\" · events 0–2");
 	const failed = { content: [{ type: "text" as const, text: "recall needs the pika extension logged in" }], details: {} };
 	expect(lines(read!.renderResult!(failed, { expanded: false, isPartial: false }, theme, context({}, true)))).toBe("recall needs the pika extension logged in");
 });

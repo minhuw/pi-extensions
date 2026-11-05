@@ -97,10 +97,11 @@ it("falls back to the cwd's basename without a resolver, when it fails, or when 
 	expect(pika.requestsTo("search").map((request) => request.query.get("project"))).toEqual(["my-project", "my-project", "my-project"]);
 });
 
-it("registers both tools in every mode, with prompt guidance, whatever the credentials", async () => {
+it("registers every tool in every mode, with prompt guidance, whatever the credentials", async () => {
 	setCredentials(undefined);
 	const h = await session({ mode: "print" });
-	expect(h.session.getActiveToolNames()).toEqual(expect.arrayContaining(["recall_search", "recall_read"]));
+	expect(h.session.getActiveToolNames()).toEqual(expect.arrayContaining(["recall_search", "recall_read", "recall_herder"]));
 	expect(h.session.systemPrompt).toContain("recall_search");
 	expect(h.session.systemPrompt).toContain("Use recall_search when the user refers to earlier work");
+	expect(h.session.systemPrompt).toContain("Use recall_herder when the user asks how an earlier Herder run went");
 });
