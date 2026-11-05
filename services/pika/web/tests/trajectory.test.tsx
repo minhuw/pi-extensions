@@ -534,8 +534,9 @@ describe("session views", () => {
 		fireEvent.click(within(views).getByRole("radio", { name: "Transcript" }));
 		await waitFor(() => expect(document.querySelector("[data-turn-list]")).not.toBeNull());
 		expect(document.querySelector("[data-trajectory]")).toBeNull();
-		// The transcript has the compact overview above it, loaded on demand like the trajectory.
-		await waitFor(() => expect(document.querySelector("[data-transcript-overview] [data-overview][data-compact]")).not.toBeNull());
+		// The transcript has the same timeline as the trajectory, loaded on demand.
+		await waitFor(() => expect(document.querySelector("[data-transcript-overview] [data-overview]")).not.toBeNull());
+		expect(document.querySelector("[data-transcript-overview] [data-overview][data-compact]")).toBeNull();
 		expect(localStorage.getItem(VIEW_STORAGE_KEY)).toBe("transcript");
 		first.unmount();
 

@@ -10,13 +10,14 @@ import { ContextButton, ContextDrawerProvider } from "../context/ContextDrawer";
 import { ApiError, useApi } from "../lib/api";
 import { formatCount } from "../lib/format";
 import { useOnlineSessions } from "../lib/relay";
-import type { OnlineSession, SessionDetail } from "../lib/types";
+import type { OnlineSession, SessionDetail, SessionTrace } from "../lib/types";
 import { ViewStateProvider } from "../lib/viewState";
 import { SessionSlotsContext, SessionViewContext, type SessionSlots } from "../session/context";
 import { isLive, useLiveUpdates } from "../session/live";
 import { HiddenBadge, SessionManageActions } from "../session/manage";
 import { InlineAgentChild, sessionContextFor } from "../session/subagents";
 import { TurnList } from "../session/TurnList";
+import type { OverviewItem } from "../trace/axis";
 import { useTrace } from "../trace/data";
 import { KpiStrip, SessionChips, ViewSwitch, type SessionViewMode } from "../trace/Header";
 import { AgentTreeSkeleton } from "../tree/Skeleton";
@@ -68,6 +69,29 @@ const publicSlots: SessionSlots = { AgentChild: InlineAgentChild };
 // The trajectory view and its canvas overview load on demand, in their own chunk.
 const Trajectory = lazy(() => import("../trace/Trajectory").then((module) => ({ default: module.Trajectory })));
 const Overview = lazy(() => import("../trace/Overview").then((module) => ({ default: module.Overview })));
+
+/** The trajectory page's timeline, full width, above the transcript and the agent tree. */
+function SessionTimeline({ trace, onSelect }: { trace: SessionTrace; onSelect: (item: OverviewItem) => void }) {
+	return (
+		<div className={cx(TRAJECTORY_COLUMN, "mt-4")} data-transcript-overview="">
+			<div className="-mx-6 min-h-[84px] border-y border-line px-6 pt-2 pb-1.5">
+				<ErrorBoundary
+					label="the transcript's timeline"
+					resetKey={trace}
+					fallback={() => (
+						<div className="flex h-[64px] items-center justify-center text-[12.5px] text-muted" data-overview-error="">
+							The timeline could not be drawn.
+						</div>
+					)}
+				>
+					<Suspense fallback={null}>
+						<Overview trace={trace} onSelect={onSelect} />
+					</Suspense>
+				</ErrorBoundary>
+			</div>
+		</div>
+	);
+}
 const AgentTree = lazy(() => import("../tree/AgentTree").then((module) => ({ default: module.AgentTree })));
 
 /** What a crashed trajectory shows: the transcript reads the same session without it. */
@@ -218,16 +242,21 @@ function SessionPage({ id }: { id: string }) {
 			),
 		[setParams],
 	);
+	const selectOverview = useCallback(
+		(item: OverviewItem) => {
+			const seq = item.record?.seq ?? (item.turnIndex !== undefined ? trace.data?.turns.find((turn) => turn.index === item.turnIndex)?.startSeq : undefined);
+			if (seq !== undefined) focusOn(seq);
+		},
+		[trace.data, focusOn],
+	);
 
 	const context = useMemo(() => sessionContextFor(id, session.data, { showHidden }), [id, session.data, showHidden]);
 
 	if (session.error instanceof ApiError && session.error.status === 404) return <NotFoundPage what="session" />;
 
 	const live = session.data ? isLive(session.data.lastAt) : false;
-	const column = shown === "transcript" ? TRANSCRIPT_COLUMN : TRAJECTORY_COLUMN;
-
 	const header = session.data && (
-		<header className={cx(column, "pt-4")} data-session-header="">
+		<header className={cx(TRAJECTORY_COLUMN, "pt-4")} data-session-header="">
 			<Breadcrumb session={session.data} />
 			<div className="mt-1.5 flex items-start gap-4 max-md:flex-col">
 				<div className="min-w-0 flex-1">
@@ -257,7 +286,6 @@ function SessionPage({ id }: { id: string }) {
 							</span>
 						)}
 					</div>
-					<SessionChips session={session.data} />
 				</div>
 				<div className="flex shrink-0 flex-wrap items-center gap-2 pt-1">
 					{shown === "transcript" && (
@@ -288,6 +316,8 @@ function SessionPage({ id }: { id: string }) {
 					</div>
 				</div>
 			</div>
+			{/* Under the title and the controls, so a long chip row is not squeezed into the column beside the view switch. */}
+			<SessionChips session={session.data} />
 			<KpiStrip session={session.data} trace={trace.data} onOpenTree={family ? () => setView("agents") : undefined} />
 		</header>
 	);
@@ -334,6 +364,7 @@ function SessionPage({ id }: { id: string }) {
 			) : shown === "agents" ? (
 				<div className="pb-32" data-session-page="agents">
 					{header}
+					{trace.data && trace.data.records.length > 0 && <SessionTimeline trace={trace.data} onSelect={selectOverview} />}
 					<div className="mt-3 border-t border-line">
 						<ErrorBoundary label="the agent tree" resetKey={id} fallback={({ reset }) => <AgentTreeError reset={reset} />}>
 							<Suspense fallback={<AgentTreeSkeleton />}>
@@ -345,36 +376,13 @@ function SessionPage({ id }: { id: string }) {
 			) : (
 				<div className="pb-32" data-session-page="transcript">
 					{header}
-					<div className={cx(TRANSCRIPT_COLUMN, "mt-4")}>
+					{trace.data && trace.data.records.length > 0 && <SessionTimeline trace={trace.data} onSelect={selectOverview} />}
+					<div className={cx(TRANSCRIPT_COLUMN, "mt-4")} data-transcript-body="">
 						{traceMissing && wanted === "trajectory" && (
 							<div className="mb-4">
 								<Callout title="Transcript only">
 									<div className="text-[13px]">This server does not serve session traces yet, so the trajectory view is unavailable.</div>
 								</Callout>
-							</div>
-						)}
-						{trace.data && trace.data.records.length > 0 && (
-							<div className="mb-4 min-h-[84px] border-y border-line pt-2 pb-1.5" data-transcript-overview="">
-								<ErrorBoundary
-									label="the transcript's timeline"
-									resetKey={trace.data}
-									fallback={() => (
-										<div className="flex h-[64px] items-center justify-center text-[12.5px] text-muted" data-overview-error="">
-											The timeline could not be drawn; the transcript below is complete.
-										</div>
-									)}
-								>
-									<Suspense fallback={null}>
-										<Overview
-											trace={trace.data}
-											compact
-											onSelect={(item) => {
-												const seq = item.record?.seq ?? (item.turnIndex !== undefined ? trace.data.turns.find((turn) => turn.index === item.turnIndex)?.startSeq : undefined);
-												if (seq !== undefined) focusOn(seq);
-											}}
-										/>
-									</Suspense>
-								</ErrorBoundary>
 							</div>
 						)}
 						<TurnList key={id} sessionId={id} showHidden={showHidden} focusSeq={focusSeq} onFocusHandled={clearFocus} />

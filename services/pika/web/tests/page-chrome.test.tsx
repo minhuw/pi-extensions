@@ -106,19 +106,25 @@ describe("page width", () => {
 		expect(page.className.match(/max-w-\[[^\]]+\]/g)).toEqual([column]);
 	});
 
-	it("gives the session page the full width, and the transcript a wider reading column", async () => {
+	it("gives the session header the full width, and the transcript body a reading column", async () => {
 		const server = createFakeServer({ sessions: [{ detail: summary("s1", { title: "Fix the parser" }), turns: [], entries: [] }] });
 		const first = renderApp("/s/s1", server.fetch);
 		const heading = await screen.findByRole("heading", { name: "Fix the parser", level: 1 });
 		const header = heading.closest<HTMLElement>("[data-session-header]")!;
 		for (const name of TRAJECTORY_COLUMN.split(" ")) expect(header.classList).toContain(name);
 		expect(header.className).not.toMatch(/max-w-/);
+		expect(header.querySelector("[data-kpi-strip]")?.parentElement).toBe(header);
 		first.unmount();
 
 		renderApp("/s/s1?view=transcript", server.fetch);
 		const again = await screen.findByRole("heading", { name: "Fix the parser", level: 1 });
-		const column = again.closest<HTMLElement>("[data-session-header]")!;
-		for (const name of TRANSCRIPT_COLUMN.split(" ")) expect(column.classList).toContain(name);
+		const sessionHeader = again.closest<HTMLElement>("[data-session-header]")!;
+		for (const name of TRAJECTORY_COLUMN.split(" ")) expect(sessionHeader.classList).toContain(name);
+		expect(sessionHeader.className).not.toMatch(/max-w-/);
+		expect(sessionHeader.querySelector("[data-kpi-strip]")?.parentElement).toBe(sessionHeader);
+		const body = document.querySelector("[data-transcript-body]")!;
+		expect(body.contains(again)).toBe(false);
+		for (const name of TRANSCRIPT_COLUMN.split(" ")) expect(body.classList).toContain(name);
 		expect(TRANSCRIPT_COLUMN).toContain("max-w-[1100px]");
 	});
 });
