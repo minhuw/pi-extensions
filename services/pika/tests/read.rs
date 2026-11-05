@@ -712,7 +712,8 @@ async fn herder_runs_and_run_detail() {
             { "runId": RUN2, "device": DESKTOP, "deviceName": DESKTOP_NAME, "repo": "gadgets", "title": "Speed up gadgets", "status": "running",
               "startedAt": "2026-10-22T09:00:00.000Z", "lastAt": "2026-10-22T09:01:00.000Z", "stepCount": 1 },
             { "runId": RUN_ID, "device": DEVICE, "deviceName": DEVICE_NAME, "repo": "widgets", "title": "Add pagination", "status": "delivered",
-              "verdict": "met", "startedAt": "2026-10-21T10:00:00.000Z", "lastAt": "2026-10-21T10:14:00.000Z", "stepCount": 2 },
+              "verdict": "met", "startedAt": "2026-10-21T10:00:00.000Z", "lastAt": "2026-10-21T10:14:00.000Z", "stepCount": 2,
+              "sessionId": "orch-1" },
         ])
     );
     assert_eq!(app.all_pages("herder/runs", 1).await, *runs["items"].as_array().unwrap());

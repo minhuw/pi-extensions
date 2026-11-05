@@ -25,6 +25,9 @@ pub struct RunSummary {
     pub started_at: Option<String>,
     pub last_at: Option<String>,
     pub step_count: i64,
+    /// The orchestrating pi session, from `run.started`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     #[serde(skip)]
     last_at_ms: i64,
 }
@@ -72,7 +75,8 @@ pub struct RunDetail {
     pub steps: Vec<Step>,
 }
 
-const RUN_COLUMNS: &str = "run_id, device, repo, title, finished_status, verdict, started_at, last_at, event_count, step_count";
+const RUN_COLUMNS: &str =
+    "run_id, device, repo, title, finished_status, verdict, started_at, last_at, event_count, step_count, session_id";
 
 fn run_summary(r: &Row) -> rusqlite::Result<RunSummary> {
     let last_at: i64 = r.get(7)?;
@@ -89,25 +93,30 @@ fn run_summary(r: &Row) -> rusqlite::Result<RunSummary> {
         started_at: iso(if has_time { started_at } else { None }),
         last_at: iso(has_time.then_some(last_at)),
         step_count: r.get(9)?,
+        session_id: r.get(10)?,
         last_at_ms: last_at,
     })
 }
 
+/// Runs newest `lastAt` first; `repo` keeps only the runs of that repository, as `RunSummary.repo` names it.
 pub fn list(conn: &Connection, p: &Params) -> ReadResult<Page<RunSummary>> {
     let limit = p.limit(RUN_LIMIT, MAX_RUN_LIMIT)?;
+    let repo = p.get("repo");
     let items = match p.cursor()? {
         Some(key) => {
             let (last_at, run_id) = (cursor_int(&key, 0)?, cursor_str(&key, 1)?);
             conn.prepare_cached(&format!(
                 "SELECT {RUN_COLUMNS} FROM herder_runs WHERE last_at <= ?1 AND (last_at < ?1 OR run_id < ?2)
-                 ORDER BY last_at DESC, run_id DESC LIMIT ?3"
+                 AND (?4 IS NULL OR repo = ?4) ORDER BY last_at DESC, run_id DESC LIMIT ?3"
             ))?
-            .query_map(params![last_at, run_id, limit + 1], run_summary)?
+            .query_map(params![last_at, run_id, limit + 1, repo], run_summary)?
             .collect::<rusqlite::Result<Vec<_>>>()?
         }
         None => conn
-            .prepare_cached(&format!("SELECT {RUN_COLUMNS} FROM herder_runs ORDER BY last_at DESC, run_id DESC LIMIT ?1"))?
-            .query_map([limit + 1], run_summary)?
+            .prepare_cached(&format!(
+                "SELECT {RUN_COLUMNS} FROM herder_runs WHERE ?2 IS NULL OR repo = ?2 ORDER BY last_at DESC, run_id DESC LIMIT ?1"
+            ))?
+            .query_map(params![limit + 1, repo], run_summary)?
             .collect::<rusqlite::Result<Vec<_>>>()?,
     };
     let names = DeviceNames::load(conn)?;
@@ -122,7 +131,7 @@ fn document(conn: &Connection, key: &str) -> ReadResult<Option<String>> {
 pub fn detail(conn: &Connection, blobs: &BlobStore, run_id: &str) -> ReadResult<RunDetail> {
     let (rid, run) = conn
         .prepare_cached(&format!("SELECT {RUN_COLUMNS}, rid FROM herder_runs WHERE run_id = ?1"))?
-        .query_row([run_id], |r| Ok((r.get::<_, i64>(10)?, run_summary(r)?)))
+        .query_row([run_id], |r| Ok((r.get::<_, i64>(11)?, run_summary(r)?)))
         .optional()?
         .ok_or(ReadError::NotFound)?;
     let run = RunSummary { device_name: DeviceNames::load(conn)?.of(&run.device), ..run };

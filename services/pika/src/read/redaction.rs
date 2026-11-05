@@ -7,8 +7,11 @@
 //! Titles and turns' prompts and replies are read as derive stored them, cut, so a credential across the cut may be
 //! left without its end; they are scrubbed as cut text (`Scope::cut_text`) when they are as long as derive keeps.
 
+use serde_json::Value;
+
 use super::Page;
 use super::entries::Entry;
+use super::herder::{RunDetail, RunSummary};
 use super::sessions::{SessionDetail, SessionSummary, SessionTree, Turn, Updates};
 use super::trace::{Record, Trace};
 use crate::redact::{Scope, scrub_content, scrub_text};
@@ -101,6 +104,41 @@ pub fn trace(trace: &mut Trace) {
     }
     scope.finish();
     super::trace::finish_public(trace);
+}
+
+pub fn runs(page: &mut Page<RunSummary>) {
+    let mut scope = Scope::new();
+    page.items.iter_mut().for_each(|run| scope.text(&mut run.title));
+    scope.finish();
+}
+
+/// A run's title, goal, plan, and steps' names as text. Journal events are Herder's own records, so their strings
+/// are scrubbed whatever their field is called (a step's `key` stays), except the agent-written `data` of a step and
+/// a launch's `args`, which are session content.
+pub fn run(detail: &mut RunDetail) {
+    let mut scope = Scope::new();
+    scope.text(&mut detail.run.title);
+    text(&mut scope, &mut detail.goal);
+    text(&mut scope, &mut detail.plan);
+    for event in &mut detail.events {
+        match &mut event.data {
+            Value::Object(fields) => {
+                for (key, value) in fields.iter_mut() {
+                    if key == "data" || key == "args" { scope.content(value) } else { scope.strings(value) }
+                }
+            }
+            data => scope.strings(data),
+        }
+    }
+    for step in &mut detail.steps {
+        scope.text(&mut step.key);
+        scope.text(&mut step.id);
+        scope.text(&mut step.role);
+        text(&mut scope, &mut step.task);
+        text(&mut scope, &mut step.label);
+        text(&mut scope, &mut step.phase);
+    }
+    scope.finish();
 }
 
 /// Each entry's line is session content.

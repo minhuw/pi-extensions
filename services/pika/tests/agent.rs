@@ -20,6 +20,8 @@ const PASSWORD: &str = "correct horse battery";
 const SESSION: &str = "a9e47000-0000-4000-8000-000000000001";
 const CHILD: &str = "a9e47000-0000-4000-8000-0000000000c1";
 const OTHER: &str = "a9e47000-0000-4000-8000-000000000002";
+/// A Herder run in `widgets` that `SESSION` orchestrated and whose step ran in `CHILD`.
+const RUN: &str = "20261020-090010-a9e4";
 
 const GITHUB_TOKEN: &str = "ghp_FAKEagentFAKEagentFAKEagentFAKEagent";
 const ENV_SECRET: &str = "s3cr3t-Value-91827364";
@@ -107,7 +109,10 @@ impl App {
     }
 
     async fn upload(&self, id: &str, lines: &[String]) {
-        let batch = json!({ "streams": [stream(&format!("session:{id}"), "session", 0, lines)] });
+        self.ingest(json!({ "streams": [stream(&format!("session:{id}"), "session", 0, lines)] })).await;
+    }
+
+    async fn ingest(&self, batch: Value) {
         let request = Request::post("/api/ingest/v1/batch")
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
@@ -179,6 +184,31 @@ fn child() -> Vec<String> {
     ])
 }
 
+/// `RUN`'s journal: its title, a check's command and log, and the step's reply and structured output hold credentials.
+fn journal() -> Vec<String> {
+    let at = |s: u32| format!("2026-10-20T09:{:02}:{:02}.000Z", 10 + s / 60, s % 60);
+    lines(&[
+        json!({ "v": 1, "t": "run.started", "at": at(0), "runId": RUN, "title": format!("Rotate {GITHUB_TOKEN}"), "base": "abc1234",
+                "runtime": "1.0.0", "repo": "/home/me/code/widgets", "sessionId": SESSION }),
+        json!({ "v": 1, "t": "goal.approved", "at": at(1), "sha256": "9a1f", "approvedBy": "user",
+                "checks": [{ "id": "test", "command": format!("DB_PASSWORD={ENV_SECRET} npm test"), "timeoutMs": 600000 }] }),
+        json!({ "v": 1, "t": "script.launched", "at": at(2), "launch": 1, "scriptSha256": "5d5d", "head": "abc1234",
+                "args": { "api_key": "FAKEargsKey0042" } }),
+        json!({ "v": 1, "t": "step.started", "at": at(3), "key": "impl-T1", "id": "impl-T1", "occurrence": 0, "fingerprint": "f1",
+                "attempt": 1, "role": "worker", "write": true, "base": "abc1234", "task": "T1", "launch": 1, "label": "Implement T1",
+                "sessionId": CHILD }),
+        json!({ "v": 1, "t": "step.completed", "at": at(64), "key": "impl-T1", "fingerprint": "f1", "status": "ok", "commit": "c0ffee1234",
+                "text": format!("Rotated {GITHUB_TOKEN}."), "data": { "token": LINK_TOKEN, "files": 2 }, "sessionId": CHILD }),
+        json!({ "v": 1, "t": "check.completed", "at": at(65), "checkId": "test", "commit": "d00d1234", "exitCode": 0, "timedOut": false,
+                "durationMs": 900, "logRef": "logs/test.log", "tail": format!("DB_PASSWORD={ENV_SECRET} ok"), "purpose": "integrate" }),
+        json!({ "v": 1, "t": "integrate.completed", "at": at(66), "key": "impl-T1", "from": "abc1234", "source": "c0ffee1234",
+                "head": "d00d1234", "tree": "7ree", "message": "fix: rotate the token", "task": "T1", "checks": [] }),
+        json!({ "v": 1, "t": "verify.completed", "at": at(67), "head": "d00d1234", "checks": [], "verdict": "met", "verifierRan": true,
+                "criteria": [{ "id": "C1", "status": "met", "evidence": "tests pass" }] }),
+        json!({ "v": 1, "t": "run.finished", "at": at(68), "status": "delivered", "reason": "done" }),
+    ])
+}
+
 /// Another root session, in project `gadgets`, a day later.
 fn other() -> Vec<String> {
     lines(&[
@@ -193,13 +223,25 @@ async fn world(auth: AuthMode) -> App {
     app.upload(SESSION, &session()).await;
     app.upload(CHILD, &child()).await;
     app.upload(OTHER, &other()).await;
+    let key = format!("herder:{RUN}");
+    app.ingest(json!({
+        "streams": [stream(&key, "herder-journal", 0, &journal())],
+        "documents": [
+            { "key": format!("{key}:goal.md"), "kind": "herder-goal", "runId": RUN, "content": format!("# Goal\nRevoke {GITHUB_TOKEN}.") },
+            { "key": format!("{key}:plan.md"), "kind": "herder-plan", "runId": RUN, "content": format!("# Plan\n- T1: replace {GITHUB_TOKEN}") },
+        ],
+    }))
+    .await;
     app
 }
 
-const ROUTES: [&str; 8] = ["facets", "sessions", "sessions/{id}", "sessions/{id}/tree", "sessions/{id}/turns", "sessions/{id}/entries", "sessions/{id}/trace", "search?q=zebra"];
+const ROUTES: [&str; 10] = [
+    "facets", "sessions", "sessions/{id}", "sessions/{id}/tree", "sessions/{id}/turns", "sessions/{id}/entries", "sessions/{id}/trace",
+    "search?q=zebra", "herder/runs", "herder/runs/{run}",
+];
 
 fn route(path: &str) -> String {
-    path.replace("{id}", SESSION)
+    path.replace("{id}", SESSION).replace("{run}", RUN)
 }
 
 #[tokio::test]
@@ -385,7 +427,8 @@ async fn the_agent_namespace_is_an_allowlist() {
         "/api/agent/v1/sessions/{id}/entries/1/raw",
         "/api/agent/v1/sessions/{id}/entries/1/image/0",
         "/api/agent/v1/requests/req-1",
-        "/api/agent/v1/herder/runs",
+        "/api/agent/v1/herder",
+        "/api/agent/v1/herder/runs/{run}/events",
         "/api/agent/v1/devices",
         "/api/agent/v1/index.html",
     ] {
@@ -513,6 +556,52 @@ async fn every_agent_route_scrubs_credentials() {
     let mut text = String::new();
     std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&r.body[..]), &mut text).unwrap();
     assert!(!text.contains(GITHUB_TOKEN) && text.contains("[REDACTED:API_KEY]"), "{text}");
+}
+
+/// Herder runs: the owner's list and detail, with the `repo` filter and the orchestrating session, scrubbed as session
+/// text; journal events keep Herder's own fields, and only a step's `data` and a launch's `args` are session content.
+#[tokio::test]
+async fn agents_read_herder_runs_scrubbed() {
+    let app = world(AuthMode::None).await;
+    let reader = app.reader("reader");
+    let runs = app.agent(&reader, "herder/runs").await.json();
+    assert_eq!(runs["items"].as_array().unwrap().len(), 1);
+    let run = &runs["items"][0];
+    assert_eq!((&run["runId"], &run["repo"], &run["sessionId"]), (&json!(RUN), &json!("widgets"), &json!(SESSION)));
+    assert_eq!((&run["title"], &run["status"], &run["verdict"]), (&json!("Rotate [REDACTED:API_KEY]"), &json!("delivered"), &json!("met")));
+    for (base, token) in [("/api/v1/", None), ("/api/agent/v1/", Some(reader.as_str()))] {
+        for (repo, count) in [("widgets", 1), ("gadgets", 0), ("", 1)] {
+            let r = app.get_as(&format!("{base}herder/runs?repo={repo}"), token).await;
+            assert_eq!(r.json()["items"].as_array().map(Vec::len), Some(count), "{base} {repo}");
+        }
+    }
+
+    let owner = app.owner(&format!("herder/runs/{RUN}")).await.json();
+    let detail = app.agent(&reader, &format!("herder/runs/{RUN}")).await.json();
+    assert_only_scrubbed(&owner, &detail, "run");
+    assert_eq!(detail["run"]["sessionId"], SESSION);
+    assert_eq!(detail["goal"], "# Goal\nRevoke [REDACTED:API_KEY].");
+    assert_eq!(detail["plan"], "# Plan\n- T1: replace [REDACTED:API_KEY]");
+    let event = |t: &str| detail["events"].as_array().unwrap().iter().find(|e| e["t"] == t).unwrap()["data"].clone();
+    assert_eq!(event("goal.approved")["checks"][0]["command"], "DB_PASSWORD=[REDACTED:SECRET] npm test");
+    assert_eq!(event("script.launched")["args"], json!({ "api_key": "[REDACTED]" }));
+    let completed = event("step.completed");
+    assert_eq!((&completed["key"], &completed["commit"]), (&json!("impl-T1"), &json!("c0ffee1234")));
+    assert_eq!((&completed["text"], &completed["data"]), (&json!("Rotated [REDACTED:API_KEY]."), &json!({ "token": "[REDACTED]", "files": 2 })));
+    assert_eq!(event("check.completed")["tail"], "DB_PASSWORD=[REDACTED:SECRET] ok");
+    let step = &detail["steps"][0];
+    assert_eq!((&step["key"], &step["status"], &step["commit"], &step["sessionId"]), (&json!("impl-T1"), &json!("ok"), &json!("c0ffee1234"), &json!(CHILD)));
+    let body = serde_json::to_string(&detail).unwrap();
+    for secret in [GITHUB_TOKEN, ENV_SECRET, LINK_TOKEN, "FAKEargsKey0042"] {
+        assert!(!body.contains(secret), "the run shows {secret}: {body}");
+    }
+
+    let r = app.get_as("/api/agent/v1/herder/runs/nope", Some(&reader)).await;
+    assert_eq!((r.status, r.json()), (StatusCode::NOT_FOUND, json!({ "error": "not_found" })));
+    // The public namespace has no runs.
+    for path in ["/api/public/v1/herder/runs".to_owned(), format!("/api/public/v1/herder/runs/{RUN}")] {
+        assert_eq!(app.get_as(&path, None).await.status, StatusCode::NOT_FOUND, "{path}");
+    }
 }
 
 /// A summary's `link`, the whole session-link entry, is session content: scrubbed in the sessions list, a session's

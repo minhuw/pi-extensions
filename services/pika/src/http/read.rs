@@ -57,12 +57,12 @@ fn session_routes() -> Router<AppState> {
 pub fn routes() -> Router<AppState> {
     session_routes()
         .merge(aggregate_routes())
-        .layer(Extension(OWNER))
         .route("/settings/publishing", get(publishing).patch(publish))
         .route("/sessions/{id}/export", get(export_session))
         .route("/requests/{id}", get(request))
         .route("/herder/runs", get(herder_runs))
         .route("/herder/runs/{id}", get(herder_run))
+        .layer(Extension(OWNER))
 }
 
 /// An explicit allowlist: unknown public endpoints never reach the SPA fallback.
@@ -87,6 +87,8 @@ pub fn agent_routes(state: &AppState) -> Router<AppState> {
         .route("/sessions/{id}/entries", get(entries))
         .route("/sessions/{id}/trace", get(trace))
         .route("/search", get(search))
+        .route("/herder/runs", get(herder_runs))
+        .route("/herder/runs/{id}", get(herder_run))
         .layer(Extension(AGENT))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_read_access))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found") })
@@ -469,12 +471,27 @@ async fn request(State(state): State<AppState>, Path(id): Path<String>) -> Respo
     json(&state, move |store, conn| crate::requests::load(conn, &store.blobs, &id)?.ok_or(ReadError::NotFound)).await
 }
 
-async fn herder_runs(State(state): State<AppState>, Query(params): QueryParams) -> Response {
-    json(&state, move |_, conn| read::herder::list(conn, &Params(params))).await
+/// Herder runs exist only in the owner's and the agent's namespaces, never in the public one.
+async fn herder_runs(State(state): State<AppState>, Extension(scope): Extension<Scope>, Query(params): QueryParams) -> Response {
+    json(&state, move |_, conn| {
+        let mut page = read::herder::list(conn, &Params(params))?;
+        if scope.redact {
+            read::redaction::runs(&mut page);
+        }
+        Ok(page)
+    })
+    .await
 }
 
-async fn herder_run(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    json(&state, move |store, conn| read::herder::detail(conn, &store.blobs, &id)).await
+async fn herder_run(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>) -> Response {
+    json(&state, move |store, conn| {
+        let mut detail = read::herder::detail(conn, &store.blobs, &id)?;
+        if scope.redact {
+            read::redaction::run(&mut detail);
+        }
+        Ok(detail)
+    })
+    .await
 }
 
 async fn search(State(state): State<AppState>, Extension(scope): Extension<Scope>, Query(params): QueryParams) -> Response {

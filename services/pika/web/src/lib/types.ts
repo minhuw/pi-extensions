@@ -247,6 +247,8 @@ export interface RunSummary {
 	startedAt: string;
 	lastAt: string;
 	stepCount: number;
+	/** The orchestrating pi session. */
+	sessionId?: string;
 }
 
 export interface RunEvent {
