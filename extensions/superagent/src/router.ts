@@ -13,7 +13,7 @@ export const ROUTER_TICKET_TOOLS = ["ticket_create", "ticket_message", "ticket_s
 const READ_BUILTINS = ["read", "grep", "find", "ls", "ffgrep", "fffind"];
 /** Subagents tools for the router's own read-only helpers (`Agent` itself is gated by type). */
 const SUBAGENT_TOOLS = ["get_subagent_result", "steer_subagent"];
-const FIXED_TOOLS = new Set<string>([...READ_BUILTINS, ...ROUTER_TICKET_TOOLS, ...SUBAGENT_TOOLS, "relay_list", "relay_send", "relay_status", "recall_search", "recall_read", "loop_schedule", "loop_stop"]);
+const FIXED_TOOLS = new Set<string>([...READ_BUILTINS, ...ROUTER_TICKET_TOOLS, ...SUBAGENT_TOOLS, "relay_list", "relay_send", "relay_status", "recall_search", "recall_read", "recall_herder", "loop_schedule", "loop_stop"]);
 
 export const blockReason = (tool: string) =>
 	`${tool} is not available in superagent mode: create a ticket with ticket_create for changes, or switch to direct mode with /superagent off.`;

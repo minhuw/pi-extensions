@@ -151,7 +151,7 @@ describe.skipIf(!modulesExist)("superagent router", () => {
 		// pika loads last in `pi.extensions`; relay registers its tools only after every `session_start` handler.
 		const pika = (await import("../../pika/index.ts")).default;
 		const h = await start({ extensions: [pika] });
-		const pikaTools = ["relay_list", "relay_send", "relay_status", "recall_search", "recall_read"];
+		const pikaTools = ["relay_list", "relay_send", "relay_status", "recall_search", "recall_read", "recall_herder"];
 		await waitFor(() => pikaTools.every((name) => h.session.getAllTools().some((tool) => tool.name === name)), 5_000, "relay's tools");
 		const seen = script(h, () => fauxAssistantMessage("done"));
 		await h.session.prompt("what did we do before?");
