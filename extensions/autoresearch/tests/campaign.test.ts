@@ -5,7 +5,7 @@ import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@eare
 import { afterEach, expect, it, vi } from "vitest";
 import extension from "../index.ts";
 import { parseMetrics } from "../../benchmark/core.ts";
-import { approvalKey, ITERATION, restoreState, type State } from "../campaign.ts";
+import { approvalKey, ITERATION, proposal, restoreState, type State } from "../campaign.ts";
 import { renderReport, SNAPSHOT } from "../report.ts";
 
 async function fixture(mode: "tui" | "rpc" | "print" = "tui") {
@@ -330,6 +330,156 @@ it("times out an unstarted pass and pauses when the approved campaign lifetime e
 		expect(h.messages.filter(message => message.customType === ITERATION)).toHaveLength(2);
 		expect(vi.getTimerCount()).toBe(0);
 	} finally { await h.cleanup(); }
+});
+
+it("states pass time limits and flags slow baselines", async () => {
+	vi.useFakeTimers(); const h = await fixture();
+	const text = async (work: Promise<{ content: { text: string }[] }>) => (await work).content[0]!.text;
+	const latest = () => h.messages.findLast(message => message.customType === ITERATION).content as string;
+	// Every benchmark or check command advances the fake clock by `step` milliseconds.
+	const timed = (step: number) => vi.mocked(h.ctx.executeTool).mockImplementation(async (_name, input) => {
+		vi.setSystemTime(Date.now() + step);
+		return { isError: false, result: { content: [{ type: "text", text: (input as { command: string }).command === "check" ? "checks passed" : "METRIC compile_ms=100" }], details: undefined } } as any;
+	});
+	const warning = "Warning: the baseline measurement took more than half of an iteration's 15 minutes";
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		expect(latest()).toContain("Time limits: this setup pass has 30 minutes; after approval, each optimization iteration has 15 minutes. Exceeding a limit pauses the campaign.");
+		expect(latest()).toContain("one measurement takes well under half the iteration limit (7.5 minutes)");
+		timed(10_000);
+		const fast = await text(h.baseline());
+		expect(fast).toContain("Baseline measurement time: 40s (every repetition plus the correctness check); pass limits: 30 minutes for setup, 15 minutes per optimization iteration.");
+		expect(fast).not.toContain("Warning");
+		expect(h.state()?.campaign?.baselineMs).toBe(40_000);
+		await h.settle();
+
+		// Four commands of 2.5 minutes: 10 minutes, over half the iteration limit and under the setup limit.
+		await h.command("revise measure a smaller workload"); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		expect(h.state()?.campaign?.baselineMs).toBeUndefined();
+		timed(150_000);
+		const slow = await text(h.baseline());
+		expect(slow).toContain("Baseline measurement time: 10m 0s (every repetition plus the correctness check)");
+		expect(slow).toContain(`${warning}, leaving little time for an edit, so iterations will likely time out and pause the campaign. Use fewer repetitions or a smaller workload via /autoresearch revise <feedback>.`);
+		expect(h.state()?.campaign).toMatchObject({ state: "awaiting_approval", baselineMs: 600_000 });
+		await h.settle(); await h.command("status");
+		expect(h.messages.at(-1).content).toContain("Baseline measurement time: 10m 0s");
+		expect(h.messages.at(-1).content).toContain(warning);
+
+		await h.command("approve"); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		expect(latest()).toContain("Autoresearch iteration 1/25");
+		expect(latest()).toContain("This pass is limited to 15 minutes, including the measurement; exceeding the limit pauses the campaign.");
+		expect(latest()).toContain("Baseline measurement time: 10m 0s");
+		expect(latest()).toContain(warning);
+
+		const stored = h.state()!;
+		expect(restoreState(stored).campaign?.baselineMs).toBe(600_000);
+		const older = structuredClone(stored); delete older.campaign!.baselineMs;
+		expect(restoreState(older).campaign?.approved).toBe(approvalKey(older));
+		expect(proposal(older)).not.toContain("Baseline measurement time");
+		for (const baselineMs of [-1, Number.NaN, Number.POSITIVE_INFINITY, "600000", null]) {
+			expect(() => restoreState({ ...stored, campaign: { ...stored.campaign, baselineMs } })).toThrow("Invalid research campaign");
+		}
+	} finally { await h.cleanup(); }
+});
+
+it.each([
+	{ step: 0, check: true, total: 0, warn: false }, { step: 112_500, check: true, total: 450_000, warn: false },
+	{ step: 112_501, check: true, total: 450_004, warn: true }, { step: 10_000, check: false, total: 30_000, warn: false },
+	{ step: 160_000, check: false, total: 480_000, warn: true },
+])("records a $total ms baseline measurement (check: $check) and warns only above half the iteration limit: $warn", async ({ step, check, total, warn }) => {
+	vi.useFakeTimers(); const h = await fixture();
+	vi.mocked(h.ctx.executeTool).mockImplementation(async (_name, input) => {
+		vi.setSystemTime(Date.now() + step);
+		return { isError: false, result: { content: [{ type: "text", text: (input as { command: string }).command === "check" ? "checks passed" : "METRIC compile_ms=100" }], details: undefined } } as any;
+	});
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		const result = (await h.baseline(check ? {} : { checkCommand: undefined })).content[0].text as string;
+		expect(h.state()?.campaign?.baselineMs).toBe(total);
+		expect(result).toContain("Baseline measurement time");
+		if (warn) expect(result).toMatch(/warning/i); else expect(result).not.toMatch(/warning/i);
+		await h.settle(); await h.command("status");
+		if (warn) expect(h.messages.at(-1).content).toMatch(/warning/i); else expect(h.messages.at(-1).content).not.toMatch(/warning/i);
+	} finally { await h.cleanup(); }
+});
+
+it("pauses a started setup pass at 30 minutes and an iteration at 15 minutes, with a six-hour lifetime", async () => {
+	vi.useFakeTimers(); const h = await fixture();
+	const timedOut = "Research pass timed out; resume explicitly to continue.";
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1);
+		await vi.advanceTimersByTimeAsync(29_999); expect(h.state()?.campaign?.state).toBe("preparing");
+		await h.enter();
+		await vi.advanceTimersByTimeAsync(30 * 60_000 - 1); expect(h.state()?.campaign?.state).toBe("preparing");
+		await vi.advanceTimersByTimeAsync(1);
+		expect(h.state()?.campaign).toMatchObject({ state: "paused", reason: timedOut }); expect(h.ctx.abort).toHaveBeenCalledOnce();
+		await h.settle(true);
+		await h.command("resume"); await vi.advanceTimersByTimeAsync(1); await h.enter(); await h.baseline(); await h.settle();
+		await h.command("approve");
+		expect(h.state()?.campaign?.deadline).toBe(Date.now() + 6 * 60 * 60_000);
+		await vi.advanceTimersByTimeAsync(1); await h.enter();
+		await vi.advanceTimersByTimeAsync(15 * 60_000 - 1); expect(h.state()?.campaign?.state).toBe("running");
+		await vi.advanceTimersByTimeAsync(1);
+		expect(h.state()?.campaign).toMatchObject({ state: "paused", reason: timedOut }); expect(h.ctx.abort).toHaveBeenCalledTimes(2);
+	} finally { await h.cleanup(); }
+});
+
+it("keeps the baseline time across reloads and iterations and omits it for older snapshots", async () => {
+	vi.useFakeTimers(); const h = await fixture();
+	const latest = () => h.messages.findLast(message => message.customType === ITERATION).content as string;
+	vi.mocked(h.ctx.executeTool).mockImplementation(async (_name, input) => {
+		vi.setSystemTime(Date.now() + 30_000);
+		return { isError: false, result: { content: [{ type: "text", text: (input as { command: string }).command === "check" ? "checks passed" : "METRIC compile_ms=100" }], details: undefined } } as any;
+	});
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter(); await h.baseline(); await h.settle();
+		expect(h.state()?.campaign?.baselineMs).toBe(120_000);
+		expect(Object.keys(h.state()!.campaign!.baseline!).sort()).toEqual(["samples", "timestamp", "values"]);
+		await h.emit("session_start", { reason: "reload" }); await h.command("status");
+		expect(h.messages.at(-1).content).toContain("Baseline measurement time: 2m 0s");
+		await h.command("approve"); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		await h.tool("autoresearch_measure", {}); await h.settle(); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		expect(latest()).toContain("Autoresearch iteration 2/25");
+		expect(latest()).toContain("Baseline measurement time: 2m 0s");
+		expect(h.state()?.campaign?.baselineMs).toBe(120_000);
+		await h.command("pause"); await h.settle(true);
+
+		const older = structuredClone(h.state()!); delete older.campaign!.baselineMs;
+		h.entries.push({ type: "custom", customType: SNAPSHOT, data: older });
+		await h.emit("session_start", { reason: "reload" });
+		expect(h.ctx.ui.notify).not.toHaveBeenCalled();
+		await h.command("status");
+		expect(h.messages.at(-1).content).toContain("State: paused");
+		expect(h.messages.at(-1).content).not.toContain("Baseline measurement time");
+		await h.command("resume"); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		expect(latest()).toContain("Autoresearch iteration 3/25");
+		expect(latest()).toMatch(/15 minutes|15-minute/);
+		expect(latest()).toContain("pauses the campaign");
+		expect(latest()).not.toContain("Baseline measurement time");
+		await h.command("pause"); await h.settle(true);
+
+		const stored = h.state()!;
+		expect(restoreState({ ...stored, campaign: { ...stored.campaign, baselineMs: 0 } }).campaign?.baselineMs).toBe(0);
+		expect(restoreState({ ...stored, campaign: { ...stored.campaign, baselineMs: 1 } }).campaign?.approved).toBe(stored.campaign!.approved);
+		h.entries.push({ type: "custom", customType: SNAPSHOT, data: { ...stored, campaign: { ...stored.campaign, baselineMs: -1 } } });
+		await h.emit("session_start", { reason: "reload" });
+		expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("Saved research state is invalid. Use /research-report clear to reset it.", "warning");
+	} finally { await h.cleanup(); }
+});
+
+it("states the pass limits in help without duplicating limit literals in index.ts", async () => {
+	const h = await fixture();
+	try {
+		await h.command("help");
+		expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("15 minutes per iteration (30 minutes for setup)"), "info");
+	} finally { await h.cleanup(); }
+	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
+	expect(source).not.toMatch(/60_000|30_000|\b(15|30) minutes|six hours/);
+});
+
+it("documents the pass limits, the recorded baseline time, and its warning in the README", async () => {
+	const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+	for (const pattern of [/15-minute|15 minutes/, /30 minutes/, /baseline measurement time/i, /half of the 15-minute iteration limit/, /warning/i]) expect(readme).toMatch(pattern);
 });
 
 it.each([

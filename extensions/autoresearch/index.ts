@@ -5,11 +5,12 @@ import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@ear
 import { Markdown } from "@earendil-works/pi-tui";
 import { Parameters, renderReport, SNAPSHOT, STATUS_KEY, summary, updateReport } from "./report.ts";
 import { fingerprint, measure, verifyHarness } from "../benchmark/core.ts";
-import { approvalKey, BaselineParameters, emptyState, HARNESS_MESSAGES, ITERATION, measuredReport, prompt, proposal, ranges, restoreState, terminal, type Benchmark, type State } from "./campaign.ts";
+import { approvalKey, BaselineParameters, DISPATCH_LIMIT_MS, duration, emptyState, HARNESS_MESSAGES, ITERATION, ITERATION_LIMIT_MS, LIFETIME_MS, measuredReport, prompt, proposal, ranges, restoreState, SETUP_LIMIT_MS, terminal, type Benchmark, type State } from "./campaign.ts";
 
 const DISPLAY = "autoresearch:display";
-const HELP = "/autoresearch <target> [--max 25] prepares and measures a baseline. /autoresearch approve starts iterations after review. Other commands: status, revise <feedback>, pause, resume, stop. Limits: 25 iterations by default, six hours after approval, 15 minutes per iteration (30 minutes for setup).";
+const HELP = `/autoresearch <target> [--max 25] prepares and measures a baseline. /autoresearch approve starts iterations after review. Other commands: status, revise <feedback>, pause, resume, stop. Limits: 25 iterations by default, ${duration(LIFETIME_MS)} after approval, ${duration(ITERATION_LIMIT_MS)} per iteration (${duration(SETUP_LIMIT_MS)} for setup).`;
 interface Active { token: string; kind: "prepare" | "iterate"; dispatchedAt: number; startedAt?: number; measured: boolean; outcome?: string }
+const expiresAt = (active: Active) => active.startedAt === undefined ? active.dispatchedAt + DISPATCH_LIMIT_MS : active.startedAt + (active.kind === "prepare" ? SETUP_LIMIT_MS : ITERATION_LIMIT_MS);
 interface Runtime {
 	ctx: ExtensionContext; state: State; invalid: boolean; closed: boolean; uiDepth: number;
 	active?: Active; pending?: "prepare" | "iterate"; timer?: ReturnType<typeof setTimeout>;
@@ -59,10 +60,8 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 		closeTimer(r);
 		if (r.closed || r.invalid || (r.ctx.mode !== "tui" && r.ctx.mode !== "rpc") || (!r.pending && !r.active)) return;
 		let delay = 1;
-		if (r.active) {
-			const limit = r.active.startedAt === undefined ? 30_000 : r.active.kind === "prepare" ? 30 * 60_000 : 15 * 60_000;
-			delay = Math.max(1, (r.active.startedAt ?? r.active.dispatchedAt) + limit - Date.now());
-		} else if (!r.ctx.isIdle() || r.ctx.hasPendingMessages() || r.uiDepth) delay = 1000;
+		if (r.active) delay = Math.max(1, expiresAt(r.active) - Date.now());
+		else if (!r.ctx.isIdle() || r.ctx.hasPendingMessages() || r.uiDepth) delay = 1000;
 		if (r.state.campaign?.deadline !== undefined && r.state.campaign.state === "running") delay = Math.min(delay, Math.max(1, r.state.campaign.deadline - Date.now()));
 		r.timer = setTimeout(() => {
 			r.timer = undefined;
@@ -84,8 +83,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 			pause(r, "Six-hour research limit reached.");
 			if (r.active?.startedAt !== undefined) r.ctx.abort();
 		} else if (r.active) {
-			const limit = r.active.startedAt === undefined ? 30_000 : r.active.kind === "prepare" ? 30 * 60_000 : 15 * 60_000;
-			if (Date.now() >= (r.active.startedAt ?? r.active.dispatchedAt) + limit) {
+			if (Date.now() >= expiresAt(r.active)) {
 				pause(r, "Research pass timed out; resume explicitly to continue.");
 				if (r.active.startedAt !== undefined) r.ctx.abort();
 				r.active = undefined;
@@ -200,10 +198,12 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 			const benchmark: Benchmark = { root: await realpath(ctx.cwd), methodology: params.methodology, command: params.command, checkCommand: params.checkCommand,
 				files: await fingerprint(ctx.cwd, params.files), repetitions: params.repetitions ?? 3, timeoutSeconds: params.timeoutSeconds ?? 120 };
 			assert();
+			const started = Date.now();
 			const baseline = await measure(ctx, benchmark, definitions.metrics.map(metric => metric.name), signal, assert, HARNESS_MESSAGES);
+			const baselineMs = Math.max(0, Date.now() - started);
 			const next = structuredClone(r.state);
 			next.report = measuredReport(definitions, baseline, true);
-			Object.assign(next.campaign!, { state: "awaiting_approval", benchmark, baseline, latest: baseline, approved: undefined, reason: undefined });
+			Object.assign(next.campaign!, { state: "awaiting_approval", benchmark, baseline, baselineMs, latest: baseline, approved: undefined, reason: undefined });
 			save(r, next); active.measured = true;
 			return { content: [{ type: "text", text: proposal(next) }], details: { report: next.report, baseline, awaitingApproval: true } };
 		},
@@ -277,7 +277,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 				if (r.active || !ctx.isIdle() || ctx.hasPendingMessages()) throw new Error("Wait for the baseline explanation to finish before approving.");
 				await verifyHarness(ctx.cwd, c.benchmark, HARNESS_MESSAGES);
 				if (get(ctx) !== r || r.state.campaign !== c || c.state !== "awaiting_approval") throw new Error("Research proposal changed while approving.");
-				const next = structuredClone(r.state); next.campaign!.approved = approvalKey(next); next.campaign!.state = "running"; next.campaign!.deadline = Date.now() + 6 * 60 * 60_000;
+				const next = structuredClone(r.state); next.campaign!.approved = approvalKey(next); next.campaign!.state = "running"; next.campaign!.deadline = Date.now() + LIFETIME_MS;
 				save(r, next); r.pending = "iterate"; arm(r); return;
 			}
 			if (action === "resume") {
