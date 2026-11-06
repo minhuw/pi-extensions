@@ -5,6 +5,7 @@ on:
     paths:
       - extensions/statusline-footer/**
       - extensions/autoresearch/**
+      - extensions/benchmark/**
       - .github/workflows/statusline.yml
       - package.json
       - package-lock.json
@@ -15,6 +16,7 @@ on:
     paths:
       - extensions/statusline-footer/**
       - extensions/autoresearch/**
+      - extensions/benchmark/**
       - .github/workflows/statusline.yml
       - package.json
       - package-lock.json
@@ -50,6 +52,9 @@ jobs:
 
       - name: Run autoresearch tests
         run: npm run test:autoresearch -- --cache=false
+
+      - name: Run benchmark tests
+        run: npm run test:benchmark -- --cache=false
 
       - name: Run typecheck
         run: npm run typecheck
