@@ -178,8 +178,12 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 		async execute(_id, params, _signal, _update, ctx) {
 			const r = get(ctx); if (r.invalid) throw new Error("Saved report is invalid. Use /research-report clear first.");
 			if (r.state.campaign) {
-				owner(ctx);
+				// The setup pass that measured the baseline may still report; only /autoresearch approve moves the campaign on.
+				const active = r.active;
+				const reviewing = r.state.campaign.state === "awaiting_approval" && active?.kind === "prepare" && active.startedAt !== undefined && active.measured;
+				if (!reviewing) owner(ctx);
 				if (params.metrics) throw new Error("Campaign metrics must come from autoresearch_baseline or autoresearch_measure.");
+				if (reviewing && (params.phase === "paused" || params.phase === "complete")) throw new Error("The measured baseline awaits /autoresearch approve; explain it to the user and stop instead of pausing or completing.");
 			}
 			const next = structuredClone(r.state);
 			next.report = updateReport(next.report, params, randomUUID(), Date.now());

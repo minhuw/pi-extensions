@@ -106,7 +106,7 @@ autoresearch_update({
 })
 ```
 
-Phases are `planning`, `editing`, `measuring`, `checking`, `paused`, and `complete`. Paused/complete updates end automatic continuation. Campaign metric values come exclusively from the measurement tools; `autoresearch_update` cannot replace them. Before a campaign exists, the reporting tool still supports standalone model-reported tables for compatibility with the first version.
+Phases are `planning`, `editing`, `measuring`, `checking`, `paused`, and `complete`. Paused/complete updates end automatic continuation. After `autoresearch_baseline`, the setup pass may still post progress messages until it ends, but a paused or complete update is rejected because the measured baseline awaits `/autoresearch approve`; the campaign and its approval are unchanged. Campaign metric values come exclusively from the measurement tools; `autoresearch_update` cannot replace them. Before a campaign exists, the reporting tool still supports standalone model-reported tables for compatibility with the first version.
 
 ## Presentation
 

@@ -88,6 +88,103 @@ it("prepares a real baseline proposal and never dispatches optimization until an
 	} finally { await h.cleanup(); expect(vi.getTimerCount()).toBe(0); }
 });
 
+it("lets the setup pass report progress after its baseline", async () => {
+	vi.useFakeTimers(); const h = await fixture();
+	const update = (params: object) => h.tool("autoresearch_update", params);
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		expect(h.messages[0].content).toContain("After autoresearch_baseline you may still report with it, but do not mark the phase paused or complete: the measured baseline awaits /autoresearch approve.");
+		await h.baseline();
+		const key = approvalKey(h.state()!); const before = h.state()!.report!.message;
+		await update({ phase: "checking", message: "Baseline recorded; explaining the methodology." });
+		expect(h.state()?.report).toMatchObject({ phase: "checking", message: "Baseline recorded; explaining the methodology.", provenance: "tool-measured" });
+		expect(h.state()?.report?.message).not.toBe(before);
+		expect(h.state()?.campaign).toMatchObject({ state: "awaiting_approval", approved: undefined });
+		expect(approvalKey(h.state()!)).toBe(key);
+		const stored = h.state(); const saved = h.entries.length;
+		for (const phase of ["complete", "paused"]) await expect(update({ phase, message: "Nothing left to do." })).rejects.toThrow("/autoresearch approve");
+		await expect(update({ phase: "checking", message: "Fake score", metrics: [{ name: "compile_ms", value: 1 }] })).rejects.toThrow("must come from");
+		expect(h.entries).toHaveLength(saved); expect(h.state()).toEqual(stored);
+		await h.settle();
+		await expect(update({ phase: "checking", message: "A late note." })).rejects.toThrow("This tool requires the currently owned /autoresearch pass.");
+		expect(h.entries).toHaveLength(saved); expect(h.state()?.campaign?.state).toBe("awaiting_approval");
+		await h.command("approve"); await vi.advanceTimersByTimeAsync(1);
+		expect(h.state()?.campaign).toMatchObject({ state: "running", iterations: 1, approved: key });
+		expect(h.messages.filter(message => message.customType === ITERATION)).toHaveLength(2);
+		expect(h.messages.at(-1).content).toContain("Autoresearch iteration 1/25");
+	} finally { await h.cleanup(); }
+});
+
+it("keeps the baseline and measurement tools owned-only while the setup pass reports after its baseline", async () => {
+	vi.useFakeTimers(); const h = await fixture();
+	const owned = "This tool requires the currently owned /autoresearch pass.";
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter(); await h.baseline();
+		const key = approvalKey(h.state()!); const saved = h.entries.length;
+		await expect(h.baseline()).rejects.toThrow(owned);
+		await expect(h.tool("autoresearch_measure", {})).rejects.toThrow(owned);
+		expect(h.entries).toHaveLength(saved);
+		for (const [phase, message] of [["planning", "Summarizing the workload."], ["editing", "Writing the explanation."], ["measuring", "Reviewing the samples."]]) {
+			await h.tool("autoresearch_update", { phase, message });
+			expect(h.state()).toMatchObject({ report: { phase, message }, campaign: { state: "awaiting_approval", approved: undefined } });
+			expect(approvalKey(h.state()!)).toBe(key);
+		}
+		expect(h.entries).toHaveLength(saved + 3);
+		await expect(h.tool("autoresearch_update", { phase: "complete", message: "Done.", metrics: [{ name: "compile_ms", value: 1 }] })).rejects.toThrow(/must come from|\/autoresearch approve/);
+		expect(h.entries).toHaveLength(saved + 3);
+	} finally { await h.cleanup(); }
+});
+
+it.each([
+	["settles", async (h: Awaited<ReturnType<typeof fixture>>) => { await h.settle(); }],
+	["times out", async () => { await vi.advanceTimersByTimeAsync(30 * 60_000); }],
+	["yields to user input", async (h: Awaited<ReturnType<typeof fixture>>) => { await h.emit("message_start", { message: { role: "user", content: "wait" } }); }],
+	["yields to another prompt", async (h: Awaited<ReturnType<typeof fixture>>) => { await h.emit("before_agent_start", { messageType: "user", prompt: "wait" }); }],
+	["is paused by the user", async (h: Awaited<ReturnType<typeof fixture>>) => { await h.command("pause"); }],
+	["is reloaded", async (h: Awaited<ReturnType<typeof fixture>>) => { await h.emit("session_start", { reason: "reload" }); }],
+])("rejects progress updates after the setup pass that measured the baseline %s", async (_name, end) => {
+	vi.useFakeTimers(); const h = await fixture();
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter(); await h.baseline();
+		await h.tool("autoresearch_update", { phase: "checking", message: "Explaining the baseline." });
+		await end(h);
+		const saved = h.entries.length; const stored = h.state();
+		await expect(h.tool("autoresearch_update", { phase: "checking", message: "A late note." })).rejects.toThrow("This tool requires the currently owned /autoresearch pass.");
+		expect(h.entries).toHaveLength(saved); expect(h.state()).toEqual(stored);
+	} finally { await h.cleanup(); }
+});
+
+it.each([
+	["setup", "paused"], ["setup", "complete"], ["iteration", "paused"], ["iteration", "complete"],
+] as const)("still lets a %s pass end the campaign with phase %s", async (pass, phase) => {
+	vi.useFakeTimers(); const h = await fixture();
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		if (pass === "iteration") { await h.baseline(); await h.settle(); await h.command("approve"); await vi.advanceTimersByTimeAsync(1); await h.enter(); await h.tool("autoresearch_measure", {}); }
+		const dispatched = h.messages.filter(message => message.customType === ITERATION).length;
+		await h.tool("autoresearch_update", { phase, message: "Needs a user decision." });
+		expect(h.state()).toMatchObject({ campaign: { state: phase, reason: "Needs a user decision." }, report: { phase } });
+		await h.settle(); await vi.advanceTimersByTimeAsync(10_000);
+		expect(h.state()?.campaign?.state).toBe(phase);
+		expect(h.messages.filter(message => message.customType === ITERATION)).toHaveLength(dispatched);
+	} finally { await h.cleanup(); }
+});
+
+it("restores an awaiting proposal after the setup pass reported progress and approves it with the same key", async () => {
+	vi.useFakeTimers(); const h = await fixture();
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter(); await h.baseline();
+		const key = approvalKey(h.state()!);
+		await h.tool("autoresearch_update", { phase: "checking", message: "Explaining the baseline." }); await h.settle();
+		expect(approvalKey(restoreState(structuredClone(h.state())))).toBe(key);
+		await h.emit("session_start", { reason: "reload" }); await vi.advanceTimersByTimeAsync(1000);
+		expect(h.state()?.campaign?.state).toBe("awaiting_approval");
+		await h.command("approve"); await vi.advanceTimersByTimeAsync(1);
+		expect(h.state()?.campaign).toMatchObject({ state: "running", iterations: 1, approved: key });
+		expect(h.messages.at(-1).content).toContain("Autoresearch iteration 1/25");
+	} finally { await h.cleanup(); }
+});
+
 it("shows each metric's median, range, and sample count, and the objective's noise verdict", async () => {
 	vi.useFakeTimers(); const h = await fixture();
 	const text = async (work: Promise<{ content: { text: string }[] }>) => (await work).content[0]!.text;

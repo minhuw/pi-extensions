@@ -141,7 +141,7 @@ export function prompt(state: State, kind: "prepare" | "iterate"): string {
 		`Time limits: this setup pass has ${duration(SETUP_LIMIT_MS)}; after approval, each optimization iteration has ${duration(ITERATION_LIMIT_MS)}. Exceeding a limit pauses the campaign. One iteration must fit a focused edit plus one full autoresearch_measure (all repetitions plus the correctness check), so size the workload and repetitions so that one measurement takes well under half the iteration limit (${duration(ITERATION_LIMIT_MS / 2)}).`,
 		"The harness must emit exactly one METRIC name=value line per declared metric per run. Call autoresearch_baseline with your methodology, command, harness files, metrics, repetition count, and optional checkCommand. That tool executes the baseline and records the measured samples.",
 		"Then explain the methodology and initial results to the user, ask whether they match what the user intends, and stop. The user must run /autoresearch approve before optimization starts. Never approve on their behalf or start optimization iterations during setup.",
-		"Use autoresearch_update for concise progress messages. Existing tool permissions apply. Do not discard unrelated user changes.",
+		"Use autoresearch_update for concise progress messages. After autoresearch_baseline you may still report with it, but do not mark the phase paused or complete: the measured baseline awaits /autoresearch approve. Existing tool permissions apply. Do not discard unrelated user changes.",
 		c.reason ? `User feedback: ${c.reason}` : "",
 	].filter(Boolean).join("\n\n");
 	return [
