@@ -1,6 +1,6 @@
 # Orca bridge
 
-A dedicated Pi ≥1.3 extension that keeps Orca busy while the main agent or background extension work remains active. It maintains Orca-compatible terminal titles, provides `/orca-status` diagnostics, and adds `/orca-open` and `/orca-diff` navigation commands. It has no runtime dependency on Subagents.
+A dedicated Pi ≥1.3 extension that keeps Orca busy while the main agent or background extension work remains active. It maintains Orca-compatible terminal titles, provides `/orca-status` diagnostics, and adds `/orca-open` and `/orca-diff` navigation commands. An optional [Pi Activity companion plugin](plugin/README.md) adds a native Orca sidebar and status bar with session state, background agents, and workflow progress. The bridge has no runtime dependency on Subagents.
 
 The collection registers this extension automatically. It activates only inside an Orca pane. Load `extensions/orca-bridge/index.ts` through Pi's extension configuration when using it separately, or try it directly:
 
@@ -9,6 +9,14 @@ pi --extension ./extensions/orca-bridge/index.ts
 ```
 
 The factory only registers handlers and the command. Activation, transport, and title animation begin at `session_start`; an idempotent `session_shutdown` handler removes listeners, stops animation, discards pending status, and releases ownership after a bounded final completion attempt.
+
+## Optional Pi Activity plugin
+
+The Pi extension works on its own. For a native activity panel and status bar, load the separate [`plugin/`](plugin/README.md) folder in Orca and approve it there. The plugin uses Orca's public components, worker, launch-hook, panel-message, and status-bar APIs; it requires Orca ≥1.4.248 as declared by the public schema. Development verification used Orca 1.4.251; the vendored API types come from v1.4.247.
+
+The panel shows all connected **local Pi terminal sessions**, independently of the focused workspace. Select a session to see its main agent, model, background operations, elapsed times, and workflow progress. Waiting sessions take priority; stale sessions are marked disconnected and excluded from active counts. The status item opens a text summary when clicked. Subagents and Herder provide metadata through the event protocol below; other extensions can opt in to the same protocol. Orca's external managed roster is not included in this panel.
+
+Pi publishes metadata only while the plugin is present. No plugin means no snapshot directory or session file is created by Pi. `/orca-status` includes companion readiness. Set `PI_ORCA_COMPANION=off` before starting Pi to disable this projection. The companion needs both processes on the same machine and user account; it does not transport activity from SSH or WSL or add native-chat background tracking. [Setup, transport limits, and verification](plugin/README.md) describe the complete contract.
 
 ## Activity protocol
 
@@ -19,7 +27,11 @@ pi.events.emit("pi-extensions:activity", {
   source: "my-extension",
   activities: [
     { id: "build-1", label: "Building project" },
-    { id: "review-1", label: "Reviewing changes" },
+    {
+      id: "review-1", label: "Reviewing changes", kind: "workflow",
+      state: "running", startedAt: Date.now(), model: "provider/model",
+      progress: { completed: 1, total: 3 },
+    },
   ],
 });
 
@@ -30,7 +42,7 @@ pi.events.emit("pi-extensions:activity", {
 });
 ```
 
-IDs are independent across sources. A snapshot replaces the entire source, so a partial finish retains the other activities. Repeating or reordering the same snapshot causes no hook transition. Label changes update background titles without introducing an idle boundary.
+IDs are independent across sources. A snapshot replaces the entire source, so a partial finish retains the other activities. Repeating or reordering the same snapshot causes no hook transition. Label changes update background titles without introducing an idle boundary. Optional `kind` (`agent`, `workflow`, or `step`), `state` (`running` or `waiting`), `startedAt` (Unix milliseconds), `model` (up to 240 characters), and `progress` (`0 ≤ completed ≤ total`, integer `total ≥ 1`) enrich the companion panel. Keep `startedAt` stable across updates. Invalid optional metadata rejects the complete snapshot; omitted metadata remains valid. Metadata updates do not restart managed child activity.
 
 Register a replay listener in the producer's factory and emit its current snapshot when the bridge asks:
 
@@ -46,7 +58,7 @@ Validation is atomic. Sources are 1–64 ASCII letters, digits, `.`, `_`, or `-`
 
 ## Native chat and Pi RPC
 
-The bridge integrates with unmodified Orca using its released hook and CLI interfaces. Background activity aggregation currently works in terminal panes. Stock Orca v1.4.230's native-chat adapter ignores extension status decorations and derives idle state from Pi's own streaming, compaction, and message queue, so this bridge cannot extend native chat's background indicator through the available interface.
+The bridge integrates with unmodified Orca using its released hook and CLI interfaces. Background activity aggregation currently works in terminal panes. Orca's native-chat adapter derives idle state from Pi's own streaming, compaction, and message queue. The public plugin APIs in v1.4.247 do not expose a native-chat activity setter, so the companion panel does not change that indicator.
 
 In RPC mode, the bridge leaves Pi's idle state unchanged, sends no custom background-status messages, and disables terminal hooks and title updates. Navigation commands and standard Pi dialogs remain available through the existing RPC interface. Compatibility tests verify these behaviors without claiming native-chat background tracking.
 
@@ -132,7 +144,8 @@ The commands use an inherited absolute `ORCA_CLI_COMMAND` first. Orca's managed 
 ## Offline verification
 
 ```sh
-npx vitest run extensions/orca-bridge
+npm run test:orca-bridge
+npm run typecheck
 ```
 
-The suite uses mocked fetch, fake timers, temporary endpoint/session files, separate event-bus wrappers, and isolated ownership globals/environment. It covers source/ID overlap, modern settlement, partial finishes, early capture/replay, validation limits, prompts and titles, nested/duplicate ownership, managed relaying, endpoint rotation, HTTP/network errors, stalled requests, bounded queue ordering, stale getters, and shutdown/reload cleanup. It also loads the [actual v1.4.230 managed reporter](tests/fixtures/README.md) in both factory orders and launches an isolated real Pi RPC process to check command discovery, unchanged model-idle state while extension work exists, absence of custom bridge status messages, and dialogs without a model call. Navigation tests mock CLI execution. No live Orca or provider requests are made.
+The suite uses mocked fetch, fake timers, temporary endpoint/session files, separate event-bus wrappers, and isolated ownership globals/environment. It covers source/ID overlap, modern settlement, partial finishes, early capture/replay, validation limits, prompts and titles, nested/duplicate ownership, managed relaying, endpoint rotation, HTTP/network errors, stalled requests, bounded queue ordering, stale getters, and shutdown/reload cleanup. It also loads the [actual v1.4.230 and v1.4.247 managed reporters](tests/fixtures/README.md) in both factory orders and launches an isolated real Pi RPC process to check command discovery, unchanged model-idle state while extension work exists, absence of custom bridge status messages, and dialogs without a model call. Navigation tests mock CLI execution. Companion tests use real temporary files to exercise publication, restart recovery, stale sessions, private permissions, malformed files (including POSIX FIFOs), and shutdown. No live Orca or provider requests are made by this suite. Native panel tests and render scenarios run separately with the [Orca CLI](plugin/README.md#verification).

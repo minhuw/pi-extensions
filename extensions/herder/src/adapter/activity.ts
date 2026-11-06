@@ -1,6 +1,6 @@
 import type { StepActivity } from "./runtime.ts";
 
-export interface Activity { id: string; label: string }
+export interface Activity { id: string; label: string; kind?: "step"; startedAt?: number }
 export interface ActivitySnapshot { source: "herder"; activities: Activity[] }
 
 const MAX_ACTIVITIES = 128;
@@ -15,6 +15,8 @@ export function activities(running: readonly StepActivity[]): Activity[] {
 	const rows = running.map((step) => ({
 		id: clean(`step:${step.key}`, 160),
 		label: clean(`Herder ${[step.task, step.label || step.phase || step.key].filter(Boolean).join(" · ")}`, 240),
+		kind: "step" as const,
+		...(step.startedAt === undefined ? {} : { startedAt: step.startedAt }),
 	}));
 	return rows.length <= MAX_ACTIVITIES ? rows : [...rows.slice(0, MAX_ACTIVITIES - 1), { id: "overflow", label: `${rows.length - MAX_ACTIVITIES + 1} more Herder steps` }];
 }

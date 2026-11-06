@@ -4,6 +4,7 @@ import { activate, ManagedRelay, type Activation } from "./compatibility.ts";
 import { endpoint, HookTransport, sessionMetadata } from "./transport.ts";
 import { Titles } from "./titles.ts";
 import { registerNavigationCommands } from "./navigation.ts";
+import { Companion } from "./companion.ts";
 
 export default function orcaBridge(pi: ExtensionAPI): void {
 	const activities = new Activities();
@@ -28,6 +29,7 @@ export default function orcaBridge(pi: ExtensionAPI): void {
 	let supplementalPrompt = false;
 	let relaying = false;
 	let managedRefreshQueued = false;
+	const companion = new Companion(() => ({ ctx, parent, promptDepth, activities: activities.entries() }));
 
 	function foreignCount(): number {
 		const count = relay?.foreignCount() ?? 0;
@@ -66,6 +68,7 @@ export default function orcaBridge(pi: ExtensionAPI): void {
 		}
 		previousBusy = busy;
 		previousPrompt = prompt;
+		companion.update();
 		titles.update(ctx, { managed: activation.mode === "managed", parent, prompt, labels: rows.map(row => row.label), foreignCount });
 	}
 
@@ -94,7 +97,10 @@ export default function orcaBridge(pi: ExtensionAPI): void {
 			: activate();
 		started = true;
 		if (activation.mode === "managed") relay = new ManagedRelay((channel, value) => pi.events.emit(channel, value));
-		if (activation.mode !== "inactive") transport = new HookTransport(() => sessionMetadata(ctx));
+		if (activation.mode !== "inactive") {
+			transport = new HookTransport(() => sessionMetadata(ctx));
+			if (context.mode === "tui") companion.start();
+		}
 		// All factories have run. Listen before asking producers to replay, and apply
 		// synchronous replies together with any snapshots captured during loading.
 		replaying = true;
@@ -102,6 +108,10 @@ export default function orcaBridge(pi: ExtensionAPI): void {
 		catch { /* An unrelated replay listener must not prevent activation. */ }
 		finally { replaying = false; }
 		reconcile();
+	}));
+	subscriptions.push(pi.on("model_select", (_event, context) => {
+		if (disposed) return;
+		ctx = context; companion.update();
 	}));
 	subscriptions.push(pi.on("agent_start", (_event, context) => {
 		if (disposed) return;
@@ -138,7 +148,7 @@ export default function orcaBridge(pi: ExtensionAPI): void {
 		previousBusy = false;
 		previousPrompt = false;
 		shutdown = (async () => {
-			try { await transport?.close(final); }
+			try { await Promise.all([transport?.close(final), companion.close()]); }
 			finally {
 				if (activation.mode !== "inactive") activation.release();
 				activation = { mode: "inactive", reason: "session shut down" };
@@ -156,6 +166,7 @@ export default function orcaBridge(pi: ExtensionAPI): void {
 			const rows = activities.entries();
 			const report = [
 				`Orca bridge: ${mode}`,
+				`Companion: ${companion.status}`,
 				`Endpoint: ${coords ? `ready (127.0.0.1:${coords.port}/hook/pi)` : "unavailable"}`,
 				...(context.mode === "rpc" ? ["RPC mode: background activity reporting is unavailable in stock Orca native chat"] : []),
 				`Main: ${parent ? 1 : 0}; background: ${rows.length}; prompts: ${promptDepth}${relay ? `; external: ${foreignCount()}` : ""}`,

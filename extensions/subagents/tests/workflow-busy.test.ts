@@ -86,10 +86,22 @@ describe("workflow activity publication", () => {
     // UI visibility and parent settlement must not clear a workflow-only lease.
     await activation.lifecycle.get("agent_settled")({}, context());
     expect(snapshots.at(-1)?.source).toBe("subagents");
+    expect(snapshots.at(-1)?.activities[0]).toMatchObject({ label: "busy-test", kind: "workflow", state: "running", startedAt: expect.any(Number) });
     expect(busy()).toBe(true);
     runs[0].finish(status);
     await flush();
     expect(busy()).toBe(false);
+  });
+
+  it("publishes workflow progress without waiting for another agent event", async () => {
+    const activation = await boot();
+    await start(activation);
+    const options = vi.mocked(runWorkflow).mock.calls.at(-1)![0];
+    options.onProgress!([
+      { type: "workflow_agent", index: 0, label: "Inspect", state: "done" },
+      { type: "workflow_agent", index: 1, label: "Implement", state: "start" },
+    ]);
+    expect(snapshots.at(-1)?.activities[0]).toMatchObject({ label: "busy-test", kind: "workflow", progress: { completed: 1, total: 2 } });
   });
 
   it("releases on a runtime rejection before any child starts", async () => {

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stablyai/orca/v1.4.247/docs/schemas/plugins/orca-plugin.v2.schema.json",
+  "manifestVersion": 2,
+  "id": "pi-activity",
+  "name": "Pi Activity",
+  "version": "0.1.0",
+  "description": "Live Pi sessions, background agents and workflow progress in Orca.",
+  "license": "MIT",
+  "engines": { "orca": ">=1.4.248" },
+  "pluginApi": 1,
+  "execution": "trusted-worker",
+  "main": "src/worker.ts",
+  "capabilities": [],
+  "contributes": {
+    "panels": [{ "id": "activity", "title": "Pi Activity", "icon": "activity", "entry": "src/panel.tsx", "ui": "components" }],
+    "commands": [{ "id": "activity.summary", "title": "Pi: Show activity summary" }],
+    "hooks": [{ "event": "agent.launch.before" }],
+    "statusBarItems": [{ "id": "activity", "text": "π · No sessions", "icon": "activity", "command": "activity.summary", "tooltip": "Local Pi terminal activity" }]
+  }
+}

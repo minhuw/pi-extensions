@@ -13,7 +13,7 @@ Extensions, prompts, skills, and a theme for the [Pi](https://github.com/earendi
 | [Impeccable](extensions/impeccable/README.md) | The Impeccable design skill, with `/impeccable`, `/design`, and 24 `/design-*` prompts for building, refining, and critiquing interfaces. |
 | [Subagents](extensions/subagents/README.md) | A vendored copy of `@tintinweb/pi-subagents` v0.22.0, plus a local agent fleet (`recon`, `worker`, `reviewer`, `expert`). |
 | [Herder](extensions/herder/README.md) | `/herder <goal>` runs a coding task in disposable git worktrees, checks the result against the goal, and delivers it to your branch after you confirm. `/herder-improve` and `/herder-simplify` audit the repository and start a run for the findings you pick. |
-| [Orca Bridge](extensions/orca-bridge/README.md) | Shows Pi activity in Orca panes, titles panes from your prompts, and opens files and diffs in Orca. |
+| [Orca Bridge](extensions/orca-bridge/README.md) | Shows Pi activity in Orca panes, opens files and diffs, and offers an optional native activity panel and status bar. |
 | [Autoresearch](extensions/autoresearch/README.md) | `/autoresearch <target>` measures a baseline, waits for your approval, then runs a bounded number of optimization passes. |
 | [Benchmark](extensions/benchmark/README.md) | `/benchmark <what>` measures a performance claim. Its `benchmark_compare` tool runs one command, or two alternately, and reports medians, ranges, run counts, and a verdict. |
 | [Loop](extensions/loop/README.md) | Repeats a prompt on a fixed interval, a cron schedule, or a delay the model picks. |
@@ -40,7 +40,7 @@ This installs everything listed above and the theme. Some extensions need a few 
 - **Autoresearch:** remove `npm:pi-autoresearch` if you have it, because both register `/autoresearch`. Existing `.auto/` data is kept.
 - **Impeccable:** the design engine (0.1.18) is downloaded and verified the first time it is needed. Live browser work needs an app it can run. Writer keeps `/polish` for prose; use `/design-polish` for UI.
 - **Herder:** run state lives in the git directory (`<git-common-dir>/herder/` and `refs/herder/`), not in the working tree. Approving a goal and confirming delivery need an interactive session (TUI or RPC).
-- **Orca Bridge:** activates only inside Orca panes. Background activity is tracked in Orca's terminal view, not its native chat. `/orca-status` shows what it sees.
+- **Orca Bridge:** activates only inside Orca panes. The optional [Pi Activity plugin](extensions/orca-bridge/plugin/README.md) shows local terminal sessions, agents, and workflow progress in Orca's sidebar and status bar. Native-chat background tracking is unavailable. `/orca-status` shows bridge and companion readiness.
 - **Magpie Provider:** needs a running Magpie gateway (default `http://127.0.0.1:3425`). `/login magpie` saves its URL and key.
 - **pika:** does nothing until `/pika login` connects it to a server. Uploads include file contents and command output, so use only a server you control. Relay needs a pika server 0.3.0 or newer. Recall needs a pika server with the agent read API. Every device may read by default; turn off "Agents can read" on the server's Devices page, or run `pika token read-access <device> off`, to stop one.
 
