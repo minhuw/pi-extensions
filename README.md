@@ -7,6 +7,7 @@ Extensions, prompts, skills, and a theme for the [Pi](https://github.com/earendi
 | Extension | What it does |
 | --- | --- |
 | [Commit](extensions/commit/README.md) | `/commit` commits your current changes as a series of self-contained patches. |
+| [Recap](extensions/recap/README.md) | `/recap` summarizes the current session's goal, recent progress, and where to pick up after a break. |
 | [Quality](extensions/quality/README.md) | `/simplify` cleans up code, `/review` reports bugs without fixing them, `/verify` runs checks without repairing anything, and `/deslop` removes AI slop. |
 | [Writer](extensions/writer/README.md) | Eight prompts for writing CS conference papers, ported from [claude-writer](https://github.com/minhuw/claude-writer). |
 | [Impeccable](extensions/impeccable/README.md) | The Impeccable design skill, with `/impeccable`, `/design`, and 24 `/design-*` prompts for building, refining, and critiquing interfaces. |

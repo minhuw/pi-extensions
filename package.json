@@ -76,6 +76,7 @@
 		"skills": ["./extensions/herder/skills", "./extensions/impeccable/skills"],
 		"prompts": [
 			"./extensions/commit/prompts/commit.md",
+			"./extensions/recap/prompts/recap.md",
 			"./extensions/quality/prompts/simplify.md",
 			"./extensions/quality/prompts/review.md",
 			"./extensions/quality/prompts/verify.md",
