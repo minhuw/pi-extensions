@@ -230,6 +230,10 @@ describe("statusline footer visual language", () => {
 		expect(renderStatus(theme, "\x1b[32mpainted\x1b[0m", "x")).toBe("\x1b[32mpainted\x1b[0m");
 		expect(new Set(["autoresearch", "herder", "loop", PROCESS_STATUS_KEY].map(key => statusHue(theme, key))).size).toBe(4);
 		expect(statusHue(theme, "custom")).toBe(statusHue(theme, "custom"));
+		// Appended to the known keys, so the slots before it keep their colors.
+		const palette = statusPalette(theme);
+		expect(statusHue(theme, "impeccable-live")).toBe(palette[5 % palette.length]);
+		expect(statusHue(theme, "language")).toBe(palette[6 % palette.length]);
 		for (const segment of ["1 failed", "1 stuck", "state error", "herder: verified not_met", "verified blocked"]) {
 			expect(statusTone(segment)).toBe("problem");
 		}
@@ -778,6 +782,118 @@ describe("statusline footer rendering", () => {
 		}
 	});
 
+	it.each(["full", "compact"])("shows the language in the %s bar and never on a status row", async (mode) => {
+		const harness = createHarness(`language-bar-${mode}`, "tui", {
+			extensionStatuses: [],
+			keyedExtensionStatuses: { language: "English" },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", mode);
+		const rows = mode === "full" ? 3 : 1;
+		try {
+			const lines = harness.getFooter()!.render(120);
+			expect(lines).toHaveLength(rows);
+			expect(lines[0]).toContain("\u{F05CA} English");
+			for (const line of lines.slice(1)) expect(line).not.toContain("English");
+			harness.setStatus("language", "中文");
+			expect(harness.getFooter()!.render(120)[0]).toContain("\u{F05CA} 中文");
+			expect(harness.getFooter()!.render(120)[0]).not.toContain("English");
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			harness.setStatus("language", "English");
+			expect(harness.getFooter()!.render(120)[0]).toContain("English");
+			expect(harness.getFooter()!.render(120)[0]).not.toContain("\u{F05CA}");
+			harness.setStatus("language");
+			expect(harness.getFooter()!.render(120)).toHaveLength(rows);
+			expect(harness.getFooter()!.render(120)[0]).not.toContain("English");
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it("keeps the other statuses on their row beside the language in full mode", async () => {
+		const harness = createHarness("language-beside-row", "tui", {
+			keyedExtensionStatuses: { language: "English", loop: "↻ build · next 4m", other: "SYNC" },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			const lines = harness.getFooter()!.render(120);
+			expect(lines).toHaveLength(4);
+			expect(lines[0]).toContain("English");
+			for (const status of ["↻ build · next 4m", "READY", "SYNC"]) {
+				expect(lines[0]).not.toContain(status);
+				expect(lines[3]).toContain(status);
+			}
+			expect(lines[3]).not.toContain("English");
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it("gives the language up before the workflow and process statuses in compact mode", async () => {
+		const statuses = { herder: "herder: T2 integrate", [PROCESS_STATUS_KEY]: "bg 1" };
+		const start = async (id: string, keyedExtensionStatuses: Record<string, string>) => {
+			const harness = createHarness(id, "tui", { extensionStatuses: [] });
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			await harness.runCommand("footer", "compact");
+			// Set after startup: the footer's process watcher publishes its own key then.
+			for (const [key, status] of Object.entries(keyedExtensionStatuses)) harness.setStatus(key, status);
+			return harness;
+		};
+		const harness = await start("language-order", { ...statuses, language: "English" });
+		const baseline = await start("language-order-baseline", statuses);
+		try {
+			const narrowest = { language: Infinity, workflow: Infinity };
+			for (let width = 160; width >= 1; width--) {
+				const line = harness.getFooter()!.render(width)[0]!;
+				if (line.includes("English")) {
+					narrowest.language = width;
+					expect(line, `${width}`).toContain("herder: T2 integrate  bg 1");
+				} else {
+					expect(line, `${width}`).toBe(baseline.getFooter()!.render(width)[0]);
+				}
+				if (line.includes("herder: T2 integrate")) narrowest.workflow = width;
+			}
+			expect(narrowest.language).toBeGreaterThan(narrowest.workflow);
+			expect(narrowest.workflow).toBeLessThan(160);
+		} finally {
+			harness.disposeFooter();
+			baseline.disposeFooter();
+		}
+	});
+
+	it("keeps the provider fallback in full mode, with the language outlasting the provider", async () => {
+		const start = async (id: string, keyedExtensionStatuses: Record<string, string>) => {
+			const harness = createHarness(id, "tui", { extensionStatuses: [], keyedExtensionStatuses });
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			return harness;
+		};
+		const harness = await start("language-provider", { language: "English" });
+		const baseline = await start("language-provider-baseline", {});
+		const bar = (footer: typeof harness, width: number) => footer.getFooter()!.render(width)[0]!;
+		try {
+			const seen = { both: false, languageOnly: false, providerOnly: false, neither: false };
+			for (let width = 160; width >= 24; width--) {
+				const line = bar(harness, width);
+				const language = line.includes("English");
+				const provider = line.includes("(moonshot)");
+				if (language && provider) seen.both = true;
+				else if (language) seen.languageOnly = true;
+				else if (provider) seen.providerOnly = true;
+				else seen.neither = true;
+				if (!language) expect(line, `${width}`).toBe(bar(baseline, width));
+			}
+			expect(seen).toEqual({ both: true, languageOnly: true, providerOnly: false, neither: true });
+		} finally {
+			harness.disposeFooter();
+			baseline.disposeFooter();
+		}
+	});
+
 	it("paints extension statuses by identity and tone instead of the theme accent", async () => {
 		const harness = createHarness("status-tone", "tui", {
 			keyedExtensionStatuses: { herder: "herder: T2 integrate", loop: "↻ build", other: "SYNC" },
@@ -975,6 +1091,51 @@ describe("statusline footer powerline style", () => {
 				harness.disposeFooter();
 			}
 		}
+	});
+
+	describe.each(["full", "compact"])("language in the %s bar", (mode) => {
+		const start = async (id: string, model: typeof claude, keyedExtensionStatuses: Record<string, string>, theme?: ReturnType<typeof rgbTheme>) => {
+			const harness = createHarness(id, "tui", { model, extensionStatuses: [], keyedExtensionStatuses, theme });
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			await harness.runCommand("footer", mode);
+			return harness;
+		};
+
+		it.each([
+			["English", "flat", claude.id],
+			["English", "powerline", claude.id],
+			["简体中文", "flat", claude.id],
+			["简体中文", "powerline", claude.id],
+			["简体中文", "powerline", "模型模型模型模型"],
+			["简体中文".repeat(10), "powerline", longClaude.id],
+		] as const)("fits %s on the %s bar beside %s and yields to the model and percent at every width", async (language, skin, modelId) => {
+			const model = { ...claude, id: modelId };
+			const theme = skin === "powerline" ? rgbTheme() : undefined;
+			const id = `language-sweep-${mode}-${skin}-${language}-${modelId}`;
+			const harness = await start(id, model, { language }, theme);
+			const baseline = await start(`${id}-baseline`, model, {}, theme);
+			try {
+				let shown = 0;
+				for (let width = 200; width >= 1; width--) {
+					const lines = harness.getFooter()!.render(width);
+					const plain = baseline.getFooter()!.render(width);
+					for (const line of lines) expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
+					// The name goes whole: no stray glyph is ever left behind.
+					if (lines[0]!.includes(language)) shown++;
+					else expect(lines[0], `${width}`).toBe(plain[0]);
+					expect(lines.slice(1), `${width}`).toEqual(plain.slice(1));
+					for (const whole of [model.id, "42.5%"]) {
+						if (plain[0]!.includes(whole)) expect(lines[0], `${width}`).toContain(whole);
+					}
+				}
+				expect(shown).toBeGreaterThan(0);
+				expect(shown).toBeLessThan(200);
+			} finally {
+				harness.disposeFooter();
+				baseline.disposeFooter();
+			}
+		});
 	});
 
 	it("keeps a chip that truncation cuts into on its own color and closes it", async () => {

@@ -11,7 +11,7 @@
  *   ▌✻ model ▶ HIGH  (provider) ▶ ──────── ◀ ▉▉▉░░░  8.2%  78.9k/1.05M ▐
  *    ├ # 13  ⏱ 1h 28m  ❯  ⏱ 4.2s  » 28.9 tok/s     $0.75  $0.06/turn  ❮  ↑ 65k  ↓ 31k
  *    ├ ⎇ main  +42 −17                            ▤ 5 touched  ❮  ⌂ ~/…/my-project
- *    ╰ herder: T2 integrate · 3/5 tasks  ❯  ↻ build · next 4m   (while any status is set)
+ *    ╰ herder: T2 integrate · 3/5 tasks  ❯  ↻ build · next 4m   (while any status but the language is set)
  *
  * Compact mode: the bar alone.
  *   ▌✻ model ▶ HIGH ▶ ──────── ◀ ▉▉▉░░░  42%  $1.23  12m ▐
@@ -393,7 +393,7 @@ export function statusTone(segment: string): "problem" | "attention" | "calm" {
 }
 
 // Known extensions keep a fixed slot so their color does not move as others come and go.
-const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live"];
+const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language"];
 const STATUS_ICONS: Record<string, string> = {
 	autoresearch: "\u{F0093}", // md-flask
 	herder: "\u{F0CC6}", // md-sheep
@@ -401,6 +401,7 @@ const STATUS_ICONS: Record<string, string> = {
 	[PROCESS_STATUS_KEY]: "\u{F018D}", // md-console
 	subagents: "\u{F06A9}", // md-robot
 	"impeccable-live": "\u{F03D8}", // md-palette
+	language: "\u{F05CA}", // md-translate
 };
 const STATUS_DEFAULT_ICON = "\u{F0431}"; // md-puzzle
 const STATUS_HUES: ThemeToken[] = [
@@ -469,6 +470,12 @@ export function renderStatus(theme: Theme, text: string, key = "", withIcon = fa
 		if (tone === "attention") return theme.fg("warning", part);
 		return theme.fg(index === 0 ? identity : "muted", part);
 	}).join("");
+}
+
+/** The language for the bar. A bare name does not say what it is, so it keeps its icon in both modes. */
+function renderLanguage(theme: Theme, statuses: ReadonlyMap<string, string>): string | undefined {
+	const language = statuses.get("language");
+	return language ? renderStatus(theme, language, "language", hasNerdFonts()) : undefined;
 }
 
 // ── model marks ─────────────────────────────────────────────────────
@@ -1023,6 +1030,7 @@ function renderIdentityRow(
 	state: SessionState,
 	s: Stats,
 	compactMode: boolean,
+	languageStatus?: string,
 	workflowStatus?: string,
 ): string {
 	const set = icons();
@@ -1039,14 +1047,17 @@ function renderIdentityRow(
 	] : [];
 	const context = renderContext(theme, usage, barWidth, s.compactions, set.compact);
 	const right = cluster([context, ...tail], "  ");
-	const loop = compactMode && workflowStatus ? workflowStatus : "";
-	if (loop && visibleWidth(left) + visibleWidth(loop) + visibleWidth(right) + chrome + 2 <= width) {
-		return skin.bar(cluster([left, loop], "  "), right, width);
-	}
 	const minimumContext = usage?.percent != null ? visibleWidth(`${usage.percent.toFixed(1)}%`) : 0;
 	// Compact already renders the provider-free label, so it is the fallback identity too.
 	const compactIdentity = compactMode ? left : label(false);
-	const showLoop = Boolean(loop) && visibleWidth(compactIdentity) + visibleWidth(loop) + minimumContext + chrome + 2 <= width;
+	const fitsBeside = (status: string) => visibleWidth(compactIdentity) + visibleWidth(status) + minimumContext + chrome + 2 <= width;
+	// The language goes first, and whole; what stays then lays out as if it had never been set.
+	const allStatuses = cluster([workflowStatus, languageStatus], "  ");
+	const loop = fitsBeside(allStatuses) ? allStatuses : workflowStatus ?? "";
+	if (loop && visibleWidth(left) + visibleWidth(loop) + visibleWidth(right) + chrome + 2 <= width) {
+		return skin.bar(cluster([left, loop], "  "), right, width);
+	}
+	const showLoop = Boolean(loop) && fitsBeside(loop);
 	if (!showLoop && visibleWidth(left) + visibleWidth(right) + chrome <= width) return skin.bar(left, right, width);
 
 	// Keep identity and context percent; shed provider, token counts, and compact extras first.
@@ -1072,7 +1083,7 @@ function renderCompact(
 ): string {
 	const statuses = footerData.getExtensionStatuses();
 	const workflowKey = ["autoresearch", "herder", "loop"].find((key) => statuses.get(key));
-	return renderIdentityRow(ctx, theme, skin, width, state, collectStats(ctx, state), true, cluster([
+	return renderIdentityRow(ctx, theme, skin, width, state, collectStats(ctx, state), true, renderLanguage(theme, statuses), cluster([
 		workflowKey && renderStatus(theme, statuses.get(workflowKey)!, workflowKey),
 		statuses.get(PROCESS_STATUS_KEY) && renderStatus(theme, statuses.get(PROCESS_STATUS_KEY)!, PROCESS_STATUS_KEY),
 	], "  "));
@@ -1104,15 +1115,16 @@ function renderFull(
 	state: SessionState,
 ): string[] {
 	const s = collectStats(ctx, state);
-	const line1 = renderIdentityRow(ctx, theme, skin, width, state, s, false);
+	const extensionStatuses = footerData.getExtensionStatuses();
+	const line1 = renderIdentityRow(ctx, theme, skin, width, state, s, false, renderLanguage(theme, extensionStatuses));
 
 	// Extension statuses get their own row, present only while one is published:
-	// workflows first (research, Herder, Loop, processes), then the rest.
-	const extensionStatuses = footerData.getExtensionStatuses();
+	// workflows first (research, Herder, Loop, processes), then the rest. The
+	// language is nearly always set, so it rides the bar and keeps the row away.
 	const workflowKeys = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY];
 	const statuses = [
 		...workflowKeys.map((key): [string, string | undefined] => [key, extensionStatuses.get(key)]),
-		...[...extensionStatuses.entries()].filter(([key]) => !workflowKeys.includes(key)),
+		...[...extensionStatuses.entries()].filter(([key]) => key !== "language" && !workflowKeys.includes(key)),
 	].flatMap(([key, status]) => status ? [renderStatus(theme, status, key, hasNerdFonts())] : []);
 
 	return [line1, ...renderDetailRows(ctx, theme, footerData, width, state, s, statuses)];

@@ -28,4 +28,6 @@ Behavior worth knowing:
 - Subagents, Herder steps, and print and JSON modes are not affected, and `/language` only shows a warning there.
 - If compaction drops the hidden message during a long run, the rest of that run may fall back to the default until the next prompt.
 
+[Statusline Footer](../statusline-footer/README.md) shows the active language in its bar. Before a session's first prompt, it shows the default that prompt will use.
+
 Run `npm run test:language` for offline tests that drive real Pi sessions on a local faux provider and check what the provider receives.
