@@ -233,10 +233,15 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 		const content = typeof message.content === "string" ? message.content : "Autoresearch";
 		return new Markdown(expanded ? content : content.split("\n")[0]!, 0, 0, getMarkdownTheme());
 	});
+	// Displays stay outside model context: a transcript entry in TUI, a notification elsewhere. Older sessions stored them as messages.
 	pi.registerMessageRenderer(DISPLAY, message => new Markdown(typeof message.content === "string" ? message.content : "", 0, 0, getMarkdownTheme()));
-	const display = (r: Runtime) => pi.sendMessage({ customType: DISPLAY, display: true, content: r.state.campaign?.benchmark
-		? `${proposal(r.state)}\n\nState: ${r.state.campaign.state}${r.state.campaign.reason ? ` — ${r.state.campaign.reason}` : ""}`
-		: r.state.report ? renderReport(r.state.report) : r.state.campaign ? `Research target: ${r.state.campaign.goal}\nState: ${r.state.campaign.state}` : "No research report. Start with /autoresearch <target>." }, { triggerTurn: false });
+	pi.registerEntryRenderer<{ text?: unknown }>(DISPLAY, entry => new Markdown(typeof entry.data?.text === "string" ? entry.data.text : "", 0, 0, getMarkdownTheme()));
+	const display = (r: Runtime, ctx: ExtensionContext) => {
+		const text = r.state.campaign?.benchmark
+			? `${proposal(r.state)}\n\nState: ${r.state.campaign.state}${r.state.campaign.reason ? ` — ${r.state.campaign.reason}` : ""}`
+			: r.state.report ? renderReport(r.state.report) : r.state.campaign ? `Research target: ${r.state.campaign.goal}\nState: ${r.state.campaign.state}` : "No research report. Start with /autoresearch <target>.";
+		if (ctx.mode === "tui") pi.appendEntry(DISPLAY, { text }); else ctx.ui.notify(text, "info");
+	};
 	pi.registerCommand("research-report", {
 		description: "Show research methodology and metrics: /research-report [status|results|clear|help]",
 		handler: async (args, ctx) => {
@@ -250,7 +255,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 				save(r, emptyState()); r.invalid = false; return;
 			}
 			if (r.invalid) throw new Error("Saved report is invalid. Use /research-report clear first.");
-			display(r);
+			display(r, ctx);
 		},
 	});
 	pi.registerCommand("autoresearch", {
@@ -260,7 +265,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 			const r = get(ctx); const input = args.trim(); const action = input.toLowerCase();
 			if (!input || action === "help") { ctx.ui.notify(HELP, "info"); return; }
 			if (r.invalid && action !== "stop") throw new Error("Saved research state is invalid. Recover with /autoresearch stop or /research-report clear.");
-			if (action === "status") { display(r); return; }
+			if (action === "status") { display(r, ctx); return; }
 			const c = r.state.campaign;
 			if (["pause", "stop"].includes(action)) {
 				if (!c && !r.invalid) throw new Error("No research campaign.");
@@ -289,7 +294,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 			if (action === "resume") {
 				if (!c || c.state !== "paused") throw new Error("Research must be paused before resuming.");
 				if (r.active) throw new Error("Wait for the previous pass to settle.");
-				if (c.baseline && !c.approved) { const next = structuredClone(r.state); next.campaign!.state = "awaiting_approval"; save(r, next); display(r); return; }
+				if (c.baseline && !c.approved) { const next = structuredClone(r.state); next.campaign!.state = "awaiting_approval"; save(r, next); display(r, ctx); return; }
 				if (c.approved) {
 					const limit = c.iterations >= c.maxIterations ? ITERATION_LIMIT : (c.deadline ?? 0) <= Date.now() ? LIFETIME_LIMIT : undefined;
 					if (limit) { complete(r, limit); ctx.ui.notify(`Research complete: ${limit} Start a new campaign with /autoresearch <target>.`, "info"); return; }

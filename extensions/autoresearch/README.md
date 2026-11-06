@@ -45,12 +45,12 @@ After approval, the extension schedules bounded experiment passes in the same Pi
 | `/autoresearch <target> [--max N]` | Understand the target, implement the harness, measure the baseline, and request review. |
 | `/autoresearch approve` | Approve the pending measured baseline and start optimization. |
 | `/autoresearch revise <feedback>` | Return to setup with feedback; discard the previous approval and require a new one. |
-| `/autoresearch status` | Show the methodology, samples, per-metric ranges, baseline measurement time, metric table, and campaign state. |
+| `/autoresearch status` | Show the methodology, samples, per-metric ranges, baseline measurement time, metric table, and campaign state as a transcript entry in TUI or a notification in RPC, outside model context. |
 | `/autoresearch pause` | Pause scheduling and abort an owned active pass. |
-| `/autoresearch resume` | Resume a paused campaign. An unapproved baseline still needs approval. An approved campaign at its iteration or lifetime limit is marked complete instead, so `/autoresearch <target>` can start a new one; otherwise its pinned harness is re-checked before any pass is scheduled. |
+| `/autoresearch resume` | Resume a paused campaign. An unapproved baseline still needs approval; its proposal is shown again for review, like `/autoresearch status`. An approved campaign at its iteration or lifetime limit is marked complete instead, so `/autoresearch <target>` can start a new one; otherwise its pinned harness is re-checked before any pass is scheduled. |
 | `/autoresearch stop` | Stop the campaign and abort an owned active pass. Preserve reports and working files. |
 | `/autoresearch help` | Show syntax and limits. |
-| `/research-report` or `/research-report results` | Show the current report. |
+| `/research-report` or `/research-report results` | Show the current report, displayed like `/autoresearch status`. |
 | `/research-report clear` | Clear a stopped/completed campaign or standalone report. Stop an active campaign first. |
 
 The default is 25 optimization passes; `--max` accepts 1–1,000 and must appear at the end of the start command. Campaigns have a six-hour lifetime after approval. Reaching the iteration limit completes the campaign; reaching the lifetime pauses it, and `/autoresearch resume` then marks it complete. Each optimization pass has a 15-minute timeout; initial setup has 30 minutes. The setup and iteration prompts state these pass limits. Because each iteration must fit a focused edit plus one full `autoresearch_measure` (every repetition plus the correctness check), the setup prompt asks the agent to size the workload and repetitions so that one measurement takes well under half the iteration limit. Timeouts and interrupted/unmeasured passes pause for explicit recovery. A failed latest measurement cannot be masked by an earlier successful measurement in the same pass.
@@ -118,7 +118,7 @@ research · awaiting approval · measured · Compile 213 ms (0%)
 research · run 3/20 · measured · Compile 182 ms (-14.554%)
 ```
 
-The tool response and report command display the agent's message and all metrics. Negative change means the number decreased; direction determines whether that is desirable. The extension computes arithmetic and distinguishes tool-measured numbers from standalone model-reported numbers. Parsing a measurement does not establish that the methodology is appropriate or that an improvement is statistically significant; reviewing the baseline is part of the workflow.
+The tool response and report command display the agent's message and all metrics. Status and report displays never enter model context: in TUI they appear as transcript entries, and in RPC as notifications. Negative change means the number decreased; direction determines whether that is desirable. The extension computes arithmetic and distinguishes tool-measured numbers from standalone model-reported numbers. Parsing a measurement does not establish that the methodology is appropriate or that an improvement is statistically significant; reviewing the baseline is part of the workflow.
 
 The baseline proposal and `/autoresearch status` show each metric's baseline median, min–max range, and sample count:
 
@@ -139,7 +139,7 @@ The verdict is `within noise` when the baseline and latest ranges overlap, inclu
 
 ## Session lifecycle
 
-Campaigns and reports are stored together in versioned custom session entries, outside model context. They survive compaction and follow the selected conversation branch. Earlier standalone reporting snapshots are supported. Each new pass receives a checkpoint reconstructed from stored methodology and measurements, without replacing Pi/Magpie compaction.
+Campaigns and reports are stored together in versioned custom session entries, outside model context. They survive compaction and follow the selected conversation branch. Status and report displays are separate transcript entries in TUI and notifications in RPC, also outside model context; restoration reads only the latest snapshot. Earlier standalone reporting snapshots are supported. Each new pass receives a checkpoint reconstructed from stored methodology and measurements, without replacing Pi/Magpie compaction.
 
 The scheduler waits outside Pi's queue until the session is idle, no user messages are pending, and no extension dialog is open. Only one pass is owned at a time. User input, aborts, unrelated prompts taking over a pass, or tree navigation prevent silent continuation. Stale queued passes are canceled before a provider request. Results arriving after ownership is lost are rejected.
 

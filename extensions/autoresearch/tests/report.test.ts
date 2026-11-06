@@ -80,7 +80,7 @@ it("validates durable snapshots and escapes metric table cells", () => {
 function harness(mode: "tui" | "rpc" | "print" = "tui") {
 	const handlers = new Map<string, Array<(event: any, ctx: ExtensionContext) => unknown>>();
 	const tools = new Map<string, any>(); const commands = new Map<string, any>();
-	const entries: any[] = []; const statuses = new Map<string, string>(); const displays: any[] = [];
+	const entries: any[] = []; const statuses = new Map<string, string>();
 	let sessionId = "owner";
 	let branch = entries;
 	let footer: { render(width: number): string[]; dispose(): void } | undefined;
@@ -88,9 +88,9 @@ function harness(mode: "tui" | "rpc" | "print" = "tui") {
 		on: (name: string, handler: any) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
 		registerTool: (tool: any) => tools.set(tool.name, tool),
 		registerCommand: (name: string, command: any) => commands.set(name, command),
-		registerMessageRenderer: vi.fn(),
+		registerMessageRenderer: vi.fn(), registerEntryRenderer: vi.fn(),
 		appendEntry: vi.fn((customType: string, data: unknown) => entries.push({ type: "custom", customType, data: structuredClone(data) })),
-		sendMessage: vi.fn((message: any) => displays.push(message)),
+		sendMessage: vi.fn(),
 		events: createEventBus(),
 	} as unknown as ExtensionAPI;
 	const ctx = {
@@ -111,7 +111,8 @@ function harness(mode: "tui" | "rpc" | "print" = "tui") {
 	} as unknown as ExtensionContext;
 	extension(pi);
 	return {
-		pi, ctx, entries, statuses, displays, tools, commands,
+		pi, ctx, entries, statuses, tools, commands,
+		displays: () => (ctx.sessionManager.getBranch() as any[]).flatMap(entry => entry.type === "custom" && entry.customType === "autoresearch:display" ? [entry.data.text as string] : []),
 		setBranch: (next: any[]) => { branch = next; },
 		setSession: (id: string) => { sessionId = id; },
 		getFooter: () => footer,
@@ -126,9 +127,9 @@ it("persists reports, restores as paused, clears durably, and follows the select
 	await h.update(baseline);
 	const original = structuredClone(h.entries);
 	await h.command("results");
-	expect(h.displays[0].content).toContain("Testing cached lookups.");
-	expect(h.displays[0].content).toContain("| Metric |");
-	expect(h.pi.sendMessage).toHaveBeenLastCalledWith(expect.anything(), { triggerTurn: false });
+	expect(h.displays()[0]).toContain("Testing cached lookups.");
+	expect(h.displays()[0]).toContain("| Metric |");
+	expect(h.pi.sendMessage).not.toHaveBeenCalled(); expect(h.ctx.ui.notify).not.toHaveBeenCalled();
 	await h.emit("session_start", { reason: "reload" });
 	expect(h.statuses.get("autoresearch")).toContain("paused");
 	await h.command("clear");
@@ -161,7 +162,7 @@ it("does not publish failed persistence or invalid updates", async () => {
 	vi.mocked(h.pi.appendEntry).mockImplementationOnce(() => { throw new Error("disk full"); });
 	await expect(h.update({ phase: "editing", message: "Not saved" })).rejects.toThrow("disk full");
 	expect(h.statuses.get("autoresearch")).toBe(before);
-	await h.command("status"); expect(h.displays[0].content).toContain("Testing cached lookups.");
+	await h.command("status"); expect(h.displays()[0]).toContain("Testing cached lookups.");
 });
 
 function failedWrite(action: string, h: ReturnType<typeof harness>) {
@@ -171,7 +172,7 @@ async function expectPreviousReportSurvives(h: ReturnType<typeof harness>) {
 	await h.emit("session_start", { reason: "reload" });
 	expect(h.statuses.get("autoresearch")).toContain("Lookup 182 ms");
 	await h.command("results");
-	expect(h.displays.at(-1).content).toContain("Testing cached lookups.");
+	expect(h.displays().at(-1)).toContain("Testing cached lookups.");
 	await expect(h.update({ phase: "planning", message: "Changed objective", metrics: [{ name: "other", direction: "higher" }] })).rejects.toThrow("Unknown metric");
 }
 function realManager(h: ReturnType<typeof harness>) {
@@ -228,6 +229,9 @@ it.each(["tui", "rpc", "print"] as const)("registers native commands and reports
 	expect(h.commands.has("autoresearch")).toBe(true);
 	await h.update(baseline);
 	expect(h.ctx.ui.setStatus).toHaveBeenCalledTimes(mode === "print" ? 0 : 2);
+	await h.command("status");
+	if (mode === "tui") expect(h.displays().at(-1)).toContain("Testing cached lookups.");
+	else { expect(h.displays()).toEqual([]); expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("Testing cached lookups."), "info"); }
 	await h.command("help");
 	expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("/autoresearch <target>"), "info");
 	await expect(h.command("surprise")).rejects.toThrow("Usage");

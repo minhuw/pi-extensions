@@ -30,7 +30,7 @@ async function fixture(mode: "tui" | "rpc" | "print" = "tui") {
 		on: (name: string, handler: any) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
 		registerTool: (tool: any) => tools.set(tool.name, tool),
 		registerCommand: (name: string, command: any) => commands.set(name, command),
-		registerMessageRenderer() {},
+		registerMessageRenderer() {}, registerEntryRenderer() {},
 		appendEntry: vi.fn((customType: string, data: unknown) => entries.push({ type: "custom", customType, data: structuredClone(data) })),
 		sendMessage: vi.fn((message: any, options: any) => { messages.push(message); if (options?.triggerTurn) idle = false; }),
 	} as unknown as ExtensionAPI;
@@ -39,6 +39,7 @@ async function fixture(mode: "tui" | "rpc" | "print" = "tui") {
 	await emit("session_start", { reason: "startup" });
 	const state = () => entries.findLast(entry => entry.type === "custom" && entry.customType === SNAPSHOT)?.data as State | undefined;
 	const tool = (name: string, args: unknown) => tools.get(name).execute("call", args, undefined, undefined, ctx);
+	const shown = () => { expect(entries.at(-1)).toMatchObject({ type: "custom", customType: "autoresearch:display" }); return entries.at(-1).data.text as string; };
 	const baseline = (overrides: object = {}) => tool("autoresearch_baseline", {
 		methodology: "Clean compilation of the fixed project inputs. Clear build outputs before each run; measure wall time in milliseconds. Three repetitions, median. Keep correctness checks unchanged.",
 		command: "bash measure.sh", checkCommand: "check", files: ["measure.sh"], repetitions: 3,
@@ -51,7 +52,7 @@ async function fixture(mode: "tui" | "rpc" | "print" = "tui") {
 	const settle = async (aborted = false) => {
 		idle = true; await emit("agent_before_settle", { outcome: aborted ? "aborted" : "completed" }); await emit("agent_settled", { aborted });
 	};
-	return { directory, ctx, pi, commands, entries, messages, statuses, emit, state, tool, baseline, enter, settle,
+	return { directory, ctx, pi, commands, entries, messages, statuses, emit, state, tool, shown, baseline, enter, settle,
 		command: (text: string) => commands.get("autoresearch").handler(text, ctx),
 		idle: (value: boolean) => { idle = value; }, queued: (value: boolean) => { queued = value; },
 		values: (next: number[]) => { values = next; },
@@ -193,7 +194,7 @@ it("shows each metric's median, range, and sample count, and the objective's noi
 		const proposed = await text(h.baseline());
 		expect(proposed).toContain("Baseline samples: [{\"compile_ms\":100},{\"compile_ms\":110},{\"compile_ms\":90}]\nCompile: baseline 100 ms (range 90–110 ms, n=3)\n");
 		await h.settle(); await h.command("status");
-		expect(h.messages.at(-1).content).toContain("Compile: baseline 100 ms (range 90–110 ms, n=3)");
+		expect(h.shown()).toContain("Compile: baseline 100 ms (range 90–110 ms, n=3)");
 		await h.command("approve"); await vi.advanceTimersByTimeAsync(1); await h.enter();
 		const iteration = h.messages.findLast(message => message.customType === ITERATION).content;
 		expect(iteration).toContain("\"within noise\" (the baseline and latest ranges overlap) is no measurable difference, not an improvement. With fewer than 2 repetitions noise cannot be estimated (\"noise unknown\"); say so when reporting a change.");
@@ -242,9 +243,9 @@ it("shows every metric's range with its own label and unit and judges noise on t
 		expect(proposed).toContain(baseline.join("\n"));
 		expect(verdicts(proposed)).toEqual([]);
 		await h.settle(); await h.command("status");
-		expect(h.messages.at(-1).content).toContain(baseline.join("\n"));
+		expect(h.shown()).toContain(baseline.join("\n"));
 		await h.emit("session_start", { reason: "reload" }); await h.command("status");
-		expect(h.messages.at(-1).content).toContain(baseline.join("\n"));
+		expect(h.shown()).toContain(baseline.join("\n"));
 		await h.command("approve"); await vi.advanceTimersByTimeAsync(1); await h.enter();
 		expect(h.messages.findLast(message => message.customType === ITERATION).content).toContain(baseline.join("\n"));
 
@@ -606,8 +607,8 @@ it("states pass time limits and flags slow baselines", async () => {
 		expect(slow).toContain(`${warning}, leaving little time for an edit, so iterations will likely time out and pause the campaign. Use fewer repetitions or a smaller workload via /autoresearch revise <feedback>.`);
 		expect(h.state()?.campaign).toMatchObject({ state: "awaiting_approval", baselineMs: 600_000 });
 		await h.settle(); await h.command("status");
-		expect(h.messages.at(-1).content).toContain("Baseline measurement time: 10m 0s");
-		expect(h.messages.at(-1).content).toContain(warning);
+		expect(h.shown()).toContain("Baseline measurement time: 10m 0s");
+		expect(h.shown()).toContain(warning);
 
 		await h.command("approve"); await vi.advanceTimersByTimeAsync(1); await h.enter();
 		expect(latest()).toContain("Autoresearch iteration 1/25");
@@ -643,7 +644,7 @@ it.each([
 		expect(result).toContain("Baseline measurement time");
 		if (warn) expect(result).toMatch(/warning/i); else expect(result).not.toMatch(/warning/i);
 		await h.settle(); await h.command("status");
-		if (warn) expect(h.messages.at(-1).content).toMatch(/warning/i); else expect(h.messages.at(-1).content).not.toMatch(/warning/i);
+		if (warn) expect(h.shown()).toMatch(/warning/i); else expect(h.shown()).not.toMatch(/warning/i);
 	} finally { await h.cleanup(); }
 });
 
@@ -680,7 +681,7 @@ it("keeps the baseline time across reloads and iterations and omits it for older
 		expect(h.state()?.campaign?.baselineMs).toBe(120_000);
 		expect(Object.keys(h.state()!.campaign!.baseline!).sort()).toEqual(["samples", "timestamp", "values"]);
 		await h.emit("session_start", { reason: "reload" }); await h.command("status");
-		expect(h.messages.at(-1).content).toContain("Baseline measurement time: 2m 0s");
+		expect(h.shown()).toContain("Baseline measurement time: 2m 0s");
 		await h.command("approve"); await vi.advanceTimersByTimeAsync(1); await h.enter();
 		await h.tool("autoresearch_measure", {}); await h.settle(); await vi.advanceTimersByTimeAsync(1); await h.enter();
 		expect(latest()).toContain("Autoresearch iteration 2/25");
@@ -693,8 +694,8 @@ it("keeps the baseline time across reloads and iterations and omits it for older
 		await h.emit("session_start", { reason: "reload" });
 		expect(h.ctx.ui.notify).not.toHaveBeenCalled();
 		await h.command("status");
-		expect(h.messages.at(-1).content).toContain("State: paused");
-		expect(h.messages.at(-1).content).not.toContain("Baseline measurement time");
+		expect(h.shown()).toContain("State: paused");
+		expect(h.shown()).not.toContain("Baseline measurement time");
 		await h.command("resume"); await vi.advanceTimersByTimeAsync(1); await h.enter();
 		expect(latest()).toContain("Autoresearch iteration 3/25");
 		expect(latest()).toMatch(/15 minutes|15-minute/);
@@ -719,6 +720,15 @@ it("states the pass limits in help without duplicating limit literals in index.t
 	} finally { await h.cleanup(); }
 	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
 	expect(source).not.toMatch(/60_000|30_000|\b(15|30) minutes|six hours/);
+});
+
+it("documents status and report displays as TUI transcript entries and RPC notifications outside model context in the README", async () => {
+	const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+	const section = (title: string) => readme.split(/^## /m).find(part => part.startsWith(`${title}\n`)) ?? "";
+	for (const title of ["Commands", "Presentation", "Session lifecycle"]) {
+		const text = section(title);
+		for (const pattern of [/TUI/, /transcript entr(y|ies)/, /RPC/, /notifications?\b/, /model context/]) expect(text, title).toMatch(pattern);
+	}
 });
 
 it("documents the pass limits, the recorded baseline time, and its warning in the README", async () => {
