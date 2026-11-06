@@ -19,7 +19,7 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:benchmark && npm run test:autoresearch && npm run test:subagents && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:superagent && npm run test:impeccable",
+		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:benchmark && npm run test:autoresearch && npm run test:subagents && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:impeccable",
 		"test:impeccable": "vitest run --config extensions/impeccable/vitest.config.ts",
 		"test:impeccable:package": "vitest run --config extensions/impeccable/vitest.package.config.ts",
 		"test:impeccable:e2e": "vitest run --config extensions/impeccable/vitest.e2e.config.ts",
@@ -41,7 +41,6 @@
 		"test:pika": "vitest run extensions/pika",
 		"test:relay": "vitest run extensions/pika/tests/relay",
 		"test:recall": "vitest run extensions/pika/tests/recall",
-		"test:superagent": "vitest run extensions/superagent",
 		"test:herder": "vitest run --config extensions/herder/vitest.config.ts",
 		"typecheck": "tsc -p tsconfig.json && npm run typecheck:subagents",
 		"typecheck:subagents": "tsc -p extensions/subagents/tsconfig.json"
@@ -127,7 +126,6 @@
 			"./extensions/subagents/src/index.ts",
 			"./extensions/herder/index.ts",
 			"./extensions/impeccable/index.ts",
-			"./extensions/superagent/index.ts",
 			"./extensions/pika/index.ts"
 		]
 	}

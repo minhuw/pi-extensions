@@ -393,14 +393,13 @@ export function statusTone(segment: string): "problem" | "attention" | "calm" {
 }
 
 // Known extensions keep a fixed slot so their color does not move as others come and go.
-const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "superagent", "impeccable-live"];
+const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live"];
 const STATUS_ICONS: Record<string, string> = {
 	autoresearch: "\u{F0093}", // md-flask
 	herder: "\u{F0CC6}", // md-sheep
 	loop: "\u{F04E6}", // md-sync
 	[PROCESS_STATUS_KEY]: "\u{F018D}", // md-console
 	subagents: "\u{F06A9}", // md-robot
-	superagent: "\u{F0913}", // md-ticket-outline
 	"impeccable-live": "\u{F03D8}", // md-palette
 };
 const STATUS_DEFAULT_ICON = "\u{F0431}"; // md-puzzle

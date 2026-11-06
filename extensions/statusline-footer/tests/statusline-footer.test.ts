@@ -236,7 +236,7 @@ describe("statusline footer visual language", () => {
 		for (const segment of ["paused", "awaiting approval", "1 for you", "1 stopping", "1 killed"]) {
 			expect(statusTone(segment)).toBe("attention");
 		}
-		for (const segment of ["↻ fix-errors", "herder: verified met", "next 4m", "waiting", "superagent: on", "2 working"]) {
+		for (const segment of ["↻ fix-errors", "herder: verified met", "next 4m", "waiting", "subagents: on", "2 working"]) {
 			expect(statusTone(segment)).toBe("calm");
 		}
 	});
