@@ -17,6 +17,7 @@ Extensions, prompts, skills, and a theme for the [Pi](https://github.com/earendi
 | [Benchmark](extensions/benchmark/README.md) | `/benchmark <what>` measures a performance claim. Its `benchmark_compare` tool runs one command, or two alternately, and reports medians, ranges, run counts, and a verdict. |
 | [Loop](extensions/loop/README.md) | Repeats a prompt on a fixed interval, a cron schedule, or a delay the model picks. |
 | [Molt](extensions/molt/README.md) | `/molt` starts a new session with the current model and thinking level. |
+| [Language](extensions/language/README.md) | `/language` sets the language the model responds in, with a default for new sessions and switches that leave the cached prompt alone. |
 | [Statusline Footer](extensions/statusline-footer/README.md) | A footer for model, context, performance, cost, and Git status. |
 | [pika](extensions/pika/README.md) | Uploads sessions, model requests, subagent sessions, and Herder journals to a self-hosted [pika server](services/pika/README.md), where you can search and read them. Through the same server, [relay](extensions/pika/README.md#relay) lets Pi sessions on your machines send messages to each other, and [recall](extensions/pika/README.md#recall) lets the agent search and read your past sessions from every machine and project. |
 | [Magpie Provider](extensions/magpie-provider/README.md) | Adds the models of a Magpie gateway, with native compaction for OpenAI/Codex Responses models. |
