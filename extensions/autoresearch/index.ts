@@ -9,6 +9,7 @@ import { approvalKey, BaselineParameters, DISPATCH_LIMIT_MS, duration, emptyStat
 
 const DISPLAY = "autoresearch:display";
 const HELP = `/autoresearch <target> [--max 25] prepares and measures a baseline. /autoresearch approve starts iterations after review. Other commands: status, revise <feedback>, pause, resume, stop. Limits: 25 iterations by default, ${duration(LIFETIME_MS)} after approval, ${duration(ITERATION_LIMIT_MS)} per iteration (${duration(SETUP_LIMIT_MS)} for setup).`;
+const ITERATION_LIMIT = "Iteration limit reached."; const LIFETIME_LIMIT = "Six-hour research limit reached.";
 interface Active { token: string; kind: "prepare" | "iterate"; dispatchedAt: number; startedAt?: number; measured: boolean; outcome?: string }
 const expiresAt = (active: Active) => active.startedAt === undefined ? active.dispatchedAt + DISPATCH_LIMIT_MS : active.startedAt + (active.kind === "prepare" ? SETUP_LIMIT_MS : ITERATION_LIMIT_MS);
 interface Runtime {
@@ -50,6 +51,11 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 		if (next.report && next.report.phase !== "complete") next.report.phase = "paused";
 		save(r, next);
 	}
+	function complete(r: Runtime, reason: string): void {
+		const next = structuredClone(r.state); next.campaign!.state = "complete"; next.campaign!.reason = reason;
+		if (next.report) next.report.phase = "complete";
+		save(r, next);
+	}
 	function closeTimer(r: Runtime): void { if (r.timer) clearTimeout(r.timer); r.timer = undefined; }
 	function haltOwned(r: Runtime): void {
 		const active = r.active;
@@ -80,7 +86,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 		if (r.closed) return;
 		const c = r.state.campaign;
 		if (c?.state === "running" && c.deadline !== undefined && Date.now() >= c.deadline) {
-			pause(r, "Six-hour research limit reached.");
+			pause(r, LIFETIME_LIMIT);
 			if (r.active?.startedAt !== undefined) r.ctx.abort();
 		} else if (r.active) {
 			if (Date.now() >= expiresAt(r.active)) {
@@ -91,11 +97,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 		} else if (r.pending && r.ctx.isIdle() && !r.ctx.hasPendingMessages() && !r.uiDepth) {
 			const kind = r.pending;
 			if (!c || (kind === "prepare" ? c.state !== "preparing" : c.state !== "running" || c.approved !== approvalKey(r.state))) { r.pending = undefined; return; }
-			if (kind === "iterate" && c.iterations >= c.maxIterations) {
-				const next = structuredClone(r.state); next.campaign!.state = "complete"; next.campaign!.reason = "Iteration limit reached.";
-				if (next.report) next.report.phase = "complete";
-				r.pending = undefined; save(r, next); return;
-			}
+			if (kind === "iterate" && c.iterations >= c.maxIterations) { r.pending = undefined; complete(r, ITERATION_LIMIT); return; }
 			const next = structuredClone(r.state);
 			if (kind === "iterate") next.campaign!.iterations++;
 			save(r, next);
@@ -284,7 +286,12 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 				if (!c || c.state !== "paused") throw new Error("Research must be paused before resuming.");
 				if (r.active) throw new Error("Wait for the previous pass to settle.");
 				if (c.baseline && !c.approved) { const next = structuredClone(r.state); next.campaign!.state = "awaiting_approval"; save(r, next); display(r); return; }
-				if (c.approved && (c.iterations >= c.maxIterations || (c.deadline ?? 0) <= Date.now())) throw new Error("Research reached its limits. Start a new campaign.");
+				if (c.approved) {
+					const limit = c.iterations >= c.maxIterations ? ITERATION_LIMIT : (c.deadline ?? 0) <= Date.now() ? LIFETIME_LIMIT : undefined;
+					if (limit) { complete(r, limit); ctx.ui.notify(`Research complete: ${limit} Start a new campaign with /autoresearch <target>.`, "info"); return; }
+					await verifyHarness(ctx.cwd, c.benchmark!, HARNESS_MESSAGES);
+					if (get(ctx) !== r || r.state.campaign !== c || c.state !== "paused" || r.active) throw new Error("Research campaign changed while resuming.");
+				}
 				const next = structuredClone(r.state); next.campaign!.state = c.approved ? "running" : "preparing";
 				save(r, next); r.pending = c.approved ? "iterate" : "prepare"; arm(r); return;
 			}

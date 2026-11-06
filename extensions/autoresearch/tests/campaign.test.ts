@@ -332,6 +332,153 @@ it("times out an unstarted pass and pauses when the approved campaign lifetime e
 	} finally { await h.cleanup(); }
 });
 
+it("resume settles exhausted campaigns and checks the harness before dispatch", async () => {
+	vi.useFakeTimers(); const h = await fixture();
+	const dispatched = () => h.messages.filter(message => message.customType === ITERATION).length;
+	const prepare = async (target: string) => {
+		await h.command(target); expect(h.state()?.campaign).toMatchObject({ state: "preparing", iterations: 0 });
+		await vi.advanceTimersByTimeAsync(1); await h.enter(); await h.baseline(); await h.settle(); await h.command("approve");
+	};
+	try {
+		// Iteration limit: the only iteration is measured and then paused before it can complete the campaign.
+		await prepare("compile faster --max 1"); await vi.advanceTimersByTimeAsync(1); await h.enter();
+		await h.tool("autoresearch_measure", {}); await h.command("pause"); await h.settle(true);
+		expect(h.state()?.campaign).toMatchObject({ state: "paused", iterations: 1, maxIterations: 1 });
+		let count = dispatched();
+		await expect(h.command("resume")).resolves.toBeUndefined(); await vi.advanceTimersByTimeAsync(60_000);
+		expect(h.state()).toMatchObject({ campaign: { state: "complete", reason: "Iteration limit reached.", iterations: 1 }, report: { phase: "complete" } });
+		expect(h.ctx.ui.notify).toHaveBeenLastCalledWith("Research complete: Iteration limit reached. Start a new campaign with /autoresearch <target>.", "info");
+		expect(dispatched()).toBe(count);
+
+		// Lifetime: approved and paused before dispatch, then resumed after the deadline.
+		await prepare("another target"); await h.command("pause");
+		count = dispatched(); vi.setSystemTime(h.state()!.campaign!.deadline!);
+		await expect(h.command("resume")).resolves.toBeUndefined(); await vi.advanceTimersByTimeAsync(60_000);
+		expect(h.state()).toMatchObject({ campaign: { state: "complete", reason: "Six-hour research limit reached.", iterations: 0 }, report: { phase: "complete" } });
+		expect(dispatched()).toBe(count);
+
+		// Harness: a changed pinned file rejects resume before anything is saved or scheduled.
+		await prepare("a third target"); await h.command("pause");
+		count = dispatched(); const saved = h.entries.length;
+		const file = join(h.directory, "measure.sh"); const original = await readFile(file, "utf8");
+		await writeFile(file, "echo changed\n");
+		await expect(h.command("resume")).rejects.toThrow(new Error("Benchmark harness changed. Prepare a new baseline and obtain approval again."));
+		expect(h.entries).toHaveLength(saved); expect(vi.getTimerCount()).toBe(0);
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(h.state()?.campaign).toMatchObject({ state: "paused", iterations: 0 });
+		expect(dispatched()).toBe(count);
+		await writeFile(file, original);
+		await h.command("resume"); await vi.advanceTimersByTimeAsync(1);
+		expect(h.state()?.campaign).toMatchObject({ state: "running", iterations: 1 });
+		expect(dispatched()).toBe(count + 1);
+	} finally { await h.cleanup(); }
+});
+
+it("resume completes a campaign the lifetime paused without checking its changed harness, and a new target starts", async () => {
+	vi.useFakeTimers(); const h = await fixture();
+	const dispatched = () => h.messages.filter(message => message.customType === ITERATION).length;
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter(); await h.baseline(); await h.settle(); await h.command("approve");
+		h.queued(true); vi.setSystemTime(h.state()!.campaign!.deadline! - 1); await vi.advanceTimersByTimeAsync(1000);
+		expect(h.state()?.campaign).toMatchObject({ state: "paused", reason: "Six-hour research limit reached." });
+		h.queued(false); const count = dispatched();
+		await writeFile(join(h.directory, "measure.sh"), "echo changed\n");
+		await expect(h.command("resume")).resolves.toBeUndefined();
+		expect(h.state()).toMatchObject({ campaign: { state: "complete", reason: "Six-hour research limit reached.", iterations: 0 }, report: { phase: "complete" } });
+		expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("/autoresearch <target>"), "info");
+		await vi.advanceTimersByTimeAsync(60_000); expect(dispatched()).toBe(count); expect(vi.getTimerCount()).toBe(0);
+		await h.command("a new research target");
+		expect(h.state()?.campaign).toMatchObject({ state: "preparing", goal: "a new research target", iterations: 0 });
+	} finally { await h.cleanup(); }
+});
+
+it.each([
+	{ limit: "the iteration limit", iterations: 2, offset: 60_000, changed: true, reason: "Iteration limit reached." },
+	{ limit: "the lifetime deadline", iterations: 1, offset: 0, changed: true, reason: "Six-hour research limit reached." },
+	{ limit: "a passed lifetime deadline", iterations: 1, offset: -1, changed: true, reason: "Six-hour research limit reached." },
+	{ limit: "one iteration and 2 ms short of the limits", iterations: 1, offset: 2, changed: false, reason: undefined },
+])("resume of a restored approved campaign at $limit settles or dispatches", async ({ iterations, offset, changed, reason }) => {
+	vi.useFakeTimers(); const h = await fixture();
+	const dispatched = () => h.messages.filter(message => message.customType === ITERATION).length;
+	try {
+		await h.command("compile faster --max 2"); await vi.advanceTimersByTimeAsync(1); await h.enter(); await h.baseline(); await h.settle();
+		await h.command("approve"); await vi.advanceTimersByTimeAsync(1); await h.enter(); await h.tool("autoresearch_measure", {});
+		// A reload interrupts the running pass; the snapshot carries the iteration count and deadline under test.
+		const snapshot = structuredClone(h.state()!); Object.assign(snapshot.campaign!, { iterations, deadline: Date.now() + offset });
+		h.entries.push({ type: "custom", customType: SNAPSHOT, data: snapshot });
+		await h.emit("session_start", { reason: "reload" }); await h.settle(true);
+		if (changed) await writeFile(join(h.directory, "measure.sh"), "echo changed\n");
+		const count = dispatched();
+		await expect(h.command("resume")).resolves.toBeUndefined();
+		if (reason) {
+			expect(h.state()).toMatchObject({ campaign: { state: "complete", reason, iterations }, report: { phase: "complete" } });
+			expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("/autoresearch <target>"), "info");
+			await vi.advanceTimersByTimeAsync(60_000); expect(dispatched()).toBe(count); expect(vi.getTimerCount()).toBe(0);
+			await h.command("another target"); expect(h.state()?.campaign).toMatchObject({ state: "preparing", goal: "another target" });
+		} else {
+			await vi.advanceTimersByTimeAsync(1);
+			expect(h.state()?.campaign).toMatchObject({ state: "running", iterations: 2 });
+			expect(dispatched()).toBe(count + 1); expect(h.messages.at(-1).content).toContain("Autoresearch iteration 2/2");
+		}
+	} finally { await h.cleanup(); }
+});
+
+it.each(["moved", "deleted"])("resume rejects a %s harness without saving or scheduling and resumes once it is restored", async failure => {
+	vi.useFakeTimers(); const h = await fixture();
+	const dispatched = () => h.messages.filter(message => message.customType === ITERATION).length;
+	const file = join(h.directory, "measure.sh"); const original = await readFile(file, "utf8");
+	const moved = await mkdtemp(join(tmpdir(), "pi-autoresearch-other-project-"));
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter(); await h.baseline(); await h.settle();
+		await h.command("approve"); await h.command("pause");
+		const count = dispatched(); const saved = h.entries.length;
+		if (failure === "moved") { await writeFile(join(moved, "measure.sh"), original); Object.assign(h.ctx, { cwd: moved }); }
+		else await rm(file);
+		if (failure === "moved") await expect(h.command("resume")).rejects.toThrow(new Error("Research working directory changed. Prepare and approve a new baseline."));
+		else await expect(h.command("resume")).rejects.toThrow();
+		expect(h.entries).toHaveLength(saved); expect(vi.getTimerCount()).toBe(0);
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(h.state()?.campaign).toMatchObject({ state: "paused", iterations: 0 }); expect(dispatched()).toBe(count);
+		Object.assign(h.ctx, { cwd: h.directory }); await writeFile(file, original);
+		await h.command("resume"); await vi.advanceTimersByTimeAsync(1);
+		expect(h.state()?.campaign).toMatchObject({ state: "running", iterations: 1 }); expect(dispatched()).toBe(count + 1);
+	} finally { Object.assign(h.ctx, { cwd: h.directory }); await rm(moved, { recursive: true, force: true }); await h.cleanup(); }
+});
+
+it.each([
+	{ action: "resume", state: "running", passes: 1 }, { action: "pause", state: "paused", passes: 0 },
+	{ action: "stop", state: "stopped", passes: 0 }, { action: "reload", state: "paused", passes: 0 },
+])("a $action during resume's harness check leaves one resume at most and $passes dispatched passes", async ({ action, state, passes }) => {
+	vi.useFakeTimers(); const h = await fixture();
+	const dispatched = () => h.messages.filter(message => message.customType === ITERATION).length;
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter(); await h.baseline(); await h.settle();
+		await h.command("approve"); await h.command("pause");
+		const count = dispatched();
+		// The resume suspends in its harness check; the second action runs before that check returns.
+		const results = await Promise.allSettled([h.command("resume"), action === "reload" ? h.emit("session_start", { reason: "reload" }) : h.command(action)]);
+		expect(results.map(result => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+		if (action !== "resume") expect(results[0]!.status).toBe("rejected");
+		await vi.advanceTimersByTimeAsync(1);
+		expect(h.state()?.campaign).toMatchObject({ state, iterations: passes }); expect(dispatched()).toBe(count + passes);
+		if (!passes) { await vi.advanceTimersByTimeAsync(60_000); expect(dispatched()).toBe(count); expect(vi.getTimerCount()).toBe(0); }
+	} finally { await h.cleanup(); }
+});
+
+it("resume returns an unapproved paused baseline to review without checking its harness", async () => {
+	vi.useFakeTimers(); const h = await fixture();
+	const dispatched = () => h.messages.filter(message => message.customType === ITERATION).length;
+	try {
+		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter(); await h.baseline(); await h.settle();
+		await h.command("pause"); expect(h.state()?.campaign).toMatchObject({ state: "paused", approved: undefined });
+		await writeFile(join(h.directory, "measure.sh"), "echo changed\n");
+		await expect(h.command("resume")).resolves.toBeUndefined();
+		expect(h.state()?.campaign?.state).toBe("awaiting_approval");
+		await vi.advanceTimersByTimeAsync(60_000); expect(dispatched()).toBe(1); expect(vi.getTimerCount()).toBe(0);
+		await expect(h.command("approve")).rejects.toThrow(new Error("Benchmark harness changed. Prepare a new baseline and obtain approval again."));
+	} finally { await h.cleanup(); }
+});
+
 it("states pass time limits and flags slow baselines", async () => {
 	vi.useFakeTimers(); const h = await fixture();
 	const text = async (work: Promise<{ content: { text: string }[] }>) => (await work).content[0]!.text;

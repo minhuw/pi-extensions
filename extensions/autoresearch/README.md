@@ -47,13 +47,13 @@ After approval, the extension schedules bounded experiment passes in the same Pi
 | `/autoresearch revise <feedback>` | Return to setup with feedback; discard the previous approval and require a new one. |
 | `/autoresearch status` | Show the methodology, samples, per-metric ranges, baseline measurement time, metric table, and campaign state. |
 | `/autoresearch pause` | Pause scheduling and abort an owned active pass. |
-| `/autoresearch resume` | Resume a paused campaign. An unapproved baseline still needs approval. |
+| `/autoresearch resume` | Resume a paused campaign. An unapproved baseline still needs approval. An approved campaign at its iteration or lifetime limit is marked complete instead, so `/autoresearch <target>` can start a new one; otherwise its pinned harness is re-checked before any pass is scheduled. |
 | `/autoresearch stop` | Stop the campaign and abort an owned active pass. Preserve reports and working files. |
 | `/autoresearch help` | Show syntax and limits. |
 | `/research-report` or `/research-report results` | Show the current report. |
 | `/research-report clear` | Clear a stopped/completed campaign or standalone report. Stop an active campaign first. |
 
-The default is 25 optimization passes; `--max` accepts 1–1,000 and must appear at the end of the start command. Campaigns have a six-hour lifetime after approval. Each optimization pass has a 15-minute timeout; initial setup has 30 minutes. The setup and iteration prompts state these pass limits. Because each iteration must fit a focused edit plus one full `autoresearch_measure` (every repetition plus the correctness check), the setup prompt asks the agent to size the workload and repetitions so that one measurement takes well under half the iteration limit. Timeouts and interrupted/unmeasured passes pause for explicit recovery. A failed latest measurement cannot be masked by an earlier successful measurement in the same pass.
+The default is 25 optimization passes; `--max` accepts 1–1,000 and must appear at the end of the start command. Campaigns have a six-hour lifetime after approval. Reaching the iteration limit completes the campaign; reaching the lifetime pauses it, and `/autoresearch resume` then marks it complete. Each optimization pass has a 15-minute timeout; initial setup has 30 minutes. The setup and iteration prompts state these pass limits. Because each iteration must fit a focused edit plus one full `autoresearch_measure` (every repetition plus the correctness check), the setup prompt asks the agent to size the workload and repetitions so that one measurement takes well under half the iteration limit. Timeouts and interrupted/unmeasured passes pause for explicit recovery. A failed latest measurement cannot be masked by an earlier successful measurement in the same pass.
 
 ## Measurement tools
 
@@ -93,7 +93,7 @@ Baseline measurement time: 2m 10s (every repetition plus the correctness check);
 
 When the baseline measurement takes more than half of the 15-minute iteration limit, a warning follows: iterations will likely time out and pause the campaign, so use fewer repetitions or a smaller workload via `/autoresearch revise <feedback>`. Campaigns saved before this time was recorded show no timing line.
 
-The working directory, iteration limit, benchmark/check commands, methodology, metric definitions, baseline, and SHA-256 fingerprints of the declared harness files are bound to the approval. List every measurement/check harness file in `files` (1–16 project-relative files, each at most 4 MiB). Paths and symlinks escaping the project are rejected. Harness content is checked before and after measurement, and before approval. A changed harness requires a revised baseline and fresh approval.
+The working directory, iteration limit, benchmark/check commands, methodology, metric definitions, baseline, and SHA-256 fingerprints of the declared harness files are bound to the approval. List every measurement/check harness file in `files` (1–16 project-relative files, each at most 4 MiB). Paths and symlinks escaping the project are rejected. Harness content is checked before and after measurement, before approval, and before resuming an approved campaign. A changed harness requires a revised baseline and fresh approval; a resume that finds one keeps the campaign paused and schedules nothing.
 
 During an approved iteration, the agent calls `autoresearch_measure({})`. It accepts no replacement command or metric values, uses the approved configuration, and records the measured samples and medians. Both measurement tools invoke nested `bash` calls through Pi's normal tool hooks and permissions.
 
