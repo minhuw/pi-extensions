@@ -64,6 +64,8 @@ const events = () => bodies().map(body => body.payload.hook_event_name);
 beforeEach(() => {
 	vi.useFakeTimers();
 	originalEnv = { ...process.env };
+	// These tests isolate the terminal-hook/title path; companion I/O has its own integration suite.
+	process.env.PI_ORCA_COMPANION = "off";
 	for (const key of Object.keys(process.env)) if (key.startsWith("ORCA_")) delete process.env[key];
 	Object.assign(process.env, { ORCA_PANE_KEY: "test-pane", ORCA_AGENT_HOOK_PORT: "12345", ORCA_AGENT_HOOK_TOKEN: "secret-test-token" });
 	originalRoster = Object.getOwnPropertyDescriptor(globalThis, "__orcaPiSubagents");

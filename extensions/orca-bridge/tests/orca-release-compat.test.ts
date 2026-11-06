@@ -17,6 +17,7 @@ let root: string;
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
 beforeEach(() => {
 	oldEnv = { ...process.env };
+	process.env.PI_ORCA_COMPANION = "off";
 	for (const key of Object.keys(process.env)) if (key.startsWith("ORCA_")) delete process.env[key];
 	Object.assign(process.env, { ORCA_PANE_KEY: "compat-pane", ORCA_AGENT_HOOK_PORT: "12345", ORCA_AGENT_HOOK_TOKEN: "fixture-token" });
 	descriptors = keys.map(key => Object.getOwnPropertyDescriptor(globalThis, key));
@@ -42,11 +43,11 @@ afterEach(async () => {
 	rmSync(root, { recursive: true, force: true });
 });
 
-it.each([false, true])("cooperates with Orca v1.4.230's actual managed reporter (bridge first=%s)", async bridgeFirst => {
+it.each(["1.4.230", "1.4.247"].flatMap(version => [false, true].map(bridgeFirst => ({ version, bridgeFirst }))))("cooperates with Orca v$version's actual managed reporter (bridge first=$bridgeFirst)", async ({ version, bridgeFirst }) => {
 	const request = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
 	const { createJiti } = request("jiti") as { createJiti: (filename: string, options: { moduleCache: boolean }) => { import: (path: string) => Promise<{ default: Factory }> } };
 	const filename = join(root, "orca-agent-status.ts");
-	writeFileSync(filename, readFileSync(new URL("./fixtures/orca-v1.4.230-status.ts.txt", import.meta.url)));
+	writeFileSync(filename, readFileSync(new URL(`./fixtures/orca-v${version}-status.ts.txt`, import.meta.url)));
 	const managed = (await createJiti(filename, { moduleCache: false }).import(filename)).default;
 	const handlers = new Map<string, Set<Handler>>();
 	const listeners = new Map<string, Set<(data: unknown) => void>>();

@@ -26,7 +26,7 @@
 		"test:impeccable:visual-foundations": "vitest run --config extensions/impeccable/vitest.visual-foundations.config.ts",
 		"test:impeccable:engine": "vitest run --config extensions/impeccable/vitest.engine.config.ts",
 		"test:impeccable:contracts": "vitest run --config extensions/impeccable/vitest.config.ts extensions/impeccable/tests/contracts.test.ts",
-		"test:orca-bridge": "vitest run extensions/orca-bridge",
+		"test:orca-bridge": "vitest run --config extensions/orca-bridge/vitest.config.ts",
 		"test:magpie-provider": "vitest run extensions/magpie-provider",
 		"test:commit": "node --experimental-strip-types --test extensions/commit/tests/*.test.ts",
 		"test:quality": "node --experimental-strip-types --test extensions/quality/tests/*.test.ts",

@@ -608,13 +608,26 @@ export default function (pi: ExtensionAPI) {
   // Publish one entry per operation; visibility and parent settlement do not own activity.
   function updateActivity(): void {
     if (shuttingDown || !hostRegistration || !currentCtx) return;
+    const label = (value: string, fallback: string) => value.replace(/[\x00-\x1f\x7f-\x9f]+/g, " ").trim().slice(0, 240) || fallback;
     const activities = [
       ...manager.listAgents()
         .filter(record => !record.owner && (record.status === "running" || record.status === "queued"))
-        .map(record => ({ id: `agent:${record.id}`, label: "Agent" })),
+        .map(record => ({
+          id: `agent:${record.id}`,
+          label: label([record.alias || record.handle || (record.type ? getDisplayName(record.type) : "Agent"), record.description].filter(Boolean).join(" · "), "Agent"),
+          kind: "agent" as const,
+          state: "running" as const,
+          startedAt: record.startedAt,
+          ...(record.model ? { model: label(record.model, "Unknown model") } : {}),
+        })),
       ...[...workflowTasks.values()]
         .filter(task => task.status === "running" || task.status === "paused")
-        .map(task => ({ id: `workflow:${task.id}`, label: "Workflow" })),
+        .map(task => ({
+          id: `workflow:${task.id}`, label: label(task.workflowName || "Workflow", "Workflow"),
+          kind: "workflow" as const, state: task.status === "paused" ? "waiting" as const : "running" as const,
+          startedAt: task.startTime,
+          ...(task.agentCount > 0 ? { progress: { completed: task.doneCount, total: task.agentCount } } : {}),
+        })),
     ];
     const visible = activities.length <= 128 ? activities : [
       ...activities.slice(0, 127),
@@ -1406,6 +1419,9 @@ export default function (pi: ExtensionAPI) {
     }
     return { action: "handled" };
   });
+
+  // Pause/resume controls may change a workflow while its dialog is open.
+  pi.on("ui_prompt_end", (_event, ctx) => { currentCtx = ctx; updateActivity(); });
 
   pi.on("agent_settled", async (_event, ctx) => {
     currentCtx = ctx;
@@ -2908,7 +2924,7 @@ Terse command-style prompts produce shallow, generic work.
           workflowId: task.id,
           ...(task.toolCallId !== undefined ? { toolCallId: task.toolCallId } : {}),
         }),
-        onProgress: entries => updateWorkflowProgressBatch(task, entries),
+        onProgress: entries => { updateWorkflowProgressBatch(task, entries); updateActivity(); },
         // The dialog's pause / skip / retry keys run through this; it is dropped
         // again when the task settles.
         onControl: control => { task.control = control; },

@@ -1,0 +1,51 @@
+{
+  "tag": "v1.4.247",
+  "commit": "97b9bb3613a333450a38057d745628323f3ad185",
+  "files": [
+    {
+      "source": "resources/plugins/declarative/orca.d.ts",
+      "file": "orca.d.ts",
+      "sha256": "9e0bb4e1e1f96b201e65e18c724a94baf24cd4f05663ab915538118b23e4292c"
+    },
+    {
+      "source": "resources/plugins/declarative/orca-components.d.ts",
+      "file": "orca-components.d.ts",
+      "sha256": "61e7577503191f743b167a8406fdca504b2848b9b8c267082994610fcfe585ce"
+    },
+    {
+      "source": "resources/plugins/declarative/orca-components-data.d.ts",
+      "file": "orca-components-data.d.ts",
+      "sha256": "bf3b8bb8e4664b73c79d378cabbc7a66a0d781a8d86899d3903ba6c4b23d2312"
+    },
+    {
+      "source": "resources/plugins/declarative/orca-components-layout.d.ts",
+      "file": "orca-components-layout.d.ts",
+      "sha256": "f513b362e0f47bdda326a1e3d4c3c0669df842685da0c01dee3611e521784f87"
+    },
+    {
+      "source": "resources/plugins/types/orca-host.d.ts",
+      "file": "orca-host.d.ts",
+      "sha256": "25f1307b9cdb2571e4ca671748a9441cebf0b74cff549c9466eaa99060b5dc94"
+    },
+    {
+      "source": "resources/plugins/types/orca-worker.d.ts",
+      "file": "orca-worker.d.ts",
+      "sha256": "40ddb3a58cbe5804d9b25c92b256654354bc6aee4bf2e8891aa1d4a54359b171"
+    },
+    {
+      "source": "resources/plugins/types/orca-services.d.ts",
+      "file": "orca-services.d.ts",
+      "sha256": "b741a67d67e23991d47b6e2ef7fac6afa15655d1d0b29fc060ab1f025e268935"
+    },
+    {
+      "source": "resources/plugins/types/orca-frame.d.ts",
+      "file": "orca-frame.d.ts",
+      "sha256": "013d5b4d1c4f5f206a7cb30eb2ba4cf21c0f2cadb9e3536b14427562f4724c83"
+    },
+    {
+      "source": "resources/plugins/types/orca-testing.d.ts",
+      "file": "orca-testing.d.ts",
+      "sha256": "4c01f47a0f6cffc1850c2839b266cbdd6b822bed5d2013b4196bd9e1bdeb7fdd"
+    }
+  ]
+}

@@ -1,18 +1,11 @@
+import { data, isText as text, parseActivity, type Activity } from "./plugin/src/protocol.ts";
+export type { Activity } from "./plugin/src/protocol.ts";
+
 /** Bounded source snapshots; rejected updates leave the previous snapshot intact. */
-export interface Activity { id: string; label: string }
 export interface Snapshot { source: string; activities: Activity[] }
 const MAX_SOURCES = 64;
 const MAX_ACTIVITIES = 128;
 const MAX_TOTAL = 1024;
-const text = (value: unknown, max: number): value is string =>
-	typeof value === "string" && value.trim().length > 0 && value.length <= max && !/[\x00-\x1f\x7f-\x9f]/.test(value);
-
-// Read data properties only: malformed extension messages must not execute getters.
-function data(value: unknown, key: string): unknown {
-	if (!value || typeof value !== "object") return undefined;
-	const descriptor = Object.getOwnPropertyDescriptor(value, key);
-	return descriptor && "value" in descriptor ? descriptor.value : undefined;
-}
 export function parseSnapshot(value: unknown): Snapshot | undefined {
 	try {
 		const source = data(value, "source");
@@ -22,12 +15,10 @@ export function parseSnapshot(value: unknown): Snapshot | undefined {
 		const activities: Activity[] = [];
 		const seen = new Set<string>();
 		for (let i = 0; i < rows.length; i++) {
-			const row = data(rows, String(i));
-			const id = data(row, "id");
-			const label = data(row, "label");
-			if (!text(id, 160) || !text(label, 240) || seen.has(id)) return;
-			seen.add(id);
-			activities.push({ id, label });
+			const row = parseActivity(data(rows, String(i)));
+			if (!row || seen.has(row.id)) return;
+			seen.add(row.id);
+			activities.push(row);
 		}
 		return { source, activities };
 	} catch { return undefined; }
@@ -46,7 +37,7 @@ export class Activities {
 		const previous = this.sources.get(snapshot.source);
 		if (!previous && snapshot.activities.length && this.sources.size >= MAX_SOURCES) return false;
 		if (this.size - (previous?.size ?? 0) + snapshot.activities.length > MAX_TOTAL) return false;
-		if ((previous?.size ?? 0) === snapshot.activities.length && snapshot.activities.every(row => previous?.get(row.id)?.label === row.label)) return false;
+		if ((previous?.size ?? 0) === snapshot.activities.length && snapshot.activities.every(row => JSON.stringify(previous?.get(row.id)) === JSON.stringify(row))) return false;
 		if (snapshot.activities.length) this.sources.set(snapshot.source, new Map(snapshot.activities.map(row => [row.id, row])));
 		else this.sources.delete(snapshot.source);
 		return true;

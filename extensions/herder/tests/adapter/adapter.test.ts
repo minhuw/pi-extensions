@@ -364,8 +364,8 @@ describe("activity and shutdown", () => {
 		const { h, run } = await approved();
 		await h.tool("herder_workflow", { mode: "run", script: "return 1" });
 		const runtime = h.runtime();
-		runtime.env.onActivity({ key: "impl-0", label: "implement greeting", task: "T2", phase: "integrate", state: "running" });
-		expect(h.snapshots.at(-1)).toEqual({ source: "herder", activities: [{ id: "step:impl-0", label: "Herder T2 · implement greeting" }] });
+		runtime.env.onActivity({ key: "impl-0", label: "implement greeting", task: "T2", phase: "integrate", state: "running", startedAt: 1_700_000_000_000 });
+		expect(h.snapshots.at(-1)).toEqual({ source: "herder", activities: [{ id: "step:impl-0", label: "Herder T2 · implement greeting", kind: "step", startedAt: 1_700_000_000_000 }] });
 		expect(h.statuses.get(STATUS_KEY)).toBe("herder: T2 integrate");
 		writeFileSync(run.paths.plan, "- [ ] T1 (AC-1) one\n- [ ] T2 (AC-1) two\n");
 		runtime.env.onProgress();

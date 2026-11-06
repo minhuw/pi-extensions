@@ -1,0 +1,5 @@
+{
+  "extends": "../../../tsconfig.json",
+  "include": ["src", "types", "tests"],
+  "exclude": [".orca", "node_modules"]
+}
