@@ -1,6 +1,6 @@
 /**
- * The embedded `ticket` agent and `context_files`, through the REAL runner,
- * loader and session (faux model; assertions on the session as constructed):
+ * A `context_files` agent, through the REAL runner, loader and session (faux
+ * model; assertions on the session as constructed):
  * Pi's normal prompt plus the agent text, every extension tool, nested Agent
  * limited to recon/worker/reviewer/expert, context files bounded at the
  * worktree root, and `linkData` / `parentToolCallId` in the session link.
@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseAgentDefinition, parseAgentFrontmatter } from "../src/agent-definitions.js";
 import { serializeAgentFile } from "../src/agent-file-toggle.js";
 import { runAgent } from "../src/agent-runner.js";
-import { getAgentConfig, registerAgents } from "../src/agent-types.js";
+import { registerAgents } from "../src/agent-types.js";
 import { SESSION_LINK_CUSTOM_TYPE } from "../src/child-session-hooks.js";
 import { loadBoundedContextFiles } from "../src/context-files.js";
 import type { AgentConfig } from "../src/types.js";
@@ -26,6 +26,12 @@ vi.setConfig({ testTimeout: 30_000 });
 const HOOKS_KEY = Symbol.for("pi-extensions.child-session-hooks");
 const BUILTINS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
+const BOUNDED: AgentConfig = {
+  name: "bounded", description: "bounded", modelVisible: false, extensions: true, skills: true,
+  contextFiles: true, isolation: "off", allowedSubagents: ["recon", "worker", "reviewer", "expert"],
+  requireToolUse: true, systemPrompt: "BOUNDED_INSTRUCTIONS", promptMode: "append",
+};
+
 const PROBE_EXTENSION = `export default (pi) => {
   const tool = (name, exposure) => pi.registerTool({ name, label: name, description: name, ...(exposure ? { exposure } : {}),
     parameters: { type: "object", properties: {} }, async execute() { return { content: [] }; } });
@@ -33,7 +39,7 @@ const PROBE_EXTENSION = `export default (pi) => {
   tool("mcp__probe__lookup", "codemode");
 };`;
 
-describe("ticket agent and context_files (real runner)", () => {
+describe("context_files agent (real runner)", () => {
   let base: string;
   let repo: string;
   let worktree: string;
@@ -42,8 +48,8 @@ describe("ticket agent and context_files (real runner)", () => {
   let faux: ReturnType<typeof registerFauxProvider>;
 
   beforeEach(() => {
-    base = mkdtempSync(join(tmpdir(), "ticket-agent-"));
-    // A main checkout with a linked worktree nested inside it, as superagent lays them out.
+    base = mkdtempSync(join(tmpdir(), "context-files-"));
+    // A main checkout with a linked worktree nested inside it.
     repo = join(base, "repo");
     worktree = join(repo, ".worktrees", "t1");
     cwd = join(worktree, "pkg");
@@ -59,7 +65,7 @@ describe("ticket agent and context_files (real runner)", () => {
     agentDir = process.env.PI_CODING_AGENT_DIR!;
     writeFileSync(join(agentDir, "AGENTS.md"), "GLOBAL_CTX\n");
     faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
-    registerAgents(new Map());
+    registerAgents(new Map([["bounded", BOUNDED]]));
   });
 
   afterEach(() => {
@@ -126,18 +132,6 @@ describe("ticket agent and context_files (real runner)", () => {
     }
   }
 
-  it("is configured as the contract describes", () => {
-    expect(getAgentConfig("ticket")).toMatchObject({
-      displayName: "Ticket",
-      description: "Long-running agent for one superagent ticket. Spawned by the superagent extension only.",
-      modelVisible: false, extensions: true, skills: true, contextFiles: true, isolation: "off",
-      allowedSubagents: ["recon", "worker", "reviewer", "expert"], requireToolUse: true, promptMode: "append",
-    });
-    // Inherits model and thinking; all built-in tools.
-    const cfg = getAgentConfig("ticket")!;
-    expect([cfg.model, cfg.thinking, cfg.builtinToolNames]).toEqual([undefined, undefined, undefined]);
-  });
-
   it("loads context files from its cwd up to the worktree root, plus the global file", () => {
     const files = loadBoundedContextFiles(cwd, agentDir).map(f => f.content.trim());
     expect(files).toEqual(["GLOBAL_CTX", "WORKTREE_CTX", "PKG_CTX"]);
@@ -147,7 +141,7 @@ describe("ticket agent and context_files (real runner)", () => {
   });
 
   it("gets Pi's own prompt with its context files, then its text; not the parent's", async () => {
-    const session = await construct("ticket");
+    const session = await construct("bounded");
     const prompt: string = session.systemPrompt;
     // Pi's own default prompt: its preamble first, then its tool and rule sections.
     expect(prompt.startsWith(await piDefaultPreamble())).toBe(true);
@@ -157,16 +151,13 @@ describe("ticket agent and context_files (real runner)", () => {
     expect(prompt).not.toContain("ROOT_CTX");
     expect(prompt).not.toContain("ABOVE_REPO_CTX");
     expect(prompt).not.toContain("PARENT_PROMPT");
-    expect(prompt).toContain('<active_agent name="ticket"/>');
-    expect(prompt).toContain("You own one long-running task. Where you work, whether you commit, and how you report come from the extension that started you");
-    // Mode-neutral: the worktree specifics belong to the extension that started it.
-    expect(prompt).not.toContain("own git branch");
+    expect(prompt).toContain('<active_agent name="bounded"/>');
     // Its text is appended after Pi's preamble, tool list and rules.
-    expect(prompt.indexOf("You own one long-running task")).toBeGreaterThan(prompt.indexOf("</rules>"));
+    expect(prompt.indexOf("BOUNDED_INSTRUCTIONS")).toBeGreaterThan(prompt.indexOf("</rules>"));
   });
 
   it("has every built-in and extension tool, and nested Agent limited to its allowlist", async () => {
-    const session = await construct("ticket");
+    const session = await construct("bounded");
     const active: string[] = session.getActiveToolNames();
     const registered: string[] = session.getAllTools().map((t: any) => t.name);
     for (const name of [...BUILTINS, "probe_tool", "Agent", "get_subagent_result", "steer_subagent"]) {
@@ -178,7 +169,7 @@ describe("ticket agent and context_files (real runner)", () => {
     const agent = session.getAllTools().find((t: any) => t.name === "Agent");
     const typeDescription = JSON.stringify(agent.parameters);
     expect(typeDescription).toContain("Available: recon, worker, reviewer, expert.");
-    expect(typeDescription).not.toMatch(/\bticket\b/);
+    expect(typeDescription).not.toMatch(/\bbounded\b/);
   });
 
   it("leaves context files off by default", async () => {
@@ -195,17 +186,17 @@ describe("ticket agent and context_files (real runner)", () => {
   it("writes parentToolCallId and linkData into the session link", async () => {
     const hooks = ((globalThis as Record<symbol, unknown>)[HOOKS_KEY] ??= new Set()) as Set<unknown>;
     hooks.add({ name: "noop-hook", extensionFactory: () => {} });
-    const session = await construct("ticket", {
+    const session = await construct("bounded", {
       agentId: "agent-9", description: "#9 title", parentToolCallId: "call-9",
-      linkData: { superagent: { ticketId: 9, branch: "pi/9-x", title: "title" } },
+      linkData: { origin: { id: 9, title: "title" } },
     });
     const link = session.sessionManager.getEntries().find(
       (e: any) => e.type === "custom" && e.customType === SESSION_LINK_CUSTOM_TYPE,
     );
     expect(link?.data).toEqual({
       kind: "subagent", parentSessionId: "parent-id", parentSessionFile: "/parent.jsonl",
-      parentToolCallId: "call-9", agentId: "agent-9", agentType: "ticket", description: "#9 title",
-      superagent: { ticketId: 9, branch: "pi/9-x", title: "title" },
+      parentToolCallId: "call-9", agentId: "agent-9", agentType: "bounded", description: "#9 title",
+      origin: { id: 9, title: "title" },
     });
   });
 });
@@ -224,7 +215,7 @@ describe("model_visible / context_files frontmatter", () => {
   });
 
   it("round-trips through eject", () => {
-    const text = serializeAgentFile(getAgentConfig("ticket")!);
+    const text = serializeAgentFile(BOUNDED);
     expect(text).toContain("model_visible: false");
     expect(text).toContain("context_files: true");
     expect(parse(text)).toMatchObject({ modelVisible: false, contextFiles: true, promptMode: "append" });

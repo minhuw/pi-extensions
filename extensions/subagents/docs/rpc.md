@@ -52,7 +52,7 @@ For the channel list, the reply envelope, the per-channel snippets and the event
 
 Four things that are not obvious from the tables:
 
-- **Agent types a model cannot name are spawnable here.** An agent with `model_visible: false` (the embedded `ticket` agent is one) is absent from the `Agent` tool, nested tools, `@type` mentions, workflows, schedules, the subagent host's descriptors and the fallback, but `spawn`, `reopen` and the registry's `spawn` accept it. The fallback itself never lands on a hidden type.
+- **Agent types a model cannot name are spawnable here.** An agent with `model_visible: false` is absent from the `Agent` tool, nested tools, `@type` mentions, workflows, schedules, the subagent host's descriptors and the fallback, but `spawn`, `reopen` and the registry's `spawn` accept it. The fallback itself never lands on a hidden type.
 - **Nothing is required at runtime.** `description` is non-optional in TypeScript and never validated. A spawn with no `options` at all is legal and is what "returns agent id on success" in `test/cross-extension-rpc.test.ts` pins.
 - **`bypassQueue` is not stripped.** Its own doc comment scopes it to the scheduler and the `/agents` generator, but a bus caller can set it and skip the `maxConcurrent` check.
 - **`structuredOutput` is documented "set only by the workflow host"** (its field comment on `SpawnOptions`) and is also not stripped.
@@ -239,7 +239,7 @@ This document has no test of its own, so it is worth knowing which claims are ac
 | `test/rpc-lifecycle-gating.test.ts` | Real extension factory | Nothing wired at factory time, everything once at `session_start`, and live widget activity for RPC spawns ([#142](https://github.com/tintinweb/pi-subagents/issues/142)/[#181](https://github.com/tintinweb/pi-subagents/pull/181)) |
 | `test/rpc-result-consumption.test.ts` | Real delivery path | The notification firing, and not firing, around `consume` |
 | `tests/rpc-protocol-v3.test.ts` | Real extension, scripted runner | Version 3; hidden types refused by every model-facing path and spawnable over RPC; the protocol-3 spawn options and `linkData` errors; `send` delivery and its errors; `reopen` validation strings and its happy path after eviction; lifecycle payloads including queued stops |
-| `tests/ticket-agent.test.ts` | Real runner and loader | The `ticket` agent's prompt, tools and nested allowlist; the context-file stop rule; `linkData` and `parentToolCallId` in a real session link |
+| `tests/context-files.test.ts` | Real runner and loader | A `context_files` agent's prompt, tools and nested allowlist; the context-file stop rule; `linkData` and `parentToolCallId` in a real session link |
 
 Not pinned anywhere, so treat them as descriptions rather than contracts: the `SpawnOptions.cwd` error strings (except through `reopen`), `subagents:ready`'s `{}` payload, consume's handle resolution, and its missing `workflowId` check.
 

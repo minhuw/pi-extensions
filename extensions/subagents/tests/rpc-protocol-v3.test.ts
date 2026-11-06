@@ -40,6 +40,9 @@ import { ctx, flush, type Hermetic, hermeticDir, makePi, textOf } from "../test/
 /** Past the completion outbox's 200 ms idle hold. */
 const PAST_THE_HOLD_MS = 400;
 
+/** A type no model may name, as a real agent file. */
+const HIDDEN_AGENT = "---\ndescription: Not for models\nmodel_visible: false\nisolation: off\n---\nHidden.\n";
+
 let hermetic: Hermetic | undefined;
 let lifecycle: Map<string, any> | undefined;
 let sessionCounter = 0;
@@ -95,7 +98,10 @@ function scriptResume(tools: number) {
 }
 
 async function boot(settings: Record<string, unknown> = {}) {
-  hermetic = hermeticDir({ settings: { outputTranscript: false, schedulingEnabled: false, ...settings } });
+  hermetic = hermeticDir({
+    settings: { outputTranscript: false, schedulingEnabled: false, ...settings },
+    agentFiles: { "hidden-helper": HIDDEN_AGENT },
+  });
   const booted = makePi();
   const bus = dispatchingBus();
   booted.pi.events = bus;
@@ -154,24 +160,24 @@ describe("protocol version", () => {
 });
 
 describe("model_visible: false", () => {
-  it("keeps the embedded ticket type out of the Agent tool's description, listing and fallback", async () => {
+  it("keeps a hidden type out of the Agent tool's description, listing and fallback", async () => {
     const { tools } = await boot();
-    expect(getAgentConfig("ticket")?.modelVisible).toBe(false);
-    expect(getEnabledTypes()).toContain("ticket");
-    expect(getAvailableTypes()).not.toContain("ticket");
+    expect(getAgentConfig("hidden-helper")?.modelVisible).toBe(false);
+    expect(getEnabledTypes()).toContain("hidden-helper");
+    expect(getAvailableTypes()).not.toContain("hidden-helper");
     const agent = tools.get("Agent");
-    expect(agent.description).not.toMatch(/\bticket\b/i);
-    expect(JSON.stringify(agent.parameters)).not.toMatch(/\bticket\b/);
+    expect(agent.description).not.toMatch(/\bhidden-helper\b/i);
+    expect(JSON.stringify(agent.parameters)).not.toMatch(/\bhidden-helper\b/);
   });
 
   it("refuses a direct Agent call naming it, without spawning", async () => {
     const { tools } = await boot();
     setFallbackSubagent(NO_FALLBACK);
     const result = await tools.get("Agent").execute(
-      "tc-1", { prompt: "go", description: "hidden", subagent_type: "ticket" }, undefined, undefined, ctx(),
+      "tc-1", { prompt: "go", description: "hidden", subagent_type: "hidden-helper" }, undefined, undefined, ctx(),
     );
-    expect(textOf(result)).toContain('Unknown or disabled agent type: "ticket"');
-    expect(textOf(result)).not.toMatch(/Available:.*\bticket\b/);
+    expect(textOf(result)).toContain('Unknown or disabled agent type: "hidden-helper"');
+    expect(textOf(result)).not.toMatch(/Available:.*\bhidden-helper\b/);
     expect(runAgent).not.toHaveBeenCalled();
   });
 
@@ -179,19 +185,19 @@ describe("model_visible: false", () => {
     const { tools } = await boot();
     scriptRun();
     const result = await tools.get("Agent").execute(
-      "tc-2", { prompt: "go", description: "hidden", subagent_type: "ticket" }, undefined, undefined, ctx(),
+      "tc-2", { prompt: "go", description: "hidden", subagent_type: "hidden-helper" }, undefined, undefined, ctx(),
     );
-    expect(textOf(result)).toContain('Note: Unknown agent type "ticket"');
+    expect(textOf(result)).toContain('Note: Unknown agent type "hidden-helper"');
     expect(runAgent).toHaveBeenCalledWith(expect.anything(), "worker", "go", expect.anything());
   });
 
   it("is never a configured fallback", async () => {
     const { tools } = await boot();
-    setFallbackSubagent("ticket");
+    setFallbackSubagent("hidden-helper");
     const result = await tools.get("Agent").execute(
       "tc-3", { prompt: "go", description: "x", subagent_type: "nope" }, undefined, undefined, ctx(),
     );
-    expect(textOf(result)).toContain('The configured fallbackSubagent "ticket" is itself unknown or disabled');
+    expect(textOf(result)).toContain('The configured fallbackSubagent "hidden-helper" is itself unknown or disabled');
     expect(runAgent).not.toHaveBeenCalled();
   });
 
@@ -201,18 +207,18 @@ describe("model_visible: false", () => {
       manager: {} as any, pi: {} as any, parentAgentId: "p", depth: 1, maxSubagentDepth: 3,
       allowedSubagents: "all", configCwd: process.cwd(),
     });
-    expect(JSON.stringify(agentTool.parameters)).not.toMatch(/\bticket\b/);
+    expect(JSON.stringify(agentTool.parameters)).not.toMatch(/\bhidden-helper\b/);
     expect(JSON.stringify(agentTool.parameters)).toContain("worker");
     const result: any = await agentTool.execute(
-      "tc-n", { prompt: "go", description: "x", subagent_type: "ticket" } as any, undefined, undefined, ctx(),
+      "tc-n", { prompt: "go", description: "x", subagent_type: "hidden-helper" } as any, undefined, undefined, ctx(),
     );
-    expect(textOf(result)).toContain('Unknown or disabled nested agent type: "ticket"');
+    expect(textOf(result)).toContain('Unknown or disabled nested agent type: "hidden-helper"');
   });
 
   it("does not start from an @type mention", async () => {
     const { lifecycle: lc } = await boot({ agentMentions: "direct" });
     scriptRun({ hold: new Promise(() => {}) });
-    const hidden = await lc.get("input")({ type: "input", text: "@ticket do it", source: "interactive" }, ctx());
+    const hidden = await lc.get("input")({ type: "input", text: "@hidden-helper do it", source: "interactive" }, ctx());
     expect(hidden).toEqual({ action: "continue" });
     expect(runAgent).not.toHaveBeenCalled();
     const visible = await lc.get("input")({ type: "input", text: "@worker do it", source: "interactive" }, ctx());
@@ -224,10 +230,10 @@ describe("model_visible: false", () => {
     scriptRun();
     const cwd = realpathSync(process.cwd());
     const reply = await rpc("spawn", {
-      type: "ticket", prompt: "work", options: { description: "#1 t", cwd, isolation: "worktree" },
+      type: "hidden-helper", prompt: "work", options: { description: "#1 t", cwd, isolation: "worktree" },
     });
     expect(reply.success).toBe(true);
-    expect(runAgent).toHaveBeenCalledWith(expect.anything(), "ticket", "work", expect.objectContaining({ cwd }));
+    expect(runAgent).toHaveBeenCalledWith(expect.anything(), "hidden-helper", "work", expect.objectContaining({ cwd }));
     expect(vi.mocked(runAgent).mock.calls[0][3].worktreeBase).toBeUndefined();
   });
 });
@@ -236,7 +242,7 @@ describe("spawn options over RPC", () => {
   it("passes parentToolCallId and linkData to the runner and the session record", async () => {
     const { rpc, pi } = await boot();
     scriptRun();
-    const linkData = { superagent: { ticketId: 7, branch: "pi/7-x", title: "X" } };
+    const linkData = { origin: { id: 7, title: "X" } };
     const reply = await rpc("spawn", {
       type: "worker", prompt: "go", options: { description: "d", parentToolCallId: "call-7", linkData },
     });
@@ -413,9 +419,9 @@ describe("subagents:rpc:reopen", () => {
     const { rpc } = await boot();
     const file = writeSession(join(sessionsRoot(), "a", "b"), "t.jsonl", childHeader);
     scriptRun();
-    expect((await rpc("reopen", { sessionFile: file, type: "ticket", prompt: "go" })).success).toBe(true);
+    expect((await rpc("reopen", { sessionFile: file, type: "hidden-helper", prompt: "go" })).success).toBe(true);
     expect(vi.mocked(runAgent).mock.calls[0][3].thinkingLevel).toBeUndefined();
-    expect((await rpc("reopen", { sessionFile: file, type: "ticket", prompt: "go", options: { thinkingLevel: "high" } })).success).toBe(true);
+    expect((await rpc("reopen", { sessionFile: file, type: "hidden-helper", prompt: "go", options: { thinkingLevel: "high" } })).success).toBe(true);
     expect(vi.mocked(runAgent).mock.calls[1][3].thinkingLevel).toBe("high");
   });
 

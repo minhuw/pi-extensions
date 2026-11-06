@@ -1,8 +1,7 @@
 /**
  * default-agents.ts — Embedded default agent configurations.
  *
- * Fleet: recon, worker, reviewer, expert; plus the hidden `ticket` agent that
- * only the superagent extension spawns (model_visible: false).
+ * Fleet: recon, worker, reviewer, expert.
  * User .md files with the same name override these.
  */
 
@@ -261,34 +260,6 @@ designs, and tradeoffs. Own the judgment and explain your reasoning.
 Lead with the answer, then supporting evidence and reasoning. Keep the response
 proportionate to the question and make limitations explicit. Advice only; no file modifications.`,
       promptMode: "replace",
-      isDefault: true,
-    },
-  ],
-  [
-    "ticket",
-    {
-      name: "ticket",
-      displayName: "Ticket",
-      description:
-        "Long-running agent for one superagent ticket. Spawned by the superagent extension only.",
-      // Not offered to models: only a trusted extension (superagent, over
-      // cross-extension RPC) starts one, in a working directory it chose.
-      modelVisible: false,
-      // builtinToolNames omitted: all built-ins.
-      extensions: true,
-      skills: true,
-      // Its working directory's AGENTS.md, stopping at the worktree root, and the
-      // agent dir's global file. With append mode this also builds the child's
-      // own Pi prompt rather than cloning the parent's.
-      contextFiles: true,
-      // The extension that starts it owns its working directory.
-      isolation: "off",
-      allowedSubagents: ["recon", "worker", "reviewer", "expert"],
-      requireToolUse: true,
-      systemPrompt: `You own one long-running task. Where you work, whether you commit, and how you report come from the extension that started you; its task-specific instructions follow.
-
-You may delegate to recon, worker, reviewer, and expert agents; they work in your working directory unless those instructions say otherwise.`,
-      promptMode: "append",
       isDefault: true,
     },
   ],
