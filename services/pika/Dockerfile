@@ -1,20 +1,25 @@
-# Build context: services/pika
-#   docker build -t pika services/pika
+# Build context: repository root
+#   docker build -f services/pika/Dockerfile -t pika .
 #   docker run --rm -it -v pika-data:/data pika password set
 #   docker run -d -p 127.0.0.1:7171:7171 -v pika-data:/data -e PIKA_TRUST_PROXY=1 pika
 
 FROM node:22-bookworm-slim AS web
-WORKDIR /src/web
-COPY web/package.json web/package-lock.json ./
+WORKDIR /src/services/pika/web
+COPY services/pika/web/package.json services/pika/web/package-lock.json ./
 RUN npm ci
-COPY web/ ./
+COPY services/pika/web/ ./
+# Preserve repository-relative Markdown paths for the docs build's content whitelist.
+COPY README.md /src/README.md
+COPY docs/ /src/docs/
+COPY extensions/ /src/extensions/
+COPY services/pika/README.md /src/services/pika/README.md
 RUN npm run build
 
 FROM rust:1-bookworm AS build
-WORKDIR /src
-COPY . .
-# Release builds embed web/dist.
-COPY --from=web /src/web/dist web/dist
+WORKDIR /src/services/pika
+COPY services/pika/ ./
+# Release builds embed web/dist, including the public documentation.
+COPY --from=web /src/services/pika/web/dist web/dist
 # The commit /api/health, the web UI, and --version report; the image workflow passes it.
 ARG PIKA_REVISION=
 RUN cargo build --release --locked
@@ -26,7 +31,7 @@ RUN apt-get update \
 	&& useradd --system --user-group --uid 10001 --home-dir /data --no-create-home pika \
 	&& mkdir /data \
 	&& chown pika:pika /data
-COPY --from=build /src/target/release/pika /usr/local/bin/pika
+COPY --from=build /src/services/pika/target/release/pika /usr/local/bin/pika
 ENV PIKA_BIND=0.0.0.0:7171 \
 	PIKA_DATA_DIR=/data \
 	PIKA_BASE_PATH=/

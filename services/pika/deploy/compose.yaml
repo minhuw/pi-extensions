@@ -11,7 +11,9 @@ services:
     # The published multi-arch image; see the server README's Docker section for its tags.
     image: ghcr.io/minhuw/pika:latest
     # To build from this checkout instead, replace `image` with:
-    # build: ..
+    # build:
+    #   context: ../../..
+    #   dockerfile: services/pika/Dockerfile
     restart: unless-stopped
     ports:
       # Publish on loopback; the reverse proxy on the host forwards to it.

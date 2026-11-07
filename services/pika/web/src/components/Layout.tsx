@@ -342,6 +342,7 @@ export function Layout({ children }: { children?: ReactNode }) {
 				</main>
 				{/* The colophon: a thin line under every page, with the server's build in its corner and out of the band. */}
 				<footer className="flex h-6 shrink-0 items-center justify-end border-t border-line px-4 text-muted">
+					<Link to="/docs" className="mr-auto text-xs hover:text-ink hover:underline">Documentation</Link>
 					<ServerVersion />
 				</footer>
 			</div>

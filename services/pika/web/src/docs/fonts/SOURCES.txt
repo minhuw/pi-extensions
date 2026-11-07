@@ -1,0 +1,2 @@
+Public Sans variable WOFF2 faces (normal and italic, weights 400-700) are self-hosted in this directory under the SIL Open Font License 1.1 (see LICENSE-publicsans.txt).
+Aileron WOFF2 faces (400, 400 italic, 600, 700) are self-hosted in ../../assets/fonts/ under CC0 (see ../../assets/fonts/LICENSE-Aileron.txt).

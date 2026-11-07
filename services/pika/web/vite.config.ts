@@ -2,10 +2,11 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { docsContent } from "./docs/plugin";
 
 export default defineConfig(({ mode }) => ({
 	base: "./",
-	plugins: [react(), tailwindcss()],
+	plugins: [docsContent(), react(), tailwindcss()],
 	server: {
 		// Herder worktrees live under `.git/`, which Vite's default deny list blocks for test modules.
 		// Tests also read the logo's source of truth, `../resource/pika-icon.svg`.

@@ -1,7 +1,8 @@
 /target/
 /pika-data/
-# Impeccable's local design state: decision sketches, surface briefs, review captures
-/.impeccable/
+# Keep review captures and local design state private; version the shared design tokens.
+/.impeccable/*
+!/.impeccable/design.json
 *.db
 *.db-shm
 *.db-wal

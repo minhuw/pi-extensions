@@ -1,0 +1,522 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-04-19T12:00:00.000Z",
+  "title": "Design System: Pi extensions documentation",
+  "extensions": {
+    "colorMeta": {
+      "docs-ink": {
+        "role": "neutral",
+        "displayName": "Deep carbon ink",
+        "tonalRamp": [
+          "oklch(15% 0.0004 106.59)",
+          "oklch(27% 0.0009 106.59)",
+          "oklch(39% 0.0015 106.59)",
+          "oklch(51% 0.0020 106.59)",
+          "oklch(63% 0.0020 106.59)",
+          "oklch(75% 0.0016 106.59)",
+          "oklch(87% 0.0008 106.59)",
+          "oklch(95% 0.0002 106.59)"
+        ]
+      },
+      "docs-muted": {
+        "role": "neutral",
+        "displayName": "Warm graphite secondary ink",
+        "tonalRamp": [
+          "oklch(15% 0.0021 87.53)",
+          "oklch(27% 0.0053 87.53)",
+          "oklch(39% 0.0088 87.53)",
+          "oklch(51% 0.0118 87.53)",
+          "oklch(63% 0.0118 87.53)",
+          "oklch(75% 0.0094 87.53)",
+          "oklch(87% 0.0047 87.53)",
+          "oklch(95% 0.0014 87.53)"
+        ]
+      },
+      "docs-accent": {
+        "role": "primary",
+        "displayName": "International Vermilion",
+        "tonalRamp": [
+          "oklch(15% 0.0343 32.81)",
+          "oklch(27% 0.0859 32.81)",
+          "oklch(39% 0.1431 32.81)",
+          "oklch(51% 0.1908 32.81)",
+          "oklch(63% 0.1908 32.81)",
+          "oklch(75% 0.1527 32.81)",
+          "oklch(87% 0.0763 32.81)",
+          "oklch(95% 0.0229 32.81)"
+        ]
+      },
+      "docs-rule": {
+        "role": "neutral",
+        "displayName": "Exposed hairline",
+        "tonalRamp": [
+          "oklch(15% 0.0023 86.83)",
+          "oklch(27% 0.0058 86.83)",
+          "oklch(39% 0.0097 86.83)",
+          "oklch(51% 0.0129 86.83)",
+          "oklch(63% 0.0129 86.83)",
+          "oklch(75% 0.0103 86.83)",
+          "oklch(87% 0.0052 86.83)",
+          "oklch(95% 0.0016 86.83)"
+        ]
+      },
+      "docs-strong-rule": {
+        "role": "neutral",
+        "displayName": "Strong hairline",
+        "tonalRamp": [
+          "oklch(15% 0.0033 84.59)",
+          "oklch(27% 0.0082 84.59)",
+          "oklch(39% 0.0136 84.59)",
+          "oklch(51% 0.0181 84.59)",
+          "oklch(63% 0.0181 84.59)",
+          "oklch(75% 0.0145 84.59)",
+          "oklch(87% 0.0072 84.59)",
+          "oklch(95% 0.0022 84.59)"
+        ]
+      },
+      "docs-ink-rule": {
+        "role": "neutral",
+        "displayName": "Structural ink rule",
+        "tonalRamp": [
+          "oklch(15% 0.0004 106.59)",
+          "oklch(27% 0.0009 106.59)",
+          "oklch(39% 0.0015 106.59)",
+          "oklch(51% 0.0020 106.59)",
+          "oklch(63% 0.0020 106.59)",
+          "oklch(75% 0.0016 106.59)",
+          "oklch(87% 0.0008 106.59)",
+          "oklch(95% 0.0002 106.59)"
+        ]
+      },
+      "docs-ground": {
+        "role": "neutral",
+        "displayName": "Stone ground",
+        "tonalRamp": [
+          "oklch(15% 0.0016 84.57)",
+          "oklch(27% 0.0039 84.57)",
+          "oklch(39% 0.0065 84.57)",
+          "oklch(51% 0.0086 84.57)",
+          "oklch(63% 0.0086 84.57)",
+          "oklch(75% 0.0069 84.57)",
+          "oklch(87% 0.0034 84.57)",
+          "oklch(95% 0.0010 84.57)"
+        ]
+      },
+      "docs-paper": {
+        "role": "neutral",
+        "displayName": "Warm archival paper",
+        "tonalRamp": [
+          "oklch(15% 0.0010 84.57)",
+          "oklch(27% 0.0026 84.57)",
+          "oklch(39% 0.0043 84.57)",
+          "oklch(51% 0.0057 84.57)",
+          "oklch(63% 0.0057 84.57)",
+          "oklch(75% 0.0046 84.57)",
+          "oklch(87% 0.0023 84.57)",
+          "oklch(95% 0.0007 84.57)"
+        ]
+      },
+      "docs-input": {
+        "role": "neutral",
+        "displayName": "Crisp input ground",
+        "tonalRamp": [
+          "oklch(15% 0.0000 0.00)",
+          "oklch(27% 0.0000 0.00)",
+          "oklch(39% 0.0000 0.00)",
+          "oklch(51% 0.0000 0.00)",
+          "oklch(63% 0.0000 0.00)",
+          "oklch(75% 0.0000 0.00)",
+          "oklch(87% 0.0000 0.00)",
+          "oklch(95% 0.0000 0.00)"
+        ]
+      },
+      "docs-selected": {
+        "role": "primary",
+        "displayName": "Directory selection fill",
+        "tonalRamp": [
+          "oklch(15% 0.0010 84.57)",
+          "oklch(27% 0.0026 84.57)",
+          "oklch(39% 0.0043 84.57)",
+          "oklch(51% 0.0057 84.57)",
+          "oklch(63% 0.0057 84.57)",
+          "oklch(75% 0.0046 84.57)",
+          "oklch(87% 0.0023 84.57)",
+          "oklch(95% 0.0007 84.57)"
+        ]
+      },
+      "docs-selection-ink": {
+        "role": "primary",
+        "displayName": "Selection ink",
+        "tonalRamp": [
+          "oklch(15% 0.0343 32.81)",
+          "oklch(27% 0.0859 32.81)",
+          "oklch(39% 0.1431 32.81)",
+          "oklch(51% 0.1908 32.81)",
+          "oklch(63% 0.1908 32.81)",
+          "oklch(75% 0.1527 32.81)",
+          "oklch(87% 0.0763 32.81)",
+          "oklch(95% 0.0229 32.81)"
+        ]
+      },
+      "docs-dark-ink": {
+        "role": "neutral",
+        "displayName": "Dark Deep carbon ink",
+        "tonalRamp": [
+          "oklch(15% 0.0013 88.64)",
+          "oklch(27% 0.0032 88.64)",
+          "oklch(39% 0.0053 88.64)",
+          "oklch(51% 0.0070 88.64)",
+          "oklch(63% 0.0070 88.64)",
+          "oklch(75% 0.0056 88.64)",
+          "oklch(87% 0.0028 88.64)",
+          "oklch(95% 0.0008 88.64)"
+        ]
+      },
+      "docs-dark-muted": {
+        "role": "neutral",
+        "displayName": "Dark Warm graphite secondary ink",
+        "tonalRamp": [
+          "oklch(15% 0.0027 88.72)",
+          "oklch(27% 0.0067 88.72)",
+          "oklch(39% 0.0112 88.72)",
+          "oklch(51% 0.0150 88.72)",
+          "oklch(63% 0.0150 88.72)",
+          "oklch(75% 0.0120 88.72)",
+          "oklch(87% 0.0060 88.72)",
+          "oklch(95% 0.0018 88.72)"
+        ]
+      },
+      "docs-dark-accent": {
+        "role": "primary",
+        "displayName": "Dark International Vermilion",
+        "tonalRamp": [
+          "oklch(15% 0.0311 33.67)",
+          "oklch(27% 0.0777 33.67)",
+          "oklch(39% 0.1295 33.67)",
+          "oklch(51% 0.1726 33.67)",
+          "oklch(63% 0.1726 33.67)",
+          "oklch(75% 0.1381 33.67)",
+          "oklch(87% 0.0690 33.67)",
+          "oklch(95% 0.0207 33.67)"
+        ]
+      },
+      "docs-dark-rule": {
+        "role": "neutral",
+        "displayName": "Dark Exposed hairline",
+        "tonalRamp": [
+          "oklch(15% 0.0010 91.57)",
+          "oklch(27% 0.0025 91.57)",
+          "oklch(39% 0.0042 91.57)",
+          "oklch(51% 0.0056 91.57)",
+          "oklch(63% 0.0056 91.57)",
+          "oklch(75% 0.0045 91.57)",
+          "oklch(87% 0.0022 91.57)",
+          "oklch(95% 0.0007 91.57)"
+        ]
+      },
+      "docs-dark-strong-rule": {
+        "role": "neutral",
+        "displayName": "Dark Strong hairline",
+        "tonalRamp": [
+          "oklch(15% 0.0019 84.59)",
+          "oklch(27% 0.0047 84.59)",
+          "oklch(39% 0.0079 84.59)",
+          "oklch(51% 0.0105 84.59)",
+          "oklch(63% 0.0105 84.59)",
+          "oklch(75% 0.0084 84.59)",
+          "oklch(87% 0.0042 84.59)",
+          "oklch(95% 0.0013 84.59)"
+        ]
+      },
+      "docs-dark-ink-rule": {
+        "role": "neutral",
+        "displayName": "Dark Structural ink rule",
+        "tonalRamp": [
+          "oklch(15% 0.0016 88.72)",
+          "oklch(27% 0.0039 88.72)",
+          "oklch(39% 0.0066 88.72)",
+          "oklch(51% 0.0087 88.72)",
+          "oklch(63% 0.0087 88.72)",
+          "oklch(75% 0.0070 88.72)",
+          "oklch(87% 0.0035 88.72)",
+          "oklch(95% 0.0010 88.72)"
+        ]
+      },
+      "docs-dark-ground": {
+        "role": "neutral",
+        "displayName": "Dark Stone ground",
+        "tonalRamp": [
+          "oklch(15% 0.0007 106.71)",
+          "oklch(27% 0.0017 106.71)",
+          "oklch(39% 0.0029 106.71)",
+          "oklch(51% 0.0038 106.71)",
+          "oklch(63% 0.0038 106.71)",
+          "oklch(75% 0.0031 106.71)",
+          "oklch(87% 0.0015 106.71)",
+          "oklch(95% 0.0005 106.71)"
+        ]
+      },
+      "docs-dark-paper": {
+        "role": "neutral",
+        "displayName": "Dark Warm archival paper",
+        "tonalRamp": [
+          "oklch(15% 0.0004 106.59)",
+          "oklch(27% 0.0009 106.59)",
+          "oklch(39% 0.0015 106.59)",
+          "oklch(51% 0.0020 106.59)",
+          "oklch(63% 0.0020 106.59)",
+          "oklch(75% 0.0016 106.59)",
+          "oklch(87% 0.0008 106.59)",
+          "oklch(95% 0.0002 106.59)"
+        ]
+      },
+      "docs-dark-input": {
+        "role": "neutral",
+        "displayName": "Dark Crisp input ground",
+        "tonalRamp": [
+          "oklch(15% 0.0004 106.59)",
+          "oklch(27% 0.0009 106.59)",
+          "oklch(39% 0.0015 106.59)",
+          "oklch(51% 0.0020 106.59)",
+          "oklch(63% 0.0020 106.59)",
+          "oklch(75% 0.0016 106.59)",
+          "oklch(87% 0.0008 106.59)",
+          "oklch(95% 0.0002 106.59)"
+        ]
+      },
+      "docs-dark-selected": {
+        "role": "primary",
+        "displayName": "Dark Directory selection fill",
+        "tonalRamp": [
+          "oklch(15% 0.0004 106.59)",
+          "oklch(27% 0.0009 106.59)",
+          "oklch(39% 0.0015 106.59)",
+          "oklch(51% 0.0020 106.59)",
+          "oklch(63% 0.0020 106.59)",
+          "oklch(75% 0.0016 106.59)",
+          "oklch(87% 0.0008 106.59)",
+          "oklch(95% 0.0002 106.59)"
+        ]
+      },
+      "docs-dark-selection-ink": {
+        "role": "primary",
+        "displayName": "Dark Selection ink",
+        "tonalRamp": [
+          "oklch(15% 0.0311 33.67)",
+          "oklch(27% 0.0777 33.67)",
+          "oklch(39% 0.1295 33.67)",
+          "oklch(51% 0.1726 33.67)",
+          "oklch(63% 0.1726 33.67)",
+          "oklch(75% 0.1381 33.67)",
+          "oklch(87% 0.0690 33.67)",
+          "oklch(95% 0.0207 33.67)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "docs-display": {
+        "displayName": "Chapter & page title",
+        "purpose": "Page and chapter h1 above 760px in Aileron."
+      },
+      "docs-display-mobile": {
+        "displayName": "Compact chapter title",
+        "purpose": "Page and chapter h1 at or below 760px in Aileron."
+      },
+      "docs-headline": {
+        "displayName": "Section headline",
+        "purpose": "h2 sections and linked article section headings in Aileron."
+      },
+      "docs-title": {
+        "displayName": "Subsection title",
+        "purpose": "h3 subsections in Aileron."
+      },
+      "docs-subheading": {
+        "displayName": "Minor heading",
+        "purpose": "h4–h6 headings in Aileron."
+      },
+      "docs-body": {
+        "displayName": "Reading text",
+        "purpose": "Article prose in Public Sans, capped at 68ch."
+      },
+      "docs-label": {
+        "displayName": "Masthead tab label",
+        "purpose": "Masthead section navigation tabs in Aileron."
+      },
+      "docs-filter-label": {
+        "displayName": "Category filter label",
+        "purpose": "Inline command concordance category filter tabs in Aileron."
+      },
+      "docs-directory": {
+        "displayName": "Directory entry",
+        "purpose": "Grouped left-rail chapter navigation in Public Sans; current entries use weight 600."
+      },
+      "docs-contents": {
+        "displayName": "Contents entry",
+        "purpose": "Right-rail in-page navigation in Public Sans; current entries use weight 600."
+      },
+      "docs-caption": {
+        "displayName": "Code control caption",
+        "purpose": "Code toolbar status and Copy button label."
+      },
+      "docs-command-label": {
+        "displayName": "Structural uppercase heading",
+        "purpose": "Uppercase table column headers, directory group headers, and margin section headers in Aileron."
+      },
+      "docs-code": {
+        "displayName": "Code & command syntax",
+        "purpose": "Preformatted code examples, inline code, and boxed command badges."
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "docs-interactive-hairline",
+        "value": "color 140ms ease-out, background-color 140ms ease-out, border-color 140ms ease-out",
+        "purpose": "Contents-link and category filter-chip state transitions, gated by prefers-reduced-motion: no-preference."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "docs-mobile-max",
+        "value": "760px"
+      },
+      {
+        "name": "docs-compact-contents-max",
+        "value": "1100px"
+      },
+      {
+        "name": "docs-narrow-desktop-max",
+        "value": "1280px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Docs quiet icon button",
+      "kind": "button",
+      "refersTo": "docs-icon-button",
+      "description": "32×32px desktop (38×38px mobile) quiet icon control with 1px rule hover frame and vermilion icon state.",
+      "html": "<div class=\"ds-docs-sample\"><button class=\"ds-docs-icon-button\" type=\"button\" aria-label=\"Switch to dark theme\"><svg width=\"17\" height=\"17\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M13 9.6A5.4 5.4 0 0 1 6.4 3 5.4 5.4 0 1 0 13 9.6z\"/></svg></button></div>",
+      "css": ".ds-docs-sample { background: var(--docs-paper, #faf8f4); color: var(--docs-ink, #141413); font: 400 15.5px/1.62 \"Docs Public Sans\", \"Aileron\", sans-serif; padding: 8px; }\n.ds-docs-sample :is(a,button,summary,[tabindex]):focus-visible { outline: 2px solid var(--docs-accent, #c83214); outline-offset: 2px; }\n.ds-docs-icon-button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; flex-shrink: 0; border: 1px solid transparent; border-radius: 2px; background: transparent; color: var(--docs-ink, #141413); cursor: pointer; }\n.ds-docs-icon-button:hover { background: var(--docs-ground, #f2efe9); border-color: var(--docs-rule, #dfdbd2); color: var(--docs-accent, #c83214); }\n@media (max-width:760px) { .ds-docs-icon-button { width: 38px; height: 38px; margin-top: 6px; } }"
+    },
+    {
+      "name": "Docs masthead & section tabs",
+      "kind": "nav",
+      "refersTo": "docs-section-tabs",
+      "description": "54px Swiss structural masthead with 236px wordmark cell, Aileron section tabs with 2px vermilion underline, and 1px left-bordered search cell.",
+      "html": "<div class=\"ds-docs-sample\"><header class=\"ds-docs-masthead\"><a class=\"ds-docs-wordmark\" href=\"/docs\">Pi <span>extensions</span></a><nav class=\"ds-docs-tabs\" aria-label=\"Documentation sections\"><a href=\"/docs\" aria-current=\"page\">Reference</a><a href=\"/docs/guides\">Guides</a><a href=\"/docs/commands\">Commands</a><a href=\"/docs/pika\">Deploy</a></nav><form class=\"ds-docs-header-search\" role=\"search\" action=\"/docs/search\"><input type=\"search\" aria-label=\"Search documentation\" placeholder=\"Search documentation (/)\" maxlength=\"256\"/></form></header></div>",
+      "css": ".ds-docs-sample { background: var(--docs-paper, #faf8f4); color: var(--docs-ink, #141413); font: 400 15.5px/1.62 \"Docs Public Sans\", \"Aileron\", sans-serif; }\n.ds-docs-sample :is(a,button,summary,[tabindex]):focus-visible { outline: 2px solid var(--docs-accent, #c83214); outline-offset: 2px; }\n.ds-docs-sample input:focus-visible { outline: 2px solid var(--docs-accent, #c83214); outline-offset: -1px; border-color: var(--docs-accent, #c83214); }\n.ds-docs-masthead { height: 54px; display: flex; align-items: center; gap: 18px; padding: 0 24px 0 0; background: var(--docs-paper, #faf8f4); border-bottom: 1px solid var(--docs-ink-rule, #141413); font-family: \"Aileron\", \"Docs Public Sans\", sans-serif; }\n.ds-docs-wordmark { width: 236px; height: 100%; flex-shrink: 0; display: flex; align-items: center; gap: 5px; padding: 0 24px; border-right: 1px solid var(--docs-rule, #dfdbd2); color: var(--docs-ink, #141413); font-size: 16px; font-weight: 700; letter-spacing: -0.025em; text-decoration: none; white-space: nowrap; }\n.ds-docs-wordmark span { color: var(--docs-muted, #59564f); font-weight: 400; }\n.ds-docs-tabs { display: flex; align-self: stretch; gap: 26px; padding-left: 18px; font-size: 13.5px; font-weight: 600; }\n.ds-docs-tabs a { position: relative; display: flex; align-items: center; color: var(--docs-muted, #59564f); text-decoration: none; }\n.ds-docs-tabs a:hover, .ds-docs-tabs a[aria-current] { color: var(--docs-ink, #141413); }\n.ds-docs-tabs a[aria-current]::after { content: \"\"; height: 2px; background: var(--docs-accent, #c83214); position: absolute; bottom: -1px; left: 0; right: 0; }\n.ds-docs-header-search { margin-left: auto; height: 100%; display: flex; align-items: center; padding-left: 18px; border-left: 1px solid var(--docs-rule, #dfdbd2); }\n.ds-docs-header-search input { width: 256px; height: 32px; border: 1px solid var(--docs-strong-rule, #b8b2a6); background: var(--docs-input, #ffffff); border-radius: 2px; padding: 0 11px; font-size: 13px; color: var(--docs-ink, #141413); caret-color: var(--docs-accent, #c83214); }\n.ds-docs-header-search input::placeholder { color: var(--docs-muted, #59564f); opacity: 1; }"
+    },
+    {
+      "name": "Docs content search",
+      "kind": "input",
+      "refersTo": "docs-content-search",
+      "description": "42px full-width search input beneath an Aileron label, using single-frame focus (outline-offset: -1px).",
+      "html": "<div class=\"ds-docs-sample\"><label class=\"ds-docs-search-label\" for=\"ds-docs-content-query\">Search documentation content</label><input class=\"ds-docs-content-search\" id=\"ds-docs-content-query\" type=\"search\" placeholder=\"Try /benchmark or configuration\" maxlength=\"256\"/></div>",
+      "css": ".ds-docs-sample { background: var(--docs-paper, #faf8f4); color: var(--docs-ink, #141413); font: 400 15.5px/1.62 \"Docs Public Sans\", \"Aileron\", sans-serif; padding: 8px; }\n.ds-docs-search-label { display: block; font-family: \"Aileron\", \"Docs Public Sans\", sans-serif; font-size: 13px; font-weight: 700; margin-bottom: 8px; }\n.ds-docs-content-search { width: 100%; height: 42px; border: 1px solid var(--docs-strong-rule, #b8b2a6); border-radius: 2px; background: var(--docs-input, #ffffff); padding: 0 13px; font: 400 15px/1.62 \"Docs Public Sans\", \"Aileron\", sans-serif; color: var(--docs-ink, #141413); caret-color: var(--docs-accent, #c83214); }\n.ds-docs-content-search::placeholder { color: var(--docs-muted, #59564f); opacity: 1; }\n.ds-docs-content-search:focus-visible { outline: 2px solid var(--docs-accent, #c83214); outline-offset: -1px; border-color: var(--docs-accent, #c83214); }"
+    },
+    {
+      "name": "Docs category filter strip",
+      "kind": "chip",
+      "refersTo": "docs-filter-chip",
+      "description": "Inline typographic category filter tabs in Aileron 12.5px with a 2px vermilion bottom rule on the active category.",
+      "html": "<div class=\"ds-docs-sample\"><div class=\"ds-docs-filter-strip\" role=\"toolbar\" aria-label=\"Filter commands by category\"><button type=\"button\" class=\"ds-docs-filter-chip\" aria-pressed=\"true\">Essential</button><button type=\"button\" class=\"ds-docs-filter-chip\" aria-pressed=\"false\">Quality &amp; Git</button><button type=\"button\" class=\"ds-docs-filter-chip\" aria-pressed=\"false\">Delegation</button><button type=\"button\" class=\"ds-docs-filter-chip\" aria-pressed=\"false\">Performance</button><button type=\"button\" class=\"ds-docs-filter-chip\" aria-pressed=\"false\">Design</button></div></div>",
+      "css": ".ds-docs-sample { background: var(--docs-paper, #faf8f4); color: var(--docs-ink, #141413); font: 400 15.5px/1.62 \"Docs Public Sans\", \"Aileron\", sans-serif; padding: 8px; }\n.ds-docs-filter-strip { display: flex; flex-wrap: wrap; gap: 2px 18px; padding: 0; border-top: 1px solid var(--docs-rule, #dfdbd2); border-bottom: 1px solid var(--docs-ink-rule, #141413); }\n.ds-docs-filter-chip { position: relative; padding: 5px 0 6px; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: transparent; color: var(--docs-muted, #59564f); font-family: \"Aileron\", \"Docs Public Sans\", sans-serif; font-size: 12.5px; font-weight: 600; cursor: pointer; }\n.ds-docs-filter-chip:hover { color: var(--docs-ink, #141413); }\n.ds-docs-filter-chip[aria-pressed=\"true\"] { color: var(--docs-ink, #141413); border-bottom-color: var(--docs-accent, #c83214); }\n.ds-docs-filter-chip:focus-visible { outline: 2px solid var(--docs-accent, #c83214); outline-offset: 2px; }"
+    },
+    {
+      "name": "Docs directory rail",
+      "kind": "nav",
+      "refersTo": "docs-directory-link",
+      "description": "236px stone-ground directory with 11px uppercase Aileron group headers, 1px group dividers, and warm-paper + vermilion active selection.",
+      "html": "<div class=\"ds-docs-sample\"><aside class=\"ds-docs-directory\" aria-label=\"Documentation navigation\"><nav><section><h2>Getting started</h2><a href=\"/docs/overview\">About the collection</a><a href=\"/docs/configuration\">Configuration</a></section><section><h2>Reference</h2><a href=\"/docs\" aria-current=\"page\">Overview</a><a href=\"/docs/commands\">All commands</a><a href=\"/docs/extensions/benchmark\">Benchmark</a></section></nav></aside></div>",
+      "css": ".ds-docs-sample { background: var(--docs-paper, #faf8f4); color: var(--docs-ink, #141413); font: 400 15.5px/1.62 \"Docs Public Sans\", \"Aileron\", sans-serif; }\n.ds-docs-directory { width: 236px; background: var(--docs-ground, #f2efe9); padding: 20px 18px 28px 24px; font-size: 13.5px; line-height: 1.38; border-right: 1px solid var(--docs-rule, #dfdbd2); }\n.ds-docs-directory section { padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--docs-rule, #dfdbd2); }\n.ds-docs-directory section:last-child { border-bottom: 0; margin-bottom: 0; padding-bottom: 0; }\n.ds-docs-directory h2 { font-family: \"Aileron\", \"Docs Public Sans\", sans-serif; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--docs-muted, #59564f); margin: 0 0 6px; }\n.ds-docs-directory a { display: block; padding: 4px 10px; margin-left: -10px; border-left: 1px solid transparent; color: var(--docs-ink, #141413); text-decoration: none; }\n.ds-docs-directory a:hover { color: var(--docs-accent, #c83214); }\n.ds-docs-directory a[aria-current] { background: var(--docs-selected, #faf8f4); color: var(--docs-selection-ink, #c83214); border-left-color: var(--docs-accent, #c83214); font-weight: 600; }\n.ds-docs-directory a:focus-visible { outline: 2px solid var(--docs-accent, #c83214); outline-offset: 2px; }"
+    },
+    {
+      "name": "Docs page outline & disclosure",
+      "kind": "nav",
+      "refersTo": "docs-contents-link",
+      "description": "12.5px in-page outline along a 1px vertical hairline, with a 1px vermilion active marker and nested h3 indentation.",
+      "html": "<div class=\"ds-docs-sample\"><aside class=\"ds-docs-margin\" aria-label=\"Page reference\"><h2>On this page</h2><nav class=\"ds-docs-contents-links\" aria-label=\"On this page\"><a href=\"#commands\" aria-current=\"location\">Commands</a><a href=\"#performance\">Performance</a><a class=\"ds-docs-contents-nested\" href=\"#example\">Example usage</a><a href=\"#extensions\">Extensions</a></nav></aside></div>",
+      "css": ".ds-docs-sample { background: var(--docs-paper, #faf8f4); color: var(--docs-ink, #141413); font: 400 15.5px/1.62 \"Docs Public Sans\", \"Aileron\", sans-serif; }\n.ds-docs-margin { width: 224px; padding: 24px 24px 28px; font-size: 12.5px; border-left: 1px solid var(--docs-rule, #dfdbd2); }\n.ds-docs-margin h2 { font-family: \"Aileron\", \"Docs Public Sans\", sans-serif; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--docs-muted, #59564f); font-weight: 700; margin: 0 0 10px; }\n.ds-docs-contents-links { border-left: 1px solid var(--docs-rule, #dfdbd2); padding: 0 0 0 13px; display: flex; flex-direction: column; gap: 8px; }\n.ds-docs-contents-links a { color: var(--docs-muted, #59564f); line-height: 1.42; margin-left: -14px; padding-left: 13px; border-left: 1px solid transparent; text-decoration: none; }\n.ds-docs-contents-links a:hover { color: var(--docs-ink, #141413); }\n.ds-docs-contents-links a[aria-current] { color: var(--docs-accent, #c83214); border-left-color: var(--docs-accent, #c83214); font-weight: 600; }\n.ds-docs-contents-nested { padding-left: 23px !important; }"
+    },
+    {
+      "name": "Docs command concordance",
+      "kind": "custom",
+      "refersTo": "docs-command-table",
+      "description": "High-density Swiss command concordance with 1px ink top rule, uppercase Aileron headers, and boxed monospace command badges.",
+      "html": "<div class=\"ds-docs-sample\"><div class=\"ds-docs-table-scroll\" role=\"region\" aria-label=\"Command index\" tabindex=\"0\"><table class=\"ds-docs-command-table\"><thead><tr><th scope=\"col\">Command</th><th scope=\"col\">Extension</th><th scope=\"col\">Purpose</th></tr></thead><tbody><tr><td><a href=\"/docs/extensions/commit\"><code>/commit</code></a><span class=\"ds-docs-command-owner\"><a href=\"/docs/extensions/commit\">Commit</a></span></td><td><a href=\"/docs/extensions/commit\">Commit</a></td><td>Commit changes as self-contained patches</td></tr><tr><td><a href=\"/docs/extensions/benchmark\"><code>/benchmark</code></a><span class=\"ds-docs-command-owner\"><a href=\"/docs/extensions/benchmark\">Benchmark</a></span></td><td><a href=\"/docs/extensions/benchmark\">Benchmark</a></td><td>Measure a performance claim</td></tr></tbody></table></div></div>",
+      "css": ".ds-docs-sample { background: var(--docs-paper, #faf8f4); color: var(--docs-ink, #141413); font: 400 15.5px/1.62 \"Docs Public Sans\", \"Aileron\", sans-serif; padding: 8px; }\n.ds-docs-table-scroll { max-width: 100%; overflow-x: auto; }\n.ds-docs-command-table { width: 100%; border-collapse: collapse; border-top: 1px solid var(--docs-ink-rule, #141413); text-align: left; font-size: 13.5px; font-variant-numeric: tabular-nums; }\n.ds-docs-command-table th { font-family: \"Aileron\", \"Docs Public Sans\", sans-serif; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--docs-muted, #59564f); padding: 7px 14px 7px 0; border-bottom: 1px solid var(--docs-strong-rule, #b8b2a6); }\n.ds-docs-command-table th:first-child { width: 170px; }\n.ds-docs-command-table th:nth-child(2) { width: 130px; }\n.ds-docs-command-table td { padding: 7.5px 14px 7.5px 0; border-bottom: 1px solid var(--docs-rule, #dfdbd2); vertical-align: baseline; line-height: 1.45; }\n.ds-docs-command-table :is(th,td):last-child { padding-right: 0; }\n.ds-docs-command-table td:first-child { font-weight: 600; white-space: nowrap; }\n.ds-docs-command-table td:first-child code { display: inline-block; padding: 1px 6px; background: var(--docs-ground, #f2efe9); border: 1px solid var(--docs-rule, #dfdbd2); border-radius: 2px; color: var(--docs-ink, #141413); font: 600 12.5px/1.45 ui-monospace, \"SF Mono\", SFMono-Regular, Menlo, Consolas, monospace; }\n.ds-docs-command-table td:first-child a { text-decoration: none; }\n.ds-docs-command-table td:first-child a:hover code { border-color: var(--docs-accent, #c83214); color: var(--docs-accent, #c83214); }\n.ds-docs-command-table td:nth-child(2) a { color: var(--docs-ink, #141413); font-weight: 600; text-decoration: none; }\n.ds-docs-command-table td:nth-child(2) a:hover { color: var(--docs-accent, #c83214); }\n.ds-docs-command-table td:last-child { color: var(--docs-muted, #59564f); }\n.ds-docs-command-owner { display: none; }"
+    },
+    {
+      "name": "Docs single-row command code bar",
+      "kind": "custom",
+      "refersTo": "docs-code-surface",
+      "description": "Language-less single-row flex code surface with a 1px left-divided Copy cell on the right.",
+      "html": "<div class=\"ds-docs-sample\"><div class=\"ds-docs-code-inline\"><div class=\"ds-docs-code-scroll\" role=\"region\" aria-label=\"Code example\" tabindex=\"0\"><pre class=\"ds-docs-code-block\"><code>/benchmark the new parser against main on the large fixture</code></pre></div><div class=\"ds-docs-code-tools\"><button class=\"ds-docs-copy-button\" type=\"button\" aria-label=\"Copy code\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><rect x=\"5.5\" y=\"5.5\" width=\"8\" height=\"8\" rx=\"1.5\"/><path d=\"M10.5 3.5v-.5A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5\"/></svg><span>Copy</span></button></div></div></div>",
+      "css": ".ds-docs-sample { background: var(--docs-paper, #faf8f4); color: var(--docs-ink, #141413); font: 400 15.5px/1.62 \"Docs Public Sans\", \"Aileron\", sans-serif; padding: 8px; }\n.ds-docs-code-inline { display: flex; align-items: stretch; border: 1px solid var(--docs-strong-rule, #b8b2a6); background: var(--docs-ground, #f2efe9); max-width: 100%; }\n.ds-docs-code-scroll { flex: 1; min-width: 0; overflow-x: auto; }\n.ds-docs-code-block { margin: 0; padding: 10px 16px; background: transparent; color: var(--docs-ink, #141413); font: 12.5px/1.55 ui-monospace, \"SF Mono\", SFMono-Regular, Menlo, Consolas, monospace; white-space: pre; }\n.ds-docs-code-tools { flex-shrink: 0; display: flex; align-items: center; padding: 0 8px; border-left: 1px solid var(--docs-rule, #dfdbd2); background: var(--docs-ground, #f2efe9); color: var(--docs-muted, #59564f); font-size: 11.5px; }\n.ds-docs-copy-button { display: inline-flex; align-items: center; gap: 5px; padding: 2px 6px; background: transparent; border: 1px solid transparent; border-radius: 2px; font: 500 11.5px/1.62 \"Docs Public Sans\", \"Aileron\", sans-serif; color: var(--docs-muted, #59564f); cursor: pointer; }\n.ds-docs-copy-button:hover { color: var(--docs-accent, #c83214); background: var(--docs-paper, #faf8f4); border-color: var(--docs-rule, #dfdbd2); }"
+    },
+    {
+      "name": "Docs three-column guide strip",
+      "kind": "custom",
+      "refersTo": "docs-guide-strip",
+      "description": "Three-column Swiss reference strip bounded by a 1px ink top rule and divided by 1px vertical hairlines.",
+      "html": "<div class=\"ds-docs-sample\"><div class=\"ds-docs-guide-strip\"><div class=\"ds-docs-guide-item\"><a href=\"/docs/guides/performance\">Performance workflow</a><p>Measure claims with Benchmark and iterate with Autoresearch.</p></div><div class=\"ds-docs-guide-item\"><a href=\"/docs/guides/delegation\">Delegation</a><p>Choose between subagents and durable Herder runs.</p></div><div class=\"ds-docs-guide-item\"><a href=\"/docs/guides/code-quality\">Code quality</a><p>Review, simplify, verify, and commit clean patches.</p></div></div></div>",
+      "css": ".ds-docs-sample { background: var(--docs-paper, #faf8f4); color: var(--docs-ink, #141413); font: 400 15.5px/1.62 \"Docs Public Sans\", \"Aileron\", sans-serif; padding: 8px; }\n.ds-docs-guide-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--docs-ink-rule, #141413); border-bottom: 1px solid var(--docs-rule, #dfdbd2); }\n.ds-docs-guide-item { padding: 11px 16px 11px 0; border-right: 1px solid var(--docs-rule, #dfdbd2); }\n.ds-docs-guide-item:nth-child(n+2) { padding-left: 16px; }\n.ds-docs-guide-item:last-child { border-right: 0; padding-right: 0; }\n.ds-docs-guide-item a { font-family: \"Aileron\", \"Docs Public Sans\", sans-serif; font-size: 14px; font-weight: 700; color: var(--docs-ink, #141413); text-decoration: none; }\n.ds-docs-guide-item a:hover { color: var(--docs-accent, #c83214); }\n.ds-docs-guide-item p { font-size: 12.5px; line-height: 1.42; color: var(--docs-muted, #59564f); margin: 3px 0 0; }"
+    },
+    {
+      "name": "Docs search result",
+      "kind": "custom",
+      "refersTo": "docs-search-result",
+      "description": "Hairline-separated search record with Aileron 17px ink title (vermilion + underlined on hover), 12px context, and 68ch description.",
+      "html": "<div class=\"ds-docs-sample\"><ul class=\"ds-docs-search-results\"><li><a href=\"/docs/extensions/benchmark\"><span class=\"ds-docs-result-title\">Benchmark</span><span class=\"ds-docs-result-context\">Reference</span><span class=\"ds-docs-result-description\">Compare two implementations with alternating runs, medians, ranges, and a verdict.</span></a></li></ul></div>",
+      "css": ".ds-docs-sample { background: var(--docs-paper, #faf8f4); color: var(--docs-ink, #141413); font: 400 15.5px/1.62 \"Docs Public Sans\", \"Aileron\", sans-serif; padding: 8px; }\n.ds-docs-search-results { padding: 0; margin: 0; list-style: none; border-top: 1px solid var(--docs-ink-rule, #141413); }\n.ds-docs-search-results li { border-bottom: 1px solid var(--docs-rule, #dfdbd2); }\n.ds-docs-search-results a { display: block; padding: 16px 0; text-decoration: none; }\n.ds-docs-result-title { font-family: \"Aileron\", \"Docs Public Sans\", sans-serif; font-size: 17px; font-weight: 700; color: var(--docs-ink, #141413); }\n.ds-docs-search-results a:hover .ds-docs-result-title { color: var(--docs-accent, #c83214); text-decoration: underline; text-underline-offset: 4px; }\n.ds-docs-result-context { display: block; color: var(--docs-muted, #59564f); font-size: 12px; margin: 2px 0 6px; }\n.ds-docs-result-description { display: block; color: var(--docs-ink, #141413); font-size: 14.5px; max-width: 68ch; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Swiss Typographic Concordance / 瑞士网格命令速查册",
+    "overview": "This is the independent documentation identity for `/docs/*`, implemented by `web/src/pages/Docs.tsx` and `web/src/docs`. It serves users looking up Pi extension commands, configuration, and reference material. Warm archival paper, a stone directory and code ground, exposed one-pixel structural rules, crisp neo-grotesque headings, and a restrained International Vermilion accent give the collection the character of a Swiss typographic concordance (Ulm / Müller-Brockmann technical index): immediate, scannable, and dense enough to surface the command index in the first viewport.\n\nThe system is flat, structural, and typographic. Continuous one-pixel hairlines align the masthead wordmark cell, left directory rail, central reference sheet, and right page-outline rail; inline category filter tabs narrow the command concordance in place; and code remains selectable inside its own stone surface. Confirmed visual rejections ban decorative kickers or eyebrows above headings, hero stat boxes, ornamental section numbering, monospace styling on non-code labels, Unicode glyph stand-ins, and nested card chrome. These tokens and rules apply only to `/docs/*`. Existing pika session, dashboard, and public trajectory interfaces retain their separate incumbent identity and are outside this design system. No rule here is a global design ban or a replacement for pika's product or logo commitments.",
+    "keyCharacteristics": [
+      "Warm archival reading paper with a stone navigation and code ground, deep carbon ink, and exposed structural hairlines.",
+      "Self-hosted Aileron neo-grotesque for headings, masthead navigation, filter tabs, table headers, and index titles, paired with self-hosted Public Sans for long-form prose.",
+      "High-density command concordance with inline typographic category filtering, boxed monospace command tokens, and a three-column guide strip.",
+      "Continuous exposed one-pixel grid connecting the 54px masthead, 236px directory rail, central sheet, and 224px page-outline rail.",
+      "Matching light and dark roles, single-frame input focus, and compact mobile disclosures."
+    ],
+    "rules": [
+      {
+        "name": "The Docs Location Rule",
+        "body": "Reserve the vermilion accent for links, active location markers (two-pixel tab underlines and one-pixel directory/outline left rules), and keyboard focus; pair selection fill with selection ink for the active directory entry.",
+        "section": "colors"
+      },
+      {
+        "name": "The Three-Weight Hairline Rule",
+        "body": "Distinguish structural anchors (`docs-ink-rule`), interactive or container frames (`docs-strong-rule`), and internal cell or row subdivisions (`docs-rule`) by border tone rather than by drop shadows or thick borders.",
+        "section": "colors"
+      },
+      {
+        "name": "The Docs Concordance Type Rule",
+        "body": "Use Aileron for structural headings, masthead navigation, category filter tabs, uppercase table headers, and index titles; use Public Sans for reading prose and navigation rails; reserve monospace strictly for actual commands, code blocks, and code language identifiers.",
+        "section": "typography"
+      },
+      {
+        "name": "The Docs Flat Reference Rule",
+        "body": "Separate documentation regions with paper, stone ground, and one-pixel structural hairlines; never introduce drop shadows, blurred glass headers, or floating cards.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do apply this system only to `/docs/*` (`web/src/pages/Docs.tsx` and `web/src/docs`); preserve the separate incumbent identity of pika's session, dashboard, and public trajectory interfaces.",
+      "Do use the Docs Location Rule and Three-Weight Hairline Rule to structure navigation, tables, and active states in both light and dark themes.",
+      "Do use the Docs Concordance Type Rule and keep reading prose within its observed `68ch` maximum measure.",
+      "Do use the single-row flex code bar with a right-hand `1px`-divided Copy cell for language-less command specimens, and the top toolbar with `.docs-code-lang` for language-labeled blocks.",
+      "Do hide the masthead search form on `/docs/search` (`.docs-header-search-hidden`) and use single-frame focus (`outline-offset: -1px`) on search inputs.",
+      "Do retain the mobile two-column command/purpose concordance adaptation with `.docs-command-owner` beneath the command badge at `<=760px`."
+    ],
+    "donts": [
+      "Don't apply documentation tokens or Swiss grid rules to pika's incumbent session or dashboard interfaces without a separate design decision.",
+      "Don't reintroduce `Docs Source Serif`, decorative kickers/eyebrows above headings, stat cards, or pill-shaped filter chips.",
+      "Don't apply monospace fonts to table column headers, directory group labels, or category filter tabs; those are Aileron structural labels, not code.",
+      "Don't treat synthesized sidecar tonal ramps as additional production palette tokens, or substitute static sidecar component previews for the live React routing, search, theme, and clipboard behavior."
+    ]
+  }
+}

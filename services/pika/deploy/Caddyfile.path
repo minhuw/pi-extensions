@@ -26,7 +26,7 @@ homelab.example {
 		# read API, pairing devices have no login yet, and health checks are anonymous, so
 		# leave those out.
 		# Hash with `caddy hash-password`. (Caddy < 2.8 calls the directive basicauth.)
-		# @browser not path /pika/api/ingest/* /pika/api/pair/* /pika/api/relay/* /pika/api/agent/* /pika/api/health /pika/api/public/* /pika/public /pika/public/* /pika/assets/*
+		# @browser not path /pika/api/ingest/* /pika/api/pair/* /pika/api/relay/* /pika/api/agent/* /pika/api/health /pika/api/public/* /pika/public /pika/public/* /pika/docs /pika/docs/* /pika/assets/*
 		# basic_auth @browser {
 		# 	me $2a$14$replace-with-the-hash
 		# }

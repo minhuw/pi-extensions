@@ -16,6 +16,7 @@ import { SessionListPage } from "./pages/SessionList";
 import { SettingsPage } from "./pages/Settings";
 
 // The session page, with its trajectory, transcript renderers, and context viewer, loads on demand in its own chunk.
+const DocsPage = lazy(() => import("./pages/Docs").then((module) => ({ default: module.DocsPage })));
 const StatisticsPage = lazy(() => import("./pages/Statistics").then((module) => ({ default: module.StatisticsPage })));
 const SessionViewPage = lazy(() => import("./pages/SessionView").then((module) => ({ default: module.SessionViewPage })));
 
@@ -53,6 +54,7 @@ function LegacyRunRedirect() {
 export function AppRoutes() {
 	return (
 		<Routes>
+			<Route path="docs/*" element={<Suspense fallback={<main className="p-8" role="status">Loading documentation…</main>}><DocsPage /></Suspense>} />
 			<Route path="login" element={<LoginPage />} />
 			<Route path="public" element={<PublicLayout />}>
 				<Route index element={<SessionListPage />} />

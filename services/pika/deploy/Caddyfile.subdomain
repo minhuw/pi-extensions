@@ -21,7 +21,7 @@ pika.example.com {
 	# read API, pairing devices have no login yet, and health checks are anonymous, so
 	# leave those out.
 	# Hash with `caddy hash-password`. (Caddy < 2.8 calls the directive basicauth.)
-	# @browser not path /api/ingest/* /api/pair/* /api/relay/* /api/agent/* /api/health /api/public/* /public /public/* /assets/*
+	# @browser not path /api/ingest/* /api/pair/* /api/relay/* /api/agent/* /api/health /api/public/* /public /public/* /docs /docs/* /assets/*
 	# basic_auth @browser {
 	# 	me $2a$14$replace-with-the-hash
 	# }

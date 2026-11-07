@@ -1,12 +1,20 @@
 # pika server
 
-`pika` is one Rust binary that stores every Pi trajectory from your machines and serves it back. It takes uploads from the [pika extension](../../extensions/pika/README.md), keeps each session line verbatim in SQLite, stores large content and request blocks once in a compressed blob store, and serves a read API and an embedded web UI: a filtered session list, which can show each session's subagents and steps as a tree under it; session views with a zoomable timeline of every turn, model call, and tool call, per-tool rendering, inline subagents, the exact request each model call received, and how long each one waited for its first token; an agent tree of each session's whole family of subagents, with their timing and costs; Herder run views; and full-text search. It also relays messages between running Pi sessions on any of your machines (see [Relay](#relay)).
+`pika` is a Rust server for the Pi sessions captured across your machines. It accepts uploads from the [pika extension](../../extensions/pika/README.md), preserves each session line verbatim in SQLite, and stores large content and request blocks once in a compressed blob store.
 
-It is built for one user in a homelab: plain HTTP, meant to sit behind a reverse proxy that terminates TLS. Devices authenticate with per-device tokens, which they get by pairing with the web UI. The UI is protected by one password with server-side sessions, or by the reverse proxy; the server refuses to start until one of them is set up.
+The embedded web UI lets you filter and search sessions, inspect transcripts and captured model requests, and follow turns, model calls, and tool calls on a zoomable timeline. Session views include per-tool rendering, inline subagents, and time to first token. The session list can show children as a tree; a separate agent tree shows the whole family with timing and costs. Herder run views show orchestrated work. A read API exposes the recorded data, and [Relay](#relay) connects running Pi sessions across your machines.
+
+pika is designed for one user in a homelab. It serves plain HTTP behind a reverse proxy that terminates TLS. Devices authenticate with per-device tokens, usually obtained by pairing with the web UI. Protect the owner UI with pika's password login and server-side sessions, or an authenticating reverse proxy. The default password mode refuses to start without a password; `PIKA_AUTH=none` disables viewer authentication for local development.
+
+## Documentation
+
+The public `/docs` pages bring together the [collection overview](../../README.md), extension references, and [installation](../../docs/installation.md), [configuration](../../docs/configuration.md), [development](../../docs/development.md), and workflow guides. They require no pika login and use the UI's base path: with `PIKA_BASE_PATH=/pika`, open `/pika/docs`.
+
+The web build compiles an explicit whitelist of repository Markdown into `web/dist`. Release binaries embed this content alongside the session viewer; the documentation needs no separate runtime server or database. Build from a full repository checkout so the root README, extension READMEs, and guides are available. When using proxy authentication, leave the docs routes and shared assets public as described under [Reverse proxy](#reverse-proxy).
 
 ## Build
 
-Requirements: stable Rust 1.89 or newer (the locked dependencies need it) and Node 22 for the web UI. SQLite and zstd are compiled in; there are no system library dependencies.
+Requirements: stable Rust 1.89 or newer (the locked dependencies need it), Node 22.19.0 or newer for the web UI, and a full checkout of this repository. SQLite and zstd are compiled in; there are no system library dependencies. Start from the repository root:
 
 ```bash
 cd services/pika
@@ -24,7 +32,7 @@ pika [--data-dir DIR] <command>
 
 pika serve [--bind ADDR] [--base-path PATH] [--auth password|proxy|none] [--password-file FILE]
            [--password PASSWORD] [--cookie-secure auto|always|never] [--trust-proxy] [--max-body SIZE]
-           [--relay on|off] [--visitor-analytics off|auto|direct|proxy|cloudflare]
+           [--relay] [--visitor-analytics off|auto|direct|proxy|cloudflare] [--prices SOURCE]
 pika password set
 pika password clear
 pika token create <name> [--no-read-access]
@@ -55,7 +63,7 @@ pika delete project <name> [--yes]
 
 `<device>` is a device id, or a name that exactly one device has; when several share it, the command fails and lists their ids, so use one of those. `revoke` considers only devices that have a token.
 
-Every command opens the data directory and creates it if needed. `password`, `token`, `reindex`, `export`, and `delete` can run while the server is running; a new stored password, revoked tokens, and deletions apply at once.
+Every command opens the data directory and creates it if needed. Use the same `--data-dir` or `PIKA_DATA_DIR` as the server when running administrative commands. `password`, `token`, `reindex`, `export`, and `delete` can run while the server is running; a new stored password, revoked tokens, and deletions apply at once.
 
 | Flag | Environment variable | Default | Meaning |
 | --- | --- | --- | --- |
@@ -66,10 +74,10 @@ Every command opens the data directory and creates it if needed. `password`, `to
 | `--password-file` | `PIKA_PASSWORD_FILE` | none | Reads the password from this file, without one trailing newline. Wins over `--password` and the stored password; suits Docker secrets. |
 | `--password` | `PIKA_PASSWORD` | none | The password. Wins over the stored one. Empty means unset. |
 | `--cookie-secure` | `PIKA_COOKIE_SECURE` | `auto` | When the session cookie is `Secure`: `auto` when a trusted proxy reports HTTPS, `always`, or `never`. |
-| `--trust-proxy` | `PIKA_TRUST_PROXY` | off | Takes the client address from the rightmost `X-Forwarded-For` entry and HTTPS from `X-Forwarded-Proto`. Turn it on behind a reverse proxy, and only then: without a proxy, clients could pick their own address. `1`, `true`, `yes`, or `on` turn it on; `0`, `false`, `no`, `off`, or empty leave it off; any other value stops `serve` with an error. |
+| `--trust-proxy` | `PIKA_TRUST_PROXY` | off | Takes the client address from the rightmost `X-Forwarded-For` entry and HTTPS from `X-Forwarded-Proto`. Turn it on behind a reverse proxy, and only then: without a proxy, clients could pick their own address. `--trust-proxy` takes no value; in `PIKA_TRUST_PROXY`, `1`, `true`, `yes`, or `on` turn it on, `0`, `false`, `no`, `off`, or empty leave it off, and any other value stops `serve` with an error. |
 | `--visitor-analytics` | `PIKA_VISITOR_ANALYTICS` | `auto` | Count public page views and select the address source automatically. Set `off` to disable collection. See [Visitor origins](#visitor-origins). |
 | `--max-body` | `PIKA_MAX_BODY` | `32MiB` | Largest ingest body, both as sent and after gzip decompression. Accepts bytes or `K`/`KiB`, `M`/`MiB`, `G`/`GiB` (all binary). |
-| `--relay` | `PIKA_RELAY` | `on` | Relay between Pi sessions (see [Relay](#relay)): `on` or `off`, with the same spellings as `--trust-proxy`, except that empty means `on`. When `off`, every relay route answers 404 `{ "error": "relay_disabled" }`. |
+| `--relay` | `PIKA_RELAY` | `on` | Relay between Pi sessions (see [Relay](#relay)). `--relay` is a boolean flag with no value; to disable relay, set `PIKA_RELAY=off` (in `PIKA_RELAY`, `1`, `true`, `yes`, `on`, or empty turn it on, `0`, `false`, `no`, or `off` turn it off, and any other value stops `serve` with an error). When off, every relay route answers 404 `{ "error": "relay_disabled" }`. |
 | `--prices` | `PIKA_PRICES` | `https://models.dev/api.json` | Where pika finds prices for Magpie calls that recorded no cost (see [Usage statistics](#usage-statistics-and-performance)): a models.dev-format catalog URL or file, fetched daily and kept in `prices.json` in the data directory. `off` counts recorded costs only; empty means the default. |
 
 Flags win over environment variables. `PIKA_DEBUG=1` turns on debug logging. In `password` mode the password comes from `--password-file`, else `--password`, else `pika password set`; the server logs when a configured password overrides a stored one. Prefer `pika password set` or a password file over `--password` and `PIKA_PASSWORD`, which other users can see in the process list or the container's configuration.
@@ -85,6 +93,7 @@ Every route is under the base path:
 - `api/agent/v1/*` is the read API for pi agents on devices with read access, with `Authorization: Bearer <token>` and credentials scrubbed (see [Agent read access](#agent-read-access)).
 - `api/v1/*` is the read API used by the UI, plus login, browser sessions (`auth/sessions`), devices, pairing approval, and the relay dashboard (`relay/sessions`, `relay/messages`, `relay/events`).
 - `api/public/v1/*` provides anonymous read access to published projects only (see [Publishing projects](#publishing-projects)), plus anonymous usage aggregates that any site may query (see [Usage API for other sites](#usage-api-for-other-sites)).
+- `docs` and `docs/*` serve the public documentation without a pika login.
 - Every other path serves the UI. The server injects `<meta name="pika-base">` into `index.html`, so one build works under any base path.
 
 The protocol and the read API are specified in [`docs/SPEC.md`](docs/SPEC.md).
@@ -216,7 +225,7 @@ Relay lets a running Pi session send a text message to any other running Pi sess
 
 - **Open by default:** relay is on unless you start the server with `PIKA_RELAY=off`. Any device token may connect, so **a device token now also lets that device see and message every online session**, not only upload. Revoke a device to cut it off; its relay connections close at once.
 - **Messages:** up to 32 KiB of text each, kept in memory until the target session accepts them or 5 minutes pass; a server restart drops queued messages and the dashboard's recent messages. Session transcripts, which pika already stores, are the permanent record. Each sending session may send 60 messages a minute, and the server keeps at most 100 queued messages per target and 10,000 in total.
-- **Turning it off:** set `PIKA_RELAY=off` (or `--relay off`) and restart the server. Health then omits `"relay"` from `features`, so extensions stay offline and the UI hides the page.
+- **Turning it off:** set `PIKA_RELAY=off` in the environment and restart the server (`--relay` is a value-less flag and cannot take `off`). Health then omits `"relay"` from `features`, so extensions stay offline and the UI hides the page.
 - **Behind a proxy:** `/api/relay/` must stay open to devices and needs WebSocket upgrades (see [Reverse proxy](#reverse-proxy)).
 
 `PIKA_RELAY_TTL_SECS` and `PIKA_RELAY_HEARTBEAT_SECS` shorten the message lifetime and the heartbeat. They exist for tests and the end-to-end script only; do not set them in production.
@@ -286,18 +295,18 @@ Agents read under `api/agent/v1/`: the session list, sessions, their trees, turn
     └── ab/cd/abcd….zst   zstd-compressed content-addressed blobs, named by SHA-256
 ```
 
-`pika.db` is the source of truth. It holds every stream's verbatim lines (lines over 1 MiB live in the blob store, referenced by hash), the uploaded requests with their block lists, Herder goal and plan documents, device token hashes, the password hash, browser session and pairing records (only hashes of their secrets), an argon2id hash of a password from `PIKA_PASSWORD`/`PIKA_PASSWORD_FILE` (to notice when it changes), and a random database key that fingerprints the stored hash. The typed tables (sessions, models, links, entries, turns, model and tool calls, Herder runs, events, and steps, and the search index) are derived from the verbatim lines. The blob store holds request blocks and oversized lines; each is written once, and blobs are never modified or deleted.
+`pika.db` is the source of truth. It holds every stream's verbatim lines (lines over 1 MiB live in the blob store, referenced by hash), the uploaded requests with their block lists, Herder goal and plan documents, device token hashes, the password hash, browser session and pairing records (only hashes of their secrets), an argon2id hash of a password from `PIKA_PASSWORD`/`PIKA_PASSWORD_FILE` (to notice when it changes), and a random database key that fingerprints the stored hash. The typed tables (sessions, models, links, entries, turns, model and tool calls, Herder runs, events, and steps, and the search index) are derived from the verbatim lines. The blob store holds request blocks and oversized lines. Blobs are immutable, but deleting sessions or projects removes blobs that no remaining data references.
 
 ### Backup
 
-Back up the database online, then the blobs:
+For an online backup, pause session and project deletions until both commands finish. Back up the database first, then copy the blobs:
 
 ```bash
 sqlite3 /srv/pika/pika.db ".backup '/backups/pika/pika.db'"
 rsync -a /srv/pika/blobs/ /backups/pika/blobs/
 ```
 
-Copy in that order: blobs are never deleted, so a blob copy taken after the database snapshot contains every blob the snapshot references. Do not copy `pika.db` with `cp` while the server runs; use `.backup` or stop the server first. The Docker image has no `sqlite3`, so with Docker either bind-mount the data directory and run the commands on the host, or stop the container and copy the volume.
+Copy in that order: while deletions are paused, a blob copy taken after the database snapshot includes every blob that snapshot references. A concurrent deletion could remove one before it is copied. For a backup without that coordination, stop the server and avoid CLI deletions until the copy finishes. Do not copy `pika.db` with `cp` while the server runs; use `.backup` or stop the server first. The Docker image has no `sqlite3`, so with Docker either bind-mount the data directory and run the commands on the host, or stop the container and copy the volume.
 
 ### Restore
 
@@ -324,7 +333,7 @@ The [`pika image`](../../.github/workflows/pika-image.yml) workflow publishes a 
 | Tag | Source |
 | --- | --- |
 | `latest`, `0.9.0`, `0.9` | a `pika-v0.9.0` release tag |
-| `edge` | the newest `master` commit that changed `services/pika/` |
+| `edge` | the newest `master` commit matching the image workflow's paths: pika, published documentation sources, or the workflow itself |
 | `sha-<commit>` | that commit |
 
 Prefer a version tag in production and `edge` to follow `master`.
@@ -362,11 +371,13 @@ The bottom right corner of the UI shows the version and commit the server runs, 
 
 ### Building it yourself
 
-The [`Dockerfile`](Dockerfile) builds the web UI on `node:22-bookworm-slim`, builds the binary on `rust:1-bookworm` with `cargo build --release --locked` (embedding the UI), and runs it on `debian:bookworm-slim` as the non-root user `pika` (uid 10001). The build context is `services/pika/`:
+The [`Dockerfile`](Dockerfile) builds the web UI and documentation on `node:22-bookworm-slim`, builds the binary on `rust:1-bookworm` with `cargo build --release --locked` (embedding `web/dist`), and runs it on `debian:bookworm-slim` as the non-root user `pika` (uid 10001). Use the **repository root** as the build context so the web build can read the documentation sources:
 
 ```bash
-docker build -t pika services/pika
+docker build -f services/pika/Dockerfile -t pika .
 ```
+
+[`Dockerfile.dockerignore`](Dockerfile.dockerignore) excludes dependency directories, build output, local data, and credentials from this context. npm dependencies are installed before source and Markdown are copied, so content changes reuse the dependency layer. The frontend workspace is `/src/services/pika/web`; the Rust stage builds in `/src/services/pika`. To record a revision in `/api/health` and `--version`, pass `--build-arg PIKA_REVISION="$(git rev-parse HEAD)"` to the build command.
 
 Then use `pika` in place of `ghcr.io/minhuw/pika:latest` in the commands here.
 
@@ -452,7 +463,14 @@ homelab.example {
 }
 ```
 
-The proxy may handle authentication instead of the built-in password: basic auth, or forward auth with Authelia, Authentik, or a VPN. Then start pika with `PIKA_AUTH=proxy`, and exempt the following paths from the proxy's login (including your base path, for example `/pika/api/ingest/`): `api/ingest/`, `api/relay/`, and `api/agent/`, because devices send their own `Authorization: Bearer` token there; `api/pair/`, because a device pairing with the server has no login yet; `api/health`, for monitoring; and `public`, `public/*`, `api/public/*`, and `assets/*`, for the public gallery. Everything else, the owner UI and `api/v1/` included, must go through the proxy's login: with `PIKA_AUTH=proxy`, pika itself lets every request in. The examples include commented-out basic-auth lines that do this. Set the devices' `url` to the `https://` address: pika does not follow redirects, so an `http://` URL that the proxy redirects never uploads.
+The proxy can handle viewer authentication with basic auth, forward auth through Authelia or Authentik, or restricted access through a VPN. Start pika with `PIKA_AUTH=proxy` and exempt these paths from the proxy's login, including your base path (for example `/pika/api/ingest/`):
+
+- `api/ingest/`, `api/relay/`, and `api/agent/`: devices authenticate with their own `Authorization: Bearer` tokens.
+- `api/pair/`: a device requesting pairing has no login yet; approval remains in the owner UI.
+- `api/health`: monitoring needs no login.
+- `public`, `public/*`, `api/public/*`, `docs`, `docs/*`, and `assets/*`: the public gallery, documentation, and their assets.
+
+**Keep everything else, including the owner UI and `api/v1/`, behind the proxy's login.** With `PIKA_AUTH=proxy`, pika does not authenticate viewers itself. The examples include commented-out basic-auth settings with these exclusions. Set each device's `url` to the `https://` address: pika does not follow redirects, so uploads fail if the proxy redirects its configured `http://` URL.
 
 ## Development
 
@@ -463,13 +481,23 @@ cargo test --locked          # no web build needed; the UI routes serve the plac
 
 The `service-tests` check uses a shared target directory: `CARGO_TARGET_DIR="$HOME/.cache/pika-target" cargo test --locked --manifest-path services/pika/Cargo.toml`.
 
-The web UI is React, Vite, TypeScript, and Tailwind in [`web/`](web/):
+The web UI is React, Vite, TypeScript, and Tailwind in [`web/`](web/). Keep the full repository checkout: its Vite build reads the whitelisted Markdown sources outside `web/` as well. Run the API and web dev server in separate terminals, starting each from `services/pika`:
 
 ```bash
-PIKA_AUTH=none cargo run -- serve     # API on 127.0.0.1:7171, base path /, no login
-cd web && npm ci && npm run dev       # Vite dev server; proxies /api to 127.0.0.1:7171
+PIKA_AUTH=none cargo run --locked -- serve  # API on 127.0.0.1:7171, base path /, no login
+```
+
+```bash
+cd web
+npm ci
+npm run dev                           # Vite dev server; proxies /api to 127.0.0.1:7171
+```
+
+From `services/pika/web`, run the web checks and production build:
+
+```bash
 npm test                              # Vitest + jsdom
-npm run build                         # type-check, then write web/dist
+npm run build                         # type-check, then write web/dist including docs
 ```
 
 The dev server proxies `/api` to the server at `127.0.0.1:7171`, so run that server with the default base path `/`.

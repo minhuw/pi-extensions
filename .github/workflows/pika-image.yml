@@ -8,7 +8,10 @@ on:
   pull_request:
     paths:
       - services/pika/**
-      - "!services/pika/**/*.md"
+      - README.md
+      - docs/**
+      - extensions/**/README.md
+      - services/pika/Dockerfile.dockerignore
       - "!services/pika/deploy/**"
       - .github/workflows/pika-image.yml
   push:
@@ -18,7 +21,10 @@ on:
       - pika-v*
     paths:
       - services/pika/**
-      - "!services/pika/**/*.md"
+      - README.md
+      - docs/**
+      - extensions/**/README.md
+      - services/pika/Dockerfile.dockerignore
       - "!services/pika/deploy/**"
       - .github/workflows/pika-image.yml
   workflow_dispatch:
@@ -81,7 +87,8 @@ jobs:
       - name: Build for the smoke test
         uses: docker/build-push-action@v7
         with:
-          context: services/pika
+          context: .
+          file: services/pika/Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           tags: pika:smoke
@@ -174,7 +181,8 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v7
         with:
-          context: services/pika
+          context: .
+          file: services/pika/Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ env.IMAGE }}

@@ -1,0 +1,30 @@
+# Used with the repository-root context and -f services/pika/Dockerfile.
+**/.git
+**/node_modules
+**/dist
+**/target
+**/.impeccable
+**/.pi
+
+# Local runtime data, credentials, and environment files.
+**/pika-data
+**/data
+**/blobs
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.sqlite
+**/*.sqlite3
+**/*.sqlite-shm
+**/*.sqlite-wal
+**/*.sqlite3-shm
+**/*.sqlite3-wal
+**/.env
+**/.env.*
+**/*.env
+**/env
+**/.secrets
+**/secrets
+**/*.pem
+**/*.key
+**/deploy/pika-password.txt
