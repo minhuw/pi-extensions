@@ -5,6 +5,7 @@ import { Icon } from "../components/icons";
 import { ModelMark } from "../components/ModelName";
 import { useSigningOut } from "../components/Layout";
 import { MessageDialog } from "../components/MessageDialog";
+import { Messenger } from "../components/Messenger";
 import { BUTTON, Callout, cx, EmptyState, ErrorState, Page, PageTitle, Pill, SkeletonLines } from "../components/ui";
 import { useApi } from "../lib/api";
 import { formatDateTime, formatRelative, plural } from "../lib/format";
@@ -18,6 +19,7 @@ import {
 	relayAvailability,
 	RELAY_EVENTS_KEY,
 	RELAY_POLL_MS,
+	RELAY_ROOMS_KEY,
 	RELAY_SESSIONS_KEY,
 	senderLabel,
 	sessionLabel,
@@ -307,6 +309,7 @@ export function ActiveSessionsPage() {
 		if (!signingOut) return;
 		void queryClient.cancelQueries({ queryKey: RELAY_SESSIONS_KEY });
 		void queryClient.cancelQueries({ queryKey: RELAY_EVENTS_KEY });
+		void queryClient.cancelQueries({ queryKey: RELAY_ROOMS_KEY });
 	}, [signingOut, queryClient]);
 	const availability = relayAvailability(health, sessions.error, events.error);
 	const now = useNow(true, CLOCK_MS);
@@ -333,6 +336,7 @@ export function ActiveSessionsPage() {
 	else
 		body = (
 			<>
+				<Messenger sessions={items} events={eventItems} now={now} />
 				<H2 aside={items.length > 0 && <Pill tone="accent">{items.length}</Pill>}>Online</H2>
 				{sessions.isPending ? (
 					<SkeletonLines lines={3} />

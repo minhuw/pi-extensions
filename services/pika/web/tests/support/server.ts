@@ -13,6 +13,9 @@ import type {
 	OnlineSession,
 	Pairing,
 	RelayEvent,
+	RelayRoom,
+	RelayRoomMember,
+	RelayRoomMessage,
 	RelayTarget,
 	RunDetail,
 	SearchHit,
@@ -345,6 +348,7 @@ export function createFakeServer({
 	relay,
 	online = [],
 	relayEvents = [],
+	relayRooms = [],
 	trace = true,
 	traces,
 	tree = true,
@@ -385,6 +389,8 @@ export function createFakeServer({
 	online?: OnlineSession[];
 	/** Relay events, newest first. */
 	relayEvents?: RelayEvent[];
+	/** Active chatrooms, newest first. */
+	relayRooms?: { room: RelayRoom; messages: RelayRoomMessage[] }[];
 	/** Serves `sessions/:id/trace`; older servers answer 404. */
 	trace?: boolean;
 	/** Traces served as given instead of derived, by session id: malformed or partial ones. */
@@ -411,6 +417,7 @@ export function createFakeServer({
 		relay: relay ?? features?.includes("relay") === true,
 		online: [...online],
 		relayEvents: [...relayEvents],
+		relayRooms: relayRooms.map((item) => ({ room: { ...item.room, members: [...item.room.members] }, messages: [...item.messages] })),
 		/** The reason the next web sends are refused with, if any. */
 		relayFailure: undefined as string | undefined,
 		/** Whether online targets acknowledge in time, so sends report `delivered`; otherwise `queued`. */
@@ -600,9 +607,185 @@ export function createFakeServer({
 				const limit = Math.min(Number(params.get("limit") ?? 100), RELAY_EVENTS_MAX);
 				return json(200, { items: state.relayEvents.slice(0, limit) });
 			}
+			const buildMember = (sid: string, joinedAt: string): RelayRoomMember => {
+				const on = state.online.find((s) => s.id === sid);
+				const rec = byId.get(sid)?.detail;
+				return {
+					sessionId: sid,
+					device: on?.device ?? rec?.device,
+					deviceName: on?.deviceName ?? rec?.deviceName,
+					name: on?.name,
+					title: on?.title ?? rec?.title,
+					project: on?.project ?? rec?.project,
+					model: on?.model,
+					state: on ? on.state : "offline",
+					online: Boolean(on),
+					joinedAt,
+				};
+			};
+			if (parts[1] === "rooms" && parts.length === 2 && method === "GET") {
+				return json(200, { items: state.relayRooms.map((r) => r.room) });
+			}
+			if (parts[1] === "rooms" && parts.length === 2 && method === "POST") {
+				const req = (body ?? {}) as { name?: string; topic?: string; members?: string[] };
+				const clean = (req.name ?? "").trim().replace(/^#/, "");
+				if (!/^[A-Za-z0-9._-]{1,64}$/.test(clean)) return json(400, { error: "invalid" });
+				const now = new Date().toISOString();
+				let entry = state.relayRooms.find((r) => r.room.name === clean);
+				const members = (req.members ?? []).map((sid) => buildMember(sid, now));
+				if (!entry) {
+					entry = {
+						room: {
+							name: clean,
+							...(req.topic ? { topic: req.topic } : {}),
+							createdAt: now,
+							updatedAt: now,
+							messageCount: 0,
+							members,
+						},
+						messages: [],
+					};
+					state.relayRooms.unshift(entry);
+				} else {
+					if (req.topic) entry.room.topic = req.topic;
+					for (const m of members) {
+						if (!entry.room.members.some((existing) => existing.sessionId === m.sessionId)) {
+							entry.room.members.push(m);
+						}
+					}
+					entry.room.updatedAt = now;
+				}
+				return json(200, entry);
+			}
+			if (parts[1] === "rooms" && parts.length === 3 && method === "GET") {
+				const clean = parts[2].replace(/^#/, "");
+				const entry = state.relayRooms.find((r) => r.room.name === clean);
+				if (!entry) return json(404, { error: "not_found" });
+				return json(200, entry);
+			}
+			if (parts[1] === "rooms" && parts.length === 3 && method === "DELETE") {
+				const clean = parts[2].replace(/^#/, "");
+				const idx = state.relayRooms.findIndex((r) => r.room.name === clean);
+				if (idx === -1) return json(404, { error: "not_found" });
+				state.relayRooms.splice(idx, 1);
+				return noContent();
+			}
+			if (parts[1] === "rooms" && parts.length === 4 && parts[3] === "members" && method === "POST") {
+				const clean = parts[2].replace(/^#/, "");
+				const req = (body ?? {}) as { sessionId?: string; action?: "add" | "remove" };
+				const sid = req.sessionId ?? "";
+				const now = new Date().toISOString();
+				let entry = state.relayRooms.find((r) => r.room.name === clean);
+				if (req.action === "remove") {
+					if (!entry) return json(400, { error: "invalid" });
+					entry.room.members = entry.room.members.filter((m) => m.sessionId !== sid);
+					entry.room.updatedAt = now;
+				} else {
+					if (!entry) {
+						entry = {
+							room: { name: clean, createdAt: now, updatedAt: now, messageCount: 0, members: [] },
+							messages: [],
+						};
+						state.relayRooms.unshift(entry);
+					}
+					if (!entry.room.members.some((m) => m.sessionId === sid)) {
+						entry.room.members.push(buildMember(sid, now));
+					}
+					entry.room.updatedAt = now;
+				}
+				return json(200, entry);
+			}
 			if (parts[1] === "messages" && method === "POST") {
 				if (state.relayHold) await state.relayHold;
-				const request = (body ?? {}) as { to?: string; text?: string; urgent?: boolean };
+				const request = (body ?? {}) as { to?: string; room?: string; mentions?: string[]; text?: string; urgent?: boolean };
+				if (typeof request.room === "string") {
+					const cleanRoom = request.room.trim().replace(/^#/, "");
+					const text = request.text ?? "";
+					let reason: string | undefined;
+					if (!text || !/^[A-Za-z0-9._-]{1,64}$/.test(cleanRoom)) reason = "invalid";
+					else if (new TextEncoder().encode(text).length > RELAY_MAX_TEXT_BYTES) reason = "too_large";
+					else if (state.relayFailure) reason = state.relayFailure;
+					relaySent += 1;
+					const id = `web-${relaySent}`;
+					const at = new Date().toISOString();
+					const roomTarget: RelayTarget = { sessionId: `#${cleanRoom}`, name: `#${cleanRoom}` };
+					if (reason) {
+						state.relayEvents.unshift({
+							id,
+							at,
+							from: { kind: "web" },
+							to: roomTarget,
+							room: cleanRoom,
+							status: "rejected",
+							reason,
+							urgent: request.urgent === true,
+							hops: 0,
+							text,
+						});
+						return json(reason === "rate_limited" || reason === "mailbox_full" ? 429 : 400, { error: reason });
+					}
+					let entry = state.relayRooms.find((r) => r.room.name === cleanRoom);
+					if (!entry) {
+						entry = {
+							room: { name: cleanRoom, createdAt: at, updatedAt: at, messageCount: 0, members: [] },
+							messages: [],
+						};
+						state.relayRooms.unshift(entry);
+					}
+					const tokens = [
+						...(request.mentions ?? []).map((m) => m.replace(/^@/, "")),
+						...[...text.matchAll(/(?:^|[\s([{"',:;])@([A-Za-z0-9._-]+)/g)].map((m) => m[1]!),
+					];
+					const mentionAll = tokens.some((t) => t.toLowerCase() === "all" || t === "*");
+					const notifiedMembers = entry.room.members.filter(
+						(m) =>
+							mentionAll
+							|| tokens.some(
+								(tok) =>
+									m.sessionId.toLowerCase() === tok.toLowerCase()
+									|| m.name?.toLowerCase() === tok.toLowerCase()
+									|| m.project?.toLowerCase() === tok.toLowerCase(),
+							),
+					);
+					const notified: RelayTarget[] = notifiedMembers.map((m) => ({
+						sessionId: m.sessionId,
+						device: m.device,
+						deviceName: m.deviceName,
+						name: m.name,
+						title: m.title,
+						project: m.project,
+					}));
+					const roomMsg: RelayRoomMessage = {
+						id,
+						seq: entry.messages.length + 1,
+						room: cleanRoom,
+						from: { kind: "web" },
+						text,
+						mentions: notified.map((n) => n.sessionId),
+						notified,
+						urgent: request.urgent === true,
+						hops: 0,
+						at,
+					};
+					entry.messages.push(roomMsg);
+					entry.room.messageCount = entry.messages.length;
+					entry.room.lastMessage = roomMsg;
+					entry.room.updatedAt = at;
+					state.relayEvents.unshift({
+						id,
+						at,
+						from: { kind: "web" },
+						to: roomTarget,
+						room: cleanRoom,
+						mentions: roomMsg.mentions,
+						status: "delivered",
+						deliveredAt: at,
+						urgent: request.urgent === true,
+						hops: 0,
+						text,
+					});
+					return json(200, { id, status: "delivered", room: cleanRoom, notified, to: roomTarget });
+				}
 				const to = request.to ?? "";
 				const text = request.text ?? "";
 				const onlineTarget = state.online.find((item) => item.id === to);

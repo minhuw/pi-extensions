@@ -19,6 +19,8 @@ export const MAX_TEXT_BYTES = 32 * 1024;
 export const HEALTH_KEY = ["health"] as const;
 export const RELAY_SESSIONS_KEY = ["relay", "sessions"] as const;
 export const RELAY_EVENTS_KEY = ["relay", "events"] as const;
+export const RELAY_ROOMS_KEY = ["relay", "rooms"] as const;
+export const relayRoomKey = (name: string) => ["relay", "room", name.replace(/^#/, "")] as const;
 
 /**
  * `on`, or why the dashboard can't show anything: `off` when the server runs with `PIKA_RELAY=off`, `unsupported`
@@ -108,6 +110,7 @@ export function senderLabel(sender: RelaySender): string {
 }
 
 export function targetLabel(target: RelayTarget): string {
+	if (target.sessionId.startsWith("#")) return target.sessionId;
 	const label = sessionLabel(target);
 	return target.device ? `${label} on ${deviceLabel({ device: target.device, deviceName: target.deviceName })}` : label;
 }

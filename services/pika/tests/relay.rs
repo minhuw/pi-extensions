@@ -1551,3 +1551,124 @@ async fn the_oldest_remembered_owners_are_forgotten_first() {
     assert_eq!(r.json(), json!({ "error": "unknown_session" }));
     assert_eq!(s.state.relay.remembered(), 0);
 }
+
+#[tokio::test]
+async fn chatrooms_sync_agents_across_repos_and_only_notify_mentioned_members() {
+    let s = server().await;
+    // Three sessions across different repos: sess-a (backend), sess-b (web-app), sess-c (docs).
+    let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    let (mut b, _) = Client::online(&s, &s.desktop, "sess-b").await;
+    let (mut c, _) = Client::online(&s, &s.laptop, "sess-c").await;
+
+    // No implicit rooms exist initially.
+    let list = http(&s.app, get("/api/relay/v1/rooms", Some(&s.laptop), None)).await;
+    assert_eq!((list.status, list.json()), (StatusCode::OK, json!({ "items": [] })));
+
+    // Explicitly create/join #auth-sync from the browser route with sess-a, sess-b, sess-c.
+    let created = http(
+        &s.app,
+        post(
+            "/api/v1/relay/rooms",
+            json!({
+                "name": "#auth-sync",
+                "topic": "Coordinate token schema across repos",
+                "members": ["sess-a", "sess-b", "sess-c"],
+            }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK);
+    assert_eq!(created.json()["room"]["name"], "auth-sync");
+    assert_eq!(created.json()["room"]["topic"], "Coordinate token schema across repos");
+    assert_eq!(created.json()["room"]["members"].as_array().unwrap().len(), 3);
+
+    // 1. sess-a posts a status update without @mentions: recorded in room history, nobody gets a pushed message frame.
+    let sent1 = a
+        .relay(json!({
+            "type": "send",
+            "clientId": "r1",
+            "room": "auth-sync",
+            "text": "Starting backend schema migration.",
+            "hops": 1,
+        }))
+        .await;
+    assert_eq!(
+        (&sent1["status"], &sent1["room"], &sent1["notified"]),
+        (&json!("delivered"), &json!("auth-sync"), &json!([]))
+    );
+    assert_eq!(s.state.relay.queued(), 0);
+
+    // 2. sess-a posts mentioning @name-sess-b: only sess-b receives a pushed message frame; sess-c is not interrupted.
+    a.send(json!({
+        "type": "send",
+        "clientId": "r2",
+        "room": "#auth-sync",
+        "text": "Hey @name-sess-b I updated the payload fields, please check.",
+        "hops": 1,
+    }))
+    .await;
+    let sent2 = a.next().await;
+    assert_eq!(sent2["type"], "sent");
+    assert_eq!(sent2["room"], "auth-sync");
+    assert_eq!(sent2["notified"].as_array().unwrap().len(), 1);
+    assert_eq!(sent2["notified"][0]["sessionId"], "sess-b");
+
+    let pushed_b = b.next().await;
+    assert_eq!(
+        (&pushed_b["type"], &pushed_b["room"], &pushed_b["mentions"], &pushed_b["from"]["sessionId"]),
+        (&json!("message"), &json!("auth-sync"), &json!(["sess-b"]), &json!("sess-a"))
+    );
+    b.send(json!({ "type": "ack", "id": pushed_b["id"] })).await;
+
+    // 3. Any agent (such as sess-c, which was not notified) can read the full room history on demand.
+    let detail = http(&s.app, get("/api/relay/v1/rooms/auth-sync", Some(&s.laptop), None)).await;
+    assert_eq!(detail.status, StatusCode::OK);
+    let msgs = detail.json()["messages"].as_array().unwrap().clone();
+    assert_eq!(msgs.len(), 2);
+    assert_eq!((&msgs[0]["seq"], &msgs[0]["text"], &msgs[0]["mentions"]), (&json!(1), &json!("Starting backend schema migration."), &json!([])));
+    assert_eq!((&msgs[1]["seq"], &msgs[1]["mentions"]), (&json!(2), &json!(["sess-b"])));
+
+    // 4. Web UI posts to the room with explicit `mentions: ["sess-c"]`; only sess-c is notified.
+    let web_post = http(
+        &s.app,
+        post(
+            "/api/v1/relay/messages",
+            json!({
+                "room": "auth-sync",
+                "text": "Please document the new fields.",
+                "mentions": ["sess-c"],
+                "urgent": true,
+            }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(web_post.status, StatusCode::OK);
+    assert_eq!(web_post.json()["room"], "auth-sync");
+    assert_eq!(web_post.json()["notified"][0]["sessionId"], "sess-c");
+
+    let pushed_c = c.next().await;
+    assert_eq!(
+        (&pushed_c["room"], &pushed_c["from"], &pushed_c["urgent"]),
+        (&json!("auth-sync"), &json!({ "kind": "web" }), &json!(true))
+    );
+    c.send(json!({ "type": "ack", "id": pushed_c["id"] })).await;
+
+    // 5. Leaving and deleting the room works cleanly.
+    let leave_req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/relay/v1/rooms")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", s.laptop))
+        .body(Body::from(json!({ "room": "auth-sync", "sessionId": "sess-c", "action": "leave" }).to_string()))
+        .unwrap();
+    let left = http(&s.app, leave_req).await;
+    assert_eq!(left.status, StatusCode::OK);
+    assert_eq!(left.json()["room"]["members"].as_array().unwrap().len(), 2);
+
+    let deleted = http(&s.app, with_body(Method::DELETE, "/api/v1/relay/rooms/auth-sync", json!({}), None)).await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    let list_after = http(&s.app, get("/api/v1/relay/rooms", None, None)).await;
+    assert_eq!(list_after.json()["items"], json!([]));
+}

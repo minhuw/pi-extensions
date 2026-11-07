@@ -1,13 +1,15 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { WebSocket, WebSocketServer } from "ws";
-import type { HelloSession, OnlineSession, Target } from "../../../relay/protocol.ts";
+import type { HelloSession, OnlineSession, RelayRoom, RoomMember, RoomMessage, Target } from "../../../relay/protocol.ts";
 
 export const TOKEN = "relay-test-token";
 
 type Frame = { type: string; [key: string]: unknown };
 /** A `sent` frame without its type and client id. */
-export type SentAnswer = { status: "delivered" | "queued"; id: string; to: Target } | { status: "rejected"; reason: string };
+export type SentAnswer =
+	| { status: "delivered" | "queued"; id: string; to: Target; room?: string; notified?: Target[] }
+	| { status: "rejected"; reason: string };
 
 /** One device WebSocket the server accepted. */
 export interface Connection {
@@ -71,6 +73,7 @@ export class FakeRelay {
 	limits = { ttlSeconds: 300, heartbeatSeconds: 20, maxTextBytes: 32 * 1024, maxHops: 8 };
 	/** Messages `queue` accepted: pushed on every welcome of their target until acknowledged or expired. */
 	readonly mailbox = new Map<string, { sessionId: string; frame: Frame }>();
+	readonly rooms = new Map<string, { name: string; topic?: string; createdAt: string; updatedAt: string; members: Set<string>; messages: RoomMessage[] }>();
 
 	async start(base = ""): Promise<this> {
 		this.base = base;
@@ -108,6 +111,53 @@ export class FakeRelay {
 			if (!this.features?.includes("relay")) return json(response, 404, { error: "relay_disabled" });
 			if (!this.authorized(request)) return json(response, 401, { error: "unauthorized" });
 			return json(response, 200, { items: this.onlineSessions() });
+		}
+		if (route === "/api/relay/v1/rooms" && request.method === "GET") {
+			if (!this.features?.includes("relay")) return json(response, 404, { error: "relay_disabled" });
+			if (!this.authorized(request)) return json(response, 401, { error: "unauthorized" });
+			return json(response, 200, { items: [...this.rooms.keys()].map((name) => this.roomSummary(name)) });
+		}
+		if (route === "/api/relay/v1/rooms" && request.method === "POST") {
+			if (!this.features?.includes("relay")) return json(response, 404, { error: "relay_disabled" });
+			if (!this.authorized(request)) return json(response, 401, { error: "unauthorized" });
+			const chunks: Buffer[] = [];
+			request.on("data", (chunk: Buffer) => chunks.push(chunk));
+			request.on("end", () => {
+				const body = JSON.parse(Buffer.concat(chunks).toString() || "{}") as { room?: string; sessionId?: string; action?: string; topic?: string };
+				const name = (body.room ?? "").trim().replace(/^#/, "");
+				const sid = body.sessionId ?? "";
+				if (!name || !sid) return json(response, 400, { error: "invalid" });
+				const now = new Date().toISOString();
+				let room = this.rooms.get(name);
+				if (body.action === "leave") {
+					if (!room) return json(response, 400, { error: "invalid" });
+					room.members.delete(sid);
+					room.updatedAt = now;
+				} else {
+					if (!room) {
+						room = { name, ...(body.topic ? { topic: body.topic } : {}), createdAt: now, updatedAt: now, members: new Set(), messages: [] };
+						this.rooms.set(name, room);
+					} else if (body.topic) {
+						room.topic = body.topic;
+						room.updatedAt = now;
+					}
+					room.members.add(sid);
+				}
+				return json(response, 200, { room: this.roomSummary(name), messages: room.messages });
+			});
+			return;
+		}
+		if (route.startsWith("/api/relay/v1/rooms/") && request.method === "GET") {
+			if (!this.features?.includes("relay")) return json(response, 404, { error: "relay_disabled" });
+			if (!this.authorized(request)) return json(response, 401, { error: "unauthorized" });
+			const name = decodeURIComponent(route.slice("/api/relay/v1/rooms/".length)).replace(/^#/, "");
+			const room = this.rooms.get(name);
+			if (!room) return json(response, 404, { error: "not_found" });
+			const query = new URL(request.url ?? "", "http://localhost").searchParams;
+			const after = Number(query.get("after") ?? 0);
+			const limit = Number(query.get("limit") ?? 50);
+			const messages = room.messages.filter((m) => m.seq > after).slice(-limit);
+			return json(response, 200, { room: this.roomSummary(name), messages });
 		}
 		json(response, 404, { error: "not_found" });
 	}
@@ -168,7 +218,119 @@ export class FakeRelay {
 		return session ? { sessionId: id, ...named(this.online(id)!), ...(session.name ? { name: session.name } : {}), ...(session.title ? { title: session.title } : {}), project: session.project } : { sessionId: id };
 	}
 
+	private roomSummary(name: string): RelayRoom {
+		const room = this.rooms.get(name)!;
+		const members: RoomMember[] = [...room.members].map((sid) => {
+			const conn = this.online(sid);
+			const s = conn?.session;
+			return {
+				sessionId: sid,
+				...(conn ? named(conn) : {}),
+				...(s?.name ? { name: s.name } : {}),
+				...(s?.title ? { title: s.title } : {}),
+				...(s?.project ? { project: s.project } : {}),
+				...(s?.model ? { model: s.model } : {}),
+				state: s ? s.state : "offline",
+				online: Boolean(conn),
+				joinedAt: room.createdAt,
+			};
+		});
+		const lastMessage = room.messages.at(-1);
+		return {
+			name: room.name,
+			...(room.topic ? { topic: room.topic } : {}),
+			createdAt: room.createdAt,
+			updatedAt: room.updatedAt,
+			messageCount: room.messages.length,
+			members,
+			...(lastMessage ? { lastMessage } : {}),
+		};
+	}
+
 	private async route(from: Connection, frame: Frame): Promise<SentAnswer> {
+		if (typeof frame.room === "string") {
+			const roomName = frame.room.trim().replace(/^#/, "");
+			const text = String(frame.text ?? "");
+			const hops = frame.hops as number;
+			if (!roomName || !text || !Number.isInteger(hops) || hops < 1) return { status: "rejected", reason: "invalid" };
+			if (hops > this.limits.maxHops) return { status: "rejected", reason: "hop_limit" };
+			const now = new Date().toISOString();
+			let room = this.rooms.get(roomName);
+			if (!room) {
+				room = { name: roomName, createdAt: now, updatedAt: now, members: new Set(), messages: [] };
+				this.rooms.set(roomName, room);
+			}
+			const sender = from.session!;
+			room.members.add(sender.id);
+			const rawMentions = [
+				...(Array.isArray(frame.mentions) ? frame.mentions.map((m) => String(m).replace(/^@/, "")) : []),
+				...[...text.matchAll(/(?:^|[\s([{"',:;])@([A-Za-z0-9._-]+)/g)].map((m) => m[1]!),
+			];
+			const all = rawMentions.some((m) => m.toLowerCase() === "all" || m.toLowerCase() === "everyone" || m === "*");
+			const notifiedIds: string[] = [];
+			for (const sid of room.members) {
+				if (sid === sender.id) continue;
+				const conn = this.online(sid);
+				const s = conn?.session;
+				const matched = all || rawMentions.some((tok) => {
+					const low = tok.toLowerCase();
+					return sid.toLowerCase() === low
+						|| (low.length >= 8 && sid.toLowerCase().startsWith(low))
+						|| s?.name?.toLowerCase() === low
+						|| s?.title?.toLowerCase() === low
+						|| s?.project?.toLowerCase() === low;
+				});
+				if (matched) notifiedIds.push(sid);
+			}
+			const id = this.nextId();
+			const notified = notifiedIds.map((sid) => this.target(sid));
+			const senderInfo = {
+				kind: "session" as const,
+				sessionId: sender.id,
+				...named(from),
+				...(sender.name ? { name: sender.name } : {}),
+				...(sender.title ? { title: sender.title } : {}),
+				project: sender.project,
+			};
+			room.messages.push({
+				id,
+				seq: room.messages.length + 1,
+				room: roomName,
+				from: senderInfo,
+				text,
+				mentions: notifiedIds,
+				notified,
+				urgent: frame.urgent === true,
+				...(frame.replyTo ? { replyTo: String(frame.replyTo) } : {}),
+				hops,
+				at: now,
+			});
+			room.updatedAt = now;
+			for (const [idx, sid] of notifiedIds.entries()) {
+				const targetConn = this.online(sid);
+				if (targetConn) {
+					this.sendTo(targetConn, {
+						type: "message",
+						id: idx === 0 ? id : this.nextId(),
+						room: roomName,
+						mentions: notifiedIds,
+						text,
+						urgent: frame.urgent === true,
+						hops,
+						sentAt: now,
+						from: senderInfo,
+						...(frame.replyTo ? { replyTo: frame.replyTo } : {}),
+					});
+				}
+			}
+			return {
+				status: "delivered",
+				id,
+				room: roomName,
+				notified,
+				to: { sessionId: `#${roomName}`, name: `#${roomName}` },
+			};
+		}
 		const to = String(frame.to);
 		const hops = frame.hops as number;
 		if (!String(frame.text ?? "") || !Number.isInteger(hops) || hops < 1) return { status: "rejected", reason: "invalid" };

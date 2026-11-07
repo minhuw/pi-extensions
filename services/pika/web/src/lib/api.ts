@@ -14,6 +14,8 @@ import type {
 	Pairing,
 	PairingApproval,
 	RelayEvent,
+	RelayRoom,
+	RelayRoomDetail,
 	RelaySendResult,
 	RunDetail,
 	RunSummary,
@@ -355,9 +357,29 @@ export class PikaApi {
 		return this.request("relay/events", { limit });
 	}
 
-	/** Sends a message from the user to a session; a refusal is an `ApiError` whose message is the reason. */
-	sendRelayMessage(body: { to: string; text: string; urgent: boolean }): Promise<RelaySendResult> {
+	/** Sends a message from the user to a session or a chatroom; a refusal is an `ApiError` whose message is the reason. */
+	sendRelayMessage(body: { to?: string; room?: string; mentions?: string[]; text: string; urgent: boolean; replyTo?: string }): Promise<RelaySendResult> {
 		return this.send("relay/messages", "POST", body);
+	}
+
+	relayRooms(): Promise<{ items: RelayRoom[] }> {
+		return this.request("relay/rooms");
+	}
+
+	relayRoom(name: string, limit?: number, after?: number): Promise<RelayRoomDetail> {
+		return this.request(`relay/rooms/${encodeURIComponent(name.replace(/^#/, ""))}`, { limit, after });
+	}
+
+	saveRelayRoom(body: { name: string; topic?: string; members?: string[] }): Promise<RelayRoomDetail> {
+		return this.send("relay/rooms", "POST", body);
+	}
+
+	setRelayRoomMember(name: string, body: { sessionId: string; action: "add" | "remove" }): Promise<RelayRoomDetail> {
+		return this.send(`relay/rooms/${encodeURIComponent(name.replace(/^#/, ""))}/members`, "POST", body);
+	}
+
+	deleteRelayRoom(name: string): Promise<void> {
+		return this.send(`relay/rooms/${encodeURIComponent(name.replace(/^#/, ""))}`, "DELETE");
 	}
 }
 

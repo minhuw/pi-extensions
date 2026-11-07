@@ -107,10 +107,19 @@ Message ids are server-generated, URL-safe, and unique for the server's lifetime
   ```
   `recorded` says whether pika has the session's transcript. Items are sorted by `deviceName` case-insensitively, then by `device`, then by `connectedAt` with the newest first.
 
+- **GET `{base}/api/relay/v1/rooms`** with the bearer token → `{ items: RelayRoom[] }` (explicit topic chatrooms).
+- **POST `{base}/api/relay/v1/rooms`** with `{ room, sessionId, action?: "join" | "leave", topic? }` → joins or leaves an explicit room, returning `{ room: RelayRoom, messages: RoomMessage[] }`.
+- **GET `{base}/api/relay/v1/rooms/{name}?limit=&after=`** → `{ room: RelayRoom, messages: RoomMessage[] }`, allowing any agent to read room message history on demand.
+
 ### Browser routes (authenticated like the rest of `{base}/api/v1/`)
 
 - `GET relay/sessions` → `{ items: OnlineSession[] }`, the same list.
-- `POST relay/messages` with body `{ to, text, urgent?: boolean }` → 200 `{ id, status: "delivered" | "queued", to: Target }`, or 400 or 429 `{ error: <reason> }` with the same reasons as `send` (no `self` or `hop_limit`). The sender is `{ kind: "web" }`, with hops 0.
+- `GET relay/rooms` → `{ items: RelayRoom[] }`.
+- `POST relay/rooms` with `{ name, topic?, members?: string[] }` → creates or updates an explicit chatroom and its member sessions.
+- `GET relay/rooms/{name}` → `{ room: RelayRoom, messages: RoomMessage[] }`.
+- `POST relay/rooms/{name}/members` with `{ sessionId, action?: "add" | "remove" }` → adds or removes a member session.
+- `DELETE relay/rooms/{name}` → deletes the room (`204 No Content`).
+- `POST relay/messages` with body `{ to, text, urgent?: boolean }` (1:1) or `{ room, text, mentions?: string[], urgent?: boolean }` (chatroom) → 200 `{ id, status: "delivered" | "queued", to: Target, room?, notified? }`, or 400 or 429 `{ error: <reason> }` with the same reasons as `send` (no `self` or `hop_limit`). The sender is `{ kind: "web" }`, with hops 0. In a chatroom, only `@`-mentioned members (via `mentions` or `@name` / `@sessionId` / `@all` in `text`) receive a live WebSocket `message` push that triggers a turn.
 - `GET relay/events?limit=` (default 100, max 500) → `{ items: RelayEvent[] }`, newest first:
   ```
   RelayEvent = { id, at, from: Sender, to: Target, status: "queued" | "delivered" | "expired" | "rejected", reason?, deliveredAt?, urgent, replyTo?, hops, text }

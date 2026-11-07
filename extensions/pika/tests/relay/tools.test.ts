@@ -239,3 +239,41 @@ it("counts hops: user turns send 1, turns started by relay messages send one mor
 	await waitFor(() => a.session.isStreaming === false, 5_000, "idle");
 	expect(a.errors).toEqual([]);
 });
+
+it("supports explicit chatrooms: only @mentioned members wake up, and any agent can read history via relay_room", async () => {
+	const a = await online();
+	const b = await online();
+	const c = await online();
+
+	callTool(a, "relay_room", { action: "join", room: "#auth-sync", topic: "Coordinate token changes" });
+	callTool(b, "relay_room", { action: "join", room: "auth-sync" });
+	callTool(c, "relay_room", { action: "join", room: "auth-sync" });
+	await a.session.prompt("join room");
+	await b.session.prompt("join room");
+	await c.session.prompt("join room");
+
+	// A posts without @mention: recorded in room history, neither B nor C wakes up.
+	callTool(a, "relay_send", { room: "auth-sync", text: "Started backend migration." });
+	await a.session.prompt("post status");
+	expect(results(a, "relay_send")[0]!.text).toContain("Posted message msg-1 to room #auth-sync (recorded in room history (no @mentions notified)).");
+	await sleep(150);
+	expect(b.sent).toHaveLength(0);
+	expect(c.sent).toHaveLength(0);
+
+	// A posts mentioning B: only B gets a [relay] turn; C stays undisturbed.
+	b.faux.setResponses([fauxAssistantMessage("b saw mention")]);
+	callTool(a, "relay_send", { room: "auth-sync", text: "Please review the schema.", mentions: [b.session.sessionId] });
+	await a.session.prompt("mention b");
+	expect(results(a, "relay_send")[1]!.text).toContain(`notified pi session ${b.session.sessionId}`);
+	await waitFor(() => texts(b.session, "assistant").includes("b saw mention"), 5_000, "b's woken turn");
+	expect(c.sent).toHaveLength(0);
+
+	// C reads the full room history on demand via relay_room.
+	callTool(c, "relay_room", { action: "history", room: "auth-sync" });
+	await c.session.prompt("read room history");
+	const historyText = results(c, "relay_room").at(-1)!.text;
+	expect(historyText).toContain("#auth-sync — Coordinate token changes · 2 msgs");
+	expect(historyText).toContain("Started backend migration.");
+	expect(historyText).toContain("Please review the schema.");
+});
+

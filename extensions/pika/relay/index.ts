@@ -7,7 +7,7 @@ import { credentialsRegistry } from "../credentials.ts";
 import { type ConnectionState, RelayConnection } from "./connection.ts";
 import {
 	cut, deviceLabel, expiredContent, headerField, type HelloSession, MAX_HOPS, MESSAGE_TYPE, type MessageFrame, messageContent, NOTICE_TYPE, type OnlineSession, RECEIVED_TYPE,
-	RELAY_VERSION, sanitize, type SentFrame, type SessionState, since, type StatusFrame, type Target, targetLabel, timing, ttlText,
+	type RelayRoom, type RelayRoomDetail, RELAY_VERSION, type RoomMember, type RoomMessage, sanitize, type SentFrame, type SessionState, since, type StatusFrame, type Target, targetLabel, timing, ttlText,
 } from "./protocol.ts";
 import { join, leave, shared, syncHook } from "./shared.ts";
 
@@ -17,12 +17,12 @@ export { timing } from "./protocol.ts";
 const SENT_KEPT = 200;
 const SENT_SHOWN = 50;
 const USAGE = "Usage: /relay [status|send <sessionId> <text>|off|on]";
-const SUBCOMMANDS = ["status", "send", "off", "on"];
+const SUBCOMMANDS = ["status", "send", "join", "leave", "rooms", "off", "on"];
 
 type SentStatus = "queued" | "delivered" | "expired" | "rejected";
 interface SentRecord { id?: string; to: string; label: string; status: SentStatus; reason?: string; at: number; text: string }
 
-export interface RelayMessageDetails { id: string; from: MessageFrame["from"]; text: string; urgent: boolean; replyTo?: string; hops: number; sentAt: string | number }
+export interface RelayMessageDetails { id: string; room?: string; mentions?: string[]; from: MessageFrame["from"]; text: string; urgent: boolean; replyTo?: string; hops: number; sentAt: string | number }
 export interface RelayNoticeDetails { id: string; to: Target; status: "expired"; at: string | number }
 
 const REJECTIONS: Record<string, string> = {
@@ -223,7 +223,10 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		const hops = Number.isInteger(frame.hops) && frame.hops >= 0 ? frame.hops : 0;
 		const urgent = frame.urgent === true;
 		const details: RelayMessageDetails = {
-			id: frame.id, from: frame.from, text: frame.text, urgent, hops, sentAt: frame.sentAt, ...(frame.replyTo ? { replyTo: frame.replyTo } : {}),
+			id: frame.id, from: frame.from, text: frame.text, urgent, hops, sentAt: frame.sentAt,
+			...(frame.room ? { room: frame.room } : {}),
+			...(frame.mentions?.length ? { mentions: frame.mentions } : {}),
+			...(frame.replyTo ? { replyTo: frame.replyTo } : {}),
 		};
 		try {
 			const options = ctx.isIdle() ? { triggerTurn: true } : urgent ? { deliverAs: "steer" as const, triggerTurn: true } : { deliverAs: "followUp" as const, triggerTurn: true };
@@ -235,7 +238,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		seen.add(frame.id);
 		runHops = Math.max(runHops, hops);
 		// The text stays in the transcript even if Esc or RPC clear_queue drops a queued delivery.
-		guard(() => pi.appendEntry(RECEIVED_TYPE, { id: frame.id, from: frame.from, text: frame.text, replyTo: frame.replyTo, hops, urgent, at: new Date().toISOString() }));
+		guard(() => pi.appendEntry(RECEIVED_TYPE, { id: frame.id, ...(frame.room ? { room: frame.room } : {}), from: frame.from, text: frame.text, replyTo: frame.replyTo, hops, urgent, at: new Date().toISOString() }));
 		current.send({ type: "ack", id: frame.id });
 	}
 
@@ -397,26 +400,56 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		});
 	});
 
-	async function onlineSessions(): Promise<OnlineSession[]> {
+	async function relayFetch<T>(path: string, init?: RequestInit): Promise<T> {
 		const current = credentialsRegistry().current;
 		const reason = blocked();
 		if (reason || !current) throw new Error(`relay is offline in this session: ${reason ?? "no credentials"}`);
 		let response: Response;
 		try {
-			response = await fetch(`${current.url}/api/relay/v1/sessions`, {
-				headers: { Authorization: `Bearer ${current.token}` }, signal: AbortSignal.timeout(timing.httpTimeoutMs), redirect: "error",
+			response = await fetch(`${current.url}${path}`, {
+				...init,
+				headers: { Authorization: `Bearer ${current.token}`, ...(init?.headers ?? {}) },
+				signal: AbortSignal.timeout(timing.httpTimeoutMs),
+				redirect: "error",
 			});
 		} catch (error) {
 			throw new Error(`could not reach ${current.url}: ${errorText(error)}`);
 		}
 		if (response.status !== 200) {
-			await response.body?.cancel().catch(() => {});
+			let errBody: { error?: unknown } | undefined;
+			try { errBody = await response.json() as { error?: unknown }; } catch { await response.body?.cancel().catch(() => {}); }
 			if (response.status === 401) throw new Error("the server rejected this device's token (HTTP 401)");
+			if (response.status === 404 && errBody?.error === "not_found") throw new Error("no such chatroom exists yet");
 			if (response.status === 404) throw new Error(`the pika server at ${current.url} has no relay (HTTP 404)`);
+			if (typeof errBody?.error === "string") throw new Error(`relay error (${errBody.error}): ${REJECTIONS[errBody.error] ?? errBody.error}`);
 			throw new Error(`unexpected HTTP ${response.status} from ${current.url}`);
 		}
-		const body = await response.json() as { items?: unknown };
+		return await response.json() as T;
+	}
+
+	async function onlineSessions(): Promise<OnlineSession[]> {
+		const body = await relayFetch<{ items?: unknown }>("/api/relay/v1/sessions");
 		return Array.isArray(body.items) ? body.items as OnlineSession[] : [];
+	}
+
+	async function relayRooms(): Promise<RelayRoom[]> {
+		const body = await relayFetch<{ items?: unknown }>("/api/relay/v1/rooms");
+		return Array.isArray(body.items) ? body.items as RelayRoom[] : [];
+	}
+
+	async function roomDetail(room: string, limit = 50, after = 0): Promise<RelayRoomDetail> {
+		const clean = room.trim().replace(/^#/, "");
+		const params = new URLSearchParams({ limit: String(limit), ...(after > 0 ? { after: String(after) } : {}) });
+		return relayFetch<RelayRoomDetail>(`/api/relay/v1/rooms/${encodeURIComponent(clean)}?${params}`);
+	}
+
+	async function updateRoomMembership(room: string, action: "join" | "leave", topic?: string): Promise<RelayRoomDetail> {
+		const clean = room.trim().replace(/^#/, "");
+		return relayFetch<RelayRoomDetail>("/api/relay/v1/rooms", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ room: clean, sessionId: sessionId!, action, ...(topic ? { topic } : {}) }),
+		});
 	}
 
 	/** One online session; every field comes from another device. */
@@ -428,17 +461,51 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		].join(" · ");
 	}
 
+	function memberLabel(member: RoomMember): string {
+		const name = headerField(member.name) || headerField(member.title) || headerField(member.sessionId);
+		const project = headerField(member.project);
+		return `${name}${project ? ` (${project})` : ""} [${headerField(member.sessionId)}, ${headerField(member.state)}]`;
+	}
+
+	function roomLine(room: RelayRoom): string {
+		const topic = headerField(room.topic);
+		const members = room.members.map(memberLabel).join(", ") || "no members";
+		return `#${headerField(room.name)}${topic ? ` — ${topic}` : ""} · ${room.messageCount} msg${room.messageCount === 1 ? "" : "s"} · members: ${members}`;
+	}
+
+	function roomMessageLine(msg: RoomMessage): string {
+		const sender = msg.from.kind === "web"
+			? "user (web)"
+			: `${headerField(msg.from.name) || headerField(msg.from.title) || headerField(msg.from.sessionId)}${msg.from.project ? ` (${headerField(msg.from.project)})` : ""}`;
+		const mentions = msg.mentions?.length ? ` [notified: ${msg.mentions.map(headerField).join(", ")}]` : "";
+		return `[#${msg.seq} · ${headerField(msg.id)} · ${since(msg.at)} ago] ${sender}${mentions}: ${sanitize(msg.text)}`;
+	}
+
 	function sendResult(answer: SentFrame & { status: "delivered" | "queued" }, label: string): string {
+		if (answer.room) {
+			const notified = answer.notified ?? [];
+			const who = notified.length
+				? `notified ${notified.map((t) => targetLabel(t)).join(", ")}`
+				: "recorded in room history (no @mentions notified)";
+			return `Posted message ${answer.id} to room #${headerField(answer.room)} (${who}).`;
+		}
 		if (answer.status === "delivered") return `Delivered message ${answer.id} to ${label}.`;
 		return `Queued message ${answer.id} for ${label}: it has not been delivered yet. If it is not delivered within ${ttlText(ttlSeconds)} it is dropped and you will get a notice.`;
 	}
 
-	/** Sends one message and records it; throws with the text an error result or notice shows. */
-	async function send(to: string, text: string, options: { urgent?: boolean; replyTo?: string; hops: number }): Promise<{ text: string; answer: SentFrame }> {
+	/** Sends one message (1:1 or chatroom) and records it; throws with the text an error result or notice shows. */
+	async function send(
+		to: string,
+		text: string,
+		options: { room?: string; mentions?: string[]; urgent?: boolean; replyTo?: string; hops: number },
+	): Promise<{ text: string; answer: SentFrame }> {
 		const current = connection;
 		const reason = offlineReason();
 		if (reason || !current) throw new Error(`This session is not connected to pika relay: ${reason ?? "it is not connected"}.`);
-		const record: SentRecord = { to, label: targetLabel(undefined, to), status: "queued", at: Date.now(), text };
+		const rawRoom = options.room ?? (to.startsWith("#") ? to.slice(1) : undefined);
+		const room = rawRoom?.trim().replace(/^#/, "");
+		const targetKey = room ? `#${room}` : to;
+		const record: SentRecord = { to: targetKey, label: targetLabel(undefined, targetKey), status: "queued", at: Date.now(), text };
 		const remember = () => { sent.push(record); if (sent.length > SENT_KEPT) sent.splice(0, sent.length - SENT_KEPT); };
 		if (Buffer.byteLength(text, "utf8") > maxTextBytes) {
 			record.status = "rejected"; record.reason = "too_large"; remember();
@@ -446,7 +513,14 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		}
 		let answer: SentFrame;
 		try {
-			answer = await current.request({ to, text, hops: options.hops, ...(options.urgent ? { urgent: true } : {}), ...(options.replyTo ? { replyTo: options.replyTo } : {}) });
+			answer = await current.request({
+				...(room !== undefined ? { room } : { to }),
+				...(options.mentions?.length ? { mentions: options.mentions } : {}),
+				text,
+				hops: options.hops,
+				...(options.urgent ? { urgent: true } : {}),
+				...(options.replyTo ? { replyTo: options.replyTo } : {}),
+			});
 		} catch (error) {
 			throw new Error(`relay_send failed: ${errorText(error)}.`);
 		}
@@ -455,7 +529,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			throw new Error(`relay rejected the message (${answer.reason}): ${REJECTIONS[answer.reason] ?? "see the reason"}.`);
 		}
 		record.id = answer.id;
-		record.label = targetLabel(answer.to, to);
+		record.label = answer.room ? `room #${headerField(answer.room)}` : targetLabel(answer.to, to);
 		// A status frame may already have reported it delivered.
 		record.status = answer.status;
 		remember();
@@ -468,7 +542,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		return records.map((record) => `${record.id ?? "(no id)"} to ${record.label}: ${record.status}${record.reason ? ` (${record.reason})` : ""}, sent ${since(record.at)} ago: "${preview(record.text)}"`).join("\n");
 	}
 
-	const TOOLS = ["relay_list", "relay_send", "relay_status"] as const;
+	const TOOLS = ["relay_list", "relay_send", "relay_status", "relay_room"] as const;
 	// A real model kept sleeping and polling relay_status for an answer, which pi queues until its turn ends.
 	const ANSWER_HINT = "Any answer arrives as a new [relay] message after your current turn ends, never during it: do not sleep or poll for it. "
 		+ "End your turn now, telling your user what you are waiting for if that helps.";
@@ -504,21 +578,29 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		});
 		pi.registerTool({
 			name: "relay_send", label: "Relay Send",
-			description: "Send a text message to another running pi session through pika relay. "
-				+ "`to` is a session id from relay_list, or the sender of a [relay] message you are answering; when answering, set `replyTo` to that message's id. "
-				+ "The message starts a turn in the target session, or joins the turn it is running; `urgent` steers it into that turn at once. "
-				+ "Delivered means the target session received it, not that its model has read or answered it. "
+			description: "Send a text message to another running pi session or to an explicit multi-agent chatroom through pika relay. "
+				+ "For a 1:1 message, pass `to` (a session id from relay_list). For a chatroom, pass `room` (or `to: \"#room\"`) and optional `mentions` (session ids, agent names, or 'all'). "
+				+ "In a chatroom, only @mentioned members receive a live notification that starts/joins a turn; all agents can read room history on demand with relay_room. "
 				+ "An answer arrives as a new [relay] message in this session only after your current turn ends, never during it, so do not sleep, poll relay_status, or call relay_list to wait for one: end your turn instead. "
 				+ "Messages that cannot be delivered within 5 minutes are dropped, and you get a notice.",
-			promptSnippet: "Send a text message to another running pi session through pika relay",
+			promptSnippet: "Send a text message to another running pi session or a chatroom through pika relay",
 			parameters: Type.Object({
-				to: Type.String({ description: "The target pi session id" }),
+				to: Type.Optional(Type.String({ description: "The target pi session id (or #roomName for a chatroom)" })),
+				room: Type.Optional(Type.String({ description: "Chatroom name to post to (alternative to `to`); only @mentioned members are woken up" })),
+				mentions: Type.Optional(Type.Array(Type.String(), { description: "In a chatroom, session ids or names (or 'all') to notify and wake up" })),
 				text: Type.String({ description: "The message text (at most 32 KiB)" }),
 				urgent: Type.Optional(Type.Boolean({ description: "Steer the message into the target's current turn instead of queueing it after that turn" })),
 				replyTo: Type.Optional(Type.String({ description: "The id of the relay message this answers" })),
 			}),
 			async execute(_id, params) {
-				const { text, answer } = await send(params.to, params.text, { urgent: params.urgent, replyTo: params.replyTo, hops: runHops + 1 });
+				if (!params.to && !params.room) throw new Error("relay_send requires either `to` (a session id) or `room` (a chatroom name).");
+				const { text, answer } = await send(params.to ?? "", params.text, {
+					room: params.room,
+					mentions: params.mentions,
+					urgent: params.urgent,
+					replyTo: params.replyTo,
+					hops: runHops + 1,
+				});
 				return { content: [{ type: "text", text: `${text} ${ANSWER_HINT}` }], details: answer };
 			},
 		});
@@ -529,6 +611,73 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			parameters: Type.Object({ id: Type.Optional(Type.String({ description: "A message id from relay_send" })) }),
 			async execute(_id, params) {
 				return { content: [{ type: "text", text: statusLines(params.id) }], details: { messages: sent.filter((record) => !params.id || record.id === params.id).slice(-SENT_SHOWN).reverse() } };
+			},
+		});
+		pi.registerTool({
+			name: "relay_room", label: "Relay Room",
+			description: "Manage explicit multi-agent chatrooms across repositories and read room message history on demand. "
+				+ "`action: \"list\"` lists active rooms and their members. "
+				+ "`action: \"join\"` creates or joins `room` (with optional `topic`). "
+				+ "`action: \"leave\"` leaves `room`. "
+				+ "`action: \"history\"` reads recent messages in `room` (even those where this session was not @mentioned). "
+				+ "`action: \"send\"` posts `text` to `room` and notifies only `@mentioned` members (via `@name`/`@sessionId` in `text` or `mentions`).",
+			promptSnippet: "Join/leave multi-agent chatrooms, read room history, or post to a room",
+			parameters: Type.Object({
+				action: Type.Union([
+					Type.Literal("list"),
+					Type.Literal("join"),
+					Type.Literal("leave"),
+					Type.Literal("history"),
+					Type.Literal("send"),
+				], { description: "Operation: list, join, leave, history, or send" }),
+				room: Type.Optional(Type.String({ description: "Room name (e.g. 'auth-sync'); required for join, leave, history, send" })),
+				topic: Type.Optional(Type.String({ description: "Optional topic description when joining/creating a room" })),
+				text: Type.Optional(Type.String({ description: "Message text when action is 'send'" })),
+				mentions: Type.Optional(Type.Array(Type.String(), { description: "Session ids or agent names (or 'all') to notify when action is 'send'" })),
+				urgent: Type.Optional(Type.Boolean({ description: "Steer into mentioned members' active turns when action is 'send'" })),
+				replyTo: Type.Optional(Type.String({ description: "Message id being answered when action is 'send'" })),
+				limit: Type.Optional(Type.Integer({ description: "Max messages to read in 'history' (default 50, max 200)" })),
+				after: Type.Optional(Type.Integer({ description: "Only return messages with seq > after in 'history'" })),
+			}),
+			async execute(_id, params) {
+				type RoomToolDetails = { rooms?: RelayRoom[]; detail?: RelayRoomDetail; sent?: SentFrame };
+				if (params.action === "list") {
+					const items = await relayRooms();
+					const text = items.length
+						? `${items.length} active chatroom${items.length === 1 ? "" : "s"}:\n${items.map(roomLine).join("\n")}`
+						: "No active chatrooms. Call relay_room with action \"join\" and a room name to create one.";
+					return { content: [{ type: "text", text }], details: { rooms: items } as RoomToolDetails };
+				}
+				const room = params.room?.trim().replace(/^#/, "");
+				if (!room) throw new Error(`relay_room (${params.action}) requires a \`room\` name.`);
+				if (params.action === "join" || params.action === "leave") {
+					const detail = await updateRoomMembership(room, params.action, params.topic);
+					const verb = params.action === "join" ? "Joined" : "Left";
+					return {
+						content: [{ type: "text", text: `${verb} room #${headerField(detail.room.name)}.\n${roomLine(detail.room)}` }],
+						details: { detail } as RoomToolDetails,
+					};
+				}
+				if (params.action === "history") {
+					const detail = await roomDetail(room, params.limit ?? 50, params.after ?? 0);
+					const header = roomLine(detail.room);
+					const body = detail.messages.length
+						? detail.messages.map(roomMessageLine).join("\n")
+						: "No messages in this room yet.";
+					return {
+						content: [{ type: "text", text: `${header}\n\n${body}` }],
+						details: { detail } as RoomToolDetails,
+					};
+				}
+				if (!params.text) throw new Error("relay_room (send) requires `text`.");
+				const { text, answer } = await send("", params.text, {
+					room,
+					mentions: params.mentions,
+					urgent: params.urgent,
+					replyTo: params.replyTo,
+					hops: runHops + 1,
+				});
+				return { content: [{ type: "text", text: `${text} ${ANSWER_HINT}` }], details: { sent: answer } as RoomToolDetails };
 			},
 		});
 	}
@@ -553,8 +702,9 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		const from = sender.kind === "web"
 			? "your user, from the pika web UI"
 			: `${headerField(sender.name) || headerField(sender.title) || headerField(sender.sessionId)} on ${deviceLabel(sender)}${project ? ` · ${project}` : ""}`;
+		const roomTag = details.room ? theme.fg("accent", `#${headerField(details.room)}`) : "";
 		const replyTo = headerField(details.replyTo);
-		const tags = [details.urgent ? theme.fg("warning", "urgent") : "", replyTo ? theme.fg("dim", `reply to ${replyTo}`) : ""].filter(Boolean);
+		const tags = [roomTag, details.urgent ? theme.fg("warning", "urgent") : "", replyTo ? theme.fg("dim", `reply to ${replyTo}`) : ""].filter(Boolean);
 		const lines = sanitize(details.text).split("\n");
 		const shown = expanded ? lines : lines.slice(0, 3);
 		const more = lines.length - shown.length;
@@ -616,7 +766,29 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			const [command = "status", ...rest] = trimmed.split(/\s+/).filter(Boolean);
 			if (command === "status" && !rest.length) await statusCommand(context);
 			else if (command === "send") await sendCommand(context, trimmed.slice(4));
-			else if (command === "off" && !rest.length) {
+			else if (command === "rooms" && !rest.length) {
+				try {
+					const items = await relayRooms();
+					context.ui.notify(items.length ? `Chatrooms:\n${items.map((r) => `  ${roomLine(r)}`).join("\n")}` : "No active chatrooms.", "info");
+				} catch (error) {
+					context.ui.notify(errorText(error), "error");
+				}
+			} else if (command === "join" && rest.length >= 1) {
+				try {
+					const topic = rest.slice(1).join(" ").trim() || undefined;
+					const detail = await updateRoomMembership(rest[0]!, "join", topic);
+					context.ui.notify(`Joined room #${headerField(detail.room.name)}.`, "info");
+				} catch (error) {
+					context.ui.notify(errorText(error), "error");
+				}
+			} else if (command === "leave" && rest.length === 1) {
+				try {
+					const detail = await updateRoomMembership(rest[0]!, "leave");
+					context.ui.notify(`Left room #${headerField(detail.room.name)}.`, "info");
+				} catch (error) {
+					context.ui.notify(errorText(error), "error");
+				}
+			} else if (command === "off" && !rest.length) {
 				off = true;
 				guard(() => evaluate());
 				context.ui.notify("Relay is off for this session: it is offline and receives no messages. /relay on reconnects it.", "info");

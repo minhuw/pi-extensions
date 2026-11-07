@@ -688,3 +688,75 @@ describe("session page", () => {
 		expect(relayCalls(server)).toEqual([]);
 	});
 });
+
+describe("iMessage messenger and chatrooms", () => {
+	it("supports 1:1 direct threads and explicit multi-repo chatrooms with @mention notifications", async () => {
+		const server = createFakeServer({
+			online: [
+				onlineSession("s-backend", { name: "Backend", project: "pika-server", deviceName: "Studio Mac" }),
+				onlineSession("s-web", { name: "Frontend", project: "pika-web", device: "laptop", deviceName: "MacBook" }),
+			],
+		});
+		renderApp("/active", server.fetch);
+		await waitFor(() => expect(rowIds()).toHaveLength(2));
+
+		const messenger = document.querySelector<HTMLElement>("[data-imessage]")!;
+		expect(messenger).toBeTruthy();
+
+		// 1. Direct 1:1 chat in the iMessage interface.
+		const webThreadBtn = messenger.querySelector<HTMLElement>('[data-imessage-thread="dm:s-web"]')!;
+		fireEvent.click(webThreadBtn);
+		expect(messenger.querySelector("[data-imessage-active-title]")?.textContent).toBe("Frontend");
+
+		const input = messenger.querySelector<HTMLTextAreaElement>("[data-imessage-input]")!;
+		fireEvent.change(input, { target: { value: "Check the CSS tokens." } });
+		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-send]")!);
+
+		await waitFor(() =>
+			expect(server.mutations).toContainEqual({
+				method: "POST",
+				path: "/api/v1/relay/messages",
+				body: { to: "s-web", text: "Check the CSS tokens.", urgent: false },
+				json: true,
+			}),
+		);
+		await waitFor(() => expect(messenger.querySelector("[data-imessage-bubble]")?.textContent).toContain("Check the CSS tokens."));
+
+		// 2. Create an explicit topic chatroom syncing agents across different repos (pika-server & pika-web).
+		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-new-room]")!);
+		const form = messenger.querySelector<HTMLElement>("[data-imessage-room-form]")!;
+		fireEvent.change(within(form).getByLabelText("Room name"), { target: { value: "#auth-sync" } });
+		fireEvent.change(within(form).getByLabelText("Topic (optional)"), { target: { value: "Sync token schema across repos" } });
+		for (const checkbox of within(form).getAllByRole("checkbox")) {
+			fireEvent.click(checkbox);
+		}
+		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-create-room]")!);
+
+		await waitFor(() => expect(messenger.querySelector("[data-imessage-active-title]")?.textContent).toBe("#auth-sync"));
+		expect(messenger.querySelector("[data-imessage-room-members]")?.textContent).toContain("Backend(pika-server)");
+		expect(messenger.querySelector("[data-imessage-room-members]")?.textContent).toContain("Frontend(pika-web)");
+
+		// 3. Post to the room without @mentions (saved to room history without waking agents).
+		const roomInput = messenger.querySelector<HTMLTextAreaElement>("[data-imessage-input]")!;
+		fireEvent.change(roomInput, { target: { value: "Shared schema v2 draft." } });
+		fireEvent.keyDown(roomInput, { key: "Enter" });
+		await waitFor(() =>
+			expect(messenger.querySelector("[data-imessage-stream]")?.textContent).toContain("Saved to room history (no @mention wakeup)"),
+		);
+
+		// 4. Select @Frontend pill in the Notify bar and post: notifies only s-web.
+		fireEvent.click(messenger.querySelector<HTMLButtonElement>('[data-imessage-mention="s-web"]')!);
+		fireEvent.change(roomInput, { target: { value: "Please update the client types." } });
+		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-send]")!);
+		await waitFor(() =>
+			expect(messenger.querySelector("[data-imessage-stream]")?.textContent).toContain("Notified @Frontend"),
+		);
+		expect(server.mutations.at(-1)).toEqual({
+			method: "POST",
+			path: "/api/v1/relay/messages",
+			body: { room: "auth-sync", text: "Please update the client types.", mentions: ["s-web"], urgent: false },
+			json: true,
+		});
+	});
+});
+

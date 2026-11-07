@@ -53,12 +53,65 @@ fn name_of<'a>(names: &'a Names, id: &'a str) -> &'a str {
 const MAX_ID_CHARS: usize = 128;
 const MAX_CLIENT_ID_CHARS: usize = 64;
 const MAX_MESSAGE_ID_CHARS: usize = 64;
+const MAX_ROOM_CHARS: usize = 64;
+const MAX_ROOMS: usize = 200;
+const MAX_ROOM_MESSAGES: usize = 200;
+const MAX_MENTIONS: usize = 64;
 
 /// A pi session id: 1-128 characters of `[A-Za-z0-9._-]`.
 pub fn valid_session_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_ID_CHARS
         && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// Strips a single optional leading `#` and surrounding whitespace from a room name.
+pub fn normalize_room_name(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    trimmed.strip_prefix('#').unwrap_or(trimmed)
+}
+
+/// A room name: 1-64 characters of `[A-Za-z0-9._-]` (after stripping an optional leading `#`).
+pub fn valid_room_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_ROOM_CHARS
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// Extracts `@mention` tokens from message text: `@` at the start or after whitespace/punctuation, followed by 1-128
+/// characters of `[A-Za-z0-9._-]`.
+pub fn extract_mentions(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'@' {
+            let boundary = i == 0 || {
+                let prev = bytes[i - 1];
+                prev.is_ascii_whitespace() || matches!(prev, b'(' | b'[' | b'{' | b',' | b':' | b';' | b'"' | b'\'')
+            };
+            if boundary {
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'.' | b'_' | b'-'))
+                {
+                    end += 1;
+                }
+                let len = end - start;
+                if (1..=MAX_ID_CHARS).contains(&len) {
+                    let token = &text[start..end];
+                    if !found.iter().any(|existing: &String| existing.eq_ignore_ascii_case(token)) {
+                        found.push(token.to_owned());
+                    }
+                }
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    found
 }
 
 /// A message id as the relay makes them: 1-64 characters of the URL-safe alphabet `[A-Za-z0-9_-]`.
@@ -222,13 +275,17 @@ pub fn client_id(frame: &Map<String, Value>) -> Option<String> {
 /// A message someone wants to send, before the relay checks it.
 #[derive(Clone, Debug)]
 pub struct Draft {
-    /// `to` as given, cut to 128 characters, or empty when it was not a string.
+    /// `to` as given, cut to 128 characters, or empty when it was not a string or when `room` is set.
     pub to: String,
+    /// Normalized room name when sending to a chatroom (`None` for a 1:1 session message).
+    pub room: Option<String>,
+    /// Explicit `@mention` tokens passed in `mentions` for a room message.
+    pub mentions: Vec<String>,
     pub text: String,
     pub urgent: bool,
     pub reply_to: Option<String>,
     pub hops: u64,
-    /// False for empty text, a bad `to`, bad hops, or a field of the wrong type: the `invalid` rejection.
+    /// False for empty text, a bad `to` or `room`, bad hops, or a field of the wrong type: the `invalid` rejection.
     pub valid: bool,
 }
 
@@ -238,14 +295,57 @@ impl Draft {
         let empty = Map::new();
         let object = body.as_object().unwrap_or(&empty);
         let mut valid = body.is_object();
-        let to = match object.get("to") {
-            Some(Value::String(to)) => {
-                valid &= valid_session_id(to);
-                cut_chars(to, MAX_ID_CHARS).to_owned()
+        let room = match object.get("room") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(raw)) => {
+                let norm = normalize_room_name(raw);
+                valid &= valid_room_name(norm);
+                Some(cut_chars(norm, MAX_ROOM_CHARS).to_owned())
             }
-            _ => {
+            Some(_) => {
                 valid = false;
-                String::new()
+                Some(String::new())
+            }
+        };
+        let to = if room.is_some() {
+            if object.get("to").is_some_and(|v| !v.is_null()) {
+                valid = false;
+            }
+            String::new()
+        } else {
+            match object.get("to") {
+                Some(Value::String(to)) => {
+                    valid &= valid_session_id(to);
+                    cut_chars(to, MAX_ID_CHARS).to_owned()
+                }
+                _ => {
+                    valid = false;
+                    String::new()
+                }
+            }
+        };
+        let mentions = match object.get("mentions") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(items)) if items.len() <= MAX_MENTIONS => {
+                let mut parsed = Vec::with_capacity(items.len());
+                for item in items {
+                    match item.as_str() {
+                        Some(raw) => {
+                            let token = raw.trim().strip_prefix('@').unwrap_or_else(|| raw.trim());
+                            if token.is_empty() || token.len() > MAX_ID_CHARS {
+                                valid = false;
+                            } else {
+                                parsed.push(token.to_owned());
+                            }
+                        }
+                        None => valid = false,
+                    }
+                }
+                parsed
+            }
+            Some(_) => {
+                valid = false;
+                Vec::new()
             }
         };
         let text = match object.get("text") {
@@ -282,7 +382,7 @@ impl Draft {
                 }
             }
         };
-        Draft { to, text, urgent, reply_to, hops, valid }
+        Draft { to, room, mentions, text, urgent, reply_to, hops, valid }
     }
 }
 
@@ -418,7 +518,209 @@ impl Reason {
 pub enum Outcome {
     /// `delivered` when the target acknowledged within the ack wait, otherwise `queued`.
     Accepted { id: String, delivered: bool, target: Target },
+    /// A message posted to a chatroom (`room`); `notified` lists the `@`-mentioned members who received a live push.
+    RoomAccepted { id: String, room: String, target: Target, notified: Vec<Target> },
     Rejected(Reason),
+}
+
+/// A member of a chatroom, enriched with live online state when serialized.
+#[derive(Clone, Debug)]
+pub struct RoomMember {
+    pub session_id: String,
+    pub device: Option<String>,
+    pub name: Option<String>,
+    pub title: Option<String>,
+    pub project: Option<String>,
+    pub model: Option<String>,
+    pub joined_at: i64,
+}
+
+impl RoomMember {
+    fn from_online(online: &Online, joined_at: i64) -> RoomMember {
+        RoomMember {
+            session_id: online.info.id.clone(),
+            device: Some(online.device.clone()),
+            name: online.info.name.clone(),
+            title: online.info.title.clone(),
+            project: Some(online.info.project.clone()),
+            model: online.info.model.clone(),
+            joined_at,
+        }
+    }
+
+    fn from_recorded(session_id: &str, recorded: Option<&Recorded>, joined_at: i64) -> RoomMember {
+        RoomMember {
+            session_id: session_id.to_owned(),
+            device: recorded.map(|r| r.device.clone()),
+            name: recorded.and_then(|r| r.name.clone()),
+            title: recorded.and_then(|r| r.title.clone()),
+            project: recorded.and_then(|r| r.project.clone()),
+            model: None,
+            joined_at,
+        }
+    }
+
+    fn refresh(&mut self, online: &Online) {
+        self.device = Some(online.device.clone());
+        if online.info.name.is_some() {
+            self.name = online.info.name.clone();
+        }
+        if online.info.title.is_some() {
+            self.title = online.info.title.clone();
+        }
+        self.project = Some(online.info.project.clone());
+        if online.info.model.is_some() {
+            self.model = online.info.model.clone();
+        }
+    }
+
+    fn target(&self, online: Option<&Online>) -> Target {
+        if let Some(online) = online {
+            return online.target();
+        }
+        Target {
+            session_id: self.session_id.clone(),
+            device: self.device.clone(),
+            name: self.name.clone(),
+            title: self.title.clone(),
+            project: self.project.clone(),
+        }
+    }
+
+    fn matches_mention(&self, token: &str, online: Option<&Online>) -> bool {
+        let lower = token.to_ascii_lowercase();
+        if self.session_id.eq_ignore_ascii_case(token)
+            || (lower.len() >= 8 && self.session_id.to_ascii_lowercase().starts_with(&lower))
+        {
+            return true;
+        }
+        let slug = |s: &str| {
+            s.trim()
+                .chars()
+                .map(|c| if c.is_whitespace() { '-' } else { c.to_ascii_lowercase() })
+                .collect::<String>()
+        };
+        let check_field = |val: Option<&String>| -> bool {
+            let Some(v) = val else { return false };
+            v.eq_ignore_ascii_case(token) || slug(v) == lower || v.replace(' ', "_") == token
+        };
+        let name = online.and_then(|o| o.info.name.as_ref()).or(self.name.as_ref());
+        let title = online.and_then(|o| o.info.title.as_ref()).or(self.title.as_ref());
+        let project = online.map(|o| &o.info.project).or(self.project.as_ref());
+        check_field(name) || check_field(title) || check_field(project)
+    }
+
+    fn to_json(&self, online: Option<&Online>, names: &Names) -> Value {
+        let mut object = Map::new();
+        let device = online.map(|o| o.device.as_str()).or(self.device.as_deref());
+        let name = online.and_then(|o| o.info.name.as_ref()).or(self.name.as_ref()).cloned();
+        let title = online.and_then(|o| o.info.title.as_ref()).or(self.title.as_ref()).cloned();
+        let project = online.map(|o| o.info.project.clone()).or_else(|| self.project.clone());
+        let model = online.and_then(|o| o.info.model.as_ref()).or(self.model.as_ref()).cloned();
+        object.insert("sessionId".into(), self.session_id.as_str().into());
+        if let Some(d) = device {
+            object.insert("device".into(), d.into());
+            object.insert("deviceName".into(), name_of(names, d).into());
+        }
+        put(&mut object, "name", &name);
+        put(&mut object, "title", &title);
+        put(&mut object, "project", &project);
+        put(&mut object, "model", &model);
+        object.insert("state".into(), online.map_or("offline", |o| state_str(o.info.busy)).into());
+        object.insert("online".into(), online.is_some().into());
+        object.insert("joinedAt".into(), format_iso_ms(self.joined_at).into());
+        Value::Object(object)
+    }
+}
+
+/// One message in a chatroom's transcript.
+#[derive(Clone, Debug)]
+pub struct RoomMessage {
+    pub id: String,
+    pub seq: u64,
+    pub room: String,
+    pub from: Sender,
+    pub text: String,
+    pub mentions: Vec<String>,
+    pub notified: Vec<Target>,
+    pub urgent: bool,
+    pub reply_to: Option<String>,
+    pub hops: u64,
+    pub at: i64,
+}
+
+impl RoomMessage {
+    fn to_json(&self, names: &Names) -> Value {
+        let mut object = Map::new();
+        object.insert("id".into(), self.id.as_str().into());
+        object.insert("seq".into(), self.seq.into());
+        object.insert("room".into(), self.room.as_str().into());
+        object.insert("from".into(), self.from.to_json(names));
+        object.insert("text".into(), self.text.as_str().into());
+        object.insert("mentions".into(), json!(self.mentions));
+        let notified: Vec<Value> = self.notified.iter().map(|t| t.to_json(names)).collect();
+        object.insert("notified".into(), Value::Array(notified));
+        object.insert("urgent".into(), self.urgent.into());
+        put(&mut object, "replyTo", &self.reply_to);
+        object.insert("hops".into(), self.hops.into());
+        object.insert("at".into(), format_iso_ms(self.at).into());
+        Value::Object(object)
+    }
+}
+
+/// An explicit multi-agent chatroom.
+struct Room {
+    name: String,
+    topic: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+    members: BTreeMap<String, RoomMember>,
+    messages: VecDeque<RoomMessage>,
+    next_seq: u64,
+}
+
+impl Room {
+    fn new(name: String, topic: Option<String>, now: i64) -> Room {
+        Room {
+            name,
+            topic,
+            created_at: now,
+            updated_at: now,
+            members: BTreeMap::new(),
+            messages: VecDeque::new(),
+            next_seq: 1,
+        }
+    }
+
+    fn summary_json(&self, online: &HashMap<String, Online>, names: &Names) -> Value {
+        let mut members: Vec<&RoomMember> = self.members.values().collect();
+        members.sort_by(|a, b| a.joined_at.cmp(&b.joined_at).then_with(|| a.session_id.cmp(&b.session_id)));
+        let members_json: Vec<Value> = members
+            .into_iter()
+            .map(|m| m.to_json(online.get(&m.session_id), names))
+            .collect();
+        let mut object = Map::new();
+        object.insert("name".into(), self.name.as_str().into());
+        put(&mut object, "topic", &self.topic);
+        object.insert("createdAt".into(), format_iso_ms(self.created_at).into());
+        object.insert("updatedAt".into(), format_iso_ms(self.updated_at).into());
+        object.insert("messageCount".into(), (self.next_seq - 1).into());
+        object.insert("members".into(), Value::Array(members_json));
+        if let Some(last) = self.messages.back() {
+            object.insert("lastMessage".into(), last.to_json(names));
+        }
+        Value::Object(object)
+    }
+
+    fn detail_json(&self, online: &HashMap<String, Online>, names: &Names, limit: usize, after: u64) -> Value {
+        let filtered: Vec<&RoomMessage> = self.messages.iter().filter(|m| m.seq > after).collect();
+        let start = filtered.len().saturating_sub(limit);
+        let messages: Vec<Value> = filtered[start..].iter().map(|m| m.to_json(names)).collect();
+        json!({
+            "room": self.summary_json(online, names),
+            "messages": messages,
+        })
+    }
 }
 
 /// Who sends: a connection that has passed `hello`, or the web UI.
@@ -461,6 +763,8 @@ struct Event {
     at: i64,
     from: Sender,
     to: Target,
+    room: Option<String>,
+    mentions: Vec<String>,
     status: Status,
     reason: Option<Reason>,
     delivered_at: Option<i64>,
@@ -477,6 +781,10 @@ impl Event {
         object.insert("at".into(), format_iso_ms(self.at).into());
         object.insert("from".into(), self.from.to_json(names));
         object.insert("to".into(), self.to.to_json(names));
+        put(&mut object, "room", &self.room);
+        if !self.mentions.is_empty() {
+            object.insert("mentions".into(), json!(self.mentions));
+        }
         object.insert("status".into(), self.status.as_str().into());
         put(&mut object, "reason", &self.reason.map(|r| r.as_str().to_owned()));
         put(&mut object, "deliveredAt", &self.delivered_at.map(format_iso_ms));
@@ -493,6 +801,8 @@ struct Message {
     id: String,
     from: Sender,
     to: Target,
+    room: Option<String>,
+    mentions: Vec<String>,
     text: String,
     urgent: bool,
     reply_to: Option<String>,
@@ -510,7 +820,7 @@ struct Message {
 impl Message {
     fn frame(&self, names: &Names) -> String {
         let draft = (self.text.as_str(), self.urgent, &self.reply_to, self.hops);
-        message_frame(&self.id, &self.from, draft, self.sent_at, names)
+        message_frame_with_room(&self.id, &self.from, draft, self.room.as_deref(), &self.mentions, self.sent_at, names)
     }
 }
 
@@ -522,9 +832,27 @@ fn message_frame(
     sent_at: i64,
     names: &Names,
 ) -> String {
+    message_frame_with_room(id, from, (text, urgent, reply_to, hops), None, &[], sent_at, names)
+}
+
+fn message_frame_with_room(
+    id: &str,
+    from: &Sender,
+    (text, urgent, reply_to, hops): (&str, bool, &Option<String>, u64),
+    room: Option<&str>,
+    mentions: &[String],
+    sent_at: i64,
+    names: &Names,
+) -> String {
     let mut object = Map::new();
     object.insert("type".into(), "message".into());
     object.insert("id".into(), id.into());
+    if let Some(room) = room {
+        object.insert("room".into(), room.into());
+    }
+    if !mentions.is_empty() {
+        object.insert("mentions".into(), json!(mentions));
+    }
     object.insert("from".into(), from.to_json(names));
     object.insert("text".into(), text.into());
     object.insert("urgent".into(), urgent.into());
@@ -576,6 +904,7 @@ impl Drop for Pending {
     }
 }
 
+#[derive(Clone)]
 struct Online {
     conn: u64,
     device: String,
@@ -656,6 +985,8 @@ struct Inner {
     messages: HashMap<String, Message>,
     /// Each target's message ids in acceptance order.
     queues: HashMap<String, VecDeque<String>>,
+    /// Explicit chatrooms keyed by normalized room name.
+    rooms: BTreeMap<String, Room>,
     rates: SlidingWindow,
     device_rates: SlidingWindow,
     events: VecDeque<Event>,
@@ -774,6 +1105,14 @@ impl Inner {
                         "type": "sent", "clientId": client_id, "id": id,
                         "status": if delivered { "delivered" } else { "queued" }, "to": target.to_json(&self.names),
                     }),
+                    Outcome::RoomAccepted { id, room, target, notified } => {
+                        let notified_json: Vec<Value> = notified.iter().map(|t| t.to_json(&self.names)).collect();
+                        json!({
+                            "type": "sent", "clientId": client_id, "id": id,
+                            "status": "delivered", "room": room, "notified": notified_json,
+                            "to": target.to_json(&self.names),
+                        })
+                    }
                     Outcome::Rejected(reason) => json!({
                         "type": "sent", "clientId": client_id, "status": "rejected", "reason": reason.as_str(),
                     }),
@@ -850,6 +1189,7 @@ impl Relay {
                 expired_from: 0,
                 messages: HashMap::new(),
                 queues: HashMap::new(),
+                rooms: BTreeMap::new(),
                 rates: SlidingWindow::new(config.sends_per_minute, minute),
                 device_rates: SlidingWindow::new(config.sends_per_minute_per_device, minute),
                 events: VecDeque::new(),
@@ -932,6 +1272,18 @@ impl Relay {
         target.to_json(&self.lock().names)
     }
 
+    /// Multiple targets as JSON, with their devices' current names.
+    pub fn targets_json(&self, targets: &[Target]) -> Vec<Value> {
+        let names = &self.lock().names;
+        targets.iter().map(|t| t.to_json(names)).collect()
+    }
+
+    /// Session id held online by connection `conn`.
+    pub fn session_of(&self, conn: u64) -> Option<String> {
+        let inner = self.lock();
+        inner.conns.get(&conn).and_then(|c| c.session.clone())
+    }
+
     /// Registers a new connection of `device`, made with the token whose SHA-256 is `token_hash`, or `None` when the
     /// device has too many.
     pub fn connect(&self, device: &str, token_hash: String) -> Option<Connection> {
@@ -1001,6 +1353,13 @@ impl Relay {
             id.clone(),
             Online { conn, device: device.clone(), info, connected_at: now, state_since: now, last_seen_at: now },
         );
+        if let Some(online) = inner.online.get(&id).cloned() {
+            for room in inner.rooms.values_mut() {
+                if let Some(member) = room.members.get_mut(&id) {
+                    member.refresh(&online);
+                }
+            }
+        }
         if let Some(c) = inner.conns.get_mut(&conn) {
             c.session = Some(id.clone());
         }
@@ -1065,6 +1424,10 @@ impl Relay {
     /// Checks and accepts a message; the answer goes to `reply`, at once or when the target acknowledges or the ack
     /// wait ends. `recorded` is what pika records about `draft.to`. A connection that is closing is ignored.
     pub fn send(self: &Arc<Self>, from: Origin, draft: Draft, recorded: Option<Recorded>, reply: Reply) {
+        if draft.room.is_some() {
+            self.send_room(from, draft, reply);
+            return;
+        }
         let mut inner = self.lock();
         inner.forget_expired(Instant::now());
         let sender = match from {
@@ -1122,6 +1485,8 @@ impl Relay {
             at: now,
             from: sender.clone(),
             to: target.clone(),
+            room: None,
+            mentions: Vec::new(),
             status: if rejection.is_some() { Status::Rejected } else { Status::Queued },
             reason: rejection,
             delivered_at: None,
@@ -1139,6 +1504,8 @@ impl Relay {
             id: id.clone(),
             from: sender,
             to: target.clone(),
+            room: None,
+            mentions: Vec::new(),
             text: draft.text,
             urgent: draft.urgent,
             reply_to: draft.reply_to,
@@ -1165,6 +1532,368 @@ impl Relay {
         inner.messages.insert(id, message);
     }
 
+    /// Posts a message to a chatroom and pushes live `[relay]` notifications only to `@`-mentioned members.
+    pub fn send_room(self: &Arc<Self>, from: Origin, draft: Draft, reply: Reply) {
+        let mut inner = self.lock();
+        inner.forget_expired(Instant::now());
+        let sender = match from {
+            Origin::Web => Sender::Web,
+            Origin::Conn(conn) => {
+                let online = inner.conns.get(&conn).and_then(|c| c.session.as_ref()).and_then(|s| inner.online.get(s));
+                let Some(online) = online else { return };
+                online.sender()
+            }
+        };
+        let now = now_ms();
+        let room_name = draft.room.clone().unwrap_or_default();
+        let room_target = Target {
+            session_id: if room_name.is_empty() { String::new() } else { format!("#{room_name}") },
+            device: None,
+            name: (!room_name.is_empty()).then(|| format!("#{room_name}")),
+            title: None,
+            project: None,
+        };
+        let config = &self.config;
+        let id = self.new_id();
+        let too_large = || {
+            let parts = (draft.text.as_str(), draft.urgent, &draft.reply_to, draft.hops);
+            draft.text.len() > config.max_text_bytes
+                || message_frame_with_room(&id, &sender, parts, Some(&room_name), &draft.mentions, now, &inner.names)
+                    .len()
+                    > config.max_frame_bytes
+        };
+        let room_limit_reached = !inner.rooms.contains_key(&room_name) && inner.rooms.len() >= MAX_ROOMS;
+        let rejection = if !draft.valid || !valid_room_name(&room_name) {
+            Some(Reason::Invalid)
+        } else if too_large() {
+            Some(Reason::TooLarge)
+        } else if inner.rate_limited(&sender, Instant::now()) {
+            Some(Reason::RateLimited)
+        } else if draft.hops > config.max_hops {
+            Some(Reason::HopLimit)
+        } else if room_limit_reached {
+            Some(Reason::MailboxFull)
+        } else {
+            None
+        };
+        if let Some(reason) = rejection {
+            let event = Event {
+                id,
+                at: now,
+                from: sender,
+                to: room_target,
+                room: (!room_name.is_empty()).then_some(room_name),
+                mentions: Vec::new(),
+                status: Status::Rejected,
+                reason: Some(reason),
+                delivered_at: None,
+                urgent: draft.urgent,
+                reply_to: draft.reply_to,
+                hops: draft.hops,
+                text: cut_bytes(&draft.text, config.max_text_bytes).to_owned(),
+            };
+            inner.record(event, config.event_ring);
+            inner.answer(reply, Outcome::Rejected(reason));
+            return;
+        }
+
+        // Ensure the room exists and if the sender is an online session, ensure it is a member of the room.
+        let sender_online = sender.session_id().and_then(|sid| inner.online.get(sid).cloned());
+        if !inner.rooms.contains_key(&room_name) {
+            inner.rooms.insert(room_name.clone(), Room::new(room_name.clone(), None, now));
+        }
+        if let Some(online) = &sender_online
+            && let Some(room) = inner.rooms.get_mut(&room_name)
+        {
+            room.members
+                .entry(online.info.id.clone())
+                .and_modify(|m| m.refresh(online))
+                .or_insert_with(|| RoomMember::from_online(online, now));
+        }
+
+        // Gather mention tokens from `draft.mentions` and `@token` in `draft.text`.
+        let mut tokens: Vec<String> = draft.mentions.clone();
+        for extracted in extract_mentions(&draft.text) {
+            if !tokens.iter().any(|t| t.eq_ignore_ascii_case(&extracted)) {
+                tokens.push(extracted);
+            }
+        }
+        let mention_all = tokens
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case("all") || t.eq_ignore_ascii_case("everyone") || t == "*");
+
+        // Also allow mentioning an online session by exact sessionId or exact name, auto-adding it to the room.
+        if !mention_all {
+            let mut auto_add = Vec::new();
+            for tok in &tokens {
+                for online in inner.online.values() {
+                    if online.info.id.eq_ignore_ascii_case(tok)
+                        || online.info.name.as_ref().is_some_and(|n| n.eq_ignore_ascii_case(tok))
+                    {
+                        auto_add.push(online.clone());
+                    }
+                }
+            }
+            if let Some(room) = inner.rooms.get_mut(&room_name) {
+                for online in auto_add {
+                    room.members
+                        .entry(online.info.id.clone())
+                        .and_modify(|m| m.refresh(&online))
+                        .or_insert_with(|| RoomMember::from_online(&online, now));
+                }
+            }
+        }
+
+        // Resolve mentions against room members (excluding the sender itself).
+        let sender_sid = sender.session_id().map(str::to_owned);
+        let mut notified_targets: Vec<(Target, String)> = Vec::new();
+        let mut resolved_ids: Vec<String> = Vec::new();
+        {
+            let online_snapshot: HashMap<String, Online> = inner.online.clone();
+            let remembered_owners: HashMap<String, String> = inner
+                .remembered
+                .iter()
+                .filter_map(|(sid, _)| inner.remembered_owner(sid).map(|d| (sid.clone(), d.to_owned())))
+                .collect();
+            if let Some(room) = inner.rooms.get_mut(&room_name) {
+                for member in room.members.values_mut() {
+                    if let Some(online) = online_snapshot.get(&member.session_id) {
+                        member.refresh(online);
+                    }
+                    if sender_sid.as_deref() == Some(member.session_id.as_str()) {
+                        continue;
+                    }
+                    let online = online_snapshot.get(&member.session_id);
+                    let matched = mention_all || tokens.iter().any(|tok| member.matches_mention(tok, online));
+                    if matched {
+                        let owner = online
+                            .map(|o| o.device.clone())
+                            .or_else(|| remembered_owners.get(&member.session_id).cloned())
+                            .or_else(|| member.device.clone());
+                        resolved_ids.push(member.session_id.clone());
+                        let target = member.target(online);
+                        if let Some(owner) = owner {
+                            notified_targets.push((target, owner));
+                        } else {
+                            notified_targets.push((target, String::new()));
+                        }
+                    }
+                }
+            }
+        }
+
+        let notified: Vec<Target> = notified_targets.iter().map(|(t, _)| t.clone()).collect();
+        if let Some(room) = inner.rooms.get_mut(&room_name) {
+            let seq = room.next_seq;
+            room.next_seq += 1;
+            room.updated_at = now;
+            if room.messages.len() >= MAX_ROOM_MESSAGES {
+                room.messages.pop_front();
+            }
+            room.messages.push_back(RoomMessage {
+                id: id.clone(),
+                seq,
+                room: room_name.clone(),
+                from: sender.clone(),
+                text: cut_bytes(&draft.text, config.max_text_bytes).to_owned(),
+                mentions: resolved_ids.clone(),
+                notified: notified.clone(),
+                urgent: draft.urgent,
+                reply_to: draft.reply_to.clone(),
+                hops: draft.hops,
+                at: now,
+            });
+        }
+
+        let event = Event {
+            id: id.clone(),
+            at: now,
+            from: sender.clone(),
+            to: room_target.clone(),
+            room: Some(room_name.clone()),
+            mentions: resolved_ids.clone(),
+            status: Status::Delivered,
+            reason: None,
+            delivered_at: Some(now),
+            urgent: draft.urgent,
+            reply_to: draft.reply_to.clone(),
+            hops: draft.hops,
+            text: cut_bytes(&draft.text, config.max_text_bytes).to_owned(),
+        };
+        inner.record(event, config.event_ring);
+
+        // Push/queue `[relay]` notifications for each mentioned member that has a known owner device.
+        for (idx, (target, owner)) in notified_targets.into_iter().enumerate() {
+            if owner.is_empty() {
+                continue;
+            }
+            if inner.queues.get(&target.session_id).is_some_and(|q| q.len() >= config.max_queued_per_target)
+                || inner.messages.len() >= config.max_queued
+            {
+                continue;
+            }
+            let notif_id = if idx == 0 { id.clone() } else { self.new_id() };
+            let mut message = Message {
+                id: notif_id.clone(),
+                from: sender.clone(),
+                to: target.clone(),
+                room: Some(room_name.clone()),
+                mentions: resolved_ids.clone(),
+                text: draft.text.clone(),
+                urgent: draft.urgent,
+                reply_to: draft.reply_to.clone(),
+                hops: draft.hops,
+                sent_at: now,
+                owner,
+                reply: None,
+                expiry: None,
+                ack_wait: None,
+            };
+            if let Some(conn) = inner.online.get(&target.session_id).filter(|o| o.device == message.owner).map(|o| o.conn) {
+                let frame = message.frame(&inner.names);
+                inner.push(conn, frame);
+            }
+            let expiring = notif_id.clone();
+            message.expiry = Some(self.timer(config.ttl, move |relay| relay.expire(&expiring)));
+            inner.queues.entry(target.session_id).or_default().push_back(notif_id.clone());
+            inner.messages.insert(notif_id, message);
+        }
+
+        inner.answer(
+            reply,
+            Outcome::RoomAccepted { id, room: room_name, target: room_target, notified },
+        );
+    }
+
+    /// Lists all active chatrooms, most recently active first.
+    pub fn rooms(&self) -> Vec<Value> {
+        let inner = self.lock();
+        let mut list: Vec<&Room> = inner.rooms.values().collect();
+        list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.name.cmp(&b.name)));
+        list.into_iter().map(|r| r.summary_json(&inner.online, &inner.names)).collect()
+    }
+
+    /// Reads one chatroom's summary and message history (`seq > after`, up to `limit` newest messages).
+    pub fn room(&self, raw_name: &str, limit: usize, after: u64) -> Option<Value> {
+        let name = normalize_room_name(raw_name);
+        let inner = self.lock();
+        let room = inner.rooms.get(name)?;
+        Some(room.detail_json(&inner.online, &inner.names, limit.clamp(1, MAX_ROOM_MESSAGES), after))
+    }
+
+    /// Creates or updates a chatroom and adds `members` (each with its optional `Recorded` fallback).
+    pub fn save_room(
+        &self,
+        raw_name: &str,
+        topic: Option<String>,
+        members: &[(String, Option<Recorded>)],
+    ) -> Result<Value, Reason> {
+        let name = normalize_room_name(raw_name);
+        if !valid_room_name(name) {
+            return Err(Reason::Invalid);
+        }
+        let mut inner = self.lock();
+        if !inner.rooms.contains_key(name) && inner.rooms.len() >= MAX_ROOMS {
+            return Err(Reason::MailboxFull);
+        }
+        let now = now_ms();
+        let clean_topic = topic.map(|t| cut_chars(t.trim(), 200).to_owned()).filter(|t| !t.is_empty());
+        let online_snapshot: HashMap<String, Online> =
+            inner.online.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        {
+            let room = inner
+                .rooms
+                .entry(name.to_owned())
+                .or_insert_with(|| Room::new(name.to_owned(), clean_topic.clone(), now));
+            if clean_topic.is_some() {
+                room.topic = clean_topic;
+            }
+            room.updated_at = now;
+            for (sid, rec) in members {
+                if !valid_session_id(sid) {
+                    return Err(Reason::Invalid);
+                }
+                if let Some(online) = online_snapshot.get(sid) {
+                    room.members
+                        .entry(sid.clone())
+                        .and_modify(|m| m.refresh(online))
+                        .or_insert_with(|| RoomMember::from_online(online, now));
+                } else if rec.is_some() {
+                    room.members
+                        .entry(sid.clone())
+                        .or_insert_with(|| RoomMember::from_recorded(sid, rec.as_ref(), now));
+                } else {
+                    return Err(Reason::UnknownSession);
+                }
+            }
+        }
+        Ok(inner.rooms[name].detail_json(&online_snapshot, &inner.names, MAX_ROOM_MESSAGES, 0))
+    }
+
+    /// Joins or leaves a chatroom for `session_id`. Joining creates the room if it does not exist yet.
+    pub fn set_room_member(
+        &self,
+        raw_name: &str,
+        session_id: &str,
+        recorded: Option<Recorded>,
+        join: bool,
+        topic: Option<String>,
+    ) -> Result<Value, Reason> {
+        let name = normalize_room_name(raw_name);
+        if !valid_room_name(name) || !valid_session_id(session_id) {
+            return Err(Reason::Invalid);
+        }
+        let mut inner = self.lock();
+        let now = now_ms();
+        let online_snapshot: HashMap<String, Online> = inner.online.clone();
+        if join {
+            if !inner.rooms.contains_key(name) && inner.rooms.len() >= MAX_ROOMS {
+                return Err(Reason::MailboxFull);
+            }
+            let online = online_snapshot.get(session_id);
+            if online.is_none() && recorded.is_none() {
+                return Err(Reason::UnknownSession);
+            }
+            let clean_topic = topic.map(|t| cut_chars(t.trim(), 200).to_owned()).filter(|t| !t.is_empty());
+            {
+                let room = inner
+                    .rooms
+                    .entry(name.to_owned())
+                    .or_insert_with(|| Room::new(name.to_owned(), clean_topic.clone(), now));
+                if clean_topic.is_some() {
+                    room.topic = clean_topic;
+                }
+                room.updated_at = now;
+                if let Some(online) = online {
+                    room.members
+                        .entry(session_id.to_owned())
+                        .and_modify(|m| m.refresh(online))
+                        .or_insert_with(|| RoomMember::from_online(online, now));
+                } else {
+                    room.members
+                        .entry(session_id.to_owned())
+                        .or_insert_with(|| RoomMember::from_recorded(session_id, recorded.as_ref(), now));
+                }
+            }
+            Ok(inner.rooms[name].detail_json(&online_snapshot, &inner.names, MAX_ROOM_MESSAGES, 0))
+        } else {
+            {
+                let Some(room) = inner.rooms.get_mut(name) else {
+                    return Err(Reason::Invalid);
+                };
+                room.members.remove(session_id);
+                room.updated_at = now;
+            }
+            Ok(inner.rooms[name].detail_json(&online_snapshot, &inner.names, MAX_ROOM_MESSAGES, 0))
+        }
+    }
+
+    /// Deletes a chatroom; returns whether it existed.
+    pub fn delete_room(&self, raw_name: &str) -> bool {
+        let name = normalize_room_name(raw_name);
+        self.lock().rooms.remove(name).is_some()
+    }
+
     /// Answers `queued` to a send whose target has not acknowledged yet.
     fn ack_wait_ended(&self, id: &str) {
         let mut inner = self.lock();
@@ -1183,6 +1912,9 @@ impl Relay {
             return;
         }
         let Some(mut message) = inner.take(id) else { return };
+        if message.room.is_some() {
+            return;
+        }
         let now = now_ms();
         if let Some(event) = inner.event(id) {
             event.status = Status::Delivered;
@@ -1207,6 +1939,9 @@ impl Relay {
     fn expire(&self, id: &str) {
         let mut inner = self.lock();
         let Some(mut message) = inner.take(id) else { return };
+        if message.room.is_some() {
+            return;
+        }
         if let Some(reply) = message.reply.take() {
             inner.answer(reply, Outcome::Accepted { id: id.to_owned(), delivered: false, target: message.to.clone() });
         }

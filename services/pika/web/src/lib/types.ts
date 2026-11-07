@@ -561,6 +561,8 @@ export interface RelayEvent {
 	at: string;
 	from: RelaySender;
 	to: RelayTarget;
+	room?: string;
+	mentions?: string[];
 	status: RelayStatus;
 	reason?: RelayRejection;
 	deliveredAt?: string;
@@ -575,6 +577,50 @@ export interface RelaySendResult {
 	id: string;
 	status: "delivered" | "queued";
 	to: RelayTarget;
+	room?: string;
+	notified?: RelayTarget[];
+}
+
+export interface RelayRoomMember {
+	sessionId: string;
+	device?: string;
+	deviceName?: string;
+	name?: string;
+	title?: string;
+	project?: string;
+	model?: string;
+	state: "idle" | "busy" | "offline";
+	online: boolean;
+	joinedAt: string;
+}
+
+export interface RelayRoomMessage {
+	id: string;
+	seq: number;
+	room: string;
+	from: RelaySender;
+	text: string;
+	mentions: string[];
+	notified: RelayTarget[];
+	urgent: boolean;
+	replyTo?: string;
+	hops: number;
+	at: string;
+}
+
+export interface RelayRoom {
+	name: string;
+	topic?: string;
+	createdAt: string;
+	updatedAt: string;
+	messageCount: number;
+	members: RelayRoomMember[];
+	lastMessage?: RelayRoomMessage;
+}
+
+export interface RelayRoomDetail {
+	room: RelayRoom;
+	messages: RelayRoomMessage[];
 }
 
 // pi session entry and message shapes (session-format.md, message-types.md).

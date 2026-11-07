@@ -81,7 +81,7 @@ export class RelayConnection {
 	}
 
 	/** Sends `send` and waits for its `sent`; rejects when offline, on timeout, or when the connection drops. */
-	request(frame: { to: string; text: string; urgent?: boolean; replyTo?: string; hops: number }): Promise<SentFrame> {
+	request(frame: { to?: string; room?: string; mentions?: string[]; text: string; urgent?: boolean; replyTo?: string; hops: number }): Promise<SentFrame> {
 		const clientId = randomUUID();
 		return new Promise<SentFrame>((resolve, reject) => {
 			const timer = setTimeout(() => {
@@ -90,7 +90,9 @@ export class RelayConnection {
 			}, timing.sentTimeoutMs);
 			this.pending.set(clientId, { resolve, reject, timer });
 			const sent = this.send({
-				type: "send", clientId, to: frame.to, text: frame.text, hops: frame.hops,
+				type: "send", clientId, text: frame.text, hops: frame.hops,
+				...(frame.room !== undefined ? { room: frame.room } : { to: frame.to }),
+				...(frame.mentions?.length ? { mentions: frame.mentions } : {}),
 				...(frame.urgent ? { urgent: true } : {}), ...(frame.replyTo ? { replyTo: frame.replyTo } : {}),
 			});
 			if (!sent) {

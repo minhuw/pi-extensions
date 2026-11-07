@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -96,14 +96,23 @@ pub async fn events(State(state): State<AppState>, Query(query): Query<BTreeMap<
 
 /// What pika records about a valid target id.
 async fn recorded(state: &AppState, draft: &Draft) -> anyhow::Result<Option<relay::Recorded>> {
-    if !draft.valid {
+    if !draft.valid || draft.room.is_some() {
         return Ok(None);
     }
     let (store, to) = (state.store.clone(), draft.to.clone());
     blocking(move || relay::recorded(&store, &to)).await
 }
 
-/// `POST relay/messages` with `{ to, text, urgent? }`, sent as `{ kind: "web" }` with hops 0.
+fn reason_response(reason: Reason) -> Response {
+    let status = match reason {
+        Reason::RateLimited | Reason::MailboxFull => StatusCode::TOO_MANY_REQUESTS,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    error(status, reason.as_str())
+}
+
+/// `POST relay/messages` with `{ to, text, urgent? }` or `{ room, text, mentions?, urgent?, replyTo? }`, sent as
+/// `{ kind: "web" }` with hops 0.
 pub async fn post_message(State(state): State<AppState>, body: Result<Json<Value>, JsonRejection>) -> Response {
     let body = match body {
         Ok(Json(body)) => body,
@@ -123,14 +132,218 @@ pub async fn post_message(State(state): State<AppState>, body: Result<Json<Value
             "id": id, "status": if delivered { "delivered" } else { "queued" }, "to": state.relay.target_json(&target),
         }))
         .into_response(),
-        Ok(Outcome::Rejected(reason)) => {
-            let status = match reason {
-                Reason::RateLimited | Reason::MailboxFull => StatusCode::TOO_MANY_REQUESTS,
-                _ => StatusCode::BAD_REQUEST,
-            };
-            error(status, reason.as_str())
-        }
+        Ok(Outcome::RoomAccepted { id, room, target, notified }) => Json(json!({
+            "id": id, "status": "delivered", "room": room,
+            "notified": state.relay.targets_json(&notified),
+            "to": state.relay.target_json(&target),
+        }))
+        .into_response(),
+        Ok(Outcome::Rejected(reason)) => reason_response(reason),
         Err(e) => internal_error(e),
+    }
+}
+
+async fn rooms_list(state: &AppState) -> Response {
+    refresh_names(state).await;
+    Json(json!({ "items": state.relay.rooms() })).into_response()
+}
+
+async fn room_detail_inner(state: &AppState, name: &str, query: &BTreeMap<String, String>) -> Response {
+    let limit = match query.get("limit").map(|l| l.parse::<usize>()) {
+        None => 100,
+        Some(Ok(limit)) if limit >= 1 => limit,
+        _ => return error(StatusCode::BAD_REQUEST, "invalid"),
+    };
+    let after = match query.get("after").map(|a| a.parse::<u64>()) {
+        None => 0,
+        Some(Ok(after)) => after,
+        Some(Err(_)) => return error(StatusCode::BAD_REQUEST, "invalid"),
+    };
+    refresh_names(state).await;
+    match state.relay.room(name, limit, after) {
+        Some(detail) => Json(detail).into_response(),
+        None => error(StatusCode::NOT_FOUND, "not_found"),
+    }
+}
+
+/// `GET {base}/api/relay/v1/rooms` for devices.
+pub async fn device_rooms(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match device(&state, &headers).await {
+        Ok(Some(_)) => rooms_list(&state).await,
+        Ok(None) => error(StatusCode::UNAUTHORIZED, "unauthorized"),
+        Err(e) => internal_error(e),
+    }
+}
+
+/// `GET {base}/api/relay/v1/rooms/{name}` for devices.
+pub async fn device_room_detail(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    match device(&state, &headers).await {
+        Ok(Some(_)) => room_detail_inner(&state, &name, &query).await,
+        Ok(None) => error(StatusCode::UNAUTHORIZED, "unauthorized"),
+        Err(e) => internal_error(e),
+    }
+}
+
+/// `POST {base}/api/relay/v1/rooms` with `{ room, sessionId, action?: "join" | "leave", topic? }` for devices.
+pub async fn device_update_room(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    match device(&state, &headers).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return error(StatusCode::UNAUTHORIZED, "unauthorized"),
+        Err(e) => return internal_error(e),
+    }
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection @ JsonRejection::MissingJsonContentType(_)) => return rejection.into_response(),
+        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
+    };
+    let Some(obj) = body.as_object() else { return error(StatusCode::BAD_REQUEST, "invalid") };
+    let Some(room) = obj.get("room").or_else(|| obj.get("name")).and_then(Value::as_str) else {
+        return error(StatusCode::BAD_REQUEST, "invalid");
+    };
+    let Some(session_id) = obj.get("sessionId").and_then(Value::as_str) else {
+        return error(StatusCode::BAD_REQUEST, "invalid");
+    };
+    if !relay::valid_session_id(session_id) {
+        return error(StatusCode::BAD_REQUEST, "invalid");
+    }
+    let join = match obj.get("action").and_then(Value::as_str) {
+        None | Some("join") | Some("add") => true,
+        Some("leave") | Some("remove") => false,
+        Some(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
+    };
+    let topic = match obj.get("topic") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
+    };
+    refresh_names(&state).await;
+    let (store, sid) = (state.store.clone(), session_id.to_owned());
+    let rec = match blocking(move || relay::recorded(&store, &sid)).await {
+        Ok(rec) => rec,
+        Err(e) => return internal_error(e),
+    };
+    match state.relay.set_room_member(room, session_id, rec, join, topic) {
+        Ok(detail) => Json(detail).into_response(),
+        Err(reason) => reason_response(reason),
+    }
+}
+
+/// `GET relay/rooms` for the browser.
+pub async fn rooms(State(state): State<AppState>) -> Response {
+    rooms_list(&state).await
+}
+
+/// `GET relay/rooms/{name}` for the browser.
+pub async fn room_detail(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    room_detail_inner(&state, &name, &query).await
+}
+
+/// `POST relay/rooms` with `{ name, topic?, members?: string[] }` for the browser.
+pub async fn save_room(State(state): State<AppState>, body: Result<Json<Value>, JsonRejection>) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection @ JsonRejection::MissingJsonContentType(_)) => return rejection.into_response(),
+        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
+    };
+    let Some(obj) = body.as_object() else { return error(StatusCode::BAD_REQUEST, "invalid") };
+    let Some(name) = obj.get("name").or_else(|| obj.get("room")).and_then(Value::as_str) else {
+        return error(StatusCode::BAD_REQUEST, "invalid");
+    };
+    let topic = match obj.get("topic") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
+    };
+    let member_ids: Vec<String> = match obj.get("members") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => {
+            let mut ids = Vec::with_capacity(items.len());
+            for item in items {
+                match item.as_str() {
+                    Some(s) if relay::valid_session_id(s) => ids.push(s.to_owned()),
+                    _ => return error(StatusCode::BAD_REQUEST, "invalid"),
+                }
+            }
+            ids
+        }
+        Some(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
+    };
+    refresh_names(&state).await;
+    let store = state.store.clone();
+    let lookup_ids = member_ids.clone();
+    let members_with_rec = match blocking(move || {
+        let mut out = Vec::with_capacity(lookup_ids.len());
+        for sid in lookup_ids {
+            let rec = relay::recorded(&store, &sid)?;
+            out.push((sid, rec));
+        }
+        Ok(out)
+    })
+    .await
+    {
+        Ok(list) => list,
+        Err(e) => return internal_error(e),
+    };
+    match state.relay.save_room(name, topic, &members_with_rec) {
+        Ok(detail) => Json(detail).into_response(),
+        Err(reason) => reason_response(reason),
+    }
+}
+
+/// `POST relay/rooms/{name}/members` with `{ sessionId, action?: "add" | "remove" }` for the browser.
+pub async fn room_member(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection @ JsonRejection::MissingJsonContentType(_)) => return rejection.into_response(),
+        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
+    };
+    let Some(obj) = body.as_object() else { return error(StatusCode::BAD_REQUEST, "invalid") };
+    let Some(session_id) = obj.get("sessionId").and_then(Value::as_str) else {
+        return error(StatusCode::BAD_REQUEST, "invalid");
+    };
+    if !relay::valid_session_id(session_id) {
+        return error(StatusCode::BAD_REQUEST, "invalid");
+    }
+    let add = match obj.get("action").and_then(Value::as_str) {
+        None | Some("add") | Some("join") => true,
+        Some("remove") | Some("leave") => false,
+        Some(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
+    };
+    refresh_names(&state).await;
+    let (store, sid) = (state.store.clone(), session_id.to_owned());
+    let rec = match blocking(move || relay::recorded(&store, &sid)).await {
+        Ok(rec) => rec,
+        Err(e) => return internal_error(e),
+    };
+    match state.relay.set_room_member(&name, session_id, rec, add, None) {
+        Ok(detail) => Json(detail).into_response(),
+        Err(reason) => reason_response(reason),
+    }
+}
+
+/// `DELETE relay/rooms/{name}` for the browser.
+pub async fn delete_room(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    if state.relay.delete_room(&name) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        error(StatusCode::NOT_FOUND, "not_found")
     }
 }
 
@@ -384,6 +597,8 @@ pub fn device_routes(state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/api/relay/v1/connect", get(connect))
         .route("/api/relay/v1/sessions", get(device_sessions))
+        .route("/api/relay/v1/rooms", get(device_rooms).post(device_update_room))
+        .route("/api/relay/v1/rooms/{name}", get(device_room_detail))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_enabled))
 }
 
@@ -392,6 +607,9 @@ pub fn browser_routes(state: &AppState, login: impl Fn(Router<AppState>) -> Rout
     let routes = Router::new()
         .route("/relay/sessions", get(sessions))
         .route("/relay/messages", post(post_message))
-        .route("/relay/events", get(events));
+        .route("/relay/events", get(events))
+        .route("/relay/rooms", get(rooms).post(save_room))
+        .route("/relay/rooms/{name}", get(room_detail).delete(delete_room))
+        .route("/relay/rooms/{name}/members", post(room_member));
     login(routes).route_layer(middleware::from_fn_with_state(state.clone(), require_enabled))
 }

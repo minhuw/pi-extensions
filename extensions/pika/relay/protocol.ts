@@ -91,6 +91,8 @@ export interface Welcome {
 export interface MessageFrame {
 	type: "message";
 	id: string;
+	room?: string;
+	mentions?: string[];
 	from: Sender;
 	text: string;
 	urgent: boolean;
@@ -102,8 +104,50 @@ export interface MessageFrame {
 export interface StatusFrame { type: "status"; id: string; status: "delivered" | "expired"; to: Target; at: string | number }
 
 export type SentFrame =
-	| { type: "sent"; clientId: string; id: string; status: "delivered" | "queued"; to: Target }
+	| { type: "sent"; clientId: string; id: string; status: "delivered" | "queued"; to: Target; room?: string; notified?: Target[] }
 	| { type: "sent"; clientId: string; status: "rejected"; reason: string };
+
+export interface RoomMember {
+	sessionId: string;
+	device?: string;
+	deviceName?: string;
+	name?: string;
+	title?: string;
+	project?: string;
+	model?: string;
+	state: "idle" | "busy" | "offline";
+	online: boolean;
+	joinedAt: string | number;
+}
+
+export interface RoomMessage {
+	id: string;
+	seq: number;
+	room: string;
+	from: Sender;
+	text: string;
+	mentions: string[];
+	notified: Target[];
+	urgent: boolean;
+	replyTo?: string;
+	hops: number;
+	at: string | number;
+}
+
+export interface RelayRoom {
+	name: string;
+	topic?: string;
+	createdAt: string | number;
+	updatedAt: string | number;
+	messageCount: number;
+	members: RoomMember[];
+	lastMessage?: RoomMessage;
+}
+
+export interface RelayRoomDetail {
+	room: RelayRoom;
+	messages: RoomMessage[];
+}
 
 export interface OnlineSession {
 	id: string;
@@ -159,6 +203,7 @@ export const deviceLabel = (device: { device?: unknown; deviceName?: unknown } |
 /** How a target is named in tool results and notices. */
 export function targetLabel(target: Target | undefined, fallbackId?: string): string {
 	const id = headerField(target?.sessionId ?? fallbackId) || "an unknown session";
+	if (id.startsWith("#")) return `room ${id}`;
 	const name = headerField(target?.name) || headerField(target?.title);
 	const device = deviceLabel(target);
 	return `pi session ${id}${name ? ` ("${name}")` : ""}${device ? ` on ${device}` : ""}`;
@@ -174,13 +219,24 @@ export function ttlText(seconds: number): string {
 export function messageContent(message: MessageFrame): string {
 	const urgent = message.urgent ? ", marked urgent" : "";
 	const id = headerField(message.id);
+	const room = headerField(message.room);
 	const text = sanitize(message.text);
-	if (message.from.kind === "web") return `[relay] Message ${id} from your user in the pika web UI${urgent}:\n\n${text}`;
+	if (message.from.kind === "web") {
+		if (room) {
+			return `[relay] Message ${id} in room #${room} from your user in the pika web UI${urgent}:\n\n${text}\n\nTo read the full room history, call relay_room with action "history" and room "${room}". To reply in the room, call relay_send with room "${room}".`;
+		}
+		return `[relay] Message ${id} from your user in the pika web UI${urgent}:\n\n${text}`;
+	}
 	const from = message.from;
 	const sessionId = headerField(from.sessionId);
 	const name = headerField(from.name) || headerField(from.title);
 	const project = headerField(from.project);
 	const replyTo = headerField(message.replyTo);
+	if (room) {
+		const header = `[relay] Message ${id} in room #${room} from pi session ${sessionId}${name ? ` ("${name}")` : ""} on ${deviceLabel(from)}`
+			+ `${project ? `, project ${project}` : ""}${replyTo ? `, replying to ${replyTo}` : ""}${urgent}:`;
+		return `${header}\n\n${text}\n\nYou were @mentioned in room #${room}. To read the full room history, call relay_room with action "history" and room "${room}". To reply in the room, call relay_send with room "${room}", mentions ["${sessionId}"], and replyTo "${id}".`;
+	}
 	const header = `[relay] Message ${id} from pi session ${sessionId}${name ? ` ("${name}")` : ""} on ${deviceLabel(from)}`
 		+ `${project ? `, project ${project}` : ""}${replyTo ? `, replying to ${replyTo}` : ""}${urgent}:`;
 	return `${header}\n\n${text}\n\nThis message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "${sessionId}" and replyTo "${id}".`;
