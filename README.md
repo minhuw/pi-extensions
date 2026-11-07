@@ -19,7 +19,8 @@ The [pika server](services/pika/README.md) serves this documentation publicly at
 | [Quality](extensions/quality/README.md) | `/simplify` cleans up code, `/review` reports bugs without fixing them, `/verify` runs checks without repairing anything, and `/deslop` removes AI slop. |
 | [Writer](extensions/writer/README.md) | Eight prompts for writing CS conference papers, ported from [claude-writer](https://github.com/minhuw/claude-writer). |
 | [Impeccable](extensions/impeccable/README.md) | The Impeccable design skill, with `/impeccable`, `/design`, and 24 `/design-*` prompts for building, refining, and critiquing interfaces. |
-| [Subagents](extensions/subagents/README.md) | Delegates bounded tasks to a local agent fleet (`recon`, `worker`, `reviewer`, `expert`), using a maintained fork of `@tintinweb/pi-subagents` v0.22.0. |
+| [Subagents](extensions/subagents/README.md) | Delegates bounded tasks to a local agent fleet (`recon`, `worker`, `reviewer`), using a maintained fork of `@tintinweb/pi-subagents` v0.22.0. |
+| [Council](extensions/council/README.md) | `/council <topic>` and the `council` tool convene three pinned read-only advisors (`argon`, `astra`, `opus`) for a two-round, identity-blinded deliberation on difficult architectural and design questions. |
 | [Herder](extensions/herder/README.md) | `/herder <goal>` runs a coding task in disposable git worktrees, checks the result against the goal, and delivers it to your branch after you confirm. `/herder-improve` and `/herder-simplify` audit the repository and start a run for the findings you pick. |
 | [Orca Bridge](extensions/orca-bridge/README.md) | Shows Pi activity in Orca panes, opens files and diffs, and offers an optional native activity panel and status bar. |
 | [Autoresearch](extensions/autoresearch/README.md) | `/autoresearch <target>` measures a baseline, waits for your approval, then runs a bounded number of optimization passes. |

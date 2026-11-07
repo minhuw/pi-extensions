@@ -54,6 +54,6 @@ The [pika extension reference](../extensions/pika/README.md#configuration) docum
 
 ## Delegation settings
 
-[Subagents](../extensions/subagents/README.md) reads global and project `subagents.json` settings, with project settings taking precedence; its reference lists the supported locations. Individual `recon`, `worker`, `reviewer`, and `expert` agents do not require scripted workflows. Enabling `workflowsEnabled` only makes the workflow tool available: orchestration still requires an explicit user request. Package discovery and nested delegation have separate opt-ins.
+[Subagents](../extensions/subagents/README.md) reads global and project `subagents.json` settings, with project settings taking precedence; its reference lists the supported locations. Individual `recon`, `worker`, and `reviewer` agents (as well as the three-model [Council](../extensions/council/README.md) via `/council` or the `council` tool) do not require scripted workflows. Enabling `workflowsEnabled` only makes the workflow tool available: orchestration still requires an explicit user request. Package discovery and nested delegation have separate opt-ins.
 
 Use the [Delegation guide](guides/delegation.md) to choose between an individual agent, a scripted workflow, and a durable Herder run. The [Performance guide](guides/performance.md) helps you choose between measurement, approved optimization, and recurring prompts.
