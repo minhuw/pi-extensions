@@ -1,6 +1,8 @@
 # Language
 
-`/language` sets the language the model responds in. You can set a default for new sessions and switch the current session at any time. The collection loads this extension automatically; use `/reload` after installing or updating it.
+Use `/language` to choose the model's response language in top-level TUI and RPC sessions. Set a default for new sessions or switch the current session for its next prompt.
+
+The collection loads this extension automatically; use `/reload` after installing or updating it.
 
 ```text
 /language                  show the active language, this session's default, and the default for new sessions
@@ -13,17 +15,19 @@
 
 A name is any text the model understands, such as `English` or `Simplified Chinese`, up to 40 characters. It cannot contain control characters or be `reset` or `default`. Naming the session's default is the same as `/language reset`.
 
-The default reaches the model through a system prompt section, fixed at the session's first prompt. A switch reaches it as a hidden message sent with each prompt, and the system prompt stays as it was. Both tell the model to leave code, identifiers, commands, and file paths unchanged. A reset sends one hidden message with the next prompt, telling the model to ignore earlier switches and use the session's default, or the user's language if there is none.
+The session's default is fixed at its first prompt and supplied through a system prompt section. A switch adds a hidden message with each prompt, leaving that section unchanged. Both instructions tell the model to leave code, identifiers, commands, and file paths unchanged.
 
-The split is there for the prompt cache. On Magpie, a changed section rewrites the system prompt at the head of the context, so the whole context is cached again. A message at the end of the conversation leaves the cached prefix alone.
+Resetting an active switch sends one hidden message with the next prompt. It tells the model to ignore earlier switches and return to the session's default, or the user's language if there is none.
 
-The default for new sessions lives in `<agentDir>/language.json` as `{ "default": "English" }`, and `<agentDir>` is usually `~/.pi/agent`. With no file there is no default. A file that cannot be used counts as no default and shows a warning.
+Hidden messages preserve the prompt cache. On Magpie, changing a system prompt section rewrites the head of the context and requires the context to be cached again. Appending a message leaves the cached prefix intact.
+
+The default for new sessions lives in `<agentDir>/language.json` as `{ "default": "English" }`. `<agentDir>` is usually `~/.pi/agent`. A missing file means no default; an unreadable or invalid file also means no default and produces a warning.
 
 Behavior worth knowing:
 
-- Changing the default only affects new sessions. A session that has not had its first prompt yet counts as new, so the change can reach the current one; a session that has keeps its language.
+- Changing the default affects sessions that have not yet had their first prompt, including the current session if it has not started. Sessions that have already started keep their language.
 - A switch takes effect with the next prompt, not a response in progress.
-- A session that already has conversation at its first prompt, such as one from before this extension, never gains a section. Its default is sent as a hidden message with each prompt instead, like a switch, and `/language reset` returns to that default. A session with no default at its first prompt does not pick up one configured later.
+- If a session already contains conversation when this extension handles its first prompt, the extension adds no system prompt section. This includes sessions created before the extension was installed. Their default is sent as a hidden message with each prompt, and `/language reset` returns to it. A session with no default at its first prompt does not pick up one configured later.
 - The language is stored in the session file, so it survives `/reload` and resuming. Switches follow the branch: `/tree` and forks take the language of the point they land on.
 - Subagents, Herder steps, and print and JSON modes are not affected, and `/language` only shows a warning there.
 - If compaction drops the hidden message during a long run, the rest of that run may fall back to the default until the next prompt.

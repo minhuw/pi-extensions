@@ -1,6 +1,6 @@
 # Writer
 
-A native Pi prompt-template port of [claude-writer](https://github.com/minhuw/claude-writer): academic writing workflows for papers targeting top-tier computer science conferences.
+Writer provides eight native Pi prompt templates for revising and reviewing academic papers, adapted from [claude-writer](https://github.com/minhuw/claude-writer). The prompts target computer science conference writing, with particular attention to systems papers.
 
 ## Usage
 
@@ -23,14 +23,14 @@ Each command expands its template from `prompts/` into the current Pi session. R
 | --- | --- |
 | `/conference-reviewer` | Write a formal conference-style review with scores, strengths, and weaknesses. |
 | `/evaluate` | Score text for logical flow, structure, clarity, and readability without editing it. |
-| `/grammar-checker` | Multi-pass proofreading for typos, grammar, and awkward academic phrasing. |
-| `/paper-validator` | Review a draft for weaknesses, missing evidence, and structural issues. |
+| `/grammar-checker` | Proofread in five passes, explain corrections, and provide corrected text. |
+| `/paper-validator` | Review a draft for weaknesses, missing evidence, and structural issues; edit only when explicitly requested. |
 | `/polish` | Rewrite text for grammar, fluency, and conference style while preserving LaTeX. |
 | `/selection` | Propose three scored word or phrase candidates for a `[placeholder]`. |
 | `/summary` | Summarize a section while keeping technical claims intact. |
 | `/validation` | Score a `<>`-marked word or phrase and suggest alternatives when needed. |
 
-The workflows keep the original claude-writer guidance: conference-calibrated feedback, LaTeX integrity, and an acceptance-bar rather than pedantic perfection.
+The prompts ask for feedback calibrated to the target conference, preservation of LaTeX syntax and technical meaning, and changes that materially improve the paper. These are model instructions, not automated checks of correctness or publication readiness.
 
 ## Install
 

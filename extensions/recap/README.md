@@ -1,6 +1,6 @@
 # Recap
 
-`/recap` brings you back up to speed on the current session after a break. It is a native Pi prompt template that uses the current model and the conversation already in context.
+`/recap` summarizes the current session so you can pick up after a break. This native Pi prompt template uses the current model and the conversation already in context.
 
 ```text
 /recap
@@ -11,9 +11,9 @@
 
 The response starts with the session's goal, then gives up to four short bullets: recent progress, a key decision, where work stopped, and the next step. It aims for fewer than 200 words. Completed tasks are described as complete; suggestions and unverified work are labeled.
 
-The prompt asks the model to summarize and stop, without calling tools or resuming the task. It uses existing conversation evidence, including available compaction and branch summaries. File state, test results, and background jobs are described as last observed, so the recap is not a fresh status check. If context or timestamps needed for the requested range are missing, it reports that limit. An empty session gets a short "nothing to recap yet" response.
+The prompt asks the model to summarize and stop, without calling tools or resuming the task. It draws on the conversation, including available compaction and branch summaries. File state, test results, and background jobs are described as last observed; the recap is not a fresh status check. If the requested range needs context or timestamps that are missing, the response says so. An empty session gets a short "nothing to recap yet" response.
 
-Arguments are natural-language focus instructions passed through Pi's native `$ARGUMENTS` expansion. They do not add flags or a date parser. Asking for "since the last recap" emphasizes substantive changes since the last recap visible in context.
+Arguments narrow the topic or time range through Pi's native `$ARGUMENTS` expansion. They are natural-language instructions, with no flags or date parser. Asking for "since the last recap" emphasizes substantive changes since the last recap visible in context.
 
 ## Installation
 

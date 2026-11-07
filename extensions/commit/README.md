@@ -1,6 +1,6 @@
 # Commit
 
-A lightweight native Pi prompt template for committing current changes as the smallest logical, self-contained patch series. No Commit runtime code.
+`/commit` organizes existing changes into the smallest logical series of self-contained commits. It is a native Pi prompt template that uses the current session’s tools; it adds no Commit runtime.
 
 ## Usage
 
@@ -11,14 +11,14 @@ A lightweight native Pi prompt template for committing current changes as the sm
 /commit keep this as one commit if it remains self-contained
 ```
 
-Pi expands [prompts/commit.md](prompts/commit.md) into the current session using normal tools. Optional instructions are passed through Pi's native `$ARGUMENTS`; no separate agent, custom parser, or session-wide policy is installed.
+Pi expands [prompts/commit.md](prompts/commit.md) in the current session and passes optional instructions through native `$ARGUMENTS`. The guidance applies to this invocation only; it creates no separate agent, custom parser, or session-wide policy.
 
 ## Behavior
 
 - Invoking `/commit` authorizes committing existing in-scope work without another confirmation unless there is real ambiguity.
-- Group by purpose, keeping code with necessary tests/docs and valid intermediate trees; use one commit when coherent.
+- Group changes by purpose, keeping code with its necessary tests and documentation. Each commit should leave a valid intermediate tree; use one commit when the work forms a coherent whole.
 - Respect meaningful existing staging and preserve staged-only content when regrouping. Do not implement fixes, discard/stash work, rewrite history, change branches/configuration, or push.
-- Inspect staged diffs, run diff checks and feasible focused non-mutating checks, and report what actually ran and what remains.
+- Inspect each complete staged diff and run `git diff --cached --check` for every group. Run feasible focused, non-mutating checks, then report their results and any work left over. A check against the dirty working tree does not prove that an intermediate staged tree passed.
 - Use normal Git commits with repository hooks and signing; do not suppress them or bypass failures.
 - Default messages are Linux-style `subsystem: imperative summary` with concise subjects (about 75 characters) and self-contained bodies explaining rationale and impact. Explicit repository-required Conventional Commits win. Never invent attribution or references.
 

@@ -1,6 +1,6 @@
 # Statusline Footer
 
-A rich, theme-aware Pi footer. The metrics come from this extension; the visual language follows [pikit](https://github.com/adrianapan/pikit)'s status bar: left/right justified rows, a positional gradient context bar, per-level thinking color, and Nerd Font icons, with an ASCII opt-out. The identity row is a powerline bar, and the rows below hang from it on a rail.
+See the active model, context usage, cost, performance metrics, and Git state in Pi's footer. The extension collects the metrics and adapts to the active theme. Its layout follows [pikit](https://github.com/adrianapan/pikit)'s status bar: left/right justified rows, a gradient context bar, thinking-level colors, and Nerd Font icons with an ASCII/Unicode fallback. The model and context share a powerline bar; detail rows sit below it on a rail.
 
 ## Install
 
@@ -20,7 +20,7 @@ Full mode is enabled by default when Pi starts.
 
 ## Layout
 
-Full mode is the bar and two rows that hang from it, plus a status row while any extension status other than the language is set. Primary facts sit on the left; capacity, cost, and path sit on the right. Shown with ASCII icons; the bar's groups sit on colored bands:
+Full mode shows the identity bar, a telemetry row, and a Git row. A fourth row appears while an extension publishes a status other than language. Primary facts sit on the left; capacity, cost, and path sit on the right. The example uses ASCII/Unicode icons; the bar's groups sit on colored bands:
 
 ```text
  ● ☾ k3   HIGH  (moonshot)  English  ──────────────────────────────  × 2×  ▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉  8.2%  79k/1.1M
@@ -40,9 +40,13 @@ The model name starts with its vendor's mark in the vendor's color. These are th
 
 Thinking levels are colored: dim off, amber low, green medium, lilac high, and a rainbow wash at `xhigh`/`max`. The context bar interpolates success → warning → error across its width and uses the same `▉` block for filled and empty cells so the unused portion stays a quiet charcoal instead of a checkerboard.
 
-Compact mode is the bar alone, with cost and elapsed time added on the right. When another extension publishes `ctx.ui.setStatus("autoresearch", ...)`, `ctx.ui.setStatus("herder", ...)`, or `ctx.ui.setStatus("loop", ...)`, compact mode also shows a workflow summary when there is room. Research reports take priority over Herder, and Herder over Loop, because a loop that starts a run is less specific than the run itself; clearing a higher-priority status restores the next one. Full mode shows each once on its own status row below the Git row, in the order research, Herder, Loop, background processes, then other extension statuses except the language; the row disappears when none of these is set. At narrow widths, both layouts prioritize the model and context percentage: workflow summaries and other secondary details drop out and the bar shrinks or disappears before the model is truncated. Clearing a status removes it from the footer.
+Compact mode shows only the bar, with cost and elapsed time on the right. It also includes a workflow summary when there is room. Statuses published through `ctx.ui.setStatus("autoresearch", ...)`, `ctx.ui.setStatus("herder", ...)`, and `ctx.ui.setStatus("loop", ...)` compete for that space in this order: research, Herder, then Loop. Clearing a higher-priority status reveals the next one.
 
-The `language` status from [Language](../language/README.md) shows in the bar in both compact and full modes, never on the status row: it is nearly always set and would keep that row open. It follows the provider in full mode and any workflow summary in compact mode. At narrow widths it is the first status to go: it needs room beside the model and context percentage, and once that runs out it drops out whole, while compact mode keeps the workflow summary and background processes as long as they fit. The provider, token counts, and compact mode's cost and elapsed time give way before it.
+Full mode shows these statuses together on one row below Git, ordered as research, Herder, Loop, background processes, then other extensions except language. Clearing a status removes it; the row disappears when none remain.
+
+At narrow widths, both layouts preserve the model and context percentage. Workflow summaries and secondary details drop out, and the context bar shrinks or disappears before the model is truncated.
+
+The `language` status from [Language](../language/README.md) stays in the bar in both modes, so it does not keep the status row open. It follows the provider in full mode and any workflow summary in compact mode. The provider, token counts, and compact mode's cost and elapsed time give way before language does. When language no longer fits beside the model and context percentage, it drops out whole. Compact mode keeps workflow and background-process summaries as long as they fit.
 
 ### The bar
 
@@ -113,7 +117,7 @@ For a single status display, leave pi-processes' **status widget** disabled in `
 - Context usage comes from Pi's context API; cost, turns, cache usage, compactions, errors, and touched files are derived from the active session branch.
 - TTFT spans the provider request marker to the first nonempty streamed content, with `message_start` as a fallback request marker for providers that hide HTTP events. Empty block starts and empty deltas do not count as tokens.
 - TTFB uses Pi's provider-response event when the provider exposes it.
-- Token throughput uses exact output-token usage over each whole call, from the request marker to the last token; requests without observed content, failed and aborted requests, and calls under 50 ms are excluded. The displayed average is total output tokens divided by total call time. The time after the first token is not used: many responses arrive in one burst once the model has finished, and hidden reasoning counts in output tokens without streaming, so it read as thousands of tokens per second. Throughput therefore includes the time to first token and reads lower than pure decoding speed.
+- Token throughput divides exact output-token usage by the duration of the whole call, from the request marker to the last token. Requests without observed content, failed or aborted requests, and calls under 50 ms are excluded. The displayed average is total output tokens divided by total call time. Including the time to first token avoids inflated rates when responses arrive in a single burst or include hidden reasoning tokens. This measures whole-call throughput and reads lower than pure decoding speed.
 - Cache hit rate is cached-read tokens divided by all input tokens: uncached input + cache reads + cache writes.
 - Git branch comes from Pi's footer data. Working-tree state uses a throttled `git --no-optional-locks status --porcelain=v1 --untracked-files=normal`: a successful empty result is `clean`, any output is `dirty`, and a failed or pending status is shown as `git ?` or `git …`. Optional `git diff --shortstat HEAD` supplies additions/deletions, while `git rev-list --left-right --count @{upstream}...HEAD` supplies ahead/behind; either auxiliary query can fail without changing the authoritative status.
 - Service tier is sniffed from the last `before_provider_request` payload and shown only when it is not `standard`/`default`/`auto`. `priority` displays as `FAST`; a request without a tier or a model change clears the previous badge.

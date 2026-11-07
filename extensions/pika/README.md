@@ -1,6 +1,6 @@
 # pika
 
-pika uploads every Pi trajectory to a self-hosted pika server. The server ([`services/pika/`](../../services/pika/README.md)) stores the trajectories, makes them searchable, and serves a web UI to read them. pika is built for one user with several machines. Through the same server and login, [relay](#relay) lets your Pi sessions message each other, and [recall](#recall) lets the agent search and read your past sessions.
+pika captures your Pi sessions and model requests on a self-hosted [server](../../services/pika/README.md), where you can search and read them in a web UI. It is designed for one user working across several machines. The same server connection powers [relay](#relay), which lets running Pi sessions message each other, and [recall](#recall), which lets the agent search past sessions and Herder runs.
 
 > [!WARNING]
 > Trajectories contain everything the model saw: file contents, command output, and any secret that a tool printed. Send them only to a server you control, over a network you trust or through TLS.
@@ -12,15 +12,15 @@ pika uploads every Pi trajectory to a self-hosted pika server. The server ([`ser
 - **Child sessions.** Subagents (top-level, nested, and workflow children) and Herder step sessions, through the [child-session hook](#child-session-hook). Each is uploaded as its own session and linked to its parent session, tool call, agent, workflow, or Herder run and step.
 - **Herder runs.** Each run's journal, and its `goal.md` and `plan.md` whenever their content changes and again after a switch to another server.
 
-pika never records request headers, API keys or other credentials, or Pi's auth and settings files. It reads only session files, Herder run files, and the payload and context that Pi hands to extensions.
+pika does not collect transport request headers or read Pi's auth and settings files for capture. It records session files, Herder run files, and the payload and context Pi hands to extensions. **Credentials that appear in this content are uploaded too**, including secrets printed by tools.
 
 ## Install
 
-pika is part of this collection. Installing the collection loads it as the last entry in `pi.extensions`, so its `before_provider_request` handler sees the payload after every other extension's changes. It does nothing until it is configured. Relay and recall come with it; there is nothing else to install or enable.
+pika is included in this collection and listed last in `pi.extensions`, so its `before_provider_request` handler sees the payload after the other extensions have changed it. Capture starts only after configuration. Relay and recall are included; they need no separate installation or login.
 
 1. Run the server. See the [server README](../../services/pika/README.md) for building, Docker, and the reverse proxy.
 2. Install the collection on each machine: `pi install git:github.com/minhuw/pi-extensions` (see the [root README](../../README.md#install)).
-3. In pi, run `/pika login`, enter the server URL, and pair the machine: approve the code pika shows on the server's Devices page (see [Log in](#log-in)). The current session starts uploading at once, and `/pika` confirms that it is captured. A token from `pika token create "<name>"` and writing `~/.pi/agent/pika.json` by hand (below) work too.
+3. In pi, run `/pika login`, enter the server URL, and approve the displayed code on the server's Devices page (see [Log in](#log-in)). The current session starts uploading immediately; run `/pika` to check its status. You can also create a token with `pika token create "<name>"` and write `~/.pi/agent/pika.json` by hand, as shown below.
 
 To load pika on its own, without the rest of the collection, narrow the package in `~/.pi/agent/settings.json`. Pi loads every resource type a filter leaves out, so the empty `skills`, `prompts`, and `themes` lists are needed too; with them, pika's extension, relay and recall included, is the only thing the package loads:
 
@@ -127,7 +127,7 @@ An excluded session's child sessions and Herder runs are skipped too, wherever t
 
 ### Which sessions are uploaded
 
-Only sessions that start or resume while pika is enabled are uploaded; older sessions are never backfilled. A resumed session continues from its last acknowledged byte, or from its first line if pika has not seen it before. Entries usually reach the server within a second of being written. Sessions without a session file (`--no-session`) are not captured.
+pika uploads sessions that start or resume while it is enabled, and the current session when `/pika login` succeeds. It does not scan older sessions for backfill. A resumed session continues from its last acknowledged byte, or from its first line if pika has not seen it before. Entries usually reach the server within a second of being written. Sessions without a session file (`--no-session`) are not captured.
 
 If pika is loaded twice in one session, for example from the package and again through the hook, only the last-loaded copy captures.
 
@@ -237,7 +237,7 @@ Herder emits `herder:run` on `pi.events` with `{ runId, runDir, journalPath, goa
 
 ## Relay
 
-relay, part of pika, lets a running pi session send text messages to any other running pi session, on this machine or on your other machines, through your self-hosted pika server. Every connected session also appears on the server's "Active sessions" page, where you can message a session from the web UI.
+relay lets running Pi sessions send text messages to each other across your machines through the pika server. Connected sessions appear on the server's **Active sessions** page, where you can also send them messages.
 
 The server is the only route between sessions, including two sessions on the same machine. The wire contract is [`services/pika/docs/RELAY.md`](../../services/pika/docs/RELAY.md).
 
@@ -310,7 +310,7 @@ Top-level sessions in the TUI or RPC mode get three tools; print and JSON sessio
 
 ## Recall
 
-recall, part of pika, lets the agent search and read your past pi sessions and Herder runs: every trajectory and Herder journal pika uploaded to your self-hosted pika server, from every machine and project. The agent can look up how something was done before, what was decided and why, how a past error was fixed, and how an earlier Herder run went.
+recall lets the agent search and read the sessions and Herder runs pika has uploaded from every machine and project. It can look up earlier decisions, solutions to past errors, and the steps and outcome of a Herder run.
 
 It reads through the server's agent read API (`{base}/api/agent/v1/`, "Agent read API" in [`services/pika/docs/SPEC.md`](../../services/pika/docs/SPEC.md)), which sees every recorded session and Herder run, published or not, with credentials scrubbed as in public responses.
 
@@ -352,7 +352,7 @@ docker run -d --name pika --restart unless-stopped -p 127.0.0.1:7171:7171 -v pik
   -e PIKA_BASE_PATH=/pika -e PIKA_TRUST_PROXY=1 ghcr.io/minhuw/pika:latest
 ```
 
-The first command stores the web UI's password (at least 12 characters) in the volume. Since 0.2 the server refuses to start without a password, unless `PIKA_AUTH=proxy` says the reverse proxy authenticates. The image runs as a non-root user with `/data` as its volume and a health check on `/api/health`. To build it yourself, run `docker build -t pika services/pika` and use `pika` as the image.
+The first command stores the web UI's password (at least 12 characters) in the volume. Since 0.2, the default password mode refuses to start without one. Use `PIKA_AUTH=proxy` when the reverse proxy authenticates viewers; `PIKA_AUTH=none` disables viewer authentication and is intended for local development. The image runs as a non-root user with `/data` as its volume and a health check on `/api/health`. To build it yourself, run `docker build -f services/pika/Dockerfile -t pika .` from the repository root and use `pika` as the image.
 
 Behind nginx under a path prefix, forward the path unchanged, allow bodies up to the server's `--max-body`, and pass the client's address and scheme, which pika trusts with `PIKA_TRUST_PROXY=1`:
 
@@ -368,9 +368,18 @@ location /pika/ {
     proxy_send_timeout 120s;
     proxy_read_timeout 120s;
 }
+location /pika/api/relay/ {
+    proxy_pass http://127.0.0.1:7171;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
 ```
 
-Then run `/pika login https://homelab.example/pika` on each machine and pair it, or create a token with `docker exec pika pika token create laptop` and set it with the `url` in the machine's `pika.json`. Caddy examples, subdomain variants, and putting authentication in the proxy are covered in the server README; if the proxy adds authentication, leave `/api/ingest/` to pika's bearer tokens and `/api/pair/` open for pairing.
+Then run `/pika login https://homelab.example/pika` on each machine and pair it, or create a token with `docker exec pika pika token create laptop` and set it with the `url` in the machine's `pika.json`. The server README covers Caddy, subdomain deployments, and proxy authentication. If the proxy authenticates viewers, exempt the device endpoints (`api/ingest/`, `api/relay/`, and `api/agent/`), pairing, health, and public pages and assets, including documentation. Use the server's deployment examples for the full path rules, and keep owner pages and `api/v1/` protected.
 
 ## Tests
 

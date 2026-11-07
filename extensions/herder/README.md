@@ -1,12 +1,12 @@
 # Herder
 
-Herder runs a coding goal to delivery as a durable, verified run. It has three properties:
+Herder takes a coding goal through implementation, verification, and delivery, keeping a durable record of the work. You approve the goal before agent steps begin and confirm delivery before changes reach your checkout or branches.
 
-- **Durable:** each run has an append-only, fsynced journal. A run survives crashes, quits, and new sessions without repeating finished work.
-- **Verified:** the runtime decides success from real check results and its own verification. Agent summaries and plan checkboxes are not evidence.
+- **Durable:** an append-only, fsynced journal records each run. After a crash, quit, or session change, Herder can reuse finished work whose inputs still match.
+- **Verified:** the runtime computes the verdict from check results and, when required, a fresh verifier’s assessment. Agent summaries and plan checkboxes do not establish success.
 - **Proportionate:** the main model picks how much orchestration a task needs. A single writing step plus checks is the default, and workflow scripts are for work that needs more.
 
-Agents work in disposable git worktrees. Their results are commits on hidden refs. Herder never writes to your checkout or branches until you confirm delivery.
+Agents work in disposable git worktrees, and writing steps produce commits on hidden refs. Herder’s delivery code writes to your checkout or branches only after confirmation. Worktrees are not a security sandbox: agents with `bash` can still access shared repository refs, as described under [Roles](#roles).
 
 ```text
 /herder add a --json flag to the export command
@@ -25,7 +25,7 @@ Agents work in disposable git worktrees. Their results are commits on hidden ref
 - Git 2.38 or newer (`git merge-tree --write-tree`). Herder checks the version and fails with a clear message.
 - Node >=22.19.0 and Pi >=1.3.0.
 - A git repository with at least one commit.
-- An interactive session (TUI or RPC) for the two user decisions: approving the goal and confirming delivery. Both are refused in print and JSON modes.
+- An interactive session (TUI or RPC) for user confirmations: approving the goal, confirming delivery, and confirming a model-initiated abort. All three are refused in print and JSON modes.
 
 ## Run lifecycle
 
@@ -41,7 +41,7 @@ Agents work in disposable git worktrees. Their results are commits on hidden ref
 
    The runtime computes the verdict:
    - `met`: every check passes and every criterion is met.
-   - `blocked`: the checks pass, but the verifier quoted a criterion that cannot be satisfied as written.
+   - `blocked`: every check passes, and every unmet criterion has a verifier explanation of why it cannot be satisfied as written. Each explanation must quote at least three words verbatim from its criterion, or the whole criterion if it is shorter.
    - `not_met`: anything else, including a verifier that fails or does not assess a criterion.
 
    Each verification appends a `## Convergence N` section listing the gaps to `plan.md`.
@@ -67,7 +67,7 @@ The main model drives a run with these tools. All except `herder_run`, `herder_p
 
 | Tool | Purpose |
 | --- | --- |
-| `herder_run` | `action: "start"` creates a run for `goal` as `/herder <goal>` does and returns the instructions as its result. `"status"` shows the run. `"approve_goal"` validates `goal.md` and asks you to approve it (interactive only). `"record_decision"` journals a question and your answer, given between launches. |
+| `herder_run` | `action: "start"` creates a run for `goal` as `/herder <goal>` does and returns the instructions as its result. `"status"` shows the run. `"approve_goal"` validates `goal.md` and asks you to approve it (interactive only). `"record_decision"` journals a question and your answer, given between launches. `"abort"` stops and abandons the run after your confirmation (interactive only). |
 | `herder_workflow` | `mode: "validate"` compiles a script and dry-runs it without agents. `"run"` launches `script` or `scriptPath` with `args` in the background and returns the launch number; a follow-up message reports the result. `resume: n` replays launch `n`. `"stop"` stops the running launch. |
 | `herder_step` | Run one agent step directly. It takes the same options as a script's `agent()`. |
 | `herder_integrate` | Integrate a step key or commit with a commit `message`, an optional `task`, and optional `checks`. |
@@ -251,13 +251,15 @@ Frontmatter fields:
 - `model`: `inherit` or `provider/model-id`.
 - `thinking`: `inherit` or one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
 
-Unknown fields are rejected. A read-only role (`write: false`) may list only `read`, `grep`, `find`, `ls`, and `bash`. If a read-only step changes files anyway, Herder discards the changes and reports a warning. With `inherit`, steps use the main session's model and thinking level.
+Unknown fields are rejected. A read-only role (`write: false`) may list only `read`, `grep`, `find`, `ls`, and `bash`. If a read-only step changes files anyway, Herder discards the changes and reports a warning.
+
+The role’s `model` selects the step’s model; step calls and workflow scripts cannot override it. With `inherit`, steps use the main session’s model or thinking level. A step’s `effort` option can override the role’s `thinking`.
 
 Agents with `bash` share the repository's refs. The built-in roles forbid commands that change refs, but Herder cannot enforce that.
 
 ## Templates and skill
 
-`templates/` holds three workflow scripts. The model adapts them, or passes one as `scriptPath`:
+`templates/` holds three workflow scripts for runs that need scripted orchestration. The model can adapt a template or pass it as `scriptPath`:
 
 - `sequential.js`: one task runs implement, gate, an optional probe (a `tester` adds tests from the contract, which the gate runs), a capped fix loop, then integration.
 - `disjoint.js`: independent tasks with disjoint file ownership run in a pipeline and are integrated serially in task order. A `resolver` handles conflicts.

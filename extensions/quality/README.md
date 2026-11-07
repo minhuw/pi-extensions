@@ -1,6 +1,6 @@
 # Quality
 
-Four native Pi prompt templates for cleaning up, deslopping, reviewing, and verifying code changes. Each command runs independently in the current session using normal tools. No Quality runtime, custom parser, or automatic pipeline is installed.
+Quality provides four native Pi prompt templates for code cleanup, slop removal, bug review, and verification. Each command runs independently in the current session using normal tools. No Quality runtime, custom parser, or automatic pipeline is installed.
 
 ## Commands
 
@@ -42,7 +42,7 @@ All four commands default to staged and unstaged changes versus HEAD plus releva
 - **Defensive and type slop:** guards for cases already excluded by types, callers, or validation; catches that rethrow, swallow, or return quiet defaults; `as any` and unexplained suppressions; shims for code that never shipped; and speculative abstraction.
 - **Test slop:** assertions that cannot fail, tests that only check mocks, conditional or swallowed assertions, and duplicates.
 
-When `Agent` is available, it requests one read-only reviewer per applicable lens in parallel. It skips the test lens when no tests are in scope. Slop is judged against local conventions: only lines added or modified by the scoped change are targets, and code that matches how neighboring code handles the same situation is left alone. The main session removes a guard only with evidence that it is unreachable. It keeps validation at trust boundaries and removes swallowed errors only when the change introduced them and nothing depends on them. It strengthens or deletes hollow tests but never weakens assertions or deletes the only test of a changed behavior. Uncertain items are left and listed. The report groups fixes by category.
+When `Agent` is available, it requests one read-only reviewer per applicable lens in parallel. It skips the test lens when no tests are in scope. Slop is judged against local conventions. When reviewing a diff, only added or modified lines are targets; explicitly selected files with no changes in scope are targets in full. Code that matches how neighboring code handles the same situation is left alone. The main session removes a guard only with evidence that it is unreachable. It keeps validation at trust boundaries and removes swallowed errors only when the change introduced them and nothing depends on them. It strengthens or deletes hollow tests but never weakens assertions or deletes the only test of a changed behavior. Uncertain items are left unchanged and listed in the report. The report groups fixes by category.
 
 Reviewers use the model configured for their agent type, or inherit the current session model when none is configured. With no `Agent`, the main session performs the reviews itself. Failed or incomplete reviewer coverage is completed in the main session and disclosed. None of these commands launches scripted workflows or Herder.
 

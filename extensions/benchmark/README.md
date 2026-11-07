@@ -1,6 +1,8 @@
 # Benchmark
 
-`/benchmark <what>` measures a performance claim, and the `benchmark_compare` tool runs one command or two alternately and reports each metric's median, range, and run count with a verdict. The collection loads this extension and its prompt automatically; use `/reload` after installing or updating it.
+Use `/benchmark <what>` to test a performance claim. The prompt guides the agent through preparing a harness and interpreting the results; `benchmark_compare` runs the measurements and reports each metric's median, range, and run count with a verdict. This measures a claim in the current session. For repeated optimization experiments after baseline approval, use Autoresearch.
+
+The collection loads this extension and its prompt automatically; use `/reload` after installing or updating it.
 
 ```text
 /benchmark the new parser against main on the large fixture
@@ -16,7 +18,7 @@ The prompt is a native Pi prompt template (`extensions/benchmark/prompts/benchma
 4. Build a harness that prints one `METRIC` line per metric, including an errors count and a work count.
 5. Run both sides the way production runs them, or call the result inconclusive.
 6. Measure only with `benchmark_compare`, with 5 repetitions unless a run is very slow.
-7. Answer what limits the number (why it is not twice as fast), whether the result breaks a physical limit or saves more time than the changed part takes, whether errors were zero and the work actually ran, and whether it matters end to end.
+7. Check the result: identify the bottleneck, rule out impossible speedups, confirm zero errors and equal work, and explain whether the difference matters end to end.
 8. Report the verdict first, with medians, ranges, and run counts, and never a number the tool did not produce.
 
 ## The `benchmark_compare` tool
@@ -48,9 +50,9 @@ benchmark_compare({
 | `timeoutSeconds` | 1–1,800, default 120, for each run. |
 | `files` | 0–16 project-relative harness files, each at most 4 MiB. |
 
-With one command, the tool runs it `repetitions` times. With two, it runs them alternately, A, B, A, B, for `repetitions` rounds, so load that drifts during the measurement affects both sides. Every run goes through Pi's `bash` tool and its normal hooks and permissions. A failed command, a missing, duplicate, or non-finite metric, or a timeout fails the whole call. When bash truncates a run's output, the metrics are read from its full output file.
+With one command, the tool runs it `repetitions` times. With two, it runs them alternately, A, B, A, B, for `repetitions` rounds. Alternating exposes both sides to load that drifts during measurement. Every run goes through Pi's `bash` tool and its normal hooks and permissions. A failed command, a missing, duplicate, or non-finite metric, or a timeout fails the whole call. When bash truncates a run's output, the metrics are read from its full output file.
 
-The tool fingerprints the `files` with SHA-256 before the first run and checks them again after the last; paths and symlinks escaping the project are rejected, and a changed file fails the call. The tool stores nothing: no session entries, status, or files.
+The tool fingerprints the `files` with SHA-256 before the first run and checks them again after the last. It rejects paths and symlinks that escape the project, and a changed file fails the call. The extension adds no persistent report, status, or files of its own; the commands still run through bash.
 
 ## The METRIC format
 
@@ -75,6 +77,8 @@ The result is a Markdown table with each side's median, min–max range, and sam
 
 Verdict: new is better than main (Parse, lower is better; ranges do not overlap).
 ```
+
+Declare `errorsMetric` and `workMetric` to enable the error and equal-work checks. Without them, the tool cannot use those checks to reject misleading results.
 
 For two commands the verdict is:
 

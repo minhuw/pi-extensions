@@ -1,6 +1,8 @@
 # Autoresearch
 
-A native, main-session optimization workflow with baseline review before autonomous experiments. Start with one command:
+Use `/autoresearch` to improve a measurable result through repeated experiments in the current Pi session. The agent first builds and measures a baseline for your review. Optimization starts only after you approve it with `/autoresearch approve`.
+
+Start with a target:
 
 ```text
 /autoresearch optimize compilation speed --max 20
@@ -34,7 +36,7 @@ If the proposed workload or measurement is wrong:
 /autoresearch revise measure incremental compilation after editing one source file
 ```
 
-This returns to setup, creates a fresh comparison, measures the revised baseline, and requires approval again.
+Revision returns to setup, measures a fresh baseline, and requires approval again.
 
 After approval, the extension schedules bounded experiment passes in the same Pi session. Each pass chooses a hypothesis, makes a focused change, measures it using the approved benchmark, reports its findings, and retains or undoes its own edits based on the evidence. Code changes and undo decisions are performed by the agent; the extension does not automatically commit, reset, or clean the repository.
 
@@ -53,7 +55,11 @@ After approval, the extension schedules bounded experiment passes in the same Pi
 | `/research-report` or `/research-report results` | Show the current report, displayed like `/autoresearch status`. |
 | `/research-report clear` | Clear a stopped/completed campaign or standalone report. Stop an active campaign first. |
 
-The default is 25 optimization passes; `--max` accepts 1–1,000 and must appear at the end of the start command. Campaigns have a six-hour lifetime after approval. Reaching the iteration limit completes the campaign; reaching the lifetime pauses it, and `/autoresearch resume` then marks it complete. Each optimization pass has a 15-minute timeout; initial setup has 30 minutes. The setup and iteration prompts state these pass limits. Because each iteration must fit a focused edit plus one full `autoresearch_measure` (every repetition plus the correctness check), the setup prompt asks the agent to size the workload and repetitions so that one measurement takes well under half the iteration limit. Timeouts and interrupted/unmeasured passes pause for explicit recovery. A failed latest measurement cannot be masked by an earlier successful measurement in the same pass.
+The default is 25 optimization passes; `--max` accepts 1–1,000 and must appear at the end of the start command. Campaigns have a six-hour lifetime after approval. Reaching the iteration limit completes the campaign. Reaching the lifetime pauses it; `/autoresearch resume` then marks it complete.
+
+Each optimization pass has a 15-minute timeout; initial setup has 30 minutes. The setup and iteration prompts state these limits. An iteration must fit both a focused edit and one full `autoresearch_measure`, including every repetition and the correctness check. The setup prompt therefore asks the agent to keep measurement time well under half the iteration limit.
+
+Timeouts and interrupted or unmeasured passes pause for explicit recovery. Continuation requires the latest measurement attempt in the pass to succeed; an earlier success cannot mask a later failure.
 
 ## Measurement tools
 
@@ -135,11 +141,13 @@ Noise check for Compile (objective): outside noise.
 
 The verdict is `within noise` when the baseline and latest ranges overlap, including ranges that only touch; that is no measurable difference. It is `outside noise` when the ranges do not overlap, and `noise unknown` when either side has fewer than 2 samples. The iteration prompt tells the agent that a result within noise is not an improvement. This is a coarse check, not a significance test: with 3 independent samples per side, two identical versions produce non-overlapping ranges by chance about 1 time in 10.
 
-[Statusline Footer](../statusline-footer/README.md) displays research status on the Git row in full mode and prioritizes it over Loop in compact mode. Clearing the report restores Loop's summary. Model identity and context percentage take priority at narrow widths. Pi's default footer can also display the status.
+[Statusline Footer](../statusline-footer/README.md) displays research status on a separate row below Git in full mode. In compact mode, research takes priority over Herder, then Loop. Clearing the report reveals the next available summary. Model identity and context percentage take priority at narrow widths. Pi's default footer can also display the status.
 
 ## Session lifecycle
 
-Campaigns and reports are stored together in versioned custom session entries, outside model context. They survive compaction and follow the selected conversation branch. Status and report displays are separate transcript entries in TUI and notifications in RPC, also outside model context; restoration reads only the latest snapshot. Earlier standalone reporting snapshots are supported. Each new pass receives a checkpoint reconstructed from stored methodology and measurements, without replacing Pi/Magpie compaction.
+Campaigns and reports are stored together in versioned custom session entries, outside model context. They survive compaction and follow the selected conversation branch. Restoration reads only the latest snapshot and also supports earlier standalone reporting snapshots. Each new pass receives a checkpoint reconstructed from the stored methodology and measurements; Pi/Magpie compaction continues to work normally.
+
+Status and report displays are separate transcript entries in TUI and notifications in RPC, also outside model context.
 
 The scheduler waits outside Pi's queue until the session is idle, no user messages are pending, and no extension dialog is open. Only one pass is owned at a time. User input, aborts, unrelated prompts taking over a pass, or tree navigation prevent silent continuation. Stale queued passes are canceled before a provider request. Results arriving after ownership is lost are rejected.
 

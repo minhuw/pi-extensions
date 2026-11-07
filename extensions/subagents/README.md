@@ -1,6 +1,6 @@
 # Subagents (vendored)
 
-Editable fork of [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents): autonomous subagents and scriptable multi-agent workflows for Pi. Requires **Pi >=1.3.0** in this collection.
+Subagents delegates tasks to a configurable fleet of Pi agents. This collection maintains an editable fork of [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents), with individual agents available by default and scripted workflows available after explicit opt-in. Requires **Pi >=1.3.0**.
 
 ## Upstream pin
 
@@ -28,7 +28,7 @@ Do **not** also install `npm:@tintinweb/pi-subagents` in the same Pi profile. Af
 
 ## Local defaults and compatibility
 
-- **Foreground by default:** `Agent` still waits unless `run_in_background: true` is requested. Upstream's `backgroundByDefault` setting is supported, but defaults to `false` here.
+- **Foreground by default:** `Agent` waits for completion unless background execution is selected. An agent’s frontmatter takes precedence over the tool’s `run_in_background` argument, which takes precedence over `backgroundByDefault` (default `false`).
 - **Default fleet:** `recon`, `worker`, `reviewer`, and `expert` replace upstream Explore/Plan/general-purpose. Unknown types fall back to `worker`; set `fallbackSubagent: "none"` to reject unknown types instead.
 - **Package discovery is opt-in:** `packageAgents` and `packageWorkflows` default to `false`. Enable either in `subagents.json` (or specify a package allowlist) to discover explicitly declared resources from configured packages. Project trust still applies.
 - **Nested delegation is opt-in per agent:** the new upstream delegation controls are available, but the embedded fleet does not gain recursive delegation automatically.
@@ -57,7 +57,7 @@ Settings live in the global or project `subagents.json`; see [upstream configura
 
 Default tools: `Agent`, `get_subagent_result`, and `steer_subagent`. Use `/agents` for the fleet and settings. Custom agent definitions can override embedded names; upstream also supports mentions. `SubagentWorkflow` and its inspector are available only after explicit configuration opt-in.
 
-Select an existing agent type with `subagent_type` (`agentType` in workflows). Its user-configured frontmatter `model` is authoritative; without one, the child inherits the current parent model. Agent tools and workflow scripts reject `model` overrides, including stale saved scripts. To change a type's model, edit its agent definition. Trusted external hosts retain their own model bindings.
+Select an existing agent type with `subagent_type` (`agentType` in workflows). The resolved agent definition’s `model` is authoritative, including the embedded defaults below. If the definition has no model, the child inherits the current parent model. Agent tools and workflow scripts reject `model` overrides, including stale saved scripts. To change a type’s model, edit its agent definition. Trusted external hosts retain their own model bindings.
 
 | Type | Job | Tools | Model defaults |
 | --- | --- | --- | --- |
@@ -69,6 +69,8 @@ Select an existing agent type with `subagent_type` (`agentType` in workflows). I
 A custom `expert.md` overrides the embedded Expert through normal agent discovery. `disableDefaultAgents: true` hides Expert along with the other built-ins; custom agents remain available.
 
 The embedded fleet keeps Pi's built-in `grep`/`find` and inherits installed search extensions, including `npm:@ff-labs/pi-fff` (`fffind`/`ffgrep`). This also applies to nested agents through normal discovery. Explicit `extensions: false`, `exclude_extensions`, `disallowed_tools`, `ext:` selectors, and `isolated: true` still control which tools load. Custom definitions retain their chosen extension set. Read-only role instructions are not an OS sandbox.
+
+`isolated: true` controls extension and MCP access; it does not create a separate working tree. File isolation uses `isolation: "worktree"`, subject to the project’s `worktreeIsolation` setting.
 
 ### Service tier
 
@@ -84,7 +86,11 @@ Otherwise the `Agent` tool can pass `service_tier`. `fast` maps to provider `pri
 
 ### Workflows
 
-Scripted workflows are disabled by default because validation errors can be swallowed as successful empty results, and reloads lose the in-memory run records required for resume. If explicitly enabled, `SubagentWorkflow` executes JavaScript that composes agents with pipelines, parallel calls, structured results, and optional test gates. Saved scripts can be reused, and completed call prefixes can be replayed while the run record remains available.
+Scripted workflows are disabled by default because some validation failures return error text without an error flag, and reloads lose the in-memory run records required for resume. Enabling `workflowsEnabled: true` makes the tool available; its instructions still require an explicit user request before orchestration.
+
+`SubagentWorkflow` executes JavaScript that composes agents with pipelines, parallel calls, structured results, and optional test gates. Children share the workflow’s working directory and current files by default. Set `isolation: "worktree"` on a workflow agent call when concurrent writers need separate copies, provided the project allows worktrees. Workflow calls use the script’s isolation option, not the agent definition’s `isolation` field. On successful cleanup, worktree changes are committed to a branch named in the result; applying them to the parent checkout is a separate action.
+
+Saved scripts can be reused. Completed call prefixes can be replayed while the in-memory run record remains available.
 
 ## Verification
 
