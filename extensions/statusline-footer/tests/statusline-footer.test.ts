@@ -234,6 +234,7 @@ describe("statusline footer visual language", () => {
 		const palette = statusPalette(theme);
 		expect(statusHue(theme, "impeccable-live")).toBe(palette[5 % palette.length]);
 		expect(statusHue(theme, "language")).toBe(palette[6 % palette.length]);
+		expect(statusHue(theme, "spokesman")).toBe(palette[7 % palette.length]);
 		for (const segment of ["1 failed", "1 stuck", "state error", "herder: verified not_met", "verified blocked"]) {
 			expect(statusTone(segment)).toBe("problem");
 		}
@@ -891,6 +892,136 @@ describe("statusline footer rendering", () => {
 		} finally {
 			harness.disposeFooter();
 			baseline.disposeFooter();
+		}
+	});
+
+	it.each(["full", "compact"])("shows the spokesman in the %s bar to the right of language and never on a status row", async (mode) => {
+		const harness = createHarness(`spokesman-bar-${mode}`, "tui", {
+			extensionStatuses: [],
+			keyedExtensionStatuses: { language: "English", spokesman: "gpt-4o-mini" },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", mode);
+		const rows = mode === "full" ? 3 : 1;
+		try {
+			const lines = harness.getFooter()!.render(160);
+			expect(lines).toHaveLength(rows);
+			expect(lines[0]).toContain("\u{F05CA} English");
+			expect(lines[0]).toContain("\u{F05CB} gpt-4o-mini");
+			expect(lines[0]!.indexOf("English")).toBeLessThan(lines[0]!.indexOf("gpt-4o-mini"));
+			for (const line of lines.slice(1)) expect(line).not.toContain("gpt-4o-mini");
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			expect(harness.getFooter()!.render(160)[0]).toContain("gpt-4o-mini");
+			expect(harness.getFooter()!.render(160)[0]).not.toContain("\u{F05CB}");
+			harness.setStatus("spokesman");
+			expect(harness.getFooter()!.render(160)).toHaveLength(rows);
+			expect(harness.getFooter()!.render(160)[0]).not.toContain("gpt-4o-mini");
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it("sheds spokesman whole before language as width narrows, and both outlast the provider in full mode", async () => {
+		const start = async (id: string, mode: "full" | "compact", keyedExtensionStatuses: Record<string, string>) => {
+			const harness = createHarness(id, "tui", { extensionStatuses: [], keyedExtensionStatuses });
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			await harness.runCommand("footer", mode);
+			return harness;
+		};
+		const fullHarness = await start("spokesman-full-order", "full", { language: "English", spokesman: "gpt-4o-mini" });
+		const fullLangOnly = await start("spokesman-full-lang", "full", { language: "English" });
+		const compactHarness = await start("spokesman-compact-order", "compact", {
+			herder: "herder: T2",
+			language: "English",
+			spokesman: "gpt-4o-mini",
+		});
+		try {
+			const seenFull = { all: false, bothNoProvider: false, langOnly: false, providerWithoutSpokesman: false };
+			for (let width = 160; width >= 24; width--) {
+				const line = fullHarness.getFooter()!.render(width)[0]!;
+				const hasLang = line.includes("English");
+				const hasSpokesman = line.includes("gpt-4o-mini");
+				const hasProvider = line.includes("(moonshot)");
+				if (hasSpokesman) expect(hasLang, `${width}`).toBe(true);
+				if (hasLang && hasSpokesman && hasProvider) seenFull.all = true;
+				if (hasLang && hasSpokesman && !hasProvider) seenFull.bothNoProvider = true;
+				if (hasLang && !hasSpokesman) {
+					seenFull.langOnly = true;
+					expect(line, `${width}`).toBe(fullLangOnly.getFooter()!.render(width)[0]);
+				}
+				if (hasProvider && !hasSpokesman) seenFull.providerWithoutSpokesman = true;
+			}
+			expect(seenFull).toEqual({
+				all: true,
+				bothNoProvider: true,
+				langOnly: true,
+				providerWithoutSpokesman: false,
+			});
+
+			const narrowestCompact = { spokesman: Infinity, language: Infinity, workflow: Infinity };
+			for (let width = 160; width >= 24; width--) {
+				const line = compactHarness.getFooter()!.render(width)[0]!;
+				if (line.includes("gpt-4o-mini")) narrowestCompact.spokesman = width;
+				if (line.includes("English")) narrowestCompact.language = width;
+				if (line.includes("herder: T2")) narrowestCompact.workflow = width;
+			}
+			expect(narrowestCompact.spokesman).toBeGreaterThan(narrowestCompact.language);
+			expect(narrowestCompact.language).toBeGreaterThan(narrowestCompact.workflow);
+		} finally {
+			fullHarness.disposeFooter();
+			fullLangOnly.disposeFooter();
+			compactHarness.disposeFooter();
+		}
+	});
+
+	it("accumulates spokesman-rewrite custom entry usage without incrementing turns or requests", async () => {
+		const activeBranch = [
+			{ type: "message", message: { role: "user", timestamp: 1_000 } },
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					usage: { input: 100, output: 50, cacheRead: 20, cacheWrite: 10, reasoning: 5, cost: { total: 0.10 } },
+				},
+			},
+			{
+				type: "custom",
+				customType: "spokesman-rewrite",
+				data: {
+					provider: "magpie",
+					usage: {
+						input: 40,
+						output: 30,
+						cacheRead: 80,
+						cacheWrite: 10,
+						reasoning: 15,
+						cost: { total: 0.05, magpiePricing: "estimate" },
+					},
+				},
+			},
+		];
+		const harness = createHarness("spokesman-rewrite-usage", "tui", { branch: activeBranch });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			const lines = harness.getFooter()!.render(240);
+			const row2 = lines[1]!;
+			expect(row2).toContain("# 1");
+			expect(row2).toContain("~$0.150");
+			expect(row2).toContain("$0.150/turn");
+			expect(row2).toContain("↑ 140");
+			expect(row2).toContain("↓ 80");
+			expect(row2).toContain("⚡ 100");
+			expect(row2).toContain("20 think");
+			await harness.runCommand("footer", "debug");
+			expect(harness.notifications.at(-1)).toContain("requests=0");
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
 		}
 	});
 

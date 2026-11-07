@@ -20,7 +20,7 @@ Full mode is enabled by default when Pi starts.
 
 ## Layout
 
-Full mode shows the identity bar, a telemetry row, and a Git row. A fourth row appears while an extension publishes a status other than language. Primary facts sit on the left; capacity, cost, and path sit on the right. The example uses ASCII/Unicode icons; the bar's groups sit on colored bands:
+Full mode shows the identity bar, a telemetry row, and a Git row. A fourth row appears while an extension publishes a status other than language or spokesman. Primary facts sit on the left; capacity, cost, and path sit on the right. The example uses ASCII/Unicode icons; the bar's groups sit on colored bands:
 
 ```text
  ● ☾ k3   HIGH  (moonshot)  English  ──────────────────────────────  × 2×  ▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉  8.2%  79k/1.1M
@@ -31,10 +31,10 @@ Full mode shows the identity bar, a telemetry row, and a Git row. A fourth row a
 
 | Row | Left | Right |
 | --- | --- | --- |
-| 1 | Live pulse, queued chip, model, thinking, non-standard service tier, provider, language | Compactions, gradient bar, percent, used/window |
+| 1 | Live pulse, queued chip, model, thinking, non-standard service tier, provider, language, spokesman | Compactions, gradient bar, percent, used/window |
 | 2 | Turns and elapsed time; TTFT, TTFB, and throughput; tool calls and errors | Cost and cost per turn; input / output / cached-input tokens and cache hit rate; reasoning tokens |
 | 3 | Git branch, working-tree diff, ahead/behind | Files touched, current directory |
-| 4 | Extension statuses except the language: research, Herder, Loop, background processes, then the rest; shown only while one of these is set | |
+| 4 | Extension statuses except the language and spokesman: research, Herder, Loop, background processes, then the rest; shown only while one of these is set | |
 
 The model name starts with its vendor's mark in the vendor's color. These are the OpenAI and Claude logos (Nerd Fonts 3.5 or later), the Google logo for Gemini, and related symbols for Kimi, DeepSeek, Grok, Llama, Mistral, and Qwen; with `STATUSLINE_NERD_FONTS=0`, Unicode marks such as `✻` (Claude), `⊛` (OpenAI), `✦` (Gemini), and `☾` (Kimi) take their place. The model id is matched before the provider, so Claude served through Vertex or Magpie still gets the Claude mark; an unrecognized model has none.
 
@@ -42,11 +42,11 @@ Thinking levels are colored: dim off, amber low, green medium, lilac high, and a
 
 Compact mode shows only the bar, with cost and elapsed time on the right. It also includes a workflow summary when there is room. Statuses published through `ctx.ui.setStatus("autoresearch", ...)`, `ctx.ui.setStatus("herder", ...)`, and `ctx.ui.setStatus("loop", ...)` compete for that space in this order: research, Herder, then Loop. Clearing a higher-priority status reveals the next one.
 
-Full mode shows these statuses together on one row below Git, ordered as research, Herder, Loop, background processes, then other extensions except language. Clearing a status removes it; the row disappears when none remain.
+Full mode shows these statuses together on one row below Git, ordered as research, Herder, Loop, background processes, then other extensions except language and spokesman. Clearing a status removes it; the row disappears when none remain.
 
 At narrow widths, both layouts preserve the model and context percentage. Workflow summaries and secondary details drop out, and the context bar shrinks or disappears before the model is truncated.
 
-The `language` status from [Language](../language/README.md) stays in the bar in both modes, so it does not keep the status row open. It follows the provider in full mode and any workflow summary in compact mode. The provider, token counts, and compact mode's cost and elapsed time give way before language does. When language no longer fits beside the model and context percentage, it drops out whole. Compact mode keeps workflow and background-process summaries as long as they fit.
+The `language` status from [Language](../language/README.md) and the `spokesman` status from [Spokesman](../spokesman/README.md) stay in the bar in both modes, so they do not keep the status row open. They follow the provider in full mode and any workflow summary in compact mode, with `spokesman` to the right of `language`. The provider, token counts, and compact mode's cost and elapsed time give way before `language` and `spokesman` do. As width narrows further, `spokesman` drops out whole before `language`, and `language` drops out whole when it no longer fits beside the model and context percentage. Compact mode keeps workflow and background-process summaries as long as they fit.
 
 ### The bar
 
@@ -63,7 +63,7 @@ The `language` status from [Language](../language/README.md) stays in the bar in
 - Icons carry the color and values stay `muted`, with the cost in `text` so it reads first. A value turns colored only to report a state: a first token slower than two seconds, failed tool calls, or the cache hit rate. The cache hit rate sits beside the cached-token count.
 - A row that does not fit drops whole groups, least important first, instead of cutting text: reasoning tokens, then tools, activity, token counts, and latency, keeping the cost. On the Git row the path shortens from the middle (`~/…/project`), keeping as many trailing directories as fit; the touched-file count gives way before the path would drop below twelve columns. The status row drops statuses from the end.
 
-Each extension status keeps one identity color, drawn from the theme's link, syntax, success, and border colors, for its icon and its first segment (split at ` · ` and `, `); the details stay `muted`. The footer never picks a red hue or one close to the theme's error or warning colors, so a routine status cannot look like a failure. Known extensions keep fixed colors; others get a stable color from their key. The status row also gives each status an icon: a flask for research, a sheep for Herder, a console for background processes, a robot for subagents, a palette for Impeccable, and a puzzle piece for other extensions. The language gets a translate icon in the bar in both modes, because a bare name does not say what it is. A status that starts with its own symbol, such as Loop's `↻`, gets no second icon, and compact mode shows no other status icons. Only the segments that report a problem stand out, and none of them in red: `failed`, `stuck`, `error`, `blocked`, or `not_met` use bold `warning`, and `paused`, `awaiting`, `stopping`, `killed`, or `for you` use `warning`; for example, in `bg 2 running · 1 failed` only `1 failed` turns amber. Matching is whole-word, so a loop named `fix-errors` stays calm. A status that already contains ANSI colors keeps them.
+Each extension status keeps one identity color, drawn from the theme's link, syntax, success, and border colors, for its icon and its first segment (split at ` · ` and `, `); the details stay `muted`. The footer never picks a red hue or one close to the theme's error or warning colors, so a routine status cannot look like a failure. Known extensions keep fixed colors; others get a stable color from their key. The status row also gives each status an icon: a flask for research, a sheep for Herder, a console for background processes, a robot for subagents, a palette for Impeccable, and a puzzle piece for other extensions. The language and spokesman get translate and voice icons in the bar in both modes, because a bare name does not say what it is. A status that starts with its own symbol, such as Loop's `↻`, gets no second icon, and compact mode shows no other status icons. Only the segments that report a problem stand out, and none of them in red: `failed`, `stuck`, `error`, `blocked`, or `not_met` use bold `warning`, and `paused`, `awaiting`, `stopping`, `killed`, or `for you` use `warning`; for example, in `bg 2 running · 1 failed` only `1 failed` turns amber. Matching is whole-word, so a loop named `fix-errors` stays calm. A status that already contains ANSI colors keeps them.
 
 See [Autoresearch](../autoresearch/README.md) for baseline review, approved iterations, and the reporting tool, and [Herder](../herder/README.md) for verified orchestration runs.
 

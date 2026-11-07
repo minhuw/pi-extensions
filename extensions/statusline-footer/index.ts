@@ -393,7 +393,7 @@ export function statusTone(segment: string): "problem" | "attention" | "calm" {
 }
 
 // Known extensions keep a fixed slot so their color does not move as others come and go.
-const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language"];
+const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language", "spokesman"];
 const STATUS_ICONS: Record<string, string> = {
 	autoresearch: "\u{F0093}", // md-flask
 	herder: "\u{F0CC6}", // md-sheep
@@ -402,6 +402,7 @@ const STATUS_ICONS: Record<string, string> = {
 	subagents: "\u{F06A9}", // md-robot
 	"impeccable-live": "\u{F03D8}", // md-palette
 	language: "\u{F05CA}", // md-translate
+	spokesman: "\u{F05CB}", // md-account-voice
 };
 const STATUS_DEFAULT_ICON = "\u{F0431}"; // md-puzzle
 const STATUS_HUES: ThemeToken[] = [
@@ -476,6 +477,12 @@ export function renderStatus(theme: Theme, text: string, key = "", withIcon = fa
 function renderLanguage(theme: Theme, statuses: ReadonlyMap<string, string>): string | undefined {
 	const language = statuses.get("language");
 	return language ? renderStatus(theme, language, "language", hasNerdFonts()) : undefined;
+}
+
+/** The spokesman model for the bar. Like language, it keeps its icon in both modes. */
+function renderSpokesman(theme: Theme, statuses: ReadonlyMap<string, string>): string | undefined {
+	const spokesman = statuses.get("spokesman");
+	return spokesman ? renderStatus(theme, spokesman, "spokesman", hasNerdFonts()) : undefined;
 }
 
 // ── model marks ─────────────────────────────────────────────────────
@@ -607,6 +614,11 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 			const pricing = (e.data as { pricing?: unknown } | undefined)?.pricing;
 			if (pricing === "unavailable") s.priceUnavailable = true;
 			if (pricing === "estimate") s.priceEstimated = true;
+			continue;
+		}
+		if (e.type === "custom" && e.customType === "spokesman-rewrite") {
+			const data = e.data as { usage?: Usage; provider?: string } | undefined;
+			if (data?.usage) addUsage(s, data.usage, data.provider ?? (data as { spokesmanProvider?: string })?.spokesmanProvider);
 			continue;
 		}
 		if (e.type === "compaction") {
@@ -1032,6 +1044,7 @@ function renderIdentityRow(
 	compactMode: boolean,
 	languageStatus?: string,
 	workflowStatus?: string,
+	spokesmanStatus?: string,
 ): string {
 	const set = icons();
 	const { chrome } = skin;
@@ -1051,9 +1064,13 @@ function renderIdentityRow(
 	// Compact already renders the provider-free label, so it is the fallback identity too.
 	const compactIdentity = compactMode ? left : label(false);
 	const fitsBeside = (status: string) => visibleWidth(compactIdentity) + visibleWidth(status) + minimumContext + chrome + 2 <= width;
-	// The language goes first, and whole; what stays then lays out as if it had never been set.
-	const allStatuses = cluster([workflowStatus, languageStatus], "  ");
-	const loop = fitsBeside(allStatuses) ? allStatuses : workflowStatus ?? "";
+	// The spokesman goes first, then the language, each whole; what stays then lays out as if they had never been set.
+	const candidates = [
+		cluster([workflowStatus, languageStatus, spokesmanStatus], "  "),
+		cluster([workflowStatus, languageStatus], "  "),
+		workflowStatus ?? "",
+	].filter(Boolean);
+	const loop = candidates.find(fitsBeside) ?? "";
 	if (loop && visibleWidth(left) + visibleWidth(loop) + visibleWidth(right) + chrome + 2 <= width) {
 		return skin.bar(cluster([left, loop], "  "), right, width);
 	}
@@ -1086,7 +1103,7 @@ function renderCompact(
 	return renderIdentityRow(ctx, theme, skin, width, state, collectStats(ctx, state), true, renderLanguage(theme, statuses), cluster([
 		workflowKey && renderStatus(theme, statuses.get(workflowKey)!, workflowKey),
 		statuses.get(PROCESS_STATUS_KEY) && renderStatus(theme, statuses.get(PROCESS_STATUS_KEY)!, PROCESS_STATUS_KEY),
-	], "  "));
+	], "  "), renderSpokesman(theme, statuses));
 }
 
 /** Cached reads as a share of all input, and the color that rates it. */
@@ -1116,15 +1133,26 @@ function renderFull(
 ): string[] {
 	const s = collectStats(ctx, state);
 	const extensionStatuses = footerData.getExtensionStatuses();
-	const line1 = renderIdentityRow(ctx, theme, skin, width, state, s, false, renderLanguage(theme, extensionStatuses));
+	const line1 = renderIdentityRow(
+		ctx,
+		theme,
+		skin,
+		width,
+		state,
+		s,
+		false,
+		renderLanguage(theme, extensionStatuses),
+		undefined,
+		renderSpokesman(theme, extensionStatuses),
+	);
 
 	// Extension statuses get their own row, present only while one is published:
 	// workflows first (research, Herder, Loop, processes), then the rest. The
-	// language is nearly always set, so it rides the bar and keeps the row away.
+	// language and spokesman are nearly always set, so they ride the bar and keep the row away.
 	const workflowKeys = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY];
 	const statuses = [
 		...workflowKeys.map((key): [string, string | undefined] => [key, extensionStatuses.get(key)]),
-		...[...extensionStatuses.entries()].filter(([key]) => key !== "language" && !workflowKeys.includes(key)),
+		...[...extensionStatuses.entries()].filter(([key]) => key !== "language" && key !== "spokesman" && !workflowKeys.includes(key)),
 	].flatMap(([key, status]) => status ? [renderStatus(theme, status, key, hasNerdFonts())] : []);
 
 	return [line1, ...renderDetailRows(ctx, theme, footerData, width, state, s, statuses)];
