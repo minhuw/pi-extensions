@@ -34,6 +34,10 @@ fn summary<'a>(scope: &mut Scope<'a>, summary: &'a mut SessionSummary) {
 fn turn<'a>(scope: &mut Scope<'a>, turn: &'a mut Turn) {
     scope.cut_text(&mut turn.user_text, USER_TEXT_CHARS);
     scope.text(&mut turn.final_text);
+    if let Some(spokesman) = &mut turn.spokesman {
+        scope.text(&mut spokesman.original_text);
+        scope.text(&mut spokesman.rewritten_text);
+    }
 }
 
 fn text<'a>(scope: &mut Scope<'a>, text: &'a mut Option<String>) {

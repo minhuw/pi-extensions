@@ -1737,3 +1737,67 @@ async fn the_rewrite_keeps_ordinary_text_at_the_cap_and_leaves_new_documents_alo
     }
     assert_current_at_version_8(&store);
 }
+
+#[tokio::test]
+async fn spokesman_texts_share_turn_redaction_scope_in_public_and_agent_reads() {
+    let app = App::new();
+    let id = "spokesman-redaction";
+    let original_secret = "OriginalSpokesmanSecret8392";
+    let shared_secret = "SharedSpokesmanSecret8392";
+    let rewrite_secret = "RewriteSpokesmanSecret8392";
+    let input: Vec<String> = [
+        json!({ "type": "session", "version": 3, "id": id, "cwd": "/home/me/code/widgets" }),
+        message("user", None, "2026-10-20T09:00:01.000Z", json!({
+            "role": "user", "content": format!("Please use {shared_secret}") })),
+        message("answer", Some("user"), "2026-10-20T09:00:02.000Z", assistant(json!([
+            { "type": "text", "text": format!("Final answer echoes {rewrite_secret}") }
+        ]), "stop", 1792486802000)),
+        json!({ "type": "custom", "id": "rewrite", "customType": "spokesman-rewrite", "data": {
+            "targetEntryId": "answer",
+            "originalText": format!("DB_PASSWORD={original_secret}\nAlso {shared_secret}"),
+            "rewrittenText": format!("DB_PASSWORD={shared_secret}\nAPI_TOKEN={rewrite_secret}\nEcho {original_secret}"),
+            "originalModel": "codex/gpt-6@1m", "spokesmanModel": "google/gemini@500k",
+        } }),
+    ].iter().map(Value::to_string).collect();
+    app.upload(id, &input).await;
+    let path = format!("sessions/{id}/turns");
+    let before_publish = app.send(Request::get(format!("/api/public/v1/{path}")).body(Body::empty()).unwrap()).await;
+    assert_eq!(before_publish.status, StatusCode::NOT_FOUND);
+    app.publish("widgets").await;
+
+    for route in ["turns", "updates"] {
+        let path = format!("sessions/{id}/{route}");
+        let owner = app.owner(&path).await;
+        for secret in [original_secret, shared_secret, rewrite_secret] {
+            assert!(owner.text().contains(secret), "{path}: owner text must be intact");
+        }
+        let public = app.public(&path).await;
+        for secret in [original_secret, shared_secret, rewrite_secret] {
+            assert!(!public.text().contains(secret), "{path}: leaked {secret}");
+        }
+        let public = public.json();
+        assert_only_scrubbed(&owner.json(), &public, &path);
+        let turn = if route == "turns" { &public["items"][0] } else { &public["turns"][0] };
+        assert_eq!(turn["userText"], "Please use [REDACTED:SECRET]");
+        assert_eq!(turn["finalText"], "Final answer echoes [REDACTED:SECRET]");
+        assert_eq!(turn["spokesman"]["originalText"], "DB_PASSWORD=[REDACTED:SECRET]\nAlso [REDACTED:SECRET]");
+        assert_eq!(turn["spokesman"]["rewrittenText"], "DB_PASSWORD=[REDACTED:SECRET]\nAPI_TOKEN=[REDACTED:SECRET]\nEcho [REDACTED:SECRET]");
+        assert_eq!(turn["spokesman"]["originalModel"], "gpt-6");
+        assert_eq!(turn["spokesman"]["spokesmanModel"], "gemini");
+        assert_eq!(turn["spokesman"]["seq"], 3);
+        assert_eq!(turn["spokesman"]["targetSeq"], 2);
+        if route == "turns" {
+            let agent = app.send(Request::get(format!("/api/agent/v1/{path}"))
+                .header(header::AUTHORIZATION, format!("Bearer {}", app.token))
+                .body(Body::empty()).unwrap()).await;
+            assert_eq!(agent.status, StatusCode::OK, "{}", agent.text());
+            assert_eq!(agent.json(), public);
+        }
+    }
+    let entries = app.public(&format!("sessions/{id}/entries?from=3&to=3")).await.json();
+    assert_eq!(entries["items"][0]["raw"]["data"]["originalText"], "DB_PASSWORD=[REDACTED:SECRET]\nAlso [REDACTED:SECRET]");
+    let trace = app.public(&format!("sessions/{id}/trace")).await.json();
+    assert_eq!(trace["records"][0]["spokesmanSeq"], 3);
+    assert!(trace["records"][0].get("originalText").is_none());
+    assert!(trace["records"][0].get("rewrittenText").is_none());
+}

@@ -353,8 +353,8 @@ async fn tree(State(state): State<AppState>, Extension(scope): Extension<Scope>,
 }
 
 async fn turns(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>, Query(params): QueryParams) -> Response {
-    scoped_json(&state, scope, Some(id.clone()), move |_, conn| {
-        let mut turns = read::sessions::turns(conn, &id, &Params(params))?;
+    scoped_json(&state, scope, Some(id.clone()), move |store, conn| {
+        let mut turns = read::sessions::turns(conn, &store.blobs, &id, &Params(params))?;
         if scope.redact {
             read::redaction::turns(&mut turns);
         }
@@ -364,8 +364,8 @@ async fn turns(State(state): State<AppState>, Extension(scope): Extension<Scope>
 }
 
 async fn updates(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>, Query(params): QueryParams) -> Response {
-    scoped_json(&state, scope, Some(id.clone()), move |_, conn| {
-        let mut updates = read::sessions::updates(conn, &id, &Params(params))?;
+    scoped_json(&state, scope, Some(id.clone()), move |store, conn| {
+        let mut updates = read::sessions::updates(conn, &store.blobs, &id, &Params(params))?;
         if scope.public {
             if let Some(session) = &mut updates.session {
                 read::publishing::summary(conn, session)?;

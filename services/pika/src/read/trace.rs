@@ -185,6 +185,8 @@ pub struct LlmRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
     pub tool_calls: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spokesman_seq: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -580,7 +582,10 @@ fn assistant_facts(line: &str, public: bool) -> AssistantFacts {
             match ty {
                 Some("thinking") => facts.thinking = true,
                 Some("text") if facts.text.is_none() => {
-                    facts.text = text.filter(|t| !t.trim().is_empty()).map(|t| if public { t.to_owned() } else { one_line(t) });
+                    facts.text = text
+                        .map(super::spokesman::strip_marker)
+                        .filter(|t| !t.trim().is_empty())
+                        .map(|t| if public { t.to_owned() } else { one_line(t) });
                 }
                 _ => {}
             }
@@ -840,6 +845,7 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str, redact: bool) -> ReadResu
     }
     drop(rows);
 
+    let rewrites = super::spokesman::Rewrites::load(tx, blobs, sid)?;
     let mut failed = BlobFailures::default();
     // Each call's position in its assistant message.
     let mut position: HashMap<String, usize> = HashMap::new();
@@ -873,6 +879,7 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str, redact: bool) -> ReadResu
             cost: r.get(11)?,
             request_id: r.get(12)?,
             text: facts.text,
+            spokesman_seq: rewrites.by_target.get(&seq).map(|r| r.seq),
             thinking: facts.thinking.then_some(true),
             tool_calls: calls_per_seq.get(&seq).copied().unwrap_or(0),
         }));

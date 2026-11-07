@@ -2617,3 +2617,172 @@ fn statistics_version_10_upgrade_backfills_ledger_without_changing_source_lines(
     let store = pika::store::Store::open(&data).unwrap();
     assert_eq!(dump_derived(&store), expected);
 }
+
+fn spokesman_rewrite(id: &str, target: &str, original: &str, rewritten: &str) -> Value {
+    json!({ "type": "custom", "id": id, "customType": "spokesman-rewrite",
+        "data": { "targetEntryId": target, "originalText": original, "rewrittenText": rewritten } })
+}
+
+fn spokesman_message(id: &str, content: Value) -> Value {
+    json!({ "type": "message", "id": id, "message": content })
+}
+
+fn spokesman_header(id: &str) -> Value {
+    json!({ "type": "session", "version": 3, "id": id, "cwd": "/home/me/code/widgets" })
+}
+
+#[tokio::test]
+async fn spokesman_projects_auto_and_manual_rewrites_without_reindexing() {
+    let app = app(None);
+    let id = "spokesman-auto-manual";
+    let mut auto = spokesman_rewrite("r-auto", "a-auto", "Original automatic answer", "Automatic rewrite");
+    auto["data"]["originalModel"] = json!("codex/gpt-6@1m");
+    auto["data"]["spokesmanModel"] = json!("google/gemini@500k");
+    auto["data"]["spokesmanProvider"] = json!("magpie");
+    let mut malformed = spokesman_rewrite("bad", "a-manual", "Bad", "Bad");
+    malformed["data"]["rewrittenText"] = json!(42);
+    let input = lines(&[
+        spokesman_header(id),
+        spokesman_message("u-auto", json!({ "role": "user", "content": "Automatic" })),
+        spokesman_message("a-auto", assistant("<!-- spokesman:rewritten -->\nAutomatic rewrite", "gpt-6", 1)),
+        auto,
+        spokesman_message("u-manual", json!({ "role": "user", "content": "Manual" })),
+        spokesman_message("a-manual", assistant("Original manual answer", "gpt-6", 2)),
+        spokesman_rewrite("r-old", "a-manual", "Original manual answer", "Old manual rewrite"),
+        spokesman_rewrite("r-latest", "a-manual", "Original manual answer", "Latest manual rewrite"),
+        malformed,
+        spokesman_rewrite("orphan", "missing", "Orphan", "Orphan"),
+        spokesman_rewrite("not-assistant", "u-manual", "User", "User"),
+        json!({ "type": "custom", "customType": "spokesman-rewrite", "data": {
+            "originalText": "Legacy targetless", "rewrittenText": "Legacy targetless rewrite" } }),
+        spokesman_rewrite("empty-original", "a-manual", " \n ", "Invalid"),
+        spokesman_rewrite("empty-rewrite", "a-manual", "Original manual answer", " \n "),
+        json!({ "type": "custom", "customType": "spokesman-rewrite", "data": null }),
+        spokesman_message("u-marker", json!({ "role": "user", "content": "Marker without a valid record" })),
+        spokesman_message("a-marker", assistant("<!-- spokesman:rewritten -->\nVisible answer", "gpt-6", 3)),
+    ]);
+    app.upload(DEVICE, &skey(id), "session", &input).await;
+    let foreign = lines(&[
+        spokesman_header("spokesman-other-session"),
+        spokesman_message("foreign-user", json!({ "role": "user", "content": "Other session" })),
+        spokesman_message("foreign-answer", assistant("Visible answer", "gpt-6", 1)),
+    ]);
+    app.upload(DEVICE, &skey("spokesman-other-session"), "session", &foreign).await;
+    let orphan = lines(&[spokesman_rewrite("foreign-target", "foreign-answer", "Foreign original", "Foreign rewrite")]);
+    app.append(DEVICE, &skey(id), "session", byte_len(&input), &orphan).await;
+    let before = dump_derived(&app.env.store);
+    let version = one(&app.env.store, "PRAGMA user_version");
+    let path = format!("sessions/{id}");
+    let turns = app.json(&format!("{path}/turns")).await;
+    assert_eq!(turns["items"][0]["finalText"], "Automatic rewrite");
+    assert_eq!(turns["items"][0]["spokesman"], json!({
+        "seq": 3, "targetSeq": 2, "originalText": "Original automatic answer", "rewrittenText": "Automatic rewrite",
+        "originalModel": "gpt-6", "spokesmanModel": "gemini",
+    }));
+    assert_eq!(turns["items"][1]["finalText"], "Original manual answer");
+    assert_eq!(turns["items"][1]["spokesman"], json!({
+        "seq": 7, "targetSeq": 5, "originalText": "Original manual answer", "rewrittenText": "Latest manual rewrite",
+    }));
+    assert_eq!(turns["items"][2]["finalText"], "Visible answer");
+    assert!(turns["items"][2].get("spokesman").is_none());
+    let updates = app.json(&format!("{path}/updates")).await;
+    assert_eq!(updates["turns"], turns["items"]);
+    let trace = app.json(&format!("{path}/trace")).await;
+    let records = trace["records"].as_array().unwrap();
+    assert_eq!(records.len(), 3, "rewrites are not additional model calls");
+    assert_eq!(records[0]["spokesmanSeq"], 3);
+    assert_eq!(records[1]["spokesmanSeq"], 7);
+    assert!(records[2].get("spokesmanSeq").is_none());
+    assert_eq!(records[0]["text"], "Automatic rewrite");
+    assert_eq!(records[1]["text"], "Original manual answer");
+    assert_eq!(records[2]["text"], "Visible answer");
+    for record in records {
+        assert_eq!(record["model"], "gpt-6");
+        assert_eq!(record["input"], 10);
+        assert_eq!(record["output"], 5);
+        assert_eq!(record["cost"], 0.001);
+        assert!(record.get("originalText").is_none());
+    }
+    assert_eq!(app.json(&format!("{path}/entries?from=7&to=7")).await["items"][0]["raw"]["data"]["rewrittenText"], "Latest manual rewrite");
+    assert_eq!(dump_derived(&app.env.store), before, "reads must not change existing derived data");
+    assert_eq!(one(&app.env.store, "PRAGMA user_version"), version);
+    // Reopening an existing database must expose the enhancement without running reindex.
+    let reopened = pika::store::Store::open(app.env.dir.path().join("data")).unwrap();
+    let persisted = reopened.read(|conn| pika::read::sessions::turns(conn, &reopened.blobs, id, &Default::default())).unwrap();
+    assert_eq!(serde_json::to_value(persisted).unwrap(), turns);
+    assert_eq!(dump_derived(&app.env.store), before);
+}
+
+#[tokio::test]
+async fn spokesman_associates_only_the_final_nonempty_assistant_and_polls_late_rewrites() {
+    let app = app(None);
+    let id = "spokesman-final-target";
+    let input = lines(&[
+        spokesman_header(id),
+        spokesman_message("u1", json!({ "role": "user", "content": "First turn" })),
+        spokesman_message("earlier", assistant("<!-- spokesman:rewritten -->\nEarlier rewrite", "gpt-6", 1)),
+        spokesman_rewrite("r1", "earlier", "Earlier original", "Earlier rewrite"),
+        spokesman_message("final", assistant("Final answer", "gpt-6", 2)),
+        spokesman_message("empty", assistant(" \n ", "gpt-6", 3)),
+        spokesman_rewrite("r2", "earlier", "Earlier original", "New earlier rewrite"),
+    ]);
+    app.upload(DEVICE, &skey(id), "session", &input).await;
+    let path = format!("sessions/{id}");
+    let turns = app.json(&format!("{path}/turns")).await;
+    assert_eq!(turns["items"][0]["finalText"], "Final answer");
+    assert!(turns["items"][0].get("spokesman").is_none());
+    let trace = app.json(&format!("{path}/trace")).await;
+    assert_eq!(trace["records"][0]["spokesmanSeq"], 6);
+    assert!(trace["records"][1].get("spokesmanSeq").is_none());
+    let next = lines(&[
+        spokesman_message("u2", json!({ "role": "user", "content": "Second turn" })),
+        // Identical answer text in a different turn must not participate in matching.
+        spokesman_message("second-final", assistant("Final answer", "gpt-6", 4)),
+    ]);
+    app.append(DEVICE, &skey(id), "session", byte_len(&input), &next).await;
+    let rewrite = lines(&[spokesman_rewrite("late", "final", "Final answer", "Manual rewrite of the first turn")]);
+    app.append(DEVICE, &skey(id), "session", byte_len(&input) + byte_len(&next), &rewrite).await;
+    let turns = app.json(&format!("{path}/turns")).await;
+    assert_eq!(turns["items"][0]["spokesman"]["seq"], 9);
+    assert_eq!(turns["items"][0]["spokesman"]["targetSeq"], 4);
+    assert_eq!(turns["items"][0]["finalText"], "Final answer");
+    assert!(turns["items"][1].get("spokesman").is_none());
+    let updates = app.json(&format!("{path}/updates?since=8")).await;
+    assert_eq!(updates["turns"], turns["items"], "polling must refresh the older target turn too");
+    let trace = app.json(&format!("{path}/trace")).await;
+    assert_eq!(trace["records"][1]["spokesmanSeq"], 9);
+    assert!(trace["records"][3].get("spokesmanSeq").is_none());
+    let unchanged = app.json(&format!("{path}/updates?since=9")).await;
+    assert!(unchanged.get("turns").is_none());
+}
+
+#[tokio::test]
+async fn spokesman_reads_blob_backed_rewrites_and_assistants_without_cutting_text() {
+    let app = app(None);
+    let id = "spokesman-blobs";
+    let original = format!("{}\nOriginal end", "原".repeat(400_000));
+    let rewritten = format!("{}\nRewrite end", "é".repeat(530_000));
+    let input = lines(&[
+        spokesman_header(id),
+        spokesman_message("user", json!({ "role": "user", "content": "Long response" })),
+        spokesman_message("answer", assistant(&format!("<!-- spokesman:rewritten -->\n{rewritten}"), "gpt-6", 1)),
+        spokesman_rewrite("rewrite", "answer", &original, &rewritten),
+    ]);
+    app.upload(DEVICE, &skey(id), "session", &input).await;
+    assert_eq!(one(&app.env.store, "SELECT count(*) AS n FROM lines WHERE data IS NULL AND blob IS NOT NULL")["n"], 2);
+    let path = format!("sessions/{id}");
+    let turns = app.json(&format!("{path}/turns")).await;
+    let turn = &turns["items"][0];
+    assert_eq!(turn["finalText"], rewritten);
+    assert_eq!(turn["spokesman"]["originalText"], original);
+    assert_eq!(turn["spokesman"]["rewrittenText"], rewritten);
+    assert_eq!(turn["spokesman"]["targetSeq"], 2);
+    assert_eq!(app.json(&format!("{path}/updates")).await["turns"], turns["items"]);
+    let trace = app.json(&format!("{path}/trace")).await;
+    assert_eq!(trace["records"][0]["spokesmanSeq"], 3);
+    assert!(!trace.to_string().contains("<!-- spokesman:rewritten -->"));
+    assert!(trace.to_string().len() < 5000, "trace must stay compact");
+    let raw = app.get(&format!("{path}/entries/3/raw")).await.json();
+    assert_eq!(raw["data"]["originalText"], original);
+    assert_eq!(raw["data"]["rewrittenText"], rewritten);
+}

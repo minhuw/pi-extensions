@@ -5,6 +5,10 @@ use rusqlite::{Connection, OptionalExtension, Row, params_from_iter};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::blobs::BlobStore;
+
+pub use super::spokesman::SpokesmanResponse;
+use super::spokesman::Rewrites;
 use super::{DeviceNames, Page, Params, ReadError, ReadResult, cursor_int, cursor_str, iso, page, session_sid};
 
 pub const LIST_LIMIT: i64 = 50;
@@ -131,6 +135,8 @@ pub struct Turn {
     pub cost: f64,
     pub tokens: Tokens,
     pub final_text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spokesman: Option<SpokesmanResponse>,
     /// The `customType` of the `custom_message` that started the turn; absent for a user prompt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_type: Option<String>,
@@ -210,6 +216,7 @@ fn turn(r: &Row) -> rusqlite::Result<Turn> {
         tokens: Tokens { input: r.get(10)?, output: r.get(11)?, cache_read: r.get(12)?, cache_write: r.get(13)? },
         final_text: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
         custom_type: r.get(15)?,
+        spokesman: None,
     })
 }
 
@@ -494,24 +501,27 @@ impl TreeWalk<'_> {
     }
 }
 
-pub fn turns(conn: &Connection, id: &str, p: &Params) -> ReadResult<Page<Turn>> {
+pub fn turns(conn: &Connection, blobs: &BlobStore, id: &str, p: &Params) -> ReadResult<Page<Turn>> {
+    // Projection and derived turns must come from the same snapshot while ingest is appending.
+    let _tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
     let sid = session_sid(conn, id)?;
     let limit = p.limit(TURN_LIMIT, MAX_TURN_LIMIT)?;
     let after = match p.cursor()? {
         Some(key) => cursor_int(&key, 0)?,
         None => -1,
     };
-    let items = conn
+    let mut items = conn
         .prepare_cached(&turns_sql())?
         .query_map(rusqlite::params![sid, after, limit + 1], turn)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    Rewrites::load(conn, blobs, sid)?.enrich(conn, blobs, sid, &mut items)?;
     Ok(page(items, limit, |t| vec![json!(t.index)]))
 }
 
 /// What changed after the caller's last seq `since` (missing or invalid counts as -1), for polling an active
-/// session: its summary and every turn that ends after `since`. Turns end in index order, so the walk goes down
-/// from the newest turn and stops at the first that ends at or before `since`.
-pub fn updates(conn: &Connection, id: &str, p: &Params) -> ReadResult<Updates> {
+/// session: its summary and every turn that ends after `since`, or has a newly recorded rewrite of its final
+/// assistant. Turns end in index order, so the initial walk stops at the first that ends at or before `since`.
+pub fn updates(conn: &Connection, blobs: &BlobStore, id: &str, p: &Params) -> ReadResult<Updates> {
     let since = p.int("since").ok().flatten().unwrap_or(-1);
     // One snapshot for the summary and the turns.
     // The public HTTP scope may already hold a snapshot for authorization.
@@ -541,7 +551,22 @@ pub fn updates(conn: &Connection, id: &str, p: &Params) -> ReadResult<Updates> {
         }
         turns.push(turn(row)?);
     }
-    turns.reverse();
+    let rewrites = Rewrites::load(tx, blobs, sid)?;
+    let present: HashSet<i64> = turns.iter().map(|t| t.index).collect();
+    for index in rewrites.changed_turns(since).difference(&present) {
+        if let Some(changed) = tx.prepare_cached(&format!(
+            "SELECT {TURN_COLUMNS} FROM {TURN_FROM} WHERE t.sid = ?1 AND t.idx = ?2"
+        ))?.query_row((sid, index), turn).optional()? {
+            turns.push(changed);
+        }
+    }
+    rewrites.enrich(tx, blobs, sid, &mut turns)?;
+    turns.retain(|t| present.contains(&t.index) || t.spokesman.as_ref().is_some_and(|r| r.seq > since));
+    turns.sort_by_key(|t| t.index);
+    if turns.len() > UPDATE_TURN_LIMIT {
+        turns.drain(..turns.len() - UPDATE_TURN_LIMIT);
+        truncated = Some(true);
+    }
     Ok(Updates { last_seq, last_at, session: Some(session), turns: Some(turns), truncated })
 }
 
