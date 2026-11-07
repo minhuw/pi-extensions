@@ -607,32 +607,71 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 			ui,
 			errors,
 			capturedSystems,
+			toolResultTexts: () =>
+				runtime.session.sessionManager
+					.getBranch()
+					.flatMap((entry) =>
+						entry.type === "message" && entry.message.role === "toolResult"
+							? [
+									{
+										isError: Boolean((entry.message as { isError?: boolean }).isError),
+										text: (
+											(entry.message as { content?: { text?: string }[] }).content ?? []
+										)
+											.map((part) => part.text ?? "")
+											.join(""),
+									},
+								]
+							: [],
+					),
 			dispose: () => runtime.dispose(),
 		};
 	}
 
-	it("AC-1 initializes .pi/workspaces/.gitignore, injects the workspace system prompt section, and manages child-session hooks", async () => {
-		const h = await startPiSession();
+	it("AC-1 initializes .pi/workspaces/.gitignore, injects the workspace system prompt section, and manages child-session hooks across sessions", async () => {
+		const h1 = await startPiSession({ mode: "rpc" });
+		const h2 = await startPiSession({ mode: "tui" });
 		try {
-			// .pi/workspaces/.gitignore exists with *
+			// .pi/workspaces/.gitignore exists with * and <cwd>/.gitignore is untouched
 			const gitignore = await readFile(path.join(workspacesDir(projectCwd), ".gitignore"), "utf8");
 			expect(gitignore).toBe("*\n");
+			expect(fs.existsSync(path.join(projectCwd, ".gitignore"))).toBe(false);
 
-			// Child session hook is registered while session is open
+			// Child session hook is registered (and deduplicated) while sessions are open
 			const hooks = [
 				...((globalThis as Record<symbol, Set<ChildSessionHook> | undefined>)[CHILD_SESSION_HOOKS] ?? []),
-			];
-			expect(hooks.some((hook) => hook.name === "workspace" && typeof hook.extensionFactory === "function")).toBe(
-				true,
-			);
+			].filter((hook) => hook.name === "workspace");
+			expect(hooks).toHaveLength(1);
+			expect(typeof hooks[0]!.extensionFactory).toBe("function");
 
-			await h.session.prompt("hello");
-			expect(h.capturedSystems[0]).toContain("<workspace>");
-			expect(h.capturedSystems[0]).toContain(".pi/workspaces/<name>");
-			expect(h.capturedSystems[0]).toContain("/tmp");
-			expect(h.errors).toEqual([]);
+			await h1.session.prompt("hello rpc");
+			await h2.session.prompt("hello tui");
+			for (const sys of [h1.capturedSystems[0], h2.capturedSystems[0]]) {
+				expect(sys).toContain("<workspace>");
+				expect(sys).toContain(`${projectCwd}/.pi/workspaces/<name>`);
+				expect(sys).toContain("/tmp");
+			}
+			expect(h1.errors).toEqual([]);
+			expect(h2.errors).toEqual([]);
+
+			// Touch a workspace owned by h1, then shut down h1 while h2 remains active
+			await createOrTouchWorkspace(
+				projectCwd,
+				{ name: "s1-ws", sessionId: h1.session.sessionId },
+				agentDir,
+			);
+			await h1.dispose();
+
+			// Hook stays registered because h2 is still open, and s1-ws is marked closed
+			const hooksAfterFirstClose = [
+				...((globalThis as Record<symbol, Set<ChildSessionHook> | undefined>)[CHILD_SESSION_HOOKS] ?? []),
+			];
+			expect(hooksAfterFirstClose.some((hook) => hook.name === "workspace")).toBe(true);
+			const regAfterFirstClose = await readRegistry(projectCwd);
+			expect(regAfterFirstClose.find((e) => e.name === "s1-ws")?.closedAt).toBeDefined();
 		} finally {
-			await h.dispose();
+			await h1.dispose().catch(() => {});
+			await h2.dispose().catch(() => {});
 		}
 
 		// Hook is removed when the last session shuts down
@@ -642,116 +681,378 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 		expect(remainingHooks.some((hook) => hook.name === "workspace")).toBe(false);
 	});
 
-	it("AC-2 blocks external writes in non-interactive/child sessions and prompts in interactive sessions with inheritance", async () => {
-		let nextChoice: string | undefined = "Deny";
+	it("AC-1 & AC-2 allows write, edit, and bash inside <cwd>, <cwd>/.pi/workspaces/<name>, and /tmp without prompting or touching <cwd>/.gitignore", async () => {
+		const tmpScratchDir = await mkdtemp(path.join(resolveCanonicalPath("/tmp"), "pi-ws-allowed-tmp-"));
+		const h = await startPiSession();
+		try {
+			// Remove .pi/workspaces/.gitignore before tool calls to verify touching .pi/workspaces/<name> recreates it
+			await rm(path.join(workspacesDir(projectCwd), ".gitignore"), { force: true });
+
+			const cwdFile = path.join(projectCwd, "src", "feature.ts");
+			const wsFile = path.join(workspacesDir(projectCwd), "side-exp", "notes.txt");
+			const wsBashDir = path.join(workspacesDir(projectCwd), "bash-exp");
+			const tmpFile = path.join(tmpScratchDir, "ephemeral.txt");
+
+			h.faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("write", { path: cwdFile, content: "export const v = 1;\n" }),
+					fauxToolCall("write", { path: wsFile, content: "workspace draft v1\n" }),
+					fauxToolCall("write", { path: tmpFile, content: "tmp draft v1\n" }),
+				]),
+				fauxAssistantMessage([
+					fauxToolCall("edit", {
+						path: cwdFile,
+						edits: [{ oldText: "v = 1", newText: "v = 2" }],
+					}),
+					fauxToolCall("edit", {
+						path: wsFile,
+						edits: [{ oldText: "draft v1", newText: "draft v2" }],
+					}),
+					fauxToolCall("edit", {
+						path: tmpFile,
+						edits: [{ oldText: "tmp draft v1", newText: "tmp draft v2" }],
+					}),
+				]),
+				fauxAssistantMessage([
+					fauxToolCall("bash", {
+						command: `mkdir -p "${wsBashDir}" && echo "bash-ws" > "${wsBashDir}/out.txt" && echo "// bash" >> "${cwdFile}" && echo "tmp-bash" >> "${tmpFile}"`,
+					}),
+				]),
+				fauxAssistantMessage("all internal and tmp tool calls succeeded"),
+			]);
+
+			await h.session.prompt("run write, edit, and bash in cwd, .pi/workspaces, and /tmp");
+
+			expect(h.ui.prompts).toEqual([]);
+			expect(await readFile(cwdFile, "utf8")).toBe("export const v = 2;\n// bash\n");
+			expect(await readFile(wsFile, "utf8")).toBe("workspace draft v2\n");
+			expect(await readFile(path.join(wsBashDir, "out.txt"), "utf8")).toBe("bash-ws\n");
+			expect(await readFile(tmpFile, "utf8")).toBe("tmp draft v2\ntmp-bash\n");
+
+			// .pi/workspaces/.gitignore was recreated with * and <cwd>/.gitignore was never created
+			expect(await readFile(path.join(workspacesDir(projectCwd), ".gitignore"), "utf8")).toBe("*\n");
+			expect(fs.existsSync(path.join(projectCwd, ".gitignore"))).toBe(false);
+
+			// Also verify an existing <cwd>/.gitignore is never modified when touching a workspace
+			await writeFile(path.join(projectCwd, ".gitignore"), "dist/\n", "utf8");
+			await rm(path.join(workspacesDir(projectCwd), ".gitignore"), { force: true });
+			h.faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("write", {
+						path: path.join(workspacesDir(projectCwd), "side-exp-2", "file.txt"),
+						content: "ok\n",
+					}),
+				]),
+				fauxAssistantMessage("done"),
+			]);
+			await h.session.prompt("touch second workspace");
+			expect(await readFile(path.join(workspacesDir(projectCwd), ".gitignore"), "utf8")).toBe("*\n");
+			expect(await readFile(path.join(projectCwd, ".gitignore"), "utf8")).toBe("dist/\n");
+
+			const reg = await readRegistry(projectCwd);
+			expect(reg.map((e) => e.name).sort()).toEqual(["bash-exp", "side-exp", "side-exp-2"]);
+			expect(h.errors).toEqual([]);
+		} finally {
+			await h.dispose();
+			await rm(tmpScratchDir, { recursive: true, force: true });
+		}
+	});
+
+	it("AC-2 enforces interactive approval choices (Deny, Allow once, Allow for this session, Allow for this project) and child/non-UI blocking across write, edit, bash, and symlinks", async () => {
+		const choicesQueue: string[] = [];
 		const parent = await startPiSession({
-			selectHandler: async () => nextChoice,
+			selectHandler: async () => choicesQueue.shift() ?? "Deny",
 		});
 
 		try {
-			const extFile = path.join(outsideDir, "blocked.txt");
+			const symlinkToOutside = path.join(projectCwd, "escape-symlink");
+			await symlink(outsideDir, symlinkToOutside);
 
-			// 1. Deny in interactive session blocks the write
+			const preExistingExternal = path.join(outsideDir, "existing.txt");
+			await writeFile(preExistingExternal, "original line\n", "utf8");
+
+			const homeTarget = `~/projects/pi-workspace-unapproved-${Date.now()}`;
+			const resolvedHomeTarget = resolveCanonicalPath(homeTarget, projectCwd);
+
+			// 1. Deny across write (sibling dir), edit (sibling dir), bash (~/projects/...), and symlink inside cwd pointing outside
+			choicesQueue.push("Deny", "Deny", "Deny", "Deny");
+			const deniedWriteFile = path.join(outsideDir, "denied-write.txt");
+			const deniedSymlinkFile = path.join(symlinkToOutside, "denied-symlink.txt");
+
 			parent.faux.setResponses([
-				fauxAssistantMessage([fauxToolCall("write", { path: extFile, content: "nope" })]),
-				fauxAssistantMessage("blocked as expected"),
+				fauxAssistantMessage([
+					fauxToolCall("write", { path: deniedWriteFile, content: "nope" }),
+					fauxToolCall("edit", {
+						path: preExistingExternal,
+						edits: [{ oldText: "original line", newText: "mutated line" }],
+					}),
+					fauxToolCall("bash", { command: `mkdir -p "${homeTarget}"` }),
+					fauxToolCall("write", { path: deniedSymlinkFile, content: "symlink escape" }),
+				]),
+				fauxAssistantMessage("all four denied"),
 			]);
-			await parent.session.prompt("try writing outside");
-			expect(parent.ui.prompts.length).toBe(1);
-			expect(fs.existsSync(extFile)).toBe(false);
+			await parent.session.prompt("try unapproved external writes");
 
-			// 2. Allow for this session permits the write in parent AND in a child session
-			nextChoice = "Allow for this session";
-			const allowedFile = path.join(outsideDir, "session-allowed.txt");
+			expect(parent.ui.prompts).toHaveLength(4);
+			for (const prompt of parent.ui.prompts) {
+				expect(prompt.options).toEqual([
+					"Allow once",
+					"Allow for this session",
+					"Allow for this project",
+					"Deny",
+				]);
+			}
+			expect(fs.existsSync(deniedWriteFile)).toBe(false);
+			expect(await readFile(preExistingExternal, "utf8")).toBe("original line\n");
+			expect(fs.existsSync(resolvedHomeTarget)).toBe(false);
+			expect(fs.existsSync(path.join(outsideDir, "denied-symlink.txt"))).toBe(false);
+
+			const errorTexts = parent.toolResultTexts().filter((r) => r.isError).map((r) => r.text);
+			expect(errorTexts.length).toBeGreaterThanOrEqual(4);
+			for (const text of errorTexts) {
+				expect(text).toContain("Blocked write outside project working directory");
+				expect(text).toContain(`${workspacesDir(projectCwd)}/<name>`);
+				expect(text).toContain("/tmp");
+			}
+
+			// 2. Allow once permits that single tool call, then prompts again on the next call to the same directory
+			const onceDir = path.join(sandboxRoot, "once-outside");
+			await mkdir(onceDir, { recursive: true });
+			const onceFile = path.join(onceDir, "once.txt");
+			choicesQueue.push("Allow once", "Deny");
+
 			parent.faux.setResponses([
-				fauxAssistantMessage([fauxToolCall("write", { path: allowedFile, content: "parent wrote this" })]),
-				fauxAssistantMessage("wrote after session approval"),
+				fauxAssistantMessage([fauxToolCall("write", { path: onceFile, content: "allowed once\n" })]),
+				fauxAssistantMessage([
+					fauxToolCall("edit", {
+						path: onceFile,
+						edits: [{ oldText: "allowed once", newText: "second edit denied" }],
+					}),
+				]),
+				fauxAssistantMessage("allow once verified"),
 			]);
-			await parent.session.prompt("write with session allow");
-			expect(fs.existsSync(allowedFile)).toBe(true);
+			const promptsBeforeOnce = parent.ui.prompts.length;
+			await parent.session.prompt("test allow once");
+			expect(parent.ui.prompts.length).toBe(promptsBeforeOnce + 2);
+			expect(await readFile(onceFile, "utf8")).toBe("allowed once\n");
 
-			// Child session (loaded both by path and via CHILD_SESSION_HOOKS) inherits session allowlist for outsideDir
-			// and blocks a different unapproved external directory without prompting
+			// 3. Allow for this session permits write, edit, bash, and symlink writes for the session AND child sessions without writing policy.json
+			choicesQueue.push("Allow for this session");
+			const sessionFile = path.join(outsideDir, "session-allowed.txt");
+			const sessionBashFile = path.join(outsideDir, "session-bash.txt");
+			const sessionSymlinkFile = path.join(symlinkToOutside, "session-via-link.txt");
+			const promptsBeforeSessionAllow = parent.ui.prompts.length;
+
+			parent.faux.setResponses([
+				fauxAssistantMessage([fauxToolCall("write", { path: sessionFile, content: "v1\n" })]),
+				fauxAssistantMessage([
+					fauxToolCall("edit", {
+						path: sessionFile,
+						edits: [{ oldText: "v1", newText: "v2" }],
+					}),
+					fauxToolCall("bash", { command: `echo "from bash" > "${sessionBashFile}"` }),
+					fauxToolCall("write", { path: sessionSymlinkFile, content: "via symlink\n" }),
+				]),
+				fauxAssistantMessage("session allow verified"),
+			]);
+			await parent.session.prompt("write, edit, and bash with session allow");
+			// Prompted only once for the first write; subsequent edit, bash, and symlink write in outsideDir did not prompt
+			expect(parent.ui.prompts.length).toBe(promptsBeforeSessionAllow + 1);
+			expect(await readFile(sessionFile, "utf8")).toBe("v2\n");
+			expect(await readFile(sessionBashFile, "utf8")).toBe("from bash\n");
+			expect(await readFile(path.join(outsideDir, "session-via-link.txt"), "utf8")).toBe("via symlink\n");
+			expect((await readProjectPolicy(projectCwd)).allowedPaths).toEqual([]);
+
+			// 4. Child session via bindAsChild AND child session via pi-extensions.session-link entry (even with UI bound)
+			// inherit session allowlist for outsideDir and immediately block unapproved external write/edit/bash without prompting
 			const hooks = [
 				...((globalThis as Record<symbol, Set<ChildSessionHook> | undefined>)[CHILD_SESSION_HOOKS] ?? []),
 			];
-			const childManager = SessionManager.create(projectCwd, sessionDir, {
+			const unapprovedChildDir = path.join(sandboxRoot, "unapproved-other");
+			await mkdir(unapprovedChildDir, { recursive: true });
+			const unapprovedExisting = path.join(unapprovedChildDir, "existing.txt");
+			await writeFile(unapprovedExisting, "keep\n", "utf8");
+
+			// 4a. Child session with bindAsChild: true
+			const childManager1 = SessionManager.create(projectCwd, sessionDir, {
 				parentSession: parent.session.sessionFile,
 			});
-			childManager.appendCustomEntry(SESSION_LINK_TYPE, {
-				kind: "subagent",
-				parentSessionId: parent.session.sessionId,
-				parentSessionFile: parent.session.sessionFile,
-			});
-
-			const child = await startPiSession({
-				sessionManager: childManager,
+			const child1 = await startPiSession({
+				sessionManager: childManager1,
 				bindAsChild: true,
 				extraFactories: hooks.map((h) => h.extensionFactory),
 			});
 			try {
 				const childInheritedFile = path.join(outsideDir, "child-inherited.txt");
-				const otherOutside = path.join(sandboxRoot, "unapproved-other", "blocked.txt");
+				const childBlockedWrite = path.join(unapprovedChildDir, "blocked-write.txt");
+				const childBlockedBash = path.join(unapprovedChildDir, "blocked-bash.txt");
 
-				child.faux.setResponses([
+				child1.faux.setResponses([
 					fauxAssistantMessage([
-						fauxToolCall("write", { path: childInheritedFile, content: "child ok" }),
-						fauxToolCall("write", { path: otherOutside, content: "child blocked" }),
+						fauxToolCall("write", { path: childInheritedFile, content: "child ok\n" }),
+						fauxToolCall("write", { path: childBlockedWrite, content: "child blocked" }),
+						fauxToolCall("edit", {
+							path: unapprovedExisting,
+							edits: [{ oldText: "keep", newText: "mutated" }],
+						}),
+						fauxToolCall("bash", { command: `touch "${childBlockedBash}"` }),
 					]),
-					fauxAssistantMessage("done child"),
+					fauxAssistantMessage("done child 1"),
 				]);
-				await child.session.prompt("child test");
+				await child1.session.prompt("child 1 test");
+				expect(child1.ui.prompts).toEqual([]);
 				expect(fs.existsSync(childInheritedFile)).toBe(true);
-				expect(fs.existsSync(otherOutside)).toBe(false);
-				expect(child.errors).toEqual([]);
+				expect(fs.existsSync(childBlockedWrite)).toBe(false);
+				expect(await readFile(unapprovedExisting, "utf8")).toBe("keep\n");
+				expect(fs.existsSync(childBlockedBash)).toBe(false);
+				const child1Errors = child1.toolResultTexts().filter((r) => r.isError);
+				expect(child1Errors).toHaveLength(3);
+				for (const err of child1Errors) {
+					expect(err.text).toContain(workspacesDir(projectCwd));
+				}
 			} finally {
-				await child.dispose();
+				await child1.dispose();
+			}
+
+			// 4b. Child session identified by pi-extensions.session-link entry (even when bound with rpc UI context)
+			const childManager2 = SessionManager.create(projectCwd, sessionDir, {
+				parentSession: parent.session.sessionFile,
+			});
+			childManager2.appendCustomEntry(SESSION_LINK_TYPE, {
+				kind: "subagent",
+				parentSessionId: parent.session.sessionId,
+				parentSessionFile: parent.session.sessionFile,
+			});
+			const child2 = await startPiSession({
+				sessionManager: childManager2,
+				mode: "rpc",
+				selectHandler: async () => "Allow once",
+				extraFactories: hooks.map((h) => h.extensionFactory),
+			});
+			try {
+				const linkBlockedFile = path.join(unapprovedChildDir, "link-blocked.txt");
+				child2.faux.setResponses([
+					fauxAssistantMessage([fauxToolCall("write", { path: linkBlockedFile, content: "should block" })]),
+					fauxAssistantMessage("done child 2"),
+				]);
+				await child2.session.prompt("child 2 session-link test");
+				expect(child2.ui.prompts).toEqual([]);
+				expect(fs.existsSync(linkBlockedFile)).toBe(false);
+				expect(child2.toolResultTexts().find((r) => r.isError)?.text).toContain(workspacesDir(projectCwd));
+			} finally {
+				await child2.dispose();
+			}
+
+			// 5. Allow for this project persists to policy.json and allows writes in a brand-new session without prompting
+			const projectAllowedDir = path.join(sandboxRoot, "project-allowed-ext");
+			await mkdir(projectAllowedDir, { recursive: true });
+			const projectAllowedFile = path.join(projectAllowedDir, "shared.txt");
+			choicesQueue.push("Allow for this project");
+			const promptsBeforeProjectAllow = parent.ui.prompts.length;
+
+			parent.faux.setResponses([
+				fauxAssistantMessage([fauxToolCall("write", { path: projectAllowedFile, content: "project v1\n" })]),
+				fauxAssistantMessage("project allow saved"),
+			]);
+			await parent.session.prompt("allow for this project");
+			expect(parent.ui.prompts.length).toBe(promptsBeforeProjectAllow + 1);
+			expect((await readProjectPolicy(projectCwd)).allowedPaths).toContain(
+				resolveCanonicalPath(projectAllowedDir),
+			);
+
+			const laterSession = await startPiSession();
+			try {
+				const laterBashFile = path.join(projectAllowedDir, "later-bash.txt");
+				laterSession.faux.setResponses([
+					fauxAssistantMessage([
+						fauxToolCall("edit", {
+							path: projectAllowedFile,
+							edits: [{ oldText: "project v1", newText: "project v2" }],
+						}),
+						fauxToolCall("bash", { command: `echo "later" > "${laterBashFile}"` }),
+					]),
+					fauxAssistantMessage("later session done"),
+				]);
+				await laterSession.session.prompt("write to project-allowed dir in new session");
+				expect(laterSession.ui.prompts).toEqual([]);
+				expect(await readFile(projectAllowedFile, "utf8")).toBe("project v2\n");
+				expect(await readFile(laterBashFile, "utf8")).toBe("later\n");
+			} finally {
+				await laterSession.dispose();
 			}
 		} finally {
 			await parent.dispose();
 		}
 	});
 
-	it("AC-3 & AC-4 supports the workspace tool and /workspace commands (list, allow, deny, pin, unpin, gc)", async () => {
-		let gcChoice: string | undefined = "Keep for now";
+	it("AC-3 & AC-4 supports the workspace tool (create, list, pin, unpin, release) and /workspace commands (list, allow, deny, pin, unpin, gc, gc --dry-run, gc --all, and interactive REVIEW prompts)", async () => {
+		const gcChoices: string[] = [];
 		const h = await startPiSession({
-			selectHandler: async () => gcChoice,
+			selectHandler: async () => gcChoices.shift() ?? "Keep for now",
 		});
 
 		try {
-			// Use the LLM `workspace` tool to create, pin, unpin, list, and release a workspace
+			// 1. Use the LLM `workspace` tool to exercise all 5 actions: create, pin, list, unpin, release
 			h.faux.setResponses([
 				fauxAssistantMessage([
 					fauxToolCall("workspace", {
 						action: "create",
 						name: "exp-alpha",
 						purpose: "benchmarking",
-						ttlHours: 0,
+						ttlHours: 1,
 					}),
 				]),
+				fauxAssistantMessage([fauxToolCall("workspace", { action: "pin", name: "exp-alpha" })]),
 				fauxAssistantMessage([fauxToolCall("workspace", { action: "list" })]),
+				fauxAssistantMessage([fauxToolCall("workspace", { action: "unpin", name: "exp-alpha" })]),
 				fauxAssistantMessage([fauxToolCall("workspace", { action: "release", name: "exp-alpha" })]),
-				fauxAssistantMessage("workspace lifecycle complete"),
+				fauxAssistantMessage([fauxToolCall("workspace", { action: "list" })]),
+				fauxAssistantMessage("workspace tool lifecycle complete"),
 			]);
-			await h.session.prompt("create and release workspace");
+			await h.session.prompt("exercise workspace tool actions");
+
+			const toolOutputs = h.toolResultTexts().map((r) => r.text);
+			expect(toolOutputs.some((t) => t.includes('Workspace "exp-alpha" ready'))).toBe(true);
+			expect(toolOutputs.some((t) => t.includes('Pinned workspace "exp-alpha"'))).toBe(true);
+			expect(toolOutputs.some((t) => t.includes("- exp-alpha [PINNED] (pinned)"))).toBe(true);
+			expect(toolOutputs.some((t) => t.includes('Unpinned workspace "exp-alpha"'))).toBe(true);
+			expect(toolOutputs.some((t) => t.includes('Released workspace "exp-alpha"'))).toBe(true);
+			expect(toolOutputs.some((t) => t.includes("- exp-alpha [SAFE] (empty workspace directory)"))).toBe(true);
 
 			const entries = await readRegistry(projectCwd);
-			expect(entries.some((e) => e.name === "exp-alpha")).toBe(true);
+			expect(entries.some((e) => e.name === "exp-alpha" && e.pinned === false && Boolean(e.releasedAt))).toBe(
+				true,
+			);
 
-			// Create a dirty workspace that requires REVIEW
-			const reviewEntry = await createOrTouchWorkspace(
+			// 2. Create two REVIEW workspaces ("exp-dirty-pin" and "exp-dirty-remove") and a linked git worktree ("exp-wt")
+			initGitRepo(projectCwd);
+			commitFile(projectCwd, "index.ts", "export const main = true;\n");
+			const wtPath = path.join(workspacesDir(projectCwd), "exp-wt");
+			git(projectCwd, ["worktree", "add", "-b", "exp-wt-branch", wtPath, "HEAD"]);
+
+			const dirtyPinEntry = await createOrTouchWorkspace(
 				projectCwd,
-				{ name: "exp-dirty", purpose: "has notes" },
+				{ name: "exp-dirty-pin", purpose: "keep via pin" },
 				agentDir,
 			);
-			await writeFile(path.join(reviewEntry.path, "draft.txt"), "unfinished work\n", "utf8");
+			await writeFile(path.join(dirtyPinEntry.path, "draft.txt"), "unfinished work\n", "utf8");
 
-			// Test /workspace list
+			const dirtyRemoveEntry = await createOrTouchWorkspace(
+				projectCwd,
+				{ name: "exp-dirty-remove", purpose: "remove on review" },
+				agentDir,
+			);
+			await writeFile(path.join(dirtyRemoveEntry.path, "scratch.txt"), "throwaway\n", "utf8");
+
+			// 3. Test /workspace list
 			await h.session.prompt("/workspace list");
-			expect(h.ui.notes.at(-1)?.message).toContain("exp-alpha: SAFE");
-			expect(h.ui.notes.at(-1)?.message).toContain("exp-dirty: REVIEW");
+			const listMsg = h.ui.notes.at(-1)?.message ?? "";
+			expect(listMsg).toContain("exp-alpha: SAFE");
+			expect(listMsg).toContain("exp-wt: SAFE");
+			expect(listMsg).toContain("exp-dirty-pin: REVIEW");
+			expect(listMsg).toContain("exp-dirty-remove: REVIEW");
 
-			// Test /workspace allow and /workspace deny
+			// 4. Test /workspace allow and /workspace deny
 			await h.session.prompt(`/workspace allow ${outsideDir}`);
 			expect(h.ui.notes.at(-1)?.message).toContain("Allowed external path:");
 			expect((await readProjectPolicy(projectCwd)).allowedPaths).toContain(resolveCanonicalPath(outsideDir));
@@ -760,7 +1061,7 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 			expect(h.ui.notes.at(-1)?.message).toContain("Denied external path:");
 			expect((await readProjectPolicy(projectCwd)).allowedPaths).not.toContain(resolveCanonicalPath(outsideDir));
 
-			// Test /workspace pin and /workspace unpin
+			// 5. Test /workspace pin and /workspace unpin
 			await h.session.prompt("/workspace pin exp-alpha");
 			expect(h.ui.notes.at(-1)?.message).toContain('Pinned workspace "exp-alpha"');
 			expect((await readRegistry(projectCwd)).find((e) => e.name === "exp-alpha")?.pinned).toBe(true);
@@ -769,20 +1070,40 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 			expect(h.ui.notes.at(-1)?.message).toContain('Unpinned workspace "exp-alpha"');
 			expect((await readRegistry(projectCwd)).find((e) => e.name === "exp-alpha")?.pinned).toBe(false);
 
-			// Test /workspace gc --dry-run
+			// 6. Test /workspace gc --dry-run
 			await h.session.prompt("/workspace gc --dry-run");
 			expect(h.ui.notes.at(-1)?.message).toContain("[Dry run] Workspace GC complete");
 			expect(fs.existsSync(path.join(workspacesDir(projectCwd), "exp-alpha"))).toBe(true);
+			expect(fs.existsSync(wtPath)).toBe(true);
 
-			// Test /workspace gc (interactive prompt pins exp-dirty and removes SAFE exp-alpha)
-			gcChoice = "Pin permanently";
+			// 7. Test /workspace gc (interactive prompt pins exp-dirty-pin, removes exp-dirty-remove, and removes SAFE exp-alpha + exp-wt)
+			gcChoices.push("Pin permanently", "Remove anyway");
 			await h.session.prompt("/workspace gc");
-			expect(h.ui.notes.at(-1)?.message).toContain("Removed (1): exp-alpha");
-			expect(h.ui.notes.at(-1)?.message).toContain("Newly pinned (1): exp-dirty");
+			const gcMsg = h.ui.notes.at(-1)?.message ?? "";
+			expect(gcMsg).toContain("exp-alpha");
+			expect(gcMsg).toContain("exp-wt");
+			expect(gcMsg).toContain("exp-dirty-remove");
+			expect(gcMsg).toContain("Newly pinned (1): exp-dirty-pin");
 			expect(fs.existsSync(path.join(workspacesDir(projectCwd), "exp-alpha"))).toBe(false);
-			expect(fs.existsSync(path.join(workspacesDir(projectCwd), "exp-dirty"))).toBe(true);
+			expect(fs.existsSync(wtPath)).toBe(false);
+			expect(fs.existsSync(dirtyRemoveEntry.path)).toBe(false);
+			expect(fs.existsSync(dirtyPinEntry.path)).toBe(true);
+			expect(git(projectCwd, ["worktree", "list"])).not.toContain("exp-wt");
 
-			// Auto-records workspace in .registry.json when write or bash touches .pi/workspaces/<name>/...
+			// 8. Test /workspace gc --all across a second project closure and a deleted project closure
+			const otherProject = path.join(sandboxRoot, "other-project");
+			const otherSafe = await createOrTouchWorkspace(otherProject, { name: "other-safe" }, agentDir);
+			const deletedProject = path.join(sandboxRoot, "deleted-project");
+			await createOrTouchWorkspace(deletedProject, { name: "gone-ws" }, agentDir);
+			await rm(deletedProject, { recursive: true, force: true });
+
+			await h.session.prompt("/workspace gc --all --yes");
+			const gcAllMsg = h.ui.notes.at(-1)?.message ?? "";
+			expect(gcAllMsg).toContain("other-safe");
+			expect(gcAllMsg).toContain("Pruned missing projects (1)");
+			expect(fs.existsSync(otherSafe.path)).toBe(false);
+
+			// 9. Auto-records workspace in .registry.json when write or bash touches .pi/workspaces/<name>/...
 			const autoFile = path.join(workspacesDir(projectCwd), "auto-tracked", "hello.txt");
 			h.faux.setResponses([
 				fauxAssistantMessage([fauxToolCall("write", { path: autoFile, content: "auto tracked!" })]),
@@ -815,9 +1136,16 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 		expect(commandCount).toBe(1);
 	});
 
-	it("is registered in package.json before pika and wired into npm test", async () => {
-		const pkgPath = fileURLToPath(new URL("../../../package.json", import.meta.url));
-		const manifest = JSON.parse(await readFile(pkgPath, "utf8")) as {
+	it("AC-5 is registered in package.json before pika, wired into npm test, and documented in README.md and AGENTS.md", async () => {
+		const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
+		const [pkgRaw, wsReadme, rootReadme, agentsMd] = await Promise.all([
+			readFile(path.join(repoRoot, "package.json"), "utf8"),
+			readFile(path.join(repoRoot, "extensions/workspace/README.md"), "utf8"),
+			readFile(path.join(repoRoot, "README.md"), "utf8"),
+			readFile(path.join(repoRoot, "AGENTS.md"), "utf8"),
+		]);
+
+		const manifest = JSON.parse(pkgRaw) as {
 			scripts: Record<string, string>;
 			pi: { extensions: string[] };
 		};
@@ -828,5 +1156,32 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 		expect(exts).toContain("./extensions/workspace/index.ts");
 		expect(exts.at(-1)).toBe("./extensions/pika/index.ts");
 		expect(exts.indexOf("./extensions/workspace/index.ts")).toBe(exts.indexOf("./extensions/pika/index.ts") - 1);
+
+		for (const expected of [
+			".pi/workspaces/<name>",
+			".pi/workspaces/.gitignore",
+			"/tmp",
+			"Allow once",
+			"Allow for this session",
+			"Allow for this project",
+			"Deny",
+			"workspace",
+			"PINNED",
+			"ACTIVE",
+			"SAFE",
+			"REVIEW",
+			"/workspace list",
+			"/workspace gc",
+			"/workspace allow",
+			"/workspace deny",
+			"/workspace pin",
+			"/workspace unpin",
+		]) {
+			expect(wsReadme).toContain(expected);
+		}
+
+		expect(rootReadme).toContain("[Workspace](extensions/workspace/README.md)");
+		expect(agentsMd).toContain("`extensions/workspace/`");
+		expect(agentsMd).toContain("`npm run test:workspace`");
 	});
 });
