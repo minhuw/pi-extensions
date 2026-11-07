@@ -485,7 +485,7 @@ it.each([undefined, "none"])("returns the upstream fallback from a real disabled
 		expect(startedChildren).toBe(0);
 		expect(rawRefusal).toBeDefined();
 		expect(rawRefusal?.details).toBeUndefined();
-		const refusal = `Unknown or disabled agent type: "worker". ${fallbackSubagent === "none" ? "" : 'Default fallback "worker" is unknown or disabled. '}Available: recon, reviewer, expert.`;
+		const refusal = `Unknown or disabled agent type: "worker". ${fallbackSubagent === "none" ? "" : 'Default fallback "worker" is unknown or disabled. '}Available: recon, reviewer.`;
 		expect(rawRefusal?.content).toEqual([{ type: "text", text: refusal }]);
 		const results = h.session.sessionManager.getEntries().flatMap((entry) => entry.type === "message" && entry.message.role === "toolResult" ? [entry.message] : []);
 		const result = results.find((entry) => entry.toolName === "impeccable_delegate");
