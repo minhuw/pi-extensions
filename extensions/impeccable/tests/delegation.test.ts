@@ -13,7 +13,7 @@ function context(executeTool = vi.fn(), tools = [{ name: "Agent", parameters: {}
 
 describe("complete role delegation through Agent", () => {
 	it.each([
-		["asset-producer", "worker", 24], ["documenter", "worker", 30], ["finish-reviewer", "reviewer", 30], ["manual-edit-applier", "worker", 12],
+		["asset-producer", "worker", 24], ["documenter", "worker", 30], ["finish-reviewer", "recon", 30], ["manual-edit-applier", "worker", 12],
 	] as const)("loads the entire %s role with real resources and its ceiling", async (role, type, turns) => {
 		const packet = await buildDelegation({ ...request, role }, "/project with spaces");
 		const canonical = await readFile(packet.rolePath, "utf8");
@@ -41,7 +41,7 @@ describe("complete role delegation through Agent", () => {
 		await Promise.all([delegate({ ...request, role: "assessment-a" }, ctx), delegate({ ...request, role: "assessment-b" }, ctx)]);
 		expect(execute).toHaveBeenCalledTimes(2);
 		const calls = execute.mock.calls.map((call) => call[1]);
-		expect(calls.map((args) => args.subagent_type).sort()).toEqual(["reviewer", "worker"]);
+		expect(calls.map((args) => args.subagent_type).sort()).toEqual(["recon", "worker"]);
 		const completeCritique = await readFile(path.join(getSkillDir(), "reference/critique.md"), "utf8");
 		for (const args of calls) {
 			expect(args).toMatchObject({ inherit_context: false, isolated: false, run_in_background: false, max_turns: 30 });
@@ -121,9 +121,9 @@ describe("complete role delegation through Agent", () => {
 	it.each([
 		{ details: { status: "error" }, content: [{ type: "text", text: "Model unavailable after edit" }] },
 		{ details: { status: "completed", subagentType: "worker" }, content: [{ type: "text", text: "Fallback worker edits" }] },
-		{ details: { status: "steered", subagentType: "reviewer", tags: ["inherit context"] }, content: [] },
-		{ details: { status: "completed", subagentType: "reviewer", tags: ["isolated"] }, content: [] },
-		{ details: { status: "completed", subagentType: "reviewer", maxTurns: 100 }, content: [] },
+		{ details: { status: "steered", subagentType: "recon", tags: ["inherit context"] }, content: [] },
+		{ details: { status: "completed", subagentType: "recon", tags: ["isolated"] }, content: [] },
+		{ details: { status: "completed", subagentType: "recon", maxTurns: 100 }, content: [] },
 	])("retains failed, substituted or policy-conflicting terminal review without replay: %j", async (agentResult) => {
 		const execute = vi.fn().mockResolvedValue({ isError: false, result: agentResult });
 		const result = await delegate({ ...request, role: "finish-reviewer" }, context(execute));
@@ -290,7 +290,7 @@ describe("complete role delegation through Agent", () => {
 		expect(execute).not.toHaveBeenCalled();
 	});
 	it("rejects an actual over-budget final result even when no progress was emitted", async () => {
-		const result = await delegate({ ...request, role: "finish-reviewer" }, context(vi.fn().mockResolvedValue({ result: { content: [{ type: "text", text: "Over-budget verdict" }], details: { status: "completed", subagentType: "reviewer", turnCount: 40 } } })));
+		const result = await delegate({ ...request, role: "finish-reviewer" }, context(vi.fn().mockResolvedValue({ result: { content: [{ type: "text", text: "Over-budget verdict" }], details: { status: "completed", subagentType: "recon", turnCount: 40 } } })));
 		expect(result.details).toMatchObject({ status: "partial", inlineSubstitutionAllowed: false, reason: "turn-boundary-reached" });
 		expect(result.details).not.toHaveProperty("fallbackPath");
 		expect(text(result)).toContain("actual turn count 40 exceeds role ceiling 30");

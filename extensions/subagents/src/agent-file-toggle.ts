@@ -287,7 +287,7 @@ export function serializeAgentFile(cfg: AgentConfig): string {
   if (cfg.isolated) fmFields.push("isolated: true");
   if (cfg.memory) fmFields.push(`memory: ${cfg.memory}`);
   if (cfg.isolation) fmFields.push(`isolation: ${cfg.isolation}`);
-  // Both values: the embedded recon/worker/reviewer set it, so an ejected copy
+  // Both values: the embedded recon/worker set it, so an ejected copy
   // must keep the guard, and an explicit `false` must survive a round trip.
   if (cfg.requireToolUse !== undefined) fmFields.push(`require_tool_use: ${cfg.requireToolUse}`);
   // Both values round-trip.

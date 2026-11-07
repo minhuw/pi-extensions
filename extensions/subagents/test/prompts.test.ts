@@ -47,13 +47,6 @@ describe("buildAgentPrompt", () => {
     expect(prompt).toContain("codebase reconnaissance specialist");
   });
 
-  it("reviewer prompt is read-only", () => {
-    const config = getDefaultConfig("reviewer");
-    const prompt = buildAgentPrompt(config, "/workspace", env);
-    expect(prompt).toContain("READ-ONLY");
-    expect(prompt).toContain("You review code with fresh context");
-  });
-
   it("worker uses its bounded-task prompt instead of cloning the parent", () => {
     const config = getDefaultConfig("worker");
     const parentPrompt = "You are a parent coding agent with full powers.";

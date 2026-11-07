@@ -52,7 +52,7 @@ async function fixture(options: { subagents?: boolean; nested?: boolean; uiConte
 			process.chdir(directory);
 			await mkdir(join(directory, ".pi/agents"), { recursive: true });
 			if (options.fallbackSubagent !== undefined) await writeFile(join(directory, ".pi/subagents.json"), JSON.stringify({ fallbackSubagent: options.fallbackSubagent }));
-			for (const type of ["worker", "reviewer", ...(options.nested ? ["orchestrator"] : [])]) {
+			for (const type of ["worker", "recon", ...(options.nested ? ["orchestrator"] : [])]) {
 				await writeFile(join(directory, `.pi/agents/${type}.md`), `---\ndescription: Isolated faux ${type}\nmodel: impeccable-test/test\nextensions: true\nskills: false\n${options.agentFrontmatter?.[type] ?? ""}---\nPerform the bounded supplied task.\n`);
 			}
 			if (options.nested) {
@@ -399,7 +399,7 @@ it.each(["soft-wrap", "terminal-error", "type-substitution"] as const)("preserve
 	const partial = "Edited page.html; verification incomplete.";
 	const h = await fixture({
 		subagents: true,
-		agentFrontmatter: { worker: "max_turns: 1\n", ...(scenario === "type-substitution" ? { reviewer: "enabled: false\n" } : {}) },
+		agentFrontmatter: { worker: "max_turns: 1\n", ...(scenario === "type-substitution" ? { recon: "enabled: false\n" } : {}) },
 		extraExtension: (pi) => {
 			pi.events.on("subagents:telemetry", (event) => { if ((event as { phase: string }).phase === "started") startedChildren++; });
 			pi.on("tool_call", (event) => { if (event.toolName === "Agent") agentCalls++; });
@@ -449,7 +449,7 @@ it.each(["soft-wrap", "terminal-error", "type-substitution"] as const)("preserve
 			childTerminated: true, inlineSubstitutionAllowed: false, evidenceAssessmentRequired: true,
 			reason: scenario === "soft-wrap" ? "soft-limit-wrap-up" : scenario === "terminal-error" ? "agent-error" : "policy-conflict",
 			agent: rawOutcome?.details,
-			policyConflicts: scenario === "type-substitution" ? ["agent type substituted: worker (requested reviewer)"] : [],
+			policyConflicts: scenario === "type-substitution" ? ["agent type substituted: worker (requested recon)"] : [],
 		});
 		expect(result.content.slice(1)).toEqual(rawOutcome?.content);
 		const output = result.content.map((part) => "text" in part ? part.text : "").join("\n");
@@ -485,7 +485,7 @@ it.each([undefined, "none"])("returns the upstream fallback from a real disabled
 		expect(startedChildren).toBe(0);
 		expect(rawRefusal).toBeDefined();
 		expect(rawRefusal?.details).toBeUndefined();
-		const refusal = `Unknown or disabled agent type: "worker". ${fallbackSubagent === "none" ? "" : 'Default fallback "worker" is unknown or disabled. '}Available: recon, reviewer.`;
+		const refusal = `Unknown or disabled agent type: "worker". ${fallbackSubagent === "none" ? "" : 'Default fallback "worker" is unknown or disabled. '}Available: recon.`;
 		expect(rawRefusal?.content).toEqual([{ type: "text", text: refusal }]);
 		const results = h.session.sessionManager.getEntries().flatMap((entry) => entry.type === "message" && entry.message.role === "toolResult" ? [entry.message] : []);
 		const result = results.find((entry) => entry.toolName === "impeccable_delegate");
@@ -571,7 +571,7 @@ it("hands off finish continuations because the actual unlimited Agent resume pat
 	let resumeUpdates = 0;
 	const h = await fixture({
 		subagents: true,
-		agentFrontmatter: { reviewer: "max_turns: 0\n" },
+		agentFrontmatter: { recon: "max_turns: 0\n" },
 		extraExtension: (pi) => pi.registerTool({
 			name: "probe_resume", label: "Probe Resume", description: "Offline continuation regression", parameters: Type.Object({}),
 			async execute(_id, _params, signal, _update, ctx) {
@@ -583,7 +583,7 @@ it("hands off finish continuations because the actual unlimited Agent resume pat
 				expect(continuation.details).toMatchObject({ status: "handoff", reason: "continuation-limit-unenforceable" });
 				// Exercise the real runtime limitation independently of the adapter:
 				// this explicit offline probe is allowed to run 31 harmless read-only turns.
-				const raw = await ctx.executeTool("Agent", { subagent_type: "reviewer", description: "Probe unlimited resume", prompt: "Recapture review evidence and report a verdict.", resume, max_turns: 30, run_in_background: false }, { signal, onUpdate: () => { resumeUpdates++; } });
+				const raw = await ctx.executeTool("Agent", { subagent_type: "recon", description: "Probe unlimited resume", prompt: "Recapture review evidence and report a verdict.", resume, max_turns: 30, run_in_background: false }, { signal, onUpdate: () => { resumeUpdates++; } });
 				resumedDetails = raw.result.details;
 				return { content: [{ type: "text", text: "Observed actual Agent resume progress behavior." }], details: {} };
 			},
@@ -599,7 +599,7 @@ it("hands off finish continuations because the actual unlimited Agent resume pat
 		]);
 		await h.session.prompt("Probe the real foreground resume with an unlimited configured reviewer.");
 		expect(h.faux.state.callCount).toBe(34);
-		expect(resumedDetails).toMatchObject({ status: "completed", subagentType: "reviewer", turnCount: 31 });
+		expect(resumedDetails).toMatchObject({ status: "completed", subagentType: "recon", turnCount: 31 });
 		expect(resumeUpdates).toBe(0);
 		expect(continuation?.details.status).toBe("handoff");
 		expect(h.errors).toEqual([]);

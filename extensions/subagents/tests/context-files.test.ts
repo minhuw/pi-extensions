@@ -168,7 +168,7 @@ describe("context_files agent (real runner)", () => {
     expect(registered).toContain("mcp__probe__lookup");
     const agent = session.getAllTools().find((t: any) => t.name === "Agent");
     const typeDescription = JSON.stringify(agent.parameters);
-    expect(typeDescription).toContain("Available: recon, worker, reviewer.");
+    expect(typeDescription).toContain("Available: recon, worker.");
     expect(typeDescription).not.toMatch(/\bbounded\b/);
   });
 

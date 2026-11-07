@@ -243,7 +243,7 @@ describe("require_tool_use frontmatter", () => {
       expect(parseFile(ejected).requireToolUse).toBe(value);
     }
     expect(serializeAgentFile(parse("description: x\n"))).not.toContain("require_tool_use");
-    for (const name of ["recon", "worker", "reviewer"]) {
+    for (const name of ["recon", "worker"]) {
       expect(DEFAULT_AGENTS.get(name)?.requireToolUse).toBe(true);
       expect(serializeAgentFile(DEFAULT_AGENTS.get(name)!)).toContain("require_tool_use: true");
     }

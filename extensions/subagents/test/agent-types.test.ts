@@ -46,13 +46,14 @@ describe("agent type registry", () => {
 
   describe("default agents", () => {
     it("recognizes all default agent types", () => {
-      expect(getAvailableTypes()).toEqual(["recon", "worker", "reviewer"]);
+      expect(getAvailableTypes()).toEqual(["recon", "worker"]);
       expect(DEFAULT_AGENT_NAMES).toEqual(getAvailableTypes());
       for (const name of [...DEFAULT_AGENT_NAMES, ...COUNCIL_AGENT_NAMES]) expect(isValidType(name)).toBe(true);
     });
 
     it("rejects unknown types", () => {
       expect(isValidType("nonexistent")).toBe(false);
+      expect(isValidType("reviewer")).toBe(false);
       expect(isValidType("")).toBe(false);
     });
 
@@ -61,7 +62,6 @@ describe("agent type registry", () => {
       expect(isValidType("RECON")).toBe(true);
       expect(isValidType("Worker")).toBe(true);
       expect(isValidType("COUNCIL-ASTRA")).toBe(true);
-      expect(isValidType("reviewer")).toBe(true);
     });
 
     it("case-insensitive lookup works for getAgentConfig", () => {
@@ -273,12 +273,12 @@ describe("agent type registry", () => {
     it("lists user agent names separately", () => {
       const agents = new Map([
         ["auditor", makeAgentConfig({ name: "auditor" })],
-        ["reviewer", makeAgentConfig({ name: "reviewer" })],
+        ["recon", makeAgentConfig({ name: "recon" })],
       ]);
       registerAgents(agents);
 
       const names = getUserAgentNames();
-      expect(names).toEqual(["reviewer", "auditor"]);
+      expect(names).toEqual(["recon", "auditor"]);
       expect(names).not.toContain("worker");
     });
 
@@ -351,7 +351,7 @@ describe("agent type registry", () => {
       expect(isValidType("worker")).toBe(true);
     });
 
-    it.each(["recon", "reviewer"])("user agent overrides default %s", name => {
+    it.each(["recon", "worker"])("user agent overrides default %s", name => {
       const override = makeAgentConfig({
         name,
         description: `Custom ${name}`,
@@ -367,7 +367,7 @@ describe("agent type registry", () => {
       expect(config.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
     });
 
-    it.each(["recon", "reviewer"])("disabled agent %s is excluded from available types", name => {
+    it.each(["recon", "worker"])("disabled agent %s is excluded from available types", name => {
       registerAgents(new Map([[name, makeAgentConfig({ name, enabled: false })]]));
 
       expect(isValidType(name)).toBe(false);
@@ -553,12 +553,12 @@ describe("resolveSpawnType — fail-closed dispatch (#183)", () => {
 });
 
 describe("local fleet runtime tool selection", () => {
-  it("uses read-only search tools for recon/reviewer/council advisors and full tools for worker", () => {
+  it("uses read-only search tools for recon/council advisors and full tools for worker", () => {
     registerAgents(new Map());
     setDefaultsDisabled(false);
     expect(getAvailableTypes()).toEqual(DEFAULT_AGENT_NAMES);
-    for (const retired of ["Explore", "Plan", "general-purpose", "expert"]) expect(isValidType(retired)).toBe(false);
-    for (const name of ["recon", "reviewer", ...COUNCIL_AGENT_NAMES]) {
+    for (const retired of ["Explore", "Plan", "general-purpose", "expert", "reviewer"]) expect(isValidType(retired)).toBe(false);
+    for (const name of ["recon", ...COUNCIL_AGENT_NAMES]) {
       expect(getToolNamesForType(name)).toEqual(["read", "bash", "grep", "find", "ls"]);
       expect(getConfig(name).excludeExtensions).toBeUndefined();
     }

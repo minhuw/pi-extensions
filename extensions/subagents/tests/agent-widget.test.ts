@@ -14,7 +14,7 @@ it("allows installed extensions in the default fleet while retaining built-in se
     expect(agent.extensions).toBe(true);
     expect(agent.excludeExtensions).toBeUndefined();
   }
-  for (const name of ["recon", "reviewer", "council-argon", "council-astra", "council-opus"]) {
+  for (const name of ["recon", "council-argon", "council-astra", "council-opus"]) {
     expect(DEFAULT_AGENTS.get(name)?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
   }
 });

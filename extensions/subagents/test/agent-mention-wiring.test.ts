@@ -649,12 +649,12 @@ describe("letting a clone of the conversation start the agent", () => {
     const { tools, lifecycle } = boot();
     cloneReturns({ spawned: true });
 
-    await send(lifecycle, "@reviewer sketch the migration");
+    await send(lifecycle, "@worker sketch the migration");
     await flush();
 
     expect(runMentionClone).toHaveBeenCalledWith(
       expect.objectContaining({
-        type: "reviewer",
+        type: "worker",
         message: "sketch the migration",
         agentTool: tools.get("Agent"),
       }),
@@ -1046,7 +1046,7 @@ describe("@agent-<type> — Claude Code's manual spelling", () => {
     await spawnBackground(tools); // plain recon → @recon
     await tools.get("Agent").execute(
       "tc-named",
-      { prompt: "go", description: "named", subagent_type: "reviewer", name: "agent-recon", run_in_background: true },
+      { prompt: "go", description: "named", subagent_type: "worker", name: "agent-recon", run_in_background: true },
       undefined, undefined, ctx(),
     );
     await flush();

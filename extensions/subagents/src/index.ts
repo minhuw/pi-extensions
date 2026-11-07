@@ -1645,8 +1645,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ---- Disable default agents configuration ----
-  // When enabled, the three hardcoded default agents (recon, worker,
-  // reviewer) are not registered. User-defined agents from project/global custom
+  // When enabled, the hardcoded default agents (recon, worker) are not
+  // registered. User-defined agents from project/global custom
   // agent dirs are completely unaffected — only DEFAULT_AGENTS are suppressed.
   // Defaults to false; opt-in via `/agents → Settings` or subagents.json.
   // State lives in agent-types.ts (isDefaultsDisabled) because registerAgents
@@ -2043,19 +2043,20 @@ Terse command-style prompts produce shallow, generic work.
     description: "Individual agents run foreground unless background is explicitly requested. Scripted multi-agent workflows require explicit user opt-in.\n\n" + agentToolDescription,
     promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
     promptGuidelines: [
-      "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
+      "Use Agent proactively when it speeds up work or protects the main context window: launch parallel subagents in a single message for independent questions or disjoint code changes, and offload multi-file exploration or high-volume command/test output so only a compact summary returns to the main conversation. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
       // Names default roles only when they can be spawned (#330).
       // Read at registration, like the type list in the description.
       (() => {
         const available = getAvailableTypes();
         const roleClauses = [
           available.includes("recon")
-            ? "For broad codebase exploration, spawn Agent with subagent_type recon"
+            ? "For broad codebase exploration or multi-file research (5+ files or 2+ independent areas), spawn Agent with subagent_type recon (in parallel when areas are independent)"
             : "For broad codebase exploration or research, spawn Agent with an appropriate subagent_type",
-          available.includes("worker") ? "for implementation use worker" : "",
-          available.includes("reviewer") ? "for post-change review use reviewer" : "",
+          available.includes("worker")
+            ? `for bounded or parallelizable implementation and empirical verification use worker (${isWorktreeIsolationEnabled() ? 'pass isolation: "worktree" when parallel writers could overlap, and ' : ""}pass inherit_context: true when the main conversation already holds the needed context)`
+            : "",
         ].filter(Boolean);
-        return `${roleClauses.join("; ")}. Otherwise use direct tools (read, grep, find) when the target is already known.`;
+        return `${roleClauses.join("; ")}. Otherwise use direct tools (read, grep, find, edit) when the target path or symbol is already known or edits are small and tightly sequential.`;
       })(),
       "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it. Continue with other work instead.",
       "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
@@ -4353,7 +4354,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         {
           id: "disableDefaultAgents",
           label: "Disable defaults",
-          description: "Hide built-in agents (recon, worker, reviewer) — custom agents are unaffected",
+          description: "Hide built-in agents (recon, worker) — custom agents are unaffected",
           currentValue: isDefaultsDisabled() ? "on" : "off",
           values: ["on", "off"],
         },

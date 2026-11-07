@@ -10,7 +10,7 @@ export const DelegateSchema = Type.Object({
 	task: Type.String({ minLength: 1, maxLength: 32000, description: "Self-contained bounded packet: original request, actual answers, scope, constraints, required role inputs, evidence, output contract; no sibling assessment results" }),
 	artifactPaths: Type.Array(Type.String({ minLength: 1, description: "Artifact file path or inspected http(s) URL" }), { minItems: 1, maxItems: 64 }),
 	contextPaths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 64 })),
-	needsBrowser: Type.Optional(Type.Boolean({ description: "Assessment A needs browser inspection: use worker rather than a read-only reviewer" })),
+	needsBrowser: Type.Optional(Type.Boolean({ description: "Assessment A needs browser inspection: use worker rather than read-only recon" })),
 	resume: Type.Optional(Type.String({ minLength: 1, description: "Finish-reviewer verdict continuation only, after valid recapture; returns a handoff when its turn ceiling cannot be enforced" })),
 });
 type Request = Static<typeof DelegateSchema>;
@@ -25,7 +25,7 @@ export async function buildDelegation(request: Request, cwd: string) {
 	const roleText = (await readFile(rolePath, "utf8")).replaceAll("<skill-base-dir>", getSkillDir());
 	const maxTurns = assessment ? 30 : Number(/^max-turns: (\d+)$/m.exec(roleText)?.[1]);
 	if (!Number.isInteger(maxTurns) || maxTurns < 1) throw new Error(`Missing turn ceiling in ${rolePath}`);
-	const type = request.role === "finish-reviewer" || (request.role === "assessment-a" && !request.needsBrowser) ? "reviewer" : "worker";
+	const type = request.role === "finish-reviewer" || (request.role === "assessment-a" && !request.needsBrowser) ? "recon" : "worker";
 	const references = request.role === "asset-producer" ? ["visualize.md", "component-review.md"]
 		: request.role === "documenter" ? ["document.md"]
 		: request.role === "finish-reviewer" ? ["craft-floor.md"]
@@ -173,7 +173,7 @@ export async function delegate(request: Request, ctx: ExtensionToolContext, sign
 export function registerDelegation(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "impeccable_delegate", label: "Impeccable Delegate",
-		description: "Send a complete Impeccable role and bounded packet to existing Agent worker/reviewer, foreground with fresh context and extension tools. Returns actual output or an explicit Agent handoff/fallback.",
+		description: "Send a complete Impeccable role and bounded packet to existing Agent worker/recon, foreground with fresh context and extension tools. Returns actual output or an explicit Agent handoff/fallback.",
 		parameters: DelegateSchema,
 		reachesTools: () => ["Agent"],
 		async execute(_id, params, signal, update, ctx) { return delegate(params, ctx, signal, update); },
