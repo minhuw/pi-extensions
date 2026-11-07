@@ -19,6 +19,7 @@ The [pika server](services/pika/README.md) serves this documentation publicly at
 | [Quality](extensions/quality/README.md) | `/simplify` cleans up code, `/review` reports bugs without fixing them, `/verify` runs checks without repairing anything, and `/deslop` removes AI slop. |
 | [Writer](extensions/writer/README.md) | Eight prompts for writing CS conference papers, ported from [claude-writer](https://github.com/minhuw/claude-writer). |
 | [Impeccable](extensions/impeccable/README.md) | The Impeccable design skill, with `/impeccable`, `/design`, and 24 `/design-*` prompts for building, refining, and critiquing interfaces. |
+| [Agent Browser](extensions/agent-browser/README.md) | Browser automation and web testing through `agent-browser`, with the `agent-browser` skill, the `agent_browser` tool (isolated per-session daemons and inline screenshots), and `/agent-browser`. |
 | [Subagents](extensions/subagents/README.md) | Delegates bounded tasks to a local agent fleet (`recon`, `worker`, `reviewer`), using a maintained fork of `@tintinweb/pi-subagents` v0.22.0. |
 | [Council](extensions/council/README.md) | `/council <topic>` and the `council` tool convene three pinned read-only advisors (`argon`, `astra`, `opus`) for a two-round, identity-blinded deliberation on difficult architectural and design questions. |
 | [Herder](extensions/herder/README.md) | `/herder <goal>` runs a coding task in disposable git worktrees, checks the result against the goal, and delivers it to your branch after you confirm. `/herder-improve` and `/herder-simplify` audit the repository and start a run for the findings you pick. |
@@ -50,6 +51,7 @@ This installs all the extensions above, their prompts and skills, and the theme.
 - **Subagents:** don't also install `@tintinweb/pi-subagents` from npm in the same Pi profile. Scripted workflows (`SubagentWorkflow`) are off by default; set `workflowsEnabled: true` to turn them on.
 - **Autoresearch:** remove `npm:pi-autoresearch` if you have it, because both register `/autoresearch`. Existing `.auto/` data is kept.
 - **Impeccable:** the design engine (0.1.18) is downloaded and verified the first time it is needed. Live browser work needs an app it can run. Writer keeps `/polish` for prose; use `/design-polish` for UI.
+- **Agent Browser:** needs the `agent-browser` CLI and its Chromium runtime on `PATH` (or `AGENT_BROWSER_BIN`): `npm install -g agent-browser && agent-browser install`.
 - **Herder:** run state lives in the git directory (`<git-common-dir>/herder/` and `refs/herder/`), not in the working tree. Approving a goal and confirming delivery need an interactive session (TUI or RPC).
 - **Orca Bridge:** activates only inside Orca panes. The optional [Pi Activity plugin](extensions/orca-bridge/plugin/README.md) shows local terminal sessions, agents, and workflow progress in Orca's sidebar and status bar. Native-chat background tracking is unavailable. `/orca-status` shows bridge and companion readiness.
 - **Magpie Provider:** needs a running Magpie gateway (default `http://127.0.0.1:3425`). `/login magpie` saves its URL and key.
