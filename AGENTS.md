@@ -23,7 +23,7 @@ See the root [README](README.md#extensions) for the overview, and read the targe
 - `extensions/statusline-footer/` — theme-aware Pi statusline footer.
 - `extensions/impeccable/` — vendored Impeccable 4.8.0 (`vendor/impeccable-4.8.0/`), 26 prompts, engine 0.1.18, `impeccable_*` tools, and `scripts/transform.mjs` (never hand-edit `skills/`, `prompts/`, or vendor files; see `LOCAL-PATCHES.md`).
 - `extensions/agent-browser/` — `agent-browser` skill, `agent_browser` tool (`AGENT_BROWSER_SESSION`, inline screenshots), and `/agent-browser`.
-- `extensions/subagents/` — vendored `pi-subagents` v0.22.0 (`Agent`, `SubagentWorkflow`, `get_subagent_result`, `steer_subagent`), `recon`/`worker`/`reviewer`, and hidden `council-*` advisors (`LOCAL-PATCHES.md`).
+- `extensions/subagents/` — vendored `pi-subagents` v0.23.1 (`Agent`, `SubagentWorkflow`, `get_subagent_result`, `steer_subagent`), `recon`/`worker`/`reviewer`, and hidden `council-*` advisors (`LOCAL-PATCHES.md`).
 - `extensions/council/` — `/council` and `council` tool for two-round blinded deliberation across `argon`, `astra`, and `opus` (`agents/`).
 - `extensions/herder/` — verified git-worktree runs (`<git-common-dir>/herder/`, `refs/herder/`, git >=2.38): `src/adapter/` (`herder_*`), `agents/`, and `skills/{herder,improve,simplify}/`.
 - `extensions/pika/` — session/payload/child/Herder capture (`<agentDir>/pika/` spool), `/pika`, `credentials.ts` (`Symbol.for("pi-extensions.pika.credentials")`), `relay/` (`relay_*`, `/relay`), and `recall/` (`recall_*`). Listed last in `pi.extensions`.

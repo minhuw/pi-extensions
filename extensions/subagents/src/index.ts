@@ -12,13 +12,14 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager, assertValidSpawnCwd, isTopLevelAgent } from "./agent-manager.js";
+import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, reopenTarget } from "./agent-record-entry.js";
 import { resolveChildSessionRoot } from "./agent-runner.js";
 import { validateReopenSessionFile } from "./reopen.js";
 import { validateLinkData } from "./child-session-hooks.js";
@@ -693,18 +694,9 @@ export default function (pi: ExtensionAPI) {
       pi.events.emit("subagents:completed", eventData);
     }
 
-    // Persist final record for cross-extension history reconstruction. Fields
-    // after `completedAt` are optional; older records omit them.
-    const spawningToolCallId = record.parentToolCallId ?? record.toolCallId;
-    pi.appendEntry("subagents:record", {
-      id: record.id, type: record.type, description: record.description,
-      status: record.status, result: record.result, error: record.error,
-      startedAt: record.startedAt, completedAt: record.completedAt,
-      ...(record.sessionId !== undefined ? { sessionId: record.sessionId } : {}),
-      ...(record.sessionFile !== undefined ? { sessionFile: record.sessionFile } : {}),
-      ...(record.outputFile !== undefined ? { outputFile: record.outputFile } : {}),
-      ...(spawningToolCallId !== undefined ? { toolCallId: spawningToolCallId } : {}),
-    });
+    // Persist the final record: get_subagent_result answers from it once the
+    // live record is gone, and other extensions reconstruct history from it.
+    pi.appendEntry<AgentRecordEntryData>(AGENT_RECORD_ENTRY_TYPE, agentRecordEntryData(record));
 
     // Skip notification if result was already consumed via get_subagent_result,
     // or the spawner asked never to be notified (`notifyParent: false`).
@@ -1069,6 +1061,14 @@ export default function (pi: ExtensionAPI) {
     return resolved?.kind === "live" ? resolved.record : undefined;
   };
 
+  /** get_subagent_result's answer from a persisted record, once the live record is gone. */
+  const formatSavedAgentRecord = (saved: AgentRecordEntryData): string =>
+    `Agent: ${saved.id}\n` +
+    `Type: ${getDisplayName(saved.type)} | Status: ${saved.status}${getStatusNote(saved.status)} | Duration: ${formatDuration(saved.startedAt, saved.completedAt)}\n` +
+    `Description: ${saved.description}\n` +
+    `(From the session's saved record: the live record has been cleaned up, so its stats and conversation are gone.)\n\n` +
+    (saved.status === "error" ? `Error: ${saved.error}${partialOutputSuffix(saved)}` : saved.result?.trim() || "No output.");
+
   // --- Cross-extension RPC via pi.events ---
   // RPC handlers + the `subagents:ready` broadcast are wired on `session_start`
   // (a bound lifecycle event), not at factory time. pi runs every extension
@@ -1151,6 +1151,7 @@ export default function (pi: ExtensionAPI) {
             outbox.cancel(record.id);
             return true;
           },
+          steer: (id, message) => manager.steer(id, message),
           send: sendToAgent,
           reopen: reopenAgent,
         },
@@ -1183,6 +1184,20 @@ export default function (pi: ExtensionAPI) {
     resolveWorkflowCollisions(ctx);
     runWorkflowFlag(ctx);
   });
+
+  // Start a mentioned agent the direct way. runAgent resolves model, thinking,
+  // max turns and `isolated` from the agent's own config when the spawn omits
+  // them, but not `inherit_context`: an RPC caller decides that one itself. A
+  // mention is the user starting the agent from this session, so the file does —
+  // reloaded first, as the spawn reloads it, so a mid-session edit is not missed.
+  const startMentioned = (ctx: ExtensionContext, type: string, message: string) => {
+    reloadCustomAgents();
+    return spawnTopLevel(pi, ctx, type, message, {
+      description: describeMention(message),
+      isBackground: true,
+      inheritContext: getAgentConfig(type)?.inheritContext,
+    });
+  };
 
   /** Agent types `@` can start, in the shape the roster wants. */
   const mentionTypes = (): TypeInfo[] =>
@@ -1285,31 +1300,15 @@ export default function (pi: ExtensionAPI) {
       const entry = resolved.entry;
       const target = `@${entry.alias ?? entry.handle}`;
 
-      // Checked here rather than left to SessionManager.open: that runs inside
-      // runAgent, whose rejection lands on the record as an agent error, not in
-      // the catch below. A `/new` in another pi window or a manual delete makes
-      // the conversation unrecoverable (Claude Code's `not_reachable`), so drop
-      // the entry — a row that can only ever fail is worse than none — and say
-      // so rather than quietly sending this message to an unrelated agent.
-      if (!existsSync(entry.sessionFile)) {
-        manager.dropTombstone(entry.handle);
-        ctx.ui.notify(`Could not resume ${target} — its session is gone.`, "warning");
-        return { action: "handled" };
-      }
-
-      // The Agent tool deliberately falls back to worker for a type it
-      // cannot resolve (#183), which covers a deleted file AND a merely
-      // disabled one. A resume must not inherit that: reopening this
-      // conversation under a different agent's prompt and tools is not
-      // continuing it, and the new record would re-tombstone under the
-      // substitute, so the handle would never find its way back.
       reloadCustomAgents();
       // An existing agent's own type, so hidden types are reopened too.
-      const dispatch = resolveSpawnType(entry.type, { includeHidden: true });
-      if (!dispatch.ok || dispatch.fellBackFrom !== undefined) {
-        // The tombstone stays: re-enabling the agent makes the handle work
-        // again, which a drop would foreclose.
-        ctx.ui.notify(`Could not resume ${target} — the ${entry.type} agent is no longer available.`, "warning");
+      const reopen = reopenTarget(entry.type, entry.sessionFile, entry.worktreeLost, { includeHidden: true });
+      if (!reopen.ok) {
+        // A session that is gone can only ever fail, so its row goes with it;
+        // an unavailable agent stays, since re-enabling it makes the handle
+        // work again.
+        if (reopen.gone) manager.dropTombstone(entry.handle);
+        ctx.ui.notify(`Could not resume ${target} — ${reopen.reason}.`, "warning");
         return { action: "handled" };
       }
 
@@ -1317,7 +1316,7 @@ export default function (pi: ExtensionAPI) {
         // spawnResolved, not spawnTopLevel: the latter strips
         // `resumeSessionFile` and `reclaim` as untrusted. This path is the
         // exception — both come from a tombstone this extension wrote.
-        const id = spawnResolved(pi, ctx, dispatch.type, mention.message, {
+        const id = spawnResolved(pi, ctx, reopen.type, mention.message, {
           description: entry.description,
           reclaim: { handle: entry.handle, alias: entry.alias },
           resumeSessionFile: entry.sessionFile,
@@ -1381,10 +1380,7 @@ export default function (pi: ExtensionAPI) {
           // agent the direct way rather than leaving the user with a toast and
           // nothing running.
           try {
-            const id = spawnTopLevel(pi, ctx, type, mention.message, {
-              description: describeMention(mention.message),
-              isBackground: true,
-            });
+            const id = startMentioned(ctx, type, mention.message);
             // Same reason as the direct path below: the agent may still be
             // starting, and a failure there must reach this catch.
             await manager.awaitStartup(id);
@@ -1400,15 +1396,10 @@ export default function (pi: ExtensionAPI) {
     }
 
     try {
-      // Nothing else to pass: runAgent resolves model, thinking, max turns and
-      // `isolated` from the agent's own config when the spawn omits them, and the
-      // manager's onStart/onComplete callbacks own the widget, the fleet list
+      // The manager's onStart/onComplete callbacks own the widget, the fleet list
       // and the completion notification — the same contract the scheduler and
       // cross-extension RPC spawns run under.
-      const id = spawnTopLevel(pi, ctx, type, mention.message, {
-        description: describeMention(mention.message),
-        isBackground: true,
-      });
+      const id = startMentioned(ctx, type, mention.message);
       // The agent may still be starting (a worktree copy is an awaited git
       // call) — report a failure that lands there as a failed start, not as a
       // "Started" toast for an agent that never ran.
@@ -1445,6 +1436,7 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
     rpcHandle?.unsubConsume();
+    rpcHandle?.unsubSteer();
     rpcHandle?.unsubSend();
     rpcHandle?.unsubReopen();
     rpcHandle = undefined;
@@ -2052,7 +2044,19 @@ Terse command-style prompts produce shallow, generic work.
     promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
     promptGuidelines: [
       "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
-      "For broad codebase exploration, spawn Agent with subagent_type recon. For implementation use worker; for post-change review use reviewer. Otherwise use direct tools (read, grep, find) when the target is already known.",
+      // Names default roles only when they can be spawned (#330).
+      // Read at registration, like the type list in the description.
+      (() => {
+        const available = getAvailableTypes();
+        const roleClauses = [
+          available.includes("recon")
+            ? "For broad codebase exploration, spawn Agent with subagent_type recon"
+            : "For broad codebase exploration or research, spawn Agent with an appropriate subagent_type",
+          available.includes("worker") ? "for implementation use worker" : "",
+          available.includes("reviewer") ? "for post-change review use reviewer" : "",
+        ].filter(Boolean);
+        return `${roleClauses.join("; ")}. Otherwise use direct tools (read, grep, find) when the target is already known.`;
+      })(),
       "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it. Continue with other work instead.",
       "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
     ],
@@ -2245,15 +2249,49 @@ Terse command-style prompts produce shallow, generic work.
 
     // ---- Execute ----
 
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    execute: async (toolCallId, callParams, signal, onUpdate, ctx) => {
       // Unknown keys survive stale/raw tool calls; refuse before scheduling or resuming.
-      if ("model" in params) return { ...textResult(MODEL_OVERRIDE_ERROR), isError: true };
+      if ("model" in callParams) return { ...textResult(MODEL_OVERRIDE_ERROR), isError: true };
 
       // Ensure we have UI context for widget rendering
       widget.setUICtx(ctx.ui as UICtx);
 
       // Reload custom agents so new project/global .md files are picked up without restart
       reloadCustomAgents();
+
+      // A resume whose record is gone — evicted ten minutes after it finished,
+      // or lost to a reload or restart — reopens the agent from the session's
+      // saved record of it, under the same id, as Claude Code resumes from the
+      // transcript on disk. This is an ordinary spawn carrying a session file,
+      // like the `@handle` path's, so it runs through the spawn branches below
+      // and picks up the widget, fleet row, transcript, join batching and
+      // completion notification unchanged. Only the prompt, the turn budget and
+      // run_in_background carry over from the call: like a live resume, it
+      // ignores `subagent_type`, model and the rest, and runs under the agent
+      // type's current definition.
+      // `schedule` is left to its own branch, which refuses the combination.
+      const saved = callParams.resume !== undefined && !callParams.schedule
+        && manager.getRecord(callParams.resume) === undefined
+        ? findAgentRecordEntry(ctx, callParams.resume)
+        : undefined;
+      let reopenOptions: { resumeSessionFile: string; reclaim: { id: string; handle?: string; alias?: string } } | undefined;
+      if (saved !== undefined) {
+        const reopen = reopenTarget(saved.type, saved.sessionFile, saved.worktreeLost);
+        if (!reopen.ok) return textResult(`Agent "${saved.id}" cannot be resumed — ${reopen.reason}.`);
+        reopenOptions = {
+          resumeSessionFile: reopen.sessionFile,
+          reclaim: { id: saved.id, handle: saved.handle, alias: saved.alias },
+        };
+      }
+      const params: typeof callParams = saved === undefined ? callParams : {
+        prompt: callParams.prompt,
+        description: saved.description,
+        subagent_type: saved.type,
+        run_in_background: callParams.run_in_background,
+        max_turns: callParams.max_turns,
+        isolation: undefined,
+        schedule: undefined,
+      };
 
       const rawType = params.subagent_type as SubagentType;
       // Single decision point for dispatch (#183): unknown, disabled and
@@ -2359,8 +2397,16 @@ Terse command-style prompts produce shallow, generic work.
       const attachTranscript = (rec: AgentRecord | undefined, agentId: string): void => {
         if (!rec || !outputTranscript) return;
         rec.outputFile = createOutputFilePath(ctx.cwd, agentId, ctx.sessionManager.getSessionId());
-        writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
+        // A reopened agent keeps its id, so this is the transcript its earlier
+        // runs wrote: append to it, as a live resume does, never truncate it.
+        if (reopenOptions) ensureOutputFile(rec.outputFile);
+        else writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
       };
+      // Where a reopened agent's transcript stream starts: past the turns the
+      // reopened session already holds, so its new prompt is written once and
+      // the old turns are not written again. A spawn starts from its prompt.
+      const transcriptAnchor = (session: AgentSession): number | undefined =>
+        reopenOptions ? session.messages.length : undefined;
 
       // Unconditional, not "only when it differs from the parent": a thinking
       // level reads as a property of a model, and an agent that inherited the
@@ -2381,9 +2427,11 @@ Terse command-style prompts produce shallow, generic work.
         // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
         maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
         isolated,
-        inheritContext,
+        // Neither is applied to a reopened conversation (runAgent, the
+        // manager), so neither is shown.
+        inheritContext: reopenOptions ? undefined : inheritContext,
         runInBackground,
-        isolation,
+        isolation: reopenOptions ? undefined : isolation,
       };
       // Tool-result render shows the mode label too; viewer's header already does.
       const modeLabel = getPromptModeLabel(subagentType);
@@ -2570,7 +2618,7 @@ Terse command-style prompts produce shallow, generic work.
       const backgroundResult = (id: string, record: AgentRecord | undefined) => {
         const isQueued = record?.status === "queued";
         return textResult(
-          `${fallbackNote}Agent ${isQueued ? "queued" : "started"} in background.\n` +
+          `${fallbackNote}Agent ${isQueued ? "queued" : reopenOptions ? "resumed from its saved session" : "started"} in background.\n` +
           `Agent ID: ${id}\n` +
           `Type: ${displayName}\n` +
           `Model: ${detailBaseFor(record).modelName ?? "inherit"}\n` +
@@ -2599,7 +2647,7 @@ Terse command-style prompts produce shallow, generic work.
           origBgOnSession(session);
           const rec = manager.getRecord(id);
           if (rec?.outputFile) {
-            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, id, ctx.cwd);
+            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, id, ctx.cwd, transcriptAnchor(session));
           }
         };
 
@@ -2620,6 +2668,7 @@ Terse command-style prompts produce shallow, generic work.
           invocation: agentInvocation,
           rootSessionId: ctx.sessionManager.getSessionId(),
           parentToolCallId: toolCallId,
+          ...reopenOptions,
           ...bgCallbacks,
         });
 
@@ -2737,7 +2786,7 @@ Terse command-style prompts produce shallow, generic work.
         if (fgId) {
           const rec = manager.getRecord(fgId);
           if (rec?.outputFile) {
-            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, fgId, ctx.cwd);
+            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, fgId, ctx.cwd, transcriptAnchor(session));
           }
         }
       };
@@ -2774,6 +2823,7 @@ Terse command-style prompts produce shallow, generic work.
           signal,
           rootSessionId: ctx.sessionManager.getSessionId(),
           parentToolCallId: toolCallId,
+          ...reopenOptions,
           // Deliberately does NOT set fgId: that drives agentActivity, the
           // widget and the `finally` cleanup below, none of which should see an
           // agent that has no session and may never get one.
@@ -3322,8 +3372,21 @@ Terse command-style prompts produce shallow, generic work.
         }),
       ),
     }),
-    execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
+    execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
       const record = resolveAgentRef(params.agent_id);
+      if (!record) {
+        // Evicted, or lost to a reload: answer from the record the session saved.
+        // An evicted handle still resolves to its id through its tombstone. After
+        // a reload there is no tombstone, so the saved entry's handle and alias
+        // have to match on their own.
+        const tombstone = manager.resolveMention(params.agent_id);
+        const savedId = tombstone?.kind === "tombstone" ? tombstone.entry.id : params.agent_id;
+        const saved = findAgentRecordEntry(ctx, savedId, tombstone === undefined);
+        if (saved) {
+          outbox.cancel(saved.id);
+          return textResult(formatSavedAgentRecord(saved));
+        }
+      }
       if (!record || record.owner || !isTopLevelAgent(record)) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }

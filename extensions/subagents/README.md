@@ -7,9 +7,9 @@ Subagents delegates tasks to a configurable fleet of Pi agents. This collection 
 | Field | Value |
 | --- | --- |
 | Package | `@tintinweb/pi-subagents` |
-| Version / tag | **v0.22.0** |
-| Commit | `85a704cb8f35c96c0cabfa665b572bab296942e5` |
-| Previous vendor base | v0.14.3, `c10b1836256e760da75296ccd4e57a77ada1325e` |
+| Version / tag | **v0.23.1** |
+| Commit | `9bb6c822bae9f4fe8d33384b715a5e2e96d5df10` |
+| Previous vendor base | v0.22.0, `85a704cb8f35c96c0cabfa665b572bab296942e5` |
 | Entry | [`src/index.ts`](./src/index.ts) |
 
 [Upstream documentation](UPSTREAM.md), [changelog](CHANGELOG.md), and [local patch ledger](LOCAL-PATCHES.md). The local behavior described here takes precedence over upstream defaults.
