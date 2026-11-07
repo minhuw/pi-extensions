@@ -17,11 +17,10 @@ use super::trace::{Record, Trace};
 use crate::redact::{Scope, scrub_content, scrub_text};
 use crate::util::parse_json_lenient;
 
-/// How many characters derive keeps of the first prompt for a session's title, of a turn's prompt and of its reply
-/// (`TITLE_CHARS`, `USER_TEXT_CHARS` and `FINAL_TEXT_CHARS` in `derive::session`).
+/// How many characters derive keeps of the first prompt for a session's title and of a turn's prompt
+/// (`TITLE_CHARS` and `USER_TEXT_CHARS` in `derive::session`).
 const TITLE_CHARS: usize = 120;
 const USER_TEXT_CHARS: usize = 65_536;
-const FINAL_TEXT_CHARS: usize = 2_000;
 
 /// A summary's title, and its `link` (the whole `pi-extensions.session-link` entry, with a subagent's description and
 /// its spawner's data) as session content. The public namespace drops the link before this.
@@ -34,7 +33,7 @@ fn summary<'a>(scope: &mut Scope<'a>, summary: &'a mut SessionSummary) {
 
 fn turn<'a>(scope: &mut Scope<'a>, turn: &'a mut Turn) {
     scope.cut_text(&mut turn.user_text, USER_TEXT_CHARS);
-    scope.cut_text(&mut turn.final_text, FINAL_TEXT_CHARS);
+    scope.text(&mut turn.final_text);
 }
 
 fn text<'a>(scope: &mut Scope<'a>, text: &'a mut Option<String>) {

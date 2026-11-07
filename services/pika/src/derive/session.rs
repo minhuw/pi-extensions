@@ -8,7 +8,6 @@ use crate::util::{basename, cut_chars, parse_json_lenient, valid_project, valid_
 
 pub const LINK_CUSTOM_TYPE: &str = "pi-extensions.session-link";
 const TITLE_CHARS: usize = 120;
-const FINAL_TEXT_CHARS: usize = 2_000;
 const USER_TEXT_CHARS: usize = 65_536;
 
 struct SessionRow {
@@ -515,7 +514,7 @@ impl Deriver<'_> {
             turn.tool_calls += call_ids.len() as i64;
             let text = content_text(message.get("content"));
             if !text.trim().is_empty() {
-                turn.final_text = Some(cut_chars(&text, FINAL_TEXT_CHARS).to_owned());
+                turn.final_text = Some(text);
             }
         }
         Ok(call_ids)

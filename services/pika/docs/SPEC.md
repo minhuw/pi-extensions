@@ -179,7 +179,7 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
   { index, startSeq, endSeq, userText, at, durationMs,
     modelCalls, toolCalls, toolErrors, cost, tokens, finalText, customType? }
   ```
-  `finalText` is the last assistant text in the turn, cut to 2,000 characters. `customType` is the `customType` of the `custom_message` that started the turn, such as `relay-message`, and is absent for a user prompt; it is read from the entry at `startSeq`, so it needs no reindex.
+  `finalText` is the last assistant text in the turn. `customType` is the `customType` of the `custom_message` that started the turn, such as `relay-message`, and is absent for a user prompt; it is read from the entry at `startSeq`, so it needs no reindex.
   - A run is in progress after a user prompt until its first assistant reply. After a reply, it depends on the turn's last reply's `stopReason`:
     - `toolUse`: in progress.
     - `aborted`: ended.

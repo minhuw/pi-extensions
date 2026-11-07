@@ -172,6 +172,42 @@ pub fn normalize_models(tx: &Transaction) -> Result<bool> {
     Ok(changed)
 }
 
+/// Repairs turns whose `final_text` was truncated by the earlier 2,000-character limit.
+pub fn refresh_final_texts(tx: &Transaction, blobs: &crate::blobs::BlobStore) -> Result<()> {
+    let rows: Vec<(i64, i64, i64, i64)> = tx
+        .prepare("SELECT sid, idx, start_seq, end_seq FROM turns WHERE length(final_text) >= 2000")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut find_lines = tx.prepare_cached(
+        "SELECT l.data, l.blob FROM entries e JOIN lines l ON l.stream_id = e.sid AND l.offset = e.offset
+         WHERE e.sid = ?1 AND e.seq >= ?2 AND e.seq <= ?3 AND e.type = 'message' AND e.role = 'assistant'
+         ORDER BY e.seq DESC",
+    )?;
+    let mut update = tx.prepare_cached("UPDATE turns SET final_text = ?1 WHERE sid = ?2 AND idx = ?3")?;
+    for (sid, idx, start_seq, end_seq) in rows {
+        let lines: Vec<(Option<String>, Option<String>)> = find_lines
+            .query_map(rusqlite::params![sid, start_seq, end_seq], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (data, blob) in lines {
+            let raw = match (data, blob) {
+                (Some(data), _) => data,
+                (None, Some(hash)) => blobs.get_string(&hash)?,
+                (None, None) => continue,
+            };
+            let Ok(v) = crate::util::parse_json_lenient(&raw) else { continue };
+            let text = session::content_text(v.get("message").and_then(|m| m.get("content")));
+            if !text.trim().is_empty() {
+                update.execute(rusqlite::params![text, sid, idx])?;
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The stream's `meta` object, or `Null` when it has none or it is not JSON.
 fn stream_meta(tx: &Transaction, id: i64) -> Result<Value> {
     let meta: Option<String> =

@@ -370,11 +370,11 @@ async fn stored_json_prefixes_protect_titles_replies_children_and_search() {
     let task = source(secrets[2]);
     let title = first_chars(&prompt, 120);
     let child_title = first_chars(&task, 120);
-    let final_text = first_chars(&reply, 2000);
+    let final_text = reply.clone();
     assert_eq!(title.chars().count(), 120);
     assert_eq!(child_title.chars().count(), 120);
-    assert_eq!(final_text.chars().count(), 2000);
-    for (text, secret) in [(&title, secrets[0]), (&child_title, secrets[2]), (&final_text, secrets[1])] {
+    assert!(final_text.chars().count() > 2000);
+    for (text, secret) in [(&title, secrets[0]), (&child_title, secrets[2])] {
         assert!(text.contains(&format!("\"{secret}\",")));
         assert!(serde_json::from_str::<Value>(text.strip_prefix("Deploy with ").unwrap()).is_err());
     }
@@ -959,10 +959,9 @@ async fn texts_stored_cut_show_no_part_of_a_cut_credential() {
     let task = content(&child[2], "").as_str().unwrap().to_owned();
     let title = first_chars(&prompt, 120);
     let child_title = first_chars(&task, 120);
-    let final_text = first_chars(&reply, 2000);
     // What the cuts left of each key: no END line, part of a line of base64 or of the key.
     assert!(!title.contains("-----END") && title.ends_with(&key_lines[0][..63]), "{title:?}");
-    assert!(!final_text.contains("-----END") && final_text.contains(&key_lines[5]), "{final_text:?}");
+    assert!(reply.chars().count() > 2000 && reply.contains("-----END"), "{reply:?}");
     assert!(child_title.ends_with(CUT_KEY_LEFT) && !child_title.contains(CUT_KEY), "{child_title:?}");
 
     // The owner's routes return what derive stored.
@@ -970,7 +969,7 @@ async fn texts_stored_cut_show_no_part_of_a_cut_credential() {
     assert_eq!(detail["title"], title);
     assert_eq!(detail["children"][0]["title"], child_title);
     let turns = app.owner(&format!("sessions/{KEYS_SESSION}/turns")).await.json();
-    assert_eq!(turns["items"][0]["finalText"], final_text);
+    assert_eq!(turns["items"][0]["finalText"], reply);
     assert_eq!(app.owner(&format!("sessions/{KEYS_CHILD}")).await.json()["title"], child_title);
 
     let mut parts: Vec<String> = key_lines.iter().map(|line| line[..16].to_owned()).collect();

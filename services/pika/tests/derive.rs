@@ -706,3 +706,41 @@ fn opening_a_database_rewrites_model_ids_to_bare_names_once() {
     pika::reindex::reindex(&store).unwrap();
     assert_eq!(dump_derived(&store), expected);
 }
+
+#[test]
+fn derives_and_repairs_arbitrary_length_turn_final_text() {
+    let env = env();
+    let data = env.dir.path().join("data");
+    let long_reply = format!("START-{}-END", "long response segment ".repeat(5_000));
+    assert!(long_reply.chars().count() > 100_000);
+    let at = "2026-10-23T09:00:00.000Z";
+    let lines = [
+        json!({ "type": "session", "version": 3, "id": "long-final-1", "timestamp": at, "cwd": "/home/me/code/widgets" }).to_string(),
+        json!({ "type": "message", "id": "m1", "parentId": null, "timestamp": at, "message": { "role": "user", "content": "Explain in detail", "timestamp": 1 } }).to_string(),
+        json!({ "type": "message", "id": "m2", "parentId": "m1", "timestamp": at, "message": { "role": "assistant", "content": [{ "type": "text", "text": long_reply }], "model": "gpt-6.1-sol", "stopReason": "stop", "timestamp": 2 } }).to_string(),
+    ];
+    upload(&env.store, "session:long-final-1", "session", &lines, 10);
+    let row = one(&env.store, "SELECT final_text FROM turns t JOIN sessions s USING (sid) WHERE s.id = 'long-final-1'");
+    assert_eq!(row["final_text"], json!(long_reply));
+    let expected = dump_derived(&env.store);
+    drop(env.store);
+
+    // Simulate a legacy database that stored only the first 2,000 characters of `final_text`.
+    let truncated: String = long_reply.chars().take(2_000).collect();
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    conn.execute("UPDATE turns SET final_text = ?1", [&truncated]).unwrap();
+    conn.execute("DELETE FROM settings WHERE key = 'final_text_repaired'", []).unwrap();
+    drop(conn);
+
+    let store = pika::store::Store::open(&data).unwrap();
+    assert_eq!(dump_derived(&store), expected);
+    assert_eq!(store.setting("final_text_repaired").unwrap(), Some(vec![1]));
+    store.write(|tx| tx.execute_batch(
+        "CREATE TRIGGER no_repeated_final_text_repair BEFORE UPDATE ON turns
+         BEGIN SELECT RAISE(ABORT, 'final_text repair ran twice'); END;"
+    )).unwrap();
+    drop(store);
+    let store = pika::store::Store::open(&data).unwrap();
+    assert_eq!(dump_derived(&store), expected);
+}
+

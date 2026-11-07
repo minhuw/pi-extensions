@@ -42,6 +42,8 @@ pub const RESCRUB_AFTER: &str = "search_rescrub_after";
 const WORKTREE_PROJECTS_REPAIRED: &str = "worktree_projects_repaired";
 /// Marks the completed rewrite of derived model ids to bare model names (`crate::derive::normalize_models`).
 const BARE_MODELS_REPAIRED: &str = "bare_models_repaired";
+/// Marks the completed repair of turn `final_text` values truncated at 2,000 characters.
+const FINAL_TEXT_REPAIRED: &str = "final_text_repaired";
 const MAX_IDLE_READERS: usize = 16;
 
 /// Tables rebuilt by `pika reindex`, in the order they are cleared.
@@ -105,7 +107,7 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 /// Applies pending migrations.
-fn migrate(conn: &mut Connection) -> Result<()> {
+fn migrate(conn: &mut Connection, blobs: &BlobStore) -> Result<()> {
     let version = conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? as usize;
     if version > MIGRATIONS.len() {
         bail!("database schema version {version} is newer than this pika ({})", MIGRATIONS.len());
@@ -161,6 +163,14 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         tx.execute("INSERT INTO settings (key, value) VALUES (?1, x'01')", [BARE_MODELS_REPAIRED])?;
     }
     tx.commit()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let repaired =
+        tx.query_row("SELECT EXISTS(SELECT 1 FROM settings WHERE key = ?1)", [FINAL_TEXT_REPAIRED], |r| r.get::<_, bool>(0))?;
+    if !repaired {
+        crate::derive::refresh_final_texts(&tx, blobs).context("repairing turn final texts")?;
+        tx.execute("INSERT INTO settings (key, value) VALUES (?1, x'01')", [FINAL_TEXT_REPAIRED])?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -168,17 +178,18 @@ impl Store {
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Arc<Store>> {
         let data_dir = data_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&data_dir).with_context(|| format!("creating {}", data_dir.display()))?;
+        let blobs = BlobStore::new(data_dir.join("blobs"));
         let db_path = data_dir.join("pika.db");
         let mut writer = Connection::open(&db_path).with_context(|| format!("opening {}", db_path.display()))?;
         configure(&writer)?;
-        migrate(&mut writer)?;
+        migrate(&mut writer, &blobs)?;
         let needs_reindex = writer
             .query_row("SELECT 1 FROM settings WHERE key = ?1", [NEEDS_REINDEX], |_| Ok(()))
             .optional()?
             .is_some();
         let prices = crate::pricing::kept(&data_dir);
         let store = Arc::new(Store {
-            blobs: BlobStore::new(data_dir.join("blobs")),
+            blobs,
             data_dir,
             db_path,
             writer: Mutex::new(writer),
