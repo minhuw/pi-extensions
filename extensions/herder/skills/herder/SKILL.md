@@ -15,7 +15,7 @@ Success is computed by the runtime from real check results and its own verificat
    A run started from a `/herder-improve` or `/herder-simplify` audit implements the findings the user picked: one acceptance criterion and one task per finding, the unpicked findings out of scope. The audit already did the clarifying.
 2. **Clarify.** Read the relevant code first, then ask at most 5 questions, only ones whose answers change the work. For a run you started with `herder_run`, ask only what is still open: the conversation or audit that led to it usually answered them. Give each a recommended answer so the user can reply "yes". Skip questions you can answer from the code.
 3. **Write `goal.md`** in the format below. Prefer acceptance criteria that a check can decide.
-4. **Approve.** Call `herder_run { action: "approve_goal" }`. Herder validates the file and asks the user to confirm. If validation fails, fix the file and call it again. After approval the goal is frozen; to change it, tell the user.
+4. **Approve.** Call `herder_run { action: "approve_goal" }`. Herder validates the file and asks the user to confirm. If validation fails, fix the file and call it again. After approval the goal is frozen; to change it, tell the user (a new goal requires aborting the run with `herder_run { action: "abort" }` after the user confirms, then starting a new run).
 5. **Write `plan.md`** next to `goal.md`: tasks with IDs mapped to criteria.
 6. **Orchestrate** (see the decision table):
    - Simple runs: `herder_step` (one `agent()` step with the same options) then `herder_integrate` with its commit. Inspect each result before the next call.
@@ -28,7 +28,7 @@ Success is computed by the runtime from real check results and its own verificat
    - `uncommitted`: the changes applied to the clean working tree, unstaged.
    - `curate: true` first asks a curator to regroup the series into logical commits; it is kept only if the final tree is identical.
 
-`herder_run { action: "status" }` shows the run at any time. The user also has `/herder status`, `/herder deliver`, `/herder abort`, and `/herder clean`.
+`herder_run { action: "status" }` shows the run at any time, and `herder_run { action: "abort" }` stops and abandons the run after the user confirms (use it only when the user asks to abandon the run or replace a frozen goal; to stop a running launch without abandoning the run, use `herder_workflow { mode: "stop" }`). The user also has `/herder status`, `/herder deliver`, `/herder abort`, and `/herder clean`.
 
 ### Resuming
 

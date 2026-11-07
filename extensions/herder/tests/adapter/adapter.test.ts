@@ -53,7 +53,7 @@ describe("registration", () => {
 		const tool = (name: string) => h.tools.get(name);
 		expect(props(tool("herder_run"))).toEqual(["action", "answer", "goal", "question", "runId"]);
 		expect(tool("herder_run").parameters.required).toEqual(["action"]);
-		expect(tool("herder_run").parameters.properties.action.anyOf.map((item: any) => item.const)).toEqual(["start", "status", "approve_goal", "record_decision"]);
+		expect(tool("herder_run").parameters.properties.action.anyOf.map((item: any) => item.const)).toEqual(["start", "status", "approve_goal", "record_decision", "abort"]);
 		expect(props(tool("herder_workflow"))).toEqual(["args", "mode", "resume", "script", "scriptPath"]);
 		expect(tool("herder_workflow").parameters.properties.mode.anyOf.map((item: any) => item.const)).toEqual(["validate", "run", "stop"]);
 		expect(props(tool("herder_step"))).toEqual(["base", "effort", "fresh", "gate", "id", "label", "phase", "prompt", "role", "schema", "stallMs", "task", "timeoutMs", "write"]);
@@ -224,6 +224,43 @@ describe("herder_run", () => {
 		expect(status.content[0].text).toContain(`Herder run ${runId}`);
 		expect(status.content[0].text).toContain("Lock: this session");
 		expect(status.details).toMatchObject({ runId, status: "drafting", goalApproved: false });
+	});
+
+	it("aborts a run through herder_run only interactively and after user confirmation, stopping a running launch", async () => {
+		const nonInteractive = await started({ hasUI: false });
+		await expect(nonInteractive.h.tool("herder_run", { action: "abort" })).rejects.toThrow(/interactive/);
+		expect(nonInteractive.h.confirm).not.toHaveBeenCalled();
+		expect(nonInteractive.run.state().status).toBe("drafting");
+
+		const { h, run, runId } = await approved();
+		await h.tool("herder_workflow", { mode: "run", script: "return 1" });
+		writeFileSync(run.paths.goal, `${VALID_GOAL}\nchanged\n`);
+		const keys: string[] = [];
+		const keybindings = { matches: (data: string, binding: string) => (binding === "tui.select.cancel" && data === "\x1b") || (binding === "tui.select.confirm" && data === "\r") };
+		Object.assign(h.ctx, { mode: "tui" });
+		Object.assign(h.ctx.ui, { custom: vi.fn((factory: (...args: unknown[]) => { handleInput(data: string): void }) => new Promise((resolve) => {
+			factory({ requestRender() {}, terminal: { rows: 24 } }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, keybindings, resolve).handleInput(keys.shift()!);
+		})) });
+		keys.push("\x1b", "n", "y");
+		const dismissed = await h.tool("herder_run", { action: "abort" });
+		expect(dismissed.details).toEqual({ runId, aborted: false, dismissed: true });
+		expect(dismissed.content[0].text).toMatch(/closed without an answer.*still active/);
+		const declined = await h.tool("herder_run", { action: "abort" });
+		expect(declined.details).toEqual({ runId, aborted: false });
+		expect(declined.content[0].text).toMatch(/did not abort.*still active/);
+		expect(run.state().status).toBe("approved");
+		expect(readLock(run.paths.lock)).not.toBeNull();
+		const runtime = h.runtime();
+		const aborted = await h.tool("herder_run", { action: "abort" });
+		expect(aborted.details).toEqual({ runId, aborted: true });
+		expect(aborted.content[0].text).toBe(`Abandoned Herder run ${runId}.`);
+		expect(runtime.launches[0]!.stopped).toBe("run aborted");
+		expect(runtime.calls.at(-1)).toEqual(["abandon", "aborted by the user"]);
+		expect(run.state().status).toBe("abandoned");
+		expect(readLock(run.paths.lock)).toBeNull();
+		expect(h.statuses.has(STATUS_KEY)).toBe(false);
+		await expect(h.tool("herder_run", { action: "abort" })).rejects.toThrow(/No active Herder run/);
+		await expect(h.tool("herder_run", { action: "abort", runId })).rejects.toThrow(/abandoned/);
 	});
 });
 

@@ -21,7 +21,7 @@ const RUN_ID = Type.String({ pattern: "^\\d{8}-\\d{6}-[0-9a-f]{4}$", description
 const CHECK_IDS = (description: string) => Type.Array(Type.String({ minLength: 1 }), { description });
 
 export const RunParameters = Type.Object({
-	action: literals(["start", "status", "approve_goal", "record_decision"] as const),
+	action: literals(["start", "status", "approve_goal", "record_decision", "abort"] as const),
 	runId: Type.Optional(RUN_ID),
 	goal: Type.Optional(text("start: the goal text, as for /herder <goal>; its first line becomes the run title")),
 	question: Type.Optional(text("record_decision: the question put to the user")),
@@ -114,10 +114,33 @@ async function approveGoal(herder: Herder, s: Session, held: Held, ctx: Extensio
 	return reply(`Goal approved (${goal.criteria.length} criteria, ${goal.checks.length} checks). Next: write plan.md (${held.run.paths.plan}) with task lines, then orchestrate.`, { approved: true, sha256, checks: goal.checks });
 }
 
+async function abortRun(herder: Herder, s: Session, held: Held, ctx: ExtensionContext, signal: AbortSignal | undefined) {
+	const state = held.run.state();
+	if (isFinished(state)) throw new Error(`Herder run ${held.runId} is ${state.status}.`);
+	if (!ctx.hasUI) throw new Error("abort needs an interactive session (TUI or RPC) so the user can confirm abandoning the run; it cannot be aborted here.");
+	const summary = describeRun(held.run, state, planTasks(held.run), {
+		lock: readLock(held.run.paths.lock),
+		sessionId: herder.lockId(s),
+		launch: s.held?.runId === held.runId ? s.held.launch?.launch : undefined,
+		now: herder.now(),
+	});
+	const title = `Abort Herder run ${held.runId}${state.title ? `: ${state.title}` : ""}?`;
+	const body = `${summary}\n\nAborting stops the run, marks it abandoned, and removes its refs/herder/${held.runId}/ refs and worktrees.`;
+	const answer = await herder.op(held, signal, async (combined) => {
+		const confirmed = await confirmLong(ctx, title, body, combined);
+		if (held.closing || isFinished(held.run.state())) throw new Error(`Herder run ${held.runId} is being stopped.`);
+		return confirmed;
+	}, true);
+	if (answer === undefined) return reply(`The abort dialog was closed without an answer; Herder run ${held.runId} is still active.`, { runId: held.runId, aborted: false, dismissed: true });
+	if (!answer) return reply(`The user did not abort Herder run ${held.runId}; the run is still active.`, { runId: held.runId, aborted: false });
+	const { runId, warning } = await herder.abort(s, held.runId);
+	return reply(`Abandoned Herder run ${runId}.${warning ? ` Warning: ${warning}` : ""}`, { runId, aborted: true, ...(warning ? { warning } : {}) });
+}
+
 export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 	pi.registerTool({
 		name: "herder_run", label: "Herder Run", executionMode: "sequential",
-		description: "Herder run control. start: create a run for goal at HEAD, as /herder <goal> does, and return its instructions. status: show the active run. approve_goal: validate goal.md and ask the user to approve it (interactive only). record_decision: journal a user decision (question, answer) made between launches.",
+		description: "Herder run control. start: create a run for goal at HEAD, as /herder <goal> does, and return its instructions. status: show the active run. approve_goal: validate goal.md and ask the user to approve it (interactive only). record_decision: journal a user decision (question, answer) made between launches. abort: stop and abandon the run after user confirmation (interactive only).",
 		parameters: RunParameters,
 		async execute(_id, params, signal, _update, ctx) {
 			const s = herder.session(ctx);
@@ -136,6 +159,7 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 			}
 			const held = params.runId ? herder.hold(s, params.runId) : herder.current(s);
 			if (params.action === "approve_goal") return herder.op(held, signal, (combined) => approveGoal(herder, s, held, ctx, combined), true);
+			if (params.action === "abort") return abortRun(herder, s, held, ctx, signal);
 			const question = params.question?.trim();
 			const answer = params.answer?.trim();
 			if (!question || !answer) throw new Error("record_decision needs a question and an answer.");
