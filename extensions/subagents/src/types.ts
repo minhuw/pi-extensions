@@ -13,8 +13,11 @@ export type { ServiceTierInput };
 /** Agent type: any string name (built-in defaults or user-defined). */
 export type SubagentType = string;
 
-/** Names of the four embedded default agents. */
-export const DEFAULT_AGENT_NAMES = ["recon", "worker", "reviewer", "expert"] as const;
+/** Names of the three model-visible embedded default agents. */
+export const DEFAULT_AGENT_NAMES = ["recon", "worker", "reviewer"] as const;
+
+/** Names of the three model-hidden embedded council agents. */
+export const COUNCIL_AGENT_NAMES = ["council-argon", "council-astra", "council-opus"] as const;
 
 /** Memory scope for persistent agent memory. */
 export type MemoryScope = "user" | "project" | "local";

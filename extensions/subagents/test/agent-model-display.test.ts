@@ -249,19 +249,20 @@ describe("Agent tool result — effective model", () => {
     expect(vi.mocked(runAgent).mock.calls[0]?.[3]?.model).toBe(MODELS[1]);
   });
 
-  it("resolves Expert's exact Astra pin over a different parent model and caller thinking", async () => {
+  it("resolves a custom advisor.md's exact Astra pin over a different parent model and caller thinking", async () => {
+    pinnedAgent("model: magpie/gpt-6-astra\nthinking: xhigh\n", "advisor");
     const tool = agentTool();
     const context = ctx();
     vi.mocked(runAgent).mockImplementation(async () => ({ responseText: "advice", aborted: false, steered: false }) as never);
 
-    const result = await tool.execute("expert-pin", {
+    const result = await tool.execute("advisor-pin", {
       prompt: "Assess the design tradeoffs", description: "Assess design tradeoffs",
-      subagent_type: "expert", thinking: "low", run_in_background: false,
+      subagent_type: "advisor", thinking: "low", run_in_background: false,
     }, undefined, vi.fn(), context);
 
     const options = vi.mocked(runAgent).mock.calls[0]?.[3];
     expect(runAgent).toHaveBeenCalledOnce();
-    expect(vi.mocked(runAgent).mock.calls[0]?.[1]).toBe("expert");
+    expect(vi.mocked(runAgent).mock.calls[0]?.[1]).toBe("advisor");
     expect(options?.model).toBe(MODELS[2]);
     expect(options?.model).toMatchObject({ provider: "magpie", id: "gpt-6-astra" });
     expect(options?.model).not.toBe(context.model);
@@ -272,14 +273,14 @@ describe("Agent tool result — effective model", () => {
     expect(result.details.identity).toContain("xhigh (asked low)");
   });
 
-  it("discovers a custom expert.md in place of the embedded Expert", async () => {
-    pinnedAgent("model: anthropic/claude-haiku-4-5\nthinking: low\n", "expert");
+  it("discovers a custom recon.md in place of the embedded Recon", async () => {
+    pinnedAgent("model: anthropic/claude-haiku-4-5\nthinking: low\n", "recon");
     const tool = agentTool();
-    vi.mocked(runAgent).mockImplementation(async () => ({ responseText: "advice", aborted: false, steered: false }) as never);
+    vi.mocked(runAgent).mockImplementation(async () => ({ responseText: "recon", aborted: false, steered: false }) as never);
 
-    const result = await tool.execute("expert-override", {
-      prompt: "Assess the design", description: "Assess design",
-      subagent_type: "expert", thinking: "high", run_in_background: false,
+    const result = await tool.execute("recon-override", {
+      prompt: "Locate the entry points", description: "Locate entry points",
+      subagent_type: "recon", thinking: "high", run_in_background: false,
     }, undefined, vi.fn(), ctx());
 
     const options = vi.mocked(runAgent).mock.calls[0]?.[3];

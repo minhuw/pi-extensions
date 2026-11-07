@@ -2,7 +2,7 @@
  * A `context_files` agent, through the REAL runner, loader and session (faux
  * model; assertions on the session as constructed):
  * Pi's normal prompt plus the agent text, every extension tool, nested Agent
- * limited to recon/worker/reviewer/expert, context files bounded at the
+ * limited to recon/worker/reviewer, context files bounded at the
  * worktree root, and `linkData` / `parentToolCallId` in the session link.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -28,7 +28,7 @@ const BUILTINS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
 const BOUNDED: AgentConfig = {
   name: "bounded", description: "bounded", modelVisible: false, extensions: true, skills: true,
-  contextFiles: true, isolation: "off", allowedSubagents: ["recon", "worker", "reviewer", "expert"],
+  contextFiles: true, isolation: "off", allowedSubagents: ["recon", "worker", "reviewer"],
   requireToolUse: true, systemPrompt: "BOUNDED_INSTRUCTIONS", promptMode: "append",
 };
 
@@ -168,7 +168,7 @@ describe("context_files agent (real runner)", () => {
     expect(registered).toContain("mcp__probe__lookup");
     const agent = session.getAllTools().find((t: any) => t.name === "Agent");
     const typeDescription = JSON.stringify(agent.parameters);
-    expect(typeDescription).toContain("Available: recon, worker, reviewer, expert.");
+    expect(typeDescription).toContain("Available: recon, worker, reviewer.");
     expect(typeDescription).not.toMatch(/\bbounded\b/);
   });
 

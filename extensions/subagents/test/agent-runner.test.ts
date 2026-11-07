@@ -31,47 +31,51 @@ const {
   settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
 }));
 
-vi.mock("@earendil-works/pi-coding-agent", () => ({
-  createAgentSession,
-  // The runner forwards these to the child loader's `extensionFactories`. Stubbed
-  // to the shape pi returns: a factory that registers nothing.
-  createMcpExtension: () => () => {},
-  createCodemodeExtension: () => () => {},
-  createToolSearchExtension: () => () => {},
-  // Identity, as pi's own is: `defineTool` exists for the type inference, and
-  // the structured-output tool is built through it.
-  defineTool: (definition: unknown) => definition,
-  // Mock loader simulates pi-mono: reload() applies additionalExtensionPaths
-  // (an unknown path becomes an error row, mirroring a failed load) and then
-  // runs extensionsOverride over the result.
-  DefaultResourceLoader: class {
-    opts: any;
-    constructor(options: any) {
-      this.opts = options;
-      defaultResourceLoaderCtor(options);
-    }
-
-    async reload() {
-      // Mirror the real loader: `noExtensions: true` zeros out the discovered set
-      // entirely. Otherwise tests pre-register the extensions a path should
-      // resolve to; an unregistered path simply yields no extension (a failed load).
-      if (this.opts.noExtensions) {
-        loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
-        return;
+vi.mock("@earendil-works/pi-coding-agent", async () => {
+  const actual = await vi.importActual<any>("@earendil-works/pi-coding-agent");
+  return {
+    ...actual,
+    createAgentSession,
+    // The runner forwards these to the child loader's `extensionFactories`. Stubbed
+    // to the shape pi returns: a factory that registers nothing.
+    createMcpExtension: () => () => {},
+    createCodemodeExtension: () => () => {},
+    createToolSearchExtension: () => () => {},
+    // Identity, as pi's own is: `defineTool` exists for the type inference, and
+    // the structured-output tool is built through it.
+    defineTool: (definition: unknown) => definition,
+    // Mock loader simulates pi-mono: reload() applies additionalExtensionPaths
+    // (an unknown path becomes an error row, mirroring a failed load) and then
+    // runs extensionsOverride over the result.
+    DefaultResourceLoader: class {
+      opts: any;
+      constructor(options: any) {
+        this.opts = options;
+        defaultResourceLoaderCtor(options);
       }
-      if (this.opts.extensionsOverride) {
-        loaderExtensionsRef.current = this.opts.extensionsOverride(loaderExtensionsRef.current);
-      }
-    }
 
-    getExtensions() {
-      return loaderExtensionsRef.current;
-    }
-  },
-  getAgentDir,
-  SessionManager: { inMemory: sessionManagerInMemory, create: sessionManagerCreate, open: sessionManagerOpen },
-  SettingsManager: { create: settingsManagerCreate },
-}));
+      async reload() {
+        // Mirror the real loader: `noExtensions: true` zeros out the discovered set
+        // entirely. Otherwise tests pre-register the extensions a path should
+        // resolve to; an unregistered path simply yields no extension (a failed load).
+        if (this.opts.noExtensions) {
+          loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
+          return;
+        }
+        if (this.opts.extensionsOverride) {
+          loaderExtensionsRef.current = this.opts.extensionsOverride(loaderExtensionsRef.current);
+        }
+      }
+
+      getExtensions() {
+        return loaderExtensionsRef.current;
+      }
+    },
+    getAgentDir,
+    SessionManager: { inMemory: sessionManagerInMemory, create: sessionManagerCreate, open: sessionManagerOpen },
+    SettingsManager: { create: settingsManagerCreate },
+  };
+});
 
 vi.mock("../src/agent-types.js", () => ({
   BUILTIN_TOOL_NAMES: ["read", "bash", "edit", "write", "grep", "find", "ls"],

@@ -14,9 +14,9 @@ it("allows installed extensions in the default fleet while retaining built-in se
     expect(agent.extensions).toBe(true);
     expect(agent.excludeExtensions).toBeUndefined();
   }
-  expect(DEFAULT_AGENTS.get("recon")?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
-  expect(DEFAULT_AGENTS.get("reviewer")?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
-  expect(DEFAULT_AGENTS.get("expert")?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
+  for (const name of ["recon", "reviewer", "council-argon", "council-astra", "council-opus"]) {
+    expect(DEFAULT_AGENTS.get(name)?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
+  }
 });
 
 describe("foreground agent metadata", () => {

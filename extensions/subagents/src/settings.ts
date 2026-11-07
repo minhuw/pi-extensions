@@ -99,7 +99,7 @@ export interface SubagentsSettings {
    */
   strictAgentFiles?: boolean;
   /**
-   * When true, the four built-in default agents (recon, worker, reviewer, expert)
+   * When true, the built-in default agents (recon, worker, reviewer)
    * are not registered at startup. User-defined agents from project/global custom
    * agent dirs are completely unaffected — only the hardcoded DEFAULT_AGENTS are suppressed.
    * Defaults to false.

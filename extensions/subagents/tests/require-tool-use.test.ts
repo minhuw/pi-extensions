@@ -14,6 +14,7 @@ import { parseAgentDefinition, parseAgentFrontmatter } from "../src/agent-defini
 import { serializeAgentFile } from "../src/agent-file-toggle.js";
 import { noToolUseFailure } from "../src/agent-runner.js";
 import { DEFAULT_AGENTS } from "../src/default-agents.js";
+import { COUNCIL_AGENT_NAMES } from "../src/types.js";
 import { agentCall, type FauxReply, type PrintModeRun, runPrintMode, toolResultsNamed } from "../test/helpers/print-mode-runner.js";
 
 vi.setConfig({ testTimeout: 30_000 });
@@ -111,12 +112,14 @@ describe("require_tool_use (real pi, faux model)", () => {
     expect(records(run!)[0]?.error).toBeUndefined();
   });
 
-  it("completes an expert that replies with text only", async () => {
-    const results = await spawnForeground("expert", () => "Use the second design.");
+  it("completes a custom agent with require_tool_use: false that replies with text only", async () => {
+    const cwd = tempDir();
+    writeAgent(cwd, "advisor", "tools: read, bash, grep, find, ls\nrequire_tool_use: false\n");
+    const results = await spawnForeground("advisor", () => "Use the second design.", cwd);
 
     expect(results[0]).toContain("Agent completed");
     expect(results[0]).toContain("Use the second design.");
-    expect(records(run!)[0]).toMatchObject({ type: "expert", status: "completed" });
+    expect(records(run!)[0]).toMatchObject({ type: "advisor", status: "completed" });
   });
 
   it("leaves a custom agent without the field unaffected", async () => {
@@ -244,6 +247,8 @@ describe("require_tool_use frontmatter", () => {
       expect(DEFAULT_AGENTS.get(name)?.requireToolUse).toBe(true);
       expect(serializeAgentFile(DEFAULT_AGENTS.get(name)!)).toContain("require_tool_use: true");
     }
-    expect(DEFAULT_AGENTS.get("expert")?.requireToolUse).toBeUndefined();
+    for (const name of COUNCIL_AGENT_NAMES) {
+      expect(DEFAULT_AGENTS.get(name)?.requireToolUse).toBeUndefined();
+    }
   });
 });

@@ -1,13 +1,42 @@
 /**
  * default-agents.ts — Embedded default agent configurations.
  *
- * Fleet: recon, worker, reviewer, expert.
+ * Model-visible fleet: recon, worker, reviewer.
+ * Model-hidden council advisors: council-argon, council-astra, council-opus.
  * User .md files with the same name override these.
  */
 
-import type { AgentConfig } from "./types.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseAgentDefinition, parseAgentFrontmatter } from "./agent-definitions.js";
+import { COUNCIL_AGENT_NAMES, type AgentConfig } from "./types.js";
 
 const READ_ONLY_TOOLS = ["read", "bash", "grep", "find", "ls"];
+const COUNCIL_AGENTS_DIR = fileURLToPath(new URL("../../council/agents", import.meta.url));
+
+function loadCouncilDefaultAgent(name: (typeof COUNCIL_AGENT_NAMES)[number]): [string, AgentConfig] {
+  const sourcePath = join(COUNCIL_AGENTS_DIR, `${name}.md`);
+  const content = readFileSync(sourcePath, "utf-8");
+  const { frontmatter, body } = parseAgentFrontmatter<Record<string, unknown>>(content);
+  const parsed = parseAgentDefinition(frontmatter, body, {
+    filename: name,
+    sourcePath,
+    source: undefined,
+  });
+  if (!parsed) {
+    throw new Error(`Failed to parse built-in council agent definition at ${sourcePath}`);
+  }
+  return [
+    parsed.name,
+    {
+      ...parsed,
+      isDefault: true,
+      source: undefined,
+      sourcePath: undefined,
+    },
+  ];
+}
 
 export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
   [
@@ -227,40 +256,5 @@ No emojis. No file modifications.`,
       isDefault: true,
     },
   ],
-  [
-    "expert",
-    {
-      name: "expert",
-      displayName: "Expert",
-      description:
-        "Read-only advisor selected by the user or parent for difficult judgment, not routine questions. Evaluates plans, designs, and tradeoffs and answers complicated technical questions. Gives evidence-based recommendations; does not implement changes.",
-      builtinToolNames: READ_ONLY_TOOLS,
-      extensions: true,
-      skills: true,
-      model: "magpie/gpt-6-astra",
-      thinking: "xhigh",
-      systemPrompt: `# READ-ONLY EXPERT
-
-You advise the user or parent on difficult technical questions and decisions: plans,
-designs, and tradeoffs. Own the judgment and explain your reasoning.
-
-## Hard rules
-- READ-ONLY. No implementation, file writes, edits, deletes, redirects, or other state changes. Use read/grep/find/ls and read-only bash inspection; use inherited extension tools and skills only for read-only investigation.
-- Do not delegate the judgment or spawn other agents.
-- Bound investigation to the assigned question and the evidence needed to decide. Stop when additional inspection is unlikely to change the answer; report unresolved gaps instead of exploring indefinitely.
-- Never invent evidence or confidence. Do not claim checks ran or passed unless you actually ran them and observed their results. Recommend state-changing validation for the parent to run; do not run it yourself.
-
-## Process
-1. Identify the question or decision, goals, constraints, and success criteria. If a critical ambiguity changes the answer, explain it and ask for the missing decision; otherwise state your assumptions.
-2. Inspect relevant code, documentation, data, or other available evidence. Cite paths and lines or sources for material claims where available. If evidence is unavailable, say what is missing and how that limits the conclusion.
-3. Distinguish observed facts, assumptions, and uncertainties. Evaluate realistic alternatives against the goals, including relevant failure modes, risks, and costs. Avoid manufacturing alternatives when the question has a direct technical answer.
-4. Give a clear, reasoned recommendation or answer. Explain the decisive evidence and tradeoffs, and what new evidence would change your conclusion.
-5. End with concrete validation steps or the next action the user or parent can take, plus any remaining uncertainty.
-
-Lead with the answer, then supporting evidence and reasoning. Keep the response
-proportionate to the question and make limitations explicit. Advice only; no file modifications.`,
-      promptMode: "replace",
-      isDefault: true,
-    },
-  ],
+  ...COUNCIL_AGENT_NAMES.map(loadCouncilDefaultAgent),
 ]);

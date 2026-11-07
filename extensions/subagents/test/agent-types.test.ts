@@ -21,7 +21,7 @@ import {
   setFallbackSubagent,
 } from "../src/agent-types.js";
 import { DEFAULT_AGENTS } from "../src/default-agents.js";
-import { DEFAULT_AGENT_NAMES, type AgentConfig } from "../src/types.js";
+import { COUNCIL_AGENT_NAMES, DEFAULT_AGENT_NAMES, type AgentConfig } from "../src/types.js";
 
 function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
@@ -46,9 +46,9 @@ describe("agent type registry", () => {
 
   describe("default agents", () => {
     it("recognizes all default agent types", () => {
-      expect(getAvailableTypes()).toEqual(["recon", "worker", "reviewer", "expert"]);
+      expect(getAvailableTypes()).toEqual(["recon", "worker", "reviewer"]);
       expect(DEFAULT_AGENT_NAMES).toEqual(getAvailableTypes());
-      for (const name of DEFAULT_AGENT_NAMES) expect(isValidType(name)).toBe(true);
+      for (const name of [...DEFAULT_AGENT_NAMES, ...COUNCIL_AGENT_NAMES]) expect(isValidType(name)).toBe(true);
     });
 
     it("rejects unknown types", () => {
@@ -60,7 +60,7 @@ describe("agent type registry", () => {
       expect(isValidType("recon")).toBe(true);
       expect(isValidType("RECON")).toBe(true);
       expect(isValidType("Worker")).toBe(true);
-      expect(isValidType("EXPERT")).toBe(true);
+      expect(isValidType("COUNCIL-ASTRA")).toBe(true);
       expect(isValidType("reviewer")).toBe(true);
     });
 
@@ -98,30 +98,77 @@ describe("agent type registry", () => {
       expect(cfg?.serviceTier).toBeUndefined();
     });
 
-    it("expert pins Astra with xhigh thinking and read-only built-ins", () => {
-      const cfg = getAgentConfig("expert");
-      expect(cfg).toMatchObject({
-        displayName: "Expert",
-        model: "magpie/gpt-6-astra",
-        thinking: "xhigh",
+    it("loads hidden read-only council advisors from extensions/council/agents", () => {
+      expect(getAgentConfig("expert")).toBeUndefined();
+      expect(getAgentConfig("council-argon")).toMatchObject({
+        name: "council-argon",
+        displayName: "Council (Argon)",
+        model: "magpie/gemini-4-argon",
+        thinking: "high",
+        modelVisible: false,
+        isolation: "off",
         builtinToolNames: ["read", "bash", "grep", "find", "ls"],
         extensions: true,
         skills: true,
         promptMode: "replace",
+        isDefault: true,
       });
-      expect(cfg?.serviceTier).toBeUndefined();
-      expect(cfg?.allowedSubagents).toBeUndefined();
+      expect(getAgentConfig("council-astra")).toMatchObject({
+        name: "council-astra",
+        displayName: "Council (Astra)",
+        model: "magpie/gpt-6-astra",
+        thinking: "xhigh",
+        modelVisible: false,
+        isolation: "off",
+        builtinToolNames: ["read", "bash", "grep", "find", "ls"],
+        extensions: true,
+        skills: true,
+        promptMode: "replace",
+        isDefault: true,
+      });
+      expect(getAgentConfig("council-opus")).toMatchObject({
+        name: "council-opus",
+        displayName: "Council (Opus)",
+        model: "magpie/claude-opus-5-5",
+        thinking: "high",
+        modelVisible: false,
+        isolation: "off",
+        builtinToolNames: ["read", "bash", "grep", "find", "ls"],
+        extensions: true,
+        skills: true,
+        promptMode: "replace",
+        isDefault: true,
+      });
+      for (const name of COUNCIL_AGENT_NAMES) {
+        const cfg = getAgentConfig(name);
+        expect(cfg?.serviceTier).toBeUndefined();
+        expect(cfg?.allowedSubagents).toBeUndefined();
+        expect(cfg?.source).toBeUndefined();
+        expect(cfg?.sourcePath).toBeUndefined();
+        expect(getAvailableTypes()).not.toContain(name);
+      }
+      expect(resolveSpawnType("council-astra")).toEqual({
+        ok: true,
+        type: "worker",
+        fellBackFrom: "council-astra",
+      });
+      expect(resolveSpawnType("council-astra", { includeHidden: true })).toEqual({
+        ok: true,
+        type: "council-astra",
+      });
     });
 
     it("default agents are marked isDefault", () => {
-      for (const name of DEFAULT_AGENT_NAMES) expect(getAgentConfig(name)?.isDefault).toBe(true);
+      for (const name of [...DEFAULT_AGENT_NAMES, ...COUNCIL_AGENT_NAMES]) {
+        expect(getAgentConfig(name)?.isDefault).toBe(true);
+      }
     });
 
     // Regression guard for #37 — default agents must not bake in callsite-strategy fields.
     // An explicit `false` here would silently win over the caller's `true` via `??` in
     // resolveAgentInvocationConfig, breaking documented Agent tool params.
     it("default agents do not lock strategy fields (run_in_background / inherit_context / isolated)", () => {
-      for (const name of DEFAULT_AGENT_NAMES) {
+      for (const name of [...DEFAULT_AGENT_NAMES, ...COUNCIL_AGENT_NAMES]) {
         const cfg = getAgentConfig(name);
         expect(cfg?.runInBackground, `${name}.runInBackground`).toBeUndefined();
         expect(cfg?.inheritContext, `${name}.inheritContext`).toBeUndefined();
@@ -130,7 +177,7 @@ describe("agent type registry", () => {
     });
 
     it("getDefaultAgentNames returns default agent names", () => {
-      expect(getDefaultAgentNames()).toEqual([...DEFAULT_AGENT_NAMES]);
+      expect(getDefaultAgentNames()).toEqual([...DEFAULT_AGENT_NAMES, ...COUNCIL_AGENT_NAMES]);
     });
 
     it("BUILTIN_TOOL_NAMES includes all built-in tools", () => {
@@ -161,7 +208,7 @@ describe("agent type registry", () => {
       registerAgents(new Map());
 
       expect(getAvailableTypes()).toEqual([]);
-      for (const name of DEFAULT_AGENT_NAMES) expect(isValidType(name)).toBe(false);
+      for (const name of [...DEFAULT_AGENT_NAMES, ...COUNCIL_AGENT_NAMES]) expect(isValidType(name)).toBe(false);
     });
 
     it("user agents are unaffected when defaults are disabled", () => {
@@ -190,7 +237,7 @@ describe("agent type registry", () => {
 
       setDefaultsDisabled(false);
       registerAgents(new Map());
-      for (const name of DEFAULT_AGENT_NAMES) expect(isValidType(name)).toBe(true);
+      for (const name of [...DEFAULT_AGENT_NAMES, ...COUNCIL_AGENT_NAMES]) expect(isValidType(name)).toBe(true);
     });
 
     it("getConfig falls back to the hardcoded config when defaults are disabled and no user agents exist", () => {
@@ -304,7 +351,7 @@ describe("agent type registry", () => {
       expect(isValidType("worker")).toBe(true);
     });
 
-    it.each(["recon", "expert"])("user agent overrides default %s", name => {
+    it.each(["recon", "reviewer"])("user agent overrides default %s", name => {
       const override = makeAgentConfig({
         name,
         description: `Custom ${name}`,
@@ -320,7 +367,7 @@ describe("agent type registry", () => {
       expect(config.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
     });
 
-    it.each(["reviewer", "expert"])("disabled agent %s is excluded from available types", name => {
+    it.each(["recon", "reviewer"])("disabled agent %s is excluded from available types", name => {
       registerAgents(new Map([[name, makeAgentConfig({ name, enabled: false })]]));
 
       expect(isValidType(name)).toBe(false);
@@ -506,12 +553,12 @@ describe("resolveSpawnType — fail-closed dispatch (#183)", () => {
 });
 
 describe("local fleet runtime tool selection", () => {
-  it("uses read-only search tools for recon/reviewer/expert and full tools for worker", () => {
+  it("uses read-only search tools for recon/reviewer/council advisors and full tools for worker", () => {
     registerAgents(new Map());
     setDefaultsDisabled(false);
     expect(getAvailableTypes()).toEqual(DEFAULT_AGENT_NAMES);
-    for (const retired of ["Explore", "Plan", "general-purpose"]) expect(isValidType(retired)).toBe(false);
-    for (const name of ["recon", "reviewer", "expert"]) {
+    for (const retired of ["Explore", "Plan", "general-purpose", "expert"]) expect(isValidType(retired)).toBe(false);
+    for (const name of ["recon", "reviewer", ...COUNCIL_AGENT_NAMES]) {
       expect(getToolNamesForType(name)).toEqual(["read", "bash", "grep", "find", "ls"]);
       expect(getConfig(name).excludeExtensions).toBeUndefined();
     }
