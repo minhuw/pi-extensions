@@ -7,6 +7,7 @@ Start with the defaults, then configure the services and workflows you need. Eac
 | Prompts and individual agents | Available after installation; `Agent` runs in the foreground by default. | Use `/agents` to inspect the fleet and settings. |
 | Theme | Installing the collection makes `material-bloom` available. | Choose it in `/settings`; it suits a light terminal background. |
 | Response language | No configured default. | Use `/language English` for this session or `/language default English` for new sessions. |
+| Spokesman model | Off until configured (`auto` mode by default). | Use `/spokesman <model>` for this session or `/spokesman default <model>` for new sessions. |
 | Magpie models | Discovers a gateway at `http://127.0.0.1:3425` by default; needs a running gateway. | Run `/login magpie`, then `/model`. |
 | pika uploads, relay, and recall | Inactive until configured. | Run `/pika login` and pair with a server you control. |
 | Subagents scripted workflows | Disabled; package agent/workflow discovery is also off. | Explicitly set `workflowsEnabled: true` in `subagents.json`, then reload with no agents running. |

@@ -19,7 +19,7 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:language && npm run test:benchmark && npm run test:autoresearch && npm run test:subagents && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:impeccable && npm run test:workspace",
+		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:language && npm run test:spokesman && npm run test:benchmark && npm run test:autoresearch && npm run test:subagents && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:impeccable && npm run test:workspace",
 		"test:workspace": "vitest run extensions/workspace",
 		"test:impeccable": "vitest run --config extensions/impeccable/vitest.config.ts",
 		"test:impeccable:package": "vitest run --config extensions/impeccable/vitest.package.config.ts",
@@ -37,6 +37,7 @@
 		"test:loop": "vitest run extensions/loop",
 		"test:molt": "vitest run extensions/molt",
 		"test:language": "vitest run extensions/language",
+		"test:spokesman": "vitest run extensions/spokesman",
 		"test:benchmark": "vitest run extensions/benchmark",
 		"test:autoresearch": "vitest run extensions/autoresearch",
 		"test:subagents": "vitest run --config extensions/subagents/vitest.config.ts",
@@ -125,6 +126,7 @@
 			"./extensions/loop/index.ts",
 			"./extensions/molt/index.ts",
 			"./extensions/language/index.ts",
+			"./extensions/spokesman/index.ts",
 			"./extensions/autoresearch/index.ts",
 			"./extensions/benchmark/index.ts",
 			"./extensions/subagents/src/index.ts",
