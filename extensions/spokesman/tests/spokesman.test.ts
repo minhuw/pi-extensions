@@ -737,6 +737,82 @@ describe("spokesman extension in real Pi sessions", () => {
 		expect(step3AssistantTexts).toEqual(["Done.", "Second manual rewrite of Step 2."]);
 	});
 
+	it("disables spokesman in auto, always, manual rewrite, and footer status when the main model is the spokesman model", async () => {
+		await writeConfig({ default: "gpt-6-sol", mode: "always" });
+		const h = await start();
+
+		// Footer status is hidden when main model (gpt-6-sol) == spokesman model (gpt-6-sol)
+		expect(h.status).toBeUndefined();
+
+		await h.command("/spokesman status");
+		expect(h.lastNote?.message).toContain(
+			"Active spokesman: gpt-6-sol (disabled: same as main model)",
+		);
+
+		// Even in always mode with dense draft, spokesman does not run when main model == spokesman model
+		h.mainQueue.push(DENSE_SOL_DRAFT);
+		await h.session.prompt("Explain the architecture");
+		expect(h.mainRequests).toHaveLength(1);
+		expect(h.spokesmanRequests).toHaveLength(0);
+		expect(h.rewriteEntries()).toHaveLength(0);
+		expect(textOf(h.assistantMessages().at(-1) as Message)).toBe(DENSE_SOL_DRAFT);
+
+		// Manual /spokesman rewrite is also disabled when main model == spokesman model
+		await h.command("/spokesman rewrite");
+		expect(h.spokesmanRequests).toHaveLength(0);
+		expect(h.rewriteEntries()).toHaveLength(0);
+		expect(h.lastNote).toEqual({
+			message: "Spokesman is disabled because the main model is already gpt-6-sol.",
+			type: "info",
+		});
+
+		// Switching spokesman to a different model (gpt-5.4) re-enables status and rewriting
+		await h.command("/spokesman gpt-5.4");
+		expect(h.status).toBe("gpt-5.4 · always");
+	});
+
+	it("disables spokesman in auto, always, manual rewrite, and footer status when the main model is the spokesman model", async () => {
+		await writeConfig({ default: "gpt-6-sol", mode: "always" });
+		const h = await start();
+
+		// Footer status is hidden when main model (gpt-6-sol) == spokesman model (gpt-6-sol)
+		expect(h.status).toBeUndefined();
+
+		await h.command("/spokesman status");
+		expect(h.lastNote?.message).toContain(
+			"Active spokesman: gpt-6-sol (disabled: same as main model)",
+		);
+
+		// Even in always mode with dense draft, spokesman does not run when main model == spokesman model
+		h.mainQueue.push(DENSE_SOL_DRAFT);
+		await h.session.prompt("Explain the architecture");
+		expect(h.mainRequests).toHaveLength(1);
+		expect(h.spokesmanRequests).toHaveLength(0);
+		expect(h.rewriteEntries()).toHaveLength(0);
+		expect(textOf(h.assistantMessages().at(-1) as Message)).toBe(DENSE_SOL_DRAFT);
+
+		// Manual /spokesman rewrite is also disabled when main model == spokesman model
+		await h.command("/spokesman rewrite");
+		expect(h.spokesmanRequests).toHaveLength(0);
+		expect(h.rewriteEntries()).toHaveLength(0);
+		expect(h.lastNote).toEqual({
+			message: "Spokesman is disabled because the main model is already gpt-6-sol.",
+			type: "info",
+		});
+
+		// Switching spokesman to a different model (gpt-5.4) re-enables status and rewriting
+		await h.command("/spokesman gpt-5.4");
+		expect(h.status).toBe("gpt-5.4 · always");
+
+		// Switching main model to gpt-5.4 via setModel fires model_select and disables spokesman again
+		await h.session.setModel(h.faux.getModel("gpt-5.4")!);
+		expect(h.status).toBeUndefined();
+
+		// Switching main model back to gpt-6-sol restores the spokesman status
+		await h.session.setModel(h.faux.getModel("gpt-6-sol")!);
+		expect(h.status).toBe("gpt-5.4 · always");
+	});
+
 	it("ignores child sessions bound with bindAsChild or carrying pi-extensions.session-link", async () => {
 		await writeConfig({ default: "gpt-5.4", mode: "always" });
 

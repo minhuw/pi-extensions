@@ -22,7 +22,7 @@ The collection loads this extension automatically; use `/reload` after installin
 
 - **`auto` (default)**: Runs a fast, deterministic prose evaluator (`evaluateProseForSpokesman`) after stripping code blocks, inline code, links, URLs, file paths, and tables (`stripNonProse`).
   - Short confirmations (`< 16` prose words without leaked internal tool shorthand) are never rewritten.
-  - If the active spokesman model is identical to the main turn model, `auto` skips rewriting.
+  - When the active spokesman model is the same as the main model, spokesman is automatically disabled across `auto`, `always`, and `/spokesman rewrite`, and its footer badge is hidden.
   - Triggers a rewrite when the draft's prose accumulates a score `>= 2` across six signals:
     - `long-sentences` — high average or maximum sentence length
     - `noun-stacks` — chains of consecutive nominalizations / long abstract words or multi-hyphenated modifiers
