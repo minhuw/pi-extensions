@@ -1,0 +1,56 @@
+# Offline collection gate: typecheck and the full `npm test` suite.
+# The Impeccable engine, visual-foundations, and e2e gates need network and a browser and stay out of CI.
+name: Extensions CI
+
+on:
+  pull_request:
+    paths:
+      - extensions/**
+      - themes/**
+      - .github/workflows/extensions.yml
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+      - vitest.config.*
+  push:
+    branches:
+      - master
+    paths:
+      - extensions/**
+      - themes/**
+      - .github/workflows/extensions.yml
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+      - vitest.config.*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extensions-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify extensions
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.19.0
+          cache: npm
+
+      - name: Install package dependencies
+        run: npm ci
+
+      - name: Run typecheck
+        run: npm run typecheck
+
+      - name: Run offline collection suite
+        run: npm test

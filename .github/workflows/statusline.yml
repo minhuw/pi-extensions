@@ -10,6 +10,7 @@ on:
       - package.json
       - package-lock.json
       - tsconfig.json
+      - vitest.config.*
   push:
     branches:
       - master
@@ -21,6 +22,7 @@ on:
       - package.json
       - package-lock.json
       - tsconfig.json
+      - vitest.config.*
   workflow_dispatch:
 
 permissions:
