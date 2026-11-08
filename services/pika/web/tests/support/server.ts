@@ -9,6 +9,7 @@ import type {
 	DeviceRef,
 	Entry,
 	Facets,
+	MemoryBatch,
 	MemoryNote,
 	MemoryRevision,
 	MemoryScopeSummary,
@@ -336,6 +337,8 @@ export interface FakeMemory {
 	notes: MemoryNote[];
 	/** Each note's revisions, oldest first, by note id. */
 	revisions: Record<string, MemoryRevision[]>;
+	/** Dream batches of every scope; listed newest first. */
+	batches?: MemoryBatch[];
 }
 
 export function createFakeServer({
@@ -450,6 +453,64 @@ export function createFakeServer({
 	let relaySent = 0;
 	let devicesCreated = 0;
 	const mutations: Mutation[] = [];
+	// Copies, so reverts change neither the caller's fixtures nor another server's.
+	const stored = {
+		notes: memory.notes.map((note) => ({ ...note })),
+		revisions: Object.fromEntries(Object.entries(memory.revisions).map(([id, list]) => [id, [...list]])),
+		batches: (memory.batches ?? []).map((batch) => ({ ...batch })),
+	};
+	/** Restores the notes the batch touched, as the server does: 409 when one changed since, writing nothing. */
+	const revertBatch = (batch: MemoryBatch): Response => {
+		if (batch.revertedAt) return json(409, { error: "already_reverted" });
+		const touched = new Map<string, { first: number; last: number; created: boolean }>();
+		for (const change of batch.changes) {
+			const seen = touched.get(change.noteId);
+			touched.set(change.noteId, {
+				first: Math.min(seen?.first ?? change.revision, change.revision),
+				last: Math.max(seen?.last ?? change.revision, change.revision),
+				created: (seen?.created ?? false) || change.created,
+			});
+		}
+		const conflicts = [...touched].filter(([id, { last }]) => stored.notes.find((note) => note.id === id)?.revision !== last).map(([id]) => id);
+		if (conflicts.length) return json(409, { error: "revert_conflict", notes: conflicts });
+		const now = new Date().toISOString();
+		for (const [id, { first, created }] of touched) {
+			const note = stored.notes.find((item) => item.id === id)!;
+			const history = (stored.revisions[id] ??= []);
+			const before = created ? undefined : history.find((item) => item.revision === first - 1);
+			const content = before ?? note;
+			const live = !created && before?.action !== "forget";
+			Object.assign(note, {
+				category: content.category,
+				title: content.title,
+				hook: content.hook,
+				body: content.body,
+				provenance: "owner",
+				sources: [],
+				revision: note.revision + 1,
+				updatedAt: now,
+				deletedAt: live ? null : now,
+				sessionId: null,
+			});
+			history.push({
+				revision: note.revision,
+				action: "revert",
+				provenance: "owner",
+				sources: [],
+				batchId: batch.id,
+				category: note.category,
+				title: note.title,
+				hook: note.hook,
+				body: note.body,
+				at: now,
+				deviceId: null,
+				sessionId: null,
+				reason: null,
+			});
+		}
+		batch.revertedAt = now;
+		return json(200, { batch });
+	};
 	const findPairing = (code: string) => state.pairings.findIndex((item) => normalizePairingCode(item.code) === normalizePairingCode(code));
 	const signOutBrowser = () => {
 		state.authenticated = false;
@@ -938,12 +999,23 @@ export function createFakeServer({
 				const scope = params.get("scope");
 				if (!scope) return json(400, { error: "bad_request", message: "scope is required" });
 				if (!memory.scopes.some((item) => item.key === scope)) return json(404, { error: "not_found" });
-				return json(200, { notes: memory.notes.filter((note) => note.scope.key === scope && note.deletedAt === null) });
+				return json(200, { notes: stored.notes.filter((note) => note.scope.key === scope && note.deletedAt === null) });
 			}
 			if (parts[1] === "notes" && parts.length === 4 && parts[3] === "revisions") {
-				if (!memory.notes.some((note) => note.id === parts[2])) return json(404, { error: "not_found" });
-				return json(200, { revisions: memory.revisions[parts[2]] ?? [] });
+				if (!stored.notes.some((note) => note.id === parts[2])) return json(404, { error: "not_found" });
+				return json(200, { revisions: stored.revisions[parts[2]] ?? [] });
 			}
+			if (parts[1] === "batches" && parts.length === 2) {
+				const scope = params.get("scope");
+				if (!scope) return json(400, { error: "bad_request", message: "scope is required" });
+				if (!memory.scopes.some((item) => item.key === scope)) return json(404, { error: "not_found" });
+				const batches = stored.batches.filter((batch) => batch.scope.key === scope).sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+				return json(200, { batches });
+			}
+		}
+		if (parts[0] === "memory" && parts[1] === "batches" && parts.length === 4 && parts[3] === "revert" && method === "POST") {
+			const batch = stored.batches.find((item) => item.id === parts[2]);
+			return batch ? revertBatch(batch) : json(404, { error: "not_found" });
 		}
 		if (parts[0] === "search") {
 			const q = (params.get("q") ?? "").trim().toLowerCase();

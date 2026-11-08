@@ -8,6 +8,7 @@ import type {
 	Facets,
 	Health,
 	Me,
+	MemoryBatch,
 	MemoryNote,
 	MemoryRevision,
 	MemoryScopeSummary,
@@ -296,9 +297,22 @@ export class PikaApi {
 		return this.request("memory/notes", { scope });
 	}
 
-	/** The note's saves and forgets, oldest first; owner only. */
+	/** The note's saves, forgets, and reverts, oldest first; owner only. */
 	memoryRevisions(id: string): Promise<{ revisions: MemoryRevision[] }> {
 		return this.request(`memory/notes/${encodeURIComponent(id)}/revisions`);
+	}
+
+	/** The scope's dream batches, newest first; owner only. */
+	memoryBatches(scope: string): Promise<{ batches: MemoryBatch[] }> {
+		return this.request("memory/batches", { scope });
+	}
+
+	/**
+	 * Restores every note the batch touched to its state before it; a 409 `revert_conflict` names the notes changed
+	 * since, and nothing is written.
+	 */
+	revertMemoryBatch(id: string): Promise<{ batch: MemoryBatch }> {
+		return this.send(`memory/batches/${encodeURIComponent(id)}/revert`, "POST");
 	}
 
 	/** Sessions matching `q`, with their newest hits; the word being typed also matches as a prefix. One page. */

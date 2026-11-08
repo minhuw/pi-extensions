@@ -295,6 +295,15 @@ export interface MemoryScopeSummary extends MemoryScope {
 	updatedAt: string | null;
 }
 
+/** Who wrote a note's revision: an agent's memory tool, a dream, or the owner undoing a dream. */
+export type MemoryProvenance = "agent" | "dream" | "owner";
+
+/** The session entry a note was drawn from. */
+export interface MemorySource {
+	sessionId: string;
+	seq: number;
+}
+
 /** A memory note's current state; `deviceId` and `sessionId` are its last writer's. */
 export interface MemoryNote {
 	id: string;
@@ -303,7 +312,9 @@ export interface MemoryNote {
 	title: string;
 	hook: string;
 	body: string;
-	provenance: string;
+	provenance: MemoryProvenance;
+	/** The latest revision's sources; empty for notes saved before dreaming. */
+	sources: MemorySource[];
 	revision: number;
 	createdAt: string;
 	updatedAt: string;
@@ -312,10 +323,14 @@ export interface MemoryNote {
 	sessionId: string | null;
 }
 
-/** A note as one save or forget left it. */
+/** A note as one save, forget, or revert left it. */
 export interface MemoryRevision {
 	revision: number;
-	action: "save" | "forget";
+	action: "save" | "forget" | "revert";
+	provenance: MemoryProvenance;
+	sources: MemorySource[];
+	/** The dream batch that wrote it, if a dream did. */
+	batchId: string | null;
 	category: string;
 	title: string;
 	hook: string;
@@ -324,6 +339,33 @@ export interface MemoryRevision {
 	deviceId: string | null;
 	sessionId: string | null;
 	reason: string | null;
+}
+
+/** One note a dream batch saved or forgot, at the revision it left. */
+export interface MemoryBatchChange {
+	noteId: string;
+	revision: number;
+	action: "save" | "forget";
+	title: string;
+	/** Whether the batch created the note. */
+	created: boolean;
+}
+
+/** What one dream committed for a project scope; the owner can revert it once. */
+export interface MemoryBatch {
+	id: string;
+	leaseId: string;
+	scope: MemoryScope;
+	mode: "auto" | "manual";
+	at: string;
+	deviceId: string;
+	sessionId: string | null;
+	dreamSessionId: string | null;
+	summary: string | null;
+	/** The sessions it consolidated. */
+	sessions: string[];
+	changes: MemoryBatchChange[];
+	revertedAt: string | null;
 }
 
 export interface SearchHit {

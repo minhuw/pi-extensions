@@ -26,6 +26,7 @@ function note(id: string, scope: MemoryScope, fields: Partial<MemoryNote> = {}):
 		hook: `Hook ${id}`,
 		body: "",
 		provenance: "agent",
+		sources: [],
 		revision: 1,
 		createdAt: at(0),
 		updatedAt: at(0),
@@ -38,6 +39,9 @@ function note(id: string, scope: MemoryScope, fields: Partial<MemoryNote> = {}):
 
 function revision(fields: Partial<MemoryRevision> & Pick<MemoryRevision, "revision" | "action">): MemoryRevision {
 	return {
+		provenance: "agent",
+		sources: [],
+		batchId: null,
 		category: "project",
 		title: "Title",
 		hook: "Hook",
