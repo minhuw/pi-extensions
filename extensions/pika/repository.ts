@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
-import { basename, dirname } from "node:path";
+import { resolve as resolvePath, win32 } from "node:path";
 
 /** What a session's cwd says about its git repository; both fields are absent outside git. */
 export interface RepositoryInfo {
@@ -25,10 +25,10 @@ function gitEnv(): NodeJS.ProcessEnv {
 	return env;
 }
 
-function git(cwd: string, args: string[]): Promise<string | undefined> {
+function git(cwd: string, args: string[], timeout = GIT_TIMEOUT_MS): Promise<string | undefined> {
 	return new Promise((resolve) => {
 		try {
-			execFile("git", ["-C", cwd, ...args], { env: gitEnv(), timeout: GIT_TIMEOUT_MS, maxBuffer: 256 * 1024, windowsHide: true, encoding: "utf8" },
+			execFile("git", ["-C", cwd, ...args], { env: gitEnv(), timeout, maxBuffer: 256 * 1024, windowsHide: true, encoding: "utf8" },
 				(error, stdout) => resolve(error ? undefined : stdout));
 		} catch {
 			resolve(undefined);
@@ -36,16 +36,20 @@ function git(cwd: string, args: string[]): Promise<string | undefined> {
 	});
 }
 
-/** A valid project name, or undefined. */
+/** A valid project name (not blank, `.` or `..`, without C0/C1 controls or path separators, at most 255 bytes), or undefined. */
 export function validProjectName(name: string): string | undefined {
-	if (!name || name === "." || name === ".." || /[/\\\u0000-\u001f\u007f-\u009f]/u.test(name)) return undefined;
+	if (!name.trim() || name === "." || name === ".." || /[/\\\u0000-\u001f\u007f-\u009f]/u.test(name)) return undefined;
 	return Buffer.byteLength(name) <= MAX_NAME_BYTES ? name : undefined;
 }
 
-/** The repository name for git's common dir: its parent's folder for a `.git` dir, else its own name without `.git`. */
+/**
+ * The repository name for git's common dir: its parent's folder for a `.git` dir, else its own name without one
+ * trailing `.git`. Both `/` and `\` separate folders on every platform, as in the server's worktree-path fallback.
+ * Herder's `repositoryName` follows the same rule; `services/pika/docs/project-names.json` holds the shared cases.
+ */
 export function projectFromCommonDir(commonDir: string): string | undefined {
-	const dir = commonDir.replace(/[/\\]+$/, "");
-	const name = basename(dir) === ".git" ? basename(dirname(dir)) : basename(dir).replace(/\.git$/, "");
+	const base = win32.basename(commonDir);
+	const name = base === ".git" ? win32.basename(win32.dirname(commonDir)) : base.replace(/\.git$/, "");
 	return validProjectName(name);
 }
 
@@ -113,13 +117,26 @@ export function pickRemoteUrl(output: string): string | undefined {
 	return urls.size === 1 ? [...urls.values()][0] : undefined;
 }
 
+/**
+ * git's common dir for `cwd`, absolute. git before 2.31 lacks `--path-format` and may print it relative to the cwd
+ * (`-C cwd`), so a failure is retried without it within what remains of `GIT_TIMEOUT_MS`.
+ */
+async function commonDir(cwd: string): Promise<string | undefined> {
+	const started = Date.now();
+	const absolute = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+	if (absolute !== undefined) return absolute.replace(/\r?\n$/, "") || undefined;
+	const left = GIT_TIMEOUT_MS - (Date.now() - started);
+	if (left <= 0) return undefined;
+	const dir = (await git(cwd, ["rev-parse", "--git-common-dir"], left))?.replace(/\r?\n$/, "");
+	return dir ? resolvePath(cwd, dir) : undefined;
+}
+
 async function resolve(cwd: string): Promise<RepositoryInfo> {
 	try {
-		const [commonDir, remotes] = await Promise.all([
-			git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+		const [dir, remotes] = await Promise.all([
+			commonDir(cwd),
 			git(cwd, ["config", "-z", "--get-regexp", "^remote\\..*\\.url$"]),
 		]);
-		const dir = commonDir?.replace(/\r?\n$/, "");
 		if (!dir) return {};
 		const project = projectFromCommonDir(await realpath(dir).catch(() => dir));
 		if (!project) return {};

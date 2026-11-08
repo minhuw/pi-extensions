@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { devNull, tmpdir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep, win32 } from "node:path";
 import { HERDER_DIR, MIN_GIT_VERSION, REF_ROOT } from "../config.ts";
 import type { Vcs } from "../types.ts";
 
@@ -154,13 +154,15 @@ export const hasHerderTrailer = (message: string) => /^herder-[\w-]*\s*:/im.test
 
 /**
  * The repository's name from its git common dir: the main checkout's folder name for `<checkout>/.git` (shared by every
- * linked worktree), else the common dir's own name without one trailing `.git` (bare repositories, submodules).
- * Undefined when the name is empty, `.` or `..`, holds a control character or path separator, or exceeds 255 bytes.
+ * linked worktree), else the common dir's own name without one trailing `.git` (bare repositories, submodules). Both `/`
+ * and `\` separate folders on every platform. Undefined when the name is blank, `.` or `..`, holds a C0/C1 control
+ * character or path separator, or exceeds 255 bytes. pika's `projectFromCommonDir` follows the same rule;
+ * `services/pika/docs/project-names.json` holds the shared cases.
  */
 export function repositoryName(commonDir: string): string | undefined {
-	const base = basename(commonDir);
-	const name = base === ".git" ? basename(dirname(commonDir)) : base.replace(/\.git$/, "");
-	if (!name || name === "." || name === ".." || /[\x00-\x1f\x7f/\\]/.test(name) || Buffer.byteLength(name, "utf8") > 255) return undefined;
+	const base = win32.basename(commonDir);
+	const name = base === ".git" ? win32.basename(win32.dirname(commonDir)) : base.replace(/\.git$/, "");
+	if (!name.trim() || name === "." || name === ".." || /[/\\\u0000-\u001f\u007f-\u009f]/u.test(name) || Buffer.byteLength(name, "utf8") > 255) return undefined;
 	return name;
 }
 

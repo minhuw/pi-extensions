@@ -361,6 +361,21 @@ mod tests {
         }
     }
 
+    /// Every name pika and Herder derive from git's common dir (`docs/project-names.json`, their shared cases) is one the
+    /// server accepts, and those clients drop a blank name, as the server would.
+    #[test]
+    fn client_project_names_are_valid() {
+        let vectors: serde_json::Value = serde_json::from_str(include_str!("../docs/project-names.json")).unwrap();
+        for case in vectors["cases"].as_array().unwrap() {
+            if let Some(name) = case["expected"].as_str() {
+                assert!(valid_project(name), "{case}");
+            }
+        }
+        for name in [" ", "\u{3000}", "a\u{85}b"] {
+            assert!(!valid_project(name), "{name:?}");
+        }
+    }
+
     #[test]
     fn project_names_and_repository_links() {
         for name in ["widgets", "my repo", "仓库", "a.b"] {

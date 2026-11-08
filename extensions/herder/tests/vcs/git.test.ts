@@ -8,6 +8,11 @@ import type { Vcs } from "../../src/types.ts";
 import { checkGitVersion, hasHerderTrailer, openVcs, RefConflictError, removeWorktrees, repositoryName, requireGit } from "../../src/vcs/git.ts";
 import { type GitFixture, withGitFixture } from "../support/git-fixture.ts";
 
+// The cases pika's projectFromCommonDir tests share (extensions/pika/tests/repository.test.ts): a run's `repo` is a session's project.
+const PROJECT_NAMES = JSON.parse(readFileSync(new URL("../../../../services/pika/docs/project-names.json", import.meta.url), "utf8")) as {
+	cases: { commonDir: string; expected: string | null; case: string }[];
+};
+
 // The Vcs inherits process.env; isolate it from the developer's global and system git configuration.
 const saved = { global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM };
 beforeAll(() => {
@@ -102,11 +107,8 @@ describe("openVcs", () => {
 				const name = fixture.dir.split("/").at(-1);
 				expect(repositoryName(openVcs(fixture.dir).commonDir())).toBe(name);
 				expect(repositoryName(openVcs(join(linked, "wt")).commonDir())).toBe(name);
-				expect(repositoryName("/srv/git/tool.git")).toBe("tool");
-				expect(repositoryName("/srv/git/tool.git.git")).toBe("tool.git");
-				expect(repositoryName("/work/app/.git/modules/lib")).toBe("lib");
-				for (const invalid of ["/.git", "/srv/git/..git", "/srv/git/...git", "/srv/a\nb/.git", `/srv/${"x".repeat(256)}.git`]) {
-					expect(repositoryName(invalid)).toBeUndefined();
+				for (const { commonDir, expected, case: label } of PROJECT_NAMES.cases) {
+					expect(repositoryName(commonDir), `${JSON.stringify(commonDir)} (${label})`).toBe(expected ?? undefined);
 				}
 			} finally {
 				rmSync(linked, { recursive: true, force: true });

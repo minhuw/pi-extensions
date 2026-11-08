@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -74,22 +75,18 @@ describe("normalizeRemoteUrl", () => {
 	});
 });
 
+// The cases Herder's repositoryName tests share (extensions/herder/tests/vcs/git.test.ts).
+const PROJECT_NAMES = JSON.parse(readFileSync(new URL("../../../services/pika/docs/project-names.json", import.meta.url), "utf8")) as {
+	cases: { commonDir: string; expected: string | null; case: string }[];
+};
+
 describe("repository names", () => {
-	it.each([
-		["/home/me/pi-extensions/.git", "pi-extensions"],
-		["/home/me/pi-extensions/.git/", "pi-extensions"],
-		["/srv/git/foo.git", "foo"],
-		["/srv/git/foo", "foo"],
-		["/srv/git/foo.git.git", "foo.git"],
-		["/home/me/super/.git/modules/sub", "sub"],
-	])("%s -> %s", (dir, name) => {
-		expect(projectFromCommonDir(dir)).toBe(name);
+	it.each(PROJECT_NAMES.cases)("$commonDir -> $expected ($case)", ({ commonDir, expected }) => {
+		expect(projectFromCommonDir(commonDir)).toBe(expected ?? undefined);
 	});
 
 	it("rejects invalid names", () => {
-		expect(projectFromCommonDir("/.git")).toBeUndefined();
-		expect(projectFromCommonDir("/srv/..git")).toBeUndefined();
-		for (const name of ["", ".", "..", "a\\b", "a\u0001b", "a\u007fb", "é".repeat(128)]) expect(validProjectName(name)).toBeUndefined();
+		for (const name of ["", " ", "\u3000", ".", "..", "a/b", "a\\b", "a\u0001b", "a\u007fb", "a\u0085b", "é".repeat(128)]) expect(validProjectName(name)).toBeUndefined();
 		expect(validProjectName("é".repeat(127))).toBe("é".repeat(127));
 	});
 
@@ -175,6 +172,33 @@ describe("resolveRepository", () => {
 			git(local, "remote", "add", "origin", bare);
 			expect(await resolveRepository(local)).toEqual({ project: "local" });
 		} finally { await rm(root, { recursive: true, force: true }); }
+	});
+
+	it.skipIf(process.platform === "win32")("falls back to a relative --git-common-dir with git older than 2.31", async () => {
+		const root = await realpath(await mkdtemp(join(tmpdir(), "pika-repo-")));
+		const savedPath = process.env.PATH;
+		try {
+			const { repo, subdir, worktree } = await makeRepo(root);
+			const bare = join(root, "server.git");
+			await mkdir(bare);
+			git(bare, "init", "-q", "--bare");
+			// A git that, like git before 2.31, rejects --path-format and so prints the common dir as given (`.git`, `.`).
+			const real = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+			const bin = join(root, "bin");
+			const log = join(root, "rejected.log");
+			await mkdir(bin);
+			await writeFile(join(bin, "git"), `#!/bin/sh\nfor arg in "$@"; do case "$arg" in --path-format=*) echo rejected >> '${log}'; echo 'error: unknown option path-format=absolute' >&2; exit 129;; esac; done\nexec '${real}' "$@"\n`);
+			await chmod(join(bin, "git"), 0o755);
+			process.env.PATH = `${bin}:${savedPath ?? ""}`;
+			expect(await resolveRepository(repo)).toEqual({ project: "my-repo", repository: NORMALIZED });
+			expect(await resolveRepository(subdir)).toEqual({ project: "my-repo", repository: NORMALIZED });
+			expect(await resolveRepository(worktree)).toEqual({ project: "my-repo", repository: NORMALIZED });
+			expect(await resolveRepository(bare)).toEqual({ project: "server" });
+			expect((await readFile(log, "utf8")).trim().split("\n")).toHaveLength(4);
+		} finally {
+			process.env.PATH = savedPath;
+			await rm(root, { recursive: true, force: true });
+		}
 	});
 });
 
