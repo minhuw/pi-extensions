@@ -154,3 +154,66 @@ export function utf8Length(text: string): number {
 export function idsKey(items: readonly { id: string }[] | undefined): string | undefined {
 	return items?.map((item) => item.id).sort().join(" ");
 }
+
+/** Messages longer than this many lines or characters show a preview in the conversation and open in full on demand. */
+export const PREVIEW_LINES = 8;
+export const PREVIEW_CHARS = 700;
+
+export interface MessageShape {
+	lines: number;
+	bytes: number;
+	/** Level 1–3 ATX headings outside code fences, in order: the sections an agent's report is organised into. */
+	sections: string[];
+	long: boolean;
+}
+
+/** What a message is made of, for the size line under a long one. */
+export function messageShape(text: string): MessageShape {
+	const lines = text.split("\n");
+	const sections: string[] = [];
+	let fence: string | null = null;
+	for (const line of lines) {
+		const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+		if (marker) {
+			if (fence === null) fence = marker[0];
+			else if (marker[0] === fence) fence = null;
+			continue;
+		}
+		if (fence !== null) continue;
+		const heading = /^\s{0,3}#{1,3}\s+(.+?)\s*#*\s*$/.exec(line);
+		if (heading) sections.push(heading[1]);
+	}
+	return {
+		lines: lines.length,
+		bytes: utf8Length(text),
+		sections,
+		long: lines.length > PREVIEW_LINES || text.length > PREVIEW_CHARS,
+	};
+}
+
+/** The start of a long message: its first lines, cut at a word near the character limit. */
+export function previewSource(text: string): string {
+	let head = text.split("\n").slice(0, PREVIEW_LINES).join("\n");
+	if (head.length > PREVIEW_CHARS) {
+		head = head.slice(0, PREVIEW_CHARS);
+		const cut = head.lastIndexOf(" ");
+		if (cut > PREVIEW_CHARS * 0.6) head = head.slice(0, cut);
+		head += "…";
+	}
+	return head;
+}
+
+/** A message as one line of plain words, for a conversation's preview in the thread list. */
+export function plainLine(text: string): string {
+	return text
+		.replace(/^\s{0,3}(`{3,}|~{3,}).*$/gm, "")
+		.replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+[.)])\s+/gm, "")
+		.replace(/[*_`]+/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+/** A byte count as B or KB, for message sizes. */
+export function formatBytes(bytes: number): string {
+	return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
+}

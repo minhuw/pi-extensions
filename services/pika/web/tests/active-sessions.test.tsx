@@ -733,15 +733,15 @@ describe("iMessage messenger and chatrooms", () => {
 		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-create-room]")!);
 
 		await waitFor(() => expect(messenger.querySelector("[data-imessage-active-title]")?.textContent).toBe("#auth-sync"));
-		expect(messenger.querySelector("[data-imessage-room-members]")?.textContent).toContain("Backend(pika-server)");
-		expect(messenger.querySelector("[data-imessage-room-members]")?.textContent).toContain("Frontend(pika-web)");
+		const members = [...messenger.querySelectorAll("[data-imessage-room-members] li")].map((li) => li.textContent);
+		expect(members).toEqual(expect.arrayContaining([expect.stringContaining("Backendpika-server"), expect.stringContaining("Frontendpika-web")]));
 
 		// 3. Post to the room without @mentions (saved to room history without waking agents).
 		const roomInput = messenger.querySelector<HTMLTextAreaElement>("[data-imessage-input]")!;
 		fireEvent.change(roomInput, { target: { value: "Shared schema v2 draft." } });
 		fireEvent.keyDown(roomInput, { key: "Enter" });
 		await waitFor(() =>
-			expect(messenger.querySelector("[data-imessage-stream]")?.textContent).toContain("Saved to room history (no @mention wakeup)"),
+			expect(messenger.querySelector("[data-imessage-stream]")?.textContent).toContain("Room history only; no one notified"),
 		);
 
 		// 4. Select @Frontend pill in the Notify bar and post: notifies only s-web.
@@ -749,7 +749,7 @@ describe("iMessage messenger and chatrooms", () => {
 		fireEvent.change(roomInput, { target: { value: "Please update the client types." } });
 		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-send]")!);
 		await waitFor(() =>
-			expect(messenger.querySelector("[data-imessage-stream]")?.textContent).toContain("Notified @Frontend"),
+			expect(messenger.querySelector("[data-imessage-stream]")?.textContent).toContain("Notified Frontend"),
 		);
 		expect(server.mutations.at(-1)).toEqual({
 			method: "POST",
@@ -758,5 +758,57 @@ describe("iMessage messenger and chatrooms", () => {
 			json: true,
 		});
 	});
-});
 
+	const report = ["# Handoff", "", "## Summary", "", ...Array.from({ length: 30 }, (_, i) => `- point ${i + 1}`), "", "```md", "## not a section", "```", "", "## Risks", "", "The final line."].join("\n");
+	const longThread = () =>
+		createFakeServer({
+			online: [onlineSession("s-web", { name: "Frontend", project: "pika-web" })],
+			relayEvents: [relayEvent("e-long", 60_000, { from: { kind: "session", sessionId: "s-web", device: "mini", name: "Frontend" }, to: { sessionId: "s-b", name: "Reviewer" }, text: report })],
+		});
+
+	it("previews a long message with its size and sections and expands it in place on narrow screens", async () => {
+		const server = longThread();
+		renderApp("/active", server.fetch);
+		const record = await waitFor(() => { const node = document.querySelector<HTMLElement>('[data-imessage-bubble="e-long"]')!; expect(node).toBeTruthy(); return node; });
+		expect(record.textContent).toContain("42 lines");
+		expect(record.textContent).toContain("Handoff · Summary · Risks");
+		expect(record.querySelector("[data-message-body]")?.textContent).not.toContain("The final line.");
+		const read = within(record).getByRole("button", { name: "Show all" });
+		expect(read.getAttribute("aria-expanded")).toBe("false");
+		fireEvent.click(read);
+		expect(record.querySelector("[data-message-body]")?.textContent).toContain("The final line.");
+		expect(within(record).getByRole("button", { name: "Show less" }).getAttribute("aria-expanded")).toBe("true");
+		expect(document.querySelector("[data-imessage-reader]")).toBeNull();
+	});
+
+	it("opens a long message in the reader on wide screens, with sections, raw text, and close", async () => {
+		const matchMedia = window.matchMedia;
+		window.matchMedia = ((query: string) => ({ ...matchMedia(query), matches: query.includes("min-width: 1280px") })) as typeof window.matchMedia;
+		const server = longThread();
+		renderApp("/active", server.fetch);
+		const record = await waitFor(() => { const node = document.querySelector<HTMLElement>('[data-imessage-bubble="e-long"]')!; expect(node).toBeTruthy(); return node; });
+		fireEvent.click(within(record).getByRole("button", { name: "Read in full" }));
+		const reader = screen.getByRole("complementary", { name: "Message reader" });
+		expect(within(reader).getByRole("navigation", { name: "Sections" }).textContent).toBe("HandoffSummaryRisks");
+		expect(reader.querySelector("[data-imessage-reader-body]")?.textContent).toContain("The final line.");
+		fireEvent.click(within(reader).getByRole("button", { name: "Raw" }));
+		expect(reader.querySelector("pre")?.textContent).toBe(report);
+		expect(within(record).getByRole("button", { name: "Close reader" }).getAttribute("aria-pressed")).toBe("true");
+		fireEvent.click(within(reader).getByRole("button", { name: "Close reader" }));
+		expect(screen.queryByRole("complementary", { name: "Message reader" })).toBeNull();
+	});
+
+	it("asks before deleting a room", async () => {
+		const server = createFakeServer({
+			relayRooms: [{ room: { name: "ops", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), messageCount: 0, members: [] }, messages: [] }],
+		});
+		renderApp("/active", server.fetch);
+		const ask = await waitFor(() => { const node = document.querySelector<HTMLButtonElement>("[data-imessage-delete-room-ask]")!; expect(node).toBeTruthy(); return node; });
+		fireEvent.click(ask);
+		expect(server.mutations).toEqual([]);
+		fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+		fireEvent.click(document.querySelector<HTMLButtonElement>("[data-imessage-delete-room-ask]")!);
+		fireEvent.click(document.querySelector<HTMLButtonElement>("[data-imessage-delete-room]")!);
+		await waitFor(() => expect(server.mutations.map((m) => `${m.method} ${m.path}`)).toEqual(["DELETE /api/v1/relay/rooms/ops"]));
+	});
+});
