@@ -38,6 +38,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         node: [22.19.0, 24]
+        # extensions.yml already covers Ubuntu on Node 22.19.0.
+        exclude:
+          - os: ubuntu-latest
+            node: 22.19.0
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

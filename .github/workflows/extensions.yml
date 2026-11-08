@@ -1,5 +1,6 @@
 # Offline collection gate: typecheck and the full `npm test` suite.
 # The Impeccable engine, visual-foundations, and e2e gates need network and a browser and stay out of CI.
+# magpie-provider.yml adds macOS and Node 24 for the Magpie provider.
 name: Extensions CI
 
 on:
