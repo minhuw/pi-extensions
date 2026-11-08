@@ -1,7 +1,10 @@
 //! Agent memory (spec "Memory"): short notes that pi agents save for the user and for a project, shared by every
 //! device, with a revision on each note for compare-and-swap writes and a history row per save and forget. A forgotten
 //! note keeps its row and history. Scope keys are computed here from what the request names and the device that sends
-//! it, never taken from the client. The tables are not derived: `pika reindex` leaves them alone.
+//! it, never taken from the client. The tables are not derived: `pika reindex` leaves them alone. Dreams, which
+//! consolidate a project's notes from its sessions under a lease, are in `dream`.
+
+pub mod dream;
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize, Serializer};
@@ -21,8 +24,8 @@ const MAX_REASON: usize = 500;
 const MAX_SESSION_ID: usize = 256;
 /// The key, and label, of the one user scope.
 pub const USER: &str = "user";
-/// Only agents write notes in v1.
-const PROVENANCE: &str = "agent";
+/// The provenance of what agents write through the memory routes.
+const AGENT: &str = "agent";
 /// The pi tools that read and write notes. Their arguments and results are memory: only the owner namespace shows
 /// them, and search never indexes them (spec "Scrubbing" under "Memory").
 pub const TOOL_NAMES: [&str; 3] = ["memory_read", "memory_save", "memory_forget"];
@@ -80,6 +83,14 @@ impl Scope {
     }
 }
 
+/// An entry of a recorded session that a dream's change rests on: `seq` is the entry's 0-based line index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Source {
+    pub session_id: String,
+    pub seq: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Note {
@@ -89,7 +100,10 @@ pub struct Note {
     pub title: String,
     pub hook: String,
     pub body: String,
+    /// The latest revision's: `agent`, `dream`, or `owner`.
     pub provenance: String,
+    /// The latest revision's; empty for what agents save.
+    pub sources: Vec<Source>,
     pub revision: i64,
     #[serde(serialize_with = "iso")]
     pub created_at: i64,
@@ -105,7 +119,7 @@ pub struct Note {
 #[serde(rename_all = "camelCase")]
 pub struct Revision {
     pub revision: i64,
-    /// `save` or `forget`.
+    /// `save`, `forget`, or `revert`.
     pub action: String,
     pub category: String,
     pub title: String,
@@ -116,6 +130,10 @@ pub struct Revision {
     pub device_id: Option<String>,
     pub session_id: Option<String>,
     pub reason: Option<String>,
+    pub provenance: String,
+    pub sources: Vec<Source>,
+    /// The dream batch that wrote it, if any.
+    pub batch_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -297,10 +315,15 @@ fn request_scopes(conn: &Connection, project: Option<Scope>) -> rusqlite::Result
 }
 
 const NOTE_SELECT: &str = "SELECT n.id, n.category, n.title, n.hook, n.body, n.provenance, n.revision, n.created_at,
-    n.updated_at, n.deleted_at, n.device_id, n.session_id, s.key, s.kind, s.label
+    n.updated_at, n.deleted_at, n.device_id, n.session_id, s.key, s.kind, s.label, n.sources
     FROM memory_notes n JOIN memory_scopes s ON s.key = n.scope_key";
 const INDEX_ORDER: &str = "ORDER BY CASE n.category WHEN 'user' THEN 0 WHEN 'feedback' THEN 1 WHEN 'project' THEN 2
     WHEN 'reference' THEN 3 ELSE 4 END, n.category, n.created_at, n.id";
+
+/// A JSON column of sources; anything unreadable is none.
+fn sources_column(text: String) -> Vec<Source> {
+    serde_json::from_str(&text).unwrap_or_default()
+}
 
 fn note_row(r: &rusqlite::Row) -> rusqlite::Result<Note> {
     Ok(Note {
@@ -317,6 +340,7 @@ fn note_row(r: &rusqlite::Row) -> rusqlite::Result<Note> {
         device_id: r.get(10)?,
         session_id: r.get(11)?,
         scope: Scope { key: r.get(12)?, kind: r.get(13)?, label: r.get(14)? },
+        sources: sources_column(r.get(15)?),
     })
 }
 
@@ -391,16 +415,56 @@ fn new_id(tx: &Transaction) -> rusqlite::Result<String> {
     }
 }
 
+/// Who writes a revision, when, why, and on what: what each revision row records beside the note.
+struct Author<'a> {
+    device: &'a str,
+    session_id: Option<String>,
+    provenance: &'a str,
+    sources: Vec<Source>,
+    batch_id: Option<&'a str>,
+    reason: Option<String>,
+    now: i64,
+}
+
+/// A note's validated, scrubbed content.
+struct Fields {
+    category: String,
+    title: String,
+    hook: String,
+    body: String,
+}
+
+fn fields(category: &str, title: &str, hook: &str, body: &str) -> Result<Fields, MemoryError> {
+    if !CATEGORIES.contains(&category) {
+        return Err(bad(format!("category must be one of {}", CATEGORIES.join(", "))));
+    }
+    let title = scrubbed(title, true);
+    if title.is_empty() || title.chars().count() > MAX_TITLE {
+        return Err(bad(format!("title must be 1 to {MAX_TITLE} characters")));
+    }
+    let hook = scrubbed(hook, true);
+    if hook.is_empty() || hook.chars().count() > MAX_HOOK || hook.contains(['\n', '\r']) {
+        return Err(bad(format!("hook must be one line of 1 to {MAX_HOOK} characters")));
+    }
+    let body = scrubbed(body, false);
+    if body.len() > MAX_BODY {
+        return Err(bad(format!("body must be at most {MAX_BODY} bytes")));
+    }
+    Ok(Fields { category: category.to_owned(), title, hook, body })
+}
+
 /// Writes the note's current state, its revision row, and its scope's `updated_at` (creating the scope).
-fn record(tx: &Transaction, note: &Note, action: &str, reason: Option<&str>) -> rusqlite::Result<()> {
+fn record(tx: &Transaction, note: &Note, action: &str, author: &Author) -> rusqlite::Result<()> {
     tx.prepare_cached(
         "INSERT INTO memory_scopes (key, kind, label, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)
          ON CONFLICT (key) DO UPDATE SET updated_at = excluded.updated_at",
     )?
     .execute(params![note.scope.key, note.scope.kind, note.scope.label, note.updated_at])?;
+    let sources = serde_json::to_string(&note.sources).expect("sources serialize");
     tx.prepare_cached(
         "INSERT OR REPLACE INTO memory_notes (id, scope_key, category, title, hook, body, provenance, revision, created_at,
-             updated_at, deleted_at, device_id, session_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             updated_at, deleted_at, device_id, session_id, sources)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
     )?
     .execute(params![
         note.id,
@@ -415,11 +479,12 @@ fn record(tx: &Transaction, note: &Note, action: &str, reason: Option<&str>) -> 
         note.updated_at,
         note.deleted_at,
         note.device_id,
-        note.session_id
+        note.session_id,
+        sources
     ])?;
     tx.prepare_cached(
         "INSERT INTO memory_revisions (note_id, revision, action, category, title, hook, body, at, device_id, session_id,
-             reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             reason, provenance, sources, batch_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
     )?
     .execute(params![
         note.id,
@@ -432,9 +497,94 @@ fn record(tx: &Transaction, note: &Note, action: &str, reason: Option<&str>) -> 
         note.updated_at,
         note.device_id,
         note.session_id,
-        reason
+        author.reason,
+        note.provenance,
+        sources,
+        author.batch_id
     ])?;
     Ok(())
+}
+
+/// Creates a note in `target` (no `id`, `expected` 0) or updates a live one of `target` at revision `expected`.
+fn put(tx: &Transaction, target: Scope, id: Option<&str>, expected: i64, fields: Fields, author: &Author) -> Result<Note, MemoryError> {
+    let note = match id {
+        Some(id) => {
+            let current = note(tx, id)?
+                .filter(|n| n.deleted_at.is_none() && n.scope.key == target.key)
+                .ok_or(MemoryError::NotFound)?;
+            if current.revision != expected {
+                return Err(MemoryError::Conflict(Box::new(current)));
+            }
+            Note {
+                category: fields.category,
+                title: fields.title,
+                hook: fields.hook,
+                body: fields.body,
+                provenance: author.provenance.to_owned(),
+                sources: author.sources.clone(),
+                revision: current.revision + 1,
+                updated_at: author.now,
+                device_id: Some(author.device.to_owned()),
+                session_id: author.session_id.clone(),
+                ..current
+            }
+        }
+        None => {
+            if expected != 0 {
+                return Err(bad("a new note needs expectedRevision 0"));
+            }
+            Note {
+                id: new_id(tx)?,
+                scope: target,
+                category: fields.category,
+                title: fields.title,
+                hook: fields.hook,
+                body: fields.body,
+                provenance: author.provenance.to_owned(),
+                sources: author.sources.clone(),
+                revision: 1,
+                created_at: author.now,
+                updated_at: author.now,
+                deleted_at: None,
+                device_id: Some(author.device.to_owned()),
+                session_id: author.session_id.clone(),
+            }
+        }
+    };
+    record(tx, &note, "save", author)?;
+    Ok(note)
+}
+
+/// Forgets the live note `id` of the user scope or `project` at revision `expected`.
+fn remove(tx: &Transaction, id: &str, expected: i64, project: Option<&Scope>, author: &Author) -> Result<Note, MemoryError> {
+    let current = note(tx, id)?
+        .filter(|n| n.deleted_at.is_none())
+        .filter(|n| n.scope.key == USER || project.is_some_and(|p| p.key == n.scope.key))
+        .ok_or(MemoryError::NotFound)?;
+    if current.revision != expected {
+        return Err(MemoryError::Conflict(Box::new(current)));
+    }
+    let note = Note {
+        provenance: author.provenance.to_owned(),
+        sources: author.sources.clone(),
+        revision: current.revision + 1,
+        updated_at: author.now,
+        deleted_at: Some(author.now),
+        device_id: Some(author.device.to_owned()),
+        session_id: author.session_id.clone(),
+        ..current
+    };
+    record(tx, &note, "forget", author)?;
+    Ok(note)
+}
+
+/// The index of the user scope and `project`, which must fit the budget.
+fn budgeted(tx: &Transaction, project: Option<Scope>) -> Result<Index, MemoryError> {
+    let index = Index::new(&groups(tx, request_scopes(tx, project)?)?);
+    if index.index_bytes > LIMIT_BYTES || index.index_lines > LIMIT_LINES {
+        return Err(MemoryError::Full { bytes: index.index_bytes, lines: index.index_lines });
+    }
+    Ok(index)
 }
 
 /// `POST memory/notes`: creates a note (no `id`, `expectedRevision` 0) or updates a live one of the scope the request
@@ -442,21 +592,7 @@ fn record(tx: &Transaction, note: &Note, action: &str, reason: Option<&str>) -> 
 /// `Store::write` does: the check, the comparison, and the write are one transaction.
 pub fn save(tx: &Transaction, device: &str, request: Save) -> Result<Written, MemoryError> {
     check_revision(request.expected_revision)?;
-    if !CATEGORIES.contains(&request.category.as_str()) {
-        return Err(bad(format!("category must be one of {}", CATEGORIES.join(", "))));
-    }
-    let title = scrubbed(&request.title, true);
-    if title.is_empty() || title.chars().count() > MAX_TITLE {
-        return Err(bad(format!("title must be 1 to {MAX_TITLE} characters")));
-    }
-    let hook = scrubbed(&request.hook, true);
-    if hook.is_empty() || hook.chars().count() > MAX_HOOK || hook.contains(['\n', '\r']) {
-        return Err(bad(format!("hook must be one line of 1 to {MAX_HOOK} characters")));
-    }
-    let body = scrubbed(&request.body, false);
-    if body.len() > MAX_BODY {
-        return Err(bad(format!("body must be at most {MAX_BODY} bytes")));
-    }
+    let fields = fields(&request.category, &request.title, &request.hook, &request.body)?;
     let reason = reason(request.reason.as_deref())?;
     let session_id = session_id(request.session_id.as_deref())?;
     let project = project_scope(request.project.as_deref(), request.repository.as_deref(), device)?;
@@ -466,53 +602,9 @@ pub fn save(tx: &Transaction, device: &str, request: Save) -> Result<Written, Me
         _ => return Err(bad("scope must be user or project")),
     };
     let target = stored(tx, target)?;
-    let now = now_ms();
-    let note = match &request.id {
-        Some(id) => {
-            let current = note(tx, id)?
-                .filter(|n| n.deleted_at.is_none() && n.scope.key == target.key)
-                .ok_or(MemoryError::NotFound)?;
-            if current.revision != request.expected_revision {
-                return Err(MemoryError::Conflict(Box::new(current)));
-            }
-            Note {
-                category: request.category,
-                title,
-                hook,
-                body,
-                revision: current.revision + 1,
-                updated_at: now,
-                device_id: Some(device.to_owned()),
-                session_id,
-                ..current
-            }
-        }
-        None => {
-            if request.expected_revision != 0 {
-                return Err(bad("a new note needs expectedRevision 0"));
-            }
-            Note {
-                id: new_id(tx)?,
-                scope: target,
-                category: request.category,
-                title,
-                hook,
-                body,
-                provenance: PROVENANCE.into(),
-                revision: 1,
-                created_at: now,
-                updated_at: now,
-                deleted_at: None,
-                device_id: Some(device.to_owned()),
-                session_id,
-            }
-        }
-    };
-    record(tx, &note, "save", reason.as_deref())?;
-    let index = Index::new(&groups(tx, request_scopes(tx, project)?)?);
-    if index.index_bytes > LIMIT_BYTES || index.index_lines > LIMIT_LINES {
-        return Err(MemoryError::Full { bytes: index.index_bytes, lines: index.index_lines });
-    }
+    let author = Author { device, session_id, provenance: AGENT, sources: Vec::new(), batch_id: None, reason, now: now_ms() };
+    let note = put(tx, target, request.id.as_deref(), request.expected_revision, fields, &author)?;
+    let index = budgeted(tx, project)?;
     Ok(Written { note, index })
 }
 
@@ -523,23 +615,8 @@ pub fn forget(tx: &Transaction, device: &str, id: &str, request: Forget) -> Resu
     let reason = reason(request.reason.as_deref())?;
     let session_id = session_id(request.session_id.as_deref())?;
     let project = project_scope(request.project.as_deref(), request.repository.as_deref(), device)?;
-    let current = note(tx, id)?
-        .filter(|n| n.deleted_at.is_none())
-        .filter(|n| n.scope.key == USER || project.as_ref().is_some_and(|p| p.key == n.scope.key))
-        .ok_or(MemoryError::NotFound)?;
-    if current.revision != request.expected_revision {
-        return Err(MemoryError::Conflict(Box::new(current)));
-    }
-    let now = now_ms();
-    let note = Note {
-        revision: current.revision + 1,
-        updated_at: now,
-        deleted_at: Some(now),
-        device_id: Some(device.to_owned()),
-        session_id,
-        ..current
-    };
-    record(tx, &note, "forget", reason.as_deref())?;
+    let author = Author { device, session_id, provenance: AGENT, sources: Vec::new(), batch_id: None, reason, now: now_ms() };
+    let note = remove(tx, id, request.expected_revision, project.as_ref(), &author)?;
     let index = Index::new(&groups(tx, request_scopes(tx, project)?)?);
     Ok(Written { note, index })
 }
@@ -577,8 +654,8 @@ pub fn revisions(conn: &Connection, id: &str) -> rusqlite::Result<Option<Vec<Rev
         return Ok(None);
     }
     tx.prepare_cached(
-        "SELECT revision, action, category, title, hook, body, at, device_id, session_id, reason
-         FROM memory_revisions WHERE note_id = ?1 ORDER BY revision",
+        "SELECT revision, action, category, title, hook, body, at, device_id, session_id, reason, provenance, sources,
+             batch_id FROM memory_revisions WHERE note_id = ?1 ORDER BY revision",
     )?
     .query_map([id], |r| {
         Ok(Revision {
@@ -592,6 +669,9 @@ pub fn revisions(conn: &Connection, id: &str) -> rusqlite::Result<Option<Vec<Rev
             device_id: r.get(7)?,
             session_id: r.get(8)?,
             reason: r.get(9)?,
+            provenance: r.get(10)?,
+            sources: sources_column(r.get(11)?),
+            batch_id: r.get(12)?,
         })
     })?
     .collect::<rusqlite::Result<_>>()
@@ -605,9 +685,10 @@ pub fn project_scope_keys(conn: &Connection, name: &str) -> rusqlite::Result<Vec
         .collect()
 }
 
-/// Deletes the scopes with their notes and the notes' revisions.
+/// Deletes the scopes with their notes, the notes' revisions, and their dream leases, batches, and checkpoints.
 pub fn delete_scopes<'a>(tx: &Transaction, keys: impl IntoIterator<Item = &'a String>) -> rusqlite::Result<()> {
     for key in keys {
+        dream::delete_scope(tx, key)?;
         tx.prepare_cached(
             "DELETE FROM memory_revisions WHERE note_id IN (SELECT id FROM memory_notes WHERE scope_key = ?1)",
         )?
@@ -630,7 +711,8 @@ mod tests {
             title: title.into(),
             hook: format!("hook of {id}"),
             body: String::new(),
-            provenance: PROVENANCE.into(),
+            provenance: AGENT.into(),
+            sources: Vec::new(),
             revision: 1,
             created_at,
             updated_at: created_at,

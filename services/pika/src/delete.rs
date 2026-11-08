@@ -2,7 +2,7 @@
 //! descendants with it; a deleted project takes its sessions, their descendants, its Herder runs, and the memory scopes
 //! labeled with its name (`crate::memory`). Everything they
 //! own goes in one transaction: stream and lines, captured requests, derived rows, search documents, session links,
-//! hidden flags, and the blob rows nothing else references. A tombstone per deleted stream key (`deleted_streams`)
+//! hidden flags, memory checkpoints, and the blob rows nothing else references. A tombstone per deleted stream key (`deleted_streams`)
 //! makes ingest discard what a running client keeps uploading, and a session recorded later whose parent or Herder
 //! run is tombstoned is deleted on arrival (`delete_orphans`). Blob files are removed after the commit, in a second
 //! transaction that skips any blob ingest stored again meanwhile; ingest rewrites a blob file it finds missing (see
@@ -291,6 +291,7 @@ fn delete_session_rows(
         .execute([id])?;
     tx.prepare_cached("DELETE FROM requests WHERE session_id = ?1")?.execute([id])?;
     tx.prepare_cached("DELETE FROM hidden_sessions WHERE id = ?1")?.execute([id])?;
+    crate::memory::dream::delete_checkpoints(tx, id)?;
     Ok(())
 }
 

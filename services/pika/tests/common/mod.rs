@@ -12,17 +12,22 @@ use tempfile::TempDir;
 pub const DEVICE: &str = "laptop";
 pub const SESSION_ID: &str = "7f3c2a10-5b1e-4c3d-9a8e-1f2e3d4c5b6a";
 pub const RUN_ID: &str = "20261021-100000-abcd";
-/// SQL that removes schema version 14 for tests that rewind `user_version`.
-pub const UNDO_V14: &str = "DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes;";
-/// SQL that removes schema versions 14 and 13 for tests that rewind `user_version`.
-pub const UNDO_V13: &str = "DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access;";
-/// SQL that removes schema versions 14, 13, and 11 (12 goes with 11's table) for tests that rewind `user_version`.
-pub const UNDO_V11: &str = "DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access; DROP TABLE usage_events; DROP INDEX entries_activity;";
-/// Remove versions 14, 13, 11, and 10 for tests that rewind `user_version`.
-pub const UNDO_V10: &str = "DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access; DROP TABLE usage_events; DROP INDEX entries_activity; DROP TABLE deleted_streams; DROP TABLE hidden_sessions; DROP TABLE session_hidden;
+/// SQL that removes schema version 15 for tests that rewind `user_version`.
+pub const UNDO_V15: &str = "DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases;
+    DROP INDEX memory_revisions_batch; ALTER TABLE memory_revisions DROP COLUMN batch_id;
+    ALTER TABLE memory_revisions DROP COLUMN sources; ALTER TABLE memory_revisions DROP COLUMN provenance;
+    ALTER TABLE memory_notes DROP COLUMN sources;";
+/// SQL that removes schema versions 15 and 14 for tests that rewind `user_version`.
+pub const UNDO_V14: &str = "DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes;";
+/// SQL that removes schema versions 15, 14, and 13 for tests that rewind `user_version`.
+pub const UNDO_V13: &str = "DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access;";
+/// SQL that removes schema versions 15, 14, 13, and 11 (12 goes with 11's table) for tests that rewind `user_version`.
+pub const UNDO_V11: &str = "DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access; DROP TABLE usage_events; DROP INDEX entries_activity;";
+/// Remove versions 15, 14, 13, 11, and 10 for tests that rewind `user_version`.
+pub const UNDO_V10: &str = "DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access; DROP TABLE usage_events; DROP INDEX entries_activity; DROP TABLE deleted_streams; DROP TABLE hidden_sessions; DROP TABLE session_hidden;
     DROP INDEX IF EXISTS search_docs_sid; DROP INDEX lines_blob; DROP INDEX request_dict_blob;";
-/// Remove versions 14, 13, 11, 10, 9, and 8 for tests that rewind `user_version`.
-pub const UNDO_V8: &str = "DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access; DROP TABLE usage_events; DROP INDEX entries_activity; DROP TABLE deleted_streams; DROP TABLE hidden_sessions; DROP TABLE session_hidden;
+/// Remove versions 15, 14, 13, 11, 10, 9, and 8 for tests that rewind `user_version`.
+pub const UNDO_V8: &str = "DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access; DROP TABLE usage_events; DROP INDEX entries_activity; DROP TABLE deleted_streams; DROP TABLE hidden_sessions; DROP TABLE session_hidden;
     DROP INDEX IF EXISTS search_docs_sid; DROP INDEX lines_blob; DROP INDEX request_dict_blob;
     DROP TABLE visitor_views; DROP TABLE visitor_day_key; ALTER TABLE sessions DROP COLUMN repository;";
 /// SQL that puts back the full-text index that schema version 7 replaced, for tests that rewind `user_version`. Dropping

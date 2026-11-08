@@ -554,7 +554,8 @@ async fn reindex_keeps_memory_and_its_history() {
     assert_eq!(
         revisions[1],
         json!({ "revision": 2, "action": "forget", "category": "feedback", "title": "Tabs", "hook": "indent with tabs",
-                "body": "", "at": revisions[1]["at"], "deviceId": "b", "sessionId": "s-2", "reason": "wrong" })
+                "body": "", "at": revisions[1]["at"], "deviceId": "b", "sessionId": "s-2", "reason": "wrong",
+                "provenance": "agent", "sources": [], "batchId": null })
     );
     assert!(revisions[1]["at"].is_string());
     assert_eq!(one(&app.env.store, &format!("SELECT revision, deleted_at IS NOT NULL AS gone FROM memory_notes WHERE id = '{}'", id(&gone))),
@@ -738,7 +739,7 @@ fn an_older_database_gains_the_memory_tables() {
     conn.execute_batch(&format!("{UNDO_V14} PRAGMA user_version = 13;")).unwrap();
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(14));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(15));
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     assert_eq!(one(&store, "SELECT COUNT(*) AS n FROM memory_scopes, memory_notes, memory_revisions")["n"], json!(0));
     assert!(!pika::store::DERIVED_TABLES.iter().any(|t| t.starts_with("memory_")));
