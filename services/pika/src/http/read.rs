@@ -90,6 +90,7 @@ pub fn agent_routes(state: &AppState) -> Router<AppState> {
         .route("/herder/runs", get(herder_runs))
         .route("/herder/runs/{id}", get(herder_run))
         .layer(Extension(AGENT))
+        .merge(super::memory::agent_routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_read_access))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found") })
         .layer(middleware::from_fn(no_store))

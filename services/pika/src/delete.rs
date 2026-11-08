@@ -1,5 +1,6 @@
 //! Deleting sessions, Herder runs, and projects (spec "Deleting and hiding"). A deleted session takes its recorded
-//! descendants with it; a deleted project takes its sessions, their descendants, and its Herder runs. Everything they
+//! descendants with it; a deleted project takes its sessions, their descendants, its Herder runs, and the memory scopes
+//! labeled with its name (`crate::memory`). Everything they
 //! own goes in one transaction: stream and lines, captured requests, derived rows, search documents, session links,
 //! hidden flags, and the blob rows nothing else references. A tombstone per deleted stream key (`deleted_streams`)
 //! makes ingest discard what a running client keeps uploading, and a session recorded later whose parent or Herder
@@ -25,14 +26,20 @@ pub struct Deleted {
     pub deleted_herder_runs: u64,
 }
 
-/// The sessions and Herder runs a deletion covers.
+/// The sessions, Herder runs, and memory scopes a deletion covers.
 #[derive(Debug, Default)]
 pub struct Plan {
     pub sessions: BTreeSet<String>,
     pub herder_runs: BTreeSet<String>,
+    /// The project memory scopes labeled with a deleted project's name (`crate::memory`).
+    pub memory_scopes: Vec<String>,
 }
 
 impl Plan {
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty() && self.herder_runs.is_empty() && self.memory_scopes.is_empty()
+    }
+
     pub fn counts(&self) -> Deleted {
         Deleted { deleted_sessions: self.sessions.len() as u64, deleted_herder_runs: self.herder_runs.len() as u64 }
     }
@@ -79,11 +86,11 @@ pub fn plan_session(conn: &Connection, id: &str) -> rusqlite::Result<Option<Plan
     if !recorded(conn, id)? {
         return Ok(None);
     }
-    Ok(Some(Plan { sessions: with_descendants(conn, [id.to_owned()])?, herder_runs: BTreeSet::new() }))
+    Ok(Some(Plan { sessions: with_descendants(conn, [id.to_owned()])?, ..Plan::default() }))
 }
 
 /// What deleting the project `name` covers: its sessions, its Herder runs (by `repo`) and their step sessions, and
-/// every recorded descendant of those sessions, whatever their project.
+/// every recorded descendant of those sessions, whatever their project; and the project memory scopes labeled `name`.
 pub fn plan_project(conn: &Connection, name: &str) -> rusqlite::Result<Plan> {
     let mut roots: Vec<String> = conn
         .prepare_cached("SELECT id FROM sessions WHERE project = ?1")?
@@ -104,7 +111,8 @@ pub fn plan_project(conn: &Connection, name: &str) -> rusqlite::Result<Plan> {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         roots.extend(steps);
     }
-    Ok(Plan { sessions: with_descendants(conn, roots)?, herder_runs })
+    let memory_scopes = crate::memory::project_scope_keys(conn, name)?;
+    Ok(Plan { sessions: with_descendants(conn, roots)?, herder_runs, memory_scopes })
 }
 
 /// Deletes the session `id` and its recorded descendants. `None` when it is not recorded.
@@ -128,7 +136,7 @@ pub fn delete_project(store: &Store, name: &str) -> Result<Option<Deleted>> {
         if selected {
             crate::read::publishing::update(tx, name, false).map_err(read_error)?;
         }
-        if plan.sessions.is_empty() && plan.herder_runs.is_empty() {
+        if plan.is_empty() {
             return Ok::<_, anyhow::Error>(selected.then(|| (Deleted::default(), Vec::new())));
         }
         let blobs = apply(tx, &plan)?;
@@ -166,7 +174,7 @@ pub fn delete_orphans<'a>(tx: &Transaction, ids: impl IntoIterator<Item = &'a st
     if roots.is_empty() {
         return Ok(Vec::new());
     }
-    let plan = Plan { sessions: with_descendants(tx, roots)?, herder_runs: BTreeSet::new() };
+    let plan = Plan { sessions: with_descendants(tx, roots)?, ..Plan::default() };
     apply(tx, &plan)
 }
 
@@ -197,6 +205,7 @@ fn apply(tx: &Transaction, plan: &Plan) -> Result<Vec<String>> {
         tx.prepare_cached("INSERT OR REPLACE INTO deleted_streams (key, deleted_at) VALUES (?1, ?2)")?
             .execute(params![run_key(run), now])?;
     }
+    crate::memory::delete_scopes(tx, &plan.memory_scopes)?;
     // The surviving parents of deleted children count their children again.
     for parent in parents.iter().filter(|p| !plan.sessions.contains(*p)) {
         tx.prepare_cached(

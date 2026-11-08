@@ -6,8 +6,8 @@ use pika::store::Store;
 use serde_json::{Value, json};
 
 const KEY: &str = "session:0c5a7e00-pricing";
-/// SQL that removes schema versions 13 and 12 for tests that rewind `user_version`.
-const UNDO_V12: &str = "ALTER TABLE devices DROP COLUMN read_access; DROP INDEX usage_events_pricing; ALTER TABLE usage_events DROP COLUMN pricing;";
+/// SQL that removes schema versions 14, 13, and 12 for tests that rewind `user_version`.
+const UNDO_V12: &str = "DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access; DROP INDEX usage_events_pricing; ALTER TABLE usage_events DROP COLUMN pricing;";
 
 fn lines(values: &[Value]) -> Vec<String> {
     values.iter().map(Value::to_string).collect()
@@ -136,7 +136,7 @@ fn the_upgrade_marks_existing_calls_without_a_reindex() {
     drop(conn);
 
     let store = Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(13));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(14));
     assert_eq!(costs(&store)["events"], events);
     assert!(store.setting(pika::store::NEEDS_REINDEX).unwrap().is_none());
 }

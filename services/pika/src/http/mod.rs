@@ -2,6 +2,7 @@ mod auth;
 mod devices;
 mod ingest;
 mod manage;
+mod memory;
 mod read;
 mod relay;
 mod ui;
@@ -128,6 +129,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/deletion", get(manage::session_deletion))
         .route("/projects/{name}", delete(manage::delete_project))
         .route("/projects/{name}/deletion", get(manage::project_deletion))
+        .merge(memory::owner_routes())
         .route("/logout", post(auth::logout))
         .route("/auth/sessions", get(auth::sessions))
         .route("/auth/sessions/revoke-all", post(auth::revoke_all))

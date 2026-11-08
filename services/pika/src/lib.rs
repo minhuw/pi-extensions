@@ -10,6 +10,7 @@ pub mod export;
 pub mod hidden;
 pub mod http;
 pub mod ingest;
+pub mod memory;
 pub mod pairing;
 pub mod pricing;
 pub mod ratelimit;

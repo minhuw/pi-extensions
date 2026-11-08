@@ -318,14 +318,15 @@ fn delete(store: &Store, what: DeleteAction) -> Result<ExitCode> {
                 let plan = plan_project(conn, &name)?;
                 Ok((plan, crate::read::publishing::is_selected(conn, &name).map_err(|e| anyhow::anyhow!("{e}"))?))
             })?;
-            if plan.sessions.is_empty() && plan.herder_runs.is_empty() && !selected {
+            if plan.is_empty() && !selected {
                 eprintln!("pika: no project {name:?}");
                 return Ok(ExitCode::FAILURE);
             }
             let what = format!(
-                "project {name:?}: {}, {}{}",
+                "project {name:?}: {}, {}{}{}",
                 plural(plan.sessions.len(), "session"),
                 plural(plan.herder_runs.len(), "Herder run"),
+                if plan.memory_scopes.is_empty() { "" } else { ", its memory" },
                 if selected { ", and its publication" } else { "" },
             );
             (yes, what, Box::new(move || delete_project(store, &name)))

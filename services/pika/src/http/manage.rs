@@ -32,7 +32,8 @@ pub async fn session_deletion(State(state): State<AppState>, Path(id): Path<Stri
     deleted(blocking(move || Ok(store.read(|conn| delete::plan_session(conn, &id))?.map(|plan| plan.counts()))).await)
 }
 
-/// `DELETE projects/:name` deletes the project's sessions, their descendants, and its Herder runs, and unpublishes it.
+/// `DELETE projects/:name` deletes the project's sessions, their descendants, its Herder runs, and its memory scopes,
+/// and unpublishes it.
 pub async fn delete_project(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     if !valid_project(&name) {
         return error(StatusCode::BAD_REQUEST, "invalid_project");
@@ -52,7 +53,7 @@ pub async fn project_deletion(State(state): State<AppState>, Path(name): Path<St
             store.read(|conn| -> anyhow::Result<Option<Deleted>> {
                 let plan = delete::plan_project(conn, &name)?;
                 let selected = crate::read::publishing::is_selected(conn, &name).map_err(|e| anyhow::anyhow!("{e}"))?;
-                Ok((selected || !plan.sessions.is_empty() || !plan.herder_runs.is_empty()).then(|| plan.counts()))
+                Ok((selected || !plan.is_empty()).then(|| plan.counts()))
             })
         })
         .await,
