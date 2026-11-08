@@ -29,7 +29,7 @@ Touching any path under `<cwd>/.pi/workspaces/<name>` through `write`, `edit`, o
 
 ## External path confirmation
 
-The extension inspects `write`, `edit`, and mutating `bash` tool calls (`mkdir`, `touch`, `rm`, `rmdir`, `cp`, `mv`, `ln`, `install`, `tee`, `dd`, `tar`, `unzip`, `git clone`, `git init`, `git worktree add`, `cargo new`/`init`, `npm`/`pnpm`/`yarn`, `cd <dir> && ...`, and shell output redirections `>` / `>>`).
+The extension inspects `write`, `edit`, and mutating `bash` tool calls (`mkdir`, `touch`, `rm`, `rmdir`, `cp`, `mv`, `ln`, `install`, `tee`, `dd of=`, `tar -C`/`-cf`, `unzip -d`, `git clone`, `git init`, `git worktree add`, `cargo new`/`init`, `npm`/`pnpm`/`yarn` `--prefix`/`-C`/`--dir`/`--cwd`, `cd <dir> && ...`, and shell output redirections `>` / `>>`).
 
 All candidate paths are canonicalized before evaluation:
 
@@ -45,6 +45,17 @@ When a tool call targets an unapproved path outside `<cwd>` and `/tmp`:
   - `Allow for this project` — records the canonical path in `<cwd>/.pi/workspaces/policy.json` (`allowedPaths`) and permits it across sessions for this project.
   - `Deny` — blocks the tool call and directs the model to `<cwd>/.pi/workspaces/<name>` or `/tmp`.
 - **Child sessions and non-interactive sessions (`print`, `json`):** While any top-level session is open, the extension registers itself in `globalThis[Symbol.for("pi-extensions.child-session-hooks")]` and removes the hook when all sessions shut down. Child sessions (including sessions carrying a `pi-extensions.session-link` entry) inherit the active session and project allowlists, and immediately block unapproved external writes without prompting.
+
+### Limits
+
+The `write` and `edit` guards are exact: every call is checked against its canonicalized `path`. The `bash` guard is a best-effort heuristic over the fixed command list above, not a sandbox. It splits statements on `;`, `&&`, `||`, `|`, and newlines, tracks `cd`, skips leading `KEY=VALUE`, `sudo`, `env`, and `command`, and expands only `~`, `$HOME`, and `${HOME}`. It does not run or evaluate the shell, so writes like these are not caught:
+
+- interpreters and nested shells: `python -c "open('/x/f','w')"`, `node -e ...`, `bash -c "touch /x/f"`;
+- in-place editors and unlisted writers: `sed -i`, `perl -i`, `rsync`, `curl -o`, `wget -O`, `find -delete`, `chmod`, `npm install -g`;
+- shell expansion: variables (`D=/x; touch $D/f`), quoted command substitution (`touch "$(dirname /x/a)/f"`), and backtick verbs;
+- indirection and wrappers: `echo /x/f | xargs rm`, `time`/`nohup <cmd>`, and commands inside `if`/`for` bodies.
+
+Other tools are not inspected.
 
 ## The `workspace` tool
 

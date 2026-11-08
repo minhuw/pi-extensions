@@ -507,6 +507,60 @@ function extractGitTargets(args: string[], baseCwd: string): string[] {
 	return [];
 }
 
+/** Returns the value of the last `--name value` / `--name=value` option among `names`. */
+function optionValue(args: string[], names: string[]): string | undefined {
+	let value: string | undefined;
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i]!;
+		for (const name of names) {
+			if (arg === name && args[i + 1]) {
+				value = args[i + 1];
+			} else if (name.startsWith("--") && arg.startsWith(`${name}=`)) {
+				value = arg.slice(name.length + 1);
+			}
+		}
+	}
+	return value;
+}
+
+/** Archive written by `tar -c/-r/-u`, or the `-C` extraction directory otherwise. */
+function extractTarTarget(args: string[]): string | undefined {
+	let archive: string | undefined;
+	let directory: string | undefined;
+	let writesArchive = false;
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i]!;
+		if (arg === "-C" || arg === "--directory" || arg === "-f" || arg === "--file") {
+			if (arg === "-C" || arg === "--directory") directory = args[i + 1];
+			else archive = args[i + 1];
+			i++;
+			continue;
+		}
+		if (arg.startsWith("--directory=")) {
+			directory = arg.slice("--directory=".length);
+			continue;
+		}
+		if (arg.startsWith("--file=")) {
+			archive = arg.slice("--file=".length);
+			continue;
+		}
+		if (arg === "--create" || arg === "--append" || arg === "--update") {
+			writesArchive = true;
+			continue;
+		}
+		// Bundled short options (`-czf out.tgz`), or traditional bundled first argument (`czf out.tgz`).
+		const letters = arg.startsWith("-") && !arg.startsWith("--") ? arg.slice(1) : i === 0 ? arg : "";
+		if (!/^[A-Za-z]+$/.test(letters)) continue;
+		if (/[cru]/.test(letters)) writesArchive = true;
+		if (letters.endsWith("f") && args[i + 1]) {
+			archive = args[i + 1];
+			i++;
+		}
+	}
+	if (writesArchive) return archive && archive !== "-" ? archive : undefined;
+	return directory;
+}
+
 /**
  * Extracts all resolved filesystem write/creation target paths from a shell command.
  */
@@ -645,6 +699,17 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 			} else {
 				targets.push(effectiveCwd);
 			}
+			continue;
+		}
+
+		const explicitTarget =
+			verb === "dd" ? args.find((arg) => arg.startsWith("of="))?.slice("of=".length)
+			: verb === "tar" ? extractTarTarget(args)
+			: verb === "unzip" ? optionValue(args, ["-d"]) ?? args.find((arg) => /^-d./.test(arg))?.slice(2)
+			: verb === "npm" || verb === "pnpm" || verb === "yarn" ? optionValue(args, ["--prefix", "-C", "--dir", "--cwd"])
+			: undefined;
+		if (explicitTarget) {
+			targets.push(resolveCanonicalPath(explicitTarget, effectiveCwd));
 			continue;
 		}
 

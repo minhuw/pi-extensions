@@ -214,6 +214,26 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 			extractBashExternalWriteTargets(`echo "hello" > ${outsideDir}/out.log`, projectCwd),
 		).toEqual([path.join(resolveCanonicalPath(outsideDir), "out.log")]);
 
+		// dd, tar, unzip, and npm/pnpm/yarn explicit target options are inspected without a preceding cd
+		const canonicalOutside = resolveCanonicalPath(outsideDir);
+		for (const [command, target] of [
+			[`dd if=/dev/zero of=${outsideDir}/disk.img`, path.join(canonicalOutside, "disk.img")],
+			[`tar -xzf archive.tgz -C ${outsideDir}`, canonicalOutside],
+			[`tar xf archive.tar --directory=${outsideDir}`, canonicalOutside],
+			[`tar -czf ${outsideDir}/out.tgz src`, path.join(canonicalOutside, "out.tgz")],
+			[`tar cf ${outsideDir}/out.tar src`, path.join(canonicalOutside, "out.tar")],
+			[`unzip archive.zip -d ${outsideDir}`, canonicalOutside],
+			[`npm install --prefix ${outsideDir}`, canonicalOutside],
+			[`pnpm -C ${outsideDir} install`, canonicalOutside],
+			[`yarn --cwd ${outsideDir} add left-pad`, canonicalOutside],
+		]) {
+			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual([target]);
+		}
+		// Reading an external archive or packing an external directory into the project is not a write outside
+		expect(extractBashExternalWriteTargets(`tar -xzf ${outsideDir}/in.tgz`, projectCwd)).toEqual([]);
+		expect(extractBashExternalWriteTargets(`tar -cf out.tar -C ${outsideDir} .`, projectCwd)).toEqual([]);
+		expect(extractBashExternalWriteTargets("dd if=/dev/zero of=/dev/null count=1", projectCwd)).toEqual([]);
+
 		// Internal and /tmp writes produce no external targets
 		expect(
 			extractBashExternalWriteTargets(
