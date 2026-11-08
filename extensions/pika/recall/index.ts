@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { credentialsRegistry } from "../credentials.ts";
@@ -45,7 +45,14 @@ async function currentProject(cwd: string): Promise<string> {
 
 /** recall: search and read the user's past pi sessions and Herder runs on their pika server. */
 export default function recallExtension(pi: ExtensionAPI): void {
-	pi.registerTool({
+	pi.registerTool(recallSearchTool());
+	pi.registerTool(recallReadTool());
+	pi.registerTool(recallHerderTool());
+}
+
+/** `recall_search`: past sessions matching a query. */
+export function recallSearchTool() {
+	return defineTool({
 		name: "recall_search", label: "Recall Search",
 		description: "Search the user's past pi sessions, recorded on their pika server from every machine and project, for text in prompts, answers, tool calls, and tool results. "
 			+ "Every word of `query` must match; \"quoted phrases\" match as phrases. Results are sessions (subagent matches count for the session that started them), each with its sessionId, project, last active date, match count, and up to 3 hits: kind, seq, date, and a snippet with matches in «…». "
@@ -90,8 +97,11 @@ export default function recallExtension(pi: ExtensionAPI): void {
 			return new Text(expanded ? `${summary}\n${theme.fg("dim", text)}` : summary, 0, 0);
 		},
 	});
+}
 
-	pi.registerTool({
+/** `recall_read`: one past session's turns, or its entries around a seq. */
+export function recallReadTool() {
+	return defineTool({
 		name: "recall_read", label: "Recall Read",
 		description: "Read one of the user's past pi sessions from their pika server, by a sessionId from recall_search. "
 			+ "Without `seq`: an overview (title, project, cwd, device, times, models, child sessions) and its turns from `fromTurn` (default 0), each with the user's prompt, the tool calls made, and the final answer. "
@@ -147,8 +157,11 @@ export default function recallExtension(pi: ExtensionAPI): void {
 			return new Text(expanded ? `${summary}\n${theme.fg("dim", text)}` : summary, 0, 0);
 		},
 	});
+}
 
-	pi.registerTool({
+/** `recall_herder`: past Herder runs, or one of them. */
+export function recallHerderTool() {
+	return defineTool({
 		name: "recall_herder", label: "Recall Herder",
 		description: "List the user's past Herder runs recorded on their pika server, newest first, or read one by runId. "
 			+ "Without `runId`: each run's title, runId, project, status, verdict, step count, times, device, and orchestrating session; `scope: \"project\"` lists only the current project's runs, `project` another one's. "

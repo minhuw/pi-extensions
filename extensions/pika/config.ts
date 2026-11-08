@@ -38,6 +38,36 @@ export function loadConfig(agentDir: string, env: NodeJS.ProcessEnv = process.en
 	return { enabled: true, config: { url: url.replace(/\/+$/, ""), token, exclude }, file };
 }
 
+/** The `memory` settings of `pika.json`, which control dreaming. */
+export interface MemorySettings {
+	/** Whether an idle top-level session starts a dream on its own. */
+	autoDream: boolean;
+	/** How long a session stays idle after its run settled before it asks for a dream. */
+	dreamIdleMinutes: number;
+	/** `<provider>/<model id>` for dreams; unset, a dream uses its session's model. */
+	dreamModel?: string;
+}
+
+export const MEMORY_DEFAULTS: Readonly<MemorySettings> = { autoDream: true, dreamIdleMinutes: 20 };
+
+/** Reads `memory` from `<agentDir>/pika.json`; a missing or unreadable file and invalid values give the defaults. */
+export function loadMemorySettings(agentDir: string): MemorySettings {
+	let memory: Record<string, unknown> = {};
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(join(agentDir, "pika.json"), "utf8"));
+		const value = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).memory : undefined;
+		if (value && typeof value === "object" && !Array.isArray(value)) memory = value as Record<string, unknown>;
+	} catch { /* the defaults */ }
+	const { autoDream, dreamIdleMinutes, dreamModel } = memory;
+	const model = typeof dreamModel === "string" ? dreamModel.trim() : "";
+	const slash = model.indexOf("/");
+	return {
+		autoDream: typeof autoDream === "boolean" ? autoDream : MEMORY_DEFAULTS.autoDream,
+		dreamIdleMinutes: typeof dreamIdleMinutes === "number" && Number.isFinite(dreamIdleMinutes) && dreamIdleMinutes >= 1 ? dreamIdleMinutes : MEMORY_DEFAULTS.dreamIdleMinutes,
+		...(slash > 0 && slash < model.length - 1 ? { dreamModel: model } : {}),
+	};
+}
+
 function expandHome(pattern: string): string {
 	return pattern === "~" ? homedir() : pattern.startsWith("~/") ? join(homedir(), pattern.slice(2)) : pattern;
 }

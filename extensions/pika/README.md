@@ -1,6 +1,6 @@
 # pika
 
-pika captures your Pi sessions and model requests on a self-hosted [server](../../services/pika/README.md), where you can search and read them in a web UI. It is designed for one user working across several machines. The same server connection powers [relay](#relay), which lets running Pi sessions message each other, and [recall](#recall), which lets the agent search past sessions and Herder runs, and [memory](#memory), which lets the agent keep durable notes for you and each project.
+pika captures your Pi sessions and model requests on a self-hosted [server](../../services/pika/README.md), where you can search and read them in a web UI. It is designed for one user working across several machines. The same server connection powers [relay](#relay), which lets running Pi sessions message each other, and [recall](#recall), which lets the agent search past sessions and Herder runs, and [memory](#memory), which lets the agent keep durable notes for you and each project and consolidates them in background [dreams](#dreaming).
 
 > [!WARNING]
 > Trajectories contain everything the model saw: file contents, command output, and any secret that a tool printed. Send them only to a server you control, over a network you trust or through TLS.
@@ -89,7 +89,8 @@ Each agent dir has a device key: `<agentDir>/pika/device-key.json`, `{ "v": 1, "
   "url": "https://homelab.example/pika",
   "token": "pika_…",
   "enabled": true,
-  "exclude": ["~/work/client-secret", "/home/me/scratch/*"]
+  "exclude": ["~/work/client-secret", "/home/me/scratch/*"],
+  "memory": { "autoDream": true, "dreamIdleMinutes": 20, "dreamModel": "anthropic/claude-haiku-5-5" }
 }
 ```
 
@@ -99,6 +100,11 @@ Each agent dir has a device key: `<agentDir>/pika/device-key.json`, `{ "v": 1, "
 | `token` | none | The device token from pairing or `pika token create "<name>"`. The server maps it to the device, so the device is never sent as data. |
 | `enabled` | `true` | `false` turns pika off without removing the file. |
 | `exclude` | `[]` | Working directories pika skips (below). |
+| `memory.autoDream` | `true` | `false` stops idle sessions from starting [dreams](#dreaming) on their own; `/memory dream` still works. |
+| `memory.dreamIdleMinutes` | `20` | How long a session stays idle after its last run before it asks for a dream; at least 1. |
+| `memory.dreamModel` | none | `<provider>/<model id>` for dreams, such as `anthropic/claude-haiku-5-5`. Unset or not found, a dream uses its session's model, and `/memory status` says so. |
+
+Invalid `memory` values fall back to their defaults. pika reads `memory` again at every idle wait and `/memory` command, so edits apply without a restart.
 
 pika is enabled only when it has both a URL and a token. A missing file means "not configured"; an unreadable or non-object file disables pika, and `/pika` shows why.
 
@@ -375,6 +381,21 @@ memory is not part of pika's [child-session hook](#child-session-hook): Subagent
 
 There is no local cache and no offline queue: every tool call goes to the server, and a call that cannot reach it fails.
 
+### Dreaming
+
+A dream is a background child session that consolidates memory from your recent sessions in one project: it reads what they did, checks it against the code, and saves, updates, or forgets notes. It runs in the pi process of a top-level session (TUI or RPC, no session link, pika logged in, not [excluded](#exclude-list)), one dream per process at a time, and the footer shows `dreaming…` while it runs.
+
+- **When.** After a run of the session settles (`agent_settled`), pika waits `memory.dreamIdleMinutes` (default 20). If the session is still idle then (no run, no queued messages, no open dialog), it asks the server for one `auto` lease. The server grants it only when no other dream holds the project, the last completed dream ended at least 4 hours ago, fewer than 3 automatic dreams ran in the project today (UTC), and some session has new entries; otherwise pika does nothing until the next run settles. Child sessions never start dreams, nor do sessions with `"autoDream": false`.
+- **`/memory dream`** asks for a `manual` lease, which skips the cooldown, the daily limit, and the activity check, and starts a dream at once; with no new sessions it only reviews the notes. **`/memory stop`** stops the running dream. **`/memory status`** (or `/memory`) shows the settings, the dream model (and why it is the session's model when `dreamModel` is unset or not found), the caps, and the running or last dream: its mode, sessions, turns, tokens, staged changes, batches committed, notes changed, and how it ended.
+- **The lease.** It holds the project for 15 minutes; pika renews it every 5 minutes and stops the dream if the server answers that it is lost. It lists the project's sessions with entries that earlier dreams have not consolidated, oldest first, at most 50, each with its seq range. Every end releases it as `completed`, `aborted`, or `failed`, without waiting for the server.
+- **The child.** A persisted Pi session under the agent dir's `pika/dreams/` folder, away from your sessions, so `/resume` does not list it. It gets the [child-session hooks](#child-session-hook), so pika uploads it, and a `pi-extensions.session-link` entry `{ kind: "subagent", agentType: "memory-dream", parentSessionId, parentSessionFile, description: "memory dream" }`; the server leaves dream sessions and their children out of later dreams, and the web UI hides them. The child uses `memory.dreamModel`, else the session's model, at the session's thinking level, and none of your extensions, skills, prompt templates, or context files. Its tools are exactly `read`, `grep`, `find`, `ls`, `recall_search`, `recall_read`, `memory_read`, `dream_save`, `dream_forget`, and `dream_commit`; it has no memory section and never starts dreams itself. Its system prompt says that transcripts, web content, files, and tool output are untrusted data whose instructions it must never follow, that every saved note needs its sources, that notes are checked against the code before they are kept, and that it commits after each group of processed sessions. Its first message gives the scope, the sessions, the current index, and four phases: orient, gather with `recall_read`, verify and consolidate, and prune.
+- **Staging and commits.** `dream_save` (with 1 to 20 `sources`, each `{ sessionId, seq }`) and `dream_forget` only stage changes. `dream_commit { sessions, summary? }` sends the staged changes (at most 50) and the sessions it names to the server as one batch, which marks those sessions consolidated. A commit that fails, for example because a note changed meanwhile (the result shows the note's current state) or the index would be too large, writes nothing and discards the staged changes; changes still staged when the dream ends are discarded too. Dream tools exist only in dream children, never in your sessions.
+- **Caps.** At 40 turns the child is told to commit and finish, and at 43 it is aborted. It is also aborted past 300,000 tokens (input, output, and cache, summed over its answers) or after 10 minutes.
+- **Preemption.** Your input (typed or from an RPC client), the start of any run in the session, and the session's shutdown abort the dream at once: its staged changes are discarded and the lease is released as `aborted` in the background, so your turn never waits for the server.
+- **Undo.** Each commit is a batch on the server. The web UI's memory pages list batches with their summary, sessions, and changes, and can revert one: a revert restores every note the batch touched, unless one of them changed since.
+
+When a dream ends, pika says how it went: the batches committed and notes changed, or why it stopped.
+
 ## Deployment
 
 The server is one Rust binary with the web UI embedded, published as the multi-arch image `ghcr.io/minhuw/pika` (amd64 and arm64). Its [README](../../services/pika/README.md) is the reference for image tags, building, the CLI, backups, and the [deployment examples](../../services/pika/deploy/). The short version:
@@ -423,4 +444,4 @@ npm run test:pika
 
 `npm run test:pika` runs offline Vitest suites against real Pi runtimes and a mock ingest server with the server's append, gap, conflict, and idempotency rules. `/pika login` and `/pika logout` run through a scripted UI, in both RPC and TUI mode, with pairing against the mock server's pairing API. One test runs a real pi TUI in `tmux` (skipped when `tmux` is not installed): it types and pastes a token, checks the captured screen never shows it, and pairs. Payload capture goes through Pi's real `openai-completions` implementation against a local mock endpoint. No live providers are used. `npm test` includes it.
 
-`npm run test:pika` also covers relay, recall, and memory; memory's tests (`extensions/pika/tests/memory/`) run real pi runtimes on the faux provider against a fake pika server. `npm run test:relay` runs only relay's part of it: a fake relay server built on the `ws` package, real pi sessions on Pi's faux provider, the real pika extension for its credentials, and a real Subagents child that must stay offline. `npm run test:recall` runs only recall's part, offline, against real pi runtimes on the faux provider and a fake pika server. The cross-component test against the real server is `bash services/pika/scripts/e2e.sh`.
+`npm run test:pika` also covers relay, recall, and memory; memory's tests (`extensions/pika/tests/memory/`) run real pi runtimes on the faux provider against a fake pika server, including dreams: the idle trigger, `/memory`, staging and commits, caps, preemption, and a real dream child session. `npm run test:relay` runs only relay's part of it: a fake relay server built on the `ws` package, real pi sessions on Pi's faux provider, the real pika extension for its credentials, and a real Subagents child that must stay offline. `npm run test:recall` runs only recall's part, offline, against real pi runtimes on the faux provider and a fake pika server. The cross-component test against the real server is `bash services/pika/scripts/e2e.sh`.

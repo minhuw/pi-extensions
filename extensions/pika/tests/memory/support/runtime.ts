@@ -7,7 +7,7 @@ import { getCurrentSystemPrompt, InMemoryCredentialStore } from "@earendil-works
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxProviderHandle, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import {
 	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
-	type AgentSession, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory, type ExtensionContext, type ExtensionFactory,
+	type AgentSession, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory, type ExtensionContext, type ExtensionFactory, type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import { credentialsRegistry } from "../../../credentials.ts";
 import { timing } from "../../../memory/client.ts";
@@ -70,10 +70,14 @@ export interface Harness {
 /** A real pi session runtime with memory and the faux provider. */
 export async function startSession(options: {
 	workspace: Workspace; cwd?: string; mode?: ExtensionContext["mode"]; sessionManager?: SessionManager; extensions?: ExtensionFactory[]; bindAsChild?: boolean; memory?: boolean;
+	/** The UI context the session binds with; default none. */
+	ui?: ExtensionUIContext;
+	/** The faux provider's model ids; default `test`. */
+	models?: string[];
 }): Promise<Harness> {
 	const cwd = options.cwd ?? options.workspace.cwd;
 	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-	const faux = fauxProvider({ api: "memory-test-api", provider: "memory-test", models: [{ id: "test" }] });
+	const faux = fauxProvider({ api: "memory-test-api", provider: "memory-test", models: (options.models ?? ["test"]).map((id) => ({ id })) as [{ id: string }, ...{ id: string }[]] });
 	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd: runtimeCwd, agentDir, sessionManager, sessionStartEvent }) => {
 		const services = await createAgentSessionServices({
@@ -90,7 +94,7 @@ export async function startSession(options: {
 	const runtime = await createAgentSessionRuntime(createRuntime, {
 		cwd, agentDir: options.workspace.agentDir, sessionManager: options.sessionManager ?? SessionManager.create(cwd, options.workspace.sessionDir),
 	});
-	const bind = () => runtime.session.bindExtensions(options.bindAsChild ? {} : { mode: options.mode ?? "rpc", onError: () => {} });
+	const bind = () => runtime.session.bindExtensions(options.bindAsChild ? {} : { mode: options.mode ?? "rpc", onError: () => {}, ...(options.ui ? { uiContext: options.ui } : {}) });
 	runtime.setRebindSession(bind);
 	await bind();
 	const systems: string[] = [];
