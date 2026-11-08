@@ -15,7 +15,7 @@ const extensionRoot = path.join(repositoryRoot, "extensions/impeccable");
 const skillsRoot = path.join(extensionRoot, "skills");
 const skillDir = path.join(skillsRoot, "impeccable");
 const promptsDir = path.join(extensionRoot, "prompts");
-const vendorRoot = path.join(extensionRoot, "vendor", "impeccable-4.8.0");
+const vendorRoot = path.join(extensionRoot, "vendor", "impeccable-4.8.1");
 const transformScript = path.join(extensionRoot, "scripts", "transform.mjs");
 
 // The 24 upstream command-metadata entries, in metadata order.
@@ -500,14 +500,14 @@ describe("provenance and reproducibility", () => {
 			upstream: { repository: string; tag: string; commit: string; engineVersion: string; license: string };
 		};
 		expect(upstream.upstream.repository).toBe("https://github.com/pbakaus/impeccable");
-		expect(upstream.upstream.tag).toBe("skill-v4.8.0");
-		expect(upstream.upstream.commit).toBe("414603bf14c7a344edb466bb1f85690c77ce8b7d");
-		expect(upstream.upstream.engineVersion).toBe("0.1.18");
+		expect(upstream.upstream.tag).toBe("skill-v4.8.1");
+		expect(upstream.upstream.commit).toBe("924bbd194d02e5e15a227e75b5901fb0d7a4ecad");
+		expect(upstream.upstream.engineVersion).toBe("0.1.19");
 		expect(upstream.upstream.license).toBe("Apache-2.0");
 
 		expect(await readFile(path.join(extensionRoot, "LICENSE"), "utf8")).toContain("Apache License");
 		expect(await readFile(path.join(extensionRoot, "NOTICE.md"), "utf8")).toContain("platform-design-skills");
-		expect(await readFile(path.join(skillDir, "scripts", "VERSION"), "utf8")).toContain("0.1.18");
+		expect(await readFile(path.join(skillDir, "scripts", "VERSION"), "utf8")).toContain("0.1.19");
 	});
 
 	it("reproduces the committed skills/ and prompts/ trees from the vendor snapshot", async () => {

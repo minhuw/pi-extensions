@@ -1,6 +1,6 @@
 # Impeccable for Pi
 
-Use [Impeccable](https://github.com/pbakaus/impeccable) in Pi to create interfaces, replace or refine visual identities, critique designs, and document or extract design systems for web, iOS and Android. This collection vendors the complete `skill-v4.8.0` distribution at commit `414603bf14c7a344edb466bb1f85690c77ce8b7d`, plus the four canonical roles, with managed engine **0.1.18**. Vendored material is [Apache-2.0](LICENSE), with [attribution](NOTICE.md).
+Use [Impeccable](https://github.com/pbakaus/impeccable) in Pi to create interfaces, replace or refine visual identities, critique designs, and document or extract design systems for web, iOS and Android. This collection vendors the complete `skill-v4.8.1` distribution at commit `924bbd194d02e5e15a227e75b5901fb0d7a4ecad`, plus the four canonical roles, with managed engine **0.1.19**. Vendored material is [Apache-2.0](LICENSE), with [attribution](NOTICE.md).
 
 The [feature and evidence map](FEATURES.md) covers every command, role and native auxiliary. [LOCAL-PATCHES.md](LOCAL-PATCHES.md) records adaptation history; [upstream.json](upstream.json) records provenance.
 
@@ -128,7 +128,7 @@ npm run test:impeccable:engine              # native management parity and live 
 npm run test:impeccable:visual-foundations  # native detector, direction decision and Chromium
 ```
 
-The combined E2E gate has six tests: two native engine smokes, three visual foundations and one actual live-browser flow. Observed browser evidence uses engine 0.1.18 on macOS arm64 and Chromium 141.0.7390.37. It includes actual opt-in detector findings/dedup/one correction, native direction page/DOM choice/ANSWER and real Pi context writes with PRODUCT bytes preserved. Live evidence covers actual Go, two source variants, cycling/accept, exact-session reload/recovery without another Go, stale-token refusal, complete acknowledgement/journal, a second Go/discard, source preservation and owned-process cleanup with app/browser/borrowed-helper survival.
+The combined E2E gate has six tests: two native engine smokes, three visual foundations and one actual live-browser flow. Observed browser evidence uses engine 0.1.19 on macOS arm64 and Chromium 141.0.7390.37. It includes actual opt-in detector findings/dedup/one correction, native direction page/DOM choice/ANSWER and real Pi context writes with PRODUCT bytes preserved. Live evidence covers actual Go, two source variants, cycling/accept, exact-session reload/recovery without another Go, stale-token refusal, complete acknowledgement/journal, a second Go/discard, source preservation and owned-process cleanup with app/browser/borrowed-helper survival.
 
 Catalog/model responses and variants are **SIMULATED**; native transactions and browser actions are real. Other platform, framework and event paths are covered by inherited playbooks, offline adapter tests, or both. That coverage does not establish equivalent browser behavior. Local static HTML accept/discard recovery is tested; paid images, aesthetic quality and all operating systems/frameworks are not certified. The [map](FEATURES.md#evidence-key) distinguishes these evidence levels.
 
@@ -136,7 +136,7 @@ Catalog/model responses and variants are **SIMULATED**; native transactions and 
 
 Runtime `install`, `update`, `link` and corresponding skill-distribution requests point here instead of installing foreign harness manifests. When `impeccable context` reports `UPDATE_AVAILABLE`, its result carries `integration.updateAvailable` with this handoff: upgrade with the steps below, never with `npx impeccable update`. Maintain the complete upstream feature set:
 
-1. Fetch the intended upstream tag/commit into isolated storage; use `upstream.json` to identify every Pi distribution and canonical role source path. Current pin: skill 4.8.0, commit `414603bf14c7a344edb466bb1f85690c77ce8b7d`, engine 0.1.18.
+1. Fetch the intended upstream tag/commit into isolated storage; use `upstream.json` to identify every Pi distribution and canonical role source path. Current pin: skill 4.8.1, commit `924bbd194d02e5e15a227e75b5901fb0d7a4ecad`, engine 0.1.19.
 2. Import the pristine distribution and all four role sources under `vendor/impeccable-<version>/`; regenerate the sorted per-file `MANIFEST.sha256` (currently 63 pristine files). Preserve Apache-2.0 license/notice and file provenance.
 3. Update `upstream.json`, engine version in `src/resources.ts`, VERSION/checksum resources and all command metadata together. Review every upstream command and role, supporting script and reference; do not reduce the set.
 4. Update anchored deterministic adaptations in `scripts/transform.mjs` and `scripts/pi-runtime.mjs`, and record changes/reasons in `LOCAL-PATCHES.md`. Run `node extensions/impeccable/scripts/transform.mjs`; never hand-edit generated skills/prompts. Contracts must reproduce them exactly.

@@ -11,7 +11,7 @@ const { createJiti } = await import(pathToFileURL(sdkRequire.resolve("jiti")).hr
 const jiti = createJiti(import.meta.url, { moduleCache: false, fsCache: false });
 const engine = await jiti.import(path.join(ext, "src/engine.ts"));
 const resources = await jiti.import(path.join(ext, "src/resources.ts"));
-assert.equal(engine.ENGINE_VERSION, "0.1.18");
+assert.equal(engine.ENGINE_VERSION, "0.1.19");
 assert.equal(resources.getSkillDir(), path.join(ext, "skills/impeccable"));
 globalThis.fetch = () => { throw new Error("Offline relocation must never download"); };
 const results = [];

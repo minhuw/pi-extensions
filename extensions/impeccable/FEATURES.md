@@ -1,6 +1,6 @@
 # Feature, prerequisite and evidence map
 
-This map covers the complete pinned skill 4.8.0 / engine 0.1.18 integration. Start with the [installation and usage guide](README.md). Entries below identify retained operations and evidence, not a claim that every playbook was exercised against a paid model or every platform.
+This map covers the complete pinned skill 4.8.1 / engine 0.1.19 integration. Start with the [installation and usage guide](README.md). Entries below identify retained operations and evidence, not a claim that every playbook was exercised against a paid model or every platform.
 
 ## Evidence key
 
@@ -13,7 +13,7 @@ This map covers the complete pinned skill 4.8.0 / engine 0.1.18 integration. Sta
 | B | Browser portion of `npm run test:impeccable:e2e`: actual native detector, direction page/Chromium DOM answer, Pi source/context mutations and live browser Go/variants/accept/discard/reload/recovery/cleanup. Foundations alone: `npm run test:impeccable:visual-foundations`. Catalog/model content and variants are **SIMULATED**. |
 | I | Complete inherited playbook/native operation retained; source/contract coverage establishes availability, not observed execution of every workflow or fidelity gate. |
 
-The combined E2E gate requires all six tests with no skipped/empty phase. The observed browser host is macOS arm64, engine 0.1.18, Chromium 141.0.7390.37. Local static HTML live acceptance/discard recovery is observed. Other frameworks/platforms, paid image services and aesthetic quality are not certified. Strict collection checking additionally requires `npm run typecheck` and `npm test`; see [all six checks](README.md#checks-and-evidence).
+The combined E2E gate requires all six tests with no skipped/empty phase. The observed browser host is macOS arm64, engine 0.1.19, Chromium 141.0.7390.37. Local static HTML live acceptance/discard recovery is observed. Other frameworks/platforms, paid image services and aesthetic quality are not certified. Strict collection checking additionally requires `npm run typecheck` and `npm test`; see [all six checks](README.md#checks-and-evidence).
 
 ## Every command-metadata entry
 

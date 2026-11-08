@@ -21,7 +21,7 @@ See the root [README](README.md#extensions) for the overview, and read the targe
 - `extensions/spokesman/` — `/spokesman` secondary communicator (`auto`/`always`, `/spokesman for` main-model filter, `<agentDir>/spokesman.json`), foldable original reply, and context replacement.
 - `extensions/workspace/` — `.pi/workspaces/<name>`, `/tmp` allowance, `write`/`edit`/`bash` guards, `workspace` tool, and `/workspace`.
 - `extensions/statusline-footer/` — theme-aware Pi statusline footer.
-- `extensions/impeccable/` — vendored Impeccable 4.8.0 (`vendor/impeccable-4.8.0/`), 26 prompts, engine 0.1.18, `impeccable_*` tools, and `scripts/transform.mjs` (never hand-edit `skills/`, `prompts/`, or vendor files; see `LOCAL-PATCHES.md`).
+- `extensions/impeccable/` — vendored Impeccable 4.8.1 (`vendor/impeccable-4.8.1/`), 26 prompts, engine 0.1.19, `impeccable_*` tools, and `scripts/transform.mjs` (never hand-edit `skills/`, `prompts/`, or vendor files; see `LOCAL-PATCHES.md`).
 - `extensions/agent-browser/` — `agent-browser` skill, `agent_browser` tool (`AGENT_BROWSER_SESSION`, inline screenshots), and `/agent-browser`.
 - `extensions/subagents/` — vendored `pi-subagents` v0.23.1 (`Agent`, `SubagentWorkflow`, `get_subagent_result`, `steer_subagent`), `recon`/`worker`, and hidden `council-*` advisors (`LOCAL-PATCHES.md`).
 - `extensions/council/` — `/council` and `council` tool for two-round blinded deliberation across `argon`, `astra`, and `opus` (`agents/`).

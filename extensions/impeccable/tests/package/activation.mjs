@@ -134,6 +134,6 @@ for (const name of ["getSkillDir", "getScriptsDir", "getChecksumsPath", "getVers
 	assert.ok(location.startsWith(ext + path.sep));
 	await fsp.stat(location);
 }
-assert.equal((await fsp.readFile(resources.getVersionPath(), "utf8")).trim(), "0.1.18");
+assert.equal((await fsp.readFile(resources.getVersionPath(), "utf8")).trim(), "0.1.19");
 assert.deepEqual(attempts, [], "including attempts caught internally by activation");
 process.stdout.write(JSON.stringify({ tools, prompts: ours.length, guardControls: 7, activationAttempts: attempts }) + "\n");

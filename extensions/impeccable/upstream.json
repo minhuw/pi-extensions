@@ -1,34 +1,34 @@
 {
   "upstream": {
     "repository": "https://github.com/pbakaus/impeccable",
-    "tag": "skill-v4.8.0",
-    "release": "4.8.0",
-    "commit": "414603bf14c7a344edb466bb1f85690c77ce8b7d",
-    "commitMessage": "Release 4.8.0 (#1192)",
-    "engineVersion": "0.1.18",
+    "tag": "skill-v4.8.1",
+    "release": "4.8.1",
+    "commit": "924bbd194d02e5e15a227e75b5901fb0d7a4ecad",
+    "commitMessage": "Merge pull request #1332 from pbakaus/release/skill-4.8.1",
+    "engineVersion": "0.1.19",
     "license": "Apache-2.0",
     "releaseAssets": [
-      { "name": "universal.zip", "bytes": 18116588 },
+      { "name": "universal.zip", "bytes": 18240246 },
       { "name": "universal.zip.sig.json", "bytes": 348 }
     ]
   },
   "vendored": {
-    "snapshot": "vendor/impeccable-4.8.0",
-    "manifest": "vendor/impeccable-4.8.0/MANIFEST.sha256",
+    "snapshot": "vendor/impeccable-4.8.1",
+    "manifest": "vendor/impeccable-4.8.1/MANIFEST.sha256",
     "sources": [
       {
         "upstreamPath": ".pi/skills/impeccable",
-        "vendoredPath": "vendor/impeccable-4.8.0/pi-dist",
+        "vendoredPath": "vendor/impeccable-4.8.1/pi-dist",
         "note": "Generated Pi distribution committed upstream: SKILL.md, reference/ playbooks, and supporting scripts (command-metadata.json, engine launcher, engine checksums, live browser helpers, font index, VERSION). Vendored byte-for-byte from the tagged commit's git tree."
       },
       {
         "upstreamPath": "skill/agents",
-        "vendoredPath": "vendor/impeccable-4.8.0/source/agents",
+        "vendoredPath": "vendor/impeccable-4.8.1/source/agents",
         "note": "Canonical agent-role instructions (impeccable-asset-producer, impeccable-documenter, impeccable-finish-reviewer, impeccable-manual-edit-applier). Upstream's Pi generator does not emit native Subagents definitions, so these are preserved verbatim and also exposed through the installed skill."
       },
       {
         "upstreamPath": "skill/SKILL.src.md",
-        "vendoredPath": "vendor/impeccable-4.8.0/source/SKILL.src.md",
+        "vendoredPath": "vendor/impeccable-4.8.1/source/SKILL.src.md",
         "note": "Upstream generator source template, kept for provenance of the generated SKILL.md."
       },
       {

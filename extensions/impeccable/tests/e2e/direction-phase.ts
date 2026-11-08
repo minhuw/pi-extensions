@@ -44,7 +44,7 @@ export async function directionPhase(f: Foundation, root: string) {
 		expect(request.headers).not.toHaveProperty("authorization");
 		expect(url.pathname).toBe("/api/roll");
 		expect(Object.fromEntries(url.searchParams)).toEqual({ scope: "direction", key: "k1", reroll: "0", mode: "persuade" });
-		expect((request.headers as Record<string, string>)["x-impeccable-client"]).toBe("impeccable/4.8.0");
+		expect((request.headers as Record<string, string>)["x-impeccable-client"]).toBe("impeccable/4.8.1");
 		const roll = JSON.parse(await fs.readFile(path.join(root, ".impeccable/questions/roll.json"), "utf8"));
 		expect(roll).toMatchObject({ source: "api", poolRevision: "0123456789ab", mode: "persuade" });
 		// Snapshot real native ledger files before --start consumes the pending roll.

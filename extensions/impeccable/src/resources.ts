@@ -14,7 +14,7 @@ const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 const extensionRoot = path.resolve(sourceDir, "..");
 
 /** The pinned engine version; must match `skills/impeccable/scripts/VERSION`. */
-export const ENGINE_VERSION = "0.1.18";
+export const ENGINE_VERSION = "0.1.19";
 
 /** Absolute path of the installed skill directory (`<skill-base-dir>`). */
 export function getSkillDir(): string {
