@@ -12,6 +12,9 @@ The collection loads this extension automatically; use `/reload` after installin
 /spokesman rewrite [<model>]            manually rewrite the latest completed assistant response now
 /spokesman off                          disable spokesman for this session
 /spokesman reset                        return to this session's pinned default spokesman and mode
+/spokesman for                          show the main models spokesman runs for
+/spokesman for <pattern>...             run spokesman only for these main models (all sessions)
+/spokesman for all                      run spokesman for every main model again
 /spokesman default                      show the default spokesman and mode for new sessions
 /spokesman default <model> [auto|always] set the default spokesman (and optional mode) for new sessions
 /spokesman default mode <auto|always>   set the default rewrite mode for new sessions
@@ -32,6 +35,15 @@ The collection loads this extension automatically; use `/reload` after installin
     - `wall-of-text` — single unbroken paragraph of `>= 90` prose words with no headings or lists
 - **`always`**: Rewrites every completed final assistant response (`stopReason === "stop"` with no pending tool calls), regardless of prose length or heuristic score.
 
+## Main-Model Filter (`/spokesman for`)
+
+By default spokesman runs for every main model. To limit it to the models that need it, list them with `/spokesman for gpt-6-sol openai/gpt-6-*` (space- or comma-separated). The command stores the list as `mainModels` in `<agentDir>/spokesman.json`.
+
+- Patterns match case-insensitively, and `*` matches any run of characters. A pattern without a slash matches the model id (`gpt-6-*`). A pattern with a slash matches `provider/id` (`openai/*`) or an id that itself contains a slash.
+- The list applies right away to every session, including sessions already pinned. Switching the main model (`model_select`) updates the footer badge.
+- When the main model is not in the list, auto and always rewrites are skipped and the footer badge is hidden. `/spokesman` status shows the spokesman as `inactive`. An explicit `/spokesman rewrite` still runs.
+- `/spokesman default off` keeps the list. `/spokesman for all` clears it.
+
 ## Transcript Display & Context Continuity
 
 When a response is rewritten:
@@ -43,7 +55,7 @@ When a response is rewritten:
 
 ## Configuration & Branch State
 
-- The default for new sessions is stored in `<agentDir>/spokesman.json` as `{ "default": "openai/gpt-5.4", "mode": "auto" }`.
+- The default for new sessions is stored in `<agentDir>/spokesman.json` as `{ "default": "openai/gpt-5.4", "mode": "auto", "mainModels": ["gpt-6-*"] }`. `mainModels` is optional and is never pinned per session.
 - Like [`language`](../language/README.md), a session pins its default at its first prompt and stores switches on the session branch (`spokesman` custom entries), so `/reload`, session resume, `/tree`, and forks follow the branch state.
 - When the `language` extension is active on the branch, `spokesman` automatically instructs the spokesman model to write prose in the active response language while preserving code, identifiers, commands, and file paths.
 - Subagents, Herder steps, and print/JSON modes are unaffected.

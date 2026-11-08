@@ -67,6 +67,7 @@ const RESERVED_SUBCOMMANDS = new Set([
 	"always",
 	"rewrite",
 	"now",
+	"for",
 ]);
 
 type SpokesmanPin = {
@@ -94,6 +95,8 @@ interface SpokesmanBranchState {
 interface SpokesmanConfig {
 	default: string | undefined;
 	mode: SpokesmanMode;
+	/** Main-model patterns spokesman runs for; undefined means every main model. */
+	mainModels: string[] | undefined;
 }
 
 interface TrackedWorkItem extends TurnWorkItem {
@@ -113,6 +116,60 @@ function validModelSpec(value: string): string | undefined {
 	if (/\s/.test(trimmed)) return undefined;
 	if (RESERVED_SUBCOMMANDS.has(trimmed.toLowerCase())) return undefined;
 	return trimmed;
+}
+
+function validModelPattern(value: string): string | undefined {
+	if (/\p{Cc}/u.test(value)) return undefined;
+	const trimmed = value.trim();
+	if (trimmed.length < 1 || trimmed.length > 120) return undefined;
+	if (/\s/.test(trimmed)) return undefined;
+	return trimmed;
+}
+
+function parseMainModels(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const patterns: string[] = [];
+	for (const item of value) {
+		const pattern = typeof item === "string" ? validModelPattern(item) : undefined;
+		if (!pattern) return undefined;
+		if (!patterns.includes(pattern)) patterns.push(pattern);
+	}
+	return patterns;
+}
+
+/**
+ * Matches a main-model pattern case-insensitively, with `*` as a wildcard. A pattern with a
+ * slash matches `provider/id` (or an id that itself contains a slash); otherwise it matches the id.
+ */
+export function matchesModelPattern(
+	pattern: string,
+	model: { id?: string; provider?: string },
+): boolean {
+	if (!model.id) return false;
+	const lowerPattern = pattern.trim().toLowerCase();
+	const regex = new RegExp(
+		`^${lowerPattern
+			.split("*")
+			.map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+			.join(".*")}$`,
+	);
+	const targets = lowerPattern.includes("/")
+		? [`${model.provider ?? ""}/${model.id}`, model.id]
+		: [model.id];
+	return targets.some((target) => regex.test(target.toLowerCase()));
+}
+
+function formatMainModels(mainModels: readonly string[] | undefined): string {
+	return mainModels?.length ? mainModels.join(", ") : "all";
+}
+
+export function isMainModelEnabled(
+	mainModels: readonly string[] | undefined,
+	model: { id?: string; provider?: string } | undefined,
+): boolean {
+	if (!mainModels || mainModels.length === 0) return true;
+	if (!model?.id) return false;
+	return mainModels.some((pattern) => matchesModelPattern(pattern, model));
 }
 
 export function shortModelName(spec: string): string {
@@ -153,10 +210,12 @@ export function isSameAsMainModel(
 function formatStatusLabel(
 	activeModel: string | undefined,
 	mode: SpokesmanMode,
+	mainModels: readonly string[] | undefined,
 	ctx: ExtensionContext,
 	rewriting = false,
 ): string | undefined {
 	if (!activeModel || isSameAsMainModel(activeModel, ctx)) return undefined;
+	if (!isMainModelEnabled(mainModels, ctx.model)) return undefined;
 	const short = shortModelName(activeModel);
 	if (rewriting) return `${short} · rewriting…`;
 	return mode === "always" ? `${short} · always` : short;
@@ -258,45 +317,54 @@ async function readConfig(ctx: ExtensionContext): Promise<SpokesmanConfig> {
 		const rawText = await readFile(path, "utf8");
 		const parsed = JSON.parse(rawText) as unknown;
 		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-			const record = parsed as { default?: unknown; mode?: unknown };
+			const record = parsed as { default?: unknown; mode?: unknown; mainModels?: unknown };
 			const hasDefault = record.default !== undefined;
 			const hasMode = record.mode !== undefined;
+			const hasMainModels = record.mainModels !== undefined;
 			const validDefault =
 				typeof record.default === "string" ? validModelSpec(record.default) : undefined;
 			const validMode = isMode(record.mode) ? record.mode : undefined;
+			const validMainModels = parseMainModels(record.mainModels);
 
 			if (
-				(hasDefault || hasMode) &&
+				(hasDefault || hasMode || hasMainModels) &&
 				(!hasDefault || validDefault !== undefined) &&
-				(!hasMode || validMode !== undefined)
+				(!hasMode || validMode !== undefined) &&
+				(!hasMainModels || validMainModels !== undefined)
 			) {
 				return {
 					default: validDefault,
 					mode: validMode ?? "auto",
+					mainModels: validMainModels?.length ? validMainModels : undefined,
 				};
 			}
 		}
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-			return { default: undefined, mode: "auto" };
+			return { default: undefined, mode: "auto", mainModels: undefined };
 		}
 	}
 	ctx.ui.notify(
-		`Ignoring ${path}: expected { "default"?: "<model>", "mode"?: "auto" | "always" }.`,
+		`Ignoring ${path}: expected { "default"?: "<model>", "mode"?: "auto" | "always", "mainModels"?: ["<pattern>", ...] }.`,
 		"warning",
 	);
-	return { default: undefined, mode: "auto" };
+	return { default: undefined, mode: "auto", mainModels: undefined };
 }
 
-async function writeConfig(next: { default?: string; mode?: SpokesmanMode }): Promise<void> {
+async function writeConfig(next: {
+	default?: string;
+	mode?: SpokesmanMode;
+	mainModels?: string[];
+}): Promise<void> {
 	const path = configPath();
-	if (!next.default && (!next.mode || next.mode === "auto")) {
+	if (!next.default && (!next.mode || next.mode === "auto") && !next.mainModels?.length) {
 		await rm(path, { force: true });
 		return;
 	}
-	const payload: { default?: string; mode?: SpokesmanMode } = {};
+	const payload: { default?: string; mode?: SpokesmanMode; mainModels?: string[] } = {};
 	if (next.default) payload.default = next.default;
 	if (next.mode) payload.mode = next.mode;
+	if (next.mainModels?.length) payload.mainModels = next.mainModels;
 
 	const temporary = `${path}.${randomUUID()}.tmp`;
 	await mkdir(getAgentDir(), { recursive: true });
@@ -664,13 +732,10 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 		syncRewriteRecordsFromBranch(ctx);
 		if (!isEligible(ctx)) return;
 		const state = readBranch(ctx);
-		const configured =
-			state.base === undefined || state.baseMode === undefined
-				? await readConfig(ctx)
-				: { default: undefined, mode: state.baseMode };
+		const configured = await readConfig(ctx);
 		const active = effectiveActive(state, configured);
 		const mode = effectiveMode(state, configured);
-		setStatus(ctx, formatStatusLabel(active, mode, ctx));
+		setStatus(ctx, formatStatusLabel(active, mode, configured.mainModels, ctx));
 	}
 
 	pi.registerEntryRenderer(
@@ -727,7 +792,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 		}
 		const active = effectiveActive(state, configured);
 		const mode = effectiveMode(state, configured);
-		setStatus(ctx, formatStatusLabel(active, mode, ctx));
+		setStatus(ctx, formatStatusLabel(active, mode, configured.mainModels, ctx));
 		return undefined;
 	});
 
@@ -780,13 +845,21 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 		}
 
 		const state = readBranch(ctx);
-		const configured =
-			state.base === undefined || state.baseMode === undefined
-				? await readConfig(ctx)
-				: { default: undefined, mode: state.baseMode };
+		const configured = await readConfig(ctx);
 		const activeSpec = effectiveActive(state, configured);
 		const mode = effectiveMode(state, configured);
 		if (!activeSpec) return undefined;
+
+		const originalModelId = msg.model || ctx.model?.id || "assistant";
+		const originalProvider = msg.provider || ctx.model?.provider;
+		if (
+			!isMainModelEnabled(configured.mainModels, {
+				id: msg.model || ctx.model?.id,
+				provider: originalProvider,
+			})
+		) {
+			return undefined;
+		}
 
 		const spokesmanModel = resolveSpokesmanModel(activeSpec, ctx);
 		if (!spokesmanModel) {
@@ -815,8 +888,6 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 			return undefined;
 		}
 
-		const originalModelId = msg.model || ctx.model?.id || "assistant";
-		const originalProvider = msg.provider || ctx.model?.provider;
 		if (isSameAsMainModel(activeSpec, ctx, { id: originalModelId, provider: originalProvider })) {
 			return undefined;
 		}
@@ -840,7 +911,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 		});
 
 		const startTime = Date.now();
-		setStatus(ctx, formatStatusLabel(activeSpec, mode, ctx, true));
+		setStatus(ctx, formatStatusLabel(activeSpec, mode, configured.mainModels, ctx, true));
 		try {
 			ctx.ui.setWorkingMessage(`Spokesman (${spokesmanModel.id}) rewriting…`);
 		} catch {}
@@ -886,7 +957,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 			try {
 				ctx.ui.setWorkingMessage();
 			} catch {}
-			setStatus(ctx, formatStatusLabel(activeSpec, mode, ctx, false));
+			setStatus(ctx, formatStatusLabel(activeSpec, mode, configured.mainModels, ctx, false));
 		}
 	});
 
@@ -1065,7 +1136,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 		});
 
 		const startTime = Date.now();
-		setStatus(ctx, formatStatusLabel(activeSpec, mode, ctx, true));
+		setStatus(ctx, formatStatusLabel(activeSpec, mode, configured.mainModels, ctx, true));
 		try {
 			ctx.ui.setWorkingMessage(`Spokesman (${spokesmanModel.id}) rewriting…`);
 		} catch {}
@@ -1100,19 +1171,36 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 			try {
 				ctx.ui.setWorkingMessage();
 			} catch {}
-			setStatus(ctx, formatStatusLabel(effectiveActive(state, configured), mode, ctx, false));
+			setStatus(
+				ctx,
+				formatStatusLabel(effectiveActive(state, configured), mode, configured.mainModels, ctx, false),
+			);
 		}
+	}
+
+	function refreshStatus(ctx: ExtensionContext, configured: SpokesmanConfig): void {
+		const state = readBranch(ctx);
+		setStatus(
+			ctx,
+			formatStatusLabel(
+				effectiveActive(state, configured),
+				effectiveMode(state, configured),
+				configured.mainModels,
+				ctx,
+			),
+		);
 	}
 
 	function reportStatus(ctx: ExtensionContext, configured: SpokesmanConfig): void {
 		const state = readBranch(ctx);
 		const active = effectiveActive(state, configured);
-		const sameModel = isSameAsMainModel(active, ctx);
-		const activeDisplay = active
-			? sameModel
+		const activeDisplay = !active
+			? "off"
+			: isSameAsMainModel(active, ctx)
 				? `${active} (disabled: same as main model)`
-				: active
-			: "off";
+				: !isMainModelEnabled(configured.mainModels, ctx.model)
+					? `${active} (inactive: main model ${ctx.model?.id ?? "unknown"} is not in the main-model list)`
+					: active;
 		const mode = effectiveMode(state, configured);
 		const pinned = state.base === undefined ? "not pinned yet" : (state.base ?? "off");
 		const stats = collectSessionStats(ctx);
@@ -1122,6 +1210,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 				`Mode: ${mode}`,
 				`Session default: ${pinned}`,
 				`Default for new sessions: ${configured.default ?? "off"} (${configured.mode})`,
+				`Main models: ${formatMainModels(configured.mainModels)}`,
 				`Session rewrites: ${stats.rewrites}/${stats.turns} turns · ↑ ${stats.inTokens} ↓ ${stats.outTokens} · $${stats.cost.toFixed(3)}`,
 			].join("\n"),
 			"info",
@@ -1130,7 +1219,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 
 	pi.registerCommand("spokesman", {
 		description:
-			"Configure or run the spokesman rewrite model: /spokesman [<model> | mode <auto|always> | rewrite | off | reset | default [<model> | mode <auto|always> | off]]",
+			"Configure or run the spokesman rewrite model: /spokesman [<model> | mode <auto|always> | rewrite | off | reset | for [<pattern>... | all] | default [<model> | mode <auto|always> | off]]",
 		getArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 			const trimmed = prefix.trimStart();
 			const subcommands: AutocompleteItem[] = [
@@ -1142,6 +1231,8 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 				{ value: "reset", label: "reset", description: "Return to this session's default spokesman" },
 				{ value: "default", label: "default", description: "Show or set the default for new sessions" },
 				{ value: "default off", label: "default off", description: "Remove the default for new sessions" },
+				{ value: "for", label: "for", description: "Show or set the main models spokesman runs for" },
+				{ value: "for all", label: "for all", description: "Run spokesman for every main model" },
 			];
 			const matches = subcommands.filter((item) =>
 				item.value.toLowerCase().startsWith(trimmed.toLowerCase()),
@@ -1159,8 +1250,39 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 
 			if (!raw || raw.toLowerCase() === "status") {
 				reportStatus(ctx, configured);
-				const state = readBranch(ctx);
-				setStatus(ctx, formatStatusLabel(effectiveActive(state, configured), effectiveMode(state, configured), ctx));
+				refreshStatus(ctx, configured);
+				return;
+			}
+
+			// /spokesman for [<pattern>... | all]
+			const forMatch = /^for(?:\s+([\s\S]+))?$/i.exec(raw);
+			if (forMatch) {
+				const rest = forMatch[1]?.trim();
+				if (!rest) {
+					ctx.ui.notify(
+						`Spokesman runs for main models: ${formatMainModels(configured.mainModels)}.`,
+						"info",
+					);
+					return;
+				}
+				let mainModels: string[] | undefined;
+				if (rest.toLowerCase() !== "all") {
+					mainModels = parseMainModels(rest.split(/[\s,]+/).filter(Boolean));
+					if (!mainModels?.length) {
+						ctx.ui.notify(
+							'Invalid main-model pattern. Provide model ids or globs like "gpt-6-sol", "gpt-6-*", or "openai/*".',
+							"warning",
+						);
+						return;
+					}
+				}
+				await writeConfig({ default: configured.default, mode: configured.mode, mainModels });
+				configured = { ...configured, mainModels };
+				ctx.ui.notify(
+					`Spokesman now runs for main models: ${formatMainModels(mainModels)} (all sessions).`,
+					"info",
+				);
+				refreshStatus(ctx, configured);
 				return;
 			}
 
@@ -1176,14 +1298,13 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 					return;
 				}
 				if (rest.toLowerCase() === "off") {
-					await writeConfig({ default: undefined, mode: undefined });
-					configured = { default: undefined, mode: "auto" };
+					await writeConfig({ mainModels: configured.mainModels });
+					configured = { default: undefined, mode: "auto", mainModels: configured.mainModels };
 					ctx.ui.notify(
 						"Removed the default spokesman for new sessions. Sessions that have had a first run keep their spokesman.",
 						"info",
 					);
-					const state = readBranch(ctx);
-					setStatus(ctx, formatStatusLabel(effectiveActive(state, configured), effectiveMode(state, configured), ctx));
+					refreshStatus(ctx, configured);
 					return;
 				}
 				const defaultModeMatch = /^mode(?:\s+(auto|always))?$/i.exec(rest);
@@ -1196,14 +1317,13 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 						);
 						return;
 					}
-					await writeConfig({ default: configured.default, mode: nextMode });
 					configured = { ...configured, mode: nextMode };
+					await writeConfig(configured);
 					ctx.ui.notify(
 						`Default spokesman mode for new sessions: ${nextMode}. Sessions that have had a first run keep their spokesman.`,
 						"info",
 					);
-					const state = readBranch(ctx);
-					setStatus(ctx, formatStatusLabel(effectiveActive(state, configured), effectiveMode(state, configured), ctx));
+					refreshStatus(ctx, configured);
 					return;
 				}
 
@@ -1221,14 +1341,13 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 					return;
 				}
 				const nextMode = maybeMode ?? configured.mode;
-				await writeConfig({ default: validSpec, mode: nextMode });
-				configured = { default: validSpec, mode: nextMode };
+				configured = { ...configured, default: validSpec, mode: nextMode };
+				await writeConfig(configured);
 				ctx.ui.notify(
 					`Default for new sessions: ${validSpec} (${nextMode}). Sessions that have had a first run keep their spokesman.`,
 					"info",
 				);
-				const state = readBranch(ctx);
-				setStatus(ctx, formatStatusLabel(effectiveActive(state, configured), effectiveMode(state, configured), ctx));
+				refreshStatus(ctx, configured);
 				return;
 			}
 
@@ -1250,15 +1369,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 					return;
 				}
 				pi.appendEntry<SpokesmanEntry>(SPOKESMAN_STATE_ENTRY, { mode: requested });
-				const nextState = readBranch(ctx);
-				setStatus(
-					ctx,
-					formatStatusLabel(
-						effectiveActive(nextState, configured),
-						effectiveMode(nextState, configured),
-						ctx,
-					),
-				);
+				refreshStatus(ctx, configured);
 				ctx.ui.notify(`Spokesman mode set to ${requested} for this session.`, "info");
 				return;
 			}
@@ -1290,15 +1401,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 					mode: targetMode,
 					reset: true,
 				});
-				const nextState = readBranch(ctx);
-				setStatus(
-					ctx,
-					formatStatusLabel(
-						effectiveActive(nextState, configured),
-						effectiveMode(nextState, configured),
-						ctx,
-					),
-				);
+				refreshStatus(ctx, configured);
 				ctx.ui.notify(
 					`Spokesman reset${targetBase ? ` to ${targetBase}` : " to off"} (${targetMode}).`,
 					"info",
@@ -1335,10 +1438,12 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 				active: modelSpec,
 				mode: nextMode,
 			});
-			setStatus(ctx, formatStatusLabel(modelSpec, nextMode, ctx));
+			setStatus(ctx, formatStatusLabel(modelSpec, nextMode, configured.mainModels, ctx));
 			const disabledNote = isSameAsMainModel(modelSpec, ctx)
 				? " (currently disabled because the main model is the same)"
-				: "";
+				: !isMainModelEnabled(configured.mainModels, ctx.model)
+					? ` (currently inactive because the main model is not in: ${formatMainModels(configured.mainModels)})`
+					: "";
 			ctx.ui.notify(
 				`Spokesman switched to ${modelSpec} (${nextMode} mode)${disabledNote}.`,
 				"info",

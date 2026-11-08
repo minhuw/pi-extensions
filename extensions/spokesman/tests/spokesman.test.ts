@@ -32,6 +32,8 @@ import {
 	formatSpokesmanSeparator,
 	hasNerdFonts,
 	HIDDEN_ORIGINAL_MARKER,
+	isMainModelEnabled,
+	matchesModelPattern,
 	SPOKESMAN_REWRITE_ENTRY,
 	SPOKESMAN_STATE_ENTRY,
 	stripNonProse,
@@ -169,6 +171,34 @@ describe("filter.ts unit tests", () => {
 		expect(prompt.userPrompt).toContain("Output: error TS2322 in src/index.ts");
 		expect(prompt.userPrompt).toContain("2. edit: src/index.ts");
 		expect(prompt.userPrompt).toContain(`[Draft response from gpt-6-sol]\n${DENSE_SOL_DRAFT}`);
+	});
+});
+
+describe("main-model filter", () => {
+	const sol = { id: "gpt-6-sol", provider: "openai" };
+
+	it("matchesModelPattern matches ids, provider/id, and * globs case-insensitively", () => {
+		expect(matchesModelPattern("gpt-6-sol", sol)).toBe(true);
+		expect(matchesModelPattern("GPT-6-SOL", sol)).toBe(true);
+		expect(matchesModelPattern("gpt-6-*", sol)).toBe(true);
+		expect(matchesModelPattern("gpt-6", sol)).toBe(false);
+		expect(matchesModelPattern("gpt-6.sol", sol)).toBe(false);
+		expect(matchesModelPattern("openai/*", sol)).toBe(true);
+		expect(matchesModelPattern("openai/gpt-6-sol", sol)).toBe(true);
+		expect(matchesModelPattern("anthropic/gpt-6-sol", sol)).toBe(false);
+		expect(matchesModelPattern("*/gpt-6-sol", { id: "gpt-6-sol" })).toBe(true);
+		// Ids that contain a slash (e.g. OpenRouter) match a slash pattern against the bare id too.
+		expect(
+			matchesModelPattern("anthropic/claude-*", { id: "anthropic/claude-opus", provider: "openrouter" }),
+		).toBe(true);
+	});
+
+	it("isMainModelEnabled allows every model without a list and requires a match with one", () => {
+		expect(isMainModelEnabled(undefined, sol)).toBe(true);
+		expect(isMainModelEnabled([], sol)).toBe(true);
+		expect(isMainModelEnabled(["claude-*", "gpt-6-*"], sol)).toBe(true);
+		expect(isMainModelEnabled(["claude-*"], sol)).toBe(false);
+		expect(isMainModelEnabled(["claude-*"], undefined)).toBe(false);
 	});
 });
 
@@ -811,6 +841,70 @@ describe("spokesman extension in real Pi sessions", () => {
 		// Switching main model back to gpt-6-sol restores the spokesman status
 		await h.session.setModel(h.faux.getModel("gpt-6-sol")!);
 		expect(h.status).toBe("gpt-5.4 · always");
+	});
+
+	it("runs only for main models in mainModels, managed by /spokesman for and kept by /spokesman default", async () => {
+		await writeConfig({ default: "gpt-5.4", mode: "always", mainModels: ["claude-*"] });
+		const h = await start();
+
+		// gpt-6-sol is not in the list: no footer badge and no rewrite, even in always mode
+		expect(h.status).toBeUndefined();
+		h.mainQueue.push(DENSE_SOL_DRAFT);
+		await h.session.prompt("Explain the architecture");
+		expect(h.spokesmanRequests).toHaveLength(0);
+		expect(h.rewriteEntries()).toHaveLength(0);
+		expect(textOf(h.assistantMessages().at(-1) as Message)).toBe(DENSE_SOL_DRAFT);
+
+		await h.command("/spokesman status");
+		expect(h.lastNote?.message).toContain(
+			"Active spokesman: gpt-5.4 (inactive: main model gpt-6-sol is not in the main-model list)",
+		);
+		expect(h.lastNote?.message).toContain("Main models: claude-*");
+
+		// An explicit manual rewrite still runs
+		h.spokesmanQueue.push(CLEAR_SPOKESMAN_REWRITE);
+		await h.command("/spokesman rewrite");
+		expect(h.spokesmanRequests).toHaveLength(1);
+		expect(h.rewriteEntries()).toHaveLength(1);
+
+		// Invalid patterns are rejected without touching the config
+		await h.command("/spokesman for gpt-6\u0007sol");
+		expect(h.lastNote?.type).toBe("warning");
+		expect(JSON.parse(await readFile(configPath(), "utf8")).mainModels).toEqual(["claude-*"]);
+
+		// Adding the main model by provider glob enables it and keeps default and mode
+		await h.command("/spokesman for claude-*, faux-openai/gpt-6-*");
+		expect(JSON.parse(await readFile(configPath(), "utf8"))).toEqual({
+			default: "gpt-5.4",
+			mode: "always",
+			mainModels: ["claude-*", "faux-openai/gpt-6-*"],
+		});
+		expect(h.status).toBe("gpt-5.4 · always");
+		await h.command("/spokesman for");
+		expect(h.lastNote?.message).toBe(
+			"Spokesman runs for main models: claude-*, faux-openai/gpt-6-*.",
+		);
+
+		h.mainQueue.push("Done.");
+		h.spokesmanQueue.push("I completed the requested task.");
+		await h.session.prompt("Run the check");
+		expect(h.spokesmanRequests).toHaveLength(2);
+		expect(h.rewriteEntries().at(-1)).toMatchObject({
+			originalText: "Done.",
+			rewrittenText: "I completed the requested task.",
+		});
+
+		// Removing the default spokesman keeps the main-model list
+		await h.command("/spokesman default off");
+		expect(JSON.parse(await readFile(configPath(), "utf8"))).toEqual({
+			mainModels: ["claude-*", "faux-openai/gpt-6-*"],
+		});
+
+		// /spokesman for all clears the list, and with nothing else left the config file goes away
+		await h.command("/spokesman for all");
+		await expect(access(configPath())).rejects.toThrow();
+		expect(h.lastNote?.message).toBe("Spokesman now runs for main models: all (all sessions).");
+		expect(h.errors).toEqual([]);
 	});
 
 	it("ignores child sessions bound with bindAsChild or carrying pi-extensions.session-link", async () => {

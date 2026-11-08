@@ -18,7 +18,7 @@ See the root [README](README.md#extensions) for the overview, and read the targe
 - `extensions/loop/` — `/loop` recurring prompts (fixed, cron, model-paced) and `loop_schedule` / `loop_stop`.
 - `extensions/molt/` — `/molt` new session keeping model and thinking level.
 - `extensions/language/` — `/language` default (`<agentDir>/language.json`), cache-safe mid-session switches, and footer status.
-- `extensions/spokesman/` — `/spokesman` secondary communicator (`auto`/`always`, `<agentDir>/spokesman.json`), foldable original reply, and context replacement.
+- `extensions/spokesman/` — `/spokesman` secondary communicator (`auto`/`always`, `/spokesman for` main-model filter, `<agentDir>/spokesman.json`), foldable original reply, and context replacement.
 - `extensions/workspace/` — `.pi/workspaces/<name>`, `/tmp` allowance, `write`/`edit`/`bash` guards, `workspace` tool, and `/workspace`.
 - `extensions/statusline-footer/` — theme-aware Pi statusline footer.
 - `extensions/impeccable/` — vendored Impeccable 4.8.0 (`vendor/impeccable-4.8.0/`), 26 prompts, engine 0.1.18, `impeccable_*` tools, and `scripts/transform.mjs` (never hand-edit `skills/`, `prompts/`, or vendor files; see `LOCAL-PATCHES.md`).
