@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { forEachChild, parse, type Command, type SyntaxNode, type Word } from "unbash";
 
 export interface ProjectPolicy {
 	allowedPaths: string[];
@@ -298,115 +299,35 @@ export function extractWorkspaceNameFromPath(targetPath: string, cwd: string): s
 	return firstSegment;
 }
 
-function splitShellStatements(command: string): string[] {
-	const statements: string[] = [];
-	let current = "";
-	let quote: "'" | '"' | null = null;
-	let escaped = false;
+const LOCAL_SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
 
-	for (let i = 0; i < command.length; i++) {
-		const ch = command[i]!;
-		if (escaped) {
-			current += ch;
-			escaped = false;
+/** Write redirections; `>&` onto a descriptor (`2>&1`, `>&-`) only duplicates or closes one. */
+const WRITE_REDIRECTS = new Set([">", ">>", ">|", "&>", "&>>", "<>", ">&"]);
+
+/** Bash pseudo-devices and standard streams, which are not files on disk. */
+const SHELL_PSEUDO_DEVICE = /^\/dev\/(?:null|stdin|stdout|stderr|tty|fd\/\d+|tcp\/.*|udp\/.*)$/;
+
+/** Words of a simple command, past leading `KEY=VALUE` assignments and `sudo`/`env`/`command` wrappers. */
+function commandWords(command: Command): string[] {
+	const words = [command.name, ...command.args]
+		.filter((arg): arg is Word => arg?.type === "Word")
+		.map((word) => word.value);
+	let idx = 0;
+	while (idx < words.length) {
+		const word = words[idx]!;
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || word === "sudo" || word === "env" || word === "command") {
+			idx++;
 			continue;
 		}
-		if (ch === "\\" && quote !== "'") {
-			current += ch;
-			escaped = true;
-			continue;
-		}
-		if (quote) {
-			if (ch === quote) quote = null;
-			current += ch;
-			continue;
-		}
-		if (ch === "'" || ch === '"') {
-			quote = ch;
-			current += ch;
-			continue;
-		}
-		if (ch === ";" || ch === "\n") {
-			if (current.trim()) statements.push(current.trim());
-			current = "";
-			continue;
-		}
-		if ((ch === "&" && command[i + 1] === "&") || (ch === "|" && command[i + 1] === "|")) {
-			if (current.trim()) statements.push(current.trim());
-			current = "";
-			i++;
-			continue;
-		}
-		if (ch === "|" && command[i - 1] !== ">") {
-			if (current.trim()) statements.push(current.trim());
-			current = "";
-			continue;
-		}
-		current += ch;
+		break;
 	}
-	if (current.trim()) statements.push(current.trim());
-	return statements;
+	return words.slice(idx);
 }
 
-function tokenizeStatement(statement: string): string[] {
-	const stripped = statement.replace(/^[(\s]+|[)\s]+$/g, "");
-	const tokens: string[] = [];
-	let current = "";
-	let quote: "'" | '"' | null = null;
-	let escaped = false;
-
-	const pushCurrent = () => {
-		if (current.length > 0) {
-			tokens.push(current);
-			current = "";
-		}
-	};
-
-	for (let i = 0; i < stripped.length; i++) {
-		const ch = stripped[i]!;
-		if (escaped) {
-			current += ch;
-			escaped = false;
-			continue;
-		}
-		if (ch === "\\" && quote !== "'") {
-			escaped = true;
-			continue;
-		}
-		if (quote) {
-			if (ch === quote) {
-				quote = null;
-			} else {
-				current += ch;
-			}
-			continue;
-		}
-		if (ch === "'" || ch === '"') {
-			quote = ch;
-			continue;
-		}
-		if (/\s/.test(ch)) {
-			pushCurrent();
-			continue;
-		}
-		if (ch === ">" || ((ch === "1" || ch === "2" || ch === "&") && current === "" && stripped[i + 1] === ">")) {
-			pushCurrent();
-			let op = ch;
-			if (ch !== ">") {
-				i++;
-				op += ">";
-			}
-			if (stripped[i + 1] === ">") {
-				i++;
-				op += ">";
-			}
-			tokens.push(op);
-			continue;
-		}
-		current += ch;
-	}
-	pushCurrent();
-	return tokens;
+function isLocalShell(node: SyntaxNode): boolean {
+	if (node.type !== "Command") return false;
+	const verb = commandWords(node)[0];
+	return verb !== undefined && LOCAL_SHELLS.has(path.basename(verb));
 }
 
 const MUTATING_VERBS = new Set([
@@ -563,74 +484,30 @@ function extractTarTarget(args: string[]): string | undefined {
 
 /**
  * Extracts all resolved filesystem write/creation target paths from a shell command.
+ * Commands for other machines (`ssh host mkdir /x`) and heredoc bodies are data unless a
+ * local shell reads them (`bash <<EOF`, `cat <<EOF | sh`).
  */
 export function extractBashWriteTargets(command: string, cwd: string): string[] {
 	const canonicalCwd = resolveCanonicalPath(cwd);
 	let effectiveCwd = canonicalCwd;
+	let shellReadsStdin = false;
 	const targets: string[] = [];
 
-	for (const statement of splitShellStatements(command)) {
-		const rawTokens = tokenizeStatement(statement);
-		if (rawTokens.length === 0) continue;
-
-		// Extract output redirections (>, >>, 1>, 2>, &>) first.
-		const cmdTokens: string[] = [];
-		let hadRedirection = false;
-		for (let i = 0; i < rawTokens.length; i++) {
-			const tok = rawTokens[i]!;
-			if (/^(?:1|2|&)?>>?$/.test(tok)) {
-				const target = rawTokens[i + 1];
-				if (target && !target.startsWith("&") && target !== "/dev/null") {
-					targets.push(resolveCanonicalPath(target, effectiveCwd));
-					hadRedirection = true;
-				}
-				i++;
-				continue;
-			}
-			const inlineRedir = /^(?:1|2|&)?>>?(.+)$/.exec(tok);
-			if (inlineRedir?.[1]) {
-				const target = inlineRedir[1];
-				if (!target.startsWith("&") && target !== "/dev/null") {
-					targets.push(resolveCanonicalPath(target, effectiveCwd));
-					hadRedirection = true;
-				}
-				continue;
-			}
-			cmdTokens.push(tok);
-		}
-
-		// Strip leading env assignments (KEY=VALUE) and command wrappers (sudo, env, command).
-		let idx = 0;
-		while (idx < cmdTokens.length) {
-			const tok = cmdTokens[idx]!;
-			if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tok) || tok === "sudo" || tok === "env" || tok === "command") {
-				idx++;
-				continue;
-			}
-			break;
-		}
-
-		const verb = cmdTokens[idx];
-		const args = cmdTokens.slice(idx + 1);
-		if (!verb) {
-			if (hadRedirection && effectiveCwd !== canonicalCwd) {
-				targets.push(effectiveCwd);
-			}
-			continue;
-		}
+	const inspectCommand = ([verb, ...args]: string[]): void => {
+		if (!verb) return;
 
 		if (verb === "cd" || verb === "pushd") {
 			const dest = args.find((a) => !a.startsWith("-")) ?? "~";
 			if (dest !== "-") {
 				effectiveCwd = resolveCanonicalPath(dest, effectiveCwd);
 			}
-			continue;
+			return;
 		}
 
 		if (verb === "git") {
 			const gitTargets = extractGitTargets(args, effectiveCwd);
 			targets.push(...gitTargets);
-			continue;
+			return;
 		}
 
 		if (verb === "mkdir" || verb === "touch" || verb === "rm" || verb === "rmdir" || verb === "tee") {
@@ -651,7 +528,7 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 			if (positionals.length === 0 && effectiveCwd !== canonicalCwd) {
 				targets.push(effectiveCwd);
 			}
-			continue;
+			return;
 		}
 
 		if (verb === "cp" || verb === "ln" || verb === "install") {
@@ -678,7 +555,7 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 			} else if (effectiveCwd !== canonicalCwd) {
 				targets.push(effectiveCwd);
 			}
-			continue;
+			return;
 		}
 
 		if (verb === "mv") {
@@ -689,7 +566,7 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 			if (positionals.length === 0 && effectiveCwd !== canonicalCwd) {
 				targets.push(effectiveCwd);
 			}
-			continue;
+			return;
 		}
 
 		if (verb === "cargo" && (args[0] === "new" || args[0] === "init")) {
@@ -699,7 +576,7 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 			} else {
 				targets.push(effectiveCwd);
 			}
-			continue;
+			return;
 		}
 
 		const explicitTarget =
@@ -710,14 +587,81 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 			: undefined;
 		if (explicitTarget) {
 			targets.push(resolveCanonicalPath(explicitTarget, effectiveCwd));
-			continue;
+			return;
 		}
 
 		if (MUTATING_VERBS.has(verb) && effectiveCwd !== canonicalCwd) {
 			targets.push(effectiveCwd);
 		}
-	}
+	};
 
+	const visit = (node: SyntaxNode): void => {
+		switch (node.type) {
+			case "Subshell":
+			case "CommandExpansion":
+			case "ProcessSubstitution":
+			case "ArithmeticCommandExpansion": {
+				// Subshells keep their `cd` to themselves.
+				const saved = effectiveCwd;
+				forEachChild(node, visit);
+				effectiveCwd = saved;
+				return;
+			}
+			case "Pipeline": {
+				// Every stage runs in its own subshell; a local shell in any stage reads the heredocs.
+				const saved = { cwd: effectiveCwd, shellReadsStdin };
+				shellReadsStdin ||= node.commands.some(isLocalShell);
+				for (const stage of node.commands) {
+					effectiveCwd = saved.cwd;
+					visit(stage);
+				}
+				effectiveCwd = saved.cwd;
+				shellReadsStdin = saved.shellReadsStdin;
+				return;
+			}
+			case "Redirected": {
+				// Redirections of a compound command open before its body runs.
+				const before = effectiveCwd;
+				visit(node.command);
+				const after = effectiveCwd;
+				effectiveCwd = before;
+				for (const redirect of node.redirects) visit(redirect);
+				effectiveCwd = after;
+				return;
+			}
+			case "Redirect": {
+				const target = node.target?.value;
+				if (!target || !WRITE_REDIRECTS.has(node.operator) || SHELL_PSEUDO_DEVICE.test(target)) return;
+				if (node.operator === ">&" && /^(?:\d+|-)$/.test(target)) return;
+				targets.push(resolveCanonicalPath(target, effectiveCwd));
+				return;
+			}
+			case "HereDoc":
+			case "HereString": {
+				// Expansions in an unquoted body run in this shell; the body itself is a script only for a local shell.
+				forEachChild(node, visit);
+				const script = node.type === "HereDoc" ? node.body.text : node.target?.value;
+				if (shellReadsStdin && script) {
+					const saved = effectiveCwd;
+					visit(parse(script));
+					effectiveCwd = saved;
+				}
+				return;
+			}
+			case "Command": {
+				const saved = shellReadsStdin;
+				shellReadsStdin ||= isLocalShell(node);
+				forEachChild(node, visit);
+				shellReadsStdin = saved;
+				inspectCommand(commandWords(node));
+				return;
+			}
+			default:
+				forEachChild(node, visit);
+		}
+	};
+
+	visit(parse(command));
 	return [...new Set(targets)];
 }
 

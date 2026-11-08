@@ -244,6 +244,57 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 		expect(extractBashExternalWriteTargets("echo 'temp' > /tmp/pi-temp-test.txt", projectCwd)).toEqual([]);
 		expect(extractBashExternalWriteTargets(`ls -la ${outsideDir} && git -C ${outsideDir} status`, projectCwd)).toEqual([]);
 	});
+
+	it("treats ssh remote commands and heredoc bodies as data unless a local shell reads them", () => {
+		const canonicalOutside = resolveCanonicalPath(outsideDir);
+		// Remote commands, remote heredoc scripts, script files written for later remote runs, and
+		// quoted or escaped `>` are not local writes.
+		for (const command of [
+			`ssh host "mkdir -p ${outsideDir}/x"`,
+			`ssh host echo hi \\> ${outsideDir}/motd`,
+			`echo ">" ${outsideDir}/x "a>${outsideDir}/y"`,
+			`ssh host <<'EOF'\nmkdir -p ${outsideDir}/x\ncd ${outsideDir}\ntouch built\nEOF`,
+			`ssh -p 2222 user@host bash -s <<EOF\nrm -rf ${outsideDir}/old\nEOF`,
+			`cat <<'EOF' | ssh host bash\necho done >> ${outsideDir}/log\nEOF`,
+			`cat > lab.sh <<'EOS'\npython3 ~/n3/summary.py "$tag" >> ${outsideDir}/results.txt\nEOS\nscp lab.sh host:`,
+			`python3 - <<-PY\n\topen("${outsideDir}/x", "w") > 0\n\tPY`,
+			`ssh host bash <<< "touch ${outsideDir}/x"`,
+		]) {
+			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual([]);
+		}
+
+		// Local writes around heredocs, local shells reading heredocs, and lines after arithmetic `<<` are still inspected.
+		for (const [command, target] of [
+			[`ssh host 'cat /etc/hosts' > ${outsideDir}/hosts`, path.join(canonicalOutside, "hosts")],
+			[`cat > ${outsideDir}/conf <<EOF\nkey=1\nEOF`, path.join(canonicalOutside, "conf")],
+			[`ssh host <<EOF\nls\nEOF\ntouch ${outsideDir}/after`, path.join(canonicalOutside, "after")],
+			[`bash <<'EOF'\nmkdir -p ${outsideDir}/x\nEOF`, path.join(canonicalOutside, "x")],
+			[`cat <<EOF | sudo sh\ntouch ${outsideDir}/y\nEOF`, path.join(canonicalOutside, "y")],
+			[`echo $((1 << 2))\ntouch ${outsideDir}/z`, path.join(canonicalOutside, "z")],
+			[`bash <<< "touch ${outsideDir}/s"`, path.join(canonicalOutside, "s")],
+			[`cat <<EOF\n$(touch ${outsideDir}/e)\nEOF`, path.join(canonicalOutside, "e")],
+		]) {
+			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual([target]);
+		}
+	});
+
+	it("inspects compound commands, subshell cd scope, and redirect operators through the bash AST", () => {
+		const canonicalOutside = resolveCanonicalPath(outsideDir);
+		for (const [command, expected] of [
+			[`for a in x y; do touch ${outsideDir}/$a; done`, [path.join(canonicalOutside, "$a")]],
+			[`if true; then mkdir ${outsideDir}/d; fi`, [path.join(canonicalOutside, "d")]],
+			[`cd ${outsideDir}; for a in arm x86; do nohup make > build-$a.log 2>&1 < /dev/null & done`, [path.join(canonicalOutside, "build-$a.log")]],
+			[`(cd ${outsideDir}; touch a); touch b`, [path.join(canonicalOutside, "a")]],
+			[`{ cd ${outsideDir}; } > log; touch c`, [path.join(canonicalOutside, "c")]],
+			[`echo hi >| ${outsideDir}/f; make &> ${outsideDir}/g; make >${outsideDir}/h 2>&1`, ["f", "g", "h"].map((name) => path.join(canonicalOutside, name))],
+			// Descriptor duplication, bash pseudo-devices, and redirections inside quoted substitutions.
+			["make 2>&1 >&2 >&- > /dev/stderr", []],
+			["for p in 1 2; do (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null && echo open; done", []],
+			['n=$(for d in a b; do [ -n "$(git -C $d status 2>/dev/null)" ] && echo y; done | wc -l)', []],
+		] as const) {
+			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual(expected);
+		}
+	});
 });
 
 describe("registry.ts & gc.ts — workspace lifecycle, safety classification, and garbage collection", () => {

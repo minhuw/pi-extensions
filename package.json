@@ -54,7 +54,8 @@
 	},
 	"dependencies": {
 		"croner": "^10.0.1",
-		"nanoid": "^5.1.16"
+		"nanoid": "^5.1.16",
+		"unbash": "^6.0.4"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-agent-core": "^1.5.0",
