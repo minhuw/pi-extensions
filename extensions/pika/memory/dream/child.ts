@@ -1,3 +1,4 @@
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
 	createAgentSession, DefaultResourceLoader, type ExtensionFactory, type InlineExtension, SessionManager, SettingsManager,
@@ -15,8 +16,19 @@ type Settings = ReturnType<SettingsManager["getGlobalSettings"]>;
 // No packages, extensions, or resource paths, which the loader would resolve and install.
 const KEPT_SETTINGS: (keyof Settings)[] = ["transport", "retry", "compaction", "shellPath", "shellCommandPrefix", "images", "thinkingBudgets"];
 
-/** Where dream sessions are kept: away from the user's sessions, so `/resume` does not list them. */
-export const dreamSessionDir = (agentDir: string) => join(agentDir, "pika", "dreams");
+/** pika's folder in the project: `<cwd>/.pi/pika/`, kept out of git by its own `.gitignore`. */
+export const projectPikaDir = (cwd: string) => join(cwd, ".pi", "pika");
+/** Where dream sessions are kept: in the project, away from the user's sessions, so `/resume` does not list them. */
+export const dreamSessionDir = (cwd: string) => join(projectPikaDir(cwd), "dreams");
+
+/** Creates `<cwd>/.pi/pika/` with a `.gitignore` of `*`, never touching the project's own `.gitignore` or an existing one. */
+async function ensureProjectPikaDir(cwd: string): Promise<void> {
+	const dir = projectPikaDir(cwd);
+	await mkdir(dir, { recursive: true });
+	await writeFile(join(dir, ".gitignore"), "*\n", { flag: "wx" }).catch((error: NodeJS.ErrnoException) => {
+		if (error.code !== "EEXIST") throw error;
+	});
+}
 
 /** The hooks registered in `globalThis[Symbol.for("pi-extensions.child-session-hooks")]`; the Set may not exist. */
 export function childSessionHooks(): InlineExtension[] {
@@ -48,7 +60,8 @@ export async function spawnDreamChild(options: SpawnOptions): Promise<DreamChild
 		appendSystemPromptOverride: () => [],
 	});
 	await resourceLoader.reload();
-	const sessionManager = SessionManager.create(cwd, dreamSessionDir(agentDir), options.parentSessionFile ? { parentSession: options.parentSessionFile } : undefined);
+	await ensureProjectPikaDir(cwd);
+	const sessionManager = SessionManager.create(cwd, dreamSessionDir(cwd), options.parentSessionFile ? { parentSession: options.parentSessionFile } : undefined);
 	const { session } = await createAgentSession({
 		cwd, agentDir, sessionManager, settingsManager, resourceLoader, model: options.model,
 		...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),

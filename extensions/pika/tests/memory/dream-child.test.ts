@@ -1,4 +1,5 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
@@ -109,8 +110,14 @@ it("a dream runs in a real persisted, linked child session with the hooks, the d
 	});
 	expect(ui.notes.at(-1)!.message).toBe("pika memory: the dream finished: 1 batch committed, 1 note changed.");
 
-	// Persisted away from the user's sessions, with the parent in its header and a session link.
-	const dir = dreamSessionDir(workspace.agentDir);
+	// Persisted in the project, away from the user's sessions and the agent dir, with the parent in its header and a session link.
+	const dir = dreamSessionDir(workspace.cwd);
+	expect(dir).toBe(join(workspace.cwd, ".pi", "pika", "dreams"));
+	expect(existsSync(join(workspace.agentDir, "pika", "dreams"))).toBe(false);
+	// Kept out of git by its own `.gitignore`, without touching the project's.
+	expect(readFileSync(join(workspace.cwd, ".pi", "pika", ".gitignore"), "utf8")).toBe("*\n");
+	expect(existsSync(join(workspace.cwd, ".gitignore"))).toBe(false);
+	expect(execFileSync("git", ["-C", workspace.cwd, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" })).toBe("");
 	const files = readdirSync(dir, { recursive: true }).map(String).filter((name) => name.endsWith(".jsonl"));
 	expect(files).toHaveLength(1);
 	const lines = readFileSync(join(dir, files[0]!), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);

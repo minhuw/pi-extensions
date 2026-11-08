@@ -235,7 +235,7 @@ describe("a real dream child", () => {
 		const run = currentDream()!;
 		await run.done;
 		expect(releases(pika)).toEqual(["completed"]);
-		const dir = dreamSessionDir(workspace.agentDir);
+		const dir = dreamSessionDir(workspace.cwd);
 		const file = readdirSync(dir, { recursive: true }).map(String).find((name) => name.endsWith(".jsonl"))!;
 		const usages = readFileSync(join(dir, file), "utf8").trim().split("\n").map((line) => JSON.parse(line) as { type: string; message?: { role: string; usage?: Record<string, number> } })
 			.flatMap((entry) => entry.type === "message" && entry.message?.role === "assistant" && entry.message.usage ? [entry.message.usage] : []);
