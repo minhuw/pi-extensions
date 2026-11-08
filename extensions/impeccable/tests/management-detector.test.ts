@@ -88,6 +88,11 @@ it("keeps genuine doctor JSON alongside Pi metadata and routes runtime upgrades 
 			expect(managed.integration?.engineRun).toBe(false);
 			expect(JSON.parse(managed.stdout).managedBy).toBe("repository");
 		}
+		expect((await runOperation({ argv: ["context"], cwd: h.directory }, h.api)).integration?.updateAvailable).toBeUndefined();
+		await h.config({ fixtureUpdateAvailable: true });
+		const notice = await runOperation({ argv: ["context"], cwd: h.directory }, h.api);
+		expect(notice.stdout).toContain("UPDATE_AVAILABLE");
+		expect(notice.integration?.updateAvailable).toMatchObject({ managedBy: "repository", message: expect.stringContaining("Do not run or offer `npx impeccable update`") });
 		await writeFile(path.join(h.directory, ".impeccable/config.json"), '{"broken":');
 		const malformed = await runOperation({ argv: ["doctor", "--json"], cwd: h.directory }, h.api);
 		expect(malformed.integration).toMatchObject({ engineRun: true, hooks: { available: false } });

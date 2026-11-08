@@ -12,20 +12,26 @@ function context(select = vi.fn(), input = vi.fn(), hasUI = true) {
 
 describe("structured question outcomes", () => {
 	it("preserves No, stable choice ids, descriptions and exact free text without a confirm dialog", async () => {
-		const ctx = context(vi.fn().mockResolvedValue("[no] No — Keep exploring"), vi.fn().mockResolvedValue("  actual purpose\nsecond line  "));
+		const ctx = context(vi.fn().mockResolvedValue("No — Keep exploring"), vi.fn().mockResolvedValue("  actual purpose\nsecond line  "));
 		const result = await askQuestions({ questions }, ctx);
 		expect(result).toMatchObject({ status: "answered", answers: [{ id: "approve", choiceId: "no", value: "No" }, { id: "purpose", value: "  actual purpose\nsecond line  " }], pending: [] });
-		expect(ctx.ui.select).toHaveBeenCalledWith("[approve] Approve?", expect.arrayContaining(["[no] No — Keep exploring"]), expect.objectContaining({ timeout: 120000 }));
+		expect(ctx.ui.select).toHaveBeenCalledWith("Approve?", expect.arrayContaining(["No — Keep exploring"]), expect.not.objectContaining({ timeout: expect.anything() }));
 		expect(ctx.ui.input).toHaveBeenCalledWith(expect.stringContaining("Describe the visitor's goal"), "Your answer", expect.anything());
 	});
+	it("shows ids only to tell duplicate labels apart and maps the selection to its choice", async () => {
+		const select = vi.fn().mockResolvedValue("Keep (b)");
+		const result = await askQuestions({ questions: [{ id: "pick", question: "Which?", choices: [{ id: "a", label: "Keep" }, { id: "b", label: "Keep" }, { id: "c", label: "Drop" }] }] }, context(select));
+		expect(select).toHaveBeenCalledWith("Which?", ["Keep (a)", "Keep (b)", "Drop"], expect.anything());
+		expect(result.answers).toEqual([{ id: "pick", value: "Keep", choiceId: "b" }]);
+	});
 	it("allows a custom answer and retains an explicitly submitted empty string", async () => {
-		const result = await askQuestions({ questions: [questions[0]!] }, context(vi.fn().mockResolvedValue("[custom-answer] Enter another answer"), vi.fn().mockResolvedValue("")));
+		const result = await askQuestions({ questions: [questions[0]!] }, context(vi.fn().mockResolvedValue("Other: type your own answer"), vi.fn().mockResolvedValue("")));
 		expect(result.answers).toEqual([{ id: "approve", value: "" }]);
 		expect(result.status).toBe("answered");
 	});
 	it("records partial answers and stops at dismissal with no default for later questions", async () => {
 		const input = vi.fn().mockResolvedValue(undefined);
-		const result = await askQuestions({ questions }, context(vi.fn().mockResolvedValue("[yes] Yes"), input));
+		const result = await askQuestions({ questions }, context(vi.fn().mockResolvedValue("Yes"), input));
 		expect(result.status).toBe("dismissed");
 		expect(result.answers).toEqual([{ id: "approve", value: "Yes", choiceId: "yes" }]);
 		expect(result.pending).toEqual([questions[1]]);
@@ -38,7 +44,7 @@ describe("structured question outcomes", () => {
 			controller.abort();
 			return undefined;
 		});
-		const result = await askQuestions({ questions }, context(vi.fn().mockResolvedValue("[no] No — Keep exploring"), input), controller.signal);
+		const result = await askQuestions({ questions }, context(vi.fn().mockResolvedValue("No — Keep exploring"), input), controller.signal);
 		expect(result.status).toBe("cancelled");
 		expect(result.answers).toEqual([{ id: "approve", value: "No", choiceId: "no" }]);
 		expect(result.pending).toEqual([questions[1]]);
@@ -57,7 +63,7 @@ describe("structured question outcomes", () => {
 		expect(ctx.ui.select).not.toHaveBeenCalled();
 	});
 	it("reports a UI failure without discarding partial answers", async () => {
-		const result = await askQuestions({ questions }, context(vi.fn().mockResolvedValue("[yes] Yes"), vi.fn().mockRejectedValue(new Error("UI disconnected"))));
+		const result = await askQuestions({ questions }, context(vi.fn().mockResolvedValue("Yes"), vi.fn().mockRejectedValue(new Error("UI disconnected"))));
 		expect(result.status).toBe("unavailable");
 		expect(result.answers).toHaveLength(1);
 		expect(result.message).toContain("UI disconnected");

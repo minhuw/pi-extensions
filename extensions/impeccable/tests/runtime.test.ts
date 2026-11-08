@@ -245,7 +245,7 @@ it("executes structured question dialogs on a real Pi faux-provider turn with ac
 	const ui = {
 		select: async (title: string, choices: string[]) => {
 			dialogs.push(title);
-			return choices.find((choice) => choice.startsWith("[no]"));
+			return choices.find((choice) => choice === "No");
 		},
 		input: async (title: string) => { dialogs.push(title); return undefined; },
 	} as unknown as ExtensionUIContext;
@@ -259,7 +259,7 @@ it("executes structured question dialogs on a real Pi faux-provider turn with ac
 			fauxAssistantMessage("The concept is not approved; the second question is unanswered."),
 		]);
 		await h.session.prompt("Ask the related design questions.");
-		expect(dialogs).toEqual(["[approve] Approve this concept?", "[purpose] What is missing?"]);
+		expect(dialogs).toEqual(["Approve this concept?", "What is missing?"]);
 		const results = h.session.sessionManager.getEntries().flatMap((entry) => entry.type === "message" && entry.message.role === "toolResult" ? [entry.message] : []);
 		expect(results.find((result) => result.toolName === "impeccable_question")?.details).toMatchObject({ status: "dismissed", answers: [{ id: "approve", choiceId: "no", value: "No" }], pending: [{ id: "purpose" }] });
 		expect(h.errors).toEqual([]);

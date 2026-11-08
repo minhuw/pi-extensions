@@ -68,14 +68,18 @@ export async function askQuestions(request: Request, ctx: Pick<ExtensionContext,
 	}
 	for (const question of request.questions) {
 		if (signal?.aborted) return report("cancelled", "Tool cancelled; retain the partial answers and ask pending questions later.");
-		const title = `[${question.id}] ${question.question}${question.description ? `\n${question.description}` : ""}`;
-		const options = { signal, timeout: 120_000 };
+		// Ids are for the model; the user reads only the question, its description, and the choice labels.
+		const title = `${question.question}${question.description ? `\n${question.description}` : ""}`;
+		// No timeout: Pi resolves a timed-out dialog as dismissed on the agent side, so an answer picked later would be lost.
+		const options = { signal };
 		try {
 			let value: string | undefined;
 			let choiceId: string | undefined;
 			if (question.choices) {
-				const labels = question.choices.map((choice) => `[${choice.id}] ${choice.label}${choice.description ? ` — ${choice.description}` : ""}`);
-				let custom = "[custom-answer] Enter another answer";
+				const duplicated = (label: string) => question.choices!.filter((choice) => choice.label === label).length > 1;
+				const labels = question.choices.map((choice) =>
+					`${choice.label}${duplicated(choice.label) ? ` (${choice.id})` : ""}${choice.description ? ` — ${choice.description}` : ""}`);
+				let custom = "Other: type your own answer";
 				while (labels.includes(custom)) custom += " (free text)";
 				const selected = await ctx.ui.select(title, question.allowFreeText ? [...labels, custom] : labels, options);
 				if (signal?.aborted) return report("cancelled", "Tool cancelled; no answer was assumed for the open dialog.");

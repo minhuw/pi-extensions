@@ -35,8 +35,12 @@ function nativeOrGeneratedBytes(bytes: Buffer): boolean {
 		|| bytes.subarray(0, 16).toString() === "SQLite format 3\0";
 }
 
+/** The `.impeccable/` files upstream's init playbook says to commit; its runtime directories stay forbidden. */
+const DURABLE_IMPECCABLE = /(^|\/)\.impeccable\/(config\.json|design\.json|surfaces\/[^/]+\.md|live\/config\.json|critique\/ignore\.md)$/;
+
 function forbiddenEntry(entry: string): boolean {
-	if (/(^|\/)(node_modules|\.impeccable|\.cache|\.npm|\.env|test-results|playwright-report|coverage|blob-report)(\/|$)/i.test(entry)) return true;
+	if (/(^|\/)\.impeccable(\/|$)/.test(entry) && !DURABLE_IMPECCABLE.test(entry)) return true;
+	if (/(^|\/)(node_modules|\.cache|\.npm|\.env|test-results|playwright-report|coverage|blob-report)(\/|$)/i.test(entry)) return true;
 	if (/(^|\/)(auth|credentials|config\.local)\.json$|(^|\/)\.env\..+$/i.test(entry)) return true;
 	if (!entry.startsWith(`${extensionPath}/`)) return false;
 	return /(^|\/)(chromium[^/]*|chrome[^/]*|firefox[^/]*|webkit[^/]*|ms-playwright|audit|cache|previews?|screenshots?|artifacts|dist|build|\.vitest)(\/|$)/i.test(entry)

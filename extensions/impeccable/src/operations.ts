@@ -12,6 +12,8 @@ import { atomicWrite, hookStatus, object, optionalText, parseTargetArgs, physica
 export interface IntegrationMetadata { adapter: "pi"; engineRun: boolean; operation: string; root: string; [key: string]: unknown }
 export type OperationResult = EngineRunResult & { integration?: IntegrationMetadata };
 const PIN_MARKER = "<!-- pi-impeccable-owned-prompt:v1 -->";
+const UPDATE_HANDOFF = "Upgrade or change this vendored distribution through this repository's README vendoring procedure.";
+const UPDATE_AVAILABLE_HANDOFF = `A newer upstream Impeccable is published. Do not run or offer \`npx impeccable update\`: it installs foreign harness skills and leaves this Pi package unchanged. ${UPDATE_HANDOFF}`;
 const execFileAsync = promisify(execFile);
 /** Establish local-config privacy before any real local-config commit. */
 async function excludeLocalConfig(root: string, signal: AbortSignal | undefined, committed: string[]): Promise<void> {
@@ -146,7 +148,11 @@ async function runOperationUnqueued(options: RunEngineOptions, pi: Pick<Extensio
 			let hooks: unknown;
 			try { root = (await validatedContext(cwd, argv)).root; hooks = await reportMetadata(root); }
 			catch (error) { hooks = { available: false, error: String(error), root }; }
-			return { ...result, integration: { adapter: "pi", engineRun: true, operation: verb, root, hooks, upstreamManifestDiscovery: "Upstream cannot discover this external Pi package; its genuine artifact findings remain in stdout." } };
+			// Upstream's notice offers `npx impeccable update`, which never updates this vendored package.
+			const updateAvailable = verb === "context" && result.stdout.includes("UPDATE_AVAILABLE")
+				? { updateAvailable: { managedBy: "repository", message: UPDATE_AVAILABLE_HANDOFF } }
+				: {};
+			return { ...result, integration: { adapter: "pi", engineRun: true, operation: verb, root, hooks, ...updateAvailable, upstreamManifestDiscovery: "Upstream cannot discover this external Pi package; its genuine artifact findings remain in stdout." } };
 		}
 		const context = await validatedContext(cwd, argv, options.signal);
 		root = context.root;
@@ -164,7 +170,7 @@ async function runOperationUnqueued(options: RunEngineOptions, pi: Pick<Extensio
 			// artifact mutations are not tracked by the adapter's commit list.
 			return { ...result, integration: { adapter: "pi", engineRun: true, operation: verb, root, ...(target === undefined ? {} : { originalTarget: target, effectiveTarget: root }), hooks: await reportMetadata(root), upstreamManifestDiscovery: "Upstream cannot discover this external Pi package; its genuine artifact findings remain in stdout." } };
 		});
-		if (["update", "install", "link"].includes(verb ?? "") || (verb === "skills" && ["update", "install", "link"].includes(argv[1] ?? ""))) return adapterResult(options, root, { managedBy: "repository", message: "Upgrade or change this vendored distribution through this repository's README vendoring procedure." });
+		if (["update", "install", "link"].includes(verb ?? "") || (verb === "skills" && ["update", "install", "link"].includes(argv[1] ?? ""))) return adapterResult(options, root, { managedBy: "repository", message: UPDATE_HANDOFF });
 		if (verb === "pin") {
 			const result = await pin(managed, root, pi, sessionCwd, committed);
 			options.signal?.throwIfAborted();

@@ -51,7 +51,7 @@ export default function(pi) {
 					try { event = JSON.parse(line); } catch { continue; }
 					if (event.type === "extension_ui_request") {
 						methods.push(event.method);
-						if (event.method === "select") send({ type: "extension_ui_response", id: event.id, value: "[no] No" });
+						if (event.method === "select") send({ type: "extension_ui_response", id: event.id, value: "No" });
 						else if (event.method === "input" && methods.length === 2) send({ type: "extension_ui_response", id: event.id, value: "Actual user purpose" });
 						else if (lastOutcome === "cancelled") send({ type: "abort" });
 						else send({ type: "extension_ui_response", id: event.id, cancelled: true });

@@ -55,6 +55,9 @@ if(args[0] === 'hook') {
  }
  const delay=config('config.json').fixtureDoctorDelay; if(delay) await new Promise(r=>setTimeout(r,delay));
  console.log(JSON.stringify({findings:[{id:'product-missing',artifact:'product',path:'PRODUCT.md',severity:'route',summary:'No product record',fix:'init'}],workspaces:[],ruleRegistryAvailable:false,args,cwd,selected}));
+} else if(args[0]==='context'&&config('config.json').fixtureUpdateAvailable) {
+ // Upstream prints UPDATE_AVAILABLE when a newer skill is published.
+ console.log('UPDATE_AVAILABLE: A newer Impeccable is available. It runs npx impeccable update.');
 } else if(args[0]==='ignores'||args[0]==='hooks') {
  const action=args[1], local=args.includes('--local'), name=local?'config.local.json':'config.json', value=config(name);
  if(args.includes('invalid-value')) { console.error('has no extractable ignore value'); process.exit(1); }

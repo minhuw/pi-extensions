@@ -80,7 +80,7 @@ Upstream catalog telemetry defaults on. Opt out with `DO_NOT_TRACK=1` or `IMPECC
 
 ## Delegation and questions
 
-`impeccable_question` accepts 1–5 related questions with stable IDs and optional choices/free text. It uses supported TUI/RPC dialogs with a two-minute timeout per dialog and returns submitted answers alongside any pending questions. It never assumes a default answer. Visual boards and component-review pages remain available where the playbook calls for them.
+`impeccable_question` accepts 1–5 related questions with stable IDs and optional choices/free text. It uses supported TUI/RPC dialogs that stay open until the user answers, dismisses them, or the tool call is aborted, and returns submitted answers alongside any pending questions. It never assumes a default answer. Visual boards and component-review pages remain available where the playbook calls for them.
 
 `impeccable_delegate` supplies the complete adapted asset-producer, documenter, finish-reviewer or manual-edit-applier role through existing Subagents `Agent` capabilities. Worker/recon mapping, packets and evidence are detailed in [FEATURES.md](FEATURES.md#roles-and-independent-assessments). It does not install a global fleet, enable scripted workflows, or override configured models/tiers. Agent execution policies remain authoritative. Fresh context uses `inherit_context:false`, `isolated:false` to retain tools; independent assessments never receive sibling conclusions. Parallel writers need distinct output boundaries and must finish before verification.
 
@@ -134,7 +134,7 @@ Catalog/model responses and variants are **SIMULATED**; native transactions and 
 
 ## Repository-managed upgrades
 
-Runtime `install`, `update`, `link` and corresponding skill-distribution requests point here instead of installing foreign harness manifests. Maintain the complete upstream feature set:
+Runtime `install`, `update`, `link` and corresponding skill-distribution requests point here instead of installing foreign harness manifests. When `impeccable context` reports `UPDATE_AVAILABLE`, its result carries `integration.updateAvailable` with this handoff: upgrade with the steps below, never with `npx impeccable update`. Maintain the complete upstream feature set:
 
 1. Fetch the intended upstream tag/commit into isolated storage; use `upstream.json` to identify every Pi distribution and canonical role source path. Current pin: skill 4.8.0, commit `414603bf14c7a344edb466bb1f85690c77ce8b7d`, engine 0.1.18.
 2. Import the pristine distribution and all four role sources under `vendor/impeccable-<version>/`; regenerate the sorted per-file `MANIFEST.sha256` (currently 63 pristine files). Preserve Apache-2.0 license/notice and file provenance.
