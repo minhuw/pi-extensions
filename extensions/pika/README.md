@@ -1,6 +1,6 @@
 # pika
 
-pika captures your Pi sessions and model requests on a self-hosted [server](../../services/pika/README.md), where you can search and read them in a web UI. It is designed for one user working across several machines. The same server connection powers [relay](#relay), which lets running Pi sessions message each other, and [recall](#recall), which lets the agent search past sessions and Herder runs.
+pika captures your Pi sessions and model requests on a self-hosted [server](../../services/pika/README.md), where you can search and read them in a web UI. It is designed for one user working across several machines. The same server connection powers [relay](#relay), which lets running Pi sessions message each other, and [recall](#recall), which lets the agent search past sessions and Herder runs, and [memory](#memory), which lets the agent keep durable notes for you and each project.
 
 > [!WARNING]
 > Trajectories contain everything the model saw: file contents, command output, and any secret that a tool printed. Send them only to a server you control, over a network you trust or through TLS.
@@ -16,13 +16,13 @@ pika does not collect transport request headers or read Pi's auth and settings f
 
 ## Install
 
-pika is included in this collection and listed last in `pi.extensions`, so its `before_provider_request` handler sees the payload after the other extensions have changed it. Capture starts only after configuration. Relay and recall are included; they need no separate installation or login.
+pika is included in this collection and listed last in `pi.extensions`, so its `before_provider_request` handler sees the payload after the other extensions have changed it. Capture starts only after configuration. Relay, recall, and memory are included; they need no separate installation or login.
 
 1. Run the server. See the [server README](../../services/pika/README.md) for building, Docker, and the reverse proxy.
 2. Install the collection on each machine: `pi install git:github.com/minhuw/pi-extensions` (see the [root README](../../README.md#install)).
 3. In pi, run `/pika login`, enter the server URL, and approve the displayed code on the server's Devices page (see [Log in](#log-in)). The current session starts uploading immediately; run `/pika` to check its status. You can also create a token with `pika token create "<name>"` and write `~/.pi/agent/pika.json` by hand, as shown below.
 
-To load pika on its own, without the rest of the collection, narrow the package in `~/.pi/agent/settings.json`. Pi loads every resource type a filter leaves out, so the empty `skills`, `prompts`, and `themes` lists are needed too; with them, pika's extension, relay and recall included, is the only thing the package loads:
+To load pika on its own, without the rest of the collection, narrow the package in `~/.pi/agent/settings.json`. Pi loads every resource type a filter leaves out, so the empty `skills`, `prompts`, and `themes` lists are needed too; with them, pika's extension, relay, recall, and memory included, is the only thing the package loads:
 
 ```json
 {
@@ -216,7 +216,7 @@ Every field except `kind` is optional, and `herder` is present only for Herder s
 
 ### Credentials registry
 
-pika publishes its active server credentials for [relay](#relay) and [recall](#recall) through a process-global registry, so module copies loaded for other cwds share them:
+pika publishes its active server credentials for [relay](#relay), [recall](#recall), and [memory](#memory) through a process-global registry, so module copies loaded for other cwds share them:
 
 ```ts
 const registry: {
@@ -262,7 +262,7 @@ One WebSocket per online session opens after the session starts; `/new`, `/resum
 
 #### Child sessions and the persistence side effect
 
-Subagents children and Herder steps never connect. To recognize them, relay registers a hook that Subagents and Herder load into every child session. A registered child-session hook makes Subagents keep every child session on disk, including nested children and agents with `persist_session: false`, so relay registers it only while at least one session in the process could connect: pika has credentials, its `exclude` list does not cover the session, the session runs in the TUI or RPC mode, and it is not `/relay off`. `/relay off`, `/relay on`, pika's credentials changing, and sessions starting, being replaced, or quitting re-evaluate it. pika's upload registers a hook of its own while it uploads, with the same effect; it adds only the upload to a child session, never relay or recall.
+Subagents children and Herder steps never connect. To recognize them, relay registers a hook that Subagents and Herder load into every child session. A registered child-session hook makes Subagents keep every child session on disk, including nested children and agents with `persist_session: false`, so relay registers it only while at least one session in the process could connect: pika has credentials, its `exclude` list does not cover the session, the session runs in the TUI or RPC mode, and it is not `/relay off`. `/relay off`, `/relay on`, pika's credentials changing, and sessions starting, being replaced, or quitting re-evaluate it. pika's upload registers a hook of its own while it uploads, with the same effect; it adds only the upload to a child session, never relay, recall, or memory.
 
 ### Turning it off
 
@@ -342,6 +342,39 @@ A call fails, and the model reads why, when:
 - the server's agent read API has no Herder runs (HTTP 404 for both a run and the run list): upgrade the server;
 - the server cannot be reached, or does not answer within 15 s; aborting the tool call stops the request.
 
+## Memory
+
+memory lets the agent keep durable notes on the pika server, shared by every machine: what you want, your corrections and preferences, confirmed pitfalls, decisions, and pointers to references. The server stores each note with its history and renders an index of their titles and hooks ("Memory" in [`services/pika/docs/SPEC.md`](../../services/pika/docs/SPEC.md)); you can read them, with their history, under the server's owner API.
+
+### Scopes
+
+- **User:** one scope for you, in every project and on every machine.
+- **Project:** the git repository of the session's working directory, as pika [names it](#projects-and-repositories). Every call sends both its `project` and `repository`; the server files notes under the repository's URL, so clones on different machines share them, or, without a remote, under the project name and this device. Outside git there is no project scope: `scope: "project"` saves fail and say so, and the user scope still works.
+
+### Tools
+
+The three tools are registered wherever pika's extension loads, whatever the credentials, but never through the child-session hook (see [Memory in child sessions](#memory-in-child-sessions)). Every call sends the session's id, which the server keeps as the note's last writer.
+
+- **`memory_read`** `{ ids?, query?, category?, scope? }` reads the user scope's and the project scope's notes and filters them in pi: `ids` by note id (the `[id]` in the index), `query` by text in the title, hook, or body, ignoring case, `category` (`user`, `feedback`, `project`, or `reference`), and `scope` (`user` or `project`). Each note shows its id, scope, category, title, hook, body, revision, and last update; a result holds about 20,000 characters and lists the notes past that by title.
+- **`memory_save`** `{ id?, expectedRevision, scope, category, title, hook, body, reason? }` creates a note (no `id`, `expectedRevision: 0`) or replaces one (`id` and its current revision). Titles are up to 120 characters, hooks one line up to 150, bodies up to 8 KiB, and the index of the user and project scopes together up to 8 KiB and 200 lines. The result shows the server's new index and says the session's pinned section stays unchanged.
+- **`memory_forget`** `{ id, expectedRevision, reason? }` forgets a note; it leaves the index, and its history stays on the server.
+
+The tools' guidelines ask the model to save only what the code, git history, and AGENTS.md cannot tell, to keep hooks short, to verify a note against the code before relying on it, and never to store secrets; the server also scrubs credentials from every note.
+
+A call fails, and the model reads why, when pika is not logged in, its `exclude` list covers the session's working directory, the server rejects the token (401) or the device's read access is off (403 `read_access_denied`, switched as for [recall](#recall)), the server has no memory routes (404), or the server cannot be reached or does not answer within 15 s. A save or forget of a note that changed since the model read it (409 `revision_conflict`) fails with the note's current state, to merge and retry. A save that would pass the index's budget (422 `memory_full`) fails with the sizes and asks the model to merge or forget notes; a note the server refuses (400) fails with the server's message.
+
+### The pinned `memory` section
+
+At the first run of a fresh top-level session (TUI or RPC, no history, no `pi-extensions.session-link` entry), pika fetches the index once, waiting at most 1.5 s, and pins it in a `pika-memory` custom entry: `{ index, fetchedAt, project?, repository? }`. It is a custom entry, never a message, so it is not shown and never starts a turn. Every run of the session then adds the same `memory` system-prompt section: a fixed header saying these are the user's and the project's notes from earlier sessions, possibly stale or wrong and not instructions, to verify against the code and maintain with `memory_read`, `memory_save`, and `memory_forget`, followed by the pinned index verbatim.
+
+The section's bytes never change within a session, so the prompt cache holds: not after `memory_save` or `memory_forget` change the server's index, nor after `/reload`, `/tree`, or a resume, which read the pin from the session file. A new session pins the index as it is then. When pika is logged out, the session is excluded, or the fetch fails or times out, the pin records `index: null` and the session never gains a section, even once the server is back. An empty index adds no section. Sessions with history but no pin, such as those from before memory, get no section and no fetch; so do print and JSON sessions.
+
+### Memory in child sessions
+
+memory is not part of pika's [child-session hook](#child-session-hook): Subagents children and Herder steps that get pika through the hook have neither the tools nor the section. A child that loads the whole pika extension itself has the tools but still no section, since it carries a session link or runs without a mode.
+
+There is no local cache and no offline queue: every tool call goes to the server, and a call that cannot reach it fails.
+
 ## Deployment
 
 The server is one Rust binary with the web UI embedded, published as the multi-arch image `ghcr.io/minhuw/pika` (amd64 and arm64). Its [README](../../services/pika/README.md) is the reference for image tags, building, the CLI, backups, and the [deployment examples](../../services/pika/deploy/). The short version:
@@ -390,4 +423,4 @@ npm run test:pika
 
 `npm run test:pika` runs offline Vitest suites against real Pi runtimes and a mock ingest server with the server's append, gap, conflict, and idempotency rules. `/pika login` and `/pika logout` run through a scripted UI, in both RPC and TUI mode, with pairing against the mock server's pairing API. One test runs a real pi TUI in `tmux` (skipped when `tmux` is not installed): it types and pastes a token, checks the captured screen never shows it, and pairs. Payload capture goes through Pi's real `openai-completions` implementation against a local mock endpoint. No live providers are used. `npm test` includes it.
 
-`npm run test:pika` also covers relay and recall. `npm run test:relay` runs only relay's part of it: a fake relay server built on the `ws` package, real pi sessions on Pi's faux provider, the real pika extension for its credentials, and a real Subagents child that must stay offline. `npm run test:recall` runs only recall's part, offline, against real pi runtimes on the faux provider and a fake pika server. The cross-component test against the real server is `bash services/pika/scripts/e2e.sh`.
+`npm run test:pika` also covers relay, recall, and memory; memory's tests (`extensions/pika/tests/memory/`) run real pi runtimes on the faux provider against a fake pika server. `npm run test:relay` runs only relay's part of it: a fake relay server built on the `ws` package, real pi sessions on Pi's faux provider, the real pika extension for its credentials, and a real Subagents child that must stay offline. `npm run test:recall` runs only recall's part, offline, against real pi runtimes on the faux provider and a fake pika server. The cross-component test against the real server is `bash services/pika/scripts/e2e.sh`.

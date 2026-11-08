@@ -6,6 +6,7 @@ import { publishCredentials } from "./credentials.ts";
 import { resolveRepository } from "./repository.ts";
 import { abortBinds, bindOnce } from "./device-key.ts";
 import { isPlainRemote, login, type LoginControl, readConfigFile, writeConfigFile } from "./login.ts";
+import memoryExtension from "./memory/index.ts";
 import recallExtension from "./recall/index.ts";
 import relayExtension from "./relay/index.ts";
 import { acquireUploader, currentUploader, releaseUploader, type Uploader, type UploaderOptions } from "./uploader.ts";
@@ -59,11 +60,15 @@ function modelInfo(ctx: ExtensionContext) {
 	return model ? { provider: model.provider, api: model.api, model: model.id } : {};
 }
 
-/** pika: upload every session to a self-hosted pika server, relay messages between sessions through it, and recall past sessions from it. */
+/**
+ * pika: upload every session to a self-hosted pika server, relay messages between sessions through it, recall past
+ * sessions from it, and keep memory notes on it. Memory, like relay and recall, never reaches child sessions through the hook.
+ */
 export default function pikaExtension(pi: ExtensionAPI): void {
 	captureExtension(pi);
 	relayExtension(pi);
 	recallExtension(pi);
+	memoryExtension(pi);
 }
 
 /** Uploads every session entry and model request; the only part child sessions get through the hook. */
