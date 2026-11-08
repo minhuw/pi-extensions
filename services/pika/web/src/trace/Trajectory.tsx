@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { cx } from "../components/ui";
 import { useApi } from "../lib/api";
+import { useMediaQuery } from "../lib/hooks";
 import { isTypingTarget } from "../lib/keyboard";
 import type { SessionTrace, TraceRecord, TraceTurn } from "../lib/types";
 import { useViewState } from "../lib/viewState";
@@ -47,18 +48,6 @@ function storedTab(): InspectorTab {
 /** Below this viewport width the inspector is a slide-over. */
 const WIDE_QUERY = "(min-width: 1200px)";
 
-function useMediaQuery(query: string): boolean {
-	const [matches, setMatches] = useState(() => typeof window.matchMedia === "function" && window.matchMedia(query).matches);
-	useEffect(() => {
-		if (typeof window.matchMedia !== "function") return;
-		const media = window.matchMedia(query);
-		const update = () => setMatches(media.matches);
-		update();
-		media.addEventListener?.("change", update);
-		return () => media.removeEventListener?.("change", update);
-	}, [query]);
-	return matches;
-}
 
 /**
  * Whether the ledger's navigation keys apply to a key press: on the page itself or in the ledger, but never on a

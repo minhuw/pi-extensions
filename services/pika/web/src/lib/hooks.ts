@@ -32,3 +32,17 @@ export function useSettling(key: string | undefined, ms: number): boolean {
 	}, [changes, ms]);
 	return changes !== settled;
 }
+
+/** Whether `query` matches now, following changes; false where `matchMedia` is missing. */
+export function useMediaQuery(query: string): boolean {
+	const [matches, setMatches] = useState(() => typeof window.matchMedia === "function" && window.matchMedia(query).matches);
+	useEffect(() => {
+		if (typeof window.matchMedia !== "function") return;
+		const media = window.matchMedia(query);
+		const update = () => setMatches(media.matches);
+		update();
+		media.addEventListener?.("change", update);
+		return () => media.removeEventListener?.("change", update);
+	}, [query]);
+	return matches;
+}

@@ -16,6 +16,7 @@ import {
 	shortUserAgent,
 } from "../lib/devices";
 import { formatDateTime, formatRelative } from "../lib/format";
+import { copyText } from "../lib/clipboard";
 import { LAYOUT_GUARD_MS, useNow, useSettling } from "../lib/hooks";
 import type { BrowserSession, Device, Pairing } from "../lib/types";
 
@@ -472,28 +473,6 @@ function RenameDialog({
 	);
 }
 
-/** Copies `text`; `navigator.clipboard` needs a secure context, which a pika on plain http to a LAN address is not. */
-async function copyText(text: string): Promise<boolean> {
-	try {
-		await navigator.clipboard.writeText(text);
-		return true;
-	} catch {
-		const area = document.createElement("textarea");
-		area.value = text;
-		area.setAttribute("readonly", "");
-		area.style.position = "fixed";
-		area.style.opacity = "0";
-		document.body.append(area);
-		area.select();
-		try {
-			return document.execCommand("copy");
-		} catch {
-			return false;
-		} finally {
-			area.remove();
-		}
-	}
-}
 
 const READ_ACCESS_DESCRIPTION_ID = "device-read-access-description";
 
