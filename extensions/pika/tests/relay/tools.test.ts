@@ -133,6 +133,7 @@ it("reports every outcome of relay_send and keeps them for relay_status", async 
 	const [all, one] = results(a, "relay_status");
 	expect(all!.text.split("\n").map((line) => line.replace(/, sent \d+s ago/, ""))).toEqual([
 		`(no id) to pi session ${target}: rejected (too_large): "${"x".repeat(59)}…"`,
+		`(no id) to pi session ${target}: unknown (timeout): "lost"`,
 		`(no id) to pi session ${target}: rejected (rate_limited): "spam"`,
 		`(no id) to pi session ${a.session.sessionId}: rejected (self): "me"`,
 		`(no id) to pi session nobody: rejected (unknown_session): "hi"`,

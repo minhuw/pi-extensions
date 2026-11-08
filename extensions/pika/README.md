@@ -299,7 +299,7 @@ Top-level sessions in the TUI or RPC mode get three tools; print and JSON sessio
 
 - **`relay_list`** `{ device?, project?, query? }` lists the other online sessions: id, device, project, name or title, idle or busy, model, and how long each has been online. `device` matches a device's name or its id, ignoring case. A session's project is the name of its git repository as pika files it (the main checkout's folder, also from a subdirectory or a linked worktree), else the basename of its working directory; relay asks pika's registry for it, and uses the basename with a pika version that cannot answer.
 - **`relay_send`** `{ to, text, urgent?, replyTo? }` sends a message and reports `delivered` (the target session accepted it) or `queued` (it is offline or busy accepting it). A message not delivered within 5 minutes is dropped, and the sender's session gets a `relay-notice` that starts a turn. Delivered means received, not read or answered; answers arrive later as messages.
-- **`relay_status`** `{ id? }` shows the state of messages this session sent in this process: `queued`, `delivered`, `expired`, or `rejected`.
+- **`relay_status`** `{ id? }` shows the state of messages this session sent in this process: `queued`, `delivered`, `expired`, `rejected`, `failed` (it never left the session), or `unknown` (the server never answered: a timeout, a dropped connection, or a cancelled tool call, so it may or may not have been accepted).
 
 ### Command
 

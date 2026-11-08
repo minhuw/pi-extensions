@@ -31,6 +31,16 @@ export interface ConnectionEvents {
 
 interface Pending { resolve(frame: SentFrame): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }
 
+/**
+ * Why `request` got no `sent`: `unsent` never left this process; `unknown` may or may not have
+ * reached the server. `code` names the cause: `not_online`, `timeout`, `closed`, or `cancelled`.
+ */
+export class RequestError extends Error {
+	constructor(message: string, readonly outcome: "unsent" | "unknown", readonly code: "not_online" | "timeout" | "closed" | "cancelled") {
+		super(message);
+	}
+}
+
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 /** Why a server without relay is unsupported, from its health answer. */
@@ -80,26 +90,42 @@ export class RelayConnection {
 		} catch { return false; }
 	}
 
-	/** Sends `send` and waits for its `sent`; rejects when offline, on timeout, or when the connection drops. */
-	request(frame: { to?: string; room?: string; mentions?: string[]; text: string; urgent?: boolean; replyTo?: string; hops: number }): Promise<SentFrame> {
+	/**
+	 * Sends `send` and waits for its `sent`; rejects with a `RequestError` when offline, on timeout,
+	 * when the connection drops, or when `signal` aborts.
+	 */
+	request(frame: { to?: string; room?: string; mentions?: string[]; text: string; urgent?: boolean; replyTo?: string; hops: number }, signal?: AbortSignal): Promise<SentFrame> {
 		const clientId = randomUUID();
 		return new Promise<SentFrame>((resolve, reject) => {
-			const timer = setTimeout(() => {
+			if (signal?.aborted) {
+				reject(new RequestError("the send was cancelled before the message left this session", "unsent", "cancelled"));
+				return;
+			}
+			const onAbort = () => this.pending.get(clientId)?.reject(
+				new RequestError("the send was cancelled before the server answered; the message may or may not have been accepted", "unknown", "cancelled"),
+			);
+			// Every way out clears the timer, the pending entry, and the abort listener.
+			const settle = <T>(next: (value: T) => void) => (value: T) => {
+				clearTimeout(pending.timer);
 				this.pending.delete(clientId);
-				reject(new Error(`the server did not answer within ${Math.ceil(timing.sentTimeoutMs / 1000)} s; the message may or may not have been accepted`));
-			}, timing.sentTimeoutMs);
-			this.pending.set(clientId, { resolve, reject, timer });
+				signal?.removeEventListener("abort", onAbort);
+				next(value);
+			};
+			const pending: Pending = {
+				resolve: settle(resolve), reject: settle(reject),
+				timer: setTimeout(() => pending.reject(new RequestError(
+					`the server did not answer within ${Math.ceil(timing.sentTimeoutMs / 1000)} s; the message may or may not have been accepted`, "unknown", "timeout",
+				)), timing.sentTimeoutMs),
+			};
+			this.pending.set(clientId, pending);
+			signal?.addEventListener("abort", onAbort, { once: true });
 			const sent = this.send({
 				type: "send", clientId, text: frame.text, hops: frame.hops,
 				...(frame.room !== undefined ? { room: frame.room } : { to: frame.to }),
 				...(frame.mentions?.length ? { mentions: frame.mentions } : {}),
 				...(frame.urgent ? { urgent: true } : {}), ...(frame.replyTo ? { replyTo: frame.replyTo } : {}),
 			});
-			if (!sent) {
-				clearTimeout(timer);
-				this.pending.delete(clientId);
-				reject(new Error("the relay connection is not online"));
-			}
+			if (!sent) pending.reject(new RequestError("the relay connection is not online", "unsent", "not_online"));
 		});
 	}
 
@@ -193,8 +219,6 @@ export class RelayConnection {
 			case "sent": {
 				const pending = typeof frame.clientId === "string" ? this.pending.get(frame.clientId) : undefined;
 				if (!pending) break;
-				this.pending.delete(frame.clientId as string);
-				clearTimeout(pending.timer);
 				pending.resolve(frame as unknown as SentFrame);
 				break;
 			}
@@ -219,10 +243,8 @@ export class RelayConnection {
 			socket.onopen = socket.onmessage = socket.onerror = socket.onclose = null;
 			try { socket.close(1000); } catch { /* already closing */ }
 		}
-		for (const [clientId, pending] of this.pending) {
-			clearTimeout(pending.timer);
-			pending.reject(new Error("the relay connection closed before the server answered; the message may or may not have been accepted"));
-			this.pending.delete(clientId);
+		for (const pending of [...this.pending.values()]) {
+			pending.reject(new RequestError("the relay connection closed before the server answered; the message may or may not have been accepted", "unknown", "closed"));
 		}
 	}
 

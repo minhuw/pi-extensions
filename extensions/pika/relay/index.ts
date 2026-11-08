@@ -4,7 +4,7 @@ import { VERSION, type ExtensionAPI, type ExtensionCommandContext, type Extensio
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { credentialsRegistry } from "../credentials.ts";
-import { type ConnectionState, RelayConnection } from "./connection.ts";
+import { type ConnectionState, RelayConnection, RequestError } from "./connection.ts";
 import {
 	cut, deviceLabel, expiredContent, headerField, type HelloSession, MAX_HOPS, MESSAGE_TYPE, type MessageFrame, messageContent, NOTICE_TYPE, type OnlineSession, RECEIVED_TYPE,
 	type RelayRoom, type RelayRoomDetail, RELAY_VERSION, type RoomMember, type RoomMessage, sanitize, type SentFrame, type SessionState, since, type StatusFrame, type Target, targetLabel, timing, ttlText,
@@ -19,7 +19,11 @@ const SENT_SHOWN = 50;
 const USAGE = "Usage: /relay [status|send <sessionId> <text>|off|on]";
 const SUBCOMMANDS = ["status", "send", "join", "leave", "rooms", "off", "on"];
 
-type SentStatus = "queued" | "delivered" | "expired" | "rejected";
+/**
+ * `failed`: the message never left this session; `unknown`: the server never answered (timeout,
+ * dropped connection, or cancelled), so it may or may not have been accepted.
+ */
+type SentStatus = "queued" | "delivered" | "expired" | "rejected" | "failed" | "unknown";
 interface SentRecord { id?: string; to: string; label: string; status: SentStatus; reason?: string; at: number; text: string }
 
 export interface RelayMessageDetails { id: string; room?: string; mentions?: string[]; from: MessageFrame["from"]; text: string; urgent: boolean; replyTo?: string; hops: number; sentAt: string | number }
@@ -498,6 +502,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		to: string,
 		text: string,
 		options: { room?: string; mentions?: string[]; urgent?: boolean; replyTo?: string; hops: number },
+		signal?: AbortSignal,
 	): Promise<{ text: string; answer: SentFrame }> {
 		const current = connection;
 		const reason = offlineReason();
@@ -520,8 +525,11 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				hops: options.hops,
 				...(options.urgent ? { urgent: true } : {}),
 				...(options.replyTo ? { replyTo: options.replyTo } : {}),
-			});
+			}, signal);
 		} catch (error) {
+			record.status = error instanceof RequestError && error.outcome === "unsent" ? "failed" : "unknown";
+			record.reason = error instanceof RequestError ? error.code : errorText(error);
+			remember();
 			throw new Error(`relay_send failed: ${errorText(error)}.`);
 		}
 		if (answer.status === "rejected") {
@@ -592,7 +600,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				urgent: Type.Optional(Type.Boolean({ description: "Steer the message into the target's current turn instead of queueing it after that turn" })),
 				replyTo: Type.Optional(Type.String({ description: "The id of the relay message this answers" })),
 			}),
-			async execute(_id, params) {
+			async execute(_id, params, signal) {
 				if (!params.to && !params.room) throw new Error("relay_send requires either `to` (a session id) or `room` (a chatroom name).");
 				const { text, answer } = await send(params.to ?? "", params.text, {
 					room: params.room,
@@ -600,13 +608,14 @@ export default function relayExtension(pi: ExtensionAPI): void {
 					urgent: params.urgent,
 					replyTo: params.replyTo,
 					hops: runHops + 1,
-				});
+				}, signal);
 				return { content: [{ type: "text", text: `${text} ${ANSWER_HINT}` }], details: answer };
 			},
 		});
 		pi.registerTool({
 			name: "relay_status", label: "Relay Status",
-			description: "Show the delivery state (queued, delivered, expired, or rejected) of the relay messages this session sent in this process, newest first, at most 50. Pass `id` for one message. "
+			description: "Show the delivery state (queued, delivered, expired, rejected, failed, or unknown) of the relay messages this session sent in this process, newest first, at most 50. Pass `id` for one message. "
+				+ "failed means the message never left this session; unknown means the server never confirmed it (a timeout, a dropped connection, or a cancelled send), so it may or may not have been accepted. "
 				+ "It never shows answers: those arrive as [relay] messages after your turn ends.",
 			parameters: Type.Object({ id: Type.Optional(Type.String({ description: "A message id from relay_send" })) }),
 			async execute(_id, params) {
@@ -639,7 +648,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				limit: Type.Optional(Type.Integer({ description: "Max messages to read in 'history' (default 50, max 200)" })),
 				after: Type.Optional(Type.Integer({ description: "Only return messages with seq > after in 'history'" })),
 			}),
-			async execute(_id, params) {
+			async execute(_id, params, signal) {
 				type RoomToolDetails = { rooms?: RelayRoom[]; detail?: RelayRoomDetail; sent?: SentFrame };
 				if (params.action === "list") {
 					const items = await relayRooms();
@@ -676,7 +685,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 					urgent: params.urgent,
 					replyTo: params.replyTo,
 					hops: runHops + 1,
-				});
+				}, signal);
 				return { content: [{ type: "text", text: `${text} ${ANSWER_HINT}` }], details: { sent: answer } as RoomToolDetails };
 			},
 		});
