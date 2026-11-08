@@ -245,6 +245,8 @@ Herder emits `herder:run` on `pi.events` with `{ runId, runDir, journalPath, goa
 
 relay lets running Pi sessions send text messages to each other across your machines through the pika server. Connected sessions appear on the server's **Active sessions** page, where you can also send them messages.
 
+Codex desktop threads can join through the [Pika Relay for Codex](../../plugins/pika-relay/README.md) plugin; they appear as sessions named `codex-…` and use the same tools.
+
 The server is the only route between sessions, including two sessions on the same machine. The wire contract is [`services/pika/docs/RELAY.md`](../../services/pika/docs/RELAY.md).
 
 ### Requirements

@@ -35,6 +35,12 @@ The [pika server](services/pika/README.md) serves this documentation publicly at
 | [pika](extensions/pika/README.md) | Uploads sessions, model requests, subagent sessions, and Herder journals to a self-hosted [pika server](services/pika/README.md), where you can search and read them. Through the same server, [relay](extensions/pika/README.md#relay) lets Pi sessions on your machines send messages to each other, and [recall](extensions/pika/README.md#recall) lets the agent search and read your past sessions from every machine and project. |
 | [Magpie Provider](extensions/magpie-provider/README.md) | Adds the models of a Magpie gateway, with native compaction for OpenAI/Codex Responses models. |
 
+### Codex plugin
+
+| Plugin | What it does |
+| --- | --- |
+| [Pika Relay for Codex](plugins/pika-relay/README.md) | Puts Codex desktop threads on pika relay, so Pi sessions and Codex threads can message each other; `relay_wait` lets a Codex thread stand by for requests from Pi. Install it from this repository's Codex marketplace (`codex plugin marketplace add /path/to/pi-extensions`). |
+
 ## Install
 
 You need Node 22.19.0 or newer and Pi 1.3.0 or newer. Herder also needs git 2.38 or newer.

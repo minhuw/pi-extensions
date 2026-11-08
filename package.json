@@ -19,7 +19,7 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:language && npm run test:spokesman && npm run test:benchmark && npm run test:autoresearch && npm run test:subagents && npm run test:council && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:impeccable && npm run test:workspace && npm run test:agent-browser",
+		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:language && npm run test:spokesman && npm run test:benchmark && npm run test:autoresearch && npm run test:subagents && npm run test:council && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:codex-relay && npm run test:impeccable && npm run test:workspace && npm run test:agent-browser",
 		"test:agent-browser": "vitest run extensions/agent-browser",
 		"test:council": "vitest run extensions/council",
 		"test:workspace": "vitest run extensions/workspace",
@@ -46,6 +46,8 @@
 		"test:pika": "vitest run extensions/pika",
 		"test:relay": "vitest run extensions/pika/tests/relay",
 		"test:recall": "vitest run extensions/pika/tests/recall",
+		"test:codex-relay": "vitest run plugins/pika-relay",
+		"build:codex-relay": "node plugins/pika-relay/scripts/build.mjs",
 		"test:herder": "vitest run --config extensions/herder/vitest.config.ts",
 		"typecheck": "tsc -p tsconfig.json && npm run typecheck:subagents",
 		"typecheck:subagents": "tsc -p extensions/subagents/tsconfig.json"

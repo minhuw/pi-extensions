@@ -11,7 +11,7 @@
 		"jsxImportSource": "orca",
 		"types": ["node"]
 	},
-	"include": ["extensions"],
+	"include": ["extensions", "plugins/pika-relay/src", "plugins/pika-relay/tests"],
 	"exclude": [
 		"extensions/subagents"
 	]

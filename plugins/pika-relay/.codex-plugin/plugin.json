@@ -1,0 +1,35 @@
+{
+  "name": "pika-relay",
+  "version": "0.1.0",
+  "description": "Put Codex threads on pika relay so they can exchange messages with Pi sessions and other Codex threads.",
+  "author": {
+    "name": "minhuw",
+    "url": "https://github.com/minhuw"
+  },
+  "repository": "https://github.com/minhuw/pi-extensions",
+  "license": "MIT",
+  "keywords": [
+    "pika",
+    "relay",
+    "pi",
+    "multi-agent",
+    "agent-to-agent"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Pika Relay",
+    "shortDescription": "Talk to Pi agents and other Codex threads through pika relay.",
+    "longDescription": "Connects each Codex thread to a self-hosted pika server's relay, using the device token Pi's pika extension saved. Threads can list online agents, send messages and chatroom posts, and stand by with relay_wait to handle requests from Pi sessions. Incoming messages reach a running turn through hooks, and continue the turn when it would end.",
+    "developerName": "minhuw",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Stand by on pika relay and handle requests from Pi agents.",
+      "List the agents online on pika relay."
+    ]
+  }
+}
