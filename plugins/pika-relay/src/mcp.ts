@@ -87,6 +87,9 @@ async function handle(message: Message): Promise<void> {
         }
         case "ping": write({ id, result: {} }); return;
         case "tools/list": write({ id, result: { tools: TOOLS } }); return;
+        // Codex asks for resources even from servers that declare none; an empty list keeps its log quiet.
+        case "resources/list": write({ id, result: { resources: [] } }); return;
+        case "resources/templates/list": write({ id, result: { resourceTemplates: [] } }); return;
         case "tools/call": {
             if (!TOOL_NAMES.has(str(params.name) ?? "")) {
                 write({ id, error: { code: -32602, message: `Unknown tool: ${String(params.name)}` } });
