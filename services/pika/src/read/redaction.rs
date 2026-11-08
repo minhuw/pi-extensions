@@ -7,13 +7,14 @@
 //! Titles and turns' prompts and replies are read as derive stored them, cut, so a credential across the cut may be
 //! left without its end; they are scrubbed as cut text (`Scope::cut_text`) when they are as long as derive keeps.
 
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
 use super::Page;
 use super::entries::Entry;
 use super::herder::{RunDetail, RunSummary};
 use super::sessions::{SessionDetail, SessionSummary, SessionTree, Turn, Updates};
 use super::trace::{Record, Trace};
+use crate::memory;
 use crate::redact::{Scope, scrub_content, scrub_text};
 use crate::util::parse_json_lenient;
 
@@ -144,6 +145,56 @@ pub fn run(detail: &mut RunDetail) {
     scope.finish();
 }
 
+/// What stands for omitted memory: a memory tool call's arguments, a memory tool result's `details`, and a
+/// `pika-memory` entry's `data`.
+fn omitted() -> Value {
+    json!({ "omitted": "memory" })
+}
+
+/// The one text block of a memory tool result's `content`.
+pub const OMITTED_RESULT: &str = "[memory tool result omitted]";
+
+/// Omits agent memory from an entry's parsed line, for the public and agent namespaces: a `pika-memory` custom
+/// entry's `data`, and the arguments of memory tool calls and the content and details of their results. Ids, names,
+/// and the rest of the line stay, so the entry tree still links and an assistant message keeps its other blocks.
+pub fn omit_memory(line: &mut Value) {
+    let Some(entry) = line.as_object_mut() else { return };
+    let custom = entry.get("customType").and_then(Value::as_str) == Some(memory::CUSTOM_TYPE);
+    match entry.get("type").and_then(Value::as_str) {
+        Some("custom") if custom => {
+            entry.insert("data".into(), omitted());
+        }
+        Some("message") => {
+            let Some(message) = entry.get_mut("message").and_then(Value::as_object_mut) else { return };
+            match message.get("role").and_then(Value::as_str) {
+                Some("assistant") => {
+                    for block in message.get_mut("content").and_then(Value::as_array_mut).into_iter().flatten() {
+                        if block["type"] == "toolCall" && block["name"].as_str().is_some_and(memory::is_tool) {
+                            // Rebuilt rather than edited, so no other field of the call can carry its arguments.
+                            let mut call = Map::new();
+                            for key in ["type", "id", "name"] {
+                                if let Some(value) = block.get(key) {
+                                    call.insert(key.into(), value.clone());
+                                }
+                            }
+                            call.insert("arguments".into(), omitted());
+                            *block = Value::Object(call);
+                        }
+                    }
+                }
+                Some("toolResult") if message.get("toolName").and_then(Value::as_str).is_some_and(memory::is_tool) => {
+                    message.insert("content".into(), json!([{ "type": "text", "text": OMITTED_RESULT }]));
+                    if message.contains_key("details") {
+                        message.insert("details".into(), omitted());
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Each entry's line is session content.
 pub fn entries(entries: &mut [Entry]) {
     let mut scope = Scope::new();
@@ -151,8 +202,9 @@ pub fn entries(entries: &mut [Entry]) {
     scope.finish();
 }
 
-/// An entry's verbatim line, scrubbed as session content and written back as one line of JSON. Malformed text
-/// becomes a JSON string (AC-1); repaired JSON must be serialized even if it contains no credentials.
+/// An entry's verbatim line without its memory (`omit_memory`), scrubbed as session content and written back as one
+/// line of JSON. Malformed text becomes a JSON string (AC-1); repaired JSON must be serialized even if it contains no
+/// credentials.
 pub fn raw(line: String) -> String {
     let strict = serde_json::from_str::<serde_json::Value>(&line);
     let unchanged_bytes = strict.is_ok() && !line.contains(['\n', '\r']);
@@ -160,6 +212,7 @@ pub fn raw(line: String) -> String {
         return serde_json::to_string(scrub_text(&line).as_ref()).expect("a JSON string serializes");
     };
     let mut value = parsed.clone();
+    omit_memory(&mut value);
     scrub_content(&mut value);
     if unchanged_bytes && value == parsed { line } else { serde_json::to_string(&value).expect("a JSON value serializes") }
 }

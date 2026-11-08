@@ -1018,3 +1018,141 @@ async fn deleting_a_project_matches_its_name_exactly_and_takes_sessions_too() {
     assert_eq!(app.count(&format!("SELECT COUNT(*) FROM memory_revisions WHERE note_id = '{}'", id(&lookalike))), 1);
     assert_eq!(app.memory(&app.a, "project=abc").await["notes"], json!([lookalike]));
 }
+
+const MEMORY_SESSION: &str = "5b0c3a20-6d1e-4f3a-8b9c-2e3f4a5b6c7d";
+/// Text that appears only in memory: the pinned index, a `memory_save` call's arguments, and its result.
+const INDEX_MARK: &str = "quokkaindex";
+const SAVE_MARK: &str = "quokkasave";
+const RESULT_MARK: &str = "quokkaresult";
+
+/// A session in project `widgets` with a pinned `pika-memory` index, an assistant message that mixes text, a
+/// `memory_save` call, and a `read` call, and both calls' results.
+fn memory_session() -> Vec<String> {
+    let message = |id: &str, parent: &str, at: &str, message: Value| {
+        json!({ "type": "message", "id": id, "parentId": parent, "timestamp": at, "message": message }).to_string()
+    };
+    vec![
+        json!({ "type": "session", "version": 3, "id": MEMORY_SESSION, "timestamp": "2026-10-20T09:00:00.000Z",
+                "cwd": "/home/me/code/widgets" }).to_string(),
+        json!({ "type": "custom", "id": "m0", "parentId": null, "timestamp": "2026-10-20T09:00:00.500Z", "customType": "pika-memory",
+                "data": { "index": format!("# User memory\n## feedback\n- Tabs — {INDEX_MARK} [0123456789ab]\n"), "indexBytes": 48 } })
+        .to_string(),
+        message("m1", "m0", "2026-10-20T09:00:01.000Z", json!({ "role": "user", "content": "Fix the wombat parser", "timestamp": 1792486801000_i64 })),
+        message("m2", "m1", "2026-10-20T09:00:02.000Z", json!({ "role": "assistant", "api": "openai-responses", "provider": "openai",
+            "model": "gpt-5", "stopReason": "toolUse", "timestamp": 1792486802000_i64,
+            "usage": { "input": 100, "output": 20, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 120, "cost": { "total": 0.002 } },
+            "content": [
+                { "type": "text", "text": "Reading the wombat parser first." },
+                { "type": "toolCall", "id": "call_mem", "name": "memory_save", "thoughtSignature": SAVE_MARK,
+                  "arguments": { "title": format!("Remember {SAVE_MARK}"), "expectedRevision": 0 } },
+                { "type": "toolCall", "id": "call_read", "name": "read", "arguments": { "path": "src/wombat.rs" } },
+            ] })),
+        message("m3", "m2", "2026-10-20T09:00:03.000Z", json!({ "role": "toolResult", "toolCallId": "call_mem", "toolName": "memory_save",
+            "isError": false, "timestamp": 1792486803000_i64, "content": [{ "type": "text", "text": format!("Saved {RESULT_MARK}") }],
+            "details": { "note": { "title": RESULT_MARK } } })),
+        message("m4", "m3", "2026-10-20T09:00:04.000Z", json!({ "role": "toolResult", "toolCallId": "call_read", "toolName": "read",
+            "isError": false, "timestamp": 1792486804000_i64, "content": [{ "type": "text", "text": "fn wombat() {}" }] })),
+    ]
+}
+
+impl App {
+    /// `GET {base}{path}` in a namespace (`v1`, `public/v1`, or `agent/v1` as device `a`), which must succeed.
+    async fn read_in(&self, namespace: &str, path: &str) -> String {
+        let token = (namespace == "agent/v1").then_some(self.a.as_str());
+        let r = self.call(Method::GET, &format!("/api/{namespace}/{path}"), token, None).await;
+        assert_eq!(r.status, StatusCode::OK, "{namespace} {path}: {}", r.text());
+        if path.ends_with("/raw") { r.text() } else { r.json().to_string() }
+    }
+
+    /// The `(sessionId, seq)` of each search hit for `q` in a namespace, in both groupings.
+    async fn hits_in(&self, namespace: &str, q: &str) -> Vec<Value> {
+        let mut hits = Vec::new();
+        for group in ["entry", "session"] {
+            let found: Value = serde_json::from_str(&self.read_in(namespace, &format!("search?q={q}&group={group}")).await).unwrap();
+            hits.extend(found["items"].as_array().unwrap().iter().cloned());
+        }
+        hits
+    }
+}
+
+/// AC-9, AC-10: memory is the owner's alone. The public and agent namespaces' entries, raw lines, and traces omit a
+/// `pika-memory` entry's data and memory tool calls' arguments and results, keeping the rest of each entry, and no
+/// namespace's search finds text that appears only in memory, before or after a reindex.
+#[tokio::test]
+async fn memory_is_omitted_from_public_and_agent_reads_and_from_search() {
+    let app = App::new(AuthMode::None);
+    upload(&app.env.store, &format!("session:{MEMORY_SESSION}"), "session", &memory_session(), 2);
+    let r = app.call(Method::PATCH, "/api/v1/settings/publishing", None, Some(json!({ "project": "widgets", "published": true }))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let marks = [INDEX_MARK, SAVE_MARK, RESULT_MARK];
+    let entries = format!("sessions/{MEMORY_SESSION}/entries");
+    let trace = format!("sessions/{MEMORY_SESSION}/trace");
+
+    let owner = app.read_in("v1", &entries).await;
+    assert!(marks.iter().all(|mark| owner.contains(mark)), "{owner}");
+    let owner_trace: Value = serde_json::from_str(&app.read_in("v1", &trace).await).unwrap();
+    let tool = |trace: &Value, name: &str| {
+        trace["records"].as_array().unwrap().iter().find(|r| r["kind"] == "tool" && r["name"] == name).cloned().unwrap()
+    };
+    assert_eq!(tool(&owner_trace, "memory_save")["summary"], json!(format!("Remember {SAVE_MARK}")));
+
+    for namespace in ["public/v1", "agent/v1"] {
+        let text = app.read_in(namespace, &entries).await;
+        assert!(marks.iter().all(|mark| !text.contains(mark)), "{namespace}: {text}");
+        let items: Value = serde_json::from_str(&text).unwrap();
+        let raw = |seq: usize| items["items"][seq]["raw"].clone();
+        assert_eq!(raw(1)["customType"], "pika-memory", "{namespace}");
+        assert_eq!(raw(1)["data"], json!({ "omitted": "memory" }), "{namespace}");
+        assert_eq!(
+            raw(3)["message"]["content"],
+            json!([
+                { "type": "text", "text": "Reading the wombat parser first." },
+                { "type": "toolCall", "id": "call_mem", "name": "memory_save", "arguments": { "omitted": "memory" } },
+                { "type": "toolCall", "id": "call_read", "name": "read", "arguments": { "path": "src/wombat.rs" } },
+            ]),
+            "{namespace}"
+        );
+        let result = raw(4)["message"].clone();
+        assert_eq!((&result["toolCallId"], &result["toolName"]), (&json!("call_mem"), &json!("memory_save")), "{namespace}");
+        assert_eq!(result["content"], json!([{ "type": "text", "text": "[memory tool result omitted]" }]), "{namespace}");
+        assert_eq!(result["details"], json!({ "omitted": "memory" }), "{namespace}");
+        assert_eq!(raw(5)["message"]["content"][0]["text"], "fn wombat() {}", "{namespace}");
+
+        let text = app.read_in(namespace, &trace).await;
+        assert!(marks.iter().all(|mark| !text.contains(mark)), "{namespace}: {text}");
+        let scrubbed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(scrubbed["records"].as_array().unwrap().len(), owner_trace["records"].as_array().unwrap().len());
+        let llm = scrubbed["records"].as_array().unwrap().iter().find(|r| r["kind"] == "llm").unwrap();
+        assert_eq!((&llm["text"], &llm["toolCalls"]), (&json!("Reading the wombat parser first."), &json!(2)), "{namespace}");
+        let memory = tool(&scrubbed, "memory_save");
+        assert_eq!((&memory["callId"], &memory["summary"], &memory["resultSeq"]), (&json!("call_mem"), &json!(""), &json!(4)), "{namespace}");
+        assert_eq!(tool(&scrubbed, "read")["summary"], json!("src/wombat.rs"), "{namespace}");
+    }
+    // The public namespace's raw lines omit it too.
+    for seq in 0..6 {
+        let line = app.read_in("public/v1", &format!("{entries}/{seq}/raw")).await;
+        assert!(marks.iter().all(|mark| !line.contains(mark)), "{seq}: {line}");
+        serde_json::from_str::<Value>(&line).unwrap();
+    }
+
+    for reindexed in [false, true] {
+        if reindexed {
+            pika::reindex::reindex(&app.env.store).unwrap();
+        }
+        for namespace in ["v1", "public/v1", "agent/v1"] {
+            for mark in marks {
+                assert_eq!(app.hits_in(namespace, mark).await, Vec::<Value>::new(), "{namespace} {mark} reindexed: {reindexed}");
+            }
+            let hits = app.hits_in(namespace, "wombat").await;
+            let kinds: Vec<&str> = hits.iter().filter_map(|h| h["kind"].as_str()).collect();
+            for kind in ["user", "assistant", "tool-call", "tool-result"] {
+                assert!(kinds.contains(&kind), "{namespace} {kind} reindexed: {reindexed}: {hits:?}");
+            }
+        }
+    }
+    let docs = app.count(&format!(
+        "SELECT COUNT(*) FROM search_docs d JOIN sessions s ON s.sid = d.sid WHERE s.id = '{MEMORY_SESSION}'"
+    ));
+    // The prompt, the reply's text, the `read` call, and its result.
+    assert_eq!(docs, 4);
+}

@@ -9,6 +9,7 @@ use rusqlite::{Transaction, params};
 use serde_json::Value;
 
 use crate::blobs::BlobStore;
+use crate::memory;
 use crate::redact::{Scope, scrub_cut_text, scrub_text};
 use crate::util::{cut_bytes, parse_json_lenient};
 
@@ -94,23 +95,27 @@ struct AssistantText {
 /// Discover across one assistant entry before replacing or capping any document. Copy only searchable text,
 /// names and arguments, not image blocks or call metadata. A later call can explain an earlier bare echo,
 /// even when its secret field lies beyond the index cap or only one sibling is requested by a rewrite batch.
+/// A memory tool call is never indexed, like an empty one, and its arguments take no part in discovery.
 fn assistant_text(content: Option<&Value>) -> AssistantText {
     let mut text = content_text(content);
     let blocks = content.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
     let mut calls: Vec<_> = blocks.iter().filter(|b| str_field(b, "type") == Some("toolCall"))
-        .map(|block| (str_field(block, "name").unwrap_or("").to_owned(),
-            block.get("arguments").cloned().unwrap_or(Value::Null)))
+        .map(|block| {
+            let name = str_field(block, "name").unwrap_or("");
+            (!memory::is_tool(name)).then(|| (name.to_owned(), block.get("arguments").cloned().unwrap_or(Value::Null)))
+        })
         .collect();
     let mut scope = Scope::new();
     scope.text(&mut text);
-    for (name, arguments) in &mut calls {
+    for (name, arguments) in calls.iter_mut().flatten() {
         scope.text(name);
         scope.content(arguments);
     }
     scope.finish();
     AssistantText {
         text: capped_text(&text, Kind::Assistant),
-        calls: calls.into_iter().map(|(mut name, arguments)| {
+        calls: calls.into_iter().map(|call| {
+            let (mut name, arguments) = call?;
             match arguments {
                 Value::Object(args) => {
                     for (key, value) in args {

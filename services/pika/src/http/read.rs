@@ -23,7 +23,8 @@ use crate::store::Store;
 struct Scope {
     /// Only published sessions, without owner-only metadata.
     public: bool,
-    /// Session text scrubbed of credentials, as "Redaction" in the spec describes: the public and agent namespaces.
+    /// Session text scrubbed of credentials, as "Redaction" in the spec describes, and without agent memory, as
+    /// "Scrubbing" under "Memory" does: the public and agent namespaces.
     redact: bool,
     /// The namespace whose image route entries' images link to; the agent namespace has none.
     images: Option<&'static str>,

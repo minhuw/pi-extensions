@@ -23,6 +23,16 @@ const MAX_SESSION_ID: usize = 256;
 pub const USER: &str = "user";
 /// Only agents write notes in v1.
 const PROVENANCE: &str = "agent";
+/// The pi tools that read and write notes. Their arguments and results are memory: only the owner namespace shows
+/// them, and search never indexes them (spec "Scrubbing" under "Memory").
+pub const TOOL_NAMES: [&str; 3] = ["memory_read", "memory_save", "memory_forget"];
+/// The `customType` of the `custom` session entry that holds a session's pinned memory index.
+pub const CUSTOM_TYPE: &str = "pika-memory";
+
+/// Whether `name` is one of the memory tools, exactly.
+pub fn is_tool(name: &str) -> bool {
+    TOOL_NAMES.contains(&name)
+}
 
 #[derive(Debug)]
 pub enum MemoryError {

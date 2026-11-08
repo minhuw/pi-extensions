@@ -769,7 +769,8 @@ pub fn trace(conn: &Connection, blobs: &BlobStore, id: &str) -> ReadResult<Trace
 }
 
 /// The trace; one to `redact` (public or agent) keeps original text and structured arguments for `redaction::trace` to
-/// scrub in one scope after any publication filtering, then select, format and cut summaries, and has no `ticket`.
+/// scrub in one scope after any publication filtering, then select, format and cut summaries, and has no `ticket`. Its
+/// memory tool calls keep no arguments, so their `summary` is empty.
 pub fn trace_scoped(conn: &Connection, blobs: &BlobStore, id: &str, redact: bool) -> ReadResult<Trace> {
     // One snapshot for every table.
     // Reuse the caller's snapshot when publication was checked in it.
@@ -825,7 +826,9 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str, redact: bool) -> ReadResu
         } else {
             arguments.map(|args| arguments_summary(name.as_deref().unwrap_or(""), args)).unwrap_or_default()
         };
-        let arguments = if redact { arguments.and_then(|args| parse_json_lenient(args).ok()) } else { None };
+        let memory = name.as_deref().is_some_and(crate::memory::is_tool);
+        let arguments =
+            if redact && !memory { arguments.and_then(|args| parse_json_lenient(args).ok()) } else { None };
         let started: Option<i64> = r.get(7)?;
         records.push(Record::Tool(ToolRecord {
             seq,

@@ -95,7 +95,7 @@ pub fn list(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str, p: &Pa
 
 /// Entries for a namespace: `images` is the API namespace (`v1`, `public/v1`) whose image route each image's `src`
 /// names, or `None` for one without that route (the agent namespace), whose images have no `src`. A `redact`ed list,
-/// public or agent, is scrubbed and has no `requestId`.
+/// public or agent, has no agent memory (`redaction::omit_memory`), is scrubbed, and has no `requestId`.
 pub fn list_scoped(
     conn: &Connection,
     blobs: &BlobStore,
@@ -133,6 +133,10 @@ pub fn list_scoped(
     let mut items = Vec::with_capacity(rows.len());
     for (mut entry, data, blob) in rows {
         let mut raw = parse(line_text(blobs, data, blob)?);
+        if redact {
+            // First, so that `truncated` tells nothing of the memory left out.
+            super::redaction::omit_memory(&mut raw);
+        }
         let seq = entry.seq;
         for_each_image(&mut raw, &mut 0, &mut |index, image| {
             image.insert("data".into(), Value::String(String::new()));

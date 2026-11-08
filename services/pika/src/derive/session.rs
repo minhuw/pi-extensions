@@ -563,6 +563,8 @@ impl Deriver<'_> {
                     Some("assistant") => {
                         search::index_assistant(self.tx, sid, seq, at, content)?;
                     }
+                    // A memory tool's result is memory, which search never indexes.
+                    Some("toolResult") if str_field(message, "toolName").is_some_and(crate::memory::is_tool) => {}
                     Some("toolResult") => {
                         search::index(self.tx, sid, seq, 0, at, Kind::ToolResult, &content_text(content))?
                     }
