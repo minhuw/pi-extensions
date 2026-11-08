@@ -59,7 +59,7 @@ The plugin uses the device token Pi saved in `${PI_CODING_AGENT_DIR:-~/.pi/agent
 Codex starts one MCP server per loaded thread and a new process for every hook, so neither can hold a relay connection. Both talk to a per-user **broker** on a Unix socket; the first one that needs it starts it in the background.
 
 - The broker keeps one relay connection per online thread, writes received messages to the thread's inbox file, and then acknowledges them, so a message is never lost between the server and a hook.
-- A thread goes online at its first hook or tool call, and offline at `SessionEnd`, when the MCP server that served it closes (unless a hook ran in the last 2 minutes), or after 24 hours without activity.
+- A thread goes online at its first hook or tool call, and offline at `SessionEnd`, when the MCP server that served it closes (or 2 minutes after its last hook, if one ran more recently), or after 24 hours without activity.
 - The broker exits after 10 minutes without online threads or connected clients.
 - Hop counts follow Pi: a prompt you type resets them; a turn continued for relay messages, or handling messages from `relay_wait`, continues from their count.
 
