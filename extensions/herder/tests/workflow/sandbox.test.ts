@@ -53,9 +53,12 @@ class FakeBridge implements WorkflowBridge {
 	}
 }
 
+// LIMITS.concurrentAgents follows the CPU count (2 on a 4-vCPU CI runner); pin it so tests that start 3 agents at once run anywhere.
+const TEST_LIMITS: Limits = { ...LIMITS, concurrentAgents: 4 };
+
 function run(source: string, bridge: WorkflowBridge = new FakeBridge(), extra: { args?: unknown; limits?: Partial<Limits> } = {}) {
 	return runScript({
-		source, args: extra.args, bridge, limits: { ...LIMITS, ...extra.limits },
+		source, args: extra.args, bridge, limits: { ...TEST_LIMITS, ...extra.limits },
 		writes: (_role, write) => write !== false,
 	});
 }
