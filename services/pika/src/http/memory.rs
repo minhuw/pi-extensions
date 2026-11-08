@@ -1,6 +1,6 @@
 //! Agent memory routes (`crate::memory`): reading and writing notes under `{base}/api/agent/v1/` with a device token
-//! that has read access, dream leases and commits (`crate::memory::dream`) beside them, and the owner's read-only view
-//! under the authenticated `{base}/api/v1/`.
+//! that has read access, dream leases and commits (`crate::memory::dream`) beside them, and the owner's view under the
+//! authenticated `{base}/api/v1/`, which reads notes and dream batches and reverts a batch.
 
 use std::collections::BTreeMap;
 
@@ -38,6 +38,8 @@ pub(super) fn owner_routes() -> Router<AppState> {
         .route("/memory", get(scopes))
         .route("/memory/notes", get(scope_notes))
         .route("/memory/notes/{id}/revisions", get(revisions))
+        .route("/memory/batches", get(batches))
+        .route("/memory/batches/{id}/revert", post(revert))
 }
 
 fn bad_request(message: impl std::fmt::Display) -> Response {
@@ -84,6 +86,9 @@ fn respond_dream<T: Serialize>(result: anyhow::Result<Result<T, DreamError>>) ->
             conflict(json!({ "error": "revision_conflict", "note": note, "change": change }))
         }
         Ok(Err(DreamError::Full { bytes, lines })) => memory_full(bytes, lines),
+        Ok(Err(DreamError::NotFound)) => error(StatusCode::NOT_FOUND, "not_found"),
+        Ok(Err(DreamError::AlreadyReverted)) => conflict(json!({ "error": "already_reverted" })),
+        Ok(Err(DreamError::RevertConflict(notes))) => conflict(json!({ "error": "revert_conflict", "notes": notes })),
         Ok(Err(DreamError::Internal(e))) => internal_error(format!("{e:#}")),
         Err(e) => internal_error(format!("{e:#}")),
     }
@@ -260,5 +265,27 @@ async fn revisions(State(state): State<AppState>, Path(id): Path<String>) -> Res
                 .ok_or(MemoryError::NotFound))
         })
         .await,
+    )
+}
+
+/// `GET memory/batches?scope=<key>` → the scope's dream batches, newest first.
+async fn batches(State(state): State<AppState>, Query(params): Query<BTreeMap<String, String>>) -> Response {
+    let Some(key) = params.get("scope").cloned() else {
+        return bad_request("scope is required");
+    };
+    let store = state.store.clone();
+    respond_dream(
+        blocking(move || {
+            Ok(store.read(|conn| dream::batches(conn, &key))?.map(|batches| json!({ "batches": batches })).ok_or(DreamError::NotFound))
+        })
+        .await,
+    )
+}
+
+/// `POST memory/batches/:id/revert` restores the notes a dream batch touched; its body is ignored.
+async fn revert(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let store = state.store.clone();
+    respond_dream(
+        blocking(move || Ok(store.write(|tx| dream::revert(tx, &id, now_ms())).map(|batch| json!({ "batch": batch })))).await,
     )
 }

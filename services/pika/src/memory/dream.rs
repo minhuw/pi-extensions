@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     Author, Index, LIMIT_BYTES, LIMIT_LINES, MemoryError, Note, Scope, Source, bad, check_revision, fields, groups, iso,
-    iso_opt, note, project_scope, put, reason, remove, request_scopes, scrubbed, session_id, stored,
+    iso_opt, note, project_scope, put, reason, record, remove, request_scopes, scrubbed, session_id, stored,
 };
 use crate::redact::scrub_cut_text;
 use crate::util::random_bytes;
@@ -34,6 +34,8 @@ const DAY_MS: i64 = 86_400_000;
 pub const AGENT_TYPE: &str = "memory-dream";
 /// The provenance of what a commit writes.
 const DREAM: &str = "dream";
+/// The provenance of what the owner's revert writes.
+const OWNER: &str = "owner";
 const OUTCOMES: [&str; 3] = ["completed", "aborted", "failed"];
 
 #[derive(Debug)]
@@ -49,6 +51,12 @@ pub enum DreamError {
     Conflict { note: Box<Note>, change: usize },
     /// The index the commit would produce.
     Full { bytes: usize, lines: usize },
+    /// No batch has the id.
+    NotFound,
+    /// The batch was reverted before.
+    AlreadyReverted,
+    /// The notes the batch touched that changed after it.
+    RevertConflict(Vec<String>),
     Internal(anyhow::Error),
 }
 
@@ -620,6 +628,62 @@ pub fn batches(conn: &Connection, key: &str) -> rusqlite::Result<Option<Vec<Batc
         .query_map([key], batch_row)?
         .collect::<rusqlite::Result<_>>()
         .map(Some)
+}
+
+/// `POST memory/batches/:id/revert`: in one transaction with the caller (`Store::write`), restores each note the batch
+/// touched to its state before the batch, as a new `revert` revision of the owner's: a note the batch created is
+/// forgotten, one it updated or forgot is live again with its previous content. Then marks the batch reverted. Writes
+/// nothing when the batch was reverted before or any of its notes changed after it. Neither checks the budget nor
+/// moves checkpoints back.
+pub fn revert(tx: &Transaction, id: &str, now: i64) -> Result<Batch, DreamError> {
+    let batch = batch(tx, id)?.ok_or(DreamError::NotFound)?;
+    if batch.reverted_at.is_some() {
+        return Err(DreamError::AlreadyReverted);
+    }
+    // Each touched note once, in the batch's order: whether the batch created it, its revision before the batch, and
+    // the batch's last revision of it.
+    let mut touched: Vec<(String, bool, i64, i64)> = Vec::new();
+    for change in &batch.changes {
+        match touched.iter_mut().find(|(note, ..)| *note == change.note_id) {
+            Some((.., last)) => *last = (*last).max(change.revision),
+            None => touched.push((change.note_id.clone(), change.created, change.revision - 1, change.revision)),
+        }
+    }
+    let mut current = Vec::new();
+    let mut changed = Vec::new();
+    for (id, created, before, last) in touched {
+        match note(tx, &id)? {
+            Some(n) if n.revision == last => current.push((n, created, before)),
+            _ => changed.push(id),
+        }
+    }
+    if !changed.is_empty() {
+        return Err(DreamError::RevertConflict(changed));
+    }
+    let author = Author { device: "", session_id: None, provenance: OWNER, sources: Vec::new(), batch_id: None, reason: None, now };
+    for (n, created, before) in current {
+        let revision = n.revision + 1;
+        let restored = if created {
+            Note { deleted_at: n.deleted_at.or(Some(now)), ..n }
+        } else {
+            let (category, title, hook, body) = tx
+                .prepare_cached("SELECT category, title, hook, body FROM memory_revisions WHERE note_id = ?1 AND revision = ?2")?
+                .query_row(params![n.id, before], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+            Note { category, title, hook, body, deleted_at: None, ..n }
+        };
+        let restored = Note {
+            provenance: OWNER.into(),
+            sources: Vec::new(),
+            revision,
+            updated_at: now,
+            device_id: None,
+            session_id: None,
+            ..restored
+        };
+        record(tx, &restored, "revert", &author)?;
+    }
+    tx.prepare_cached("UPDATE memory_dream_batches SET reverted_at = ?2 WHERE id = ?1")?.execute(params![batch.id, now])?;
+    Ok(Batch { reverted_at: Some(now), ..batch })
 }
 
 /// Deletes the scope's leases, batches, and checkpoints.

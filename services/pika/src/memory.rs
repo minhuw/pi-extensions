@@ -26,9 +26,9 @@ const MAX_SESSION_ID: usize = 256;
 pub const USER: &str = "user";
 /// The provenance of what agents write through the memory routes.
 const AGENT: &str = "agent";
-/// The pi tools that read and write notes. Their arguments and results are memory: only the owner namespace shows
-/// them, and search never indexes them (spec "Scrubbing" under "Memory").
-pub const TOOL_NAMES: [&str; 3] = ["memory_read", "memory_save", "memory_forget"];
+/// The pi tools that read and write notes, a dream's included. Their arguments and results are memory: only the owner
+/// namespace shows them, and search never indexes them (spec "Scrubbing" under "Memory").
+pub const TOOL_NAMES: [&str; 6] = ["memory_read", "memory_save", "memory_forget", "dream_save", "dream_forget", "dream_commit"];
 /// The `customType` of the `custom` session entry that holds a session's pinned memory index.
 pub const CUSTOM_TYPE: &str = "pika-memory";
 

@@ -238,10 +238,17 @@ fn content_size(content: Option<&Value>) -> i64 {
     }
 }
 
+/// Whether the link names a dream's own session (`crate::memory::dream::AGENT_TYPE`).
+fn dream_link(link: Option<&Value>) -> bool {
+    link.and_then(|l| str_field(l, "agentType")) == Some(crate::memory::dream::AGENT_TYPE)
+}
+
 struct Deriver<'a> {
     tx: &'a Transaction<'a>,
     s: SessionRow,
     turn: Option<TurnRow>,
+    /// Whether the session is a dream's or a recorded descendant of one, whose text search never indexes.
+    dream: bool,
 }
 
 impl Deriver<'_> {
@@ -286,6 +293,16 @@ impl Deriver<'_> {
         Ok(())
     }
 
+    /// Recomputes `dream` from the session's link and its parent, once either may have changed.
+    fn update_dream(&mut self) -> Result<()> {
+        self.dream = dream_link(self.s.link.as_ref())
+            || match &self.s.parent_session_id {
+                Some(parent) if *parent != self.s.id => crate::hidden::in_dream(self.tx, parent)?,
+                _ => false,
+            };
+        Ok(())
+    }
+
     fn header(&mut self, seq: i64, v: &Value) -> Result<()> {
         self.s.cwd = string_field(v, "cwd").or(self.s.cwd.take());
         self.s.version = int_field(v, "version").or(self.s.version);
@@ -300,7 +317,8 @@ impl Deriver<'_> {
                     .execute(params![self.s.sid, seq, session_id_from_file(&parent), parent])?;
             }
         }
-        self.set_parent()
+        self.set_parent()?;
+        self.update_dream()
     }
 
     fn link(&mut self, seq: i64, data: &Value) -> Result<()> {
@@ -341,7 +359,8 @@ impl Deriver<'_> {
             ])?;
         self.s.herder_run_id = h("runId");
         self.s.link = Some(data.clone());
-        self.set_parent()
+        self.set_parent()?;
+        self.update_dream()
     }
 
     fn user(&mut self, seq: i64, ts: Option<i64>, message: &Value) -> Result<()> {
@@ -548,6 +567,10 @@ impl Deriver<'_> {
     }
 
     fn index_search(&self, seq: i64, ty: &str, v: &Value, at: i64) -> Result<()> {
+        // A dream reads the user's sessions and memory; its family is the owner's alone and never searched.
+        if self.dream {
+            return Ok(());
+        }
         let sid = self.s.sid;
         match ty {
             "session_info" => {
@@ -661,8 +684,10 @@ impl Deriver<'_> {
 pub fn apply(tx: &Transaction, info: &StreamInfo, lines: &[Line]) -> Result<()> {
     let s = load_session(tx, info.id)?;
     let parent = s.parent_session_id.clone();
+    let was_dream = dream_link(s.link.as_ref());
     let turn = if s.turn_count > 0 { load_turn(tx, info.id, s.turn_count - 1)? } else { None };
-    let mut deriver = Deriver { tx, s, turn };
+    let dream = was_dream || crate::hidden::in_dream(tx, &s.id)?;
+    let mut deriver = Deriver { tx, s, turn, dream };
     for line in lines {
         deriver.line(line)?;
     }
@@ -670,8 +695,8 @@ pub fn apply(tx: &Transaction, info: &StreamInfo, lines: &[Line]) -> Result<()> 
         save_turn(tx, info.id, turn)?;
     }
     save_session(tx, &deriver.s)?;
-    // A new parent may hide the session and its subtree, or stop hiding them.
-    if deriver.s.parent_session_id != parent {
+    // A new parent may hide the session and its subtree, or stop hiding them; a dream's link hides them.
+    if deriver.s.parent_session_id != parent || dream_link(deriver.s.link.as_ref()) != was_dream {
         crate::hidden::refresh(tx, &deriver.s.id)?;
     }
     Ok(())

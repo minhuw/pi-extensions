@@ -1,7 +1,8 @@
 //! Dreaming (spec "Dreaming" under "Memory"): leases on a project scope through `{base}/api/agent/v1/memory/dream`,
 //! the scope's sessions past their checkpoints, renewal, release, and the gates on `auto` leases, and commits that
-//! apply every change, advance checkpoints, and record one batch, or write nothing. Time moves by rewriting the
-//! leases' times in the database.
+//! apply every change, advance checkpoints, and record one batch, or write nothing; dream sessions hidden from the
+//! public view and from search, with the dream tools scrubbed; and the owner's batch list and revert. Time moves by
+//! rewriting the leases' times in the database.
 
 mod common;
 
@@ -26,6 +27,7 @@ const HOUR: i64 = 60 * MINUTE;
 const DAY: i64 = 24 * HOUR;
 /// 2026-10-20T00:00:00Z.
 const BASE: i64 = 1_792_454_400_000;
+const PASSWORD: &str = "correct horse battery";
 /// The tables a failed commit must leave alone.
 const TABLES: [&str; 6] =
     ["memory_scopes", "memory_notes", "memory_revisions", "memory_dream_leases", "memory_dream_batches", "memory_checkpoints"];
@@ -55,11 +57,16 @@ struct App {
 
 impl App {
     fn new() -> App {
+        App::with_auth(AuthMode::None)
+    }
+
+    fn with_auth(auth: AuthMode) -> App {
         let env = env();
         let a = device(&env.store, DEVICE);
         let b = device(&env.store, "b");
         let mut config = ServerConfig::new(env.dir.path().join("data"));
-        config.auth = AuthMode::None;
+        config.auth = auth;
+        config.password = Some(PASSWORD.into());
         let app = router(AppState::new(env.store.clone(), config).unwrap());
         App { env, app, a, b }
     }
@@ -1004,4 +1011,363 @@ async fn malformed_dream_bodies_are_bad_requests() {
     let r = app.call(Method::POST, &format!("/api/agent/v1/memory/dream/{id}/commit"), Some(&app.a), None).await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.text());
     assert_eq!(app.dump(), before);
+}
+
+/// Text that only the dream sessions' prompts and replies hold.
+const TEXT_MARK: &str = "quokkadream";
+/// Text that only a `dream_save` call's arguments and its result hold.
+const ARG_MARK: &str = "narwhalsave";
+/// Text that only a session whose dream link arrives after its content holds.
+const LATE_MARK: &str = "axolotllate";
+
+fn dream_link(parent: &str) -> Value {
+    json!({ "kind": "subagent", "agentType": "memory-dream", "parentSessionId": parent,
+            "parentSessionFile": format!("/home/me/.pi/sessions/2026-10-20T00-00-00-000Z_{parent}.jsonl"),
+            "description": "memory dream" })
+}
+
+/// A user prompt, an assistant reply with text and a `dream_save` call, and the call's result, all at `at`.
+fn dream_turn(at: i64, text: &str, args: &str) -> Vec<String> {
+    let message = |id: &str, parent: &str, message: Value| {
+        json!({ "type": "message", "id": id, "parentId": parent, "timestamp": format_iso_ms(at), "message": message }).to_string()
+    };
+    vec![
+        message("d1", "link", json!({ "role": "user", "content": format!("Consolidate {text}"), "timestamp": at })),
+        message("d2", "d1", json!({ "role": "assistant", "api": "openai-responses", "provider": "openai", "model": "gpt-5",
+            "stopReason": "toolUse", "timestamp": at,
+            "usage": { "input": 10, "output": 2, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 12, "cost": { "total": 0.0 } },
+            "content": [
+                { "type": "text", "text": format!("Saving {text}") },
+                { "type": "toolCall", "id": "call_dream", "name": "dream_save", "arguments": { "title": format!("Remember {args}") } },
+            ] })),
+        message("d3", "d2", json!({ "role": "toolResult", "toolCallId": "call_dream", "toolName": "dream_save", "isError": false,
+            "timestamp": at, "content": [{ "type": "text", "text": format!("Staged {args}") }] })),
+    ]
+}
+
+impl App {
+    /// `GET {base}/api/{namespace}/{path}`, as device `laptop` in `agent/v1`.
+    async fn get_in(&self, namespace: &str, path: &str) -> Reply {
+        let token = (namespace == "agent/v1").then_some(self.a.as_str());
+        self.call(Method::GET, &format!("/api/{namespace}/{path}"), token, None).await
+    }
+
+    async fn read_in(&self, namespace: &str, path: &str) -> Value {
+        let r = self.get_in(namespace, path).await;
+        assert_eq!(r.status, StatusCode::OK, "{namespace} {path}: {}", r.text());
+        r.json()
+    }
+
+    /// The search hits for `q` in a namespace, in both groupings.
+    async fn hits_in(&self, namespace: &str, q: &str) -> Vec<Value> {
+        let mut hits = Vec::new();
+        for group in ["entry", "session"] {
+            let found = self.read_in(namespace, &format!("search?q={q}&group={group}")).await;
+            hits.extend(found["items"].as_array().unwrap().iter().cloned());
+        }
+        hits
+    }
+}
+
+/// AC-7: a dream's session and its descendants are hidden in the public namespace and never searched, its dream tool
+/// calls are scrubbed outside the owner namespace, and the owner still reads everything, before and after a reindex,
+/// also when the dream link arrives after the session's content.
+#[tokio::test]
+async fn dream_sessions_are_hidden_unsearched_and_scrubbed() {
+    let app = App::new();
+    let store = &app.env.store;
+    repo_session(store, "p1", BASE, 1);
+    let dream = [header("dream", BASE + HOUR, Some(dream_link("p1"))), dream_turn(BASE + HOUR, TEXT_MARK, ARG_MARK)].concat();
+    upload_as(store, DEVICE, "dream", &[], &dream, repo_meta("dream", REPO));
+    let link = json!({ "kind": "subagent", "agentType": "worker", "parentSessionId": "dream" });
+    let child = [header("child", BASE + HOUR, Some(link)), dream_turn(BASE + HOUR, TEXT_MARK, ARG_MARK)].concat();
+    upload_as(store, DEVICE, "child", &[], &child, repo_meta("child", REPO));
+    let link = json!({ "kind": "subagent", "agentType": "worker", "parentSessionId": "child" });
+    let grandchild = [header("grandchild", BASE + HOUR, Some(link)), dream_turn(BASE + HOUR, TEXT_MARK, ARG_MARK)].concat();
+    upload_as(store, DEVICE, "grandchild", &[], &grandchild, repo_meta("grandchild", REPO));
+    // Content first, its dream link in a later batch.
+    let late = [header("late", BASE + 2 * HOUR, None), dream_turn(BASE + 2 * HOUR, LATE_MARK, LATE_MARK)].concat();
+    upload_as(store, DEVICE, "late", &[], &late, repo_meta("late", REPO));
+    assert!(!app.hits_in("v1", LATE_MARK).await.is_empty(), "searched before its link");
+    let link = header("late", BASE + 2 * HOUR, Some(dream_link("p1"))).split_off(1);
+    upload_as(store, DEVICE, "late", &late, &link, repo_meta("late", REPO));
+    let r = app.call(Method::PATCH, "/api/v1/settings/publishing", None, Some(json!({ "project": "widgets", "published": true }))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let dreams = ["dream", "child", "grandchild", "late"];
+
+    for reindexed in [false, true] {
+        if reindexed {
+            pika::reindex::reindex(store).unwrap();
+        }
+        let at = format!("reindexed: {reindexed}");
+        // No owner flag hides them.
+        assert_eq!(app.count("SELECT COUNT(*) FROM hidden_sessions"), 0, "{at}");
+        let docs = "SELECT COUNT(*) FROM search_docs d JOIN sessions s ON s.sid = d.sid WHERE s.id IN ('dream', 'child', 'grandchild', 'late')";
+        assert_eq!(app.count(docs), 0, "{at}");
+
+        // The public namespace: 404s, and absent from lists, children, and trees.
+        for id in dreams {
+            for path in ["", "/entries", "/tree", "/trace", "/turns", "/entries/1/raw"] {
+                let r = app.get_in("public/v1", &format!("sessions/{id}{path}")).await;
+                assert_eq!(r.status, StatusCode::NOT_FOUND, "{id}{path} {at}: {}", r.text());
+            }
+        }
+        let list = app.read_in("public/v1", "sessions").await;
+        assert_eq!(ids(&list["items"]), ["p1"], "{at}");
+        let parent = app.read_in("public/v1", "sessions/p1").await;
+        assert_eq!((&parent["children"], &parent["childCount"]), (&json!([]), &json!(0)), "{at}");
+        let tree = app.read_in("public/v1", "sessions/p1/tree").await;
+        assert_eq!(ids(&tree["nodes"]), ["p1"], "{at}");
+
+        // No namespace's search finds them; the parent is still found.
+        for namespace in ["v1", "public/v1", "agent/v1"] {
+            for mark in [TEXT_MARK, ARG_MARK, LATE_MARK, "Consolidate"] {
+                assert_eq!(app.hits_in(namespace, mark).await, Vec::<Value>::new(), "{namespace} {mark} {at}");
+            }
+            assert!(!app.hits_in(namespace, "Prompt").await.is_empty(), "{namespace} {at}");
+        }
+
+        // The owner reads everything: listed, hidden by the dream session, every entry.
+        let owner = app.read_in("v1", "sessions").await;
+        let mut listed = ids(&owner["items"]);
+        listed.sort();
+        assert_eq!(listed, ["child", "dream", "grandchild", "late", "p1"], "{at}");
+        for (id, by) in [("dream", "dream"), ("child", "dream"), ("grandchild", "dream"), ("late", "late")] {
+            let summary = app.read_in("v1", &format!("sessions/{id}")).await;
+            assert_eq!((&summary["hidden"], &summary["hiddenBy"]), (&json!(true), &json!(by)), "{id} {at}");
+        }
+        let parent = app.read_in("v1", "sessions/p1").await;
+        assert_eq!((&parent["hidden"], &parent["childCount"]), (&json!(false), &json!(2)), "{at}");
+        let tree = app.read_in("v1", "sessions/p1/tree").await;
+        assert_eq!(ids(&tree["nodes"]).len(), 5, "{at}");
+        for id in ["dream", "grandchild"] {
+            let entries = app.read_in("v1", &format!("sessions/{id}/entries")).await.to_string();
+            assert!(entries.contains(TEXT_MARK) && entries.contains(ARG_MARK), "{id} {at}: {entries}");
+            let trace = app.read_in("v1", &format!("sessions/{id}/trace")).await.to_string();
+            assert!(trace.contains(ARG_MARK), "{id} {at}: {trace}");
+        }
+
+        // The agent namespace reads them with the dream tools scrubbed.
+        for id in ["dream", "grandchild"] {
+            let entries = app.read_in("agent/v1", &format!("sessions/{id}/entries")).await;
+            let text = entries.to_string();
+            assert!(text.contains(TEXT_MARK) && !text.contains(ARG_MARK), "{id} {at}: {text}");
+            let raw = |seq: usize| entries["items"][seq]["raw"].clone();
+            assert_eq!(
+                raw(3)["message"]["content"],
+                json!([
+                    { "type": "text", "text": format!("Saving {TEXT_MARK}") },
+                    { "type": "toolCall", "id": "call_dream", "name": "dream_save", "arguments": { "omitted": "memory" } },
+                ]),
+                "{id} {at}"
+            );
+            assert_eq!(raw(4)["message"]["content"], json!([{ "type": "text", "text": "[memory tool result omitted]" }]), "{id} {at}");
+            let trace = app.read_in("agent/v1", &format!("sessions/{id}/trace")).await;
+            assert!(!trace.to_string().contains(ARG_MARK), "{id} {at}: {trace}");
+        }
+    }
+}
+
+/// AC-7: a dream tool call is scrubbed and unsearched in any session, like the v1 memory tools.
+#[test]
+fn dream_tools_are_memory_tools() {
+    for name in ["memory_read", "memory_save", "memory_forget", "dream_save", "dream_forget", "dream_commit"] {
+        assert!(pika::memory::is_tool(name), "{name}");
+    }
+    assert!(!pika::memory::is_tool("dream"));
+}
+
+impl App {
+    /// `POST {base}/api/v1/memory/batches/:id/revert` without a login, for `AuthMode::None`.
+    async fn revert(&self, id: &Value) -> Reply {
+        self.call(Method::POST, &format!("/api/v1/memory/batches/{}/revert", id.as_str().unwrap()), None, None).await
+    }
+
+    /// The owner's view of a note: its current state and its revisions.
+    async fn note(&self, id: &Value) -> (Value, Vec<Value>) {
+        let revisions = self.owner(&format!("memory/notes/{}/revisions", id.as_str().unwrap())).await["revisions"].clone();
+        let row = one(&self.env.store, &format!("SELECT * FROM memory_notes WHERE id = '{}'", id.as_str().unwrap()));
+        (serde_json::to_value(row).unwrap(), revisions.as_array().unwrap().clone())
+    }
+}
+
+/// AC-8: reverting a batch restores each note it touched as an owner's `revert` revision: a created note is
+/// forgotten, an updated one has its previous content, a forgotten one is live again; the batch is marked reverted.
+/// A second revert, a batch whose notes changed since, and an unknown batch write nothing. Batches list newest first.
+#[tokio::test]
+async fn reverting_a_batch_restores_its_notes() {
+    let app = App::new();
+    let tabs = app
+        .saved(json!({ "expectedRevision": 0, "scope": "user", "category": "feedback", "title": "Tabs", "hook": "indent with tabs",
+                       "body": "Always tabs." }))
+        .await;
+    let old = app
+        .saved(json!({ "expectedRevision": 0, "scope": "project", "project": "widgets", "repository": REPO,
+                       "category": "reference", "title": "Old", "hook": "stale", "body": "See the wiki." }))
+        .await;
+    repo_session(&app.env.store, "s1", BASE, 2);
+    let granted = app.granted("manual").await;
+    let mut update = save("user", "Tabs always", json!([source("s1", 1)]));
+    update["id"] = tabs["id"].clone();
+    update["expectedRevision"] = json!(1);
+    let first = app
+        .committed(&granted, json!({ "sessions": ["s1"], "changes": [
+            save("project", "Build", json!([source("s1", 1)])),
+            update,
+            { "op": "forget", "id": old["id"], "expectedRevision": 1, "sources": [source("s1", 2)] },
+        ] }))
+        .await["batch"]
+        .clone();
+    let build = first["changes"][0]["noteId"].clone();
+    let listed = app.owner(&format!("memory/batches?scope={}", encode(KEY))).await;
+    assert_eq!(listed, json!({ "batches": [first] }));
+
+    let before = now_ms();
+    let r = app.revert(&first["id"]).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let reverted = r.json()["batch"].clone();
+    assert!(ms(&reverted["revertedAt"]) >= before);
+    let mut expected = first.clone();
+    expected["revertedAt"] = reverted["revertedAt"].clone();
+    assert_eq!(reverted, expected);
+
+    let owner_revert = |revision: &Value, n: i64| {
+        assert_eq!(
+            (&revision["revision"], &revision["action"], &revision["provenance"], &revision["sources"], &revision["batchId"]),
+            (&json!(n), &json!("revert"), &json!("owner"), &json!([]), &Value::Null),
+            "{revision}"
+        );
+    };
+    let (note, revisions) = app.note(&build).await;
+    assert_eq!((&note["revision"], &note["provenance"], &note["sources"]), (&json!(2), &json!("owner"), &json!("[]")));
+    assert!(!note["deleted_at"].is_null(), "{note}");
+    owner_revert(&revisions[1], 2);
+    assert_eq!(revisions[1]["title"], "Build");
+    let (note, revisions) = app.note(&tabs["id"]).await;
+    assert_eq!((&note["title"], &note["hook"], &note["body"], &note["category"]), (&json!("Tabs"), &json!("indent with tabs"), &json!("Always tabs."), &json!("feedback")));
+    assert_eq!((&note["revision"], &note["deleted_at"], &note["device_id"]), (&json!(3), &Value::Null, &Value::Null));
+    owner_revert(&revisions[2], 3);
+    let (note, revisions) = app.note(&old["id"]).await;
+    assert_eq!((&note["title"], &note["body"], &note["category"]), (&json!("Old"), &json!("See the wiki."), &json!("reference")));
+    assert_eq!((&note["revision"], &note["deleted_at"]), (&json!(3), &Value::Null));
+    owner_revert(&revisions[2], 3);
+    let memory = app.memory().await;
+    let titles: Vec<&str> = memory["notes"].as_array().unwrap().iter().map(|n| n["title"].as_str().unwrap()).collect();
+    assert_eq!(titles, ["Tabs", "Old"]);
+    // The checkpoint stays.
+    assert_eq!(app.checkpoints(), [(KEY.into(), "s1".into(), 2)]);
+
+    let state = app.dump();
+    let r = app.revert(&first["id"]).await;
+    assert_eq!((r.status, r.json()), (StatusCode::CONFLICT, json!({ "error": "already_reverted" })));
+    let r = app.revert(&json!("0000000000000000")).await;
+    assert_eq!((r.status, r.json()), (StatusCode::NOT_FOUND, json!({ "error": "not_found" })));
+    assert_eq!(app.dump(), state);
+
+    // A second batch whose notes change afterwards conflicts, listing exactly those notes.
+    let mut update = save("user", "Tabs again", json!([source("s1", 1)]));
+    update["id"] = tabs["id"].clone();
+    update["expectedRevision"] = json!(3);
+    let second = app
+        .committed(&granted, json!({ "sessions": ["s1"], "changes": [
+            save("project", "Alpha", json!([source("s1", 1)])),
+            save("project", "Beta", json!([source("s1", 1)])),
+            update,
+        ] }))
+        .await["batch"]
+        .clone();
+    let alpha = second["changes"][0]["noteId"].clone();
+    app.saved(json!({ "id": alpha, "expectedRevision": 1, "scope": "project", "project": "widgets", "repository": REPO,
+                      "category": "project", "title": "Alpha 2", "hook": "edited" }))
+        .await;
+    let r = app.post(&app.a, &format!("memory/notes/{}/forget", tabs["id"].as_str().unwrap()), json!({ "expectedRevision": 4 })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let state = app.dump();
+    let r = app.revert(&second["id"]).await;
+    assert_eq!((r.status, r.json()), (StatusCode::CONFLICT, json!({ "error": "revert_conflict", "notes": [alpha, tabs["id"]] })));
+    assert_eq!(app.dump(), state);
+
+    let listed = app.owner(&format!("memory/batches?scope={}", encode(KEY))).await;
+    assert_eq!(listed, json!({ "batches": [second, reverted] }));
+    let r = app.call(Method::GET, "/api/v1/memory/batches?scope=repo:https://example.com/none", None, None).await;
+    assert_eq!((r.status, r.json()), (StatusCode::NOT_FOUND, json!({ "error": "not_found" })));
+    let r = app.call(Method::GET, "/api/v1/memory/batches", None, None).await;
+    assert_eq!((r.status, &r.json()["error"]), (StatusCode::BAD_REQUEST, &json!("bad_request")));
+    assert_eq!(app.owner("memory/batches?scope=user").await, json!({ "batches": [] }));
+}
+
+/// AC-8: a batch that changes a note several times, forgetting it last, reverts it to its live state before the first
+/// change.
+#[tokio::test]
+async fn reverting_restores_the_state_before_the_batchs_first_change() {
+    let app = App::new();
+    let tabs = app
+        .saved(json!({ "expectedRevision": 0, "scope": "user", "category": "feedback", "title": "Tabs", "hook": "indent with tabs" }))
+        .await;
+    repo_session(&app.env.store, "s1", BASE, 1);
+    let granted = app.granted("manual").await;
+    let update = |title: &str, expected: i64| {
+        let mut change = save("user", title, json!([source("s1", 1)]));
+        change["id"] = tabs["id"].clone();
+        change["expectedRevision"] = json!(expected);
+        change
+    };
+    let mut created = save("project", "Short-lived", json!([source("s1", 1)]));
+    created["category"] = json!("reference");
+    let batch = app
+        .committed(&granted, json!({ "sessions": ["s1"], "changes": [
+            update("Two", 1), update("Three", 2), { "op": "forget", "id": tabs["id"], "expectedRevision": 3 }, created,
+        ] }))
+        .await["batch"]
+        .clone();
+    let short = batch["changes"][3]["noteId"].clone();
+    let r = app.revert(&batch["id"]).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let (note, revisions) = app.note(&tabs["id"]).await;
+    assert_eq!((&note["title"], &note["revision"], &note["deleted_at"]), (&json!("Tabs"), &json!(5), &Value::Null));
+    assert_eq!(revisions.iter().map(|r| r["action"].as_str().unwrap()).collect::<Vec<_>>(), ["save", "save", "save", "forget", "revert"]);
+    let (note, _) = app.note(&short).await;
+    assert_eq!((&note["revision"], &note["provenance"]), (&json!(2), &json!("owner")));
+    assert!(!note["deleted_at"].is_null(), "{note}");
+    assert_eq!(app.memory().await["notes"].as_array().unwrap().len(), 1);
+}
+
+/// AC-8: the batch routes need the owner's login; a device token counts for nothing.
+#[tokio::test]
+async fn batch_routes_need_the_owners_login() {
+    let app = App::with_auth(AuthMode::Password);
+    repo_session(&app.env.store, "s1", BASE, 1);
+    let granted = app.granted("manual").await;
+    let batch = app.committed(&granted, json!({ "sessions": ["s1"], "changes": [save("project", "Build", json!([source("s1", 1)]))] })).await;
+    let id = batch["batch"]["id"].as_str().unwrap().to_owned();
+    let list = format!("/api/v1/memory/batches?scope={}", encode(KEY));
+    let revert = format!("/api/v1/memory/batches/{id}/revert");
+    let state = app.dump();
+    for token in [None, Some(app.a.as_str())] {
+        for (method, path) in [(Method::GET, &list), (Method::POST, &revert)] {
+            let r = app.call(method.clone(), path, token, None).await;
+            assert_eq!((r.status, r.json()), (StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" })), "{method} {path} {token:?}");
+        }
+    }
+    assert_eq!(app.dump(), state);
+    // Not in the agent namespace.
+    let r = app.call(Method::GET, &format!("/api/agent/v1/memory/batches?scope={}", encode(KEY)), Some(&app.a), None).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+
+    let login = Request::post("/api/v1/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "password": PASSWORD }).to_string()))
+        .unwrap();
+    let response = app.app.clone().oneshot(login).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_owned();
+    let send = |method: Method, path: &str| {
+        let request = Request::builder().method(method).uri(path).header(header::COOKIE, &cookie).body(Body::empty()).unwrap();
+        app.app.clone().oneshot(request)
+    };
+    let response = send(Method::GET, &list).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = send(Method::POST, &revert).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(app.count("SELECT COUNT(*) FROM memory_revisions WHERE action = 'revert'"), 1);
 }

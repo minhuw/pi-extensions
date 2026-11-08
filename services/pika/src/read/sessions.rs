@@ -76,7 +76,8 @@ pub struct SessionSummary {
     /// public view. Public responses never set it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
-    /// Owner responses only: the hidden session that hides this one, its own id when the owner hid it.
+    /// Owner responses only: the hidden session that hides this one, its own id when the owner hid it or it is a
+    /// dream's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hidden_by: Option<String>,
     /// The raw sort key, for cursors.

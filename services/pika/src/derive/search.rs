@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
-use rusqlite::{Transaction, params};
+use rusqlite::{Connection, Transaction, params};
 use serde_json::Value;
 
 use crate::blobs::BlobStore;
@@ -170,6 +170,17 @@ fn insert_text(tx: &Transaction, sid: i64, seq: i64, part: i64, at: i64, kind: K
         };
     }
     tx.prepare_cached("INSERT INTO search_fts (rowid, text) VALUES (?1, ?2)")?.execute(params![id, text])?;
+    Ok(())
+}
+
+/// Removes the session's documents, as for a dream's session indexed before its link arrived (`crate::hidden`).
+pub fn remove(conn: &Connection, sid: i64) -> rusqlite::Result<()> {
+    // The full-text index has external content: each document leaves it with the text it was indexed with.
+    conn.prepare_cached(
+        "INSERT INTO search_fts (search_fts, rowid, text) SELECT 'delete', id, text FROM search_docs WHERE sid = ?1",
+    )?
+    .execute([sid])?;
+    conn.prepare_cached("DELETE FROM search_docs WHERE sid = ?1")?.execute([sid])?;
     Ok(())
 }
 
