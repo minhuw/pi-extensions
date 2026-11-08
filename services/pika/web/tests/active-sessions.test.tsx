@@ -560,7 +560,7 @@ describe("active sessions in the band", () => {
 		const links = within(main)
 			.getAllByRole("link")
 			.map((link) => link.getAttribute("href"));
-		expect(links.slice(0, 6)).toEqual(["/", "/statistics", "/runs", "/active", "/devices", "/search"]);
+		expect(links.slice(0, 7)).toEqual(["/", "/statistics", "/runs", "/active", "/devices", "/memory", "/search"]);
 
 		server.state.online.push(onlineSession("s-c"));
 		await advance(RELAY_BADGE_POLL_MS);

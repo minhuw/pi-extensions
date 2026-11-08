@@ -8,6 +8,9 @@ import type {
 	Facets,
 	Health,
 	Me,
+	MemoryNote,
+	MemoryRevision,
+	MemoryScopeSummary,
 	ModelRequest,
 	Page,
 	OnlineSession,
@@ -281,6 +284,21 @@ export class PikaApi {
 
 	herderRun(id: string): Promise<RunDetail> {
 		return this.request(`herder/runs/${encodeURIComponent(id)}`);
+	}
+
+	/** Every memory scope, user scope first; owner only. */
+	memoryScopes(): Promise<{ scopes: MemoryScopeSummary[] }> {
+		return this.request("memory");
+	}
+
+	/** The scope's live notes in index order; owner only. */
+	memoryNotes(scope: string): Promise<{ notes: MemoryNote[] }> {
+		return this.request("memory/notes", { scope });
+	}
+
+	/** The note's saves and forgets, oldest first; owner only. */
+	memoryRevisions(id: string): Promise<{ revisions: MemoryRevision[] }> {
+		return this.request(`memory/notes/${encodeURIComponent(id)}/revisions`);
 	}
 
 	/** Sessions matching `q`, with their newest hits; the word being typed also matches as a prefix. One page. */

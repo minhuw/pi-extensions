@@ -282,6 +282,50 @@ export interface RunDetail {
 	steps: RunStep[];
 }
 
+/** A memory scope: the single user scope, or a project's. */
+export interface MemoryScope {
+	key: string;
+	kind: "user" | "project";
+	label: string;
+}
+
+/** A scope as `GET memory` lists it: its live notes and its last save or forget. */
+export interface MemoryScopeSummary extends MemoryScope {
+	noteCount: number;
+	updatedAt: string | null;
+}
+
+/** A memory note's current state; `deviceId` and `sessionId` are its last writer's. */
+export interface MemoryNote {
+	id: string;
+	scope: MemoryScope;
+	category: string;
+	title: string;
+	hook: string;
+	body: string;
+	provenance: string;
+	revision: number;
+	createdAt: string;
+	updatedAt: string;
+	deletedAt: string | null;
+	deviceId: string | null;
+	sessionId: string | null;
+}
+
+/** A note as one save or forget left it. */
+export interface MemoryRevision {
+	revision: number;
+	action: "save" | "forget";
+	category: string;
+	title: string;
+	hook: string;
+	body: string;
+	at: string;
+	deviceId: string | null;
+	sessionId: string | null;
+	reason: string | null;
+}
+
 export interface SearchHit {
 	sessionId: string;
 	sessionTitle: string;

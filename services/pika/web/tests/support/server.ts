@@ -9,6 +9,9 @@ import type {
 	DeviceRef,
 	Entry,
 	Facets,
+	MemoryNote,
+	MemoryRevision,
+	MemoryScopeSummary,
 	ModelRequest,
 	OnlineSession,
 	Pairing,
@@ -326,6 +329,15 @@ export function treeOf(sessions: readonly FakeSession[], id: string, limits = { 
 	return { rootId, nodes, ...(truncated ? { truncated: true } : {}) };
 }
 
+/** Stored agent memory, as the owner routes read it. */
+export interface FakeMemory {
+	scopes: MemoryScopeSummary[];
+	/** Notes of every scope, forgotten ones included, in index order. */
+	notes: MemoryNote[];
+	/** Each note's revisions, oldest first, by note id. */
+	revisions: Record<string, MemoryRevision[]>;
+}
+
 export function createFakeServer({
 	base = "/",
 	sessions = [],
@@ -353,6 +365,7 @@ export function createFakeServer({
 	traces,
 	tree = true,
 	trees,
+	memory = { scopes: [], notes: [], revisions: {} },
 }: {
 	base?: string;
 	sessions?: FakeSession[];
@@ -399,6 +412,7 @@ export function createFakeServer({
 	tree?: boolean;
 	/** Trees served as given instead of derived, by session id. */
 	trees?: Record<string, unknown>;
+	memory?: FakeMemory;
 }) {
 	const calls: string[] = [];
 	const byId = new Map(sessions.map((session) => [session.detail.id, session]));
@@ -917,6 +931,19 @@ export function createFakeServer({
 			if (parts.length === 2) return json(200, page(runs.map((run) => run.run), params, 50));
 			const run = runsById.get(parts[2]);
 			return run ? json(200, run) : json(404, { error: "not found" });
+		}
+		if (parts[0] === "memory" && method === "GET") {
+			if (parts.length === 1) return json(200, { scopes: memory.scopes });
+			if (parts[1] === "notes" && parts.length === 2) {
+				const scope = params.get("scope");
+				if (!scope) return json(400, { error: "bad_request", message: "scope is required" });
+				if (!memory.scopes.some((item) => item.key === scope)) return json(404, { error: "not_found" });
+				return json(200, { notes: memory.notes.filter((note) => note.scope.key === scope && note.deletedAt === null) });
+			}
+			if (parts[1] === "notes" && parts.length === 4 && parts[3] === "revisions") {
+				if (!memory.notes.some((note) => note.id === parts[2])) return json(404, { error: "not_found" });
+				return json(200, { revisions: memory.revisions[parts[2]] ?? [] });
+			}
 		}
 		if (parts[0] === "search") {
 			const q = (params.get("q") ?? "").trim().toLowerCase();

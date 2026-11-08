@@ -329,6 +329,9 @@ export function Layout({ children }: { children?: ReactNode }) {
 						<NavItem to="/devices" icon="device">
 							Devices
 						</NavItem>
+						<NavItem to="/memory" icon="memory">
+							Memory
+						</NavItem>
 						<div className={BAND_NAV_END}>
 							<BandSearch path="/search" label="Search every session" inputRef={searchRef} />
 							<NavItem to="/settings" icon="settings" compact>

@@ -262,6 +262,11 @@ export const Icons = {
 			<path d="m3 8.5 3.2 3L13 4.5" />
 		</Svg>
 	),
+	memory: (p: IconProps) => (
+		<Svg {...p}>
+			<path d="M4 2.5h8v11L8 10.5l-4 3z" />
+		</Svg>
+	),
 	sparkle: (p: IconProps) => (
 		<Svg {...p}>
 			<path d="M8 1.8 9.4 6.6 14.2 8 9.4 9.4 8 14.2 6.6 9.4 1.8 8l4.8-1.4z" />

@@ -11,6 +11,7 @@ import { DevicesPage } from "./pages/Devices";
 import { NotFoundPage } from "./pages/NotFound";
 import { HerderRunPage, HerderRunsPage } from "./pages/HerderRuns";
 import { LoginPage } from "./pages/Login";
+import { MemoryPage } from "./pages/Memory";
 import { SearchPage } from "./pages/Search";
 import { SessionListPage } from "./pages/SessionList";
 import { SettingsPage } from "./pages/Settings";
@@ -81,6 +82,7 @@ export function AppRoutes() {
 					<Route path="herder/:id" element={<LegacyRunRedirect />} />
 					<Route path="active" element={<ActiveSessionsPage />} />
 					<Route path="devices" element={<DevicesPage />} />
+					<Route path="memory" element={<MemoryPage />} />
 					<Route path="settings" element={<SettingsPage />} />
 					<Route path="search" element={<SearchPage />} />
 					<Route path="*" element={<NotFoundPage />} />
