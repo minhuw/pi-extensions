@@ -228,7 +228,8 @@ it("counts hops: user turns send 1, turns started by relay messages send one mor
 	expect(hops()).toEqual([1, 4, 4, 1, 1]);
 	expect(notes.last).toEqual({ type: "info", message: expect.stringMatching(/^Queued message msg-\d+ for pi session peer: /) });
 
-	// At 8 hops the next answer is rejected.
+	// At 8 hops the next answer is rejected. The fake server's welcome says maxHops 8, not the default 128, so the error
+	// text shows the server's limit.
 	callTool(a, "relay_send", { to: "peer", text: "ninth hop" });
 	relay.push(id, { id: "m-8", hops: 8, from: { kind: "session", sessionId: "peer", device: "desktop" } });
 	await waitFor(() => results(a, "relay_send").length === 5, 5_000, "the rejected answer");

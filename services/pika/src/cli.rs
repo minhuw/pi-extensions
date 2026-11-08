@@ -53,6 +53,9 @@ enum Command {
         /// Relay messages between pi sessions: on or off.
         #[arg(long, env = "PIKA_RELAY", default_value = "on", value_parser = parse_switch_on)]
         relay: bool,
+        /// Most hops a relay message may travel between sessions without the user.
+        #[arg(long, env = "PIKA_RELAY_MAX_HOPS", default_value_t = config::DEFAULT_MAX_HOPS, value_parser = clap::value_parser!(u64).range(1..))]
+        relay_max_hops: u64,
         /// Prices for Magpie calls that recorded no cost: a models.dev-format catalog URL or file, or off.
         #[arg(long, env = "PIKA_PRICES", default_value = crate::pricing::DEFAULT_SOURCE)]
         prices: String,
@@ -181,10 +184,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
             max_body,
             relay,
             prices,
+            relay_max_hops,
             relay_ttl_secs,
             relay_heartbeat_secs,
         } => {
-            let mut relay_config = RelayConfig { enabled: relay, ..RelayConfig::default() };
+            let mut relay_config = RelayConfig { enabled: relay, max_hops: relay_max_hops, ..RelayConfig::default() };
             if let Some(secs) = relay_ttl_secs {
                 relay_config.ttl = Duration::from_secs(secs);
             }
@@ -431,5 +435,16 @@ mod tests {
         assert!(matches!(cli.command, Command::Delete { what: DeleteAction::Session { ref id, yes: true } } if id == "abc"));
         let cli = Cli::try_parse_from(["pika", "delete", "project", "my widgets"]).unwrap();
         assert!(matches!(cli.command, Command::Delete { what: DeleteAction::Project { ref name, yes: false } } if name == "my widgets"));
+    }
+
+    #[test]
+    fn relay_max_hops_defaults_to_128_and_must_be_positive() {
+        let hops = |extra: &[&str]| match Cli::try_parse_from([&["pika", "serve"][..], extra].concat()) {
+            Ok(Cli { command: Command::Serve { relay_max_hops, .. }, .. }) => Some(relay_max_hops),
+            _ => None,
+        };
+        assert_eq!(hops(&[]), Some(128));
+        assert_eq!(hops(&["--relay-max-hops", "1000"]), Some(1000));
+        assert_eq!(hops(&["--relay-max-hops", "0"]), None);
     }
 }

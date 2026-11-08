@@ -9,8 +9,8 @@ export const MESSAGE_TYPE = "relay-message";
 export const NOTICE_TYPE = "relay-notice";
 export const RECEIVED_TYPE = "relay-received";
 
-/** The server rejects `hops` above this. */
-export const MAX_HOPS = 8;
+/** The server's default hop limit, used until its `welcome` gives `limits.maxHops`. */
+export const MAX_HOPS = 128;
 
 /**
  * Timings, mutable so tests can shorten them. `deadAfterMs` is the liveness limit of both sides;

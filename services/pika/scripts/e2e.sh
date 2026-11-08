@@ -141,7 +141,7 @@ url="http://127.0.0.1:$port$base_path"
 export PIKA_PASSWORD="e2e-$(node -e 'console.log(require("crypto").randomBytes(9).toString("hex"))')"
 # Test-only relay timings (docs/RELAY.md): undelivered messages expire after 6 s instead of 300, and the server pings
 # and re-checks tokens every 2 s instead of 20. The driver restarts the server with the same environment.
-export PIKA_RELAY_TTL_SECS=6 PIKA_RELAY_HEARTBEAT_SECS=2
+export PIKA_RELAY_TTL_SECS=6 PIKA_RELAY_HEARTBEAT_SECS=2 PIKA_RELAY_MAX_HOPS=8
 # Offline and deterministic: costs stay as recorded, without fetching the models.dev price catalog.
 export PIKA_PRICES=off
 data="$work/data"

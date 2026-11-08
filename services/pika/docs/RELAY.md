@@ -45,6 +45,7 @@ The server reads TTL and heartbeat from internal configuration so tests can shor
 ### Configuration and discovery
 
 - `PIKA_RELAY` = `on` (default) | `off`. When off, every relay route answers 404 `{ error: "relay_disabled" }` and the WebSocket upgrade is refused with that response.
+- `PIKA_RELAY_MAX_HOPS` = the hop limit, a positive integer, default 128.
 - `GET {base}/api/health` gains `features: string[]`, containing `"relay"` when relay is on. Older servers have no `features`; the extension treats that as "no relay".
 - Version 0.3.0.
 
@@ -71,7 +72,7 @@ The server reads TTL and heartbeat from internal configuration so tests can shor
 - `send`: `{ type: "send", clientId, to, text, urgent?: boolean, replyTo?: string, hops: number }`
   - `clientId` is the sender's correlation id (≤ 64 characters); `to` is a session id; `hops` is an integer ≥ 1.
   - The server answers `sent` with the same `clientId`: either `{ type: "sent", clientId, id, status: "delivered" | "queued", to: Target }`, where `queued` means the target is offline or has not acknowledged yet, or `{ type: "sent", clientId, status: "rejected", reason }`.
-  - **Rejection reasons, checked in this order:** `invalid` (empty text, bad id, bad hops), `self` (to its own session), `too_large` (text over 32 KiB, or a `message` frame over 64 KiB once JSON-encoded, which escaping control characters can cause; this applies to web sends too), `rate_limited` (per session or per device), `hop_limit` (`hops` > 8), `unknown_session` (`to` is neither online nor a session pika has recorded), `mailbox_full`.
+  - **Rejection reasons, checked in this order:** `invalid` (empty text, bad id, bad hops), `self` (to its own session), `too_large` (text over 32 KiB, or a `message` frame over 64 KiB once JSON-encoded, which escaping control characters can cause; this applies to web sends too), `rate_limited` (per session or per device), `hop_limit` (`hops` > the hop limit, 128 by default), `unknown_session` (`to` is neither online nor a session pika has recorded), `mailbox_full`.
   - A message to an online target is pushed at once; `sent` reports `delivered` only if the target's `ack` arrives within 2 s, otherwise `queued`.
 - `ack`: `{ type: "ack", id }` from the target after it delivered message `id`. Unknown or already-acknowledged ids are ignored.
 - `pong`: `{ type: "pong" }` in answer to `ping`. Any frame counts as liveness.
@@ -224,7 +225,7 @@ Register a message renderer for `relay-message` that shows the sender line and t
 
 ### Hops
 
-The extension tracks `runHops`. It resets to 0 at `before_agent_start` with `messageType: "user"`. Each delivered relay message raises it to `max(runHops, message.hops)`. Outgoing messages carry `hops = runHops + 1`, and `/relay send` from the user carries 1. The server rejects `hops > 8`, which stops agent-to-agent chains that run without the user.
+The extension tracks `runHops`. It resets to 0 at `before_agent_start` with `messageType: "user"`. Each delivered relay message raises it to `max(runHops, message.hops)`. Outgoing messages carry `hops = runHops + 1`, and `/relay send` from the user carries 1. The server rejects `hops` above its hop limit, 128 unless `PIKA_RELAY_MAX_HOPS` sets another, and advertises it as `welcome.limits.maxHops`, which the extension's `hop_limit` error text shows. This stops agent-to-agent chains that run without the user; the per-session and per-device send rates still slow a loop below the limit.
 
 ### Tools (registered in top-level sessions only)
 

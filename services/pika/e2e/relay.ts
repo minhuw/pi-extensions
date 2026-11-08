@@ -18,6 +18,7 @@ const REPO = join(import.meta.dirname, "..", "..", "..");
 const EXTENSIONS = ["extensions/pika/index.ts"].map((path) => join(REPO, path));
 const PROVIDER = "pika-e2e-relay";
 const MODEL = "mock-model";
+/** e2e.sh starts the server with PIKA_RELAY_MAX_HOPS=8, so the chain stays short. */
 const MAX_HOPS = 8;
 
 const QUESTION = "What is the build status?";

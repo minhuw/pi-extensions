@@ -272,7 +272,7 @@ async fn hello_is_answered_with_welcome_and_lists_the_session() {
     assert_eq!(
         welcome,
         json!({ "type": "welcome", "device": "laptop", "deviceName": "laptop", "serverVersion": env!("CARGO_PKG_VERSION"),
-            "limits": { "ttlSeconds": 300, "heartbeatSeconds": 20, "maxTextBytes": 32768, "maxHops": 8 } })
+            "limits": { "ttlSeconds": 300, "heartbeatSeconds": 20, "maxTextBytes": 32768, "maxHops": 128 } })
     );
     let items = sessions(&s).await;
     let item = &items[0];
@@ -578,11 +578,11 @@ async fn sends_are_rejected_in_order() {
         (frame("nobody", "x", json!("1")), "invalid"),
         (json!({ "type": "send", "clientId": "c", "to": "nobody", "text": "x" }), "invalid"),
         (json!({ "type": "send", "clientId": "c", "to": "nobody", "text": 5, "hops": 1 }), "invalid"),
-        (frame("sess-a", &big, json!(9)), "self"),
-        (frame("nobody", &big, json!(9)), "too_large"),
-        (frame("nobody", "x", json!(9)), "hop_limit"),
+        (frame("sess-a", &big, json!(129)), "self"),
+        (frame("nobody", &big, json!(129)), "too_large"),
+        (frame("nobody", "x", json!(129)), "hop_limit"),
         (frame("nobody", "x", json!(1)), "unknown_session"),
-        (frame(SESSION_ID, &exact, json!(8)), "queued"),
+        (frame(SESSION_ID, &exact, json!(128)), "queued"),
         (frame("nobody", "x", json!(1)), "unknown_session"),
         (frame(SESSION_ID, "x", json!(1)), "mailbox_full"),
     ];
@@ -623,7 +623,7 @@ async fn each_session_may_send_60_a_minute() {
     }
     assert_eq!(a.relay(send("c60", SESSION_ID, "x")).await["reason"], "rate_limited");
     let mut over = send("c61", "nobody", "x");
-    over["hops"] = json!(9);
+    over["hops"] = json!(129);
     assert_eq!(a.relay(over).await["reason"], "rate_limited", "the rate is checked before the hops");
     assert_eq!(a.relay(send("c62", "sess-a", "x")).await["reason"], "self", "self is checked first");
     // Another session has its own budget.
@@ -1422,13 +1422,16 @@ async fn a_message_frame_over_64_kib_is_too_large() {
     let web = http(&s.app, post("/api/v1/relay/messages", json!({ "to": "sess-b", "text": controls }), None)).await;
     assert_eq!((web.status, web.json()), (StatusCode::BAD_REQUEST, json!({ "error": "too_large" })));
     // A `send` frame within 64 KiB whose `message` frame, with the sender's details, is over it.
-    let controls = escaped_text((64 * 1024 - send("c1", "sess-b", "").to_string().len()) / 6, 0);
+    // Sized for the longest frame below, the one with `hops` over the limit.
+    let mut longest = send("c1", "sess-b", "");
+    longest["hops"] = json!(129);
+    let controls = escaped_text((64 * 1024 - longest.to_string().len()) / 6, 0);
     assert!(send("c1", "sess-b", &controls).to_string().len() <= 64 * 1024);
     assert_eq!(a.relay(send("c1", "sess-b", &controls)).await["reason"], "too_large");
     // In the same place in the order: after `self`, before the hops and the target.
     assert_eq!(a.relay(send("c2", "sess-a", &controls)).await["reason"], "self");
     let mut far = send("c3", "nobody", &controls);
-    far["hops"] = json!(9);
+    far["hops"] = json!(129);
     assert_eq!(a.relay(far).await["reason"], "too_large");
     let events = events(&s, "").await;
     assert_eq!(events.len(), 4);

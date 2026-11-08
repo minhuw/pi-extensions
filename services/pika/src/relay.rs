@@ -2038,7 +2038,7 @@ mod tests {
         assert!(c.enabled);
         assert_eq!((c.ttl.as_secs(), c.heartbeat.as_secs(), c.dead_after.as_secs()), (300, 20, 45));
         assert_eq!((c.hello_timeout.as_secs(), c.ack_wait.as_secs(), c.write_timeout.as_secs()), (10, 2, 45));
-        assert_eq!((c.max_text_bytes, c.max_frame_bytes, c.max_hops), (32 * 1024, 64 * 1024, 8));
+        assert_eq!((c.max_text_bytes, c.max_frame_bytes, c.max_hops), (32 * 1024, 64 * 1024, 128));
         assert_eq!((c.sends_per_minute, c.sends_per_minute_per_device, c.max_outgoing_bytes), (60, 300, 8 << 20));
         assert_eq!((c.max_queued_per_target, c.max_queued), (100, 10_000));
         assert_eq!((c.max_online, c.max_connections_per_device, c.event_ring), (1_000, 64, 500));
