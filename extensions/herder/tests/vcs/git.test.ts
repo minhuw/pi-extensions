@@ -5,12 +5,18 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { TRAILER_FINGERPRINT, TRAILER_STEP } from "../../src/config.ts";
 import type { Vcs } from "../../src/types.ts";
-import { checkGitVersion, hasHerderTrailer, openVcs, RefConflictError, removeWorktrees, repositoryName, requireGit } from "../../src/vcs/git.ts";
+import {
+	checkGitVersion, hasHerderTrailer, openVcs, projectNameFromConfig, RefConflictError, removeWorktrees, repositoryName, requireGit, savedProjectName,
+} from "../../src/vcs/git.ts";
 import { type GitFixture, withGitFixture } from "../support/git-fixture.ts";
 
 // The cases pika's projectFromCommonDir tests share (extensions/pika/tests/repository.test.ts): a run's `repo` is a session's project.
 const PROJECT_NAMES = JSON.parse(readFileSync(new URL("../../../../services/pika/docs/project-names.json", import.meta.url), "utf8")) as {
 	cases: { commonDir: string; expected: string | null; case: string }[];
+};
+// The cases pika's parseProjectConfig tests share: the name a user gave a repository with `/pika project`.
+const PROJECT_CONFIGS = JSON.parse(readFileSync(new URL("../../../../services/pika/docs/project-config.json", import.meta.url), "utf8")) as {
+	cases: { text: string; project: string | null; case: string }[];
 };
 
 // The Vcs inherits process.env; isolate it from the developer's global and system git configuration.
@@ -110,6 +116,27 @@ describe("openVcs", () => {
 				for (const { commonDir, expected, case: label } of PROJECT_NAMES.cases) {
 					expect(repositoryName(commonDir), `${JSON.stringify(commonDir)} (${label})`).toBe(expected ?? undefined);
 				}
+			} finally {
+				rmSync(linked, { recursive: true, force: true });
+			}
+		}));
+
+	it("reads the name saved in pika's project.json, from the main checkout and its linked worktrees", () =>
+		withGitFixture((fixture) => {
+			for (const { text, project, case: label } of PROJECT_CONFIGS.cases) {
+				expect(projectNameFromConfig(text), label).toBe(project ?? undefined);
+			}
+			const linked = realpathSync(mkdtempSync(join(tmpdir(), "herder-linked-")));
+			try {
+				fixture.git("worktree", "add", "-q", "-b", "side", join(linked, "wt"));
+				const common = openVcs(join(linked, "wt")).commonDir();
+				expect(savedProjectName(common)).toBeUndefined();
+				mkdirSync(join(fixture.dir, ".pi", "pika"), { recursive: true });
+				writeFileSync(join(fixture.dir, ".pi", "pika", "project.json"), JSON.stringify({ remote: null, project: "named" }));
+				expect(savedProjectName(common)).toBe("named");
+				expect(savedProjectName(openVcs(fixture.dir).commonDir())).toBe("named");
+				// A bare repository or a submodule has no main checkout to keep it in.
+				expect(savedProjectName(join(fixture.dir, "server.git"))).toBeUndefined();
 			} finally {
 				rmSync(linked, { recursive: true, force: true });
 			}

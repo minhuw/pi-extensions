@@ -161,9 +161,33 @@ export const hasHerderTrailer = (message: string) => /^herder-[\w-]*\s*:/im.test
  */
 export function repositoryName(commonDir: string): string | undefined {
 	const base = win32.basename(commonDir);
-	const name = base === ".git" ? win32.basename(win32.dirname(commonDir)) : base.replace(/\.git$/, "");
+	return validName(base === ".git" ? win32.basename(win32.dirname(commonDir)) : base.replace(/\.git$/, ""));
+}
+
+function validName(name: string): string | undefined {
 	if (!name.trim() || name === "." || name === ".." || /[/\\\u0000-\u001f\u007f-\u009f]/u.test(name) || Buffer.byteLength(name, "utf8") > 255) return undefined;
 	return name;
+}
+
+/**
+ * The `project` of a pika `project.json` (a JSON object, optionally after a byte order mark), when it is a valid name.
+ * pika's `parseProjectConfig` reads it the same way; `services/pika/docs/project-config.json` holds the shared cases.
+ */
+export function projectNameFromConfig(text: string): string | undefined {
+	let value: unknown;
+	try { value = JSON.parse(text.replace(/^\uFEFF/, "")); } catch { return undefined; }
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const project = (value as { project?: unknown }).project;
+	return typeof project === "string" ? validName(project) : undefined;
+}
+
+/**
+ * The project name the user gave the repository in pika (`/pika project`), saved in the main checkout's
+ * `.pi/pika/project.json`; undefined without one, and for a bare repository or a submodule, which have no main checkout.
+ */
+export function savedProjectName(commonDir: string): string | undefined {
+	if (win32.basename(commonDir) !== ".git") return undefined;
+	try { return projectNameFromConfig(readFileSync(join(dirname(commonDir), ".pi", "pika", "project.json"), "utf8")); } catch { return undefined; }
 }
 
 /** Removes every Herder worktree and stale registration under `dir` (a run's `<common>/herder/worktrees/<runId>/`). */

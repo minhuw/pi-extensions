@@ -375,6 +375,17 @@ export class Uploader {
 		});
 	}
 
+	/** Replaces an open stream's `meta`; the stream's next batch carries it, and the server keeps the newest. */
+	setMeta(key: string, meta: Record<string, unknown>): Promise<void> {
+		return this.task(async () => {
+			const stream = this.streams.get(key);
+			if (!stream) return;
+			stream.state.meta = meta;
+			await this.store.saveStream(stream.state);
+			this.poke();
+		});
+	}
+
 	closeStream(key: string): Promise<void> {
 		return this.task(async () => {
 			const stream = this.streams.get(key);

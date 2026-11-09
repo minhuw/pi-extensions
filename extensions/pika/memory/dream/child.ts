@@ -1,10 +1,10 @@
 import { realpathSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import {
 	createAgentSession, DefaultResourceLoader, type ExtensionFactory, type InlineExtension, SessionManager, SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { ensureIgnoredDir } from "../../project.ts";
 import { DREAM_PROMPT } from "./prompt.ts";
 import { type DreamChild, dreamLimits, type SpawnOptions } from "./run.ts";
 
@@ -22,15 +22,6 @@ const KEPT_SETTINGS: (keyof Settings)[] = ["transport", "retry", "compaction", "
 export const projectPikaDir = (cwd: string) => join(cwd, ".pi", "pika");
 /** Where dream sessions are kept: in the project, away from the user's sessions, so `/resume` does not list them. */
 export const dreamSessionDir = (cwd: string) => join(projectPikaDir(cwd), "dreams");
-
-/** Creates `<cwd>/.pi/pika/` with a `.gitignore` of `*`, never touching the project's own `.gitignore` or an existing one. */
-async function ensureProjectPikaDir(cwd: string): Promise<void> {
-	const dir = projectPikaDir(cwd);
-	await mkdir(dir, { recursive: true });
-	await writeFile(join(dir, ".gitignore"), "*\n", { flag: "wx" }).catch((error: NodeJS.ErrnoException) => {
-		if (error.code !== "EEXIST") throw error;
-	});
-}
 
 const within = (dir: string, path: string) => {
 	const rest = relative(dir, path);
@@ -92,7 +83,7 @@ export async function spawnDreamChild(options: SpawnOptions): Promise<DreamChild
 	});
 	await resourceLoader.reload();
 	// A session kept only in memory (`--no-session`) gets a child that writes nothing either.
-	if (options.persist) await ensureProjectPikaDir(cwd);
+	if (options.persist) await ensureIgnoredDir(projectPikaDir(cwd));
 	const parent = options.parentSessionFile ? { parentSession: options.parentSessionFile } : undefined;
 	const sessionManager = options.persist ? SessionManager.create(cwd, dreamSessionDir(cwd), parent) : SessionManager.inMemory(cwd, parent);
 	const { session } = await createAgentSession({

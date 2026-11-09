@@ -141,9 +141,25 @@ If pika is loaded twice in one session, for example from the package and again t
 
 Each session is filed under a project: the name of the git repository holding its working directory, wherever Pi runs in it. pika asks git for the repository's common directory (`git rev-parse --git-common-dir`); for a `.git` directory the name is the folder holding it, the main checkout's folder, so a session in a subdirectory, in a linked `git worktree`, in a Herder step's worktree, or in a Subagents `isolation: "worktree"` child is filed under the same name as one at the repository's root. A bare repository is named after its directory without one trailing `.git`, a submodule after its directory under `.git/modules`. Both `/` and `\` separate folders. A name that is blank, `.` or `..`, holds a control character or path separator, or exceeds 255 bytes is no name; [`project-names.json`](../../services/pika/docs/project-names.json) lists the cases, which Herder's `repo` shares. git older than 2.31, which lacks `--path-format=absolute`, is asked again without it, within the same 2 s. Outside git, or when git is missing or does not answer within 2 s, the server keeps the basename of the working directory. For older uploads without repository metadata, the server also recognizes `<repo>/.git/superagent/worktrees/<ticket>` and `<repo>/.git/herder/worktrees/<run>/<step>` (including their subdirectories) and uses `<repo>` instead of the ticket or step folder. Existing sessions in these layouts are corrected once when the updated server opens its database, without reuploading or reindexing. Other old worktree paths still need client metadata to identify their repository.
 
-pika also uploads the repository's web URL, which the web UI links to from the session page. It comes from the `origin` remote, or the only remote when there is no `origin`: scp-like `git@host:path`, `ssh://`, and `git://` URLs become `https://host/path` without the port, and `https://` and `http://` URLs keep their scheme and port. Credentials (a user, password, or token before the `@`), query, fragment, a trailing `/`, and `.git` are removed. Local paths, `file://` URLs, hosts other than plain names or IPv4 addresses, and URLs with whitespace or control characters give no URL.
+pika also uploads the repository's web URL, which the web UI links to from the session page. It comes from the `origin` remote, or the only remote when there is no `origin`, after git's `url.<base>.insteadOf` rewriting: scp-like `git@host:path`, `ssh://`, and `git://` URLs become `https://host/path` without the port, and `https://` and `http://` URLs keep their scheme and port. Credentials (a user, password, or token before the `@`), query, fragment, a trailing `/`, and `.git` are removed. Local paths, `file://` URLs, hosts other than plain names or IPv4 addresses, and URLs with whitespace or control characters give no URL.
 
 git runs once per working directory and process, without prompts and without the `GIT_*` environment, so `GIT_DIR` cannot point it at another repository; when it does not answer within 2 s, the next lookup asks it again. The session's stream opens once git answered, so its first upload already carries both fields; lines written meanwhile are uploaded from the session file. Both travel in the session stream's `meta` as `project` and `repository`. The [exclude list](#exclude-list) still applies to the working directory.
+
+#### Choosing a repository's identity
+
+The rule above leaves some repositories to guesswork: one with several remotes and none named `origin`, where adding a remote would change its URL, and one with no remote that has a web URL, which the server files under its folder name on this device, so two such repositories with the same folder name share a project. For those, pika asks once and saves the answer in the main checkout's `.pi/pika/project.json`; `.pi/pika/` has its own `.gitignore` of `*`, so git ignores it, and each clone keeps its own answer. Linked worktrees, Herder steps, and Subagents worktree children read the main checkout's file. A bare repository or a submodule has no main checkout and is never asked.
+
+```json
+{ "remote": "upstream" }
+{ "remote": null, "project": "tool" }
+```
+
+- `remote` names the remote whose URL identifies the repository, instead of `origin` or the only remote. `null` gives it no URL, so it is `project` on this device whatever remotes are added later. Without the field, the rule above picks the remote.
+- `project` is the name pika files the repository under, instead of its main checkout's folder. Herder's `herder:run` `repo` uses it too, so `recall_herder` finds the runs under the same project. [`project-config.json`](../../services/pika/docs/project-config.json) lists the cases both read.
+
+A top-level TUI session that pika uploads asks when it starts in such a repository with no `project.json`, or when the saved remote is gone or has no web URL: a list of the remotes with web URLs and "None of these: give the project a name", or, without such remotes, a name with the folder's name prefilled (Enter keeps it). Picking a remote keeps a saved name; giving a name pins the repository to no remote. The question opens once git answered, without holding up the session, and once per repository at a time in a pi process. Dismissing it writes nothing: the rule's identity applies, and pika asks again in the next pi process. RPC, print, and JSON sessions, child sessions, and sessions pika does not upload never ask. `/pika project` shows how pika files the current repository and, with a UI, asks again, also when nothing is open.
+
+An answer applies at once: the session's next upload carries the new `project` and `repository`, and memory tools and dreams use them. A memory index the session already pinned stays until a new session. pika reads `project.json` at every lookup, so an answer given in one pi process applies in the others too, and hand edits apply at once; an invalid field is ignored. Sessions already uploaded and notes already saved stay under the identity they had: nothing moves to the new one. Before you give a name, make sure no other repository on this device uses it, as pika cannot check.
 
 ### Delivery and the offline spool
 
@@ -192,7 +208,7 @@ Do not share one agentDir between machines, for example over a network file syst
 - the last successful upload and the last error;
 - any stream that stopped on a conflict or an oversized line, uploads stopped by a 401, and parked items with their directory.
 
-When no URL and token are configured, it suggests `/pika login`. `/pika login [url]` and `/pika logout` are described under [Log in](#log-in).
+When no URL and token are configured, it suggests `/pika login`. `/pika login [url]` and `/pika logout` are described under [Log in](#log-in), and `/pika project` under [Choosing a repository's identity](#choosing-a-repositorys-identity).
 
 ### Child-session hook
 
@@ -357,7 +373,7 @@ memory lets the agent keep durable notes on the pika server, shared by every mac
 ### Scopes
 
 - **User:** one scope for you, in every project and on every machine.
-- **Project:** the git repository of the session's working directory, as pika [names it](#projects-and-repositories). Every call sends both its `project` and `repository`; the server files notes under the repository's URL, so clones on different machines share them, or, without a remote, under the project name and this device. Outside git there is no project scope: `scope: "project"` saves fail and say so, and the user scope still works.
+- **Project:** the git repository of the session's working directory, as pika [names it](#projects-and-repositories). Every call sends both its `project` and `repository`; the server files notes under the repository's URL, so clones on different machines share them, or, without a remote, under the project name and this device. A repository whose remotes leave that open gets its identity from [`/pika project`](#choosing-a-repositorys-identity). Outside git there is no project scope: `scope: "project"` saves fail and say so, and the user scope still works.
 
 ### Tools
 

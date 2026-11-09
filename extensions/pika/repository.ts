@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { realpath } from "node:fs/promises";
-import { resolve as resolvePath, win32 } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { dirname, join, resolve as resolvePath, win32 } from "node:path";
 
 /** What a session's cwd says about its git repository; both fields are absent outside git. */
 export interface RepositoryInfo {
@@ -107,18 +107,107 @@ export function normalizeRemoteUrl(raw: string): string | undefined {
 	return Buffer.byteLength(url) <= MAX_URL_BYTES ? url : undefined;
 }
 
-/** The URL of `origin`, else of the only remote, from `git config -z --get-regexp` output. */
-export function pickRemoteUrl(output: string): string | undefined {
+/** A git remote; `url` is its browsable URL after git's `insteadOf` rewriting, absent for a local path or an odd URL. */
+export interface Remote { name: string; url?: string }
+
+/**
+ * The remotes in git's config order, from `git config -z --get-regexp '^(remote\..*\.url|url\..*\.insteadof)$'` output.
+ * Each remote's first URL counts, rewritten by the `url.<base>.insteadOf` with the longest matching prefix, as git does.
+ */
+export function listRemotes(output: string): Remote[] {
 	const urls = new Map<string, string>();
+	const rewrites: { prefix: string; base: string }[] = [];
 	for (const record of output.split("\0")) {
 		const newline = record.indexOf("\n");
 		if (newline < 0) continue;
 		const key = record.slice(0, newline);
-		const match = /^remote\.(.+)\.url$/i.exec(key);
-		if (match && !urls.has(match[1]!)) urls.set(match[1]!, record.slice(newline + 1));
+		const value = record.slice(newline + 1);
+		const remote = /^remote\.(.+)\.url$/i.exec(key);
+		if (remote) {
+			if (!urls.has(remote[1]!)) urls.set(remote[1]!, value);
+			continue;
+		}
+		const rewrite = /^url\.(.+)\.insteadof$/i.exec(key);
+		if (rewrite && value) rewrites.push({ prefix: value, base: rewrite[1]! });
 	}
-	if (urls.has("origin")) return urls.get("origin");
-	return urls.size === 1 ? [...urls.values()][0] : undefined;
+	const expand = (url: string) => {
+		let best: { prefix: string; base: string } | undefined;
+		for (const rule of rewrites) if (url.startsWith(rule.prefix) && rule.prefix.length > (best?.prefix.length ?? -1)) best = rule;
+		return best ? best.base + url.slice(best.prefix.length) : url;
+	};
+	return [...urls].map(([name, raw]) => {
+		const url = normalizeRemoteUrl(expand(raw));
+		return url ? { name, url } : { name };
+	});
+}
+
+/** Where a repository keeps its saved identity, relative to its main checkout; `/pika project` writes it. */
+export const PROJECT_CONFIG = join(".pi", "pika", "project.json");
+
+/**
+ * A repository's saved identity. `remote` names the remote whose URL identifies it; null pins it to no remote, so it
+ * stays `project` on this device whatever remotes come later; absent leaves the remote to the rule (`origin`, else the
+ * only remote). `project` is the name pika files it under, instead of the main checkout's folder.
+ */
+export interface ProjectConfig { remote?: string | null; project?: string }
+
+/**
+ * The identity a `project.json` holds, or undefined when it is no JSON object; invalid fields are left out. Herder's
+ * `projectNameFromConfig` reads `project` the same way; `services/pika/docs/project-config.json` holds the shared cases.
+ */
+export function parseProjectConfig(text: string): ProjectConfig | undefined {
+	let value: unknown;
+	try { value = JSON.parse(text.replace(/^\uFEFF/, "")); } catch { return undefined; }
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const { remote, project } = value as { remote?: unknown; project?: unknown };
+	const name = typeof project === "string" ? validProjectName(project) : undefined;
+	return {
+		...(remote === null ? { remote: null } : typeof remote === "string" && remote && !UNSAFE.test(remote) ? { remote } : {}),
+		...(name ? { project: name } : {}),
+	};
+}
+
+/** The main checkout's `project.json`, if it holds a JSON object. */
+async function readProjectConfig(checkout: string): Promise<ProjectConfig | undefined> {
+	try { return parseProjectConfig(await readFile(join(checkout, PROJECT_CONFIG), "utf8")); } catch { return undefined; }
+}
+
+/**
+ * Why pika asks the user for a repository's identity: several remotes and none named `origin` (`ambiguous`), no remote
+ * with a web URL (`unnamed`), or a saved remote that is gone or has none (`stale`).
+ */
+export type ProjectQuestion = "ambiguous" | "unnamed" | "stale";
+
+/** What git says about a repository, before its saved identity applies. */
+export interface RepositoryFacts {
+	/** The name from git's common dir (`projectFromCommonDir`); absent outside git. */
+	folder?: string;
+	/** The main checkout, which holds `project.json`; absent for a bare repository or a submodule. */
+	checkout?: string;
+	remotes: Remote[];
+}
+
+/**
+ * The repository's identity from git and its saved configuration. A saved `remote` gives its URL while it has one; a
+ * saved null gives none; otherwise `origin` gives it, else the only remote. The saved `project` renames it. Only a
+ * repository with a main checkout, which can hold `project.json`, has a question: a saved remote that is gone or has
+ * no URL (`stale`), or, with no saved remote, no URL from the rule while some remote has one (`ambiguous`) or while
+ * none has one and no name is saved (`unnamed`). Until it is answered, the rule's identity applies.
+ */
+export function decideRepository(facts: RepositoryFacts, config: ProjectConfig | undefined): { info: RepositoryInfo; question?: ProjectQuestion } {
+	if (!facts.folder) return { info: {} };
+	const saved = typeof config?.remote === "string" ? facts.remotes.find((remote) => remote.name === config.remote && remote.url) : undefined;
+	const automatic = facts.remotes.find((remote) => remote.name === "origin") ?? (facts.remotes.length === 1 ? facts.remotes[0] : undefined);
+	const url = config?.remote === null ? undefined : (saved ?? automatic)?.url;
+	const info: RepositoryInfo = { project: config?.project ?? facts.folder, ...(url ? { repository: url } : {}) };
+	if (!facts.checkout) return { info };
+	let question: ProjectQuestion | undefined;
+	if (typeof config?.remote === "string" && !saved) question = "stale";
+	else if (config?.remote === undefined && !url) {
+		if (facts.remotes.some((remote) => remote.url)) question = "ambiguous";
+		else if (!config?.project) question = "unnamed";
+	}
+	return question ? { info, question } : { info };
 }
 
 /**
@@ -136,42 +225,62 @@ async function commonDir(cwd: string): Promise<{ dir?: string; answered: boolean
 	return { dir: dir ? resolvePath(cwd, dir) : undefined, answered: relative.answered };
 }
 
-/** The repository of `cwd`; `final` is false when git did not answer in time, so the result may be incomplete. */
-async function resolve(cwd: string): Promise<{ info: RepositoryInfo; final: boolean }> {
+/** What git says about `cwd`'s repository; `final` is false when git did not answer in time, so it may be incomplete. */
+async function resolve(cwd: string): Promise<{ facts: RepositoryFacts; final: boolean }> {
 	try {
-		const [common, remotes] = await Promise.all([
+		const [common, config] = await Promise.all([
 			commonDir(cwd),
-			git(cwd, ["config", "-z", "--get-regexp", "^remote\\..*\\.url$"]),
+			git(cwd, ["config", "-z", "--get-regexp", "^(remote\\..*\\.url|url\\..*\\.insteadof)$"]),
 		]);
 		const { dir } = common;
-		if (!dir) return { info: {}, final: common.answered };
-		const project = projectFromCommonDir(await realpath(dir).catch(() => dir));
-		if (!project) return { info: {}, final: true };
-		const remote = remotes.stdout === undefined ? undefined : pickRemoteUrl(remotes.stdout);
-		const repository = remote === undefined ? undefined : normalizeRemoteUrl(remote);
-		return { info: { project, ...(repository ? { repository } : {}) }, final: remotes.answered };
+		if (!dir) return { facts: { remotes: [] }, final: common.answered };
+		const real = await realpath(dir).catch(() => dir);
+		const folder = projectFromCommonDir(real);
+		if (!folder) return { facts: { remotes: [] }, final: true };
+		const checkout = win32.basename(real) === ".git" ? dirname(real) : undefined;
+		const remotes = config.stdout === undefined ? [] : listRemotes(config.stdout);
+		return { facts: { folder, ...(checkout ? { checkout } : {}), remotes }, final: config.answered };
 	} catch {
-		return { info: {}, final: false };
+		return { facts: { remotes: [] }, final: false };
 	}
 }
 
-const cache = new Map<string, Promise<RepositoryInfo>>();
+const cache = new Map<string, Promise<RepositoryFacts>>();
 
-/**
- * The repository of `cwd`, resolved with git once per cwd in this process; concurrent calls share one
- * resolution. It never rejects, and settles within about `GIT_TIMEOUT_MS`; an empty object means no
- * repository. A resolution that git did not answer in time, as when it stalls, is not kept: the next
- * call resolves again.
- */
-export function resolveRepository(cwd: string): Promise<RepositoryInfo> {
+/** git's answer for `cwd`, asked once per cwd in this process; one that git did not give in time is asked again. */
+function facts(cwd: string): Promise<RepositoryFacts> {
 	let pending = cache.get(cwd);
 	if (!pending) {
-		const resolving: Promise<RepositoryInfo> = resolve(cwd).then(({ info, final }) => {
+		const resolving: Promise<RepositoryFacts> = resolve(cwd).then(({ facts, final }) => {
 			if (!final && cache.get(cwd) === resolving) cache.delete(cwd);
-			return info;
+			return facts;
 		});
 		pending = resolving;
 		cache.set(cwd, pending);
 	}
 	return pending;
+}
+
+/** `cwd`'s repository: git's facts, the saved identity, the identity they give, and the question it leaves open. */
+export interface RepositoryState extends RepositoryFacts {
+	info: RepositoryInfo;
+	config?: ProjectConfig;
+	question?: ProjectQuestion;
+}
+
+/** The repository of `cwd` with everything `/pika project` needs; never rejects. */
+export async function inspectRepository(cwd: string): Promise<RepositoryState> {
+	const known = await facts(cwd);
+	const config = known.checkout ? await readProjectConfig(known.checkout) : undefined;
+	return { ...known, ...(config ? { config } : {}), ...decideRepository(known, config) };
+}
+
+/**
+ * The repository of `cwd`. git runs once per cwd in this process, and concurrent calls share it; the saved identity is
+ * read on every call, so an answer given in any process applies at once. It never rejects, and settles within about
+ * `GIT_TIMEOUT_MS`; an empty object means no repository. An answer git did not give in time, as when it stalls, is not
+ * kept: the next call asks again.
+ */
+export async function resolveRepository(cwd: string): Promise<RepositoryInfo> {
+	return (await inspectRepository(cwd)).info;
 }

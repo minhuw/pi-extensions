@@ -9,7 +9,7 @@ import { ACTIVITY_EVENT, ACTIVITY_REQUEST_EVENT, LOCK_HEARTBEAT_MS, LOCK_STALE_M
 import { acquireLock, type LockOptions, type RunLock } from "../run/lock.ts";
 import { activeRun, listRuns, openRun, type RunStore } from "../run/store.ts";
 import type { AgentRunner, Vcs } from "../types.ts";
-import { openVcs, repositoryName } from "../vcs/git.ts";
+import { openVcs, repositoryName, savedProjectName } from "../vcs/git.ts";
 import { ActivityBoard } from "./activity.ts";
 import { BackgroundLaunch, followUpText } from "./background.ts";
 import { confirmLong } from "./confirm.ts";
@@ -73,9 +73,15 @@ export function requireApproved(held: Held): RunState {
 	return state;
 }
 
-/** The repository's name from its git common dir; else the top level's basename, else that of the journaled path. */
+/**
+ * The repository's name, as pika files its sessions: the name saved with `/pika project`, else the one from its git
+ * common dir; else the top level's basename, else that of the journaled path.
+ */
 function repoName(vcs: Vcs, run: RunStore): string {
-	try { return repositoryName(vcs.commonDir()) ?? basename(vcs.topLevel()); } catch { return basename(run.state().repo ?? ""); }
+	try {
+		const common = vcs.commonDir();
+		return savedProjectName(common) ?? repositoryName(common) ?? basename(vcs.topLevel());
+	} catch { return basename(run.state().repo ?? ""); }
 }
 
 export const busy = (held: Held) => Boolean(held.launch || held.launching || held.ops.size);

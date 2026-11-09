@@ -571,12 +571,13 @@ describe("/pika", () => {
 		const ui = new ScriptedUI();
 		const h = await session(ui);
 		try {
-			for (const text of ["/pika bogus", "/pika status now", "/pika logout now", "/pika login a b"]) {
+			for (const text of ["/pika bogus", "/pika status now", "/pika logout now", "/pika login a b", "/pika project x"]) {
 				await h.session.prompt(text);
-				expect(ui.last).toEqual({ type: "error", message: "Usage: /pika [status|login [url]|logout]" });
+				expect(ui.last).toEqual({ type: "error", message: "Usage: /pika [status|login [url]|logout|project]" });
 			}
 			const command = h.session.extensionRunner.getCommand("pika")!;
 			expect(await command.getArgumentCompletions!("lo")).toEqual([{ value: "login", label: "login" }, { value: "logout", label: "logout" }]);
+			expect(await command.getArgumentCompletions!("p")).toEqual([{ value: "project", label: "project" }]);
 			expect(await command.getArgumentCompletions!("x")).toBeNull();
 			expect(await command.getArgumentCompletions!("logout")).toBeNull();
 		} finally { await h.shutdown(); }

@@ -8,7 +8,10 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { credentialsRegistry } from "../credentials.ts";
 import pikaExtension, { CHILD_SESSION_HOOKS, type ChildSessionHook } from "../index.ts";
-import { normalizeRemoteUrl, pickRemoteUrl, projectFromCommonDir, resolveRepository, validProjectName } from "../repository.ts";
+import {
+	decideRepository, inspectRepository, listRemotes, normalizeRemoteUrl, parseProjectConfig, PROJECT_CONFIG, projectFromCommonDir, type RepositoryFacts,
+	resolveRepository, validProjectName,
+} from "../repository.ts";
 import { MockIngest } from "./support/ingest-server.ts";
 import { readText, startSession, waitFor, Workspace } from "./support/runtime.ts";
 
@@ -90,13 +93,69 @@ describe("repository names", () => {
 		expect(validProjectName("é".repeat(127))).toBe("é".repeat(127));
 	});
 
-	it("picks origin, else the only remote", () => {
-		const record = (name: string, url: string) => `remote.${name}.url\n${url}\0`;
-		expect(pickRemoteUrl(record("upstream", "u") + record("origin", "o"))).toBe("o");
-		expect(pickRemoteUrl(record("fork.with.dots", "f"))).toBe("f");
-		expect(pickRemoteUrl(record("a", "1") + record("b", "2"))).toBeUndefined();
-		expect(pickRemoteUrl(record("origin", "first") + record("origin", "second"))).toBe("first");
-		expect(pickRemoteUrl("")).toBeUndefined();
+	it("lists remotes in config order with their first URL, rewritten by insteadOf as git rewrites it", () => {
+		const record = (key: string, value: string) => `${key}\n${value}\0`;
+		const output = record("remote.zeta.url", "gh:me/zeta") + record("remote.fork.with.dots.url", "git@github.com:me/f.git")
+			+ record("remote.zeta.url", "https://example.com/second") + record("remote.local.url", "/srv/git/x.git")
+			+ record("url.https://github.com/.insteadof", "gh:") + record("url.https://gitlab.com/.insteadof", "gh:me/z") + record("url.ignored.insteadof", "");
+		expect(listRemotes(output)).toEqual([
+			// The longest matching prefix wins, also when another rule comes first.
+			{ name: "zeta", url: "https://gitlab.com/eta" },
+			{ name: "fork.with.dots", url: "https://github.com/me/f" },
+			{ name: "local" },
+		]);
+		expect(listRemotes("")).toEqual([]);
+	});
+});
+
+const PROJECT_CONFIGS = JSON.parse(readFileSync(new URL("../../../services/pika/docs/project-config.json", import.meta.url), "utf8")) as {
+	cases: { text: string; project: string | null; case: string }[];
+};
+
+describe("project.json", () => {
+	it.each(PROJECT_CONFIGS.cases)("$case", ({ text, project }) => {
+		expect(parseProjectConfig(text)?.project).toBe(project ?? undefined);
+	});
+
+	it("keeps a remote name or null and drops anything else", () => {
+		expect(parseProjectConfig('{"remote":"fork"}')).toEqual({ remote: "fork" });
+		expect(parseProjectConfig('{"remote":null}')).toEqual({ remote: null });
+		for (const remote of ['""', "5", '"a b"', "false"]) expect(parseProjectConfig(`{"remote":${remote}}`)).toEqual({});
+		expect(parseProjectConfig("[]")).toBeUndefined();
+	});
+});
+
+describe("decideRepository", () => {
+	const facts = (...remotes: [string, string?][]): RepositoryFacts =>
+		({ folder: "app", checkout: "/code/app", remotes: remotes.map(([name, url]) => url ? { name, url } : { name }) });
+	const A = "https://github.com/me/a";
+	const B = "https://github.com/me/b";
+
+	it.each([
+		{ case: "origin", facts: facts(["upstream", A], ["origin", B]), config: undefined, info: { project: "app", repository: B } },
+		{ case: "the only remote", facts: facts(["fork", A]), config: undefined, info: { project: "app", repository: A } },
+		{ case: "several remotes, none origin", facts: facts(["a", A], ["b", B]), config: undefined, info: { project: "app" }, question: "ambiguous" },
+		{ case: "an origin without a web URL beside one with", facts: facts(["origin"], ["b", B]), config: undefined, info: { project: "app" }, question: "ambiguous" },
+		{ case: "no remote", facts: facts(), config: undefined, info: { project: "app" }, question: "unnamed" },
+		{ case: "only a local remote", facts: facts(["origin"]), config: undefined, info: { project: "app" }, question: "unnamed" },
+		{ case: "a saved remote", facts: facts(["a", A], ["b", B]), config: { remote: "b" }, info: { project: "app", repository: B } },
+		{ case: "a saved remote over origin", facts: facts(["origin", A], ["b", B]), config: { remote: "b" }, info: { project: "app", repository: B } },
+		{ case: "a saved name pinned to no remote", facts: facts(["origin", A]), config: { remote: null, project: "tool" }, info: { project: "tool" } },
+		{ case: "a saved name with the rule's remote", facts: facts(["origin", A]), config: { project: "tool" }, info: { project: "tool", repository: A } },
+		{ case: "a saved name without remotes", facts: facts(), config: { project: "tool" }, info: { project: "tool" } },
+		{ case: "a saved name, remote undecided", facts: facts(["a", A], ["b", B]), config: { project: "tool" }, info: { project: "tool" }, question: "ambiguous" },
+		{ case: "a saved remote that is gone", facts: facts(["origin", A]), config: { remote: "b" }, info: { project: "app", repository: A }, question: "stale" },
+		{ case: "a saved remote without a web URL", facts: facts(["b"]), config: { remote: "b" }, info: { project: "app", repository: undefined }, question: "stale" },
+		{ case: "an empty project.json", facts: facts(), config: {}, info: { project: "app" }, question: "unnamed" },
+	])("$case", ({ facts, config, info, question }) => {
+		const decided = decideRepository(facts, config);
+		expect(decided.info).toEqual(Object.fromEntries(Object.entries(info).filter(([, value]) => value !== undefined)));
+		expect(decided.question).toBe(question);
+	});
+
+	it("never asks without a main checkout, and names nothing outside git", () => {
+		expect(decideRepository({ folder: "lib", remotes: [{ name: "a", url: A }, { name: "b", url: B }] }, undefined)).toEqual({ info: { project: "lib" } });
+		expect(decideRepository({ remotes: [] }, { project: "x" })).toEqual({ info: {} });
 	});
 });
 
@@ -145,8 +204,12 @@ describe("resolveRepository", () => {
 			await mkdir(plain);
 			expect(await resolveRepository(plain)).toEqual({});
 			expect(await resolveRepository(join(root, "missing"))).toEqual({});
-			// Cached per cwd.
-			expect(resolveRepository(subdir)).toBe(resolveRepository(subdir));
+			// git's answer is kept per cwd: a later call does not run git, which cannot be found now.
+			const path = process.env.PATH;
+			process.env.PATH = "";
+			try {
+				expect(await resolveRepository(subdir)).toEqual({ project: "my-repo", repository: NORMALIZED });
+			} finally { process.env.PATH = path; }
 			expect(credentialsRegistry().repository).toBe(resolveRepository);
 		} finally {
 			for (const [name, value] of Object.entries(saved)) {
@@ -171,6 +234,28 @@ describe("resolveRepository", () => {
 			git(local, "init", "-q");
 			git(local, "remote", "add", "origin", bare);
 			expect(await resolveRepository(local)).toEqual({ project: "local" });
+		} finally { await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("reads the main checkout's project.json on every call, also from a linked worktree, and applies insteadOf", async () => {
+		const root = await realpath(await mkdtemp(join(tmpdir(), "pika-repo-")));
+		try {
+			const { repo, subdir, worktree } = await makeRepo(root);
+			git(repo, "remote", "remove", "origin");
+			git(repo, "remote", "add", "fork", "gh:me/fork.git");
+			git(repo, "config", "url.https://github.com/.insteadOf", "gh:");
+			// upstream and fork, none named origin: git leaves the identity open.
+			const open = await inspectRepository(subdir);
+			expect(open).toMatchObject({ folder: "my-repo", checkout: repo, info: { project: "my-repo" }, question: "ambiguous" });
+			expect(open.remotes).toEqual([{ name: "upstream", url: "https://github.com/other/upstream" }, { name: "fork", url: "https://github.com/me/fork" }]);
+
+			await mkdir(join(repo, ".pi", "pika"), { recursive: true });
+			await writeFile(join(repo, PROJECT_CONFIG), JSON.stringify({ remote: "fork" }));
+			expect(await resolveRepository(subdir)).toEqual({ project: "my-repo", repository: "https://github.com/me/fork" });
+			expect(await resolveRepository(worktree)).toEqual({ project: "my-repo", repository: "https://github.com/me/fork" });
+			await writeFile(join(repo, PROJECT_CONFIG), JSON.stringify({ remote: null, project: "renamed" }));
+			expect(await resolveRepository(worktree)).toEqual({ project: "renamed" });
+			expect((await inspectRepository(worktree)).question).toBeUndefined();
 		} finally { await rm(root, { recursive: true, force: true }); }
 	});
 

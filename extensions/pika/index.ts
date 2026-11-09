@@ -3,7 +3,8 @@ import { getAgentDir, VERSION, type ExtensionAPI, type ExtensionCommandContext, 
 import { isAssistant, SessionCapture } from "./capture.ts";
 import { isExcluded, loadConfig, type ConfigResult } from "./config.ts";
 import { publishCredentials } from "./credentials.ts";
-import { resolveRepository } from "./repository.ts";
+import { projectCommand, projectExtension } from "./project.ts";
+import { resolveRepository, type RepositoryInfo } from "./repository.ts";
 import { abortBinds, bindOnce } from "./device-key.ts";
 import { isPlainRemote, login, type LoginControl, readConfigFile, writeConfigFile } from "./login.ts";
 import memoryExtension from "./memory/index.ts";
@@ -52,8 +53,8 @@ const shared = (): Shared => global[SHARED] ??= { members: new Map(), detached: 
 const hooks = (): Set<ChildSessionHook> => global[CHILD_SESSION_HOOKS] ??= new Set();
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
-const USAGE = "Usage: /pika [status|login [url]|logout]";
-const SUBCOMMANDS = ["status", "login", "logout"];
+const USAGE = "Usage: /pika [status|login [url]|logout|project]";
+const SUBCOMMANDS = ["status", "login", "logout", "project"];
 
 function modelInfo(ctx: ExtensionContext) {
 	const model = ctx.model;
@@ -65,14 +66,21 @@ function modelInfo(ctx: ExtensionContext) {
  * sessions from it, and keep memory notes on it. Memory, like relay and recall, never reaches child sessions through the hook.
  */
 export default function pikaExtension(pi: ExtensionAPI): void {
-	captureExtension(pi);
+	const capture = captureExtension(pi);
+	projectExtension(pi, capture.refresh);
 	relayExtension(pi);
 	recallExtension(pi);
 	memoryExtension(pi);
 }
 
+/** What the rest of pika asks of a session's capture. */
+export interface Capture {
+	/** Sends the session's repository again with its next upload, after the user changed the repository's identity. */
+	refresh(ctx: ExtensionContext): Promise<void>;
+}
+
 /** Uploads every session entry and model request; the only part child sessions get through the hook. */
-export function captureExtension(pi: ExtensionAPI): void {
+export function captureExtension(pi: ExtensionAPI): Capture {
 	const self = {};
 	let config: ConfigResult | undefined;
 	let joined = false;
@@ -179,15 +187,29 @@ export function captureExtension(pi: ExtensionAPI): void {
 		const key = `session:${sessionId}`;
 		const capture = new SessionCapture(sessionId, key, currentUploader, self);
 		captures.set(sessionId, capture);
-		const parentSession = manager.getHeader()?.parentSession;
 		// The stream opens once git named the repository, so its first batch carries the name; the
 		// stream reads the session file from its start, so lines written meanwhile are not lost.
 		capture.opened = resolveRepository(cwd).then((repository) => {
 			// `/pika logout` stopped the capture meanwhile; a shutting-down session waits for this.
 			if (shared().captures.get(sessionId) !== capture) return;
-			const meta = { sessionId, cwd, ...(parentSession ? { parentSession } : {}), ...repository };
-			void currentUploader()?.openStream({ key, kind: "session", path: file, meta });
+			void currentUploader()?.openStream({ key, kind: "session", path: file, meta: sessionMeta(ctx, repository) });
 		}).catch((error: unknown) => { currentUploader()?.noteError(`capture: ${errorText(error)}`); });
+	}
+
+	/** A session stream's `meta`. */
+	function sessionMeta(ctx: ExtensionContext, repository: RepositoryInfo): Record<string, unknown> {
+		const manager = ctx.sessionManager;
+		const parentSession = manager.getHeader()?.parentSession;
+		return { sessionId: manager.getSessionId(), cwd: manager.getCwd() || ctx.cwd, ...(parentSession ? { parentSession } : {}), ...repository };
+	}
+
+	async function refresh(ctx: ExtensionContext): Promise<void> {
+		const capture = owned(ctx);
+		if (!capture) return;
+		await capture.opened;
+		const repository = await resolveRepository(ctx.sessionManager.getCwd() || ctx.cwd);
+		if (shared().captures.get(capture.sessionId) !== capture) return;
+		await currentUploader()?.setMeta(capture.key, sessionMeta(ctx, repository));
 	}
 
 	/** Reads the configuration and, when enabled and not excluded, captures the session from its first line. */
@@ -407,9 +429,12 @@ export function captureExtension(pi: ExtensionAPI): void {
 			if (command === "status" && !rest.length) ctx.ui.notify(statusText(config ?? loadConfig(getAgentDir()), joined, sessionId, skipped), "info");
 			else if (command === "login" && rest.length <= 1) await loginCommand(ctx, rest[0]);
 			else if (command === "logout" && !rest.length) await logoutCommand(ctx);
+			else if (command === "project" && !rest.length) await projectCommand(ctx, refresh);
 			else ctx.ui.notify(USAGE, "error");
 		},
 	});
+
+	return { refresh };
 }
 
 function bytes(value: number): string {

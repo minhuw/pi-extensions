@@ -1,0 +1,21 @@
+{
+    "description": "The project name in a repository's `.pi/pika/project.json` (written by `/pika project`), shared by pika's parseProjectConfig and Herder's projectNameFromConfig tests. `project: null` means the file gives no name, so the name comes from git's common dir.",
+    "cases": [
+        { "text": "{\"project\":\"widgets\"}", "project": "widgets", "case": "a name" },
+        { "text": "{\n\t\"remote\": null,\n\t\"project\": \"widgets\"\n}\n", "project": "widgets", "case": "a name pinned to no remote, as pika writes it" },
+        { "text": "{\"remote\":\"fork\",\"project\":\"my repo\"}", "project": "my repo", "case": "a remote and a name with a space" },
+        { "text": "\ufeff{\"project\":\"仓库\"}", "project": "仓库", "case": "byte order mark, non-ASCII" },
+        { "text": "{\"remote\":\"fork\"}", "project": null, "case": "a remote and no name" },
+        { "text": "{}", "project": null, "case": "empty object" },
+        { "text": "{\"project\":\"\"}", "project": null, "case": "empty name" },
+        { "text": "{\"project\":\"  \"}", "project": null, "case": "blank name" },
+        { "text": "{\"project\":\"..\"}", "project": null, "case": "name .." },
+        { "text": "{\"project\":\"a/b\"}", "project": null, "case": "slash" },
+        { "text": "{\"project\":\"a\\\\b\"}", "project": null, "case": "backslash" },
+        { "text": "{\"project\":\"a\\u0001b\"}", "project": null, "case": "control character" },
+        { "text": "{\"project\":5}", "project": null, "case": "not a string" },
+        { "text": "[\"widgets\"]", "project": null, "case": "an array" },
+        { "text": "null", "project": null, "case": "null" },
+        { "text": "{\"project\":\"widgets\"", "project": null, "case": "not JSON" }
+    ]
+}

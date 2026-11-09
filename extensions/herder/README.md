@@ -283,7 +283,7 @@ Every agent session of a run is saved as a Pi session file in `runs/<runId>/sess
 
 Another extension can load itself into step sessions without Herder importing it. It adds `{ name, extensionFactory }` to the Set at `globalThis[Symbol.for("pi-extensions.child-session-hooks")]`, creating the Set if it is missing. Herder appends each registered factory to the step session's extensions, binds them so they see `session_start`, and emits `session_shutdown` before it disposes the session. Steps load no other extensions.
 
-While a session holds a run, Herder emits `herder:run` on `pi.events` with `{ runId, runDir, journalPath, goalPath, planPath, repo, title }`, where `repo` is the repository's name: the main checkout's folder name, also when the run starts in a linked worktree (derived from git's common dir; a bare repository or submodule is named after the common dir without its `.git`). It emits when the run starts or is resumed, and within 250 ms after journal appends.
+While a session holds a run, Herder emits `herder:run` on `pi.events` with `{ runId, runDir, journalPath, goalPath, planPath, repo, title }`, where `repo` is the repository's name, as pika files its sessions: the name saved with pika's `/pika project` in the main checkout's `.pi/pika/project.json`, else the main checkout's folder name, also when the run starts in a linked worktree (derived from git's common dir; a bare repository or submodule is named after the common dir without its `.git`). It emits when the run starts or is resumed, and within 250 ms after journal appends.
 
 ## Development
 

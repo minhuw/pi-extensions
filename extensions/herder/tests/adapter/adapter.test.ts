@@ -768,4 +768,22 @@ describe("herder:run events", () => {
 			rmSync(linked, { recursive: true, force: true });
 		}
 	});
+
+	it("name the repo as pika files it when the user named it with /pika project", async () => {
+		const fixture = createGitFixture();
+		fixtures.push(fixture);
+		// As /pika project writes it: ignored by its own .gitignore.
+		mkdirSync(join(fixture.dir, ".pi", "pika"), { recursive: true });
+		writeFileSync(join(fixture.dir, ".pi", "pika", ".gitignore"), "*\n");
+		writeFileSync(join(fixture.dir, ".pi", "pika", "project.json"), JSON.stringify({ remote: null, project: "named-app" }));
+		const events = createEventBus();
+		const announced: Array<{ repo: string }> = [];
+		events.on(RUN_EVENT, (payload) => announced.push(payload as { repo: string }));
+		const h = harness({ cwd: fixture.dir, events });
+		cleanups.push(h.shutdown);
+		await h.command("add a greeting to the CLI");
+		const runId = activeRun(fixture.commonDir)!;
+		expect(announced).toEqual([expect.objectContaining({ runId, repo: "named-app" })]);
+		await h.shutdown();
+	});
 });
