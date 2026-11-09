@@ -16,7 +16,7 @@ See the root [README](README.md#extensions) for the overview, and read the targe
 - `extensions/autoresearch/` — `/autoresearch` optimization loop and reports (do not load with `npm:pi-autoresearch`).
 - `extensions/benchmark/` — `core.ts` (shared measurement module; registers nothing with Pi and imports no extension; Autoresearch imports only `core.ts`), `benchmark_compare` (`index.ts`), and `/benchmark <what>` (`prompts/benchmark.md`).
 - `extensions/loop/` — `/loop` recurring prompts (fixed, cron, model-paced) and `loop_schedule` / `loop_stop`.
-- `extensions/molt/` — `/molt` new session keeping model and thinking level.
+- `extensions/molt/` — `/molt` new session keeping model and thinking level, and `/handoff` (model-written handover sent as the new session's first message, never written to disk).
 - `extensions/language/` — `/language` default (`<agentDir>/language.json`), cache-safe mid-session switches, and footer status.
 - `extensions/spokesman/` — `/spokesman` secondary communicator (`auto`/`always`, `/spokesman for` main-model filter, `<agentDir>/spokesman.json`), foldable original reply, and context replacement.
 - `extensions/workspace/` — `.pi/workspaces/<name>`, `/tmp` allowance, `write`/`edit`/`bash` guards, `workspace` tool, and `/workspace`.

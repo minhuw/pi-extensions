@@ -2,9 +2,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import {
 	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
 	type CreateAgentSessionRuntimeFactory, type ExtensionAPI,
@@ -94,6 +94,88 @@ it("keeps them when the replacement session loads a fresh copy of the module", a
 		expect(h.state()).toMatchObject({ model: "chosen", thinking: "high" });
 		expect(h.errors).toEqual([]);
 	} finally { await h.cleanup(); await rm(elsewhere, { recursive: true, force: true }); }
+}, 10_000);
+
+/** Answers with `reply` and records the conversation the model was sent. */
+function answer(reply: Parameters<typeof fauxAssistantMessage>[0], seen: string[], options?: Parameters<typeof fauxAssistantMessage>[1]): FauxResponseFactory {
+	return (context) => { seen.push(JSON.stringify(context.messages)); return fauxAssistantMessage(reply, options); };
+}
+
+function firstUserText(messages: readonly { role: string; content?: unknown }[]): string {
+	const content = messages.find((message) => message.role === "user")?.content;
+	if (typeof content === "string") return content;
+	return Array.isArray(content) ? content.map((part: { text?: string }) => part.text ?? "").join("") : "";
+}
+
+it("has the model write a handover, then sends it as the first message of a new session", async () => {
+	const h = await fixture();
+	try {
+		const seen: string[] = [];
+		h.faux.setResponses([
+			answer("We fixed the parser; tests still fail.", seen),
+			// The handover turn may check state with tools first; only its last final reply counts.
+			answer([fauxToolCall("bash", { command: "true" })], seen, { stopReason: "toolUse" }),
+			answer("# Handover\nRun the parser tests.", seen),
+			answer("Running them now.", seen),
+		]);
+		await h.runtime.session.setModel(h.faux.getModel("chosen")!);
+		h.runtime.session.setThinkingLevel("high");
+		await h.runtime.session.prompt("Fix the parser.");
+		const before = h.state();
+
+		await h.runtime.session.prompt("/handoff run the parser tests");
+		await vi.waitFor(() => {
+			expect(h.state().id).not.toBe(before.id);
+			expect(h.runtime.session.messages.map((message) => message.role).filter((role) => role !== "system")).toEqual(["user", "assistant"]);
+			expect(h.runtime.session.isIdle).toBe(true);
+		});
+
+		expect(seen).toHaveLength(4);
+		expect(seen[1]).toContain("Fix the parser.");
+		expect(seen[1]).toContain("The new session's task: run the parser tests");
+		// The new session sees the handover only, not the old conversation or the request.
+		expect(seen[3]).toContain("Run the parser tests.");
+		expect(seen[3]).not.toContain("Fix the parser.");
+		expect(seen[3]).not.toContain("Write a handover");
+		expect(firstUserText(h.runtime.session.messages)).toBe(`# Handover\nRun the parser tests.\n\n---\nHanded off from pi session ${before.id}.`);
+		expect(h.state()).toMatchObject({ model: "chosen", thinking: "high" });
+		// A standalone session, not a child of the old one.
+		expect(h.runtime.session.sessionManager.getHeader()?.parentSession).toBeUndefined();
+		expect(h.errors).toEqual([]);
+	} finally { await h.cleanup(); }
+}, 10_000);
+
+it("stays in the session when the model does not finish a handover", async () => {
+	const h = await fixture();
+	try {
+		const seen: string[] = [];
+		h.faux.setResponses([
+			answer("Done with step one.", seen),
+			answer("", seen, { stopReason: "error", errorMessage: "provider failed" }),
+			answer("Plain reply.", seen),
+		]);
+		await h.runtime.session.prompt("Do step one.");
+		const before = h.state();
+
+		await h.runtime.session.prompt("/handoff");
+		await vi.waitFor(() => { expect(seen).toHaveLength(2); expect(h.runtime.session.isIdle).toBe(true); });
+		// A later ordinary run is not taken for the handover.
+		await h.runtime.session.prompt("Carry on.");
+		expect(h.state().id).toBe(before.id);
+		expect(seen).toHaveLength(3);
+		expect(h.errors).toEqual([]);
+	} finally { await h.cleanup(); }
+}, 10_000);
+
+it("does nothing in a session without a conversation", async () => {
+	const h = await fixture();
+	try {
+		const before = h.state();
+		await h.runtime.session.prompt("/handoff");
+		expect(h.state().id).toBe(before.id);
+		expect(h.faux.state.callCount).toBe(0);
+		expect(h.errors).toEqual([]);
+	} finally { await h.cleanup(); }
 }, 10_000);
 
 it("does not carry settings into a later plain new session after a cancelled switch", async () => {

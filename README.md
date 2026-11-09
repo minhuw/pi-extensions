@@ -27,7 +27,7 @@ The [pika server](services/pika/README.md) serves this documentation publicly at
 | [Autoresearch](extensions/autoresearch/README.md) | `/autoresearch <target>` measures a baseline, waits for your approval, then runs a bounded number of optimization passes. |
 | [Benchmark](extensions/benchmark/README.md) | `/benchmark <what>` measures a performance claim. Its `benchmark_compare` tool runs one command, or two alternately, and reports medians, ranges, run counts, and a verdict. |
 | [Loop](extensions/loop/README.md) | Repeats a prompt on a fixed interval, a cron schedule, or a delay the model picks. |
-| [Molt](extensions/molt/README.md) | `/molt` starts a new session with the current model and thinking level. |
+| [Molt](extensions/molt/README.md) | `/molt` starts a new session with the current model and thinking level; `/handoff [task]` has the model write a handover and continues in a new session that starts from it. |
 | [Language](extensions/language/README.md) | `/language` sets the language the model responds in, with a default for new sessions and switches that leave the cached prompt alone. |
 | [Spokesman](extensions/spokesman/README.md) | `/spokesman` rewrites dense or cryptic model replies with a secondary communicator model, folding the original response and showing the rewrite below a model separator. |
 | [Workspace](extensions/workspace/README.md) | Keeps file writes inside the current project, manages isolated side workspaces under `.pi/workspaces/<name>`, prompts before writes outside the project, and cleans up unused workspaces with `/workspace gc`. |
