@@ -1371,3 +1371,35 @@ async fn batch_routes_need_the_owners_login() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(app.count("SELECT COUNT(*) FROM memory_revisions WHERE action = 'revert'"), 1);
 }
+
+/// C2 in a commit: a dream's user-scope saves must fit every project's index too, and the 422 names the project.
+#[tokio::test]
+async fn dream_user_saves_fit_every_projects_index() {
+    let app = App::new();
+    let long = |n: usize| format!("{n:03}{}", "t".repeat(117));
+    // Long notes in device laptop's local gadgets project until one more does not fit.
+    loop {
+        let r = app
+            .post(&app.a, "memory/notes", json!({ "expectedRevision": 0, "scope": "project", "project": "gadgets",
+                                                  "category": "project", "title": long(0), "hook": "h".repeat(150) }))
+            .await;
+        if r.status != StatusCode::OK {
+            assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.text());
+            break;
+        }
+    }
+    repo_session(&app.env.store, "s1", BASE, 1);
+    let granted = app.granted("manual").await;
+    let before = app.dump();
+    let mut change = save("user", &long(1), json!([source("s1", 1)]));
+    change["hook"] = json!("h".repeat(150));
+    let r = app.commit(&app.a, &granted, json!({ "sessions": ["s1"], "changes": [change.clone()] })).await;
+    let body = r.json();
+    assert_eq!((r.status, &body["error"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full")), "{body}");
+    assert_eq!(body["project"], json!({ "key": LOCAL, "kind": "project", "label": "gadgets" }));
+    assert!(body["indexBytes"].as_u64().unwrap() > 8192, "{body}");
+    assert_eq!(app.dump(), before);
+    // The same note fits the widgets project.
+    change["scope"] = json!("project");
+    app.committed(&granted, json!({ "sessions": ["s1"], "changes": [change] })).await;
+}

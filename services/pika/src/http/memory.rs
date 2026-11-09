@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use super::ingest::bearer;
 use super::{AppState, blocking, error, internal_error};
 use crate::memory::dream::{self, DreamError};
-use crate::memory::{self, LIMIT_BYTES, LIMIT_LINES, MemoryError};
+use crate::memory::{self, LIMIT_BYTES, LIMIT_LINES, MemoryError, Overfull};
 use crate::util::{format_iso_ms, now_ms};
 
 /// Behind `read::require_read_access` in the agent namespace.
@@ -46,11 +46,11 @@ fn bad_request(message: impl std::fmt::Display) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": "bad_request", "message": message.to_string() }))).into_response()
 }
 
-fn memory_full(bytes: usize, lines: usize) -> Response {
+fn memory_full(full: Overfull) -> Response {
     (
         StatusCode::UNPROCESSABLE_ENTITY,
-        Json(json!({ "error": "memory_full", "indexBytes": bytes, "indexLines": lines,
-                     "limitBytes": LIMIT_BYTES, "limitLines": LIMIT_LINES })),
+        Json(json!({ "error": "memory_full", "indexBytes": full.bytes, "indexLines": full.lines,
+                     "limitBytes": LIMIT_BYTES, "limitLines": LIMIT_LINES, "project": full.project })),
     )
         .into_response()
 }
@@ -65,7 +65,7 @@ fn respond<T: Serialize>(result: anyhow::Result<Result<T, MemoryError>>) -> Resp
         Ok(Err(MemoryError::BadRequest(message))) => bad_request(message),
         Ok(Err(MemoryError::NotFound)) => error(StatusCode::NOT_FOUND, "not_found"),
         Ok(Err(MemoryError::Conflict(note))) => conflict(json!({ "error": "revision_conflict", "note": note })),
-        Ok(Err(MemoryError::Full { bytes, lines })) => memory_full(bytes, lines),
+        Ok(Err(MemoryError::Full(full))) => memory_full(full),
         Ok(Err(MemoryError::Internal(e))) => internal_error(format!("{e:#}")),
         Err(e) => internal_error(format!("{e:#}")),
     }
@@ -85,7 +85,7 @@ fn respond_dream<T: Serialize>(result: anyhow::Result<Result<T, DreamError>>) ->
         Ok(Err(DreamError::Conflict { note, change })) => {
             conflict(json!({ "error": "revision_conflict", "note": note, "change": change }))
         }
-        Ok(Err(DreamError::Full { bytes, lines })) => memory_full(bytes, lines),
+        Ok(Err(DreamError::Full(full))) => memory_full(full),
         Ok(Err(DreamError::NotFound)) => error(StatusCode::NOT_FOUND, "not_found"),
         Ok(Err(DreamError::AlreadyReverted)) => conflict(json!({ "error": "already_reverted" })),
         Ok(Err(DreamError::RevertConflict(notes))) => conflict(json!({ "error": "revert_conflict", "notes": notes })),

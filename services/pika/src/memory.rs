@@ -14,7 +14,7 @@ use crate::util::{format_iso_ms, now_ms, random_bytes, valid_project, valid_repo
 
 /// The note categories, in index order.
 pub const CATEGORIES: [&str; 4] = ["user", "feedback", "project", "reference"];
-/// The most bytes and lines the rendered index of a request's scopes may have after a save.
+/// The most bytes and lines a save may grow the index of the user scope with a project scope, or alone, to.
 pub const LIMIT_BYTES: usize = 8192;
 pub const LIMIT_LINES: usize = 200;
 const MAX_TITLE: usize = 120;
@@ -43,9 +43,18 @@ pub enum MemoryError {
     NotFound,
     /// The stored note, whose revision differs from the request's `expectedRevision`.
     Conflict(Box<Note>),
-    /// The index the save would produce.
-    Full { bytes: usize, lines: usize },
+    /// The index the save would grow past the budget.
+    Full(Overfull),
     Internal(anyhow::Error),
+}
+
+/// An index a write would grow past the budget: its size after the write, and the project scope whose index with the
+/// user scope it is, `None` for the user scope's alone.
+#[derive(Debug)]
+pub struct Overfull {
+    pub bytes: usize,
+    pub lines: usize,
+    pub project: Option<Scope>,
 }
 
 impl From<rusqlite::Error> for MemoryError {
@@ -578,33 +587,114 @@ fn remove(tx: &Transaction, id: &str, expected: i64, project: Option<&Scope>, au
     Ok(note)
 }
 
-/// The index of the user scope and `project`, which must fit the budget.
-fn budgeted(tx: &Transaction, project: Option<Scope>) -> Result<Index, MemoryError> {
-    let index = Index::new(&groups(tx, request_scopes(tx, project)?)?);
-    if index.index_bytes > LIMIT_BYTES || index.index_lines > LIMIT_LINES {
-        return Err(MemoryError::Full { bytes: index.index_bytes, lines: index.index_lines });
+/// The size of an index, or of one scope's part of it: an index is its scopes' parts one after another.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Size {
+    bytes: usize,
+    lines: usize,
+}
+
+impl Size {
+    fn plus(self, other: Size) -> Size {
+        Size { bytes: self.bytes + other.bytes, lines: self.lines + other.lines }
     }
-    Ok(index)
+
+    /// Whether a write made it larger than `before` in bytes or in lines.
+    fn grew(self, before: Size) -> bool {
+        self.bytes > before.bytes || self.lines > before.lines
+    }
+
+    /// Whether a write made it larger than `before` in bytes or in lines, past the limit of that measure.
+    fn overgrown(self, before: Size) -> bool {
+        (self.bytes > LIMIT_BYTES && self.bytes > before.bytes) || (self.lines > LIMIT_LINES && self.lines > before.lines)
+    }
+}
+
+/// The size of the scope's part of an index: its live notes rendered alone.
+fn part(conn: &Connection, scope: &Scope) -> rusqlite::Result<Size> {
+    let text = render_index(&[(scope.clone(), live_notes(conn, &scope.key)?)]);
+    Ok(Size { bytes: text.len(), lines: text.lines().count() })
+}
+
+/// The stored project scopes with live notes other than `except`, by key.
+fn other_project_scopes(conn: &Connection, except: Option<&str>) -> rusqlite::Result<Vec<Scope>> {
+    conn.prepare_cached(
+        "SELECT s.key, s.kind, s.label FROM memory_scopes s WHERE s.kind = 'project' AND s.key IS NOT ?1
+             AND EXISTS (SELECT 1 FROM memory_notes n WHERE n.scope_key = s.key AND n.deleted_at IS NULL)
+         ORDER BY s.key",
+    )?
+    .query_map([except], |r| Ok(Scope { key: r.get(0)?, kind: r.get(1)?, label: r.get(2)? }))?
+    .collect()
+}
+
+/// The parts of the index a write may change, measured before it: the user scope's and that of the project scope the
+/// write names (the request's, or a dream lease's), if any. Every project's index holds the user scope's notes, so a
+/// write may grow none past the budget: not the user scope's with the named project scope's (alone without one), and,
+/// when the user scope's part grew, neither the user scope's alone nor its index with any other project scope. An
+/// index already past the budget may shrink or stay as it is, so a write that grows nothing always fits.
+struct Budget {
+    project: Option<Scope>,
+    user: Size,
+    own: Size,
+}
+
+impl Budget {
+    /// Measures before the write; `project` as stored.
+    fn measure(conn: &Connection, project: Option<Scope>) -> rusqlite::Result<Budget> {
+        let user = part(conn, &Scope::user())?;
+        let own = project.as_ref().map(|p| part(conn, p)).transpose()?.unwrap_or_default();
+        Ok(Budget { project, user, own })
+    }
+
+    /// Checks the indexes after the write; `Full` with the first one it grew past the budget, in the order above, other
+    /// project scopes by key.
+    fn check(&self, conn: &Connection) -> Result<(), MemoryError> {
+        let user = part(conn, &Scope::user())?;
+        let own = self.project.as_ref().map(|p| part(conn, p)).transpose()?.unwrap_or_default();
+        let full = |size: Size, project: Option<&Scope>| {
+            MemoryError::Full(Overfull { bytes: size.bytes, lines: size.lines, project: project.cloned() })
+        };
+        if user.plus(own).overgrown(self.user.plus(self.own)) {
+            return Err(full(user.plus(own), self.project.as_ref()));
+        }
+        if !user.grew(self.user) {
+            return Ok(());
+        }
+        if user.overgrown(self.user) {
+            return Err(full(user, None));
+        }
+        for scope in other_project_scopes(conn, self.project.as_ref().map(|p| p.key.as_str()))? {
+            let theirs = part(conn, &scope)?;
+            if user.plus(theirs).overgrown(self.user.plus(theirs)) {
+                return Err(full(user.plus(theirs), Some(&scope)));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// `POST memory/notes`: creates a note (no `id`, `expectedRevision` 0) or updates a live one of the scope the request
-/// resolves to, at `expectedRevision`. Writes before checking the budget, so the caller must commit only on `Ok`, as
-/// `Store::write` does: the check, the comparison, and the write are one transaction.
+/// resolves to, at `expectedRevision`. Writes before checking the budget (see `Budget`), so the caller must commit
+/// only on `Ok`, as `Store::write` does: the check, the comparison, and the write are one transaction.
 pub fn save(tx: &Transaction, device: &str, request: Save) -> Result<Written, MemoryError> {
     check_revision(request.expected_revision)?;
     let fields = fields(&request.category, &request.title, &request.hook, &request.body)?;
     let reason = reason(request.reason.as_deref())?;
     let session_id = session_id(request.session_id.as_deref())?;
-    let project = project_scope(request.project.as_deref(), request.repository.as_deref(), device)?;
+    let project = project_scope(request.project.as_deref(), request.repository.as_deref(), device)?
+        .map(|p| stored(tx, p))
+        .transpose()?;
     let target = match request.scope.as_str() {
         "user" => Scope::user(),
         "project" => project.clone().ok_or_else(|| bad("scope project needs project or repository"))?,
         _ => return Err(bad("scope must be user or project")),
     };
     let target = stored(tx, target)?;
+    let budget = Budget::measure(tx, project.clone())?;
     let author = Author { device, session_id, provenance: AGENT, sources: Vec::new(), batch_id: None, reason, now: now_ms() };
     let note = put(tx, target, request.id.as_deref(), request.expected_revision, fields, &author)?;
-    let index = budgeted(tx, project)?;
+    budget.check(tx)?;
+    let index = Index::new(&groups(tx, request_scopes(tx, project)?)?);
     Ok(Written { note, index })
 }
 

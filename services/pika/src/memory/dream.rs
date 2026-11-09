@@ -10,8 +10,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Author, Index, LIMIT_BYTES, LIMIT_LINES, MemoryError, Note, Scope, Source, bad, check_revision, fields, groups, iso,
-    iso_opt, note, project_scope, put, reason, record, remove, request_scopes, scrubbed, session_id, stored,
+    Author, Budget, Index, MemoryError, Note, Overfull, Scope, Source, bad, check_revision, fields, groups, iso, iso_opt,
+    note, project_scope, put, reason, record, remove, request_scopes, scrubbed, session_id, stored,
 };
 use crate::redact::scrub_cut_text;
 use crate::util::random_bytes;
@@ -49,8 +49,8 @@ pub enum DreamError {
     LeaseLost,
     /// The stored note of the change at index `change`, whose revision differs from its `expectedRevision`.
     Conflict { note: Box<Note>, change: usize },
-    /// The index the commit would produce.
-    Full { bytes: usize, lines: usize },
+    /// The index the commit would grow past the budget.
+    Full(Overfull),
     /// No batch has the id.
     NotFound,
     /// The batch was reverted before.
@@ -83,7 +83,7 @@ impl DreamError {
             MemoryError::BadRequest(message) => at(message),
             MemoryError::NotFound => at("no live note with this id in the user scope or the lease's scope".into()),
             MemoryError::Conflict(note) => DreamError::Conflict { note, change: change.unwrap_or_default() },
-            MemoryError::Full { bytes, lines } => DreamError::Full { bytes, lines },
+            MemoryError::Full(full) => DreamError::Full(full),
             MemoryError::Internal(e) => DreamError::Internal(e),
         }
     }
@@ -460,9 +460,9 @@ fn check_sources(conn: &Connection, sources: &[Source], min: usize) -> Result<()
 }
 
 /// `POST memory/dream/:id/commit`: in one transaction with the caller (`Store::write`), applies the changes in order
-/// to the user scope and the lease's scope with v1's validation, scrubbing, and revisions, checks the budget of the
-/// final index when a change saves, advances each listed session's checkpoint to the lease's `toSeq` for it (never
-/// back), and records one batch. Writes before it fails, so the caller must commit only on `Ok`.
+/// to the user scope and the lease's scope with v1's validation, scrubbing, and revisions, checks that they grew no
+/// index past the budget (see `Budget`), advances each listed session's checkpoint to the lease's `toSeq` for it
+/// (never back), and records one batch. Writes before it fails, so the caller must commit only on `Ok`.
 pub fn commit(tx: &Transaction, device: &str, id: &str, request: Commit, now: i64) -> Result<Committed, DreamError> {
     let lease = held(tx, device, id, now)?;
     if request.sessions.is_empty() && request.changes.is_empty() {
@@ -489,8 +489,8 @@ pub fn commit(tx: &Transaction, device: &str, id: &str, request: Commit, now: i6
     }
     let batch_id = new_id(tx, "memory_dream_batches")?;
     let project = stored(tx, lease.scope.clone())?;
+    let budget = Budget::measure(tx, Some(project.clone()))?;
     let mut changes = Vec::new();
-    let mut saved = false;
     for (i, change) in request.changes.into_iter().enumerate() {
         let at = |e: MemoryError| DreamError::in_change(Some(i), e);
         let mut author = Author {
@@ -526,7 +526,6 @@ pub fn commit(tx: &Transaction, device: &str, id: &str, request: Commit, now: i6
                 if let Some(id) = &save.id {
                     forgotten(id)?;
                 }
-                saved = true;
                 put(tx, target, save.id.as_deref(), save.expected_revision, fields, &author).map_err(at)?
             }
             Change::Forget(forget) => {
@@ -547,10 +546,8 @@ pub fn commit(tx: &Transaction, device: &str, id: &str, request: Commit, now: i6
             created: action == "save" && note.revision == 1,
         });
     }
+    budget.check(tx)?;
     let index = Index::new(&groups(tx, request_scopes(tx, Some(project.clone()))?)?);
-    if saved && (index.index_bytes > LIMIT_BYTES || index.index_lines > LIMIT_LINES) {
-        return Err(DreamError::Full { bytes: index.index_bytes, lines: index.index_lines });
-    }
     for leased in &sessions {
         tx.prepare_cached(
             "INSERT INTO memory_checkpoints (scope_key, session_id, seq) VALUES (?1, ?2, ?3)
