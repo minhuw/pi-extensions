@@ -18,18 +18,18 @@ export interface MemoryPin { index: string | null; fetchedAt: string; project?: 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 const isPin = (entry: SessionEntry): entry is CustomEntry<MemoryPin> => entry.type === "custom" && entry.customType === PIN_ENTRY;
-const isConversation = (entry: SessionEntry) => entry.type === "message"
-	? entry.message.role !== "system"
-	: entry.type === "custom_message" || entry.type === "compaction" || entry.type === "branch_summary";
-
 /**
- * Top-level TUI and RPC sessions. Live children bind extensions with no mode, which Pi runs as print, and persisted
- * children carry a session link when child-session hooks are registered.
+ * Whether an entry shows that a provider request may have sent the session's prompt already: the messages of a run,
+ * a compaction, or a branch summary. `!` commands and custom messages appended while idle precede any request.
  */
-function isEligible(ctx: ExtensionContext): boolean {
-	if (ctx.mode !== "tui" && ctx.mode !== "rpc") return false;
-	return !ctx.sessionManager.getEntries().some((entry) => entry.type === "custom" && entry.customType === SESSION_LINK_TYPE);
-}
+const isRequested = (entry: SessionEntry) => entry.type === "message"
+	? entry.message.role === "user" || entry.message.role === "assistant" || entry.message.role === "toolResult"
+	: entry.type === "compaction" || entry.type === "branch_summary";
+
+/** Persisted children carry a session link when child-session hooks are registered; they never show a section. */
+const isChild = (ctx: ExtensionContext) => ctx.sessionManager.getEntries().some((entry) => entry.type === "custom" && entry.customType === SESSION_LINK_TYPE);
+/** Only top-level TUI and RPC sessions create a pin. Live children bind extensions with no mode, which Pi runs as print. */
+const mayPin = (ctx: ExtensionContext) => ctx.mode === "tui" || ctx.mode === "rpc";
 
 /** The pin of the current branch, else of the session: its first run fixes the prompt on every branch. */
 function readPin(ctx: ExtensionContext): MemoryPin | undefined {
@@ -65,11 +65,13 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		try {
-			if (!isEligible(ctx)) return undefined;
+			if (isChild(ctx)) return undefined;
+			// An existing pin applies in every mode, so a print or JSON resume keeps the section and its cache.
 			let pin = readPin(ctx);
 			if (!pin) {
+				if (!mayPin(ctx)) return undefined;
 				// A session with history may have its prompt cached already, so it never gains a section.
-				if (ctx.sessionManager.getEntries().some(isConversation)) return undefined;
+				if (ctx.sessionManager.getEntries().some(isRequested)) return undefined;
 				pin = await fetchPin(cwdOf(ctx));
 				pi.appendEntry<MemoryPin>(PIN_ENTRY, pin);
 			}
