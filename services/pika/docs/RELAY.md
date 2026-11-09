@@ -192,12 +192,16 @@ Otherwise it stays offline. `/relay` explains why, and the reason is reported on
 For each `message` not yet seen in this session:
 1. Deliver it with `pi.sendMessage({ customType: "relay-message", content, display: true, details })`, where `details` holds the message fields:
    - when the session is idle, `{ triggerTurn: true }`;
-   - when busy and urgent, `{ deliverAs: "steer", triggerTurn: true }`;
-   - when busy and not urgent, `{ deliverAs: "followUp", triggerTurn: true }`.
+   - when busy, `{ deliverAs: "steer", triggerTurn: true }` if the message is urgent, or if its peer is a conversation of the session (see below) and no earlier message of that peer waits as a follow-up;
+   - otherwise `{ deliverAs: "followUp", triggerTurn: true }`.
 2. Append a custom entry with `pi.appendEntry("relay-received", { id, from, text, replyTo, hops, urgent, at })`. It keeps the text in the transcript even if a queued delivery is later dropped: pressing Esc, or RPC `clear_queue`, clears pi's steer and follow-up queues, and only plain user messages are restored to the editor.
 3. Send `ack`.
 
 If `sendMessage` throws, there is no receipt and no `ack`, so the server pushes the message again. Delivering before recording means a failed delivery never leaves a receipt that would suppress that retry. If recording fails after delivery, the message is still acknowledged, because pi already holds it.
+
+**Conversations:** pi holds a follow-up until the turn ends. A busy session that writes to the sender meanwhile has not read the sender's message, so the two messages cross and each side answers the other's stale one. A message's peer is its room (`#<room>`), else its sending session; web UI messages have none. A peer is a conversation of the session for 30 minutes after the session last sent to it (`relay_send`, `relay_room` send, `/relay send`) or its model last read a message of it, which is when pi emits `message_start` for the `relay-message`. A peer's message never overtakes an earlier one of the same peer that waits as a follow-up, unless it is urgent.
+
+**Unread messages:** a delivered message of a peer stays unread until its `message_start`. `agent_settled` forgets what is still unread then, because Esc or RPC `clear_queue` dropped it. `relay_send` and `relay_room` send refuse a send to a peer once for each unread message of it (see Tools), so the model reads the peer's message before it writes again. `/relay send` comes from the user and is never refused.
 
 **During replacement:** the session is offline while leaving (see Lifecycle), so no message or status arrives for it then.
 
@@ -211,8 +215,9 @@ Seen ids are the `relay-received` entries of the current session (scanned on con
 
 <text>
 
-This message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "<sessionId>" and replyTo "<id>".
+This message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "<sessionId>" and replyTo "<id>". Messages can cross on the way: if this one adds nothing to what you already sent, do not reply just to say so.
 ```
+A room message ends with the same last sentence.
 For the web UI:
 ```
 [relay] Message <id> from your user in the pika web UI[, marked urgent]:
@@ -235,6 +240,7 @@ The extension tracks `runHops`. It resets to 0 at `before_agent_start` with `mes
   - `queued` → "Queued message <id> for <label>: it has not been delivered yet. If it is not delivered within 5 minutes it is dropped and you will get a notice.";
   - `rejected` → an error result naming the reason.
   - If the session is not connected, an error result explaining why.
+  - If the target (a session id, or `#<room>`) has unread messages not yet refused for, an error result, without sending; the next send goes out unless another message arrived. When every such message is steered or starts a turn: "Not sent: message <id> from <label> arrived while you were writing yours, and you have not read it yet. It follows this result: read it, then send again if your message still adds something." When one waits as a follow-up: "Not sent: message <id> from <label> waits for you until your current turn ends. End your turn now to read it, then reply if your message still adds something."
   - No `sent` within 10 s, a connection that drops first, or an aborted tool call (pi's abort signal) → an error result saying the message may or may not have been accepted; `relay_status` records it as `unknown` (`timeout`, `closed`, or `cancelled`). A send that never left the session (the connection went offline, or the call was aborted before it was sent) is recorded as `failed`.
   - The `delivered` and `queued` results end with: "Any answer arrives as a new [relay] message after your current turn ends, never during it: do not sleep or poll for it. End your turn now, telling your user what you are waiting for if that helps." The tool descriptions of `relay_send` and `relay_status` say the same. In a live test a model otherwise kept sleeping and polling `relay_status` inside its turn, while pi held the answer until that turn ended. `/relay send` shows the results without this sentence.
 - **`relay_status`** `{ id? }` → the state of messages this session sent in this process (`queued` | `delivered` | `expired` | `rejected` | `failed` | `unknown`), newest first, at most 50.
@@ -260,7 +266,8 @@ On `status: expired`, the extension sends `pi.sendMessage({ customType: "relay-n
   - each connect condition: mode, child, excluded, disabled, unsupported server, and credentials appearing late or switching;
   - `hello` contents;
   - `state` updates;
-  - delivery when idle (starts a turn), when busy (followUp), and when urgent (steer);
+  - delivery when idle (starts a turn), when busy (followUp), when urgent or from a conversation (steer), and in order behind a waiting follow-up;
+  - the refusal of a send that would cross an unread message, once per message, and forgetting messages a cleared queue dropped;
   - the receipt entry, deduplication across reconnect and `/resume`, and `ack`;
   - hop accounting;
   - the three tools and every `sent` outcome;

@@ -37,6 +37,11 @@ export const timing = {
     projectTimeoutMs: 3_000,
     /** How often a session that held back a message checks whether a compaction or tree summary ended. */
     settlePollMs: 100,
+    /**
+     * How long after a session last sent to a session or room, or its model last read a message from
+     * one, it still steers that peer's messages into a busy turn instead of queueing them after it.
+     */
+    conversationMs: 30 * 60_000,
 };
 /** Close codes after which a session stops reconnecting until its credentials change or `/relay on`. */
 export const TERMINAL_CLOSES = new Map([
@@ -92,6 +97,8 @@ export function ttlText(seconds) {
         return `${seconds / 60} minute${seconds === 60 ? "" : "s"}`;
     return `${seconds} second${seconds === 1 ? "" : "s"}`;
 }
+/** Closes every message from another session: two sessions that write at once can each miss the other's message. */
+const CROSSED = "Messages can cross on the way: if this one adds nothing to what you already sent, do not reply just to say so.";
 /** What the receiving session's model reads for a message. */
 export function messageContent(message) {
     const urgent = message.urgent ? ", marked urgent" : "";
@@ -112,11 +119,11 @@ export function messageContent(message) {
     if (room) {
         const header = `[relay] Message ${id} in room #${room} from pi session ${sessionId}${name ? ` ("${name}")` : ""} on ${deviceLabel(from)}`
             + `${project ? `, project ${project}` : ""}${replyTo ? `, replying to ${replyTo}` : ""}${urgent}:`;
-        return `${header}\n\n${text}\n\nYou were @mentioned in room #${room}. To read the full room history, call relay_room with action "history" and room "${room}". To reply in the room, call relay_send with room "${room}", mentions ["${sessionId}"], and replyTo "${id}".`;
+        return `${header}\n\n${text}\n\nYou were @mentioned in room #${room}. To read the full room history, call relay_room with action "history" and room "${room}". To reply in the room, call relay_send with room "${room}", mentions ["${sessionId}"], and replyTo "${id}". ${CROSSED}`;
     }
     const header = `[relay] Message ${id} from pi session ${sessionId}${name ? ` ("${name}")` : ""} on ${deviceLabel(from)}`
         + `${project ? `, project ${project}` : ""}${replyTo ? `, replying to ${replyTo}` : ""}${urgent}:`;
-    return `${header}\n\n${text}\n\nThis message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "${sessionId}" and replyTo "${id}".`;
+    return `${header}\n\n${text}\n\nThis message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "${sessionId}" and replyTo "${id}". ${CROSSED}`;
 }
 export function expiredContent(id, label, ttlSeconds) {
     return `[relay] Your message ${id} to ${label} expired: it was not delivered within ${ttlText(ttlSeconds)} and was dropped.`;

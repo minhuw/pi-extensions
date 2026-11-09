@@ -65,7 +65,7 @@ type Sender = { sessionId: string; name: string; deviceId: string; device: strin
 /** The content RELAY.md specifies for a message from a session. */
 function sessionContent(id: string, from: Sender, text: string, replyTo?: string): string {
 	return `[relay] Message ${id} from pi session ${from.sessionId} ("${from.name}") on ${from.device}, project ${from.project}${replyTo ? `, replying to ${replyTo}` : ""}:\n\n${text}\n\n`
-		+ `This message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "${from.sessionId}" and replyTo "${id}".`;
+		+ `This message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "${from.sessionId}" and replyTo "${id}". Messages can cross on the way: if this one adds nothing to what you already sent, do not reply just to say so.`;
 }
 
 /** The content RELAY.md specifies for a message from the web UI. */

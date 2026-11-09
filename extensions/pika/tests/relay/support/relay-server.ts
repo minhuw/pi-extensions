@@ -26,7 +26,7 @@ export interface Connection {
 	welcomed: boolean;
 }
 
-type PushedMessage = Partial<{ id: string; from: unknown; text: string; urgent: boolean; replyTo: string; hops: number; sentAt: string }>;
+type PushedMessage = Partial<{ id: string; room: string; from: unknown; text: string; urgent: boolean; replyTo: string; hops: number; sentAt: string }>;
 
 /** A message the default `send` handling routed between two connections. */
 export interface Routed { id: string; from: string; to: string; text: string; hops: number; urgent: boolean; replyTo?: string }

@@ -26,6 +26,11 @@ const SUBCOMMANDS = ["status", "send", "join", "leave", "rooms", "log", "off", "
  */
 type SentStatus = "queued" | "delivered" | "expired" | "rejected" | "failed" | "unknown";
 interface SentRecord { id?: string; to: string; label: string; status: SentStatus; reason?: string; at: number; text: string }
+/**
+ * A delivered message the model has not read yet. `soon`: it reaches the model before its next model
+ * call, not only after its turn; `told`: a send to its peer was refused once for it.
+ */
+interface Unread { peer: string; label: string; soon: boolean; told: boolean }
 
 export interface RelayMessageDetails { id: string; room?: string; mentions?: string[]; from: MessageFrame["from"]; text: string; urgent: boolean; replyTo?: string; hops: number; sentAt: string | number }
 export interface RelayNoticeDetails { id: string; to: Target; status: "expired"; at: string | number }
@@ -82,6 +87,19 @@ function sentSummary(frame: Partial<Extract<SentFrame, { id: string }>> | undefi
 		: `${theme.fg("warning", "queued")} for ${peerLabel(frame.to)}, not delivered yet ${id}`;
 }
 
+/** The conversation a message belongs to: `#room`, else the sending session's id; none for the web UI. */
+const peerOf = (frame: MessageFrame): string | undefined => frame.room ? `#${frame.room}` : frame.from.kind === "session" ? frame.from.sessionId : undefined;
+
+/** Why a send to a peer waits until the model read the peer's newer messages. */
+function unreadText(ids: string[], label: string, soon: boolean): string {
+	const one = ids.length === 1;
+	const which = `${one ? "message" : "messages"} ${ids.map(headerField).join(", ")} from ${label}`;
+	const it = one ? "it" : "them";
+	return soon
+		? `Not sent: ${which} arrived while you were writing yours, and you have not read ${it} yet. ${one ? "It follows" : "They follow"} this result: read ${it}, then send again if your message still adds something.`
+		: `Not sent: ${which} ${one ? "waits" : "wait"} for you until your current turn ends. End your turn now to read ${it}, then reply if your message still adds something.`;
+}
+
 function firstPrompt(ctx: ExtensionContext): string | undefined {
 	for (const entry of ctx.sessionManager.getEntries()) {
 		if (entry.type !== "message" || entry.message.role !== "user") continue;
@@ -135,6 +153,13 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	const seen = new Set<string>();
 	const notified = new Set<string>();
 	const sent: SentRecord[] = [];
+	/** When this session last sent to each peer (a session id or `#room`), or its model last read a message from it. */
+	const exchanged = new Map<string, number>();
+	/** Delivered messages the model has not read yet, by id, in arrival order. */
+	const unread = new Map<string, Unread>();
+	const talking = (peer: string) => { const at = exchanged.get(peer); return at !== undefined && Date.now() - at < timing.conversationMs; };
+	/** A message of the peer waits for the end of the turn. */
+	const waiting = (peer: string) => [...unread.values()].some((entry) => entry.peer === peer && !entry.soon);
 
 	// Relay never throws into pi.
 	const guard = (fn: () => void) => { try { fn(); } catch { /* reported through /relay */ } };
@@ -269,17 +294,28 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		if (missed || isSummarizing()) { missed = true; settle(); return; }
 		const hops = Number.isInteger(frame.hops) && frame.hops >= 0 ? frame.hops : 0;
 		const urgent = frame.urgent === true;
+		const peer = peerOf(frame);
+		const idle = ctx.isIdle();
+		// A busy session steers in the messages of a peer it is talking with, so that a reply it writes meanwhile
+		// does not cross them. Only urgent ones overtake an earlier message of the peer that waits for the turn's end.
+		const steer = !idle && (urgent || (peer !== undefined && talking(peer) && !waiting(peer)));
 		const details: RelayMessageDetails = {
 			id: frame.id, from: frame.from, text: frame.text, urgent, hops, sentAt: frame.sentAt,
 			...(frame.room ? { room: frame.room } : {}),
 			...(frame.mentions?.length ? { mentions: frame.mentions } : {}),
 			...(frame.replyTo ? { replyTo: frame.replyTo } : {}),
 		};
+		// Before the delivery, whose turn may read it at once.
+		if (peer !== undefined) {
+			const label = frame.room ? `room #${headerField(frame.room)}` : targetLabel(frame.from as Target);
+			unread.set(frame.id, { peer, label, soon: idle || steer, told: false });
+		}
 		try {
-			const options = ctx.isIdle() ? { triggerTurn: true } : urgent ? { deliverAs: "steer" as const, triggerTurn: true } : { deliverAs: "followUp" as const, triggerTurn: true };
+			const options = idle ? { triggerTurn: true } : steer ? { deliverAs: "steer" as const, triggerTurn: true } : { deliverAs: "followUp" as const, triggerTurn: true };
 			pi.sendMessage<RelayMessageDetails>({ customType: MESSAGE_TYPE, content: messageContent({ ...frame, urgent, hops }), display: true, details }, options);
 		} catch {
 			// Threw synchronously, so pi does not hold it: not acknowledged, and pushed again after a reconnect.
+			unread.delete(frame.id);
 			return;
 		}
 		seen.add(frame.id);
@@ -395,6 +431,8 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			sessionId = context.sessionManager.getSessionId();
 			started = true;
 			busy = !context.isIdle();
+			exchanged.clear();
+			unread.clear();
 			join(self, sessionId, {
 				markChild: () => guard(() => { child = true; withdrawTools(); evaluate(); }),
 				status: () => offlineReason() ?? "online",
@@ -431,6 +469,19 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	});
 	pi.on("agent_start", () => { busy = true; guard(pushState); });
 	pi.on("agent_end", () => { busy = false; guard(pushState); });
+	// The model reads a relay message when pi adds it to the context: as a turn starts, after a tool call, or after the turn.
+	pi.on("message_start", (event) => {
+		guard(() => {
+			const message = event.message as { role?: string; customType?: string; details?: { id?: unknown } };
+			if (message.role !== "custom" || message.customType !== MESSAGE_TYPE || typeof message.details?.id !== "string") return;
+			const entry = unread.get(message.details.id);
+			if (!entry) return;
+			unread.delete(message.details.id);
+			exchanged.set(entry.peer, Date.now());
+		});
+	});
+	// What the model has not read once pi settled left its queues unread (Esc, RPC clear_queue).
+	pi.on("agent_settled", () => { unread.clear(); });
 	pi.on("session_info_changed", () => { guard(pushState); });
 	pi.on("model_select", () => { guard(pushState); });
 
@@ -545,7 +596,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	async function send(
 		to: string,
 		text: string,
-		options: { room?: string; mentions?: string[]; urgent?: boolean; replyTo?: string; hops: number },
+		options: { room?: string; mentions?: string[]; urgent?: boolean; replyTo?: string; hops: number; checkUnread?: boolean },
 		signal?: AbortSignal,
 	): Promise<{ text: string; answer: SentFrame }> {
 		const current = connection;
@@ -554,6 +605,13 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		const rawRoom = options.room ?? (to.startsWith("#") ? to.slice(1) : undefined);
 		const room = rawRoom?.trim().replace(/^#/, "");
 		const targetKey = room ? `#${room}` : to;
+		// The model's send to a peer whose newer message it has not read would cross it: refused once per message.
+		const missed = options.checkUnread ? [...unread].filter(([, entry]) => entry.peer === targetKey && !entry.told) : [];
+		if (missed.length) {
+			for (const [, entry] of missed) entry.told = true;
+			exchanged.set(targetKey, Date.now());
+			throw new Error(unreadText(missed.map(([id]) => id), missed[0]![1].label, missed.every(([, entry]) => entry.soon)));
+		}
 		const record: SentRecord = { to: targetKey, label: targetLabel(undefined, targetKey), status: "queued", at: Date.now(), text };
 		const remember = () => { sent.push(record); if (sent.length > SENT_KEPT) sent.splice(0, sent.length - SENT_KEPT); };
 		if (Buffer.byteLength(text, "utf8") > maxTextBytes) {
@@ -580,6 +638,10 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			record.status = "rejected"; record.reason = answer.reason; remember();
 			throw new Error(`relay rejected the message (${answer.reason}): ${rejection(answer.reason) ?? "see the reason"}.`);
 		}
+		const now = Date.now();
+		exchanged.set(targetKey, now);
+		if (answer.room) exchanged.set(`#${answer.room}`, now);
+		else if (answer.to?.sessionId) exchanged.set(answer.to.sessionId, now);
 		record.id = answer.id;
 		record.label = answer.room ? `room #${headerField(answer.room)}` : targetLabel(answer.to, to);
 		// A status frame may already have reported it delivered.
@@ -645,6 +707,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				+ "For a 1:1 message, pass `to` (a session id from relay_list). For a chatroom, pass `room` (or `to: \"#room\"`) and optional `mentions` (session ids, agent names, or 'all'). "
 				+ "In a chatroom, only @mentioned members receive a live notification that starts/joins a turn; all agents can read room history on demand with relay_room. "
 				+ "An answer arrives as a new [relay] message in this session only after your current turn ends, never during it, so do not sleep, poll relay_status, or call relay_list to wait for one: end your turn instead. "
+				+ "A send to a session or room whose newer message you have not read yet is refused once, so that you read that message first. "
 				+ "Messages that cannot be delivered within 5 minutes are dropped, and you get a notice.",
 			promptSnippet: "Send a text message to another running pi session or a chatroom through pika relay",
 			parameters: Type.Object({
@@ -652,7 +715,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				room: Type.Optional(Type.String({ description: "Chatroom name to post to (alternative to `to`); only @mentioned members are woken up" })),
 				mentions: Type.Optional(Type.Array(Type.String(), { description: "In a chatroom, session ids or names (or 'all') to notify and wake up" })),
 				text: Type.String({ description: "The message text (at most 32 KiB)" }),
-				urgent: Type.Optional(Type.Boolean({ description: "Steer the message into the target's current turn instead of queueing it after that turn" })),
+				urgent: Type.Optional(Type.Boolean({ description: "Steer the message into the target's current turn even when it would otherwise wait until that turn ends" })),
 				replyTo: Type.Optional(Type.String({ description: "The id of the relay message this answers" })),
 			}),
 			async execute(_id, params, signal) {
@@ -663,6 +726,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 					urgent: params.urgent,
 					replyTo: params.replyTo,
 					hops: runHops + 1,
+					checkUnread: true,
 				}, signal);
 				return { content: [{ type: "text", text: `${text} ${ANSWER_HINT}` }], details: answer };
 			},
@@ -701,7 +765,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				topic: Type.Optional(Type.String({ description: "Optional topic description when joining/creating a room" })),
 				text: Type.Optional(Type.String({ description: "Message text when action is 'send'" })),
 				mentions: Type.Optional(Type.Array(Type.String(), { description: "Session ids or agent names (or 'all') to notify when action is 'send'" })),
-				urgent: Type.Optional(Type.Boolean({ description: "Steer into mentioned members' active turns when action is 'send'" })),
+				urgent: Type.Optional(Type.Boolean({ description: "Steer into mentioned members' active turns when action is 'send', even when it would otherwise wait until those turns end" })),
 				replyTo: Type.Optional(Type.String({ description: "Message id being answered when action is 'send'" })),
 				limit: Type.Optional(Type.Integer({ description: "Max messages to read in 'history' (default 50, max 200)" })),
 				after: Type.Optional(Type.Integer({ description: "Only return messages with seq > after in 'history'" })),
@@ -743,6 +807,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 					urgent: params.urgent,
 					replyTo: params.replyTo,
 					hops: runHops + 1,
+					checkUnread: true,
 				}, signal);
 				return { content: [{ type: "text", text: `${text} ${ANSWER_HINT}` }], details: { sent: answer } as RoomToolDetails };
 			},

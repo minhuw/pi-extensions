@@ -46,7 +46,7 @@ it("delivers a message to an idle session as a turn, with a receipt entry, then 
 	expect(h.sent).toEqual([{
 		message: {
 			customType: MESSAGE_TYPE, display: true,
-			content: `[relay] Message ${messageId} from pi session sender-session ("Sender") on desktop, project elsewhere, replying to msg-0:\n\nPlease run the tests.\n\nThis message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "sender-session" and replyTo "${messageId}".`,
+			content: `[relay] Message ${messageId} from pi session sender-session ("Sender") on desktop, project elsewhere, replying to msg-0:\n\nPlease run the tests.\n\nThis message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "sender-session" and replyTo "${messageId}". Messages can cross on the way: if this one adds nothing to what you already sent, do not reply just to say so.`,
 			details: expect.objectContaining({ id: messageId, text: "Please run the tests.", urgent: false, replyTo: "msg-0", hops: 2, from: expect.objectContaining({ kind: "session", sessionId: "sender-session" }) }),
 		},
 		options: { triggerTurn: true },
