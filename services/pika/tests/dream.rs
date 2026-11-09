@@ -1178,9 +1178,9 @@ fn dream_tools_are_memory_tools() {
 }
 
 impl App {
-    /// `POST {base}/api/v1/memory/batches/:id/revert` without a login, for `AuthMode::None`.
+    /// `POST {base}/api/v1/memory/batches/:id/revert` with `{}` and without a login, for `AuthMode::None`.
     async fn revert(&self, id: &Value) -> Reply {
-        self.call(Method::POST, &format!("/api/v1/memory/batches/{}/revert", id.as_str().unwrap()), None, None).await
+        self.call(Method::POST, &format!("/api/v1/memory/batches/{}/revert", id.as_str().unwrap()), None, Some(json!({}))).await
     }
 
     /// The owner's view of a note: its current state and its revisions.
@@ -1362,8 +1362,14 @@ async fn batch_routes_need_the_owners_login() {
     assert_eq!(response.status(), StatusCode::OK);
     let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_owned();
     let send = |method: Method, path: &str| {
-        let request = Request::builder().method(method).uri(path).header(header::COOKIE, &cookie).body(Body::empty()).unwrap();
-        app.app.clone().oneshot(request)
+        let post = method == Method::POST;
+        let request = Request::builder().method(method).uri(path).header(header::COOKIE, &cookie);
+        let request = if post {
+            request.header(header::CONTENT_TYPE, "application/json").body(Body::from("{}"))
+        } else {
+            request.body(Body::empty())
+        };
+        app.app.clone().oneshot(request.unwrap())
     };
     let response = send(Method::GET, &list).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -1469,5 +1475,25 @@ async fn deleting_a_project_detaches_its_dreams_user_edits() {
     assert_eq!((&revisions[0]["batchId"], &revisions[0]["sources"]), (&other["batch"]["id"], &json!([source("g1", 1)])));
     assert_eq!(app.count("SELECT COUNT(*) FROM memory_revisions WHERE batch_id IS NOT NULL"), 1);
     let r = app.revert(&other["batch"]["id"]).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+}
+
+/// S5: the owner's revert takes a JSON body, as the owner's other mutations do; a form post is 415 and reverts nothing.
+#[tokio::test]
+async fn reverts_refuse_form_posts() {
+    let app = App::new();
+    repo_session(&app.env.store, "s1", BASE, 2);
+    let granted = app.granted("auto").await;
+    let committed = app.committed(&granted, json!({ "sessions": ["s1"], "changes": [save("project", "Build", json!([source("s1", 1)]))] })).await;
+    let batch = committed["batch"]["id"].clone();
+    let state = app.dump();
+    let form = Request::post(format!("/api/v1/memory/batches/{}/revert", batch.as_str().unwrap()))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from("a=b"))
+        .unwrap();
+    let response = app.app.clone().oneshot(form).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(app.dump(), state);
+    let r = app.revert(&batch).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
 }

@@ -282,8 +282,9 @@ async fn batches(State(state): State<AppState>, Query(params): Query<BTreeMap<St
     )
 }
 
-/// `POST memory/batches/:id/revert` restores the notes a dream batch touched; its body is ignored.
-async fn revert(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+/// `POST memory/batches/:id/revert` restores the notes a dream batch touched. Its JSON body (`{}`) is ignored, but a
+/// form post is refused (415), as for the owner's other mutations.
+async fn revert(State(state): State<AppState>, Path(id): Path<String>, Json(_): Json<Value>) -> Response {
     let store = state.store.clone();
     respond_dream(
         blocking(move || Ok(store.write(|tx| dream::revert(tx, &id, now_ms())).map(|batch| json!({ "batch": batch })))).await,
