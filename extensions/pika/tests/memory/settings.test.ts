@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { loadMemorySettings } from "../../config.ts";
+import { loadMemorySettings, MAX_DREAM_IDLE_MINUTES } from "../../config.ts";
 
 let dir: string;
 beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), "pika-memory-settings-")); });
@@ -34,4 +34,15 @@ it.each([
 ])("falls back to the default for an invalid value: %j", async (memory) => {
 	await write({ memory });
 	expect(loadMemorySettings(dir)).toEqual({ autoDream: true, dreamIdleMinutes: 20 });
+});
+
+it("caps dreamIdleMinutes at the longest delay a timer holds", async () => {
+	// Node fires a timer past 2^31 - 1 ms after 1 ms, so a larger wait would dream at once.
+	expect(MAX_DREAM_IDLE_MINUTES).toBe(35_791);
+	expect(MAX_DREAM_IDLE_MINUTES * 60_000).toBeLessThanOrEqual(2 ** 31 - 1);
+	expect((MAX_DREAM_IDLE_MINUTES + 1) * 60_000).toBeGreaterThan(2 ** 31 - 1);
+	for (const [given, used] of [[35_791, 35_791], [35_792, 35_791], [1e9, 35_791], [90.5, 90.5]] as const) {
+		await write({ memory: { dreamIdleMinutes: given } });
+		expect(loadMemorySettings(dir).dreamIdleMinutes).toBe(used);
+	}
 });

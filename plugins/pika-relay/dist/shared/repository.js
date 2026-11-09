@@ -20,10 +20,12 @@ function gitEnv() {
 function git(cwd, args, timeout = GIT_TIMEOUT_MS) {
     return new Promise((resolve) => {
         try {
-            execFile("git", ["-C", cwd, ...args], { env: gitEnv(), timeout, maxBuffer: 256 * 1024, windowsHide: true, encoding: "utf8" }, (error, stdout) => resolve(error ? undefined : stdout));
+            execFile("git", ["-C", cwd, ...args], { env: gitEnv(), timeout, maxBuffer: 256 * 1024, windowsHide: true, encoding: "utf8" }, 
+            // An exit status is git's answer; a signal (the timeout's kill) or a spawn error is not.
+            (error, stdout) => resolve(error ? { answered: typeof error.code === "number" } : { stdout, answered: true }));
         }
         catch {
-            resolve(undefined);
+            resolve({ answered: false });
         }
     });
 }
@@ -128,42 +130,52 @@ export function pickRemoteUrl(output) {
 async function commonDir(cwd) {
     const started = Date.now();
     const absolute = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    if (absolute !== undefined)
-        return absolute.replace(/\r?\n$/, "") || undefined;
+    if (absolute.stdout !== undefined)
+        return { dir: absolute.stdout.replace(/\r?\n$/, "") || undefined, answered: true };
     const left = GIT_TIMEOUT_MS - (Date.now() - started);
     if (left <= 0)
-        return undefined;
-    const dir = (await git(cwd, ["rev-parse", "--git-common-dir"], left))?.replace(/\r?\n$/, "");
-    return dir ? resolvePath(cwd, dir) : undefined;
+        return { answered: false };
+    const relative = await git(cwd, ["rev-parse", "--git-common-dir"], left);
+    const dir = relative.stdout?.replace(/\r?\n$/, "");
+    return { dir: dir ? resolvePath(cwd, dir) : undefined, answered: relative.answered };
 }
+/** The repository of `cwd`; `final` is false when git did not answer in time, so the result may be incomplete. */
 async function resolve(cwd) {
     try {
-        const [dir, remotes] = await Promise.all([
+        const [common, remotes] = await Promise.all([
             commonDir(cwd),
             git(cwd, ["config", "-z", "--get-regexp", "^remote\\..*\\.url$"]),
         ]);
+        const { dir } = common;
         if (!dir)
-            return {};
+            return { info: {}, final: common.answered };
         const project = projectFromCommonDir(await realpath(dir).catch(() => dir));
         if (!project)
-            return {};
-        const remote = remotes === undefined ? undefined : pickRemoteUrl(remotes);
+            return { info: {}, final: true };
+        const remote = remotes.stdout === undefined ? undefined : pickRemoteUrl(remotes.stdout);
         const repository = remote === undefined ? undefined : normalizeRemoteUrl(remote);
-        return { project, ...(repository ? { repository } : {}) };
+        return { info: { project, ...(repository ? { repository } : {}) }, final: remotes.answered };
     }
     catch {
-        return {};
+        return { info: {}, final: false };
     }
 }
 const cache = new Map();
 /**
- * The repository of `cwd`, resolved with git once per cwd in this process. It never rejects, and
- * settles within about `GIT_TIMEOUT_MS`; an empty object means no repository.
+ * The repository of `cwd`, resolved with git once per cwd in this process; concurrent calls share one
+ * resolution. It never rejects, and settles within about `GIT_TIMEOUT_MS`; an empty object means no
+ * repository. A resolution that git did not answer in time, as when it stalls, is not kept: the next
+ * call resolves again.
  */
 export function resolveRepository(cwd) {
     let pending = cache.get(cwd);
     if (!pending) {
-        pending = resolve(cwd);
+        const resolving = resolve(cwd).then(({ info, final }) => {
+            if (!final && cache.get(cwd) === resolving)
+                cache.delete(cwd);
+            return info;
+        });
+        pending = resolving;
         cache.set(cwd, pending);
     }
     return pending;

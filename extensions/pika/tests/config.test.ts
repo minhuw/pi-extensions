@@ -22,6 +22,23 @@ it("reads pika.json, lets PIKA_URL and PIKA_TOKEN override it, and always honors
 	} finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+it("rejects a server url with credentials, a query, or a fragment, without repeating it", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pi-pika-config-"));
+	const file = join(dir, "pika.json");
+	try {
+		await writeFile(file, JSON.stringify({ url: "https://alice:hunter2@pika.example.com", token: "t" }));
+		const fromFile = loadConfig(dir, {});
+		expect(fromFile).toEqual({ enabled: false, reason: `invalid server url in ${file}: the server URL must not contain credentials`, file });
+		const fromEnv = loadConfig(dir, { PIKA_URL: "http://bob:s3cret@127.0.0.1:17171" });
+		expect(fromEnv).toEqual({ enabled: false, reason: "invalid server url in PIKA_URL: the server URL must not contain credentials", file });
+		for (const result of [fromFile, fromEnv]) expect(JSON.stringify(result)).not.toMatch(/hunter2|s3cret|alice|bob/);
+		expect(loadConfig(dir, { PIKA_URL: "https://pika.example.com/?x=1" })).toMatchObject({ enabled: false, reason: "invalid server url in PIKA_URL: the server URL must not have a query or fragment" });
+		expect(loadConfig(dir, { PIKA_URL: "https://Pika.Example.com:443/pika//" })).toMatchObject({ enabled: true, config: { url: "https://Pika.Example.com:443/pika" } });
+		await writeFile(file, `{ "token": "pika_secret" `);
+		expect(loadConfig(dir, {})).toMatchObject({ enabled: false, unreadable: true });
+	} finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 it("excludes cwd prefixes on directory boundaries and globs that match the cwd or an ancestor", () => {
 	expect(isExcluded("/work/secret", ["/work/secret"])).toBe(true);
 	expect(isExcluded("/work/secret/app", ["/work/secret/"])).toBe(true);

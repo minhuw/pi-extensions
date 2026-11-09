@@ -96,12 +96,12 @@ Each agent dir has a device key: `<agentDir>/pika/device-key.json`, `{ "v": 1, "
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `url` | none | The server's address, including its base path (`https://pika.example.com` or `https://homelab.example/pika`). It must be `http://` or `https://`; a trailing `/` is ignored. Plain `http://` works on a trusted network. |
+| `url` | none | The server's address, including its base path (`https://pika.example.com` or `https://homelab.example/pika`). It must be `http://` or `https://`, without a user name, password, query, or fragment; a trailing `/` is ignored. Plain `http://` works on a trusted network. |
 | `token` | none | The device token from pairing or `pika token create "<name>"`. The server maps it to the device, so the device is never sent as data. |
 | `enabled` | `true` | `false` turns pika off without removing the file. |
 | `exclude` | `[]` | Working directories pika skips (below). |
 | `memory.autoDream` | `true` | `false` stops idle sessions from starting [dreams](#dreaming) on their own; `/memory dream` still works. |
-| `memory.dreamIdleMinutes` | `20` | How long a session stays idle after its last run before it asks for a dream; at least 1. |
+| `memory.dreamIdleMinutes` | `20` | How long a session stays idle after its last run before it asks for a dream; at least 1 and at most 35,791 (about 24.8 days, the longest timer Node.js holds), and a larger value counts as 35,791. |
 | `memory.dreamModel` | none | `<provider>/<model id>` for dreams, such as `anthropic/claude-haiku-5-5`. Unset or not found, a dream uses its session's model, and `/memory status` says so. |
 
 Invalid `memory` values fall back to their defaults. pika reads `memory` again at every idle wait and `/memory` command, so edits apply without a restart.
@@ -143,7 +143,7 @@ Each session is filed under a project: the name of the git repository holding it
 
 pika also uploads the repository's web URL, which the web UI links to from the session page. It comes from the `origin` remote, or the only remote when there is no `origin`: scp-like `git@host:path`, `ssh://`, and `git://` URLs become `https://host/path` without the port, and `https://` and `http://` URLs keep their scheme and port. Credentials (a user, password, or token before the `@`), query, fragment, a trailing `/`, and `.git` are removed. Local paths, `file://` URLs, hosts other than plain names or IPv4 addresses, and URLs with whitespace or control characters give no URL.
 
-git runs once per working directory and process, without prompts and without the `GIT_*` environment, so `GIT_DIR` cannot point it at another repository. The session's stream opens once git answered, so its first upload already carries both fields; lines written meanwhile are uploaded from the session file. Both travel in the session stream's `meta` as `project` and `repository`. The [exclude list](#exclude-list) still applies to the working directory.
+git runs once per working directory and process, without prompts and without the `GIT_*` environment, so `GIT_DIR` cannot point it at another repository; when it does not answer within 2 s, the next lookup asks it again. The session's stream opens once git answered, so its first upload already carries both fields; lines written meanwhile are uploaded from the session file. Both travel in the session stream's `meta` as `project` and `repository`. The [exclude list](#exclude-list) still applies to the working directory.
 
 ### Delivery and the offline spool
 
@@ -234,7 +234,7 @@ const registry: {
 
 - `current` is set while pika is enabled with a URL and token, and `undefined` when it is disabled (including `PIKA_DISABLED=1`), logged out, or unconfigured. `isExcluded` applies the [exclude list](#exclude-list).
 - pika reads the configuration at each session start, `/pika login`, and `/pika logout`, and calls every listener after each change, including a login that switches servers. A configuration that reads the same is no change.
-- `repository(cwd)` resolves the git repository of `cwd` as pika files sessions (see [Projects and repositories](#projects-and-repositories)): `project` is its name and `repository` its web URL without credentials, both absent outside git. It is cached per cwd, never rejects, and settles within a few seconds. pika sets it whether or not it is logged in; older pika versions lack it, so callers fall back to the basename of `cwd`. relay names its sessions' project with it, and recall resolves `scope: "project"` with it.
+- `repository(cwd)` resolves the git repository of `cwd` as pika files sessions (see [Projects and repositories](#projects-and-repositories)): `project` is its name and `repository` its web URL without credentials, both absent outside git. It is cached per cwd once git answered, never rejects, and settles within a few seconds. pika sets it whether or not it is logged in; older pika versions lack it, so callers fall back to the basename of `cwd`. relay names its sessions' project with it, and recall resolves `scope: "project"` with it.
 - Either side may create the registry first.
 
 ### Herder runs
@@ -369,7 +369,7 @@ The three tools are registered wherever pika's extension loads, whatever the cre
 
 The tools' guidelines ask the model to save only what the code, git history, and AGENTS.md cannot tell, to keep hooks short, to verify a note against the code before relying on it, and never to store secrets; the server also scrubs credentials from every note.
 
-A call fails, and the model reads why, when pika is not logged in, its `exclude` list covers the session's working directory, the server rejects the token (401) or the device's read access is off (403 `read_access_denied`, switched as for [recall](#recall)), the server has no memory routes (404), or the server cannot be reached or does not answer within 15 s. A save or forget of a note that changed since the model read it (409 `revision_conflict`) fails with the note's current state, to merge and retry. A save that would pass the index's budget (422 `memory_full`) fails with the sizes and asks the model to merge or forget notes; a note the server refuses (400) fails with the server's message. A save or forget of an unknown note (404) reads the notes again to tell why: a save that names the wrong scope says which scope the note is in, since a note never changes scope; a note in neither scope was forgotten or belongs to another project; and when that read fails, the result says the note could not be checked.
+A call fails, and the model reads why, when pika is not logged in, pika is disabled (the result names the cause, such as `PIKA_DISABLED=1`), its `exclude` list covers the session's working directory, the server rejects the token (401) or the device's read access is off (403 `read_access_denied`, switched as for [recall](#recall)), the server has no memory routes (404), or the server cannot be reached or does not answer within 15 s; aborting the tool call stops the request. A save or forget of a note that changed since the model read it (409 `revision_conflict`) fails with the note's current state, to merge and retry. A save that would pass the index's budget (422 `memory_full`) fails with the sizes and asks the model to merge or forget notes; a note the server refuses (400) fails with the server's message. A save or forget of an unknown note (404) reads the notes again to tell why: a save that names the wrong scope says which scope the note is in, since a note never changes scope; a note in neither scope was forgotten or belongs to another project; and when that read fails, the result says the note could not be checked. No result repeats a user name or password in the server URL.
 
 ### The pinned `memory` section
 

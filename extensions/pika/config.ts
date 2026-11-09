@@ -10,7 +10,11 @@ export interface PikaConfig {
 
 export type ConfigResult =
 	| { enabled: true; config: PikaConfig; file: string }
-	| { enabled: false; reason: string; file: string; url?: string; /** No server url or token is configured anywhere. */ unconfigured?: true };
+	| {
+		enabled: false; reason: string; file: string; url?: string;
+		/** No server url or token is configured anywhere. */ unconfigured?: true;
+		/** The file cannot be read or parsed; `reason` repeats the parser's message, which may quote the file. */ unreadable?: true;
+	};
 
 /** Reads `<agentDir>/pika.json`; `PIKA_URL` and `PIKA_TOKEN` override it and `PIKA_DISABLED=1` always disables. */
 export function loadConfig(agentDir: string, env: NodeJS.ProcessEnv = process.env): ConfigResult {
@@ -21,18 +25,18 @@ export function loadConfig(agentDir: string, env: NodeJS.ProcessEnv = process.en
 		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) raw = parsed as Record<string, unknown>;
 		else return { enabled: false, reason: `${file} is not a JSON object`, file };
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { enabled: false, reason: `cannot read ${file}: ${(error as Error).message}`, file };
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { enabled: false, reason: `cannot read ${file}: ${(error as Error).message}`, file, unreadable: true };
 	}
 	const url = (env.PIKA_URL || (typeof raw.url === "string" ? raw.url : "")).trim();
 	const token = (env.PIKA_TOKEN || (typeof raw.token === "string" ? raw.token : "")).trim();
 	if (env.PIKA_DISABLED === "1") return { enabled: false, reason: "PIKA_DISABLED=1 is set", file, url: url || undefined };
 	if (raw.enabled === false) return { enabled: false, reason: `"enabled" is false in ${file}`, file, url: url || undefined };
 	if (!url || !token) return { enabled: false, reason: `no server url and token configured (${file}, PIKA_URL, PIKA_TOKEN)`, file, url: url || undefined, unconfigured: true };
+	// As `/pika login` checks it; the reason never repeats the URL, whose credentials would show wherever it is shown.
 	try {
-		const parsed = new URL(url);
-		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("not http(s)");
-	} catch {
-		return { enabled: false, reason: `invalid server url ${JSON.stringify(url)}`, file };
+		normalizeUrl(url);
+	} catch (error) {
+		return { enabled: false, reason: `invalid server url in ${env.PIKA_URL ? "PIKA_URL" : file}: ${(error as Error).message}`, file };
 	}
 	const exclude = Array.isArray(raw.exclude) ? raw.exclude.filter((value): value is string => typeof value === "string" && value.length > 0) : [];
 	return { enabled: true, config: { url: url.replace(/\/+$/, ""), token, exclude }, file };
@@ -49,8 +53,13 @@ export interface MemorySettings {
 }
 
 export const MEMORY_DEFAULTS: Readonly<MemorySettings> = { autoDream: true, dreamIdleMinutes: 20 };
+/** The longest idle wait, in whole minutes, that a timer can hold: Node fires delays past 2^31 - 1 ms at once. */
+export const MAX_DREAM_IDLE_MINUTES = Math.floor((2 ** 31 - 1) / 60_000);
 
-/** Reads `memory` from `<agentDir>/pika.json`; a missing or unreadable file and invalid values give the defaults. */
+/**
+ * Reads `memory` from `<agentDir>/pika.json`; a missing or unreadable file and invalid values give the defaults, and
+ * `dreamIdleMinutes` past `MAX_DREAM_IDLE_MINUTES` counts as that.
+ */
 export function loadMemorySettings(agentDir: string): MemorySettings {
 	let memory: Record<string, unknown> = {};
 	try {
@@ -63,7 +72,8 @@ export function loadMemorySettings(agentDir: string): MemorySettings {
 	const slash = model.indexOf("/");
 	return {
 		autoDream: typeof autoDream === "boolean" ? autoDream : MEMORY_DEFAULTS.autoDream,
-		dreamIdleMinutes: typeof dreamIdleMinutes === "number" && Number.isFinite(dreamIdleMinutes) && dreamIdleMinutes >= 1 ? dreamIdleMinutes : MEMORY_DEFAULTS.dreamIdleMinutes,
+		dreamIdleMinutes: typeof dreamIdleMinutes === "number" && Number.isFinite(dreamIdleMinutes) && dreamIdleMinutes >= 1
+			? Math.min(dreamIdleMinutes, MAX_DREAM_IDLE_MINUTES) : MEMORY_DEFAULTS.dreamIdleMinutes,
 		...(slash > 0 && slash < model.length - 1 ? { dreamModel: model } : {}),
 	};
 }

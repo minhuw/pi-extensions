@@ -25,13 +25,17 @@ function gitEnv(): NodeJS.ProcessEnv {
 	return env;
 }
 
-function git(cwd: string, args: string[], timeout = GIT_TIMEOUT_MS): Promise<string | undefined> {
+/** What git printed, if it succeeded; `answered` is false when it timed out or could not run, so a later try may answer. */
+interface GitResult { stdout?: string; answered: boolean }
+
+function git(cwd: string, args: string[], timeout = GIT_TIMEOUT_MS): Promise<GitResult> {
 	return new Promise((resolve) => {
 		try {
 			execFile("git", ["-C", cwd, ...args], { env: gitEnv(), timeout, maxBuffer: 256 * 1024, windowsHide: true, encoding: "utf8" },
-				(error, stdout) => resolve(error ? undefined : stdout));
+				// An exit status is git's answer; a signal (the timeout's kill) or a spawn error is not.
+				(error, stdout) => resolve(error ? { answered: typeof error.code === "number" } : { stdout, answered: true }));
 		} catch {
-			resolve(undefined);
+			resolve({ answered: false });
 		}
 	});
 }
@@ -121,43 +125,52 @@ export function pickRemoteUrl(output: string): string | undefined {
  * git's common dir for `cwd`, absolute. git before 2.31 lacks `--path-format` and may print it relative to the cwd
  * (`-C cwd`), so a failure is retried without it within what remains of `GIT_TIMEOUT_MS`.
  */
-async function commonDir(cwd: string): Promise<string | undefined> {
+async function commonDir(cwd: string): Promise<{ dir?: string; answered: boolean }> {
 	const started = Date.now();
 	const absolute = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-	if (absolute !== undefined) return absolute.replace(/\r?\n$/, "") || undefined;
+	if (absolute.stdout !== undefined) return { dir: absolute.stdout.replace(/\r?\n$/, "") || undefined, answered: true };
 	const left = GIT_TIMEOUT_MS - (Date.now() - started);
-	if (left <= 0) return undefined;
-	const dir = (await git(cwd, ["rev-parse", "--git-common-dir"], left))?.replace(/\r?\n$/, "");
-	return dir ? resolvePath(cwd, dir) : undefined;
+	if (left <= 0) return { answered: false };
+	const relative = await git(cwd, ["rev-parse", "--git-common-dir"], left);
+	const dir = relative.stdout?.replace(/\r?\n$/, "");
+	return { dir: dir ? resolvePath(cwd, dir) : undefined, answered: relative.answered };
 }
 
-async function resolve(cwd: string): Promise<RepositoryInfo> {
+/** The repository of `cwd`; `final` is false when git did not answer in time, so the result may be incomplete. */
+async function resolve(cwd: string): Promise<{ info: RepositoryInfo; final: boolean }> {
 	try {
-		const [dir, remotes] = await Promise.all([
+		const [common, remotes] = await Promise.all([
 			commonDir(cwd),
 			git(cwd, ["config", "-z", "--get-regexp", "^remote\\..*\\.url$"]),
 		]);
-		if (!dir) return {};
+		const { dir } = common;
+		if (!dir) return { info: {}, final: common.answered };
 		const project = projectFromCommonDir(await realpath(dir).catch(() => dir));
-		if (!project) return {};
-		const remote = remotes === undefined ? undefined : pickRemoteUrl(remotes);
+		if (!project) return { info: {}, final: true };
+		const remote = remotes.stdout === undefined ? undefined : pickRemoteUrl(remotes.stdout);
 		const repository = remote === undefined ? undefined : normalizeRemoteUrl(remote);
-		return { project, ...(repository ? { repository } : {}) };
+		return { info: { project, ...(repository ? { repository } : {}) }, final: remotes.answered };
 	} catch {
-		return {};
+		return { info: {}, final: false };
 	}
 }
 
 const cache = new Map<string, Promise<RepositoryInfo>>();
 
 /**
- * The repository of `cwd`, resolved with git once per cwd in this process. It never rejects, and
- * settles within about `GIT_TIMEOUT_MS`; an empty object means no repository.
+ * The repository of `cwd`, resolved with git once per cwd in this process; concurrent calls share one
+ * resolution. It never rejects, and settles within about `GIT_TIMEOUT_MS`; an empty object means no
+ * repository. A resolution that git did not answer in time, as when it stalls, is not kept: the next
+ * call resolves again.
  */
 export function resolveRepository(cwd: string): Promise<RepositoryInfo> {
 	let pending = cache.get(cwd);
 	if (!pending) {
-		pending = resolve(cwd);
+		const resolving: Promise<RepositoryInfo> = resolve(cwd).then(({ info, final }) => {
+			if (!final && cache.get(cwd) === resolving) cache.delete(cwd);
+			return info;
+		});
+		pending = resolving;
 		cache.set(cwd, pending);
 	}
 	return pending;

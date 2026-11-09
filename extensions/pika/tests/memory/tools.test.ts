@@ -1,5 +1,10 @@
+import { execFileSync } from "node:child_process";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { timing } from "../../memory/client.ts";
+import { request, timing, withoutCredentials } from "../../memory/client.ts";
 import { FakePika } from "./support/pika-server.ts";
 import { callTool, type Harness, note, PROJECT, PROJECT_SCOPE, REPOSITORY, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
@@ -236,4 +241,81 @@ it("a write's 404 that pika cannot check is not reported as a forgotten note", a
 	const slow = await callTool(h, "memory_forget", { id: "000000000000", expectedRevision: 1 });
 	expect(slow.text).toMatch(/^the pika server did not find note 000000000000 \(HTTP 404\), and pika could not check why: could not reach the pika server at .+: no answer within 0\.2 s\./);
 	expect(slow.text).not.toContain("not_found");
+});
+
+it("names why pika is disabled instead of asking for /pika login", async () => {
+	setCredentials(undefined);
+	const read = () => callTool(h, "memory_read", {});
+	try {
+		process.env.PIKA_DISABLED = "1";
+		expect(await read()).toMatchObject({ isError: true, text: "memory is off because pika is disabled: PIKA_DISABLED=1 is set. Tell the user; /pika shows why." });
+	} finally { delete process.env.PIKA_DISABLED; }
+	const file = join(workspace.agentDir, "pika.json");
+	await writeFile(file, JSON.stringify({ url: pika.url, token: "pika_secret_token", enabled: false }));
+	expect((await read()).text).toBe(`memory is off because pika is disabled: "enabled" is false in ${file}. Tell the user; /pika shows why.`);
+	// A parser's message may quote the file; the tool never shows it.
+	await writeFile(file, `{ token: "pika_secret_token" }`);
+	expect((await read()).text).toBe(`memory is off because pika is disabled: pika cannot read ${file}. Tell the user; /pika shows why.`);
+	await writeFile(file, JSON.stringify({ url: "https://alice:hunter2@pika.example", token: "pika_secret_token" }));
+	const credentials = await read();
+	expect(credentials.text).toBe(`memory is off because pika is disabled: invalid server url in ${file}: the server URL must not contain credentials. Tell the user; /pika shows why.`);
+	await rm(file);
+	expect((await read()).text).toBe("memory needs the pika extension logged in to a pika server, and it is not. Ask the user to run /pika login.");
+	expect(pika.requests).toEqual([]);
+});
+
+it("never shows the user name or password of the server URL", async () => {
+	setCredentials(pika.url.replace("http://", "http://alice:hunter2@"));
+	for (const [name, args] of [["memory_read", {}], ["memory_save", { id: "abc", expectedRevision: 1, scope: "user", category: "user", title: "t", hook: "h", body: "" }]] as const) {
+		const result = await callTool(h, name, args);
+		expect(result).toMatchObject({ isError: true, text: "pika's server URL contains a user name or password, which pika never sends, so memory is off. Ask the user to remove them from PIKA_URL or the url in pika.json." });
+	}
+	expect(pika.requests).toEqual([]);
+	expect(withoutCredentials("Request cannot be constructed from a URL that includes credentials: https://alice:hunter2@pika.example/api/agent/v1/memory?project=x"))
+		.toBe("Request cannot be constructed from a URL that includes credentials: https://pika.example/api/agent/v1/memory?project=x");
+	expect(withoutCredentials("at http://a@b:c@host:8080/x and ftp://u@h/ but not mail@example.com or https://host/a@b")).toBe("at http://host:8080/x and ftp://h/ but not mail@example.com or https://host/a@b");
+});
+
+it("reports a timeout or an abort while the answer arrives as such, not as an unreadable answer", async () => {
+	// Sends the headers and the start of the body, then stalls.
+	const stalling = createServer((_request, response) => { response.writeHead(200, { "Content-Type": "application/json" }); response.write('{"notes":['); });
+	await new Promise<void>((resolve) => stalling.listen(0, "127.0.0.1", resolve));
+	const url = `http://127.0.0.1:${(stalling.address() as AddressInfo).port}`;
+	try {
+		setCredentials(url);
+		timing.httpTimeoutMs = 300;
+		expect(await callTool(h, "memory_read", {})).toMatchObject({ isError: true, text: `the pika server at ${url} did not finish its answer within 0.3 s.` });
+		timing.httpTimeoutMs = 15_000;
+		const controller = new AbortController();
+		const reading = request(workspace.cwd, "GET", "memory", { signal: controller.signal });
+		setTimeout(() => controller.abort(), 200);
+		await expect(reading).rejects.toThrow(/^memory was cancelled\.$/);
+	} finally {
+		stalling.closeAllConnections();
+		await new Promise((resolve) => stalling.close(resolve));
+	}
+});
+
+it.skipIf(process.platform === "win32")("resolves the repository again after git stalled, instead of losing project memory for the process", async () => {
+	const savedPath = process.env.PATH;
+	const bin = join(workspace.root, "bin");
+	const stall = join(workspace.root, "stall");
+	const real = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+	await mkdir(bin);
+	await writeFile(join(bin, "git"), `#!/bin/sh\nif [ -e '${stall}' ]; then exec sleep 10; fi\nexec '${real}' "$@"\n`);
+	await chmod(join(bin, "git"), 0o755);
+	await writeFile(stall, "");
+	pika.routes.set("POST memory/notes", { body: written() });
+	const args = { expectedRevision: 0, scope: "project", category: "project", title: "t", hook: "h", body: "" };
+	try {
+		process.env.PATH = `${bin}:${savedPath ?? ""}`;
+		const stalled = await callTool(h, "memory_save", args);
+		expect(stalled.isError).toBe(true);
+		expect(stalled.text).toContain("is not in a git repository pika can name");
+		await rm(stall);
+		expect((await callTool(h, "memory_save", args)).isError).toBe(false);
+		expect(pika.requestsTo("memory/notes")[0]!.body).toMatchObject({ project: PROJECT, repository: REPOSITORY });
+	} finally {
+		process.env.PATH = savedPath;
+	}
 });
