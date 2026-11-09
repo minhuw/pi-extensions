@@ -201,7 +201,8 @@ describe("no section", () => {
 		const started = Date.now();
 		expect(memorySection(await h.run("one"))).toBeUndefined();
 		expect(Date.now() - started).toBeLessThan(1_500);
-		expect(h.pins()).toEqual([{ index: null, fetchedAt: expect.any(String), error: expect.stringContaining("no answer within 0.2 s") }]);
+		// The fetch gets what is left of the 0.2 s after the repository lookup, which a loaded machine slows.
+		expect(h.pins()).toEqual([{ index: null, fetchedAt: expect.any(String), error: expect.stringMatching(/no answer within 0\.[12] s/) }]);
 		pika.routes.set("GET memory", { body: { index: INDEX } });
 		expect(memorySection(await h.run("two"))).toBeUndefined();
 		expect(fetches()).toBe(1);
