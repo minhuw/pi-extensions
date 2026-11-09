@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -95,7 +97,8 @@ pub fn list(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str, p: &Pa
 
 /// Entries for a namespace: `images` is the API namespace (`v1`, `public/v1`) whose image route each image's `src`
 /// names, or `None` for one without that route (the agent namespace), whose images have no `src`. A `redact`ed list,
-/// public or agent, has no agent memory (`redaction::omit_memory`), is scrubbed, and has no `requestId`.
+/// public or agent, has no agent memory (`redaction::omit_memory`, also of calls that are memory through results
+/// outside the page), is scrubbed, and has no `requestId`.
 pub fn list_scoped(
     conn: &Connection,
     blobs: &BlobStore,
@@ -130,12 +133,16 @@ pub fn list_scoped(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let images = images.map(|namespace| format!("{prefix}/api/{namespace}/sessions/{}/entries", encode_path_segment(id)));
+    let memory_calls = match (rows.first(), rows.last()) {
+        (Some((first, ..)), Some((last, ..))) if redact => crate::derive::memory_calls(conn, sid, first.seq, last.seq)?,
+        _ => HashSet::new(),
+    };
     let mut items = Vec::with_capacity(rows.len());
     for (mut entry, data, blob) in rows {
         let mut raw = parse(line_text(blobs, data, blob)?);
         if redact {
             // First, so that `truncated` tells nothing of the memory left out.
-            super::redaction::omit_memory(&mut raw);
+            super::redaction::omit_memory(&mut raw, &memory_calls);
         }
         let seq = entry.seq;
         for_each_image(&mut raw, &mut 0, &mut |index, image| {
@@ -165,6 +172,17 @@ pub fn list_scoped(
 pub fn raw(conn: &Connection, blobs: &BlobStore, id: &str, seq: i64) -> ReadResult<String> {
     let sid = session_sid(conn, id)?;
     raw_by_sid(conn, blobs, sid, seq)
+}
+
+/// The line of entry `seq` for a namespace: verbatim, or when `redact`ed (public or agent) without agent memory and
+/// scrubbed (`redaction::raw`).
+pub fn raw_scoped(conn: &Connection, blobs: &BlobStore, id: &str, seq: i64, redact: bool) -> ReadResult<String> {
+    let sid = session_sid(conn, id)?;
+    let line = raw_by_sid(conn, blobs, sid, seq)?;
+    if !redact {
+        return Ok(line);
+    }
+    Ok(super::redaction::raw(line, &crate::derive::memory_calls(conn, sid, seq, seq)?))
 }
 
 /// The verbatim line by derived session id, shared with the search rewrite so blob-backed entries read the same way.

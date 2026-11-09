@@ -433,8 +433,7 @@ async fn raw_entry(State(state): State<AppState>, Extension(scope): Extension<Sc
         Err(e) => return read_error(e),
     };
     match scoped_query(&state, scope, Some(id.clone()), move |store, conn| {
-        let line = read::entries::raw(conn, &store.blobs, &id, seq)?;
-        Ok(if scope.redact { read::redaction::raw(line) } else { line })
+        read::entries::raw_scoped(conn, &store.blobs, &id, seq, scope.redact)
     })
     .await
     {

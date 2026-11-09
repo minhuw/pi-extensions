@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 
 use crate::blobs::BlobStore;
@@ -95,11 +95,15 @@ struct AssistantText {
 /// Discover across one assistant entry before replacing or capping any document. Copy only searchable text,
 /// names and arguments, not image blocks or call metadata. A later call can explain an earlier bare echo,
 /// even when its secret field lies beyond the index cap or only one sibling is requested by a rewrite batch.
-/// A memory tool call is never indexed, like an empty one, and its arguments take no part in discovery.
-fn assistant_text(content: Option<&Value>) -> AssistantText {
+/// A memory tool call is never indexed, like an empty one, and its arguments take no part in discovery. A call in
+/// `exclude`, which is memory through its result's nested calls (`super::nested_memory`), is not indexed either, but
+/// its arguments take part in discovery: they did when the entry was indexed before its result showed what the call
+/// was, and its siblings' documents keep the text they were indexed with.
+fn assistant_text(content: Option<&Value>, exclude: &HashSet<String>) -> AssistantText {
     let mut text = content_text(content);
     let blocks = content.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
-    let mut calls: Vec<_> = blocks.iter().filter(|b| str_field(b, "type") == Some("toolCall"))
+    let calls: Vec<_> = blocks.iter().filter(|b| str_field(b, "type") == Some("toolCall")).collect();
+    let mut arguments: Vec<_> = calls.iter()
         .map(|block| {
             let name = str_field(block, "name").unwrap_or("");
             (!memory::is_tool(name)).then(|| (name.to_owned(), block.get("arguments").cloned().unwrap_or(Value::Null)))
@@ -107,14 +111,17 @@ fn assistant_text(content: Option<&Value>) -> AssistantText {
         .collect();
     let mut scope = Scope::new();
     scope.text(&mut text);
-    for (name, arguments) in calls.iter_mut().flatten() {
+    for (name, arguments) in arguments.iter_mut().flatten() {
         scope.text(name);
         scope.content(arguments);
     }
     scope.finish();
     AssistantText {
         text: capped_text(&text, Kind::Assistant),
-        calls: calls.into_iter().map(|call| {
+        calls: arguments.into_iter().zip(calls).map(|(call, block)| {
+            if str_field(block, "id").is_some_and(|id| exclude.contains(id)) {
+                return None;
+            }
             let (mut name, arguments) = call?;
             match arguments {
                 Value::Object(args) => {
@@ -139,17 +146,71 @@ fn assistant_text(content: Option<&Value>) -> AssistantText {
     }
 }
 
-/// Preparation already scrubbed every string once; insert its capped documents without rescanning them.
-pub(super) fn index_assistant(tx: &Transaction, sid: i64, seq: i64, at: i64, content: Option<&Value>) -> Result<()> {
-    let prepared = assistant_text(content);
+/// Preparation already scrubbed every string once; insert its capped documents without rescanning them. The calls in
+/// `exclude` get no document (see `assistant_text`).
+pub(super) fn index_assistant(
+    tx: &Transaction,
+    sid: i64,
+    seq: i64,
+    at: i64,
+    content: Option<&Value>,
+    exclude: &HashSet<String>,
+) -> Result<()> {
+    let prepared = assistant_text(content, exclude);
     if let Some(text) = prepared.text {
         insert_text(tx, sid, seq, 0, at, Kind::Assistant, &text)?;
     }
-    for (part, text) in prepared.calls.into_iter().enumerate() {
+    insert_calls(tx, sid, seq, at, prepared.calls)
+}
+
+fn insert_calls(tx: &Transaction, sid: i64, seq: i64, at: i64, calls: Vec<Option<String>>) -> Result<()> {
+    for (part, text) in calls.into_iter().enumerate() {
         if let Some(text) = text {
             insert_text(tx, sid, seq, part as i64 + 1, at, Kind::ToolCall, &text)?;
         }
     }
+    Ok(())
+}
+
+/// Removes the call documents of the assistant entry at `seq` and indexes its calls again from its line, at the time,
+/// part numbers, and text they had, except those in `exclude`: calls that its results show are memory
+/// (`super::nested_memory`). The entry's own text keeps its document. An entry whose line is in the blob store (over
+/// 1 MiB), which derive cannot read, keeps no call document; so does one whose line is not an assistant message.
+pub(super) fn forget_calls(tx: &Transaction, sid: i64, seq: i64, exclude: &HashSet<String>) -> Result<()> {
+    let at: Option<i64> = tx
+        .prepare_cached("SELECT at FROM search_docs WHERE sid = ?1 AND seq = ?2 AND kind = 'tool-call' LIMIT 1")?
+        .query_row(params![sid, seq], |r| r.get(0))
+        .optional()?;
+    let Some(at) = at else { return Ok(()) };
+    remove_where(tx, "sid = ?1 AND seq = ?2 AND kind = 'tool-call'", params![sid, seq])?;
+    let line: Option<String> = tx
+        .prepare_cached(
+            "SELECT l.data FROM entries e JOIN lines l ON l.stream_id = e.sid AND l.offset = e.offset
+             WHERE e.sid = ?1 AND e.seq = ?2",
+        )?
+        .query_row(params![sid, seq], |r| r.get(0))
+        .optional()?
+        .flatten();
+    let Some(value) = line.and_then(|line| parse_json_lenient(&line).ok()) else { return Ok(()) };
+    let Some(message) = value.get("message").filter(|message| str_field(message, "role") == Some("assistant")) else {
+        return Ok(());
+    };
+    insert_calls(tx, sid, seq, at, assistant_text(message.get("content"), exclude).calls)
+}
+
+/// Removes the documents of the entry at `seq`.
+pub(super) fn forget_entry(tx: &Transaction, sid: i64, seq: i64) -> rusqlite::Result<()> {
+    remove_where(tx, "sid = ?1 AND seq = ?2", params![sid, seq])
+}
+
+/// Removes the documents that `filter`, an SQL condition on `search_docs`, selects.
+fn remove_where(conn: &Connection, filter: &str, params: impl rusqlite::Params + Clone) -> rusqlite::Result<()> {
+    // The full-text index has external content: each document leaves it with the text it was indexed with.
+    conn.prepare_cached(&format!(
+        "INSERT INTO search_fts (search_fts, rowid, text) SELECT 'delete', id, text FROM search_docs WHERE {filter}"
+    ))?
+    .execute(params.clone())?;
+    conn.prepare_cached(&format!("DELETE FROM search_docs WHERE {filter}"))?.execute(params)?;
     Ok(())
 }
 
@@ -175,13 +236,7 @@ fn insert_text(tx: &Transaction, sid: i64, seq: i64, part: i64, at: i64, kind: K
 
 /// Removes the session's documents, as for a dream's session indexed before its link arrived (`crate::hidden`).
 pub fn remove(conn: &Connection, sid: i64) -> rusqlite::Result<()> {
-    // The full-text index has external content: each document leaves it with the text it was indexed with.
-    conn.prepare_cached(
-        "INSERT INTO search_fts (search_fts, rowid, text) SELECT 'delete', id, text FROM search_docs WHERE sid = ?1",
-    )?
-    .execute([sid])?;
-    conn.prepare_cached("DELETE FROM search_docs WHERE sid = ?1")?.execute([sid])?;
-    Ok(())
+    remove_where(conn, "sid = ?1", [sid])
 }
 
 /// A row's position along the insertion probe, including low-bit and second wraparound. After each full second
@@ -262,9 +317,13 @@ impl Sources {
         if time_field(&value, "timestamp").is_some_and(|timestamp| timestamp != at) {
             return None;
         }
-        let assistant = value.get("message")
+        let assistant = match value.get("message")
             .filter(|message| str_field(&value, "type") == Some("message") && str_field(message, "role") == Some("assistant"))
-            .map(|message| assistant_text(message.get("content")));
+        {
+            // Calls that are memory through their results have no document, so they take no part in the probe below.
+            Some(message) => Some(assistant_text(message.get("content"), &super::memory_calls(tx, sid, seq, seq).ok()?)),
+            None => None,
+        };
         #[cfg(test)]
         { self.calls_extracted += assistant.as_ref().map_or(0, |prepared| prepared.calls.len()); }
         let mut calls = HashSet::new();
@@ -387,7 +446,7 @@ mod tests {
                 blocks.insert(0, json!({ "type": "text", "text": "assistant neighbor FAKElettersOnly" }));
                 blocks.push(json!({ "type": "image", "data": "FAKE".repeat(64 * 1024), "mimeType": "image/png" }));
                 let content = Value::Array(blocks);
-                index_assistant(tx, 7, 1, 5_000, Some(&content))?;
+                index_assistant(tx, 7, 1, 5_000, Some(&content), &HashSet::new())?;
                 source(tx, &store.blobs, 7, 1, json!({ "type": "message", "timestamp": 5_000,
                     "message": { "role": "assistant", "content": content } }));
                 let docs = documents(tx);
@@ -426,7 +485,7 @@ mod tests {
                     { "type": "image", "mimeType": "image/png", "data": "FAKE".repeat(64 * 1024) },
                 ]);
                 let role = if seq % 2 == 0 {
-                    index_assistant(tx, 7, seq, 5_000, Some(&content))?;
+                    index_assistant(tx, 7, seq, 5_000, Some(&content), &HashSet::new())?;
                     "assistant"
                 } else {
                     index(tx, 7, seq, 0, 5_000, Kind::ToolResult, &text)?;
@@ -458,13 +517,47 @@ mod tests {
             { "type": "text", "text": "neighbor FAKEinsideOnly" },
             { "type": "toolCall", "name": "configure", "arguments": { "client_secret": "FAKEinsideOnly" } },
         ]);
-        assert_eq!(assistant_text(Some(&first)).text.as_deref(), Some("neighbor [REDACTED:SECRET]"));
+        assert_eq!(assistant_text(Some(&first), &HashSet::new()).text.as_deref(), Some("neighbor [REDACTED:SECRET]"));
         let second = json!([
             { "type": "text", "text": "neighbor FAKEinsideOnly FAKEoutsideOnly" },
             { "type": "image", "mimeType": "image/png", "data": "DB_PASSWORD=FAKEoutsideOnly" },
             { "type": "toolCall", "id": "DB_PASSWORD=FAKEoutsideOnly", "name": "configure", "arguments": {} },
         ]);
-        assert_eq!(assistant_text(Some(&second)).text.as_deref(), Some("neighbor FAKEinsideOnly FAKEoutsideOnly"));
+        assert_eq!(assistant_text(Some(&second), &HashSet::new()).text.as_deref(), Some("neighbor FAKEinsideOnly FAKEoutsideOnly"));
+    }
+
+    /// A call that is memory through its result has no document, as a memory tool's call has none, and its siblings keep
+    /// their part numbers; unlike a memory tool's, its arguments still take part in discovery, as they did when the
+    /// entry was indexed before the result, so its siblings keep their text when the entry is indexed again.
+    #[test]
+    fn excluded_calls_have_no_document_but_take_part_in_discovery() {
+        let content = json!([
+            { "type": "toolCall", "id": "nested", "name": "codemode", "arguments": { "client_secret": "FAKEsharedOnly" } },
+            { "type": "toolCall", "id": "own", "name": "memory_save", "arguments": { "api_key": "FAKEmemoryOnly" } },
+            { "type": "toolCall", "id": "plain", "name": "bash", "arguments": { "command": "echo FAKEsharedOnly FAKEmemoryOnly" } },
+        ]);
+        let all = assistant_text(Some(&content), &HashSet::new()).calls;
+        let excluded = assistant_text(Some(&content), &HashSet::from(["nested".to_owned()])).calls;
+        assert!(all[0].as_deref().is_some_and(|text| text.starts_with("codemode\n")), "{all:?}");
+        assert_eq!(excluded[0], None);
+        assert_eq!((&all[1], &excluded[1]), (&None, &None));
+        assert_eq!(excluded[2], all[2]);
+        assert_eq!(excluded[2].as_deref(), Some("bash\ncommand: echo [REDACTED:SECRET] FAKEmemoryOnly"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        store.write(|tx| {
+            index_assistant(tx, 7, 1, 5_000, Some(&content), &HashSet::new())?;
+            tx.execute("INSERT INTO entries (sid, seq, offset, type) VALUES (7, 1, 1, 'message')", [])?;
+            tx.execute("INSERT INTO lines (stream_id, offset, data) VALUES (7, 1, ?1)",
+                [json!({ "type": "message", "message": { "role": "assistant", "content": content } }).to_string()])?;
+            let before = documents(tx);
+            forget_calls(tx, 7, 1, &HashSet::from(["nested".to_owned()]))?;
+            let after = documents(tx);
+            assert_eq!(after, before.iter().filter(|doc| !doc.5.starts_with("codemode")).cloned().collect::<Vec<_>>());
+            assert_eq!(after.iter().map(|doc| doc.0 & 7).collect::<Vec<_>>(), [3], "the bash call keeps part 3");
+            Ok::<_, anyhow::Error>(())
+        }).unwrap();
     }
 
     #[test]

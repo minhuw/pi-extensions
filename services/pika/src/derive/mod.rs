@@ -9,7 +9,9 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, Transaction};
 use serde_json::Value;
 
-pub use session::LINK_CUSTOM_TYPE;
+pub use session::{LINK_CUSTOM_TYPE, MEMORY_CALLS_TYPE, memory_calls, nested_memory};
+#[cfg(test)]
+pub(crate) use session::MEMORY_CALLS_SQL;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamKind {
@@ -204,6 +206,48 @@ pub fn refresh_final_texts(tx: &Transaction, blobs: &crate::blobs::BlobStore) ->
                 break;
             }
         }
+    }
+    Ok(())
+}
+
+/// Repairs what a pika before `MEMORY_CALLS_TYPE` derived from tool results whose tools called a memory tool
+/// (`nested_memory`): it marks each such result's entry, and removes the result's search document and its call's, as
+/// deriving them now does (`session::Deriver::index_search`). Only a line that names `nestedCalls` is parsed; a result
+/// stored in the blob store is read from it. See `store::migrate`.
+pub fn repair_memory_calls(tx: &Transaction, blobs: &crate::blobs::BlobStore) -> Result<()> {
+    let rows: Vec<(i64, i64, Option<String>, Option<String>)> = tx
+        .prepare(
+            "SELECT e.sid, e.seq, l.data, l.blob FROM entries e JOIN lines l ON l.stream_id = e.sid AND l.offset = e.offset
+             WHERE e.type = 'message' AND e.role = 'toolResult' AND e.custom_type IS NULL
+                 AND (l.blob IS NOT NULL OR instr(l.data, 'nestedCalls') > 0)",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut calls = std::collections::BTreeSet::new();
+    for (sid, seq, data, blob) in rows {
+        let line = match (data, blob) {
+            (Some(data), _) => data,
+            (None, Some(hash)) => blobs.get_string(&hash)?,
+            (None, None) => continue,
+        };
+        let Ok(value) = crate::util::parse_json_lenient(&line) else { continue };
+        let Some(message) = value.get("message").filter(|message| nested_memory(message)) else { continue };
+        tx.prepare_cached("UPDATE entries SET custom_type = ?3 WHERE sid = ?1 AND seq = ?2")?
+            .execute(rusqlite::params![sid, seq, MEMORY_CALLS_TYPE])?;
+        search::forget_entry(tx, sid, seq)?;
+        let call_seq: Option<i64> = match str_field(message, "toolCallId") {
+            Some(call_id) => tx
+                .prepare_cached("SELECT call_seq FROM tool_calls WHERE sid = ?1 AND call_id = ?2")?
+                .query_row(rusqlite::params![sid, call_id], |r| r.get(0))
+                .optional()?
+                .flatten(),
+            None => None,
+        };
+        calls.extend(call_seq.map(|call_seq| (sid, call_seq)));
+    }
+    // Once every result is marked, so each assistant entry is indexed again once, without all its memory calls.
+    for (sid, seq) in calls {
+        search::forget_calls(tx, sid, seq, &memory_calls(tx, sid, seq, seq)?)?;
     }
     Ok(())
 }

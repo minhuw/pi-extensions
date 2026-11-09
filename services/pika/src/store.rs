@@ -47,6 +47,8 @@ const WORKTREE_PROJECTS_REPAIRED: &str = "worktree_projects_repaired";
 const BARE_MODELS_REPAIRED: &str = "bare_models_repaired";
 /// Marks the completed repair of turn `final_text` values truncated at 2,000 characters.
 const FINAL_TEXT_REPAIRED: &str = "final_text_repaired";
+/// Marks the completed repair of tool results whose tools called a memory tool (`crate::derive::repair_memory_calls`).
+const MEMORY_CALLS_REPAIRED: &str = "memory_calls_repaired";
 const MAX_IDLE_READERS: usize = 16;
 
 /// Tables rebuilt by `pika reindex`, in the order they are cleared.
@@ -172,6 +174,16 @@ fn migrate(conn: &mut Connection, blobs: &BlobStore) -> Result<()> {
     if !repaired {
         crate::derive::refresh_final_texts(&tx, blobs).context("repairing turn final texts")?;
         tx.execute("INSERT INTO settings (key, value) VALUES (?1, x'01')", [FINAL_TEXT_REPAIRED])?;
+    }
+    tx.commit()?;
+    // Marking memory reached through nested tool calls is a derivation change too: an older pika indexed such calls and
+    // results for search and left their entries unmarked, so public and agent reads showed them. Repair them once.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let repaired =
+        tx.query_row("SELECT EXISTS(SELECT 1 FROM settings WHERE key = ?1)", [MEMORY_CALLS_REPAIRED], |r| r.get::<_, bool>(0))?;
+    if !repaired {
+        crate::derive::repair_memory_calls(&tx, blobs).context("repairing memory reached through nested tool calls")?;
+        tx.execute("INSERT INTO settings (key, value) VALUES (?1, x'01')", [MEMORY_CALLS_REPAIRED])?;
     }
     tx.commit()?;
     Ok(())

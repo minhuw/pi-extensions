@@ -334,6 +334,14 @@ fn the_trace_reads_primary_keys() {
             ]
         );
         assert_eq!(plan(conn, TOOL_CALLS_SQL, None), ["SEARCH tool_calls USING PRIMARY KEY (sid=?)"]);
+        // Public and agent traces, entry pages, and raw lines find calls that are memory through their results.
+        assert_eq!(
+            plan(conn, crate::derive::MEMORY_CALLS_SQL, None),
+            [
+                "SEARCH t USING INDEX tool_calls_seq (sid=? AND call_seq>? AND call_seq<?)",
+                "SEARCH e USING PRIMARY KEY (sid=? AND seq=?)",
+            ]
+        );
         assert_eq!(
             plan(conn, SUMMARIES_SQL, None),
             [

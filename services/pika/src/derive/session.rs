@@ -1,5 +1,7 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
-use rusqlite::{OptionalExtension, Row, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde_json::Value;
 
 use super::search::{self, Kind};
@@ -7,6 +9,36 @@ use super::{Line, StreamInfo, Usage, int_field, str_field, string_field, time_fi
 use crate::util::{basename, cut_chars, parse_json_lenient, valid_project, valid_repository, worktree_project};
 
 pub const LINK_CUSTOM_TYPE: &str = "pi-extensions.session-link";
+/// The `custom_type` of the entry of a tool result whose tool called a memory tool (`nested_memory`), such as a codemode
+/// script's: that result and its call are memory, for scrubbing (`crate::read::redaction::omit_memory`) and search, though
+/// their own tool is not a memory tool. Every other tool result's entry has none.
+pub const MEMORY_CALLS_TYPE: &str = "pika-memory-calls";
+
+/// Whether a tool result records a memory tool among the calls its tool made: Pi keeps the calls a tool runs through
+/// `ctx.executeTool()`, as a codemode script's are, on the tool's result as `nestedCalls: { calls: [{ name, arguments,
+/// ... }] }`. A result's own memory tool is `toolName`, which this does not look at.
+pub fn nested_memory(message: &Value) -> bool {
+    message
+        .get("nestedCalls")
+        .and_then(|nested| nested.get("calls"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|call| str_field(call, "name").is_some_and(crate::memory::is_tool))
+}
+
+/// The ids of the tool calls made at seqs `?2..=?3` whose results' entries are `MEMORY_CALLS_TYPE` (`?4`).
+pub(crate) const MEMORY_CALLS_SQL: &str = "SELECT t.call_id FROM tool_calls t
+     JOIN entries e ON e.sid = t.sid AND e.seq = t.result_seq
+     WHERE t.sid = ?1 AND t.call_seq >= ?2 AND t.call_seq <= ?3 AND e.custom_type = ?4";
+
+/// The ids of the session's tool calls made at seqs `from..=to` that are memory through their results' nested calls.
+pub fn memory_calls(conn: &Connection, sid: i64, from: i64, to: i64) -> rusqlite::Result<HashSet<String>> {
+    conn.prepare_cached(MEMORY_CALLS_SQL)?
+        .query_map(params![sid, from, to, MEMORY_CALLS_TYPE], |r| r.get(0))?
+        .collect()
+}
+
 const TITLE_CHARS: usize = 120;
 const USER_TEXT_CHARS: usize = 65_536;
 
@@ -584,10 +616,34 @@ impl Deriver<'_> {
                 match str_field(message, "role") {
                     Some("user") => search::index(self.tx, sid, seq, 0, at, Kind::User, &content_text(content))?,
                     Some("assistant") => {
-                        search::index_assistant(self.tx, sid, seq, at, content)?;
+                        // A call whose result came first and is memory gets no document, as when it comes after.
+                        let blocks = content.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+                        let exclude = if blocks.iter().any(|block| str_field(block, "type") == Some("toolCall")) {
+                            memory_calls(self.tx, sid, seq, seq)?
+                        } else {
+                            HashSet::new()
+                        };
+                        search::index_assistant(self.tx, sid, seq, at, content, &exclude)?;
                     }
                     // A memory tool's result is memory, which search never indexes.
                     Some("toolResult") if str_field(message, "toolName").is_some_and(crate::memory::is_tool) => {}
+                    // So is the result of a tool that called one; its call was indexed with its assistant message,
+                    // before this result showed what it called, and leaves the index now.
+                    Some("toolResult") if nested_memory(message) => {
+                        let Some(call_id) = string_field(message, "toolCallId") else { return Ok(()) };
+                        let call_seq: Option<i64> = self
+                            .tx
+                            .prepare_cached("SELECT call_seq FROM tool_calls WHERE sid = ?1 AND call_id = ?2")?
+                            .query_row(params![sid, call_id], |r| r.get(0))
+                            .optional()?
+                            .flatten();
+                        if let Some(call_seq) = call_seq {
+                            // This result's entry is recorded after this, so its call is not among those marked yet.
+                            let mut exclude = memory_calls(self.tx, sid, call_seq, call_seq)?;
+                            exclude.insert(call_id);
+                            search::forget_calls(self.tx, sid, call_seq, &exclude)?;
+                        }
+                    }
                     Some("toolResult") => {
                         search::index(self.tx, sid, seq, 0, at, Kind::ToolResult, &content_text(content))?
                     }
@@ -621,7 +677,12 @@ impl Deriver<'_> {
                 match role {
                     Some("user") => self.user(line.seq, ts, message)?,
                     Some("assistant") => call_ids = self.assistant(line.seq, v, ts, message)?,
-                    Some("toolResult") => call_ids = self.tool_result(line.seq, ts, message)?,
+                    Some("toolResult") => {
+                        call_ids = self.tool_result(line.seq, ts, message)?;
+                        if nested_memory(message) {
+                            custom_type = Some(MEMORY_CALLS_TYPE);
+                        }
+                    }
                     _ => {}
                 }
             }
