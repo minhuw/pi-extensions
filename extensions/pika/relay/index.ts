@@ -1,6 +1,6 @@
 import { hostname } from "node:os";
 import { basename } from "node:path";
-import { VERSION, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { VERSION, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { credentialsRegistry } from "../credentials.ts";
@@ -10,14 +10,15 @@ import {
 	type RelayRoom, type RelayRoomDetail, RELAY_VERSION, type RoomMember, type RoomMessage, sanitize, type SentFrame, type SessionState, since, type StatusFrame, type Target, targetLabel, timing, ttlText,
 } from "./protocol.ts";
 import { join, leave, shared, syncHook } from "./shared.ts";
+import { logItems, peerLabel, type RelaySentData, senderLabel, SENT_TYPE, showRelayLog, size } from "./viewer.ts";
 
 export { timing } from "./protocol.ts";
 
 /** At most this many sent messages are remembered for relay_status, and this many shown. */
 const SENT_KEPT = 200;
 const SENT_SHOWN = 50;
-const USAGE = "Usage: /relay [status|send <sessionId> <text>|off|on]";
-const SUBCOMMANDS = ["status", "send", "join", "leave", "rooms", "off", "on"];
+const USAGE = "Usage: /relay [status|send <sessionId> <text>|rooms|join <room> [topic]|leave <room>|log|off|on]";
+const SUBCOMMANDS = ["status", "send", "join", "leave", "rooms", "log", "off", "on"];
 
 /**
  * `failed`: the message never left this session; `unknown`: the server never answered (timeout,
@@ -41,6 +42,45 @@ const REJECTIONS: Record<string, string> = {
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const supportedMode = (context: ExtensionContext) => context.mode === "tui" || context.mode === "rpc";
 const preview = (text: string) => { const line = text.replace(/\s+/g, " ").trim(); return line.length > 60 ? `${line.slice(0, 59)}…` : line; };
+
+interface SendArgs { to?: string; room?: string; text?: string; urgent?: boolean; replyTo?: string }
+type ToolResult = { content: readonly { type: string; text?: string }[]; details?: unknown };
+
+const resultText = (result: ToolResult) => sanitize(result.content.map((part) => part.type === "text" ? part.text ?? "" : "").join(""));
+const firstLine = (text: string) => text.split("\n").find((line) => line.trim()) ?? "";
+
+/**
+ * `✉ relay → target [urgent] [reply to id] · size`, and the text when expanded. Every argument is the
+ * model's, and a send it repeats may carry another device's text.
+ */
+function sendCall(args: SendArgs, theme: Theme, expanded: boolean): Text {
+	const room = headerField(args.room).replace(/^#/, "");
+	const target = room ? `#${room}` : headerField(args.to) || "?";
+	const replyTo = headerField(args.replyTo);
+	const text = sanitize(args.text);
+	const tags = [args.urgent ? theme.fg("warning", "urgent") : "", replyTo ? theme.fg("dim", `reply to ${replyTo}`) : ""].filter(Boolean);
+	const head = `${theme.fg("accent", "✉ relay →")} ${theme.bold(target)}${tags.length ? ` ${tags.join(" ")}` : ""} ${theme.fg("dim", `· ${size(text)}`)}`;
+	return new Text([head, ...(expanded ? text.split("\n").map((line) => `  ${line}`) : [])].join("\n"), 0, 0);
+}
+
+/** The whole result when expanded; else one line: an error's first line, or what became of the message. */
+function resultLine(result: ToolResult, expanded: boolean, isError: boolean, theme: Theme, summary: () => string | undefined): Text {
+	const text = resultText(result);
+	if (isError) return new Text(theme.fg("error", expanded ? text : firstLine(text)), 0, 0);
+	return new Text(expanded ? text : summary() ?? firstLine(text), 0, 0);
+}
+
+function sentSummary(frame: Partial<Extract<SentFrame, { id: string }>> | undefined, theme: Theme): string | undefined {
+	if (!frame?.id || (frame.status !== "delivered" && frame.status !== "queued")) return undefined;
+	const id = theme.fg("dim", `· ${headerField(frame.id)}`);
+	if (frame.room) {
+		const notified = (frame.notified ?? []).map((target) => headerField(target.name) || headerField(target.title) || headerField(target.sessionId));
+		return `${theme.fg("success", `posted to #${headerField(frame.room)}`)} · ${notified.length ? `notified ${notified.join(", ")}` : "no one notified"} ${id}`;
+	}
+	return frame.status === "delivered"
+		? `${theme.fg("success", "delivered")} to ${peerLabel(frame.to)} ${id}`
+		: `${theme.fg("warning", "queued")} for ${peerLabel(frame.to)}, not delivered yet ${id}`;
+}
 
 function firstPrompt(ctx: ExtensionContext): string | undefined {
 	for (const entry of ctx.sessionManager.getEntries()) {
@@ -545,6 +585,17 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		// A status frame may already have reported it delivered.
 		record.status = answer.status;
 		remember();
+		// The branch's record of what was sent, for /relay log and the footer's count; never in the model's context.
+		guard(() => pi.appendEntry<RelaySentData>(SENT_TYPE, {
+			id: answer.id,
+			...(answer.room ? { room: answer.room } : { to: answer.to?.sessionId ?? to, label: peerLabel(answer.to ?? { sessionId: to }) }),
+			...(options.mentions?.length ? { mentions: options.mentions } : {}),
+			text,
+			...(options.replyTo ? { replyTo: options.replyTo } : {}),
+			urgent: options.urgent === true,
+			status: answer.status,
+			at: new Date(record.at).toISOString(),
+		}));
 		return { text: sendResult(answer, record.label), answer };
 	}
 
@@ -615,6 +666,9 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				}, signal);
 				return { content: [{ type: "text", text: `${text} ${ANSWER_HINT}` }], details: answer };
 			},
+			renderCall: (args, theme, context) => sendCall(args, theme, context.expanded),
+			renderResult: (result, { expanded }, theme, context) =>
+				resultLine(result, expanded, context.isError, theme, () => sentSummary(result.details as Partial<Extract<SentFrame, { id: string }>> | undefined, theme)),
 		});
 		pi.registerTool({
 			name: "relay_status", label: "Relay Status",
@@ -692,6 +746,19 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				}, signal);
 				return { content: [{ type: "text", text: `${text} ${ANSWER_HINT}` }], details: { sent: answer } as RoomToolDetails };
 			},
+			renderCall: (args, theme, context) => {
+				if (args.action === "send") return sendCall({ ...args, room: args.room || "?" }, theme, context.expanded);
+				const room = headerField(args.room).replace(/^#/, "");
+				return new Text(`${theme.fg("accent", "✉ relay room")} ${headerField(args.action)}${room ? ` ${theme.bold(`#${room}`)}` : ""}`, 0, 0);
+			},
+			renderResult: (result, { expanded }, theme, context) => resultLine(result, expanded, context.isError, theme, () => {
+				const details = result.details as { detail?: Partial<RelayRoomDetail>; sent?: Extract<SentFrame, { id: string }> } | undefined;
+				if (context.args.action === "send") return sentSummary(details?.sent, theme);
+				const messages = details?.detail?.messages;
+				if (context.args.action !== "history" || !Array.isArray(messages)) return undefined;
+				const room = headerField(details?.detail?.room?.name) || headerField(context.args.room).replace(/^#/, "");
+				return `${theme.fg("accent", `#${room}`)} · ${messages.length} message${messages.length === 1 ? "" : "s"}`;
+			}),
 		});
 	}
 
@@ -706,25 +773,18 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	// Every field of a message comes from another device: no terminal sequences reach the TUI.
+	// Every field of a message comes from another device: no terminal sequences reach the TUI. The model
+	// reads the message; the transcript shows one line, and the text when expanded or in /relay log.
 	pi.registerMessageRenderer<RelayMessageDetails>(MESSAGE_TYPE, (message, { expanded }, theme) => {
 		const details = message.details;
 		if (!details?.from) return undefined;
-		const sender = details.from;
-		const project = sender.kind === "web" ? "" : headerField(sender.project);
-		const from = sender.kind === "web"
-			? "your user, from the pika web UI"
-			: `${headerField(sender.name) || headerField(sender.title) || headerField(sender.sessionId)} on ${deviceLabel(sender)}${project ? ` · ${project}` : ""}`;
 		const roomTag = details.room ? theme.fg("accent", `#${headerField(details.room)}`) : "";
 		const replyTo = headerField(details.replyTo);
 		const tags = [roomTag, details.urgent ? theme.fg("warning", "urgent") : "", replyTo ? theme.fg("dim", `reply to ${replyTo}`) : ""].filter(Boolean);
-		const lines = sanitize(details.text).split("\n");
-		const shown = expanded ? lines : lines.slice(0, 3);
-		const more = lines.length - shown.length;
+		const text = sanitize(details.text);
 		return new Text([
-			`${theme.fg("accent", "✉ relay")} ${theme.bold(from)}${tags.length ? ` ${tags.join(" ")}` : ""}`,
-			...shown.map((line) => `  ${line}`),
-			...(more > 0 ? [theme.fg("dim", `  … ${more} more line${more === 1 ? "" : "s"}`)] : []),
+			`${theme.fg("accent", "✉ relay ←")} ${theme.bold(senderLabel(details.from))}${tags.length ? ` ${tags.join(" ")}` : ""} ${theme.fg("dim", `· ${size(text)}`)}`,
+			...(expanded ? text.split("\n").map((line) => `  ${line}`) : []),
 		].join("\n"), 0, 0);
 	});
 
@@ -753,6 +813,13 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		context.ui.notify(lines.join("\n"), "info");
 	}
 
+	async function logCommand(context: ExtensionCommandContext): Promise<void> {
+		if (context.mode !== "tui" || !context.hasUI) { context.ui.notify("/relay log opens only in the interactive TUI.", "info"); return; }
+		const items = logItems(context.sessionManager.getBranch(), (id) => sent.find((record) => record.id === id)?.status);
+		if (!items.length) { context.ui.notify("No relay messages on this branch.", "info"); return; }
+		await showRelayLog(context, items);
+	}
+
 	async function sendCommand(context: ExtensionCommandContext, args: string): Promise<void> {
 		const match = /^(\S+)\s+([\s\S]+)$/.exec(args.trim());
 		if (!match) { context.ui.notify("Usage: /relay send <sessionId> <text>", "error"); return; }
@@ -765,7 +832,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("relay", {
-		description: "Show pika relay status, send a message to another pi session, or turn relay off or on for this session",
+		description: "Show pika relay status, send a message to another pi session, browse this branch's relay messages, or turn relay off or on for this session",
 		getArgumentCompletions: (prefix) => {
 			// Nothing to offer for a subcommand typed in full: an open menu takes the Enter that should run it.
 			const typed = prefix.trim();
@@ -779,6 +846,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			const [command = "status", ...rest] = trimmed.split(/\s+/).filter(Boolean);
 			if (command === "status" && !rest.length) await statusCommand(context);
 			else if (command === "send") await sendCommand(context, trimmed.slice(4));
+			else if (command === "log" && !rest.length) await logCommand(context);
 			else if (command === "rooms" && !rest.length) {
 				try {
 					const items = await relayRooms();

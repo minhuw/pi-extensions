@@ -307,22 +307,37 @@ A message that arrives while the session is busy waits in pi's follow-up or stee
 
 Every field of a message comes from another device or the web UI. Terminal escape sequences and control characters other than newline and tab are stripped before a message is shown, and the sender's name, title, device, and project are put on one line without double quotes, zero-width characters, or bidirectional controls, in the text the model reads and in the sender line pi shows, so a crafted name cannot forge a second message header or disguise itself.
 
+### In the transcript
+
+Relay messages are written for the model, which reads each one in full. The transcript shows each as one line:
+
+- a received message: `✉ relay ← Builder on laptop · api #auth-sync urgent reply to msg-3 · 1.2k chars`, with the room, `urgent`, and `reply to` only when they apply;
+- a `relay_send`, or a `relay_room` send: `✉ relay → <session id or #room> · 340 chars`, then one line for the outcome, such as `delivered to Builder on laptop · api · msg-4`, `queued for …, not delivered yet`, `posted to #auth-sync · notified Docs`, or the first line of the error;
+- other `relay_room` calls: `✉ relay room history #auth-sync` and `#auth-sync · 12 messages`, or the first line of the result.
+
+Sizes count characters: `42 chars` below 1000, `1.2k chars` below 10 000, then `12k chars`. Expanding tool output (Ctrl+O) shows the text under the line and the full tool results. `relay_list` and `relay_status` keep pi's default rendering. [`/relay log`](#command) lists every relay message of the branch and opens each one in full.
+
+Every message the server accepted, from `relay_send`, `relay_room`, or `/relay send`, is recorded as a `relay-sent` entry with its id, target (`to` and a `label`, or `room`), mentions, text, reply-to, urgency, status when it was accepted (`delivered` or `queued`), and time. A send that was rejected, failed, or never answered records nothing. Like `relay-received`, `relay-sent` entries never reach the model. Sessions recorded before this entry existed list only their received messages.
+
 ### Device names
 
 A device has an id, which never changes, and a name, which you choose when you pair it and can change on the server's Devices page. relay shows the name wherever it shows a device: in `relay_list` and `/relay`, in the sender line of a message and the header the model reads, and in delivery notices. A pika server older than 0.4 sends no names; relay then shows the device id, which for devices paired before 0.4 is the name they were paired with. Names need not be unique; addressing, ownership, and revocation use the id.
 
 ### Tools
 
-Top-level sessions in the TUI or RPC mode get three tools; print and JSON sessions, including every Subagents and Herder child, never do:
+Top-level sessions in the TUI or RPC mode get four tools; print and JSON sessions, including every Subagents and Herder child, never do:
 
 - **`relay_list`** `{ device?, project?, query? }` lists the other online sessions: id, device, project, name or title, idle or busy, model, and how long each has been online. `device` matches a device's name or its id, ignoring case. A session's project is the name of its git repository as pika files it (the main checkout's folder, also from a subdirectory or a linked worktree), else the basename of its working directory; relay asks pika's registry for it, and uses the basename with a pika version that cannot answer.
-- **`relay_send`** `{ to, text, urgent?, replyTo? }` sends a message and reports `delivered` (the target session accepted it) or `queued` (it is offline or busy accepting it). A message not delivered within 5 minutes is dropped, and the sender's session gets a `relay-notice` that starts a turn. Delivered means received, not read or answered; answers arrive later as messages.
+- **`relay_send`** `{ to?, room?, mentions?, text, urgent?, replyTo? }` sends a message to the session `to` names and reports `delivered` (the target session accepted it) or `queued` (it is offline or busy accepting it). A message not delivered within 5 minutes is dropped, and the sender's session gets a `relay-notice` that starts a turn. Delivered means received, not read or answered; answers arrive later as messages. With `room` (or `to: "#room"`), it posts to that chatroom instead: every member can read it in the room's history, and only the members it @mentions (in `mentions`, or as `@name` or `@sessionId` in the text; `all` mentions everyone) get it as a message that starts a turn.
 - **`relay_status`** `{ id? }` shows the state of messages this session sent in this process: `queued`, `delivered`, `expired`, `rejected`, `failed` (it never left the session), or `unknown` (the server never answered: a timeout, a dropped connection, or a cancelled tool call, so it may or may not have been accepted).
+- **`relay_room`** `{ action, room?, topic?, text?, mentions?, urgent?, replyTo?, limit?, after? }` manages chatrooms: `list` shows the active rooms and their members, `join` creates or joins `room` (with an optional `topic`), `leave` leaves it, `history` reads its recent messages (50 unless `limit` says otherwise, only those after the sequence number `after`), including those that did not mention this session, and `send` posts `text` as `relay_send` with `room` does.
 
 ### Command
 
-- `/relay` shows the connection state, or why the session is offline, the server URL, this session's id, and the other online sessions.
+- `/relay` (or `/relay status`) shows the connection state, or why the session is offline, the server URL, this session's id, and the other online sessions.
 - `/relay send <sessionId> <text>` sends a message as you.
+- `/relay rooms` lists the active chatrooms; `/relay join <room> [topic]` and `/relay leave <room>` join or leave one.
+- `/relay log` opens the relay messages of the current branch over the transcript, oldest first with the newest selected: received (`←`) and sent (`→`), with the local time, the other side, the room, the size, and for a sent message its latest status this pi process knows. ↑ and ↓, Page Up and Page Down, Home and End move; Enter opens a message with its id, time, room, mentions, reply-to, urgency, and status, and its whole text, which the same keys scroll; Esc or q goes back, then closes the list. It reads the `relay-received` and `relay-sent` entries, so it works offline and after `/resume`, and only in the TUI.
 - `/relay off` and `/relay on` disconnect or reconnect this session.
 
 ### Safety

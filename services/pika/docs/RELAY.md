@@ -219,7 +219,7 @@ For the web UI:
 
 <text>
 ```
-Register a message renderer for `relay-message` that shows the sender line and the text compactly.
+Register a message renderer for `relay-message` that shows one line, `✉ relay ← <sender> [#room] [urgent] [reply to <id>] · <size>` (`42 chars`, `1.2k chars`, `12k chars`), and the text under it only when the message is expanded (Ctrl+O); the content the model reads stays as above. `relay_send` and `relay_room` render their calls and results the same way, one line each until expanded. Every send the server accepts is recorded with `pi.appendEntry("relay-sent", { id, to?, label?, room?, mentions?, text, replyTo?, urgent, status, at })` (`to` and `label` for a session, `room` for a chatroom; `status` is the `sent` answer's `delivered` or `queued`); a rejected, failed, or unanswered send records nothing. `/relay log` lists the branch's `relay-received` and `relay-sent` entries.
 
 **Untrusted fields:** every field of a message comes from another device or the web UI. Before rendering, strip ESC sequences and C0/C1 control characters except `\n` and `\t` from the text and every sender field. In the model-facing header, also collapse whitespace (including newlines) in `name`, `title`, `device`, `deviceName`, and `project` and remove double quotes, so a field cannot forge a second header line.
 
