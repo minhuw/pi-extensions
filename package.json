@@ -19,7 +19,7 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:language && npm run test:spokesman && npm run test:benchmark && npm run test:autoresearch && npm run test:subagents && npm run test:council && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:codex-relay && npm run test:impeccable && npm run test:workspace && npm run test:agent-browser",
+		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:continue-session && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:language && npm run test:spokesman && npm run test:benchmark && npm run test:autoresearch && npm run test:subagents && npm run test:council && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:codex-relay && npm run test:impeccable && npm run test:workspace && npm run test:agent-browser",
 		"test:agent-browser": "vitest run extensions/agent-browser",
 		"test:council": "vitest run extensions/council",
 		"test:workspace": "vitest run extensions/workspace",
@@ -32,6 +32,7 @@
 		"test:orca-bridge": "vitest run --config extensions/orca-bridge/vitest.config.ts",
 		"test:magpie-provider": "vitest run extensions/magpie-provider",
 		"test:commit": "node --experimental-strip-types --test extensions/commit/tests/*.test.ts",
+		"test:continue-session": "node --experimental-strip-types --test extensions/continue-session/tests/*.test.ts",
 		"test:quality": "node --experimental-strip-types --test extensions/quality/tests/*.test.ts",
 		"test:simplify": "npm run test:quality",
 		"test:writer": "node --experimental-strip-types --test extensions/writer/tests/*.test.ts",
@@ -87,6 +88,7 @@
 		],
 		"prompts": [
 			"./extensions/commit/prompts/commit.md",
+			"./extensions/continue-session/prompts/continue-session.md",
 			"./extensions/recap/prompts/recap.md",
 			"./extensions/quality/prompts/simplify.md",
 			"./extensions/quality/prompts/review.md",

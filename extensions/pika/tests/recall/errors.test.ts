@@ -50,7 +50,7 @@ it("tells a server without the agent API from an unknown session", async () => {
 	expect(await callTool(h, "recall_search", { query: "x" })).toMatchObject({ isError: true, text: old });
 	expect(await callTool(h, "recall_read", { sessionId: "s-1", seq: 3 })).toMatchObject({ isError: true, text: old });
 	pika.features = ["relay", "agent"];
-	expect(await callTool(h, "recall_read", { sessionId: "nope" })).toMatchObject({ isError: true, text: "no recorded session has id nope; take a sessionId from recall_search." });
+	expect(await callTool(h, "recall_read", { sessionId: "nope" })).toMatchObject({ isError: true, text: "no recorded session has id nope; use the full sessionId or find it with recall_search." });
 });
 
 it("reports other HTTP failures with their status and code", async () => {

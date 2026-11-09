@@ -334,7 +334,7 @@ Top-level sessions in the TUI or RPC mode get three tools; print and JSON sessio
 
 ## Recall
 
-recall lets the agent search and read the sessions and Herder runs pika has uploaded from every machine and project. It can look up earlier decisions, solutions to past errors, and the steps and outcome of a Herder run.
+recall lets the agent search and read the sessions and Herder runs pika has uploaded from every machine and project. It can look up earlier decisions, solutions to past errors, and the steps and outcome of a Herder run. Use [`/continue-session <session ID> [instructions]`](../continue-session/README.md) to read a recorded session and continue its work in the current session.
 
 It reads through the server's agent read API (`{base}/api/agent/v1/`, "Agent read API" in [`services/pika/docs/SPEC.md`](../../services/pika/docs/SPEC.md)), which sees every recorded session and Herder run, published or not, with credentials scrubbed as in public responses.
 

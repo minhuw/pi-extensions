@@ -9,6 +9,7 @@ See the root [README](README.md#extensions) for the overview, and read the targe
 
 - `extensions/magpie-provider/` — Magpie gateway discovery, Pi API delegation, and native compaction (`native-compaction/`).
 - `extensions/commit/` — `/commit` prompt template for self-contained patch series.
+- `extensions/continue-session/` — `/continue-session <session ID> [instructions]` prompt template for continuing a pika-recorded session's work.
 - `extensions/recap/` — `/recap [focus or time range]` session summary prompt template.
 - `extensions/quality/` — `/simplify`, `/review`, `/verify`, and `/deslop` prompt templates.
 - `extensions/writer/` — eight conference-paper writing prompt templates.
@@ -38,7 +39,7 @@ Run from the repository root with Node `>=22.19.0` (SDK baseline Pi 1.5.0; peer 
 | Command | Scope |
 | --- | --- |
 | `npm ci` / `npm run typecheck` / `npm test` | Install locked deps / strict `noEmit` TS check (collection + Subagents) / full offline collection suite. |
-| `npm run test:orca-bridge`, `npm run test:magpie-provider`, `npm run test:commit`, `npm run test:quality` (`npm run test:simplify`), `npm run test:writer`, `npm run test:statusline`, `npm run test:benchmark`, `npm run test:autoresearch`, `npm run test:loop`, `npm run test:molt`, `npm run test:language`, `npm run test:spokesman`, `npm run test:workspace`, `npm run test:agent-browser`, `npm run test:herder`, `npm run test:subagents`, `npm run test:council`, `npm run test:pika`, `npm run test:relay`, `npm run test:recall`, `npm run test:codex-relay` | Offline suite for the named extension or subsystem (`test:codex-relay` also fails when `plugins/pika-relay/dist/` is stale). |
+| `npm run test:orca-bridge`, `npm run test:magpie-provider`, `npm run test:commit`, `npm run test:continue-session`, `npm run test:quality` (`npm run test:simplify`), `npm run test:writer`, `npm run test:statusline`, `npm run test:benchmark`, `npm run test:autoresearch`, `npm run test:loop`, `npm run test:molt`, `npm run test:language`, `npm run test:spokesman`, `npm run test:workspace`, `npm run test:agent-browser`, `npm run test:herder`, `npm run test:subagents`, `npm run test:council`, `npm run test:pika`, `npm run test:relay`, `npm run test:recall`, `npm run test:codex-relay` | Offline suite for the named extension or subsystem (`test:codex-relay` also fails when `plugins/pika-relay/dist/` is stale). |
 | `npm run test:impeccable:contracts`, `npm run test:impeccable`, `npm run test:impeccable:package` | Offline Impeccable contracts/hashes, runtime doubles, and tarball checks. |
 | `npm run test:impeccable:engine`, `npm run test:impeccable:visual-foundations`, `npm run test:impeccable:e2e` | Explicit network/browser Impeccable gates (managed engine + Chromium, no paid calls). |
 | `CARGO_TARGET_DIR="$HOME/.cache/pika-target" cargo test --locked --manifest-path services/pika/Cargo.toml` | pika Rust server unit and integration tests (no `web/dist` needed). |

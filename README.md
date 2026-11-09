@@ -15,6 +15,7 @@ The [pika server](services/pika/README.md) serves this documentation publicly at
 | Extension | What it does |
 | --- | --- |
 | [Commit](extensions/commit/README.md) | `/commit` commits your current changes as a series of self-contained patches. |
+| [Continue Session](extensions/continue-session/README.md) | `/continue-session <session ID> [instructions]` reads a pika-recorded session and continues its work here. |
 | [Recap](extensions/recap/README.md) | `/recap` summarizes the current session's goal, recent progress, and where to pick up after a break. |
 | [Quality](extensions/quality/README.md) | `/simplify` cleans up code, `/review` reports bugs without fixing them, `/verify` runs checks without repairing anything, and `/deslop` removes AI slop. |
 | [Writer](extensions/writer/README.md) | Eight prompts for writing CS conference papers, ported from [claude-writer](https://github.com/minhuw/claude-writer). |
