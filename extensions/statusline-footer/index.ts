@@ -10,7 +10,7 @@
  * Full mode: the bar, with the telemetry, Git, and status rows on a rail.
  *   ▌✻ model ▶ HIGH  (provider) ▶ ──────── ◀ ▉▉▉░░░  8.2%  78.9k/1.05M ▐
  *    ├ # 13  ⏱ 1h 28m  ❯  ⏱ 4.2s  » 28.9 tok/s     $0.75  $0.06/turn  ❮  ↑ 65k  ↓ 31k
- *    ├ ⎇ main  +42 −17                            ▤ 5 touched  ❮  ⌂ ~/…/my-project
+ *    ├ ⎇ main  +42 −17         ⇌ 3 in · 2 out  ❮  ▤ 5 touched  ❮  ⌂ ~/…/my-project
  *    ╰ herder: T2 integrate · 3/5 tasks  ❯  ↻ build · next 4m   (while any status but the language is set)
  *
  * Compact mode: the bar alone.
@@ -544,6 +544,9 @@ interface Stats {
 	errors: number;
 	toolCalls: number;
 	files: number;
+	/** Pika relay messages received and sent, from its `relay-received` and `relay-sent` entries. */
+	relayIn: number;
+	relayOut: number;
 	durationMs: number;
 }
 
@@ -606,6 +609,8 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 		errors: 0,
 		toolCalls: 0,
 		files: 0,
+		relayIn: 0,
+		relayOut: 0,
 		durationMs: 0,
 	};
 	const files = new Set<string>();
@@ -621,6 +626,14 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 			const pricing = (e.data as { pricing?: unknown } | undefined)?.pricing;
 			if (pricing === "unavailable") s.priceUnavailable = true;
 			if (pricing === "estimate") s.priceEstimated = true;
+			continue;
+		}
+		if (e.type === "custom" && e.customType === "relay-received") {
+			s.relayIn++;
+			continue;
+		}
+		if (e.type === "custom" && e.customType === "relay-sent") {
+			s.relayOut++;
 			continue;
 		}
 		if (e.type === "custom" && e.customType === "spokesman-rewrite") {
@@ -879,6 +892,7 @@ type IconSet = {
 	err: string;
 	ok: string;
 	branch: string;
+	relay: string;
 	file: string;
 	cwd: string;
 };
@@ -899,6 +913,7 @@ const NERD_ICONS: IconSet = {
 	err: "\u{F0159}", // md-close-circle
 	ok: "\u{F0133}", // md-checkbox-marked-circle
 	branch: "\u{F062C}", // md-source-branch
+	relay: "\u{F028C}", // md-forum
 	file: "\u{F0224}", // md-file-outline
 	cwd: "\u{F0770}", // md-folder-open
 };
@@ -919,6 +934,7 @@ const ASCII_ICONS: IconSet = {
 	err: "✕",
 	ok: "✓",
 	branch: "⎇",
+	relay: "⇌",
 	file: "▤",
 	cwd: "⌂",
 };
@@ -1348,17 +1364,24 @@ function renderDetailRows(
 			(ahead > 0 || behind > 0) && `${theme.fg("success", `↑${ahead}`)} ${theme.fg("warning", `↓${behind}`)}`,
 		], "  ")
 		: item(set.branch, "dim", "no git", "dim");
+	const relayCounts = cluster([s.relayIn > 0 && `${s.relayIn} in`, s.relayOut > 0 && `${s.relayOut} out`], " · ");
+	const relay = relayCounts ? item(set.relay, "dim", relayCounts) : "";
 	const touched = s.files > 0 ? item(set.file, "dim", `${s.files} touched`) : "";
 	const rail3 = statusRail ? "├" : "╰";
-	// The path takes the room the branch and the file count leave. The file count
-	// gives way before the path would shrink below twelve columns.
+	// The path takes the room the branch, the relay messages, and the file count
+	// leave. The messages give way first, then the file count, before the path
+	// would shrink below twelve columns.
 	const touchedWidth = touched ? visibleWidth(touched) + RAIL_SEP_WIDTH : 0;
+	const relayWidth = relay ? visibleWidth(relay) + RAIL_SEP_WIDTH : 0;
 	const pathRoom = railRoom(width) - visibleWidth(git) - visibleWidth(`${set.cwd} `);
 	const minimumPath = 12;
 	const keepTouched = Boolean(touched) && pathRoom - touchedWidth >= minimumPath;
-	const room = keepTouched ? pathRoom - touchedWidth : pathRoom;
+	const afterTouched = keepTouched ? pathRoom - touchedWidth : pathRoom;
+	const keepRelay = Boolean(relay) && (keepTouched || !touched) && afterTouched - relayWidth >= minimumPath;
+	const room = keepRelay ? afterTouched - relayWidth : afterTouched;
 	const cwd = item(set.cwd, "dim", shortenPath(formatPath(ctx.cwd), Math.max(minimumPath, room)));
 	const row3 = railRow(theme, rail3, [{ text: git, rank: 3 }], [
+		...(keepRelay ? [{ text: relay, rank: 0 }] : []),
 		...(keepTouched ? [{ text: touched, rank: 1 }] : []),
 		{ text: cwd, rank: 2 },
 	], width);

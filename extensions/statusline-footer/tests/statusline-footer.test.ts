@@ -1492,6 +1492,131 @@ describe("statusline footer powerline style", () => {
 			}
 		});
 
+		const relay = (id: string, customType: "relay-received" | "relay-sent") =>
+			({ id, type: "custom", customType, data: { id: `msg-${id}`, from: "peer", text: "hello", at: "2026-11-09T00:00:00.000Z" } });
+		const relayIcon = "\u{F028C}";
+		const fileIcon = "\u{F0224}";
+
+		it("counts relay messages on the active branch, left of the touched files", async () => {
+			const branch = [
+				...activeBranch,
+				relay("in-1", "relay-received"),
+				relay("out-1", "relay-sent"),
+				relay("in-2", "relay-received"),
+				relay("in-3", "relay-received"),
+				relay("out-2", "relay-sent"),
+			];
+			const harness = createHarness("detail-relay", "tui", {
+				model: claude,
+				branch,
+				// Off the active branch: never counted.
+				entries: [relay("off-in", "relay-received"), relay("off-out", "relay-sent")],
+				extensionStatuses: [],
+				theme: tagged,
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			try {
+				vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+				const git = harness.getFooter()!.render(160)[2]!;
+				const plain = strip(git);
+				expect(plain).toContain(`${relayIcon} 3 in · 2 out  \u{E0B3}  ${fileIcon} 2 touched  \u{E0B3}  `);
+				expect(plain.indexOf(relayIcon)).toBeGreaterThan(plain.indexOf("main"));
+				// Drawn like the file count: the same dim icon and quiet value.
+				const styleBefore = (icon: string) => /(?:\x1b\[[0-9;]*m)+$/.exec(git.slice(0, git.indexOf(icon)))?.[0];
+				expect(styleBefore(relayIcon)).toBe(styleBefore(fileIcon));
+				expect(git).toContain(`${tone("muted")}3 in · 2 out`);
+				expect(harness.ctx.sessionManager.getEntries).not.toHaveBeenCalled();
+
+				// A new entry moves the leaf, so the cached counts refresh.
+				branch.push(relay("in-4", "relay-received"));
+				expect(strip(harness.getFooter()!.render(160)[2]!)).toContain(`${relayIcon} 4 in · 2 out`);
+			} finally {
+				vi.unstubAllEnvs();
+				harness.disposeFooter();
+			}
+		});
+
+		it.each([
+			["only sent", [relay("out-1", "relay-sent"), relay("out-2", "relay-sent")], "⇌ 2 out"],
+			["only received", [relay("in-1", "relay-received")], "⇌ 1 in"],
+			["none", [{ id: "user", type: "message", message: { role: "user", timestamp: Date.now() } }], undefined],
+		])("leaves out a zero side of the relay counts, and the group when both are zero (%s)", async (label, branch, expected) => {
+			const harness = createHarness(`detail-relay-${label}`, "tui", {
+				model: claude,
+				branch,
+				entries: [relay("off-in", "relay-received"), relay("off-out", "relay-sent")],
+				extensionStatuses: [],
+				theme: tagged,
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			try {
+				vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+				const lines = harness.getFooter()!.render(160);
+				const git = strip(lines[2]!);
+				// No file was touched, so the counts sit next to the path.
+				if (expected) expect(git).toContain(`${expected}  │  ⌂ `);
+				else expect(git).not.toContain("⇌");
+				expect(git).not.toMatch(/\b0 (in|out)\b/);
+				expect(git).not.toContain(" · ");
+				expect(git).not.toContain(relayIcon);
+				// Compact mode has no Git row and shows no counts.
+				await harness.runCommand("footer", "compact");
+				const compact = harness.getFooter()!.render(160).map(strip);
+				expect(compact).toHaveLength(1);
+				expect(compact[0]).not.toContain("⇌");
+			} finally {
+				vi.unstubAllEnvs();
+				harness.disposeFooter();
+			}
+		});
+
+		it("drops the relay counts before the touched files, and both before the path shrinks", async () => {
+			const harness = createHarness("detail-relay-fit", "tui", {
+				model: claude,
+				// Narrower than the file count, so only the drop order keeps it from outliving it.
+				branch: [...activeBranch, relay("in-1", "relay-received")],
+				extensionStatuses: [],
+				cwd: `/tmp/${"deep/".repeat(12)}project`,
+				theme: tagged,
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			try {
+				vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+				const narrowest: Record<string, number> = {};
+				let relayGone = false;
+				let touchedGone = false;
+				for (let width = 200; width >= 30; width--) {
+					const git = strip(harness.getFooter()!.render(width)[2]!);
+					expect(visibleWidth(git), `${width}`).toBeLessThanOrEqual(width);
+					expect(git, `${width}`).not.toContain("...");
+					if (width >= 40) expect(git.trimEnd().endsWith("/project"), `${width}`).toBe(true);
+					const hasRelay = git.includes(`${relayIcon} 1 in`);
+					const hasTouched = git.includes("2 touched");
+					// Each group gives way whole, the counts before the file count, and neither comes back.
+					if (hasRelay) expect(hasTouched, `${width}`).toBe(true);
+					if (relayGone) expect(hasRelay, `${width}`).toBe(false);
+					if (touchedGone) expect(hasTouched, `${width}`).toBe(false);
+					relayGone ||= !hasRelay;
+					touchedGone ||= !hasTouched;
+					if (hasRelay) narrowest.relay = width;
+					if (hasTouched) narrowest.touched = width;
+				}
+				expect(narrowest.relay).toBeGreaterThan(narrowest.touched!);
+				// The counts yield while the file count still fits.
+				const between = strip(harness.getFooter()!.render(narrowest.relay! - 1)[2]!);
+				expect(between).toContain("2 touched");
+				expect(between).not.toContain(relayIcon);
+				const roomy = strip(harness.getFooter()!.render(200)[2]!);
+				expect(roomy).toContain(`${relayIcon} 1 in  \u{E0B3}  ${fileIcon} 2 touched`);
+			} finally {
+				vi.unstubAllEnvs();
+				harness.disposeFooter();
+			}
+		});
+
 		it("shortens a path from the middle and keeps its last directory", () => {
 			expect(shortenPath("~/a/b/c/project", 20)).toBe("~/a/b/c/project");
 			expect(shortenPath("~/a/b/c/project", 14)).toBe("~/…/c/project");
