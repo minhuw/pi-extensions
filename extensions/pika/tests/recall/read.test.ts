@@ -82,6 +82,47 @@ it("reads an overview: the session, its children, and every turn with its tool c
 	expect(result.details).toEqual({ sessionId: "s-1", turns: [0, 1] });
 });
 
+it("uses zero-filled optional arguments to read and page the overview, then inspect details", async () => {
+	const turns = Array.from({ length: 25 }, (_, i) => turn(i, { finalText: `answer ${i} ${"x".repeat(1_500)}` }));
+	serve(turns, []);
+	pika.routes.set("sessions/s-1/entries", (request) => {
+		const seq = Number(request.query.get("from"));
+		return { body: { items: [{ seq, type: "message", raw: { type: "message", message: { role: "user", content: `entry ${seq}` } } }] } };
+	});
+
+	// The reported failure supplied both optional numbers, initially as zero.
+	const first = await callTool(h, "recall_read", { sessionId: "s-1", fromTurn: 0, seq: 0 });
+	expect(first.isError).toBe(false);
+	expect(first.text).toContain("## Turn 0 ·");
+	expect(first.text).toContain("seq: 0 was treated as an unused placeholder");
+	expect(pika.requestsTo("sessions/s-1/entries")).toHaveLength(0);
+	const next = (first.details as { next: { fromTurn: number } }).next.fromTurn;
+	expect(next).toBeGreaterThan(0);
+
+	const later = await callTool(h, "recall_read", { sessionId: "s-1", fromTurn: next, seq: 0 });
+	expect(later.isError).toBe(false);
+	expect(later.text).toContain(`## Turn ${next} ·`);
+	expect(later.text).not.toContain(`## Turn ${next - 1} ·`);
+
+	const details = await callTool(h, "recall_read", { sessionId: "s-1", fromTurn: 0, seq: 13 });
+	expect(details.isError).toBe(false);
+	expect(details.text).toContain("entries 9 to 21 around seq 13");
+	expect(details.text).toContain("fromTurn: 0 was treated as an unused placeholder");
+	expect(details.details).toMatchObject({ sessionId: "s-1", seq: 13 });
+
+	// A genuine request for seq 0 remains available without fromTurn.
+	const zero = await callTool(h, "recall_read", { sessionId: "s-1", seq: 0 });
+	expect(zero.isError).toBe(false);
+	expect(zero.text).toContain("entries 0 to 8 around seq 0");
+	expect(zero.text).toContain("entry 0");
+
+	const before = pika.requests.length;
+	const conflict = await callTool(h, "recall_read", { sessionId: "s-1", fromTurn: 2, seq: 13 });
+	expect(conflict.isError).toBe(true);
+	expect(conflict.text).toContain("choose either seq for entries or fromTurn for an overview");
+	expect(pika.requests).toHaveLength(before);
+});
+
 it("stops an overview at the budget and says which fromTurn continues, which then reads on", async () => {
 	const turns = Array.from({ length: 40 }, (_, i) => turn(i, { finalText: `answer ${i} ${"x".repeat(1_500)}` }));
 	serve(turns, []);

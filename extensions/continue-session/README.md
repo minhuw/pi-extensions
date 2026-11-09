@@ -9,7 +9,7 @@
 
 Provide the **full session ID**, for example from `/session`, the pika web UI, or a `recall_search` result. Any text after the ID is an instruction for the continuation. With no ID, the prompt asks for one.
 
-The model reads the overview through its last page with `recall_read`, then reads details around the latest relevant turns and other parts needed to understand the task. It checks the current project and work before acting, follows the latest user requirements, and continues the unfinished work. If the work is already complete, it reports that. An outstanding question or approval remains a blocker when its answer is necessary.
+The model starts `recall_read` with the session ID alone, follows `fromTurn` through the overview, then uses `seq` for details around the latest relevant turns and other parts needed to understand the task. It should not repeat the same page or walk every entry by default. It checks the current project and work before acting, follows the latest user requirements, and continues the unfinished work. If the work is already complete, it reports that. An outstanding question or approval remains a blocker when its answer is necessary.
 
 ## Requirements
 

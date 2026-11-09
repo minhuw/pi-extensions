@@ -17,6 +17,10 @@ it("renders compact calls and results", () => {
 	const { recall_search: search, recall_read: read } = Object.fromEntries(tools());
 	expect(lines(search!.renderCall!({ query: "parser bug", scope: "project" }, theme, context({})))).toBe("recall_search \"parser bug\" · this project");
 	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 41 }, theme, context({})))).toBe("recall_read s-1 · seq 41");
+	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 0, fromTurn: 0 }, theme, context({})))).toBe("recall_read s-1");
+	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 0, fromTurn: 8 }, theme, context({})))).toBe("recall_read s-1 · from turn 8");
+	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 41, fromTurn: 0 }, theme, context({})))).toBe("recall_read s-1 · seq 41");
+	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 41, fromTurn: 8 }, theme, context({})))).toBe("recall_read s-1 · choose seq or fromTurn");
 	const found = { content: [{ type: "text" as const, text: "[recall] …\n2 past sessions match" }], details: { sessionIds: ["a", "b"] } };
 	expect(lines(search!.renderResult!(found, { expanded: false, isPartial: false }, theme, context({})))).toBe("2 past sessions");
 	expect(lines(search!.renderResult!(found, { expanded: true, isPartial: false }, theme, context({})))).toBe("2 past sessions\n[recall] …\n2 past sessions match");
