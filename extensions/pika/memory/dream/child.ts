@@ -76,9 +76,9 @@ async function settle(promise: Promise<unknown>, ms: number): Promise<void> {
 }
 
 /**
- * A persisted child session for a dream: the child-session hooks and nothing else of the user's extensions, skills,
- * prompts, or context files; the dream's system prompt; and exactly the read-only built-in tools, kept out of
- * `<cwd>/.pi/pika/`, and `customTools`.
+ * A child session for a dream, persisted unless `persist` is false: the child-session hooks and nothing else of the
+ * user's extensions, skills, prompts, or context files; the dream's system prompt; and exactly the read-only built-in
+ * tools, kept out of `<cwd>/.pi/pika/`, and `customTools`.
  */
 export async function spawnDreamChild(options: SpawnOptions): Promise<DreamChild> {
 	const { cwd, agentDir } = options;
@@ -91,8 +91,10 @@ export async function spawnDreamChild(options: SpawnOptions): Promise<DreamChild
 		appendSystemPromptOverride: () => [],
 	});
 	await resourceLoader.reload();
-	await ensureProjectPikaDir(cwd);
-	const sessionManager = SessionManager.create(cwd, dreamSessionDir(cwd), options.parentSessionFile ? { parentSession: options.parentSessionFile } : undefined);
+	// A session kept only in memory (`--no-session`) gets a child that writes nothing either.
+	if (options.persist) await ensureProjectPikaDir(cwd);
+	const parent = options.parentSessionFile ? { parentSession: options.parentSessionFile } : undefined;
+	const sessionManager = options.persist ? SessionManager.create(cwd, dreamSessionDir(cwd), parent) : SessionManager.inMemory(cwd, parent);
 	const { session } = await createAgentSession({
 		cwd, agentDir, sessionManager, settingsManager, resourceLoader, model: options.model,
 		...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),

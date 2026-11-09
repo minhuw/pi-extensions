@@ -7,7 +7,7 @@ import type { MemoryView } from "../format.ts";
 import { cwdOf, where } from "../tools.ts";
 import { SESSION_LINK_TYPE, spawnDreamChild } from "./child.ts";
 import { kickoffText } from "./prompt.ts";
-import { type DreamChild, type DreamMode, DreamRun, dreamLimits, type Grant, type SpawnOptions } from "./run.ts";
+import { credentialsChange, type DreamChild, type DreamMode, DreamRun, dreamLimits, type Grant, type SpawnOptions } from "./run.ts";
 import { type LeaseServer, send } from "./server.ts";
 import { dreamTools } from "./tools.ts";
 
@@ -18,19 +18,25 @@ export const dreamRuntime: { spawn: (options: SpawnOptions) => Promise<DreamChil
 
 /** How long the kickoff's index fetch may take. */
 const INDEX_TIMEOUT_MS = 5_000;
+/** How long a lease request waits for the last release, which it would otherwise race and find the lease still held. */
+const RELEASE_WAIT_MS = 5_000;
 const STATUS_KEY = "pika-memory";
 const USAGE = "Usage: /memory [status|dream|stop]";
 const SUBCOMMANDS = ["status", "dream", "stop"];
 
 // One dream per process, whichever module copy started it.
 const SHARED = Symbol.for("pi-extensions.pika.memory.dream");
+/** A dream being requested; `cancelled` says why it must not start after all. */
+interface Starting { owner: object; cancelled?: string }
 interface Shared {
 	/** The running dream, until its end, which may wait for a commit in flight. */
 	running?: DreamRun;
 	/** Set while a dream is being requested, so a second one is not. */
-	starting?: object;
+	starting?: Starting;
 	/** The dream that ended last. */
 	last?: DreamRun;
+	/** The last lease release sent; a new lease request waits for it a while. */
+	released?: Promise<void>;
 }
 const shared = (): Shared => (globalThis as { [SHARED]?: Shared })[SHARED] ??= {};
 
@@ -38,6 +44,14 @@ const shared = (): Shared => (globalThis as { [SHARED]?: Shared })[SHARED] ??= {
 export const currentDream = (): DreamRun | undefined => shared().running ?? shared().last;
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+/** Waits for `promise`, at most `ms`; never rejects. */
+async function within(promise: Promise<unknown> | undefined, ms: number): Promise<void> {
+	if (!promise) return;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	await Promise.race([promise.catch(() => {}), new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); timer.unref?.(); })]);
+	clearTimeout(timer);
+}
 
 /** A top-level TUI or RPC session: never a child, which runs without a mode or carries a session link. */
 function isTopLevel(ctx: ExtensionContext): boolean {
@@ -97,8 +111,6 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 	let waiting = false;
 	/** Open dialogs. */
 	let uiDepth = 0;
-	/** Counts preemptions, so a dream requested before one does not start. */
-	let epoch = 0;
 	let settledCtx: ExtensionContext | undefined;
 
 	const cancelIdle = () => {
@@ -125,16 +137,18 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 		try {
 			if (!ctx.isIdle() || ctx.hasPendingMessages() || uiDepth > 0) return;
 			if (!isTopLevel(ctx) || !loadMemorySettings(getAgentDir()).autoDream) return;
+			// A session kept only in memory (`--no-session`) never dreams by itself.
+			if (!ctx.sessionManager.getSessionFile()) return;
 			if (credentialsProblem(cwdOf(ctx))) return;
 		} catch { return; /* a stale context */ }
 		void begin(ctx, "auto").catch(() => {});
 	}
 
-	/** Stops this session's dream, without waiting for the server. */
+	/** Stops this session's dream, or the one it is requesting, without waiting for the server. */
 	function preempt(reason: string): void {
-		epoch++;
-		const run = shared().running;
-		if (run?.owner === self) run.stop("stopped", reason);
+		const state = shared();
+		if (state.starting?.owner === self) state.starting.cancelled ??= reason;
+		if (state.running?.owner === self) state.running.stop("stopped", reason);
 	}
 
 	/** Requests a lease and starts a dream; the text says why not when it did not start. */
@@ -151,10 +165,15 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 		const settings = loadMemorySettings(getAgentDir());
 		const { model, note } = pickModel(ctx, settings);
 		if (!model) return { text: "this session has no model to dream with; select one, or set memory.dreamModel" };
-		state.starting = self;
-		const started = epoch;
+		const starting: Starting = { owner: self };
+		state.starting = starting;
+		/** Why the dream must not start any more, checked after every wait: stopped, preempted, or pika's credentials changed. */
+		const cancelled = () => starting.cancelled ?? credentialsChange(credentialsRegistry().current, server, cwd);
 		try {
+			await within(state.released, RELEASE_WAIT_MS);
 			const repository = where(await resolveRepository(cwd));
+			let why = cancelled();
+			if (why) return { text: why };
 			if (!repository.project && !repository.repository) return { text: `${cwd} is not in a git repository pika can name, so it has no project memory to dream over` };
 			const parentSessionId = ctx.sessionManager.getSessionId();
 			const parentSessionFile = ctx.sessionManager.getSessionFile();
@@ -166,18 +185,19 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 			}
 			if (!grant?.lease?.id) return { text: "the pika server sent no lease" };
 			grant.sessions = Array.isArray(grant.sessions) ? grant.sessions : [];
-			let index: string | null = null;
-			const preempted = () => {
-				if (epoch === started) return false;
-				void send(server, "POST", `memory/dream/${encodeURIComponent(grant.lease.id)}/release`, { body: { outcome: "aborted" } }).catch(() => {});
-				return true;
+			const release = (reason: string) => {
+				state.released = send(server, "POST", `memory/dream/${encodeURIComponent(grant.lease.id)}/release`, { body: { outcome: "aborted" } }).then(() => {}, () => {});
+				return { text: reason };
 			};
-			if (preempted()) return { text: "the session got input meanwhile" };
+			why = cancelled();
+			if (why) return release(why);
+			let index: string | null = null;
 			try {
 				const view = await send<MemoryView>(server, "GET", `memory?${new URLSearchParams({ ...repository })}`, { timeoutMs: INDEX_TIMEOUT_MS });
 				index = typeof view.index === "string" ? view.index : null;
 			} catch { /* the child reads it with memory_read */ }
-			if (preempted()) return { text: "the session got input meanwhile" };
+			why = cancelled();
+			if (why) return release(why);
 			const ui = ctx.hasUI ? { setStatus: (text: string | undefined) => ctx.ui.setStatus(STATUS_KEY, text), notify: (text: string, type: "info" | "warning" | "error") => ctx.ui.notify(text, type) } : undefined;
 			const thinkingLevel = ctx.thinkingLevel ?? pi.getThinkingLevel();
 			const modelRuntime = modelRuntimeOf(ctx.modelRegistry);
@@ -191,6 +211,7 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 					const now = shared();
 					if (now.running === ended) now.running = undefined;
 					now.last = ended;
+					now.released = ended.released;
 				},
 			});
 			state.running = run;
@@ -198,7 +219,7 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 			const count = grant.sessions.length;
 			return { run, text: `dreaming over ${count} session${count === 1 ? "" : "s"} of ${grant.lease.scope?.label ?? "this project"} on ${model.provider}/${model.id}` };
 		} finally {
-			if (state.starting === self) state.starting = undefined;
+			if (state.starting === starting) state.starting = undefined;
 		}
 	}
 
@@ -225,6 +246,14 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 			if (!isTopLevel(ctx)) return;
 			arm(ctx);
 		} catch { /* dreams never fail a turn */ }
+	});
+
+	// `!` commands are activity too, though they emit no `input`: the idle wait starts over.
+	pi.on("user_bash", () => {
+		if (waiting && uiDepth === 0 && settledCtx) {
+			try { arm(settledCtx); } catch { waiting = false; }
+		}
+		return undefined;
 	});
 
 	pi.on("ui_prompt_start", () => {
@@ -282,9 +311,13 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 				const { run, text } = await begin(ctx, "manual");
 				ctx.ui.notify(`pika memory: ${run ? text : `no dream: ${text}`}.`, run ? "info" : "warning");
 			} else if (command === "stop") {
-				const run = shared().running;
+				const state = shared();
+				const run = state.running;
 				if (run && !run.ended) run.stop("stopped", "stopped with /memory stop");
-				else if (run) ctx.ui.notify("pika memory: the dream is stopping; it waits for its commit's answer.", "info");
+				else if (state.starting) {
+					state.starting.cancelled ??= "stopped with /memory stop";
+					ctx.ui.notify("pika memory: the dream being requested will not start.", "info");
+				} else if (run) ctx.ui.notify("pika memory: the dream is stopping; it waits for its commit's answer.", "info");
 				else ctx.ui.notify("pika memory: no dream is running.", "info");
 			} else ctx.ui.notify(USAGE, "error");
 		},

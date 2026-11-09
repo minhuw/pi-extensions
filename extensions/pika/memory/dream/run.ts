@@ -1,4 +1,5 @@
 import type { CreateAgentSessionOptions, ModelRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { credentialsRegistry, type PikaCredentials } from "../../credentials.ts";
 import type { RepositoryInfo } from "../../repository.ts";
 import { MemoryServerError } from "../client.ts";
 import type { Category, Scope, ScopeKind } from "../format.ts";
@@ -7,8 +8,8 @@ import { type LeaseServer, send } from "./server.ts";
 export type DreamMode = "auto" | "manual";
 export type Outcome = "completed" | "aborted" | "failed";
 /**
- * Why a dream ended: `stopped` by the user, user activity, or a lost lease; at a turn, token, or time `limit`;
- * `failed` because its model or session failed; or `finished` by the child.
+ * Why a dream ended: `stopped` by the user, user activity, logout, or a lost lease; at a turn, token, or time
+ * `limit`; `failed` because its model or session failed; or `finished` by the child.
  */
 export type Ending = "stopped" | "limit" | "failed" | "finished";
 
@@ -99,6 +100,8 @@ export interface SpawnOptions {
 	agentDir: string;
 	parentSessionId: string;
 	parentSessionFile?: string;
+	/** Whether the child is kept on disk; a session that is not (`--no-session`) gets a child in memory. */
+	persist: boolean;
 	model: NonNullable<CreateAgentSessionOptions["model"]>;
 	thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
 	modelRuntime?: ModelRuntime;
@@ -140,6 +143,14 @@ export interface DreamRunOptions {
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : word.endsWith("ch") ? "es" : "s"}`;
 
+/** Why a dream granted with `server` must stop, if pika's credentials no longer match it: logged out, switched, or excluded. */
+export function credentialsChange(current: PikaCredentials | undefined, server: LeaseServer, cwd: string): string | undefined {
+	if (!current) return "pika logged out";
+	if (current.url !== server.url || current.token !== server.token) return "pika's server or token changed";
+	if (current.isExcluded(cwd)) return `pika's exclude list now covers ${cwd}`;
+	return undefined;
+}
+
 /**
  * How a dream's end is released: `aborted` when it was stopped, or hit a cap after writing a batch; `failed` when its
  * model or session failed, it hit a cap before writing one, or it finished with a failed commit and none written;
@@ -154,7 +165,7 @@ export function outcomeOf(ending: Ending, wrote: boolean, failing: boolean): Out
 
 /**
  * One dream: a child session working under a lease. It ends exactly once, when the child finishes, a cap is hit, the
- * lease is lost, or it is stopped. The child is aborted at once; a commit in flight is not,
+ * lease is lost, pika's credentials change, or it is stopped. The child is aborted at once; a commit in flight is not,
  * and the end waits for its answer. Then every end discards what is still staged, releases the lease without waiting
  * for the server, clears the footer status, and shuts the child down.
  */
@@ -188,6 +199,8 @@ export class DreamRun {
 	child?: DreamChild;
 	/** Settles once the child is shut down; never rejects. */
 	done: Promise<void> = Promise.resolve();
+	/** Settles once the release got its answer, or failed; never rejects. */
+	released?: Promise<void>;
 	private steered = false;
 	private wrapUpDue = false;
 	private inFlight = 0;
@@ -209,7 +222,9 @@ export class DreamRun {
 
 	/** Starts the child and its first prompt; resolves once the prompt is sent, or the dream ended before. */
 	async start(): Promise<void> {
+		if (this.ended) return;
 		this.status("dreaming…");
+		this.watchCredentials();
 		const { maxMs } = dreamLimits;
 		this.timer(setTimeout(() => this.stop("limit", `reached its ${Math.round(maxMs / 60_000)}-minute limit`), maxMs));
 		this.timer(setTimeout(() => this.wrapUp(), maxMs * dreamLimits.wrapUpShare));
@@ -217,7 +232,7 @@ export class DreamRun {
 		const { options } = this;
 		this.spawned = options.spawn({
 			cwd: options.cwd, agentDir: options.agentDir, parentSessionId: options.parentSessionId,
-			...(options.parentSessionFile ? { parentSessionFile: options.parentSessionFile } : {}),
+			...(options.parentSessionFile ? { parentSessionFile: options.parentSessionFile } : {}), persist: Boolean(options.parentSessionFile),
 			model: options.model, ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
 			...(options.modelRuntime ? { modelRuntime: options.modelRuntime } : {}),
 			customTools: options.tools(this),
@@ -323,7 +338,8 @@ export class DreamRun {
 		this.staged = [];
 		if (this.ending === "finished" && this.failedCommits) this.reason = this.pending ? "finished with a commit whose outcome is unknown" : "finished after a failed commit";
 		const outcome = this.outcome = outcomeOf(this.ending ?? "stopped", this.batches.length > 0, this.failedCommits > 0);
-		void send(this.options.server, "POST", `memory/dream/${encodeURIComponent(this.lease.id)}/release`, { body: { outcome } }).catch(() => { /* the lease expires */ });
+		this.released = send(this.options.server, "POST", `memory/dream/${encodeURIComponent(this.lease.id)}/release`, { body: { outcome } })
+			.then(() => {}, () => { /* the lease expires */ });
 		this.status(undefined);
 		this.notify();
 		try { this.options.onEnd(this); } catch { /* the controller's own */ }
@@ -372,6 +388,16 @@ export class DreamRun {
 		await aborted;
 		const child = await this.spawned;
 		try { await child?.shutdown(); } catch { /* disposed anyway */ }
+	}
+
+	private watchCredentials(): void {
+		const registry = credentialsRegistry();
+		const listener = () => {
+			const why = credentialsChange(registry.current, this.options.server, this.options.cwd);
+			if (why) this.stop("stopped", why);
+		};
+		registry.listeners.add(listener);
+		this.cleanups.push(() => { registry.listeners.delete(listener); });
 	}
 
 	private timer(timer: ReturnType<typeof setTimeout>): void {
