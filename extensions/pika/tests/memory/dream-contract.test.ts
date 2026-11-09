@@ -222,7 +222,7 @@ describe("a real dream child", () => {
 		expect(seen.length).toBeLessThanOrEqual(6);
 	});
 
-	it("sums input, output, and cache tokens from the child's answers", async () => {
+	it("counts input, output, and cache writes in full and cache reads at a tenth from the child's answers", async () => {
 		const h = await start();
 		const seen: Seen[] = [];
 		h.faux.appendResponses([
@@ -240,9 +240,15 @@ describe("a real dream child", () => {
 		const usages = readFileSync(join(dir, file), "utf8").trim().split("\n").map((line) => JSON.parse(line) as { type: string; message?: { role: string; usage?: Record<string, number> } })
 			.flatMap((entry) => entry.type === "message" && entry.message?.role === "assistant" && entry.message.usage ? [entry.message.usage] : []);
 		expect(usages).toHaveLength(3);
-		const total = usages.reduce((sum, usage) => sum + (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0), 0);
+		// The faux provider caches the prompt, so the later answers re-read the context.
+		expect(usages.slice(1).every((usage) => (usage.cacheRead ?? 0) > 0)).toBe(true);
+		const total = usages.reduce((sum, usage) => sum + (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheWrite ?? 0) + Math.ceil((usage.cacheRead ?? 0) / 10), 0);
 		expect(total).toBeGreaterThan(0);
 		expect(run.tokens).toBe(total);
+		const sum = (key: string) => usages.reduce((all, usage) => all + (usage[key] ?? 0), 0);
+		expect(run.usage).toEqual({ input: sum("input"), output: sum("output"), cacheRead: sum("cacheRead"), cacheWrite: sum("cacheWrite") });
+		const last = usages.at(-1)!;
+		expect(run.context).toBe((last.input ?? 0) + (last.cacheRead ?? 0) + (last.cacheWrite ?? 0));
 		expect(run.turns).toBe(3);
 	});
 
@@ -258,7 +264,7 @@ describe("a real dream child", () => {
 		await until(() => releases(pika).length === 1, "the release");
 		await currentDream()!.done;
 		expect(releases(pika)).toEqual(["aborted"]);
-		expect(currentDream()).toMatchObject({ outcome: "aborted", reason: "used more than 1 tokens" });
+		expect(currentDream()).toMatchObject({ outcome: "aborted", reason: "used more than 1 budget tokens" });
 		expect(ui.status()).toBeUndefined();
 	});
 });
@@ -269,7 +275,7 @@ describe("documentation", () => {
 		for (const text of ["/memory dream", "/memory stop", "/memory status", "autoDream", "dreamIdleMinutes", "dreamModel"]) expect(readme).toContain(text);
 		expect(readme).toMatch(/lease/i);
 		expect(readme).toMatch(/40 turns/);
-		expect(readme).toMatch(/300,000 tokens/);
+		expect(readme).toMatch(/300,000 budget tokens/);
 		expect(readme).toMatch(/10 minutes/);
 		expect(readme).toMatch(/preempt/i);
 		expect(readme).toMatch(/web UI/);

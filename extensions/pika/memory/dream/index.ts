@@ -203,7 +203,8 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 		const lines = [
 			`Dreams: automatic dreams ${settings.autoDream ? "on" : "off"} (memory.autoDream), after ${settings.dreamIdleMinutes} idle minute${settings.dreamIdleMinutes === 1 ? "" : "s"} (memory.dreamIdleMinutes).`,
 			note ? `Dream model: ${note}.` : `Dream model: ${model ? `${model.provider}/${model.id}` : "none"} (memory.dreamModel).`,
-			`Caps: wrap up at ${dreamLimits.wrapUpTurns} turns, stop at ${dreamLimits.abortTurns}, ${dreamLimits.maxTokens} tokens, or ${Math.round(dreamLimits.maxMs / 60_000)} minutes.`,
+			`Caps: stop past ${dreamLimits.abortTurns} turns, ${dreamLimits.maxTokens} budget tokens (cache reads count a tenth), or ${Math.round(dreamLimits.maxMs / 60_000)} minutes; `
+				+ `wrap up at ${dreamLimits.wrapUpTurns} turns, ${Math.round(dreamLimits.wrapUpShare * 100)}% of the tokens or time, or a context past ${dreamLimits.wrapUpContext} tokens.`,
 		];
 		const problem = credentialsProblem(cwdOf(ctx));
 		if (problem) lines.push(`This session cannot dream: ${problem}.`);

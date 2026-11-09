@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { currentDream, dreamLimits, dreamRuntime } from "../../memory/dream/index.ts";
-import { WRAP_UP } from "../../memory/dream/run.ts";
+import { type Usage, WRAP_UP } from "../../memory/dream/run.ts";
 import { FakePika } from "./support/pika-server.ts";
 import { batch, type FakeChild, fakeSpawner, LEASE_ID, RecordingUI, releases, renewals, resetDreams, serveDreams } from "./support/dream.ts";
 import { type Harness, note, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 const MINUTE = 60_000;
+const usage = (fields: Partial<Usage>): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...fields });
 const SOURCES = [{ sessionId: "s-past-1", seq: 7 }];
 const SAVE = { expectedRevision: 0, scope: "project", category: "project", title: "Pitfall", hook: "run npm ci first", body: "Tests need node_modules.", sources: SOURCES };
 
@@ -198,16 +199,19 @@ describe("outcomes", () => {
 describe("caps and the lease", () => {
 	const fakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
 
-	it("renews the lease every 5 minutes and aborts at 10 minutes", async () => {
+	it("renews the lease every 5 minutes, steers a wrap-up at 7, and aborts at 10 minutes", async () => {
 		fakeTimers();
-		await dream();
+		const child = await dream();
 		await vi.advanceTimersByTimeAsync(5 * MINUTE - 1_000);
 		await quiet();
 		expect(renewals(pika)).toEqual([]);
 		await vi.advanceTimersByTimeAsync(1_000);
 		await until(() => renewals(pika).length === 1, "the first renewal");
 		expect(renewals(pika)[0]!.body).toEqual({});
-		await vi.advanceTimersByTimeAsync(5 * MINUTE - 1_000);
+		expect(child.steers).toEqual([]);
+		await vi.advanceTimersByTimeAsync(2 * MINUTE);
+		expect(child.steers).toEqual([WRAP_UP]);
+		await vi.advanceTimersByTimeAsync(3 * MINUTE - 1_000);
 		await quiet();
 		expect(currentDream()!.ended).toBe(false);
 		expect(currentDream()!.lease.expiresAt).toBe("2026-11-08T10:20:00Z");
@@ -241,29 +245,30 @@ describe("caps and the lease", () => {
 
 	it("steers the child to wrap up at 40 turns and aborts it at 43", async () => {
 		const child = await dream();
-		for (let i = 0; i < 39; i++) child.emit({ type: "turn_end" });
+		const turn = { type: "turn_end", toolCalls: true } as const;
+		for (let i = 0; i < 39; i++) child.emit(turn);
 		expect(child.steers).toEqual([]);
-		child.emit({ type: "turn_end" });
+		child.emit(turn);
 		expect(child.steers).toEqual([WRAP_UP]);
 		expect(WRAP_UP).toContain("dream_commit");
-		child.emit({ type: "turn_end" });
-		child.emit({ type: "turn_end" });
+		child.emit(turn);
+		child.emit(turn);
 		expect(currentDream()!.ended).toBe(false);
 		expect(child.steers).toHaveLength(1);
-		child.emit({ type: "turn_end" });
+		child.emit(turn);
 		expect(currentDream()).toMatchObject({ ended: true, outcome: "aborted", reason: "reached its 43-turn limit", turns: 43 });
 		await until(() => releases(pika).length === 1, "the release");
 		expect(releases(pika)).toEqual(["aborted"]);
 		expect(child.aborts).toBeGreaterThan(0);
 	});
 
-	it("aborts past 300,000 tokens", async () => {
+	it("aborts past 300,000 budget tokens", async () => {
 		const child = await dream();
-		child.emit({ type: "usage", tokens: 200_000 });
-		child.emit({ type: "usage", tokens: 100_000 });
-		expect(currentDream()!.ended).toBe(false);
-		child.emit({ type: "usage", tokens: 1 });
-		expect(currentDream()).toMatchObject({ ended: true, outcome: "aborted", reason: "used more than 300000 tokens", tokens: 300_001 });
+		child.emit({ type: "usage", usage: usage({ input: 200_000 }) });
+		child.emit({ type: "usage", usage: usage({ output: 50_000, cacheWrite: 40_000, cacheRead: 100_000 }) });
+		expect(currentDream()).toMatchObject({ ended: false, tokens: 300_000 });
+		child.emit({ type: "usage", usage: usage({ output: 1 }) });
+		expect(currentDream()).toMatchObject({ ended: true, outcome: "aborted", reason: "used more than 300000 budget tokens", tokens: 300_001 });
 		await until(() => releases(pika).length === 1, "the release");
 		expect(releases(pika)).toEqual(["aborted"]);
 	});

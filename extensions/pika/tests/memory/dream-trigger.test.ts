@@ -81,7 +81,7 @@ describe("the idle trigger", () => {
 		expect(kickoff).toContain("s-past-1 \"Fix the flaky upload test\": entries seq 3..41");
 		expect(kickoff).toContain(INDEX.trim());
 		expect(kickoff).toMatch(/1\. Orient[\s\S]*2\. Gather[\s\S]*recall_read[\s\S]*3\. Verify and consolidate[\s\S]*4\. Prune/);
-		expect(kickoff).toContain("Budget: 40 turns, 300,000 tokens, 10 minutes");
+		expect(kickoff).toContain("Budget: 40 turns, 300,000 budget tokens, 10 minutes");
 
 		spawner.children[0]!.finish();
 		await until(() => releases(pika).length === 1, "the release");
@@ -199,7 +199,8 @@ describe("/memory", () => {
 		const status = ui.notes.at(-1)!.message;
 		expect(status).toContain("Dreams: automatic dreams on (memory.autoDream), after 20 idle minutes (memory.dreamIdleMinutes).");
 		expect(status).toContain("Dream model: memory.dreamModel is not set; dreams use this session's model, memory-test/test.");
-		expect(status).toMatch(/Dreaming of my-project \(manual\) since .*: 1 session, 0 of 43 turns, 0 of 300000 tokens, 0 changes staged\./);
+		expect(status).toMatch(/Dreaming of my-project \(manual\) since .*: 1 session, 0 of 43 turns, 0 of 300000 budget tokens, 0 changes staged\./);
+		expect(status).toContain("Caps: stop past 43 turns, 300000 budget tokens (cache reads count a tenth), or 10 minutes; wrap up at 40 turns, 70% of the tokens or time, or a context past 120000 tokens.");
 
 		await h.session.prompt("/memory stop");
 		await until(() => releases(pika).length === 1, "the release");

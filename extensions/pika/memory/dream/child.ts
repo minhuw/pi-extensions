@@ -113,11 +113,16 @@ export async function spawnDreamChild(options: SpawnOptions): Promise<DreamChild
 		sessionFile: session.sessionFile,
 		model: `${options.model.provider}/${options.model.id}`,
 		subscribe: (listener) => session.subscribe((event) => {
-			if (event.type === "turn_end") listener({ type: "turn_end" });
-			else if (event.type === "message_end" && event.message.role === "assistant") {
+			if (event.type === "turn_start") listener({ type: "turn_start" });
+			else if (event.type === "turn_end") {
+				const answer = event.message.role === "assistant" ? event.message : undefined;
+				listener({
+					type: "turn_end", toolCalls: Boolean(answer?.content.some((part) => part.type === "toolCall")),
+					failed: answer?.stopReason === "error" || answer?.stopReason === "aborted",
+				});
+			} else if (event.type === "message_end" && event.message.role === "assistant") {
 				const usage = event.message.usage;
-				const tokens = (usage?.input ?? 0) + (usage?.output ?? 0) + (usage?.cacheRead ?? 0) + (usage?.cacheWrite ?? 0);
-				listener({ type: "usage", tokens });
+				listener({ type: "usage", usage: { input: usage?.input ?? 0, output: usage?.output ?? 0, cacheRead: usage?.cacheRead ?? 0, cacheWrite: usage?.cacheWrite ?? 0 } });
 			}
 		}),
 		prompt: (text) => session.prompt(text, { expandPromptTemplates: false }),

@@ -27,16 +27,31 @@ export interface Batch {
 /** A successful `POST memory/dream/{leaseId}/commit`. */
 export interface CommitAnswer { batch: Batch; index: string; indexBytes: number; indexLines: number }
 
+/** The token counts of one answer, or of several summed. */
+export interface Usage { input: number; output: number; cacheRead: number; cacheWrite: number }
+/**
+ * What an answer costs against a dream's token budget: input, output, and cache writes in full, and cache reads at a
+ * tenth, about their price. Every call re-reads the whole cached context, so a plain sum would grow with the square
+ * of the calls and stop a dream after a handful of them.
+ */
+export const budgetTokens = (usage: Usage): number => usage.input + usage.output + usage.cacheWrite + Math.ceil(usage.cacheRead / 10);
+/** The context an answer was given: its input and cache tokens. */
+export const contextTokens = (usage: Usage): number => usage.input + usage.cacheRead + usage.cacheWrite;
+
 /** A dream's caps and timers; tests shorten them. */
 export const dreamLimits = {
 	/** At this many turns the child is told to wrap up. */
 	wrapUpTurns: 40,
-	/** At this many turns the child is aborted. */
+	/** A turn past this many is aborted; the answer of the last turn may still finish the dream. */
 	abortTurns: 43,
-	/** Past this many tokens (input, output, and cache, summed over the child's answers) the child is aborted. */
+	/** Past this many budget tokens (`budgetTokens`, summed over the child's answers) the child is aborted. */
 	maxTokens: 300_000,
+	/** When one answer's context (`contextTokens`) passes this many tokens, the child is told to wrap up. */
+	wrapUpContext: 120_000,
 	/** After this long the child is aborted. */
 	maxMs: 10 * 60_000,
+	/** At this share of `maxTokens` and of `maxMs` the child is told to wrap up. */
+	wrapUpShare: 0.7,
 	/** How often the lease is renewed; the server keeps it 15 minutes. */
 	renewMs: 5 * 60_000,
 	/** How long the child's `session_shutdown` handlers may run before it is disposed anyway. */
@@ -45,7 +60,7 @@ export const dreamLimits = {
 
 export const MAX_CHANGES = 50;
 export const MAX_SOURCES = 20;
-export const WRAP_UP = "This dream is close to its turn limit: wrap up now. Commit what you have with dream_commit and finish; changes still staged when the dream ends are discarded.";
+export const WRAP_UP = "This dream is close to one of its limits (turns, tokens, context, or time): wrap up now. Commit what you have with dream_commit, naming the sessions you finished, and finish with a short summary; changes still staged when the dream ends are discarded.";
 
 /** What a dream needs of its child session; `spawnDreamChild` makes the real one. */
 export interface DreamChild {
@@ -53,7 +68,7 @@ export interface DreamChild {
 	readonly sessionFile: string | undefined;
 	/** `<provider>/<model id>`. */
 	readonly model: string;
-	/** Calls `listener` for every turn's end and every assistant answer's token usage. */
+	/** Calls `listener` for every turn's start and end and every assistant answer's token usage. */
 	subscribe(listener: (event: ChildEvent) => void): () => void;
 	prompt(text: string): Promise<void>;
 	steer(text: string): Promise<void>;
@@ -63,7 +78,11 @@ export interface DreamChild {
 	/** Emits `session_shutdown` to the child's extensions, bounded, then disposes it. */
 	shutdown(): Promise<void>;
 }
-export type ChildEvent = { type: "turn_end" } | { type: "usage"; tokens: number };
+/**
+ * A turn's end says whether its answer called tools, so the child goes on, and whether the answer failed (an error,
+ * which Pi may retry, or an abort): a failed answer is no turn of work.
+ */
+export type ChildEvent = { type: "turn_start" } | { type: "turn_end"; toolCalls: boolean; failed?: boolean } | { type: "usage"; usage: Usage };
 
 export interface SpawnOptions {
 	cwd: string;
@@ -119,7 +138,12 @@ export class DreamRun {
 	readonly lease: Lease;
 	readonly sessions: DreamSession[];
 	turns = 0;
+	/** Budget tokens so far (`budgetTokens`). */
 	tokens = 0;
+	/** The token counts of the child's answers, summed. */
+	readonly usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	/** The latest answer's context (`contextTokens`). */
+	context = 0;
 	staged: Change[] = [];
 	readonly batches: Batch[] = [];
 	/** Staged changes thrown away by failed commits and at the end. */
@@ -132,6 +156,7 @@ export class DreamRun {
 	/** Settles once the child is shut down; never rejects. */
 	done: Promise<void> = Promise.resolve();
 	private steered = false;
+	private wrapUpDue = false;
 	private spawned?: Promise<DreamChild | undefined>;
 	private unsubscribe?: () => void;
 	private readonly timers: ReturnType<typeof setTimeout>[] = [];
@@ -150,10 +175,11 @@ export class DreamRun {
 		this.status("dreaming…");
 		const maxMs = dreamLimits.maxMs;
 		const maxTimer = setTimeout(() => this.stop("aborted", `reached its ${Math.round(maxMs / 60_000)}-minute limit`), maxMs);
+		// Early enough that the child can still commit what it has.
+		const wrapUpTimer = setTimeout(() => this.wrapUp(), maxMs * dreamLimits.wrapUpShare);
 		const renewTimer = setInterval(() => { void this.renew(); }, dreamLimits.renewMs);
-		maxTimer.unref?.();
-		renewTimer.unref?.();
-		this.timers.push(maxTimer, renewTimer);
+		for (const timer of [maxTimer, wrapUpTimer, renewTimer]) timer.unref?.();
+		this.timers.push(maxTimer, wrapUpTimer, renewTimer);
 		const { options } = this;
 		this.spawned = options.spawn({
 			cwd: options.cwd, agentDir: options.agentDir, parentSessionId: options.parentSessionId,
@@ -217,9 +243,14 @@ export class DreamRun {
 		const where = this.lease.scope?.label ? ` of ${this.lease.scope.label}` : "";
 		const head = this.ended
 			? `Last dream${where} (${this.mode}): ${this.outcome} at ${this.endedAt}, ${this.reason}.`
-			: `Dreaming${where} (${this.mode}) since ${this.startedAt}: ${plural(this.sessions.length, "session")}, ${this.turns} of ${dreamLimits.abortTurns} turns, ${this.tokens} of ${dreamLimits.maxTokens} tokens, ${plural(this.staged.length, "change")} staged.`;
-		const lines = [head, `  ${plural(this.batches.length, "batch")} committed, ${plural(this.notesChanged, "note")} changed${this.discarded ? `, ${plural(this.discarded, "uncommitted change")} discarded` : ""}.`];
-		lines.push(`  Lease ${this.lease.id}${this.child ? `, session ${this.child.sessionId} on ${this.child.model}` : ""}.`);
+			: `Dreaming${where} (${this.mode}) since ${this.startedAt}: ${plural(this.sessions.length, "session")}, ${this.turns} of ${dreamLimits.abortTurns} turns, ${this.tokens} of ${dreamLimits.maxTokens} budget tokens, ${plural(this.staged.length, "change")} staged.`;
+		const { input, output, cacheRead, cacheWrite } = this.usage;
+		const lines = [
+			head,
+			`  ${plural(this.batches.length, "batch")} committed, ${plural(this.notesChanged, "note")} changed${this.discarded ? `, ${plural(this.discarded, "uncommitted change")} discarded` : ""}.`,
+			`  Tokens: ${input} input, ${output} output, ${cacheRead} cache read, ${cacheWrite} cache write; budget tokens count cache reads at a tenth; the latest context had ${this.context}.`,
+			`  Lease ${this.lease.id}${this.child ? `, session ${this.child.sessionId} on ${this.child.model}` : ""}.`,
+		];
 		return lines.join("\n");
 	}
 
@@ -230,17 +261,33 @@ export class DreamRun {
 
 	private observe(event: ChildEvent): void {
 		if (this.ended) return;
-		if (event.type === "turn_end") {
-			this.turns++;
+		if (event.type === "turn_start") {
 			if (this.turns >= dreamLimits.abortTurns) this.stop("aborted", `reached its ${dreamLimits.abortTurns}-turn limit`);
-			else if (!this.steered && this.turns >= dreamLimits.wrapUpTurns) {
-				this.steered = true;
-				void this.child?.steer(WRAP_UP).catch(() => {});
-			}
-		} else {
-			this.tokens += event.tokens;
-			if (this.tokens > dreamLimits.maxTokens) this.stop("aborted", `used more than ${dreamLimits.maxTokens} tokens`);
+		} else if (event.type === "usage") {
+			const { usage } = event;
+			this.usage.input += usage.input;
+			this.usage.output += usage.output;
+			this.usage.cacheRead += usage.cacheRead;
+			this.usage.cacheWrite += usage.cacheWrite;
+			this.tokens += budgetTokens(usage);
+			this.context = contextTokens(usage);
+			if (this.tokens > dreamLimits.maxTokens) this.stop("aborted", `used more than ${dreamLimits.maxTokens} budget tokens`);
+			else if (this.tokens >= dreamLimits.maxTokens * dreamLimits.wrapUpShare || this.context > dreamLimits.wrapUpContext) this.wrapUpDue = true;
+		} else if (!event.failed) {
+			this.turns++;
+			// A final answer ends the dream, even on the last turn; the turn after it, if any, is stopped at its start.
+			if (!event.toolCalls) return;
+			if (this.turns >= dreamLimits.abortTurns) this.stop("aborted", `reached its ${dreamLimits.abortTurns}-turn limit`);
+			else if (this.wrapUpDue || this.turns >= dreamLimits.wrapUpTurns) this.wrapUp();
 		}
+	}
+
+	/** Tells the child once to commit and finish, now if it runs, else at its next turn that calls tools. */
+	private wrapUp(): void {
+		if (this.ended || this.steered) return;
+		if (!this.child) { this.wrapUpDue = true; return; }
+		this.steered = true;
+		void this.child.steer(WRAP_UP).catch(() => {});
 	}
 
 	private async renew(): Promise<void> {
