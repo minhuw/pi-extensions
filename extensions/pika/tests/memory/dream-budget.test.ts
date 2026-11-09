@@ -30,7 +30,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
 	vi.useRealTimers();
-	currentDream()?.stop("aborted", "the test ended");
+	currentDream()?.stop("stopped", "the test ended");
 	await currentDream()?.done;
 	await h.shutdown();
 	resetDreams();
@@ -105,7 +105,7 @@ describe("the token budget", () => {
 });
 
 describe("the time limit", () => {
-	it("steers a wrap-up at 7 of its 10 minutes, so a commit after it is kept, before the cap stops the dream", async () => {
+	it("steers a wrap-up at 7 of its 10 minutes, so a commit after it is kept, and the cap then releases the dream as aborted", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
 		const child = await fakeDream();
 		await child.call("dream_save", SAVE);
@@ -132,7 +132,7 @@ describe("the turn limit", () => {
 		expect(currentDream()).toMatchObject({ ended: false, turns: 3 });
 		// Something (a queued steer) keeps the child going after all.
 		child.emit({ type: "turn_start" });
-		expect(currentDream()).toMatchObject({ ended: true, outcome: "aborted", reason: "reached its 3-turn limit" });
+		expect(currentDream()).toMatchObject({ ended: true, ending: "limit", reason: "reached its 3-turn limit" });
 	});
 
 	it("a real child whose final answer lands on the last allowed turn is released as completed", async () => {

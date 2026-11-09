@@ -30,7 +30,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
 	vi.useRealTimers();
-	currentDream()?.stop("aborted", "the test ended");
+	currentDream()?.stop("stopped", "the test ended");
 	for (const h of open.splice(0)) await h.shutdown();
 	resetDreams();
 	await pika.stop();

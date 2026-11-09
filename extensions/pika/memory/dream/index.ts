@@ -2,12 +2,13 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ModelRuntim
 import { loadMemorySettings, type MemorySettings } from "../../config.ts";
 import { credentialsRegistry } from "../../credentials.ts";
 import { resolveRepository } from "../../repository.ts";
-import { MemoryServerError, request } from "../client.ts";
+import { MemoryServerError } from "../client.ts";
 import type { MemoryView } from "../format.ts";
 import { cwdOf, where } from "../tools.ts";
 import { SESSION_LINK_TYPE, spawnDreamChild } from "./child.ts";
 import { kickoffText } from "./prompt.ts";
 import { type DreamChild, type DreamMode, DreamRun, dreamLimits, type Grant, type SpawnOptions } from "./run.ts";
+import { type LeaseServer, send } from "./server.ts";
 import { dreamTools } from "./tools.ts";
 
 export { dreamLimits } from "./run.ts";
@@ -24,7 +25,7 @@ const SUBCOMMANDS = ["status", "dream", "stop"];
 // One dream per process, whichever module copy started it.
 const SHARED = Symbol.for("pi-extensions.pika.memory.dream");
 interface Shared {
-	/** The running dream. */
+	/** The running dream, until its end, which may wait for a commit in flight. */
 	running?: DreamRun;
 	/** Set while a dream is being requested, so a second one is not. */
 	starting?: object;
@@ -133,16 +134,20 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 	function preempt(reason: string): void {
 		epoch++;
 		const run = shared().running;
-		if (run?.owner === self) run.stop("aborted", reason);
+		if (run?.owner === self) run.stop("stopped", reason);
 	}
 
 	/** Requests a lease and starts a dream; the text says why not when it did not start. */
 	async function begin(ctx: ExtensionContext, mode: DreamMode): Promise<{ run?: DreamRun; text: string }> {
 		const state = shared();
+		if (state.running?.ended) return { text: "the last dream is still waiting for its commit's answer" };
 		if (state.running || state.starting) return { text: "a dream is already running in this pi process; /memory stop stops it" };
 		const cwd = cwdOf(ctx);
 		const problem = credentialsProblem(cwd);
 		if (problem) return { text: problem };
+		// Every lease request goes to the server and token that granted it, even once pika's credentials change.
+		const { url, token } = credentialsRegistry().current!;
+		const server: LeaseServer = { url, token };
 		const settings = loadMemorySettings(getAgentDir());
 		const { model, note } = pickModel(ctx, settings);
 		if (!model) return { text: "this session has no model to dream with; select one, or set memory.dreamModel" };
@@ -155,7 +160,7 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 			const parentSessionFile = ctx.sessionManager.getSessionFile();
 			let grant: Grant;
 			try {
-				grant = await request<Grant>(cwd, "POST", "memory/dream/lease", { body: { ...repository, sessionId: parentSessionId, mode } });
+				grant = await send<Grant>(server, "POST", "memory/dream/lease", { body: { ...repository, sessionId: parentSessionId, mode } });
 			} catch (error) {
 				return { text: leaseRefusal(error) };
 			}
@@ -164,12 +169,12 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 			let index: string | null = null;
 			const preempted = () => {
 				if (epoch === started) return false;
-				void request(cwd, "POST", `memory/dream/${encodeURIComponent(grant.lease.id)}/release`, { body: { outcome: "aborted" } }).catch(() => {});
+				void send(server, "POST", `memory/dream/${encodeURIComponent(grant.lease.id)}/release`, { body: { outcome: "aborted" } }).catch(() => {});
 				return true;
 			};
 			if (preempted()) return { text: "the session got input meanwhile" };
 			try {
-				const view = await request<MemoryView>(cwd, "GET", `memory?${new URLSearchParams({ ...repository })}`, { timeoutMs: INDEX_TIMEOUT_MS });
+				const view = await send<MemoryView>(server, "GET", `memory?${new URLSearchParams({ ...repository })}`, { timeoutMs: INDEX_TIMEOUT_MS });
 				index = typeof view.index === "string" ? view.index : null;
 			} catch { /* the child reads it with memory_read */ }
 			if (preempted()) return { text: "the session got input meanwhile" };
@@ -177,7 +182,7 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 			const thinkingLevel = ctx.thinkingLevel ?? pi.getThinkingLevel();
 			const modelRuntime = modelRuntimeOf(ctx.modelRegistry);
 			const run = new DreamRun({
-				owner: self, mode, grant, cwd, repository, parentSessionId, ...(parentSessionFile ? { parentSessionFile } : {}), agentDir: getAgentDir(),
+				owner: self, mode, grant, server, cwd, repository, parentSessionId, ...(parentSessionFile ? { parentSessionFile } : {}), agentDir: getAgentDir(),
 				index, model, ...(note ? { modelNote: note } : {}), ...(thinkingLevel ? { thinkingLevel } : {}), ...(modelRuntime ? { modelRuntime } : {}), ...(ui ? { ui } : {}),
 				spawn: (options) => dreamRuntime.spawn(options),
 				tools: dreamTools,
@@ -278,8 +283,9 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify(`pika memory: ${run ? text : `no dream: ${text}`}.`, run ? "info" : "warning");
 			} else if (command === "stop") {
 				const run = shared().running;
-				if (!run) { ctx.ui.notify("pika memory: no dream is running.", "info"); return; }
-				run.stop("aborted", "stopped with /memory stop");
+				if (run && !run.ended) run.stop("stopped", "stopped with /memory stop");
+				else if (run) ctx.ui.notify("pika memory: the dream is stopping; it waits for its commit's answer.", "info");
+				else ctx.ui.notify("pika memory: no dream is running.", "info");
 			} else ctx.ui.notify(USAGE, "error");
 		},
 	});

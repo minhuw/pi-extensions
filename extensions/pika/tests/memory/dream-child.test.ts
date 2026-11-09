@@ -44,7 +44,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
 	hooks().delete(probe);
-	currentDream()?.stop("aborted", "the test ended");
+	currentDream()?.stop("stopped", "the test ended");
 	await currentDream()?.done;
 	await h?.shutdown();
 	h = undefined;
@@ -105,7 +105,7 @@ it("a dream runs in a real persisted, linked child session with the hooks, the d
 	const commit = pika.requestsTo(`memory/dream/${LEASE_ID}/commit`);
 	expect(commit).toHaveLength(1);
 	expect(commit[0]!.body).toEqual({
-		dreamSessionId: childId, summary: "the upload fix", sessions: ["s-past-1"],
+		commitId: expect.stringMatching(/^[0-9a-f-]{36}$/), dreamSessionId: childId, summary: "the upload fix", sessions: ["s-past-1"],
 		changes: [{ op: "save", expectedRevision: 0, scope: "project", category: "project", title: "Pitfall", hook: "run npm ci first", body: "Tests need node_modules.", sources: SOURCES }],
 	});
 	expect(ui.notes.at(-1)!.message).toBe("pika memory: the dream finished: 1 batch committed, 1 note changed.");

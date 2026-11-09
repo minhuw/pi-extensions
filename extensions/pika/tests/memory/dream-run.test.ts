@@ -6,6 +6,7 @@ import { batch, type FakeChild, fakeSpawner, LEASE_ID, RecordingUI, releases, re
 import { type Harness, note, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 const MINUTE = 60_000;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const usage = (fields: Partial<Usage>): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...fields });
 const SOURCES = [{ sessionId: "s-past-1", seq: 7 }];
 const SAVE = { expectedRevision: 0, scope: "project", category: "project", title: "Pitfall", hook: "run npm ci first", body: "Tests need node_modules.", sources: SOURCES };
@@ -29,7 +30,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
 	vi.useRealTimers();
-	currentDream()?.stop("aborted", "the test ended");
+	currentDream()?.stop("stopped", "the test ended");
 	await h.shutdown();
 	resetDreams();
 	await pika.stop();
@@ -76,7 +77,7 @@ describe("staging and committing", () => {
 		expect(committed.text).toContain("- created [aaaaaaaaaaaa] Pitfall (revision 1)");
 		expect(commits()).toHaveLength(1);
 		expect(commits()[0]!.body).toEqual({
-			dreamSessionId: "dream-child-1", summary: "pitfalls from the upload fix", sessions: ["s-past-1"],
+			commitId: expect.stringMatching(UUID), dreamSessionId: "dream-child-1", summary: "pitfalls from the upload fix", sessions: ["s-past-1"],
 			changes: [
 				{ op: "save", ...SAVE, reason: "seen twice" },
 				{ op: "forget", id: "cccccccccccc", expectedRevision: 2, reason: "obsolete" },
@@ -86,7 +87,9 @@ describe("staging and committing", () => {
 		expect(currentDream()!.staged).toEqual([]);
 		// A commit that only moves checkpoints is allowed; one with nothing is refused locally.
 		expect((await child.call("dream_commit", { sessions: ["s-past-1"] })).isError).toBe(false);
-		expect(commits()[1]!.body).toEqual({ dreamSessionId: "dream-child-1", sessions: ["s-past-1"], changes: [] });
+		expect(commits()[1]!.body).toEqual({ commitId: expect.stringMatching(UUID), dreamSessionId: "dream-child-1", sessions: ["s-past-1"], changes: [] });
+		// Every commit has its own id.
+		expect((commits()[1]!.body as { commitId: string }).commitId).not.toBe((commits()[0]!.body as { commitId: string }).commitId);
 		expect(await child.call("dream_commit", { sessions: [] })).toMatchObject({ isError: true, text: "nothing to commit: no change is staged and no session is named." });
 		expect(commits()).toHaveLength(2);
 
@@ -117,7 +120,6 @@ describe("staging and committing", () => {
 	it.each([
 		["a full index", { status: 422, body: { error: "memory_full", indexBytes: 9000, indexLines: 210, limitBytes: 8192, limitLines: 200 } }, /^memory_full: .* 9000 bytes and 210 lines/],
 		["a bad request", { status: 400, body: { error: "bad_request", message: "a save needs 1 to 20 sources" } }, /^the pika server refused the commit \(HTTP 400 bad_request\): a save needs 1 to 20 sources\./],
-		["a server error", { status: 500, body: { error: "internal" } }, /^unexpected HTTP 500/],
 	])("a commit failing with %s discards the staged changes", async (_name, answer, text) => {
 		serveDreams(pika, { commit: answer });
 		const child = await dream();
@@ -199,7 +201,7 @@ describe("outcomes", () => {
 describe("caps and the lease", () => {
 	const fakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
 
-	it("renews the lease every 5 minutes, steers a wrap-up at 7, and aborts at 10 minutes", async () => {
+	it("renews the lease every 5 minutes, steers a wrap-up at 7, and stops at 10 minutes, released as failed with nothing committed", async () => {
 		fakeTimers();
 		const child = await dream();
 		await vi.advanceTimersByTimeAsync(5 * MINUTE - 1_000);
@@ -217,8 +219,8 @@ describe("caps and the lease", () => {
 		expect(currentDream()!.lease.expiresAt).toBe("2026-11-08T10:20:00Z");
 		await vi.advanceTimersByTimeAsync(1_000);
 		await until(() => releases(pika).length === 1, "the release");
-		expect(currentDream()).toMatchObject({ outcome: "aborted", reason: "reached its 10-minute limit" });
-		expect(releases(pika)).toEqual(["aborted"]);
+		expect(currentDream()).toMatchObject({ outcome: "failed", reason: "reached its 10-minute limit" });
+		expect(releases(pika)).toEqual(["failed"]);
 		expect(ui.status()).toBeUndefined();
 		// No renewals after the end.
 		const count = renewals(pika).length;
@@ -243,7 +245,7 @@ describe("caps and the lease", () => {
 		expect(child.aborts).toBeGreaterThan(0);
 	});
 
-	it("steers the child to wrap up at 40 turns and aborts it at 43", async () => {
+	it("steers the child to wrap up at 40 turns and aborts it at 43, released as failed with nothing committed", async () => {
 		const child = await dream();
 		const turn = { type: "turn_end", toolCalls: true } as const;
 		for (let i = 0; i < 39; i++) child.emit(turn);
@@ -256,21 +258,21 @@ describe("caps and the lease", () => {
 		expect(currentDream()!.ended).toBe(false);
 		expect(child.steers).toHaveLength(1);
 		child.emit(turn);
-		expect(currentDream()).toMatchObject({ ended: true, outcome: "aborted", reason: "reached its 43-turn limit", turns: 43 });
+		expect(currentDream()).toMatchObject({ ended: true, outcome: "failed", reason: "reached its 43-turn limit", turns: 43 });
 		await until(() => releases(pika).length === 1, "the release");
-		expect(releases(pika)).toEqual(["aborted"]);
+		expect(releases(pika)).toEqual(["failed"]);
 		expect(child.aborts).toBeGreaterThan(0);
 	});
 
-	it("aborts past 300,000 budget tokens", async () => {
+	it("aborts past 300,000 budget tokens, released as failed when nothing was committed", async () => {
 		const child = await dream();
 		child.emit({ type: "usage", usage: usage({ input: 200_000 }) });
 		child.emit({ type: "usage", usage: usage({ output: 50_000, cacheWrite: 40_000, cacheRead: 100_000 }) });
 		expect(currentDream()).toMatchObject({ ended: false, tokens: 300_000 });
 		child.emit({ type: "usage", usage: usage({ output: 1 }) });
-		expect(currentDream()).toMatchObject({ ended: true, outcome: "aborted", reason: "used more than 300000 budget tokens", tokens: 300_001 });
+		expect(currentDream()).toMatchObject({ ended: true, outcome: "failed", reason: "used more than 300000 budget tokens", tokens: 300_001 });
 		await until(() => releases(pika).length === 1, "the release");
-		expect(releases(pika)).toEqual(["aborted"]);
+		expect(releases(pika)).toEqual(["failed"]);
 	});
 });
 

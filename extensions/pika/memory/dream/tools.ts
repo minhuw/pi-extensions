@@ -1,17 +1,20 @@
+import { randomUUID } from "node:crypto";
 import { type AgentToolResult, defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { recallReadTool, recallSearchTool } from "../../recall/index.ts";
-import { MemoryServerError, request } from "../client.ts";
+import { MemoryServerError } from "../client.ts";
 import { type Category, type FullAnswer, formatFull, formatNote, type Note, type ScopeKind } from "../format.ts";
 import { CATEGORY, firstLine, memoryReadTool, SCOPE } from "../tools.ts";
-import { type Change, type CommitAnswer, type DreamRun, MAX_CHANGES, MAX_SOURCES, type Source } from "./run.ts";
+import { type Change, type CommitAnswer, type CommitBody, type DreamRun, MAX_CHANGES, MAX_SOURCES, type Source } from "./run.ts";
+import { outcomeUnknown, send } from "./server.ts";
 
 /** The tools only dream children get; never registered in top-level sessions. */
 export const DREAM_TOOLS = ["dream_save", "dream_forget", "dream_commit"];
 
 export interface StageDetails { position?: number; staged: number; error?: string }
-export interface CommitDetails { batchId?: string; changes?: number; discarded?: number; note?: Note; error?: string }
+/** `unknown`: the commit got no definite answer, so the server may have written it; its changes stay staged. */
+export interface CommitDetails { batchId?: string; changes?: number; discarded?: number; unknown?: boolean; note?: Note; error?: string }
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
@@ -32,7 +35,7 @@ const SOURCE = Type.Object({
 });
 const SOURCES = (minItems: number) => Type.Array(SOURCE, { minItems, maxItems: MAX_SOURCES, description: `The session entries that support the change, ${minItems} to ${MAX_SOURCES}` });
 
-const UNSAVED = "Nothing is written until dream_commit; a failed commit or the end of the dream discards every staged change.";
+const UNSAVED = "Nothing is written until dream_commit; a commit the server refuses discards its staged changes, and so does the end of the dream.";
 
 /** The tools of a dream child: reading past sessions and notes, and staging and committing changes for `run`. */
 export function dreamTools(run: DreamRun): ToolDefinition[] {
@@ -124,16 +127,40 @@ export function dreamForgetTool(run: DreamRun) {
 	});
 }
 
-/** Explains a failed commit; its staged changes are already discarded. */
-function explainCommit(error: unknown, changes: Change[], run: DreamRun): AgentToolResult<CommitDetails> {
+/** A commit's answer: a batch, a definite refusal (nothing was written), or none definite (the server may have written it). */
+type Attempt = { answer: CommitAnswer } | { failed: unknown } | { unknown: unknown };
+
+async function attempt(run: DreamRun, body: CommitBody): Promise<Attempt> {
+	try {
+		// Never aborted with the child: a commit in flight gets its answer, or times out, even when the dream is stopped.
+		return { answer: await send<CommitAnswer>(run.options.server, "POST", `memory/dream/${encodeURIComponent(run.lease.id)}/commit`, { body }) };
+	} catch (error) {
+		return outcomeUnknown(error) ? { unknown: error } : { failed: error };
+	}
+}
+
+function committedText(answer: CommitAnswer, sessions: string[]): string {
+	return [
+		`Committed batch ${answer.batch.id}: ${plural(answer.batch.changes.length, "note")} changed${sessions.length ? `, ${plural(sessions.length, "session")} consolidated` : ""}.`,
+		...answer.batch.changes.map((change) => `- ${change.action === "forget" ? "forgot" : change.created ? "created" : "updated"} [${change.noteId}] ${oneLine(change.title)} (revision ${change.revision})`),
+		`The index is now (${answer.indexBytes} bytes, ${answer.indexLines} lines):`,
+		answer.index || "(empty)",
+	].join("\n");
+}
+
+const others = (kept: number) => kept ? ` ${plural(kept, "other staged change")} ${kept === 1 ? "is" : "are"} still staged.` : "";
+
+/** Explains a refused commit: nothing was written, and its own changes are discarded; `kept` others stay staged. */
+function explainCommit(error: unknown, changes: Change[], run: DreamRun, kept: number, before: string[]): AgentToolResult<CommitDetails> {
 	const discarded = changes.length;
-	const lost = `Nothing was written, and the ${plural(discarded, "staged change")} ${discarded === 1 ? "was" : "were"} discarded.`;
-	if (!(error instanceof MemoryServerError)) return commitFailure(`${errorText(error)} ${lost}`, { discarded });
+	const lost = `Nothing was written, and the ${plural(discarded, "staged change")} ${discarded === 1 ? "was" : "were"} discarded.${others(kept)}`;
+	const failure = (text: string, details: CommitDetails = {}) => commitFailure([...before, text].join("\n\n"), { discarded, ...details });
+	if (!(error instanceof MemoryServerError)) return failure(`${errorText(error)} ${lost}`);
 	const { status, body } = error;
 	const code = typeof body.error === "string" ? body.error : undefined;
 	if (status === 409 && code === "lease_lost") {
-		run.stop("aborted", "lost its lease");
-		return commitFailure(`lease_lost: this dream no longer holds its lease, so it ends now. ${lost}`, { discarded });
+		run.stop("stopped", "lost its lease");
+		return failure(`lease_lost: this dream no longer holds its lease, so it ends now. ${lost}`);
 	}
 	if (status === 409 && code === "revision_conflict") {
 		const note = body.note && typeof body.note === "object" ? body.note as Note : undefined;
@@ -141,44 +168,113 @@ function explainCommit(error: unknown, changes: Change[], run: DreamRun): AgentT
 		const change = index !== undefined ? changes[index] : undefined;
 		const which = change ? `change ${index! + 1} (${change.op}${change.id ? ` of note ${change.id}` : ""} at expected revision ${change.expectedRevision})` : "a change";
 		const current = note ? ` Note ${note.id} is at revision ${note.revision}; its current state:\n\n${formatNote(note)}\n\n` : " ";
-		return commitFailure(`revision_conflict: ${which} no longer matches its note.${current}${lost} Merge with the current state, stage every change again with the current revisions, and commit again.`, { discarded, ...(note ? { note } : {}) });
+		return failure(`revision_conflict: ${which} no longer matches its note.${current}${lost} Merge with the current state, stage every change again with the current revisions, and commit again.`, note ? { note } : {});
 	}
-	if (status === 422) return commitFailure(`${formatFull(body as FullAnswer).replace("Nothing was saved. ", "")} ${lost} Stage the changes again with fewer or shorter notes.`, { discarded });
-	if (status === 400) return commitFailure(`the pika server refused the commit (HTTP 400 bad_request): ${typeof body.message === "string" ? body.message : "no reason given"}. ${lost}`, { discarded });
-	if (status === 404) return commitFailure(`the pika server has no memory dream API (HTTP 404): it needs a newer pika. ${lost}`, { discarded });
-	return commitFailure(`${error.message} ${lost}`, { discarded });
+	if (status === 422) return failure(`${formatFull(body as FullAnswer).replace("Nothing was saved. ", "")} ${lost} Stage the changes again with fewer or shorter notes.`);
+	if (status === 400) return failure(`the pika server refused the commit (HTTP 400 bad_request): ${typeof body.message === "string" ? body.message : "no reason given"}. ${lost}`);
+	if (status === 404) return failure(`the pika server has no memory dream API (HTTP 404): it needs a newer pika. ${lost}`);
+	return failure(`${error.message} ${lost}`);
+}
+
+/** Explains a commit without a definite answer: its changes stay staged, and a retry resends it with the same commit id. */
+function unknownCommit(error: unknown, body: CommitBody, kept: number, before: string[]): AgentToolResult<CommitDetails> {
+	const count = body.changes.length;
+	const what = [count ? plural(count, "change") : "", body.sessions.length ? plural(body.sessions.length, "session") : ""].filter(Boolean).join(" and ");
+	const text = `${errorText(error)} The outcome of this commit (${what}) is unknown: the server may or may not have written it.`
+		+ `${count ? ` Its ${plural(count, "change")} ${count === 1 ? "is" : "are"} still staged, as sent.` : ""}${others(kept)}`
+		+ " Call dream_commit again to retry it: that is safe, since the retry carries the same commit id and the server writes a commit at most once. Do not stage these changes again.";
+	return { content: [{ type: "text", text: [...before, text].join("\n\n") }], details: { unknown: true, error: text }, isError: true };
+}
+
+/**
+ * Commits for `run`: first the commit whose outcome is unknown, if any, resent exactly as it was; then the changes
+ * staged besides it and the sessions not consolidated yet, under a new commit id.
+ */
+async function commit(run: DreamRun, sessions: string[], summary: string | undefined): Promise<AgentToolResult<CommitDetails>> {
+	const texts: string[] = [];
+	let changes = run.takeStaged();
+	let left = sessions;
+	const pending = run.pending;
+	if (pending) {
+		const own = changes.slice(0, pending.body.changes.length);
+		const rest = changes.slice(own.length);
+		const result = await attempt(run, pending.body);
+		if ("unknown" in result) {
+			run.restage(changes);
+			return unknownCommit(result.unknown, pending.body, rest.length, texts);
+		}
+		run.pending = undefined;
+		if ("failed" in result) {
+			// Counted as failed already, when its outcome became unknown.
+			run.restage(rest);
+			run.dropped(own.length);
+			return explainCommit(result.failed, own, run, run.staged.length, texts);
+		}
+		run.committed(result.answer.batch);
+		texts.push(committedText(result.answer, pending.body.sessions));
+		changes = rest;
+		left = sessions.filter((id) => !pending.body.sessions.includes(id));
+		if (!changes.length && !left.length) return committedResult(texts, run);
+		if (run.ended) {
+			run.restage(changes);
+			return committedResult([...texts, `The dream has ended (${run.reason}); nothing more was committed.`], run);
+		}
+	}
+	if (!left.length && !changes.length) return commitFailure("nothing to commit: no change is staged and no session is named.", { discarded: 0 });
+	const body: CommitBody = { commitId: randomUUID(), ...(run.child ? { dreamSessionId: run.child.sessionId } : {}), ...(summary ? { summary } : {}), sessions: left, changes };
+	const result = await attempt(run, body);
+	if ("unknown" in result) {
+		run.pending = { body };
+		run.commitFailed();
+		const kept = run.staged.length;
+		run.restage(changes);
+		return unknownCommit(result.unknown, body, kept, texts);
+	}
+	if ("failed" in result) {
+		run.dropped(changes.length);
+		run.commitFailed();
+		return explainCommit(result.failed, changes, run, run.staged.length, texts);
+	}
+	run.committed(result.answer.batch);
+	texts.push(committedText(result.answer, left));
+	return committedResult(texts, run);
+}
+
+function committedResult(texts: string[], run: DreamRun): AgentToolResult<CommitDetails> {
+	const last = run.batches.at(-1);
+	const kept = run.staged.length;
+	const text = texts.join("\n\n") + (kept ? `\n${others(kept).trim()}` : "");
+	return { content: [{ type: "text", text }], details: { ...(last ? { batchId: last.id, changes: last.changes.length } : {}) } };
 }
 
 export function dreamCommitTool(run: DreamRun) {
 	return defineTool({
 		name: "dream_commit", label: "Dream Commit",
 		description: "Write every staged change as one batch, and mark the sessions you name as consolidated up to the entries this dream was given. "
-			+ "Name only sessions you finished; `sessions` may be empty when only staged changes are written. "
-			+ "If the commit fails (a note changed meanwhile, the index would be too large, or a change is invalid), nothing is written and every staged change is discarded: read again, stage again, and commit again.",
+			+ "Name only sessions you finished, from the task message; `sessions` may be empty when only staged changes are written, and a commit may name sessions with no change. "
+			+ "If the server refuses the commit (a note changed meanwhile, the index would be too large, or a change is invalid), nothing is written and its staged changes are discarded: read again, stage again, and commit again. "
+			+ "If its outcome is unknown (no answer in time, or a server error), its changes stay staged: call dream_commit again, which never writes a commit twice.",
 		parameters: Type.Object({
 			sessions: Type.Array(Type.String(), { description: "The ids of the sessions this batch finishes" }),
 			summary: Type.Optional(Type.String({ description: "One line on what this batch changes, up to 1000 characters" })),
 		}),
-		async execute(_id, params, signal): Promise<AgentToolResult<CommitDetails>> {
+		// Its whole answer's tool calls then run one by one, so a change staged beside a commit never races it.
+		executionMode: "sequential",
+		async execute(_id, params): Promise<AgentToolResult<CommitDetails>> {
 			if (run.ended) return commitFailure(`the dream has ended (${run.reason}); nothing can be committed.`, {});
-			const sessions = params.sessions.map((id) => id.trim()).filter(Boolean);
-			const changes = run.takeStaged();
-			if (!sessions.length && !changes.length) return commitFailure("nothing to commit: no change is staged and no session is named.", { discarded: 0 });
-			const summary = params.summary?.trim();
-			const body = { dreamSessionId: run.child?.sessionId, ...(summary ? { summary } : {}), sessions, changes };
+			if (run.committing) return commitFailure("another dream_commit is still running; call dream_commit again once it has returned.", {});
+			const sessions = [...new Set(params.sessions.map((id) => id.trim()).filter(Boolean))];
+			const foreign = sessions.filter((id) => !run.sessions.some((session) => session.id === id));
+			if (foreign.length) {
+				const staged = run.staged.length;
+				return commitFailure(`${foreign.join(", ")} ${foreign.length === 1 ? "is not one of" : "are not among"} this dream's sessions (${run.sessions.map((session) => session.id).join(", ") || "it has none"}). `
+					+ `Nothing was sent${staged ? `, and the ${plural(staged, "staged change")} ${staged === 1 ? "is" : "are"} still staged` : ""}: name only sessions the task message lists, and commit again.`, { discarded: 0 });
+			}
+			const done = run.beginCommit();
 			try {
-				const answer = await request<CommitAnswer>(run.options.cwd, "POST", `memory/dream/${encodeURIComponent(run.lease.id)}/commit`, { body, signal });
-				run.committed(answer.batch);
-				const text = [
-					`Committed batch ${answer.batch.id}: ${plural(answer.batch.changes.length, "note")} changed${sessions.length ? `, ${plural(sessions.length, "session")} consolidated` : ""}.`,
-					...answer.batch.changes.map((change) => `- ${change.action === "forget" ? "forgot" : change.created ? "created" : "updated"} [${change.noteId}] ${oneLine(change.title)} (revision ${change.revision})`),
-					`The index is now (${answer.indexBytes} bytes, ${answer.indexLines} lines):`,
-					answer.index || "(empty)",
-				].join("\n");
-				return { content: [{ type: "text", text }], details: { batchId: answer.batch.id, changes: answer.batch.changes.length } };
-			} catch (error) {
-				run.dropped(changes.length);
-				return explainCommit(error, changes, run);
+				return await commit(run, sessions, params.summary?.trim() || undefined);
+			} finally {
+				done();
 			}
 		},
 		renderCall(args, theme) {

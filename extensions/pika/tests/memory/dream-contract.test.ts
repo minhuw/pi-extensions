@@ -31,7 +31,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
 	vi.useRealTimers();
-	currentDream()?.stop("aborted", "the test ended");
+	currentDream()?.stop("stopped", "the test ended");
 	await currentDream()?.done;
 	for (const h of open.splice(0)) await h.shutdown();
 	resetDreams();
@@ -203,7 +203,7 @@ function recorder(seen: Seen[], answer: () => ReturnType<typeof fauxAssistantMes
 }
 
 describe("a real dream child", () => {
-	it("is steered to wrap up at the wrap-up turn and aborted at the abort turn", async () => {
+	it("is steered to wrap up at the wrap-up turn and aborted at the abort turn, released as failed with nothing committed", async () => {
 		dreamLimits.wrapUpTurns = 2;
 		dreamLimits.abortTurns = 5;
 		const h = await start();
@@ -213,8 +213,8 @@ describe("a real dream child", () => {
 		await h.session.prompt("/memory dream");
 		await until(() => releases(pika).length === 1, "the release");
 		await currentDream()!.done;
-		expect(releases(pika)).toEqual(["aborted"]);
-		expect(currentDream()).toMatchObject({ outcome: "aborted", reason: "reached its 5-turn limit", turns: 5 });
+		expect(releases(pika)).toEqual(["failed"]);
+		expect(currentDream()).toMatchObject({ outcome: "failed", reason: "reached its 5-turn limit", turns: 5 });
 		// The wrap-up reaches the model after turn 2, before the abort.
 		const steeredAt = seen.findIndex((request) => request.userTexts.some((text) => text.includes(WRAP_UP)));
 		expect(steeredAt).toBeGreaterThanOrEqual(2);
@@ -263,8 +263,8 @@ describe("a real dream child", () => {
 		await h.session.prompt("/memory dream");
 		await until(() => releases(pika).length === 1, "the release");
 		await currentDream()!.done;
-		expect(releases(pika)).toEqual(["aborted"]);
-		expect(currentDream()).toMatchObject({ outcome: "aborted", reason: "used more than 1 budget tokens" });
+		expect(releases(pika)).toEqual(["failed"]);
+		expect(currentDream()).toMatchObject({ outcome: "failed", reason: "used more than 1 budget tokens" });
 		expect(ui.status()).toBeUndefined();
 	});
 });
@@ -276,6 +276,7 @@ describe("documentation", () => {
 		expect(readme).toMatch(/lease/i);
 		expect(readme).toMatch(/40 turns/);
 		expect(readme).toMatch(/300,000 budget tokens/);
+		expect(readme).toMatch(/commitId/);
 		expect(readme).toMatch(/10 minutes/);
 		expect(readme).toMatch(/preempt/i);
 		expect(readme).toMatch(/web UI/);
