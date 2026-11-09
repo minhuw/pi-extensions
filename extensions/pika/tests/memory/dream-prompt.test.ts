@@ -44,4 +44,16 @@ describe("the system prompt", () => {
 		expect(DREAM_PROMPT).toContain("300,000 budget tokens (input, output, and cache writes, with cache reads counting a tenth)");
 		expect(DREAM_PROMPT).toContain("You are told to wrap up at 40 turns, at 70% of the tokens or the time, or once your context passes 120,000 tokens");
 	});
+
+	it("keeps durable, evidenced rules and excludes what the code shows or what keeps changing", () => {
+		expect(DREAM_PROMPT).toContain("ending with no change is a good outcome when the sessions held nothing durable");
+		expect(DREAM_PROMPT).toContain("The assistant's proposals, summaries, and claims of success count only when the user accepted them or a tool or test confirmed them.");
+		expect(DREAM_PROMPT).toContain("Keep a rule only as broad as its evidence.");
+		expect(DREAM_PROMPT).toContain("the current state of anything, which keeps changing: files out of sync, what is done or still broken, work in progress");
+		expect(DREAM_PROMPT).toContain("how a bug was fixed or what changed: the fix is in the code and its commit");
+		expect(DREAM_PROMPT).toContain("then a \"Why:\" line with the reason the user gave or the incident behind it; then a \"How to apply:\" line");
+		expect(DREAM_PROMPT).toContain("do not rewrite notes for style or add detail for its own sake");
+		expect(DREAM_PROMPT).toContain("Do not describe the code to support the rule");
+		expect(DREAM_PROMPT).toContain("A rule the user had to enforce because an agent got it wrong is such a part, even when the code hints at it");
+	});
 });
