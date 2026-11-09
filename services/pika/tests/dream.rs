@@ -252,14 +252,14 @@ fn ms(value: &Value) -> i64 {
     parse_iso_ms(value.as_str().unwrap()).unwrap()
 }
 
-/// AC-1: a grant lists the scope's sessions with new entries, oldest activity first, at most 50, each with `fromSeq`
+/// AC-1: a grant lists the scope's sessions with new entries, oldest activity first, at most 20, each with `fromSeq`
 /// and `toSeq`, leaving out other repositories and dream sessions with their descendants.
 #[tokio::test]
 async fn a_lease_lists_the_scopes_sessions_oldest_first() {
     let app = App::new();
     let store = &app.env.store;
     // Uploaded newest first, so the order is the sessions' activity, not their arrival.
-    for i in (0..52).rev() {
+    for i in (0..22).rev() {
         repo_session(store, &format!("s{i:02}"), BASE + i as i64 * HOUR, 2);
     }
     // A clone URL of the same repository, oldest of all.
@@ -286,7 +286,7 @@ async fn a_lease_lists_the_scopes_sessions_oldest_first() {
     assert_eq!(ms(&lease["expiresAt"]) - ms(&lease["grantedAt"]), 15 * MINUTE);
 
     let sessions = &granted["sessions"];
-    let expected: Vec<String> = std::iter::once("s-git".to_owned()).chain((0..49).map(|i| format!("s{i:02}"))).collect();
+    let expected: Vec<String> = std::iter::once("s-git".to_owned()).chain((0..19).map(|i| format!("s{i:02}"))).collect();
     assert_eq!(ids(sessions), expected);
     let mut last = i64::MIN;
     for session in sessions.as_array().unwrap() {
@@ -297,7 +297,7 @@ async fn a_lease_lists_the_scopes_sessions_oldest_first() {
     }
     // The snapshot is stored with the lease.
     let stored: Value = serde_json::from_str(one(store, "SELECT sessions FROM memory_dream_leases")["sessions"].as_str().unwrap()).unwrap();
-    assert_eq!(stored.as_array().unwrap().len(), 50);
+    assert_eq!(stored.as_array().unwrap().len(), 20);
     assert_eq!(stored[0], json!({ "id": "s-git", "fromSeq": 0, "toSeq": 2 }));
 }
 
@@ -383,9 +383,10 @@ async fn auto_leases_need_activity_a_cooldown_and_quota() {
     let manual = app.granted("manual").await;
     assert_eq!(ids(&manual["sessions"]), ["s1"]);
     app.released(&manual, "completed").await;
-    // Both completed leases are past the cooldown; an aborted one starts none.
+    // Both completed leases are past the cooldown; an aborted one starts none. Having committed, it counts.
     app.exec(&format!("UPDATE memory_dream_leases SET released_at = {} WHERE outcome = 'completed'", now_ms() - 4 * HOUR - 1));
     let second = app.granted("auto").await;
+    app.committed(&second, json!({ "changes": [save("project", "Build", json!([source("s1", 1)]))] })).await;
     app.released(&second, "aborted").await;
     let third = app.granted("auto").await;
     app.released(&third, "failed").await;
@@ -514,7 +515,7 @@ async fn commits_write_dream_revisions_and_advance_checkpoints() {
     assert_eq!(
         batch,
         &json!({ "id": batch["id"], "leaseId": granted["lease"]["id"], "scope": granted["lease"]["scope"], "mode": "auto",
-                 "at": batch["at"], "deviceId": DEVICE, "sessionId": "main", "dreamSessionId": "dream-1",
+                 "at": batch["at"], "deviceId": DEVICE, "sessionId": "main", "dreamSessionId": "dream-1", "commitId": null,
                  "summary": "Merged notes", "sessions": ["s1", "s2"], "revertedAt": null, "changes": [
                      { "noteId": build_id, "revision": 1, "action": "save", "title": "Build", "created": true },
                      { "noteId": tabs["id"], "revision": 2, "action": "save", "title": "Tabs always", "created": false },
@@ -741,7 +742,7 @@ fn an_older_database_gains_the_dream_tables() {
     conn.execute_batch(&format!("{UNDO_V15} PRAGMA user_version = 14;")).unwrap();
     drop(conn);
     let store = Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(15));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(16));
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     assert_eq!(one(&store, "SELECT sources FROM memory_notes")["sources"], json!("[]"));
     let revision = one(&store, "SELECT provenance, sources, batch_id FROM memory_revisions");
@@ -793,21 +794,21 @@ async fn checkpoints_advance_to_the_snapshot_not_the_live_stream() {
     assert_eq!(sessions, [("s2".to_owned(), 0, 1), ("s1".to_owned(), 3, 4)]);
 }
 
-/// AC-1, AC-6: the 50-session limit applies to sessions with new entries, so once a commit consolidates the first 50
+/// AC-1, AC-6: the 20-session limit applies to sessions with new entries, so once a commit consolidates the first 20
 /// the next lease lists the rest.
 #[tokio::test]
 async fn the_next_lease_lists_the_sessions_past_the_limit() {
     let app = App::new();
-    for i in 0..53 {
+    for i in 0..23 {
         repo_session(&app.env.store, &format!("s{i:02}"), BASE + i as i64 * HOUR, 1);
     }
     let granted = app.granted("manual").await;
     let listed = ids(&granted["sessions"]);
-    assert_eq!(listed.len(), 50);
+    assert_eq!(listed.len(), 20);
     app.committed(&granted, json!({ "sessions": listed })).await;
     app.released(&granted, "completed").await;
     let next = app.granted("manual").await;
-    assert_eq!(ids(&next["sessions"]), ["s50", "s51", "s52"]);
+    assert_eq!(ids(&next["sessions"]), ["s20", "s21", "s22"]);
 }
 
 /// AC-1: every descendant of a dream session is left out, not just its children; a repository scope lists the
@@ -1496,4 +1497,173 @@ async fn reverts_refuse_form_posts() {
     assert_eq!(app.dump(), state);
     let r = app.revert(&batch).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+}
+
+/// The file a session with id `id` is recorded in, as a fork's header or a ticket's link names its parent.
+fn session_file(id: &str) -> String {
+    format!("/home/me/.pi/sessions/2026-10-20T00-00-00-000Z_{id}.jsonl")
+}
+
+/// The dream backlog: sessions that a session link files under a parent (subagents, Herder steps, tickets) are not
+/// scope sessions, since their parent's transcript holds their reports; a fork, whose parent only its header names,
+/// still is.
+#[tokio::test]
+async fn child_sessions_are_not_scope_sessions() {
+    let app = App::new();
+    let store = &app.env.store;
+    repo_session(store, "s1", BASE, 1);
+    let children = [
+        ("worker", json!({ "kind": "subagent", "agentType": "worker", "parentSessionId": "s1" })),
+        ("step", json!({ "kind": "herder-step", "parentSessionId": "s1",
+                         "herder": { "runId": RUN_ID, "stepKey": "k1", "stepId": "t1", "role": "worker", "attempt": 1, "launch": 1 } })),
+        ("ticket", json!({ "kind": "subagent", "agentType": "ticket", "parentSessionFile": session_file("s1"),
+                           "superagent": { "ticketId": 1, "branch": "pi/1-x", "title": "x" } })),
+    ];
+    for (id, link) in children {
+        let lines = [header(id, BASE + HOUR, Some(link)), prompts(BASE + HOUR, 0, 1)].concat();
+        upload_as(store, DEVICE, id, &[], &lines, repo_meta(id, REPO));
+    }
+    let fork = json!({ "type": "session", "version": 3, "id": "fork", "timestamp": format_iso_ms(BASE + 2 * HOUR),
+                       "cwd": "/home/me/widgets", "parentSession": session_file("s1") });
+    let lines = [vec![fork.to_string()], prompts(BASE + 2 * HOUR, 0, 1)].concat();
+    upload_as(store, DEVICE, "fork", &[], &lines, repo_meta("fork", REPO));
+    assert_eq!(app.count("SELECT COUNT(*) FROM sessions WHERE parent_session_id = 's1'"), 4);
+    let granted = app.granted("manual").await;
+    assert_eq!(ids(&granted["sessions"]), ["s1", "fork"]);
+}
+
+/// D4: an `auto` lease released `aborted` before it committed a batch (stopped by the user, by user activity, or by
+/// logout) uses none of the daily quota. One aborted after a commit, a failed one, and one that expired unreleased
+/// count, as completed ones do; an expired lease that its device then releases `aborted` without a batch stops counting.
+#[tokio::test]
+async fn auto_leases_aborted_before_a_commit_leave_the_quota_alone() {
+    let app = App::new();
+    repo_session(&app.env.store, "s1", BASE, 2);
+    for _ in 0..4 {
+        let stopped = app.granted("auto").await;
+        app.released(&stopped, "aborted").await;
+    }
+    let committed = app.granted("auto").await;
+    app.committed(&committed, json!({ "changes": [save("project", "Build", json!([source("s1", 1)]))] })).await;
+    app.released(&committed, "aborted").await;
+    let failed = app.granted("auto").await;
+    app.released(&failed, "failed").await;
+    let expired = app.granted("auto").await;
+    app.set_lease(&expired, "expires_at", now_ms() - 1);
+    let r = app.lease(&app.a, "auto").await;
+    assert_eq!((r.status, &r.json()["reason"]), (StatusCode::CONFLICT, &json!("quota")), "{}", r.text());
+    app.released(&expired, "aborted").await;
+    let last = app.granted("auto").await;
+    app.released(&last, "failed").await;
+    let r = app.lease(&app.a, "auto").await;
+    assert_eq!((r.status, &r.json()["reason"]), (StatusCode::CONFLICT, &json!("quota")), "{}", r.text());
+}
+
+/// D1: a commit that names a `commitId` applies once. A retry with the same id under the same lease, also with another
+/// body, and also once the lease is released or expired, answers the batch the first try recorded with the current
+/// index and writes nothing; another device's retry, and a new id once the lease ended, are `lease_lost`. Ids are per
+/// lease, and without one every commit applies.
+#[tokio::test]
+async fn commits_with_a_commit_id_apply_once() {
+    let app = App::new();
+    repo_session(&app.env.store, "s1", BASE, 2);
+    let granted = app.granted("manual").await;
+    let body = json!({ "commitId": "c1", "sessions": ["s1"], "changes": [save("project", "Build", json!([source("s1", 1)]))] });
+    let first = app.committed(&granted, body.clone()).await;
+    assert_eq!(first["batch"]["commitId"], "c1");
+    let state = app.dump();
+    assert_eq!(app.committed(&granted, body.clone()).await, first);
+    let other = json!({ "commitId": "c1", "changes": [save("user", "Tabs", json!([source("s1", 2)]))] });
+    assert_eq!(app.committed(&granted, other).await, first);
+    assert_eq!(app.dump(), state);
+
+    // The answer's index is the current one.
+    app.saved(json!({ "expectedRevision": 0, "scope": "user", "category": "feedback", "title": "Tabs", "hook": "indent with tabs" }))
+        .await;
+    let current = app.memory().await;
+    let state = app.dump();
+    let again = app.committed(&granted, body.clone()).await;
+    assert_eq!(again["batch"], first["batch"]);
+    assert_eq!(
+        (&again["index"], &again["indexBytes"], &again["indexLines"]),
+        (&current["index"], &current["indexBytes"], &current["indexLines"])
+    );
+    let r = app.commit(&app.b, &granted, body.clone()).await;
+    assert_eq!((r.status, r.json()), (StatusCode::CONFLICT, json!({ "error": "lease_lost" })));
+    assert_eq!(app.dump(), state);
+
+    // Another id applies, and so does every commit without one.
+    let second = app.committed(&granted, json!({ "commitId": "c2", "changes": [save("project", "Test", json!([source("s1", 1)]))] })).await;
+    assert_ne!(second["batch"]["id"], first["batch"]["id"]);
+    for _ in 0..2 {
+        app.committed(&granted, json!({ "changes": [save("project", "Lint", json!([source("s1", 1)]))] })).await;
+    }
+    assert_eq!(app.count("SELECT COUNT(*) FROM memory_notes WHERE title = 'Lint'"), 2);
+    assert_eq!(app.count("SELECT COUNT(*) FROM memory_dream_batches"), 4);
+
+    // Released, the lease still answers its batch by id, and refuses a new one.
+    app.released(&granted, "completed").await;
+    let state = app.dump();
+    assert_eq!(app.committed(&granted, body.clone()).await["batch"], first["batch"]);
+    let r = app.commit(&app.a, &granted, json!({ "commitId": "c3", "sessions": ["s1"] })).await;
+    assert_eq!((r.status, r.json()), (StatusCode::CONFLICT, json!({ "error": "lease_lost" })));
+    assert_eq!(app.dump(), state);
+
+    // Ids are per lease; an expired lease answers its batch too.
+    let next = app.granted("manual").await;
+    let docs = json!({ "commitId": "c1", "changes": [save("project", "Docs", json!([source("s1", 1)]))] });
+    let third = app.committed(&next, docs.clone()).await;
+    assert_ne!(third["batch"]["id"], first["batch"]["id"]);
+    app.set_lease(&next, "expires_at", now_ms() - 1);
+    assert_eq!(app.committed(&next, docs).await["batch"], third["batch"]);
+    let r = app.commit(&app.a, &next, json!({ "commitId": "c4", "sessions": ["s1"] })).await;
+    assert_eq!((r.status, r.json()), (StatusCode::CONFLICT, json!({ "error": "lease_lost" })));
+    assert_eq!(app.count("SELECT COUNT(*) FROM memory_notes WHERE title = 'Docs'"), 1);
+}
+
+/// D1: a `commitId` is 1 to 64 characters of its class; anything else is a 400 that writes nothing, and `null` is none.
+#[tokio::test]
+async fn bad_commit_ids_are_bad_requests() {
+    let app = App::new();
+    repo_session(&app.env.store, "s1", BASE, 1);
+    let granted = app.granted("manual").await;
+    let before = app.dump();
+    for id in [json!(""), json!("a".repeat(65)), json!("a b"), json!("é"), json!("a\n"), json!(7), json!(["c1"])] {
+        let r = app.commit(&app.a, &granted, json!({ "commitId": id, "sessions": ["s1"] })).await;
+        assert_eq!((r.status, &r.json()["error"]), (StatusCode::BAD_REQUEST, &json!("bad_request")), "{id}: {}", r.text());
+        assert_eq!(app.dump(), before, "{id}");
+    }
+    let committed = app.committed(&granted, json!({ "commitId": "a".repeat(64), "sessions": ["s1"] })).await;
+    assert_eq!(committed["batch"]["commitId"], json!("a".repeat(64)));
+    let committed = app.committed(&granted, json!({ "commitId": null, "sessions": ["s1"] })).await;
+    assert_eq!(committed["batch"]["commitId"], Value::Null);
+}
+
+/// Schema version 16 adds `commit_id` to a version 15 database's batches without a reindex; existing batches have none.
+#[test]
+fn an_older_database_gains_commit_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    {
+        let store = Store::open(&data).unwrap();
+        device(&store, DEVICE);
+        repo_session(&store, "s1", BASE, 1);
+        let request = serde_json::from_value(json!({ "project": "widgets", "repository": REPO, "mode": "manual" })).unwrap();
+        let granted = store.write(|tx| pika::memory::dream::lease(tx, DEVICE, request, now_ms())).unwrap();
+        let commit = serde_json::from_value(json!({ "sessions": ["s1"] })).unwrap();
+        store.write(|tx| pika::memory::dream::commit(tx, DEVICE, &granted.lease.id, commit, now_ms())).unwrap();
+    }
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    conn.execute_batch(
+        "DROP INDEX memory_dream_batches_commit; DROP INDEX memory_dream_batches_lease;
+         ALTER TABLE memory_dream_batches DROP COLUMN commit_id; PRAGMA user_version = 15;",
+    )
+    .unwrap();
+    drop(conn);
+    let store = Store::open(&data).unwrap();
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(16));
+    assert_eq!(store.setting("needs_reindex").unwrap(), None);
+    assert_eq!(one(&store, "SELECT commit_id FROM memory_dream_batches")["commit_id"], Value::Null);
+    let indexes = "SELECT COUNT(*) AS n FROM sqlite_master WHERE name IN ('memory_dream_batches_commit', 'memory_dream_batches_lease')";
+    assert_eq!(one(&store, indexes)["n"], json!(2));
 }

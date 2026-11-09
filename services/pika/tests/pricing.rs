@@ -136,7 +136,7 @@ fn the_upgrade_marks_existing_calls_without_a_reindex() {
     drop(conn);
 
     let store = Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(15));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(16));
     assert_eq!(costs(&store)["events"], events);
     assert!(store.setting(pika::store::NEEDS_REINDEX).unwrap().is_none());
 }

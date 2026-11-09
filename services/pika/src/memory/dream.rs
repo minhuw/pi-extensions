@@ -1,11 +1,13 @@
 //! Dreaming (spec "Dreaming" under "Memory"): a device leases a project scope, reads the scope's sessions past their
 //! checkpoints, and commits its note changes as one batch that also advances those checkpoints. A lease is live until
 //! it is released or expires; at most one is live per scope, and `auto` leases also wait out a cooldown after a
-//! completed dream, a daily quota, and new activity. Every function takes the time, so tests can move it. The tables
-//! are not derived: `pika reindex` leaves them alone.
+//! completed dream, a daily quota, and new activity. A commit may name a `commitId`, which makes retrying it safe.
+//! Every function takes the time, so tests can move it. The tables are not derived: `pika reindex` leaves them alone.
 
 use std::collections::BTreeSet;
+use std::sync::LazyLock;
 
+use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
@@ -20,15 +22,17 @@ use crate::util::random_bytes;
 pub const LEASE_TTL_MS: i64 = 15 * 60_000;
 /// How long after a scope's latest `completed` dream an `auto` lease is refused.
 pub const AUTO_COOLDOWN_MS: i64 = 4 * 3_600_000;
-/// The most `auto` leases granted per scope per UTC day.
+/// The most `auto` leases granted per scope per UTC day, not counting those released `aborted` before any commit.
 pub const AUTO_DAILY_LIMIT: i64 = 3;
 /// The most sessions a lease lists.
-pub const DREAM_SESSION_LIMIT: usize = 50;
+pub const DREAM_SESSION_LIMIT: usize = 20;
 /// The most changes per commit.
 pub const MAX_CHANGES: usize = 50;
 /// The most sources per change.
 pub const MAX_SOURCES: usize = 20;
 const MAX_SUMMARY: usize = 1000;
+/// The characters of a commit's `commitId`, 1 to 64 of them.
+const COMMIT_ID_CLASS: &str = r#"[A-Za-z0-9_-]"#;
 const DAY_MS: i64 = 86_400_000;
 /// The session-link `agentType` of a dream's own session, which with its descendants is never a scope session.
 pub const AGENT_TYPE: &str = "memory-dream";
@@ -172,6 +176,8 @@ pub struct Batch {
     pub device_id: String,
     pub session_id: Option<String>,
     pub dream_session_id: Option<String>,
+    /// The commit's idempotency key, if it named one.
+    pub commit_id: Option<String>,
     pub summary: Option<String>,
     /// The sessions whose checkpoints it advanced.
     pub sessions: Vec<String>,
@@ -207,6 +213,8 @@ pub struct Release {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Commit {
+    /// Names the commit so that a retry finds the batch the first try recorded instead of applying it again.
+    pub commit_id: Option<String>,
     pub dream_session_id: Option<String>,
     pub summary: Option<String>,
     #[serde(default)]
@@ -290,8 +298,9 @@ fn held(conn: &Connection, device: &str, id: &str, now: i64) -> Result<Lease, Dr
 
 /// The scope's sessions with entries past their checkpoint, oldest activity first, at most `DREAM_SESSION_LIMIT`:
 /// for a `repo:` scope the sessions whose repository normalizes to its URL, for a `local:` scope the sessions of its
-/// project recorded from its device. Dream sessions (session-link `agentType` `memory-dream`) and their descendants
-/// are never scope sessions.
+/// project recorded from its device. Child sessions, whose session link names their parent (subagents, Herder steps,
+/// tickets), are not scope sessions: their parent's transcript holds their reports. Forks, whose parent only their
+/// header names, are. Nor are dream sessions (session-link `agentType` `memory-dream`) and their descendants.
 pub fn scope_sessions(conn: &Connection, key: &str) -> rusqlite::Result<Vec<DreamSession>> {
     let (filter, repository, local) = if let Some(url) = key.strip_prefix("repo:") {
         ("s.repository IS NOT NULL", Some(url), None)
@@ -311,7 +320,8 @@ pub fn scope_sessions(conn: &Connection, key: &str) -> rusqlite::Result<Vec<Drea
                  (SELECT MAX(e.seq) FROM entries e WHERE e.sid = s.sid) AS to_seq,
                  COALESCE((SELECT c.seq FROM memory_checkpoints c WHERE c.scope_key = ?1 AND c.session_id = s.id), -1)
                      AS checkpoint
-             FROM sessions s WHERE {filter} AND s.id NOT IN (SELECT id FROM dream)
+             FROM sessions s WHERE {filter} AND (s.parent_session_id IS NULL OR s.link IS NULL)
+                 AND s.id NOT IN (SELECT id FROM dream)
          ) WHERE to_seq > checkpoint ORDER BY last_at, id"
     );
     let mut stmt = conn.prepare_cached(&sql)?;
@@ -344,9 +354,10 @@ pub fn scope_sessions(conn: &Connection, key: &str) -> rusqlite::Result<Vec<Drea
 }
 
 /// `POST memory/dream/lease`: grants `device` a lease on the project scope the request names, unless a live lease
-/// holds it, or, for `auto`, the scope is cooling down after a completed dream, has used its daily quota, or has no
-/// session with entries past its checkpoint. The checks and the grant are one write transaction, so of concurrent
-/// requests at most one is granted. Stores the scope if it is not yet, so deleting its project finds the lease.
+/// holds it, or, for `auto`, the scope is cooling down after a completed dream, has used its daily quota (`auto` leases
+/// granted today, but for those released `aborted` without a batch), or has no session with entries past its
+/// checkpoint. The checks and the grant are one write transaction, so of concurrent requests at most one is granted.
+/// Stores the scope if it is not yet, so deleting its project finds the lease.
 pub fn lease(tx: &Transaction, device: &str, request: LeaseRequest, now: i64) -> Result<Granted, DreamError> {
     let auto = match request.mode.as_str() {
         "auto" => true,
@@ -372,10 +383,12 @@ pub fn lease(tx: &Transaction, device: &str, request: LeaseRequest, now: i64) ->
         if let Some(retry_at) = completed.map(|at| at + AUTO_COOLDOWN_MS).filter(|retry_at| now < *retry_at) {
             return Err(DreamError::NotDue { reason: "cooldown", retry_at: Some(retry_at) });
         }
+        // A dream stopped before it committed anything (by the user, user activity, or logout) used none of the quota.
         let today = now - now.rem_euclid(DAY_MS);
         let granted: i64 = tx
             .prepare_cached(
-                "SELECT COUNT(*) FROM memory_dream_leases WHERE scope_key = ?1 AND mode = 'auto' AND granted_at >= ?2",
+                "SELECT COUNT(*) FROM memory_dream_leases l WHERE l.scope_key = ?1 AND l.mode = 'auto' AND l.granted_at >= ?2
+                     AND (l.outcome IS NOT 'aborted' OR EXISTS (SELECT 1 FROM memory_dream_batches b WHERE b.lease_id = l.id))",
             )?
             .query_row(params![scope.key, today], |r| r.get(0))?;
         if granted >= AUTO_DAILY_LIMIT {
@@ -459,11 +472,40 @@ fn check_sources(conn: &Connection, sources: &[Source], min: usize) -> Result<()
     Ok(())
 }
 
+/// A commit's `commitId`, if it names one: 1 to 64 characters of `COMMIT_ID_CLASS`.
+fn commit_id(id: Option<&str>) -> Result<Option<String>, DreamError> {
+    static PATTERN: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(&format!("^{COMMIT_ID_CLASS}{{1,64}}$")).expect("the commitId pattern compiles"));
+    match id {
+        Some(id) if !PATTERN.is_match(id) => {
+            Err(DreamError::BadRequest(format!("commitId must be 1 to 64 characters of {COMMIT_ID_CLASS}")))
+        }
+        id => Ok(id.map(str::to_owned)),
+    }
+}
+
+/// `device`'s batch that a commit named `commit_id` recorded under the lease `lease`, if any.
+fn committed(conn: &Connection, device: &str, lease: &str, commit_id: &str) -> rusqlite::Result<Option<Batch>> {
+    conn.prepare_cached(&format!("{BATCH_SELECT} WHERE b.lease_id = ?1 AND b.commit_id = ?2 AND b.device_id = ?3"))?
+        .query_row(params![lease, commit_id, device], batch_row)
+        .optional()
+}
+
 /// `POST memory/dream/:id/commit`: in one transaction with the caller (`Store::write`), applies the changes in order
 /// to the user scope and the lease's scope with v1's validation, scrubbing, and revisions, checks that they grew no
 /// index past the budget (see `Budget`), advances each listed session that is still recorded to the lease's `toSeq`
 /// for it (never back), and records one batch. Writes before it fails, so the caller must commit only on `Ok`.
+///
+/// A commit whose `commitId` names a batch this lease already recorded applies nothing and answers that batch with
+/// the current index, even once the lease is no longer live, so retrying a commit whose answer was lost is safe.
 pub fn commit(tx: &Transaction, device: &str, id: &str, request: Commit, now: i64) -> Result<Committed, DreamError> {
+    let commit_id = commit_id(request.commit_id.as_deref())?;
+    if let Some(commit_id) = &commit_id
+        && let Some(batch) = committed(tx, device, id, commit_id)?
+    {
+        let index = Index::new(&groups(tx, request_scopes(tx, Some(batch.scope.clone()))?)?);
+        return Ok(Committed { batch, index });
+    }
     let lease = held(tx, device, id, now)?;
     if request.sessions.is_empty() && request.changes.is_empty() {
         return Err(DreamError::BadRequest("a commit needs sessions or changes".into()));
@@ -573,6 +615,7 @@ pub fn commit(tx: &Transaction, device: &str, id: &str, request: Commit, now: i6
         device_id: device.to_owned(),
         session_id: lease.session_id,
         dream_session_id,
+        commit_id,
         summary,
         sessions: sessions.into_iter().map(|l| l.id.clone()).collect(),
         changes,
@@ -580,7 +623,7 @@ pub fn commit(tx: &Transaction, device: &str, id: &str, request: Commit, now: i6
     };
     tx.prepare_cached(
         "INSERT INTO memory_dream_batches (id, lease_id, scope_key, mode, at, device_id, session_id, dream_session_id,
-             summary, sessions, changes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             summary, sessions, changes, commit_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
     )?
     .execute(params![
         batch.id,
@@ -593,13 +636,14 @@ pub fn commit(tx: &Transaction, device: &str, id: &str, request: Commit, now: i6
         batch.dream_session_id,
         batch.summary,
         serde_json::to_string(&batch.sessions).expect("sessions serialize"),
-        serde_json::to_string(&batch.changes).expect("changes serialize")
+        serde_json::to_string(&batch.changes).expect("changes serialize"),
+        batch.commit_id
     ])?;
     Ok(Committed { batch, index })
 }
 
 const BATCH_SELECT: &str = "SELECT b.id, b.lease_id, b.mode, b.at, b.device_id, b.session_id, b.dream_session_id,
-    b.summary, b.sessions, b.changes, b.reverted_at, s.key, s.kind, s.label
+    b.summary, b.sessions, b.changes, b.reverted_at, s.key, s.kind, s.label, b.commit_id
     FROM memory_dream_batches b JOIN memory_scopes s ON s.key = b.scope_key";
 
 fn batch_row(r: &rusqlite::Row) -> rusqlite::Result<Batch> {
@@ -616,6 +660,7 @@ fn batch_row(r: &rusqlite::Row) -> rusqlite::Result<Batch> {
         changes: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_default(),
         reverted_at: r.get(10)?,
         scope: Scope { key: r.get(11)?, kind: r.get(12)?, label: r.get(13)? },
+        commit_id: r.get(14)?,
     })
 }
 
