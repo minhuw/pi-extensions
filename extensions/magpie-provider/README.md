@@ -59,6 +59,12 @@ A gateway-advertised bare ID follows Magpie's routing rules: a matching routing 
 
 Pricing and automatic compaction eligibility still use the exact model name after the last `/`, independently of gateway provider prefixes and `owned_by`. These are estimates and eligibility heuristics, not evidence that different providers serve equivalent models. Case and model suffixes are preserved; no display-label matching or fuzzy matching is used. The picker therefore keeps different sources separate even when their estimates match. See [Magpie's bare-ID documentation](https://github.com/yetone/magpie/blob/main/docs/subsystems/gateway-routing.md#model-ids-without-the-provider).
 
+## Fast mode
+
+Run `/fast` or `/fast on` to request Fast mode for the current session; `/fast off` stops this switch from adding the tier and `/fast status` shows the switch. The selected model must be a Magpie Responses model whose current gateway catalog advertises `priority`. While enabled, eligible requests send `service_tier: "priority"`; switching to a model without that capability leaves its requests unchanged. `/magpie-refresh` updates the catalog. Fast is off in a new session; the switch follows the active session branch and survives reload, resume and fork. Subagents have separate sessions and can request a tier through their own `service_tier` setting.
+
+Fast can increase API charges or subscription usage. After a request, the footer's `FAST` label reports the outgoing tier, not the tier or speed delivered upstream. Its cost is an estimate, not a subscription bill or a guarantee that Fast pricing is reflected. Gateway and upstream routing can reject, drop or downgrade a tier, and Codex responses may report `default` even when Magpie forwarded `priority`. Check Magpie's request log for the requested and sent tiers. Native compaction uses a separate request and does not use this switch.
+
 ## Automatic web-search MCP
 
 A saved `/login magpie` connection automatically registers **one** native MCP server, `magpie-web-search`, at `<gateway-origin>/mcp/magpie/web-search`. It exposes only `web_search` and `web_fetch` directly (Pi names them `mcp__magpie_web_search__web_search` and `mcp__magpie_web_search__web_fetch`); other server tools stay hidden. Start Magpie and configure its web-search backend separately. Model discovery validates login, not search-backend availability.

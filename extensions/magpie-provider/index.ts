@@ -8,6 +8,7 @@ import { getAgentDir, readStoredCredential, type ExtensionAPI } from "@earendil-
 import { loadModelsDevPricing } from "./catalog-pricing.ts";
 import { emptyMagpieCatalog, sharedMagpieCatalogs, type MagpieCatalogs } from "./catalog.ts";
 import { registerMagpieCompaction } from "./compaction.ts";
+import { registerMagpieFast } from "./fast.ts";
 import { addMagpieModelAliases, assertMagpieAliasRoute, magpieRequestContext, resolveMagpieAlias, type MagpieModel } from "./model-aliases.ts";
 import { magpieModelName } from "./model-identity.ts";
 import { assertNativeCatalog } from "./models-config.ts";
@@ -53,6 +54,9 @@ export function parseModels(value: unknown, origin: string, resolvePricing = cre
 		const output = strings(modalities.output);
 		if (output.length && !output.includes("text") && output.some(v => v === "image" || v === "audio")) continue;
 		const endpoints = strings(entry.native_endpoints);
+		const serviceTiers = Array.isArray(entry.service_tiers) ? entry.service_tiers.flatMap(tier =>
+			typeof tier === "string" ? [tier] : object(tier) && typeof tier.id === "string" ? [tier.id] : [],
+		) : [];
 		const api = endpoints.includes("/v1/responses") ? "openai-responses" :
 			endpoints.includes("/v1/messages") ? "anthropic-messages" : "openai-completions";
 		const efforts = Array.isArray(entry.supported_reasoning_levels)
@@ -79,6 +83,7 @@ export function parseModels(value: unknown, origin: string, resolvePricing = cre
 			magpiePricing: cost.magpiePricing,
 			id: entry.id, name: typeof entry.display_name === "string" && entry.display_name.trim() ? entry.display_name : entry.id,
 			provider: "magpie", api, baseUrl: api === "anthropic-messages" ? origin : `${origin}/v1`,
+			...(serviceTiers.length ? { magpieServiceTiers: [...new Set(serviceTiers)] } : {}),
 			reasoning: entry.reasoning === true || efforts.length > 0,
 			...(thinkingLevelMap ? { thinkingLevelMap } : {}),
 			...(api !== "openai-responses" ? { compat: {
@@ -309,4 +314,5 @@ export default async function magpie(pi: ExtensionAPI): Promise<void> {
 		},
 	});
 	registerMagpieCompaction(pi);
+	registerMagpieFast(pi);
 }

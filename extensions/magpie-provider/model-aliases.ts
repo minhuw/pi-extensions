@@ -6,6 +6,7 @@ import type { MagpieApi } from "./streams.ts";
 export interface MagpieRouteMetadata {
 	magpieRoute?: { canonicalId: string; owner?: string; group: boolean };
 	magpieAliasTarget?: string;
+	magpieServiceTiers?: string[];
 }
 export type MagpieModel = Model<MagpieApi> & MagpieRouteMetadata;
 export interface MagpieAliasMessageMetadata { magpiePhysicalModel?: string }
