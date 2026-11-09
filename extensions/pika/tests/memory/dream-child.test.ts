@@ -1,12 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { CHILD_SESSION_HOOKS, dreamSessionDir } from "../../memory/dream/child.ts";
+import { CHILD_SESSION_HOOKS, dreamSessionDir, inProjectPikaDir } from "../../memory/dream/child.ts";
 import { currentDream } from "../../memory/dream/index.ts";
 import { DREAM_PROMPT } from "../../memory/dream/prompt.ts";
 import { FakePika } from "./support/pika-server.ts";
@@ -167,6 +167,46 @@ it("stopping a real child aborts its run and shuts it down", async () => {
 	await until(() => releases(pika).length === 1, "the release");
 	expect(releases(pika)).toEqual(["aborted"]);
 	expect(probeEvents).toContain("shutdown");
+});
+
+it("keeps the read tools out of .pi/pika/, where earlier dreams' sessions are", async () => {
+	const old = dreamSessionDir(workspace.cwd);
+	await mkdir(old, { recursive: true });
+	await writeFile(join(old, "old-dream.jsonl"), "{\"secret\":\"an earlier dream's transcript\"}\n");
+	await writeFile(join(workspace.cwd, "README.md"), "the project's readme\n");
+	h = await startSession({ workspace, ui: ui.context() });
+	const results: { name: string; text: string; isError: boolean }[] = [];
+	const collect: FauxResponseFactory = (context) => {
+		for (const message of context.messages) {
+			if (message.role !== "toolResult" || results.some((seen) => seen.name === message.toolCallId)) continue;
+			results.push({ name: message.toolCallId, text: message.content.map((part) => part.type === "text" ? part.text : "").join(""), isError: message.isError });
+		}
+		return fauxAssistantMessage("Nothing to keep.");
+	};
+	h.faux.appendResponses([
+		fauxAssistantMessage([
+			fauxToolCall("read", { path: ".pi/pika/dreams/old-dream.jsonl" }, { id: "read-dream" }),
+			fauxToolCall("ls", { path: `${workspace.cwd}/.pi/pika` }, { id: "ls-pika" }),
+			fauxToolCall("grep", { pattern: "secret", path: "./.pi/pika/" }, { id: "grep-pika" }),
+			fauxToolCall("read", { path: "README.md" }, { id: "read-readme" }),
+			fauxToolCall("grep", { pattern: "secret" }, { id: "grep-all" }),
+		], { stopReason: "toolUse" }),
+		collect,
+	]);
+	await h.session.prompt("/memory dream");
+	await until(() => releases(pika).length === 1, "the release");
+	const byId = Object.fromEntries(results.map((result) => [result.name, result]));
+	for (const id of ["read-dream", "ls-pika", "grep-pika"]) {
+		expect(byId[id]).toMatchObject({ isError: true });
+		expect(byId[id]!.text).toContain(".pi/pika/ holds earlier dreams' own sessions");
+		expect(byId[id]!.text).not.toContain("an earlier dream's transcript");
+	}
+	expect(byId["read-readme"]).toMatchObject({ isError: false, text: expect.stringContaining("the project's readme") });
+	expect(byId["grep-all"]!.text).not.toContain("an earlier dream's transcript");
+	expect(inProjectPikaDir("/work/p", "@.pi/pika")).toBe(true);
+	expect(inProjectPikaDir("/work/p", "src/../.pi/pika/dreams/x.jsonl")).toBe(true);
+	expect(inProjectPikaDir("/work/p", ".pi")).toBe(false);
+	expect(inProjectPikaDir("/work/p", ".pi/pikachu")).toBe(false);
 });
 
 it("the dream prompt treats read content as untrusted, requires sources and verification, and asks for a commit per group", () => {

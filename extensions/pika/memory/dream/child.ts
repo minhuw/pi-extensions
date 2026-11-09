@@ -1,5 +1,7 @@
+import { realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import {
 	createAgentSession, DefaultResourceLoader, type ExtensionFactory, type InlineExtension, SessionManager, SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -30,6 +32,34 @@ async function ensureProjectPikaDir(cwd: string): Promise<void> {
 	});
 }
 
+const within = (dir: string, path: string) => {
+	const rest = relative(dir, path);
+	return rest === "" || (!rest.startsWith("..") && !isAbsolute(rest));
+};
+const real = (path: string) => { try { return realpathSync.native(path); } catch { return path; } };
+
+/** Whether `path`, as `read`, `ls`, `grep`, and `find` take it in `cwd`, names `<cwd>/.pi/pika/` or something in it. */
+export function inProjectPikaDir(cwd: string, path: string): boolean {
+	const bare = path.trim().replace(/^@/, "");
+	const expanded = bare === "~" ? homedir() : bare.startsWith("~/") ? join(homedir(), bare.slice(2)) : bare;
+	const target = resolve(cwd, expanded || ".");
+	const dir = projectPikaDir(cwd);
+	return within(dir, target) || within(real(dir), real(target));
+}
+
+/** Keeps the dream's read tools out of `<cwd>/.pi/pika/`, which holds earlier dreams' own sessions; `grep` and `find` skip it by its `.gitignore`. */
+const pikaDirGuard = (cwd: string): InlineExtension => ({
+	name: "pika-dream-guard",
+	factory: (pi) => {
+		pi.on("tool_call", (event) => {
+			if (!READ_TOOLS.includes(event.toolName)) return undefined;
+			const path = (event.input as { path?: unknown }).path;
+			if (typeof path !== "string" || !inProjectPikaDir(cwd, path)) return undefined;
+			return { block: true, reason: ".pi/pika/ holds earlier dreams' own sessions, not the user's: a dream does not read it." };
+		});
+	},
+});
+
 /** The hooks registered in `globalThis[Symbol.for("pi-extensions.child-session-hooks")]`; the Set may not exist. */
 export function childSessionHooks(): InlineExtension[] {
 	const hooks = (globalThis as Record<symbol, unknown>)[CHILD_SESSION_HOOKS];
@@ -47,7 +77,8 @@ async function settle(promise: Promise<unknown>, ms: number): Promise<void> {
 
 /**
  * A persisted child session for a dream: the child-session hooks and nothing else of the user's extensions, skills,
- * prompts, or context files; the dream's system prompt; and exactly the read-only built-in tools and `customTools`.
+ * prompts, or context files; the dream's system prompt; and exactly the read-only built-in tools, kept out of
+ * `<cwd>/.pi/pika/`, and `customTools`.
  */
 export async function spawnDreamChild(options: SpawnOptions): Promise<DreamChild> {
 	const { cwd, agentDir } = options;
@@ -55,7 +86,7 @@ export async function spawnDreamChild(options: SpawnOptions): Promise<DreamChild
 	const settingsManager = SettingsManager.inMemory(Object.fromEntries(KEPT_SETTINGS.filter((key) => global[key] !== undefined).map((key) => [key, global[key]])), { projectTrusted: false });
 	const resourceLoader = new DefaultResourceLoader({
 		cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-		extensionFactories: childSessionHooks(),
+		extensionFactories: [...childSessionHooks(), pikaDirGuard(cwd)],
 		systemPromptOverride: () => DREAM_PROMPT,
 		appendSystemPromptOverride: () => [],
 	});
