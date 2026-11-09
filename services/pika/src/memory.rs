@@ -775,7 +775,8 @@ pub fn project_scope_keys(conn: &Connection, name: &str) -> rusqlite::Result<Vec
         .collect()
 }
 
-/// Deletes the scopes with their notes, the notes' revisions, and their dream leases, batches, and checkpoints.
+/// Deletes the scopes with their notes, the notes' revisions, and their dream leases, batches, and checkpoints. Their
+/// batches' edits of user notes stay as ordinary edits (see `dream::delete_scope`).
 pub fn delete_scopes<'a>(tx: &Transaction, keys: impl IntoIterator<Item = &'a String>) -> rusqlite::Result<()> {
     for key in keys {
         dream::delete_scope(tx, key)?;

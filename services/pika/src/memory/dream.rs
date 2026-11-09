@@ -461,8 +461,8 @@ fn check_sources(conn: &Connection, sources: &[Source], min: usize) -> Result<()
 
 /// `POST memory/dream/:id/commit`: in one transaction with the caller (`Store::write`), applies the changes in order
 /// to the user scope and the lease's scope with v1's validation, scrubbing, and revisions, checks that they grew no
-/// index past the budget (see `Budget`), advances each listed session's checkpoint to the lease's `toSeq` for it
-/// (never back), and records one batch. Writes before it fails, so the caller must commit only on `Ok`.
+/// index past the budget (see `Budget`), advances each listed session that is still recorded to the lease's `toSeq`
+/// for it (never back), and records one batch. Writes before it fails, so the caller must commit only on `Ok`.
 pub fn commit(tx: &Transaction, device: &str, id: &str, request: Commit, now: i64) -> Result<Committed, DreamError> {
     let lease = held(tx, device, id, now)?;
     if request.sessions.is_empty() && request.changes.is_empty() {
@@ -548,6 +548,15 @@ pub fn commit(tx: &Transaction, device: &str, id: &str, request: Commit, now: i6
     }
     budget.check(tx)?;
     let index = Index::new(&groups(tx, request_scopes(tx, Some(project.clone()))?)?);
+    // A session deleted since the grant took its checkpoints along; it gets none back.
+    let mut recorded = tx.prepare_cached("SELECT 1 FROM sessions WHERE id = ?1")?;
+    let mut kept = Vec::new();
+    for leased in sessions {
+        if recorded.query_row([&leased.id], |_| Ok(())).optional()?.is_some() {
+            kept.push(leased);
+        }
+    }
+    let sessions = kept;
     for leased in &sessions {
         tx.prepare_cached(
             "INSERT INTO memory_checkpoints (scope_key, session_id, seq) VALUES (?1, ?2, ?3)
@@ -683,8 +692,21 @@ pub fn revert(tx: &Transaction, id: &str, now: i64) -> Result<Batch, DreamError>
     Ok(Batch { reverted_at: Some(now), ..batch })
 }
 
-/// Deletes the scope's leases, batches, and checkpoints.
+/// Deletes the scope's leases, batches, and checkpoints. What its batches wrote to the user scope stays, as ordinary
+/// edits: those revisions lose their `batch_id` and sources, which named the deleted batches and, mostly, the deleted
+/// project's sessions, and so does a note whose current revision is one of them. They keep their `dream` provenance.
 pub(super) fn delete_scope(tx: &Transaction, key: &str) -> rusqlite::Result<()> {
+    tx.prepare_cached(
+        "UPDATE memory_notes SET sources = '[]' WHERE scope_key != ?1 AND EXISTS (
+             SELECT 1 FROM memory_revisions r JOIN memory_dream_batches b ON b.id = r.batch_id
+             WHERE r.note_id = memory_notes.id AND r.revision = memory_notes.revision AND b.scope_key = ?1)",
+    )?
+    .execute([key])?;
+    tx.prepare_cached(
+        "UPDATE memory_revisions SET batch_id = NULL, sources = '[]'
+         WHERE batch_id IN (SELECT id FROM memory_dream_batches WHERE scope_key = ?1)",
+    )?
+    .execute([key])?;
     for table in ["memory_dream_leases", "memory_dream_batches", "memory_checkpoints"] {
         tx.prepare_cached(&format!("DELETE FROM {table} WHERE scope_key = ?1"))?.execute([key])?;
     }

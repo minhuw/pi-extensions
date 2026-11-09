@@ -1403,3 +1403,71 @@ async fn dream_user_saves_fit_every_projects_index() {
     change["scope"] = json!("project");
     app.committed(&granted, json!({ "sessions": ["s1"], "changes": [change] })).await;
 }
+
+/// S3: a session deleted while a lease lists it gets no checkpoint back from a commit, which still succeeds and lists
+/// only the sessions it advanced.
+#[tokio::test]
+async fn commits_skip_sessions_deleted_during_the_lease() {
+    let app = App::new();
+    let store = &app.env.store;
+    repo_session(store, "s1", BASE, 3);
+    repo_session(store, "s2", BASE + HOUR, 1);
+    let granted = app.granted("manual").await;
+    assert_eq!(ids(&granted["sessions"]), ["s1", "s2"]);
+    let r = app.call(Method::DELETE, "/api/v1/sessions/s1", None, None).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let committed = app
+        .committed(&granted, json!({ "sessions": ["s1", "s2"], "changes": [save("project", "Build", json!([source("s2", 1)]))] }))
+        .await;
+    assert_eq!(committed["batch"]["sessions"], json!(["s2"]));
+    assert_eq!(app.checkpoints(), [(KEY.into(), "s2".into(), 1)]);
+    // The deleted session alone: a batch that advanced nothing.
+    let committed = app.committed(&granted, json!({ "sessions": ["s1"] })).await;
+    assert_eq!(committed["batch"]["sessions"], json!([]));
+    assert_eq!(app.checkpoints(), [(KEY.into(), "s2".into(), 1)]);
+}
+
+/// S4: deleting a project keeps what its dreams wrote to user notes as ordinary edits: those revisions, and a note
+/// whose current revision is one of them, lose the batch and sources that named the deleted batch and sessions, and
+/// keep their `dream` provenance. Another project's dream edits keep theirs.
+#[tokio::test]
+async fn deleting_a_project_detaches_its_dreams_user_edits() {
+    let app = App::new();
+    let store = &app.env.store;
+    repo_session(store, "s1", BASE, 2);
+    let lines = [header("g1", BASE, None), prompts(BASE, 0, 1)].concat();
+    upload_as(store, DEVICE, "g1", &[], &lines, json!({ "sessionId": "g1", "cwd": "/x", "project": "gadgets" }));
+    let widgets = app.granted("manual").await;
+    let committed = app
+        .committed(&widgets, json!({ "sessions": ["s1"], "changes": [
+            save("user", "Tabs", json!([source("s1", 1)])),
+            save("user", "Lint", json!([source("s1", 2)])),
+            save("project", "Build", json!([source("s1", 1)])),
+        ] }))
+        .await;
+    let tabs = committed["batch"]["changes"][0]["noteId"].clone();
+    let lint = committed["batch"]["changes"][1]["noteId"].clone();
+    app.saved(json!({ "id": lint, "expectedRevision": 1, "scope": "user", "category": "project", "title": "Lint", "hook": "run clippy" }))
+        .await;
+    let gadgets = app.post(&app.a, "memory/dream/lease", json!({ "project": "gadgets", "mode": "manual" })).await.json();
+    let other = app.committed(&gadgets, json!({ "sessions": ["g1"], "changes": [save("user", "Spaces", json!([source("g1", 1)]))] })).await;
+    let spaces = other["batch"]["changes"][0]["noteId"].clone();
+
+    let r = app.call(Method::DELETE, "/api/v1/projects/widgets", None, None).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let (note, revisions) = app.note(&tabs).await;
+    assert_eq!((&note["sources"], &note["provenance"], &note["deleted_at"]), (&json!("[]"), &json!("dream"), &Value::Null));
+    assert_eq!(
+        (&revisions[0]["batchId"], &revisions[0]["sources"], &revisions[0]["provenance"]),
+        (&Value::Null, &json!([]), &json!("dream"))
+    );
+    let (note, revisions) = app.note(&lint).await;
+    assert_eq!((&note["sources"], &note["provenance"]), (&json!("[]"), &json!("agent")));
+    assert_eq!((&revisions[0]["batchId"], &revisions[0]["sources"], revisions.len()), (&Value::Null, &json!([]), 2));
+    let (note, revisions) = app.note(&spaces).await;
+    assert_eq!(note["sources"], json!(json!([source("g1", 1)]).to_string()));
+    assert_eq!((&revisions[0]["batchId"], &revisions[0]["sources"]), (&other["batch"]["id"], &json!([source("g1", 1)])));
+    assert_eq!(app.count("SELECT COUNT(*) FROM memory_revisions WHERE batch_id IS NOT NULL"), 1);
+    let r = app.revert(&other["batch"]["id"]).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+}
