@@ -13,6 +13,8 @@ export interface WriteDetails { note?: Note; index?: string; error?: string }
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 export const cwdOf = (ctx: ExtensionContext) => ctx.sessionManager.getCwd() || ctx.cwd;
 export const firstLine = (text: string) => text.split("\n").find((line) => line.trim())?.trim() ?? "";
+/** A note id as the model may copy it from the index, `[id]`, without its brackets. */
+const noteId = (text: string) => text.trim().replace(/^\[|\]$/g, "");
 
 /** The repository fields every request names, empty ones left out. */
 export const where = (info: RepositoryInfo): RepositoryInfo => ({
@@ -24,19 +26,33 @@ export function failure(text: string, details: WriteDetails = {}): AgentToolResu
 	return { content: [{ type: "text", text }], details: { ...details, error: text }, isError: true };
 }
 
-/** The text for a 404 from a write: an unknown note, unless the server has no memory routes at all. */
-async function notFound(cwd: string, id: string | undefined, repository: RepositoryInfo, signal: AbortSignal | undefined): Promise<string> {
+/**
+ * The text for a 404 from a write: a note saved with the wrong scope, an unknown note, or a server without memory
+ * routes, as the notes the server lists tell; when they cannot be read, it says so.
+ */
+async function notFound(cwd: string, id: string | undefined, scope: ScopeKind | undefined, repository: RepositoryInfo, signal: AbortSignal | undefined): Promise<string> {
 	if (!id) return noMemoryApi();
+	let view: MemoryView;
 	try {
-		await request(cwd, "GET", `memory?${new URLSearchParams({ ...repository })}`, { signal });
+		view = await request<MemoryView>(cwd, "GET", `memory?${new URLSearchParams({ ...repository })}`, { signal });
 	} catch (error) {
 		if (error instanceof MemoryServerError && error.status === 404) return noMemoryApi();
+		return `the pika server did not find note ${id} (HTTP 404), and pika could not check why: ${errorText(error)} Read the notes with memory_read before you retry.`;
+	}
+	const live = Array.isArray(view.notes) ? view.notes.find((note) => note.id === id && !note.deletedAt) : undefined;
+	if (live) {
+		const kind = live.scope?.kind;
+		if (scope && kind && kind !== scope) {
+			return `note ${id} is in the ${kind} scope, not the ${scope} scope; a note never changes scope. Save it again with scope "${kind}" to update it, `
+				+ `or create a note in the ${scope} scope (no id, expectedRevision 0) and memory_forget this one if it should move.`;
+		}
+		return `the pika server did not find note ${id} (HTTP 404), though it lists the note as live; read it again with memory_read and retry.`;
 	}
 	return `not_found: no live note ${id} in the user scope or this project's scope; it was forgotten, or belongs to another project. List the notes with memory_read.`;
 }
 
 /** Explains a failed save or forget; the server's answer to a 409 carries the current note. */
-async function explain(error: unknown, options: { cwd: string; id?: string; expected: number; tool: "memory_save" | "memory_forget"; repository: RepositoryInfo; signal?: AbortSignal }): Promise<AgentToolResult<WriteDetails>> {
+async function explain(error: unknown, options: { cwd: string; id?: string; scope?: ScopeKind; expected: number; tool: "memory_save" | "memory_forget"; repository: RepositoryInfo; signal?: AbortSignal }): Promise<AgentToolResult<WriteDetails>> {
 	if (!(error instanceof MemoryServerError)) return failure(errorText(error));
 	const { status, body } = error;
 	if (status === 409) {
@@ -45,7 +61,7 @@ async function explain(error: unknown, options: { cwd: string; id?: string; expe
 	}
 	if (status === 422) return failure(formatFull(body as FullAnswer));
 	if (status === 400) return failure(`the pika server refused the request (HTTP 400 bad_request): ${typeof body.message === "string" ? body.message : "no reason given"}.`);
-	if (status === 404) return failure(await notFound(options.cwd, options.id, options.repository, options.signal));
+	if (status === 404) return failure(await notFound(options.cwd, options.id, options.scope, options.repository, options.signal));
 	return failure(error.message);
 }
 
@@ -80,7 +96,7 @@ export function memoryReadTool() {
 				const repository = where(await resolveRepository(cwd));
 				const view = await request<MemoryView>(cwd, "GET", `memory?${new URLSearchParams({ ...repository })}`, { signal });
 				const all = Array.isArray(view.notes) ? view.notes : [];
-				const ids = params.ids?.map((id) => id.trim().replace(/^\[|\]$/g, "")).filter(Boolean);
+				const ids = params.ids?.map(noteId).filter(Boolean);
 				const query = params.query?.trim().toLowerCase();
 				const notes = all.filter((note) => (!ids?.length || ids.includes(note.id))
 					&& (!query || [note.title, note.hook, note.body].some((text) => text.toLowerCase().includes(query)))
@@ -132,7 +148,7 @@ export function memorySaveTool() {
 		}),
 		async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<WriteDetails>> {
 			const cwd = cwdOf(ctx);
-			const id = params.id?.trim() || undefined;
+			const id = params.id === undefined ? undefined : noteId(params.id) || undefined;
 			let repository: RepositoryInfo = {};
 			try {
 				repository = where(await resolveRepository(cwd));
@@ -147,7 +163,7 @@ export function memorySaveTool() {
 				const answer = await request<WriteAnswer>(cwd, "POST", "memory/notes", { body, signal });
 				return { content: [{ type: "text", text: formatWrite(answer, id ? "updated" : "created") }], details: { note: answer.note, index: answer.index } };
 			} catch (error) {
-				return explain(error, { cwd, id, expected: params.expectedRevision, tool: "memory_save", repository, signal });
+				return explain(error, { cwd, id, scope: params.scope as ScopeKind, expected: params.expectedRevision, tool: "memory_save", repository, signal });
 			}
 		},
 		renderCall(args, theme) {
@@ -178,7 +194,7 @@ export function memoryForgetTool() {
 		}),
 		async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<WriteDetails>> {
 			const cwd = cwdOf(ctx);
-			const id = params.id.trim().replace(/^\[|\]$/g, "");
+			const id = noteId(params.id);
 			let repository: RepositoryInfo = {};
 			try {
 				if (!id) return failure("memory_forget needs the id of a note; memory_read lists them.");

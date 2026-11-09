@@ -201,3 +201,39 @@ it("reports an unreachable server and one that does not answer in time", async (
 	const slow = await callTool(h, "memory_read", {});
 	expect(slow).toMatchObject({ isError: true, text: `could not reach the pika server at ${pika.url}: no answer within 0.2 s.` });
 });
+
+it("memory_save takes an id in brackets, as the index shows it", async () => {
+	const stored = note({ revision: 2 });
+	pika.routes.set("POST memory/notes", { body: written(stored) });
+	const result = await callTool(h, "memory_save", { id: ` [${stored.id}] `, expectedRevision: 1, scope: "project", category: "project", title: "t", hook: "h", body: "" });
+	expect(result.isError).toBe(false);
+	expect(pika.requestsTo("memory/notes")[0]!.body).toMatchObject({ id: stored.id });
+});
+
+it("memory_save of a note in the other scope says which scope it is in, not that it was forgotten", async () => {
+	const tabs = note({ scope: USER_SCOPE, category: "feedback", title: "Tabs" });
+	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [tabs], index: INDEX } });
+	pika.routes.set("POST memory/notes", { status: 404, body: { error: "not_found" } });
+	const result = await callTool(h, "memory_save", { id: tabs.id, expectedRevision: 1, scope: "project", category: "feedback", title: "Tabs", hook: "h", body: "" });
+	expect(result.isError).toBe(true);
+	expect(result.text).toBe(`note ${tabs.id} is in the user scope, not the project scope; a note never changes scope. Save it again with scope "user" to update it, `
+		+ "or create a note in the project scope (no id, expectedRevision 0) and memory_forget this one if it should move.");
+	// Listed in the scope the save named: the 404 raced a change, so it is no proof the note is gone.
+	const same = await callTool(h, "memory_save", { id: `[${tabs.id}]`, expectedRevision: 1, scope: "user", category: "feedback", title: "Tabs", hook: "h", body: "" });
+	expect(same.text).toBe(`the pika server did not find note ${tabs.id} (HTTP 404), though it lists the note as live; read it again with memory_read and retry.`);
+});
+
+it("a write's 404 that pika cannot check is not reported as a forgotten note", async () => {
+	pika.routes.set("POST memory/notes", { status: 404, body: { error: "not_found" } });
+	const args = { id: "000000000000", expectedRevision: 1, scope: "user", category: "user", title: "t", hook: "h", body: "" };
+	pika.routes.set("GET memory", { status: 500, body: { error: "internal" } });
+	const failed = await callTool(h, "memory_save", args);
+	expect(failed.isError).toBe(true);
+	expect(failed.text).toBe(`the pika server did not find note 000000000000 (HTTP 404), and pika could not check why: unexpected HTTP 500 (internal) from the pika server at ${pika.url}. `
+		+ "Read the notes with memory_read before you retry.");
+	timing.httpTimeoutMs = 200;
+	pika.routes.set("GET memory", { delayMs: 2_000, body: { notes: [] } });
+	const slow = await callTool(h, "memory_forget", { id: "000000000000", expectedRevision: 1 });
+	expect(slow.text).toMatch(/^the pika server did not find note 000000000000 \(HTTP 404\), and pika could not check why: could not reach the pika server at .+: no answer within 0\.2 s\./);
+	expect(slow.text).not.toContain("not_found");
+});
