@@ -535,6 +535,7 @@ interface Stats {
 	cost: number;
 	priceUnavailable: boolean;
 	priceEstimated: boolean;
+	magpieFastEnabled: boolean;
 	cacheRead: number;
 	cacheWrite: number;
 	reasoning: number;
@@ -596,6 +597,7 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 		cost: 0,
 		priceUnavailable: false,
 		priceEstimated: false,
+		magpieFastEnabled: false,
 		cacheRead: 0,
 		cacheWrite: 0,
 		reasoning: 0,
@@ -610,6 +612,11 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 	let firstTs: number | undefined;
 
 	for (const e of ctx.sessionManager.getBranch()) {
+		if (e.type === "custom" && e.customType === "magpie-fast") {
+			const enabled = (e.data as { enabled?: unknown } | undefined)?.enabled;
+			if (typeof enabled === "boolean") s.magpieFastEnabled = enabled;
+			continue;
+		}
 		if (e.type === "custom" && e.customType === "magpie-pricing") {
 			const pricing = (e.data as { pricing?: unknown } | undefined)?.pricing;
 			if (pricing === "unavailable") s.priceUnavailable = true;
@@ -944,6 +951,33 @@ export function renderThinking(theme: Theme, level: string): string {
 	return theme.fg("muted", text);
 }
 
+interface TierLabel {
+	text: string;
+	active: boolean;
+	observed?: string;
+}
+
+/** Prefer the current Magpie switch to the last request's tier. */
+function tierLabel(ctx: ExtensionContext, stats: Stats, observedTier?: string): TierLabel | undefined {
+	const selected = ctx.model;
+	if (selected?.provider === "magpie" && selected.api === "openai-responses") {
+		const current = ctx.modelRegistry.getAll().find(model => model.provider === selected.provider && model.id === selected.id) as
+			(typeof selected & { magpieServiceTiers?: string[] }) | undefined;
+		if (current && current.api === selected.api && current.magpieServiceTiers?.includes("priority")) {
+			const observed = displayServiceTier(observedTier);
+			return {
+				text: stats.magpieFastEnabled ? "FAST" : "FAST OFF",
+				active: stats.magpieFastEnabled,
+				observed: observed === "FAST" ? undefined : observed,
+			};
+		}
+		// A stale request must not advertise Fast after the catalog removes support.
+		if (displayServiceTier(observedTier) === "FAST") return undefined;
+	}
+	const text = displayServiceTier(observedTier);
+	return text ? { text, active: true } : undefined;
+}
+
 function renderModelLabel(
 	ctx: ExtensionContext,
 	theme: Theme,
@@ -951,11 +985,15 @@ function renderModelLabel(
 	includeProvider: boolean,
 	live = false,
 	queued = false,
-	serviceTier?: string,
+	tier?: TierLabel,
 ): string {
 	const model = ctx.model;
 	const queuedMark = queued && theme.fg("warning", "queued");
-	const details = model && modelDetails(ctx, theme, includeProvider, serviceTier);
+	const tierMark = tier && cluster([
+		theme.fg(tier.active ? "warning" : "dim", theme.bold(tier.text)),
+		tier.observed && theme.fg("warning", theme.bold(tier.observed)),
+	], "  ");
+	const details = model && modelDetails(ctx, theme, includeProvider);
 	const brand = model && modelBrand(model.id, model.provider);
 	// A chip carries the live dot and the vendor mark in its own ink.
 	const chipColor = skin.chip && ((brand?.color && hexToRgb(brand.color)) || resolveThemeRgb(theme, "accent"));
@@ -963,6 +1001,7 @@ function renderModelLabel(
 		const mark = brand ? `${hasNerdFonts() ? brand.nerd : brand.plain} ` : "";
 		return cluster([
 			skin.chip(`${live ? "● " : ""}${mark}${model?.id ?? "no-model"}`, chipColor),
+			tierMark,
 			queuedMark,
 			details,
 		], "  ");
@@ -971,16 +1010,14 @@ function renderModelLabel(
 	const name = model
 		? renderModelMark(theme, model.id, model.provider) + theme.fg("accent", theme.bold(model.id))
 		: theme.fg("accent", theme.bold("no-model"));
-	return cluster([liveMark, queuedMark, name, details], "  ");
+	return cluster([liveMark, queuedMark, name, tierMark, details], "  ");
 }
 
-/** Thinking level, non-standard service tier, and provider, each separated by two spaces. */
-function modelDetails(ctx: ExtensionContext, theme: Theme, includeProvider: boolean, serviceTier?: string): string {
+/** Thinking level and provider, each separated by two spaces. */
+function modelDetails(ctx: ExtensionContext, theme: Theme, includeProvider: boolean): string {
 	const model = ctx.model!;
-	const tier = displayServiceTier(serviceTier);
 	return cluster([
 		model.reasoning && renderThinking(theme, ctx.thinkingLevel ?? "off"),
-		tier && theme.fg("warning", theme.bold(tier)),
 		includeProvider && model.provider && theme.fg("dim", `(${model.provider})`),
 	], "  ");
 }
@@ -1050,8 +1087,9 @@ function renderIdentityRow(
 	const { chrome } = skin;
 	const usage = ctx.getContextUsage();
 	const barWidth = compactMode ? COMPACT_BAR_WIDTH : BAR_WIDTH;
-	const label = (includeProvider: boolean) => renderModelLabel(
-		ctx, theme, skin, includeProvider, !ctx.isIdle(), ctx.hasPendingMessages(), state.serviceTier,
+	const tier = tierLabel(ctx, s, state.serviceTier);
+	const label = (includeProvider: boolean, showTier = true) => renderModelLabel(
+		ctx, theme, skin, includeProvider, !ctx.isIdle(), ctx.hasPendingMessages(), showTier ? tier : undefined,
 	);
 	let left = label(!compactMode);
 	const tail = compactMode ? [
@@ -1062,7 +1100,12 @@ function renderIdentityRow(
 	const right = cluster([context, ...tail], "  ");
 	const minimumContext = usage?.percent != null ? visibleWidth(`${usage.percent.toFixed(1)}%`) : 0;
 	// Compact already renders the provider-free label, so it is the fallback identity too.
-	const compactIdentity = compactMode ? left : label(false);
+	let compactIdentity = compactMode ? left : label(false);
+	// The tier is optional: drop it whole before shortening the model or context percentage.
+	if (tier && visibleWidth(compactIdentity) + minimumContext + chrome > width) {
+		left = label(!compactMode, false);
+		compactIdentity = compactMode ? left : label(false, false);
+	}
 	const fitsBeside = (status: string) => visibleWidth(compactIdentity) + visibleWidth(status) + minimumContext + chrome + 2 <= width;
 	// The spokesman goes first, then the language, each whole; what stays then lays out as if they had never been set.
 	const candidates = [

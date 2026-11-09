@@ -44,8 +44,11 @@ type FooterComponent = {
 	render: (width: number) => string[];
 };
 
+type HarnessModel = { id: string; provider?: string; api?: string; reasoning?: boolean; magpieServiceTiers?: string[]; magpiePricing?: "estimate" | "unavailable"; cost?: { input: number; output: number; cacheRead: number; cacheWrite: number } };
+
 type HarnessOptions = {
-	model?: { id: string; provider?: string; reasoning?: boolean; magpiePricing?: "estimate" | "unavailable"; cost?: { input: number; output: number; cacheRead: number; cacheWrite: number } } | null;
+	model?: HarnessModel | null;
+	registryModels?: HarnessModel[];
 	thinkingLevel?: string;
 	contextUsage?: { percent?: number; tokens?: number; contextWindow: number } | null;
 	branch?: any[];
@@ -124,9 +127,12 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 		getContextUsage: () => options.contextUsage === null
 			? undefined
 			: options.contextUsage ?? { percent: 42.5, tokens: 42_500, contextWindow: 100_000 },
+		modelRegistry: {
+			getAll: () => options.registryModels ?? (ctx.model ? [ctx.model] : []),
+		},
 		sessionManager: {
 			getSessionId: () => sessionId,
-			getLeafId: () => "leaf",
+			getLeafId: () => options.branch?.at(-1)?.id ?? "leaf",
 			getBranch: () => options.branch ?? [],
 			getEntries: vi.fn(() => entries),
 		},
@@ -1131,6 +1137,32 @@ describe("statusline footer powerline style", () => {
 	}
 	const claude = { id: "claude-opus-5-5", provider: "anthropic", reasoning: true };
 	const longClaude = { id: "claude-opus-5-5-with-an-unusually-long-model-name", provider: "anthropic", reasoning: true };
+
+	it.each(["full", "compact"])("keeps Fast beside the model chip in %s mode", async (mode) => {
+		const model: HarnessModel = {
+			id: "gpt-6.1-terra", provider: "magpie", api: "openai-responses", reasoning: true,
+			magpieServiceTiers: ["priority"], magpiePricing: "estimate",
+		};
+		const harness = createHarness(`fast-chip-${mode}`, "tui", {
+			model, theme: rgbTheme(), extensionStatuses: [], hasPendingMessages: true,
+			branch: [{ id: "fast-on", type: "custom", customType: "magpie-fast", data: { enabled: true } }],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+		await harness.runCommand("footer", mode);
+		try {
+			const line = harness.getFooter()!.render(160)[0]!.replace(/\x1b\[[0-9;]*m/g, "");
+			expect(line).toMatch(/gpt-6\.1-terra\s+(?:\uE0B0\s+)?FAST\s+queued/);
+			expect(line.indexOf("FAST")).toBeLessThan(line.indexOf("HIGH"));
+			for (let width = 1; width <= 120; width++) {
+				const row = harness.getFooter()!.render(width)[0]!;
+				expect(visibleWidth(row), `${width}`).toBeLessThanOrEqual(width);
+				if (!row.includes("FAST")) expect(row, `${width}`).not.toContain("FA");
+			}
+		} finally {
+			harness.disposeFooter();
+		}
+	});
 
 	it("chooses chip ink by contrast and lifts faded colors just enough", () => {
 		expect(chipInk(hex("#D97757"))).toEqual(hex("#1b1b1f"));
@@ -2172,6 +2204,78 @@ describe("statusline footer degraded stream lifecycle", () => {
 });
 
 describe("statusline footer session isolation", () => {
+	it.each(["full", "compact"])("shows the Magpie Fast switch immediately after the model in %s mode", async (mode) => {
+		const model: HarnessModel = {
+			id: "gpt-6.1-terra", provider: "magpie", api: "openai-responses", reasoning: true,
+			magpieServiceTiers: ["priority"], magpiePricing: "estimate",
+		};
+		const branch: any[] = [];
+		const catalog = [model];
+		const harness = createHarness(`magpie-fast-${mode}`, "tui", {
+			model, registryModels: catalog, branch, extensionStatuses: [], hasPendingMessages: true,
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+		await harness.runCommand("footer", mode);
+		const line = () => harness.getFooter()!.render(160)[0]!;
+		try {
+			expect(line()).toContain(`${model.id}  FAST OFF`);
+			branch.push({ id: "on", type: "custom", customType: "magpie-fast", data: { enabled: true } });
+			expect(line()).toContain(`${model.id}  FAST`);
+			expect(line()).not.toContain("FAST OFF");
+			expect(line().indexOf("FAST")).toBeLessThan(line().indexOf("HIGH"));
+			await harness.emit("before_provider_request", { payload: { service_tier: "priority" } });
+			branch.push({ id: "off", type: "custom", customType: "magpie-fast", data: { enabled: false } });
+			expect(line()).toContain(`${model.id}  FAST OFF`);
+			await harness.emit("before_provider_request", { payload: { service_tier: "flex" } });
+			expect(line()).toContain(`${model.id}  FAST OFF  FLEX`);
+			await harness.emit("before_provider_request", { payload: { service_tier: "priority" } });
+
+			// Navigating back restores the branch's state without a provider request.
+			branch.pop();
+			expect(line()).toContain(`${model.id}  FAST`);
+			expect(line()).not.toContain("FAST OFF");
+			catalog.splice(0);
+			expect(line()).not.toContain("FAST");
+			catalog.push(model);
+			harness.ctx.model = { ...model, provider: "other" } as typeof harness.ctx.model;
+			await harness.emit("model_select", { type: "model_select" });
+			expect(line()).not.toContain("FAST");
+			harness.ctx.model = model as typeof harness.ctx.model;
+			await harness.emit("model_select", { type: "model_select" });
+			expect(line()).toContain(`${model.id}  FAST`);
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it.each(["full", "compact"])("drops the Fast badge whole at narrow widths in %s mode", async (mode) => {
+		const model: HarnessModel = {
+			id: "gpt-6.1-terra", provider: "magpie", api: "openai-responses", reasoning: true,
+			magpieServiceTiers: ["priority"], magpiePricing: "estimate",
+		};
+		const harness = createHarness(`magpie-fast-width-${mode}`, "tui", { model, extensionStatuses: [] });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+		await harness.runCommand("footer", mode);
+		try {
+			let shown = false;
+			let hidden = false;
+			for (let width = 1; width <= 120; width++) {
+				const row = harness.getFooter()!.render(width)[0]!;
+				expect(visibleWidth(row), `${width}`).toBeLessThanOrEqual(width);
+				if (row.includes("FAST OFF")) shown = true;
+				else {
+					hidden = true;
+					expect(row, `${width}`).not.toContain("FA");
+				}
+			}
+			expect({ shown, hidden }).toEqual({ shown: true, hidden: true });
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
 	it.each([{}, { service_tier: "standard" }])("replaces stale priority tier with %j and clears it on model switch", async (payload) => {
 		const root = createHarness(`tier-root-${JSON.stringify(payload)}`, "tui");
 		const other = createHarness(`tier-other-${JSON.stringify(payload)}`, "tui");

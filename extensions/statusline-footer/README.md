@@ -31,7 +31,7 @@ Full mode shows the identity bar, a telemetry row, and a Git row. A fourth row a
 
 | Row | Left | Right |
 | --- | --- | --- |
-| 1 | Live pulse, queued chip, model, thinking, non-standard service tier, provider, language, spokesman | Compactions, gradient bar, percent, used/window |
+| 1 | Live pulse, queued chip, model, Fast or non-standard service tier, thinking, provider, language, spokesman | Compactions, gradient bar, percent, used/window |
 | 2 | Turns and elapsed time; TTFT, TTFB, and throughput; tool calls and errors | Cost and cost per turn; input / output / cached-input tokens and cache hit rate; reasoning tokens |
 | 3 | Git branch, working-tree diff, ahead/behind | Files touched, current directory |
 | 4 | Extension statuses except the language and spokesman: research, Herder, Loop, background processes, then the rest; shown only while one of these is set | |
@@ -120,7 +120,7 @@ For a single status display, leave pi-processes' **status widget** disabled in `
 - Token throughput divides exact output-token usage by the duration of the whole call, from the request marker to the last token. Requests without observed content, failed or aborted requests, and calls under 50 ms are excluded. The displayed average is total output tokens divided by total call time. Including the time to first token avoids inflated rates when responses arrive in a single burst or include hidden reasoning tokens. This measures whole-call throughput and reads lower than pure decoding speed.
 - Cache hit rate is cached-read tokens divided by all input tokens: uncached input + cache reads + cache writes.
 - Git branch comes from Pi's footer data. Working-tree state uses a throttled `git --no-optional-locks status --porcelain=v1 --untracked-files=normal`: a successful empty result is `clean`, any output is `dirty`, and a failed or pending status is shown as `git ?` or `git …`. Optional `git diff --shortstat HEAD` supplies additions/deletions, while `git rev-list --left-right --count @{upstream}...HEAD` supplies ahead/behind; either auxiliary query can fail without changing the authoritative status.
-- Service tier is sniffed from the last `before_provider_request` payload and shown only when it is not `standard`/`default`/`auto`. `priority` displays as `FAST`; a request without a tier or a model change clears the previous badge.
+- For a Magpie Responses model advertising `priority`, `FAST` or `FAST OFF` appears immediately after the model name and reflects the current session branch's `/fast` switch, before any request. The label disappears if the model is no longer eligible. Other non-standard tiers are shown from the last `before_provider_request` payload; on other APIs, a requested `priority` displays as `FAST`. A request without a tier or a model change clears the previous request's badge. These labels describe the switch or request, not the tier delivered upstream.
 
 ## License
 
