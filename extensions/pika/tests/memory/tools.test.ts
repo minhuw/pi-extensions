@@ -106,6 +106,13 @@ it("memory_save explains a full memory and passes a bad request's message", asyn
 	expect(full).toMatchObject({ isError: true });
 	expect(full.text).toBe("memory_full: with this note the memory index of the user scope and this project's scope would be 8300 bytes and 150 lines, over its limit of 8192 bytes and 200 lines. "
 		+ "Nothing was saved. Merge related notes into one, shorten titles and hooks, or memory_forget notes that are no longer useful, then save again.");
+	// A user-scope save is budgeted against every project's index, so the server names the one that overflows.
+	pika.routes.set("POST memory/notes", { status: 422, body: { error: "memory_full", indexBytes: 8300, indexLines: 150, limitBytes: 8192, limitLines: 200, project: { key: "repo:https://example.com/other", kind: "project", label: "other" } } });
+	const other = await callTool(h, "memory_save", { expectedRevision: 0, scope: "user", category: "user", title: "t", hook: "h", body: "" });
+	expect(other.text).toMatch(/^memory_full: with this note the memory index of the user scope and project other's scope would be 8300 bytes/);
+	pika.routes.set("POST memory/notes", { status: 422, body: { error: "memory_full", indexBytes: 8300, indexLines: 150, limitBytes: 8192, limitLines: 200, project: null } });
+	const alone = await callTool(h, "memory_save", { expectedRevision: 0, scope: "user", category: "user", title: "t", hook: "h", body: "" });
+	expect(alone.text).toMatch(/^memory_full: with this note the user scope's memory index would be 8300 bytes/);
 
 	pika.routes.set("POST memory/notes", { status: 400, body: { error: "bad_request", message: "hook must be one line" } });
 	const bad = await callTool(h, "memory_save", { expectedRevision: 0, scope: "user", category: "user", title: "t", hook: "a\nb", body: "" });

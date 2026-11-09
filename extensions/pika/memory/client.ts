@@ -15,16 +15,22 @@ export class MemoryServerError extends Error {
 	constructor(message: string, readonly status: number, readonly body: Record<string, unknown>) { super(message); }
 }
 
-/** Why pika published no credentials: its configuration disables it, else it is not logged in. */
-function notLoggedIn(): string {
+/** Why pika's configuration disables it, when it does; undefined when pika is merely not logged in. */
+export function disabledCause(): string | undefined {
 	try {
 		const config = loadConfig(getAgentDir());
 		if (!config.enabled && !config.unconfigured) {
 			// A parser's message may quote the file, token included.
-			const cause = config.unreadable ? `pika cannot read ${config.file}` : config.reason;
-			return `memory is off because pika is disabled: ${withoutCredentials(cause)}. Tell the user; /pika shows why.`;
+			return withoutCredentials(config.unreadable ? `pika cannot read ${config.file}` : config.reason);
 		}
 	} catch { /* not logged in */ }
+	return undefined;
+}
+
+/** Why pika published no credentials: its configuration disables it, else it is not logged in. */
+function notLoggedIn(): string {
+	const cause = disabledCause();
+	if (cause) return `memory is off because pika is disabled: ${cause}. Tell the user; /pika shows why.`;
 	return "memory needs the pika extension logged in to a pika server, and it is not. Ask the user to run /pika login.";
 }
 

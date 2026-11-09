@@ -11,7 +11,8 @@ export interface MemoryView { scopes?: Scope[]; notes?: Note[]; index?: string; 
 /** A successful save or forget. */
 export interface WriteAnswer { note: Note; index: string; indexBytes: number; indexLines: number }
 /** A 422 `memory_full`. */
-export interface FullAnswer { indexBytes?: number; indexLines?: number; limitBytes?: number; limitLines?: number }
+/** A 422 `memory_full`; `project` is the project scope whose index with the user scope overflows, null for the user scope's alone (absent from older servers). */
+export interface FullAnswer { indexBytes?: number; indexLines?: number; limitBytes?: number; limitLines?: number; project?: Scope | null }
 
 export const LIMIT_BYTES = 8192;
 export const LIMIT_LINES = 200;
@@ -102,6 +103,9 @@ export function formatConflict(note: Note | undefined, expected: number, tool: "
 export function formatFull(answer: FullAnswer): string {
 	const bytes = answer.limitBytes ?? LIMIT_BYTES;
 	const lines = answer.limitLines ?? LIMIT_LINES;
-	return `memory_full: with this note the memory index of the user scope and this project's scope would be ${answer.indexBytes ?? "?"} bytes and ${answer.indexLines ?? "?"} lines, `
+	const index = answer.project === null ? "the user scope's memory index"
+		: answer.project?.label ? `the memory index of the user scope and project ${answer.project.label}'s scope`
+		: "the memory index of the user scope and this project's scope";
+	return `memory_full: with this note ${index} would be ${answer.indexBytes ?? "?"} bytes and ${answer.indexLines ?? "?"} lines, `
 		+ `over its limit of ${bytes} bytes and ${lines} lines. Nothing was saved. Merge related notes into one, shorten titles and hooks, or memory_forget notes that are no longer useful, then save again.`;
 }

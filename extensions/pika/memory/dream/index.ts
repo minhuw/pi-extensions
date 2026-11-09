@@ -2,7 +2,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ModelRuntim
 import { loadMemorySettings, type MemorySettings } from "../../config.ts";
 import { credentialsRegistry } from "../../credentials.ts";
 import { resolveRepository } from "../../repository.ts";
-import { MemoryServerError } from "../client.ts";
+import { disabledCause, MemoryServerError } from "../client.ts";
 import type { MemoryView } from "../format.ts";
 import { cwdOf, where } from "../tools.ts";
 import { SESSION_LINK_TYPE, spawnDreamChild } from "./child.ts";
@@ -59,10 +59,13 @@ function isTopLevel(ctx: ExtensionContext): boolean {
 	return !ctx.sessionManager.getEntries().some((entry) => entry.type === "custom" && entry.customType === SESSION_LINK_TYPE);
 }
 
-/** Why this session cannot dream, if it cannot: logged out or excluded. */
+/** Why this session cannot dream, if it cannot: disabled, logged out, or excluded. */
 function credentialsProblem(cwd: string): string | undefined {
 	const value = credentialsRegistry().current;
-	if (!value) return "pika is not logged in to a server; run /pika login";
+	if (!value) {
+		const cause = disabledCause();
+		return cause ? `pika is disabled: ${cause}` : "pika is not logged in to a server; run /pika login";
+	}
 	if (value.isExcluded(cwd)) return `pika's exclude list covers ${cwd}`;
 	return undefined;
 }

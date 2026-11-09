@@ -239,6 +239,12 @@ describe("/memory", () => {
 		expect(ui.notes.at(-1)!.message).toBe("pika memory: no dream: pika is not logged in to a server; run /pika login.");
 		await h.session.prompt("/memory status");
 		expect(ui.notes.at(-1)!.message).toContain("This session cannot dream: pika is not logged in to a server; run /pika login.");
+		// A login cannot help a disabled pika, so the answer names the setting instead.
+		process.env.PIKA_DISABLED = "1";
+		try {
+			await h.session.prompt("/memory dream");
+			expect(ui.notes.at(-1)!.message).toBe("pika memory: no dream: pika is disabled: PIKA_DISABLED=1 is set.");
+		} finally { delete process.env.PIKA_DISABLED; }
 		expect(spawner.children).toEqual([]);
 	});
 
