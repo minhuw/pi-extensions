@@ -66,8 +66,10 @@ describe("the system prompt", () => {
 	});
 
 	it("keeps bodies short and to the rule, and user-scope notes free of any project's context", () => {
-		expect(DREAM_PROMPT).toContain("Choose the user scope only for a note that an agent in any of the user's projects understands and can act on without knowing the project it came from");
-		expect(DREAM_PROMPT).toContain("Test it against an unrelated kind of project, such as a web app or a paper: the note must still make sense there. A rule about how to build one kind of software (a network stack, a compiler) goes in the project scope");
+		expect(DREAM_PROMPT).toContain("That is the test for every note: an agent months later, in another task, that never saw the session, must understand from the note alone what it says, when it applies, and what to do.");
+		expect(DREAM_PROMPT).toContain("A note that needs its backstory to make sense belongs to that session: leave it out");
+		expect(DREAM_PROMPT).toContain("The user scope takes the test one step further: the note must also make sense without the project, to an agent in an unrelated kind of project such as a web app or a paper");
+		expect(DREAM_PROMPT).toContain("A rule about how to build one kind of software (a network stack, a compiler) goes in the project scope");
 		expect(DREAM_PROMPT).toContain("The body takes at most 600 characters");
 		expect(DREAM_PROMPT).toContain("do not retell how the rule came up");
 		expect(DREAM_PROMPT).toContain("it does not append the new case to the old ones");
