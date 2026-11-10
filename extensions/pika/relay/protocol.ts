@@ -45,6 +45,8 @@ export const timing = {
 	 * one, it still steers that peer's messages into a busy turn instead of queueing them after it.
 	 */
 	conversationMs: 30 * 60_000,
+	/** How long a side request may take before it counts as failed and the sender gets a busy notice. */
+	sideTimeoutMs: 120_000,
 };
 
 /** Close codes after which a session stops reconnecting until its credentials change or `/relay on`. */

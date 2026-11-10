@@ -38,20 +38,23 @@ export function loadConfig(agentDir, env = process.env) {
 export const MEMORY_DEFAULTS = { autoDream: true, dreamIdleMinutes: 20 };
 /** The longest idle wait, in whole minutes, that a timer can hold: Node fires delays past 2^31 - 1 ms at once. */
 export const MAX_DREAM_IDLE_MINUTES = Math.floor((2 ** 31 - 1) / 60_000);
+/** An object field of `<agentDir>/pika.json`; empty when the file, or the field, is missing or invalid. */
+function readSection(agentDir, key) {
+    try {
+        const parsed = JSON.parse(readFileSync(join(agentDir, "pika.json"), "utf8"));
+        const value = parsed && typeof parsed === "object" ? parsed[key] : undefined;
+        if (value && typeof value === "object" && !Array.isArray(value))
+            return value;
+    }
+    catch { /* the defaults */ }
+    return {};
+}
 /**
  * Reads `memory` from `<agentDir>/pika.json`; a missing or unreadable file and invalid values give the defaults, and
  * `dreamIdleMinutes` past `MAX_DREAM_IDLE_MINUTES` counts as that.
  */
 export function loadMemorySettings(agentDir) {
-    let memory = {};
-    try {
-        const parsed = JSON.parse(readFileSync(join(agentDir, "pika.json"), "utf8"));
-        const value = parsed && typeof parsed === "object" ? parsed.memory : undefined;
-        if (value && typeof value === "object" && !Array.isArray(value))
-            memory = value;
-    }
-    catch { /* the defaults */ }
-    const { autoDream, dreamIdleMinutes, dreamModel } = memory;
+    const { autoDream, dreamIdleMinutes, dreamModel } = readSection(agentDir, "memory");
     const model = typeof dreamModel === "string" ? dreamModel.trim() : "";
     const slash = model.indexOf("/");
     return {
@@ -59,6 +62,19 @@ export function loadMemorySettings(agentDir) {
         dreamIdleMinutes: typeof dreamIdleMinutes === "number" && Number.isFinite(dreamIdleMinutes) && dreamIdleMinutes >= 1
             ? Math.min(dreamIdleMinutes, MAX_DREAM_IDLE_MINUTES) : MEMORY_DEFAULTS.dreamIdleMinutes,
         ...(slash > 0 && slash < model.length - 1 ? { dreamModel: model } : {}),
+    };
+}
+export const RELAY_DEFAULTS = { sideAnswers: true, sideAnswerSeconds: 60 };
+/**
+ * Reads `relay` from `<agentDir>/pika.json` as `loadMemorySettings` reads `memory`; any positive number of seconds is
+ * valid, up to the longest delay a timer can hold.
+ */
+export function loadRelaySettings(agentDir) {
+    const { sideAnswers, sideAnswerSeconds } = readSection(agentDir, "relay");
+    return {
+        sideAnswers: typeof sideAnswers === "boolean" ? sideAnswers : RELAY_DEFAULTS.sideAnswers,
+        sideAnswerSeconds: typeof sideAnswerSeconds === "number" && Number.isFinite(sideAnswerSeconds) && sideAnswerSeconds > 0
+            ? Math.min(sideAnswerSeconds, (2 ** 31 - 1) / 1000) : RELAY_DEFAULTS.sideAnswerSeconds,
     };
 }
 function expandHome(pattern) {

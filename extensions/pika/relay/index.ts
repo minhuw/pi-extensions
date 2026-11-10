@@ -1,8 +1,9 @@
 import { hostname } from "node:os";
 import { basename } from "node:path";
-import { VERSION, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, VERSION, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { loadRelaySettings } from "../config.ts";
 import { credentialsRegistry } from "../credentials.ts";
 import { type ConnectionState, RelayConnection, RequestError } from "./connection.ts";
 import {
@@ -10,6 +11,10 @@ import {
 	type RelayRoom, type RelayRoomDetail, RELAY_VERSION, type RoomMember, type RoomMessage, sanitize, type SentFrame, type SessionState, since, type StatusFrame, type Target, targetLabel, timing, ttlText,
 } from "./protocol.ts";
 import { join, leave, shared, syncHook } from "./shared.ts";
+import {
+	answerText, askSide, automatic, busyText, type Running, type SideAnswer, type SideDetails, type SideJob, sideNote, type SideOutcome, sideRequest,
+	SideScheduler, SIDE_TYPE, Transcript,
+} from "./side.ts";
 import { logItems, peerLabel, type RelaySentData, senderLabel, SENT_TYPE, showRelayLog, size } from "./viewer.ts";
 
 export { timing } from "./protocol.ts";
@@ -17,8 +22,8 @@ export { timing } from "./protocol.ts";
 /** At most this many sent messages are remembered for relay_status, and this many shown. */
 const SENT_KEPT = 200;
 const SENT_SHOWN = 50;
-const USAGE = "Usage: /relay [status|send <sessionId> <text>|rooms|join <room> [topic]|leave <room>|log|off|on]";
-const SUBCOMMANDS = ["status", "send", "join", "leave", "rooms", "log", "off", "on"];
+const USAGE = "Usage: /relay [status|send <sessionId> <text>|rooms|join <room> [topic]|leave <room>|log|side [on|off]|off|on]";
+const SUBCOMMANDS = ["status", "send", "join", "leave", "rooms", "log", "side", "off", "on"];
 
 /**
  * `failed`: the message never left this session; `unknown`: the server never answered (timeout,
@@ -160,6 +165,24 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	const talking = (peer: string) => { const at = exchanged.get(peer); return at !== undefined && Date.now() - at < timing.conversationMs; };
 	/** A message of the peer waits for the end of the turn. */
 	const waiting = (peer: string) => [...unread.values()].some((entry) => entry.peer === peer && !entry.soon);
+
+	/** The turn's last model request and what followed it, which a side request repeats. */
+	const transcript = new Transcript();
+	/** The turn's top-level tool calls that have not finished, by id, in start order. */
+	const running = new Map<string, Running>();
+	let turnStartedAt: number | undefined;
+	/** `/relay side on|off` in this session; undefined follows `relay.sideAnswers` in pika.json. */
+	let sideOverride: boolean | undefined;
+	/** What side requests answered since the session last settled. */
+	const sideAnswers: SideAnswer[] = [];
+	const sideSettings = () => {
+		const settings = loadRelaySettings(getAgentDir());
+		return { on: sideOverride ?? settings.sideAnswers, afterMs: settings.sideAnswerSeconds * 1000 };
+	};
+	const scheduler = new SideScheduler({
+		waiting: (id) => unread.has(id) && started && !leaving && ctx?.isIdle() === false && sideSettings().on,
+		run: (job, signal) => answerSide(job, signal),
+	});
 
 	// Relay never throws into pi.
 	const guard = (fn: () => void) => { try { fn(); } catch { /* reported through /relay */ } };
@@ -305,11 +328,9 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			...(frame.mentions?.length ? { mentions: frame.mentions } : {}),
 			...(frame.replyTo ? { replyTo: frame.replyTo } : {}),
 		};
+		const label = frame.room ? `room #${headerField(frame.room)}` : targetLabel(frame.from as Target);
 		// Before the delivery, whose turn may read it at once.
-		if (peer !== undefined) {
-			const label = frame.room ? `room #${headerField(frame.room)}` : targetLabel(frame.from as Target);
-			unread.set(frame.id, { peer, label, soon: idle || steer, told: false });
-		}
+		if (peer !== undefined) unread.set(frame.id, { peer, label, soon: idle || steer, told: false });
 		try {
 			const options = idle ? { triggerTurn: true } : steer ? { deliverAs: "steer" as const, triggerTurn: true } : { deliverAs: "followUp" as const, triggerTurn: true };
 			// Unless steered, the model reads it right after an answer the user has not replied to.
@@ -324,12 +345,50 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		// The text stays in the transcript even if Esc or RPC clear_queue drops a queued delivery.
 		guard(() => pi.appendEntry(RECEIVED_TYPE, { id: frame.id, ...(frame.room ? { room: frame.room } : {}), from: frame.from, text: frame.text, replyTo: frame.replyTo, hops, urgent, at: new Date().toISOString() }));
 		current.send({ type: "ack", id: frame.id });
+		// Another session's message that a busy turn leaves unread gets a side answer; a side answer or busy notice never does.
+		if (idle || frame.from.kind !== "session" || automatic(frame.text)) return;
+		const side = sideSettings();
+		if (side.on) scheduler.schedule({ frame: { ...frame, urgent, hops }, label, soon: steer, at: Date.now() }, side.afterMs);
+	}
+
+	/**
+	 * One side request for a message the turn has not read, then its answer or a busy notice to the sender, unless the
+	 * model read the message meanwhile. The turn also gets the answer, before the message.
+	 */
+	async function answerSide(job: SideJob, signal: AbortSignal): Promise<void> {
+		const context = ctx;
+		const { frame } = job;
+		if (!context || frame.from.kind !== "session") return;
+		const messages = transcript.snapshot(running);
+		let outcome: SideOutcome | undefined;
+		if (messages) {
+			messages.push({ role: "user", content: sideRequest(job, sideAnswers), timestamp: Date.now() });
+			const limited = AbortSignal.any([signal, AbortSignal.timeout(timing.sideTimeoutMs)]);
+			outcome = await askSide(context, pi.getThinkingLevel(), messages, limited).catch(() => undefined);
+		}
+		if (signal.aborted || !unread.has(frame.id)) return;
+		outcome ??= { kind: "defer", reason: "" };
+		if (outcome.kind === "none") return;
+		const text = outcome.kind === "answer" ? answerText(outcome.text) : busyText(job, turnStartedAt, running.values().next().value, outcome.reason);
+		const options = { replyTo: frame.id, hops: frame.hops + 1 };
+		const { answer } = frame.room
+			? await send("", text, { ...options, room: frame.room, mentions: [frame.from.sessionId] })
+			: await send(frame.from.sessionId, text, options);
+		if (outcome.kind !== "answer" || answer.status === "rejected") return;
+		sideAnswers.push({ id: frame.id, label: job.label, text: outcome.text });
+		// The note quotes the message, so a correction the model sends cannot cross it.
+		const entry = unread.get(frame.id);
+		if (entry) entry.told = true;
+		const details: SideDetails = { id: frame.id, replyId: answer.id, label: job.label, question: frame.text, text: outcome.text };
+		// An idle session read the message already, or is about to: the note waits for its next turn.
+		pi.sendMessage<SideDetails>({ customType: SIDE_TYPE, content: sideNote(details), display: true, details }, context.isIdle() ? {} : { deliverAs: "steer", triggerTurn: true });
 	}
 
 	/** pi is replacing the session: go offline until `session_shutdown`, or reconnect if it never comes. */
 	function depart(): void {
 		if (!started) return;
 		leaving = true;
+		scheduler.clear();
 		clearTimeout(leaveTimer);
 		leaveTimer = setTimeout(() => guard(stay), timing.leaveTimeoutMs);
 		leaveTimer.unref?.();
@@ -434,6 +493,10 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			busy = !context.isIdle();
 			exchanged.clear();
 			unread.clear();
+			scheduler.clear();
+			transcript.clear();
+			running.clear();
+			sideAnswers.length = 0;
 			join(self, sessionId, {
 				markChild: () => guard(() => { child = true; withdrawTools(); evaluate(); }),
 				status: () => offlineReason() ?? "online",
@@ -468,13 +531,20 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		if (!title && event.prompt.trim()) title = cut(event.prompt.replace(/\s+/g, " ").trim(), 120);
 		return undefined;
 	});
-	pi.on("agent_start", () => { busy = true; guard(pushState); });
-	pi.on("agent_end", () => { busy = false; guard(pushState); });
+	// The previous run's request lacks this run's prompt: until this run's first request, there is nothing to repeat.
+	pi.on("agent_start", () => { busy = true; turnStartedAt = Date.now(); transcript.clear(); guard(pushState); });
+	pi.on("agent_end", () => { busy = false; turnStartedAt = undefined; running.clear(); guard(pushState); });
+	// pika loads last and leaves the request as it is, so this is what the provider gets.
+	pi.on("context_with_system", (event) => { transcript.onRequest(event.messages); return undefined; });
+	pi.on("message_end", (event) => { guard(() => transcript.onMessageEnd(event.message)); return undefined; });
+	pi.on("tool_execution_start", (event) => { if (!event.parentToolCallId) running.set(event.toolCallId, { name: event.toolName, startedAt: Date.now() }); });
+	pi.on("tool_execution_end", (event) => { running.delete(event.toolCallId); });
 	// The model reads a relay message when pi adds it to the context: as a turn starts, after a tool call, or after the turn.
 	pi.on("message_start", (event) => {
 		guard(() => {
 			const message = event.message as { role?: string; customType?: string; details?: { id?: unknown } };
 			if (message.role !== "custom" || message.customType !== MESSAGE_TYPE || typeof message.details?.id !== "string") return;
+			scheduler.read(message.details.id);
 			const entry = unread.get(message.details.id);
 			if (!entry) return;
 			unread.delete(message.details.id);
@@ -482,7 +552,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		});
 	});
 	// What the model has not read once pi settled left its queues unread (Esc, RPC clear_queue).
-	pi.on("agent_settled", () => { unread.clear(); });
+	pi.on("agent_settled", () => { unread.clear(); scheduler.clear(); sideAnswers.length = 0; });
 	pi.on("session_info_changed", () => { guard(pushState); });
 	pi.on("model_select", () => { guard(pushState); });
 
@@ -490,6 +560,8 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		guard(() => {
 			started = false;
 			leaving = false;
+			scheduler.clear();
+			transcript.clear();
 			clearTimeout(fallback);
 			clearTimeout(leaveTimer);
 			leaveTimer = undefined;
@@ -854,6 +926,16 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		].join("\n"), 0, 0);
 	});
 
+	pi.registerMessageRenderer<SideDetails>(SIDE_TYPE, (message, { expanded }, theme) => {
+		const details = message.details;
+		if (!details) return undefined;
+		const text = sanitize(details.text);
+		return new Text([
+			`${theme.fg("accent", "✉ relay side answer →")} ${theme.bold(headerField(details.label))} ${theme.fg("dim", `· ${size(text)}`)}`,
+			...(expanded ? text.split("\n").map((line) => `  ${line}`) : []),
+		].join("\n"), 0, 0);
+	});
+
 	pi.registerMessageRenderer<RelayNoticeDetails>(NOTICE_TYPE, (message, _options, theme) => {
 		const content = typeof message.content === "string" ? message.content : "";
 		// The first line is the notice; what follows it is only for the model.
@@ -880,6 +962,13 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		context.ui.notify(lines.join("\n"), "info");
 	}
 
+	function sideLine(): string {
+		const side = sideSettings();
+		return side.on
+			? `Side answers are on: while this session is busy, another session's message that stays unread for ${side.afterMs / 1000} s is answered beside the turn.`
+			: "Side answers are off.";
+	}
+
 	async function logCommand(context: ExtensionCommandContext): Promise<void> {
 		if (context.mode !== "tui" || !context.hasUI) { context.ui.notify("/relay log opens only in the interactive TUI.", "info"); return; }
 		const items = logItems(context.sessionManager.getBranch(), (id) => sent.find((record) => record.id === id)?.status);
@@ -899,7 +988,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("relay", {
-		description: "Show pika relay status, send a message to another pi session, browse this branch's relay messages, or turn relay off or on for this session",
+		description: "Show pika relay status, send a message to another pi session, browse this branch's relay messages, or turn side answers or relay off or on for this session",
 		getArgumentCompletions: (prefix) => {
 			// Nothing to offer for a subcommand typed in full: an open menu takes the Enter that should run it.
 			const typed = prefix.trim();
@@ -936,6 +1025,10 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				} catch (error) {
 					context.ui.notify(errorText(error), "error");
 				}
+			} else if (command === "side" && (!rest.length || (rest.length === 1 && (rest[0] === "on" || rest[0] === "off")))) {
+				if (rest[0]) sideOverride = rest[0] === "on";
+				if (sideOverride === false) scheduler.clear();
+				context.ui.notify(`${sideLine()}${rest[0] ? " This holds for this session; relay.sideAnswers in pika.json sets the default." : ""}`, "info");
 			} else if (command === "off" && !rest.length) {
 				off = true;
 				guard(() => evaluate());

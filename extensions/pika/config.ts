@@ -56,18 +56,22 @@ export const MEMORY_DEFAULTS: Readonly<MemorySettings> = { autoDream: true, drea
 /** The longest idle wait, in whole minutes, that a timer can hold: Node fires delays past 2^31 - 1 ms at once. */
 export const MAX_DREAM_IDLE_MINUTES = Math.floor((2 ** 31 - 1) / 60_000);
 
+/** An object field of `<agentDir>/pika.json`; empty when the file, or the field, is missing or invalid. */
+function readSection(agentDir: string, key: string): Record<string, unknown> {
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(join(agentDir, "pika.json"), "utf8"));
+		const value = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>)[key] : undefined;
+		if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+	} catch { /* the defaults */ }
+	return {};
+}
+
 /**
  * Reads `memory` from `<agentDir>/pika.json`; a missing or unreadable file and invalid values give the defaults, and
  * `dreamIdleMinutes` past `MAX_DREAM_IDLE_MINUTES` counts as that.
  */
 export function loadMemorySettings(agentDir: string): MemorySettings {
-	let memory: Record<string, unknown> = {};
-	try {
-		const parsed: unknown = JSON.parse(readFileSync(join(agentDir, "pika.json"), "utf8"));
-		const value = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).memory : undefined;
-		if (value && typeof value === "object" && !Array.isArray(value)) memory = value as Record<string, unknown>;
-	} catch { /* the defaults */ }
-	const { autoDream, dreamIdleMinutes, dreamModel } = memory;
+	const { autoDream, dreamIdleMinutes, dreamModel } = readSection(agentDir, "memory");
 	const model = typeof dreamModel === "string" ? dreamModel.trim() : "";
 	const slash = model.indexOf("/");
 	return {
@@ -75,6 +79,29 @@ export function loadMemorySettings(agentDir: string): MemorySettings {
 		dreamIdleMinutes: typeof dreamIdleMinutes === "number" && Number.isFinite(dreamIdleMinutes) && dreamIdleMinutes >= 1
 			? Math.min(dreamIdleMinutes, MAX_DREAM_IDLE_MINUTES) : MEMORY_DEFAULTS.dreamIdleMinutes,
 		...(slash > 0 && slash < model.length - 1 ? { dreamModel: model } : {}),
+	};
+}
+
+/** The `relay` settings of `pika.json`, which control side answers. */
+export interface RelaySettings {
+	/** Whether a busy session answers another session's waiting message from its conversation, beside the turn. */
+	sideAnswers: boolean;
+	/** How long such a message waits unread before that side request. */
+	sideAnswerSeconds: number;
+}
+
+export const RELAY_DEFAULTS: Readonly<RelaySettings> = { sideAnswers: true, sideAnswerSeconds: 60 };
+
+/**
+ * Reads `relay` from `<agentDir>/pika.json` as `loadMemorySettings` reads `memory`; any positive number of seconds is
+ * valid, up to the longest delay a timer can hold.
+ */
+export function loadRelaySettings(agentDir: string): RelaySettings {
+	const { sideAnswers, sideAnswerSeconds } = readSection(agentDir, "relay");
+	return {
+		sideAnswers: typeof sideAnswers === "boolean" ? sideAnswers : RELAY_DEFAULTS.sideAnswers,
+		sideAnswerSeconds: typeof sideAnswerSeconds === "number" && Number.isFinite(sideAnswerSeconds) && sideAnswerSeconds > 0
+			? Math.min(sideAnswerSeconds, (2 ** 31 - 1) / 1000) : RELAY_DEFAULTS.sideAnswerSeconds,
 	};
 }
 

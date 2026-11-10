@@ -90,7 +90,8 @@ Each agent dir has a device key: `<agentDir>/pika/device-key.json`, `{ "v": 1, "
   "token": "pika_…",
   "enabled": true,
   "exclude": ["~/work/client-secret", "/home/me/scratch/*"],
-  "memory": { "autoDream": true, "dreamIdleMinutes": 20, "dreamModel": "anthropic/claude-haiku-5-5" }
+  "memory": { "autoDream": true, "dreamIdleMinutes": 20, "dreamModel": "anthropic/claude-haiku-5-5" },
+  "relay": { "sideAnswers": true, "sideAnswerSeconds": 60 }
 }
 ```
 
@@ -104,7 +105,10 @@ Each agent dir has a device key: `<agentDir>/pika/device-key.json`, `{ "v": 1, "
 | `memory.dreamIdleMinutes` | `20` | How long a session stays idle after its last run before it asks for a dream; at least 1 and at most 35,791 (about 24.8 days, the longest timer Node.js holds), and a larger value counts as 35,791. |
 | `memory.dreamModel` | none | `<provider>/<model id>` for dreams, such as `anthropic/claude-haiku-5-5`. Unset or not found, a dream uses its session's model, and `/memory status` says so. |
 
-Invalid `memory` values fall back to their defaults. pika reads `memory` again at every idle wait and `/memory` command, so edits apply without a restart.
+| `relay.sideAnswers` | `true` | `false` turns off [side answers](#side-answers); `/relay side on` still turns them on for one session. |
+| `relay.sideAnswerSeconds` | `60` | How long another session's message waits unread in a busy session before a side answer; any positive number. |
+
+Invalid `memory` and `relay` values fall back to their defaults. pika reads `memory` again at every idle wait and `/memory` command, and `relay` at every message, so edits apply without a restart.
 
 pika is enabled only when it has both a URL and a token. A missing file means "not configured"; an unreadable or non-object file disables pika, and `/pika` shows why.
 
@@ -313,13 +317,25 @@ A message that arrives while the session is busy waits in pi's follow-up or stee
 
 Every field of a message comes from another device or the web UI. Terminal escape sequences and control characters other than newline and tab are stripped before a message is shown, and the sender's name, title, device, and project are put on one line without double quotes, zero-width characters, or bidirectional controls, in the text the model reads and in the sender line pi shows, so a crafted name cannot forge a second message header or disguise itself.
 
+### Side answers
+
+A busy session reads a queued message only when its turn ends, and a steered one only after its running tool calls, which can take an hour while the sender waits. So when another session's message stays unread for `relay.sideAnswerSeconds` (60 s) in a busy session, relay asks the session's model about it in one request beside the turn:
+
+- The request repeats the turn's last model request (prompt, tools, and messages), adds the assistant messages and tool results since, a placeholder result for each tool call still running, and the message. It uses the session's model and thinking level, so it reads that request's cached prefix. Its tool calls are never run.
+- The model answers from the conversation, says `DEFER` when the answer needs an action, a decision, you, or facts the conversation lacks, or `NO_REPLY` when the message needs no answer.
+- An answer goes to the sender as a reply starting with `[side answer]`. A deferral, a failure, or a request that takes over 2 minutes sends a `[busy notice]` instead: how long the turn has run, which tool is running and for how long, and when the message will be read.
+- The turn gets the question and the answer steered in before the message itself, so it corrects a wrong answer instead of answering again.
+
+One side request runs at a time. It is dropped when the model reads the message first, at Esc, and when the session settles. A message from the web UI, a side answer, and a busy notice never get one, so two busy sessions cannot side-answer each other. Side requests are not captured as model requests of the session. `/relay side off` turns them off for the session.
+
 ### In the transcript
 
 Relay messages are written for the model, which reads each one in full. The transcript shows each as one line:
 
 - a received message: `✉ relay ← Builder on laptop · api #auth-sync urgent reply to msg-3 · 1.2k chars`, with the room, `urgent`, and `reply to` only when they apply;
 - a `relay_send`, or a `relay_room` send: `✉ relay → <session id or #room> · 340 chars`, then one line for the outcome, such as `delivered to Builder on laptop · api · msg-4`, `queued for …, not delivered yet`, `posted to #auth-sync · notified Docs`, or the first line of the error;
-- other `relay_room` calls: `✉ relay room history #auth-sync` and `#auth-sync · 12 messages`, or the first line of the result.
+- other `relay_room` calls: `✉ relay room history #auth-sync` and `#auth-sync · 12 messages`, or the first line of the result;
+- a [side answer](#side-answers) the turn reads: `✉ relay side answer → pi session … · 210 chars`.
 
 Sizes count characters: `42 chars` below 1000, `1.2k chars` below 10 000, then `12k chars`. Expanding tool output (Ctrl+O) shows the text under the line and the full tool results. `relay_list` and `relay_status` keep pi's default rendering. [`/relay log`](#command) lists every relay message of the branch and opens each one in full.
 
@@ -344,6 +360,7 @@ Top-level sessions in the TUI or RPC mode get four tools; print and JSON session
 - `/relay send <sessionId> <text>` sends a message as you.
 - `/relay rooms` lists the active chatrooms; `/relay join <room> [topic]` and `/relay leave <room>` join or leave one.
 - `/relay log` opens the relay messages of the current branch over the transcript, oldest first with the newest selected: received (`←`) and sent (`→`), with the local time, the other side, the room, the size, and for a sent message its latest status this pi process knows. ↑ and ↓, Page Up and Page Down, Home and End move; Enter opens a message with its id, time, room, mentions, reply-to, urgency, and status, and its whole text, which the same keys scroll; Esc or q goes back, then closes the list. It reads the `relay-received` and `relay-sent` entries, so it works offline and after `/resume`, and only in the TUI.
+- `/relay side` shows whether [side answers](#side-answers) are on; `/relay side on` and `/relay side off` override `relay.sideAnswers` for this session.
 - `/relay off` and `/relay on` disconnect or reconnect this session.
 
 ### Safety

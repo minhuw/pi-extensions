@@ -235,6 +235,16 @@ Register a message renderer for `relay-message` that shows one line, `✉ relay 
 
 **Untrusted fields:** every field of a message comes from another device or the web UI. Before rendering, strip ESC sequences and C0/C1 control characters except `\n` and `\t` from the text and every sender field. In the model-facing header, also collapse whitespace (including newlines) in `name`, `title`, `device`, `deviceName`, and `project` and remove double quotes, so a field cannot forge a second header line.
 
+### Side answers
+
+Client-only (`extensions/pika/relay/side.ts`); the wire format is unchanged. A busy session that leaves a message from another session unread for `relay.sideAnswerSeconds` of `pika.json` (60 s; `relay.sideAnswers: false` or `/relay side off` turns it off) answers it with one model request beside the turn:
+
+- **Request:** the messages of the turn's last `context_with_system` (pika loads last, so that is what the provider got), the non-error assistant messages and tool results since its `message_end`, a placeholder tool result ("still running for N") for each tool call without one, and a user message `[relay side request] …` holding the message and the answers already given in this run. It goes through `ctx.modelRegistry.streamSimple` with the session's model, `reasoning` set to its thinking level, and its session id, and no `toolChoice`, which on Anthropic would drop the cached messages. Tool calls in the response are never run. `timing.sideTimeoutMs` (120 s) bounds it.
+- **Outcomes:** `NO_REPLY` sends nothing. Text sends `[side answer] <preamble>\n\n<answer>`. `DEFER: <reason>`, an empty or tool-call-only response, a failure, or the timeout sends `[busy notice] …` with the run's duration, the oldest running top-level tool and its duration, when the message is read (after the current tool calls when steered, else when the turn ends), and the reason. Both are replies (`replyTo` the message, `hops` the message's plus one; in a room with `mentions: [sender]`) through the same `send` as the tools, without the unread check.
+- **The turn:** after an answer, a `relay-side` custom message `{ id, replyId, label, question, text }` is steered in, quoting the question and the answer. pi may deliver the message itself only after the turn, in a turn of its own, so the note comes first and tells the model to correct the answer rather than answer again. The message's unread entry is marked refused, so a correction is not refused.
+- **Scheduling:** a timer per message, started after its `ack`; one request at a time, in due order. A message is skipped or its request aborted, and nothing is sent, when its `message_start` comes first, at `agent_settled`, when the session leaves or shuts down, and when side answers are turned off. `agent_start` forgets the previous run's request, so a message due before the run's first request gets a busy notice.
+- **Never side-answered:** web UI messages, and messages whose text starts with `[side answer]` or `[busy notice]`, so two busy sessions cannot answer each other's automatic replies.
+
 ### Hops
 
 The extension tracks `runHops`. It resets to 0 at `before_agent_start` with `messageType: "user"`. Each delivered relay message raises it to `max(runHops, message.hops)`. Outgoing messages carry `hops = runHops + 1`, and `/relay send` from the user carries 1. The server rejects `hops` above its hop limit, 128 unless `PIKA_RELAY_MAX_HOPS` sets another, and advertises it as `welcome.limits.maxHops`, which the extension's `hop_limit` error text shows. This stops agent-to-agent chains that run without the user; the per-session and per-device send rates still slow a loop below the limit.
@@ -266,6 +276,8 @@ When the session is idle, the notice starts a turn, and its content ends with th
 
 - `/relay` shows the connection state and reason, the server URL, this session's id, and the online sessions.
 - `/relay send <sessionId> <text>` sends as the user (hops 1).
+- `/relay rooms`, `/relay join <room> [topic]`, and `/relay leave <room>` list, join, or leave chatrooms; `/relay log` lists the branch's relay messages.
+- `/relay side [on|off]` shows side answers, or overrides `relay.sideAnswers` for this session.
 - `/relay off` and `/relay on` disconnect or reconnect this session for its lifetime.
 
 ### Tests (Vitest, offline)
@@ -284,6 +296,7 @@ When the session is idle, the notice starts a turn, and its content ends with th
   - the expiry notice waking the sender;
   - reconnect backoff and the terminal close codes;
   - `/relay` subcommands;
+  - side answers: the repeated request and its placeholder tool results, each outcome, tool calls never run, the note steered into the turn, rooms, dropping an answer the turn read first, the timeout, the settings, and never answering the web UI or an automatic reply;
   - a real Subagents child staying offline.
 
 ## Web (`services/pika/web/`)
