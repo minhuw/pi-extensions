@@ -19,8 +19,9 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:continue-session && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:language && npm run test:spokesman && npm run test:boom && npm run test:alwayson && npm run test:selfdrive && npm run test:benchmark && npm run test:autoresearch && npm run test:subagents && npm run test:council && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:codex-relay && npm run test:impeccable && npm run test:workspace && npm run test:agent-browser",
+		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:continue-session && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:language && npm run test:spokesman && npm run test:boom && npm run test:alwayson && npm run test:selfdrive && npm run test:benchmark && npm run test:autoresearch && npm run test:subagents && npm run test:council && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:codex-relay && npm run test:impeccable && npm run test:workspace && npm run test:agent-browser && npm run test:agents-md",
 		"test:agent-browser": "vitest run extensions/agent-browser",
+		"test:agents-md": "vitest run extensions/agents-md",
 		"test:council": "vitest run extensions/council",
 		"test:workspace": "vitest run extensions/workspace",
 		"test:impeccable": "vitest run --config extensions/impeccable/vitest.config.ts",
@@ -131,7 +132,8 @@
 			"./extensions/impeccable/prompts/design-quieter.md",
 			"./extensions/impeccable/prompts/design-shape.md",
 			"./extensions/impeccable/prompts/design-typeset.md",
-			"./extensions/impeccable/prompts/impeccable.md"
+			"./extensions/impeccable/prompts/impeccable.md",
+			"./extensions/agents-md/prompts/agents-md.md"
 		],
 		"extensions": [
 			"./extensions/orca-bridge/index.ts",
@@ -151,6 +153,7 @@
 			"./extensions/herder/index.ts",
 			"./extensions/impeccable/index.ts",
 			"./extensions/agent-browser/index.ts",
+			"./extensions/agents-md/index.ts",
 			"./extensions/workspace/index.ts",
 			"./extensions/pika/index.ts"
 		]
