@@ -1,6 +1,7 @@
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	createAgentSession, DefaultResourceLoader, type ExtensionFactory, type InlineExtension, SessionManager, SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -25,27 +26,68 @@ export const dreamSessionDir = (cwd: string) => join(projectPikaDir(cwd), "dream
 
 const within = (dir: string, path: string) => {
 	const rest = relative(dir, path);
-	return rest === "" || (!rest.startsWith("..") && !isAbsolute(rest));
+	return rest === "" || (rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest));
 };
-const real = (path: string) => { try { return realpathSync.native(path); } catch { return path; } };
+/** `path` with its symlinks resolved, as far as it exists. */
+const real = (path: string): string => {
+	try { return realpathSync.native(path); } catch {
+		const parent = dirname(path);
+		return parent === path ? path : join(real(parent), basename(path));
+	}
+};
+
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+const curly = (path: string) => path.replace(/'/g, "\u2019");
+
+/**
+ * The path `tool` (`read`, `ls`, `grep`, or `find`) opens for `path` in `cwd`, as Pi's `resolveToCwd` reads it, and for
+ * `read` the spelling it falls back to when the path does not exist as given; undefined for a `file://` URL that names
+ * no local path, which the tools refuse.
+ */
+function toolPath(cwd: string, path: string, tool?: string): string | undefined {
+	let bare = path.replace(UNICODE_SPACES, " ").replace(/^@/, "");
+	const windows = process.platform === "win32";
+	// A Git Bash, MSYS, Cygwin, or WSL drive path.
+	const drive = windows && !bare.startsWith("//") && !bare.includes("\\") ? /^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i.exec(bare) : null;
+	if (drive) bare = `${drive[1]!.toUpperCase()}:\\${drive[2]?.replaceAll("/", "\\") ?? ""}`;
+	if (bare === "~") bare = homedir();
+	else if (bare.startsWith("~/") || (windows && bare.startsWith("~\\"))) bare = join(homedir(), bare.slice(2));
+	else if (/^file:\/\//.test(bare)) {
+		try { bare = fileURLToPath(bare); } catch { return undefined; }
+	}
+	const target = resolve(cwd, bare);
+	if (tool !== "read") return target;
+	const nfd = target.normalize("NFD");
+	return [target, target.replace(/ (AM|PM)\./gi, "\u202F$1."), nfd, curly(target), curly(nfd)].find((spelling) => existsSync(spelling)) ?? target;
+}
 
 /** Whether `path`, as `read`, `ls`, `grep`, and `find` take it in `cwd`, names `<cwd>/.pi/pika/` or something in it. */
-export function inProjectPikaDir(cwd: string, path: string): boolean {
-	const bare = path.trim().replace(/^@/, "");
-	const expanded = bare === "~" ? homedir() : bare.startsWith("~/") ? join(homedir(), bare.slice(2)) : bare;
-	const target = resolve(cwd, expanded || ".");
+export function inProjectPikaDir(cwd: string, path: string, tool?: string): boolean {
+	const target = toolPath(cwd, path, tool);
+	if (target === undefined) return false;
 	const dir = projectPikaDir(cwd);
 	return within(dir, target) || within(real(dir), real(target));
 }
 
-/** Keeps the dream's read tools out of `<cwd>/.pi/pika/`, which holds earlier dreams' own sessions; `grep` and `find` skip it by its `.gitignore`. */
+/** Whether `path`, as `tool` takes it in `cwd`, leads out of `cwd`: by itself or through a symlink. Real paths are compared, so a `cwd` reached through a symlink holds its own files. */
+export function outsideProject(cwd: string, path: string, tool?: string): boolean {
+	const target = toolPath(cwd, path, tool);
+	return target === undefined || !within(real(cwd), real(target));
+}
+
+/**
+ * Keeps the dream's read tools inside `cwd`, so it reads the project and nothing else the user can, and out of
+ * `<cwd>/.pi/pika/`, which holds earlier dreams' own sessions; `grep` and `find` skip it by its `.gitignore`.
+ */
 const pikaDirGuard = (cwd: string): InlineExtension => ({
 	name: "pika-dream-guard",
 	factory: (pi) => {
 		pi.on("tool_call", (event) => {
 			if (!READ_TOOLS.includes(event.toolName)) return undefined;
 			const path = (event.input as { path?: unknown }).path;
-			if (typeof path !== "string" || !inProjectPikaDir(cwd, path)) return undefined;
+			if (typeof path !== "string") return undefined;
+			if (outsideProject(cwd, path, event.toolName)) return { block: true, reason: "A dream reads only inside the project: this path leads outside its working directory." };
+			if (!inProjectPikaDir(cwd, path, event.toolName)) return undefined;
 			return { block: true, reason: ".pi/pika/ holds earlier dreams' own sessions, not the user's: a dream does not read it." };
 		});
 	},
@@ -69,7 +111,7 @@ async function settle(promise: Promise<unknown>, ms: number): Promise<void> {
 /**
  * A child session for a dream, persisted unless `persist` is false: the child-session hooks and nothing else of the
  * user's extensions, skills, prompts, or context files; the dream's system prompt; and exactly the read-only built-in
- * tools, kept out of `<cwd>/.pi/pika/`, and `customTools`.
+ * tools, kept inside `cwd` and out of `<cwd>/.pi/pika/`, and `customTools`.
  */
 export async function spawnDreamChild(options: SpawnOptions): Promise<DreamChild> {
 	const { cwd, agentDir } = options;
