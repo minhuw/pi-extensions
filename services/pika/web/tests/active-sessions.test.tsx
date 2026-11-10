@@ -146,7 +146,11 @@ describe("active sessions page", () => {
 		expect(text).toContain("pi sessions logged into pika appear here while they run");
 		expect(text).toContain("relay extension");
 		expect(text).toContain("/pika login");
-		expect(await screen.findByText(/No messages yet/)).toBeTruthy();
+		expect(
+			await screen.findByText(
+				"No messages yet. Messages between sessions, and the ones you send from here, show up here; pika keeps the last 500.",
+			),
+		).toBeTruthy();
 	});
 
 	it("polls sessions and messages every 3 seconds, and pauses while the tab is hidden", async () => {
@@ -317,7 +321,7 @@ describe("message composer", () => {
 		["mailbox_full", "Too many messages are waiting to be delivered. Try again later."],
 		["unknown_session", "pika doesn't know this session: it is offline and was never uploaded."],
 		["too_large", "The message is too long: the limit is 32 KiB."],
-		["invalid", "The message is empty or the session id is not valid."],
+		["invalid", "The message is empty, or the target, replyTo, or mention is not valid."],
 	])("shows a %s refusal as a readable reason and keeps the text", async (reason, message) => {
 		const server = createFakeServer({ online: [onlineSession("s-a", { name: "Alpha" })] });
 		server.state.relayFailure = reason;

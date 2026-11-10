@@ -72,7 +72,7 @@ export function useOnlineSessions(pollMs: number | false) {
 }
 
 const REASONS: Record<string, { short: string; long: string }> = {
-	invalid: { short: "invalid", long: "The message is empty or the session id is not valid." },
+	invalid: { short: "invalid", long: "The message is empty, or the target, replyTo, or mention is not valid." },
 	self: { short: "sent to itself", long: "A session can't message itself." },
 	too_large: { short: "too large", long: "The message is too long: the limit is 32 KiB." },
 	rate_limited: { short: "rate limited", long: "Too many messages in the last minute. Wait a moment and try again." },

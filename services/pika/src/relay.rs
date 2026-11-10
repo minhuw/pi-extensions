@@ -1,18 +1,21 @@
-//! pika relay: the online pi sessions, an in-memory mailbox, and the dashboard's event ring. The WebSocket and HTTP
-//! routes are in `http::relay`. See `docs/RELAY.md`.
+//! pika relay: the online pi sessions, mailbox, chatrooms, and the dashboard's event ring, backed by SQLite when
+//! opened with a [`Store`]. The WebSocket and HTTP routes are in `http::relay`. See `docs/RELAY.md`.
 //!
-//! All state sits behind one mutex that is never held across an `await`. Every frame to a connection goes through that
-//! connection's `Outbox` while the lock is held, so `sent`, `status`, and `message` frames keep the order in which the
-//! relay decided them. Each connection's writer task drains its outbox, so a peer that stops reading holds up neither
-//! the relay nor its own connection's reader; a queue that grows past its maximum closes the connection with 1008.
+//! All state sits behind one mutex that is never held across an `await` or SQLite disk I/O. Every frame to a
+//! connection goes through that connection's `Outbox` while the lock is held, so `sent`, `status`, and `message`
+//! frames keep the order in which the relay decided them; persistence operations go through `Inner::persist` in the
+//! same causal order to a dedicated writer thread. Each connection's writer task drains its outbox, so a peer that
+//! stops reading holds up neither the relay nor its own connection's reader; a queue that grows past its maximum
+//! closes the connection with 1008.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
-use rusqlite::OptionalExtension;
+use anyhow::{Context, Result};
+use rusqlite::{OptionalExtension, Transaction, params};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::AbortHandle;
@@ -420,10 +423,20 @@ pub fn recorded_ids(store: &Store, ids: &[String]) -> Result<HashSet<String>> {
     })?)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Sender {
     Web,
-    Session { session_id: String, device: String, name: Option<String>, title: Option<String>, project: String },
+    #[serde(rename_all = "camelCase")]
+    Session {
+        session_id: String,
+        device: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        project: String,
+    },
 }
 
 impl Sender {
@@ -466,12 +479,17 @@ impl Sender {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Target {
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
 }
 
@@ -521,6 +539,22 @@ impl Reason {
             Reason::NotOwner => "not_owner",
         }
     }
+
+    fn from_str(s: &str) -> Option<Reason> {
+        match s {
+            "invalid" => Some(Reason::Invalid),
+            "self" => Some(Reason::SelfTarget),
+            "too_large" => Some(Reason::TooLarge),
+            "rate_limited" => Some(Reason::RateLimited),
+            "hop_limit" => Some(Reason::HopLimit),
+            "unknown_session" => Some(Reason::UnknownSession),
+            "unknown_room" => Some(Reason::UnknownRoom),
+            "not_member" => Some(Reason::NotMember),
+            "mailbox_full" => Some(Reason::MailboxFull),
+            "not_owner" => Some(Reason::NotOwner),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -534,7 +568,7 @@ pub enum Outcome {
 }
 
 /// A member of a chatroom, enriched with live online state when serialized.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomMember {
     pub session_id: String,
     pub device: Option<String>,
@@ -570,7 +604,8 @@ impl RoomMember {
         }
     }
 
-    fn refresh(&mut self, online: &Online) {
+    fn refresh(&mut self, online: &Online) -> bool {
+        let before = self.clone();
         self.device = Some(online.device.clone());
         if online.info.name.is_some() {
             self.name = online.info.name.clone();
@@ -582,6 +617,7 @@ impl RoomMember {
         if online.info.model.is_some() {
             self.model = online.info.model.clone();
         }
+        *self != before
     }
 
     fn target(&self, online: Option<&Online>) -> Target {
@@ -696,7 +732,7 @@ struct Room {
     created_at: i64,
     updated_at: i64,
     members: BTreeMap<String, RoomMember>,
-    /// The member that represents the user in the room, at most one; in memory only, like the room.
+    /// The member that represents the user in the room, at most one.
     representative: Option<String>,
     messages: VecDeque<RoomMessage>,
     next_seq: u64,
@@ -780,9 +816,20 @@ impl Status {
             Status::Rejected => "rejected",
         }
     }
+
+    fn from_str(s: &str) -> Option<Status> {
+        match s {
+            "queued" => Some(Status::Queued),
+            "delivered" => Some(Status::Delivered),
+            "expired" => Some(Status::Expired),
+            "rejected" => Some(Status::Rejected),
+            _ => None,
+        }
+    }
 }
 
 /// A dashboard entry, one per message, updated in place.
+#[derive(Clone)]
 struct Event {
     id: String,
     at: i64,
@@ -993,6 +1040,256 @@ impl OnlineSession {
     }
 }
 
+#[derive(Clone)]
+struct RoomRow {
+    name: String,
+    topic: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+    representative: Option<String>,
+    next_seq: u64,
+}
+
+impl RoomRow {
+    fn from_room(room: &Room) -> RoomRow {
+        RoomRow {
+            name: room.name.clone(),
+            topic: room.topic.clone(),
+            created_at: room.created_at,
+            updated_at: room.updated_at,
+            representative: room.representative.clone(),
+            next_seq: room.next_seq,
+        }
+    }
+}
+
+struct MailboxRow {
+    id: String,
+    session_id: String,
+    owner: String,
+    from: Sender,
+    to: Target,
+    room: Option<String>,
+    mentions: Vec<String>,
+    text: String,
+    urgent: bool,
+    reply_to: Option<String>,
+    hops: u64,
+    sent_at: i64,
+}
+
+impl MailboxRow {
+    fn from_message(m: &Message) -> MailboxRow {
+        MailboxRow {
+            id: m.id.clone(),
+            session_id: m.to.session_id.clone(),
+            owner: m.owner.clone(),
+            from: m.from.clone(),
+            to: m.to.clone(),
+            room: m.room.clone(),
+            mentions: m.mentions.clone(),
+            text: m.text.clone(),
+            urgent: m.urgent,
+            reply_to: m.reply_to.clone(),
+            hops: m.hops,
+            sent_at: m.sent_at,
+        }
+    }
+}
+
+enum PersistOp {
+    UpsertRoom(RoomRow),
+    UpsertRoomMember { room: String, member: RoomMember },
+    DeleteRoomMember { room: String, session_id: String },
+    DeleteRoom { name: String },
+    InsertRoomMessage { message: RoomMessage, max_messages: usize },
+    InsertEvent { event: Event, ring: usize },
+    MarkEventDelivered { id: String, delivered_at: i64 },
+    MarkEventExpired { id: String },
+    InsertMailbox(MailboxRow),
+    DeleteMailbox { id: String },
+}
+
+enum PersistCmd {
+    Op(PersistOp),
+    Flush(oneshot::Sender<()>),
+}
+
+fn apply_persist_ops(tx: &Transaction, ops: &[PersistOp]) -> Result<()> {
+    for op in ops {
+        match op {
+            PersistOp::UpsertRoom(r) => {
+                tx.prepare_cached(
+                    "INSERT INTO relay_rooms (name, topic, created_at, updated_at, representative, next_seq)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(name) DO UPDATE SET
+                         topic = excluded.topic,
+                         created_at = excluded.created_at,
+                         updated_at = excluded.updated_at,
+                         representative = excluded.representative,
+                         next_seq = excluded.next_seq",
+                )?
+                .execute(params![r.name, r.topic, r.created_at, r.updated_at, r.representative, r.next_seq as i64])?;
+            }
+            PersistOp::UpsertRoomMember { room, member: m } => {
+                tx.prepare_cached(
+                    "INSERT INTO relay_room_members (room, session_id, device, name, title, project, model, joined_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT(room, session_id) DO UPDATE SET
+                         device = excluded.device,
+                         name = excluded.name,
+                         title = excluded.title,
+                         project = excluded.project,
+                         model = excluded.model,
+                         joined_at = excluded.joined_at",
+                )?
+                .execute(params![room, m.session_id, m.device, m.name, m.title, m.project, m.model, m.joined_at])?;
+            }
+            PersistOp::DeleteRoomMember { room, session_id } => {
+                tx.prepare_cached("DELETE FROM relay_room_members WHERE room = ?1 AND session_id = ?2")?
+                    .execute(params![room, session_id])?;
+            }
+            PersistOp::DeleteRoom { name } => {
+                tx.prepare_cached("DELETE FROM relay_room_messages WHERE room = ?1")?.execute([name])?;
+                tx.prepare_cached("DELETE FROM relay_room_members WHERE room = ?1")?.execute([name])?;
+                tx.prepare_cached("DELETE FROM relay_rooms WHERE name = ?1")?.execute([name])?;
+            }
+            PersistOp::InsertRoomMessage { message: m, max_messages } => {
+                let from_json = serde_json::to_string(&m.from)?;
+                let mentions_json = serde_json::to_string(&m.mentions)?;
+                let notified_json = serde_json::to_string(&m.notified)?;
+                tx.prepare_cached(
+                    "INSERT OR REPLACE INTO relay_room_messages
+                         (room, seq, id, from_json, text, mentions_json, notified_json, urgent, reply_to, hops, at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                )?
+                .execute(params![
+                    m.room,
+                    m.seq as i64,
+                    m.id,
+                    from_json,
+                    m.text,
+                    mentions_json,
+                    notified_json,
+                    i64::from(m.urgent),
+                    m.reply_to,
+                    m.hops as i64,
+                    m.at,
+                ])?;
+                tx.prepare_cached(
+                    "DELETE FROM relay_room_messages
+                     WHERE room = ?1
+                       AND seq <= COALESCE(
+                           (SELECT seq FROM relay_room_messages WHERE room = ?1 ORDER BY seq DESC LIMIT 1 OFFSET ?2),
+                           -1
+                       )",
+                )?
+                .execute(params![m.room, *max_messages as i64])?;
+            }
+            PersistOp::InsertEvent { event: e, ring } => {
+                if *ring == 0 {
+                    tx.prepare_cached("DELETE FROM relay_events")?.execute([])?;
+                } else {
+                    let from_json = serde_json::to_string(&e.from)?;
+                    let to_json = serde_json::to_string(&e.to)?;
+                    let mentions_json = serde_json::to_string(&e.mentions)?;
+                    tx.prepare_cached(
+                        "INSERT OR REPLACE INTO relay_events
+                             (id, at, from_json, to_json, room, mentions_json, status, reason, delivered_at, urgent, reply_to, hops, text)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    )?
+                    .execute(params![
+                        e.id,
+                        e.at,
+                        from_json,
+                        to_json,
+                        e.room,
+                        mentions_json,
+                        e.status.as_str(),
+                        e.reason.map(Reason::as_str),
+                        e.delivered_at,
+                        i64::from(e.urgent),
+                        e.reply_to,
+                        e.hops as i64,
+                        e.text,
+                    ])?;
+                    tx.prepare_cached(
+                        "DELETE FROM relay_events
+                         WHERE seq <= COALESCE(
+                             (SELECT seq FROM relay_events ORDER BY seq DESC LIMIT 1 OFFSET ?1),
+                             -1
+                         )",
+                    )?
+                    .execute(params![*ring as i64])?;
+                }
+            }
+            PersistOp::MarkEventDelivered { id, delivered_at } => {
+                tx.prepare_cached(
+                    "UPDATE relay_events SET status = 'delivered', delivered_at = ?2 WHERE id = ?1 AND status = 'queued'",
+                )?
+                .execute(params![id, delivered_at])?;
+            }
+            PersistOp::MarkEventExpired { id } => {
+                tx.prepare_cached("UPDATE relay_events SET status = 'expired' WHERE id = ?1 AND status = 'queued'")?
+                    .execute([id])?;
+            }
+            PersistOp::InsertMailbox(m) => {
+                let from_json = serde_json::to_string(&m.from)?;
+                let to_json = serde_json::to_string(&m.to)?;
+                let mentions_json = serde_json::to_string(&m.mentions)?;
+                tx.prepare_cached(
+                    "INSERT OR REPLACE INTO relay_mailbox
+                         (id, session_id, owner, from_json, to_json, room, mentions_json, text, urgent, reply_to, hops, sent_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                )?
+                .execute(params![
+                    m.id,
+                    m.session_id,
+                    m.owner,
+                    from_json,
+                    to_json,
+                    m.room,
+                    mentions_json,
+                    m.text,
+                    i64::from(m.urgent),
+                    m.reply_to,
+                    m.hops as i64,
+                    m.sent_at,
+                ])?;
+            }
+            PersistOp::DeleteMailbox { id } => {
+                tx.prepare_cached("DELETE FROM relay_mailbox WHERE id = ?1")?.execute([id])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn persist_loop(store: Arc<Store>, rx: std::sync::mpsc::Receiver<PersistCmd>) {
+    while let Ok(first) = rx.recv() {
+        let mut ops = Vec::new();
+        let mut flushes = Vec::new();
+        match first {
+            PersistCmd::Op(op) => ops.push(op),
+            PersistCmd::Flush(tx) => flushes.push(tx),
+        }
+        for cmd in rx.try_iter() {
+            match cmd {
+                PersistCmd::Op(op) => ops.push(op),
+                PersistCmd::Flush(tx) => flushes.push(tx),
+            }
+        }
+        if !ops.is_empty()
+            && let Err(e) = store.write(|tx| apply_persist_ops(tx, &ops))
+        {
+            tracing::error!("relay: persisting state: {e:#}");
+        }
+        for tx in flushes {
+            let _ = tx.send(());
+        }
+    }
+}
+
 struct Inner {
     /// The message TTL, which is also how long an offline session's owner is remembered.
     ttl: Duration,
@@ -1018,9 +1315,17 @@ struct Inner {
     names: Names,
     /// Counts in-process renames, so that a snapshot of the store read before one does not undo it.
     names_generation: u64,
+    /// Ordered persistence queue to the background SQLite writer thread (`None` in memory-only mode).
+    persist: Option<std::sync::mpsc::Sender<PersistCmd>>,
 }
 
 impl Inner {
+    fn persist(&self, op: PersistOp) {
+        if let Some(tx) = &self.persist {
+            let _ = tx.send(PersistCmd::Op(op));
+        }
+    }
+
     /// Queues a frame for connection `conn`; one whose queue would grow past its maximum is closed with 1008.
     fn push(&mut self, conn: u64, frame: String) {
         let Some(c) = self.conns.get(&conn).filter(|c| !c.closed()) else { return };
@@ -1041,12 +1346,8 @@ impl Inner {
         }
     }
 
-    /// Takes `session` offline if `conn` holds it, and remembers `device` as its owner.
-    fn offline(&mut self, session: String, conn: u64, device: String) {
-        if self.online.get(&session).is_none_or(|o| o.conn != conn) {
-            return;
-        }
-        self.online.remove(&session);
+    /// Remembers `device` as the offline owner of `session`.
+    fn remember(&mut self, device: String, session: String) {
         let now = Instant::now();
         self.forget_expired(now);
         self.forget(&session);
@@ -1059,6 +1360,15 @@ impl Inner {
         {
             self.remembered.remove(&oldest);
         }
+    }
+
+    /// Takes `session` offline if `conn` holds it, and remembers `device` as its owner.
+    fn offline(&mut self, session: String, conn: u64, device: String) {
+        if self.online.get(&session).is_none_or(|o| o.conn != conn) {
+            return;
+        }
+        self.online.remove(&session);
+        self.remember(device, session);
     }
 
     /// Stops remembering the owner of `session`.
@@ -1107,6 +1417,10 @@ impl Inner {
     }
 
     fn record(&mut self, event: Event, ring: usize) {
+        self.persist(PersistOp::InsertEvent { event: event.clone(), ring });
+        if ring == 0 {
+            return;
+        }
         if self.events.len() >= ring {
             self.events.pop_front();
         }
@@ -1162,6 +1476,7 @@ impl Inner {
     /// Removes a message from the mailbox and cancels its timers.
     fn take(&mut self, id: &str) -> Option<Message> {
         let mut message = self.messages.remove(id)?;
+        self.persist(PersistOp::DeleteMailbox { id: id.to_owned() });
         for timer in [message.expiry.take(), message.ack_wait.take()].into_iter().flatten() {
             timer.abort();
         }
@@ -1219,12 +1534,30 @@ impl Drop for Task<'_> {
 pub struct Relay {
     config: RelayConfig,
     inner: Mutex<Inner>,
+    persist_worker: Option<std::thread::JoinHandle<()>>,
     next_conn: AtomicU64,
     next_message: AtomicU64,
     /// Expiry and ack-wait timers that have neither fired nor been aborted.
     timers: Arc<AtomicUsize>,
     /// Connection tasks still running, including ones finishing their close handshake.
     tasks: watch::Sender<usize>,
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        {
+            let mut inner = self.lock();
+            for message in inner.messages.values_mut() {
+                for timer in [message.expiry.take(), message.ack_wait.take()].into_iter().flatten() {
+                    timer.abort();
+                }
+            }
+            inner.persist = None;
+        }
+        if let Some(worker) = self.persist_worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 impl Relay {
@@ -1249,13 +1582,410 @@ impl Relay {
                 events: VecDeque::new(),
                 names: Names::new(),
                 names_generation: 0,
+                persist: None,
             }),
+            persist_worker: None,
             config,
             next_conn: AtomicU64::new(1),
             next_message: AtomicU64::new(1),
             timers: Arc::default(),
             tasks: watch::channel(0).0,
         }
+    }
+
+    /// Hydrates persistent relay state from `store` and spawns the background SQLite writer thread.
+    pub fn open(config: RelayConfig, store: Arc<Store>) -> Result<Arc<Relay>> {
+        if !config.enabled {
+            return Ok(Arc::new(Relay::new(config)));
+        }
+        let now = now_ms();
+        let ttl_ms = i64::try_from(config.ttl.as_millis()).unwrap_or(i64::MAX);
+        let event_ring = config.event_ring;
+        let (names, rooms, mut events, live_messages, expired_mailbox_ids, has_orphan_queued) =
+            store.read(|conn| -> Result<_> {
+                let names = crate::auth::device_names(conn)?;
+
+                let mut rooms = BTreeMap::new();
+                {
+                    let mut stmt = conn.prepare(
+                        "SELECT name, topic, created_at, updated_at, representative, next_seq FROM relay_rooms",
+                    )?;
+                    let rows = stmt.query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, i64>(2)?,
+                            r.get::<_, i64>(3)?,
+                            r.get::<_, Option<String>>(4)?,
+                            r.get::<_, i64>(5)?.max(1) as u64,
+                        ))
+                    })?;
+                    for row in rows {
+                        let (name, topic, created_at, updated_at, representative, next_seq) = row?;
+                        rooms.insert(
+                            name.clone(),
+                            Room {
+                                name,
+                                topic,
+                                created_at,
+                                updated_at,
+                                members: BTreeMap::new(),
+                                representative,
+                                messages: VecDeque::new(),
+                                next_seq,
+                            },
+                        );
+                    }
+                }
+
+                {
+                    let mut stmt = conn.prepare(
+                        "SELECT room, session_id, device, name, title, project, model, joined_at FROM relay_room_members",
+                    )?;
+                    let rows = stmt.query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            RoomMember {
+                                session_id: r.get(1)?,
+                                device: r.get(2)?,
+                                name: r.get(3)?,
+                                title: r.get(4)?,
+                                project: r.get(5)?,
+                                model: r.get(6)?,
+                                joined_at: r.get(7)?,
+                            },
+                        ))
+                    })?;
+                    for row in rows {
+                        let (room_name, member) = row?;
+                        if let Some(room) = rooms.get_mut(&room_name) {
+                            room.members.insert(member.session_id.clone(), member);
+                        }
+                    }
+                }
+
+                {
+                    let mut stmt = conn.prepare(
+                        "SELECT room, seq, id, from_json, text, mentions_json, notified_json, urgent, reply_to, hops, at
+                         FROM relay_room_messages
+                         ORDER BY room ASC, seq ASC",
+                    )?;
+                    let rows = stmt.query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)?.max(1) as u64,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, String>(3)?,
+                            r.get::<_, String>(4)?,
+                            r.get::<_, String>(5)?,
+                            r.get::<_, String>(6)?,
+                            r.get::<_, i64>(7)? != 0,
+                            r.get::<_, Option<String>>(8)?,
+                            r.get::<_, i64>(9)?.max(0) as u64,
+                            r.get::<_, i64>(10)?,
+                        ))
+                    })?;
+                    for row in rows {
+                        let (
+                            room_name,
+                            seq,
+                            id,
+                            from_json,
+                            text,
+                            mentions_json,
+                            notified_json,
+                            urgent,
+                            reply_to,
+                            hops,
+                            at,
+                        ) = row?;
+                        let Some(room) = rooms.get_mut(&room_name) else { continue };
+                        let from: Sender = serde_json::from_str(&from_json)
+                            .with_context(|| format!("parsing relay_room_messages.from_json for {id}"))?;
+                        let mentions: Vec<String> = serde_json::from_str(&mentions_json)
+                            .with_context(|| format!("parsing relay_room_messages.mentions_json for {id}"))?;
+                        let notified: Vec<Target> = serde_json::from_str(&notified_json)
+                            .with_context(|| format!("parsing relay_room_messages.notified_json for {id}"))?;
+                        room.messages.push_back(RoomMessage {
+                            id,
+                            seq,
+                            room: room_name,
+                            from,
+                            text,
+                            mentions,
+                            notified,
+                            urgent,
+                            reply_to,
+                            hops,
+                            at,
+                        });
+                    }
+                    for room in rooms.values_mut() {
+                        while room.messages.len() > MAX_ROOM_MESSAGES {
+                            room.messages.pop_front();
+                        }
+                        let min_next = room.messages.back().map_or(1, |m| m.seq.saturating_add(1));
+                        room.next_seq = room.next_seq.max(min_next).max(1);
+                    }
+                }
+
+                let mut events = VecDeque::new();
+                if event_ring > 0 {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, at, from_json, to_json, room, mentions_json, status, reason, delivered_at, urgent, reply_to, hops, text
+                         FROM (
+                             SELECT seq, id, at, from_json, to_json, room, mentions_json, status, reason, delivered_at, urgent, reply_to, hops, text
+                             FROM relay_events
+                             ORDER BY seq DESC
+                             LIMIT ?1
+                         )
+                         ORDER BY seq ASC",
+                    )?;
+                    let rows = stmt.query_map([event_ring as i64], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, String>(3)?,
+                            r.get::<_, Option<String>>(4)?,
+                            r.get::<_, String>(5)?,
+                            r.get::<_, String>(6)?,
+                            r.get::<_, Option<String>>(7)?,
+                            r.get::<_, Option<i64>>(8)?,
+                            r.get::<_, i64>(9)? != 0,
+                            r.get::<_, Option<String>>(10)?,
+                            r.get::<_, i64>(11)?.max(0) as u64,
+                            r.get::<_, String>(12)?,
+                        ))
+                    })?;
+                    for row in rows {
+                        let (
+                            id,
+                            at,
+                            from_json,
+                            to_json,
+                            room,
+                            mentions_json,
+                            status_str,
+                            reason_str,
+                            delivered_at,
+                            urgent,
+                            reply_to,
+                            hops,
+                            text,
+                        ) = row?;
+                        let from: Sender = serde_json::from_str(&from_json)
+                            .with_context(|| format!("parsing relay_events.from_json for {id}"))?;
+                        let to: Target = serde_json::from_str(&to_json)
+                            .with_context(|| format!("parsing relay_events.to_json for {id}"))?;
+                        let mentions: Vec<String> = serde_json::from_str(&mentions_json)
+                            .with_context(|| format!("parsing relay_events.mentions_json for {id}"))?;
+                        let status = Status::from_str(&status_str).unwrap_or(Status::Expired);
+                        let reason = reason_str.as_deref().and_then(Reason::from_str);
+                        events.push_back(Event {
+                            id,
+                            at,
+                            from,
+                            to,
+                            room,
+                            mentions,
+                            status,
+                            reason,
+                            delivered_at,
+                            urgent,
+                            reply_to,
+                            hops,
+                            text,
+                        });
+                    }
+                }
+
+                let mut expired_mailbox_ids = Vec::new();
+                let mut live_messages = Vec::new();
+                {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, session_id, owner, from_json, to_json, room, mentions_json, text, urgent, reply_to, hops, sent_at
+                         FROM relay_mailbox
+                         ORDER BY seq ASC",
+                    )?;
+                    let rows = stmt.query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, String>(3)?,
+                            r.get::<_, String>(4)?,
+                            r.get::<_, Option<String>>(5)?,
+                            r.get::<_, String>(6)?,
+                            r.get::<_, String>(7)?,
+                            r.get::<_, i64>(8)? != 0,
+                            r.get::<_, Option<String>>(9)?,
+                            r.get::<_, i64>(10)?.max(0) as u64,
+                            r.get::<_, i64>(11)?,
+                        ))
+                    })?;
+                    for row in rows {
+                        let (
+                            id,
+                            session_id,
+                            owner,
+                            from_json,
+                            to_json,
+                            room,
+                            mentions_json,
+                            text,
+                            urgent,
+                            reply_to,
+                            hops,
+                            sent_at,
+                        ) = row?;
+                        let deadline_ms = sent_at.saturating_add(ttl_ms);
+                        if deadline_ms <= now {
+                            expired_mailbox_ids.push(id);
+                            continue;
+                        }
+                        let from: Sender = serde_json::from_str(&from_json)
+                            .with_context(|| format!("parsing relay_mailbox.from_json for {id}"))?;
+                        let mut to: Target = serde_json::from_str(&to_json)
+                            .with_context(|| format!("parsing relay_mailbox.to_json for {id}"))?;
+                        if to.session_id.is_empty() {
+                            to.session_id = session_id;
+                        }
+                        let mentions: Vec<String> = serde_json::from_str(&mentions_json)
+                            .with_context(|| format!("parsing relay_mailbox.mentions_json for {id}"))?;
+                        let remaining = Duration::from_millis((deadline_ms - now) as u64);
+                        live_messages.push((
+                            Message {
+                                id,
+                                from,
+                                to,
+                                room,
+                                mentions,
+                                text,
+                                urgent,
+                                reply_to,
+                                hops,
+                                sent_at,
+                                owner,
+                                reply: None,
+                                expiry: None,
+                                ack_wait: None,
+                            },
+                            remaining,
+                        ));
+                    }
+                }
+
+                let has_orphan_queued: bool = conn.query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM relay_events
+                         WHERE status = 'queued'
+                           AND NOT EXISTS (SELECT 1 FROM relay_mailbox WHERE relay_mailbox.id = relay_events.id)
+                     )",
+                    [],
+                    |r| r.get(0),
+                )?;
+
+                Ok((names, rooms, events, live_messages, expired_mailbox_ids, has_orphan_queued))
+            })?;
+
+        if !expired_mailbox_ids.is_empty() || has_orphan_queued {
+            store.write(|tx| {
+                for id in &expired_mailbox_ids {
+                    tx.prepare_cached("DELETE FROM relay_mailbox WHERE id = ?1")?.execute([id])?;
+                }
+                tx.execute(
+                    "UPDATE relay_events SET status = 'expired'
+                     WHERE status = 'queued'
+                       AND NOT EXISTS (SELECT 1 FROM relay_mailbox WHERE relay_mailbox.id = relay_events.id)",
+                    [],
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            })?;
+        }
+
+        let (persist_tx, persist_rx) = std::sync::mpsc::channel();
+        let writer_store = store.clone();
+        let worker = std::thread::Builder::new()
+            .name("pika-relay-persist".into())
+            .spawn(move || persist_loop(writer_store, persist_rx))
+            .context("spawning relay persistence worker")?;
+
+        let minute = Duration::from_secs(60);
+        let mut inner = Inner {
+            ttl: config.ttl,
+            conns: HashMap::new(),
+            per_device: HashMap::new(),
+            online: HashMap::new(),
+            remembered: HashMap::new(),
+            forgetting: BTreeMap::new(),
+            max_remembered: config.max_remembered,
+            next_remembered: 0,
+            expired_from: 0,
+            messages: HashMap::new(),
+            queues: HashMap::new(),
+            rooms,
+            rates: SlidingWindow::new(config.sends_per_minute, minute),
+            device_rates: SlidingWindow::new(config.sends_per_minute_per_device, minute),
+            events: VecDeque::new(),
+            names,
+            names_generation: 0,
+            persist: Some(persist_tx),
+        };
+
+        let mut live_expiries = Vec::with_capacity(live_messages.len());
+        for (message, remaining) in live_messages {
+            let id = message.id.clone();
+            let session_id = message.to.session_id.clone();
+            let owner = message.owner.clone();
+            inner.queues.entry(session_id.clone()).or_default().push_back(id.clone());
+            inner.messages.insert(id.clone(), message);
+            inner.remember(owner, session_id);
+            live_expiries.push((id, remaining));
+        }
+
+        for event in &mut events {
+            if event.status == Status::Queued && !inner.messages.contains_key(&event.id) {
+                event.status = Status::Expired;
+            }
+        }
+        inner.events = events;
+
+        let relay = Arc::new(Relay {
+            inner: Mutex::new(inner),
+            persist_worker: Some(worker),
+            config,
+            next_conn: AtomicU64::new(1),
+            next_message: AtomicU64::new(1),
+            timers: Arc::default(),
+            tasks: watch::channel(0).0,
+        });
+
+        if !live_expiries.is_empty() && tokio::runtime::Handle::try_current().is_ok() {
+            let mut inner = relay.lock();
+            for (id, remaining) in live_expiries {
+                if let Some(message) = inner.messages.get_mut(&id) {
+                    let expiring = id.clone();
+                    message.expiry = Some(relay.timer(remaining, move |r| r.expire(&expiring)));
+                }
+            }
+        }
+
+        Ok(relay)
+    }
+
+    /// Waits until every persistence operation queued so far has been committed to SQLite.
+    pub async fn flush(&self) {
+        let rx = {
+            let inner = self.lock();
+            let Some(persist) = &inner.persist else { return };
+            let (tx, rx) = oneshot::channel();
+            if persist.send(PersistCmd::Flush(tx)).is_err() {
+                return;
+            }
+            rx
+        };
+        let _ = rx.await;
     }
 
     /// Counts a connection task until the guard drops, so stopping the server can wait for its close handshake.
@@ -1291,11 +2021,13 @@ impl Relay {
     /// Calls `f` after `after` unless the returned handle aborts it first.
     fn timer(self: &Arc<Self>, after: Duration, f: impl FnOnce(&Relay) + Send + 'static) -> AbortHandle {
         let pending = Pending::new(&self.timers);
-        let relay = self.clone();
+        let relay = Arc::downgrade(self);
         tokio::spawn(async move {
             let _pending = pending;
             tokio::time::sleep(after).await;
-            f(&relay);
+            if let Some(relay) = relay.upgrade() {
+                f(&relay);
+            }
         })
         .abort_handle()
     }
@@ -1407,12 +2139,18 @@ impl Relay {
             id.clone(),
             Online { conn, device: device.clone(), info, connected_at: now, state_since: now, last_seen_at: now },
         );
+        let mut refreshed_members = Vec::new();
         if let Some(online) = inner.online.get(&id).cloned() {
-            for room in inner.rooms.values_mut() {
-                if let Some(member) = room.members.get_mut(&id) {
-                    member.refresh(&online);
+            for (room_name, room) in &mut inner.rooms {
+                if let Some(member) = room.members.get_mut(&id)
+                    && member.refresh(&online)
+                {
+                    refreshed_members.push((room_name.clone(), member.clone()));
                 }
             }
+        }
+        for (room_name, member) in refreshed_members {
+            inner.persist(PersistOp::UpsertRoomMember { room: room_name, member });
         }
         if let Some(c) = inner.conns.get_mut(&conn) {
             c.session = Some(id.clone());
@@ -1582,6 +2320,7 @@ impl Relay {
         }
         let expiring = id.clone();
         message.expiry = Some(self.timer(config.ttl, move |relay| relay.expire(&expiring)));
+        inner.persist(PersistOp::InsertMailbox(MailboxRow::from_message(&message)));
         inner.queues.entry(draft.to).or_default().push_back(id.clone());
         inner.messages.insert(id, message);
     }
@@ -1669,6 +2408,7 @@ impl Relay {
         let mut notified_targets: Vec<(Target, String)> = Vec::new();
         let mut resolved_ids: Vec<String> = Vec::new();
         let mut named = vec![false; tokens.len()];
+        let mut refreshed_members: Vec<RoomMember> = Vec::new();
         {
             let online_snapshot: HashMap<String, Online> = inner.online.clone();
             let remembered_owners: HashMap<String, String> = inner
@@ -1678,8 +2418,10 @@ impl Relay {
                 .collect();
             if let Some(room) = inner.rooms.get_mut(&room_name) {
                 for member in room.members.values_mut() {
-                    if let Some(online) = online_snapshot.get(&member.session_id) {
-                        member.refresh(online);
+                    if let Some(online) = online_snapshot.get(&member.session_id)
+                        && member.refresh(online)
+                    {
+                        refreshed_members.push(member.clone());
                     }
                     let online = online_snapshot.get(&member.session_id);
                     let mut matched = mention_all;
@@ -1708,12 +2450,16 @@ impl Relay {
                 }
             }
         }
+        for member in refreshed_members {
+            inner.persist(PersistOp::UpsertRoomMember { room: room_name.clone(), member });
+        }
 
         let unmatched: Vec<String> = (tokens.into_iter().zip(named))
             .filter(|(token, named)| !named && !everyone(token))
             .map(|(token, _)| token)
             .collect();
         let notified: Vec<Target> = notified_targets.iter().map(|(t, _)| t.clone()).collect();
+        let mut room_persistence = None;
         if let Some(room) = inner.rooms.get_mut(&room_name) {
             let seq = room.next_seq;
             room.next_seq += 1;
@@ -1721,7 +2467,7 @@ impl Relay {
             if room.messages.len() >= MAX_ROOM_MESSAGES {
                 room.messages.pop_front();
             }
-            room.messages.push_back(RoomMessage {
+            let room_msg = RoomMessage {
                 id: id.clone(),
                 seq,
                 room: room_name.clone(),
@@ -1733,7 +2479,13 @@ impl Relay {
                 reply_to: draft.reply_to.clone(),
                 hops: draft.hops,
                 at: now,
-            });
+            };
+            room.messages.push_back(room_msg.clone());
+            room_persistence = Some((RoomRow::from_room(room), room_msg));
+        }
+        if let Some((room_row, room_msg)) = room_persistence {
+            inner.persist(PersistOp::UpsertRoom(room_row));
+            inner.persist(PersistOp::InsertRoomMessage { message: room_msg, max_messages: MAX_ROOM_MESSAGES });
         }
 
         let event = Event {
@@ -1786,6 +2538,7 @@ impl Relay {
             }
             let expiring = notif_id.clone();
             message.expiry = Some(self.timer(config.ttl, move |relay| relay.expire(&expiring)));
+            inner.persist(PersistOp::InsertMailbox(MailboxRow::from_message(&message)));
             inner.queues.entry(target.session_id).or_default().push_back(notif_id.clone());
             inner.messages.insert(notif_id, message);
         }
@@ -1828,7 +2581,17 @@ impl Relay {
         let clean_topic = topic.map(|t| cut_chars(t.trim(), 200).to_owned()).filter(|t| !t.is_empty());
         let online_snapshot: HashMap<String, Online> =
             inner.online.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        {
+        for (sid, rec) in members {
+            if !valid_session_id(sid) {
+                return Err(Reason::Invalid);
+            }
+            let already_member = inner.rooms.get(name).is_some_and(|r| r.members.contains_key(sid));
+            if !online_snapshot.contains_key(sid) && rec.is_none() && !already_member {
+                return Err(Reason::UnknownSession);
+            }
+        }
+        let mut upserted_members = Vec::new();
+        let room_row = {
             let room = inner
                 .rooms
                 .entry(name.to_owned())
@@ -1838,22 +2601,30 @@ impl Relay {
             }
             room.updated_at = now;
             for (sid, rec) in members {
-                if !valid_session_id(sid) {
-                    return Err(Reason::Invalid);
-                }
                 if let Some(online) = online_snapshot.get(sid) {
-                    room.members
+                    let member = room
+                        .members
                         .entry(sid.clone())
-                        .and_modify(|m| m.refresh(online))
-                        .or_insert_with(|| RoomMember::from_online(online, now));
+                        .and_modify(|m| {
+                            m.refresh(online);
+                        })
+                        .or_insert_with(|| RoomMember::from_online(online, now))
+                        .clone();
+                    upserted_members.push(member);
                 } else if rec.is_some() {
-                    room.members
+                    let member = room
+                        .members
                         .entry(sid.clone())
-                        .or_insert_with(|| RoomMember::from_recorded(sid, rec.as_ref(), now));
-                } else {
-                    return Err(Reason::UnknownSession);
+                        .or_insert_with(|| RoomMember::from_recorded(sid, rec.as_ref(), now))
+                        .clone();
+                    upserted_members.push(member);
                 }
             }
+            RoomRow::from_room(room)
+        };
+        inner.persist(PersistOp::UpsertRoom(room_row));
+        for member in upserted_members {
+            inner.persist(PersistOp::UpsertRoomMember { room: name.to_owned(), member });
         }
         Ok(inner.rooms[name].detail_json(&online_snapshot, &inner.names, MAX_ROOM_MESSAGES, 0))
     }
@@ -1877,8 +2648,14 @@ impl Relay {
             return Err(Reason::Invalid);
         }
         let mut inner = self.lock();
+        let member_device = inner
+            .rooms
+            .get(name)
+            .and_then(|r| r.members.get(session_id))
+            .and_then(|m| m.device.clone());
         if let Some(device) = device {
-            match inner.owner(session_id, recorded.as_ref().map(|r| r.device.as_str())) {
+            let known_device = recorded.as_ref().map(|r| r.device.as_str()).or(member_device.as_deref());
+            match inner.owner(session_id, known_device) {
                 None => return Err(Reason::UnknownSession),
                 Some(owner) if owner != device => return Err(Reason::NotOwner),
                 Some(_) => {}
@@ -1892,11 +2669,12 @@ impl Relay {
                 return Err(Reason::MailboxFull);
             }
             let online = online_snapshot.get(session_id);
-            if online.is_none() && recorded.is_none() {
+            let already_member = inner.rooms.get(name).is_some_and(|r| r.members.contains_key(session_id));
+            if online.is_none() && recorded.is_none() && !already_member {
                 return Err(Reason::UnknownSession);
             }
             let clean_topic = topic.map(|t| cut_chars(t.trim(), 200).to_owned()).filter(|t| !t.is_empty());
-            {
+            let (room_row, member) = {
                 let room = inner
                     .rooms
                     .entry(name.to_owned())
@@ -1905,33 +2683,52 @@ impl Relay {
                     room.topic = clean_topic;
                 }
                 room.updated_at = now;
-                if let Some(online) = online {
+                let member = if let Some(online) = online {
                     room.members
                         .entry(session_id.to_owned())
-                        .and_modify(|m| m.refresh(online))
-                        .or_insert_with(|| RoomMember::from_online(online, now));
+                        .and_modify(|m| {
+                            m.refresh(online);
+                        })
+                        .or_insert_with(|| RoomMember::from_online(online, now))
+                        .clone()
                 } else {
                     room.members
                         .entry(session_id.to_owned())
-                        .or_insert_with(|| RoomMember::from_recorded(session_id, recorded.as_ref(), now));
-                }
+                        .or_insert_with(|| RoomMember::from_recorded(session_id, recorded.as_ref(), now))
+                        .clone()
+                };
                 if action == RoomAction::Represent {
                     room.representative = Some(session_id.to_owned());
                 }
-            }
-        } else {
-            let Some(room) = inner.rooms.get_mut(name) else {
-                return Err(Reason::Invalid);
+                (RoomRow::from_room(room), member)
             };
-            let represents = room.representative.as_deref() == Some(session_id);
-            if represents {
-                room.representative = None;
+            inner.persist(PersistOp::UpsertRoom(room_row));
+            inner.persist(PersistOp::UpsertRoomMember { room: name.to_owned(), member });
+        } else {
+            let (room_row, represents) = {
+                let Some(room) = inner.rooms.get_mut(name) else {
+                    return Err(Reason::Invalid);
+                };
+                let represents = room.representative.as_deref() == Some(session_id);
+                if represents {
+                    room.representative = None;
+                }
+                if action == RoomAction::Leave {
+                    room.members.remove(session_id);
+                }
+                if action == RoomAction::Leave || represents {
+                    room.updated_at = now;
+                }
+                (RoomRow::from_room(room), represents)
+            };
+            if action == RoomAction::Leave || represents {
+                inner.persist(PersistOp::UpsertRoom(room_row));
             }
             if action == RoomAction::Leave {
-                room.members.remove(session_id);
-            }
-            if action == RoomAction::Leave || represents {
-                room.updated_at = now;
+                inner.persist(PersistOp::DeleteRoomMember {
+                    room: name.to_owned(),
+                    session_id: session_id.to_owned(),
+                });
             }
         }
         let room = &inner.rooms[name];
@@ -1950,6 +2747,7 @@ impl Relay {
         let name = normalize_room_name(raw_name);
         let mut inner = self.lock();
         let Some(room) = inner.rooms.remove(name) else { return false };
+        inner.persist(PersistOp::DeleteRoom { name: name.to_owned() });
         if let Some(representative) = room.representative {
             let mut sessions: BTreeSet<String> = room.members.into_keys().collect();
             sessions.insert(representative);
@@ -1980,9 +2778,16 @@ impl Relay {
             return;
         }
         let now = now_ms();
-        if let Some(event) = inner.event(id) {
+        let mut transitioned = false;
+        if let Some(event) = inner.event(id)
+            && event.status == Status::Queued
+        {
             event.status = Status::Delivered;
             event.delivered_at = Some(now);
+            transitioned = true;
+        }
+        if transitioned {
+            inner.persist(PersistOp::MarkEventDelivered { id: id.to_owned(), delivered_at: now });
         }
         let sender_conn = message.from.session_id().and_then(|s| inner.conn_of(s));
         match message.reply.take() {
@@ -2009,8 +2814,15 @@ impl Relay {
         if let Some(reply) = message.reply.take() {
             inner.answer(reply, Outcome::Accepted { id: id.to_owned(), delivered: false, target: message.to.clone() });
         }
-        if let Some(event) = inner.event(id) {
+        let mut transitioned = false;
+        if let Some(event) = inner.event(id)
+            && event.status == Status::Queued
+        {
             event.status = Status::Expired;
+            transitioned = true;
+        }
+        if transitioned {
+            inner.persist(PersistOp::MarkEventExpired { id: id.to_owned() });
         }
         inner.status(&message, Status::Expired, now_ms());
     }
@@ -2181,5 +2993,34 @@ mod tests {
         ] {
             assert!(SessionInfo::parse(Some(&bad)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn persisted_sender_and_target_store_raw_device_ids_and_resolve_names_dynamically() {
+        let sender = Sender::Session {
+            session_id: "s1".into(),
+            device: "dev-1".into(),
+            name: Some("worker".into()),
+            title: None,
+            project: "pika".into(),
+        };
+        let target = Target {
+            session_id: "s2".into(),
+            device: Some("dev-2".into()),
+            name: Some("review".into()),
+            title: Some("Review PR".into()),
+            project: Some("pika".into()),
+        };
+        let sender_db: Value = serde_json::from_str(&serde_json::to_string(&sender).unwrap()).unwrap();
+        let target_db: Value = serde_json::from_str(&serde_json::to_string(&target).unwrap()).unwrap();
+        assert!(sender_db.get("deviceName").is_none(), "{sender_db}");
+        assert!(target_db.get("deviceName").is_none(), "{target_db}");
+        assert_eq!(serde_json::from_value::<Sender>(sender_db).unwrap(), sender);
+        assert_eq!(serde_json::from_value::<Target>(target_db).unwrap(), target);
+        assert_eq!(serde_json::from_str::<Sender>(r#"{"kind":"web"}"#).unwrap(), Sender::Web);
+
+        let names = Names::from([("dev-1".into(), "MacBook".into()), ("dev-2".into(), "Workstation".into())]);
+        assert_eq!(sender.to_json(&names)["deviceName"], "MacBook");
+        assert_eq!(target.to_json(&names)["deviceName"], "Workstation");
     }
 }

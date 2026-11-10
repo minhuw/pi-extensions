@@ -6,7 +6,7 @@ Relay lets a running pi session send text messages to any other running pi sessi
 - **Extension:** `extensions/pika/relay/`, part of the pika extension (TypeScript pi extension). It reads pika's credentials through the `globalThis` registry that `extensions/pika/credentials.ts` publishes, so module copies loaded for other cwds share them.
 - **Web:** `services/pika/web/`, an "Active sessions" dashboard.
 
-Deferred, not in v1: addressing subagent and Herder child sessions, a same-machine shortcut, groups or broadcast, attachments, persistent message storage, a blocking ask tool.
+Deferred, not in v1: addressing subagent and Herder child sessions, a same-machine shortcut, groups or broadcast, attachments, a blocking ask tool.
 
 ## Terms
 
@@ -92,11 +92,11 @@ Clients ignore frame types they do not know, so a server may add frames.
 
 `Target` is `{ sessionId, device?, deviceName?, name?, title?, project? }`, filled from the online entry or pika's records when known; `deviceName` is present exactly when `device` is. Servers older than 0.4 send no `deviceName` anywhere, so clients treat it as optional.
 
-Message ids are server-generated, URL-safe, and unique for the server's lifetime.
+Message ids are server-generated and URL-safe, carrying 72 random bits plus a counter so they stay unique across restarts.
 
 ### Mailbox and lifecycle
 
-- Held in memory only; a restart drops queued messages, the event ring, and chatrooms with their members and representatives. Session transcripts, which pika already uploads, are the permanent record.
+- Live WebSocket connections and online state are held in memory; the mailbox (unexpired queued messages, re-armed for their remaining TTL or expired on startup), the 500-event ring, and chatrooms (up to 200 rooms, with their members, representatives, monotonic `seq`, and last 200 messages per room) are persisted in SQLite (`relay_*` tables, not cleared by `pika reindex`). Session transcripts, which pika already uploads, are the permanent record.
 - A message is accepted (`queued`), pushed while the target is online, and becomes `delivered` on `ack`. If it is not acknowledged within the TTL of its acceptance, it is removed and becomes `expired`, and the sender gets `status: expired`.
 - **Bound to the target's device:** when a message is accepted, the target's owner (see Ownership) is recorded with it if known, and the message is pushed only to a connection of that device.
 - **Sender reconnecting:** if the sender's connection changed between `send` and the outcome, a `delivered` outcome that can no longer be reported as `sent` goes to the sender's current connection as `status: delivered`.
@@ -133,7 +133,7 @@ A room may have one representative: a member session that stands for the user. T
 - `unrepresent` clears the representative only when this session is it; otherwise nothing changes.
 - A representative that leaves the room, by `leave` or by the browser's member route, stops representing it. Deleting a room ends its representative too. Going offline does not.
 - Each change pushes `room` to every online member of the room, and to the previous representative if it left. An action that changes nothing pushes nothing. Clients learn the current representatives from `GET rooms` when they connect.
-- The representative is kept with the room, in memory: a server restart clears it.
+- The representative is persisted with the room in SQLite (`relay_rooms`), so it survives restarts.
 
 ### Browser routes (authenticated like the rest of `{base}/api/v1/`)
 

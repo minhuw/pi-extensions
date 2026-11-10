@@ -247,7 +247,7 @@ fn route(path: &str) -> String {
 #[tokio::test]
 async fn new_databases_and_devices_start_with_read_access() {
     let app = App::new(AuthMode::None);
-    assert_eq!(one(&app.env.store, "PRAGMA user_version")["user_version"], json!(17));
+    assert_eq!(one(&app.env.store, "PRAGMA user_version")["user_version"], json!(18));
     app.reader("fresh");
     assert_eq!(app.read_access("fresh"), json!(1));
     let devices = app.owner("devices").await.json();
@@ -265,7 +265,7 @@ async fn new_databases_and_devices_start_with_read_access() {
     conn.execute_batch(&format!("{UNDO_V13} PRAGMA user_version = 12;")).unwrap();
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(17));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(18));
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     assert_eq!(one(&store, "SELECT id, read_access FROM devices"), one(&store, &format!("SELECT '{DEVICE}' AS id, 1 AS read_access")));
 }

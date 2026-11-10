@@ -742,7 +742,7 @@ fn an_older_database_gains_the_dream_tables() {
     conn.execute_batch(&format!("{UNDO_V15} PRAGMA user_version = 14;")).unwrap();
     drop(conn);
     let store = Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(17));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(18));
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     assert_eq!(one(&store, "SELECT sources FROM memory_notes")["sources"], json!("[]"));
     let revision = one(&store, "SELECT provenance, sources, batch_id FROM memory_revisions");
@@ -1661,7 +1661,7 @@ fn an_older_database_gains_commit_ids() {
     .unwrap();
     drop(conn);
     let store = Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(17));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(18));
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     assert_eq!(one(&store, "SELECT commit_id FROM memory_dream_batches")["commit_id"], Value::Null);
     let indexes = "SELECT COUNT(*) AS n FROM sqlite_master WHERE name IN ('memory_dream_batches_commit', 'memory_dream_batches_lease')";

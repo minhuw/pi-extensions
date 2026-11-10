@@ -33,13 +33,15 @@ struct Server {
     base: String,
     laptop: String,
     desktop: String,
+    serve_task: tokio::task::JoinHandle<()>,
 }
 
-/// A served router with tokens for `laptop` and `desktop`, `PIKA_AUTH=none` unless `configure` says otherwise.
-async fn server_with(configure: impl FnOnce(&mut ServerConfig)) -> Server {
-    let env = env();
-    let laptop = common::device(&env.store, DEVICE);
-    let desktop = common::device(&env.store, OTHER);
+async fn start_on(
+    env: Env,
+    laptop: String,
+    desktop: String,
+    configure: impl FnOnce(&mut ServerConfig),
+) -> Server {
     let mut config = ServerConfig::new(env.dir.path().join("data"));
     config.auth = AuthMode::None;
     configure(&mut config);
@@ -49,8 +51,34 @@ async fn server_with(configure: impl FnOnce(&mut ServerConfig)) -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let served = app.clone().into_make_service_with_connect_info::<SocketAddr>();
-    tokio::spawn(async move { axum::serve(listener, served).await.unwrap() });
-    Server { env, state, app, addr, base, laptop, desktop }
+    let serve_task = tokio::spawn(async move { axum::serve(listener, served).await.unwrap() });
+    Server { env, state, app, addr, base, laptop, desktop, serve_task }
+}
+
+/// A served router with tokens for `laptop` and `desktop`, `PIKA_AUTH=none` unless `configure` says otherwise.
+async fn server_with(configure: impl FnOnce(&mut ServerConfig)) -> Server {
+    let env = env();
+    let laptop = common::device(&env.store, DEVICE);
+    let desktop = common::device(&env.store, OTHER);
+    start_on(env, laptop, desktop, configure).await
+}
+
+impl Server {
+    /// Stops this server, drops `AppState` and `Store` (so `Drop for Relay` flushes and joins the writer thread),
+    /// reopens `Store` from disk, and starts a fresh `AppState` and listener.
+    async fn restart(self, configure: impl FnOnce(&mut ServerConfig)) -> Server {
+        let Server { env, state, app, laptop, desktop, serve_task, .. } = self;
+        state.relay.close_all(pika::relay::close::GOING_AWAY, "server stopping");
+        let _ = state.relay.drained(Duration::from_secs(2)).await;
+        serve_task.abort();
+        let _ = serve_task.await;
+        drop(app);
+        drop(state);
+        let Env { dir, store } = env;
+        drop(store);
+        let store = Store::open(dir.path().join("data")).unwrap();
+        start_on(Env { dir, store }, laptop, desktop, configure).await
+    }
 }
 
 async fn server() -> Server {
@@ -2057,4 +2085,393 @@ async fn the_web_posts_to_any_existing_room() {
     assert_eq!((r.status, &r.json()["notified"]), (StatusCode::OK, &json!([])));
     assert!(r.json().get("unmatched").is_none());
     assert_eq!(room_detail(&s, "empty").await["room"]["messageCount"], 1);
+}
+
+#[test]
+fn schema_v18_migrates_from_v17_without_a_reindex() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    {
+        let store = Store::open(&data).unwrap();
+        common::device(&store, DEVICE);
+        record(&store, SESSION_ID, DEVICE);
+    }
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    conn.execute_batch(&format!("{UNDO_V18} PRAGMA user_version = 17;")).unwrap();
+    drop(conn);
+
+    let store = Store::open(&data).unwrap();
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(18));
+    assert_eq!(store.setting(pika::store::NEEDS_REINDEX).unwrap(), None);
+    assert!(!pika::store::DERIVED_TABLES.iter().any(|t| t.starts_with("relay_")));
+    for table in ["relay_rooms", "relay_room_members", "relay_room_messages", "relay_events", "relay_mailbox"] {
+        assert_eq!(one(&store, &format!("SELECT COUNT(*) AS n FROM {table}"))["n"], json!(0), "{table}");
+    }
+    assert_eq!(one(&store, "SELECT COUNT(*) AS n FROM sessions")["n"], json!(1));
+}
+
+#[tokio::test]
+async fn chatrooms_members_representatives_messages_and_deletions_survive_restarts() {
+    let s = server_with(|c| {
+        c.relay.sends_per_minute = 1_000;
+        c.relay.sends_per_minute_per_device = 1_000;
+    })
+    .await;
+    s.env
+        .store
+        .write(|tx| {
+            tx.execute_batch(
+                "UPDATE devices SET name = 'Old Laptop' WHERE id = 'laptop';
+                 UPDATE devices SET name = 'Old Desk' WHERE id = 'desktop';",
+            )
+        })
+        .unwrap();
+    record(&s.env.store, "sess-rec", OTHER);
+
+    let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    let (mut b, _) = Client::online(&s, &s.desktop, "sess-b").await;
+    let (_c, _) = Client::online(&s, &s.laptop, "sess-c").await;
+
+    // Invalid/unknown members in `save_room` fail before any room or member is created or mutated.
+    let bad_create = http(
+        &s.app,
+        post("/api/v1/relay/rooms", json!({ "name": "atomic-check", "members": ["sess-a", "nobody"] }), None),
+    )
+    .await;
+    assert_eq!(bad_create.status, StatusCode::BAD_REQUEST);
+    assert_eq!(http(&s.app, get("/api/v1/relay/rooms/atomic-check", None, None)).await.status, StatusCode::NOT_FOUND);
+
+    let created = http(
+        &s.app,
+        post(
+            "/api/v1/relay/rooms",
+            json!({
+                "name": "#auth-sync",
+                "topic": "Coordinate token schema",
+                "members": ["sess-a", "sess-b", "sess-rec"],
+            }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK);
+
+    let bad_update = http(
+        &s.app,
+        post(
+            "/api/v1/relay/rooms",
+            json!({ "name": "auth-sync", "topic": "Should not apply", "members": ["sess-c", "nobody"] }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(bad_update.status, StatusCode::BAD_REQUEST);
+    assert_eq!(room_detail(&s, "auth-sync").await["room"]["topic"], "Coordinate token schema");
+    assert!(!member_ids(&room_detail(&s, "auth-sync").await["room"]).contains(&"sess-c"));
+
+    // Elect sess-b as representative.
+    let rep = room_action(&s, Some(&s.desktop), json!({ "room": "auth-sync", "sessionId": "sess-b", "action": "represent" })).await;
+    assert_eq!((rep.status, &rep.json()["room"]["representative"]), (StatusCode::OK, &json!("sess-b")));
+    for client in [&mut a, &mut b] {
+        assert_eq!(client.next().await["type"], "room");
+    }
+
+    // Create and delete a second room; deletion removes its room, members, and messages from SQLite.
+    create_room(&s, "doomed", &["sess-a"]).await;
+    a.relay(room_post("d1", "doomed", "temporary note")).await;
+    let deleted = http(&s.app, with_body(Method::DELETE, "/api/v1/relay/rooms/doomed", json!({}), None)).await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+
+    // Post 205 messages to #auth-sync (exceeding MAX_ROOM_MESSAGES = 200) so pruning and monotonic seq are exercised.
+    for i in 1..=204 {
+        let sent = a.relay(room_post(&format!("m{i}"), "auth-sync", &format!("progress {i}"))).await;
+        assert_eq!(sent["status"], "delivered");
+    }
+    // Message 205 mentions @name-sess-b so `notified` carries a Target with a device id.
+    let sent205 = a
+        .relay(json!({
+            "type": "send",
+            "clientId": "m205",
+            "room": "auth-sync",
+            "text": "final check @name-sess-b",
+            "urgent": true,
+            "hops": 2,
+        }))
+        .await;
+    assert_eq!(sent205["status"], "delivered");
+    let pushed = b.next().await;
+    b.send(json!({ "type": "ack", "id": pushed["id"] })).await;
+
+    drop(a);
+    drop(b);
+    drop(_c);
+
+    // Restart Server on the same data directory (testing Drop-driven flush & join without explicit flush()).
+    let s = s
+        .restart(|c| {
+            c.relay.sends_per_minute = 1_000;
+            c.relay.sends_per_minute_per_device = 1_000;
+        })
+        .await;
+
+    // Deleted room and its rows are gone from SQLite; #auth-sync pruned to 200 newest rows.
+    for table in ["relay_rooms WHERE name = 'doomed'", "relay_room_members WHERE room = 'doomed'", "relay_room_messages WHERE room = 'doomed'"] {
+        assert_eq!(one(&s.env.store, &format!("SELECT COUNT(*) AS n FROM {table}"))["n"], json!(0), "{table}");
+    }
+    assert_eq!(one(&s.env.store, "SELECT COUNT(*) AS n FROM relay_room_messages WHERE room = 'auth-sync'")["n"], json!(200));
+    let raw_msg = one(&s.env.store, "SELECT from_json, notified_json FROM relay_room_messages WHERE room = 'auth-sync' AND seq = 205");
+    assert!(!raw_msg["from_json"].as_str().unwrap().contains("deviceName"), "{raw_msg:?}");
+    assert!(!raw_msg["notified_json"].as_str().unwrap().contains("deviceName"), "{raw_msg:?}");
+
+    // Before reconnect, all hydrated members are offline, representative and topic hold, and device renames resolve dynamically.
+    assert_eq!(
+        http(&s.app, patch(&format!("/api/v1/devices/{DEVICE}"), json!({ "name": "New Laptop" }), None)).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        http(&s.app, patch(&format!("/api/v1/devices/{OTHER}"), json!({ "name": "New Desk" }), None)).await.status,
+        StatusCode::OK
+    );
+
+    let list = http(&s.app, get("/api/v1/relay/rooms", None, None)).await.json();
+    assert_eq!(list["items"].as_array().unwrap().len(), 1);
+    let summary = &list["items"][0];
+    assert_eq!(
+        (&summary["name"], &summary["topic"], &summary["representative"], &summary["messageCount"]),
+        (&json!("auth-sync"), &json!("Coordinate token schema"), &json!("sess-b"), &json!(205))
+    );
+    for m in summary["members"].as_array().unwrap() {
+        assert_eq!((&m["online"], &m["state"]), (&json!(false), &json!("offline")), "{m}");
+    }
+    assert_eq!(summary["lastMessage"]["seq"], 205);
+    assert_eq!(summary["lastMessage"]["from"]["deviceName"], "New Laptop");
+    assert_eq!(summary["lastMessage"]["notified"][0]["deviceName"], "New Desk");
+
+    let recent = http(&s.app, get("/api/v1/relay/rooms/auth-sync?after=203", None, None)).await.json();
+    let seqs: Vec<u64> = recent["messages"].as_array().unwrap().iter().map(|m| m["seq"].as_u64().unwrap()).collect();
+    assert_eq!(seqs, [204, 205]);
+    assert_eq!(recent["messages"][1]["from"]["deviceName"], "New Laptop");
+    assert_eq!(recent["messages"][1]["notified"][0]["deviceName"], "New Desk");
+
+    let all_kept = http(&s.app, get("/api/v1/relay/rooms/auth-sync?limit=200", None, None)).await.json();
+    assert_eq!(all_kept["messages"].as_array().unwrap().len(), 200);
+    assert_eq!(all_kept["messages"][0]["seq"], 6);
+    assert_eq!(all_kept["messages"][199]["seq"], 205);
+
+    // Unrecorded offline member ownership (`sess-b` owned by `desktop`) survives restart via `RoomMember.device`.
+    let wrong_dev = room_action(&s, Some(&s.laptop), json!({ "room": "auth-sync", "sessionId": "sess-b", "action": "unrepresent" })).await;
+    assert_eq!((wrong_dev.status, wrong_dev.json()), (StatusCode::FORBIDDEN, json!({ "error": "not_owner" })));
+    let cleared = room_action(&s, Some(&s.desktop), json!({ "room": "auth-sync", "sessionId": "sess-b", "action": "unrepresent" })).await;
+    assert_eq!(cleared.status, StatusCode::OK);
+    assert!(cleared.json()["room"].get("representative").is_none());
+
+    // Reconnecting sess-a updates its online state and persists refreshed member metadata; new messages continue at seq 206.
+    let mut a2 = Client::connect(&s, &s.laptop).await;
+    a2.send(json!({
+        "type": "hello",
+        "session": {
+            "id": "sess-a",
+            "name": "name-sess-a",
+            "title": "Refreshed after restart",
+            "cwd": "/home/me/code/widgets",
+            "project": "widgets",
+            "host": "laptop.local",
+            "model": "claude-opus-4-6",
+            "state": "busy",
+            "piVersion": "1.5.0",
+            "relayVersion": "0.1.0",
+        }
+    }))
+    .await;
+    assert_eq!(a2.next().await["type"], "welcome");
+
+    let detail_online = room_detail(&s, "auth-sync").await;
+    let members = detail_online["room"]["members"].as_array().unwrap();
+    let member_a = members.iter().find(|m| m["sessionId"] == "sess-a").unwrap();
+    let member_b = members.iter().find(|m| m["sessionId"] == "sess-b").unwrap();
+    assert_eq!((&member_a["online"], &member_a["state"], &member_a["title"], &member_a["deviceName"]), (&json!(true), &json!("busy"), &json!("Refreshed after restart"), &json!("New Laptop")));
+    assert_eq!((&member_b["online"], &member_b["state"], &member_b["deviceName"]), (&json!(false), &json!("offline"), &json!("New Desk")));
+
+    assert_eq!(a2.relay(room_post("m206", "auth-sync", "back online")).await["status"], "delivered");
+    let after205 = http(&s.app, get("/api/v1/relay/rooms/auth-sync?after=205", None, None)).await.json();
+    assert_eq!(after205["room"]["messageCount"], 206);
+    assert_eq!(after205["messages"].as_array().unwrap().len(), 1);
+    assert_eq!((&after205["messages"][0]["seq"], &after205["messages"][0]["text"]), (&json!(206), &json!("back online")));
+
+    // Unrecorded offline `sess-b` can also leave from its owning device after restart, and that persists too.
+    let left_b = room_action(&s, Some(&s.desktop), json!({ "room": "auth-sync", "sessionId": "sess-b", "action": "leave" })).await;
+    assert_eq!(left_b.status, StatusCode::OK);
+    drop(a2);
+    let s = s.restart(|_| {}).await;
+    let final_room = room_detail(&s, "auth-sync").await["room"].clone();
+    assert_eq!(member_ids(&final_room), ["sess-a", "sess-rec"]);
+    let persisted_a = final_room["members"].as_array().unwrap().iter().find(|m| m["sessionId"] == "sess-a").unwrap();
+    assert_eq!((&persisted_a["title"], &persisted_a["model"]), (&json!("Refreshed after restart"), &json!("claude-opus-4-6")));
+    assert!(final_room.get("representative").is_none());
+}
+
+#[tokio::test]
+async fn relay_events_and_mailbox_survive_restarts_and_expire_cleanly() {
+    let s = server_with(|c| {
+        c.relay.ttl = Duration::from_secs(30);
+        c.relay.ack_wait = Duration::from_millis(20);
+    })
+    .await;
+    s.env
+        .store
+        .write(|tx| {
+            tx.execute_batch(
+                "UPDATE devices SET name = 'Laptop v1' WHERE id = 'laptop';
+                 UPDATE devices SET name = 'Desk v1' WHERE id = 'desktop';",
+            )
+        })
+        .unwrap();
+    record(&s.env.store, "sess-offline-rec", OTHER);
+
+    let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    let (mut b, _) = Client::online(&s, &s.desktop, "sess-b").await;
+    // `sess-wait` is unrecorded; it receives a message without acking before the server restarts.
+    let (mut wait_initial, _) = Client::online(&s, &s.desktop, "sess-wait").await;
+
+    // 1. Delivered 1:1 message.
+    a.send(send("c1", "sess-b", "live delivery")).await;
+    let live_msg = b.next().await;
+    b.send(json!({ "type": "ack", "id": live_msg["id"] })).await;
+    assert_eq!(a.next().await["status"], "delivered");
+
+    // 2. Rejected 1:1 message.
+    assert_eq!(a.relay(send("c2", "nobody", "bad target")).await["reason"], "unknown_session");
+
+    // 3. Unacknowledged message to unrecorded `sess-wait` (answers `queued` once `ack_wait` elapses).
+    let unacked_sent = a.relay(send("c3", "sess-wait", "waiting across restart")).await;
+    let _unacked_push = wait_initial.next().await;
+    assert_eq!(unacked_sent["status"], "queued");
+    let unacked_id = unacked_sent["id"].as_str().unwrap().to_owned();
+
+    // 4. Queued 1:1 message to offline recorded `sess-offline-rec`.
+    let offline_sent = a.relay(send("c4", "sess-offline-rec", "for recorded offline target")).await;
+    assert_eq!(offline_sent["status"], "queued");
+    let offline_id = offline_sent["id"].as_str().unwrap().to_owned();
+
+    drop(wait_initial);
+    drop(a);
+    drop(b);
+
+    // Restart with the 30s TTL; rename devices before recipients reconnect.
+    let s = s.restart(|c| c.relay.ttl = Duration::from_secs(30)).await;
+    assert_eq!(s.state.relay.queued(), 2);
+    assert_eq!(s.state.relay.pending_timers(), 2);
+
+    assert_eq!(
+        http(&s.app, patch(&format!("/api/v1/devices/{DEVICE}"), json!({ "name": "Laptop v2" }), None)).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        http(&s.app, patch(&format!("/api/v1/devices/{OTHER}"), json!({ "name": "Desk v2" }), None)).await.status,
+        StatusCode::OK
+    );
+
+    let ev = events(&s, "").await;
+    assert_eq!(ev.len(), 4);
+    assert_eq!(
+        (&ev[0]["id"], &ev[0]["status"], &ev[0]["from"]["deviceName"], &ev[0]["to"]["deviceName"]),
+        (&json!(offline_id), &json!("queued"), &json!("Laptop v2"), &json!("Desk v2"))
+    );
+    assert_eq!(
+        (&ev[1]["id"], &ev[1]["status"], &ev[1]["from"]["deviceName"], &ev[1]["to"]["deviceName"]),
+        (&json!(unacked_id), &json!("queued"), &json!("Laptop v2"), &json!("Desk v2"))
+    );
+    assert_eq!((&ev[2]["status"], &ev[2]["reason"]), (&json!("rejected"), &json!("unknown_session")));
+    assert_eq!((&ev[3]["status"], &ev[3]["text"]), (&json!("delivered"), &json!("live delivery")));
+    assert!(ev[3]["deliveredAt"].is_string());
+
+    // Offline ownership of unrecorded `sess-wait` was restored from `relay_mailbox`, so laptop cannot hijack it.
+    let mut thief = Client::connect(&s, &s.laptop).await;
+    thief.send(hello("sess-wait")).await;
+    assert_eq!(thief.closed().await, 4403);
+
+    // Desktop reconnects both `sess-wait` and `sess-offline-rec`, receives the queued messages with updated `deviceName`, and acknowledges them.
+    let (mut wait_reconnected, _) = Client::online(&s, &s.desktop, "sess-wait").await;
+    let pushed1 = wait_reconnected.next().await;
+    assert_eq!(
+        (&pushed1["id"], &pushed1["text"], &pushed1["from"]["deviceName"]),
+        (&json!(unacked_id), &json!("waiting across restart"), &json!("Laptop v2"))
+    );
+    wait_reconnected.send(json!({ "type": "ack", "id": unacked_id })).await;
+
+    let (mut rec_reconnected, _) = Client::online(&s, &s.desktop, "sess-offline-rec").await;
+    let pushed2 = rec_reconnected.next().await;
+    assert_eq!(
+        (&pushed2["id"], &pushed2["text"], &pushed2["from"]["deviceName"]),
+        (&json!(offline_id), &json!("for recorded offline target"), &json!("Laptop v2"))
+    );
+    rec_reconnected.send(json!({ "type": "ack", "id": offline_id })).await;
+
+    timers_until(&s, 0).await;
+    assert_eq!(s.state.relay.queued(), 0);
+    s.state.relay.flush().await;
+    assert_eq!(one(&s.env.store, "SELECT COUNT(*) AS n FROM relay_mailbox")["n"], json!(0));
+    let ev_after = events(&s, "").await;
+    assert_eq!((&ev_after[0]["id"], &ev_after[0]["status"]), (&json!(offline_id), &json!("delivered")));
+    assert_eq!((&ev_after[1]["id"], &ev_after[1]["status"]), (&json!(unacked_id), &json!("delivered")));
+    assert!(ev_after[0]["deliveredAt"].is_string() && ev_after[1]["deliveredAt"].is_string());
+
+    // Now queue a message with a short TTL, stop the server until the TTL elapses, and verify startup transitions it to `expired`.
+    drop(wait_reconnected);
+    drop(rec_reconnected);
+    let s = s.restart(|c| c.relay.ttl = Duration::from_millis(120)).await;
+    record(&s.env.store, "sess-expiring", DEVICE);
+    let r = http(&s.app, post("/api/v1/relay/messages", json!({ "to": "sess-expiring", "text": "expires while down" }), None)).await;
+    assert_eq!((r.status, &r.json()["status"]), (StatusCode::OK, &json!("queued")));
+    let exp_id = r.json()["id"].as_str().unwrap().to_owned();
+
+    // Stop the server, wait past TTL while down, then reopen.
+    let Server { env, state, app, laptop, desktop, serve_task, .. } = s;
+    serve_task.abort();
+    let _ = serve_task.await;
+    drop(app);
+    drop(state);
+    tokio::time::sleep(Duration::from_millis(180)).await;
+    let Env { dir, store } = env;
+    drop(store);
+    let store = Store::open(dir.path().join("data")).unwrap();
+    let s = start_on(Env { dir, store }, laptop, desktop, |c| c.relay.ttl = Duration::from_millis(120)).await;
+
+    assert_eq!(s.state.relay.queued(), 0);
+    assert_eq!(one(&s.env.store, "SELECT COUNT(*) AS n FROM relay_mailbox")["n"], json!(0));
+    assert_eq!(
+        one(&s.env.store, &format!("SELECT status FROM relay_events WHERE id = '{exp_id}'"))["status"],
+        json!("expired")
+    );
+    let latest = &events(&s, "?limit=1").await[0];
+    assert_eq!((&latest["id"], &latest["status"]), (&json!(exp_id), &json!("expired")));
+}
+
+#[tokio::test]
+async fn reindex_preserves_relay_tables() {
+    let s = server().await;
+    upload(&s.env.store, &format!("session:{SESSION_ID}"), "session", &fixture("session.jsonl"), 50);
+    let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    create_room(&s, "keep-me", &[SESSION_ID, "sess-a"]).await;
+    room_action(&s, Some(&s.laptop), json!({ "room": "keep-me", "sessionId": "sess-a", "action": "represent" })).await;
+    assert_eq!(a.next().await["type"], "room");
+    assert_eq!(a.relay(room_post("r1", "keep-me", "persisted room message")).await["status"], "delivered");
+    assert_eq!(a.relay(send("q1", SESSION_ID, "persisted mailbox message")).await["status"], "queued");
+    s.state.relay.flush().await;
+
+    let tables = [
+        "SELECT * FROM relay_rooms ORDER BY name",
+        "SELECT * FROM relay_room_members ORDER BY room, session_id",
+        "SELECT * FROM relay_room_messages ORDER BY room, seq",
+        "SELECT * FROM relay_events ORDER BY seq",
+        "SELECT * FROM relay_mailbox ORDER BY seq",
+    ];
+    let before: Vec<_> = tables.iter().map(|sql| query(&s.env.store, sql)).collect();
+    assert!(before.iter().all(|rows| !rows.is_empty()));
+
+    let stats = pika::reindex::reindex(&s.env.store).unwrap();
+    assert_eq!(stats.streams, 1);
+
+    let after: Vec<_> = tables.iter().map(|sql| query(&s.env.store, sql)).collect();
+    assert_eq!(after, before);
 }

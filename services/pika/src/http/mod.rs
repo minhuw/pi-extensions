@@ -88,7 +88,7 @@ impl AppState {
         }
         visitor::cleanup(&store)?;
         let auth = Auth::new(&store, &config)?;
-        let relay = Arc::new(Relay::new(config.relay.clone()));
+        let relay = Relay::open(config.relay.clone(), store.clone())?;
         Ok(AppState { store, auth: Arc::new(auth), config: Arc::new(config), limits: Arc::default(), relay })
     }
 }
@@ -210,6 +210,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     if !relay.drained(std::time::Duration::from_secs(3)).await {
         tracing::warn!("relay: stopping with connections still closing");
     }
+    relay.flush().await;
     Ok(())
 }
 

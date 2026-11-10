@@ -365,8 +365,7 @@ export function ActiveSessionsPage() {
 					<ErrorState error={events.error} onRetry={() => void events.refetch()} />
 				) : eventItems.length === 0 ? (
 					<p className="text-[13px] text-muted">
-						No messages yet. Messages between sessions, and the ones you send from here, show up until pika restarts; it keeps
-						the last 500.
+						No messages yet. Messages between sessions, and the ones you send from here, show up here; pika keeps the last 500.
 					</p>
 				) : (
 					<ul className="border-t border-ink border-b border-b-line" data-relay-events="">
