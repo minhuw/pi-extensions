@@ -8,16 +8,18 @@ import type { RunState } from "../journal/fold.ts";
 import { readLock } from "../run/lock.ts";
 import { AGENT_OPTION_KEYS, type AgentOptions, type DeliveryMode } from "../types.ts";
 import { validateScript } from "../workflow/validate.ts";
-import { DELIVERY_MODES, startRun } from "./commands.ts";
+import { DELIVERY_MODES, startRun, statusReport } from "./commands.ts";
 import { confirmLong } from "./confirm.ts";
 import { describeChecks, describeDelivery, describeIntegration, describeStep, describeVerification } from "./format.ts";
 import { requireApproved, requireIdle, type Herder, type Held, type Session } from "./session.ts";
-import { describeRun, isFinished, planTasks, runDetails } from "./status.ts";
+import { sinceGrant, standingGrant, type StandingApproval } from "./standing.ts";
+import { describeRun, isFinished, isParked, planTasks, runDetails } from "./status.ts";
 
 const literals = <T extends string>(values: readonly T[], description?: string) =>
 	Type.Union(values.map((value) => Type.Literal(value)), description ? { description } : {});
 const text = (description: string) => Type.String({ minLength: 1, description });
-const RUN_ID = Type.String({ pattern: "^\\d{8}-\\d{6}-[0-9a-f]{4}$", description: "Run id; default: the active run" });
+const RUN_ID_PATTERN = "^\\d{8}-\\d{6}-[0-9a-f]{4}$";
+const RUN_ID = Type.String({ pattern: RUN_ID_PATTERN, description: "Run id; default: the active run" });
 const CHECK_IDS = (description: string) => Type.Array(Type.String({ minLength: 1 }), { description });
 
 export const RunParameters = Type.Object({
@@ -62,6 +64,7 @@ export const CheckParameters = Type.Object({
 });
 export const VerifyParameters = Type.Object({});
 export const DeliverParameters = Type.Object({
+	runId: Type.Optional(Type.String({ pattern: RUN_ID_PATTERN, description: "Run to deliver, e.g. a parked one; default: the held run, else the only unfinished run" })),
 	mode: Type.Optional(literals(DELIVERY_MODES, "Default series")),
 	curate: Type.Optional(Type.Boolean({ description: "Let a curator regroup the series first (kept only with an identical tree)" })),
 });
@@ -85,10 +88,15 @@ function scriptSource(ctx: ExtensionContext, params: { script?: string; scriptPa
 	}
 }
 
+/** The standing grant covering the held run's repository. */
+const grantFor = (held: Held): StandingApproval | undefined => standingGrant(held.vcs.commonDir());
+
 async function approveGoal(herder: Herder, s: Session, held: Held, ctx: ExtensionContext, signal: AbortSignal) {
 	const state = held.run.state();
 	if (isFinished(state)) throw new Error(`Herder run ${held.runId} is ${state.status}.`);
-	if (!ctx.hasUI) throw new Error("approve_goal needs an interactive session (TUI or RPC) so the user can confirm the goal; it cannot be approved here.");
+	// Under the user's standing authorization (self-driving mode) nobody is there to answer a dialog.
+	const grant = grantFor(held);
+	if (!grant && !ctx.hasUI) throw new Error("approve_goal needs an interactive session (TUI or RPC) so the user can confirm the goal; it cannot be approved here.");
 	const source = readFileSync(held.run.paths.goal, "utf8");
 	let goal;
 	try {
@@ -102,6 +110,12 @@ async function approveGoal(herder: Herder, s: Session, held: Held, ctx: Extensio
 		if (state.goal.sha256 === sha256) return reply("The goal is already approved.", { approved: true, sha256 });
 		throw new Error("The goal is already approved and frozen, but goal.md changed since. Restore the approved text; a different goal needs a new run.");
 	}
+	if (grant) {
+		held.run.journal.append({ t: "goal.approved", sha256, checks: goal.checks, approvedBy: "standing", authorization: grant.text, grant: grant.id });
+		held.run.renderProgress(planTasks(held.run));
+		herder.refresh(s);
+		return reply(`Goal approved under the user's standing authorization (self-driving mode), without asking (${goal.criteria.length} criteria, ${goal.checks.length} checks). Delivery still waits for the user: never call herder_deliver; once verified, leave the run parked. Next: write plan.md (${held.run.paths.plan}) with task lines, then orchestrate.`, { approved: true, sha256, checks: goal.checks, approvedBy: "standing", grant: grant.id });
+	}
 	const answer = await confirmLong(ctx, `Approve Herder goal: ${goal.title}`, `${source.trim()}\n\nThe goal is frozen once approved.`, signal);
 	// An abort may have begun while the dialog was open; it must not end with an approved goal.
 	if (held.closing || isFinished(held.run.state())) throw new Error(`Herder run ${held.runId} is being stopped.`);
@@ -114,9 +128,22 @@ async function approveGoal(herder: Herder, s: Session, held: Held, ctx: Extensio
 	return reply(`Goal approved (${goal.criteria.length} criteria, ${goal.checks.length} checks). Next: write plan.md (${held.run.paths.plan}) with task lines, then orchestrate.`, { approved: true, sha256, checks: goal.checks });
 }
 
+/** Whether a standing grant may abandon the run unasked: its goal was approved by one, or the run is no older than the grant. */
+function standingMayAbort(held: Held, state: RunState, grant: StandingApproval): boolean {
+	if (state.goal?.event.approvedBy === "standing") return true;
+	return sinceGrant(grant, held.run.journal.read().find((event) => event.t === "run.started")?.at);
+}
+
 async function abortRun(herder: Herder, s: Session, held: Held, ctx: ExtensionContext, signal: AbortSignal | undefined) {
 	const state = held.run.state();
 	if (isFinished(state)) throw new Error(`Herder run ${held.runId} is ${state.status}.`);
+	const grant = grantFor(held);
+	if (grant) {
+		// The user is away while a grant stands: a run it does not cover is refused, never left waiting on a dialog.
+		if (!standingMayAbort(held, state, grant)) throw new Error(`Herder run ${held.runId} predates the user's standing authorization (self-driving mode) and its goal was not approved under it, so abandoning it needs the user, who is away: leave the run as it is; they can abort it with /herder abort ${held.runId}.`);
+		const { runId, warning } = await herder.abort(s, held.runId, `aborted under the user's standing authorization (grant ${grant.id})`);
+		return reply(`Abandoned Herder run ${runId} under the user's standing authorization (self-driving mode), without asking.${warning ? ` Warning: ${warning}` : ""}`, { runId, aborted: true, grant: grant.id, ...(warning ? { warning } : {}) });
+	}
 	if (!ctx.hasUI) throw new Error("abort needs an interactive session (TUI or RPC) so the user can confirm abandoning the run; it cannot be aborted here.");
 	const summary = describeRun(held.run, state, planTasks(held.run), {
 		lock: readLock(held.run.paths.lock),
@@ -140,7 +167,7 @@ async function abortRun(herder: Herder, s: Session, held: Held, ctx: ExtensionCo
 export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 	pi.registerTool({
 		name: "herder_run", label: "Herder Run", executionMode: "sequential",
-		description: "Herder run control. start: create a run for goal at HEAD, as /herder <goal> does, and return its instructions. status: show the active run. approve_goal: validate goal.md and ask the user to approve it (interactive only). record_decision: journal a user decision (question, answer) made between launches. abort: stop and abandon the run after user confirmation (interactive only).",
+		description: "Herder run control. start: create a run for goal at HEAD, as /herder <goal> does, and return its instructions. status: show the run and any parked runs. approve_goal: validate goal.md and ask the user to approve it (or apply their standing authorization). record_decision: journal a user decision (question, answer) made between launches. abort: stop and abandon the run after user confirmation.",
 		parameters: RunParameters,
 		async execute(_id, params, signal, _update, ctx) {
 			const s = herder.session(ctx);
@@ -154,8 +181,8 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 				const run = herder.peek(s, params.runId);
 				if (!run) return reply("No Herder runs in this repository.", { runId: undefined });
 				const state = run.state();
-				const tasks = planTasks(run);
-				return reply(describeRun(run, state, tasks, { lock: readLock(run.paths.lock), sessionId: herder.lockId(s), launch: s.held?.runId === run.runId ? s.held.launch?.launch : undefined, now: herder.now() }), runDetails(run, state, tasks));
+				const parked = herder.unfinished(s).filter((entry) => isParked(entry.state)).map(({ runId, state: other }) => ({ runId, title: other.title, head: other.verification!.head }));
+				return reply(statusReport(herder, s, params.runId), { ...runDetails(run, state, planTasks(run)), parked });
 			}
 			const held = params.runId ? herder.hold(s, params.runId) : herder.current(s);
 			if (params.action === "approve_goal") return herder.op(held, signal, (combined) => approveGoal(herder, s, held, ctx, combined), true);
@@ -271,12 +298,15 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 
 	pi.registerTool({
 		name: "herder_deliver", label: "Herder Deliver", executionMode: "sequential",
-		description: "Deliver a verified run (verdict met at the current head) to the user after their confirmation. Modes: series (default), branch, squash, uncommitted; curate regroups commits first. Interactive only.",
+		description: "Deliver a verified run (verdict met at the current head) to the user after their confirmation. runId picks the run, e.g. a parked one. Modes: series (default), branch, squash, uncommitted; curate regroups commits first. Interactive only; refused under a standing authorization.",
 		parameters: DeliverParameters,
 		async execute(_id, params, signal, _update, ctx) {
 			const s = herder.session(ctx);
+			// The user is away while a grant stands: nobody could answer the delivery dialog. `/herder deliver` stays theirs.
+			const grant = herder.standing(s);
+			if (grant) throw new Error(`herder_deliver is refused under the user's standing authorization (self-driving mode, grant ${grant.id}): the user is away and delivery waits for them. Leave the verified run parked and report it; they deliver it with /herder deliver <runId> when they return.`);
 			if (!ctx.hasUI) throw new Error("herder_deliver needs an interactive session (TUI or RPC) so the user can confirm delivery.");
-			const held = herder.current(s);
+			const held = params.runId ? herder.hold(s, params.runId) : herder.current(s);
 			const outcome = await herder.deliver(s, held, { mode: (params.mode ?? "series") as DeliveryMode, ...(params.curate ? { curate: true } : {}) }, signal);
 			return reply(describeDelivery(outcome), outcome);
 		},

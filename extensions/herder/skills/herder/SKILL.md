@@ -21,7 +21,7 @@ Success is computed by the runtime from real check results and its own verificat
    - Simple runs: `herder_step` (one `agent()` step with the same options) then `herder_integrate` with its commit. Inspect each result before the next call.
    - Larger runs: write a script, check it with `herder_workflow { mode: "validate", script | scriptPath }`, then launch it with `herder_workflow { mode: "run", script | scriptPath, args }`. It runs in the background and returns a launch number; a follow-up message reports the script's return value and how many steps were reused, changed, or new. Do not poll; continue when the follow-up arrives. `herder_workflow { mode: "stop" }` stops it.
 7. **Check and verify.** `herder_check` runs checks at the integration head (or a given commit). `herder_verify` runs every check, runs the fresh-context verifier when the run is non-trivial, and computes the verdict (`met`, `not_met`, or `blocked`). On `not_met`, read the gaps it appended to `plan.md` (a `## Convergence N` section), plan a fix, and launch again. On `blocked`, take the quoted criterion to the user.
-8. **Deliver.** `herder_deliver` requires a `met` verdict at the current head and the user's confirmation. Modes:
+8. **Deliver.** `herder_deliver` requires a `met` verdict at the current head and the user's confirmation; under a standing authorization, leave the run parked instead (see Standing approval). Modes:
    - `series` (default): the run's commits, one per integrated task, fast-forwarded onto the user's branch (the checkout must be clean and on that branch).
    - `branch`: a new `herder/<runId>` branch; the checkout is untouched.
    - `squash`: one commit on the user's branch, titled from the goal.
@@ -38,6 +38,15 @@ After a crash, a stop, or in a new session, the user runs `/herder resume`, whic
 - Steps that failed or were interrupted run again. Changed steps run live.
 - `fresh: true` on an `agent()` call deliberately resamples a step that would otherwise be reused.
 - Without `resume`, a launch starts from the current integration head (use this for follow-up work, such as fixes after verification).
+
+### Standing approval
+
+When a tool result or Herder message says a standing authorization is in effect (self-driving mode), the user is away and approved the work in advance. Do not ask the user anything:
+
+- Skip the Clarify questions. Write the assumptions you made into `goal.md` (Constraints or Out of scope), or record each with `herder_run { action: "record_decision", question, answer }`, the answer marked as your assumption.
+- `approve_goal` and `herder_pick_findings` answer without dialogs, and `abort` needs no confirmation for a run whose goal it approved or that started after it was granted. Nothing waits for the user: `abort` refuses any other run, and `herder_deliver` refuses.
+- Never call `herder_deliver`. Once `herder_verify` reports `met`, leave the run parked and report it: the user delivers it later with `/herder deliver <runId>`, and a new run may start meanwhile.
+- On `blocked`, or when a decision only the user can make comes up, do not wait for them: report the question, leave the run, and move on.
 
 ## Choosing orchestration
 

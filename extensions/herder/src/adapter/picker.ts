@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Key, type KeybindingsManager, matchesKey, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
+import type { StandingApproval } from "./standing.ts";
 
 const optional = (description: string) => Type.Optional(Type.String({ description }));
 export const FindingSchema = Type.Object({
@@ -21,7 +22,8 @@ export const PickParameters = Type.Object({
 });
 export type Finding = Static<typeof FindingSchema>;
 export type PickParams = Static<typeof PickParameters>;
-export interface PickDetails { selected: string[]; note?: string; cancelled: boolean; via: "picker" | "editor" }
+/** `via: "standing"`: the user's standing authorization (self-driving mode) took the recommended set without asking. */
+export interface PickDetails { selected: string[]; note?: string; cancelled: boolean; via: "picker" | "editor" | "standing"; grant?: string }
 /** Picker state shared across the picker instances of one interaction (each note edit reopens the picker). */
 export interface PickState { title: string; findings: readonly Finding[]; selected: Set<string>; note?: string; cursor: number; offset: number }
 export type PickerAction = "confirm" | "cancel" | "note";
@@ -208,7 +210,8 @@ export function pickResult(total: number, details: PickDetails) {
 		: details.selected.length ? `Selected ${details.selected.length} of ${total}: ${ids}.`
 		: `Selected none of ${total}; start no run.`;
 	const note = !details.cancelled && details.note ? `\nNote: ${details.note}` : "";
-	return { content: [{ type: "text" as const, text: summary + note }], details };
+	const standing = details.via === "standing" ? "The user's standing authorization (self-driving mode) took the recommended findings and their dependencies, without asking. " : "";
+	return { content: [{ type: "text" as const, text: standing + summary + note }], details };
 }
 
 /** `promise`, or undefined once `signal` aborts: `ctx.ui.editor` takes no signal, so an abort must not wait for it. */
@@ -253,13 +256,16 @@ async function pickInEditor(ctx: ExtensionContext, title: string, findings: read
 	return { ...parseChecklist(edited, findings), cancelled: false, via: "editor" };
 }
 
-export function registerPickerTool(pi: ExtensionAPI): void {
+/** `standing` finds the user's standing authorization for the session's repository; with one, nobody is asked. */
+export function registerPickerTool(pi: ExtensionAPI, standing: (ctx: ExtensionContext) => StandingApproval | undefined = () => undefined): void {
 	pi.registerTool({
 		name: "herder_pick_findings", label: "Herder Pick Findings", executionMode: "sequential",
 		description: "Let the user pick which audit findings to resolve. Post the findings table and explanations in chat first, then pass the same findings in table order; recommended ones start selected. Returns the selected ids and an optional note: build the Herder run from exactly that selection, and start no run if none is selected or the user cancels. Needs no run.",
 		parameters: PickParameters,
 		async execute(_id, params, signal, _update, ctx) {
 			validateFindings(params.findings);
+			const grant = standing(ctx);
+			if (grant) return pickResult(params.findings.length, { selected: ordered(params.findings, recommendedSet(params.findings)), cancelled: false, via: "standing", grant: grant.id });
 			if (ctx.mode === "tui") return pickResult(params.findings.length, await pickInTui(ctx, params.title, params.findings, signal));
 			if (ctx.hasUI) return pickResult(params.findings.length, await pickInEditor(ctx, params.title, params.findings, signal));
 			throw new Error("herder_pick_findings needs an interactive session; ask the user in chat which findings to resolve.");

@@ -14,6 +14,7 @@ Agents work in disposable git worktrees, and writing steps produce commits on hi
 /herder resume
 /herder deliver
 /herder deliver branch --curate
+/herder deliver 20261025-141500-a3f9 squash
 /herder abort
 /herder clean
 /herder-improve deep security
@@ -25,11 +26,11 @@ Agents work in disposable git worktrees, and writing steps produce commits on hi
 - Git 2.38 or newer (`git merge-tree --write-tree`). Herder checks the version and fails with a clear message.
 - Node >=22.19.0 and Pi >=1.3.0.
 - A git repository with at least one commit.
-- An interactive session (TUI or RPC) for user confirmations: approving the goal, confirming delivery, and confirming a model-initiated abort. All three are refused in print and JSON modes.
+- An interactive session (TUI or RPC) for user confirmations: approving the goal, confirming delivery, and confirming a model-initiated abort. All three are refused in print and JSON modes, except that a [standing authorization](#standing-approval-and-parked-runs) approves goals and aborts its own runs without one.
 
 ## Run lifecycle
 
-1. **Start.** `/herder <goal>` creates a run on the current `HEAD` and writes a draft `goal.md`. It then sends the main model the Herder skill instructions. Only one unfinished run per repository is allowed; finish, resume, or abort the existing one first.
+1. **Start.** `/herder <goal>` creates a run on the current `HEAD` and writes a draft `goal.md`. It then sends the main model the Herder skill instructions. A new run starts only when every unfinished run of the repository is [parked](#standing-approval-and-parked-runs); otherwise finish, resume, or abort the existing one first.
 2. **Clarify.** The model reads the code and asks at most five questions, each with a recommended answer.
 3. **Goal.** The model completes `goal.md` and calls `herder_run { action: "approve_goal" }`. Herder validates the file and asks you to confirm it. In the TUI, the goal scrolls inside the dialog (↑↓, PgUp/PgDn, Home/End), and the Yes/No choice stays on screen; `y` or `n` answer at any point, and Esc closes the dialog without an answer, which Herder reports to the model separately from a no. The delivery summary uses the same dialog. Once approved, the goal is frozen: its hash is journaled, and Herder's tools refuse to work if `goal.md` changes afterwards. A different goal needs a new run.
 4. **Plan.** The model writes `plan.md` with task lines linked to acceptance criteria.
@@ -45,7 +46,7 @@ Agents work in disposable git worktrees, and writing steps produce commits on hi
    - `not_met`: anything else, including a verifier that fails or does not assess a criterion.
 
    Each verification appends a `## Convergence N` section listing the gaps to `plan.md`.
-7. **Deliver.** `herder_deliver` or `/herder deliver` requires a `met` verdict at the current integration head. It shows you a summary and writes only after you confirm.
+7. **Deliver.** `herder_deliver` or `/herder deliver` requires a `met` verdict at the current integration head. It shows you a summary and writes only after you confirm. A verified run you have not delivered yet is parked: it waits for `/herder deliver <runId>` while other runs start.
 
 ## Commands
 
@@ -53,9 +54,9 @@ Agents work in disposable git worktrees, and writing steps produce commits on hi
 | --- | --- |
 | `/herder <goal>` | Start a run. A goal whose first word is a subcommand name needs a leading `--`, for example `/herder -- status page shows uptime`. |
 | `/herder` or `/herder help` | Show usage. |
-| `/herder status [runId]` | Show the run: status, tasks, launches, verdict, and lock holder. Without an id, it shows the held, active, or latest run. |
-| `/herder resume [runId]` | Take the run in this session. The main model receives the goal, plan, progress, recorded decisions, and the next action. |
-| `/herder deliver [series\|branch\|squash\|uncommitted] [--curate]` | Deliver the verified run. The mode defaults to `series`. |
+| `/herder status [runId]` | Show the run: status, tasks, launches, verdict, and lock holder, then one line per parked run. Without an id, it shows the held, active, or latest run. |
+| `/herder resume [runId]` | Take the run in this session. The main model receives the goal, plan, progress, recorded decisions, and the next action. Without an id, it takes the held run or the only unfinished run. |
+| `/herder deliver [runId] [series\|branch\|squash\|uncommitted] [--curate]` | Deliver the verified run. With an id, this session takes that run first (refused while another live session holds it). Without one, it delivers the held run or the only unfinished run. The mode defaults to `series`. |
 | `/herder abort [runId]` | Stop the run's launch and tool calls, journal it as abandoned, and remove its refs and worktrees. The run directory stays. |
 | `/herder clean [runId\|--finished]` | Delete the directories, refs, and worktrees of finished runs (delivered, abandoned, or failed). The default is `--finished`. A named run must be finished; abort it first. |
 | `/herder-improve [quick\|standard\|deep] [focus\|path\|branch\|next\|features\|roadmap] [--lang <language>] [--auto]` | Audit the repository for vetted improvements and start a run for the findings you pick. See [Audits](#audits). |
@@ -67,14 +68,16 @@ The main model drives a run with these tools. All except `herder_run`, `herder_p
 
 | Tool | Purpose |
 | --- | --- |
-| `herder_run` | `action: "start"` creates a run for `goal` as `/herder <goal>` does and returns the instructions as its result. `"status"` shows the run. `"approve_goal"` validates `goal.md` and asks you to approve it (interactive only). `"record_decision"` journals a question and your answer, given between launches. `"abort"` stops and abandons the run after your confirmation (interactive only). |
+| `herder_run` | `action: "start"` creates a run for `goal` as `/herder <goal>` does and returns the instructions as its result. `"status"` shows the run and the parked runs. `"approve_goal"` validates `goal.md` and asks you to approve it (interactive only, unless a standing authorization approves it). `"record_decision"` journals a question and your answer, given between launches. `"abort"` stops and abandons the run after your confirmation (interactive only, unless a standing authorization covers the run; a run it does not cover is then refused). |
 | `herder_workflow` | `mode: "validate"` compiles a script and dry-runs it without agents. `"run"` launches `script` or `scriptPath` with `args` in the background and returns the launch number; a follow-up message reports the result. `resume: n` replays launch `n`. `"stop"` stops the running launch. |
 | `herder_step` | Run one agent step directly. It takes the same options as a script's `agent()`. |
 | `herder_integrate` | Integrate a step key or commit with a commit `message`, an optional `task`, and optional `checks`. |
 | `herder_check` | Run checks (default: all) at the integration head or at a given commit. |
 | `herder_verify` | Verify the run and compute the verdict. |
-| `herder_deliver` | Deliver after your confirmation (interactive only). It takes `mode` and `curate`. |
-| `herder_pick_findings` | Show an audit's findings as a checklist (interactive only). Recommended findings start checked, checking a finding also checks the findings it depends on, and you can add a note. It returns the selected ids. |
+| `herder_deliver` | Deliver after your confirmation (interactive only; refused under a standing authorization). It takes `runId`, `mode`, and `curate`. |
+| `herder_pick_findings` | Show an audit's findings as a checklist (interactive only). Recommended findings start checked, checking a finding also checks the findings it depends on, and you can add a note. It returns the selected ids. Under a standing authorization it returns the recommended findings and their dependencies without asking. |
+
+A run is named by `runId` where a tool takes one. Tools that take none use the run this session holds, else the repository's only unfinished run; when several are unfinished and none is held, they refuse and list them, so the user picks one with `/herder resume <runId>` or `/herder deliver <runId>`.
 
 The model gets the full rules and the script API from the bundled `herder` skill (`skills/herder/SKILL.md`). The `/herder` and `/herder resume` commands also send it to the model, and `herder_run { action: "start" }` returns it.
 
@@ -85,7 +88,7 @@ The model gets the full rules and the script API from the bundled `herder` skill
 - `/herder-improve` looks for bugs, security, performance, test, architecture, dependency, tooling, and documentation problems, plus evidence-backed directions for the project.
 - `/herder-simplify` looks for code to delete or consolidate, obsolete paths and abstractions, and needless state or control flow, while preserving the behavior that callers rely on.
 
-The audit is read-only. It changes no files, installs nothing, and holds no run or lock. It needs an interactive session, a commit, and no unfinished run. The flow is:
+The audit is read-only. It changes no files, installs nothing, and holds no run or lock. It needs an interactive session, a commit, and no unfinished run that is not parked. The flow is:
 
 1. The model recons the repository, audits it (with read-only `recon` subagents when Subagents is loaded), and vets every finding against the code.
 2. It posts a table of the vetted findings, followed by a short explanation of each.
@@ -101,6 +104,19 @@ Arguments:
 - `--lang <language>` sets the language of the findings and the discussion, for example `--lang zh-CN` or `--lang "Traditional Chinese"`. The goal, plan, and agent prompts stay in English.
 
 The skills live in `skills/improve/` and `skills/simplify/`, each with its playbook under `references/`. Improve derives from [shadcn/improve](https://github.com/shadcn/improve) (MIT); see `skills/improve/UPSTREAM.md`.
+
+## Standing approval and parked runs
+
+Another extension can let the session work while you are away (self-driving mode). It publishes a standing authorization: what you confirmed, for one repository and this Pi process. Extensions do not import each other, so the registry lives on `globalThis[Symbol.for("pi-extensions.standing-approval")]` as `{ grants: Map<id, { id, commonDir, toplevel, text, since }> }`, keyed by the granting session's id; whoever needs it first creates it. Herder's copy of the contract is `src/adapter/standing.ts`. While a grant covers the repository (the realpath of its git common dir):
+
+- `approve_goal` validates `goal.md` as usual and approves it without a dialog, even without a UI. The `goal.approved` journal event records `approvedBy: "standing"`, the authorization's text, and the grant's id.
+- `herder_pick_findings` takes the recommended findings and their dependencies without a checklist.
+- A model-initiated `abort` needs no confirmation for a run whose goal the authorization approved, or that was created at or after the grant. Any other run is refused, not asked about.
+- Delivery always needs your confirmation. Under the authorization `herder_deliver` refuses (the skills tell the model never to call it); `/herder deliver`, which you type, asks you as usual.
+
+Nothing waits for you while a grant stands: every gate either answers from the authorization or refuses at once.
+
+A run is parked when its goal is approved, its latest verdict is `met` at the current integration head, and no delivery has started. Parked runs do not block `/herder <goal>` or the audits, so several verified runs can wait for you. A session that starts or resumes another run gives up the parked one it held; it stays on disk. `/herder status` lists every parked run, and `/herder deliver <runId>` delivers one.
 
 ## goal.md
 

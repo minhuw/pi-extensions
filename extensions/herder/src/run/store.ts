@@ -109,19 +109,32 @@ export function listRuns(commonDir: string): string[] {
 	return readdirSync(dir).filter(isRunId).sort();
 }
 
+/** The run's folded state when it is started and not delivered, abandoned, or failed. */
+function unfinishedState(commonDir: string, runId: string, onError?: (runId: string, error: Error) => void): RunState | undefined {
+	const paths = runPaths(commonDir, runId);
+	if (!existsSync(paths.journal)) return undefined;
+	let state: RunState;
+	try {
+		state = fold(new Journal(paths.journal).read());
+	} catch (error) {
+		onError?.(runId, error instanceof Error ? error : new Error(String(error)));
+		return undefined;
+	}
+	return state.runId !== undefined && !FINISHED.has(state.status) ? state : undefined;
+}
+
 /** The latest started run that is not delivered, abandoned, or failed, or null. Runs whose journal cannot be read are skipped and passed to `onError`. */
 export function activeRun(commonDir: string, onError?: (runId: string, error: Error) => void): string | null {
-	for (const runId of listRuns(commonDir).reverse()) {
-		const paths = runPaths(commonDir, runId);
-		if (!existsSync(paths.journal)) continue;
-		let state: RunState;
-		try {
-			state = fold(new Journal(paths.journal).read());
-		} catch (error) {
-			onError?.(runId, error instanceof Error ? error : new Error(String(error)));
-			continue;
-		}
-		if (state.runId !== undefined && !FINISHED.has(state.status)) return runId;
-	}
+	for (const runId of listRuns(commonDir).reverse()) if (unfinishedState(commonDir, runId, onError)) return runId;
 	return null;
+}
+
+/** Every started run that is not delivered, abandoned, or failed, oldest first, with its state. Unreadable runs are skipped as in `activeRun`. */
+export function unfinishedRuns(commonDir: string, onError?: (runId: string, error: Error) => void): Array<{ runId: string; state: RunState }> {
+	const runs: Array<{ runId: string; state: RunState }> = [];
+	for (const runId of listRuns(commonDir)) {
+		const state = unfinishedState(commonDir, runId, onError);
+		if (state) runs.push({ runId, state });
+	}
+	return runs;
 }

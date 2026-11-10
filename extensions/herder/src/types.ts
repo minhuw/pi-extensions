@@ -156,7 +156,8 @@ export interface Gap { kind: "missing" | "partial" | "contradicts" | "unrequeste
 interface EventBase { v: 1; at: string }
 /** `sessionId` is the orchestrating Pi session. */
 export interface RunStartedEvent extends EventBase { t: "run.started"; runId: string; title: string; base: string; runtime: string; repo: string; sessionId?: string }
-export interface GoalApprovedEvent extends EventBase { t: "goal.approved"; sha256: string; checks: CheckSpec[]; approvedBy: "user" }
+/** `standing`: approved under the user's standing authorization (self-driving mode); `authorization` is its text, `grant` its id. */
+export interface GoalApprovedEvent extends EventBase { t: "goal.approved"; sha256: string; checks: CheckSpec[]; approvedBy: "user" | "standing"; authorization?: string; grant?: string }
 export interface PlanUpdatedEvent extends EventBase { t: "plan.updated"; sha256: string }
 /** `head` is the integration head the launch starts from; `resumes` names the launch it replays (§6, deviation). */
 export interface ScriptLaunchedEvent extends EventBase { t: "script.launched"; launch: number; scriptSha256: string; args: unknown; head: string; resumes?: number }

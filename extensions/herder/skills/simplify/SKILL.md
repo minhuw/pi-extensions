@@ -105,6 +105,10 @@ Surface the dependency order and the characterization tests a reduction needs fi
 
 Do not create abstractions merely to make a task look smaller. Deleting behavior based on an uncertain caller search is not mechanical.
 
+## Standing Approval
+
+When a tool result or Herder message says a standing authorization is in effect (self-driving mode), do not ask the user anything: settle open points yourself (including an unclear `--lang`) and write the assumptions you made into `goal.md`, or record them with `record_decision` as your assumption. `herder_pick_findings` takes the recommended findings and their dependencies, and `approve_goal` approves, without dialogs. Never call `herder_deliver`; leave the verified run parked for the user.
+
 ## Invocation Variants
 
 - Bare: `standard` whole-repository simplification survey.

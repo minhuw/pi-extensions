@@ -7,7 +7,7 @@ import { hashGoal } from "../artifacts/goal.ts";
 import { killAllChecks } from "../checks/runner.ts";
 import { ACTIVITY_EVENT, ACTIVITY_REQUEST_EVENT, LOCK_HEARTBEAT_MS, LOCK_STALE_MS, RUN_EVENT, RUN_EVENT_DEBOUNCE_MS, STATUS_KEY } from "../config.ts";
 import { acquireLock, type LockOptions, type RunLock } from "../run/lock.ts";
-import { activeRun, listRuns, openRun, type RunStore } from "../run/store.ts";
+import { activeRun, listRuns, openRun, unfinishedRuns, type RunStore } from "../run/store.ts";
 import type { AgentRunner, Vcs } from "../types.ts";
 import { openVcs, repositoryName, savedProjectName } from "../vcs/git.ts";
 import { ActivityBoard } from "./activity.ts";
@@ -16,7 +16,8 @@ import { confirmLong } from "./confirm.ts";
 import { StepAgents } from "./external-agents.ts";
 import type { RunState } from "../journal/fold.ts";
 import type { DeliveryOutcome, DeliveryRequest, HerderRuntime, LaunchRequest, RuntimeFactory } from "./runtime.ts";
-import { isFinished, planTasks, statusText } from "./status.ts";
+import { hasStandingGrants, standingGrant, type StandingApproval } from "./standing.ts";
+import { isFinished, planTasks, severalRunsText, statusText, type RunEntry } from "./status.ts";
 
 export const FOLLOW_UP_TYPE = "herder:launch";
 
@@ -171,13 +172,33 @@ export class Herder {
 		return held;
 	}
 
-	/** The session's run: the one it holds, else the repository's unfinished run (locked on first use). */
+	/** The session's run: the one it holds, else the repository's only unfinished run (locked on first use). */
 	current(s: Session): Held {
 		if (s.held && !isFinished(s.held.run.state())) return this.#check(s, s.held);
 		if (s.held && !busy(s.held)) this.release(s);
-		const runId = activeRun(this.vcs(s).commonDir());
+		const runId = this.implied(s);
 		if (!runId) throw new Error("No active Herder run in this repository. The user starts one with /herder <goal> or continues one with /herder resume <runId>.");
 		return this.hold(s, runId);
+	}
+
+	/** The repository's unfinished runs, oldest first. */
+	unfinished(s: Session): RunEntry[] { return unfinishedRuns(this.vcs(s).commonDir()); }
+
+	/**
+	 * The run meant when none is named: the held unfinished run, else the only unfinished run. Several unfinished runs
+	 * (parked ones waiting for delivery among them) are never resolved to the newest: that refuses, listing them.
+	 */
+	implied(s: Session): string | undefined {
+		if (s.held && !isFinished(s.held.run.state())) return s.held.runId;
+		const runs = this.unfinished(s);
+		if (runs.length > 1) throw new Error(severalRunsText(runs));
+		return runs[0]?.runId;
+	}
+
+	/** The user's standing authorization (self-driving mode) covering the session's repository, if any. */
+	standing(s: Session): StandingApproval | undefined {
+		if (!hasStandingGrants()) return undefined;
+		try { return standingGrant(this.vcs(s).commonDir()); } catch { return undefined; }
 	}
 
 	/** A run to describe, without locking: `runId`, else the held run, else the active or latest run. */
@@ -374,9 +395,9 @@ export class Herder {
 	 * Stops the run's launch, journals `run.finished abandoned` through the runtime, and releases the lock. Returns the
 	 * run id and a warning when the run's refs or worktrees could not be removed.
 	 */
-	async abort(s: Session, runId?: string): Promise<{ runId: string; warning?: string }> {
+	async abort(s: Session, runId?: string, reason = "aborted by the user"): Promise<{ runId: string; warning?: string }> {
 		const commonDir = this.vcs(s).commonDir();
-		const id = runId ?? s.held?.runId ?? activeRun(commonDir);
+		const id = runId ?? this.implied(s);
 		if (!id) throw new Error("No unfinished Herder run to abort.");
 		const run = s.held?.runId === id ? s.held.run : openRun(commonDir, id);
 		const state = run.state();
@@ -392,7 +413,7 @@ export class Herder {
 			throw new Error(`A Herder tool call of run ${id} is still stopping; run /herder abort again in a moment.`);
 		}
 		try {
-			const warning = await this.runtime(s, held).abandon("aborted by the user");
+			const warning = await this.runtime(s, held).abandon(reason);
 			return warning ? { runId: id, warning } : { runId: id };
 		} finally {
 			this.board.clear();

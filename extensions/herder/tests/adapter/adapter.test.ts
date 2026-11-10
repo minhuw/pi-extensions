@@ -62,7 +62,8 @@ describe("registration", () => {
 		expect(tool("herder_integrate").parameters.required.sort()).toEqual(["message", "source"]);
 		expect(props(tool("herder_check"))).toEqual(["checks", "commit"]);
 		expect(props(tool("herder_verify"))).toEqual([]);
-		expect(props(tool("herder_deliver"))).toEqual(["curate", "mode"]);
+		expect(props(tool("herder_deliver"))).toEqual(["curate", "mode", "runId"]);
+		expect(tool("herder_deliver").parameters.required ?? []).toEqual([]);
 		expect(props(tool("herder_pick_findings"))).toEqual(["findings", "title"]);
 		for (const item of h.tools.values()) expect(item.description.length).toBeLessThan(400);
 	});
@@ -96,6 +97,8 @@ describe("command parsing", () => {
 		expect(parseCommand("resume 20260101-000000-abcd")).toEqual({ action: "resume", runId: "20260101-000000-abcd" });
 		expect(parseCommand("deliver --curate squash")).toEqual({ action: "deliver", mode: "squash", curate: true });
 		expect(parseCommand("deliver")).toEqual({ action: "deliver", mode: "series", curate: false });
+		expect(parseCommand("deliver 20260101-000000-abcd")).toEqual({ action: "deliver", runId: "20260101-000000-abcd", mode: "series", curate: false });
+		expect(parseCommand("deliver branch --curate 20260101-000000-abcd")).toEqual({ action: "deliver", runId: "20260101-000000-abcd", mode: "branch", curate: true });
 		expect(parseCommand("clean")).toEqual({ action: "clean" });
 		expect(parseCommand("clean --finished")).toEqual({ action: "clean" });
 		expect(parseCommand("statusbar shows the wrong branch")).toEqual({ action: "start", goal: "statusbar shows the wrong branch" });
@@ -103,7 +106,7 @@ describe("command parsing", () => {
 		expect(parseCommand("fix the\nlogin flow")).toEqual({ action: "start", goal: "fix the\nlogin flow" });
 	});
 
-	it.each(["status page is broken", "deliver fast", "deliver series branch", "deliver --curate --curate", "abort a b", "clean --all", "--fast goal", "--", "help me"])("rejects %s with usage", (args) => {
+	it.each(["status page is broken", "deliver fast", "deliver series branch", "deliver 20260101-000000-abcd 20260101-000000-abce", "deliver 2026-01-01", "deliver --curate --curate", "abort a b", "clean --all", "--fast goal", "--", "help me"])("rejects %s with usage", (args) => {
 		expect(() => parseCommand(args)).toThrow(UsageError);
 		expect(() => parseCommand(args)).toThrow(/Usage:/);
 	});

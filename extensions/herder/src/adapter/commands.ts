@@ -3,12 +3,12 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { goalDraft } from "../artifacts/goal.ts";
 import { readLock } from "../run/lock.ts";
 import { isRunId, refPrefix } from "../run/paths.ts";
-import { activeRun, createRun, listRuns, openRun } from "../run/store.ts";
+import { createRun, listRuns, openRun } from "../run/store.ts";
 import type { DeliveryMode } from "../types.ts";
 import { describeDelivery } from "./format.ts";
 import { auditPrompt, auditSkillDir, resumePrompt, skillText, startPrompt, type AuditInvocation, type AuditKind } from "./prompts.ts";
 import { busy, message, type Herder, type Held, type Session } from "./session.ts";
-import { describeRun, isFinished, planTasks } from "./status.ts";
+import { describeRun, isFinished, isParked, parkedLines, planTasks } from "./status.ts";
 
 export const PROMPT_TYPE = "herder:prompt";
 export const DELIVERY_MODES: readonly DeliveryMode[] = ["series", "branch", "squash", "uncommitted"];
@@ -19,7 +19,7 @@ export const USAGE = [
 	"/herder <goal>                     start a run for a goal",
 	"/herder status [runId]             show the run",
 	"/herder resume [runId]             continue a run in this session",
-	"/herder deliver [series|branch|squash|uncommitted] [--curate]",
+	"/herder deliver [runId] [series|branch|squash|uncommitted] [--curate]",
 	"/herder abort [runId]              stop and abandon the run",
 	"/herder clean [runId|--finished]   delete finished run directories (default: --finished)",
 	"A first word that names a subcommand is always that subcommand; start with -- to use it as goal text (/herder -- status page …).",
@@ -29,7 +29,7 @@ export type HerderCommand =
 	| { action: "help" }
 	| { action: "start"; goal: string }
 	| { action: "status" | "resume" | "abort"; runId?: string }
-	| { action: "deliver"; mode: DeliveryMode; curate: boolean }
+	| { action: "deliver"; runId?: string; mode: DeliveryMode; curate: boolean }
 	| { action: "clean"; runId?: string };
 
 export class UsageError extends Error {}
@@ -65,12 +65,14 @@ export function parseCommand(args: string): HerderCommand {
 		case "deliver": {
 			let mode: DeliveryMode | undefined;
 			let curate = false;
+			let runId: string | undefined;
 			for (const word of rest) {
 				if (word === "--curate" && !curate) curate = true;
 				else if ((DELIVERY_MODES as readonly string[]).includes(word) && !mode) mode = word as DeliveryMode;
+				else if (isRunId(word) && !runId) runId = word;
 				else throw usage(`Unexpected deliver argument ${word}.`);
 			}
-			return { action: "deliver", mode: mode ?? "series", curate };
+			return { action: "deliver", ...(runId ? { runId } : {}), mode: mode ?? "series", curate };
 		}
 		case "clean":
 			if (rest.length === 1 && rest[0] === "--finished") return { action: "clean" };
@@ -84,7 +86,10 @@ export function titleOf(goal: string): string {
 	return line.length <= 100 ? line : `${line.slice(0, 99)}…`;
 }
 
-/** The repository's head and common directory, refusing without a commit or while a run is unfinished. */
+/**
+ * The repository's head and common directory, refusing without a commit or while a run is unfinished and not parked
+ * (parked runs wait for delivery and do not block new work).
+ */
 function startable(herder: Herder, s: Session): { head: string; commonDir: string } {
 	const vcs = herder.vcs(s);
 	let head: string;
@@ -94,7 +99,7 @@ function startable(herder: Herder, s: Session): { head: string; commonDir: strin
 		throw new Error("Herder needs a repository with at least one commit.");
 	}
 	const commonDir = vcs.commonDir();
-	const unfinished = activeRun(commonDir);
+	const unfinished = herder.unfinished(s).filter(({ state }) => !isParked(state)).at(-1)?.runId;
 	if (unfinished) throw new Error(`Herder run ${unfinished} is unfinished. Continue it with /herder resume ${unfinished}, or abandon it with /herder abort ${unfinished}.`);
 	return { head, commonDir };
 }
@@ -116,7 +121,7 @@ export function startRun(herder: Herder, s: Session, goal: string, fromTool = fa
 		if (held) herder.release(s);
 		throw error;
 	}
-	return { runId: run.runId, prompt: startPrompt(run, goal, skill, fromTool) };
+	return { runId: run.runId, prompt: startPrompt(run, goal, skill, fromTool, herder.standing(s) !== undefined) };
 }
 
 function start(herder: Herder, s: Session, goal: string): string {
@@ -155,13 +160,13 @@ function audit(herder: Herder, s: Session, kind: AuditKind, args: string): strin
 	startable(herder, s);
 	const invocation = parseAudit(args);
 	const repo = herder.vcs(s).topLevel();
-	herder.pi.sendMessage({ customType: PROMPT_TYPE, display: true, content: auditPrompt(kind, invocation, repo), details: { action: kind, invocation, skillDir: auditSkillDir(kind) } }, { triggerTurn: true, deliverAs: "followUp" });
+	herder.pi.sendMessage({ customType: PROMPT_TYPE, display: true, content: auditPrompt(kind, invocation, repo, herder.standing(s) !== undefined), details: { action: kind, invocation, skillDir: auditSkillDir(kind) } }, { triggerTurn: true, deliverAs: "followUp" });
 	return `Started the read-only /herder-${kind} audit.`;
 }
 
 function resume(herder: Herder, s: Session, runId: string | undefined): string {
 	const commonDir = herder.vcs(s).commonDir();
-	const id = runId ?? activeRun(commonDir);
+	const id = runId ?? herder.implied(s);
 	if (!id) throw new Error("nothing to resume: no unfinished Herder run in this repository");
 	const run = s.held?.runId === id ? s.held.run : openRun(commonDir, id);
 	const state = run.state();
@@ -171,7 +176,7 @@ function resume(herder: Herder, s: Session, runId: string | undefined): string {
 	const held = herder.hold(s, id, run);
 	const tasks = planTasks(held.run);
 	held.run.renderProgress(tasks);
-	herder.pi.sendMessage({ customType: PROMPT_TYPE, display: true, content: resumePrompt(held.run, held.run.state(), tasks, skill), details: { runId: id, action: "resume" } }, { triggerTurn: true, deliverAs: "followUp" });
+	herder.pi.sendMessage({ customType: PROMPT_TYPE, display: true, content: resumePrompt(held.run, held.run.state(), tasks, skill, herder.standing(s) !== undefined), details: { runId: id, action: "resume" } }, { triggerTurn: true, deliverAs: "followUp" });
 	return `Resumed Herder run ${id}.`;
 }
 
@@ -203,15 +208,17 @@ function clean(herder: Herder, s: Session, runId: string | undefined): string {
 	return deleted.length ? `Deleted ${deleted.length} Herder run(s): ${deleted.join(", ")}.` : "No finished Herder runs to delete.";
 }
 
-function status(herder: Herder, s: Session, runId: string | undefined): string {
+/** `/herder status` and `herder_run { action: "status" }`: the run, then one line per parked run. */
+export function statusReport(herder: Herder, s: Session, runId: string | undefined): string {
 	const run = herder.peek(s, runId);
 	if (!run) return "No Herder runs in this repository.";
-	return describeRun(run, run.state(), planTasks(run), { lock: readLock(run.paths.lock), sessionId: herder.lockId(s), launch: s.held?.runId === run.runId ? s.held.launch?.launch : undefined, now: herder.now() });
+	const text = describeRun(run, run.state(), planTasks(run), { lock: readLock(run.paths.lock), sessionId: herder.lockId(s), launch: s.held?.runId === run.runId ? s.held.launch?.launch : undefined, now: herder.now() });
+	return [text, ...parkedLines(herder.unfinished(s))].join("\n");
 }
 
 export function registerCommands(pi: ExtensionAPI, herder: Herder): void {
 	pi.registerCommand("herder", {
-		description: "Durable, verified coding runs: /herder <goal> | status | resume | deliver [mode] [--curate] | abort | clean",
+		description: "Durable, verified coding runs: /herder <goal> | status | resume | deliver [runId] [mode] [--curate] | abort | clean",
 		getArgumentCompletions: (prefix) => {
 			const words = prefix.trimStart().split(/\s+/);
 			const last = words.pop() ?? "";
@@ -229,7 +236,7 @@ export function registerCommands(pi: ExtensionAPI, herder: Herder): void {
 				const s = herder.session(ctx);
 				switch (command.action) {
 					case "start": ctx.ui.notify(start(herder, s, command.goal), "info"); break;
-					case "status": ctx.ui.notify(status(herder, s, command.runId), "info"); break;
+					case "status": ctx.ui.notify(statusReport(herder, s, command.runId), "info"); break;
 					case "resume": ctx.ui.notify(resume(herder, s, command.runId), "info"); break;
 					case "abort": {
 						const { runId, warning } = await herder.abort(s, command.runId);
@@ -238,7 +245,8 @@ export function registerCommands(pi: ExtensionAPI, herder: Herder): void {
 					}
 					case "clean": ctx.ui.notify(clean(herder, s, command.runId), "info"); break;
 					case "deliver": {
-						const outcome = await herder.deliver(s, herder.current(s), { mode: command.mode, curate: command.curate });
+						const held = command.runId ? herder.hold(s, command.runId) : herder.current(s);
+						const outcome = await herder.deliver(s, held, { mode: command.mode, curate: command.curate });
 						ctx.ui.notify(describeDelivery(outcome), outcome.status === "delivered" ? "info" : "warning");
 						break;
 					}

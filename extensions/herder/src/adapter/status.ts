@@ -7,8 +7,33 @@ import type { StepActivity } from "./runtime.ts";
 
 export const FINISHED_STATUSES: ReadonlySet<string> = new Set(["delivered", "abandoned", "failed"]);
 export const isFinished = (state: RunState) => FINISHED_STATUSES.has(state.status);
+/** Verified `met` at its current integration head, with no delivery started: waiting for the user to deliver it. */
+export const isParked = (state: RunState) => state.goal !== undefined && !isFinished(state) && !state.deliveryStarted && !state.delivery
+	&& state.verification?.verdict === "met" && state.verification.head === state.integrationHead;
 const short = (sha: string | undefined) => (sha ? sha.slice(0, 12) : "—");
 const clip = (text: string, max: number) => (text.length <= max ? text : `${text.slice(0, max - 1)}…`);
+
+export interface RunEntry { runId: string; state: RunState }
+const titled = ({ runId, state }: RunEntry) => `${runId}${state.title ? ` ${clip(state.title, 80)}` : ""}`;
+
+/** One line per parked run: id, title, the verified head, and how to deliver it; empty without parked runs. */
+export function parkedLines(runs: readonly RunEntry[]): string[] {
+	const parked = runs.filter((run) => isParked(run.state));
+	if (!parked.length) return [];
+	return [
+		`Parked runs (verified, waiting for delivery): ${parked.length}`,
+		...parked.map((run) => `  ${titled(run)} — verified met at ${short(run.state.verification!.head)}; deliver with /herder deliver ${run.runId}`),
+	];
+}
+
+/** The refusal when several runs are unfinished and none is named or held. */
+export function severalRunsText(runs: readonly RunEntry[]): string {
+	return [
+		`${runs.length} Herder runs are unfinished in this repository and this session holds none of them; name one:`,
+		...runs.map((run) => `  ${titled(run)} — ${isParked(run.state) ? "parked (verified met, waiting for delivery)" : `not parked (${run.state.status})`}`),
+		"Continue one with /herder resume <runId>, or deliver a parked one with /herder deliver <runId> (herder_deliver { runId }).",
+	].join("\n");
+}
 
 /** Task lines of plan.md; an unreadable plan has none. */
 export function planTasks(run: RunStore): PlanTask[] {
