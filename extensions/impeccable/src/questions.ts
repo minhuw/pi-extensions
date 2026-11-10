@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
 import { Type, type Static } from "typebox";
+import { promptTuiQuestion } from "./question-ui.ts";
 
 export const QuestionSchema = Type.Object({
 	questions: Type.Array(Type.Object({
@@ -56,42 +57,59 @@ function validate(request: Request): void {
 	}
 }
 
-export async function askQuestions(request: Request, ctx: Pick<ExtensionContext, "hasUI" | "ui">, signal?: AbortSignal): Promise<QuestionReport> {
+export async function askQuestions(
+	request: Request,
+	ctx: Pick<ExtensionContext, "hasUI" | "ui"> & Partial<Pick<ExtensionContext, "mode">>,
+	signal?: AbortSignal,
+): Promise<QuestionReport> {
 	validate(request);
 	const answers: QuestionReport["answers"] = [];
 	const report = (status: QuestionReport["status"], message: string): QuestionReport => ({
 		status, answers, pending: request.questions.slice(answers.length), message,
 	});
 	if (signal?.aborted) return report("cancelled", "Tool cancelled; no answer was assumed.");
-	if (!ctx.hasUI || typeof ctx.ui?.input !== "function" || typeof ctx.ui?.select !== "function") {
+	const useTuiCustom = (ctx as Partial<Pick<ExtensionContext, "mode">>).mode === "tui" && typeof ctx.ui?.custom === "function";
+	if (!ctx.hasUI || (!useTuiCustom && (typeof ctx.ui?.input !== "function" || typeof ctx.ui?.select !== "function"))) {
 		return report("unavailable", "Dialog UI unavailable. Ask the pending questions in chat and wait for actual answers before proceeding with the decision.");
 	}
-	for (const question of request.questions) {
+	for (const [questionIndex, question] of request.questions.entries()) {
 		if (signal?.aborted) return report("cancelled", "Tool cancelled; retain the partial answers and ask pending questions later.");
-		// Ids are for the model; the user reads only the question, its description, and the choice labels.
-		const title = `${question.question}${question.description ? `\n${question.description}` : ""}`;
-		// No timeout: Pi resolves a timed-out dialog as dismissed on the agent side, so an answer picked later would be lost.
-		const options = { signal };
 		try {
 			let value: string | undefined;
 			let choiceId: string | undefined;
-			if (question.choices) {
-				const duplicated = (label: string) => question.choices!.filter((choice) => choice.label === label).length > 1;
-				const labels = question.choices.map((choice) =>
-					`${choice.label}${duplicated(choice.label) ? ` (${choice.id})` : ""}${choice.description ? ` — ${choice.description}` : ""}`);
-				let custom = "Other: type your own answer";
-				while (labels.includes(custom)) custom += " (free text)";
-				const selected = await ctx.ui.select(title, question.allowFreeText ? [...labels, custom] : labels, options);
-				if (signal?.aborted) return report("cancelled", "Tool cancelled; no answer was assumed for the open dialog.");
-				const index = selected === undefined ? -1 : labels.indexOf(selected);
-				if (index >= 0) {
-					value = question.choices[index]!.label;
-					choiceId = question.choices[index]!.id;
-				} else if (selected === custom && question.allowFreeText) {
-					value = await ctx.ui.input(title, "Your answer", options);
+			if (useTuiCustom) {
+				const answered = await promptTuiQuestion(ctx.ui, question, {
+					index: questionIndex,
+					total: request.questions.length,
+					signal,
+				});
+				if (answered) {
+					value = answered.value;
+					choiceId = answered.choiceId;
 				}
 			} else {
-				value = await ctx.ui.input(title, "Your answer", options);
+				// Ids are for the model; the user reads only the question, its description, and the choice labels.
+				const title = `${question.question}${question.description ? `\n${question.description}` : ""}`;
+				// No timeout: Pi resolves a timed-out dialog as dismissed on the agent side, so an answer picked later would be lost.
+				const options = { signal };
+				if (question.choices) {
+					const duplicated = (label: string) => question.choices!.filter((choice) => choice.label === label).length > 1;
+					const labels = question.choices.map((choice) =>
+						`${choice.label}${duplicated(choice.label) ? ` (${choice.id})` : ""}${choice.description ? ` — ${choice.description}` : ""}`);
+					let custom = "Other: type your own answer";
+					while (labels.includes(custom)) custom += " (free text)";
+					const selected = await ctx.ui.select(title, question.allowFreeText ? [...labels, custom] : labels, options);
+					if (signal?.aborted) return report("cancelled", "Tool cancelled; no answer was assumed for the open dialog.");
+					const index = selected === undefined ? -1 : labels.indexOf(selected);
+					if (index >= 0) {
+						value = question.choices[index]!.label;
+						choiceId = question.choices[index]!.id;
+					} else if (selected === custom && question.allowFreeText) {
+						value = await ctx.ui.input(title, "Your answer", options);
+					}
+				} else {
+					value = await ctx.ui.input(title, "Your answer", options);
+				}
 			}
 			if (signal?.aborted) return report("cancelled", "Tool cancelled; no answer was assumed for the open dialog.");
 			if (value === undefined) return report("dismissed", "Dialog dismissed or timed out. No answer was assumed; ask the pending questions in chat and wait.");
