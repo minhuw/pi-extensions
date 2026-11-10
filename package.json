@@ -59,6 +59,7 @@
 	},
 	"dependencies": {
 		"croner": "^10.0.1",
+		"diff": "^8.0.4",
 		"nanoid": "^5.1.16",
 		"unbash": "^6.0.4"
 	},
@@ -70,8 +71,8 @@
 		"@sinclair/typebox": "^0.34.52",
 		"@types/node": "^24.12.0",
 		"@types/ws": "^8.18.2",
-		"typebox": "^1.3.27",
 		"playwright-core": "1.56.1",
+		"typebox": "^1.3.27",
 		"typescript": "^5.9.3",
 		"vitest": "^4.1.11",
 		"ws": "^8.22.0"
@@ -84,7 +85,9 @@
 		"typebox": "*"
 	},
 	"pi": {
-		"themes": ["./themes"],
+		"themes": [
+			"./themes"
+		],
 		"skills": [
 			"./extensions/herder/skills",
 			"./extensions/impeccable/skills",

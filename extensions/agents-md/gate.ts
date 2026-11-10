@@ -6,8 +6,10 @@ import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSy
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { structuredPatch } from "diff";
 import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { isContextFile, lintContextFile, newFindings, repositoryContextFiles, type LintFinding } from "./lint.ts";
+import { promptReviewDialog } from "./review-ui.ts";
 
 export const SESSION_LINK_TYPE = "pi-extensions.session-link";
 /** selfdrive publishes its grants here while the user is away; read it, never import selfdrive. */
@@ -164,81 +166,25 @@ export function applyEdits(current: string, edits: readonly { oldText: string; n
 
 // ---- Diff ----
 
-type Op = { type: " " | "-" | "+"; text: string };
-
-const splitLines = (text: string): string[] => {
-	if (text === "") return [];
-	const lines = text.split("\n");
-	if (lines.at(-1) === "") lines.pop();
-	return lines;
+const lineText = (t: string): string => {
+	const lf = t.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+	return lf === "" ? "" : lf.endsWith("\n") ? lf : `${lf}\n`;
 };
-
-/** Line operations turning `a` into `b`: common prefix and suffix, and an LCS of the middle when it is small enough. */
-function diffOps(a: string[], b: string[]): Op[] {
-	let start = 0;
-	while (start < a.length && start < b.length && a[start] === b[start]) start++;
-	let endA = a.length;
-	let endB = b.length;
-	while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
-		endA--;
-		endB--;
-	}
-	const ops: Op[] = a.slice(0, start).map((text) => ({ type: " ", text }));
-	const midA = a.slice(start, endA);
-	const midB = b.slice(start, endB);
-	if (midA.length * midB.length > 4_000_000) {
-		ops.push(...midA.map((text): Op => ({ type: "-", text })), ...midB.map((text): Op => ({ type: "+", text })));
-	} else {
-		// lcs[i][j]: the LCS length of midA[i..] and midB[j..].
-		const width = midB.length + 1;
-		const lcs = new Uint32Array((midA.length + 1) * width);
-		for (let i = midA.length - 1; i >= 0; i--) {
-			for (let j = midB.length - 1; j >= 0; j--) {
-				lcs[i * width + j] = midA[i] === midB[j] ? lcs[(i + 1) * width + j + 1]! + 1 : Math.max(lcs[(i + 1) * width + j]!, lcs[i * width + j + 1]!);
-			}
-		}
-		let i = 0;
-		let j = 0;
-		while (i < midA.length || j < midB.length) {
-			if (i < midA.length && j < midB.length && midA[i] === midB[j]) {
-				ops.push({ type: " ", text: midA[i++]! });
-				j++;
-			} else if (i < midA.length && (j === midB.length || lcs[(i + 1) * width + j]! >= lcs[i * width + j + 1]!)) {
-				// On a tie the removal goes first, as unified diffs show a replaced line.
-				ops.push({ type: "-", text: midA[i++]! });
-			} else {
-				ops.push({ type: "+", text: midB[j++]! });
-			}
-		}
-	}
-	ops.push(...a.slice(endA).map((text): Op => ({ type: " ", text })));
-	return ops;
-}
 
 /** A unified diff of `before` → `after` (hunks only, without file headers), or [] when the lines are the same. */
 export function unifiedDiff(before: string, after: string, context = CONTEXT_LINES): string[] {
-	const ops = diffOps(splitLines(before), splitLines(after));
-	const changed = ops.flatMap((op, index) => (op.type === " " ? [] : [index]));
-	if (changed.length === 0) return [];
+	const oldStr = lineText(before);
+	const newStr = lineText(after);
+	if (oldStr === newStr) return [];
+	const patch = structuredPatch("", "", oldStr, newStr, undefined, undefined, { context });
 	const out: string[] = [];
-	let k = 0;
-	while (k < changed.length) {
-		const first = Math.max(0, changed[k]! - context);
-		let last = changed[k]!;
-		while (k + 1 < changed.length && changed[k + 1]! - last <= 2 * context) last = changed[++k]!;
-		k++;
-		const end = Math.min(ops.length, last + context + 1);
-		let oldStart = 1;
-		let newStart = 1;
-		for (const op of ops.slice(0, first)) {
-			if (op.type !== "+") oldStart++;
-			if (op.type !== "-") newStart++;
+	for (const hunk of patch.hunks) {
+		const oldStart = hunk.oldLines === 0 ? hunk.oldStart - 1 : hunk.oldStart;
+		const newStart = hunk.newLines === 0 ? hunk.newStart - 1 : hunk.newStart;
+		out.push(`@@ -${oldStart},${hunk.oldLines} +${newStart},${hunk.newLines} @@`);
+		for (const line of hunk.lines) {
+			if (line !== "\\ No newline at end of file") out.push(line);
 		}
-		const hunk = ops.slice(first, end);
-		const oldCount = hunk.filter((op) => op.type !== "+").length;
-		const newCount = hunk.filter((op) => op.type !== "-").length;
-		out.push(`@@ -${oldCount ? oldStart : oldStart - 1},${oldCount} +${newCount ? newStart : newStart - 1},${newCount} @@`);
-		out.push(...hunk.map((op) => `${op.type}${op.text}`));
 	}
 	return out;
 }
@@ -327,13 +273,22 @@ export async function reviewToolCall(toolName: string, input: unknown, ctx: Exte
 	if (proposal.kind === "allow") return undefined;
 	if (proposal.kind === "block") return { block: true, reason: proposal.reason };
 
-	const text = reviewText(path, toolName, proposal.before, proposal.after, addedFindings(proposal.before, proposal.after, file, root), proposal.existed);
+	const added = addedFindings(proposal.before, proposal.after, file, root);
 	const options = { signal: ctx.signal };
 	let choice: string | undefined;
-	try {
-		choice = await ctx.ui.select(text, [CHOICES.apply, CHOICES.reject, CHOICES.note], options);
-	} catch {
-		choice = undefined;
+	if (ctx.mode === "tui" && typeof ctx.ui.custom === "function") {
+		choice = await promptReviewDialog(
+			ctx,
+			{ path, tool: toolName, before: proposal.before, after: proposal.after, existed: proposal.existed, added },
+			ctx.signal,
+		);
+	} else {
+		const text = reviewText(path, toolName, proposal.before, proposal.after, added, proposal.existed);
+		try {
+			choice = await ctx.ui.select(text, [CHOICES.apply, CHOICES.reject, CHOICES.note], options);
+		} catch {
+			choice = undefined;
+		}
 	}
 	if (choice === CHOICES.apply && !ctx.signal?.aborted) return undefined;
 	let note: string | undefined;
