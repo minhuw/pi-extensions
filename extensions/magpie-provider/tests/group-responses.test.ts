@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 vi.mock("../catalog-pricing.ts", async importOriginal => ({ ...await importOriginal<object>(), loadModelsDevPricing: async () => undefined }));
 import { createMagpieProvider, parseModels } from "../index.ts";
+import { withResponsesToolStrict } from "../streams.ts";
 
 const origin = "https://gateway.example";
 const name = "gpt-6-luna";
@@ -81,17 +82,79 @@ it.each([false, true])("sends the priority tier through the real Responses deleg
 			id: "response-1", status: "completed", output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 },
 		} })}\n\n`, { headers: { "content-type": "text/event-stream" } });
 	};
-	const context = normalizeContext({ messages: [{ role: "user", content: "Hi", timestamp: 0 }] });
+	const context = normalizeContext({
+		messages: [{ role: "user", content: "Hi", timestamp: 0 }],
+		tools: [{
+			name: "relay_send",
+			description: "Send a relay message",
+			parameters: {
+				type: "object",
+				properties: { to: { type: "string" }, room: { type: "string" }, text: { type: "string" } },
+				required: ["text"],
+			} as any,
+		}],
+	});
+	const seenByOnPayload: unknown[] = [];
 	for (const method of ["stream", "streamSimple"] as const) {
 		const options = { apiKey: "fixture-key", fetch: mockedFetch, maxRetries: 0, serviceTier: "priority" as const,
 			// Subagents pins the tier after the SDK's simple-options conversion too.
-			onPayload: (payload: unknown) => ({ ...payload as Record<string, unknown>, service_tier: "priority" }) };
+			onPayload: (payload: unknown) => {
+				seenByOnPayload.push(payload);
+				return { ...payload as Record<string, unknown>, service_tier: "priority" };
+			} };
 		const result = await provider[method](model, context, options).result();
 		expect(result.stopReason, result.errorMessage).toBe("stop");
 		const request = requests.at(-1)!;
 		expect(request.url).toBe(`${origin}/v1/responses`);
-		expect(await request.json()).toMatchObject({ model: advertised ? name : group.id, service_tier: "priority" });
+		expect(await request.json()).toMatchObject({
+			model: advertised ? name : group.id,
+			service_tier: "priority",
+			tools: [{
+				type: "function",
+				name: "relay_send",
+				strict: false,
+				parameters: {
+					type: "object",
+					properties: { to: { type: "string" }, room: { type: "string" }, text: { type: "string" } },
+					required: ["text"],
+				},
+			}],
+		});
 		expect(result.model).toBe(name);
 	}
+	expect(seenByOnPayload).toHaveLength(2);
+	for (const payload of seenByOnPayload) {
+		expect(payload).toMatchObject({ tools: [{ name: "relay_send", strict: false }] });
+	}
 	expect(requests).toHaveLength(2);
+});
+
+it("defaults omitted Responses function-tool strict flags to false without altering explicit strict or non-function tools", () => {
+	const unchanged = { model: "gpt-6.1-terra", tools: [{ type: "function", name: "strict_fn", strict: true }, { type: "web_search" }] };
+	expect(withResponsesToolStrict(unchanged)).toBe(unchanged);
+
+	const transformed = withResponsesToolStrict({
+		model: "gpt-6.1-terra",
+		tools: [
+			{ type: "function", name: "relay_send", parameters: { type: "object" } },
+			{ type: "function", name: "kept_true", strict: true },
+			{ type: "namespace", name: "functions", tools: [{ type: "function", name: "nested" }] },
+		],
+		input: [
+			{ type: "additional_tools", role: "developer", tools: [{ type: "function", name: "loaded" }] },
+			{ role: "user", content: "hi" },
+		],
+	});
+	expect(transformed).toEqual({
+		model: "gpt-6.1-terra",
+		tools: [
+			{ type: "function", name: "relay_send", parameters: { type: "object" }, strict: false },
+			{ type: "function", name: "kept_true", strict: true },
+			{ type: "namespace", name: "functions", tools: [{ type: "function", name: "nested", strict: false }] },
+		],
+		input: [
+			{ type: "additional_tools", role: "developer", tools: [{ type: "function", name: "loaded", strict: false }] },
+			{ role: "user", content: "hi" },
+		],
+	});
 });

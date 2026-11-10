@@ -257,7 +257,13 @@ it.each((["/v1/chat/completions", "/v1/responses", "/v1/messages"] as const).fla
 		const received = [];
 		for await (const item of provider[method](model, context, options)) received.push(item);
 		expect(received).toEqual([event]);
-		expect(delegates[key][method]).toHaveBeenCalledWith(model, context, options);
+		const expectedOptions = key === "responses" ? { ...options, onPayload: expect.any(Function) } : options;
+		expect(delegates[key][method]).toHaveBeenCalledWith(model, context, expectedOptions);
+		if (key === "responses") {
+			const delegatedOnPayload = delegates[key][method].mock.lastCall![2].onPayload;
+			await delegatedOnPayload({ tools: [{ type: "function", name: "relay_send" }] }, model);
+			expect(options.onPayload).toHaveBeenLastCalledWith({ tools: [{ type: "function", name: "relay_send", strict: false }] }, model);
+		}
 		const delegatedModel = delegates[key][method].mock.lastCall![0];
 		expect(delegatedModel.id).toBe(id);
 	}
@@ -289,7 +295,8 @@ describe.each([
 		delegates[key][method].mockReturnValue(source);
 		const stream = provider[method](selected, context, options);
 		const result = await stream.result();
-		expect(delegates[key][method]).toHaveBeenLastCalledWith({ ...selected, id, baseUrl: key === "messages" ? config.origin : `${config.origin}/v1` }, context, options);
+		const expectedOptions = key === "responses" ? { ...options, onPayload: expect.any(Function) } : options;
+		expect(delegates[key][method]).toHaveBeenLastCalledWith({ ...selected, id, baseUrl: key === "messages" ? config.origin : `${config.origin}/v1` }, context, expectedOptions);
 		expect(result).toMatchObject({ model: name, magpiePhysicalModel: id });
 		expect(result.usage.cost).toMatchObject({ total: 0.0079, magpiePricing: "unavailable" });
 		const events = [];
