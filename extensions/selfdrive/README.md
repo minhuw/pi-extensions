@@ -25,7 +25,7 @@ It never delivers, pushes, publishes, opens pull requests or issues, uses sudo o
 
 ## How it runs
 
-The session continues on its own with a short message carrying the elapsed time, optional focus, and a bounded summary of open tasks and recent outcomes, with counts of omitted entries. This context supports choosing the next useful work. `/selfdrive status` labels the kickoff and continuation count as `driver starts`; it does not count all model turns or Herder runs.
+The session continues on its own with a short message carrying the elapsed time, optional focus, up to five open tasks with a count of any others, and up to three recent outcomes. This context supports choosing the next useful work. `/selfdrive status` labels the kickoff and continuation count as `driver starts`; it does not count all model turns or Herder runs.
 
 The model keeps candidates in the existing `selfdrive_task` ledger as `planned` with a `why`, marks work `running`, and finishes each as `proposed`, `done`, `failed`, or `dropped`, with the outcome in `result`. These outcomes inform follow-up choices and explain why candidates were dropped. It paces itself with `selfdrive_next`: `wait` while background work runs (a completion notification wakes it earlier), `done` when nothing worthwhile is left. `done` is rejected while any ledger task is `planned` or `running`; `proposed` is terminal, and an empty ledger may finish. This check relies on the recorded ledger.
 
