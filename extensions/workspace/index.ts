@@ -13,6 +13,7 @@ import {
 	extractWorkspaceNameFromPath,
 	isSubpath,
 	normalizeFileToolPath,
+	policyFilePath,
 	readProjectPolicy,
 	resolveCanonicalPath,
 	workspacesDir,
@@ -21,6 +22,7 @@ import {
 	createOrTouchWorkspace,
 	inspectWorkspaceSafety,
 	markSessionWorkspacesClosed,
+	registryFilePath,
 	releaseWorkspace,
 	setWorkspacePin,
 	syncWorkspaces,
@@ -179,6 +181,17 @@ function selectAllowTarget(resolvedPath: string, cwd: string, isFileTool: boolea
 	return resolvedPath;
 }
 
+/**
+ * Returns `policy.json` or `.registry.json` when one of `targetPaths` resolves to it. Letter case is
+ * ignored: macOS resolves `POLICY.JSON` to the same file.
+ */
+function findManagedStateFile(targetPaths: string[], cwd: string): string | undefined {
+	const resolvedTargets = targetPaths.map((targetPath) => resolveCanonicalPath(targetPath, cwd).toLowerCase());
+	return [policyFilePath(cwd), registryFilePath(cwd)].find((file) =>
+		resolvedTargets.includes(resolveCanonicalPath(file).toLowerCase()),
+	);
+}
+
 export function buildWorkspaceSystemPromptSection(cwd: string): string {
 	return `Workspace rules: Keep file writes inside the current project (${cwd}). When you need a side checkout, clone, worktree, or isolated experiment, create it under ${cwd}/.pi/workspaces/<name> (which is git-ignored) or use the workspace tool. Ephemeral temporary files may use /tmp. Do not create or modify directories in ~/projects or other paths outside ${cwd} unless explicitly approved by the user.`;
 }
@@ -315,6 +328,15 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			workspaceTouchPaths = extractBashWriteTargets(command, ctx.cwd);
 		} else {
 			return undefined;
+		}
+
+		// The guard's own state is never a tool's to write: no prompt, and no allow list unblocks it.
+		const managedFile = findManagedStateFile(workspaceTouchPaths, ctx.cwd);
+		if (managedFile) {
+			return {
+				block: true,
+				reason: `Blocked write to "${managedFile}": this file is managed by the workspace extension and tool calls cannot change it. The user changes it with "/workspace allow <path>" or "/workspace deny <path>".`,
+			};
 		}
 
 		const policy = await readProjectPolicy(ctx.cwd);

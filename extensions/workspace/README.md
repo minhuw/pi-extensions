@@ -36,7 +36,7 @@ All candidate paths are canonicalized before evaluation:
 - `~` and `$HOME` are expanded.
 - A `write` or `edit` `path` is first normalized the way Pi's file tools resolve it: Unicode spaces become plain spaces, one leading `@` is dropped, and a `file://` URL becomes its filesystem path, so `@/x/f` and `file:///x/f` are judged as `/x/f`. A `file://` URL that names no local file is blocked. Words in `bash` commands keep `@` and `file:` literal.
 - Symlinks are resolved through the deepest existing ancestor on disk, so a symlink inside `<cwd>` that points outside `<cwd>` is evaluated by its real external target.
-- Writes inside `<cwd>` (including `<cwd>/.pi/workspaces/<name>`), the repository's git common directory, `/tmp` (and `os.tmpdir()`), and paths in the session or project allowlist succeed without prompting.
+- Writes inside `<cwd>` (including `<cwd>/.pi/workspaces/<name>`), the repository's git common directory, `/tmp` (and `os.tmpdir()`), and paths in the session or project allowlist succeed without prompting, except for the two [guard state files](#guard-state-files).
 
 When a tool call targets an unapproved path outside `<cwd>` and `/tmp`:
 
@@ -47,6 +47,12 @@ When a tool call targets an unapproved path outside `<cwd>` and `/tmp`:
   - `Deny` — blocks the tool call and directs the model to `<cwd>/.pi/workspaces/<name>` or `/tmp`.
 - **Child sessions and non-interactive sessions (`print`, `json`):** While any top-level session is open, the extension registers itself in `globalThis[Symbol.for("pi-extensions.child-session-hooks")]` and removes the hook when all sessions shut down. Child sessions (including sessions carrying a `pi-extensions.session-link` entry) inherit the active session and project allowlists, and immediately block unapproved external writes without prompting.
 
+### Guard state files
+
+`<cwd>/.pi/workspaces/policy.json` (the project allowlist) and `<cwd>/.pi/workspaces/.registry.json` (the workspace registry that `/workspace gc` reads) are written only by the extension: `/workspace allow`, `/workspace deny`, `/workspace pin`, `/workspace unpin`, `/workspace gc`, the `workspace` tool, automatic workspace registration, and the `Allow for this project` choice.
+
+A `write`, `edit`, or `bash` call whose target resolves to either file is blocked without a prompt in interactive, non-interactive, and child sessions, so the model cannot approve its own external writes. The target is compared by canonical path, ignoring letter case (macOS resolves `POLICY.JSON` to the same file), so a relative, absolute, `..`, or symlinked spelling is caught. No session or project allowlist entry unblocks these files, including an entry for `<cwd>/.pi/workspaces` or for the file itself. The block reason says that the file is managed by the workspace extension and that the user changes it with `/workspace allow <path>` or `/workspace deny <path>`. Other writes under `<cwd>/.pi/workspaces/`, such as workspace directories and their contents, stay allowed.
+
 ### Limits
 
 The `write` and `edit` guards are exact: every call is checked against its canonicalized `path`. The `bash` guard is a best-effort heuristic over the fixed command list above, not a sandbox. It parses the command with [`unbash`](https://github.com/webpro-nl/unbash) and inspects every simple command, including those in `if`/`for`/`while`/`case` bodies, subshells, and command and process substitutions. It tracks `cd` (scoped to subshells and pipeline stages), skips leading `KEY=VALUE`, `sudo`, `env`, and `command`, expands only `~`, `$HOME`, and `${HOME}`, and ignores descriptor duplication (`2>&1`) and bash pseudo-devices (`/dev/null`, `/dev/stderr`, `/dev/fd/N`, `/dev/tcp/...`). Remote commands are not local writes: `ssh host mkdir /x`, quoted or escaped `>` (`ssh host echo hi \> /x`), and heredoc bodies (`ssh host <<EOF`, `cat > run.sh <<EOF`) are skipped; only the local side, such as `ssh host cmd > /x/log`, is checked. A heredoc or here-string is inspected as commands only when a local shell (`sh`, `bash`, `zsh`, `dash`, `ksh`) in the same pipeline reads it (`bash <<EOF`, `cat <<EOF | sh`). It does not run or evaluate the shell, so writes like these are not caught:
@@ -54,7 +60,8 @@ The `write` and `edit` guards are exact: every call is checked against its canon
 - interpreters and nested shells: `python -c "open('/x/f','w')"`, `node -e ...`, `bash -c "touch /x/f"`;
 - in-place editors and unlisted writers: `sed -i`, `perl -i`, `rsync`, `curl -o`, `wget -O`, `find -delete`, `chmod`, `npm install -g`;
 - shell expansion: variables (`D=/x; touch $D/f`), quoted command substitution (`touch "$(dirname /x/a)/f"`), and backtick verbs;
-- indirection and wrappers: `echo /x/f | xargs rm`, `nohup`/`timeout <cmd>`.
+- indirection and wrappers: `echo /x/f | xargs rm`, `nohup`/`timeout <cmd>`;
+- a guard state file reached through its directory: `mv /tmp/policy.json .pi/workspaces/`, `rm -rf .pi/workspaces`.
 
 Other tools are not inspected.
 
