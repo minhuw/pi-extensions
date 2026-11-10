@@ -61,7 +61,7 @@ Select an existing agent type with `subagent_type` (`agentType` in workflows). T
 
 | Type | Job | Tools | Model defaults |
 | --- | --- | --- | --- |
-| `recon` | Read-only reconnaissance; compressed handoff | read-only; must call a tool | `claude-haiku-5-5` from any provider with credentials, thinking `max`, no tier override |
+| `recon` | Read-only reconnaissance; compressed handoff | read-only; must call a tool | `deepseek-flash` from any provider with credentials, thinking `max`, no tier override |
 | `worker` | Bounded implementation and verification | coding tools; must call a tool | inherit parent |
 | `council-argon` | Read-only council advisor (`model_visible: false`, `isolation: off`) | read-only | `magpie/gemini-4-argon`, thinking `high`, no tier override |
 | `council-astra` | Read-only council advisor (`model_visible: false`, `isolation: off`) | read-only | `magpie/gpt-6-astra`, thinking `xhigh`, no tier override |

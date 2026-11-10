@@ -49,7 +49,7 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
       builtinToolNames: READ_ONLY_TOOLS,
       extensions: true,
       skills: true,
-      model: "claude-haiku-5-5",
+      model: "deepseek-flash",
       thinking: "max",
       systemPrompt: `# READ-ONLY RECON
 

@@ -67,7 +67,7 @@ describe("agent type registry", () => {
     it("case-insensitive lookup works for getAgentConfig", () => {
       const config = getAgentConfig("recon");
       expect(config?.name).toBe("recon");
-      expect(config?.model).toBe("claude-haiku-5-5");
+      expect(config?.model).toBe("deepseek-flash");
     });
 
     it("resolveType returns canonical key or undefined", () => {
@@ -91,9 +91,9 @@ describe("agent type registry", () => {
       expect(config.builtinToolNames).not.toContain("write");
     });
 
-    it("recon uses Claude Haiku 5.5 with max thinking and no tier override", () => {
+    it("recon uses DeepSeek Flash with max thinking and no tier override", () => {
       const cfg = getAgentConfig("recon");
-      expect(cfg?.model).toBe("claude-haiku-5-5");
+      expect(cfg?.model).toBe("deepseek-flash");
       expect(cfg?.thinking).toBe("max");
       expect(cfg?.serviceTier).toBeUndefined();
     });
