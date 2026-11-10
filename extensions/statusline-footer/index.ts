@@ -396,6 +396,8 @@ export function statusTone(segment: string): "problem" | "attention" | "calm" {
 const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language", "spokesman", "boom", "alwayson", "selfdrive", "representative"];
 /** Session modes that change how the model works; they ride the bar before the context, not the status row. */
 const MODE_KEYS = ["boom", "alwayson", "selfdrive", "representative"];
+// Pika publishes sorted, sanitized room labels as plain text; clearing the key leaves no rooms.
+const RELAY_ROOMS_STATUS_KEY = "relay-rooms";
 const STATUS_ICONS: Record<string, string> = {
 	autoresearch: "\u{F0093}", // md-flask
 	herder: "\u{F0CC6}", // md-sheep
@@ -1140,6 +1142,7 @@ function renderIdentityRow(
 	workflowStatus?: string,
 	spokesmanStatus?: string,
 	modeStatus?: string,
+	relayRooms?: string,
 ): string {
 	const set = icons();
 	const { chrome } = skin;
@@ -1153,6 +1156,7 @@ function renderIdentityRow(
 	const tail = compactMode ? [
 		renderPrice(ctx, s, theme, set),
 		theme.fg("dim", fmtDuration(s.durationMs)),
+		...(relayRooms ? [`${glyph(theme, set.relay, "dim")} ${theme.fg("muted", relayRooms)}`] : []),
 	] : [];
 	const minimumContext = usage?.percent != null ? visibleWidth(`${usage.percent.toFixed(1)}%`) : 0;
 	// Compact already renders the provider-free label, so it is the fallback identity too.
@@ -1208,7 +1212,7 @@ function renderCompact(
 	return renderIdentityRow(ctx, theme, skin, width, state, collectStats(ctx, state), true, renderLanguage(theme, statuses), cluster([
 		workflowKey && renderStatus(theme, statuses.get(workflowKey)!, workflowKey),
 		statuses.get(PROCESS_STATUS_KEY) && renderStatus(theme, statuses.get(PROCESS_STATUS_KEY)!, PROCESS_STATUS_KEY),
-	], "  "), renderSpokesman(theme, statuses), renderModes(theme, statuses));
+	], "  "), renderSpokesman(theme, statuses), renderModes(theme, statuses), statuses.get(RELAY_ROOMS_STATUS_KEY));
 }
 
 /** Cached reads as a share of all input, and the color that rates it. */
@@ -1259,7 +1263,7 @@ function renderFull(
 	const workflowKeys = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY];
 	const statuses = [
 		...workflowKeys.map((key): [string, string | undefined] => [key, extensionStatuses.get(key)]),
-		...[...extensionStatuses.entries()].filter(([key]) => key !== "language" && key !== "spokesman" && !MODE_KEYS.includes(key) && !workflowKeys.includes(key)),
+		...[...extensionStatuses.entries()].filter(([key]) => key !== "language" && key !== "spokesman" && key !== RELAY_ROOMS_STATUS_KEY && !MODE_KEYS.includes(key) && !workflowKeys.includes(key)),
 	].flatMap(([key, status]) => status ? [renderStatus(theme, status, key, hasNerdFonts())] : []);
 
 	return [line1, ...renderDetailRows(ctx, theme, footerData, width, state, s, statuses)];
@@ -1415,25 +1419,33 @@ function renderDetailRows(
 		], "  ")
 		: item(set.branch, "dim", "no git", "dim");
 	const relayCounts = cluster([s.relayIn > 0 && `${s.relayIn} in`, s.relayOut > 0 && `${s.relayOut} out`], " · ");
-	const relay = relayCounts ? item(set.relay, "dim", relayCounts) : "";
+	const relayRooms = footerData.getExtensionStatuses().get(RELAY_ROOMS_STATUS_KEY);
+	const rooms = relayRooms ? item(set.relay, "dim", relayRooms) : "";
+	const counts = relayCounts ? item(set.relay, "dim", relayCounts) : "";
 	const touched = s.files > 0 ? item(set.file, "dim", `${s.files} touched`) : "";
 	const rail3 = statusRail ? "├" : "╰";
-	// The path takes the room the branch, the relay messages, and the file count
-	// leave. The messages give way first, then the file count, before the path
-	// would shrink below twelve columns.
-	const touchedWidth = touched ? visibleWidth(touched) + RAIL_SEP_WIDTH : 0;
-	const relayWidth = relay ? visibleWidth(relay) + RAIL_SEP_WIDTH : 0;
+	// Reserve room labels before touched files and message counts. The path keeps
+	// at least twelve columns, and counts-only sessions keep their old drop order.
 	const pathRoom = railRoom(width) - visibleWidth(git) - visibleWidth(`${set.cwd} `);
 	const minimumPath = 12;
-	const keepTouched = Boolean(touched) && pathRoom - touchedWidth >= minimumPath;
-	const afterTouched = keepTouched ? pathRoom - touchedWidth : pathRoom;
-	const keepRelay = Boolean(relay) && (keepTouched || !touched) && afterTouched - relayWidth >= minimumPath;
-	const room = keepRelay ? afterTouched - relayWidth : afterTouched;
+	const roomsWidth = rooms ? visibleWidth(rooms) + RAIL_SEP_WIDTH : 0;
+	const keepRooms = Boolean(rooms) && pathRoom - roomsWidth >= minimumPath;
+	const afterRooms = keepRooms ? pathRoom - roomsWidth : pathRoom;
+	const touchedWidth = touched ? visibleWidth(touched) + RAIL_SEP_WIDTH : 0;
+	const keepTouched = Boolean(touched) && afterRooms - touchedWidth >= minimumPath;
+	const afterTouched = keepTouched ? afterRooms - touchedWidth : afterRooms;
+	// Counts extend the same group when rooms are present, sharing its icon.
+	const countsWidth = keepRooms ? visibleWidth(` · ${relayCounts}`) : counts ? visibleWidth(counts) + RAIL_SEP_WIDTH : 0;
+	const keepCounts = Boolean(counts) && (keepTouched || !touched) && afterTouched - countsWidth >= minimumPath;
+	const relay = keepRooms
+		? rooms + (keepCounts ? theme.fg("muted", ` · ${relayCounts}`) : "")
+		: keepCounts ? counts : "";
+	const room = keepCounts ? afterTouched - countsWidth : afterTouched;
 	const cwd = item(set.cwd, "dim", shortenPath(formatPath(ctx.cwd), Math.max(minimumPath, room)));
-	const row3 = railRow(theme, rail3, [{ text: git, rank: 3 }], [
-		...(keepRelay ? [{ text: relay, rank: 0 }] : []),
+	const row3 = railRow(theme, rail3, [{ text: git, rank: 4 }], [
+		...(relay ? [{ text: relay, rank: keepRooms ? 2 : 0 }] : []),
 		...(keepTouched ? [{ text: touched, rank: 1 }] : []),
-		{ text: cwd, rank: 2 },
+		{ text: cwd, rank: 3 },
 	], width);
 
 	if (!statusRail) return [row2, row3];

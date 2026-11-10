@@ -1703,6 +1703,143 @@ describe("statusline footer powerline style", () => {
 			}
 		});
 
+		it.each(["0", "1"])("shows live room membership without traffic and clears it without a branch change (Nerd Fonts %s)", async (nerdFonts) => {
+			const harness = createHarness(`detail-relay-rooms-${nerdFonts}`, "tui", {
+				extensionStatuses: [],
+				keyedExtensionStatuses: { "relay-rooms": "#dev #ops" },
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			try {
+				vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+				const icon = nerdFonts === "1" ? relayIcon : "⇌";
+				let lines = harness.getFooter()!.render(160).map(strip);
+				expect(lines).toHaveLength(3);
+				expect(lines[2]).toContain(`${icon} #dev #ops`);
+				expect(lines.join("\n")).not.toMatch(/\b0 (in|out)\b/);
+				expect(lines.filter(line => line.includes("#dev"))).toHaveLength(1);
+
+				harness.setStatus("relay-rooms", "#ops");
+				lines = harness.getFooter()!.render(160).map(strip);
+				expect(lines[2]).toContain(`${icon} #ops`);
+				expect(lines.join("\n")).not.toContain("#dev");
+				await harness.runCommand("footer", "compact");
+				expect(strip(harness.getFooter()!.render(160)[0]!)).toContain(`${icon} #ops`);
+				harness.setStatus("relay-rooms", undefined);
+				expect(strip(harness.getFooter()!.render(160)[0]!)).not.toContain(icon);
+				await harness.runCommand("footer", "full");
+				lines = harness.getFooter()!.render(160).map(strip);
+				expect(lines).toHaveLength(3);
+				expect(lines.join("\n")).not.toContain("#ops");
+				expect(lines[2]).not.toContain(icon);
+			} finally {
+				vi.unstubAllEnvs();
+				harness.disposeFooter();
+			}
+		});
+
+		it("keeps room labels after counts and touched files give way on the Git row", async () => {
+			const harness = createHarness("detail-relay-rooms-fit", "tui", {
+				branch: [...activeBranch, relay("in", "relay-received"), relay("out", "relay-sent")],
+				extensionStatuses: [],
+				keyedExtensionStatuses: { "relay-rooms": "#dev #ops" },
+				cwd: `/tmp/${"deep/".repeat(12)}project`,
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			try {
+				vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+				const roomy = strip(harness.getFooter()!.render(200)[2]!);
+				expect(roomy).toContain("⇌ #dev #ops · 1 in · 1 out  │");
+				const narrowest: Record<string, number> = {};
+				for (let width = 200; width >= 1; width--) {
+					const lines = harness.getFooter()!.render(width).map(strip);
+					for (const line of lines) expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
+					if (width >= 40) {
+						expect(lines[0]).toContain("k3");
+						expect(lines[0]).toContain("42.5%");
+					}
+					const git = lines[2]!;
+					for (const [key, marker] of Object.entries({ rooms: "#dev #ops", counts: "1 in · 1 out", touched: "2 touched" })) {
+						if (git.includes(marker)) narrowest[key] = width;
+					}
+					if (git.includes("#dev")) expect(git).toContain("#dev #ops");
+				}
+				expect(narrowest.counts).toBeGreaterThan(narrowest.touched!);
+				expect(narrowest.touched).toBeGreaterThan(narrowest.rooms!);
+				const narrow = strip(harness.getFooter()!.render(60)[2]!);
+				expect(narrow).toContain("⇌ #dev #ops");
+				expect(narrow).not.toContain("1 in");
+				expect(narrow).toContain("/project");
+				harness.setStatus("relay-rooms", undefined);
+				const cleared = strip(harness.getFooter()!.render(200)[2]!);
+				expect(cleared).toContain("⇌ 1 in · 1 out");
+				expect(cleared).not.toContain("#dev");
+			} finally {
+				vi.unstubAllEnvs();
+				harness.disposeFooter();
+			}
+		});
+
+		it("fits compact rooms in the optional tail without displacing workflow, processes, model, or percent", async () => {
+			const harness = createHarness("compact-relay-rooms-fit", "tui", {
+				extensionStatuses: [],
+				keyedExtensionStatuses: { herder: "herder: T2", [PROCESS_STATUS_KEY]: "bg 1 running" },
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			await harness.runCommand("footer", "compact");
+			try {
+				vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+				let sawRooms = false;
+				let sawWorkflowWithoutRooms = false;
+				for (let width = 200; width >= 1; width--) {
+					harness.setStatus("relay-rooms", undefined);
+					const baseline = strip(harness.getFooter()!.render(width)[0]!);
+					harness.setStatus("relay-rooms", "#dev #ops");
+					const lines = harness.getFooter()!.render(width).map(strip);
+					expect(lines).toHaveLength(1);
+					const line = lines[0]!;
+					expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
+					for (const marker of ["k3", "42.5%", "herder: T2", "bg 1 running"]) {
+						if (baseline.includes(marker)) expect(line, `${width}`).toContain(marker);
+					}
+					if (line.includes("#dev")) {
+						expect(line).toContain("⇌ #dev #ops");
+						sawRooms = true;
+					} else if (line.includes("herder: T2")) sawWorkflowWithoutRooms = true;
+				}
+				expect(sawRooms).toBe(true);
+				expect(sawWorkflowWithoutRooms).toBe(true);
+			} finally {
+				vi.unstubAllEnvs();
+				harness.disposeFooter();
+			}
+		});
+
+		it.each(["full", "compact"])("bounds long room labels in %s mode", async (mode) => {
+			const harness = createHarness(`relay-long-rooms-${mode}`, "tui", {
+				extensionStatuses: [],
+				keyedExtensionStatuses: { "relay-rooms": `#${"room".repeat(100)} #工具` },
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			await harness.runCommand("footer", mode);
+			try {
+				for (let width = 200; width >= 1; width--) {
+					const lines = harness.getFooter()!.render(width).map(strip);
+					for (const line of lines) expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
+					if (width >= 40) {
+						expect(lines[0]).toContain("k3");
+						expect(lines[0]).toContain("42.5%");
+					}
+					expect(lines.join("\n")).not.toContain("#room");
+				}
+			} finally {
+				harness.disposeFooter();
+			}
+		});
+
 		const memoryPin = (id: string, index: string | null) =>
 			({ id, type: "custom", customType: "pika-memory", data: { index, fetchedAt: "2026-11-09T00:00:00.000Z" } });
 		const toolResult = (id: string, toolName: string, text: string) => ({
