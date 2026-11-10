@@ -26,6 +26,8 @@ async function online(options: Partial<Parameters<typeof startSession>[0]> = {})
 
 const received = (h: Harness) => h.session.sessionManager.getEntries().filter((entry) => entry.type === "custom" && entry.customType === RECEIVED_TYPE);
 const relayMessages = (h: Harness) => h.session.messages.filter((message) => message.role === "custom" && (message as { customType?: string }).customType === MESSAGE_TYPE);
+/** Closes a message the model reads right after an answer the user has not replied to. */
+const UNANSWERED = "\n\nYour user has not written since your last answer to them, so do not take that answer as read. If it still holds something they need (a question, a decision, a result), repeat that in full, not as a summary, in the answer that ends this turn, then say what changed since.";
 
 /** A response that waits for `release`, so the session stays busy meanwhile. */
 function gate(): { step: () => Promise<ReturnType<typeof fauxAssistantMessage>>; release(): void; started: Promise<void> } {
@@ -46,7 +48,7 @@ it("delivers a message to an idle session as a turn, with a receipt entry, then 
 	expect(h.sent).toEqual([{
 		message: {
 			customType: MESSAGE_TYPE, display: true,
-			content: `[relay] Message ${messageId} from pi session sender-session ("Sender") on desktop, project elsewhere, replying to msg-0:\n\nPlease run the tests.\n\nThis message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "sender-session" and replyTo "${messageId}". Messages can cross on the way: if this one adds nothing to what you already sent, do not reply just to say so.`,
+			content: `[relay] Message ${messageId} from pi session sender-session ("Sender") on desktop, project elsewhere, replying to msg-0:\n\nPlease run the tests.\n\nThis message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "sender-session" and replyTo "${messageId}". Messages can cross on the way: if this one adds nothing to what you already sent, do not reply just to say so.${UNANSWERED}`,
 			details: expect.objectContaining({ id: messageId, text: "Please run the tests.", urgent: false, replyTo: "msg-0", hops: 2, from: expect.objectContaining({ kind: "session", sessionId: "sender-session" }) }),
 		},
 		options: { triggerTurn: true },
@@ -86,6 +88,9 @@ it.each([
 	const messageId = relay.push(id, { text: "news", urgent });
 	await relay.waitForAck(id, messageId);
 	expect(h.sent.map((sent) => sent.options)).toEqual([options]);
+	// A follow-up comes after the turn's answer, which the user has not replied to; a steered message comes before it.
+	expect(String(h.sent[0]!.message.content).endsWith(UNANSWERED)).toBe(!urgent);
+	expect(String(h.sent[0]!.message.content).endsWith("do not reply just to say so.")).toBe(urgent);
 	busy.release();
 	await prompt;
 	await waitFor(() => texts(h.session, "assistant").includes("second answer"), 5_000, "the turn with the message");
@@ -145,6 +150,9 @@ it("renders a relay message as one line with its sender and size, and its text o
 	// The collapsed line stays one line however many lines the text has.
 	expect(render(MESSAGE_TYPE, { content: "", details: { ...details, text: "line\n".repeat(50) } }, false)).toHaveLength(1);
 	expect(render(NOTICE_TYPE, { content: "[relay] Your message msg-2 to pi session s-1 expired: it was not delivered within 5 minutes and was dropped." }, false))
+		.toEqual(["✉ relay Your message msg-2 to pi session s-1 expired: it was not delivered within 5 minutes and was dropped."]);
+	// What follows a notice's first line is only for the model.
+	expect(render(NOTICE_TYPE, { content: `[relay] Your message msg-2 to pi session s-1 expired: it was not delivered within 5 minutes and was dropped.${UNANSWERED}` }, false))
 		.toEqual(["✉ relay Your message msg-2 to pi session s-1 expired: it was not delivered within 5 minutes and was dropped."]);
 });
 

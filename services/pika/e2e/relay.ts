@@ -62,7 +62,10 @@ interface RelayEvent {
 
 type Sender = { sessionId: string; name: string; deviceId: string; device: string; project: string };
 
-/** The content RELAY.md specifies for a message from a session. */
+/** The paragraph RELAY.md specifies for what the model reads right after an answer the user has not replied to. */
+const UNANSWERED = "\n\nYour user has not written since your last answer to them, so do not take that answer as read. If it still holds something they need (a question, a decision, a result), repeat that in full, not as a summary, in the answer that ends this turn, then say what changed since.";
+
+/** The content RELAY.md specifies for a steered message from a session; any other delivery ends with `UNANSWERED`. */
 function sessionContent(id: string, from: Sender, text: string, replyTo?: string): string {
 	return `[relay] Message ${id} from pi session ${from.sessionId} ("${from.name}") on ${from.device}, project ${from.project}${replyTo ? `, replying to ${replyTo}` : ""}:\n\n${text}\n\n`
 		+ `This message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "${from.sessionId}" and replyTo "${id}". Messages can cross on the way: if this one adds nothing to what you already sent, do not reply just to say so.`;
@@ -195,13 +198,14 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 			"B's relay-received entry for the question");
 		const question = customMessages(bEntries, "relay-message").find((entry) => entry.details?.id === askId);
 		check(question, `B has no relay-message for ${askId}`);
-		checkEqual(question.content, sessionContent(askId, A, QUESTION), "the relay message B's model reads");
+		// B was idle, so the question started its turn.
+		checkEqual(question.content, sessionContent(askId, A, QUESTION) + UNANSWERED, "the relay message B's model reads");
 		checkEqual(question.display, true, "the relay message is displayed");
 		check(bEntries.indexOf(received) < bEntries.indexOf(question), "B appended the receipt entry after the relay message");
 		answered(bEntries, question, "the question in B");
 		check(provider.bodies.some((raw) => {
 			const messages = (JSON.parse(raw) as { messages: { role: string; content: unknown }[] }).messages;
-			return textOf(messages.findLast((message) => message.role === "user")?.content) === sessionContent(askId, A, QUESTION);
+			return textOf(messages.findLast((message) => message.role === "user")?.content) === sessionContent(askId, A, QUESTION) + UNANSWERED;
 		}), "no model call of B ends with the relay message");
 		const answerSent = /^Delivered message (\S+) to /.exec(lastText(toolResults(bEntries, "relay_send").at(-1)));
 		check(answerSent, `B's relay_send answered ${JSON.stringify(lastText(toolResults(bEntries, "relay_send").at(-1)))}`);
@@ -209,7 +213,9 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 		const aEntries = await a.entries();
 		const answer = customMessages(aEntries, "relay-message").find((entry) => entry.details?.id === answerSent[1]);
 		check(answer, "A has no relay-message for the answer");
-		checkEqual(answer.content, sessionContent(answerSent[1]!, B, ANSWER, askId), "the answer A's model reads");
+		// A is talking with B: the answer is steered into A's turn while it still runs, and starts a turn once A is idle.
+		const steered = sessionContent(answerSent[1]!, B, ANSWER, askId);
+		check(answer.content === steered || answer.content === steered + UNANSWERED, `the answer A's model reads is ${JSON.stringify(answer.content)}`);
 		answered(aEntries, answer, "the answer in A");
 		log(`relay: A asked B (${askId}, hops 1); B's turn started with it and its answer ${answerSent[1]} (hops 2) reached A`);
 
@@ -245,7 +251,8 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 		// The server and this driver share a clock; the notice is seen within a poll of its arrival.
 		const noticedAfter = Date.now() - acceptedAt;
 		await a.settled(30_000, "the expiry notice");
-		checkEqual(notice.content, `[relay] Your message ${lateId} to ${lateLabel} expired: it was not delivered within ${ttl} seconds and was dropped.`, "the expiry notice");
+		// A was idle, so the notice started its turn.
+		checkEqual(notice.content, `[relay] Your message ${lateId} to ${lateLabel} expired: it was not delivered within ${ttl} seconds and was dropped.${UNANSWERED}`, "the expiry notice");
 		answered(await a.entries(), notice, "the expiry notice in A");
 		checkEqual((await events()).find((event) => event.id === lateId)?.status, "expired", "the late note's event");
 		check(noticedAfter >= ttl * 1000, `the notice came ${noticedAfter} ms after the server accepted the message, before the ${ttl} s TTL`);

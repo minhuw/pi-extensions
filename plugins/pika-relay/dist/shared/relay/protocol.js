@@ -99,8 +99,13 @@ export function ttlText(seconds) {
 }
 /** Closes every message from another session: two sessions that write at once can each miss the other's message. */
 const CROSSED = "Messages can cross on the way: if this one adds nothing to what you already sent, do not reply just to say so.";
-/** What the receiving session's model reads for a message. */
-export function messageContent(message) {
+/**
+ * Closes what starts a turn, or follows one, without the user: the model would take its last answer for read and
+ * end the new turn with a summary of it, leaving what the user never saw above the relay exchange.
+ */
+export const UNANSWERED = "Your user has not written since your last answer to them, so do not take that answer as read. If it still holds something they need (a question, a decision, a result), repeat that in full, not as a summary, in the answer that ends this turn, then say what changed since.";
+/** What the receiving session's model reads for a message; `unanswered` when it follows an answer the user has not replied to. */
+export function messageContent(message, unanswered = false) {
     const urgent = message.urgent ? ", marked urgent" : "";
     const id = headerField(message.id);
     const room = headerField(message.room);
@@ -116,17 +121,19 @@ export function messageContent(message) {
     const name = headerField(from.name) || headerField(from.title);
     const project = headerField(from.project);
     const replyTo = headerField(message.replyTo);
+    const closing = `${CROSSED}${unanswered ? `\n\n${UNANSWERED}` : ""}`;
     if (room) {
         const header = `[relay] Message ${id} in room #${room} from pi session ${sessionId}${name ? ` ("${name}")` : ""} on ${deviceLabel(from)}`
             + `${project ? `, project ${project}` : ""}${replyTo ? `, replying to ${replyTo}` : ""}${urgent}:`;
-        return `${header}\n\n${text}\n\nYou were @mentioned in room #${room}. To read the full room history, call relay_room with action "history" and room "${room}". To reply in the room, call relay_send with room "${room}", mentions ["${sessionId}"], and replyTo "${id}". ${CROSSED}`;
+        return `${header}\n\n${text}\n\nYou were @mentioned in room #${room}. To read the full room history, call relay_room with action "history" and room "${room}". To reply in the room, call relay_send with room "${room}", mentions ["${sessionId}"], and replyTo "${id}". ${closing}`;
     }
     const header = `[relay] Message ${id} from pi session ${sessionId}${name ? ` ("${name}")` : ""} on ${deviceLabel(from)}`
         + `${project ? `, project ${project}` : ""}${replyTo ? `, replying to ${replyTo}` : ""}${urgent}:`;
-    return `${header}\n\n${text}\n\nThis message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "${sessionId}" and replyTo "${id}". ${CROSSED}`;
+    return `${header}\n\n${text}\n\nThis message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "${sessionId}" and replyTo "${id}". ${closing}`;
 }
-export function expiredContent(id, label, ttlSeconds) {
-    return `[relay] Your message ${id} to ${label} expired: it was not delivered within ${ttlText(ttlSeconds)} and was dropped.`;
+/** The notice for an expired message; `unanswered` as for `messageContent`. */
+export function expiredContent(id, label, ttlSeconds, unanswered = false) {
+    return `[relay] Your message ${id} to ${label} expired: it was not delivered within ${ttlText(ttlSeconds)} and was dropped.${unanswered ? `\n\n${UNANSWERED}` : ""}`;
 }
 /** A short "3m" style duration. */
 export function since(at, now = Date.now()) {

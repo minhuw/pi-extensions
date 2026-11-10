@@ -312,7 +312,8 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		}
 		try {
 			const options = idle ? { triggerTurn: true } : steer ? { deliverAs: "steer" as const, triggerTurn: true } : { deliverAs: "followUp" as const, triggerTurn: true };
-			pi.sendMessage<RelayMessageDetails>({ customType: MESSAGE_TYPE, content: messageContent({ ...frame, urgent, hops }), display: true, details }, options);
+			// Unless steered, the model reads it right after an answer the user has not replied to.
+			pi.sendMessage<RelayMessageDetails>({ customType: MESSAGE_TYPE, content: messageContent({ ...frame, urgent, hops }, !steer), display: true, details }, options);
 		} catch {
 			// Threw synchronously, so pi does not hold it: not acknowledged, and pushed again after a reconnect.
 			unread.delete(frame.id);
@@ -358,7 +359,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		if (record) record.status = "expired";
 		const label = record?.label ?? targetLabel(frame.to);
 		pi.sendMessage<RelayNoticeDetails>(
-			{ customType: NOTICE_TYPE, content: expiredContent(frame.id, label, ttlSeconds), display: true, details: { id: frame.id, to: frame.to, status: "expired", at: frame.at } },
+			{ customType: NOTICE_TYPE, content: expiredContent(frame.id, label, ttlSeconds, ctx?.isIdle() === true), display: true, details: { id: frame.id, to: frame.to, status: "expired", at: frame.at } },
 			{ deliverAs: "steer", triggerTurn: true },
 		);
 	}
@@ -855,7 +856,8 @@ export default function relayExtension(pi: ExtensionAPI): void {
 
 	pi.registerMessageRenderer<RelayNoticeDetails>(NOTICE_TYPE, (message, _options, theme) => {
 		const content = typeof message.content === "string" ? message.content : "";
-		return new Text(`${theme.fg("warning", "✉ relay")} ${sanitize(content).replace(/^\[relay\] /, "")}`, 0, 0);
+		// The first line is the notice; what follows it is only for the model.
+		return new Text(`${theme.fg("warning", "✉ relay")} ${sanitize(content).replace(/^\[relay\] /, "").split("\n", 1)[0]}`, 0, 0);
 	});
 
 	async function statusCommand(context: ExtensionCommandContext): Promise<void> {

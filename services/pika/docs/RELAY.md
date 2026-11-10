@@ -224,6 +224,13 @@ For the web UI:
 
 <text>
 ```
+
+**Unanswered answers:** a message that starts a turn or waits as a follow-up reaches the model right after an answer the user has not replied to, in the same place a user's reply would take. The model then takes that answer for read and ends the new turn with a summary of it, so a question the user never saw scrolls away above the relay exchange. Every delivery from a session except a steered one therefore ends with one more paragraph:
+```
+Your user has not written since your last answer to them, so do not take that answer as read. If it still holds something they need (a question, a decision, a result), repeat that in full, not as a summary, in the answer that ends this turn, then say what changed since.
+```
+A steered message comes before the turn's answer and has no such paragraph; a web UI message is from the user and has none either.
+
 Register a message renderer for `relay-message` that shows one line, `✉ relay ← <sender> [#room] [urgent] [reply to <id>] · <size>` (`42 chars`, `1.2k chars`, `12k chars`), and the text under it only when the message is expanded (Ctrl+O); the content the model reads stays as above. `relay_send` and `relay_room` render their calls and results the same way, one line each until expanded. Every send the server accepts is recorded with `pi.appendEntry("relay-sent", { id, to?, label?, room?, mentions?, text, replyTo?, urgent, status, at })` (`to` and `label` for a session, `room` for a chatroom; `status` is the `sent` answer's `delivered` or `queued`); a rejected, failed, or unanswered send records nothing. `/relay log` lists the branch's `relay-received` and `relay-sent` entries.
 
 **Untrusted fields:** every field of a message comes from another device or the web UI. Before rendering, strip ESC sequences and C0/C1 control characters except `\n` and `\t` from the text and every sender field. In the model-facing header, also collapse whitespace (including newlines) in `name`, `title`, `device`, `deviceName`, and `project` and remove double quotes, so a field cannot forge a second header line.
@@ -251,6 +258,8 @@ On `status: expired`, the extension sends `pi.sendMessage({ customType: "relay-n
 ```
 [relay] Your message <id> to <label> expired: it was not delivered within 5 minutes and was dropped.
 ```
+When the session is idle, the notice starts a turn, and its content ends with the paragraph for unanswered answers (see Receiving). The renderer for `relay-notice` shows the first line only.
+
 `status: delivered` updates `relay_status` silently and does not wake the session.
 
 ### Command `/relay`
@@ -268,6 +277,7 @@ On `status: expired`, the extension sends `pi.sendMessage({ customType: "relay-n
   - `state` updates;
   - delivery when idle (starts a turn), when busy (followUp), when urgent or from a conversation (steer), and in order behind a waiting follow-up;
   - the refusal of a send that would cross an unread message, once per message, and forgetting messages a cleared queue dropped;
+  - the paragraph for unanswered answers on every delivery but a steered or web UI one, and on an idle session's expiry notice;
   - the receipt entry, deduplication across reconnect and `/resume`, and `ack`;
   - hop accounting;
   - the three tools and every `sent` outcome;

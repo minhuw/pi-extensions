@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { headerField, messageContent, sanitize, targetLabel } from "../../relay/protocol.ts";
+import { expiredContent, headerField, messageContent, sanitize, targetLabel } from "../../relay/protocol.ts";
 
 it.each([
 	["CSI", "a\x1b[31mred\x1b[0mb", "aredb"],
@@ -68,4 +68,17 @@ it("names a device by its name, else by its id, on one line", () => {
 	expect(message({ deviceName: " " })).toBe(`[relay] Message m-1 from pi session s-1 on 7f9c2ba4-e88f-4a1b-9a3c-0d2f6e1b5c47:`);
 	expect(targetLabel({ sessionId: "s-2", device: "desktop", deviceName: "Desk top", name: "Docs" })).toBe(`pi session s-2 ("Docs") on Desk top`);
 	expect(targetLabel({ sessionId: "s-2", device: "desktop" })).toBe("pi session s-2 on desktop");
+});
+
+it("closes what follows an unanswered answer by telling the model not to take it as read, except a message of the user", () => {
+	const close = "\n\nYour user has not written since your last answer to them, so do not take that answer as read. If it still holds something they need (a question, a decision, a result), repeat that in full, not as a summary, in the answer that ends this turn, then say what changed since.";
+	const frame = { type: "message" as const, id: "m-1", text: "hi", urgent: false, hops: 1, sentAt: "", from: { kind: "session" as const, sessionId: "s-1", device: "desktop" } };
+	for (const message of [frame, { ...frame, room: "ops" }]) {
+		expect(messageContent(message, true)).toBe(`${messageContent(message)}${close}`);
+		expect(messageContent(message).endsWith("do not reply just to say so.")).toBe(true);
+	}
+	// The user wrote these in the web UI.
+	for (const message of [{ ...frame, from: { kind: "web" as const } }, { ...frame, room: "ops", from: { kind: "web" as const } }]) expect(messageContent(message, true)).toBe(messageContent(message));
+	expect(expiredContent("m-2", "pi session s-1", 300)).toBe("[relay] Your message m-2 to pi session s-1 expired: it was not delivered within 5 minutes and was dropped.");
+	expect(expiredContent("m-2", "pi session s-1", 300, true)).toBe(`[relay] Your message m-2 to pi session s-1 expired: it was not delivered within 5 minutes and was dropped.${close}`);
 });

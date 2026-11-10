@@ -176,7 +176,9 @@ it("wakes the sender with a notice when a message expires, and records delivery 
 	expect(a.sent.slice(before)).toEqual([{
 		message: {
 			customType: NOTICE_TYPE, display: true,
-			content: "[relay] Your message msg-2 to pi session offline-session (\"Docs\") on desktop expired: it was not delivered within 5 minutes and was dropped.",
+			// The session was idle, so the notice starts a turn after an answer the user has not replied to.
+			content: "[relay] Your message msg-2 to pi session offline-session (\"Docs\") on desktop expired: it was not delivered within 5 minutes and was dropped.\n\n"
+				+ "Your user has not written since your last answer to them, so do not take that answer as read. If it still holds something they need (a question, a decision, a result), repeat that in full, not as a summary, in the answer that ends this turn, then say what changed since.",
 			details: expect.objectContaining({ id: "msg-2", status: "expired" }),
 		},
 		options: { deliverAs: "steer", triggerTurn: true },
