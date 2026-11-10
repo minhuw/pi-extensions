@@ -842,4 +842,44 @@ describe("iMessage messenger and chatrooms", () => {
 		fireEvent.click(document.querySelector<HTMLButtonElement>("[data-imessage-delete-room]")!);
 		await waitFor(() => expect(server.mutations.map((m) => `${m.method} ${m.path}`)).toEqual(["DELETE /api/v1/relay/rooms/ops"]));
 	});
+
+	it("says plainly that a room is gone, and posting does not create it again", async () => {
+		const at = new Date().toISOString();
+		const server = createFakeServer({ relayRooms: [{ room: { name: "ops", createdAt: at, updatedAt: at, messageCount: 0, members: [] }, messages: [] }] });
+		renderApp("/active", server.fetch);
+		const messenger = await waitFor(() => { const node = document.querySelector<HTMLElement>("[data-imessage-active-title]")!; expect(node?.textContent).toBe("#ops"); return node.closest<HTMLElement>("[data-imessage]")!; });
+		server.state.relayRooms.splice(0);
+		fireEvent.change(messenger.querySelector<HTMLTextAreaElement>("[data-imessage-input]")!, { target: { value: "Anyone here?" } });
+		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-send]")!);
+		const feedback = await waitFor(() => { const node = messenger.querySelector<HTMLElement>('[data-imessage-feedback="error"]')!; expect(node).toBeTruthy(); return node; });
+		expect(feedback.textContent).toBe("No such room. Create it here or with /relay join.");
+		expect(server.state.relayRooms).toEqual([]);
+	});
+
+	it("wakes only members: a mentioned non-member is named in the feedback and is not added", async () => {
+		const at = new Date().toISOString();
+		const lead = { sessionId: "s-lead", device: "mini", name: "Lead", project: "pika-server", state: "idle" as const, online: true, joinedAt: at };
+		const server = createFakeServer({
+			online: [onlineSession("s-lead", { name: "Lead", project: "pika-server" }), onlineSession("s-bob", { name: "Bob", project: "pika-web" })],
+			relayRooms: [{ room: { name: "ops", createdAt: at, updatedAt: at, messageCount: 0, members: [lead] }, messages: [] }],
+		});
+		renderApp("/active", server.fetch);
+		const messenger = await waitFor(() => { const node = document.querySelector<HTMLElement>("[data-imessage-active-title]")!; expect(node?.textContent).toBe("#ops"); return node.closest<HTMLElement>("[data-imessage]")!; });
+		fireEvent.change(messenger.querySelector<HTMLTextAreaElement>("[data-imessage-input]")!, { target: { value: "@Bob can you check?" } });
+		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-send]")!);
+		await waitFor(() => expect(messenger.querySelector('[data-imessage-feedback="ok"]')?.textContent).toBe("Posted to the room's history. Not members: @Bob"));
+		await waitFor(() => expect(messenger.querySelector("[data-notified]")?.textContent).toBe("Room history only; no one notified"));
+		expect(server.state.relayRooms[0]!.room.members.map((m) => m.sessionId)).toEqual(["s-lead"]);
+
+		// Only the user adds members.
+		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-manage-members]")!);
+		fireEvent.click(messenger.querySelector<HTMLButtonElement>('[data-imessage-toggle-member="s-bob"]')!);
+		await waitFor(() => expect(messenger.querySelectorAll("[data-imessage-room-members] li")).toHaveLength(2));
+		expect(server.mutations.at(-1)).toEqual({
+			method: "POST",
+			path: "/api/v1/relay/rooms/ops/members",
+			body: { sessionId: "s-bob", action: "add" },
+			json: true,
+		});
+	});
 });

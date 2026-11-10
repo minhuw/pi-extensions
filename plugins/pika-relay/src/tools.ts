@@ -43,8 +43,8 @@ export const TOOLS: ToolDefinition[] = [
     {
         name: "relay_send", title: "Relay Send",
         description: "Send a text message to another running pi session or to an explicit multi-agent chatroom through pika relay. "
-            + "For a 1:1 message, pass `to` (a session id from relay_list). For a chatroom, pass `room` (or `to: \"#room\"`) and optional `mentions` (session ids, agent names, or 'all'). "
-            + "In a chatroom, only @mentioned members receive a live notification that starts/joins a turn; all agents can read room history on demand with relay_room. "
+            + "For a 1:1 message, pass `to` (a session id from relay_list). For a chatroom this thread is a member of, pass `room` (or `to: \"#room\"`) and optional `mentions` (members' session ids or names, or 'all'). "
+            + "In a chatroom, only @mentioned members receive a live notification that starts/joins a turn; members read room history on demand with relay_room. "
             + "An answer arrives as a new [relay] message in this thread after a later tool call or when this turn ends; do not sleep, poll relay_status, or call relay_list to wait for one, call relay_wait instead. "
             + "Messages that cannot be delivered within 5 minutes are dropped, and you get a notice.",
         inputSchema: {
@@ -52,7 +52,7 @@ export const TOOLS: ToolDefinition[] = [
             properties: {
                 to: string("The target pi session id (or #roomName for a chatroom)"),
                 room: string("Chatroom name to post to (alternative to `to`); only @mentioned members are woken up"),
-                mentions: strings("In a chatroom, session ids or names (or 'all') to notify and wake up"),
+                mentions: strings("In a chatroom, members' session ids or names (or 'all') to notify and wake up"),
                 text: string("The message text (at most 32 KiB)"),
                 urgent: { type: "boolean", description: "Steer the message into the target's current turn instead of queueing it after that turn" },
                 replyTo: string("The id of the relay message this answers"),
@@ -70,20 +70,18 @@ export const TOOLS: ToolDefinition[] = [
     },
     {
         name: "relay_room", title: "Relay Room",
-        description: "Manage explicit multi-agent chatrooms across repositories and read room message history on demand. "
+        description: "Read and post in multi-agent chatrooms across repositories. "
             + "`action: \"list\"` lists active rooms and their members. "
-            + "`action: \"join\"` creates or joins `room` (with optional `topic`). "
-            + "`action: \"leave\"` leaves `room`. "
             + "`action: \"history\"` reads recent messages in `room` (even those where this thread was not @mentioned). "
-            + "`action: \"send\"` posts `text` to `room` and notifies only `@mentioned` members (via `@name`/`@sessionId` in `text` or `mentions`).",
+            + "`action: \"send\"` posts `text` to `room` and notifies only `@mentioned` members (via `@name`/`@sessionId` in `text` or `mentions`). "
+            + "Only your user adds this thread to a room, in the pika web UI; a send to a room this thread is not a member of is refused. To be in a room, ask your user.",
         inputSchema: {
             type: "object", additionalProperties: false, required: ["action"],
             properties: {
-                action: { type: "string", enum: ["list", "join", "leave", "history", "send"], description: "Operation: list, join, leave, history, or send" },
-                room: string("Room name (e.g. 'auth-sync'); required for join, leave, history, send"),
-                topic: string("Optional topic description when joining/creating a room"),
+                action: { type: "string", enum: ["list", "history", "send"], description: "Operation: list, history, or send" },
+                room: string("Room name (e.g. 'auth-sync'); required for history and send"),
                 text: string("Message text when action is 'send'"),
-                mentions: strings("Session ids or agent names (or 'all') to notify when action is 'send'"),
+                mentions: strings("Members' session ids or names (or 'all') to notify when action is 'send'"),
                 urgent: { type: "boolean", description: "Steer into mentioned members' active turns when action is 'send'" },
                 replyTo: string("Message id being answered when action is 'send'"),
                 limit: { type: "integer", description: "Max messages to read in 'history' (default 50, max 200)" },

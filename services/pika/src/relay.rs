@@ -497,6 +497,10 @@ pub enum Reason {
     RateLimited,
     HopLimit,
     UnknownSession,
+    /// A room post to a room that does not exist.
+    UnknownRoom,
+    /// A room post from a session that is not a member of the room.
+    NotMember,
     MailboxFull,
     /// A device acted for a session that another device owns; room actions only.
     NotOwner,
@@ -511,6 +515,8 @@ impl Reason {
             Reason::RateLimited => "rate_limited",
             Reason::HopLimit => "hop_limit",
             Reason::UnknownSession => "unknown_session",
+            Reason::UnknownRoom => "unknown_room",
+            Reason::NotMember => "not_member",
             Reason::MailboxFull => "mailbox_full",
             Reason::NotOwner => "not_owner",
         }
@@ -521,8 +527,9 @@ impl Reason {
 pub enum Outcome {
     /// `delivered` when the target acknowledged within the ack wait, otherwise `queued`.
     Accepted { id: String, delivered: bool, target: Target },
-    /// A message posted to a chatroom (`room`); `notified` lists the `@`-mentioned members who received a live push.
-    RoomAccepted { id: String, room: String, target: Target, notified: Vec<Target> },
+    /// A message posted to a chatroom (`room`); `notified` lists the `@`-mentioned members who received a live push,
+    /// `unmatched` the mention tokens that named no member.
+    RoomAccepted { id: String, room: String, target: Target, notified: Vec<Target>, unmatched: Vec<String> },
     Rejected(Reason),
 }
 
@@ -1131,13 +1138,17 @@ impl Inner {
                         "type": "sent", "clientId": client_id, "id": id,
                         "status": if delivered { "delivered" } else { "queued" }, "to": target.to_json(&self.names),
                     }),
-                    Outcome::RoomAccepted { id, room, target, notified } => {
+                    Outcome::RoomAccepted { id, room, target, notified, unmatched } => {
                         let notified_json: Vec<Value> = notified.iter().map(|t| t.to_json(&self.names)).collect();
-                        json!({
+                        let mut frame = json!({
                             "type": "sent", "clientId": client_id, "id": id,
                             "status": "delivered", "room": room, "notified": notified_json,
                             "to": target.to_json(&self.names),
-                        })
+                        });
+                        if !unmatched.is_empty() {
+                            frame["unmatched"] = json!(unmatched);
+                        }
+                        frame
                     }
                     Outcome::Rejected(reason) => json!({
                         "type": "sent", "clientId": client_id, "status": "rejected", "reason": reason.as_str(),
@@ -1575,7 +1586,9 @@ impl Relay {
         inner.messages.insert(id, message);
     }
 
-    /// Posts a message to a chatroom and pushes live `[relay]` notifications only to `@`-mentioned members.
+    /// Posts a message to an existing chatroom and pushes live `[relay]` notifications only to `@`-mentioned members.
+    /// A session must be a member of the room, the web UI may post to any room; posting never creates a room or adds a
+    /// member, and mentions resolve only among the members.
     pub fn send_room(self: &Arc<Self>, from: Origin, draft: Draft, reply: Reply) {
         let mut inner = self.lock();
         inner.forget_expired(Instant::now());
@@ -1605,7 +1618,6 @@ impl Relay {
                     .len()
                     > config.max_frame_bytes
         };
-        let room_limit_reached = !inner.rooms.contains_key(&room_name) && inner.rooms.len() >= MAX_ROOMS;
         let rejection = if !draft.valid || !valid_room_name(&room_name) {
             Some(Reason::Invalid)
         } else if too_large() {
@@ -1614,8 +1626,10 @@ impl Relay {
             Some(Reason::RateLimited)
         } else if draft.hops > config.max_hops {
             Some(Reason::HopLimit)
-        } else if room_limit_reached {
-            Some(Reason::MailboxFull)
+        } else if !inner.rooms.contains_key(&room_name) {
+            Some(Reason::UnknownRoom)
+        } else if sender.session_id().is_some_and(|s| !inner.rooms[&room_name].members.contains_key(s)) {
+            Some(Reason::NotMember)
         } else {
             None
         };
@@ -1640,57 +1654,21 @@ impl Relay {
             return;
         }
 
-        // Ensure the room exists and if the sender is an online session, ensure it is a member of the room.
-        let sender_online = sender.session_id().and_then(|sid| inner.online.get(sid).cloned());
-        if !inner.rooms.contains_key(&room_name) {
-            inner.rooms.insert(room_name.clone(), Room::new(room_name.clone(), None, now));
-        }
-        if let Some(online) = &sender_online
-            && let Some(room) = inner.rooms.get_mut(&room_name)
-        {
-            room.members
-                .entry(online.info.id.clone())
-                .and_modify(|m| m.refresh(online))
-                .or_insert_with(|| RoomMember::from_online(online, now));
-        }
-
         // Gather mention tokens from `draft.mentions` and `@token` in `draft.text`.
-        let mut tokens: Vec<String> = draft.mentions.clone();
-        for extracted in extract_mentions(&draft.text) {
-            if !tokens.iter().any(|t| t.eq_ignore_ascii_case(&extracted)) {
-                tokens.push(extracted);
+        let mut tokens: Vec<String> = Vec::new();
+        for token in draft.mentions.iter().cloned().chain(extract_mentions(&draft.text)) {
+            if !tokens.iter().any(|t| t.eq_ignore_ascii_case(&token)) {
+                tokens.push(token);
             }
         }
-        let mention_all = tokens
-            .iter()
-            .any(|t| t.eq_ignore_ascii_case("all") || t.eq_ignore_ascii_case("everyone") || t == "*");
+        let everyone = |t: &str| t.eq_ignore_ascii_case("all") || t.eq_ignore_ascii_case("everyone") || t == "*";
+        let mention_all = tokens.iter().any(|t| everyone(t));
 
-        // Also allow mentioning an online session by exact sessionId or exact name, auto-adding it to the room.
-        if !mention_all {
-            let mut auto_add = Vec::new();
-            for tok in &tokens {
-                for online in inner.online.values() {
-                    if online.info.id.eq_ignore_ascii_case(tok)
-                        || online.info.name.as_ref().is_some_and(|n| n.eq_ignore_ascii_case(tok))
-                    {
-                        auto_add.push(online.clone());
-                    }
-                }
-            }
-            if let Some(room) = inner.rooms.get_mut(&room_name) {
-                for online in auto_add {
-                    room.members
-                        .entry(online.info.id.clone())
-                        .and_modify(|m| m.refresh(&online))
-                        .or_insert_with(|| RoomMember::from_online(&online, now));
-                }
-            }
-        }
-
-        // Resolve mentions against room members (excluding the sender itself).
+        // Resolve mentions among the room's members; the sender may be named but is never notified.
         let sender_sid = sender.session_id().map(str::to_owned);
         let mut notified_targets: Vec<(Target, String)> = Vec::new();
         let mut resolved_ids: Vec<String> = Vec::new();
+        let mut named = vec![false; tokens.len()];
         {
             let online_snapshot: HashMap<String, Online> = inner.online.clone();
             let remembered_owners: HashMap<String, String> = inner
@@ -1703,11 +1681,17 @@ impl Relay {
                     if let Some(online) = online_snapshot.get(&member.session_id) {
                         member.refresh(online);
                     }
+                    let online = online_snapshot.get(&member.session_id);
+                    let mut matched = mention_all;
+                    for (token, named) in tokens.iter().zip(named.iter_mut()) {
+                        if !everyone(token) && member.matches_mention(token, online) {
+                            *named = true;
+                            matched = true;
+                        }
+                    }
                     if sender_sid.as_deref() == Some(member.session_id.as_str()) {
                         continue;
                     }
-                    let online = online_snapshot.get(&member.session_id);
-                    let matched = mention_all || tokens.iter().any(|tok| member.matches_mention(tok, online));
                     if matched {
                         let owner = online
                             .map(|o| o.device.clone())
@@ -1725,6 +1709,10 @@ impl Relay {
             }
         }
 
+        let unmatched: Vec<String> = (tokens.into_iter().zip(named))
+            .filter(|(token, named)| !named && !everyone(token))
+            .map(|(token, _)| token)
+            .collect();
         let notified: Vec<Target> = notified_targets.iter().map(|(t, _)| t.clone()).collect();
         if let Some(room) = inner.rooms.get_mut(&room_name) {
             let seq = room.next_seq;
@@ -1802,10 +1790,7 @@ impl Relay {
             inner.messages.insert(notif_id, message);
         }
 
-        inner.answer(
-            reply,
-            Outcome::RoomAccepted { id, room: room_name, target: room_target, notified },
-        );
+        inner.answer(reply, Outcome::RoomAccepted { id, room: room_name, target: room_target, notified, unmatched });
     }
 
     /// Lists all active chatrooms, most recently active first.

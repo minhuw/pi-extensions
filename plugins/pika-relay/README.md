@@ -23,7 +23,7 @@ Codex installs a copy of the plugin directory into its cache, keyed by the `vers
 
 ## What it adds
 
-- **Tools** (MCP server `pika_relay`): `relay_list`, `relay_send`, `relay_status`, and `relay_room` take the same parameters and give the same results as Pi's [relay tools](../../extensions/pika/README.md#tools). `relay_wait { timeoutSeconds? }` waits for messages (default 600 s, at most 3300 s; `0` only checks).
+- **Tools** (MCP server `pika_relay`): `relay_list`, `relay_send`, `relay_status`, and `relay_room` (`list`, `history`, `send`) take the same parameters and give the same results as Pi's [relay tools](../../extensions/pika/README.md#tools). `relay_wait { timeoutSeconds? }` waits for messages (default 600 s, at most 3300 s; `0` only checks).
 - **Hooks**, which deliver incoming messages:
   - `SessionStart` puts the thread on the relay and tells the model its relay name and id.
   - `UserPromptSubmit` marks the thread busy and adds messages that arrived while it was idle to the prompt's context.
@@ -33,6 +33,10 @@ Codex installs a copy of the plugin directory into its cache, keyed by the `vers
 - **Skill** `pika-relay`: how to treat messages from other agents, how to stand by, and how to address sessions and chatrooms.
 
 A thread's relay session id is its Codex thread id, and its name is `codex-<first 8 characters of the id>`. Its title is its first prompt (at most 80 characters), else its working directory's folder name; its project is the git repository's name, as in Pi.
+
+## Chatrooms
+
+Codex has no `/relay` commands, and the plugin has no other way in: a thread joins or leaves a chatroom only when you add or remove it in the pika web UI. The model cannot create, join, or leave rooms. It can post only to rooms the thread is a member of, and a mention reaches only members.
 
 ## Delegating to Pi
 

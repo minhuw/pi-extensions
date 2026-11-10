@@ -95,7 +95,7 @@ const commandEntries: [string, string, string][] = [
 	["workspace", "workspace", "Inspect project workspaces, manage external write rules, and run workspace garbage collection."],
 	["footer", "statusline-footer", "Choose the custom footer layout."],
 	["pika", "pika", "Log in, log out, or inspect upload status."],
-	["relay", "pika", "Check relay status, send messages, or toggle relay for this session."],
+	["relay", "pika", "Check relay status, send messages, join or leave rooms, or toggle relay for this session."],
 	["magpie-refresh", "magpie-provider", "Refresh the gateway's model catalog."],
 	["magpie-native-compaction", "magpie-provider", "Check whether native compaction is enabled for the selected model."],
 ];

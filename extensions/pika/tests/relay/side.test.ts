@@ -236,6 +236,7 @@ it("answers in the room, mentioning the sender", async () => {
 	h.faux.setResponses([busy.step, reply("Deploy is at step 3 of 5."), reply("after the note"), reply("after the room")]);
 	const prompt = h.session.prompt("work on something");
 	await busy.started;
+	relay.addRoom("ops", [id, "peer"]);
 	const message = relay.push(id, { room: "ops", from: PEER, text: "@me where is the deploy?" });
 	await waitFor(noted(h), 5_000, "the side answer");
 	expect(relay.frames(id, "send")[0]).toMatchObject({ room: "ops", mentions: ["peer"], replyTo: message, hops: 2 });

@@ -8,6 +8,9 @@ export const REJECTIONS = {
     rate_limited: "this session sent too many messages in the last minute; wait before sending more",
     unknown_session: "no online or recorded pi session has that id; call relay_list for the online sessions",
     mailbox_full: "the target's mailbox is full; try again later",
+    // Codex has no /relay commands: a thread is added to rooms in the pika web UI.
+    unknown_room: "no such chatroom; your user creates rooms in the pika web UI",
+    not_member: "this session is not a member of that room; only your user can add it, in the pika web UI",
 };
 export const rejection = (reason, maxHops) => reason === "hop_limit"
     ? `the message would travel more than ${maxHops} hops between sessions without the user; stop relaying and wait for your user`
@@ -44,7 +47,9 @@ export function sendResult(answer, label, ttlSeconds) {
         const who = notified.length
             ? `notified ${notified.map((t) => targetLabel(t)).join(", ")}`
             : "recorded in room history (no @mentions notified)";
-        return `Posted message ${answer.id} to room #${headerField(answer.room)} (${who}).`;
+        const unmatched = Array.isArray(answer.unmatched) ? answer.unmatched.map(headerField).filter(Boolean) : [];
+        const nobody = unmatched.length ? ` These mentions reached nobody, as they are not members: ${unmatched.join(", ")}.` : "";
+        return `Posted message ${answer.id} to room #${headerField(answer.room)} (${who}).${nobody}`;
     }
     if (answer.status === "delivered")
         return `Delivered message ${answer.id} to ${label}.`;

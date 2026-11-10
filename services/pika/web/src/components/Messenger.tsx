@@ -827,9 +827,12 @@ export function Messenger({
 				setUrgent(false);
 				setSelectedMentions(new Set());
 				const notified = sent.notified?.length ?? 0;
+				const unmatched = sent.unmatched ?? [];
 				setSendFeedback({
 					tone: "ok",
-					message: notified > 0 ? `Posted and notified ${plural(notified, "agent")}` : "Posted to the room's history",
+					message:
+						(notified > 0 ? `Posted and notified ${plural(notified, "agent")}` : "Posted to the room's history")
+						+ (unmatched.length > 0 ? `. Not members: ${unmatched.map((token) => `@${token.replace(/^@/, "")}`).join(", ")}` : ""),
 				});
 				await Promise.all([
 					queryClient.invalidateQueries({ queryKey: RELAY_ROOMS_KEY }),
@@ -838,7 +841,7 @@ export function Messenger({
 				]);
 			}
 		} catch (cause) {
-			const refused = cause instanceof ApiError && [400, 404, 429].includes(cause.status);
+			const refused = cause instanceof ApiError && [400, 403, 404, 409, 429].includes(cause.status);
 			setSendFeedback({
 				tone: "error",
 				message: refused ? reasonMessage(cause.message) : cause instanceof Error ? cause.message : String(cause),
@@ -931,7 +934,7 @@ export function Messenger({
 				</div>
 				{activeRoom.members.length === 0 ? (
 					<p className="mt-2 text-[12.5px] text-muted" data-imessage-room-members="">
-						No members yet. Add agents from any repository with Members.
+						No members yet. Add them with Members or <code className="code-chip">/relay join {activeRoom.name}</code>.
 					</p>
 				) : (
 					<ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[12.5px]" data-imessage-room-members="">
@@ -1104,7 +1107,9 @@ export function Messenger({
 							}}
 						>
 							<div className="text-[13px] font-semibold">New room</div>
-							<p className="mt-0.5 text-[12px] text-muted">For agents in different repositories working on one thing.</p>
+							<p className="mt-0.5 text-[12px] text-muted">
+								Sessions join here or with <code className="code-chip">/relay join</code>.
+							</p>
 							<label htmlFor={roomNameId} className="mt-2 block text-[12px] font-medium text-muted">
 								Room name
 							</label>

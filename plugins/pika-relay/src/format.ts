@@ -10,6 +10,9 @@ export const REJECTIONS: Record<string, string> = {
     rate_limited: "this session sent too many messages in the last minute; wait before sending more",
     unknown_session: "no online or recorded pi session has that id; call relay_list for the online sessions",
     mailbox_full: "the target's mailbox is full; try again later",
+    // Codex has no /relay commands: a thread is added to rooms in the pika web UI.
+    unknown_room: "no such chatroom; your user creates rooms in the pika web UI",
+    not_member: "this session is not a member of that room; only your user can add it, in the pika web UI",
 };
 
 export const rejection = (reason: string, maxHops: number): string | undefined => reason === "hop_limit"
@@ -47,13 +50,15 @@ export function roomMessageLine(msg: RoomMessage): string {
     return `[#${msg.seq} · ${headerField(msg.id)} · ${since(msg.at)} ago] ${sender}${mentions}: ${sanitize(msg.text)}`;
 }
 
-export function sendResult(answer: SentFrame & { status: "delivered" | "queued" }, label: string, ttlSeconds: number): string {
+export function sendResult(answer: SentFrame & { status: "delivered" | "queued"; unmatched?: string[] }, label: string, ttlSeconds: number): string {
     if (answer.room) {
         const notified = answer.notified ?? [];
         const who = notified.length
             ? `notified ${notified.map((t) => targetLabel(t)).join(", ")}`
             : "recorded in room history (no @mentions notified)";
-        return `Posted message ${answer.id} to room #${headerField(answer.room)} (${who}).`;
+        const unmatched = Array.isArray(answer.unmatched) ? answer.unmatched.map(headerField).filter(Boolean) : [];
+        const nobody = unmatched.length ? ` These mentions reached nobody, as they are not members: ${unmatched.join(", ")}.` : "";
+        return `Posted message ${answer.id} to room #${headerField(answer.room)} (${who}).${nobody}`;
     }
     if (answer.status === "delivered") return `Delivered message ${answer.id} to ${label}.`;
     return `Queued message ${answer.id} for ${label}: it has not been delivered yet. If it is not delivered within ${ttlText(ttlSeconds)} it is dropped and you will get a notice.`;

@@ -89,6 +89,13 @@ const UPDATES_TURN_LIMIT = 50;
 const RELAY_MAX_TEXT_BYTES = 32 * 1024;
 const RELAY_EVENTS_MAX = 500;
 
+/** The HTTP status of a refused web send. */
+function relayRejectionStatus(reason: string): number {
+	if (reason === "rate_limited" || reason === "mailbox_full") return 429;
+	if (reason === "unknown_room") return 404;
+	return reason === "not_member" ? 403 : 400;
+}
+
 function withoutChildren({ children: _children, ...rest }: SessionDetail) {
 	return rest;
 }
@@ -776,8 +783,10 @@ export function createFakeServer({
 				if (state.relayHold) await state.relayHold;
 				const request = (body ?? {}) as { to?: string; room?: string; mentions?: string[]; text?: string; urgent?: boolean };
 				if (typeof request.room === "string") {
+					// Posting never creates a room or adds a member; the web may post to any existing room.
 					const cleanRoom = request.room.trim().replace(/^#/, "");
 					const text = request.text ?? "";
+					const entry = state.relayRooms.find((r) => r.room.name === cleanRoom);
 					let reason: string | undefined;
 					if (!text || !/^[A-Za-z0-9._-]{1,64}$/.test(cleanRoom)) reason = "invalid";
 					else if (new TextEncoder().encode(text).length > RELAY_MAX_TEXT_BYTES) reason = "too_large";
@@ -786,7 +795,8 @@ export function createFakeServer({
 					const id = `web-${relaySent}`;
 					const at = new Date().toISOString();
 					const roomTarget: RelayTarget = { sessionId: `#${cleanRoom}`, name: `#${cleanRoom}` };
-					if (reason) {
+					if (reason || !entry) {
+						reason ??= "unknown_room";
 						state.relayEvents.unshift({
 							id,
 							at,
@@ -799,31 +809,22 @@ export function createFakeServer({
 							hops: 0,
 							text,
 						});
-						return json(reason === "rate_limited" || reason === "mailbox_full" ? 429 : 400, { error: reason });
+						return json(relayRejectionStatus(reason), { error: reason });
 					}
-					let entry = state.relayRooms.find((r) => r.room.name === cleanRoom);
-					if (!entry) {
-						entry = {
-							room: { name: cleanRoom, createdAt: at, updatedAt: at, messageCount: 0, members: [] },
-							messages: [],
-						};
-						state.relayRooms.unshift(entry);
-					}
-					const tokens = [
+					const tokens: string[] = [];
+					for (const token of [
 						...(request.mentions ?? []).map((m) => m.replace(/^@/, "")),
 						...[...text.matchAll(/(?:^|[\s([{"',:;])@([A-Za-z0-9._-]+)/g)].map((m) => m[1]!),
-					];
-					const mentionAll = tokens.some((t) => t.toLowerCase() === "all" || t === "*");
-					const notifiedMembers = entry.room.members.filter(
-						(m) =>
-							mentionAll
-							|| tokens.some(
-								(tok) =>
-									m.sessionId.toLowerCase() === tok.toLowerCase()
-									|| m.name?.toLowerCase() === tok.toLowerCase()
-									|| m.project?.toLowerCase() === tok.toLowerCase(),
-							),
-					);
+					]) {
+						if (!tokens.some((t) => t.toLowerCase() === token.toLowerCase())) tokens.push(token);
+					}
+					// Mentions resolve only among the room's members; `all`, `everyone`, and `*` mean every member.
+					const everyone = (tok: string) => ["all", "everyone", "*"].includes(tok.toLowerCase());
+					const mentionAll = tokens.some(everyone);
+					const matches = (m: RelayRoomMember, tok: string) =>
+						[m.sessionId, m.name, m.title, m.project].some((field) => field?.toLowerCase() === tok.toLowerCase());
+					const notifiedMembers = entry.room.members.filter((m) => mentionAll || tokens.some((tok) => matches(m, tok)));
+					const unmatched = tokens.filter((tok) => !everyone(tok) && !entry.room.members.some((m) => matches(m, tok)));
 					const notified: RelayTarget[] = notifiedMembers.map((m) => ({
 						sessionId: m.sessionId,
 						device: m.device,
@@ -861,7 +862,7 @@ export function createFakeServer({
 						hops: 0,
 						text,
 					});
-					return json(200, { id, status: "delivered", room: cleanRoom, notified, to: roomTarget });
+					return json(200, { id, status: "delivered", room: cleanRoom, notified, to: roomTarget, ...(unmatched.length > 0 ? { unmatched } : {}) });
 				}
 				const to = request.to ?? "";
 				const text = request.text ?? "";
@@ -900,7 +901,7 @@ export function createFakeServer({
 					hops: 0,
 					text,
 				});
-				if (reason) return json(reason === "rate_limited" || reason === "mailbox_full" ? 429 : 400, { error: reason });
+				if (reason) return json(relayRejectionStatus(reason), { error: reason });
 				return json(200, { id, status, to: target });
 			}
 			return json(405, { error: "method not allowed" });

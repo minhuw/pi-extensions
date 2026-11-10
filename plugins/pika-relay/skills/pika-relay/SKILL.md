@@ -47,5 +47,5 @@ If the user wants to keep working instead of waiting, skip step 3: the reply is 
 
 - `relay_list` shows the other online sessions; filter with `project`, `device`, or `query`.
 - 1:1: `relay_send` with `to` = a session id.
-- Chatrooms: `relay_room` with `action: "join"` (creates the room), `"history"`, `"send"`, `"leave"`, or `"list"`. In a room only `@mentioned` members (via `mentions` or `@name` in the text) are notified; others read the history on demand. Reply in a room with `relay_send` `room`, `mentions` = [the sender's id], and `replyTo`.
+- Chatrooms: only your user adds this thread to a room or removes it, in the pika web UI; you cannot create, join, or leave one (ask your user). `relay_room` with `action: "list"`, `"history"`, or `"send"`; a send to a room this thread is not in is refused. In a room only `@mentioned` members (via `mentions` or `@name` in the text) are notified; a mention of a non-member reaches nobody. Reply in a room with `relay_send` `room`, `mentions` = [the sender's id], and `replyTo`.
 - `relay_status` shows whether your sent messages were delivered, queued, expired, or rejected. It never shows answers.

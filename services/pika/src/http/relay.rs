@@ -107,14 +107,15 @@ async fn recorded(state: &AppState, draft: &Draft) -> anyhow::Result<Option<rela
 fn reason_response(reason: Reason) -> Response {
     let status = match reason {
         Reason::RateLimited | Reason::MailboxFull => StatusCode::TOO_MANY_REQUESTS,
-        Reason::NotOwner => StatusCode::FORBIDDEN,
+        Reason::NotOwner | Reason::NotMember => StatusCode::FORBIDDEN,
+        Reason::UnknownRoom => StatusCode::NOT_FOUND,
         _ => StatusCode::BAD_REQUEST,
     };
     error(status, reason.as_str())
 }
 
 /// `POST relay/messages` with `{ to, text, urgent? }` or `{ room, text, mentions?, urgent?, replyTo? }`, sent as
-/// `{ kind: "web" }` with hops 0.
+/// `{ kind: "web" }` with hops 0. The room must exist; the web needs no membership.
 pub async fn post_message(State(state): State<AppState>, body: Result<Json<Value>, JsonRejection>) -> Response {
     let body = match body {
         Ok(Json(body)) => body,
@@ -134,12 +135,17 @@ pub async fn post_message(State(state): State<AppState>, body: Result<Json<Value
             "id": id, "status": if delivered { "delivered" } else { "queued" }, "to": state.relay.target_json(&target),
         }))
         .into_response(),
-        Ok(Outcome::RoomAccepted { id, room, target, notified }) => Json(json!({
-            "id": id, "status": "delivered", "room": room,
-            "notified": state.relay.targets_json(&notified),
-            "to": state.relay.target_json(&target),
-        }))
-        .into_response(),
+        Ok(Outcome::RoomAccepted { id, room, target, notified, unmatched }) => {
+            let mut body = json!({
+                "id": id, "status": "delivered", "room": room,
+                "notified": state.relay.targets_json(&notified),
+                "to": state.relay.target_json(&target),
+            });
+            if !unmatched.is_empty() {
+                body["unmatched"] = json!(unmatched);
+            }
+            Json(body).into_response()
+        }
         Ok(Outcome::Rejected(reason)) => reason_response(reason),
         Err(e) => internal_error(e),
     }

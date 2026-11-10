@@ -112,8 +112,9 @@ export interface MessageFrame {
 
 export interface StatusFrame { type: "status"; id: string; status: "delivered" | "expired"; to: Target; at: string | number }
 
+/** `unmatched`: for a room post, the mention tokens that matched no member; servers before it send none. */
 export type SentFrame =
-	| { type: "sent"; clientId: string; id: string; status: "delivered" | "queued"; to: Target; room?: string; notified?: Target[] }
+	| { type: "sent"; clientId: string; id: string; status: "delivered" | "queued"; to: Target; room?: string; notified?: Target[]; unmatched?: string[] }
 	| { type: "sent"; clientId: string; status: "rejected"; reason: string };
 
 export interface RoomMember {

@@ -632,7 +632,7 @@ export interface RelayTarget {
 
 export type RelayStatus = "queued" | "delivered" | "expired" | "rejected";
 
-/** Why the server refused a message; `self` and `hop_limit` come only from sessions. */
+/** Why the server refused a message; `self`, `hop_limit`, and `not_member` come only from sessions. */
 export type RelayRejection =
 	| "invalid"
 	| "self"
@@ -640,6 +640,8 @@ export type RelayRejection =
 	| "rate_limited"
 	| "hop_limit"
 	| "unknown_session"
+	| "unknown_room"
+	| "not_member"
 	| "mailbox_full"
 	| (string & {});
 
@@ -667,6 +669,8 @@ export interface RelaySendResult {
 	to: RelayTarget;
 	room?: string;
 	notified?: RelayTarget[];
+	/** Room posts only: mention tokens that matched no member. */
+	unmatched?: string[];
 }
 
 export interface RelayRoomMember {

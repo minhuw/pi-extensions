@@ -249,12 +249,9 @@ it("supports explicit chatrooms: only @mentioned members wake up, and any agent 
 	const b = await online();
 	const c = await online();
 
-	callTool(a, "relay_room", { action: "join", room: "#auth-sync", topic: "Coordinate token changes" });
-	callTool(b, "relay_room", { action: "join", room: "auth-sync" });
-	callTool(c, "relay_room", { action: "join", room: "auth-sync" });
-	await a.session.prompt("join room");
-	await b.session.prompt("join room");
-	await c.session.prompt("join room");
+	await a.session.prompt("/relay join #auth-sync Coordinate token changes");
+	await b.session.prompt("/relay join auth-sync");
+	await c.session.prompt("/relay join auth-sync");
 
 	// A posts without @mention: recorded in room history, neither B nor C wakes up.
 	callTool(a, "relay_send", { room: "auth-sync", text: "Started backend migration." });
@@ -281,3 +278,68 @@ it("supports explicit chatrooms: only @mentioned members wake up, and any agent 
 	expect(historyText).toContain("Please review the schema.");
 });
 
+
+it("gives the model no way to join or leave a room: relay_room only lists, reads, and sends", async () => {
+	const a = await online();
+	const parameters = a.session.extensionRunner.getToolDefinition("relay_room")!.parameters as { properties: Record<string, { anyOf?: { const: string }[] }> };
+	expect(parameters.properties.action!.anyOf!.map((option) => option.const)).toEqual(["list", "history", "send"]);
+	expect(parameters.properties.topic).toBeUndefined();
+	callTool(a, "relay_room", { action: "join", room: "ops" });
+	await a.session.prompt("join ops");
+	expect(results(a, "relay_room")[0]!.isError).toBe(true);
+	expect(relay.rooms.size).toBe(0);
+	callTool(a, "relay_room", { action: "list" });
+	await a.session.prompt("list rooms");
+	expect(results(a, "relay_room")[1]).toEqual({ text: "No active chatrooms; your user creates them with /relay join.", isError: false });
+});
+
+it("refuses a post to an unknown room or to a room this session is not a member of, and the server keeps nothing", async () => {
+	const a = await online();
+	const b = await online();
+	relay.addRoom("ops", [b.session.sessionId]);
+	callTool(a, "relay_room", { action: "send", room: "nowhere", text: "hello" });
+	await a.session.prompt("post to nowhere");
+	callTool(a, "relay_send", { room: "ops", text: "hello @all" });
+	await a.session.prompt("post to ops");
+	expect(results(a, "relay_room")).toEqual([{ text: "relay rejected the message (unknown_room): no such chatroom; your user creates rooms with /relay join.", isError: true }]);
+	expect(results(a, "relay_send")).toEqual([{ text: "relay rejected the message (not_member): this session is not a member of that room; only your user can add it, with /relay join <room>.", isError: true }]);
+	expect(relay.rooms.has("nowhere")).toBe(false);
+	expect([...relay.rooms.get("ops")!.members]).toEqual([b.session.sessionId]);
+	expect(relay.rooms.get("ops")!.messages).toEqual([]);
+	callTool(a, "relay_status", {});
+	await a.session.prompt("status");
+	expect(results(a, "relay_status")[0]!.text.split("\n").map((line) => line.replace(/, sent \d+s ago/, ""))).toEqual([
+		`(no id) to room #ops: rejected (not_member): "hello @all"`,
+		`(no id) to room #nowhere: rejected (unknown_room): "hello"`,
+	]);
+	await sleep(150);
+	expect(b.sent).toHaveLength(0);
+	expect(a.errors).toEqual([]);
+});
+
+it("says which mentions reached nobody, and never adds a session it mentions to the room", async () => {
+	const a = await online();
+	const b = await online();
+	const c = await online();
+	await a.session.prompt("/relay join ops");
+	await b.session.prompt("/relay join ops");
+	b.faux.setResponses([fauxAssistantMessage("b saw the mention")]);
+	callTool(a, "relay_room", { action: "send", room: "ops", text: "@ghost please look", mentions: [b.session.sessionId, c.session.sessionId] });
+	await a.session.prompt("post");
+	const [posted] = results(a, "relay_room");
+	expect(posted!.isError).toBe(false);
+	expect(posted!.text).toContain(`notified pi session ${b.session.sessionId}`);
+	expect(posted!.text).toContain(`). Mentions that reached nobody (not members): ${c.session.sessionId}, ghost. ${ANSWER_HINT}`);
+	await waitFor(() => texts(b.session, "assistant").includes("b saw the mention"), 5_000, "b's turn");
+	await sleep(150);
+	expect(c.sent).toHaveLength(0);
+	expect([...relay.rooms.get("ops")!.members].sort()).toEqual([a.session.sessionId, b.session.sessionId].sort());
+
+	// Every mention matched a member, the sender included: the result names none.
+	b.faux.appendResponses([fauxAssistantMessage("b saw the thanks")]);
+	callTool(a, "relay_room", { action: "send", room: "ops", text: "thanks @all", mentions: [a.session.sessionId] });
+	await a.session.prompt("thank");
+	expect(results(a, "relay_room")[1]!.text).not.toContain("reached nobody");
+	await waitFor(() => texts(b.session, "assistant").includes("b saw the thanks"), 5_000, "b's second turn");
+	expect(a.errors).toEqual([]);
+});

@@ -54,6 +54,8 @@ const REJECTIONS: Record<string, string> = {
 	unknown_session: "no online or recorded pi session has that id; call relay_list for the online sessions",
 	mailbox_full: "the target's mailbox is full; try again later",
 	not_owner: "that session belongs to another device, so only that device may act for it in rooms",
+	unknown_room: "no such chatroom; your user creates rooms with /relay join",
+	not_member: "this session is not a member of that room; only your user can add it, with /relay join <room>",
 };
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -93,12 +95,19 @@ function sentSummary(frame: Partial<Extract<SentFrame, { id: string }>> | undefi
 	const id = theme.fg("dim", `· ${headerField(frame.id)}`);
 	if (frame.room) {
 		const notified = (frame.notified ?? []).map((target) => headerField(target.name) || headerField(target.title) || headerField(target.sessionId));
-		return `${theme.fg("success", `posted to #${headerField(frame.room)}`)} · ${notified.length ? `notified ${notified.join(", ")}` : "no one notified"} ${id}`;
+		const unmatched = unmatchedOf(frame);
+		return `${theme.fg("success", `posted to #${headerField(frame.room)}`)} · ${notified.length ? `notified ${notified.join(", ")}` : "no one notified"}`
+			+ `${unmatched.length ? ` · ${theme.fg("warning", `not members: ${unmatched.join(", ")}`)}` : ""} ${id}`;
 	}
 	return frame.status === "delivered"
 		? `${theme.fg("success", "delivered")} to ${peerLabel(frame.to)} ${id}`
 		: `${theme.fg("warning", "queued")} for ${peerLabel(frame.to)}, not delivered yet ${id}`;
 }
+
+/** The mention tokens of a room post that matched no member, cleaned for display. */
+const unmatchedOf = (frame: { unmatched?: unknown }): string[] => Array.isArray(frame.unmatched)
+	? frame.unmatched.map((token) => cut(headerField(token), 64)!).filter(Boolean)
+	: [];
 
 /** The conversation a message belongs to: `#room`, else the sending session's id; none for the web UI. */
 const peerOf = (frame: MessageFrame): string | undefined => frame.room ? `#${frame.room}` : frame.from.kind === "session" ? frame.from.sessionId : undefined;
@@ -350,7 +359,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			...(frame.replyTo ? { replyTo: frame.replyTo } : {}),
 		};
 		const label = frame.room ? `room #${headerField(frame.room)}` : targetLabel(frame.from as Target);
-		// A mention adds an online session to a room it may not know of yet.
+		// The user may have added this session to the room in the web UI since the last list.
 		if (frame.room && rooms && !rooms.has(roomKey(frame.room))) guard(refreshRooms);
 		// Unless steered, the model reads it right after an answer the user has not replied to; but a member that
 		// reports to a representative has no user reading it.
@@ -791,7 +800,9 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			const who = notified.length
 				? `notified ${notified.map((t) => targetLabel(t)).join(", ")}`
 				: "recorded in room history (no @mentions notified)";
-			return `Posted message ${answer.id} to room #${headerField(answer.room)} (${who}).`;
+			const unmatched = unmatchedOf(answer);
+			return `Posted message ${answer.id} to room #${headerField(answer.room)} (${who}).`
+				+ `${unmatched.length ? ` Mentions that reached nobody (not members): ${unmatched.join(", ")}.` : ""}`;
 		}
 		if (answer.status === "delivered") return `Delivered message ${answer.id} to ${label}.`;
 		return `Queued message ${answer.id} for ${label}: it has not been delivered yet. If it is not delivered within ${ttlText(ttlSeconds)} it is dropped and you will get a notice.`;
@@ -845,7 +856,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		}
 		const now = Date.now();
 		exchanged.set(targetKey, now);
-		// Posting joins the room.
+		// The user may have added this session to the room in the web UI since the last list.
 		if (answer.room && rooms && !rooms.has(answer.room)) guard(refreshRooms);
 		if (answer.room) exchanged.set(`#${answer.room}`, now);
 		else if (answer.to?.sessionId) exchanged.set(answer.to.sessionId, now);
@@ -911,7 +922,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		pi.registerTool({
 			name: "relay_send", label: "Relay Send",
 			description: "Send a text message to another running pi session or to an explicit multi-agent chatroom through pika relay. "
-				+ "For a 1:1 message, pass `to` (a session id from relay_list). For a chatroom, pass `room` (or `to: \"#room\"`) and optional `mentions` (session ids, agent names, or 'all'). "
+				+ "For a 1:1 message, pass `to` (a session id from relay_list). For a chatroom this session is a member of, pass `room` (or `to: \"#room\"`) and optional `mentions` (members' session ids or names, or 'all'). "
 				+ "In a chatroom, only @mentioned members receive a live notification that starts/joins a turn; all agents can read room history on demand with relay_room. "
 				+ "An answer arrives as a new [relay] message in this session only after your current turn ends, never during it, so do not sleep, poll relay_status, or call relay_list to wait for one: end your turn instead. "
 				+ "A send to a session or room whose newer message you have not read yet is refused once, so that you read that message first. "
@@ -920,7 +931,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			parameters: Type.Object({
 				to: Type.Optional(Type.String({ description: "The target pi session id (or #roomName for a chatroom)" })),
 				room: Type.Optional(Type.String({ description: "Chatroom name to post to (alternative to `to`); only @mentioned members are woken up" })),
-				mentions: Type.Optional(Type.Array(Type.String(), { description: "In a chatroom, session ids or names (or 'all') to notify and wake up" })),
+				mentions: Type.Optional(Type.Array(Type.String(), { description: "In a chatroom, members' session ids or names (or 'all') to notify and wake up" })),
 				text: Type.String({ description: "The message text (at most 32 KiB)" }),
 				urgent: Type.Optional(Type.Boolean({ description: "Steer the message into the target's current turn even when it would otherwise wait until that turn ends" })),
 				replyTo: Type.Optional(Type.String({ description: "The id of the relay message this answers" })),
@@ -953,25 +964,22 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		});
 		pi.registerTool({
 			name: "relay_room", label: "Relay Room",
-			description: "Manage explicit multi-agent chatrooms across repositories and read room message history on demand. "
+			description: "List multi-agent chatrooms, read their history, or post to one. "
+				+ "Only your user adds this session to rooms (/relay join <room>); if asked to join one, ask your user. "
 				+ "`action: \"list\"` lists active rooms and their members. "
-				+ "`action: \"join\"` creates or joins `room` (with optional `topic`). "
-				+ "`action: \"leave\"` leaves `room`. "
 				+ "`action: \"history\"` reads recent messages in `room` (even those where this session was not @mentioned). "
-				+ "`action: \"send\"` posts `text` to `room` and notifies only `@mentioned` members (via `@name`/`@sessionId` in `text` or `mentions`).",
-			promptSnippet: "Join/leave multi-agent chatrooms, read room history, or post to a room",
+				+ "`action: \"send\"` posts `text` to `room` and notifies only the `@mentioned` members (via `@name`/`@sessionId` in `text` or `mentions`); "
+				+ "a send to a room this session is not a member of is refused.",
+			promptSnippet: "List chatrooms, read room history, or post to a room this session is in",
 			parameters: Type.Object({
 				action: Type.Union([
 					Type.Literal("list"),
-					Type.Literal("join"),
-					Type.Literal("leave"),
 					Type.Literal("history"),
 					Type.Literal("send"),
-				], { description: "Operation: list, join, leave, history, or send" }),
-				room: Type.Optional(Type.String({ description: "Room name (e.g. 'auth-sync'); required for join, leave, history, send" })),
-				topic: Type.Optional(Type.String({ description: "Optional topic description when joining/creating a room" })),
+				], { description: "Operation: list, history, or send" }),
+				room: Type.Optional(Type.String({ description: "Room name (e.g. 'auth-sync'); required for history and send" })),
 				text: Type.Optional(Type.String({ description: "Message text when action is 'send'" })),
-				mentions: Type.Optional(Type.Array(Type.String(), { description: "Session ids or agent names (or 'all') to notify when action is 'send'" })),
+				mentions: Type.Optional(Type.Array(Type.String(), { description: "Members' session ids or names (or 'all') to notify when action is 'send'" })),
 				urgent: Type.Optional(Type.Boolean({ description: "Steer into mentioned members' active turns when action is 'send', even when it would otherwise wait until those turns end" })),
 				replyTo: Type.Optional(Type.String({ description: "Message id being answered when action is 'send'" })),
 				limit: Type.Optional(Type.Integer({ description: "Max messages to read in 'history' (default 50, max 200)" })),
@@ -984,20 +992,11 @@ export default function relayExtension(pi: ExtensionAPI): void {
 					guard(() => learnRooms(items));
 					const text = items.length
 						? `${items.length} active chatroom${items.length === 1 ? "" : "s"}:\n${items.map(roomLine).join("\n")}`
-						: "No active chatrooms. Call relay_room with action \"join\" and a room name to create one.";
+						: "No active chatrooms; your user creates them with /relay join.";
 					return { content: [{ type: "text", text }], details: { rooms: items } as RoomToolDetails };
 				}
 				const room = params.room?.trim().replace(/^#/, "");
 				if (!room) throw new Error(`relay_room (${params.action}) requires a \`room\` name.`);
-				if (params.action === "join" || params.action === "leave") {
-					const detail = await updateRoomMembership(room, params.action, params.topic);
-					guard(() => learnRoom(detail.room));
-					const verb = params.action === "join" ? "Joined" : "Left";
-					return {
-						content: [{ type: "text", text: `${verb} room #${headerField(detail.room.name)}.\n${roomLine(detail.room)}` }],
-						details: { detail } as RoomToolDetails,
-					};
-				}
 				if (params.action === "history") {
 					const detail = await roomDetail(room, params.limit ?? 50, params.after ?? 0);
 					const header = roomLine(detail.room);

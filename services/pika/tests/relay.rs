@@ -1842,6 +1842,9 @@ async fn a_device_acts_in_rooms_only_for_the_sessions_it_owns() {
     let action = |id: &str, action: &str| json!({ "room": "team", "sessionId": id, "action": action });
     let all = |id: &str| ["join", "leave", "represent", "unrepresent"].map(|a| action(id, a));
     let room = || async { http(&s.app, get("/api/v1/relay/rooms/team", None, None)).await.json()["room"].clone() };
+    // Members joining in the same millisecond sort by id, so compare them as sets.
+    let set = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<std::collections::BTreeSet<String>>();
+    let members = |room: &Value| set(&member_ids(room));
     let (mut l, _) = Client::online(&s, &s.laptop, "sess-l").await;
     let (mut d, _) = Client::online(&s, &s.desktop, "sess-d").await;
 
@@ -1864,28 +1867,28 @@ async fn a_device_acts_in_rooms_only_for_the_sessions_it_owns() {
     refused_room_actions(&s, &s.laptop, &all("sess-d"), 403, "not_owner").await;
     refused_room_actions(&s, &s.desktop, &all("sess-l"), 403, "not_owner").await;
     let unchanged = room().await;
-    assert_eq!((member_ids(&unchanged), &unchanged["representative"]), (vec!["sess-d", "sess-l"], &json!("sess-d")));
+    assert_eq!((members(&unchanged), &unchanged["representative"]), (set(&["sess-d", "sess-l"]), &json!("sess-d")));
 
     let cleared = room_action(&s, Some(&s.desktop), action("sess-d", "unrepresent")).await;
     assert_eq!(cleared.status, StatusCode::OK);
     assert!(cleared.json()["room"].get("representative").is_none(), "{}", cleared.json());
     heard(&mut [&mut l, &mut d], None).await;
     let left = room_action(&s, Some(&s.desktop), action("sess-d", "leave")).await;
-    assert_eq!((left.status, member_ids(&left.json()["room"])), (StatusCode::OK, vec!["sess-l"]));
+    assert_eq!((left.status, members(&left.json()["room"])), (StatusCode::OK, set(&["sess-l"])));
 
     // A recorded owner counts while the session is offline, and a remembered one after it went offline.
     record(&s.env.store, "sess-recorded", OTHER);
     refused_room_actions(&s, &s.laptop, &all("sess-recorded"), 403, "not_owner").await;
     let joined = room_action(&s, Some(&s.desktop), action("sess-recorded", "join")).await;
-    assert_eq!((joined.status, member_ids(&joined.json()["room"])), (StatusCode::OK, vec!["sess-l", "sess-recorded"]));
+    assert_eq!((joined.status, members(&joined.json()["room"])), (StatusCode::OK, set(&["sess-l", "sess-recorded"])));
     let (gone, _) = Client::online(&s, &s.desktop, "sess-gone").await;
     room_action(&s, Some(&s.desktop), action("sess-gone", "join")).await;
     drop(gone);
     sessions_until(&s, |items| !ids(items).contains(&"sess-gone")).await;
     refused_room_actions(&s, &s.laptop, &all("sess-gone"), 403, "not_owner").await;
-    assert_eq!(member_ids(&room().await), ["sess-l", "sess-recorded", "sess-gone"]);
+    assert_eq!(members(&room().await), set(&["sess-l", "sess-recorded", "sess-gone"]));
     let left = room_action(&s, Some(&s.desktop), action("sess-gone", "leave")).await;
-    assert_eq!((left.status, member_ids(&left.json()["room"])), (StatusCode::OK, vec!["sess-l", "sess-recorded"]));
+    assert_eq!((left.status, members(&left.json()["room"])), (StatusCode::OK, set(&["sess-l", "sess-recorded"])));
 
     // An id that nobody owns is still unknown, for every action.
     refused_room_actions(&s, &s.laptop, &all("nobody"), 400, "unknown_session").await;
@@ -1894,7 +1897,7 @@ async fn a_device_acts_in_rooms_only_for_the_sessions_it_owns() {
     let path = "/api/v1/relay/rooms/team/members";
     let added = http(&s.app, post(path, json!({ "sessionId": "sess-d" }), None)).await;
     let (status, detail) = (added.status, added.json());
-    assert_eq!((status, member_ids(&detail["room"])), (StatusCode::OK, vec!["sess-l", "sess-recorded", "sess-d"]));
+    assert_eq!((status, members(&detail["room"])), (StatusCode::OK, set(&["sess-l", "sess-recorded", "sess-d"])));
     let removed = http(&s.app, post(path, json!({ "sessionId": "sess-d", "action": "remove" }), None)).await;
     assert_eq!(removed.status, StatusCode::OK);
 
@@ -1905,4 +1908,153 @@ async fn a_device_acts_in_rooms_only_for_the_sessions_it_owns() {
         let frame = client.next().await;
         assert_eq!((&frame["type"], &frame["text"]), (&json!("message"), &json!("after the room")), "{frame}");
     }
+}
+
+fn room_post(client_id: &str, room: &str, text: &str) -> Value {
+    json!({ "type": "send", "clientId": client_id, "room": room, "text": text, "hops": 1 })
+}
+
+/// Creates room `name` from the browser with `members`.
+async fn create_room(s: &Server, name: &str, members: &[&str]) {
+    let r = http(&s.app, post("/api/v1/relay/rooms", json!({ "name": name, "members": members }), None)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json());
+}
+
+async fn room_detail(s: &Server, name: &str) -> Value {
+    let r = http(&s.app, get(&format!("/api/v1/relay/rooms/{name}"), None, None)).await;
+    assert_eq!(r.status, StatusCode::OK);
+    r.json()
+}
+
+#[tokio::test]
+async fn a_post_to_a_room_that_does_not_exist_is_refused_and_creates_none() {
+    let s = server().await;
+    let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    let (_b, _) = Client::online(&s, &s.desktop, "sess-b").await;
+    let sent = a.relay(room_post("r1", "#nowhere", "hello @name-sess-b")).await;
+    assert_eq!(sent, json!({ "type": "sent", "clientId": "r1", "status": "rejected", "reason": "unknown_room" }));
+    let web = http(&s.app, post("/api/v1/relay/messages", json!({ "room": "nowhere", "text": "hi" }), None)).await;
+    assert_eq!((web.status, web.json()), (StatusCode::NOT_FOUND, json!({ "error": "unknown_room" })));
+    // A bad name is still `invalid`, checked first.
+    let sent = a.relay(room_post("r2", "bad room", "hi")).await;
+    assert_eq!(sent["reason"], "invalid");
+
+    let rooms = http(&s.app, get("/api/v1/relay/rooms", None, None)).await;
+    assert_eq!(rooms.json()["items"], json!([]), "posting creates no room");
+    let events = events(&s, "").await;
+    let refused: Vec<(&Value, &Value, &Value)> =
+        events.iter().map(|e| (&e["status"], &e["reason"], &e["room"])).collect();
+    let unknown = (&json!("rejected"), &json!("unknown_room"), &json!("nowhere"));
+    assert_eq!(refused[1..], [unknown, unknown], "{events:?}");
+    assert_eq!(s.state.relay.queued(), 0);
+}
+
+#[tokio::test]
+async fn a_session_posts_only_to_rooms_it_is_a_member_of() {
+    let s = server().await;
+    let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    let (mut b, _) = Client::online(&s, &s.desktop, "sess-b").await;
+    let (mut x, _) = Client::online(&s, &s.laptop, "sess-x").await;
+    create_room(&s, "team", &["sess-a", "sess-b"]).await;
+
+    // An outsider's post is refused: the room stores nothing and gains no member, and nothing is pushed.
+    let sent = x.relay(room_post("r1", "team", "@all and @sess-a, hello")).await;
+    assert_eq!(sent, json!({ "type": "sent", "clientId": "r1", "status": "rejected", "reason": "not_member" }));
+    let detail = room_detail(&s, "team").await;
+    assert_eq!(member_ids(&detail["room"]), ["sess-a", "sess-b"]);
+    assert_eq!((&detail["room"]["messageCount"], &detail["messages"]), (&json!(0), &json!([])));
+    assert_eq!(s.state.relay.queued(), 0);
+    let event = &events(&s, "?limit=1").await[0];
+    let seen = (&event["status"], &event["reason"], &event["room"]);
+    assert_eq!(seen, (&json!("rejected"), &json!("not_member"), &json!("team")), "{event}");
+
+    // Each member's next frame is a post made after the refused one.
+    b.relay(room_post("p1", "team", "@sess-a after")).await;
+    let frame = a.next().await;
+    assert_eq!((&frame["type"], &frame["text"]), (&json!("message"), &json!("@sess-a after")), "{frame}");
+    a.send(json!({ "type": "ack", "id": frame["id"] })).await;
+    a.relay(room_post("p2", "team", "@sess-b after")).await;
+    let frame = b.next().await;
+    assert_eq!((&frame["type"], &frame["text"]), (&json!("message"), &json!("@sess-b after")), "{frame}");
+    b.send(json!({ "type": "ack", "id": frame["id"] })).await;
+
+    // Once the user adds it, it may post; after it leaves, it may not.
+    let added = http(&s.app, post("/api/v1/relay/rooms/team/members", json!({ "sessionId": "sess-x" }), None)).await;
+    assert_eq!(added.status, StatusCode::OK);
+    let sent = x.relay(room_post("r2", "team", "joined")).await;
+    assert_eq!((&sent["status"], &sent["room"]), (&json!("delivered"), &json!("team")), "{sent}");
+    let leave = json!({ "room": "team", "sessionId": "sess-x", "action": "leave" });
+    assert_eq!(room_action(&s, Some(&s.laptop), leave).await.status, StatusCode::OK);
+    let sent = x.relay(room_post("r3", "team", "gone")).await;
+    assert_eq!(sent["reason"], "not_member");
+    let detail = room_detail(&s, "team").await;
+    let texts: Vec<&Value> = detail["messages"].as_array().unwrap().iter().map(|m| &m["text"]).collect();
+    assert_eq!(texts, ["@sess-a after", "@sess-b after", "joined"]);
+}
+
+#[tokio::test]
+async fn mentions_reach_only_members_and_the_others_come_back_unmatched() {
+    let s = server().await;
+    let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    let (mut b, _) = Client::online(&s, &s.desktop, "sess-b").await;
+    let (mut x, _) = Client::online(&s, &s.laptop, "sess-x").await;
+    create_room(&s, "team", &["sess-a", "sess-b"]).await;
+
+    // An online non-member named by id or by name is neither notified nor added.
+    let sent = a
+        .relay(json!({ "type": "send", "clientId": "m1", "room": "team", "mentions": ["sess-x"], "hops": 1,
+            "text": "@name-sess-b and @name-sess-x, see @nobody" }))
+        .await;
+    assert_eq!(sent["status"], "delivered", "{sent}");
+    let notified: Vec<&Value> = sent["notified"].as_array().unwrap().iter().map(|t| &t["sessionId"]).collect();
+    assert_eq!(notified, ["sess-b"]);
+    assert_eq!(sent["unmatched"], json!(["sess-x", "name-sess-x", "nobody"]));
+    let pushed = b.next().await;
+    assert_eq!((&pushed["type"], &pushed["mentions"]), (&json!("message"), &json!(["sess-b"])), "{pushed}");
+    b.send(json!({ "type": "ack", "id": pushed["id"] })).await;
+    let detail = room_detail(&s, "team").await;
+    assert_eq!(member_ids(&detail["room"]), ["sess-a", "sess-b"]);
+    assert_eq!(detail["messages"][0]["mentions"], json!(["sess-b"]));
+
+    // `@all` reaches every member but the sender; neither it nor the sender's own name is unmatched.
+    let sent = a.relay(room_post("m2", "team", "@all, from @name-sess-a")).await;
+    let notified: Vec<&Value> = sent["notified"].as_array().unwrap().iter().map(|t| &t["sessionId"]).collect();
+    assert_eq!(notified, ["sess-b"]);
+    assert!(sent.get("unmatched").is_none(), "{sent}");
+    let pushed = b.next().await;
+    assert_eq!(pushed["text"], "@all, from @name-sess-a");
+    b.send(json!({ "type": "ack", "id": pushed["id"] })).await;
+
+    // The non-member heard nothing: its next frame is a message sent now.
+    a.send(send("p1", "sess-x", "after the room")).await;
+    let frame = x.next().await;
+    assert_eq!((&frame["type"], &frame["text"]), (&json!("message"), &json!("after the room")), "{frame}");
+}
+
+#[tokio::test]
+async fn the_web_posts_to_any_existing_room() {
+    let s = server().await;
+    let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    let (_x, _) = Client::online(&s, &s.desktop, "sess-x").await;
+    create_room(&s, "team", &["sess-a"]).await;
+    create_room(&s, "empty", &[]).await;
+
+    let body = json!({ "room": "#team", "text": "@name-sess-a please look, cc @sess-x" });
+    let r = http(&s.app, post("/api/v1/relay/messages", body, None)).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let posted = r.json();
+    let seen = (&posted["status"], &posted["room"], &posted["notified"][0]["sessionId"], &posted["unmatched"]);
+    assert_eq!(seen, (&json!("delivered"), &json!("team"), &json!("sess-a"), &json!(["sess-x"])), "{posted}");
+    let pushed = a.next().await;
+    assert_eq!((&pushed["room"], &pushed["from"]), (&json!("team"), &json!({ "kind": "web" })), "{pushed}");
+    a.send(json!({ "type": "ack", "id": pushed["id"] })).await;
+    let detail = room_detail(&s, "team").await;
+    assert_eq!(member_ids(&detail["room"]), ["sess-a"], "the web joins nothing, and adds nobody");
+    assert_eq!(detail["messages"][0]["from"], json!({ "kind": "web" }));
+
+    // A room without members takes the post too.
+    let r = http(&s.app, post("/api/v1/relay/messages", json!({ "room": "empty", "text": "note" }), None)).await;
+    assert_eq!((r.status, &r.json()["notified"]), (StatusCode::OK, &json!([])));
+    assert!(r.json().get("unmatched").is_none());
+    assert_eq!(room_detail(&s, "empty").await["room"]["messageCount"], 1);
 }

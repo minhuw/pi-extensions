@@ -69,6 +69,9 @@ it("renders a relay_send result as one status line, the full text when expanded,
 	expect(result(args, { content: text("Posted …"), details: { ...posted, notified: [{ sessionId: "s-2", name: "Docs" }, { sessionId: "s-3\x1b[2J" }] } }))
 		.toEqual(["posted to #ops · notified Docs, s-3 · msg-3"]);
 	expect(result(args, { content: text("Posted …"), details: { ...posted, notified: [] } })).toEqual(["posted to #ops · no one notified · msg-3"]);
+	// Mentions that matched no member come from the server, as the model or another device wrote them.
+	expect(result(args, { content: text("Posted …"), details: { ...posted, notified: [], unmatched: ["ghost", "x\x1b[2J\ny", ""] } }))
+		.toEqual(["posted to #ops · no one notified · not members: ghost, x y · msg-3"]);
 	const error = "relay rejected the message (self): that is this session's own id.\nsecond line";
 	expect(result(args, { content: text(error), details: {} }, { isError: true })).toEqual(["relay rejected the message (self): that is this session's own id."]);
 	expect(result(args, { content: text(error), details: {} }, { isError: true, expanded: true })).toEqual(error.split("\n"));
@@ -84,7 +87,7 @@ it("renders relay_room: send like relay_send, other calls as one line, history a
 	expect(call({ action: "send", room: "ops", text: "status", urgent: true })).toEqual(["✉ relay → #ops urgent · 6 chars"]);
 	expect(call({ action: "send", room: "ops", text: "a\nb" }, true)).toEqual(["✉ relay → #ops · 3 chars", "  a", "  b"]);
 	expect(call({ action: "history", room: "#auth-sync" })).toEqual(["✉ relay room history #auth-sync"]);
-	expect(call({ action: "join", room: "ops\x1b[2J", topic: "Coordinate" })).toEqual(["✉ relay room join #ops"]);
+	expect(call({ action: "history", room: "ops\x1b[2J" })).toEqual(["✉ relay room history #ops"]);
 	expect(call({ action: "list" })).toEqual(["✉ relay room list"]);
 
 	const history = "#auth-sync · 2 msgs · members: …\n\n[#1 · msg-1 · 3s ago] A: first\n[#2 · msg-2 · 1s ago] B: second";

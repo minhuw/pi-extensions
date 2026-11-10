@@ -8,7 +8,7 @@ export const TOKEN = "relay-test-token";
 type Frame = { type: string; [key: string]: unknown };
 /** A `sent` frame without its type and client id. */
 export type SentAnswer =
-	| { status: "delivered" | "queued"; id: string; to: Target; room?: string; notified?: Target[] }
+	| { status: "delivered" | "queued"; id: string; to: Target; room?: string; notified?: Target[]; unmatched?: string[] }
 	| { status: "rejected"; reason: string };
 
 /** One device WebSocket the server accepted. */
@@ -41,8 +41,8 @@ const json = (response: ServerResponse, status: number, body: unknown) => {
 
 /**
  * An in-memory relay server: health with `features`, the device WebSocket with bearer auth, the
- * sessions route, and enough of `send` to route messages between two real sessions. Tests drive
- * everything else (pushes, statuses, closes) directly.
+ * sessions and rooms routes, and enough of `send` to route messages between real sessions and post to
+ * rooms they are members of. Tests drive everything else (pushes, statuses, closes) directly.
  */
 export class FakeRelay {
 	private server?: Server;
@@ -291,33 +291,32 @@ export class FakeRelay {
 			if (!roomName || !text || !Number.isInteger(hops) || hops < 1) return { status: "rejected", reason: "invalid" };
 			if (hops > this.limits.maxHops) return { status: "rejected", reason: "hop_limit" };
 			const now = new Date().toISOString();
-			let room = this.rooms.get(roomName);
-			if (!room) {
-				room = { name: roomName, createdAt: now, updatedAt: now, members: new Set(), messages: [] };
-				this.rooms.set(roomName, room);
-			}
+			// Posting never creates a room or adds a member.
+			const room = this.rooms.get(roomName);
+			if (!room) return { status: "rejected", reason: "unknown_room" };
 			const sender = from.session!;
-			room.members.add(sender.id);
-			const rawMentions = [
+			if (!room.members.has(sender.id)) return { status: "rejected", reason: "not_member" };
+			const rawMentions: string[] = [];
+			for (const token of [
 				...(Array.isArray(frame.mentions) ? frame.mentions.map((m) => String(m).replace(/^@/, "")) : []),
 				...[...text.matchAll(/(?:^|[\s([{"',:;])@([A-Za-z0-9._-]+)/g)].map((m) => m[1]!),
-			];
-			const all = rawMentions.some((m) => m.toLowerCase() === "all" || m.toLowerCase() === "everyone" || m === "*");
-			const notifiedIds: string[] = [];
-			for (const sid of room.members) {
-				if (sid === sender.id) continue;
-				const conn = this.online(sid);
-				const s = conn?.session;
-				const matched = all || rawMentions.some((tok) => {
-					const low = tok.toLowerCase();
-					return sid.toLowerCase() === low
-						|| (low.length >= 8 && sid.toLowerCase().startsWith(low))
-						|| s?.name?.toLowerCase() === low
-						|| s?.title?.toLowerCase() === low
-						|| s?.project?.toLowerCase() === low;
-				});
-				if (matched) notifiedIds.push(sid);
-			}
+			]) if (token && !rawMentions.some((seen) => seen.toLowerCase() === token.toLowerCase())) rawMentions.push(token);
+			const isAll = (m: string) => m.toLowerCase() === "all" || m.toLowerCase() === "everyone" || m === "*";
+			const all = rawMentions.some(isAll);
+			// Mentions resolve only among the members, the sender excluded.
+			const others = [...room.members].filter((sid) => sid !== sender.id);
+			const matches = (sid: string, tok: string) => {
+				const s = this.online(sid)?.session;
+				const low = tok.toLowerCase();
+				return sid.toLowerCase() === low
+					|| (low.length >= 8 && sid.toLowerCase().startsWith(low))
+					|| s?.name?.toLowerCase() === low
+					|| s?.title?.toLowerCase() === low
+					|| s?.project?.toLowerCase() === low;
+			};
+			const notifiedIds = others.filter((sid) => all || rawMentions.some((tok) => matches(sid, tok)));
+			// A token naming the sender counts as matched (the sender is a member), as on the server.
+			const unmatched = rawMentions.filter((tok) => !isAll(tok) && ![...room.members].some((sid) => matches(sid, tok)));
 			const id = this.nextId();
 			const notified = notifiedIds.map((sid) => this.target(sid));
 			const senderInfo = {
@@ -364,6 +363,7 @@ export class FakeRelay {
 				id,
 				room: roomName,
 				notified,
+				...(unmatched.length ? { unmatched } : {}),
 				to: { sessionId: `#${roomName}`, name: `#${roomName}` },
 			};
 		}

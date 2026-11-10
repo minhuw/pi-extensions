@@ -78,6 +78,8 @@ const REASONS: Record<string, { short: string; long: string }> = {
 	rate_limited: { short: "rate limited", long: "Too many messages in the last minute. Wait a moment and try again." },
 	hop_limit: { short: "too many hops", long: "The message went through more sessions without the user than the server allows." },
 	unknown_session: { short: "unknown session", long: "pika doesn't know this session: it is offline and was never uploaded." },
+	unknown_room: { short: "unknown room", long: "No such room. Create it here or with /relay join." },
+	not_member: { short: "not a member", long: "The sender is not a member of the room." },
 	mailbox_full: { short: "mailbox full", long: "Too many messages are waiting to be delivered. Try again later." },
 	relay_disabled: { short: "relay off", long: "Relay is turned off on this server." },
 };

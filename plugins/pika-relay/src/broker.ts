@@ -15,7 +15,7 @@ import {
     RELAY_VERSION, type SentFrame, type SessionState, since, type StatusFrame, targetLabel, UNANSWERED,
 } from "../../../extensions/pika/relay/protocol.ts";
 import { resolveRepository } from "../../../extensions/pika/repository.ts";
-import { preview, rejection, roomLine, roomMessageLine, sendResult, sessionLine } from "./format.ts";
+import { preview, REJECTIONS, rejection, roomLine, roomMessageLine, sendResult, sessionLine } from "./format.ts";
 import { readLines, writeLine } from "./ipc.ts";
 import { agentDir, inboxPath, pendingPath, pidPath, socketPath, stateDir } from "./paths.ts";
 import { ANSWER_HINT, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "./tools.ts";
@@ -482,7 +482,7 @@ class Broker {
             let body: { error?: unknown } | undefined;
             try { body = await response.json() as { error?: unknown }; } catch { await response.body?.cancel().catch(() => {}); }
             if (response.status === 401) throw new Error("the server rejected this device's token (HTTP 401)");
-            if (response.status === 404 && body?.error === "not_found") throw new Error("no such chatroom exists yet");
+            if (response.status === 404 && body?.error === "not_found") throw new Error(REJECTIONS.unknown_room);
             if (response.status === 404) throw new Error(`the pika server at ${config.url} has no relay (HTTP 404)`);
             if (typeof body?.error === "string") throw new Error(`relay error (${body.error}): ${rejection(body.error, thread.limits.maxHops) ?? body.error}`);
             throw new Error(`unexpected HTTP ${response.status} from ${config.url}`);
@@ -576,20 +576,12 @@ class Broker {
                     const items = Array.isArray(body.items) ? body.items as RelayRoom[] : [];
                     return items.length
                         ? `${items.length} active chatroom${items.length === 1 ? "" : "s"}:\n${items.map(roomLine).join("\n")}`
-                        : "No active chatrooms. Call relay_room with action \"join\" and a room name to create one.";
+                        : "No active chatrooms.";
                 }
-                if (!["join", "leave", "history", "send"].includes(action ?? "")) throw new Error("relay_room requires `action`: list, join, leave, history, or send.");
+                // Only the user adds a thread to a room (in the pika web UI); the model never joins or leaves.
+                if (action !== "history" && action !== "send") throw new Error("relay_room requires `action`: list, history, or send.");
                 const room = str("room")?.trim().replace(/^#/, "");
                 if (!room) throw new Error(`relay_room (${action}) requires a \`room\` name.`);
-                if (action === "join" || action === "leave") {
-                    const topic = str("topic");
-                    const detail = await this.relayFetch<RelayRoomDetail>(thread, "/api/relay/v1/rooms", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ room, sessionId: thread.id, action, ...(topic ? { topic } : {}) }),
-                    });
-                    return `${action === "join" ? "Joined" : "Left"} room #${headerField(detail.room.name)}.\n${roomLine(detail.room)}`;
-                }
                 if (action === "history") {
                     const limit = int("limit") ?? 50, after = int("after") ?? 0;
                     const params = new URLSearchParams({ limit: String(limit), ...(after > 0 ? { after: String(after) } : {}) });

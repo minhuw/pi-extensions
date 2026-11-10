@@ -63,7 +63,9 @@ it("records every message the server accepted as a relay-sent entry, from the to
 	const b = await online();
 	const target = b.session.sessionId;
 	relay.recorded.add("offline-session");
-	callTool(b, "relay_room", { action: "join", room: "ops" });
+	await a.session.prompt("/relay join ops");
+	await b.session.prompt("/relay join ops");
+	b.faux.setResponses([fauxAssistantMessage("joined")]);
 	await b.session.prompt("join ops");
 	b.faux.setResponses([fauxAssistantMessage("b got it"), fauxAssistantMessage("b saw the mention")]);
 

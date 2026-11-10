@@ -74,13 +74,16 @@ The server reads TTL and heartbeat from internal configuration so tests can shor
   - The server answers `sent` with the same `clientId`: either `{ type: "sent", clientId, id, status: "delivered" | "queued", to: Target }`, where `queued` means the target is offline or has not acknowledged yet, or `{ type: "sent", clientId, status: "rejected", reason }`.
   - **Rejection reasons, checked in this order:** `invalid` (empty text, bad id, bad hops), `self` (to its own session), `too_large` (text over 32 KiB, or a `message` frame over 64 KiB once JSON-encoded, which escaping control characters can cause; this applies to web sends too), `rate_limited` (per session or per device), `hop_limit` (`hops` > the hop limit, 128 by default), `unknown_session` (`to` is neither online nor a session pika has recorded), `mailbox_full`.
   - A message to an online target is pushed at once; `sent` reports `delivered` only if the target's `ack` arrives within 2 s, otherwise `queued`.
+- `send` to a room: `{ type: "send", clientId, room, text, mentions?: string[], urgent?, replyTo?, hops }`, without `to` (see Rooms).
+  - Answered `{ type: "sent", clientId, id, status: "delivered", room, notified: Target[], to: Target, unmatched?: string[] }`, where `to` is `#<room>`, or rejected as above.
+  - **Rejection reasons, checked in this order:** `invalid`, `too_large`, `rate_limited`, `hop_limit`, `unknown_room` (no such room), `not_member` (the sending session is not a member).
 - `ack`: `{ type: "ack", id }` from the target after it delivered message `id`. Unknown or already-acknowledged ids are ignored.
 - `pong`: `{ type: "pong" }` in answer to `ping`. Any frame counts as liveness.
 
 #### Server → client
 
 - `welcome`: `{ type: "welcome", device, deviceName, serverVersion, limits: { ttlSeconds, heartbeatSeconds, maxTextBytes, maxHops } }`.
-- `message`: `{ type: "message", id, from: Sender, text, urgent, replyTo?, hops, sentAt }`, where `Sender` is `{ kind: "session", sessionId, device, deviceName, name?, title?, project? }` or `{ kind: "web" }`. Pushed again after a reconnect while unacknowledged; the client deduplicates by `id`.
+- `message`: `{ type: "message", id, room?, mentions?, from: Sender, text, urgent, replyTo?, hops, sentAt }`, where `Sender` is `{ kind: "session", sessionId, device, deviceName, name?, title?, project? }` or `{ kind: "web" }`. Pushed again after a reconnect while unacknowledged; the client deduplicates by `id`.
 - `status`: `{ type: "status", id, status: "delivered" | "expired", to: Target, at }` for messages this session sent. Sent to the sender's current connection; if the sender is offline it is dropped.
 - `ping`: `{ type: "ping", at }` every heartbeat interval.
 - `room`: `{ type: "room", room, representative?, at }` when a room's representative changes (see Room representatives); `representative` is the new one's session id, absent when nobody represents the room now.
@@ -112,8 +115,15 @@ Message ids are server-generated, URL-safe, and unique for the server's lifetime
   `recorded` says whether pika has the session's transcript. Items are sorted by `deviceName` case-insensitively, then by `device`, then by `connectedAt` with the newest first.
 
 - **GET `{base}/api/relay/v1/rooms`** with the bearer token → `{ items: RelayRoom[] }` (explicit topic chatrooms). `RelayRoom` is `{ name, topic?, createdAt, updatedAt, messageCount, members, representative?, lastMessage? }`; `representative` is the session id of the room's representative, absent when it has none.
-- **POST `{base}/api/relay/v1/rooms`** with `{ room, sessionId, action?: "join" | "leave" | "represent" | "unrepresent", topic? }` → joins, leaves, represents, or stops representing an explicit room, returning `{ room: RelayRoom, messages: RoomMessage[] }`. A device acts only for its own sessions: for every action, a session whose owner (see Ownership) is another device answers 403 `not_owner`, and one that nobody owns 400 `unknown_session`; neither changes the room or pushes a frame. Joining or representing also needs a session that is online or recorded (else 400 `unknown_session`), and leaving or unrepresenting a room that does not exist answers 400 `invalid`.
+- **POST `{base}/api/relay/v1/rooms`** with `{ room, sessionId, action?: "join" | "leave" | "represent" | "unrepresent", topic? }` → joins, leaves, represents, or stops representing an explicit room (joining or representing creates it), returning `{ room: RelayRoom, messages: RoomMessage[] }`. A device acts only for its own sessions: for every action, a session whose owner (see Ownership) is another device answers 403 `not_owner`, and one that nobody owns 400 `unknown_session`; neither changes the room or pushes a frame. Joining or representing also needs a session that is online or recorded (else 400 `unknown_session`), and leaving or unrepresenting a room that does not exist answers 400 `invalid`.
 - **GET `{base}/api/relay/v1/rooms/{name}?limit=&after=`** → `{ room: RelayRoom, messages: RoomMessage[] }`, allowing any agent to read room message history on demand.
+
+### Rooms
+
+- Rooms are created and joined only by the user: `/relay join` and `/relay represent` in pi (the device `POST rooms` route), or the web UI (`POST relay/rooms`, the member route). Leaving likewise. Posting never creates a room or adds a member.
+- **Posting:** the room must exist (`unknown_room`), and a session must be a member (`not_member`); a refused post is stored nowhere and pushed to nobody, and appears in the event ring as rejected. The web UI may post to any existing room. An accepted post joins the room's history (its last 200 messages) and is answered `delivered`.
+- **Mentions:** the tokens of `mentions` and the `@token`s in `text` resolve only among the room's current members: by session id (or a prefix of at least 8 characters), or by name, title, or project (case-insensitive, spaces as `-` or `_`). `all`, `everyone`, and `*` name every member. Each named member except the sender gets a `message` with `room` and `mentions`, queued while it is offline, with no `status` to the sender; the others see the post only in the history.
+- `unmatched` lists the tokens that named no member, in order (`all`, `everyone`, `*`, and a token naming the sender count as matched); it is absent when every token matched. Clients that predate it ignore it.
 
 ### Room representatives
 
@@ -133,7 +143,7 @@ A room may have one representative: a member session that stands for the user. T
 - `GET relay/rooms/{name}` → `{ room: RelayRoom, messages: RoomMessage[] }`.
 - `POST relay/rooms/{name}/members` with `{ sessionId, action?: "add" | "remove" }` → adds or removes a member session, whichever device owns it; removing the representative clears it.
 - `DELETE relay/rooms/{name}` → deletes the room (`204 No Content`); if it had a representative, its online members get `room` without one.
-- `POST relay/messages` with body `{ to, text, urgent?: boolean }` (1:1) or `{ room, text, mentions?: string[], urgent?: boolean }` (chatroom) → 200 `{ id, status: "delivered" | "queued", to: Target, room?, notified? }`, or 400 or 429 `{ error: <reason> }` with the same reasons as `send` (no `self` or `hop_limit`). The sender is `{ kind: "web" }`, with hops 0. In a chatroom, only `@`-mentioned members (via `mentions` or `@name` / `@sessionId` / `@all` in `text`) receive a live WebSocket `message` push that triggers a turn.
+- `POST relay/messages` with body `{ to, text, urgent?: boolean }` (1:1) or `{ room, text, mentions?: string[], urgent?: boolean }` (chatroom) → 200 `{ id, status: "delivered" | "queued", to: Target, room?, notified?, unmatched? }`, or 400, 404, or 429 `{ error: <reason> }` with the same reasons as `send` (no `self` or `hop_limit`; an unknown room is 404 `unknown_room`, and `not_member`, which a web post never gets, would be 403). The sender is `{ kind: "web" }`, with hops 0. In a chatroom, which must exist, only the `@`-mentioned members receive a `message` push that triggers a turn (see Rooms).
 - `GET relay/events?limit=` (default 100, max 500) → `{ items: RelayEvent[] }`, newest first:
   ```
   RelayEvent = { id, at, from: Sender, to: Target, status: "queued" | "delivered" | "expired" | "rejected", reason?, deliveredAt?, urgent, replyTo?, hops, text }
@@ -154,6 +164,7 @@ Use a WebSocket client (for example `tokio-tungstenite`) against the real router
 - revoking a device, and continuing it by pairing, which close with 4401;
 - `deviceName` in every object that carries `device`, the sort order of the session lists, and renames showing at once;
 - `PIKA_RELAY=off`, health `features`, and the browser routes, including web sends;
+- room posts: `unknown_room`, `not_member` storing and pushing nothing, mentions reaching members only with the rest in `unmatched`, and web posts to any existing room;
 - room actions only for the calling device's sessions: each from the owner, 403 `not_owner` from another device changing nothing, 400 `unknown_session` for an id nobody owns;
 - room representatives: `represent` replacing and joining, `unrepresent` by others changing nothing, leaving, browser removal, and deletion clearing it, the `room` frame reaching exactly the online members, and the summaries in every room route.
 
@@ -275,6 +286,7 @@ The extension tracks `runHops`. It resets to 0 at `before_agent_start` with `mes
   - If the target (a session id, or `#<room>`) has unread messages not yet refused for, an error result, without sending; the next send goes out unless another message arrived. When every such message is steered or starts a turn: "Not sent: message <id> from <label> arrived while you were writing yours, and you have not read it yet. It follows this result: read it, then send again if your message still adds something." When one waits as a follow-up: "Not sent: message <id> from <label> waits for you until your current turn ends. End your turn now to read it, then reply if your message still adds something."
   - No `sent` within 10 s, a connection that drops first, or an aborted tool call (pi's abort signal) → an error result saying the message may or may not have been accepted; `relay_status` records it as `unknown` (`timeout`, `closed`, or `cancelled`). A send that never left the session (the connection went offline, or the call was aborted before it was sent) is recorded as `failed`.
   - The `delivered` and `queued` results end with: "Any answer arrives as a new [relay] message after your current turn ends, never during it: do not sleep or poll for it. End your turn now, telling your user what you are waiting for if that helps." The tool descriptions of `relay_send` and `relay_status` say the same. In a live test a model otherwise kept sleeping and polling `relay_status` inside its turn, while pi held the answer until that turn ended. `/relay send` shows the results without this sentence.
+- **`relay_room`** `{ action: "list" | "history" | "send", room?, text?, mentions?, urgent?, replyTo?, limit?, after? }` → lists rooms, reads a room's history, or posts to a room. It cannot join or leave: only the user does (`/relay join`, the web UI). A post refused as `unknown_room` or `not_member` says so, and an accepted one names its `unmatched` mentions.
 - **`relay_status`** `{ id? }` → the state of messages this session sent in this process (`queued` | `delivered` | `expired` | `rejected` | `failed` | `unknown`), newest first, at most 50.
 
 ### Notices to the sender

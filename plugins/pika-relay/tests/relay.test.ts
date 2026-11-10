@@ -261,6 +261,12 @@ describe("MCP tools", () => {
         expect(init).toMatchObject({ protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "pika-relay" } });
         const list = await server.request("tools/list").response;
         expect(list.result.tools.map((tool: { name: string }) => tool.name)).toEqual(["relay_list", "relay_send", "relay_status", "relay_room", "relay_wait"]);
+        // The model never joins, leaves, or creates a room.
+        const room = list.result.tools.find((tool: { name: string }) => tool.name === "relay_room");
+        expect(room.inputSchema.properties.action.enum).toEqual(["list", "history", "send"]);
+        expect(Object.keys(room.inputSchema.properties)).not.toContain("topic");
+        expect(room.description).toContain("Only your user adds this thread to a room, in the pika web UI; a send to a room this thread is not a member of is refused.");
+        expect(JSON.stringify(list.result.tools)).not.toMatch(/"join"|creates or joins/);
         expect((await server.request("ping").response).result).toEqual({});
         expect((await server.request("tools/call", { name: "nope", arguments: {} }).response).error.code).toBe(-32602);
         expect((await server.request("nope").response).error.code).toBe(-32601);
@@ -295,10 +301,12 @@ describe("MCP tools", () => {
         ]);
         expect((await server.call(C, "relay_status")).text).toBe("This session has sent no relay messages in this process.");
 
-        expect((await server.call(A, "relay_room", { action: "list" })).text).toBe("No active chatrooms. Call relay_room with action \"join\" and a room name to create one.");
-        const joined = await server.call(A, "relay_room", { action: "join", room: "#design", topic: "slides" });
-        expect(joined.text).toBe(`Joined room #design.\n#design — slides · 0 msgs · members: codex-aaaa1111 (${relay.online(A)!.session!.project}) [${A}, idle]`);
-        await server.call(B, "relay_room", { action: "join", room: "design" });
+        expect((await server.call(A, "relay_room", { action: "list" })).text).toBe("No active chatrooms.");
+        // The user adds threads to rooms in the web UI.
+        relay.addRoom("design", [A, B], "slides");
+        expect((await server.call(A, "relay_room", { action: "list" })).text).toBe(
+            `1 active chatroom:\n#design — slides · 0 msgs · members: codex-aaaa1111 (${relay.online(A)!.session!.project}) [${A}, idle], codex-bbbb2222 (project) [${B}, busy]`,
+        );
         const posted = await server.call(A, "relay_room", { action: "send", room: "design", text: "deck is ready", mentions: [B] });
         expect(posted.text).toMatch(new RegExp(`^Posted message msg-\\d+ to room #design \\(notified pi session ${B} \\("codex-bbbb2222"\\) on laptop\\)\\. `));
         const history = await server.call(B, "relay_room", { action: "history", room: "design" });
@@ -306,7 +314,37 @@ describe("MCP tools", () => {
         const roomMessage = await server.call(B, "relay_wait", { timeoutSeconds: 0 });
         expect(roomMessage.text).toContain(`in room #design from pi session ${A}`);
         expect((await server.call(A, "relay_room", { action: "history" })).text).toBe("relay_room (history) requires a `room` name.");
-        expect((await server.call(A, "relay_room", { action: "history", room: "nowhere" })).text).toBe("no such chatroom exists yet");
+        expect((await server.call(A, "relay_room", { action: "history", room: "nowhere" })).text).toBe("no such chatroom; your user creates rooms in the pika web UI");
+    });
+
+    it("posts only to rooms the thread is a member of, and says which mentions reached nobody", async () => {
+        await start(B);
+        await start(C);
+        const server = await mcp();
+        expect((await server.call(A, "relay_room", { action: "send", room: "nowhere", text: "hi" })).text)
+            .toBe("relay rejected the message (unknown_room): no such chatroom; your user creates rooms in the pika web UI.");
+        expect(relay.rooms.has("nowhere")).toBe(false);
+
+        relay.addRoom("design", [B]);
+        expect(await server.call(A, "relay_send", { room: "design", mentions: [B], text: "let me in" })).toEqual({
+            text: "relay rejected the message (not_member): this session is not a member of that room; only your user can add it, in the pika web UI.", isError: true,
+        });
+        expect(await server.call(A, "relay_room", { action: "join", room: "design" })).toEqual({ text: "relay_room requires `action`: list, history, or send.", isError: true });
+        expect(relay.rooms.get("design")!.messages).toEqual([]);
+        expect([...relay.rooms.get("design")!.members]).toEqual([B]);
+        expect((await server.call(B, "relay_wait", { timeoutSeconds: 0 })).text).toBe("No relay messages are waiting.");
+
+        // C is online but not a member: mentioning it notifies nobody and does not add it.
+        relay.addRoom("design", [A]);
+        const posted = await server.call(A, "relay_room", { action: "send", room: "design", text: "deck is ready", mentions: [B, C] });
+        expect(posted).toEqual({
+            text: `Posted message ${relay.rooms.get("design")!.messages[0]!.id} to room #design (notified pi session ${B} ("codex-bbbb2222") on laptop). `
+                + `These mentions reached nobody, as they are not members: ${C}. ${ANSWER_HINT}`,
+            isError: false,
+        });
+        expect([...relay.rooms.get("design")!.members].sort()).toEqual([A, B]);
+        expect((await server.call(B, "relay_wait", { timeoutSeconds: 0 })).text).toContain("deck is ready");
+        expect((await server.call(C, "relay_wait", { timeoutSeconds: 0 })).text).toBe("No relay messages are waiting.");
     });
 
     it("explains why a thread cannot send while pika is disabled", async () => {
