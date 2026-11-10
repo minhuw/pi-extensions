@@ -28,12 +28,14 @@ These instructions override the more conservative default guidance of the `Agent
 Always-on mode switches the way [Boom](../boom/README.md#the-prompt-cache) does:
 
 - `/alwayson on` before the first prompt puts the instructions in a system prompt section from the start.
-- Turning it on after the first prompt adds the instructions as a hidden message with each prompt and leaves the section alone.
-- Turning it off in a session whose section carries it adds a hidden "always-on mode is off" message with each prompt.
-- Returning to the section's state sends one hidden message that cancels the earlier ones, and no more after it.
+- Turning it on after the first prompt adds the instructions as a hidden message with the next prompt and leaves the section alone.
+- Turning it off in a session whose section carries it adds a hidden "always-on mode is off" message with the next prompt.
+- Returning to the section's state sends one hidden message that cancels the earlier ones.
+
+Each hidden message is sent once, since every copy stays in the context. It is sent again, once, only after a compaction drops it from what the model sees, or after `/tree` moves to a branch that does not hold it. Once a compaction has dropped the earlier messages, returning to the section's state sends none. Pi 1.3 and 1.4 cannot show the extension what a compaction dropped, so there the message goes with every prompt while the switch differs from the section.
 
 A switch takes effect with the next prompt. The state is stored in the session file, survives `/reload` and resuming, and follows the branch through `/tree` and forks. A session that already holds conversation when this extension handles its first prompt never gains a section. Subagents, Herder steps, and print and JSON modes are not affected, and `/alwayson` only shows a warning there. If compaction drops the hidden message during a long run, the rest of that run may fall back to the section's state until the next prompt.
 
-While always-on mode is on, [Statusline Footer](../statusline-footer/README.md) shows `📡 alwayson` in its bar, after boom's status and just before the compaction count.
+While always-on mode is on, [Statusline Footer](../statusline-footer/README.md) shows `📡 alwayson` in its bar, after boom's status and just before the compaction count. The extension also lists the session in a registry that other extensions in the Pi process read: [relay](../pika/README.md#relay) accepts only such a session as a room's representative.
 
 Run `npm run test:alwayson` for offline tests that drive real Pi sessions on a local faux provider and check what the provider receives.

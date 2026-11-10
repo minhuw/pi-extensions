@@ -27,6 +27,20 @@ const ON_NOTE = "Always-on mode 📡 on: the model runs long tasks in background
 const OFF_NOTE = "Always-on mode off. Takes effect with the next prompt.";
 const USAGE = "Usage: /alwayson [on | off | status]";
 const INELIGIBLE = "/alwayson works only in top-level TUI and RPC sessions.";
+const SESSION_MODES = Symbol.for("pi-extensions.session-modes");
+
+interface SessionModesRegistry { modes: Map<string, Set<string>>; listeners: Set<(sessionId: string) => void> }
+/** The session modes registry as Relay reads it, created by whoever reads it first. */
+const sessionModes = () => {
+	const shared = globalThis as Record<symbol, unknown>;
+	return (shared[SESSION_MODES] ??= { modes: new Map(), listeners: new Set() }) as SessionModesRegistry;
+};
+/** Record the session ids the registry's listeners are called with. */
+const listen = () => {
+	const calls: string[] = [];
+	sessionModes().listeners.add((sessionId) => { calls.push(sessionId); });
+	return calls;
+};
 
 type Message = { role: string; content: unknown };
 interface Captured { system: string; systems: number; conversation: Message[] }
@@ -68,6 +82,7 @@ beforeEach(async () => {
 	await Promise.all([agentDir(), sessionDir(), cwd()].map((path) => mkdir(path)));
 	previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	process.env.PI_CODING_AGENT_DIR = agentDir();
+	delete (globalThis as Record<symbol, unknown>)[SESSION_MODES];
 });
 
 afterEach(async () => {
@@ -76,6 +91,7 @@ afterEach(async () => {
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		delete (globalThis as Record<symbol, unknown>)[SESSION_MODES];
 		await rm(root, { recursive: true, force: true });
 	}
 });
@@ -146,6 +162,9 @@ async function start(options: { sessionManager?: SessionManager; mode?: Extensio
 		runtime, faux, requests, errors, ...ui,
 		get session() { return runtime.session; },
 		get status() { return ui.statuses.get("alwayson"); },
+		get sessionId() { return runtime.session.sessionManager.getSessionId(); },
+		/** The modes the registry holds for the session. */
+		get modes() { return [...sessionModes().modes.get(runtime.session.sessionManager.getSessionId()) ?? []]; },
 		get lastNote() { return ui.notes.at(-1); },
 		/** Run one prompt and return the request it made. */
 		async run(prompt: string) {
@@ -165,12 +184,33 @@ async function start(options: { sessionManager?: SessionManager; mode?: Extensio
 }
 type Harness = Awaited<ReturnType<typeof start>>;
 
+/** Close the session, as quitting Pi does. */
+async function close(h: Harness) {
+	await h.dispose();
+	started.splice(started.indexOf(h), 1);
+}
+
 /** Close the session and open its file again, as a new Pi process would. */
 async function reopen(h: Harness, mode?: ExtensionContext["mode"]) {
 	const file = h.session.sessionFile!;
-	await h.dispose();
-	started.splice(started.indexOf(h), 1);
+	await close(h);
 	return start({ sessionManager: SessionManager.open(file, sessionDir()), mode });
+}
+
+/** The latest user message on the branch. */
+const lastPrompt = (h: Harness) => h.session.sessionManager.getBranch().filter((entry) => entry.type === "message" && entry.message.role === "user").at(-1)!;
+
+/** Take `buildSessionProjection` away from the extensions' `ctx.sessionManager`, as in Pi 1.3 and 1.4. Pi keeps its own reference. */
+function withoutProjection(h: Harness) {
+	const runner = h.session.extensionRunner as unknown as { sessionManager: SessionManager };
+	runner.sessionManager = new Proxy(runner.sessionManager, {
+		get: (target, property) => {
+			if (property === "buildSessionProjection") return undefined;
+			const value: unknown = Reflect.get(target, property, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+		has: (target, property) => property !== "buildSessionProjection" && Reflect.has(target, property),
+	});
 }
 
 /** Answer the next requests with `reply`, called while the request is in flight. */
@@ -218,7 +258,7 @@ describe("from the session's start", () => {
 		expect(h.errors).toEqual([]);
 	});
 
-	it("keeps the section when switched off, sends the off message each run, and the on message once on return", async () => {
+	it("keeps the section when switched off, sends the off message once, and the on message once on return", async () => {
 		const h = await start();
 		await h.command("/alwayson on");
 		const first = await h.run("one");
@@ -230,7 +270,8 @@ describe("from the session's start", () => {
 		expect(afterPrompt(off, "two")).toEqual([OFF_MESSAGE]);
 		const stillOff = await h.run("three");
 		expectSamePrefix(stillOff, off);
-		expect(afterPrompt(stillOff, "three")).toEqual([OFF_MESSAGE]);
+		expect(afterPrompt(stillOff, "three")).toEqual([]);
+		expect(alwaysOnMessages(stillOff)).toEqual([OFF_MESSAGE]);
 		expect(stillOff.system).toContain(SECTION);
 
 		await h.command("/alwayson on");
@@ -240,11 +281,38 @@ describe("from the session's start", () => {
 		expect(afterPrompt(on, "four")).toEqual([ON_MESSAGE]);
 		expect(afterPrompt(await h.run("five"), "five")).toEqual([]);
 		expect(h.entries()).toEqual([{ active: true }, { base: true }, { active: false }, { active: true }]);
+		expect(h.hiddenMessages().map((entry) => entry.content)).toEqual([OFF_MESSAGE, ON_MESSAGE]);
+	});
+
+	it("sends the off message again once after a real compaction drops it, and nothing for a return the section states", async () => {
+		const h = await start();
+		await h.command("/alwayson on");
+		await h.run("one");
+		await h.command("/alwayson off");
+		expect(afterPrompt(await h.run("two"), "two")).toEqual([OFF_MESSAGE]);
+		await h.session.compact();
+		const after = await h.run("three");
+		expect(after.system).toContain(SECTION);
+		expect(afterPrompt(after, "three")).toEqual([OFF_MESSAGE]);
+		expect(alwaysOnMessages(after)).toEqual([OFF_MESSAGE]);
+		const next = await h.run("four");
+		expectSamePrefix(next, after);
+		expect(afterPrompt(next, "four")).toEqual([]);
+
+		// The compaction drops the off message, so the model sees only the section, which says always-on mode is on.
+		await h.session.compact();
+		await h.command("/alwayson on");
+		const on = await h.run("five");
+		expect(on.system).toContain(SECTION);
+		expect(alwaysOnMessages(on)).toEqual([]);
+		expect(alwaysOnMessages(await h.run("six"))).toEqual([]);
+		expect(h.hiddenMessages().map((entry) => entry.content)).toEqual([OFF_MESSAGE, OFF_MESSAGE]);
+		expect(h.errors).toEqual([]);
 	});
 });
 
 describe("mid-session", () => {
-	it("keeps the system prompt and sends a hidden on message after the prompt of every run", async () => {
+	it("keeps the system prompt and sends a hidden on message once, after the prompt of the next run", async () => {
 		const h = await start();
 		const before = await h.run("one");
 		await h.command("/alwayson on");
@@ -255,9 +323,12 @@ describe("mid-session", () => {
 		expect(afterPrompt(on, "two")).toEqual([ON_MESSAGE]);
 		const again = await h.run("three");
 		expectSamePrefix(again, on);
-		expect(afterPrompt(again, "three")).toEqual([ON_MESSAGE]);
-		expect(alwaysOnMessages(again)).toEqual([ON_MESSAGE, ON_MESSAGE]);
-		expect(h.hiddenMessages().map((entry) => entry.display)).toEqual([false, false]);
+		expect(afterPrompt(again, "three")).toEqual([]);
+		expect(alwaysOnMessages(again)).toEqual([ON_MESSAGE]);
+		const later = await h.run("four");
+		expectSamePrefix(later, again);
+		expect(alwaysOnMessages(later)).toEqual([ON_MESSAGE]);
+		expect(h.hiddenMessages().map((entry) => entry.display)).toEqual([false]);
 		expect(h.entries()).toEqual([{ base: false }, { active: true }]);
 	});
 
@@ -285,16 +356,49 @@ describe("mid-session", () => {
 		expect(afterPrompt(h.requests.at(-1)!, "nudge")).toEqual([ON_MESSAGE]);
 	});
 
-	it("adds the message to the first run after a real compaction", async () => {
+	it("sends the message again once after a real compaction drops it", async () => {
 		const h = await start();
 		const before = await h.run("one");
 		await h.command("/alwayson on");
-		await h.run("two");
+		expect(afterPrompt(await h.run("two"), "two")).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(await h.run("three"), "three")).toEqual([]);
 		await h.session.compact();
 		expect(h.session.sessionManager.getBranch().some((entry) => entry.type === "compaction")).toBe(true);
-		const after = await h.run("three");
+		const after = await h.run("four");
 		expect(after.system).toBe(before.system);
-		expect(afterPrompt(after, "three")).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(after, "four")).toEqual([ON_MESSAGE]);
+		expect(alwaysOnMessages(after)).toEqual([ON_MESSAGE]);
+		const next = await h.run("five");
+		expectSamePrefix(next, after);
+		expect(afterPrompt(next, "five")).toEqual([]);
+		expect(alwaysOnMessages(next)).toEqual([ON_MESSAGE]);
+		expect(h.hiddenMessages()).toHaveLength(2);
+		expect(h.errors).toEqual([]);
+	});
+
+	// A compaction keeps the entries from its `firstKeptEntryId` on, so the message is gone only when they start after it.
+	it.each([
+		["sends nothing after a real compaction that keeps the message", 0, []],
+		["sends the message again after a real compaction that keeps only the entries after it", 1, [ON_MESSAGE]],
+	] as const)("%s", async (_name, offset, expected) => {
+		const h = await start({
+			register: (pi) => {
+				pi.on("session_before_compact", (event) => {
+					const message = event.branchEntries.findIndex((entry) => entry.type === "custom_message" && entry.customType === "alwayson");
+					expect(message).toBeGreaterThanOrEqual(0);
+					const firstKeptEntryId = event.branchEntries[message + offset]!.id;
+					return { compaction: { summary: "summary", firstKeptEntryId, tokensBefore: event.preparation.tokensBefore } };
+				});
+			},
+		});
+		await h.run("one");
+		await h.command("/alwayson on");
+		await h.run("two");
+		await h.session.compact();
+		const after = await h.run("three");
+		expect(afterPrompt(after, "three")).toEqual(expected);
+		expect(alwaysOnMessages(after)).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(await h.run("four"), "four")).toEqual([]);
 		expect(h.errors).toEqual([]);
 	});
 });
@@ -360,6 +464,7 @@ describe("switches during a run", () => {
 		const next = await h.run("three");
 		expectSamePrefix(next, during);
 		expect(afterPrompt(next, "three")).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(await h.run("four"), "four")).toEqual([]);
 	});
 
 	it("sends the off message once when it is used during a run that carries the on message", async () => {
@@ -391,7 +496,7 @@ describe("switches during a run", () => {
 });
 
 describe("sessions that predate the extension", () => {
-	it("sends the on message and adds no section when /alwayson on comes before the first run with the extension", async () => {
+	it("sends the on message once and adds no section when /alwayson on comes before the first run with the extension", async () => {
 		const old = await start({ extension: false });
 		const before = await old.run("old");
 		const h = await reopen(old);
@@ -405,7 +510,44 @@ describe("sessions that predate the extension", () => {
 		expect(h.entries()).toEqual([{ active: true }, { base: false }]);
 		const second = await h.run("two");
 		expectSamePrefix(second, first);
-		expect(afterPrompt(second, "two")).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(second, "two")).toEqual([]);
+		expect(alwaysOnMessages(second)).toEqual([ON_MESSAGE]);
+	});
+});
+
+describe("in Pi 1.3 and 1.4, without a session projection", () => {
+	it("repeats the on message with every run while the switch differs from the section, and sends one off message on return", async () => {
+		const projections: string[] = [];
+		const h = await start({ register: (pi) => { pi.on("before_agent_start", (_event, ctx) => { projections.push(typeof ctx.sessionManager.buildSessionProjection); }); } });
+		withoutProjection(h);
+		await h.run("one");
+		await h.command("/alwayson on");
+		const on = await h.run("two");
+		expect(afterPrompt(on, "two")).toEqual([ON_MESSAGE]);
+		const again = await h.run("three");
+		expectSamePrefix(again, on);
+		expect(afterPrompt(again, "three")).toEqual([ON_MESSAGE]);
+		await h.session.compact();
+		expect(afterPrompt(await h.run("four"), "four")).toEqual([ON_MESSAGE]);
+		await h.command("/alwayson off");
+		expect(afterPrompt(await h.run("five"), "five")).toEqual([OFF_MESSAGE]);
+		expect(afterPrompt(await h.run("six"), "six")).toEqual([]);
+		expect(projections).toEqual(Array(6).fill("undefined"));
+		expect(h.errors).toEqual([]);
+	});
+
+	it("repeats the off message with every run in a session whose section carries always-on mode", async () => {
+		const h = await start();
+		withoutProjection(h);
+		await h.command("/alwayson on");
+		expect((await h.run("one")).system).toContain(SECTION);
+		await h.command("/alwayson off");
+		expect(afterPrompt(await h.run("two"), "two")).toEqual([OFF_MESSAGE]);
+		expect(afterPrompt(await h.run("three"), "three")).toEqual([OFF_MESSAGE]);
+		await h.command("/alwayson on");
+		expect(afterPrompt(await h.run("four"), "four")).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(await h.run("five"), "five")).toEqual([]);
+		expect(h.errors).toEqual([]);
 	});
 });
 
@@ -428,7 +570,8 @@ describe("restoring a session", () => {
 		expect(switchedAgain.status).toBe(STATUS);
 		const switchedNext = await switchedAgain.run("three");
 		expect(switchedNext.system).toBe(switchedFirst.system);
-		expect(afterPrompt(switchedNext, "three")).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(switchedNext, "three")).toEqual([]);
+		expect(alwaysOnMessages(switchedNext)).toEqual([ON_MESSAGE]);
 	});
 
 	it("follows the branch through /tree", async () => {
@@ -449,7 +592,41 @@ describe("restoring a session", () => {
 		expect(h.status).toBe(STATUS);
 		const back = await h.run("three");
 		expect(back.system).toBe(first.system);
-		expect(afterPrompt(back, "three")).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(back, "three")).toEqual([]);
+		expect(alwaysOnMessages(back)).toEqual([ON_MESSAGE]);
+		expect(h.errors).toEqual([]);
+	});
+
+	// Editing prompt two from /tree continues from its parent, the switch, without the message that followed the prompt.
+	it.each([false, true])("sends the message again after /tree to a branch that holds the switch but not the message (summarize: %s)", async (summarize) => {
+		const h = await start();
+		const first = await h.run("one");
+		await h.command("/alwayson on");
+		expect(afterPrompt(await h.run("two"), "two")).toEqual([ON_MESSAGE]);
+		await h.session.navigateTree(lastPrompt(h).id, { summarize });
+		expect(h.status).toBe(STATUS);
+		expect(h.entries()).toEqual([{ base: false }, { active: true }]);
+		expect(h.hiddenMessages()).toEqual([]);
+		expect(h.session.sessionManager.getBranch().some((entry) => entry.type === "branch_summary")).toBe(summarize);
+		const edited = await h.run("two, edited");
+		expect(edited.system).toBe(first.system);
+		expect(afterPrompt(edited, "two, edited")).toEqual([ON_MESSAGE]);
+		expect(alwaysOnMessages(edited)).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(await h.run("three"), "three")).toEqual([]);
+		expect(h.errors).toEqual([]);
+	});
+
+	it("keeps the message the fork copies and sends no other", async () => {
+		const h = await start();
+		await h.run("one");
+		await h.command("/alwayson on");
+		await h.run("two");
+		const result = await h.runtime.fork(h.session.sessionManager.getLeafId()!, { position: "at" });
+		expect(result.cancelled).toBe(false);
+		expect(h.status).toBe(STATUS);
+		const forked = await h.run("three");
+		expect(afterPrompt(forked, "three")).toEqual([]);
+		expect(alwaysOnMessages(forked)).toEqual([ON_MESSAGE]);
 		expect(h.errors).toEqual([]);
 	});
 });
@@ -473,6 +650,7 @@ describe("sessions that are left alone", () => {
 		expect(h.entries()).toEqual(entries);
 		expect(h.hiddenMessages()).toEqual([]);
 		expect(h.statuses.has("alwayson")).toBe(false);
+		expect(sessionModes().modes.has(h.sessionId)).toBe(false);
 	});
 
 	it("adds nothing to a child bound as Subagents and Herder bind it", async () => {
@@ -485,6 +663,112 @@ describe("sessions that are left alone", () => {
 		expect(h.entries()).toEqual([]);
 		expect(h.hiddenMessages()).toEqual([]);
 		expect(h.statuses.has("alwayson")).toBe(false);
+		expect(sessionModes().modes.has(h.sessionId)).toBe(false);
+	});
+});
+
+describe("the session modes registry", () => {
+	it("holds alwayson for the session exactly while the mode is on, in the registry Relay created first", async () => {
+		const registry = sessionModes();
+		const calls = listen();
+		const h = await start();
+		expect(sessionModes()).toBe(registry);
+		expect(registry.modes.has(h.sessionId)).toBe(false);
+		await h.command("/alwayson on");
+		expect(h.modes).toEqual(["alwayson"]);
+		expect(calls).toEqual([h.sessionId]);
+		await h.command("/alwayson on");
+		await h.command("/alwayson status");
+		await h.command("/alwayson maybe");
+		await h.run("one");
+		expect(calls).toEqual([h.sessionId]);
+		await h.command("/alwayson off");
+		expect(registry.modes.has(h.sessionId)).toBe(false);
+		expect(calls).toEqual([h.sessionId, h.sessionId]);
+		await h.command("/alwayson");
+		expect(h.modes).toEqual(["alwayson"]);
+		expect(calls).toHaveLength(3);
+		expect(h.errors).toEqual([]);
+	});
+
+	it("creates the registry when it reads it first, and leaves another mode of the session alone", async () => {
+		const h = await start();
+		const registry = (globalThis as Record<symbol, unknown>)[SESSION_MODES] as SessionModesRegistry;
+		expect(registry.modes).toBeInstanceOf(Map);
+		expect(registry.listeners).toBeInstanceOf(Set);
+		registry.modes.set(h.sessionId, new Set(["other"]));
+		await h.command("/alwayson on");
+		expect(h.modes).toEqual(["other", "alwayson"]);
+		await h.command("/alwayson off");
+		expect(h.modes).toEqual(["other"]);
+	});
+
+	it("follows the branch through /tree and the session through shutdown and a resume", async () => {
+		const h = await start();
+		await h.run("one");
+		const beforeSwitch = h.session.sessionManager.getLeafId()!;
+		await h.command("/alwayson on");
+		await h.run("two");
+		const switchedLeaf = h.session.sessionManager.getLeafId()!;
+		const id = h.sessionId;
+		const calls = listen();
+		await h.session.navigateTree(beforeSwitch);
+		expect(sessionModes().modes.has(id)).toBe(false);
+		await h.session.navigateTree(switchedLeaf);
+		expect(h.modes).toEqual(["alwayson"]);
+		expect(calls).toEqual([id, id]);
+
+		const again = await reopen(h);
+		expect(again.sessionId).toBe(id);
+		expect(again.modes).toEqual(["alwayson"]);
+		expect(calls).toEqual([id, id, id, id]);
+		await close(again);
+		expect(sessionModes().modes.has(id)).toBe(false);
+		expect(calls).toHaveLength(5);
+	});
+
+	it("moves to the new session of a fork and leaves a new session out", async () => {
+		const h = await start();
+		await h.run("one");
+		await h.command("/alwayson on");
+		await h.run("two");
+		const original = h.sessionId;
+		const calls = listen();
+		await h.runtime.fork(h.session.sessionManager.getLeafId()!, { position: "at" });
+		const forked = h.sessionId;
+		expect(forked).not.toBe(original);
+		expect(sessionModes().modes.has(original)).toBe(false);
+		expect(h.modes).toEqual(["alwayson"]);
+		expect(calls).toEqual([original, forked]);
+
+		await h.runtime.newSession();
+		expect(sessionModes().modes.has(forked)).toBe(false);
+		expect(sessionModes().modes.has(h.sessionId)).toBe(false);
+		expect(h.status).toBeUndefined();
+		expect(calls).toEqual([original, forked, forked]);
+	});
+
+	it("catches the errors of its listeners and still calls the others", async () => {
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			sessionModes().listeners.add(() => { throw new Error("listener failed"); });
+			sessionModes().listeners.add(async () => { throw new Error("async listener failed"); });
+			const calls = listen();
+			const h = await start();
+			await h.command("/alwayson on");
+			expect(h.lastNote).toEqual({ message: ON_NOTE, type: "info" });
+			expect(h.modes).toEqual(["alwayson"]);
+			await h.command("/alwayson off");
+			expect(h.lastNote).toEqual({ message: OFF_NOTE, type: "info" });
+			expect(calls).toEqual([h.sessionId, h.sessionId]);
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			expect(unhandled).toEqual([]);
+			expect(h.errors).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
 	});
 });
 
