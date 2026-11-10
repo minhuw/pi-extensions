@@ -16,7 +16,6 @@ import { grants } from "../grants.ts";
 import selfdriveExtension, { runtime as selfdriveRuntime, timing } from "../index.ts";
 
 const RULES_START = "Self-driving mode 🚗 is on. Your user is away";
-const KICKOFF = "Start now: delegate a survey of the candidates, record them with selfdrive_task, and launch the first work.";
 const BACK = "[selfdrive] Your user is back, so self-driving mode is off";
 const CONTINUE = "[selfdrive] Continue self-driving";
 
@@ -155,6 +154,7 @@ async function start(options: { mode?: ExtensionContext["mode"]; bindAsChild?: b
 		},
 		entries: () => branch().flatMap((entry) => entry.type === "custom" && entry.customType === "selfdrive" ? [entry.data as Record<string, unknown>] : []),
 		tasks: () => branch().flatMap((entry) => entry.type === "custom" && entry.customType === "selfdrive-task" ? [entry.data as Record<string, unknown>] : []),
+		toolResults: () => branch().flatMap((entry) => entry.type === "message" && entry.message.role === "toolResult" ? [entry.message] : []),
 		messages: () => branch().flatMap((entry) => entry.type === "custom_message" && entry.customType === "selfdrive" ? [{ content: entry.content as string, details: entry.details as Record<string, unknown> }] : []),
 		dispose: async () => { if (!disposed) { disposed = true; await runtime.dispose(); } },
 	};
@@ -189,8 +189,9 @@ describe("activation", () => {
 		expect(h.entries()[0]).toMatchObject({ active: true, focus: "fix the docs" });
 		const kickoff = h.requests[0]!.texts.at(-1)!;
 		expect(kickoff.startsWith(RULES_START)).toBe(true);
-		expect(kickoff).toContain("the focus your user gave: fix the docs;");
-		expect(kickoff.endsWith(KICKOFF)).toBe(true);
+		expect(kickoff).toContain("the focus your user gave: fix the docs");
+		expect(kickoff).toContain("Do not expand outside it");
+		expect(kickoff).toContain("delegate the next useful step");
 		expect(h.messages()[0]!.details).toEqual({ kind: "start", focus: "fix the docs" });
 		expect(h.activeTools()).toEqual(expect.arrayContaining(["selfdrive_task", "selfdrive_next"]));
 		const top = realpathSync(cwd());
@@ -209,7 +210,7 @@ describe("activation", () => {
 		expect(awake).toEqual({ started: 1, killed: 1 });
 		const report = h.messages().at(-1)!;
 		expect(report.details.kind).toBe("report");
-		expect((report.details.lines as string[])[0]).toMatch(/^🚗 Self-driving report · 0m · 1 run · \$0\.00 · no tasks recorded$/);
+		expect((report.details.lines as string[])[0]).toBe("🚗 Self-driving report · 0m · 0 tasks · $0.00");
 		await expect(h.session.prompt("go")).resolves.toBeUndefined();
 		await h.settle(3);
 	});
@@ -260,22 +261,154 @@ describe("driver", () => {
 		expect(h.tasks()).toEqual([{ id: "T1", title: "Run the suite", status: "running" }]);
 		await h.settle(4);
 		const continuation = h.requests[2]!.texts.at(-1)!;
-		expect(continuation).toMatch(/^\[selfdrive\] Continue self-driving: run 2, 0m since it started; your user is still away\. Ledger: 1 running; open: T1 Run the suite \(running\)\./);
+		expect(continuation.startsWith(CONTINUE)).toBe(true);
+		expect(continuation).toContain("2 driver starts");
+		expect(continuation).toContain("evidence-based candidates across the project");
+		expect(continuation).toContain("T1 Run the suite (running)");
 		expect(h.messages()[1]!.details).toEqual({ kind: "continue", run: 2, elapsed: "0m" });
 		expect(h.status).toBe("🚗 selfdrive 0m · waiting 1m");
 		await sleep(400);
 		expect(h.requests).toHaveLength(4);
 		await h.settle(6);
-		expect(h.requests[4]!.texts.at(-1)).toContain("run 3");
+		expect(h.requests[4]!.texts.at(-1)).toContain("3 driver starts");
 		expect(h.status).toBe("🚗 selfdrive 0m · done");
 		expect(h.entries().at(-1)).toMatchObject({ done: "nothing left" });
 		await sleep(200);
 		expect(h.requests).toHaveLength(6);
 		await h.command("/selfdrive status");
-		expect(h.lastNote?.message).toMatch(/is on since .*: 3 runs; tasks: 1 done; done: nothing left\.$/);
+		expect(h.lastNote?.message).toMatch(/is on since .*: 3 driver starts; tasks: 1 done; done: nothing left\.$/);
 		await h.command("/selfdrive report");
-		expect(h.lastNote?.message.split("\n")).toEqual(["🚗 Self-driving report · 0m · 3 runs · $0.00", "Done:", "  T1 Run the suite · 0 failures"]);
+		expect(h.lastNote?.message.split("\n")).toEqual(["🚗 Self-driving report · 0m · 1 task · $0.00", "Stopped: nothing left", "Done:", "  T1 Run the suite · 0 failures"]);
 		expect(h.grant === undefined || h.grant.id === h.session.sessionManager.getSessionId()).toBe(true);
+	});
+
+	it.each(["planned", "running"])("refuses done with %s tasks, then accepts their completed outcomes", async (status) => {
+		const h = await start({ script: [
+			calls(...Array.from({ length: 7 }, (_, i) => fauxToolCall("selfdrive_task", { title: `Check ${i + 1}`, status })), next("done")),
+			fauxAssistantMessage("still open"),
+			calls(...Array.from({ length: 7 }, (_, i) => fauxToolCall("selfdrive_task", { id: `T${i + 1}`, status: "done", result: "Verified" })), next("done", { reason: "Verification found no further actionable problems" })),
+			fauxAssistantMessage("finished"),
+		] });
+		await h.command("/selfdrive");
+		await h.settle(2);
+		const refusal = h.toolResults().find((result) => result.toolName === "selfdrive_next")!;
+		expect(refusal).toMatchObject({ isError: true, details: {} });
+		const error = textOf(refusal);
+		expect(error).toContain(`T1 (${status})`);
+		expect(error).toContain(`T5 (${status})`);
+		expect(error).not.toContain("T6");
+		expect(error).toContain("+2 more");
+		expect(error).toContain("actual outcomes");
+		expect(error).not.toContain("dropped");
+		expect(h.entries().some((entry) => "done" in entry)).toBe(false);
+		await h.settle(4);
+		expect(h.entries().at(-1)).toMatchObject({ done: "Verification found no further actionable problems" });
+		expect(h.toolResults().at(-1)).toMatchObject({ isError: false, details: { action: "done" } });
+	});
+
+	it.each(["empty", "proposed-only"])("allows done with an %s ledger without a discovery gate", async (ledger) => {
+		const h = await start({ script: [
+			calls(...(ledger === "empty" ? [] : [fauxToolCall("selfdrive_task", { title: "Verified fix", status: "proposed", result: "Ready for review", herderRun: "20260101-000000-abcd", needs: "Deliver the verified run" })]), next("done", { reason: "No further actionable evidence within scope" })),
+			fauxAssistantMessage("finished"),
+		] });
+		await h.command("/selfdrive");
+		await h.settle(2);
+		expect(h.entries().at(-1)).toMatchObject({ done: "No further actionable evidence within scope" });
+		expect(h.toolResults().at(-1)).toMatchObject({ isError: false, details: { action: "done" } });
+		expect(h.tasks()).toHaveLength(ledger === "empty" ? 0 : 1);
+	});
+
+	it("clears an earlier accepted done when a later done is refused, even if the tasks then finish", async () => {
+		const h = await start({ script: [
+			calls(next("done", { reason: "stale decision" })),
+			calls(fauxToolCall("selfdrive_task", { title: "New evidence", status: "planned" }), next("done")),
+			calls(fauxToolCall("selfdrive_task", { id: "T1", status: "done", result: "Checked the evidence" })),
+			fauxAssistantMessage("updated the outcome"),
+			calls(next("done", { reason: "No further actionable evidence after the check" })),
+			fauxAssistantMessage("finished"),
+		] });
+		await h.command("/selfdrive");
+		await h.settle(4);
+		expect(h.toolResults().filter((result) => result.toolName === "selfdrive_next").map((result) => result.isError)).toEqual([false, true]);
+		expect(h.entries().some((entry) => "done" in entry)).toBe(false);
+		await h.settle(6);
+		expect(h.entries().at(-1)).toMatchObject({ done: "No further actionable evidence after the check" });
+	});
+
+	it("rechecks an accepted done when a later call in the same turn creates an open task", async () => {
+		const h = await start({ script: [
+			calls(next("done", { reason: "before new evidence" }), fauxToolCall("selfdrive_task", { title: "Follow up new evidence", status: "planned" })),
+			fauxAssistantMessage("new work remains"),
+			calls(next("wait", { seconds: 60 })),
+			fauxAssistantMessage("waiting"),
+		] });
+		await h.command("/selfdrive");
+		await h.settle(2);
+		expect(h.toolResults()[0]).toMatchObject({ toolName: "selfdrive_next", isError: false, details: { action: "done" } });
+		expect(h.entries().some((entry) => "done" in entry)).toBe(false);
+		await h.settle(4);
+		expect(h.requests[2]!.texts.at(-1)).toContain("T1 Follow up new evidence (planned)");
+		expect(h.status).toContain("waiting");
+	});
+
+	it("keeps refused done calls idle for the three-no-work protective stop", async () => {
+		const h = await start({ script: [
+			calls(fauxToolCall("selfdrive_task", { title: "Unfinished check", status: "planned" }), next("done")),
+			fauxAssistantMessage("no work"),
+			calls(next("done")), fauxAssistantMessage("no work"),
+			calls(next("done")), fauxAssistantMessage("no work"),
+		] });
+		await h.command("/selfdrive");
+		await h.settle(6);
+		expect(h.toolResults().filter((result) => result.toolName === "selfdrive_next").map((result) => result.isError)).toEqual([true, true, true]);
+		expect(h.tasks().at(-1)).toMatchObject({ status: "planned" });
+		expect(h.entries().at(-1)).toMatchObject({ done: "three continuations in a row did nothing" });
+	});
+
+	it("summarizes bounded open tasks and latest terminal updates while retaining the focus", async () => {
+		const h = await start({ script: [
+			calls(
+				fauxToolCall("selfdrive_task", { title: "Earliest task", status: "done", result: "Old result" }),
+				fauxToolCall("selfdrive_task", { title: "Old finished task", status: "done", result: "Old finding" }),
+				fauxToolCall("selfdrive_task", { title: "Verified fix", status: "proposed", result: "Fix ready", needs: "Review and deliver" }),
+				fauxToolCall("selfdrive_task", { title: "Flaky check", status: "failed", result: "Reproduced timeout", needs: "Fixture access" }),
+				fauxToolCall("selfdrive_task", { title: "Reopened check", status: "done", result: "Obsolete terminal outcome" }),
+				...Array.from({ length: 7 }, (_, i) => fauxToolCall("selfdrive_task", { title: `Open ${i + 1} ${"x".repeat(300)}`, status: "planned", why: `Evidence ${i + 1} ${"y".repeat(300)}` })),
+				fauxToolCall("selfdrive_task", { id: "T1", status: "done", result: "Intermediate result" }),
+				fauxToolCall("selfdrive_task", { id: "T1", status: "done", result: `Latest finding ${"z".repeat(300)}`, needs: "Bounded verification" }),
+				fauxToolCall("selfdrive_task", { id: "T5", status: "planned", why: "New evidence reopens the check" }),
+				fauxToolCall("probe", {}),
+			),
+			fauxAssistantMessage("recorded"),
+			calls(next("wait", { seconds: 60 })),
+			fauxAssistantMessage("waiting"),
+		] });
+		await h.command("/selfdrive on test reliability");
+		await h.settle(4);
+		const continuation = h.requests[2]!.texts.at(-1)!;
+		expect(continuation).toContain("Focus: test reliability");
+		expect(continuation).toContain("Work only within this focus");
+		expect(continuation).not.toContain(RULES_START);
+		const open = continuation.split("Open tasks: ")[1]!.split("\n")[0]!;
+		expect(open.match(/T\d+ /g)).toHaveLength(5);
+		expect(open).toContain("T5 Reopened check (planned); why: New evidence reopens the check");
+		expect(open).toContain("T9 Open 4");
+		expect(open).toContain("why: Evidence 4");
+		expect(open).toContain("+3 more");
+		expect(open).not.toContain("T10");
+		const outcomes = continuation.split("Latest outcomes: ")[1]!.split("\n")[0]!;
+		expect(outcomes.match(/T\d+ /g)).toEqual(["T1 ", "T4 ", "T3 "]);
+		expect(outcomes).toContain("result: Latest finding");
+		expect(outcomes).toContain("needs: Bounded verification");
+		expect(outcomes).toContain("result: Reproduced timeout");
+		expect(outcomes).toContain("needs: Fixture access");
+		expect(outcomes).toContain("result: Fix ready");
+		expect(outcomes).toContain("needs: Review and deliver");
+		expect(outcomes).toContain("1 proposed waiting for your user");
+		expect(outcomes).toContain("do not block completion");
+		expect(outcomes).not.toMatch(/Old finding|Old result|Intermediate result|Obsolete terminal outcome/);
+		for (const char of ["x", "y", "z"]) expect(continuation).not.toContain(char.repeat(101));
+		expect(continuation.length).toBeLessThan(3_000);
 	});
 
 	it("stops after three driver runs in a row that did nothing", async () => {
@@ -288,7 +421,7 @@ describe("driver", () => {
 		await sleep(200);
 		expect(h.requests).toHaveLength(3);
 		await h.command("/selfdrive report");
-		expect(h.lastNote?.message).toBe("🚗 Self-driving report · 0m · 3 runs · $0.00 · nothing worth doing: three continuations in a row did nothing");
+		expect(h.lastNote?.message.split("\n")).toEqual(["🚗 Self-driving report · 0m · 0 tasks · $0.00", "Stopped: three continuations in a row did nothing"]);
 	});
 
 	it("counts continuations that never start a run as failures", async () => {
@@ -326,7 +459,7 @@ describe("driver", () => {
 		await h.command("/selfdrive off");
 		notify(4);
 		await h.command("/selfdrive report");
-		expect(h.lastNote?.message).toBe("🚗 Self-driving report · 0m · 1 run · $1.00 (subagents $1.00) · no tasks recorded");
+		expect(h.lastNote?.message).toBe("🚗 Self-driving report · 0m · 0 tasks · $1.00 (subagents $1.00)");
 	});
 
 	it("holds while an extension dialog is open", async () => {
@@ -344,7 +477,7 @@ describe("driver", () => {
 		answer(false);
 		await asking;
 		await h.settle(3);
-		expect(h.requests[2]!.texts.at(-1)!.startsWith(`${CONTINUE}: run 2`)).toBe(true);
+		expect(h.requests[2]!.texts.at(-1)).toContain("2 driver starts");
 	});
 });
 
@@ -358,7 +491,7 @@ describe("user return", () => {
 		const texts = h.requests[2]!.texts;
 		expect(texts.at(-1)).toBe("I'm back");
 		expect(texts.at(-2)!.startsWith(`${BACK}: start no new self-driving work`)).toBe(true);
-		expect(texts.at(-2)).toContain("🚗 Self-driving report · 0m · 1 run");
+		expect(texts.at(-2)).toContain("🚗 Self-driving report · 0m · 0 tasks");
 		expect(h.entries().at(-1)).toMatchObject({ active: false, reason: "returned" });
 		expect(h.messages().at(-1)!.details.kind).toBe("report");
 		expect(h.status).toBeUndefined();
@@ -392,6 +525,9 @@ describe("user return", () => {
 		await h.settle(3);
 		expect(h.entries()).toHaveLength(1);
 		expect(h.status).toMatch(/^🚗 selfdrive/);
+		await h.command("/selfdrive status");
+		expect(h.lastNote?.message).toContain("1 driver start;");
+		expect(h.lastNote?.message).not.toContain("driver starts");
 	});
 
 	it("ends on Esc", async () => {
@@ -433,6 +569,47 @@ describe("lifecycle", () => {
 		expect(h.grant).toBeDefined();
 		expect(h.status).toMatch(/^🚗 selfdrive/);
 		expect(awake).toEqual({ started: 2, killed: 1 });
+	});
+
+	it.each(["compaction", "reload"])("derives focus, open tasks, and latest outcomes from the ledger after %s", async (recovery) => {
+		const h = await start({
+			register: (pi) => {
+				pi.on("session_before_compact", ({ preparation, branchEntries }) => ({ compaction: {
+					summary: "Earlier conversation.", firstKeptEntryId: branchEntries.at(-1)!.id, tokensBefore: preparation.tokensBefore,
+				} }));
+			},
+			script: [
+				calls(
+					fauxToolCall("selfdrive_task", { title: "Audit", status: "done", result: "Original result" }),
+					fauxToolCall("selfdrive_task", { title: "Check", status: "failed", result: "Timeout reproduced" }),
+					fauxToolCall("selfdrive_task", { id: "T1", status: "done", result: "Latest audit finding", needs: "Check the fixture" }),
+					fauxToolCall("selfdrive_task", { title: "Verify finding", status: "planned", why: "Audit found a race" }),
+					next("wait", { seconds: 1 }),
+				),
+				fauxAssistantMessage("waiting"),
+				calls(next("wait", { seconds: 60 })),
+				fauxAssistantMessage("waiting"),
+			],
+		});
+		await h.command("/selfdrive on fixture reliability");
+		await h.settle(2);
+		if (recovery === "compaction") {
+			await h.session.compact();
+			expect(h.session.sessionManager.getBranch().some((entry) => entry.type === "compaction")).toBe(true);
+		} else await h.session.reload();
+		await h.settle(4);
+		const continuation = h.requests[2]!.texts.at(-1)!;
+		expect(continuation).toContain("Focus: fixture reliability");
+		expect(continuation).toContain("T3 Verify finding (planned); why: Audit found a race");
+		const outcomes = continuation.split("Latest outcomes: ")[1]!.split("\n")[0]!;
+		expect(outcomes.match(/T\d+ /g)).toEqual(["T1 ", "T2 "]);
+		expect(outcomes).toContain("result: Latest audit finding; needs: Check the fixture");
+		expect(outcomes).toContain("result: Timeout reproduced");
+		expect(outcomes).not.toContain("Original result");
+		if (recovery === "compaction") {
+			expect(continuation).toContain(RULES_START);
+			expect(h.requests[2]!.texts).not.toContain(h.requests[0]!.texts.at(-1));
+		}
 	});
 
 	it("throws from the tools while off", async () => {
