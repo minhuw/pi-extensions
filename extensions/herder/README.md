@@ -30,7 +30,7 @@ Agents work in disposable git worktrees, and writing steps produce commits on hi
 
 ## Run lifecycle
 
-1. **Start.** `/herder <goal>` creates a run on the current `HEAD` and writes a draft `goal.md`. It then sends the main model the Herder skill instructions. Each session holds at most one active run at a time, while separate sessions can run concurrent runs in the same repository; within the same session, a new run starts once its held run is finished or [parked](#standing-approval-and-parked-runs) (or `blocked` under a standing authorization).
+1. **Start.** `/herder <goal>` creates a run on the current `HEAD` and writes a draft `goal.md`. It then sends the main model the Herder skill instructions. Each session holds at most one active run at a time, while separate sessions can run concurrent runs in the same repository; within the same session, a new run starts once its held run is finished or [parked](#standing-approval-and-parked-runs) (or `blocked` under a standing authorization). A run whose journal cannot be read also blocks a new one (see [Where state lives](#where-state-lives)).
 2. **Clarify.** The model reads the code and asks at most five questions, each with a recommended answer.
 3. **Goal.** The model completes `goal.md` and calls `herder_run { action: "approve_goal" }`. Herder validates the file and asks you to confirm it. In the TUI, the goal scrolls inside the dialog (↑↓, PgUp/PgDn, Home/End), and the Yes/No choice stays on screen; `y` or `n` answer at any point, and Esc closes the dialog without an answer, which Herder reports to the model separately from a no. The delivery summary uses the same dialog. Once approved, the goal is frozen: its hash is journaled, and Herder's tools refuse to work if `goal.md` changes afterwards. A different goal needs a new run.
 4. **Plan.** The model writes `plan.md` with task lines linked to acceptance criteria.
@@ -58,7 +58,7 @@ Agents work in disposable git worktrees, and writing steps produce commits on hi
 | `/herder resume [runId]` | Take the run in this session. The main model receives the goal, plan, progress, recorded decisions, and the next action. Without an id, it takes the held run or the only unfinished run. |
 | `/herder deliver [runId] [series\|branch\|squash\|uncommitted] [--curate]` | Deliver the verified run. With an id, this session takes that run first (refused while another live session holds it). Without one, it delivers the held run or the only unfinished run. The mode defaults to `series`. |
 | `/herder abort [runId]` | Stop the run's launch and tool calls, journal it as abandoned, and remove its refs and worktrees. The run directory stays. |
-| `/herder clean [runId\|--finished]` | Delete the directories, refs, and worktrees of finished runs (delivered, abandoned, or failed). The default is `--finished`. A named run must be finished; abort it first. |
+| `/herder clean [runId\|--finished]` | Delete the directories, refs, and worktrees of finished runs (delivered, abandoned, or failed). The default is `--finished`. A named run must be finished; abort it first. The exception is a run whose journal cannot be read: naming it deletes it, and `--finished` skips it. |
 | `/herder-improve [quick\|standard\|deep] [focus\|path\|branch\|next\|features\|roadmap] [--lang <language>] [--auto]` | Audit the repository for vetted improvements and start a run for the findings you pick. See [Audits](#audits). |
 | `/herder-simplify [quick\|standard\|deep] [focus\|path\|branch] [--lang <language>] [--auto]` | Audit the repository for vetted simplifications and start a run for the findings you pick. See [Audits](#audits). |
 
@@ -210,6 +210,8 @@ refs/herder/<runId>/steps/<stepKey>  each completed writing step's commit
 ```
 
 Run ids look like `20261025-141500-a3f9` (UTC). `/herder clean` deletes finished runs. Do not edit the journal, `progress.md`, or the refs by hand.
+
+A run whose journal cannot be read (corrupt before its last line, or written by a newer Herder) still counts as a run: no new run starts while it exists. A readable unfinished run next to it stays usable. Without one, `/herder <goal>`, `herder_run { action: "start" }`, the other tools, and `/herder resume`, `/herder status`, and `/herder abort` without a run id report the unreadable run and its journal error. Update Herder if a newer version wrote the journal; otherwise delete the run, with its refs and worktrees, using `/herder clean <runId>`.
 
 ## Resuming
 

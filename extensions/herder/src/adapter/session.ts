@@ -62,6 +62,20 @@ export interface Session {
 
 export const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
+export const unreadableRunError = (id: string, error: unknown) =>
+	new Error(`Herder run ${id} cannot be read: ${message(error)}. Update Herder if a newer version wrote its journal; otherwise delete the run with /herder clean ${id}.`, { cause: error });
+
+/**
+ * The repository's unfinished run, or null. A run whose journal cannot be read is not "no run": without a readable
+ * unfinished run, the latest such run is thrown with its journal error and what to do about it.
+ */
+export function unfinishedRun(commonDir: string): string | null {
+	const unreadable: Error[] = [];
+	const runId = activeRun(commonDir, (id, error) => unreadable.push(unreadableRunError(id, error)));
+	if (!runId && unreadable.length) throw unreadable[0];
+	return runId;
+}
+
 /** The folded state of a run whose goal is approved, unchanged on disk, and not finished. */
 export function requireApproved(held: Held): RunState {
 	const state = held.run.state();
@@ -137,7 +151,6 @@ export class Herder {
 		return s.vcs.vcs;
 	}
 
-	/** Locks `runId` for this session (taking over only a stale lock) and makes it the session's run. */
 	/** Locks the unfinished run `runId` for this session (taking over only a stale lock) and makes it the session's run. */
 	hold(s: Session, runId: string, run?: RunStore): Held {
 		if (s.held?.runId === runId) return this.#check(s, s.held);
@@ -181,17 +194,23 @@ export class Herder {
 	}
 
 	/** The repository's unfinished runs, oldest first. */
-	unfinished(s: Session): RunEntry[] { return unfinishedRuns(this.vcs(s).commonDir()); }
+	unfinished(s: Session, onError?: (runId: string, error: Error) => void): RunEntry[] {
+		return unfinishedRuns(this.vcs(s).commonDir(), onError);
+	}
 
 	/**
 	 * The run meant when none is named: the held unfinished run, else the only unfinished run. Several unfinished runs
-	 * (parked ones waiting for delivery among them) are never resolved to the newest: that refuses, listing them.
+	 * (parked ones waiting for delivery among them) are never resolved to the newest: that refuses, listing them. A run
+	 * whose journal cannot be read is reported when no readable unfinished run exists.
 	 */
 	implied(s: Session): string | undefined {
 		if (s.held && !isFinished(s.held.run.state())) return s.held.runId;
-		const runs = this.unfinished(s);
+		const unreadable: Error[] = [];
+		const runs = this.unfinished(s, (id, error) => unreadable.push(unreadableRunError(id, error)));
 		if (runs.length > 1) throw new Error(severalRunsText(runs));
-		return runs[0]?.runId;
+		if (runs.length === 1) return runs[0]!.runId;
+		if (unreadable.length) throw unreadable.at(-1)!;
+		return undefined;
 	}
 
 	/** The user's standing authorization (self-driving mode) covering the session's repository, if any. */
@@ -204,7 +223,7 @@ export class Herder {
 	peek(s: Session, runId?: string): RunStore | undefined {
 		if (!runId && s.held) return s.held.run;
 		const commonDir = this.vcs(s).commonDir();
-		const id = runId ?? activeRun(commonDir) ?? listRuns(commonDir).at(-1);
+		const id = runId ?? unfinishedRun(commonDir) ?? listRuns(commonDir).at(-1);
 		return id ? openRun(commonDir, id) : undefined;
 	}
 

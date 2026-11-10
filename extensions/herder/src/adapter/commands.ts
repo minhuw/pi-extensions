@@ -1,13 +1,14 @@
 import { existsSync, rmSync } from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { goalDraft } from "../artifacts/goal.ts";
+import type { RunState } from "../journal/fold.ts";
 import { readLock } from "../run/lock.ts";
 import { isRunId, refPrefix, runPaths } from "../run/paths.ts";
-import { createRun, listRuns, openRun } from "../run/store.ts";
+import { createRun, listRuns, openRun, type RunStore } from "../run/store.ts";
 import type { DeliveryMode } from "../types.ts";
 import { describeDelivery } from "./format.ts";
 import { auditPrompt, auditSkillDir, resumePrompt, skillText, startPrompt, type AuditInvocation, type AuditKind } from "./prompts.ts";
-import { busy, message, type Herder, type Held, type Session } from "./session.ts";
+import { busy, message, unreadableRunError, type Herder, type Held, type Session } from "./session.ts";
 import { describeRun, isBlocked, isFinished, isParked, otherUnfinishedLines, parkedLines, planTasks, type RunEntry } from "./status.ts";
 
 export const PROMPT_TYPE = "herder:prompt";
@@ -21,7 +22,7 @@ export const USAGE = [
 	"/herder resume [runId]             continue a run in this session",
 	"/herder deliver [runId] [series|branch|squash|uncommitted] [--curate]",
 	"/herder abort [runId]              stop and abandon the run",
-	"/herder clean [runId|--finished]   delete finished run directories (default: --finished)",
+	"/herder clean [runId|--finished]   delete finished run directories (default: --finished), or a named run whose journal cannot be read",
 	"A first word that names a subcommand is always that subcommand; start with -- to use it as goal text (/herder -- status page …).",
 ].join("\n");
 
@@ -87,8 +88,8 @@ export function titleOf(goal: string): string {
 }
 
 /**
- * The repository's head and common directory, refusing without a commit or while this session holds an unparked
- * unfinished run (unless it is blocked under a standing authorization).
+ * The repository's head and common directory, refusing without a commit, while this session holds an unparked
+ * unfinished run (unless it is blocked under a standing authorization), or while a run's journal cannot be read.
  */
 function startable(herder: Herder, s: Session): { head: string; commonDir: string } {
 	const vcs = herder.vcs(s);
@@ -101,11 +102,15 @@ function startable(herder: Herder, s: Session): { head: string; commonDir: strin
 	const commonDir = vcs.commonDir();
 	if (s.held && busy(s.held)) throw new Error(`Run ${s.held.runId} still has a launch or tool call running in this session.`);
 	if (s.held) {
-		const state = s.held.run.state();
+		let state: RunState;
+		try { state = s.held.run.state(); } catch (error) { throw unreadableRunError(s.held.runId, error); }
 		if (!isFinished(state) && !isParked(state) && !(herder.standing(s) !== undefined && isBlocked(state))) {
 			throw new Error(`Herder run ${s.held.runId} is unfinished in this session. Continue it with /herder resume ${s.held.runId}, abandon it with /herder abort ${s.held.runId}, or start another run in a separate session.`);
 		}
 	}
+	const unreadable: Error[] = [];
+	herder.unfinished(s, (id, error) => unreadable.push(unreadableRunError(id, error)));
+	if (unreadable.length) throw unreadable.at(-1)!;
 	return { head, commonDir };
 }
 
@@ -189,21 +194,25 @@ function clean(herder: Herder, s: Session, runId: string | undefined): string {
 	const commonDir = vcs.commonDir();
 	const deleted: string[] = [];
 	for (const id of runId ? [runId] : listRuns(commonDir)) {
-		let finished: boolean;
+		let run: RunStore;
 		try {
-			const state = openRun(commonDir, id).state();
-			finished = isFinished(state);
-			if (!finished && runId) throw new Error(`Herder run ${id} is unfinished (${state.status}); abort it first with /herder abort ${id}.`);
+			run = openRun(commonDir, id);
 		} catch (error) {
 			if (runId) throw error;
 			continue;
 		}
-		if (!finished) continue;
+		// A run whose journal cannot be read goes only when named: nothing can resume or abort it.
+		let state: RunState | undefined;
+		try { state = run.state(); } catch { if (!runId) continue; }
+		if (state && !isFinished(state)) {
+			if (runId) throw new Error(`Herder run ${id} is unfinished (${state.status}); abort it first with /herder abort ${id}.`);
+			continue;
+		}
 		if (s.held?.runId === id) {
 			if (busy(s.held)) throw new Error(`Run ${id} still has a Herder tool call running; clean it once that finishes.`);
 			herder.release(s);
 		}
-		const paths = openRun(commonDir, id).paths;
+		const { paths } = run;
 		vcs.deleteRefs(refPrefix(id));
 		if (existsSync(paths.worktrees)) vcs.removeWorktree(paths.worktrees);
 		rmSync(paths.dir, { recursive: true, force: true });
