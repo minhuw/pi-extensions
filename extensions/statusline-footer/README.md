@@ -20,7 +20,7 @@ Full mode is enabled by default when Pi starts.
 
 ## Layout
 
-Full mode shows the identity bar, a telemetry row, and a Git row. A fourth row appears while an extension publishes a status other than language or spokesman. Primary facts sit on the left; capacity, cost, and path sit on the right. The example uses ASCII/Unicode icons; the bar's groups sit on colored bands:
+Full mode shows the identity bar, a telemetry row, and a Git row. A fourth row appears while an extension publishes a status other than language, spokesman, boom, or always-on. Primary facts sit on the left; capacity, cost, and path sit on the right. The example uses ASCII/Unicode icons; the bar's groups sit on colored bands:
 
 ```text
  ● ☾ k3   HIGH  (moonshot)  English  ─────────────────────────────────────────────  × 2×  ▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉  8.2%  79k/1.1M
@@ -31,10 +31,10 @@ Full mode shows the identity bar, a telemetry row, and a Git row. A fourth row a
 
 | Row | Left | Right |
 | --- | --- | --- |
-| 1 | Live pulse, queued chip, model, Fast or non-standard service tier, thinking, provider, language, spokesman | Compactions, gradient bar, percent, used/window |
+| 1 | Live pulse, queued chip, model, Fast or non-standard service tier, thinking, provider, language, spokesman | Boom and always-on modes, compactions, gradient bar, percent, used/window |
 | 2 | Turns and elapsed time; TTFT, TTFB, and throughput; tool calls and errors | Cost and cost per turn; input / output / cached-input tokens and cache hit rate; Pika memory's context share; reasoning tokens |
 | 3 | Git branch, working-tree diff, ahead/behind | Relay messages received and sent, files touched, current directory |
-| 4 | Extension statuses except the language and spokesman: research, Herder, Loop, background processes, then the rest; shown only while one of these is set | |
+| 4 | Extension statuses except the language, spokesman, and modes: research, Herder, Loop, background processes, then the rest; shown only while one of these is set | |
 
 The message counts on the Git row (`⇌ 3 in · 2 out`) tally [Pika](../pika/README.md) relay messages received and sent on the current session branch, read from Pika relay's `relay-received` and `relay-sent` session entries. A side with no messages is left out (`⇌ 2 out`), and the group disappears when both are zero. Compact mode does not show them.
 
@@ -46,11 +46,13 @@ Thinking levels are colored: dim off, amber low, green medium, lilac high, and a
 
 Compact mode shows only the bar, with cost and elapsed time on the right. It also includes a workflow summary when there is room. Statuses published through `ctx.ui.setStatus("autoresearch", ...)`, `ctx.ui.setStatus("herder", ...)`, and `ctx.ui.setStatus("loop", ...)` compete for that space in this order: research, Herder, then Loop. Clearing a higher-priority status reveals the next one.
 
-Full mode shows these statuses together on one row below Git, ordered as research, Herder, Loop, background processes, then other extensions except language and spokesman. Clearing a status removes it; the row disappears when none remain.
+Full mode shows these statuses together on one row below Git, ordered as research, Herder, Loop, background processes, then other extensions except language, spokesman, and the modes. Clearing a status removes it; the row disappears when none remain.
 
 At narrow widths, both layouts preserve the model and context percentage. Workflow summaries and secondary details drop out, and the context bar shrinks or disappears before the model is truncated.
 
 The `language` status from [Language](../language/README.md) and the `spokesman` status from [Spokesman](../spokesman/README.md) stay in the bar in both modes, so they do not keep the status row open. They follow the provider in full mode and any workflow summary in compact mode, with `spokesman` to the right of `language`. The provider, token counts, and compact mode's cost and elapsed time give way before `language` and `spokesman` do. As width narrows further, `spokesman` drops out whole before `language`, and `language` drops out whole when it no longer fits beside the model and context percentage. Compact mode keeps workflow and background-process summaries as long as they fit.
+
+The `boom` status from [Boom](../boom/README.md) and the `alwayson` status from [Always-on](../alwayson/README.md) also stay in the bar in both modes, on the right just before the compaction count, boom first, so they never open the status row. They outlast every other status: the left side's statuses give way to them, and they drop out together only when they no longer fit beside the model and context percentage.
 
 ### The bar
 

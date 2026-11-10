@@ -34,6 +34,6 @@ Always-on mode switches the way [Boom](../boom/README.md#the-prompt-cache) does:
 
 A switch takes effect with the next prompt. The state is stored in the session file, survives `/reload` and resuming, and follows the branch through `/tree` and forks. A session that already holds conversation when this extension handles its first prompt never gains a section. Subagents, Herder steps, and print and JSON modes are not affected, and `/alwayson` only shows a warning there. If compaction drops the hidden message during a long run, the rest of that run may fall back to the section's state until the next prompt.
 
-While always-on mode is on, [Statusline Footer](../statusline-footer/README.md) shows `📡 alwayson` in its full-mode status row.
+While always-on mode is on, [Statusline Footer](../statusline-footer/README.md) shows `📡 alwayson` in its bar, after boom's status and just before the compaction count.
 
 Run `npm run test:alwayson` for offline tests that drive real Pi sessions on a local faux provider and check what the provider receives.

@@ -393,7 +393,9 @@ export function statusTone(segment: string): "problem" | "attention" | "calm" {
 }
 
 // Known extensions keep a fixed slot so their color does not move as others come and go.
-const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language", "spokesman"];
+const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language", "spokesman", "boom", "alwayson"];
+/** Session modes that change how the model works; they ride the bar before the context, not the status row. */
+const MODE_KEYS = ["boom", "alwayson"];
 const STATUS_ICONS: Record<string, string> = {
 	autoresearch: "\u{F0093}", // md-flask
 	herder: "\u{F0CC6}", // md-sheep
@@ -483,6 +485,11 @@ function renderLanguage(theme: Theme, statuses: ReadonlyMap<string, string>): st
 function renderSpokesman(theme: Theme, statuses: ReadonlyMap<string, string>): string | undefined {
 	const spokesman = statuses.get("spokesman");
 	return spokesman ? renderStatus(theme, spokesman, "spokesman", hasNerdFonts()) : undefined;
+}
+
+/** Boom and always-on modes for the bar, in that order; each status leads with its own symbol. */
+function renderModes(theme: Theme, statuses: ReadonlyMap<string, string>): string | undefined {
+	return cluster(MODE_KEYS.map((key) => statuses.get(key) && renderStatus(theme, statuses.get(key)!, key)), "  ") || undefined;
 }
 
 // ── model marks ─────────────────────────────────────────────────────
@@ -1132,6 +1139,7 @@ function renderIdentityRow(
 	languageStatus?: string,
 	workflowStatus?: string,
 	spokesmanStatus?: string,
+	modeStatus?: string,
 ): string {
 	const set = icons();
 	const { chrome } = skin;
@@ -1146,8 +1154,6 @@ function renderIdentityRow(
 		renderPrice(ctx, s, theme, set),
 		theme.fg("dim", fmtDuration(s.durationMs)),
 	] : [];
-	const context = renderContext(theme, usage, barWidth, s.compactions, set.compact);
-	const right = cluster([context, ...tail], "  ");
 	const minimumContext = usage?.percent != null ? visibleWidth(`${usage.percent.toFixed(1)}%`) : 0;
 	// Compact already renders the provider-free label, so it is the fallback identity too.
 	let compactIdentity = compactMode ? left : label(false);
@@ -1156,7 +1162,12 @@ function renderIdentityRow(
 		left = label(!compactMode, false);
 		compactIdentity = compactMode ? left : label(false, false);
 	}
-	const fitsBeside = (status: string) => visibleWidth(compactIdentity) + visibleWidth(status) + minimumContext + chrome + 2 <= width;
+	// The modes outlast every other status: they stay whole while they fit beside the model and context percentage.
+	const modes = modeStatus && visibleWidth(compactIdentity) + visibleWidth(modeStatus) + minimumContext + chrome + 2 <= width ? modeStatus : undefined;
+	const reserved = modes ? visibleWidth(modes) + 2 : 0;
+	const context = renderContext(theme, usage, barWidth, s.compactions, set.compact);
+	const right = cluster([modes, context, ...tail], "  ");
+	const fitsBeside = (status: string) => visibleWidth(compactIdentity) + visibleWidth(status) + minimumContext + chrome + 2 + reserved <= width;
 	// The spokesman goes first, then the language, each whole; what stays then lays out as if they had never been set.
 	const candidates = [
 		cluster([workflowStatus, languageStatus, spokesmanStatus], "  "),
@@ -1173,11 +1184,12 @@ function renderIdentityRow(
 	// Keep identity and context percent; shed provider, token counts, and compact extras first.
 	left = showLoop ? cluster([compactIdentity, loop], "  ") : compactIdentity;
 	// A status is optional: never shorten the model or percent to make space for it.
-	left = truncateToWidth(left, Math.max(0, width - minimumContext - chrome));
-	const budget = Math.max(0, width - visibleWidth(left) - chrome);
+	left = truncateToWidth(left, Math.max(0, width - minimumContext - chrome - reserved));
+	const budget = Math.max(0, width - visibleWidth(left) - chrome - reserved);
 	while (tail.length && visibleWidth(cluster(tail, "  ")) + 2 + minimumContext > budget) tail.pop();
 	const contextBudget = Math.max(0, budget - (tail.length ? visibleWidth(cluster(tail, "  ")) + 2 : 0));
 	return skin.bar(left, cluster([
+		modes,
 		renderContext(theme, usage, barWidth, s.compactions, set.compact, contextBudget),
 		...tail,
 	], "  "), width);
@@ -1196,7 +1208,7 @@ function renderCompact(
 	return renderIdentityRow(ctx, theme, skin, width, state, collectStats(ctx, state), true, renderLanguage(theme, statuses), cluster([
 		workflowKey && renderStatus(theme, statuses.get(workflowKey)!, workflowKey),
 		statuses.get(PROCESS_STATUS_KEY) && renderStatus(theme, statuses.get(PROCESS_STATUS_KEY)!, PROCESS_STATUS_KEY),
-	], "  "), renderSpokesman(theme, statuses));
+	], "  "), renderSpokesman(theme, statuses), renderModes(theme, statuses));
 }
 
 /** Cached reads as a share of all input, and the color that rates it. */
@@ -1237,15 +1249,17 @@ function renderFull(
 		renderLanguage(theme, extensionStatuses),
 		undefined,
 		renderSpokesman(theme, extensionStatuses),
+		renderModes(theme, extensionStatuses),
 	);
 
 	// Extension statuses get their own row, present only while one is published:
 	// workflows first (research, Herder, Loop, processes), then the rest. The
-	// language and spokesman are nearly always set, so they ride the bar and keep the row away.
+	// language and spokesman are nearly always set, so they ride the bar and keep the row away;
+	// the boom and always-on modes ride it too, beside the context they spend.
 	const workflowKeys = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY];
 	const statuses = [
 		...workflowKeys.map((key): [string, string | undefined] => [key, extensionStatuses.get(key)]),
-		...[...extensionStatuses.entries()].filter(([key]) => key !== "language" && key !== "spokesman" && !workflowKeys.includes(key)),
+		...[...extensionStatuses.entries()].filter(([key]) => key !== "language" && key !== "spokesman" && !MODE_KEYS.includes(key) && !workflowKeys.includes(key)),
 	].flatMap(([key, status]) => status ? [renderStatus(theme, status, key, hasNerdFonts())] : []);
 
 	return [line1, ...renderDetailRows(ctx, theme, footerData, width, state, s, statuses)];

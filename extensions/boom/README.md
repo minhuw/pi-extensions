@@ -39,6 +39,6 @@ Behavior worth knowing:
 - Subagents, Herder steps, and print and JSON modes are not affected, and `/boom` only shows a warning there. Children never fan out further because of boom mode.
 - If compaction drops the hidden message during a long run, the rest of that run may fall back to the section's state until the next prompt.
 
-While boom mode is on, [Statusline Footer](../statusline-footer/README.md) shows `💥 boom` in its full-mode status row.
+While boom mode is on, [Statusline Footer](../statusline-footer/README.md) shows `💥 boom` in its bar, just before the compaction count.
 
 Run `npm run test:boom` for offline tests that drive real Pi sessions on a local faux provider and check what the provider receives.

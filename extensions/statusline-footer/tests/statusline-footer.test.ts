@@ -929,6 +929,84 @@ describe("statusline footer rendering", () => {
 		}
 	});
 
+	it.each(["full", "compact"])("shows boom and always-on in the %s bar left of the compactions, and never on a status row", async (mode) => {
+		const harness = createHarness(`modes-bar-${mode}`, "tui", {
+			extensionStatuses: [],
+			keyedExtensionStatuses: { alwayson: "📡 alwayson", boom: "💥 boom", language: "English" },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", mode);
+		const rows = mode === "full" ? 3 : 1;
+		try {
+			const lines = harness.getFooter()!.render(160);
+			const bar = lines[0]!;
+			expect(lines).toHaveLength(rows);
+			// Boom, then always-on, then the compaction count that opens the context.
+			expect(bar.indexOf("English")).toBeLessThan(bar.indexOf("💥 boom"));
+			expect(bar.indexOf("💥 boom")).toBeLessThan(bar.indexOf("📡 alwayson"));
+			expect(bar.indexOf("📡 alwayson")).toBeLessThan(bar.indexOf("\u{F0615}"));
+			expect(bar.indexOf("\u{F0615}")).toBeLessThan(bar.indexOf("0×"));
+			for (const line of lines.slice(1)) expect(line).not.toMatch(/boom|alwayson/);
+			harness.setStatus("boom");
+			expect(harness.getFooter()!.render(160)[0]).not.toContain("boom");
+			expect(harness.getFooter()!.render(160)[0]).toContain("📡 alwayson");
+			harness.setStatus("alwayson");
+			expect(harness.getFooter()!.render(160)).toHaveLength(rows);
+			expect(harness.getFooter()!.render(160)[0]).not.toContain("alwayson");
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it("keeps the other statuses on their row beside the modes in full mode", async () => {
+		const harness = createHarness("modes-beside-row", "tui", { keyedExtensionStatuses: { boom: "💥 boom", other: "SYNC" } });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			const lines = harness.getFooter()!.render(160);
+			expect(lines).toHaveLength(4);
+			expect(lines[0]).toContain("💥 boom");
+			expect(lines[3]).toContain("SYNC");
+			expect(lines[3]).not.toContain("boom");
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it.each(["full", "compact"])("keeps the modes in the %s bar longer than the provider and the language, and drops them whole", async (mode) => {
+		const start = async (id: string, keyedExtensionStatuses: Record<string, string>) => {
+			const harness = createHarness(id, "tui", { extensionStatuses: [], keyedExtensionStatuses });
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			await harness.runCommand("footer", mode);
+			return harness;
+		};
+		const harness = await start(`modes-order-${mode}`, { boom: "💥 boom", alwayson: "📡 alwayson", language: "English" });
+		const baseline = await start(`modes-order-baseline-${mode}`, { language: "English" });
+		try {
+			const seen = { modesWithoutLanguage: false, dropped: false };
+			for (let width = 160; width >= 24; width--) {
+				const line = harness.getFooter()!.render(width)[0]!;
+				const boom = line.includes("💥 boom");
+				expect(line.includes("📡 alwayson"), `${width}`).toBe(boom);
+				if (!boom) {
+					seen.dropped = true;
+					expect(line, `${width}`).toBe(baseline.getFooter()!.render(width)[0]);
+					continue;
+				}
+				if (!line.includes("English")) seen.modesWithoutLanguage = true;
+				// Whatever gave way already, the model and the context percentage stay.
+				expect(line, `${width}`).toMatch(/\d+\.\d%/);
+				if (line.includes("(moonshot)")) expect(line, `${width}`).toContain("English");
+			}
+			expect(seen).toEqual({ modesWithoutLanguage: true, dropped: true });
+		} finally {
+			harness.disposeFooter();
+			baseline.disposeFooter();
+		}
+	});
+
 	it("sheds spokesman whole before language as width narrows, and both outlast the provider in full mode", async () => {
 		const start = async (id: string, mode: "full" | "compact", keyedExtensionStatuses: Record<string, string>) => {
 			const harness = createHarness(id, "tui", { extensionStatuses: [], keyedExtensionStatuses });
