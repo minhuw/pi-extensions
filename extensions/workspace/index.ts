@@ -12,6 +12,7 @@ import {
 	extractBashWriteTargets,
 	extractWorkspaceNameFromPath,
 	isSubpath,
+	normalizeFileToolPath,
 	readProjectPolicy,
 	resolveCanonicalPath,
 	workspacesDir,
@@ -294,8 +295,18 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			const input = event.input as { path?: unknown; file_path?: unknown } | undefined;
 			const rawPath = typeof input?.path === "string" ? input.path : typeof input?.file_path === "string" ? input.file_path : undefined;
 			if (!rawPath || !rawPath.trim()) return undefined;
-			targetPaths = [rawPath];
-			workspaceTouchPaths = [rawPath];
+			// Judge the file Pi's tool will touch, not the raw argument (`@/x` and `file:///x` both mean `/x`).
+			let filePath: string;
+			try {
+				filePath = normalizeFileToolPath(rawPath);
+			} catch (error) {
+				return {
+					block: true,
+					reason: `Blocked write to "${rawPath}": ${error instanceof Error ? error.message : String(error)}`,
+				};
+			}
+			targetPaths = [filePath];
+			workspaceTouchPaths = [filePath];
 		} else if (event.toolName === "bash") {
 			const input = event.input as { command?: unknown } | undefined;
 			const command = typeof input?.command === "string" ? input.command : undefined;

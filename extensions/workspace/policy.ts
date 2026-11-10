@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { forEachChild, parse, type Command, type SyntaxNode, type Word } from "unbash";
 
 export interface ProjectPolicy {
@@ -78,6 +79,24 @@ export function resolveCanonicalPath(targetPath: string, baseCwd?: string, seen 
 		trailing.unshift(path.basename(current));
 		current = parent;
 	}
+}
+
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+/**
+ * Normalizes a `write` / `edit` tool `path` the way Pi's file tools do before resolving it against
+ * `<cwd>`: Unicode spaces become plain spaces, one leading `@` is dropped, `~` is expanded, and a
+ * `file://` URL becomes its filesystem path (throwing when the URL names no local file).
+ * Shell words are not normalized this way: there `@name` and `file://...` are ordinary relative names.
+ */
+export function normalizeFileToolPath(rawPath: string): string {
+	let normalized = rawPath.replace(UNICODE_SPACES, " ");
+	if (normalized.startsWith("@")) {
+		normalized = normalized.slice(1);
+	}
+	if (normalized === "~") return os.homedir();
+	if (normalized.startsWith("~/")) return path.join(os.homedir(), normalized.slice(2));
+	return /^file:\/\//.test(normalized) ? fileURLToPath(normalized) : normalized;
 }
 
 export function workspacesDir(cwd: string): string {

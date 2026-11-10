@@ -34,6 +34,7 @@ The extension inspects `write`, `edit`, and mutating `bash` tool calls (`mkdir`,
 All candidate paths are canonicalized before evaluation:
 
 - `~` and `$HOME` are expanded.
+- A `write` or `edit` `path` is first normalized the way Pi's file tools resolve it: Unicode spaces become plain spaces, one leading `@` is dropped, and a `file://` URL becomes its filesystem path, so `@/x/f` and `file:///x/f` are judged as `/x/f`. A `file://` URL that names no local file is blocked. Words in `bash` commands keep `@` and `file:` literal.
 - Symlinks are resolved through the deepest existing ancestor on disk, so a symlink inside `<cwd>` that points outside `<cwd>` is evaluated by its real external target.
 - Writes inside `<cwd>` (including `<cwd>/.pi/workspaces/<name>`), the repository's git common directory, `/tmp` (and `os.tmpdir()`), and paths in the session or project allowlist succeed without prompting.
 
