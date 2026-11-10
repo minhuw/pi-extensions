@@ -27,8 +27,9 @@ const SENT_KEPT = 200;
 const SENT_SHOWN = 50;
 const USAGE = "Usage: /relay [status|send <sessionId> <text>|rooms|join <room> [topic]|leave <room>|represent <room>|represent off [<room>]|log|side [on|off]|off|on]";
 const SUBCOMMANDS = ["status", "send", "join", "leave", "represent", "rooms", "log", "side", "off", "on"];
-/** The footer status key, and the session mode a representative needs. */
+/** The footer status keys, and the session mode a representative needs. */
 const ROLE_STATUS = "representative";
+const ROOMS_STATUS = "relay-rooms";
 const ALWAYSON = "alwayson";
 
 /**
@@ -200,8 +201,9 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	let rooms: Map<string, RelayRoom> | undefined;
 	/** Counts room lists, so an older answer never replaces a newer one. */
 	let roomsGeneration = 0;
-	/** The footer's `representative` status as last set. */
+	/** The footer's room statuses as last set, cached independently. */
 	let roleShown: string | undefined;
+	let roomsShown: string | undefined;
 	/** Always-on mode is off while this session represents a room: it stops representing once this fires. */
 	let unrepresentTimer: ReturnType<typeof setTimeout> | undefined;
 	const isMember = (room: RelayRoom) => Array.isArray(room?.members) && room.members.some((member) => member.sessionId === sessionId);
@@ -468,18 +470,25 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		refreshRooms();
 	}
 
-	function showRoles(): void {
-		const text = roleStatus(rooms, sessionId);
-		if (text === roleShown) return;
-		roleShown = text;
-		try { ctx?.ui.setStatus(ROLE_STATUS, text); } catch { /* a closed UI */ }
+	function showRoomStatuses(): void {
+		const names = [...(rooms?.keys() ?? [])].map(headerField).sort();
+		const joined = names.length ? names.map((name) => `#${name}`).join(" ") : undefined;
+		if (joined !== roomsShown) {
+			roomsShown = joined;
+			try { ctx?.ui.setStatus(ROOMS_STATUS, joined); } catch { /* a closed UI */ }
+		}
+		const role = roleStatus(rooms, sessionId);
+		if (role !== roleShown) {
+			roleShown = role;
+			try { ctx?.ui.setStatus(ROLE_STATUS, role); } catch { /* a closed UI */ }
+		}
 	}
 
 	/** The rooms of a full list that this session is a member of. */
 	function learnRooms(items: RelayRoom[]): void {
 		roomsGeneration++;
 		rooms = new Map(items.filter(isMember).map((room) => [room.name, room]));
-		showRoles();
+		showRoomStatuses();
 		checkRepresentation();
 	}
 
@@ -489,7 +498,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		if (rooms) {
 			if (isMember(room)) rooms.set(room.name, room);
 			else rooms.delete(room.name);
-			showRoles();
+			showRoomStatuses();
 		}
 		refreshRooms();
 	}
@@ -508,7 +517,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		if (rooms && known) {
 			const { representative: _previous, ...room } = known;
 			rooms.set(name, typeof frame.representative === "string" && frame.representative ? { ...room, representative: frame.representative } : room);
-			showRoles();
+			showRoomStatuses();
 			checkRepresentation();
 		}
 		// For the representative's name, and for a room this session was added to unseen.
@@ -621,6 +630,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			sideAnswers.length = 0;
 			rooms = undefined;
 			roomsGeneration++;
+			showRoomStatuses();
 			clearTimeout(unrepresentTimer);
 			unrepresentTimer = undefined;
 			sessionModes().listeners.add(onModes);
@@ -695,10 +705,9 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			clearTimeout(unrepresentTimer);
 			unrepresentTimer = undefined;
 			sessionModes().listeners.delete(onModes);
-			if (roleShown !== undefined) {
-				roleShown = undefined;
-				try { ctx?.ui.setStatus(ROLE_STATUS, undefined); } catch { /* a closed UI */ }
-			}
+			rooms = undefined;
+			roomsGeneration++;
+			showRoomStatuses();
 			started = false;
 			leaving = false;
 			scheduler.clear();

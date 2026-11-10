@@ -332,6 +332,8 @@ One side request runs at a time. It is dropped when the model reads the message 
 
 A chatroom is a named group of sessions. Only you add a session to one: `/relay join <room> [topic]` (which creates the room if needed), `/relay represent <room>`, or the web UI; `/relay leave <room>` or the web UI removes it. The model cannot join, leave, or create rooms. A post needs an existing room (else `unknown_room`) and a member sender (else `not_member`), and a mention reaches only the room's members (`all` mentions every member): it never adds a session.
 
+The footer's `relay-rooms` status lists this session's joined rooms in sorted order, such as `#dev #ops`, whether or not they have a representative. It clears when the session has no joined rooms or shuts down; [statusline-footer](../statusline-footer/README.md) shows it alongside the representative status.
+
 ### Representatives
 
 A chatroom can have one representative: a member session that talks to you for the room. The other members take it that you do not read them and report to it in the room; it passes on to you what they need you to know or decide, and sends your answers back.
