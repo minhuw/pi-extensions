@@ -53,7 +53,7 @@ const STEP_OPTIONS = {
 } satisfies Record<(typeof AGENT_OPTION_KEYS)[number], TSchema>;
 export const StepParameters = Type.Object({ prompt: text("The step's task"), ...STEP_OPTIONS });
 export const IntegrateParameters = Type.Object({
-	source: text("Step key or commit to integrate"),
+	source: text("Step key or commit to integrate (a gate_failed step or its commit is refused)"),
 	message: text("Commit message of the integrated task"),
 	task: Type.Optional(Type.String({ minLength: 1, description: "Plan task id" })),
 	checks: Type.Optional(CHECK_IDS("Check ids to run before advancing (default: checks marked integrate)")),
@@ -249,7 +249,7 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 
 	pi.registerTool({
 		name: "herder_integrate", label: "Herder Integrate", executionMode: "sequential",
-		description: "Integrate a step's commit onto the run's integration line (one commit per task). Runs integration checks first; conflicts and failing checks are returned, the head does not move. Requires an approved goal.",
+		description: "Integrate a step's commit onto the run's integration line (one commit per task). A gate_failed step is refused. Runs integration checks first; conflicts and failing checks are returned, the head does not move. Requires an approved goal.",
 		parameters: IntegrateParameters,
 		async execute(_id, params, signal, _update, ctx) {
 			const s = herder.session(ctx);
@@ -258,6 +258,7 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 			requireIdle(held, "A direct integration");
 			checkIds(state, params.checks);
 			const step = state.steps.get(params.source);
+			if (step?.status === "gate_failed") throw new Error(`Step ${params.source} is gate_failed: its gates did not pass, so it cannot be integrated. Base a fix step on its commit and integrate that step.`);
 			if (step && !step.completed?.commit) throw new Error(`Step ${params.source} has no commit to integrate (status ${step.status}).`);
 			const source = step?.completed?.commit ?? params.source;
 			const opts = { message: params.message, ...(params.task ? { task: params.task } : {}), ...(params.checks ? { checks: params.checks } : {}) };

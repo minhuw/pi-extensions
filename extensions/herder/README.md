@@ -34,7 +34,7 @@ Agents work in disposable git worktrees, and writing steps produce commits on hi
 2. **Clarify.** The model reads the code and asks at most five questions, each with a recommended answer.
 3. **Goal.** The model completes `goal.md` and calls `herder_run { action: "approve_goal" }`. Herder validates the file and asks you to confirm it. In the TUI, the goal scrolls inside the dialog (↑↓, PgUp/PgDn, Home/End), and the Yes/No choice stays on screen; `y` or `n` answer at any point, and Esc closes the dialog without an answer, which Herder reports to the model separately from a no. The delivery summary uses the same dialog. Once approved, the goal is frozen: its hash is journaled, and Herder's tools refuse to work if `goal.md` changes afterwards. A different goal needs a new run.
 4. **Plan.** The model writes `plan.md` with task lines linked to acceptance criteria.
-5. **Orchestrate.** The model runs direct steps (`herder_step`, then `herder_integrate`) or launches a workflow script in the background. A writing step's commit is integrated as one commit per task on the run's integration line. The integration checks must pass before the line advances.
+5. **Orchestrate.** The model runs direct steps (`herder_step`, then `herder_integrate`) or launches a workflow script in the background. A writing step's commit is integrated as one commit per task on the run's integration line. A step whose gate failed is refused; a fix step built on its commit is integrated once it passes. The integration checks must pass before the line advances.
 6. **Verify.** `herder_verify` runs every check at the integration head. A fresh, read-only verifier also runs when any of these hold:
    - more than one task was integrated;
    - the diff exceeds 200 changed lines;
@@ -71,7 +71,7 @@ The main model drives a run with these tools. All except `herder_run`, `herder_p
 | `herder_run` | `action: "start"` creates a run for `goal` as `/herder <goal>` does and returns the instructions as its result. `"status"` shows the run, parked runs, and any other unfinished runs. `"approve_goal"` validates `goal.md` and asks you to approve it (interactive only, unless a standing authorization approves it). `"record_decision"` journals a question and your answer, given between launches. `"abort"` stops and abandons the run after your confirmation (interactive only, unless a standing authorization covers the run; a run it does not cover is then refused). |
 | `herder_workflow` | `mode: "validate"` compiles a script and dry-runs it without agents. `"run"` launches `script` or `scriptPath` with `args` in the background and returns the launch number; a follow-up message reports the result. `resume: n` replays launch `n`. `"stop"` stops the running launch. |
 | `herder_step` | Run one agent step directly. It takes the same options as a script's `agent()`. |
-| `herder_integrate` | Integrate a step key or commit with a commit `message`, an optional `task`, and optional `checks`. |
+| `herder_integrate` | Integrate a step key or commit with a commit `message`, an optional `task`, and optional `checks`. A `gate_failed` step is refused, by key or by its commit. |
 | `herder_check` | Run checks (default: all) at the integration head or at a given commit. |
 | `herder_verify` | Verify the run and compute the verdict. |
 | `herder_deliver` | Deliver after your confirmation (interactive only; refused under a standing authorization). It takes `runId`, `mode`, and `curate`. |
