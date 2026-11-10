@@ -393,9 +393,9 @@ export function statusTone(segment: string): "problem" | "attention" | "calm" {
 }
 
 // Known extensions keep a fixed slot so their color does not move as others come and go.
-const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language", "spokesman", "boom", "alwayson"];
+const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language", "spokesman", "boom", "alwayson", "selfdrive"];
 /** Session modes that change how the model works; they ride the bar before the context, not the status row. */
-const MODE_KEYS = ["boom", "alwayson"];
+const MODE_KEYS = ["boom", "alwayson", "selfdrive"];
 const STATUS_ICONS: Record<string, string> = {
 	autoresearch: "\u{F0093}", // md-flask
 	herder: "\u{F0CC6}", // md-sheep
@@ -1255,7 +1255,7 @@ function renderFull(
 	// Extension statuses get their own row, present only while one is published:
 	// workflows first (research, Herder, Loop, processes), then the rest. The
 	// language and spokesman are nearly always set, so they ride the bar and keep the row away;
-	// the boom and always-on modes ride it too, beside the context they spend.
+	// the boom, always-on, and self-driving modes ride it too, beside the context they spend.
 	const workflowKeys = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY];
 	const statuses = [
 		...workflowKeys.map((key): [string, string | undefined] => [key, extensionStatuses.get(key)]),

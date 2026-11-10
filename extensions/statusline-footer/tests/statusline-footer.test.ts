@@ -929,10 +929,10 @@ describe("statusline footer rendering", () => {
 		}
 	});
 
-	it.each(["full", "compact"])("shows boom and always-on in the %s bar left of the compactions, and never on a status row", async (mode) => {
+	it.each(["full", "compact"])("shows boom, always-on, and self-driving in the %s bar left of the compactions, and never on a status row", async (mode) => {
 		const harness = createHarness(`modes-bar-${mode}`, "tui", {
 			extensionStatuses: [],
-			keyedExtensionStatuses: { alwayson: "📡 alwayson", boom: "💥 boom", language: "English" },
+			keyedExtensionStatuses: { selfdrive: "🚗 selfdrive 2h13m", alwayson: "📡 alwayson", boom: "💥 boom", language: "English" },
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
@@ -942,18 +942,22 @@ describe("statusline footer rendering", () => {
 			const lines = harness.getFooter()!.render(160);
 			const bar = lines[0]!;
 			expect(lines).toHaveLength(rows);
-			// Boom, then always-on, then the compaction count that opens the context.
+			// Boom, then always-on, then self-driving, then the compaction count that opens the context.
 			expect(bar.indexOf("English")).toBeLessThan(bar.indexOf("💥 boom"));
 			expect(bar.indexOf("💥 boom")).toBeLessThan(bar.indexOf("📡 alwayson"));
-			expect(bar.indexOf("📡 alwayson")).toBeLessThan(bar.indexOf("\u{F0615}"));
+			expect(bar.indexOf("📡 alwayson")).toBeLessThan(bar.indexOf("🚗 selfdrive 2h13m"));
+			expect(bar.indexOf("🚗 selfdrive 2h13m")).toBeLessThan(bar.indexOf("\u{F0615}"));
 			expect(bar.indexOf("\u{F0615}")).toBeLessThan(bar.indexOf("0×"));
-			for (const line of lines.slice(1)) expect(line).not.toMatch(/boom|alwayson/);
+			for (const line of lines.slice(1)) expect(line).not.toMatch(/boom|alwayson|selfdrive/);
 			harness.setStatus("boom");
 			expect(harness.getFooter()!.render(160)[0]).not.toContain("boom");
 			expect(harness.getFooter()!.render(160)[0]).toContain("📡 alwayson");
 			harness.setStatus("alwayson");
-			expect(harness.getFooter()!.render(160)).toHaveLength(rows);
 			expect(harness.getFooter()!.render(160)[0]).not.toContain("alwayson");
+			expect(harness.getFooter()!.render(160)[0]).toContain("🚗 selfdrive 2h13m");
+			harness.setStatus("selfdrive");
+			expect(harness.getFooter()!.render(160)).toHaveLength(rows);
+			expect(harness.getFooter()!.render(160)[0]).not.toContain("selfdrive");
 		} finally {
 			harness.disposeFooter();
 		}

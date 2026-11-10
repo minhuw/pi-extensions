@@ -20,7 +20,7 @@ Full mode is enabled by default when Pi starts.
 
 ## Layout
 
-Full mode shows the identity bar, a telemetry row, and a Git row. A fourth row appears while an extension publishes a status other than language, spokesman, boom, or always-on. Primary facts sit on the left; capacity, cost, and path sit on the right. The example uses ASCII/Unicode icons; the bar's groups sit on colored bands:
+Full mode shows the identity bar, a telemetry row, and a Git row. A fourth row appears while an extension publishes a status other than language, spokesman, boom, always-on, or self-driving. Primary facts sit on the left; capacity, cost, and path sit on the right. The example uses ASCII/Unicode icons; the bar's groups sit on colored bands:
 
 ```text
  ● ☾ k3   HIGH  (moonshot)  English  ─────────────────────────────────────────────  × 2×  ▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉  8.2%  79k/1.1M
@@ -52,7 +52,7 @@ At narrow widths, both layouts preserve the model and context percentage. Workfl
 
 The `language` status from [Language](../language/README.md) and the `spokesman` status from [Spokesman](../spokesman/README.md) stay in the bar in both modes, so they do not keep the status row open. They follow the provider in full mode and any workflow summary in compact mode, with `spokesman` to the right of `language`. The provider, token counts, and compact mode's cost and elapsed time give way before `language` and `spokesman` do. As width narrows further, `spokesman` drops out whole before `language`, and `language` drops out whole when it no longer fits beside the model and context percentage. Compact mode keeps workflow and background-process summaries as long as they fit.
 
-The `boom` status from [Boom](../boom/README.md) and the `alwayson` status from [Always-on](../alwayson/README.md) also stay in the bar in both modes, on the right just before the compaction count, boom first, so they never open the status row. They outlast every other status: the left side's statuses give way to them, and they drop out together only when they no longer fit beside the model and context percentage.
+The `boom` status from [Boom](../boom/README.md), the `alwayson` status from [Always-on](../alwayson/README.md), and the `selfdrive` status from [Selfdrive](../selfdrive/README.md) also stay in the bar in both modes, on the right just before the compaction count, in that order, so they never open the status row. They outlast every other status: the left side's statuses give way to them, and they drop out together only when they no longer fit beside the model and context percentage.
 
 ### The bar
 
