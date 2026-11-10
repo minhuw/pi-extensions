@@ -598,10 +598,11 @@ async fn memory_routes_need_a_reading_device_or_the_owner() {
     let app = App::new(AuthMode::Password);
     let note = app.saved(&app.a, user_note("Tabs", "indent with tabs")).await;
     let forget = format!("/api/agent/v1/memory/notes/{}/forget", id(&note));
-    let agent: [(Method, &str, Option<Value>); 3] = [
+    let agent: [(Method, &str, Option<Value>); 4] = [
         (Method::GET, "/api/agent/v1/memory?project=widgets", None),
         (Method::POST, "/api/agent/v1/memory/notes", Some(user_note("Spaces", "indent with spaces"))),
         (Method::POST, forget.as_str(), Some(json!({ "expectedRevision": 1 }))),
+        (Method::POST, "/api/agent/v1/memory/used", Some(json!({ "ids": [id(&note)] }))),
     ];
     pika::auth::update_device(&app.env.store, "b", None, Some(false)).unwrap();
     for (method, path, body) in &agent {
@@ -614,6 +615,7 @@ async fn memory_routes_need_a_reading_device_or_the_owner() {
         assert_eq!((r.status, r.json()), (StatusCode::FORBIDDEN, json!({ "error": "read_access_denied" })), "{method} {path}");
     }
     assert_eq!(app.count("SELECT COUNT(*) FROM memory_revisions"), 1);
+    assert_eq!(app.count("SELECT COUNT(*) FROM memory_notes WHERE last_used_at IS NOT NULL"), 0);
     // A revoked token is refused at once.
     pika::auth::revoke_token(&app.env.store, "a").unwrap();
     let r = app.call(Method::GET, "/api/agent/v1/memory", Some(&app.a), None).await;
@@ -741,7 +743,7 @@ fn an_older_database_gains_the_memory_tables() {
     conn.execute_batch(&format!("{UNDO_V14} PRAGMA user_version = 13;")).unwrap();
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(16));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(17));
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     assert_eq!(one(&store, "SELECT COUNT(*) AS n FROM memory_scopes, memory_notes, memory_revisions")["n"], json!(0));
     assert!(!pika::store::DERIVED_TABLES.iter().any(|t| t.starts_with("memory_")));
@@ -779,10 +781,11 @@ async fn agent_memory_routes_need_a_token_without_owner_auth() {
     let app = App::new(AuthMode::None);
     let note = app.saved(&app.a, user_note("Tabs", "indent with tabs")).await;
     let forget = format!("/api/agent/v1/memory/notes/{}/forget", id(&note));
-    let agent: [(Method, &str, Option<Value>); 3] = [
+    let agent: [(Method, &str, Option<Value>); 4] = [
         (Method::GET, "/api/agent/v1/memory", None),
         (Method::POST, "/api/agent/v1/memory/notes", Some(user_note("Spaces", "indent with spaces"))),
         (Method::POST, forget.as_str(), Some(json!({ "expectedRevision": 1 }))),
+        (Method::POST, "/api/agent/v1/memory/used", Some(json!({ "ids": [id(&note)] }))),
     ];
     pika::auth::update_device(&app.env.store, "b", None, Some(false)).unwrap();
     for (method, path, body) in &agent {
@@ -795,6 +798,7 @@ async fn agent_memory_routes_need_a_token_without_owner_auth() {
     }
     assert_eq!(app.count("SELECT COUNT(*) FROM memory_revisions"), 1);
     assert_eq!(app.count("SELECT revision FROM memory_notes"), 1);
+    assert_eq!(app.count("SELECT COUNT(*) FROM memory_notes WHERE last_used_at IS NOT NULL"), 0);
 }
 
 /// AC-3: more 400 cases: missing and out-of-range fields, sizes in bytes or characters as the contract counts them,
@@ -1248,4 +1252,166 @@ async fn memory_is_omitted_from_public_and_agent_reads_and_from_search() {
     ));
     // The prompt, the reply's text, the `read` call, and its result.
     assert_eq!(docs, 4);
+}
+
+impl App {
+    /// `POST memory/used` as `token`.
+    async fn used(&self, token: &str, body: Value) -> Reply {
+        self.call(Method::POST, "/api/agent/v1/memory/used", Some(token), Some(body)).await
+    }
+
+    /// A `POST memory/used` that must succeed; its count.
+    async fn marked(&self, token: &str, body: Value) -> Value {
+        let r = self.used(token, body).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+        assert_eq!(r.headers[header::CACHE_CONTROL], "no-store");
+        r.json()
+    }
+}
+
+/// `POST memory/used` sets `lastUsedAt` and nothing else: no revision, no history, the same `updatedAt` and index. A
+/// fresh note has none, and later writes keep it.
+#[tokio::test]
+async fn marking_notes_used_records_only_the_time() {
+    let app = App::new(AuthMode::None);
+    let note = app.saved(&app.a, repo_note("Build", "project")).await;
+    let other = app.saved(&app.a, user_note("Tabs", "indent with tabs")).await;
+    assert_eq!((&note["lastUsedAt"], &other["lastUsedAt"]), (&Value::Null, &Value::Null));
+    let query = format!("project=widgets&repository={}", encode(REPO));
+    let before = app.memory(&app.a, &query).await;
+    assert_eq!(before["notes"], json!([other, note]));
+    let history = query_history(&app);
+
+    assert_eq!(app.marked(&app.a, json!({ "ids": [] })).await, json!({ "used": 0 }));
+    let marked = app.marked(&app.b, json!({ "ids": [id(&note), id(&note)], "project": "widgets", "repository": REPO,
+                                             "sessionId": "s-2" }))
+        .await;
+    assert_eq!(marked, json!({ "used": 1 }));
+    let after = app.memory(&app.a, &query).await;
+    let used = after["notes"][1].clone();
+    assert_eq!(used["id"], note["id"]);
+    let at = used["lastUsedAt"].as_str().expect("lastUsedAt is set");
+    assert!(at.ends_with('Z') && at >= note["updatedAt"].as_str().unwrap(), "{at}");
+    let mut expected = note.clone();
+    expected["lastUsedAt"] = json!(at);
+    assert_eq!(used, expected);
+    assert_eq!(after["notes"][0], other);
+    assert_eq!((&after["index"], &after["indexBytes"], &after["indexLines"]), (&before["index"], &before["indexBytes"], &before["indexLines"]));
+    assert_eq!(query_history(&app), history);
+    let row = one(&app.env.store, &format!("SELECT revision, updated_at, last_used_at FROM memory_notes WHERE id = '{}'", id(&note)));
+    assert_eq!(row["revision"], json!(1));
+    assert!(row["last_used_at"].as_i64().unwrap() >= row["updated_at"].as_i64().unwrap());
+    // The owner sees it too.
+    let r = app.owner(&format!("memory/notes?scope={}", encode(&format!("repo:{REPO}")))).await;
+    assert_eq!(r.json(), json!({ "notes": [used] }));
+
+    // A later save or forget keeps it, and a conflict shows it.
+    let mut update = repo_note("Build fast", "project");
+    update["id"] = json!(id(&note));
+    update["expectedRevision"] = json!(1);
+    let updated = app.saved(&app.a, update.clone()).await;
+    assert_eq!((&updated["revision"], &updated["lastUsedAt"]), (&json!(2), &json!(at)));
+    let r = app.save(&app.a, update).await;
+    assert_eq!((r.status, &r.json()["note"]["lastUsedAt"]), (StatusCode::CONFLICT, &json!(at)));
+    let r = app.forget(&app.a, &id(&note), json!({ "expectedRevision": 2, "project": "widgets", "repository": REPO })).await;
+    assert_eq!((r.status, &r.json()["note"]["lastUsedAt"]), (StatusCode::OK, &json!(at)), "{}", r.text());
+    // A note marked before counts again.
+    assert_eq!(app.marked(&app.a, json!({ "ids": [id(&other)] })).await, json!({ "used": 1 }));
+    assert_eq!(app.marked(&app.a, json!({ "ids": [id(&other)] })).await, json!({ "used": 1 }));
+    let read = app.memory(&app.a, "").await;
+    assert!(read["notes"][0]["lastUsedAt"].is_string());
+    assert_eq!(read["notes"][0]["revision"], json!(1));
+}
+
+/// Every revision row, for checking that marking notes used leaves history alone.
+fn query_history(app: &App) -> Vec<std::collections::BTreeMap<String, Value>> {
+    query(&app.env.store, "SELECT * FROM memory_revisions ORDER BY note_id, revision")
+}
+
+/// Only live notes of the user scope and the request's project scope are marked and counted; other ids are ignored.
+#[tokio::test]
+async fn marking_ignores_other_scopes_and_forgotten_notes() {
+    let app = App::new(AuthMode::None);
+    let repo = app.saved(&app.a, repo_note("Build", "project")).await;
+    let user = app.saved(&app.a, user_note("Tabs", "indent with tabs")).await;
+    let local = |project: &str| {
+        json!({ "expectedRevision": 0, "scope": "project", "project": project, "category": "project",
+                "title": format!("{project} note"), "hook": "h", "body": "" })
+    };
+    // The same project name on another device is another scope.
+    let on_b = app.saved(&app.b, local("alpha")).await;
+    let on_a = app.saved(&app.a, local("alpha")).await;
+    let gone = app.saved(&app.a, user_note("Spaces", "indent with spaces")).await;
+    let r = app.forget(&app.a, &id(&gone), json!({ "expectedRevision": 1 })).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let ids = json!([id(&repo), id(&user), id(&on_b), id(&on_a), id(&gone), "nope", ""]);
+
+    let marked = app.marked(&app.a, json!({ "ids": ids, "project": "alpha" })).await;
+    assert_eq!(marked, json!({ "used": 2 }));
+    let used = |note: &Value| app.count(&format!("SELECT last_used_at IS NOT NULL FROM memory_notes WHERE id = '{}'", id(note)));
+    assert_eq!([used(&repo), used(&user), used(&on_b), used(&on_a), used(&gone)], [0, 1, 0, 1, 0]);
+    // Without a project, only the user scope.
+    assert_eq!(app.marked(&app.b, json!({ "ids": ids })).await, json!({ "used": 1 }));
+    assert_eq!(app.marked(&app.b, json!({ "ids": ids, "project": "", "repository": "" })).await, json!({ "used": 1 }));
+    assert_eq!(app.marked(&app.b, json!({ "ids": ids, "repository": REPO })).await, json!({ "used": 2 }));
+    assert_eq!([used(&repo), used(&user), used(&on_b), used(&on_a), used(&gone)], [1, 1, 0, 1, 0]);
+    // The forgotten note's GET-visible state is unchanged.
+    let read = app.owner(&format!("memory/notes/{}/revisions", id(&gone))).await.json();
+    assert_eq!(read["revisions"].as_array().unwrap().len(), 2);
+    assert_eq!(app.count("SELECT COUNT(*) FROM memory_revisions"), 6);
+}
+
+/// More than 50 ids, a non-string id, no `ids`, and an invalid project or session id are 400s that mark nothing.
+#[tokio::test]
+async fn invalid_used_requests_are_bad_requests() {
+    let app = App::new(AuthMode::None);
+    let note = app.saved(&app.a, user_note("Tabs", "indent with tabs")).await;
+    let many: Vec<String> = std::iter::repeat_n(id(&note), 51).collect();
+    let bodies = [
+        json!({ "ids": many }),
+        json!({ "ids": [id(&note), 7] }),
+        json!({ "ids": [null] }),
+        json!({ "ids": id(&note) }),
+        json!({}),
+        json!([id(&note)]),
+        json!({ "ids": [id(&note)], "project": "a/b" }),
+        json!({ "ids": [id(&note)], "repository": "git@github.com:me/widgets.git" }),
+        json!({ "ids": [id(&note)], "sessionId": "x".repeat(257) }),
+    ];
+    for body in bodies {
+        let r = app.used(&app.a, body.clone()).await;
+        assert_eq!((r.status, &r.json()["error"]), (StatusCode::BAD_REQUEST, &json!("bad_request")), "{body}: {}", r.text());
+    }
+    let r = app
+        .send(Request::post("/api/agent/v1/memory/used").header(header::AUTHORIZATION, format!("Bearer {}", app.a)).body(Body::from("{")).unwrap())
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(app.count("SELECT COUNT(*) FROM memory_notes WHERE last_used_at IS NOT NULL"), 0);
+    // Exactly 50 is fine.
+    let fifty: Vec<String> = std::iter::repeat_n(id(&note), 50).collect();
+    assert_eq!(app.marked(&app.a, json!({ "ids": fifty })).await, json!({ "used": 1 }));
+}
+
+/// Schema version 17 adds `last_used_at` to an existing database's notes without a reindex; existing notes have none.
+#[test]
+fn an_older_database_gains_last_used_times() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    {
+        let store = pika::store::Store::open(&data).unwrap();
+        device(&store, DEVICE);
+        let request = serde_json::from_value(json!({ "expectedRevision": 0, "scope": "user", "category": "user",
+                                                     "title": "Role", "hook": "a developer" }))
+        .unwrap();
+        store.write(|tx| pika::memory::save(tx, DEVICE, request)).unwrap();
+    }
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    conn.execute_batch(&format!("{UNDO_V17} PRAGMA user_version = 16;")).unwrap();
+    drop(conn);
+    let store = pika::store::Store::open(&data).unwrap();
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(17));
+    assert_eq!(store.setting("needs_reindex").unwrap(), None);
+    assert_eq!(one(&store, "SELECT last_used_at FROM memory_notes")["last_used_at"], Value::Null);
+    let view = store.read(|conn| pika::memory::view(conn, DEVICE, None, None)).unwrap();
+    assert_eq!(serde_json::to_value(&view.notes[0]).unwrap()["lastUsedAt"], Value::Null);
 }

@@ -64,6 +64,67 @@ it("memory_read bounds its output and lists the rest by title", async () => {
 	expect(result.text).toContain(`- [${notes[5]!.id}] ${notes[5]!.title} — ${notes[5]!.hook}`);
 });
 
+async function until(check: () => boolean, what: string, ms = 10_000): Promise<void> {
+	const deadline = performance.now() + ms;
+	while (performance.now() < deadline) {
+		if (check()) return;
+		await new Promise<void>((resolve) => setTimeout(resolve, 5));
+	}
+	throw new Error(`timed out waiting for ${what}`);
+}
+const used = () => pika.requestsTo("memory/used");
+
+it("memory_read by ids or query tells the server which notes it showed in full; other reads tell it nothing", async () => {
+	const notes = Array.from({ length: 6 }, (_, n) => note({ title: n === 4 ? "Needle" : `Big ${n}`, body: "x".repeat(8_000) }));
+	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes, index: "", indexBytes: 0, indexLines: 0 } });
+	pika.routes.set("POST memory/used", (request) => ({ body: { used: (request.body as { ids: string[] }).ids.length } }));
+
+	// An unfiltered listing, a category or scope filter, and ids that match nothing count as no use.
+	await callTool(h, "memory_read", {});
+	await callTool(h, "memory_read", { category: "project" });
+	await callTool(h, "memory_read", { scope: "project", category: "project" });
+	await callTool(h, "memory_read", { ids: ["000000000000"] });
+	// Only the notes shown in full count, not those past the budget that are listed by title.
+	const read = await callTool(h, "memory_read", { ids: notes.map((n) => `[${n.id}]`).reverse() });
+	expect(read.text).toContain("4 more notes not shown in full");
+	await until(() => used().length === 1, "memory/used");
+	expect(used()).toHaveLength(1);
+	expect(used()[0]).toMatchObject({ method: "POST", contentType: "application/json" });
+	expect(used()[0]!.body).toEqual({ ids: [notes[0]!.id, notes[1]!.id], project: PROJECT, repository: REPOSITORY, sessionId: h.session.sessionId });
+
+	await callTool(h, "memory_read", { query: "needle" });
+	await until(() => used().length === 2, "the second memory/used");
+	expect(used()[1]!.body).toEqual({ ids: [notes[4]!.id], project: PROJECT, repository: REPOSITORY, sessionId: h.session.sessionId });
+	expect(pika.requests.filter((request) => request.method === "POST").map((request) => request.path)).toEqual(["memory/used", "memory/used"]);
+});
+
+it("memory_read names at most 50 notes as used", async () => {
+	const notes = Array.from({ length: 60 }, () => note({ title: "Short", hook: "h", body: "b" }));
+	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes, index: "" } });
+	pika.routes.set("POST memory/used", { body: { used: 50 } });
+	const read = await callTool(h, "memory_read", { query: "short" });
+	expect(read.details).toEqual({ noteIds: notes.map((n) => n.id), total: 60 });
+	await until(() => used().length === 1, "memory/used");
+	expect((used()[0]!.body as { ids: string[] }).ids).toEqual(notes.slice(0, 50).map((n) => n.id));
+});
+
+it("memory_read returns its notes whether memory/used is missing, fails, or hangs", async () => {
+	const tabs = note({ title: "Tabs", body: "Use tabs." });
+	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [tabs], index: INDEX } });
+	const expected = (await callTool(h, "memory_read", {})).text;
+	// An older server answers 404; others fail, or never answer while the read goes on.
+	for (const answer of [undefined, { status: 500, body: { error: "internal" } }, { delayMs: 30_000, body: { used: 1 } }]) {
+		if (answer) pika.routes.set("POST memory/used", answer);
+		const before = used().length;
+		const started = performance.now();
+		const read = await callTool(h, "memory_read", { ids: [tabs.id] });
+		expect(read).toMatchObject({ isError: false, details: { noteIds: [tabs.id], total: 1 } });
+		expect(read.text.replace("1 note matching, of 1", "1 note")).toBe(expected);
+		expect(performance.now() - started).toBeLessThan(10_000);
+		await until(() => used().length === before + 1, "memory/used");
+	}
+});
+
 it("memory_save creates and updates notes with the repository and session id", async () => {
 	const created = note({ title: "Pitfall", hook: "Run npm ci first" });
 	pika.routes.set("POST memory/notes", (request) => ({ body: written((request.body as { id?: string }).id ? { ...created, revision: 2 } : created) }));

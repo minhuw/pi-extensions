@@ -11,7 +11,7 @@ import { currentDream } from "../../memory/dream/index.ts";
 import { DREAM_PROMPT } from "../../memory/dream/prompt.ts";
 import { FakePika } from "./support/pika-server.ts";
 import { LEASE_ID, RecordingUI, releases, resetDreams, serveDreams } from "./support/dream.ts";
-import { type Harness, memorySection, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
+import { callTool, type Harness, memorySection, note, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 const INDEX = "# Project memory: my-project\n## project\n- Pitfall — run npm ci first [bbbbbbbbbbbb]\n";
 const SOURCES = [{ sessionId: "s-past-1", seq: 7 }];
@@ -130,6 +130,41 @@ it("a dream runs in a real persisted, linked child session with the hooks, the d
 	// The registered hooks ran in the child, saw its start, and its shutdown.
 	expect(probeEvents).toEqual(expect.arrayContaining(["loaded", `start:${childId}`, "shutdown"]));
 	expect(ui.status()).toBeUndefined();
+});
+
+it("lists the notes unused for 90 days in the task message, and the dream's own reads never count as use", async () => {
+	const stale = note({ title: "Stale pitfall", createdAt: "2025-01-01T10:00:00Z", updatedAt: "2025-01-02T10:00:00Z", lastUsedAt: null });
+	const fresh = note({ title: "Fresh pitfall", createdAt: "2025-01-01T10:00:00Z", updatedAt: "2025-01-02T10:00:00Z", lastUsedAt: new Date().toISOString() });
+	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [stale, fresh], index: INDEX } });
+	pika.routes.set("POST memory/used", (request) => ({ body: { used: (request.body as { ids: string[] }).ids.length } }));
+	h = await startSession({ workspace, ui: ui.context() });
+	const seen: Seen[] = [];
+	const reads: { isError: boolean; details: unknown }[] = [];
+	h.faux.appendResponses([
+		recorder(seen, () => fauxAssistantMessage([
+			fauxToolCall("memory_read", { ids: [stale.id, fresh.id] }, { id: "read-ids" }),
+			fauxToolCall("memory_read", { query: "pitfall" }, { id: "read-query" }),
+		], { stopReason: "toolUse" })),
+		(context, ...rest) => {
+			for (const message of context.messages) if (message.role === "toolResult") reads.push({ isError: message.isError, details: message.details });
+			return recorder(seen, () => fauxAssistantMessage("Nothing to change."))(context, ...rest);
+		},
+	]);
+	await h.session.prompt("/memory dream");
+	await until(() => releases(pika).length === 1, "the release");
+	await currentDream()!.done;
+	expect(seen).toHaveLength(2);
+	expect(reads).toEqual([
+		{ isError: false, details: { noteIds: [stale.id, fresh.id], total: 2 } },
+		{ isError: false, details: { noteIds: [stale.id, fresh.id], total: 2 } },
+	]);
+	expect(seen[0]!.lastUser).toContain(`<unused-notes>\n- [${stale.id}] Stale pitfall: last read or changed 2025-01-02\n</unused-notes>`);
+	expect(seen[0]!.lastUser).not.toContain("Fresh pitfall");
+
+	// The same read in the session itself counts, and is the only one that did.
+	await callTool(h, "memory_read", { ids: [stale.id] });
+	await until(() => pika.requestsTo("memory/used").length > 0, "memory/used");
+	expect(pika.requestsTo("memory/used").map((request) => request.body)).toEqual([{ ids: [stale.id], project: expect.any(String), repository: expect.any(String), sessionId: h.session.sessionId }]);
 });
 
 it("uses memory.dreamModel when it is found", async () => {

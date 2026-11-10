@@ -91,8 +91,24 @@ export const SCOPE = Type.Union([Type.Literal("user"), Type.Literal("project")],
 	description: "\"user\": every project of the user, only for a note an agent in any project understands without this project's context; \"project\": the current git repository only",
 });
 
-/** `memory_read`: the user's and the project's notes, filtered in pi. */
-export function memoryReadTool() {
+/** The most note ids one `POST memory/used` takes. */
+const MAX_USED = 50;
+
+/**
+ * Tells the server a session read these notes in full, without waiting: never aborted with the tool call, and every
+ * failure, a 404 from an older server included, is ignored.
+ */
+function recordUse(cwd: string, repository: RepositoryInfo, sessionId: string, notes: Note[]): void {
+	const ids = notes.slice(0, MAX_USED).map((note) => note.id);
+	if (!ids.length) return;
+	void request(cwd, "POST", "memory/used", { body: { ids, ...repository, sessionId } }).catch(() => {});
+}
+
+/**
+ * `memory_read`: the user's and the project's notes, filtered in pi. A read by `ids` or `query` tells the server which
+ * notes it showed in full, unless `recordUse` is false, as in dreams.
+ */
+export function memoryReadTool(options: { recordUse?: boolean } = {}) {
 	return defineTool({
 		name: "memory_read", label: "Memory Read",
 		description: "Read the notes saved for the user and for the current project on the user's pika server, shared by every machine. "
@@ -126,7 +142,8 @@ export function memoryReadTool() {
 					&& (!params.category || note.category === params.category)
 					&& (!params.scope || note.scope?.kind === params.scope));
 				const filtered = Boolean(ids?.length || query || params.category || params.scope);
-				const text = formatRead(notes, { total: all.length, scopes: Array.isArray(view.scopes) ? view.scopes : [], filtered });
+				const { text, shown } = formatRead(notes, { total: all.length, scopes: Array.isArray(view.scopes) ? view.scopes : [], filtered });
+				if (options.recordUse !== false && (ids?.length || query)) recordUse(cwd, repository, ctx.sessionManager.getSessionId(), shown);
 				return { content: [{ type: "text", text }], details: { noteIds: notes.map((note) => note.id), total: all.length } };
 			} catch (error) {
 				if (error instanceof MemoryServerError && error.status === 404) return failure(noMemoryApi());

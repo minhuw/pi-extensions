@@ -26,6 +26,7 @@ pub(super) fn agent_routes() -> Router<AppState> {
         .route("/memory", get(view))
         .route("/memory/notes", post(save))
         .route("/memory/notes/{id}/forget", post(forget))
+        .route("/memory/used", post(used))
         .route("/memory/dream/lease", post(dream_lease))
         .route("/memory/dream/{id}/renew", post(dream_renew))
         .route("/memory/dream/{id}/commit", post(dream_commit))
@@ -162,6 +163,20 @@ async fn forget(
     };
     let store = state.store.clone();
     respond(blocking(move || Ok(store.write(|tx| memory::forget(tx, &device, &id, request)))).await)
+}
+
+/// `POST memory/used` records that the named notes were used, without a revision.
+async fn used(State(state): State<AppState>, headers: HeaderMap, body: Result<Json<Value>, JsonRejection>) -> Response {
+    let device = match device(&state, &headers).await {
+        Ok(device) => device,
+        Err(response) => return *response,
+    };
+    let request: memory::Used = match parse(body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    let store = state.store.clone();
+    respond(blocking(move || Ok(store.write(|tx| memory::used(tx, &device, request)))).await)
 }
 
 /// `POST memory/dream/lease` grants a dream lease on the project scope the body names.

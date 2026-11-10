@@ -1212,7 +1212,7 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
     std::fs::rename(&blob, &aside).unwrap();
     assert!(pika::store::Store::open(&data).is_err());
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 16);
+    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 17);
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM settings WHERE key = 'needs_reindex'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     drop(conn);
@@ -2602,7 +2602,7 @@ fn statistics_version_10_upgrade_backfills_ledger_without_changing_source_lines(
         BEGIN SELECT RAISE(ABORT, 'source deleted'); END;").unwrap();
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 16);
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 17);
     assert_eq!(dump_derived(&store), expected);
     assert!(store.setting(pika::store::NEEDS_REINDEX).unwrap().is_none());
     assert!(store.setting(pika::store::DERIVED_GENERATION).unwrap().is_some());

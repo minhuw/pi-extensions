@@ -4,7 +4,7 @@ import { credentialsRegistry } from "../../credentials.ts";
 import { resolveRepository } from "../../repository.ts";
 import { disabledCause, MemoryServerError } from "../client.ts";
 import { DREAM_ENTRY, type DreamRecord } from "../entries.ts";
-import type { MemoryView } from "../format.ts";
+import type { MemoryView, Note } from "../format.ts";
 import { memoryLogItems, showMemoryLog } from "../log.ts";
 import { cwdOf, where } from "../tools.ts";
 import { SESSION_LINK_TYPE, spawnDreamChild } from "./child.ts";
@@ -210,9 +210,11 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 			why = cancelled();
 			if (why) return release(why);
 			let index: string | null = null;
+			let notes: Note[] = [];
 			try {
 				const view = await send<MemoryView>(server, "GET", `memory?${new URLSearchParams({ ...repository })}`, { timeoutMs: INDEX_TIMEOUT_MS });
 				index = typeof view.index === "string" ? view.index : null;
+				notes = Array.isArray(view.notes) ? view.notes : [];
 			} catch { /* the child reads it with memory_read */ }
 			why = cancelled();
 			if (why) return release(why);
@@ -224,7 +226,7 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 				index, model, ...(note ? { modelNote: note } : {}), ...(thinkingLevel ? { thinkingLevel } : {}), ...(modelRuntime ? { modelRuntime } : {}), ...(ui ? { ui } : {}),
 				spawn: (options) => dreamRuntime.spawn(options),
 				tools: dreamTools,
-				kickoff: (current) => kickoffText(current, index),
+				kickoff: (current) => kickoffText(current, index, notes),
 				onEnd: (ended) => {
 					const now = shared();
 					if (now.running === ended) now.running = undefined;

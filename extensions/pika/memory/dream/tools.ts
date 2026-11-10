@@ -37,9 +37,9 @@ const SOURCES = (minItems: number) => Type.Array(SOURCE, { minItems, maxItems: M
 
 const UNSAVED = "Nothing is written until dream_commit; a commit the server refuses discards its staged changes, and so does the end of the dream.";
 
-/** The tools of a dream child: reading past sessions and notes, and staging and committing changes for `run`. */
+/** The tools of a dream child: reading past sessions and notes, and staging and committing changes for `run`. A dream's reads never count as use. */
 export function dreamTools(run: DreamRun): ToolDefinition[] {
-	return [recallSearchTool(), recallReadTool(), memoryReadTool(), dreamSaveTool(run), dreamForgetTool(run), dreamCommitTool(run)];
+	return [recallSearchTool(), recallReadTool(), memoryReadTool({ recordUse: false }), dreamSaveTool(run), dreamForgetTool(run), dreamCommitTool(run)];
 }
 
 /** Why a change cannot be staged now, if it cannot. */

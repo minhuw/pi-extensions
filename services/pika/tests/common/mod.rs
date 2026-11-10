@@ -12,8 +12,10 @@ use tempfile::TempDir;
 pub const DEVICE: &str = "laptop";
 pub const SESSION_ID: &str = "7f3c2a10-5b1e-4c3d-9a8e-1f2e3d4c5b6a";
 pub const RUN_ID: &str = "20261021-100000-abcd";
-/// SQL that removes schema version 15 for tests that rewind `user_version`.
-pub const UNDO_V15: &str = "DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases;
+/// SQL that removes schema version 17 for tests that rewind `user_version`.
+pub const UNDO_V17: &str = "ALTER TABLE memory_notes DROP COLUMN last_used_at;";
+/// SQL that removes schema versions 17, 16 (it goes with 15's table), and 15 for tests that rewind `user_version`.
+pub const UNDO_V15: &str = "ALTER TABLE memory_notes DROP COLUMN last_used_at; DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases;
     DROP INDEX memory_revisions_batch; ALTER TABLE memory_revisions DROP COLUMN batch_id;
     ALTER TABLE memory_revisions DROP COLUMN sources; ALTER TABLE memory_revisions DROP COLUMN provenance;
     ALTER TABLE memory_notes DROP COLUMN sources;";

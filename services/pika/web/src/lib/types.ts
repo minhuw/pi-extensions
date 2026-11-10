@@ -321,6 +321,8 @@ export interface MemoryNote {
 	deletedAt: string | null;
 	deviceId: string | null;
 	sessionId: string | null;
+	/** When an agent last marked it used; absent from servers before schema version 17. */
+	lastUsedAt?: string | null;
 }
 
 /** A note as one save, forget, or revert left it. */

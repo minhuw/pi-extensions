@@ -6,6 +6,8 @@
 
 pub mod dream;
 
+use std::collections::BTreeSet;
+
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize, Serializer};
 
@@ -22,6 +24,8 @@ const MAX_HOOK: usize = 150;
 const MAX_BODY: usize = 8192;
 const MAX_REASON: usize = 500;
 const MAX_SESSION_ID: usize = 256;
+/// The most note ids one `POST memory/used` may name.
+const MAX_USED: usize = 50;
 /// The key, and label, of the one user scope.
 pub const USER: &str = "user";
 /// The provenance of what agents write through the memory routes.
@@ -122,6 +126,9 @@ pub struct Note {
     pub deleted_at: Option<i64>,
     pub device_id: Option<String>,
     pub session_id: Option<String>,
+    /// When `POST memory/used` last named it; no revision records it.
+    #[serde(serialize_with = "iso_opt")]
+    pub last_used_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -214,6 +221,21 @@ pub struct Forget {
     pub repository: Option<String>,
     pub session_id: Option<String>,
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Used {
+    pub ids: Vec<String>,
+    pub project: Option<String>,
+    pub repository: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// `POST memory/used`: how many live notes it marked.
+#[derive(Debug, Serialize)]
+pub struct Marked {
+    pub used: usize,
 }
 
 fn category_rank(category: &str) -> usize {
@@ -324,7 +346,7 @@ fn request_scopes(conn: &Connection, project: Option<Scope>) -> rusqlite::Result
 }
 
 const NOTE_SELECT: &str = "SELECT n.id, n.category, n.title, n.hook, n.body, n.provenance, n.revision, n.created_at,
-    n.updated_at, n.deleted_at, n.device_id, n.session_id, s.key, s.kind, s.label, n.sources
+    n.updated_at, n.deleted_at, n.device_id, n.session_id, s.key, s.kind, s.label, n.sources, n.last_used_at
     FROM memory_notes n JOIN memory_scopes s ON s.key = n.scope_key";
 const INDEX_ORDER: &str = "ORDER BY CASE n.category WHEN 'user' THEN 0 WHEN 'feedback' THEN 1 WHEN 'project' THEN 2
     WHEN 'reference' THEN 3 ELSE 4 END, n.category, n.created_at, n.id";
@@ -350,6 +372,7 @@ fn note_row(r: &rusqlite::Row) -> rusqlite::Result<Note> {
         session_id: r.get(11)?,
         scope: Scope { key: r.get(12)?, kind: r.get(13)?, label: r.get(14)? },
         sources: sources_column(r.get(15)?),
+        last_used_at: r.get(16)?,
     })
 }
 
@@ -472,8 +495,8 @@ fn record(tx: &Transaction, note: &Note, action: &str, author: &Author) -> rusql
     let sources = serde_json::to_string(&note.sources).expect("sources serialize");
     tx.prepare_cached(
         "INSERT OR REPLACE INTO memory_notes (id, scope_key, category, title, hook, body, provenance, revision, created_at,
-             updated_at, deleted_at, device_id, session_id, sources)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             updated_at, deleted_at, device_id, session_id, sources, last_used_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
     )?
     .execute(params![
         note.id,
@@ -489,7 +512,8 @@ fn record(tx: &Transaction, note: &Note, action: &str, author: &Author) -> rusql
         note.deleted_at,
         note.device_id,
         note.session_id,
-        sources
+        sources,
+        note.last_used_at
     ])?;
     tx.prepare_cached(
         "INSERT INTO memory_revisions (note_id, revision, action, category, title, hook, body, at, device_id, session_id,
@@ -557,6 +581,7 @@ fn put(tx: &Transaction, target: Scope, id: Option<&str>, expected: i64, fields:
                 deleted_at: None,
                 device_id: Some(author.device.to_owned()),
                 session_id: author.session_id.clone(),
+                last_used_at: None,
             }
         }
     };
@@ -711,6 +736,27 @@ pub fn forget(tx: &Transaction, device: &str, id: &str, request: Forget) -> Resu
     Ok(Written { note, index })
 }
 
+/// `POST memory/used`: sets `last_used_at` to now on each named live note of the user scope or the request's project
+/// scope, without a revision or history row; other ids are ignored. Counts each note once.
+pub fn used(tx: &Transaction, device: &str, request: Used) -> Result<Marked, MemoryError> {
+    if request.ids.len() > MAX_USED {
+        return Err(bad(format!("ids must hold at most {MAX_USED} note ids")));
+    }
+    session_id(request.session_id.as_deref())?;
+    let project = project_scope(request.project.as_deref(), request.repository.as_deref(), device)?;
+    let project = project.as_ref().map(|p| p.key.as_str());
+    let now = now_ms();
+    let mut mark = tx.prepare_cached(
+        "UPDATE memory_notes SET last_used_at = ?2
+         WHERE id = ?1 AND deleted_at IS NULL AND (scope_key = ?3 OR scope_key IS ?4)",
+    )?;
+    let mut used = 0;
+    for id in request.ids.iter().collect::<BTreeSet<_>>() {
+        used += mark.execute(params![id, now, USER, project])?;
+    }
+    Ok(Marked { used })
+}
+
 /// Every stored scope with its live note count: the user scope first, then by label and key.
 pub fn scopes(conn: &Connection) -> rusqlite::Result<Vec<ScopeSummary>> {
     conn.prepare_cached(
@@ -810,6 +856,7 @@ mod tests {
             deleted_at: None,
             device_id: None,
             session_id: None,
+            last_used_at: None,
         }
     }
 
