@@ -293,10 +293,10 @@ it("leaves boom's own messages unchanged", async () => {
 	const on = await h.run("two", calls(...lookups(5)), "done");
 	expect(afterPrompt(on[0], "two")).toEqual([ON_MESSAGE]);
 	expect(coachTexts(on[1])).toEqual([streakText(5)]);
-	expect(afterPrompt((await h.run("three", "ok"))[0], "three")).toEqual([ON_MESSAGE]);
+	expect(afterPrompt((await h.run("three", "ok"))[0], "three")).toEqual([]);
 	await h.command("/boom off");
 	expect(afterPrompt((await h.run("four", "ok"))[0], "four")).toEqual([OFF_MESSAGE]);
 	expect(afterPrompt((await h.run("five", "ok"))[0], "five")).toEqual([]);
-	expect(h.boomMessages()).toEqual([ON_MESSAGE, ON_MESSAGE, OFF_MESSAGE]);
+	expect(h.boomMessages()).toEqual([ON_MESSAGE, OFF_MESSAGE]);
 	expect(COACH).toEqual({ lookupStreak: 5, contextShare: 50 });
 });

@@ -27,11 +27,12 @@ While boom mode is on, a coach steers the model back when it stops delegating. A
 Each session decides at its first prompt whether its system prompt carries boom mode:
 
 - `/boom on` before the first prompt puts the instructions in a system prompt section from the start.
-- Turning boom mode on after the first prompt adds the instructions as a hidden message with each prompt and leaves the section alone.
-- Turning boom mode off in a session whose section carries it adds a hidden "boom mode is off" message with each prompt.
-- Returning to the section's state sends one hidden message that cancels the earlier ones, and no more after it.
+- Turning boom mode on after the first prompt sends the instructions once, as a hidden message with the next prompt, and leaves the section alone.
+- Turning boom mode off in a session whose section carries it sends a hidden "boom mode is off" message once, with the next prompt.
+- Returning to the section's state sends one hidden message that cancels the earlier ones.
+- A hidden message is sent again, once, only when the model can no longer see it: after a compaction drops it from the context, or after `/tree` or a fork moves to a point whose branch does not contain it.
 
-Hidden messages preserve the prompt cache. On Magpie, changing a system prompt section rewrites the head of the context and requires the context to be cached again. Appending a message leaves the cached prefix intact.
+Hidden messages preserve the prompt cache. On Magpie, changing a system prompt section rewrites the head of the context and requires the context to be cached again. Appending a message leaves the cached prefix intact. Sending each message once keeps the context free of repeated copies.
 
 Behavior worth knowing:
 
@@ -39,7 +40,7 @@ Behavior worth knowing:
 - If a session already contains conversation when this extension handles its first prompt, it never gains a section, even with `/boom on` used before that prompt. This includes sessions created before the extension was installed.
 - The state is stored in the session file, so it survives `/reload` and resuming. Switches follow the branch: `/tree` and forks take the state of the point they land on.
 - Subagents, Herder steps, and print and JSON modes are not affected, and `/boom` only shows a warning there. Children never fan out further because of boom mode.
-- If compaction drops the hidden message during a long run, the rest of that run may fall back to the section's state until the next prompt.
+- If compaction drops the hidden message during a long run, the rest of that run may fall back to the section's state until the next prompt sends the message again.
 
 While boom mode is on, [Statusline Footer](../statusline-footer/README.md) shows `💥 boom` in its bar, just before the compaction count.
 

@@ -217,7 +217,7 @@ describe("from the session's start", () => {
 		expect(h.errors).toEqual([]);
 	});
 
-	it("keeps the section when switched off, sends the off message each run, and the on message once on return", async () => {
+	it("keeps the section when switched off, sends the off message once and again after a compaction drops it, and the on message once on return", async () => {
 		const h = await start();
 		await h.command("/boom on");
 		const first = await h.run("one");
@@ -229,21 +229,37 @@ describe("from the session's start", () => {
 		expect(afterPrompt(off, "two")).toEqual([OFF_MESSAGE]);
 		const stillOff = await h.run("three");
 		expectSamePrefix(stillOff, off);
-		expect(afterPrompt(stillOff, "three")).toEqual([OFF_MESSAGE]);
+		expect(afterPrompt(stillOff, "three")).toEqual([]);
+		expect(boomMessages(stillOff)).toEqual([OFF_MESSAGE]);
 		expect(stillOff.system).toContain(SECTION);
+
+		await h.session.compact();
+		const compacted = await h.run("four");
+		expect(compacted.system).toContain(SECTION);
+		expect(boomMessages(compacted)).toEqual([OFF_MESSAGE]);
+		expect(afterPrompt(compacted, "four")).toEqual([OFF_MESSAGE]);
+		const afterCompaction = await h.run("five");
+		expectSamePrefix(afterCompaction, compacted);
+		expect(afterPrompt(afterCompaction, "five")).toEqual([]);
 
 		await h.command("/boom on");
 		expect(h.status).toBe(STATUS);
-		const on = await h.run("four");
-		expectSamePrefix(on, stillOff);
-		expect(afterPrompt(on, "four")).toEqual([ON_MESSAGE]);
-		expect(afterPrompt(await h.run("five"), "five")).toEqual([]);
+		const on = await h.run("six");
+		expectSamePrefix(on, afterCompaction);
+		expect(afterPrompt(on, "six")).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(await h.run("seven"), "seven")).toEqual([]);
+		// Back at the section's state, a compaction that drops the on message leaves nothing to send.
+		await h.session.compact();
+		const back = await h.run("eight");
+		expect(back.system).toContain(SECTION);
+		expect(boomMessages(back)).toEqual([]);
 		expect(h.entries()).toEqual([{ active: true }, { base: true }, { active: false }, { active: true }]);
+		expect(h.errors).toEqual([]);
 	});
 });
 
 describe("mid-session", () => {
-	it("keeps the system prompt and sends a hidden on message after the prompt of every run", async () => {
+	it("keeps the system prompt and sends a hidden on message once, after the prompt of the next run", async () => {
 		const h = await start();
 		const before = await h.run("one");
 		await h.command("/boom on");
@@ -254,9 +270,9 @@ describe("mid-session", () => {
 		expect(afterPrompt(on, "two")).toEqual([ON_MESSAGE]);
 		const again = await h.run("three");
 		expectSamePrefix(again, on);
-		expect(afterPrompt(again, "three")).toEqual([ON_MESSAGE]);
-		expect(boomMessages(again)).toEqual([ON_MESSAGE, ON_MESSAGE]);
-		expect(h.hiddenMessages().map((entry) => entry.display)).toEqual([false, false]);
+		expect(afterPrompt(again, "three")).toEqual([]);
+		expect(boomMessages(again)).toEqual([ON_MESSAGE]);
+		expect(h.hiddenMessages().map((entry) => entry.display)).toEqual([false]);
 		expect(h.entries()).toEqual([{ base: false }, { active: true }]);
 	});
 
@@ -284,17 +300,51 @@ describe("mid-session", () => {
 		expect(afterPrompt(h.requests.at(-1)!, "nudge")).toEqual([ON_MESSAGE]);
 	});
 
-	it("adds the message to the first run after a real compaction", async () => {
+	it("sends the message again, once, after a real compaction drops it", async () => {
 		const h = await start();
 		const before = await h.run("one");
 		await h.command("/boom on");
-		await h.run("two");
+		expect(afterPrompt(await h.run("two"), "two")).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(await h.run("three"), "three")).toEqual([]);
+		await h.session.compact();
+		expect(h.session.sessionManager.getBranch().some((entry) => entry.type === "compaction")).toBe(true);
+		const after = await h.run("four");
+		expect(after.system).toBe(before.system);
+		expect(boomMessages(after)).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(after, "four")).toEqual([ON_MESSAGE]);
+		const next = await h.run("five");
+		expectSamePrefix(next, after);
+		expect(afterPrompt(next, "five")).toEqual([]);
+		expect(h.hiddenMessages()).toHaveLength(2);
+		expect(h.errors).toEqual([]);
+	});
+
+	it("sends nothing after a real compaction that keeps the message", async () => {
+		let keep: string | undefined;
+		const h = await start({ register: (pi) => {
+			pi.on("session_before_compact", async ({ preparation }) => ({ compaction: { summary: "Earlier work.", firstKeptEntryId: keep!, tokensBefore: preparation.tokensBefore } }));
+		} });
+		await h.run("one");
+		await h.command("/boom on");
+		expect(afterPrompt(await h.run("two"), "two")).toEqual([ON_MESSAGE]);
+		keep = h.hiddenMessages()[0]!.id;
 		await h.session.compact();
 		expect(h.session.sessionManager.getBranch().some((entry) => entry.type === "compaction")).toBe(true);
 		const after = await h.run("three");
-		expect(after.system).toBe(before.system);
-		expect(afterPrompt(after, "three")).toEqual([ON_MESSAGE]);
+		expect(after.conversation.map(textOf)).not.toContain("one");
+		expect(boomMessages(after)).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(after, "three")).toEqual([]);
 		expect(h.errors).toEqual([]);
+	});
+});
+
+describe("Pi without a session projection", () => {
+	it("takes the section's state as seen, so a switch is sent with every run, as before", async () => {
+		const { seenState } = await import("../index.ts");
+		const ctx = { sessionManager: {} } as unknown as ExtensionContext;
+		expect(seenState(ctx, undefined)).toBe(false);
+		expect(seenState(ctx, true)).toBe(true);
+		expect(seenState(ctx, false)).toBe(false);
 	});
 });
 
@@ -390,7 +440,7 @@ describe("switches during a run", () => {
 });
 
 describe("sessions that predate the extension", () => {
-	it("sends the on message and adds no section when /boom on comes before the first run with the extension", async () => {
+	it("sends the on message once and adds no section when /boom on comes before the first run with the extension", async () => {
 		const old = await start({ extension: false });
 		const before = await old.run("old");
 		const h = await reopen(old);
@@ -404,7 +454,7 @@ describe("sessions that predate the extension", () => {
 		expect(h.entries()).toEqual([{ active: true }, { base: false }]);
 		const second = await h.run("two");
 		expectSamePrefix(second, first);
-		expect(afterPrompt(second, "two")).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(second, "two")).toEqual([]);
 	});
 });
 
@@ -427,15 +477,17 @@ describe("restoring a session", () => {
 		expect(switchedAgain.status).toBe(STATUS);
 		const switchedNext = await switchedAgain.run("three");
 		expect(switchedNext.system).toBe(switchedFirst.system);
-		expect(afterPrompt(switchedNext, "three")).toEqual([ON_MESSAGE]);
+		expect(boomMessages(switchedNext)).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(switchedNext, "three")).toEqual([]);
 	});
 
-	it("follows the branch through /tree", async () => {
+	it("follows the branch through /tree, and sends the message again only to a branch without it", async () => {
 		const h = await start();
 		const first = await h.run("one");
 		const beforeSwitch = h.session.sessionManager.getBranch().find((entry) => entry.type === "message" && entry.message.role === "assistant")!;
 		await h.command("/boom on");
-		await h.run("two");
+		const switchEntry = h.session.sessionManager.getLeafId()!;
+		expect(afterPrompt(await h.run("two"), "two")).toEqual([ON_MESSAGE]);
 		const switchedLeaf = h.session.sessionManager.getLeafId()!;
 
 		await h.session.navigateTree(beforeSwitch.id);
@@ -444,11 +496,22 @@ describe("restoring a session", () => {
 		expect(other.system).toBe(first.system);
 		expect(afterPrompt(other, "other branch")).toEqual([]);
 
+		// Back where the model sees the on message: nothing to send.
 		await h.session.navigateTree(switchedLeaf);
 		expect(h.status).toBe(STATUS);
 		const back = await h.run("three");
 		expect(back.system).toBe(first.system);
-		expect(afterPrompt(back, "three")).toEqual([ON_MESSAGE]);
+		expect(boomMessages(back)).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(back, "three")).toEqual([]);
+
+		// The switch without the message that followed it: the on message once more.
+		await h.session.navigateTree(switchEntry);
+		expect(h.status).toBe(STATUS);
+		const lacking = await h.run("four");
+		expect(lacking.system).toBe(first.system);
+		expect(boomMessages(lacking)).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(lacking, "four")).toEqual([ON_MESSAGE]);
+		expect(afterPrompt(await h.run("five"), "five")).toEqual([]);
 		expect(h.errors).toEqual([]);
 	});
 });

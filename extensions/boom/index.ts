@@ -10,7 +10,8 @@ const ON_TEXT = `${ON_PREFIX}: the user wants maximum development speed and expl
 	+ 'Give concurrent writers isolation: "worktree" when their files could overlap, and apply the branches they report. '
 	+ "Run agents in the background while you have other work, and keep your own context for planning, integration, and review. "
 	+ "Use direct tools only for a known target or a short sequential edit. Check agents' changes before reporting them. This overrides more conservative subagent guidance.";
-const OFF_TEXT = "Boom mode is off. Ignore earlier boom mode instructions: the user no longer opts in to background agents or SubagentWorkflow, and the standard subagent guidance applies.";
+const OFF_PREFIX = "Boom mode is off";
+const OFF_TEXT = `${OFF_PREFIX}. Ignore earlier boom mode instructions: the user no longer opts in to background agents or SubagentWorkflow, and the standard subagent guidance applies.`;
 const SECTION_TEXT = `${ON_TEXT} A later boom mode message overrides this.`;
 
 /** The pin, written once at a branch's first run, or a switch. */
@@ -22,8 +23,6 @@ interface BoomState {
 	/** Whether the current branch holds the pin. `/tree` can move to before it. */
 	pinned: boolean;
 	active: boolean;
-	/** What the model was last told on this branch: the latest boom message, else the section. */
-	told: boolean;
 }
 
 const hidden = (content: string) => ({ message: { customType: ENTRY, content, display: false } });
@@ -36,10 +35,7 @@ const isConversation = (entry: SessionEntry) => entry.type === "message"
 function readBranch(ctx: ExtensionContext): BoomState {
 	let pin: boolean | undefined;
 	let active: boolean | undefined;
-	let told: boolean | undefined;
 	for (const entry of ctx.sessionManager.getBranch()) {
-		// What the latest message said, not which switch it followed: a run already starting can land its message after a later switch.
-		if (entry.type === "custom_message" && entry.customType === ENTRY && typeof entry.content === "string") told = entry.content.startsWith(ON_PREFIX);
 		if (entry.type !== "custom" || entry.customType !== ENTRY) continue;
 		const data = entry.data as BoomEntry;
 		if ("base" in data) pin = data.base;
@@ -47,7 +43,28 @@ function readBranch(ctx: ExtensionContext): BoomState {
 	}
 	// Off the branch only for this: a session's first run fixes its prompt on every branch, even one that leaves before the pin.
 	const base = pin ?? ctx.sessionManager.getEntries().find(isPin)?.data?.base;
-	return { base, pinned: pin !== undefined, active: active ?? base ?? false, told: told ?? base ?? false };
+	return { base, pinned: pin !== undefined, active: active ?? base ?? false };
+}
+
+/**
+ * The state the model can see: what the latest boom message in the context Pi builds says, else the section. That context
+ * follows the current branch, keeps only the latest compaction's summary and the entries from its `firstKeptEntryId` on,
+ * and applies context edits, so a message on another branch, before that boundary, or omitted is not seen.
+ */
+export function seenState(ctx: ExtensionContext, base: boolean | undefined): boolean {
+	// Pi before 1.5 has no projection: assume the model saw only the section, so a switch is sent with every run, as it was.
+	if (typeof ctx.sessionManager.buildSessionProjection !== "function") return base ?? false;
+	let seen: boolean | undefined;
+	for (const { sourceEntry, messages } of ctx.sessionManager.buildSessionProjection().entries) {
+		if (sourceEntry.type !== "custom_message" || sourceEntry.customType !== ENTRY) continue;
+		for (const message of messages) {
+			// What the message says, not which switch it followed: a run already starting can land its message after a later switch.
+			if (message.role !== "custom" || typeof message.content !== "string") continue;
+			if (message.content.startsWith(ON_PREFIX)) seen = true;
+			else if (message.content.startsWith(OFF_PREFIX)) seen = false;
+		}
+	}
+	return seen ?? base ?? false;
 }
 
 /**
@@ -89,8 +106,8 @@ export default function boomExtension(pi: ExtensionAPI): void {
 		}
 		// Set on every run: Pi diffs each run's sections against the transcript, so a missing one would be removed.
 		if (state.base) event.systemPromptOptions.sections.boom = SECTION_TEXT;
-		// Repeated while the switch differs from the section, so a compaction cannot drop it for long.
-		if (state.active !== state.base || state.told !== state.active) return hidden(state.active ? ON_TEXT : OFF_TEXT);
+		// Sent once per switch, and again only when the model can no longer see it: a compaction dropped it, or the branch lacks it.
+		if (state.active !== seenState(ctx, state.base)) return hidden(state.active ? ON_TEXT : OFF_TEXT);
 		return undefined;
 	});
 
