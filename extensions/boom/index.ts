@@ -1,4 +1,5 @@
 import type { CustomEntry, ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { registerCoach } from "./coach.ts";
 
 const ENTRY = "boom";
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
@@ -77,6 +78,7 @@ export default function boomExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", showBranch);
 	pi.on("session_tree", showBranch);
+	registerCoach(pi, (ctx) => isEligible(ctx) && readBranch(ctx).active);
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (!isEligible(ctx)) return undefined;

@@ -20,6 +20,8 @@ Boom mode is never on by default: every session starts with it off, and only `/b
 
 These instructions override the more conservative default guidance of the `Agent` tool. Each subagent pays for its own context and cache, so boom mode trades tokens for wall-clock time. It helps most when work splits into independent pieces, and it is slower for small sequential edits.
 
+While boom mode is on, a coach steers the model back when it stops delegating. After five direct lookups in a row (`read`, `grep`, `find`, `ls`, `ffgrep`, `fffind`, or `bash`), it sends a hidden message asking the model to hand the rest of the exploration to parallel `recon` agents. A call to `Agent`, `SubagentWorkflow`, `herder_step`, or `herder_workflow` restarts the count. Edits, writes, and calls made inside another tool do not count. Once the context is half full, the coach asks the model, once, to delegate the remaining work to background agents and keep only their summaries; it asks again only after a compaction. Coach messages join a request the run makes anyway, after the model's tool calls, so they never start a turn. The coach makes no model call and sends nothing while the model keeps to the rules.
+
 ## The prompt cache
 
 Each session decides at its first prompt whether its system prompt carries boom mode:
