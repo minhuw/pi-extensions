@@ -70,7 +70,7 @@ describe("herder_run start", () => {
 		await expect(h.tool("herder_run", { action: "start", goal: "  " })).rejects.toThrow(/goal text/);
 		const result = await h.tool("herder_run", { action: "start", goal: "first goal" });
 		const runId = result.details.runId as string;
-		await expect(h.tool("herder_run", { action: "start", goal: "second goal" })).rejects.toThrow(`/herder resume ${runId}, or abandon it with /herder abort ${runId}`);
+		await expect(h.tool("herder_run", { action: "start", goal: "second goal" })).rejects.toThrow(`/herder resume ${runId}, abandon it with /herder abort ${runId}`);
 		await h.command("third goal");
 		expect(h.lastNotice()).toMatchObject({ level: "error", text: expect.stringContaining(`/herder resume ${runId}`) });
 		expect(listRuns(fixture.commonDir)).toEqual([runId]);
@@ -192,7 +192,7 @@ describe("/herder-improve and /herder-simplify", () => {
 		expect(h.sent[1].content).toContain("ask the user which language");
 	});
 
-	it("refuses without UI, without a commit, and while a run is unfinished", async () => {
+	it("refuses without UI, without a commit, and while this session holds an unfinished run", async () => {
 		const headless = setup({ hasUI: false });
 		await headless.audit("improve", "");
 		expect(headless.h.lastNotice()).toEqual({ level: "error", text: "/herder-improve needs an interactive session (TUI or RPC): the audit ends in a run you approve." });
@@ -209,5 +209,33 @@ describe("/herder-improve and /herder-simplify", () => {
 		expect(h.lastNotice()!.text).toContain(`/herder abort ${runId}`);
 		for (const s of [headless, empty]) expect(s.h.sent).toHaveLength(0);
 		expect(h.sent).toHaveLength(1);
+	});
+
+	it("allows another session to run audits and start a run while session A holds an active run", async () => {
+		const { fixture, h: a, audit: auditA } = setup({ sessionId: "session-a" });
+		await a.command("first goal");
+		const r1 = a.sent[0].details.runId as string;
+
+		// Session A itself is refused while holding its active run.
+		await auditA("improve", "");
+		expect(a.lastNotice()).toMatchObject({ level: "error", text: expect.stringContaining(`/herder resume ${r1}`) });
+		await auditA("simplify", "");
+		expect(a.lastNotice()).toMatchObject({ level: "error", text: expect.stringContaining(`/herder abort ${r1}`) });
+		await expect(a.tool("herder_run", { action: "start", goal: "blocked in a" })).rejects.toThrow(`/herder resume ${r1}`);
+
+		// Session B in the same repository can audit and start its own run concurrently.
+		const b = harness({ cwd: fixture.dir, sessionId: "session-b" });
+		cleanups.push(b.shutdown);
+		await b.commands.get("herder-improve").handler("quick", b.ctx);
+		expect(b.lastNotice()).toEqual({ level: "info", text: "Started the read-only /herder-improve audit." });
+		await b.commands.get("herder-simplify").handler("quick", b.ctx);
+		expect(b.lastNotice()).toEqual({ level: "info", text: "Started the read-only /herder-simplify audit." });
+		expect(b.sent).toHaveLength(2);
+
+		const startedB = await b.tool("herder_run", { action: "start", goal: "second goal" });
+		const r2 = startedB.details.runId as string;
+		expect(r2).not.toBe(r1);
+		expect(readLock(openRun(fixture.commonDir, r1).paths.lock)?.sessionId).toMatch(/^session-a#/);
+		expect(readLock(openRun(fixture.commonDir, r2).paths.lock)?.sessionId).toMatch(/^session-b#/);
 	});
 });

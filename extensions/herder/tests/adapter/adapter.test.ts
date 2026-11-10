@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { createEventBus } from "@earendil-works/pi-coding-agent";
+import { createEventBus, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import herderExtension from "../../index.ts";
 import { parseCommand, UsageError } from "../../src/adapter/commands.ts";
 import { FOLLOW_UP_TYPE } from "../../src/adapter/session.ts";
+import { runCheck } from "../../src/checks/runner.ts";
 import { ACTIVITY_REQUEST_EVENT, FOLLOWUP_RESULT_LIMIT, LOCK_STALE_MS, MAX_CLARIFYING_QUESTIONS, RUN_EVENT, STATUS_KEY } from "../../src/config.ts";
 import { readLock } from "../../src/run/lock.ts";
 import { activeRun, listRuns, openRun } from "../../src/run/store.ts";
@@ -131,12 +132,13 @@ describe("/herder", () => {
 		expect(fixture.status()).toBe("");
 	});
 
-	it("refuses while another run is unfinished", async () => {
+	it("refuses in the same session while its held run is unfinished", async () => {
 		const { fixture, h, runId } = await started();
 		await h.command("something else");
 		expect(h.lastNotice()).toMatchObject({ level: "error" });
 		expect(h.lastNotice()!.text).toContain(`/herder resume ${runId}`);
 		expect(h.lastNotice()!.text).toContain(`/herder abort ${runId}`);
+		expect(h.lastNotice()!.text).toContain("separate session");
 		expect(listRuns(fixture.commonDir)).toEqual([runId]);
 	});
 
@@ -788,5 +790,159 @@ describe("herder:run events", () => {
 		const runId = activeRun(fixture.commonDir)!;
 		expect(announced).toEqual([expect.objectContaining({ runId, repo: "named-app" })]);
 		await h.shutdown();
+	});
+});
+
+function peerSession(h: ReturnType<typeof harness>, sessionId: string) {
+	const statuses = new Map<string, string>();
+	const notices: Array<{ text: string; level?: string }> = [];
+	const confirm = vi.fn(async () => true);
+	const ctx = {
+		mode: "rpc", hasUI: true, cwd: h.ctx.cwd,
+		ui: {
+			notify: vi.fn((text: string, level?: string) => notices.push({ text, level })),
+			setStatus: vi.fn((key: string, value?: string) => { if (value) statuses.set(key, value); else statuses.delete(key); }),
+			confirm,
+		},
+		sessionManager: { getSessionId: () => sessionId, getSessionFile: () => undefined },
+		modelRegistry: {}, model: undefined,
+	} as unknown as ExtensionContext;
+	const shutdown = async () => { for (const handler of h.handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, ctx); };
+	cleanups.push(shutdown);
+	return {
+		ctx, statuses, notices, confirm,
+		command: (args: string) => h.commands.get("herder").handler(args, ctx) as Promise<void>,
+		tool: (name: string, params: unknown, signal?: AbortSignal) => h.tools.get(name).execute("call", params, signal, undefined, ctx),
+		shutdown,
+		lastNotice: () => notices.at(-1),
+	};
+}
+
+describe("concurrent active runs across sessions", () => {
+	it("isolates per-session footers, scopes ActivityBoard by run, and clears only the shutting-down session's run", async () => {
+		const { fixture, h: a } = setup();
+		const b = peerSession(a, "session-b");
+		const c = peerSession(a, "session-c");
+
+		const s1 = await a.tool("herder_run", { action: "start", goal: "first goal" });
+		const r1 = s1.details.runId as string;
+		const run1 = openRun(fixture.commonDir, r1);
+		writeFileSync(run1.paths.goal, VALID_GOAL);
+		await a.tool("herder_run", { action: "approve_goal" });
+
+		const s2 = await b.tool("herder_run", { action: "start", goal: "second goal" });
+		const r2 = s2.details.runId as string;
+		const run2 = openRun(fixture.commonDir, r2);
+		expect(r2).not.toBe(r1);
+		writeFileSync(run2.paths.goal, VALID_GOAL);
+		await b.tool("herder_run", { action: "approve_goal" });
+
+		await a.tool("herder_workflow", { mode: "run", script: "return 1" });
+		await b.tool("herder_workflow", { mode: "run", script: "return 2" });
+		expect(a.statuses.get(STATUS_KEY)).toBe("herder: launch 1");
+		expect(b.statuses.get(STATUS_KEY)).toBe("herder: launch 1");
+
+		const runtime1 = a.runtimes[0]!;
+		const runtime2 = a.runtimes[1]!;
+		runtime1.env.onActivity({ key: "impl-0", label: "implement one", task: "T1", phase: "implement", state: "running", startedAt: 100 });
+		expect(a.snapshots.at(-1)).toEqual({
+			source: "herder",
+			activities: [{ id: "step:impl-0", label: "Herder T1 · implement one", kind: "step", startedAt: 100 }],
+		});
+		expect(a.statuses.get(STATUS_KEY)).toBe("herder: T1 implement");
+		expect(b.statuses.get(STATUS_KEY)).toBe("herder: launch 1");
+
+		runtime2.env.onActivity({ key: "impl-0", label: "implement two", task: "T2", phase: "verify", state: "running", startedAt: 200 });
+		expect(a.snapshots.at(-1)).toEqual({
+			source: "herder",
+			activities: [
+				{ id: `step:${r1}:impl-0`, label: `Herder ${r1} · T1 · implement one`, kind: "step", startedAt: 100 },
+				{ id: `step:${r2}:impl-0`, label: `Herder ${r2} · T2 · implement two`, kind: "step", startedAt: 200 },
+			],
+		});
+		expect(a.statuses.get(STATUS_KEY)).toBe("herder: T1 implement");
+		expect(b.statuses.get(STATUS_KEY)).toBe("herder: T2 verify");
+
+		// Shutting down an idle session never wipes running steps of other sessions.
+		const beforeIdleShutdown = a.snapshots.length;
+		await c.shutdown();
+		expect(a.snapshots).toHaveLength(beforeIdleShutdown + 1);
+		expect(a.snapshots.at(-1).activities).toHaveLength(2);
+
+		// Shutting down session A clears only R1 and leaves R2 running with its lock and footer intact.
+		await a.shutdown();
+		expect(runtime1.launches[0]!.stopped).toBe("session shutdown");
+		expect(runtime2.launches[0]!.stopped).toBeUndefined();
+		expect(readLock(run1.paths.lock)).toBeNull();
+		expect(readLock(run2.paths.lock)?.sessionId).toMatch(/^session-b#/);
+		expect(a.statuses.has(STATUS_KEY)).toBe(false);
+		expect(b.statuses.get(STATUS_KEY)).toBe("herder: T2 verify");
+		expect(a.snapshots.at(-1)).toEqual({
+			source: "herder",
+			activities: [{ id: "step:impl-0", label: "Herder T2 · implement two", kind: "step", startedAt: 200 }],
+		});
+
+		// A second shutdown of the already-closed session A still leaves R2 intact.
+		await a.shutdown();
+		expect(a.snapshots.at(-1)).toEqual({
+			source: "herder",
+			activities: [{ id: "step:impl-0", label: "Herder T2 · implement two", kind: "step", startedAt: 200 }],
+		});
+	});
+
+	it("shutting down one session aborts its check without killing another session's live check", async () => {
+		const { fixture, h: a, run: runA } = await approved();
+		const b = harness({ cwd: fixture.dir, sessionId: "session-b" });
+		cleanups.push(b.shutdown);
+		const r2 = (await b.tool("herder_run", { action: "start", goal: "parallel check goal" })).details.runId as string;
+		const runB = openRun(fixture.commonDir, r2);
+		writeFileSync(runB.paths.goal, VALID_GOAL);
+		await b.tool("herder_run", { action: "approve_goal" });
+
+		const checkA = runCheck(
+			{ id: "a-slow", command: "sleep 5", timeoutMs: 10_000, integrate: false },
+			{ cwd: fixture.dir, commit: fixture.head(), outputs: runA.outputs, signal: a.runtime().env.signal },
+		);
+		const checkB = runCheck(
+			{ id: "b-live", command: "sleep 0.25", timeoutMs: 10_000, integrate: false },
+			{ cwd: fixture.dir, commit: fixture.head(), outputs: runB.outputs, signal: b.runtime().env.signal },
+		);
+		await tick(60);
+
+		await a.shutdown();
+		await expect(checkA).rejects.toThrow(/session shutdown/);
+		await expect(checkB).resolves.toMatchObject({ id: "b-live", passed: true, exitCode: 0, timedOut: false });
+	});
+
+	it("reports other unfinished runs and their lock holders in /herder status and herder_run status", async () => {
+		const { fixture, h: a } = setup();
+		const b = harness({ cwd: fixture.dir, sessionId: "session-b" });
+		cleanups.push(b.shutdown);
+
+		const r1 = (await a.tool("herder_run", { action: "start", goal: "first feature" })).details.runId as string;
+		const r2 = (await b.tool("herder_run", { action: "start", goal: "second feature" })).details.runId as string;
+		writeFileSync(openRun(fixture.commonDir, r2).paths.goal, VALID_GOAL);
+		await b.tool("herder_run", { action: "approve_goal" });
+
+		const lockIdA = a.herder.lockId(a.herder.session(a.ctx));
+		await b.command("status");
+		const lockedText = b.lastNotice()!.text;
+		expect(lockedText).toContain(`Herder run ${r2}: second feature`);
+		expect(lockedText).toContain("Other unfinished runs: 1");
+		expect(lockedText).toContain(`  ${r1} first feature — drafting (locked by session ${lockIdA})`);
+
+		const statusTool = await b.tool("herder_run", { action: "status" });
+		expect(statusTool.content[0].text).toBe(lockedText);
+		expect(statusTool.details).toMatchObject({
+			runId: r2,
+			parked: [],
+			otherUnfinished: [{ runId: r1, title: "first feature", status: "drafting" }],
+		});
+
+		await a.shutdown();
+		await b.command("status");
+		const unlockedText = b.lastNotice()!.text;
+		expect(unlockedText).toContain("Other unfinished runs: 1");
+		expect(unlockedText).toContain(`  ${r1} first feature — drafting (unlocked; continue with /herder resume ${r1})`);
 	});
 });

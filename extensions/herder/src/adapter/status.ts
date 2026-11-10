@@ -10,6 +10,9 @@ export const isFinished = (state: RunState) => FINISHED_STATUSES.has(state.statu
 /** Verified `met` at its current integration head, with no delivery started: waiting for the user to deliver it. */
 export const isParked = (state: RunState) => state.goal !== undefined && !isFinished(state) && !state.deliveryStarted && !state.delivery
 	&& state.verification?.verdict === "met" && state.verification.head === state.integrationHead;
+/** Verified `blocked` at its current integration head, with no delivery started. */
+export const isBlocked = (state: RunState) => state.goal !== undefined && !isFinished(state) && !state.deliveryStarted && !state.delivery
+	&& state.verification?.verdict === "blocked" && state.verification.head === state.integrationHead;
 const short = (sha: string | undefined) => (sha ? sha.slice(0, 12) : "—");
 const clip = (text: string, max: number) => (text.length <= max ? text : `${text.slice(0, max - 1)}…`);
 
@@ -23,6 +26,22 @@ export function parkedLines(runs: readonly RunEntry[]): string[] {
 	return [
 		`Parked runs (verified, waiting for delivery): ${parked.length}`,
 		...parked.map((run) => `  ${titled(run)} — verified met at ${short(run.state.verification!.head)}; deliver with /herder deliver ${run.runId}`),
+	];
+}
+
+/** One line per other non-parked unfinished run: id, title, status, and lock holder; empty without any. */
+export function otherUnfinishedLines(runs: readonly RunEntry[], currentRunId: string, lockOf: (runId: string) => LockInfo | null, sessionId: string): string[] {
+	const others = runs.filter((run) => run.runId !== currentRunId && !isParked(run.state));
+	if (!others.length) return [];
+	return [
+		`Other unfinished runs: ${others.length}`,
+		...others.map((run) => {
+			const lock = lockOf(run.runId);
+			const holder = !lock ? `unlocked; continue with /herder resume ${run.runId}`
+				: lock.sessionId === sessionId ? "locked by this session"
+				: `locked by session ${lock.sessionId}`;
+			return `  ${titled(run)} — ${run.state.status} (${holder})`;
+		}),
 	];
 }
 

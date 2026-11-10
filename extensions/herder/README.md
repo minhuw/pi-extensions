@@ -30,7 +30,7 @@ Agents work in disposable git worktrees, and writing steps produce commits on hi
 
 ## Run lifecycle
 
-1. **Start.** `/herder <goal>` creates a run on the current `HEAD` and writes a draft `goal.md`. It then sends the main model the Herder skill instructions. A new run starts only when every unfinished run of the repository is [parked](#standing-approval-and-parked-runs); otherwise finish, resume, or abort the existing one first.
+1. **Start.** `/herder <goal>` creates a run on the current `HEAD` and writes a draft `goal.md`. It then sends the main model the Herder skill instructions. Each session holds at most one active run at a time, while separate sessions can run concurrent runs in the same repository; within the same session, a new run starts once its held run is finished or [parked](#standing-approval-and-parked-runs) (or `blocked` under a standing authorization).
 2. **Clarify.** The model reads the code and asks at most five questions, each with a recommended answer.
 3. **Goal.** The model completes `goal.md` and calls `herder_run { action: "approve_goal" }`. Herder validates the file and asks you to confirm it. In the TUI, the goal scrolls inside the dialog (↑↓, PgUp/PgDn, Home/End), and the Yes/No choice stays on screen; `y` or `n` answer at any point, and Esc closes the dialog without an answer, which Herder reports to the model separately from a no. The delivery summary uses the same dialog. Once approved, the goal is frozen: its hash is journaled, and Herder's tools refuse to work if `goal.md` changes afterwards. A different goal needs a new run.
 4. **Plan.** The model writes `plan.md` with task lines linked to acceptance criteria.
@@ -54,7 +54,7 @@ Agents work in disposable git worktrees, and writing steps produce commits on hi
 | --- | --- |
 | `/herder <goal>` | Start a run. A goal whose first word is a subcommand name needs a leading `--`, for example `/herder -- status page shows uptime`. |
 | `/herder` or `/herder help` | Show usage. |
-| `/herder status [runId]` | Show the run: status, tasks, launches, verdict, and lock holder, then one line per parked run. Without an id, it shows the held, active, or latest run. |
+| `/herder status [runId]` | Show the run: status, tasks, launches, verdict, and lock holder, plus any parked runs and other unfinished runs. Without an id, it shows the held, active, or latest run. |
 | `/herder resume [runId]` | Take the run in this session. The main model receives the goal, plan, progress, recorded decisions, and the next action. Without an id, it takes the held run or the only unfinished run. |
 | `/herder deliver [runId] [series\|branch\|squash\|uncommitted] [--curate]` | Deliver the verified run. With an id, this session takes that run first (refused while another live session holds it). Without one, it delivers the held run or the only unfinished run. The mode defaults to `series`. |
 | `/herder abort [runId]` | Stop the run's launch and tool calls, journal it as abandoned, and remove its refs and worktrees. The run directory stays. |
@@ -68,7 +68,7 @@ The main model drives a run with these tools. All except `herder_run`, `herder_p
 
 | Tool | Purpose |
 | --- | --- |
-| `herder_run` | `action: "start"` creates a run for `goal` as `/herder <goal>` does and returns the instructions as its result. `"status"` shows the run and the parked runs. `"approve_goal"` validates `goal.md` and asks you to approve it (interactive only, unless a standing authorization approves it). `"record_decision"` journals a question and your answer, given between launches. `"abort"` stops and abandons the run after your confirmation (interactive only, unless a standing authorization covers the run; a run it does not cover is then refused). |
+| `herder_run` | `action: "start"` creates a run for `goal` as `/herder <goal>` does and returns the instructions as its result. `"status"` shows the run, parked runs, and any other unfinished runs. `"approve_goal"` validates `goal.md` and asks you to approve it (interactive only, unless a standing authorization approves it). `"record_decision"` journals a question and your answer, given between launches. `"abort"` stops and abandons the run after your confirmation (interactive only, unless a standing authorization covers the run; a run it does not cover is then refused). |
 | `herder_workflow` | `mode: "validate"` compiles a script and dry-runs it without agents. `"run"` launches `script` or `scriptPath` with `args` in the background and returns the launch number; a follow-up message reports the result. `resume: n` replays launch `n`. `"stop"` stops the running launch. |
 | `herder_step` | Run one agent step directly. It takes the same options as a script's `agent()`. |
 | `herder_integrate` | Integrate a step key or commit with a commit `message`, an optional `task`, and optional `checks`. |
@@ -88,7 +88,7 @@ The model gets the full rules and the script API from the bundled `herder` skill
 - `/herder-improve` looks for bugs, security, performance, test, architecture, dependency, tooling, and documentation problems, plus evidence-backed directions for the project.
 - `/herder-simplify` looks for code to delete or consolidate, obsolete paths and abstractions, and needless state or control flow, while preserving the behavior that callers rely on.
 
-The audit is read-only. It changes no files, installs nothing, and holds no run or lock. It needs an interactive session, a commit, and no unfinished run that is not parked. The flow is:
+The audit is read-only. It changes no files, installs nothing, and holds no run or lock. It needs an interactive session, a commit, and that this session does not already hold an unparked unfinished run (unless it is `blocked` under a standing authorization). The flow is:
 
 1. The model recons the repository, audits it (with read-only `recon` subagents when Subagents is loaded), and vets every finding against the code.
 2. It posts a table of the vetted findings, followed by a short explanation of each.
@@ -116,7 +116,7 @@ Another extension can let the session work while you are away (self-driving mode
 
 Nothing waits for you while a grant stands: every gate either answers from the authorization or refuses at once.
 
-A run is parked when its goal is approved, its latest verdict is `met` at the current integration head, and no delivery has started. Parked runs do not block `/herder <goal>` or the audits, so several verified runs can wait for you. A session that starts or resumes another run gives up the parked one it held; it stays on disk. `/herder status` lists every parked run, and `/herder deliver <runId>` delivers one.
+A run is parked when its goal is approved, its latest verdict is `met` at the current integration head, and no delivery has started. Parked runs do not block `/herder <goal>` or the audits in the same session, so several verified runs can wait for you; under a standing authorization, a run verified `blocked` at its current integration head can likewise be left behind by the session so subsequent runs can start. A session that starts or resumes another run gives up the parked (or standing-`blocked`) one it held; it stays on disk. `/herder status` lists parked runs and any other unfinished runs, and `/herder deliver <runId>` delivers a parked one.
 
 ## goal.md
 

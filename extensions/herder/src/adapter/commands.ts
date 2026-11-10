@@ -2,13 +2,13 @@ import { existsSync, rmSync } from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { goalDraft } from "../artifacts/goal.ts";
 import { readLock } from "../run/lock.ts";
-import { isRunId, refPrefix } from "../run/paths.ts";
+import { isRunId, refPrefix, runPaths } from "../run/paths.ts";
 import { createRun, listRuns, openRun } from "../run/store.ts";
 import type { DeliveryMode } from "../types.ts";
 import { describeDelivery } from "./format.ts";
 import { auditPrompt, auditSkillDir, resumePrompt, skillText, startPrompt, type AuditInvocation, type AuditKind } from "./prompts.ts";
 import { busy, message, type Herder, type Held, type Session } from "./session.ts";
-import { describeRun, isFinished, isParked, parkedLines, planTasks } from "./status.ts";
+import { describeRun, isBlocked, isFinished, isParked, otherUnfinishedLines, parkedLines, planTasks, type RunEntry } from "./status.ts";
 
 export const PROMPT_TYPE = "herder:prompt";
 export const DELIVERY_MODES: readonly DeliveryMode[] = ["series", "branch", "squash", "uncommitted"];
@@ -87,8 +87,8 @@ export function titleOf(goal: string): string {
 }
 
 /**
- * The repository's head and common directory, refusing without a commit or while a run is unfinished and not parked
- * (parked runs wait for delivery and do not block new work).
+ * The repository's head and common directory, refusing without a commit or while this session holds an unparked
+ * unfinished run (unless it is blocked under a standing authorization).
  */
 function startable(herder: Herder, s: Session): { head: string; commonDir: string } {
 	const vcs = herder.vcs(s);
@@ -99,15 +99,19 @@ function startable(herder: Herder, s: Session): { head: string; commonDir: strin
 		throw new Error("Herder needs a repository with at least one commit.");
 	}
 	const commonDir = vcs.commonDir();
-	const unfinished = herder.unfinished(s).filter(({ state }) => !isParked(state)).at(-1)?.runId;
-	if (unfinished) throw new Error(`Herder run ${unfinished} is unfinished. Continue it with /herder resume ${unfinished}, or abandon it with /herder abort ${unfinished}.`);
+	if (s.held && busy(s.held)) throw new Error(`Run ${s.held.runId} still has a launch or tool call running in this session.`);
+	if (s.held) {
+		const state = s.held.run.state();
+		if (!isFinished(state) && !isParked(state) && !(herder.standing(s) !== undefined && isBlocked(state))) {
+			throw new Error(`Herder run ${s.held.runId} is unfinished in this session. Continue it with /herder resume ${s.held.runId}, abandon it with /herder abort ${s.held.runId}, or start another run in a separate session.`);
+		}
+	}
 	return { head, commonDir };
 }
 
 /** Creates a run at HEAD for `goal`, as `/herder <goal>` and `herder_run { action: "start" }` (`fromTool`) do; returns the start prompt. */
 export function startRun(herder: Herder, s: Session, goal: string, fromTool = false): { runId: string; prompt: string } {
 	const { head, commonDir } = startable(herder, s);
-	if (s.held && busy(s.held)) throw new Error(`Run ${s.held.runId} still has a launch or tool call running in this session.`);
 	const skill = skillText();
 	const title = titleOf(goal);
 	const run = createRun(commonDir, { title, base: head, repo: herder.vcs(s).topLevel(), goal: goalDraft(title), sessionId: s.id });
@@ -208,12 +212,14 @@ function clean(herder: Herder, s: Session, runId: string | undefined): string {
 	return deleted.length ? `Deleted ${deleted.length} Herder run(s): ${deleted.join(", ")}.` : "No finished Herder runs to delete.";
 }
 
-/** `/herder status` and `herder_run { action: "status" }`: the run, then one line per parked run. */
-export function statusReport(herder: Herder, s: Session, runId: string | undefined): string {
+/** `/herder status` and `herder_run { action: "status" }`: the run, then parked runs and any other unfinished runs. */
+export function statusReport(herder: Herder, s: Session, runId: string | undefined, unfinished: readonly RunEntry[] = herder.unfinished(s)): string {
 	const run = herder.peek(s, runId);
 	if (!run) return "No Herder runs in this repository.";
-	const text = describeRun(run, run.state(), planTasks(run), { lock: readLock(run.paths.lock), sessionId: herder.lockId(s), launch: s.held?.runId === run.runId ? s.held.launch?.launch : undefined, now: herder.now() });
-	return [text, ...parkedLines(herder.unfinished(s))].join("\n");
+	const commonDir = herder.vcs(s).commonDir();
+	const sessionId = herder.lockId(s);
+	const text = describeRun(run, run.state(), planTasks(run), { lock: readLock(run.paths.lock), sessionId, launch: s.held?.runId === run.runId ? s.held.launch?.launch : undefined, now: herder.now() });
+	return [text, ...parkedLines(unfinished), ...otherUnfinishedLines(unfinished, run.runId, (id) => readLock(runPaths(commonDir, id).lock), sessionId)].join("\n");
 }
 
 export function registerCommands(pi: ExtensionAPI, herder: Herder): void {

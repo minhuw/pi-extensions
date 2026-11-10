@@ -75,15 +75,34 @@ function store(runId: string, paths: RunPaths): RunStore {
 	return self;
 }
 
+export const storeFs = { mkdirSync, newRunId };
+
 /** Creates the run layout, journals `run.started`, and renders progress.md. Does not touch git. `sessionId` is the orchestrating Pi session. */
 export function createRun(commonDir: string, init: { title: string; base: string; repo: string; goal?: string; runId?: string; sessionId?: string }): RunStore {
-	const runId = init.runId ?? newRunId();
-	const paths = runPaths(commonDir, runId);
-	mkdirSync(join(paths.dir, ".."), { recursive: true });
-	mkdirSync(paths.dir); // throws if the run already exists
-	mkdirSync(paths.scripts);
-	mkdirSync(paths.outputs);
-	syncDir(join(paths.dir, ".."));
+	const parent = runsDir(commonDir);
+	let runId: string;
+	let paths: RunPaths;
+	if (init.runId !== undefined) {
+		runId = init.runId;
+		paths = runPaths(commonDir, runId);
+		storeFs.mkdirSync(parent, { recursive: true });
+		storeFs.mkdirSync(paths.dir); // throws if the run already exists
+	} else {
+		storeFs.mkdirSync(parent, { recursive: true });
+		for (let attempt = 1; ; attempt++) {
+			runId = storeFs.newRunId();
+			paths = runPaths(commonDir, runId);
+			try {
+				storeFs.mkdirSync(paths.dir);
+				break;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt >= 64) throw error;
+			}
+		}
+	}
+	storeFs.mkdirSync(paths.scripts);
+	storeFs.mkdirSync(paths.outputs);
+	syncDir(parent);
 	writeSynced(paths.goal, init.goal ?? "", "wx");
 	writeSynced(paths.plan, "", "wx");
 	writeSynced(paths.notes, "", "wx");

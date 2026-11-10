@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { TRAILER_FINGERPRINT, TRAILER_STEP } from "../../src/config.ts";
 import type { Vcs } from "../../src/types.ts";
 import {
-	checkGitVersion, hasHerderTrailer, openVcs, projectNameFromConfig, RefConflictError, removeWorktrees, repositoryName, requireGit, savedProjectName,
+	checkGitVersion, GitError, hasHerderTrailer, openVcs, projectNameFromConfig, RefConflictError, removeWorktrees, repositoryName, requireGit, savedProjectName,
 } from "../../src/vcs/git.ts";
 import { type GitFixture, withGitFixture } from "../support/git-fixture.ts";
 
@@ -791,4 +792,156 @@ describe("delivery", () => {
 			fixture.git("add", "-A");
 			expect(fixture.git("write-tree")).toBe(vcs.treeOf(tip));
 		}, { "README.md": "# r\n", "gone.txt": "gone\n", "rename-me.txt": "a long enough line to be detected as a rename\nsecond line\n", "edit.txt": "edit\n", "image.bin": "\0old\0" }));
+});
+
+/** Creates `lockPath`, removes it from a worker thread `delayMs` after `fn` begins, and waits for cleanup before returning. */
+function withTransientLock(lockPath: string, delayMs: number, fn: () => void): void {
+	mkdirSync(dirname(lockPath), { recursive: true });
+	writeFileSync(lockPath, "");
+	const state = new Int32Array(new SharedArrayBuffer(4));
+	const worker = new Worker(
+		`const { rmSync } = require("node:fs");
+		const { workerData: { lockPath, delayMs, state } } = require("node:worker_threads");
+		Atomics.store(state, 0, 1);
+		Atomics.notify(state, 0);
+		Atomics.wait(state, 0, 1, delayMs);
+		try { rmSync(lockPath, { force: true }); } finally {
+			Atomics.store(state, 0, 2);
+			Atomics.notify(state, 0);
+		}`,
+		{ eval: true, workerData: { lockPath, delayMs, state } },
+	);
+	try {
+		while (Atomics.load(state, 0) === 0) {
+			if (Atomics.wait(state, 0, 0, 5000) === "timed-out") throw new Error("lock worker did not start");
+		}
+		fn();
+	} finally {
+		Atomics.compareExchange(state, 0, 1, 3);
+		Atomics.notify(state, 0);
+		while (Atomics.load(state, 0) !== 2) {
+			const current = Atomics.load(state, 0);
+			if (current === 2 || Atomics.wait(state, 0, current, 5000) === "timed-out") break;
+		}
+		rmSync(lockPath, { force: true });
+		void worker.terminate();
+	}
+}
+
+describe("concurrency", () => {
+	it("retries transient .lock contention and fails with GitError when a lock stays stuck", () =>
+		untouched((fixture, vcs) => {
+			const head = fixture.head();
+			const next = vcs.commitTree(vcs.treeOf(head), [head], "next\n");
+
+			// Transient loose-ref lock released while updateRef is waiting.
+			const ref = "refs/herder/run-lock/integration";
+			const refLock = join(fixture.commonDir, "refs", "herder", "run-lock", "integration.lock");
+			withTransientLock(refLock, 40, () => vcs.updateRef(ref, head, null));
+			expect(vcs.readRef(ref)).toBe(head);
+
+			// Transient packed-refs.lock released while deleteRefs removes a packed ref.
+			fixture.git("pack-refs", "--all");
+			withTransientLock(join(fixture.commonDir, "packed-refs.lock"), 40, () => vcs.deleteRefs("refs/herder/run-lock"));
+			expect(vcs.readRef(ref)).toBeNull();
+
+			// Transient worktree index.lock released while snapshot stages changes.
+			const wt = slot(fixture, "s1", "20260101-000000-10c4");
+			vcs.addWorktree(wt, head);
+			const wtGitDir = realpathSync(fixture.git("-C", wt, "rev-parse", "--path-format=absolute", "--git-dir"));
+			writeFileSync(join(wt, "contended.txt"), "ok\n");
+			let snap: string | null = null;
+			withTransientLock(join(wtGitDir, "index.lock"), 40, () => {
+				snap = vcs.snapshot(wt, "contended\n", head);
+			});
+			expect(snap).toMatch(/^[0-9a-f]{40}$/);
+			vcs.removeWorktree(wt);
+
+			// Permanent .lock still exhausts retries and throws GitError.
+			const stuckLock = join(fixture.commonDir, "refs", "herder", "run-stuck", "integration.lock");
+			mkdirSync(dirname(stuckLock), { recursive: true });
+			writeFileSync(stuckLock, "");
+			try {
+				expect(() => vcs.updateRef("refs/herder/run-stuck/integration", head, null)).toThrow(GitError);
+			} finally {
+				rmSync(stuckLock, { force: true });
+			}
+
+			// Genuine CAS conflict throws RefConflictError immediately without lock-retry delay.
+			vcs.updateRef("refs/herder/run-cas/integration", head, null);
+			const started = performance.now();
+			expect(() => vcs.updateRef("refs/herder/run-cas/integration", next, null)).toThrow(RefConflictError);
+			expect(performance.now() - started).toBeLessThan(200);
+			vcs.deleteRefs("refs/herder/run-cas");
+		}));
+
+	it("isolates concurrent runs sharing a repository across worktrees and refs", () =>
+		untouched((fixture) => {
+			const vcsA = openVcs(fixture.dir);
+			const vcsB = openVcs(fixture.dir);
+			const base = fixture.head();
+			const runA = "20260101-000000-aaaa";
+			const runB = "20260101-000000-bbbb";
+			const [a1, a2] = [slot(fixture, "s1", runA), slot(fixture, "s2", runA)];
+			const [b1, b2] = [slot(fixture, "s1", runB), slot(fixture, "s2", runB)];
+
+			vcsA.addWorktree(a1, base);
+			vcsB.addWorktree(b1, base);
+			vcsA.addWorktree(a2, base);
+			vcsB.addWorktree(b2, base);
+
+			writeFileSync(join(a1, "a1.txt"), "a1\n");
+			writeFileSync(join(b1, "b1.txt"), "b1\n");
+			writeFileSync(join(a2, "a2.txt"), "a2\n");
+			writeFileSync(join(b2, "b2.txt"), "b2\n");
+
+			const commitA1 = vcsA.snapshot(a1, "a1\n", base)!;
+			const commitB1 = vcsB.snapshot(b1, "b1\n", base)!;
+			const commitA2 = vcsA.snapshot(a2, "a2\n", base)!;
+			const commitB2 = vcsB.snapshot(b2, "b2\n", base)!;
+
+			vcsA.updateRef(`refs/herder/${runA}/base`, base, null);
+			vcsB.updateRef(`refs/herder/${runB}/base`, base, null);
+			vcsA.updateRef(`refs/herder/${runA}/integration`, commitA1, null);
+			vcsB.updateRef(`refs/herder/${runB}/integration`, commitB1, null);
+			vcsA.updateRef(`refs/herder/${runA}/steps/s1`, commitA1, null);
+			vcsB.updateRef(`refs/herder/${runB}/steps/s1`, commitB1, null);
+			fixture.git("pack-refs", "--all");
+			vcsA.updateRef(`refs/herder/${runA}/integration`, commitA2, commitA1);
+			vcsB.updateRef(`refs/herder/${runB}/integration`, commitB2, commitB1);
+			vcsA.updateRef(`refs/herder/${runA}/steps/s2`, commitA2, null);
+			vcsB.updateRef(`refs/herder/${runB}/steps/s2`, commitB2, null);
+
+			// Tear down runA completely; runB's worktrees and refs must remain untouched.
+			removeWorktrees(vcsA, join(herderRoot(fixture), runA));
+			vcsA.deleteRefs(`refs/herder/${runA}`);
+
+			expect(existsSync(join(herderRoot(fixture), runA))).toBe(false);
+			expect(worktreeList(fixture)).not.toContain(a1);
+			expect(worktreeList(fixture)).not.toContain(a2);
+			expect(vcsA.readRef(`refs/herder/${runA}/base`)).toBeNull();
+			expect(vcsA.readRef(`refs/herder/${runA}/integration`)).toBeNull();
+			expect(vcsA.readRef(`refs/herder/${runA}/steps/s1`)).toBeNull();
+			expect(vcsA.readRef(`refs/herder/${runA}/steps/s2`)).toBeNull();
+
+			expect(existsSync(b1) && existsSync(b2)).toBe(true);
+			expect(worktreeList(fixture)).toContain(b1);
+			expect(worktreeList(fixture)).toContain(b2);
+			expect(vcsB.worktreeHead(b1)).toBe(commitB1);
+			expect(vcsB.worktreeHead(b2)).toBe(commitB2);
+			expect(vcsB.isClean(b1) && vcsB.isClean(b2)).toBe(true);
+			expect(vcsB.readRef(`refs/herder/${runB}/base`)).toBe(base);
+			expect(vcsB.readRef(`refs/herder/${runB}/integration`)).toBe(commitB2);
+			expect(vcsB.readRef(`refs/herder/${runB}/steps/s1`)).toBe(commitB1);
+			expect(vcsB.readRef(`refs/herder/${runB}/steps/s2`)).toBe(commitB2);
+
+			writeFileSync(join(b1, "b1-more.txt"), "more\n");
+			const commitB3 = vcsB.snapshot(b1, "b1-more\n", commitB1)!;
+			expect(commitB3).toMatch(/^[0-9a-f]{40}$/);
+
+			removeWorktrees(vcsB, join(herderRoot(fixture), runB));
+			vcsB.deleteRefs(`refs/herder/${runB}`);
+			expect(existsSync(join(herderRoot(fixture), runB))).toBe(false);
+			expect(vcsB.readRef(`refs/herder/${runB}/integration`)).toBeNull();
+		}));
 });

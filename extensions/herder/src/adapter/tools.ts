@@ -167,7 +167,7 @@ async function abortRun(herder: Herder, s: Session, held: Held, ctx: ExtensionCo
 export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 	pi.registerTool({
 		name: "herder_run", label: "Herder Run", executionMode: "sequential",
-		description: "Herder run control. start: create a run for goal at HEAD, as /herder <goal> does, and return its instructions. status: show the run and any parked runs. approve_goal: validate goal.md and ask the user to approve it (or apply their standing authorization). record_decision: journal a user decision (question, answer) made between launches. abort: stop and abandon the run after user confirmation.",
+		description: "Herder run control. start: create a run for goal at HEAD, as /herder <goal> does, and return its instructions. status: show the run and unfinished runs. approve_goal: validate goal.md and ask the user to approve it (or apply their standing authorization). record_decision: journal a user decision (question, answer) made between launches. abort: stop and abandon the run after user confirmation.",
 		parameters: RunParameters,
 		async execute(_id, params, signal, _update, ctx) {
 			const s = herder.session(ctx);
@@ -181,8 +181,10 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 				const run = herder.peek(s, params.runId);
 				if (!run) return reply("No Herder runs in this repository.", { runId: undefined });
 				const state = run.state();
-				const parked = herder.unfinished(s).filter((entry) => isParked(entry.state)).map(({ runId, state: other }) => ({ runId, title: other.title, head: other.verification!.head }));
-				return reply(statusReport(herder, s, params.runId), { ...runDetails(run, state, planTasks(run)), parked });
+				const unfinished = herder.unfinished(s);
+				const parked = unfinished.filter((entry) => isParked(entry.state)).map(({ runId, state: other }) => ({ runId, title: other.title, head: other.verification!.head }));
+				const otherUnfinished = unfinished.filter((entry) => entry.runId !== run.runId && !isParked(entry.state)).map(({ runId, state: other }) => ({ runId, title: other.title, status: other.status }));
+				return reply(statusReport(herder, s, params.runId, unfinished), { ...runDetails(run, state, planTasks(run)), parked, ...(otherUnfinished.length ? { otherUnfinished } : {}) });
 			}
 			const held = params.runId ? herder.hold(s, params.runId) : herder.current(s);
 			if (params.action === "approve_goal") return herder.op(held, signal, (combined) => approveGoal(herder, s, held, ctx, combined), true);

@@ -75,11 +75,27 @@ function disableNamedHooks(cwd: string, env: NodeJS.ProcessEnv): NodeJS.ProcessE
 	return result;
 }
 
+const LOCK_CONTENTION = /Unable to create '[^']*\.lock'|could not lock config file/i;
+const LOCK_RETRY_DELAYS_MS = [10, 25, 50, 100, 200];
+
+function sleepSync(delayMs: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+}
+
 function spawn(cwd: string, args: string[], options: RunOptions = {}): Output {
-	const env = options.env ?? gitEnv();
-	const result = spawnSync("git", options.hooks ? args : [...NO_HOOKS, ...args], { cwd, env: options.hooks ? env : disableNamedHooks(cwd, env), input: options.input ?? "", maxBuffer: MAX_BUFFER });
-	if (result.error) throw new GitError(args, null, result.error.message);
-	return { status: result.status, stdout: result.stdout, stderr: result.stderr.toString("utf8").trim() };
+	const baseEnv = options.env ?? gitEnv();
+	const gitArgs = options.hooks ? args : [...NO_HOOKS, ...args];
+	const env = options.hooks ? baseEnv : disableNamedHooks(cwd, baseEnv);
+	for (let attempt = 0; ; attempt++) {
+		const result = spawnSync("git", gitArgs, { cwd, env, input: options.input ?? "", maxBuffer: MAX_BUFFER });
+		if (result.error) throw new GitError(args, null, result.error.message);
+		const stderr = result.stderr.toString("utf8").trim();
+		if (result.status !== 0 && attempt < LOCK_RETRY_DELAYS_MS.length && LOCK_CONTENTION.test(stderr)) {
+			sleepSync(LOCK_RETRY_DELAYS_MS[attempt]!);
+			continue;
+		}
+		return { status: result.status, stdout: result.stdout, stderr };
+	}
 }
 
 function run(cwd: string, args: string[], options: RunOptions = {}): Output {

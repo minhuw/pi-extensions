@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { HERDER_VERSION } from "../../src/config.ts";
 import { sha256Hex } from "../../src/journal/keys.ts";
 import { fileFs, writeAtomic } from "../../src/run/files.ts";
-import { activeRun, createOutputStore, createRun, listRuns, openRun } from "../../src/run/store.ts";
+import { activeRun, createOutputStore, createRun, listRuns, openRun, storeFs } from "../../src/run/store.ts";
 
 const dirs: string[] = [];
 const commonDir = () => {
@@ -14,6 +14,7 @@ const commonDir = () => {
 	return dir;
 };
 afterEach(() => {
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -33,6 +34,32 @@ describe("run store", () => {
 		expect(readFileSync(run.paths.progress, "utf8")).toContain("# Herder run 20260101-000000-abcd: Do the thing");
 		expect(() => createRun(common, { ...init, runId: "20260101-000000-abcd" })).toThrow();
 		expect(createRun(common, init).runId).toMatch(/^\d{8}-\d{6}-[0-9a-f]{4}$/);
+	});
+
+	it("retries generated runId collisions on EEXIST while rejecting duplicate explicit runIds", () => {
+		const common = commonDir();
+		createRun(common, { ...init, runId: "20260304-050607-0001" });
+		mkdirSync(join(common, "herder", "runs", "20260304-050607-0002"), { recursive: true });
+		expect(() => createRun(common, { ...init, runId: "20260304-050607-0001" })).toThrow(/EEXIST/);
+
+		const candidates = ["20260304-050607-0001", "20260304-050607-0002", "20260304-050607-0003"];
+		const spy = vi.spyOn(storeFs, "newRunId").mockImplementation(() => candidates.shift() ?? "20260304-050607-0001");
+		const recovered = createRun(common, init);
+		expect(recovered.runId).toBe("20260304-050607-0003");
+		expect(spy).toHaveBeenCalledTimes(3);
+		expect(recovered.journal.read()).toMatchObject([{ t: "run.started", runId: "20260304-050607-0003" }]);
+
+		spy.mockClear();
+		spy.mockReturnValue("20260304-050607-0001");
+		expect(() => createRun(common, init)).toThrow(/EEXIST/);
+		expect(spy).toHaveBeenCalledTimes(64);
+
+		vi.restoreAllMocks();
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-03-04T05:06:07Z"));
+		const batch = Array.from({ length: 16 }, () => createRun(common, init).runId);
+		for (const id of batch) expect(id).toMatch(/^20260304-050607-[0-9a-f]{4}$/);
+		expect(new Set(batch).size).toBe(16);
 	});
 
 	it("opens an existing run and fails with nothing to resume otherwise", () => {

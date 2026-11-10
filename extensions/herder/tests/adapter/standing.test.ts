@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { STANDING_APPROVAL_KEY, STANDING_NOTE, standingGrant, standingRegistry, type StandingApproval } from "../../src/adapter/standing.ts";
-import { isParked } from "../../src/adapter/status.ts";
+import { isBlocked, isParked } from "../../src/adapter/status.ts";
 import { STATUS_KEY } from "../../src/config.ts";
 import { readLock } from "../../src/run/lock.ts";
 import { listRuns, openRun, type RunStore } from "../../src/run/store.ts";
@@ -48,6 +48,14 @@ async function start(h: ReturnType<typeof session>, fixture: GitFixture, goal = 
 /** Verified `met` at the run's current integration head, as `herder_verify` journals it. */
 function park(run: RunStore): void {
 	run.journal.append({ t: "verify.completed", head: run.state().integrationHead!, checks: [], verdict: "met", criteria: [], verifierRan: false });
+}
+
+/** Verified `blocked` at the run's current integration head, as `herder_verify` journals it. */
+function block(run: RunStore): void {
+	run.journal.append({
+		t: "verify.completed", head: run.state().integrationHead!, checks: [], verdict: "blocked",
+		criteria: [{ id: "AC-1", status: "not_met", evidence: "WHEN the program runs cannot be satisfied" }], verifierRan: true,
+	});
 }
 
 /** The run id besides `first`: ids created within one second do not sort by creation. */
@@ -312,14 +320,14 @@ describe("parked runs", () => {
 		expect(isParked(run.state())).toBe(true);
 	});
 
-	it("an unfinished run that is not parked still blocks new runs and audits", async () => {
+	it("an unfinished run that is not parked still blocks new runs and audits in the same session", async () => {
 		const { fixture, h, runId, run } = await parkedRun();
 		// The head moved since verification.
 		run.journal.append({ t: "integrate.completed", key: "k", from: run.state().integrationHead!, source: "s", head: "d".repeat(40), tree: "t", message: "m", task: "T1", checks: [] });
 		expect(isParked(run.state())).toBe(false);
 		await h.command("second goal");
 		expect(h.lastNotice()).toMatchObject({ level: "error" });
-		expect(h.lastNotice()!.text).toBe(`Herder run ${runId} is unfinished. Continue it with /herder resume ${runId}, or abandon it with /herder abort ${runId}.`);
+		expect(h.lastNotice()!.text).toBe(`Herder run ${runId} is unfinished in this session. Continue it with /herder resume ${runId}, abandon it with /herder abort ${runId}, or start another run in a separate session.`);
 		await expect(h.tool("herder_run", { action: "start", goal: "another goal" })).rejects.toThrow(`/herder resume ${runId}`);
 		await h.commands.get("herder-improve").handler("", h.ctx);
 		expect(h.lastNotice()).toMatchObject({ level: "error", text: expect.stringContaining(`/herder abort ${runId}`) });
@@ -331,6 +339,45 @@ describe("parked runs", () => {
 		expect(isParked(run.state())).toBe(false);
 		await h.command("second goal");
 		expect(h.lastNotice()).toMatchObject({ level: "error" });
+	});
+
+	it("a blocked run lets the same session start a new run only under a standing authorization", async () => {
+		const fixture = repo();
+		const h = session(fixture);
+		const { runId: first, run } = await start(h, fixture);
+		writeFileSync(run.paths.goal, VALID_GOAL);
+		await h.tool("herder_run", { action: "approve_goal" });
+		block(run);
+		expect(isBlocked(run.state())).toBe(true);
+		expect(isParked(run.state())).toBe(false);
+
+		// Without a standing grant, a blocked run still blocks same-session start and audits.
+		await h.command("second goal");
+		expect(h.lastNotice()).toMatchObject({ level: "error", text: expect.stringContaining(`/herder resume ${first}`) });
+		await expect(h.tool("herder_run", { action: "start", goal: "second goal" })).rejects.toThrow(`/herder resume ${first}`);
+		await h.commands.get("herder-improve").handler("", h.ctx);
+		expect(h.lastNotice()).toMatchObject({ level: "error", text: expect.stringContaining(`/herder abort ${first}`) });
+		expect(listRuns(fixture.commonDir)).toEqual([first]);
+
+		// Under a standing grant, the session can leave the blocked run behind and start a new run or audit.
+		grant(fixture);
+		await h.commands.get("herder-improve").handler("", h.ctx);
+		expect(h.lastNotice()).toEqual({ level: "info", text: "Started the read-only /herder-improve audit." });
+
+		const { runId: second, run: secondRun } = await start(h, fixture, "second goal");
+		expect(second).not.toBe(first);
+		expect(readLock(run.paths.lock)).toBeNull();
+		expect(readLock(secondRun.paths.lock)?.sessionId).toBe(h.herder.lockId(h.herder.session(h.ctx)));
+		expect(run.state().status).toBe("approved");
+		expect(isBlocked(run.state())).toBe(true);
+
+		// If the head moved since the blocked verdict, it is no longer verified blocked and blocks same-session start even under a grant.
+		writeFileSync(secondRun.paths.goal, VALID_GOAL);
+		await h.tool("herder_run", { action: "approve_goal" });
+		block(secondRun);
+		secondRun.journal.append({ t: "integrate.completed", key: "k", from: secondRun.state().integrationHead!, source: "s", head: "d".repeat(40), tree: "t", message: "m", task: "T1", checks: [] });
+		expect(isBlocked(secondRun.state())).toBe(false);
+		await expect(h.tool("herder_run", { action: "start", goal: "third goal" })).rejects.toThrow(`/herder resume ${second}`);
 	});
 
 	it("tools and commands refuse to pick one of several unfinished runs, listing them; an id resolves it", async () => {

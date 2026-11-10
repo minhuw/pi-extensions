@@ -192,3 +192,95 @@ describe("end to end: other delivery modes", () => {
 		expectCleanedUp(fixture, run);
 	});
 });
+
+describe("end to end: concurrent runs across sessions", () => {
+	it("runs two sessions concurrently from the same base and replays the second series delivery onto the first", async () => {
+		const fixture = createGitFixture();
+		fixtures.push(fixture);
+		const base = fixture.head();
+		const before = checkout(fixture);
+
+		const runnerA = new FakeRunner([
+			{ match: "Create greeting.txt", files: { "greeting.txt": "hello\n" }, text: "created greeting.txt" },
+		]);
+		const runnerB = new FakeRunner([
+			{ match: "Create farewell.txt", files: { "farewell.txt": "goodbye\n" }, text: "created farewell.txt" },
+		]);
+		const a = openSession(fixture, runnerA, cleanups, { sessionId: "session-a" });
+		const b = openSession(fixture, runnerB, cleanups, { sessionId: "session-b" });
+
+		const startedA = await startRun(a, fixture, "Greet the user");
+		const startedB = await startRun(b, fixture, "Bid farewell");
+		expect(startedB.runId).not.toBe(startedA.runId);
+
+		await approve(a, startedA);
+		writeFileSync(startedA.planPath, "- [ ] T1 (AC-1) Add greeting.txt\n");
+
+		const farewellGoal = `# Goal: Bid farewell
+
+## Intent
+Readers of the project want a farewell message.
+
+## Acceptance criteria
+- AC-1: WHEN farewell.txt is read THE SYSTEM SHALL say goodbye. verify: check:farewell
+
+## Checks
+| id | command | timeout | integrate |
+| --- | --- | --- | --- |
+| farewell | grep -q goodbye farewell.txt | 1m | yes |
+`;
+		writeFileSync(startedB.goalPath, farewellGoal);
+		await expect(b.tool("herder_run", { action: "approve_goal" })).resolves.toMatchObject({ details: { approved: true } });
+		writeFileSync(startedB.planPath, "- [ ] T1 (AC-1) Add farewell.txt\n");
+
+		const [stepA, stepB] = await Promise.all([
+			a.tool("herder_step", { prompt: "Create greeting.txt", task: "T1", gate: "greeting" }),
+			b.tool("herder_step", { prompt: "Create farewell.txt", task: "T1", gate: "farewell" }),
+		]);
+		expect(stepA.details.status).toBe("ok");
+		expect(stepB.details.status).toBe("ok");
+
+		const [intA, intB] = await Promise.all([
+			a.tool("herder_integrate", { source: stepA.details.key, message: "Add greeting", task: "T1" }),
+			b.tool("herder_integrate", { source: stepB.details.key, message: "Add farewell", task: "T1" }),
+		]);
+		expect(intA.details.status).toBe("integrated");
+		expect(intB.details.status).toBe("integrated");
+
+		const [verA, verB] = await Promise.all([
+			a.tool("herder_verify", {}),
+			b.tool("herder_verify", {}),
+		]);
+		expect(verA.details).toMatchObject({ verdict: "met" });
+		expect(verB.details).toMatchObject({ verdict: "met" });
+		expectUntouched(fixture, before);
+
+		// Session A delivers first, advancing main from base.
+		const deliveredA = await a.tool("herder_deliver", { mode: "series" });
+		expect(deliveredA.details).toMatchObject({ status: "delivered", mode: "series", target: "main" });
+		const tipA = fixture.head();
+		expect(tipA).not.toBe(base);
+		expect(fixture.read("greeting.txt")).toBe("hello\n");
+
+		// Session B delivers second: replays onto tipA, re-runs B's check on the merged tree, and fast-forwards main.
+		const deliveredB = await b.tool("herder_deliver", { mode: "series" });
+		expect(deliveredB.details).toMatchObject({
+			status: "delivered",
+			mode: "series",
+			target: "main",
+			rebasedOnto: tipA,
+			checks: [expect.objectContaining({ id: "farewell", passed: true })],
+		});
+		expect(startedB.run.journal.read().some((event) => event.t === "check.completed" && event.purpose === "deliver")).toBe(true);
+		expect(fixture.git("log", "--format=%s", `${base}..HEAD`).split("\n")).toEqual(["Add farewell", "Add greeting"]);
+		expect(fixture.read("greeting.txt")).toBe("hello\n");
+		expect(fixture.read("farewell.txt")).toBe("goodbye\n");
+		expect(fixture.status()).toBe("");
+		expect(startedA.run.state().status).toBe("delivered");
+		expect(startedB.run.state().status).toBe("delivered");
+		expectCleanedUp(fixture, startedA.run);
+		expectCleanedUp(fixture, startedB.run);
+		expectRuntimeViews(startedA.run);
+		expectRuntimeViews(startedB.run);
+	});
+});

@@ -4,7 +4,6 @@ import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createPiAgentRunner, modelRuntimeOf } from "../agents/session.ts";
 import { hashGoal } from "../artifacts/goal.ts";
-import { killAllChecks } from "../checks/runner.ts";
 import { ACTIVITY_EVENT, ACTIVITY_REQUEST_EVENT, LOCK_HEARTBEAT_MS, LOCK_STALE_MS, RUN_EVENT, RUN_EVENT_DEBOUNCE_MS, STATUS_KEY } from "../config.ts";
 import { acquireLock, type LockOptions, type RunLock } from "../run/lock.ts";
 import { activeRun, listRuns, openRun, unfinishedRuns, type RunStore } from "../run/store.ts";
@@ -215,9 +214,11 @@ export class Herder {
 			runner: () => held.runner ??= this.#runner(s, held.run),
 			onActivity: (activity) => {
 				if (s.closed) return;
-				this.board.update(activity);
 				// A stopping run's steps still report until they see the abort; their entries are already gone.
-				if (!held.closing && s.held === held) (s.agents ??= new StepAgents()).update(activity, { ownerSessionId: s.id, runId: held.runId, launch: held.launch?.launch });
+				if (!held.closing && s.held === held) {
+					this.board.update(held.runId, activity);
+					(s.agents ??= new StepAgents()).update(activity, { ownerSessionId: s.id, runId: held.runId, launch: held.launch?.launch });
+				}
 				this.refresh(s);
 			},
 			onProgress: () => this.refresh(s),
@@ -302,7 +303,7 @@ export class Herder {
 			});
 			const launch: BackgroundLaunch = new BackgroundLaunch(handle, (outcome, silenced) => {
 				if (held.launch === launch) held.launch = undefined;
-				this.board.clear();
+				this.board.clearRun(held.runId);
 				this.refresh(s);
 				if (silenced || s.closed) return;
 				this.pi.sendMessage({ customType: FOLLOW_UP_TYPE, display: true, content: followUpText(outcome, { runId: held.runId, dir: held.run.paths.dir }), details: { runId: held.runId, ...outcome } }, { triggerTurn: true, deliverAs: "followUp" });
@@ -320,7 +321,7 @@ export class Herder {
 		const held = s.held;
 		let text: string | undefined;
 		try {
-			text = held && statusText({ state: held.run.state(), tasks: planTasks(held.run), running: this.board.running(), launch: held.launch?.launch });
+			text = held && statusText({ state: held.run.state(), tasks: planTasks(held.run), running: this.board.running(held.runId), launch: held.launch?.launch });
 		} catch {
 			text = held && `herder: ${held.runId}`;
 		}
@@ -335,6 +336,10 @@ export class Herder {
 		if (s.timer) clearInterval(s.timer);
 		s.timer = undefined;
 		s.held = undefined;
+		if (held) {
+			this.board.clearRun(held.runId);
+			s.agents?.clear();
+		}
 		this.refresh(s);
 		held?.unannounce?.();
 		try { held?.lock.release(); } catch {}
@@ -364,7 +369,7 @@ export class Herder {
 		held.controller.abort(new Error("run lock lost"));
 		const launch = held.launch;
 		void launch?.stop("run lock lost", 0, "always");
-		this.board.clear();
+		this.board.clearRun(held.runId);
 		s.agents?.clear();
 		this.refresh(s);
 		if (s.closed) return;
@@ -416,7 +421,7 @@ export class Herder {
 			const warning = await this.runtime(s, held).abandon(reason);
 			return warning ? { runId: id, warning } : { runId: id };
 		} finally {
-			this.board.clear();
+			this.board.clearRun(held.runId);
 			s.agents?.clear();
 			if (s.held === held) this.release(s);
 		}
@@ -425,14 +430,14 @@ export class Herder {
 	/** Releases a run that has finished (delivered, abandoned, failed); otherwise refreshes the footer. */
 	settle(s: Session, held: Held): void {
 		if (s.held === held && !held.launch && !held.launching && isFinished(held.run.state())) {
-			this.board.clear();
+			this.board.clearRun(held.runId);
 			this.release(s);
 		} else this.refresh(s);
 	}
 
 	/**
-	 * Stops the launch and tool calls, kills checks, and clears footer and activity. The lock is released once all work
-	 * settled: Pi keeps the process alive across reload, new, resume, and fork, so unsettled work could still journal.
+	 * Stops the session's launch, tool calls, and checks, and clears its footer and activity. The lock is released once all
+	 * work settled: Pi keeps the process alive across reload, new, resume, and fork, so unsettled work could still journal.
 	 * Until then the lock stays (going stale without heartbeats). Safe to call twice.
 	 */
 	async shutdown(ctx: ExtensionContext): Promise<void> {
@@ -449,12 +454,11 @@ export class Herder {
 			held.closing = true;
 			held.controller.abort(new Error("session shutdown"));
 		}
-		killAllChecks();
 		if (held?.launch) try { await held.launch.stop("session shutdown", 0, "always"); } catch {}
 		const work = held ? Promise.allSettled([...held.ops, ...(held.launch ? [held.launch.settled] : [])]) : undefined;
 		const settled = !work || await within(work, this.stopWaitMs);
 		try { ctx.ui.setStatus(STATUS_KEY, undefined); } catch {}
-		this.board.clear(true);
+		this.board.clearRun(held?.runId, true);
 		s?.agents?.clear();
 		if (s) s.held = undefined;
 		const release = () => {
