@@ -26,7 +26,7 @@ Keep a note only when a later agent, in a session other than the one it came fro
 The categories:
 - user: who the user is (role, expertise, goals) as far as it bears on the work. Only what they said or showed; no guesses, flattery, or judgments of them.
 - feedback: how the user wants the agent to work: their corrections ("don't", "stop doing X", work they asked to redo) and approaches they confirmed ("yes, exactly", or an unusual choice they accepted). Record what worked as well as what failed, or later agents drift away from what the user already approved.
-- project: standing constraints and pitfalls of this project that the code does not show and later work must respect: a rule the user set for the project, why something must stay a certain way, a trap that cost time and would again. A decision made for one task is none of these: its code and commit record it.
+- project: standing constraints and pitfalls of this project that the code does not show and later work must respect: a rule the user set for the project, why something must stay a certain way, a trap that cost time and would again. A decision made for one task is none of these: its code and commit record it. A standing rule every session in this repository must follow belongs in its AGENTS.md, which you cannot change: keep it as a project note, and the user moves such notes into AGENTS.md, where they are reviewed.
 - reference: where to find information outside the code: documents, dashboards, issue trackers, systems, people.
 
 Weigh the evidence:
@@ -114,7 +114,7 @@ export function kickoffText(run: DreamRun, index: string | null, notes: Note[] =
 		...unusedSection,
 		"",
 		"Work in four phases:",
-		"1. Orient: memory_read the notes, and look around the code with ls and read so you know what is there and which notes the code now contradicts.",
+		"1. Orient: memory_read the notes, read the project's AGENTS.md or CLAUDE.md files (you are not given them), and look around the code with ls and read so you know what is there, what AGENTS.md already says, and which notes the code or AGENTS.md now contradicts or repeats.",
 		"2. Gather: take the sessions one or two at a time, oldest first, and recall_read each from its first new entry (recall_read with seq = its fromSeq, then onwards). Look first at what the user said: corrections, confirmations, stated defaults, decisions and their reasons, and references.",
 		"3. Verify and consolidate: hold each candidate to \"What to keep\" and check its claims against the code with read, grep, find, and ls; stage notes with dream_save (with sources) and outdated ones with dream_forget; then dream_commit, naming the one or two sessions, before you read the next ones. Commit them even when nothing was worth keeping, so they count as done.",
 		unused.length

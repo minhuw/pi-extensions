@@ -97,6 +97,8 @@ describe("the system prompt", () => {
 		expect(DREAM_PROMPT).toContain("Before keeping a candidate drawn from one session, recall_search the user's other sessions for the same theme. Keep a project decision or preference only when it came up in two or more sessions, or the user stated it as a standing rule");
 		expect(DREAM_PROMPT).toContain("keep one note about the cause rather than one per instance");
 		expect(DREAM_PROMPT).toContain("A decision made for one task is none of these: its code and commit record it.");
+		expect(DREAM_PROMPT).toContain("A standing rule every session in this repository must follow belongs in its AGENTS.md, which you cannot change: keep it as a project note");
+		expect(kickoffText(run(), "")).toContain("read the project's AGENTS.md or CLAUDE.md files (you are not given them)");
 		expect(DREAM_PROMPT).toContain("conventions visible in the code, and decisions the code now implements;");
 		expect(DREAM_PROMPT).toContain("the current state of anything, which keeps changing: files out of sync, what is done or still broken, work in progress");
 		expect(DREAM_PROMPT).toContain("how a bug was fixed or what changed: the fix is in the code and its commit");
