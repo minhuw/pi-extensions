@@ -100,6 +100,8 @@ Workspace inspection classifies each `<cwd>/.pi/workspaces/<name>` directory int
 
 When removing a workspace that is a linked `git worktree`, garbage collection runs `git worktree remove --force` and `git worktree prune` against the main repository so Git's worktree metadata stays clean.
 
+A symbolic link under `<cwd>/.pi/workspaces/` is not a workspace, whether it points outside the project, elsewhere inside it, or at another workspace. `/workspace list` and `/workspace gc` skip it, a registry entry for it is dropped, and garbage collection removes neither the link nor its target. Garbage collection removes only an entry directly under `<cwd>/.pi/workspaces/` that is not a symbolic link: a `path` in `.registry.json` cannot redirect it anywhere else, and `/workspace gc` fails with an error when a workspace turns into a link while its review prompt is open.
+
 ## `/workspace` subcommands
 
 - `/workspace` or `/workspace list` — synchronize `<cwd>/.pi/workspaces/` with `.registry.json` and display each workspace's safety state (`PINNED`, `ACTIVE`, `SAFE`, `REVIEW`), reasons, byte size, purpose, and path, along with any allowed external paths.
@@ -119,4 +121,4 @@ npm run test:workspace
 npm run typecheck
 ```
 
-The offline Vitest suite covers path canonicalization, symlink escape detection, bash write target extraction, `.pi/workspaces` closure and registry persistence, `PINNED` / `ACTIVE` / `SAFE` / `REVIEW` safety classification, linked `git worktree` cleanup, and real Pi session runs on the faux provider.
+The offline Vitest suite covers path canonicalization, symlink escape detection, bash write target extraction, `.pi/workspaces` closure and registry persistence, `PINNED` / `ACTIVE` / `SAFE` / `REVIEW` safety classification, linked `git worktree` cleanup, symlinked `.pi/workspaces/<name>` entries that garbage collection must not follow, and real Pi session runs on the faux provider.

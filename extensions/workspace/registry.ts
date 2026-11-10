@@ -252,15 +252,8 @@ export async function syncWorkspaces(cwd: string, now?: Date, agentDir?: string)
 	for (const dirent of dirEntries) {
 		if (dirent.name.startsWith(".") || dirent.name === "policy.json") continue;
 		const fullPath = path.join(wsRoot, dirent.name);
-		let isDir = dirent.isDirectory();
-		if (dirent.isSymbolicLink()) {
-			try {
-				isDir = fs.statSync(fullPath).isDirectory();
-			} catch {
-				isDir = false;
-			}
-		}
-		if (!isDir) continue;
+		// A symbolic link is never a workspace: garbage collection would remove what it points at.
+		if (!dirent.isDirectory()) continue;
 		onDiskNames.add(dirent.name);
 
 		if (!byName.has(dirent.name)) {

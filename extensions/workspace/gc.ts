@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import { rm } from "node:fs/promises";
+import * as path from "node:path";
 import { promisify } from "node:util";
 import { resolveCanonicalPath, workspacesDir } from "./policy.ts";
 import {
@@ -35,7 +36,22 @@ export interface GcResult {
 	dryRun: boolean;
 }
 
-async function removeWorkspaceDirectory(report: WorkspaceSafetyReport): Promise<void> {
+/**
+ * Garbage collection removes only an entry directly under `<cwd>/.pi/workspaces/` that is not a symbolic
+ * link, so a symlinked, stale, or hand-edited registry path cannot redirect the removal elsewhere.
+ */
+function isRemovableWorkspacePath(projectCwd: string, entryPath: string): boolean {
+	const wsRoot = resolveCanonicalPath(workspacesDir(projectCwd));
+	return path.dirname(entryPath) === wsRoot && resolveCanonicalPath(entryPath) === entryPath;
+}
+
+async function removeWorkspaceDirectory(projectCwd: string, report: WorkspaceSafetyReport): Promise<void> {
+	if (!isRemovableWorkspacePath(projectCwd, report.entry.path)) {
+		throw new Error(
+			`Refusing to remove "${report.entry.path}": it is not a workspace directory in ${workspacesDir(projectCwd)}.`,
+		);
+	}
+
 	if (report.isWorktree && report.worktreeMainRepo) {
 		try {
 			await execFileAsync(
@@ -96,9 +112,15 @@ export async function runWorkspaceGc(options: GcOptions): Promise<GcResult> {
 				checkPid: options.checkPid,
 			});
 
+			// A path that removal refuses is never reported as removed or offered for removal.
+			if (!isRemovableWorkspacePath(projectCwd, entry.path)) {
+				kept.push(report);
+				continue;
+			}
+
 			if (report.status === "SAFE") {
 				if (!dryRun) {
-					await removeWorkspaceDirectory(report);
+					await removeWorkspaceDirectory(projectCwd, report);
 					removedNames.add(entry.name);
 				}
 				removed.push(report);
@@ -109,7 +131,7 @@ export async function runWorkspaceGc(options: GcOptions): Promise<GcResult> {
 				if (!dryRun && options.confirmReview) {
 					const decision = await options.confirmReview(report);
 					if (decision === "remove") {
-						await removeWorkspaceDirectory(report);
+						await removeWorkspaceDirectory(projectCwd, report);
 						removedNames.add(entry.name);
 						removed.push(report);
 						continue;
