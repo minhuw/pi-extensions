@@ -65,7 +65,7 @@ The server reads TTL and heartbeat from internal configuration so tests can shor
   ```
   - `id` must look like a pi session id (1–128 characters of `[A-Za-z0-9._-]`); `name`, `title`, `model` are cut to 200 characters, `cwd` to 1024, `project` and `host` to 255.
   - `project` is the name of the git repository holding `cwd` as pika files the session: the main checkout's folder, also from a subdirectory, a linked worktree, a Herder step, or a Subagents worktree child. The extension gets it from the credentials registry's `repository(cwd)` and waits at most 3 s for it before each connect. Outside git, with an older pika without `repository`, or when it fails, `project` is the basename of `cwd`.
-  - **Ownership:** the owner of a session id is, in order, the device pika's `sessions` table records for it, the device holding it online, or the device that last held it online if that was within the TTL or messages are still queued for it. A `hello` from a device other than a recorded or remembered owner closes 4403; one while the id is online from another device closes 4409. If it is online from the same device, the older connection is closed with 4410 and this one takes over.
+  - **Ownership:** the owner of a session id is, in order, the device pika's `sessions` table records for it, the device holding it online, or the device that last held it online if that was within the TTL or messages are still queued for it. A `hello` from a device other than a recorded or remembered owner closes 4403; one while the id is online from another device closes 4409. If it is online from the same device, the older connection is closed with 4410 and this one takes over. The same owner decides which device may act for a session in a room (`POST {base}/api/relay/v1/rooms`).
   - The token is checked again when `hello` arrives, so a device revoked between the upgrade and `hello` is closed with 4401.
   - On success the server answers `welcome` and then pushes every queued, unexpired message for this session in acceptance order.
 - `state`: `{ type: "state", state?: "idle" | "busy", name?, title?, model? }` updates the online entry.
@@ -83,6 +83,9 @@ The server reads TTL and heartbeat from internal configuration so tests can shor
 - `message`: `{ type: "message", id, from: Sender, text, urgent, replyTo?, hops, sentAt }`, where `Sender` is `{ kind: "session", sessionId, device, deviceName, name?, title?, project? }` or `{ kind: "web" }`. Pushed again after a reconnect while unacknowledged; the client deduplicates by `id`.
 - `status`: `{ type: "status", id, status: "delivered" | "expired", to: Target, at }` for messages this session sent. Sent to the sender's current connection; if the sender is offline it is dropped.
 - `ping`: `{ type: "ping", at }` every heartbeat interval.
+- `room`: `{ type: "room", room, representative?, at }` when a room's representative changes (see Room representatives); `representative` is the new one's session id, absent when nobody represents the room now.
+
+Clients ignore frame types they do not know, so a server may add frames.
 
 `Target` is `{ sessionId, device?, deviceName?, name?, title?, project? }`, filled from the online entry or pika's records when known; `deviceName` is present exactly when `device` is. Servers older than 0.4 send no `deviceName` anywhere, so clients treat it as optional.
 
@@ -90,7 +93,7 @@ Message ids are server-generated, URL-safe, and unique for the server's lifetime
 
 ### Mailbox and lifecycle
 
-- Held in memory only; a restart drops queued messages and the event ring. Session transcripts, which pika already uploads, are the permanent record.
+- Held in memory only; a restart drops queued messages, the event ring, and chatrooms with their members and representatives. Session transcripts, which pika already uploads, are the permanent record.
 - A message is accepted (`queued`), pushed while the target is online, and becomes `delivered` on `ack`. If it is not acknowledged within the TTL of its acceptance, it is removed and becomes `expired`, and the sender gets `status: expired`.
 - **Bound to the target's device:** when a message is accepted, the target's owner (see Ownership) is recorded with it if known, and the message is pushed only to a connection of that device.
 - **Sender reconnecting:** if the sender's connection changed between `send` and the outcome, a `delivered` outcome that can no longer be reported as `sent` goes to the sender's current connection as `status: delivered`.
@@ -108,18 +111,28 @@ Message ids are server-generated, URL-safe, and unique for the server's lifetime
   ```
   `recorded` says whether pika has the session's transcript. Items are sorted by `deviceName` case-insensitively, then by `device`, then by `connectedAt` with the newest first.
 
-- **GET `{base}/api/relay/v1/rooms`** with the bearer token → `{ items: RelayRoom[] }` (explicit topic chatrooms).
-- **POST `{base}/api/relay/v1/rooms`** with `{ room, sessionId, action?: "join" | "leave", topic? }` → joins or leaves an explicit room, returning `{ room: RelayRoom, messages: RoomMessage[] }`.
+- **GET `{base}/api/relay/v1/rooms`** with the bearer token → `{ items: RelayRoom[] }` (explicit topic chatrooms). `RelayRoom` is `{ name, topic?, createdAt, updatedAt, messageCount, members, representative?, lastMessage? }`; `representative` is the session id of the room's representative, absent when it has none.
+- **POST `{base}/api/relay/v1/rooms`** with `{ room, sessionId, action?: "join" | "leave" | "represent" | "unrepresent", topic? }` → joins, leaves, represents, or stops representing an explicit room, returning `{ room: RelayRoom, messages: RoomMessage[] }`. A device acts only for its own sessions: for every action, a session whose owner (see Ownership) is another device answers 403 `not_owner`, and one that nobody owns 400 `unknown_session`; neither changes the room or pushes a frame. Joining or representing also needs a session that is online or recorded (else 400 `unknown_session`), and leaving or unrepresenting a room that does not exist answers 400 `invalid`.
 - **GET `{base}/api/relay/v1/rooms/{name}?limit=&after=`** → `{ room: RelayRoom, messages: RoomMessage[] }`, allowing any agent to read room message history on demand.
+
+### Room representatives
+
+A room may have one representative: a member session that stands for the user. The other members take it that the user does not read their own output and report to the representative, which talks to the user. The extension lets only a session with always-on mode represent (see `/relay represent`).
+
+- `represent` makes the session a member if it is not one, and replaces any previous representative.
+- `unrepresent` clears the representative only when this session is it; otherwise nothing changes.
+- A representative that leaves the room, by `leave` or by the browser's member route, stops representing it. Deleting a room ends its representative too. Going offline does not.
+- Each change pushes `room` to every online member of the room, and to the previous representative if it left. An action that changes nothing pushes nothing. Clients learn the current representatives from `GET rooms` when they connect.
+- The representative is kept with the room, in memory: a server restart clears it.
 
 ### Browser routes (authenticated like the rest of `{base}/api/v1/`)
 
 - `GET relay/sessions` → `{ items: OnlineSession[] }`, the same list.
-- `GET relay/rooms` → `{ items: RelayRoom[] }`.
+- `GET relay/rooms` → `{ items: RelayRoom[] }`, with `representative` as for devices.
 - `POST relay/rooms` with `{ name, topic?, members?: string[] }` → creates or updates an explicit chatroom and its member sessions.
 - `GET relay/rooms/{name}` → `{ room: RelayRoom, messages: RoomMessage[] }`.
-- `POST relay/rooms/{name}/members` with `{ sessionId, action?: "add" | "remove" }` → adds or removes a member session.
-- `DELETE relay/rooms/{name}` → deletes the room (`204 No Content`).
+- `POST relay/rooms/{name}/members` with `{ sessionId, action?: "add" | "remove" }` → adds or removes a member session, whichever device owns it; removing the representative clears it.
+- `DELETE relay/rooms/{name}` → deletes the room (`204 No Content`); if it had a representative, its online members get `room` without one.
 - `POST relay/messages` with body `{ to, text, urgent?: boolean }` (1:1) or `{ room, text, mentions?: string[], urgent?: boolean }` (chatroom) → 200 `{ id, status: "delivered" | "queued", to: Target, room?, notified? }`, or 400 or 429 `{ error: <reason> }` with the same reasons as `send` (no `self` or `hop_limit`). The sender is `{ kind: "web" }`, with hops 0. In a chatroom, only `@`-mentioned members (via `mentions` or `@name` / `@sessionId` / `@all` in `text`) receive a live WebSocket `message` push that triggers a turn.
 - `GET relay/events?limit=` (default 100, max 500) → `{ items: RelayEvent[] }`, newest first:
   ```
@@ -140,7 +153,9 @@ Use a WebSocket client (for example `tokio-tungstenite`) against the real router
 - the heartbeat timeout marking a session offline;
 - revoking a device, and continuing it by pairing, which close with 4401;
 - `deviceName` in every object that carries `device`, the sort order of the session lists, and renames showing at once;
-- `PIKA_RELAY=off`, health `features`, and the browser routes, including web sends.
+- `PIKA_RELAY=off`, health `features`, and the browser routes, including web sends;
+- room actions only for the calling device's sessions: each from the owner, 403 `not_owner` from another device changing nothing, 400 `unknown_session` for an id nobody owns;
+- room representatives: `represent` replacing and joining, `unrepresent` by others changing nothing, leaving, browser removal, and deletion clearing it, the `room` frame reaching exactly the online members, and the summaries in every room route.
 
 ## Credentials registry (`extensions/pika/`, additive)
 
@@ -277,6 +292,7 @@ When the session is idle, the notice starts a turn, and its content ends with th
 - `/relay` shows the connection state and reason, the server URL, this session's id, and the online sessions.
 - `/relay send <sessionId> <text>` sends as the user (hops 1).
 - `/relay rooms`, `/relay join <room> [topic]`, and `/relay leave <room>` list, join, or leave chatrooms; `/relay log` lists the branch's relay messages.
+- `/relay represent <room>` makes this session the room's representative, refused unless always-on mode is on; `/relay represent off [<room>]` stops. Turning always-on off stops representing every room.
 - `/relay side [on|off]` shows side answers, or overrides `relay.sideAnswers` for this session.
 - `/relay off` and `/relay on` disconnect or reconnect this session for its lifetime.
 

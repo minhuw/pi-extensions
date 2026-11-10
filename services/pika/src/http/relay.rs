@@ -21,7 +21,8 @@ use tokio::time::{Duration, Instant};
 use super::ingest::bearer;
 use super::{AppState, blocking, error, internal_error};
 use crate::relay::{
-    self, Closing, Connection, Draft, Frames, Origin, Outcome, Reason, Reply, SessionInfo, StateUpdate, close,
+    self, Closing, Connection, Draft, Frames, Origin, Outcome, Reason, Reply, RoomAction, SessionInfo, StateUpdate,
+    close,
 };
 use crate::util::{format_iso_ms, now_ms, sha256_hex};
 
@@ -106,6 +107,7 @@ async fn recorded(state: &AppState, draft: &Draft) -> anyhow::Result<Option<rela
 fn reason_response(reason: Reason) -> Response {
     let status = match reason {
         Reason::RateLimited | Reason::MailboxFull => StatusCode::TOO_MANY_REQUESTS,
+        Reason::NotOwner => StatusCode::FORBIDDEN,
         _ => StatusCode::BAD_REQUEST,
     };
     error(status, reason.as_str())
@@ -189,17 +191,18 @@ pub async fn device_room_detail(
     }
 }
 
-/// `POST {base}/api/relay/v1/rooms` with `{ room, sessionId, action?: "join" | "leave", topic? }` for devices.
+/// `POST {base}/api/relay/v1/rooms` with `{ room, sessionId, action?: "join" | "leave" | "represent" | "unrepresent",
+/// topic? }` for devices, for a session the device owns.
 pub async fn device_update_room(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    match device(&state, &headers).await {
-        Ok(Some(_)) => {}
+    let device = match device(&state, &headers).await {
+        Ok(Some((device, _))) => device,
         Ok(None) => return error(StatusCode::UNAUTHORIZED, "unauthorized"),
         Err(e) => return internal_error(e),
-    }
+    };
     let body = match body {
         Ok(Json(body)) => body,
         Err(rejection @ JsonRejection::MissingJsonContentType(_)) => return rejection.into_response(),
@@ -215,9 +218,11 @@ pub async fn device_update_room(
     if !relay::valid_session_id(session_id) {
         return error(StatusCode::BAD_REQUEST, "invalid");
     }
-    let join = match obj.get("action").and_then(Value::as_str) {
-        None | Some("join") | Some("add") => true,
-        Some("leave") | Some("remove") => false,
+    let action = match obj.get("action").and_then(Value::as_str) {
+        None | Some("join") | Some("add") => RoomAction::Join,
+        Some("leave") | Some("remove") => RoomAction::Leave,
+        Some("represent") => RoomAction::Represent,
+        Some("unrepresent") => RoomAction::Unrepresent,
         Some(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
     };
     let topic = match obj.get("topic") {
@@ -231,7 +236,7 @@ pub async fn device_update_room(
         Ok(rec) => rec,
         Err(e) => return internal_error(e),
     };
-    match state.relay.set_room_member(room, session_id, rec, join, topic) {
+    match state.relay.set_room_member(room, session_id, rec, Some(&device), action, topic) {
         Ok(detail) => Json(detail).into_response(),
         Err(reason) => reason_response(reason),
     }
@@ -321,9 +326,9 @@ pub async fn room_member(
     if !relay::valid_session_id(session_id) {
         return error(StatusCode::BAD_REQUEST, "invalid");
     }
-    let add = match obj.get("action").and_then(Value::as_str) {
-        None | Some("add") | Some("join") => true,
-        Some("remove") | Some("leave") => false,
+    let action = match obj.get("action").and_then(Value::as_str) {
+        None | Some("add") | Some("join") => RoomAction::Join,
+        Some("remove") | Some("leave") => RoomAction::Leave,
         Some(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
     };
     refresh_names(&state).await;
@@ -332,7 +337,7 @@ pub async fn room_member(
         Ok(rec) => rec,
         Err(e) => return internal_error(e),
     };
-    match state.relay.set_room_member(&name, session_id, rec, add, None) {
+    match state.relay.set_room_member(&name, session_id, rec, None, action, None) {
         Ok(detail) => Json(detail).into_response(),
         Err(reason) => reason_response(reason),
     }

@@ -389,6 +389,10 @@ async fn sessions_belong_to_one_device() {
     assert_eq!(c.closed().await, 4403);
     let (_recorded, _) = Client::online(&s, &s.laptop, SESSION_ID).await;
     tokio::time::sleep(Duration::from_millis(5)).await;
+    // Nor while the laptop holds it online: the recorded owner decides first.
+    let mut c = Client::connect(&s, &s.desktop).await;
+    c.send(hello(SESSION_ID)).await;
+    assert_eq!(c.closed().await, 4403);
 
     // Online from the laptop: the desktop may not take it over.
     let (mut first, _) = Client::online(&s, &s.laptop, "sess-a").await;
@@ -1674,4 +1678,231 @@ async fn chatrooms_sync_agents_across_repos_and_only_notify_mentioned_members() 
     assert_eq!(deleted.status, StatusCode::NO_CONTENT);
     let list_after = http(&s.app, get("/api/v1/relay/rooms", None, None)).await;
     assert_eq!(list_after.json()["items"], json!([]));
+}
+
+/// `POST {base}/api/relay/v1/rooms` as the device of `token`.
+async fn room_action(s: &Server, token: Option<&str>, body: Value) -> Reply {
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{}/api/relay/v1/rooms", s.base))
+        .header("content-type", "application/json");
+    if let Some(token) = token {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    http(&s.app, request.body(Body::from(body.to_string())).unwrap()).await
+}
+
+/// Reads the next `room` frame of each client and checks that it names `representative`, or nobody.
+async fn heard(clients: &mut [&mut Client], representative: Option<&str>) {
+    for client in clients.iter_mut() {
+        let frame = client.next().await;
+        assert_eq!((&frame["type"], &frame["room"]), (&json!("room"), &json!("team")), "{frame}");
+        assert_eq!(frame.get("representative").and_then(Value::as_str), representative, "{frame}");
+        assert!(frame["at"].as_str().is_some_and(|at| at.ends_with('Z')), "{frame}");
+    }
+}
+
+fn member_ids(room: &Value) -> Vec<&str> {
+    room["members"].as_array().unwrap().iter().map(|m| m["sessionId"].as_str().unwrap()).collect()
+}
+
+#[tokio::test]
+async fn a_room_has_one_representative_and_its_online_members_hear_each_change() {
+    let s = server().await;
+    let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    let (mut b, _) = Client::online(&s, &s.desktop, "sess-b").await;
+    let (mut c, _) = Client::online(&s, &s.laptop, "sess-c").await;
+    let (mut outsider, _) = Client::online(&s, &s.laptop, "sess-x").await;
+    for (id, token) in [("sess-a", &s.laptop), ("sess-b", &s.desktop)] {
+        let joined = room_action(&s, Some(token), json!({ "room": "team", "sessionId": id })).await;
+        assert_eq!(joined.status, StatusCode::OK);
+        assert!(joined.json()["room"].get("representative").is_none(), "nobody represents a new room");
+    }
+
+    // A member represents the room; its online members hear it, a session outside it does not.
+    let body = json!({ "room": "#team", "sessionId": "sess-b", "action": "represent" });
+    let represented = room_action(&s, Some(&s.desktop), body).await;
+    assert_eq!(represented.status, StatusCode::OK);
+    assert_eq!(represented.json()["room"]["representative"], "sess-b");
+    assert!(represented.json()["messages"].is_array(), "the room detail, as for join");
+    heard(&mut [&mut a, &mut b], Some("sess-b")).await;
+
+    // A session that is not a member becomes one and replaces the representative.
+    let body = json!({ "room": "team", "sessionId": "sess-c", "action": "represent" });
+    let replaced = room_action(&s, Some(&s.laptop), body).await;
+    assert_eq!(replaced.status, StatusCode::OK);
+    assert_eq!(replaced.json()["room"]["representative"], "sess-c");
+    assert_eq!(member_ids(&replaced.json()["room"]), ["sess-a", "sess-b", "sess-c"]);
+    heard(&mut [&mut a, &mut b, &mut c], Some("sess-c")).await;
+
+    // Every room summary carries it: the device and browser lists and details.
+    for (path, token) in [("/api/relay/v1/rooms", Some(s.laptop.as_str())), ("/api/v1/relay/rooms", None)] {
+        let list = http(&s.app, get(path, token, None)).await;
+        assert_eq!(list.json()["items"][0]["representative"], "sess-c", "{path}");
+    }
+    for (path, token) in [("/api/relay/v1/rooms/team", Some(s.laptop.as_str())), ("/api/v1/relay/rooms/team", None)] {
+        let detail = http(&s.app, get(path, token, None)).await;
+        assert_eq!(detail.json()["room"]["representative"], "sess-c", "{path}");
+    }
+
+    // `unrepresent` by another member, and `represent` by the representative, change nothing and push nothing.
+    let body = json!({ "room": "team", "sessionId": "sess-a", "action": "unrepresent" });
+    let unchanged = room_action(&s, Some(&s.laptop), body).await;
+    assert_eq!((unchanged.status, &unchanged.json()["room"]["representative"]), (StatusCode::OK, &json!("sess-c")));
+    let body = json!({ "room": "team", "sessionId": "sess-c", "action": "represent" });
+    let unchanged = room_action(&s, Some(&s.laptop), body).await;
+    assert_eq!(unchanged.json()["room"]["representative"], "sess-c");
+
+    // The representative stops representing and stays a member; the next frame each member gets says so.
+    let body = json!({ "room": "team", "sessionId": "sess-c", "action": "unrepresent" });
+    let cleared = room_action(&s, Some(&s.laptop), body).await;
+    assert_eq!(cleared.status, StatusCode::OK);
+    assert!(cleared.json()["room"].get("representative").is_none(), "{}", cleared.json());
+    assert_eq!(member_ids(&cleared.json()["room"]), ["sess-a", "sess-b", "sess-c"]);
+    heard(&mut [&mut a, &mut b, &mut c], None).await;
+
+    // A representative that leaves stops representing, and hears it with the members that stay.
+    room_action(&s, Some(&s.laptop), json!({ "room": "team", "sessionId": "sess-a", "action": "represent" })).await;
+    heard(&mut [&mut a, &mut b, &mut c], Some("sess-a")).await;
+    let body = json!({ "room": "team", "sessionId": "sess-a", "action": "leave" });
+    let left = room_action(&s, Some(&s.laptop), body).await;
+    assert!(left.json()["room"].get("representative").is_none(), "{}", left.json());
+    assert_eq!(member_ids(&left.json()["room"]), ["sess-b", "sess-c"]);
+    heard(&mut [&mut a, &mut b, &mut c], None).await;
+
+    // So does one the browser removes.
+    room_action(&s, Some(&s.desktop), json!({ "room": "team", "sessionId": "sess-b", "action": "represent" })).await;
+    heard(&mut [&mut b, &mut c], Some("sess-b")).await;
+    let body = json!({ "sessionId": "sess-b", "action": "remove" });
+    let removed = http(&s.app, post("/api/v1/relay/rooms/team/members", body, None)).await;
+    assert!(removed.json()["room"].get("representative").is_none(), "{}", removed.json());
+    heard(&mut [&mut b, &mut c], None).await;
+
+    // Deleting a represented room tells its members that nobody represents it.
+    room_action(&s, Some(&s.laptop), json!({ "room": "team", "sessionId": "sess-c", "action": "represent" })).await;
+    heard(&mut [&mut c], Some("sess-c")).await;
+    let deleted = http(&s.app, with_body(Method::DELETE, "/api/v1/relay/rooms/team", json!({}), None)).await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    heard(&mut [&mut c], None).await;
+
+    // Sessions outside the room heard nothing: their next frame is a message sent now.
+    for (client, to) in [(&mut a, "sess-a"), (&mut outsider, "sess-x")] {
+        b.send(send(to, to, "after the room")).await;
+        let frame = client.next().await;
+        assert_eq!((&frame["type"], &frame["text"]), (&json!("message"), &json!("after the room")), "{frame}");
+    }
+    assert_eq!(s.state.relay.queued(), 2, "room frames never enter the mailbox");
+}
+
+#[tokio::test]
+async fn representing_follows_the_rules_of_joining_and_leaving() {
+    let s = server().await;
+    record(&s.env.store, "sess-recorded", DEVICE);
+    let represent = |id: &str, room: &str| json!({ "room": room, "sessionId": id, "action": "represent" });
+
+    let unauthorized = room_action(&s, None, represent("sess-recorded", "team")).await;
+    assert_eq!(unauthorized.status, StatusCode::UNAUTHORIZED);
+    for (body, status, reason) in [
+        (json!({ "room": "team", "sessionId": "sess-recorded", "action": "elect" }), 400, "invalid"),
+        (represent("nobody", "team"), 400, "unknown_session"),
+        (represent("sess-recorded", "bad room"), 400, "invalid"),
+        (json!({ "room": "missing", "sessionId": "sess-recorded", "action": "unrepresent" }), 400, "invalid"),
+    ] {
+        let r = room_action(&s, Some(&s.laptop), body.clone()).await;
+        assert_eq!((r.status.as_u16(), &r.json()["error"]), (status, &json!(reason)), "{body}");
+    }
+    let r = http(&s.app, get("/api/v1/relay/rooms", None, None)).await;
+    assert_eq!(r.json()["items"], json!([]), "a refused represent creates no room");
+
+    // A recorded session that is offline may represent, as it may join; that creates the room.
+    let represented = room_action(&s, Some(&s.laptop), represent("sess-recorded", "team")).await;
+    assert_eq!(represented.status, StatusCode::OK);
+    let room = &represented.json()["room"];
+    assert_eq!((&room["name"], &room["representative"]), (&json!("team"), &json!("sess-recorded")));
+    assert_eq!((member_ids(room), &room["members"][0]["online"]), (vec!["sess-recorded"], &json!(false)));
+
+    // An online member hears a change; nobody else is around to.
+    let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    room_action(&s, Some(&s.laptop), json!({ "room": "team", "sessionId": "sess-a" })).await;
+    room_action(&s, Some(&s.laptop), json!({ "room": "team", "sessionId": "sess-recorded", "action": "leave" })).await;
+    heard(&mut [&mut a], None).await;
+}
+
+/// Checks that each body, sent as the device of `token`, is refused with `status` and `reason`.
+async fn refused_room_actions(s: &Server, token: &str, bodies: &[Value], status: u16, reason: &str) {
+    for body in bodies {
+        let r = room_action(s, Some(token), body.clone()).await;
+        assert_eq!((r.status.as_u16(), r.json()), (status, json!({ "error": reason })), "{body}");
+    }
+}
+
+#[tokio::test]
+async fn a_device_acts_in_rooms_only_for_the_sessions_it_owns() {
+    let s = server().await;
+    let action = |id: &str, action: &str| json!({ "room": "team", "sessionId": id, "action": action });
+    let all = |id: &str| ["join", "leave", "represent", "unrepresent"].map(|a| action(id, a));
+    let room = || async { http(&s.app, get("/api/v1/relay/rooms/team", None, None)).await.json()["room"].clone() };
+    let (mut l, _) = Client::online(&s, &s.laptop, "sess-l").await;
+    let (mut d, _) = Client::online(&s, &s.desktop, "sess-d").await;
+
+    // The laptop may not act for the desktop's online session; a refused join or represent creates no room.
+    refused_room_actions(&s, &s.laptop, &all("sess-d"), 403, "not_owner").await;
+    let r = http(&s.app, get("/api/v1/relay/rooms", None, None)).await;
+    assert_eq!(r.json()["items"], json!([]), "a refused action creates no room");
+
+    // Each action works from the owning device.
+    for (token, id) in [(&s.desktop, "sess-d"), (&s.laptop, "sess-l")] {
+        let joined = room_action(&s, Some(token), action(id, "join")).await;
+        assert_eq!(joined.status, StatusCode::OK, "{id}");
+    }
+    let represented = room_action(&s, Some(&s.desktop), action("sess-d", "represent")).await;
+    assert_eq!(represented.status, StatusCode::OK);
+    assert_eq!(represented.json()["room"]["representative"], "sess-d");
+    heard(&mut [&mut l, &mut d], Some("sess-d")).await;
+
+    // From another device, every action is refused and changes nothing.
+    refused_room_actions(&s, &s.laptop, &all("sess-d"), 403, "not_owner").await;
+    refused_room_actions(&s, &s.desktop, &all("sess-l"), 403, "not_owner").await;
+    let unchanged = room().await;
+    assert_eq!((member_ids(&unchanged), &unchanged["representative"]), (vec!["sess-d", "sess-l"], &json!("sess-d")));
+
+    let cleared = room_action(&s, Some(&s.desktop), action("sess-d", "unrepresent")).await;
+    assert_eq!(cleared.status, StatusCode::OK);
+    assert!(cleared.json()["room"].get("representative").is_none(), "{}", cleared.json());
+    heard(&mut [&mut l, &mut d], None).await;
+    let left = room_action(&s, Some(&s.desktop), action("sess-d", "leave")).await;
+    assert_eq!((left.status, member_ids(&left.json()["room"])), (StatusCode::OK, vec!["sess-l"]));
+
+    // A recorded owner counts while the session is offline, and a remembered one after it went offline.
+    record(&s.env.store, "sess-recorded", OTHER);
+    refused_room_actions(&s, &s.laptop, &all("sess-recorded"), 403, "not_owner").await;
+    let joined = room_action(&s, Some(&s.desktop), action("sess-recorded", "join")).await;
+    assert_eq!((joined.status, member_ids(&joined.json()["room"])), (StatusCode::OK, vec!["sess-l", "sess-recorded"]));
+    let (gone, _) = Client::online(&s, &s.desktop, "sess-gone").await;
+    room_action(&s, Some(&s.desktop), action("sess-gone", "join")).await;
+    drop(gone);
+    sessions_until(&s, |items| !ids(items).contains(&"sess-gone")).await;
+    refused_room_actions(&s, &s.laptop, &all("sess-gone"), 403, "not_owner").await;
+    assert_eq!(member_ids(&room().await), ["sess-l", "sess-recorded", "sess-gone"]);
+    let left = room_action(&s, Some(&s.desktop), action("sess-gone", "leave")).await;
+    assert_eq!((left.status, member_ids(&left.json()["room"])), (StatusCode::OK, vec!["sess-l", "sess-recorded"]));
+
+    // An id that nobody owns is still unknown, for every action.
+    refused_room_actions(&s, &s.laptop, &all("nobody"), 400, "unknown_session").await;
+
+    // The browser, as the user, may act for any device's session.
+    let path = "/api/v1/relay/rooms/team/members";
+    let added = http(&s.app, post(path, json!({ "sessionId": "sess-d" }), None)).await;
+    let (status, detail) = (added.status, added.json());
+    assert_eq!((status, member_ids(&detail["room"])), (StatusCode::OK, vec!["sess-l", "sess-recorded", "sess-d"]));
+    let removed = http(&s.app, post(path, json!({ "sessionId": "sess-d", "action": "remove" }), None)).await;
+    assert_eq!(removed.status, StatusCode::OK);
+
+    // No refused action pushed a frame: each member's next frame is a message sent now.
+    let (mut x, _) = Client::online(&s, &s.laptop, "sess-x").await;
+    for (client, to) in [(&mut l, "sess-l"), (&mut d, "sess-d")] {
+        x.send(send(to, to, "after the room")).await;
+        let frame = client.next().await;
+        assert_eq!((&frame["type"], &frame["text"]), (&json!("message"), &json!("after the room")), "{frame}");
+    }
 }

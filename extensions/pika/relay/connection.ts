@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-	CLOSE_REASONS, type HelloSession, type MessageFrame, type SentFrame, type StatusFrame, TERMINAL_CLOSES, timing, type Welcome, wsUrl,
+	CLOSE_REASONS, type HelloSession, type MessageFrame, type RoomFrame, type SentFrame, type StatusFrame, TERMINAL_CLOSES, timing, type Welcome, wsUrl,
 } from "./protocol.ts";
 
 export interface Credentials { url: string; token: string }
@@ -24,6 +24,8 @@ export interface ConnectionEvents {
 	hello(): HelloSession;
 	onMessage(frame: MessageFrame): void;
 	onStatus(frame: StatusFrame): void;
+	/** A room's representative changed. */
+	onRoom?(frame: RoomFrame): void;
 	onChange(state: ConnectionState): void;
 	/** The server has no relay; called once per connection. */
 	onUnsupported?(reason: string): void;
@@ -198,6 +200,7 @@ export class RelayConnection {
 		let frame: { type?: unknown; [key: string]: unknown };
 		try { frame = JSON.parse(data); } catch { return; }
 		if (!frame || typeof frame !== "object") return;
+		// A frame type this version does not know is ignored.
 		switch (frame.type) {
 			case "welcome":
 				this.onlineSince = Date.now();
@@ -214,6 +217,11 @@ export class RelayConnection {
 			case "status":
 				if (typeof frame.id === "string") {
 					try { this.events.onStatus(frame as unknown as StatusFrame); } catch { /* as above */ }
+				}
+				break;
+			case "room":
+				if (typeof frame.room === "string") {
+					try { this.events.onRoom?.(frame as unknown as RoomFrame); } catch { /* as above */ }
 				}
 				break;
 			case "sent": {

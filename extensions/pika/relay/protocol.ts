@@ -47,6 +47,8 @@ export const timing = {
 	conversationMs: 30 * 60_000,
 	/** How long a side request may take before it counts as failed and the sender gets a busy notice. */
 	sideTimeoutMs: 120_000,
+	/** How long a representative whose always-on mode went off waits for it to come back before it stops representing. */
+	modesGraceMs: 500,
 };
 
 /** Close codes after which a session stops reconnecting until its credentials change or `/relay on`. */
@@ -149,7 +151,12 @@ export interface RelayRoom {
 	messageCount: number;
 	members: RoomMember[];
 	lastMessage?: RoomMessage;
+	/** The session id of the member that represents the user in the room; absent when none does. */
+	representative?: string;
 }
+
+/** Pushed to every online member when a room's representative changes; servers before representatives send none. */
+export interface RoomFrame { type: "room"; room: string; representative?: string; at: string | number }
 
 export interface RelayRoomDetail {
 	room: RelayRoom;

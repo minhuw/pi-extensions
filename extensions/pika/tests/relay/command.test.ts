@@ -104,14 +104,14 @@ it("/relay on says why a session stays offline, and unknown subcommands show the
 	harnesses.push(h);
 	await h.session.prompt("/relay on");
 	expect(notes.last).toEqual({ type: "warning", message: "Relay stays offline: pika is not logged in or is disabled; run /pika login." });
-	for (const text of ["/relay bogus", "/relay off now", "/relay status now", "/relay log now"]) {
+	for (const text of ["/relay bogus", "/relay off now", "/relay status now", "/relay log now", "/relay represent", "/relay represent a b"]) {
 		await h.session.prompt(text);
-		expect(notes.last).toEqual({ type: "error", message: "Usage: /relay [status|send <sessionId> <text>|rooms|join <room> [topic]|leave <room>|log|side [on|off]|off|on]" });
+		expect(notes.last).toEqual({ type: "error", message: "Usage: /relay [status|send <sessionId> <text>|rooms|join <room> [topic]|leave <room>|represent <room>|represent off [<room>]|log|side [on|off]|off|on]" });
 	}
 	const command = h.session.extensionRunner.getCommand("relay")!;
 	expect(await command.getArgumentCompletions!("o")).toEqual([{ value: "off", label: "off" }, { value: "on", label: "on" }]);
 	expect(await command.getArgumentCompletions!("l")).toEqual([{ value: "leave", label: "leave" }, { value: "log", label: "log" }]);
-	expect((await command.getArgumentCompletions!(""))!.map((item) => item.value)).toEqual(["status", "send", "join", "leave", "rooms", "log", "side", "off", "on"]);
+	expect((await command.getArgumentCompletions!(""))!.map((item) => item.value)).toEqual(["status", "send", "join", "leave", "represent", "rooms", "log", "side", "off", "on"]);
 	// A subcommand typed in full gets no menu, so Enter runs it.
 	expect(await command.getArgumentCompletions!("off")).toBeNull();
 });

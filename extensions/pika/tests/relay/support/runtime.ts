@@ -12,6 +12,7 @@ import {
 import relayExtension from "../../../relay/index.ts";
 import { timing } from "../../../relay/protocol.ts";
 import { type CredentialsRegistry, credentialsRegistry } from "../../../credentials.ts";
+import { sessionModes } from "../../../relay/modes.ts";
 import { shared } from "../../../relay/shared.ts";
 import { TOKEN } from "./relay-server.ts";
 
@@ -37,6 +38,8 @@ export class Workspace {
 	async cleanup(): Promise<void> {
 		setCredentials(undefined);
 		credentialsRegistry().listeners.clear();
+		sessionModes().modes.clear();
+		sessionModes().listeners.clear();
 		await rm(this.root, { recursive: true, force: true });
 	}
 }
@@ -48,12 +51,22 @@ export function setCredentials(url: string | undefined, options: { token?: strin
 	for (const listener of [...registry.listeners]) listener();
 }
 
+/** Publishes a session's modes as always-on mode would, telling every listener. */
+export function setModes(sessionId: string, ...modes: string[]): void {
+	const registry = sessionModes();
+	if (modes.length) registry.modes.set(sessionId, new Set(modes));
+	else registry.modes.delete(sessionId);
+	for (const listener of [...registry.listeners]) listener(sessionId);
+}
+
 export interface Sent { message: { customType: string; content: unknown; display?: boolean; details?: unknown }; options: unknown }
 
 export interface SessionOptions {
 	workspace: Workspace;
 	/** Extension factories loaded after relay. */
 	extensions?: ExtensionFactory[];
+	/** Extension factories loaded before relay, as always-on mode is. */
+	extensionsBefore?: ExtensionFactory[];
 	/** Leave relay out, for example when it loads by path instead. */
 	noRelay?: boolean;
 	extensionPaths?: string[];
@@ -64,6 +77,8 @@ export interface SessionOptions {
 	ui?: ExtensionUIContext;
 	/** Makes relay's `pi.sendMessage` throw while it returns true, as a stale runtime would. */
 	failSend?: () => boolean;
+	/** How many recent tokens `session.compact()` keeps; 1 compacts away everything before the last turn. */
+	keepRecentTokens?: number;
 }
 
 export interface Harness {
@@ -99,7 +114,9 @@ export async function startSession(options: SessionOptions): Promise<Harness> {
 	const agentDir = options.workspace.agentDir;
 	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
 	const faux = options.faux ?? fauxProvider({ api: "relay-test-api", provider: "relay-test", models: [{ id: "test" }, { id: "other" }] });
-	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
+	const settingsManager = SettingsManager.inMemory({
+		retry: { enabled: false }, compaction: { enabled: false, ...(options.keepRecentTokens !== undefined ? { keepRecentTokens: options.keepRecentTokens } : {}) },
+	});
 	const sent: Sent[] = [];
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd: runtimeCwd, agentDir: runtimeAgentDir, sessionManager, sessionStartEvent }) => {
 		const services = await createAgentSessionServices({
@@ -109,6 +126,7 @@ export async function startSession(options: SessionOptions): Promise<Harness> {
 				additionalExtensionPaths: options.extensionPaths,
 				extensionFactories: [
 					(pi) => { pi.registerProvider(faux.provider); },
+					...(options.extensionsBefore ?? []),
 					...(options.noRelay ? [] : [(pi: ExtensionAPI) => relayExtension(spying(pi, sent, options.failSend))]),
 					...(options.extensions ?? []),
 				],
@@ -149,13 +167,18 @@ export async function startSession(options: SessionOptions): Promise<Harness> {
 	};
 }
 
-/** A UI context that records notifications; every other method is a no-op. */
+/** A UI context that records notifications and statuses; every other method is a no-op. */
 export class Notes {
 	readonly notes: { message: string; type?: string }[] = [];
+	/** The statuses set, by key; a cleared one is gone. */
+	readonly statuses = new Map<string, string>();
 	get last() { return this.notes.at(-1); }
 	get messages() { return this.notes.map((note) => note.message); }
 	context(): ExtensionUIContext {
-		const methods: Partial<ExtensionUIContext> = { notify: (message, type) => { this.notes.push({ message, type }); } };
+		const methods: Partial<ExtensionUIContext> = {
+			notify: (message, type) => { this.notes.push({ message, type }); },
+			setStatus: (key, text) => { if (text === undefined) this.statuses.delete(key); else this.statuses.set(key, text); },
+		};
 		return new Proxy(methods, {
 			get: (target, name) => name in target ? target[name as keyof ExtensionUIContext] : name === "then" ? undefined : () => undefined,
 		}) as ExtensionUIContext;

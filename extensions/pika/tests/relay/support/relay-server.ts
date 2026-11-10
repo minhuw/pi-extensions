@@ -73,7 +73,9 @@ export class FakeRelay {
 	limits = { ttlSeconds: 300, heartbeatSeconds: 20, maxTextBytes: 32 * 1024, maxHops: 8 };
 	/** Messages `queue` accepted: pushed on every welcome of their target until acknowledged or expired. */
 	readonly mailbox = new Map<string, { sessionId: string; frame: Frame }>();
-	readonly rooms = new Map<string, { name: string; topic?: string; createdAt: string; updatedAt: string; members: Set<string>; messages: RoomMessage[] }>();
+	readonly rooms = new Map<string, { name: string; topic?: string; createdAt: string; updatedAt: string; members: Set<string>; messages: RoomMessage[]; representative?: string }>();
+	/** Every `room` frame pushed, with the session it went to. */
+	readonly roomFrames: { sessionId: string; frame: Frame }[] = [];
 
 	async start(base = ""): Promise<this> {
 		this.base = base;
@@ -133,6 +135,11 @@ export class FakeRelay {
 					if (!room) return json(response, 400, { error: "invalid" });
 					room.members.delete(sid);
 					room.updatedAt = now;
+					// A representative that leaves stops representing.
+					if (room.representative === sid) this.setRepresentative(name, undefined);
+				} else if (body.action === "unrepresent") {
+					if (!room) return json(response, 404, { error: "not_found" });
+					if (room.representative === sid) this.setRepresentative(name, undefined);
 				} else {
 					if (!room) {
 						room = { name, ...(body.topic ? { topic: body.topic } : {}), createdAt: now, updatedAt: now, members: new Set(), messages: [] };
@@ -142,6 +149,7 @@ export class FakeRelay {
 						room.updatedAt = now;
 					}
 					room.members.add(sid);
+					if (body.action === "represent") this.setRepresentative(name, sid);
 				}
 				return json(response, 200, { room: this.roomSummary(name), messages: room.messages });
 			});
@@ -244,7 +252,35 @@ export class FakeRelay {
 			messageCount: room.messages.length,
 			members,
 			...(lastMessage ? { lastMessage } : {}),
+			...(room.representative ? { representative: room.representative } : {}),
 		};
+	}
+
+	/**
+	 * Makes a member the room's representative, or none, and pushes the change to every online member as the server
+	 * does; no change pushes nothing.
+	 */
+	setRepresentative(name: string, sessionId: string | undefined): void {
+		const room = this.rooms.get(name);
+		if (!room) throw new Error(`no room ${name}`);
+		if (room.representative === sessionId) return;
+		if (sessionId === undefined) delete room.representative;
+		else { room.members.add(sessionId); room.representative = sessionId; }
+		const frame: Frame = { type: "room", room: name, ...(sessionId ? { representative: sessionId } : {}), at: new Date().toISOString() };
+		for (const member of room.members) {
+			const connection = this.online(member);
+			if (!connection) continue;
+			this.roomFrames.push({ sessionId: member, frame });
+			this.sendTo(connection, frame);
+		}
+	}
+
+	/** Creates a room with these members, as joins would. */
+	addRoom(name: string, members: string[], topic?: string): void {
+		const now = new Date().toISOString();
+		const room = this.rooms.get(name) ?? { name, ...(topic ? { topic } : {}), createdAt: now, updatedAt: now, members: new Set<string>(), messages: [] };
+		for (const member of members) room.members.add(member);
+		this.rooms.set(name, room);
 	}
 
 	private async route(from: Connection, frame: Frame): Promise<SentAnswer> {

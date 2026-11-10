@@ -701,6 +701,8 @@ export interface RelayRoom {
 	updatedAt: string;
 	messageCount: number;
 	members: RelayRoomMember[];
+	/** The session id of the member that represents the user in the room; absent when none. */
+	representative?: string;
 	lastMessage?: RelayRoomMessage;
 }
 

@@ -6,7 +6,7 @@
 //! relay decided them. Each connection's writer task drains its outbox, so a peer that stops reading holds up neither
 //! the relay nor its own connection's reader; a queue that grows past its maximum closes the connection with 1008.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -488,7 +488,7 @@ impl Target {
     }
 }
 
-/// Why a send was rejected, in the order the relay checks.
+/// Why a send was rejected, in the order the relay checks, or a room action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
     Invalid,
@@ -498,6 +498,8 @@ pub enum Reason {
     HopLimit,
     UnknownSession,
     MailboxFull,
+    /// A device acted for a session that another device owns; room actions only.
+    NotOwner,
 }
 
 impl Reason {
@@ -510,6 +512,7 @@ impl Reason {
             Reason::HopLimit => "hop_limit",
             Reason::UnknownSession => "unknown_session",
             Reason::MailboxFull => "mailbox_full",
+            Reason::NotOwner => "not_owner",
         }
     }
 }
@@ -668,6 +671,17 @@ impl RoomMessage {
     }
 }
 
+/// What a device does to a session's place in a room (`action` of `POST {base}/api/relay/v1/rooms`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomAction {
+    Join,
+    Leave,
+    /// Joins if needed and becomes the room's representative, replacing any other.
+    Represent,
+    /// Stops representing the room; no change unless the session is its representative.
+    Unrepresent,
+}
+
 /// An explicit multi-agent chatroom.
 struct Room {
     name: String,
@@ -675,6 +689,8 @@ struct Room {
     created_at: i64,
     updated_at: i64,
     members: BTreeMap<String, RoomMember>,
+    /// The member that represents the user in the room, at most one; in memory only, like the room.
+    representative: Option<String>,
     messages: VecDeque<RoomMessage>,
     next_seq: u64,
 }
@@ -687,6 +703,7 @@ impl Room {
             created_at: now,
             updated_at: now,
             members: BTreeMap::new(),
+            representative: None,
             messages: VecDeque::new(),
             next_seq: 1,
         }
@@ -706,6 +723,7 @@ impl Room {
         object.insert("updatedAt".into(), format_iso_ms(self.updated_at).into());
         object.insert("messageCount".into(), (self.next_seq - 1).into());
         object.insert("members".into(), Value::Array(members_json));
+        put(&mut object, "representative", &self.representative);
         if let Some(last) = self.messages.back() {
             object.insert("lastMessage".into(), last.to_json(names));
         }
@@ -1064,6 +1082,14 @@ impl Inner {
         (Instant::now() < r.until || self.queues.contains_key(session)).then_some(r.device.as_str())
     }
 
+    /// The owner of `session` ("Ownership" in `docs/RELAY.md`): `recorded_device`, the device pika's sessions table
+    /// records for it, else the device holding it online, else the remembered one. `None` means nobody owns it.
+    fn owner<'a>(&'a self, session: &str, recorded_device: Option<&'a str>) -> Option<&'a str> {
+        recorded_device
+            .or_else(|| self.online.get(session).map(|o| o.device.as_str()))
+            .or_else(|| self.remembered_owner(session))
+    }
+
     /// The current connection of an online session.
     fn conn_of(&self, session: &str) -> Option<u64> {
         self.online.get(session).map(|o| o.conn)
@@ -1149,6 +1175,23 @@ impl Inner {
             "at": format_iso_ms(at),
         });
         self.push(conn, frame.to_string());
+    }
+
+    /// Tells the online sessions among `sessions` (the room's members, and its previous representative if that left)
+    /// that `representative` now represents `room`, or nobody.
+    fn announce_representative(&mut self, room: &str, representative: Option<&str>, sessions: BTreeSet<String>) {
+        let mut frame = Map::new();
+        frame.insert("type".into(), "room".into());
+        frame.insert("room".into(), room.into());
+        if let Some(representative) = representative {
+            frame.insert("representative".into(), representative.into());
+        }
+        frame.insert("at".into(), format_iso_ms(now_ms()).into());
+        let frame = Value::Object(frame).to_string();
+        let conns: Vec<u64> = sessions.iter().filter_map(|s| self.conn_of(s)).collect();
+        for conn in conns {
+            self.push(conn, frame.clone());
+        }
     }
 }
 
@@ -1330,18 +1373,18 @@ impl Relay {
             Some(c) => c.device.clone(),
             None => return Err(close::GOING_AWAY),
         };
-        // The owner is the recorded device, else the one holding the session online, else the remembered one.
-        if recorded_device.is_some_and(|d| d != device) {
-            return Err(close::OTHER_DEVICE);
-        }
+        // Only the owner takes the session online. Another device holding it online closes 4409, unless pika records a
+        // third device for it; any other owner closes 4403.
         match inner.online.get(&info.id) {
-            Some(other) if other.device != device => return Err(close::ONLINE_ELSEWHERE),
+            Some(other) if other.device != device && recorded_device.is_none_or(|d| d == device) => {
+                return Err(close::ONLINE_ELSEWHERE);
+            }
+            _ if inner.owner(&info.id, recorded_device).is_some_and(|d| d != device) => {
+                return Err(close::OTHER_DEVICE);
+            }
             Some(other) => {
                 let old = other.conn;
                 inner.close(old, close::REPLACED, "replaced by a newer connection");
-            }
-            None if recorded_device.is_none() && inner.remembered_owner(&info.id).is_some_and(|d| d != device) => {
-                return Err(close::OTHER_DEVICE);
             }
             None if inner.online.len() >= self.config.max_online => return Err(close::TOO_MANY),
             None => {}
@@ -1830,13 +1873,18 @@ impl Relay {
         Ok(inner.rooms[name].detail_json(&online_snapshot, &inner.names, MAX_ROOM_MESSAGES, 0))
     }
 
-    /// Joins or leaves a chatroom for `session_id`. Joining creates the room if it does not exist yet.
+    /// Joins, leaves, represents, or stops representing a chatroom for `session_id`. Joining and representing create
+    /// the room if it does not exist yet. When the representative changes, every online member, and the previous
+    /// representative if it left, gets a `room` frame. `device` is the device acting for the session, which must own
+    /// it (see `Inner::owner`): another owner is `NotOwner`, none at all `UnknownSession`, and neither changes
+    /// anything. `None` is the user, who may act for any session.
     pub fn set_room_member(
         &self,
         raw_name: &str,
         session_id: &str,
         recorded: Option<Recorded>,
-        join: bool,
+        device: Option<&str>,
+        action: RoomAction,
         topic: Option<String>,
     ) -> Result<Value, Reason> {
         let name = normalize_room_name(raw_name);
@@ -1844,9 +1892,17 @@ impl Relay {
             return Err(Reason::Invalid);
         }
         let mut inner = self.lock();
+        if let Some(device) = device {
+            match inner.owner(session_id, recorded.as_ref().map(|r| r.device.as_str())) {
+                None => return Err(Reason::UnknownSession),
+                Some(owner) if owner != device => return Err(Reason::NotOwner),
+                Some(_) => {}
+            }
+        }
         let now = now_ms();
         let online_snapshot: HashMap<String, Online> = inner.online.clone();
-        if join {
+        let previous = inner.rooms.get(name).and_then(|r| r.representative.clone());
+        if matches!(action, RoomAction::Join | RoomAction::Represent) {
             if !inner.rooms.contains_key(name) && inner.rooms.len() >= MAX_ROOMS {
                 return Err(Reason::MailboxFull);
             }
@@ -1874,24 +1930,47 @@ impl Relay {
                         .entry(session_id.to_owned())
                         .or_insert_with(|| RoomMember::from_recorded(session_id, recorded.as_ref(), now));
                 }
+                if action == RoomAction::Represent {
+                    room.representative = Some(session_id.to_owned());
+                }
             }
-            Ok(inner.rooms[name].detail_json(&online_snapshot, &inner.names, MAX_ROOM_MESSAGES, 0))
         } else {
-            {
-                let Some(room) = inner.rooms.get_mut(name) else {
-                    return Err(Reason::Invalid);
-                };
+            let Some(room) = inner.rooms.get_mut(name) else {
+                return Err(Reason::Invalid);
+            };
+            let represents = room.representative.as_deref() == Some(session_id);
+            if represents {
+                room.representative = None;
+            }
+            if action == RoomAction::Leave {
                 room.members.remove(session_id);
+            }
+            if action == RoomAction::Leave || represents {
                 room.updated_at = now;
             }
-            Ok(inner.rooms[name].detail_json(&online_snapshot, &inner.names, MAX_ROOM_MESSAGES, 0))
         }
+        let room = &inner.rooms[name];
+        let current = room.representative.clone();
+        if current != previous {
+            let mut sessions: BTreeSet<String> = room.members.keys().cloned().collect();
+            sessions.extend(previous);
+            inner.announce_representative(name, current.as_deref(), sessions);
+        }
+        Ok(inner.rooms[name].detail_json(&online_snapshot, &inner.names, MAX_ROOM_MESSAGES, 0))
     }
 
-    /// Deletes a chatroom; returns whether it existed.
+    /// Deletes a chatroom; returns whether it existed. A room that had a representative tells its online members
+    /// that nobody represents it now.
     pub fn delete_room(&self, raw_name: &str) -> bool {
         let name = normalize_room_name(raw_name);
-        self.lock().rooms.remove(name).is_some()
+        let mut inner = self.lock();
+        let Some(room) = inner.rooms.remove(name) else { return false };
+        if let Some(representative) = room.representative {
+            let mut sessions: BTreeSet<String> = room.members.into_keys().collect();
+            sessions.insert(representative);
+            inner.announce_representative(name, None, sessions);
+        }
+        true
     }
 
     /// Answers `queued` to a send whose target has not acknowledged yet.

@@ -129,6 +129,19 @@ function StateDot({ state }: { state: PeerState }) {
 	);
 }
 
+/** Marks a room's representative; outlined in the text colour, so it reads on pressed buttons too. */
+function RepBadge() {
+	return (
+		<span
+			title="Representative"
+			data-imessage-representative=""
+			className="inline-flex h-4 shrink-0 items-center rounded-sm border border-current px-1 text-[11px] leading-none font-medium"
+		>
+			rep
+		</span>
+	);
+}
+
 function DeliveryStatus({ message }: { message: ChatMessage }) {
 	switch (message.status) {
 		case "delivered":
@@ -851,10 +864,17 @@ export function Messenger({
 	// Room members and online sessions, for the member manager.
 	const candidates = activeRoom
 		? [
-				...activeRoom.members.map((m) => ({ id: m.sessionId, label: sessionLabel(m), project: m.project, device: memberDevice(m), state: m.state })),
+				...activeRoom.members.map((m) => ({
+					id: m.sessionId,
+					label: sessionLabel(m),
+					project: m.project,
+					device: memberDevice(m),
+					state: m.state,
+					representative: m.sessionId === activeRoom.representative,
+				})),
 				...sessions
 					.filter((s) => !activeRoom.members.some((m) => m.sessionId === s.id))
-					.map((s) => ({ id: s.id, label: sessionLabel(s), project: s.project, device: deviceLabel(s), state: s.state as PeerState })),
+					.map((s) => ({ id: s.id, label: sessionLabel(s), project: s.project, device: deviceLabel(s), state: s.state as PeerState, representative: false })),
 			]
 		: [];
 
@@ -919,6 +939,7 @@ export function Messenger({
 							<li key={m.sessionId} className="flex min-w-0 items-center gap-1.5" title={`${m.sessionId} · ${STATE_WORD[m.state]}`}>
 								<StateDot state={m.state} />
 								<span className="max-w-[28ch] truncate font-medium">{sessionLabel(m)}</span>
+								{m.sessionId === activeRoom.representative && <RepBadge />}
 								{m.project && <span className="text-muted">{m.project}</span>}
 								<span className="sr-only">{STATE_WORD[m.state]}</span>
 							</li>
@@ -937,7 +958,10 @@ export function Messenger({
 										<li key={c.id} className="flex items-center gap-2 border-b border-line py-1.5 text-[12.5px]">
 											<StateDot state={c.state} />
 											<div className="min-w-0 flex-1">
-												<div className="truncate font-medium">{c.label}</div>
+												<div className="flex min-w-0 items-center gap-1.5">
+													<span className="truncate font-medium">{c.label}</span>
+													{c.representative && <RepBadge />}
+												</div>
 												<div className="truncate text-[11.5px] text-muted">
 													{[c.project, c.device].filter(Boolean).join(" · ")}
 												</div>
@@ -1218,11 +1242,12 @@ export function Messenger({
 											Notify
 										</span>
 										<div role="group" aria-labelledby={notifyId} className="flex flex-wrap gap-1.5">
-											{[{ token: "all", label: "Everyone", title: "Every member of the room" }, ...activeRoom.members.map((m) => ({
+											{[{ token: "all", label: "Everyone", title: "Every member of the room", representative: false }, ...activeRoom.members.map((m) => ({
 												token: m.sessionId,
 												label: sessionLabel(m),
 												title: [m.project, memberDevice(m)].filter(Boolean).join(" · "),
-											}))].map(({ token, label, title }) => {
+												representative: m.sessionId === activeRoom.representative,
+											}))].map(({ token, label, title, representative }) => {
 												const active = selectedMentions.has("all") || selectedMentions.has(token);
 												return (
 													<button
@@ -1233,11 +1258,12 @@ export function Messenger({
 														aria-pressed={active}
 														title={title}
 														className={cx(
-															"h-6 max-w-[22ch] truncate rounded-sm border px-2 font-medium transition-colors duration-150",
+															"inline-flex h-6 max-w-[22ch] items-center gap-1 rounded-sm border px-2 font-medium transition-colors duration-150",
 															active ? "border-ink bg-ink text-page" : "border-line text-ink hover:border-ink",
 														)}
 													>
-														{label}
+														<span className="truncate">{label}</span>
+														{representative && <RepBadge />}
 													</button>
 												);
 											})}

@@ -197,6 +197,7 @@ export class RelayConnection {
         }
         if (!frame || typeof frame !== "object")
             return;
+        // A frame type this version does not know is ignored.
         switch (frame.type) {
             case "welcome":
                 this.onlineSince = Date.now();
@@ -217,6 +218,14 @@ export class RelayConnection {
                 if (typeof frame.id === "string") {
                     try {
                         this.events.onStatus(frame);
+                    }
+                    catch { /* as above */ }
+                }
+                break;
+            case "room":
+                if (typeof frame.room === "string") {
+                    try {
+                        this.events.onRoom?.(frame);
                     }
                     catch { /* as above */ }
                 }

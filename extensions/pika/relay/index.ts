@@ -8,8 +8,11 @@ import { credentialsRegistry } from "../credentials.ts";
 import { type ConnectionState, RelayConnection, RequestError } from "./connection.ts";
 import {
 	cut, deviceLabel, expiredContent, headerField, type HelloSession, MAX_HOPS, MESSAGE_TYPE, type MessageFrame, messageContent, NOTICE_TYPE, type OnlineSession, RECEIVED_TYPE,
-	type RelayRoom, type RelayRoomDetail, RELAY_VERSION, type RoomMember, type RoomMessage, sanitize, type SentFrame, type SessionState, since, type StatusFrame, type Target, targetLabel, timing, ttlText,
+	type RelayRoom, type RelayRoomDetail, RELAY_VERSION, type RoomFrame, type RoomMember, type RoomMessage, sanitize, type SentFrame, type SessionState, since, type StatusFrame, type Target, targetLabel, timing,
+	ttlText,
 } from "./protocol.ts";
+import { hasMode, sessionModes } from "./modes.ts";
+import { representativeLabel, ROLE_TYPE, roleStatus, roleUpdate } from "./roles.ts";
 import { join, leave, shared, syncHook } from "./shared.ts";
 import {
 	answerText, askSide, automatic, busyText, type Running, type SideAnswer, type SideDetails, type SideJob, sideNote, type SideOutcome, sideRequest,
@@ -22,8 +25,11 @@ export { timing } from "./protocol.ts";
 /** At most this many sent messages are remembered for relay_status, and this many shown. */
 const SENT_KEPT = 200;
 const SENT_SHOWN = 50;
-const USAGE = "Usage: /relay [status|send <sessionId> <text>|rooms|join <room> [topic]|leave <room>|log|side [on|off]|off|on]";
-const SUBCOMMANDS = ["status", "send", "join", "leave", "rooms", "log", "side", "off", "on"];
+const USAGE = "Usage: /relay [status|send <sessionId> <text>|rooms|join <room> [topic]|leave <room>|represent <room>|represent off [<room>]|log|side [on|off]|off|on]";
+const SUBCOMMANDS = ["status", "send", "join", "leave", "represent", "rooms", "log", "side", "off", "on"];
+/** The footer status key, and the session mode a representative needs. */
+const ROLE_STATUS = "representative";
+const ALWAYSON = "alwayson";
 
 /**
  * `failed`: the message never left this session; `unknown`: the server never answered (timeout,
@@ -47,9 +53,11 @@ const REJECTIONS: Record<string, string> = {
 	rate_limited: "this session sent too many messages in the last minute; wait before sending more",
 	unknown_session: "no online or recorded pi session has that id; call relay_list for the online sessions",
 	mailbox_full: "the target's mailbox is full; try again later",
+	not_owner: "that session belongs to another device, so only that device may act for it in rooms",
 };
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+const roomKey = (name: string) => name.trim().replace(/^#/, "");
 const supportedMode = (context: ExtensionContext) => context.mode === "tui" || context.mode === "rpc";
 const preview = (text: string) => { const line = text.replace(/\s+/g, " ").trim(); return line.length > 60 ? `${line.slice(0, 59)}…` : line; };
 
@@ -179,6 +187,19 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		const settings = loadRelaySettings(getAgentDir());
 		return { on: sideOverride ?? settings.sideAnswers, afterMs: settings.sideAnswerSeconds * 1000 };
 	};
+	/** The rooms this session is a member of, by name, as the server last listed them; undefined until the first full list. */
+	let rooms: Map<string, RelayRoom> | undefined;
+	/** Counts room lists, so an older answer never replaces a newer one. */
+	let roomsGeneration = 0;
+	/** The footer's `representative` status as last set. */
+	let roleShown: string | undefined;
+	/** Always-on mode is off while this session represents a room: it stops representing once this fires. */
+	let unrepresentTimer: ReturnType<typeof setTimeout> | undefined;
+	const isMember = (room: RelayRoom) => Array.isArray(room?.members) && room.members.some((member) => member.sessionId === sessionId);
+	/** The rooms this session represents, as far as it knows. */
+	const represented = () => [...(rooms?.values() ?? [])].filter((room) => room.representative === sessionId).map((room) => room.name);
+	/** Another session represents the user in the room, so this one reports there and its user does not read it. */
+	const reportsIn = (name: string) => { const representative = rooms?.get(roomKey(name))?.representative; return representative !== undefined && representative !== sessionId; };
 	const scheduler = new SideScheduler({
 		waiting: (id) => unread.has(id) && started && !leaving && ctx?.isIdle() === false && sideSettings().on,
 		run: (job, signal) => answerSide(job, signal),
@@ -329,12 +350,16 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			...(frame.replyTo ? { replyTo: frame.replyTo } : {}),
 		};
 		const label = frame.room ? `room #${headerField(frame.room)}` : targetLabel(frame.from as Target);
+		// A mention adds an online session to a room it may not know of yet.
+		if (frame.room && rooms && !rooms.has(roomKey(frame.room))) guard(refreshRooms);
+		// Unless steered, the model reads it right after an answer the user has not replied to; but a member that
+		// reports to a representative has no user reading it.
+		const unanswered = !steer && !(frame.room && reportsIn(frame.room));
 		// Before the delivery, whose turn may read it at once.
 		if (peer !== undefined) unread.set(frame.id, { peer, label, soon: idle || steer, told: false });
 		try {
 			const options = idle ? { triggerTurn: true } : steer ? { deliverAs: "steer" as const, triggerTurn: true } : { deliverAs: "followUp" as const, triggerTurn: true };
-			// Unless steered, the model reads it right after an answer the user has not replied to.
-			pi.sendMessage<RelayMessageDetails>({ customType: MESSAGE_TYPE, content: messageContent({ ...frame, urgent, hops }, !steer), display: true, details }, options);
+			pi.sendMessage<RelayMessageDetails>({ customType: MESSAGE_TYPE, content: messageContent({ ...frame, urgent, hops }, unanswered), display: true, details }, options);
 		} catch {
 			// Threw synchronously, so pi does not hold it: not acknowledged, and pushed again after a reconnect.
 			unread.delete(frame.id);
@@ -431,6 +456,94 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		if (Number.isFinite(limits?.maxHops) && limits.maxHops > 0) maxHops = limits.maxHops;
 		// State may have changed between hello and welcome.
 		pushState();
+		refreshRooms();
+	}
+
+	function showRoles(): void {
+		const text = roleStatus(rooms, sessionId);
+		if (text === roleShown) return;
+		roleShown = text;
+		try { ctx?.ui.setStatus(ROLE_STATUS, text); } catch { /* a closed UI */ }
+	}
+
+	/** The rooms of a full list that this session is a member of. */
+	function learnRooms(items: RelayRoom[]): void {
+		roomsGeneration++;
+		rooms = new Map(items.filter(isMember).map((room) => [room.name, room]));
+		showRoles();
+		checkRepresentation();
+	}
+
+	/** One room as a join, leave, or represent answered it; a full list follows. */
+	function learnRoom(room: RelayRoom): void {
+		if (!started) return;
+		if (rooms) {
+			if (isMember(room)) rooms.set(room.name, room);
+			else rooms.delete(room.name);
+			showRoles();
+		}
+		refreshRooms();
+	}
+
+	/** Lists the rooms again; only the latest list counts. */
+	function refreshRooms(): void {
+		const generation = ++roomsGeneration;
+		const id = sessionId;
+		relayRooms().then((items) => guard(() => { if (generation === roomsGeneration && started && sessionId === id) learnRooms(items); }), () => undefined);
+	}
+
+	/** A room's representative changed; the server tells every online member. */
+	function roomChanged(frame: RoomFrame): void {
+		const name = roomKey(frame.room);
+		const known = rooms?.get(name);
+		if (rooms && known) {
+			const { representative: _previous, ...room } = known;
+			rooms.set(name, typeof frame.representative === "string" && frame.representative ? { ...room, representative: frame.representative } : room);
+			showRoles();
+			checkRepresentation();
+		}
+		// For the representative's name, and for a room this session was added to unseen.
+		refreshRooms();
+	}
+
+	/**
+	 * A representative must keep always-on mode on: without it for `modesGraceMs`, this session stops representing.
+	 * The wait lets a shutdown, which also takes the mode out of the registry, cancel it first.
+	 */
+	function checkRepresentation(): void {
+		if (!started || leaving || hasMode(sessionId, ALWAYSON) || !represented().length) {
+			clearTimeout(unrepresentTimer);
+			unrepresentTimer = undefined;
+			return;
+		}
+		if (unrepresentTimer) return;
+		unrepresentTimer = setTimeout(() => guard(() => {
+			unrepresentTimer = undefined;
+			if (!started || leaving || hasMode(sessionId, ALWAYSON)) return;
+			void stopRepresenting().then(({ done, failed }) => guard(() => {
+				if (!ctx?.hasUI) return;
+				if (done.length) ctx.ui.notify(`Always-on mode is off, so this session no longer represents you in ${done.join(", ")}.`, "info");
+				if (failed.length) ctx.ui.notify(`Always-on mode is off, but this session could not stop representing you in ${failed.join("; ")}.`, "error");
+			}));
+		}), timing.modesGraceMs);
+		unrepresentTimer.unref?.();
+	}
+
+	const onModes = (id: string) => { if (id === sessionId) guard(checkRepresentation); };
+
+	/** Stops representing every room this session represents, all at once. */
+	async function stopRepresenting(): Promise<{ done: string[]; failed: string[] }> {
+		const names = represented();
+		const results = await Promise.allSettled(names.map((name) => updateRoomMembership(name, "unrepresent")));
+		const done: string[] = [];
+		const failed: string[] = [];
+		results.forEach((result, index) => {
+			const name = `#${headerField(names[index])}`;
+			if (result.status === "rejected") { failed.push(`${name}: ${errorText(result.reason)}`); return; }
+			done.push(name);
+			guard(() => learnRoom(result.value.room));
+		});
+		return { done, failed };
 	}
 
 	function onUnsupported(reason: string): void {
@@ -464,7 +577,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		if (same && !restart) return;
 		disconnect();
 		connection = new RelayConnection({ url: current.url, token: current.token }, {
-			prepare, hello, onMessage: (frame) => guard(() => receive(frame)), onStatus: (frame) => guard(() => status(frame)),
+			prepare, hello, onMessage: (frame) => guard(() => receive(frame)), onStatus: (frame) => guard(() => status(frame)), onRoom: (frame) => guard(() => roomChanged(frame)),
 			onChange: (state) => guard(() => onChange(state)), onUnsupported: (reason) => guard(() => onUnsupported(reason)),
 		});
 		connection.start();
@@ -497,6 +610,11 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			transcript.clear();
 			running.clear();
 			sideAnswers.length = 0;
+			rooms = undefined;
+			roomsGeneration++;
+			clearTimeout(unrepresentTimer);
+			unrepresentTimer = undefined;
+			sessionModes().listeners.add(onModes);
 			join(self, sessionId, {
 				markChild: () => guard(() => { child = true; withdrawTools(); evaluate(); }),
 				status: () => offlineReason() ?? "online",
@@ -522,14 +640,19 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	pi.on("session_before_tree", () => { summarizing = true; return undefined; });
 	pi.on("session_tree", () => { summarizing = false; });
 
-	pi.on("before_agent_start", (event) => {
-		if (event.messageType !== "user") return undefined;
+	pi.on("before_agent_start", (event, context) => {
+		// This session's role in its rooms, while the model cannot see it: once per change, and again after a
+		// compaction drops it or /tree leaves it off the branch.
+		let role: ReturnType<typeof roleUpdate>;
+		try { role = sessionId ? roleUpdate(rooms, sessionId, context.sessionManager.getBranch()) : undefined; } catch { role = undefined; }
+		const result = role ? { message: { customType: ROLE_TYPE, content: role.content, display: false, details: role.details } } : undefined;
+		if (event.messageType !== "user") return result;
 		runHops = 0;
 		// The user prompted this session, so a replacement was cancelled or failed.
 		guard(stay);
 		// The prompt is not in the session yet when agent_start tells the server it is busy.
 		if (!title && event.prompt.trim()) title = cut(event.prompt.replace(/\s+/g, " ").trim(), 120);
-		return undefined;
+		return result;
 	});
 	// The previous run's request lacks this run's prompt: until this run's first request, there is nothing to repeat.
 	pi.on("agent_start", () => { busy = true; turnStartedAt = Date.now(); transcript.clear(); guard(pushState); });
@@ -558,6 +681,15 @@ export default function relayExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", () => {
 		guard(() => {
+			// Always-on mode leaves the registry at every shutdown, /reload's too: that is no turning off, so the
+			// session keeps its rooms. The full room list after the next connect checks the registry again.
+			clearTimeout(unrepresentTimer);
+			unrepresentTimer = undefined;
+			sessionModes().listeners.delete(onModes);
+			if (roleShown !== undefined) {
+				roleShown = undefined;
+				try { ctx?.ui.setStatus(ROLE_STATUS, undefined); } catch { /* a closed UI */ }
+			}
 			started = false;
 			leaving = false;
 			scheduler.clear();
@@ -615,7 +747,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		return relayFetch<RelayRoomDetail>(`/api/relay/v1/rooms/${encodeURIComponent(clean)}?${params}`);
 	}
 
-	async function updateRoomMembership(room: string, action: "join" | "leave", topic?: string): Promise<RelayRoomDetail> {
+	async function updateRoomMembership(room: string, action: "join" | "leave" | "represent" | "unrepresent", topic?: string): Promise<RelayRoomDetail> {
 		const clean = room.trim().replace(/^#/, "");
 		return relayFetch<RelayRoomDetail>("/api/relay/v1/rooms", {
 			method: "POST",
@@ -713,6 +845,8 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		}
 		const now = Date.now();
 		exchanged.set(targetKey, now);
+		// Posting joins the room.
+		if (answer.room && rooms && !rooms.has(answer.room)) guard(refreshRooms);
 		if (answer.room) exchanged.set(`#${answer.room}`, now);
 		else if (answer.to?.sessionId) exchanged.set(answer.to.sessionId, now);
 		record.id = answer.id;
@@ -847,6 +981,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				type RoomToolDetails = { rooms?: RelayRoom[]; detail?: RelayRoomDetail; sent?: SentFrame };
 				if (params.action === "list") {
 					const items = await relayRooms();
+					guard(() => learnRooms(items));
 					const text = items.length
 						? `${items.length} active chatroom${items.length === 1 ? "" : "s"}:\n${items.map(roomLine).join("\n")}`
 						: "No active chatrooms. Call relay_room with action \"join\" and a room name to create one.";
@@ -856,6 +991,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				if (!room) throw new Error(`relay_room (${params.action}) requires a \`room\` name.`);
 				if (params.action === "join" || params.action === "leave") {
 					const detail = await updateRoomMembership(room, params.action, params.topic);
+					guard(() => learnRoom(detail.room));
 					const verb = params.action === "join" ? "Joined" : "Left";
 					return {
 						content: [{ type: "text", text: `${verb} room #${headerField(detail.room.name)}.\n${roomLine(detail.room)}` }],
@@ -952,6 +1088,10 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			`This session: ${sessionId ?? context.sessionManager.getSessionId()}`,
 		];
 		if (!reason) {
+			try { const items = await relayRooms(); guard(() => learnRooms(items)); } catch { /* the rooms it knows */ }
+		}
+		lines.push(...roleLines());
+		if (!reason) {
 			try {
 				const others = (await onlineSessions()).filter((session) => session.id !== sessionId);
 				lines.push(others.length ? `Online sessions:\n${others.map((session) => `  ${sessionLine(session)}`).join("\n")}` : "No other pi session is online.");
@@ -960,6 +1100,45 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			}
 		}
 		context.ui.notify(lines.join("\n"), "info");
+	}
+
+	/** The rooms this session represents, and who represents the others it is in. */
+	function roleLines(): string[] {
+		if (!rooms) return [];
+		const mine = represented().map((name) => `#${headerField(name)}`);
+		return [
+			...(mine.length ? [`This session represents you in ${mine.join(", ")}.`] : []),
+			...[...rooms.values()].filter((room) => room.representative && room.representative !== sessionId)
+				.map((room) => `#${headerField(room.name)} is represented by ${representativeLabel(room)}.`),
+		];
+	}
+
+	async function representCommand(context: ExtensionCommandContext, rest: string[]): Promise<void> {
+		const id = sessionId ?? context.sessionManager.getSessionId();
+		try {
+			if (rest[0] !== "off") {
+				if (!hasMode(id, ALWAYSON)) { context.ui.notify("Turn on /alwayson first: a representative must stay responsive.", "warning"); return; }
+				const detail = await updateRoomMembership(rest[0]!, "represent");
+				learnRoom(detail.room);
+				context.ui.notify(`This session now represents you in #${headerField(detail.room.name)}: the room's other members report to it.`, "info");
+				return;
+			}
+			if (!rooms) { const items = await relayRooms(); learnRooms(items); }
+			if (rest[1]) {
+				const name = roomKey(rest[1]);
+				const was = rooms?.get(name)?.representative === id;
+				const detail = await updateRoomMembership(name, "unrepresent");
+				learnRoom(detail.room);
+				context.ui.notify(`This session ${was ? "no longer represents" : "does not represent"} you in #${headerField(detail.room.name)}.`, "info");
+				return;
+			}
+			const { done, failed } = await stopRepresenting();
+			if (!done.length && !failed.length) context.ui.notify("This session represents you in no room.", "info");
+			if (done.length) context.ui.notify(`This session no longer represents you in ${done.join(", ")}.`, "info");
+			if (failed.length) context.ui.notify(`This session could not stop representing you in ${failed.join("; ")}.`, "error");
+		} catch (error) {
+			context.ui.notify(errorText(error), "error");
+		}
 	}
 
 	function sideLine(): string {
@@ -988,7 +1167,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("relay", {
-		description: "Show pika relay status, send a message to another pi session, browse this branch's relay messages, or turn side answers or relay off or on for this session",
+		description: "Show pika relay status, send a message to another pi session, join or represent you in chatrooms, browse this branch's relay messages, or turn side answers or relay off or on for this session",
 		getArgumentCompletions: (prefix) => {
 			// Nothing to offer for a subcommand typed in full: an open menu takes the Enter that should run it.
 			const typed = prefix.trim();
@@ -1003,9 +1182,11 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			if (command === "status" && !rest.length) await statusCommand(context);
 			else if (command === "send") await sendCommand(context, trimmed.slice(4));
 			else if (command === "log" && !rest.length) await logCommand(context);
+			else if (command === "represent" && (rest.length === 1 || (rest.length === 2 && rest[0] === "off"))) await representCommand(context, rest);
 			else if (command === "rooms" && !rest.length) {
 				try {
 					const items = await relayRooms();
+					guard(() => learnRooms(items));
 					context.ui.notify(items.length ? `Chatrooms:\n${items.map((r) => `  ${roomLine(r)}`).join("\n")}` : "No active chatrooms.", "info");
 				} catch (error) {
 					context.ui.notify(errorText(error), "error");
@@ -1014,6 +1195,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				try {
 					const topic = rest.slice(1).join(" ").trim() || undefined;
 					const detail = await updateRoomMembership(rest[0]!, "join", topic);
+					guard(() => learnRoom(detail.room));
 					context.ui.notify(`Joined room #${headerField(detail.room.name)}.`, "info");
 				} catch (error) {
 					context.ui.notify(errorText(error), "error");
@@ -1021,6 +1203,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			} else if (command === "leave" && rest.length === 1) {
 				try {
 					const detail = await updateRoomMembership(rest[0]!, "leave");
+					guard(() => learnRoom(detail.room));
 					context.ui.notify(`Left room #${headerField(detail.room.name)}.`, "info");
 				} catch (error) {
 					context.ui.notify(errorText(error), "error");

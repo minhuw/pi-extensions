@@ -393,9 +393,9 @@ export function statusTone(segment: string): "problem" | "attention" | "calm" {
 }
 
 // Known extensions keep a fixed slot so their color does not move as others come and go.
-const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language", "spokesman", "boom", "alwayson", "selfdrive"];
+const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language", "spokesman", "boom", "alwayson", "selfdrive", "representative"];
 /** Session modes that change how the model works; they ride the bar before the context, not the status row. */
-const MODE_KEYS = ["boom", "alwayson", "selfdrive"];
+const MODE_KEYS = ["boom", "alwayson", "selfdrive", "representative"];
 const STATUS_ICONS: Record<string, string> = {
 	autoresearch: "\u{F0093}", // md-flask
 	herder: "\u{F0CC6}", // md-sheep
@@ -487,7 +487,7 @@ function renderSpokesman(theme: Theme, statuses: ReadonlyMap<string, string>): s
 	return spokesman ? renderStatus(theme, spokesman, "spokesman", hasNerdFonts()) : undefined;
 }
 
-/** Boom and always-on modes for the bar, in that order; each status leads with its own symbol. */
+/** Boom, always-on, self-driving, and representative modes for the bar, in that order; each status leads with its own symbol. */
 function renderModes(theme: Theme, statuses: ReadonlyMap<string, string>): string | undefined {
 	return cluster(MODE_KEYS.map((key) => statuses.get(key) && renderStatus(theme, statuses.get(key)!, key)), "  ") || undefined;
 }

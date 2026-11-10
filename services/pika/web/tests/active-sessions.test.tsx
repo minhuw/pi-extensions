@@ -798,6 +798,37 @@ describe("iMessage messenger and chatrooms", () => {
 		expect(screen.queryByRole("complementary", { name: "Message reader" })).toBeNull();
 	});
 
+	it("marks the room's representative wherever members are listed", async () => {
+		const at = new Date().toISOString();
+		const member = (sessionId: string, name: string) => ({ sessionId, device: "mini", name, project: "pika", state: "idle" as const, online: true, joinedAt: at });
+		const server = createFakeServer({
+			online: [onlineSession("s-lead", { name: "Lead" }), onlineSession("s-web", { name: "Frontend" })],
+			relayRooms: [{
+				room: { name: "ops", createdAt: at, updatedAt: at, messageCount: 0, members: [member("s-lead", "Lead"), member("s-web", "Frontend")], representative: "s-lead" },
+				messages: [],
+			}],
+		});
+		renderApp("/active", server.fetch);
+		const messenger = await waitFor(() => { const node = document.querySelector<HTMLElement>("[data-imessage-room-members]")!; expect(node).toBeTruthy(); return node.closest<HTMLElement>("[data-imessage]")!; });
+		const badged = (selector: string) =>
+			[...messenger.querySelectorAll<HTMLElement>(selector)].filter((node) => node.querySelector("[data-imessage-representative]")).map((node) => node.textContent);
+
+		expect(badged("[data-imessage-room-members] li")).toEqual(["LeadreppikaIdle"]);
+		const badge = messenger.querySelector<HTMLElement>("[data-imessage-representative]")!;
+		expect(badge.textContent).toBe("rep");
+		expect(badge.title).toBe("Representative");
+		expect(badged("[data-imessage-mention]")).toEqual(["Leadrep"]);
+
+		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-manage-members]")!);
+		expect(badged("[data-imessage-member-drawer] li")).toHaveLength(1);
+		expect(messenger.querySelector("[data-imessage-member-drawer] li [data-imessage-representative]")?.closest("li")?.querySelector("[data-imessage-toggle-member]")?.getAttribute("data-imessage-toggle-member")).toBe("s-lead");
+
+		// Removed, the representative is no longer one, and no member carries the badge.
+		fireEvent.click(messenger.querySelector<HTMLButtonElement>('[data-imessage-toggle-member="s-lead"]')!);
+		await waitFor(() => expect(messenger.querySelectorAll("[data-imessage-room-members] li")).toHaveLength(1));
+		expect(messenger.querySelector("[data-imessage-representative]")).toBeNull();
+	});
+
 	it("asks before deleting a room", async () => {
 		const server = createFakeServer({
 			relayRooms: [{ room: { name: "ops", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), messageCount: 0, members: [] }, messages: [] }],

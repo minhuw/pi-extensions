@@ -754,6 +754,8 @@ export function createFakeServer({
 				if (req.action === "remove") {
 					if (!entry) return json(400, { error: "invalid" });
 					entry.room.members = entry.room.members.filter((m) => m.sessionId !== sid);
+					// A representative that leaves the room stops being its representative.
+					if (entry.room.representative === sid) delete entry.room.representative;
 					entry.room.updatedAt = now;
 				} else {
 					if (!entry) {
