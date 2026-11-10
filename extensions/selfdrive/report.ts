@@ -68,7 +68,7 @@ export interface ReportInput {
 	since: string;
 	ended?: string;
 	now?: number;
-	/** Runs the driver started: the kickoff and each continuation. */
+	/** Driver starts: the kickoff and each continuation, not a count of tasks or model turns. */
 	runs: number;
 	/** Everything, subagents included. */
 	cost: number;
@@ -83,14 +83,16 @@ const line = (...parts: (string | undefined)[]) => parts.filter((part) => part?.
 /** The report's lines, the first one its header. */
 export function buildReport(input: ReportInput): string[] {
 	const end = input.ended ? Date.parse(input.ended) : input.now ?? Date.now();
+	const proposals = input.tasks.filter((task) => task.status === "proposed").length;
 	const header = line(
 		"🚗 Self-driving report",
 		elapsed(end - Date.parse(input.since)),
-		`${input.runs} ${input.runs === 1 ? "run" : "runs"}`,
+		`${input.tasks.length} ${input.tasks.length === 1 ? "task" : "tasks"}`,
+		proposals ? `${proposals} ${proposals === 1 ? "proposal" : "proposals"}` : undefined,
 		money(input.cost) + (input.subagentCost > 0 ? ` (subagents ${money(input.subagentCost)})` : ""),
 	);
-	if (!input.tasks.length) return [line(header, input.doneReason ? `nothing worth doing: ${input.doneReason}` : "no tasks recorded")];
 	const lines = [header];
+	if (input.doneReason) lines.push(`Stopped: ${input.doneReason}`);
 	const section = (title: string, tasks: Task[], format: (task: Task) => string) => {
 		if (tasks.length) lines.push(`${title}:`, ...tasks.map((task) => `  ${format(task)}`));
 	};

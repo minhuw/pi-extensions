@@ -17,7 +17,7 @@ describe("buildReport", () => {
 			{ id: "T7", title: "Audit relay", status: "running" },
 		];
 		expect(buildReport({ tasks, since, ended, runs: 23, cost: 4.12, subagentCost: 2.8 })).toEqual([
-			"🚗 Self-driving report · 7h42m · 23 runs · $4.12 (subagents $2.80)",
+			"🚗 Self-driving report · 7h42m · 7 tasks · 1 proposal · $4.12 (subagents $2.80)",
 			"Needs you:",
 			"  T1 Fix stale hop limit in RELAY.md · verified Herder run 20261111-0102 · /herder deliver 20261111-0102",
 			"  T3 Pick the side-answer threshold · needs: choose 30 s or 60 s",
@@ -30,11 +30,61 @@ describe("buildReport", () => {
 		]);
 	});
 
-	it("says why there was nothing to do", () => {
+	it("counts multiple proposals once each and keeps their delivery commands", () => {
+		const tasks: Task[] = [
+			{ id: "T1", title: "Fix relay retries", status: "proposed", result: "Bound retries after disconnect", herderRun: "20261111-010203-abcd" },
+			{ id: "T2", title: "Clarify setup", status: "proposed", herderRun: "20261111-020304-abcd" },
+			{ id: "T3", title: "Choose retry delay", status: "planned", needs: "pick a delay" },
+		];
+		const report = buildReport({ tasks, since, ended, runs: 1, cost: 2, subagentCost: 0.5 });
+		expect(report).toEqual([
+			"🚗 Self-driving report · 7h42m · 3 tasks · 2 proposals · $2.00 (subagents $0.50)",
+			"Needs you:",
+			"  T1 Fix relay retries · Bound retries after disconnect · /herder deliver 20261111-010203-abcd",
+			"  T2 Clarify setup · /herder deliver 20261111-020304-abcd",
+			"  T3 Choose retry delay · needs: pick a delay",
+		]);
+		expect(report.join("\n")).not.toContain("verified");
+	});
+
+	it.each([
+		["done", "1 task"],
+		["proposed", "1 task · 1 proposal"],
+	] as const)("uses singular counts for one %s task and omits empty sections", (status, counts) => {
+		const tasks: Task[] = [{ id: "T1", title: "Check relay", status }];
+		const input = { tasks, since, ended, runs: 1, cost: 0, subagentCost: 0, doneReason: "no further candidates supported by the findings" };
+		expect(buildReport(input)).toEqual([
+			`🚗 Self-driving report · 7h42m · ${counts} · $0.00`,
+			"Stopped: no further candidates supported by the findings",
+			status === "proposed" ? "Needs you:" : "Done:",
+			"  T1 Check relay",
+		]);
+		expect(buildReport({ ...input, runs: 200 })).toEqual(buildReport(input));
+	});
+
+	it("shows an empty ledger and its stop reason without filler rows", () => {
 		expect(buildReport({ tasks: [], since, ended: "2026-11-10T22:05:00.000Z", runs: 1, cost: 0.014, subagentCost: 0, doneReason: "no open questions" }))
-			.toEqual(["🚗 Self-driving report · 5m · 1 run · $0.01 · nothing worth doing: no open questions"]);
+			.toEqual(["🚗 Self-driving report · 5m · 0 tasks · $0.01", "Stopped: no open questions"]);
 		expect(buildReport({ tasks: [], since, now: Date.parse(since) + 60_000, runs: 0, cost: 0, subagentCost: 0 }))
-			.toEqual(["🚗 Self-driving report · 1m · 0 runs · $0.00 · no tasks recorded"]);
+			.toEqual(["🚗 Self-driving report · 1m · 0 tasks · $0.00"]);
+	});
+
+	it.each([
+		"three continuations in a row did nothing",
+		"three runs in a row failed",
+		"three continuations in a row did not start",
+	])("shows the recorded stop reason with a nonempty ledger: %s", (doneReason) => {
+		const tasks: Task[] = [
+			{ id: "T1", title: "Check relay", status: "done", result: "0 failures" },
+			{ id: "T2", title: "Inspect retries", status: "running" },
+		];
+		expect(buildReport({ tasks, since, ended, runs: 3, cost: 1, subagentCost: 0, doneReason })).toEqual([
+			"🚗 Self-driving report · 7h42m · 2 tasks · $1.00",
+			`Stopped: ${doneReason}`,
+			"Done:",
+			"  T1 Check relay · 0 failures",
+			"Still open: T2 Inspect retries (running)",
+		]);
 	});
 });
 
