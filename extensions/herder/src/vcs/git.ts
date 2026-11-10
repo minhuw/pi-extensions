@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { devNull, tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep, win32 } from "node:path";
 import { HERDER_DIR, MIN_GIT_VERSION, REF_ROOT } from "../config.ts";
@@ -393,8 +393,30 @@ export function openVcs(cwd: string): Vcs {
 			return total;
 		},
 
+		ignoredCollisions(from, to) {
+			const added = git(["diff-tree", "-r", "-z", "--name-only", "--diff-filter=A", resolveCommit(from), resolveCommit(to)]).split("\0").filter(Boolean);
+			// In the way of an added path: a file or symlink at the path or, where the path needs a directory, above it.
+			const present = new Set<string>();
+			for (const path of added) {
+				const parts = path.split("/");
+				for (let depth = 1; depth <= parts.length; depth++) {
+					const entry = parts.slice(0, depth).join("/");
+					let directory: boolean;
+					try { directory = lstatSync(join(top, entry)).isDirectory(); } catch { break; }
+					if (directory) continue;
+					present.add(entry);
+					break;
+				}
+			}
+			if (present.size === 0) return [];
+			// check-ignore echoes the untracked ones an ignore rule matches; `./` keeps a leading `:` from reading as pathspec
+			// magic. A failure reports nothing: the merge still refuses.
+			const ignored = spawn(top, ["check-ignore", "-z", "--stdin"], { input: [...present].map((path) => `./${path}\0`).join("") });
+			return ignored.status === 0 ? ignored.stdout.toString("utf8").split("\0").filter(Boolean).map((path) => path.slice(2)) : [];
+		},
+		/** `--no-overwrite-ignore`: git merges over ignored files by default. */
 		fastForward(commit) {
-			git(["merge", "--ff-only", "--no-autostash", "--quiet", resolveCommit(commit)], { hooks: true });
+			git(["merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", "--quiet", resolveCommit(commit)], { hooks: true });
 		},
 		applyDiff(from, to) {
 			const patch = run(top, ["diff", "--binary", ...DIFF_FLAGS, "--src-prefix=a/", "--dst-prefix=b/", resolveCommit(from), resolveCommit(to)]).stdout;

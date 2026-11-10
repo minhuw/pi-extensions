@@ -38,8 +38,8 @@ export interface AgentRunner { run(request: AgentRunRequest): Promise<AgentRunRe
 export interface Usage { input: number; output: number; cost?: number }
 
 /**
- * Git behind a small interface. `head`, `isClean()`, `currentBranch`, `fastForward`, and `applyDiff` act on the user's
- * checkout; everything else touches only objects, refs, and the worktree paths passed in.
+ * Git behind a small interface. `head`, `isClean()`, `currentBranch`, `ignoredCollisions`, `fastForward`, and `applyDiff`
+ * act on the user's checkout; everything else touches only objects, refs, and the worktree paths passed in.
  */
 export interface Vcs {
 	commonDir(): string; topLevel(): string; head(): string; currentBranch(): string | null;
@@ -70,7 +70,12 @@ export interface Vcs {
 	revList(range: string): string[]; diffStat(range: string): string;
 	/** Added plus deleted lines in `range` (binary files count as one line each). */
 	changedLines(range: string): number;
-	/** `git merge --ff-only <commit>` in the user's checkout. Delivery only. */
+	/**
+	 * Untracked files and symlinks the user's checkout ignores that are in the way of a path `to` adds to `from`: at the
+	 * path, or where it needs a directory. `fastForward` refuses to overwrite them.
+	 */
+	ignoredCollisions(from: string, to: string): string[];
+	/** `git merge --ff-only <commit>` in the user's checkout, which never overwrites a file the checkout ignores. Delivery only. */
 	fastForward(commit: string): void;
 	/** Applies `git diff --binary <from> <to>` to the user's working tree, unstaged. Delivery only. */
 	applyDiff(from: string, to: string): void;

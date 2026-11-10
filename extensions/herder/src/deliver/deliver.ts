@@ -4,7 +4,7 @@ import { LIMITS } from "../config.ts";
 import { integrationRef, refPrefix, runPaths, worktreePath } from "../run/paths.ts";
 import type { RunStore } from "../run/store.ts";
 import type { AgentRunner, CheckResult, CheckSpec, DeliveryCompletedEvent, DeliveryMode, DeliveryStartedEvent, Faults, JournalInput, RoleDefinition, Vcs } from "../types.ts";
-import { hasHerderTrailer, RefConflictError, removeWorktrees } from "../vcs/git.ts";
+import { GitError, hasHerderTrailer, RefConflictError, removeWorktrees } from "../vcs/git.ts";
 import { acceptCuration } from "./curate.ts";
 
 export interface DeliverDeps {
@@ -54,6 +54,15 @@ function guard(vcs: Vcs, mode: DeliveryMode, expected?: Expected): string | unde
 	const head = vcs.head();
 	if (head !== expected.head) return `HEAD moved from ${short(expected.head)} to ${short(head)} after the delivery was prepared; deliver again`;
 	return undefined;
+}
+
+/** Why the checkout cannot fast-forward from `onto` to `tip`: that would overwrite files it ignores. */
+function inTheWay(vcs: Vcs, mode: DeliveryMode, onto: string, tip: string): string | undefined {
+	if (mode !== "series" && mode !== "squash") return undefined;
+	const paths = vcs.ignoredCollisions(onto, tip);
+	if (!paths.length) return undefined;
+	const listed = paths.length > 10 ? `${paths.slice(0, 10).join(", ")}, and ${paths.length - 10} more` : paths.join(", ");
+	return `the delivery would overwrite files the checkout ignores (${listed}); move or delete them, then deliver again`;
 }
 
 function curatorPrompt(vcs: Vcs, runId: string, base: string, head: string): string {
@@ -240,6 +249,8 @@ export async function deliver(deps: DeliverDeps, request: DeliveryRequest): Prom
 	const commits = vcs.revList(`${onto}..${tip}`);
 	const marked = commits.find((commit) => hasHerderTrailer(vcs.message(commit)));
 	if (marked) return refuse(`commit ${short(marked)} carries a Herder trailer; it cannot be delivered`, extra());
+	const ignored = inTheWay(vcs, mode, onto, tip);
+	if (ignored) return refuse(ignored, extra());
 
 	const target = mode === "uncommitted" ? vcs.topLevel() : mode === "branch" ? reviewBranch(runId) : expected.branch!;
 	const lines = [`Deliver Herder run ${runId} (${title}) as ${mode} to ${target}.`];
@@ -252,7 +263,7 @@ export async function deliver(deps: DeliverDeps, request: DeliveryRequest): Prom
 	lines.push(`Commits (oldest first):`, ...commits.map((commit) => `  ${short(commit)} ${subject(vcs.message(commit))}`));
 	if (!await deps.confirm(lines.join("\n"))) return { status: "cancelled", reason: "the user declined the delivery", mode, ...extra() };
 
-	const moved = guard(vcs, mode, expected);
+	const moved = guard(vcs, mode, expected) ?? inTheWay(vcs, mode, onto, tip);
 	if (moved) return refuse(moved, extra());
 	let delivered = mode === "uncommitted" ? [] : commits;
 	if (mode === "squash") {
@@ -261,8 +272,16 @@ export async function deliver(deps: DeliverDeps, request: DeliveryRequest): Prom
 		delivered = [tip];
 	}
 	store.journal.append({ t: "delivery.started", mode, target, tip, onto, commits: delivered, rebasedOnto, curated });
-	if (mode === "series" || mode === "squash") vcs.fastForward(tip);
-	else if (mode === "uncommitted") vcs.applyDiff(onto, tip);
+	if (mode === "series" || mode === "squash") {
+		try {
+			vcs.fastForward(tip);
+		} catch (error) {
+			// The merge kept an ignored file that appeared after the guard; the next delivery starts over (see `interrupted`).
+			const late = error instanceof GitError ? inTheWay(vcs, mode, onto, tip) : undefined;
+			if (late) return refuse(late, extra());
+			throw error;
+		}
+	} else if (mode === "uncommitted") vcs.applyDiff(onto, tip);
 	else {
 		try {
 			vcs.updateRef(`refs/heads/${target}`, tip, null);

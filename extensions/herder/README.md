@@ -173,6 +173,7 @@ Checks and agents run in fresh Herder worktrees checked out at a commit. Ignored
 
 - **Moved branch:** if your `HEAD` moved since the run started, Herder replays the series onto it for all modes except `branch`. The commit messages are kept. Herder drops commits whose changes your branch already has, then reruns every check at the new tip. A failing check refuses the delivery. A replay conflict stops and reports the conflicting paths. You can then deliver as `branch`, which never replays, or resolve the conflict on your branch and deliver again.
 - **Checkout changes after confirmation:** Herder checks the checkout again after you confirm. If `HEAD` or the branch changed while the dialog was open, it refuses and asks you to deliver again.
+- **Ignored files:** `series` and `squash` never overwrite a file your checkout ignores. If the run tracks a path where your checkout holds an ignored file, Herder refuses and names the path. Move or delete the file, then deliver again.
 - **Curation:** `--curate` (or `curate: true`) has a `curator` agent regroup the series into logical commits first. Herder keeps the curated series only if three conditions hold:
   - its tip tree equals the verified tree;
   - its history is linear above the base;
