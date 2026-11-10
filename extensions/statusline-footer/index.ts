@@ -1135,10 +1135,13 @@ function renderContext(
 		const window = fmtTokens(usage.contextWindow);
 		const percent = theme.fg("muted", `${pct.toFixed(1)}%`);
 		const counts = theme.fg("dim", `${used}/${window}`);
-		const barSpace = maxWidth - visibleWidth(cluster([compact, percent, counts], "  ")) - 2;
+		const numbers = cluster([compact, percent, counts], "  ");
+		const barSpace = maxWidth - visibleWidth(numbers) - 2;
 		if (barSpace >= 4) {
 			return cluster([compact, gradientBar(pct, Math.min(barWidth, barSpace), theme), percent, counts], "  ");
 		}
+		// Keep the numerical context when it fits without a bar.
+		if (visibleWidth(numbers) <= maxWidth) return numbers;
 		const prefix = compactions > 0 ? compact : "";
 		const remaining = maxWidth - visibleWidth(cluster([prefix, percent], "  ")) - 2;
 		return remaining >= 4

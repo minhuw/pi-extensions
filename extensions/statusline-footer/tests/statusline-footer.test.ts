@@ -356,7 +356,10 @@ describe("statusline footer responsive identity and icons", () => {
 				}
 				const narrow = harness.getFooter()!.render(40)[0]!;
 				expect(narrow).not.toContain("openai");
-				expect(narrow).not.toContain("100k");
+				if (mode === "full") {
+					expect(narrow).toContain("43k/100k");
+					expect(narrow).not.toContain("▉");
+				} else expect(narrow).not.toContain("100k");
 				expect([...narrow].filter((char) => char === "▉").length).toBeLessThan(mode === "full" ? 18 : 10);
 			} finally {
 				harness.disposeFooter();
@@ -1240,6 +1243,44 @@ describe("statusline footer powerline style", () => {
 				if (!row.includes("FAST")) expect(row, `${width}`).not.toContain("FA");
 			}
 		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it.each(["0", "1"])("keeps numeric context at 140 columns with the long preview identity (Nerd Fonts %s)", async (nerdFonts) => {
+		const harness = createHarness(`context-preview-${nerdFonts}`, "tui", {
+			model: {
+				id: "gpt-6.1-terra", provider: "magpie", api: "openai-responses", reasoning: true,
+				magpieServiceTiers: ["priority"], magpiePricing: "estimate",
+			},
+			theme: rgbTheme(), extensionStatuses: [], isIdle: false, hasPendingMessages: true,
+			thinkingLevel: "xhigh",
+			contextUsage: { percent: 42.5, tokens: 425_000, contextWindow: 1_000_000 },
+			branch: [
+				{ id: "compact-1", type: "compaction", summary: "earlier work", firstKeptEntryId: "compact-1", tokensBefore: 90_000 },
+				{ id: "compact-2", type: "compaction", summary: "earlier work", firstKeptEntryId: "compact-2", tokensBefore: 90_000 },
+				{ id: "fast-on", type: "custom", customType: "magpie-fast", data: { enabled: true } },
+			],
+			keyedExtensionStatuses: {
+				language: "English", spokesman: "auto · Kimi", boom: "💥 boom",
+				alwayson: "📡 alwayson", selfdrive: "🚗 selfdrive 2h13m",
+			},
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+			for (const width of [140, 180, 240]) {
+				const lines = harness.getFooter()!.render(width);
+				for (const line of lines) expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
+				const identity = lines[0]!.replace(/\x1b\[[0-9;]*m/g, "");
+				for (const value of ["gpt-6.1-terra", "FAST", "queued", "XHIGH", "English", "auto · Kimi", "💥 boom", "📡 alwayson", "🚗 selfdrive 2h13m", "2×", "42.5%", "425k/1.0M"]) {
+					expect(identity, `${width}`).toContain(value);
+				}
+				if (width === 140 && nerdFonts === "1") expect(identity).not.toContain("▉");
+			}
+		} finally {
+			vi.unstubAllEnvs();
 			harness.disposeFooter();
 		}
 	});
