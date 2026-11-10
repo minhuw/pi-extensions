@@ -4,7 +4,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { recallReadTool, recallSearchTool } from "../../recall/index.ts";
 import { MemoryServerError } from "../client.ts";
-import { type Category, type FullAnswer, formatFull, formatNote, type Note, type ScopeKind } from "../format.ts";
+import { BODY_LIMIT, bodyTooLong, type Category, type FullAnswer, formatFull, formatNote, type Note, type ScopeKind } from "../format.ts";
 import { CATEGORY, firstLine, memoryReadTool, SCOPE } from "../tools.ts";
 import { type Change, type CommitAnswer, type CommitBody, type DreamRun, MAX_CHANGES, MAX_SOURCES, type Source } from "./run.ts";
 import { outcomeUnknown, send } from "./server.ts";
@@ -63,9 +63,9 @@ export function dreamSaveTool(run: DreamRun) {
 		name: "dream_save", label: "Dream Save",
 		description: "Stage a note to create or update in the user's memory; dream_commit writes the staged changes. "
 			+ "Create: leave out `id` and pass `expectedRevision: 0`. Update: pass the note's `id` and the `revision` memory_read showed; the whole note is replaced. "
-			+ "`scope: \"user\"` applies to every project, `scope: \"project\"` to the dream's project. "
+			+ "`scope: \"user\"` applies to every project and needs no project's context to understand, `scope: \"project\"` to the dream's project. "
 			+ `Every note needs \`sources\`: 1 to ${MAX_SOURCES} session entries ({ sessionId, seq }) that support it. `
-			+ "Limits: title up to 120 characters, hook one line up to 150, body up to 8 KiB. " + UNSAVED,
+			+ `Limits: title up to 120 characters, hook one line up to 150, body up to ${BODY_LIMIT} characters. ` + UNSAVED,
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({ description: "The note to update; leave out to create one" })),
 			expectedRevision: Type.Integer({ minimum: 0, description: "0 to create; the note's current revision to update" }),
@@ -73,7 +73,7 @@ export function dreamSaveTool(run: DreamRun) {
 			category: CATEGORY,
 			title: Type.String({ description: "A short title, up to 120 characters" }),
 			hook: Type.String({ description: "One line, up to 150 characters, saying when the note matters; the index lists it" }),
-			body: Type.String({ description: "The note itself, up to 8 KiB; may be empty" }),
+			body: Type.String({ description: `The note itself, up to ${BODY_LIMIT} characters; may be empty` }),
 			reason: Type.Optional(Type.String({ description: "Why it is saved or changed, kept in the note's history" })),
 			sources: SOURCES(1),
 		}),
@@ -81,6 +81,8 @@ export function dreamSaveTool(run: DreamRun) {
 			const refused = refusal(run);
 			if (refused) return stageFailure(refused, { staged: run.staged.length });
 			if (!params.sources.length || params.sources.length > MAX_SOURCES) return stageFailure(`dream_save needs 1 to ${MAX_SOURCES} sources.`, { staged: run.staged.length });
+			const long = bodyTooLong(params.body, "Nothing was staged.");
+			if (long) return stageFailure(long, { staged: run.staged.length });
 			const id = params.id ? cleanId(params.id) : "";
 			const change: Change = {
 				op: "save", ...(id ? { id } : {}), expectedRevision: params.expectedRevision, scope: params.scope as ScopeKind, category: params.category as Category,

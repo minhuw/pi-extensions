@@ -16,6 +16,16 @@ export interface FullAnswer { indexBytes?: number; indexLines?: number; limitByt
 
 export const LIMIT_BYTES = 8192;
 export const LIMIT_LINES = 200;
+/** The longest body, in characters, `memory_save` and `dream_save` take; the server itself allows 8 KiB. */
+export const BODY_LIMIT = 600;
+
+/** Why `body` is too long to save, if it is; `nothing` says what did not happen ("Nothing was saved."). */
+export function bodyTooLong(body: string, nothing: string): string | undefined {
+	const length = [...body].length;
+	if (length <= BODY_LIMIT) return undefined;
+	return `body_too_long: the body is ${length} characters, over the limit of ${BODY_LIMIT}. ${nothing} `
+		+ "Keep the rule, a one-sentence \"Why:\", and a one-sentence \"How to apply:\"; leave out how the rule came up (which session, which day, what was tried), then try again.";
+}
 /** About how many characters `memory_read` shows; notes past it are listed by title. */
 export const READ_BUDGET = 20_000;
 

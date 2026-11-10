@@ -120,6 +120,20 @@ it("memory_save explains a full memory and passes a bad request's message", asyn
 	expect(bad).toMatchObject({ isError: true, text: "the pika server refused the request (HTTP 400 bad_request): hook must be one line." });
 });
 
+it("memory_save refuses a body over 600 characters before sending it, counting characters rather than bytes", async () => {
+	const save = { expectedRevision: 0, scope: "user", category: "feedback", title: "t", hook: "h" };
+	const long = await callTool(h, "memory_save", { ...save, body: "x".repeat(601) });
+	expect(long.isError).toBe(true);
+	expect(long.text.startsWith("body_too_long: the body is 601 characters, over the limit of 600. Nothing was saved.")).toBe(true);
+	expect(pika.requests).toEqual([]);
+
+	pika.routes.set("POST memory/notes", { body: written() });
+	expect((await callTool(h, "memory_save", { ...save, body: "x".repeat(600) })).isError).toBe(false);
+	// 600 two-byte characters are 1200 bytes, still within the limit.
+	expect((await callTool(h, "memory_save", { ...save, body: "é".repeat(600) })).isError).toBe(false);
+	expect(pika.requestsTo("memory/notes").map((request) => (request.body as { body: string }).body.length)).toEqual([600, 600]);
+});
+
 it("memory_save tells an unknown note from a server without memory", async () => {
 	pika.routes.set("GET memory", { body: { scopes: [], notes: [], index: "" } });
 	const unknown = await callTool(h, "memory_save", { id: "000000000000", expectedRevision: 1, scope: "user", category: "user", title: "t", hook: "h", body: "" });

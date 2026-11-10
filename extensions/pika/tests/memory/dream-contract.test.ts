@@ -191,6 +191,23 @@ describe("source limits", () => {
 	});
 });
 
+describe("body limit", () => {
+	it("dream_save refuses a body over 600 characters and stages nothing", async () => {
+		const spawner = fakeSpawner();
+		const h = await start();
+		await h.session.prompt("/memory dream");
+		await until(() => spawner.children[0]?.prompts.length === 1, "the kickoff");
+		const child = spawner.children[0]!;
+		const long = await child.call("dream_save", { ...SAVE, body: "x".repeat(601) });
+		expect(long.isError).toBe(true);
+		expect(long.text).toMatch(/^body_too_long: the body is 601 characters, over the limit of 600\. Nothing was staged\./);
+		expect(long.details).toMatchObject({ staged: 0 });
+		expect(currentDream()!.staged).toEqual([]);
+		expect((await child.call("dream_save", { ...SAVE, body: "x".repeat(600) })).isError).toBe(false);
+		expect(currentDream()!.staged).toHaveLength(1);
+	});
+});
+
 interface Seen { userTexts: string[] }
 function recorder(seen: Seen[], answer: () => ReturnType<typeof fauxAssistantMessage>): FauxResponseFactory {
 	return (context) => {
