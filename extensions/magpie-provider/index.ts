@@ -5,6 +5,7 @@ import {
 	type ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
 import { getAgentDir, readStoredCredential, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerMagpieAutoContinue } from "./auto-continue.ts";
 import { loadModelsDevPricing } from "./catalog-pricing.ts";
 import { emptyMagpieCatalog, sharedMagpieCatalogs, type MagpieCatalogs } from "./catalog.ts";
 import { registerMagpieCompaction } from "./compaction.ts";
@@ -315,4 +316,5 @@ export default async function magpie(pi: ExtensionAPI): Promise<void> {
 	});
 	registerMagpieCompaction(pi);
 	registerMagpieFast(pi);
+	registerMagpieAutoContinue(pi);
 }

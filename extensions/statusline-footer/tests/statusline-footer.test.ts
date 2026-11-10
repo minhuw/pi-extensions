@@ -236,13 +236,17 @@ describe("statusline footer visual language", () => {
 		expect(renderStatus(theme, "\x1b[32mpainted\x1b[0m", "x")).toBe("\x1b[32mpainted\x1b[0m");
 		expect(new Set(["autoresearch", "herder", "loop", PROCESS_STATUS_KEY].map(key => statusHue(theme, key))).size).toBe(4);
 		expect(statusHue(theme, "custom")).toBe(statusHue(theme, "custom"));
-		// Appended to the known keys, so the slots before it keep their colors.
+		// Explicit slots keep existing colors when a new status takes priority.
 		const palette = statusPalette(theme);
 		expect(statusHue(theme, "impeccable-live")).toBe(palette[5 % palette.length]);
 		expect(statusHue(theme, "language")).toBe(palette[6 % palette.length]);
 		expect(statusHue(theme, "spokesman")).toBe(palette[7 % palette.length]);
-		for (const [slot, key] of ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language", "spokesman", "boom", "alwayson", "selfdrive", "representative"].entries()) {
+		for (const [slot, key] of ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language", "spokesman", "boom", "alwayson", "selfdrive", "representative", "magpie-quota"].entries()) {
 			expect(statusHue(theme, key)).toBe(palette[slot % palette.length]);
+		}
+		for (const state of ["awaiting", "paused"]) {
+			expect(renderStatus(theme, `quota ${state} · retry in 2h 10m · Nov 12, 14:30`, "magpie-quota", true))
+				.toBe(`<${statusHue(theme, "magpie-quota")}>\u{F0954} <warning>quota ${state}<dim> · <muted>retry in 2h 10m<dim> · <muted>Nov 12<dim>, <muted>14:30`);
 		}
 		for (const segment of ["1 failed", "1 stuck", "state error", "herder: verified not_met", "verified blocked"]) {
 			expect(statusTone(segment)).toBe("problem");
@@ -792,6 +796,97 @@ describe("statusline footer rendering", () => {
 			}
 		} finally {
 			harness.disposeFooter();
+		}
+	});
+
+	it.each(["full", "compact"])("prioritizes Magpie quota waits and restores workflows in %s mode", async (mode) => {
+		vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+		const workflows = [
+			["autoresearch", "research 2/5"], ["herder", "herder: T2 integrate"], ["loop", "↻ build"],
+		] as const;
+		const harness = createHarness(`quota-priority-${mode}`, "tui", {
+			extensionStatuses: [],
+			keyedExtensionStatuses: Object.fromEntries([...workflows].reverse()),
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", mode);
+		try {
+			const summaryRow = mode === "full" ? 1 : 0;
+			const original = harness.getFooter()!.render(240)[summaryRow]!;
+			for (const status of [
+				"quota awaiting · checking availability",
+				"quota awaiting · retry in 2h 10m · Nov 12, 14:30",
+				"quota awaiting · retry in 2h 9m · Nov 12, 14:30",
+				"quota paused · automatic continuation unavailable",
+			]) {
+				harness.ctx.ui.setStatus("magpie-quota", status);
+				const lines = harness.getFooter()!.render(240);
+				const summary = lines[summaryRow]!;
+				expect(lines.join("\n").split("quota ")).toHaveLength(2);
+				expect(summary).toContain(status);
+				if (mode === "full") {
+					expect(lines[0]).not.toContain("quota");
+					expect(summary.split("\u{F0954}")).toHaveLength(2);
+					expect(summary).not.toContain("\u{F0431}");
+					const order = [status, ...workflows.map(([, text]) => text)].map(text => summary.indexOf(text));
+					expect(order.every(index => index >= 0)).toBe(true);
+					expect(order).toEqual([...order].sort((a, b) => a - b));
+				} else {
+					expect(summary).not.toContain("\u{F0954}");
+					for (const [, text] of workflows) expect(summary).not.toContain(text);
+				}
+			}
+			harness.ctx.ui.setStatus("magpie-quota", undefined);
+			expect(harness.getFooter()!.render(240)[summaryRow]).toBe(original);
+			for (const [key, text] of workflows) {
+				const summary = harness.getFooter()!.render(240)[summaryRow]!;
+				expect(summary).toContain(text);
+				if (mode === "compact") {
+					for (const [otherKey, otherText] of workflows) if (otherKey !== key) expect(summary).not.toContain(otherText);
+				}
+				harness.ctx.ui.setStatus(key, undefined);
+			}
+			expect(harness.getFooter()!.render(240)).toHaveLength(mode === "full" ? 4 : 1);
+		} finally {
+			harness.disposeFooter();
+			vi.unstubAllEnvs();
+		}
+	});
+
+	it.each(["full", "compact"])("preserves model, context, and width with a quota countdown in %s mode", async (mode) => {
+		const status = "quota awaiting · retry in 2h 10m · Nov 12, 14:30";
+		for (const nerdFonts of ["0", "1"]) {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+			const harness = createHarness(`quota-width-${mode}-${nerdFonts}`, "tui", {
+				model: { id: "gpt-5.4", provider: "magpie", reasoning: true, magpiePricing: "estimate" },
+				extensionStatuses: [],
+				keyedExtensionStatuses: {
+					herder: "herder: T2 integrate", autoresearch: "research 2/5", loop: "↻ build", "magpie-quota": status,
+				},
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			await harness.runCommand("footer", mode);
+			try {
+				for (let width = 0; width <= 160; width++) {
+					const lines = harness.getFooter()!.render(width);
+					for (const line of lines) expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
+					if (width >= 24) {
+						expect(lines[0], `${width}`).toContain("gpt-5.4");
+						expect(lines[0], `${width}`).toContain("42.5%");
+					}
+					if (mode === "compact" && lines[0]!.includes("quota")) expect(lines[0], `${width}`).toContain(status);
+				}
+				const narrow = harness.getFooter()!.render(60)[mode === "full" ? 1 : 0]!;
+				if (mode === "full") expect(narrow).toContain(status);
+				else expect(narrow).not.toContain("quota");
+				for (const text of ["research 2/5", "herder: T2 integrate", "↻ build"]) expect(narrow).not.toContain(text);
+				expect(harness.getFooter()!.render(160)[mode === "full" ? 1 : 0]).toContain(status);
+			} finally {
+				harness.disposeFooter();
+				vi.unstubAllEnvs();
+			}
 		}
 	});
 

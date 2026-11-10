@@ -402,6 +402,7 @@ type StatusDescriptor = {
 	compact?: "workflow" | "process";
 };
 const STATUS_DESCRIPTORS: Record<string, StatusDescriptor> = {
+	"magpie-quota": { placement: "activity", colorSlot: 12, icon: "\u{F0954}", compact: "workflow" },
 	autoresearch: { placement: "activity", colorSlot: 0, icon: "\u{F0093}", compact: "workflow" },
 	herder: { placement: "activity", colorSlot: 1, icon: "\u{F0CC6}", compact: "workflow" },
 	loop: { placement: "activity", colorSlot: 2, icon: "\u{F04E6}", compact: "workflow" },

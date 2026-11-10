@@ -65,6 +65,25 @@ Run `/fast` or `/fast on` to request Fast mode for the current session; `/fast o
 
 Fast can increase API charges or subscription usage. For eligible models, the footer shows `FAST` or `FAST OFF` immediately after the model name to reflect the session switch; this does not confirm the tier or speed delivered upstream. Its cost is an estimate, not a subscription bill or a guarantee that Fast pricing is reflected. Gateway and upstream routing can reject, drop or downgrade a tier, and Codex responses may report `default` even when Magpie forwarded `priority`. Check Magpie's request log for the requested and sent tiers. Native compaction uses a separate request and does not use this switch.
 
+## Continue after a quota reset
+
+Quota auto-continue is **on by default in top-level TUI and RPC sessions**. After a Magpie request fails with a quota or rate-limit error, the extension queries authenticated `/v1/magpie/quotas` and the current session's `/v1/magpie/route`. It records the earliest future reset on exhausted subscription/plan windows belonging to the failed route's providers, waits another **30 seconds**, then starts one continuation of the interrupted task in the same conversation. Completed tool results stay in context. Successful calls do not trigger quota queries, and the wait makes no model calls or network polls.
+
+The footer shows `quota awaiting · retry in 2h 10m · Nov 12, 14:30`, refreshed at most every 30 seconds. [Statusline Footer](../statusline-footer/README.md) places it first on the full activity row and ahead of other workflow summaries in compact mode. Pi's default footer also receives the status. `quota paused` explains a missing reset or a failed lookup.
+
+| Command | Effect |
+| --- | --- |
+| `/magpie-auto-continue` or `status` | Show the session switch and pending retry. |
+| `/magpie-auto-continue cancel` | Cancel this wait, keeping detection enabled for later requests. |
+| `/magpie-auto-continue off` / `on` | Disable or enable detection for this session branch. |
+| `/magpie-auto-continue resume` | Explicitly resume a saved or paused wait for the same failed call. |
+
+New input, a new run, model changes, conversation branching, compaction, session switching/forking, and an aborted run cancel the old wait. A due continuation waits outside Pi's message queue while the session is busy, has queued messages, or has an open dialog. Gateway or credential changes pause it. Reloading or reopening Pi restores a pending wait **paused**; use `resume` to authorize it again. Pi must remain running to wake automatically. Print/JSON and child sessions do not schedule continuations.
+
+The timestamp is a **retry opportunity**, not a promise of available quota: Magpie's public cards do not associate windows with model families or route attempts with individual accounts. Another window or account may still be blocked. A later quota failure can schedule a newly observed future reset; an expired timestamp cannot repeat the same timer. Balance exhaustion, billing/authentication errors, and context/output limits do not auto-resume. Explicit Magpie percentage caps are honored when the error names the cap.
+
+Automatic/group routes require a fresh failed session route to identify relevant providers; an explicit concrete route can instead match its provider directly. Unrelated account cards and guessed model-name matches are never used. The extension retains an observation across Pi's short retries because a later gateway route can omit attempts while accounts are resting. If the gateway has already lost that route, denies access, or supplies no usable future reset, auto-continue pauses and reports why. Gateway/key access to the public quota and route APIs is required. Each lookup has a 15-second deadline and a 1 MiB response limit, rejects redirects, and uses Pi's current paired gateway credential. Credentials and raw quota/account data are not persisted.
+
 ## Automatic web-search MCP
 
 A saved `/login magpie` connection automatically registers **one** native MCP server, `magpie-web-search`, at `<gateway-origin>/mcp/magpie/web-search`. It exposes only `web_search` and `web_fetch` directly (Pi names them `mcp__magpie_web_search__web_search` and `mcp__magpie_web_search__web_fetch`); other server tools stay hidden. Start Magpie and configure its web-search backend separately. Model discovery validates login, not search-backend availability.
