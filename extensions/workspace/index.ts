@@ -1,5 +1,4 @@
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { Type, type Static } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { runWorkspaceGc } from "./gc.ts";
@@ -161,24 +160,6 @@ function addSessionAllowedPath(ctx: ExtensionContext, targetPath: string): void 
 		state.sessionAllowedPaths.set(sessionId, set);
 	}
 	set.add(resolveCanonicalPath(targetPath, ctx.cwd));
-}
-
-function selectAllowTarget(resolvedPath: string, cwd: string, isFileTool: boolean): string {
-	try {
-		if (fs.existsSync(resolvedPath) && fs.statSync(resolvedPath).isDirectory()) {
-			return resolvedPath;
-		}
-	} catch {
-		// Ignore stat errors.
-	}
-	if (isFileTool || path.extname(resolvedPath) !== "") {
-		const parentDir = path.dirname(resolvedPath);
-		const canonicalCwd = resolveCanonicalPath(cwd);
-		if (parentDir !== resolvedPath && parentDir !== path.dirname(parentDir) && !isSubpath(parentDir, canonicalCwd)) {
-			return parentDir;
-		}
-	}
-	return resolvedPath;
 }
 
 /**
@@ -371,18 +352,15 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 				continue;
 			}
 
+			// Both lasting choices cover exactly the path the prompt shows, never its parent directory.
 			if (choice === "Allow for this session" || choice === "Allow for session") {
-				const allowTarget = selectAllowTarget(resolvedPath, ctx.cwd, isFileTool);
-				addSessionAllowedPath(ctx, allowTarget);
 				addSessionAllowedPath(ctx, resolvedPath);
-				sessionAllowed.add(allowTarget);
 				sessionAllowed.add(resolvedPath);
 				continue;
 			}
 
 			if (choice === "Allow for this project" || choice === "Allow for project") {
-				const allowTarget = selectAllowTarget(resolvedPath, ctx.cwd, isFileTool);
-				const saved = await allowProjectPath(ctx.cwd, allowTarget);
+				const saved = await allowProjectPath(ctx.cwd, resolvedPath);
 				policy.allowedPaths.push(saved);
 				addSessionAllowedPath(ctx, saved);
 				sessionAllowed.add(saved);

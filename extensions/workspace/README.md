@@ -42,9 +42,11 @@ When a tool call targets an unapproved path outside `<cwd>` and `/tmp`:
 
 - **Interactive top-level sessions (`hasUI: true`):** Pi prompts with `ctx.ui.select`:
   - `Allow once` — permits this single tool call only.
-  - `Allow for this session` — permits the path (and its parent directory for file writes) for the rest of the current session and any child sessions it spawns.
-  - `Allow for this project` — records the canonical path in `<cwd>/.pi/workspaces/policy.json` (`allowedPaths`) and permits it across sessions for this project.
+  - `Allow for this session` — permits exactly the path the prompt shows for the rest of the current session and any child sessions it spawns.
+  - `Allow for this project` — records exactly the path the prompt shows in `<cwd>/.pi/workspaces/policy.json` (`allowedPaths`) and permits it across sessions for this project.
   - `Deny` — blocks the tool call and directs the model to `<cwd>/.pi/workspaces/<name>` or `/tmp`.
+
+  The prompt title, `Allow write outside workspace (<path>)?`, names the canonical path, and `Allow for this session` and `Allow for this project` cover that path only, never its parent directory: after `~/notes/a.txt` is allowed, a later write to `~/notes/a.txt` does not prompt and a write to `~/notes/b.txt` prompts again. When the path shown is a directory (for example the target of `mkdir` or `cp`), allowing it allows everything under it. To allow a directory when the prompt shows a file, run `/workspace allow <dir>`.
 - **Child sessions and non-interactive sessions (`print`, `json`):** While any top-level session is open, the extension registers itself in `globalThis[Symbol.for("pi-extensions.child-session-hooks")]` and removes the hook when all sessions shut down. Child sessions (including sessions carrying a `pi-extensions.session-link` entry) inherit the active session and project allowlists, and immediately block unapproved external writes without prompting.
 
 ### Guard state files
@@ -109,7 +111,7 @@ A symbolic link under `<cwd>/.pi/workspaces/` is not a workspace, whether it poi
   - `--dry-run` reports which workspaces would be removed or kept without deleting anything.
   - `--yes` skips interactive review prompts (removing `SAFE` workspaces and keeping `REVIEW`, `ACTIVE`, and `PINNED` workspaces).
   - `--all` runs garbage collection across every project closure listed in `<agentDir>/workspaces-index.json` and prunes entries whose project directories no longer exist.
-- `/workspace allow <path>` — canonicalize `<path>` and add it to `<cwd>/.pi/workspaces/policy.json` and the current session allowlist.
+- `/workspace allow <path>` — canonicalize `<path>` and add it to `<cwd>/.pi/workspaces/policy.json` and the current session allowlist. A directory allows everything under it.
 - `/workspace deny <path>` — remove `<path>` from `<cwd>/.pi/workspaces/policy.json` and active session allowlists.
 - `/workspace pin <name>` — mark workspace `<name>` as `PINNED`.
 - `/workspace unpin <name>` — clear the `PINNED` flag on workspace `<name>`.

@@ -497,10 +497,12 @@ describe("workspace write guard — the guard's own policy.json and .registry.js
 				["tool-ws", true],
 			]);
 
-			// The only prompt is for the outside write; "Allow for this project" records its directory.
+			// The only prompt is for the outside write; "Allow for this project" records that path.
 			expect(h.prompts).toEqual([`Allow write outside workspace (${path.join(canonicalOutside, "approved.txt")})?`]);
 			expect(await readFile(approved, "utf8")).toBe("approved\n");
-			expect(JSON.parse(await readFile(policyFile, "utf8"))).toEqual({ allowedPaths: [canonicalOutside] });
+			expect(JSON.parse(await readFile(policyFile, "utf8"))).toEqual({
+				allowedPaths: [path.join(canonicalOutside, "approved.txt")],
+			});
 			expect(h.errors).toEqual([]);
 		} finally {
 			await h.dispose();

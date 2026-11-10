@@ -253,8 +253,8 @@ describe("workspace write guard — paths Pi's write and edit tools resolve diff
 		expect(await toolCall({ toolName: "write", input: { path: `@${outsideDir}/allowed.txt` } }, ctx)).toBeUndefined();
 		expect(titles).toEqual([`Allow write outside workspace (${path.join(canonicalOutside, "allowed.txt")})?`]);
 
-		// The session allowlist holds the real directory, so other spellings of files in it pass unprompted.
-		for (const spelling of [path.join(outsideDir, "allowed.txt"), `file://${outsideDir}/other.txt`]) {
+		// The session allowlist holds the real file, so other spellings of it pass unprompted.
+		for (const spelling of [path.join(outsideDir, "allowed.txt"), `file://${outsideDir}/allowed.txt`]) {
 			expect(await toolCall({ toolName: "edit", input: { path: spelling } }, ctx), spelling).toBeUndefined();
 		}
 		expect(titles).toHaveLength(1);

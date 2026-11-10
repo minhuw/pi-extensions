@@ -907,7 +907,7 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 			expect(parent.ui.prompts.length).toBe(promptsBeforeOnce + 2);
 			expect(await readFile(onceFile, "utf8")).toBe("allowed once\n");
 
-			// 3. Allow for this session permits write, edit, bash, and symlink writes for the session AND child sessions without writing policy.json
+			// 3. Allow for this session permits the approved path for the session AND child sessions without writing policy.json; sibling files prompt again
 			choicesQueue.push("Allow for this session");
 			const sessionFile = path.join(outsideDir, "session-allowed.txt");
 			const sessionBashFile = path.join(outsideDir, "session-bash.txt");
@@ -927,15 +927,15 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 				fauxAssistantMessage("session allow verified"),
 			]);
 			await parent.session.prompt("write, edit, and bash with session allow");
-			// Prompted only once for the first write; subsequent edit, bash, and symlink write in outsideDir did not prompt
-			expect(parent.ui.prompts.length).toBe(promptsBeforeSessionAllow + 1);
+			// Prompted for the first write and not for the edit of the same path; the bash and symlink writes to sibling files in outsideDir each prompted again and were denied
+			expect(parent.ui.prompts.length).toBe(promptsBeforeSessionAllow + 3);
 			expect(await readFile(sessionFile, "utf8")).toBe("v2\n");
-			expect(await readFile(sessionBashFile, "utf8")).toBe("from bash\n");
-			expect(await readFile(path.join(outsideDir, "session-via-link.txt"), "utf8")).toBe("via symlink\n");
+			expect(fs.existsSync(sessionBashFile)).toBe(false);
+			expect(fs.existsSync(path.join(outsideDir, "session-via-link.txt"))).toBe(false);
 			expect((await readProjectPolicy(projectCwd)).allowedPaths).toEqual([]);
 
 			// 4. Child session via bindAsChild AND child session via pi-extensions.session-link entry (even with UI bound)
-			// inherit session allowlist for outsideDir and immediately block unapproved external write/edit/bash without prompting
+			// inherit the session allowlist entry for sessionFile and immediately block unapproved external write/edit/bash without prompting
 			const hooks = [
 				...((globalThis as Record<symbol, Set<ChildSessionHook> | undefined>)[CHILD_SESSION_HOOKS] ?? []),
 			];
@@ -954,7 +954,7 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 				extraFactories: hooks.map((h) => h.extensionFactory),
 			});
 			try {
-				const childInheritedFile = path.join(outsideDir, "child-inherited.txt");
+				const childInheritedFile = sessionFile;
 				const childBlockedWrite = path.join(unapprovedChildDir, "blocked-write.txt");
 				const childBlockedBash = path.join(unapprovedChildDir, "blocked-bash.txt");
 
@@ -972,7 +972,7 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 				]);
 				await child1.session.prompt("child 1 test");
 				expect(child1.ui.prompts).toEqual([]);
-				expect(fs.existsSync(childInheritedFile)).toBe(true);
+				expect(await readFile(childInheritedFile, "utf8")).toBe("child ok\n");
 				expect(fs.existsSync(childBlockedWrite)).toBe(false);
 				expect(await readFile(unapprovedExisting, "utf8")).toBe("keep\n");
 				expect(fs.existsSync(childBlockedBash)).toBe(false);
@@ -1014,7 +1014,7 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 				await child2.dispose();
 			}
 
-			// 5. Allow for this project persists to policy.json and allows writes in a brand-new session without prompting
+			// 5. Allow for this project persists the approved path to policy.json and allows it in a brand-new session without prompting; a sibling file prompts again
 			const projectAllowedDir = path.join(sandboxRoot, "project-allowed-ext");
 			await mkdir(projectAllowedDir, { recursive: true });
 			const projectAllowedFile = path.join(projectAllowedDir, "shared.txt");
@@ -1027,9 +1027,9 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 			]);
 			await parent.session.prompt("allow for this project");
 			expect(parent.ui.prompts.length).toBe(promptsBeforeProjectAllow + 1);
-			expect((await readProjectPolicy(projectCwd)).allowedPaths).toContain(
-				resolveCanonicalPath(projectAllowedDir),
-			);
+			expect((await readProjectPolicy(projectCwd)).allowedPaths).toEqual([
+				resolveCanonicalPath(projectAllowedFile),
+			]);
 
 			const laterSession = await startPiSession();
 			try {
@@ -1045,9 +1045,11 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 					fauxAssistantMessage("later session done"),
 				]);
 				await laterSession.session.prompt("write to project-allowed dir in new session");
-				expect(laterSession.ui.prompts).toEqual([]);
+				expect(laterSession.ui.prompts.map((prompt) => prompt.title)).toEqual([
+					`Allow write outside workspace (${resolveCanonicalPath(laterBashFile)})?`,
+				]);
 				expect(await readFile(projectAllowedFile, "utf8")).toBe("project v2\n");
-				expect(await readFile(laterBashFile, "utf8")).toBe("later\n");
+				expect(fs.existsSync(laterBashFile)).toBe(false);
 			} finally {
 				await laterSession.dispose();
 			}
