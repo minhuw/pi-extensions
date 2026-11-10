@@ -18,7 +18,7 @@ See the root [README](README.md#extensions) for the overview, and read the targe
 - `extensions/benchmark/` — `core.ts` (shared measurement module; registers nothing with Pi and imports no extension; Autoresearch imports only `core.ts`), `benchmark_compare` (`index.ts`), and `/benchmark <what>` (`prompts/benchmark.md`).
 - `extensions/loop/` — `/loop` recurring prompts (fixed, cron, model-paced) and `loop_schedule` / `loop_stop`.
 - `extensions/molt/` — `/molt` new session keeping model and thinking level, and `/handoff` (model-written handover sent as the new session's first message, never written to disk).
-- `extensions/language/` — `/language` default (`<agentDir>/language.json`), cache-safe mid-session switches, and footer status.
+- `extensions/language/` — `/language` default (`<agentDir>/language.json`), cache-safe mid-session switches, footer status, and the script-based answer-language check (`agent_before_settle`, one hidden correction per run).
 - `extensions/spokesman/` — `/spokesman` secondary communicator (`auto`/`always`, `/spokesman for` main-model filter, `<agentDir>/spokesman.json`), foldable original reply, and context replacement.
 - `extensions/boom/` — `/boom` session-only subagent-first mode (never on by default), cache-safe mid-session switches, and status.
 - `extensions/alwayson/` — `/alwayson` session-only mode (never on by default) that sends long tasks to background subagents so the session keeps answering relay messages; boom's cache-safe switches and status.

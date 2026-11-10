@@ -19,6 +19,8 @@ The session's default is fixed at its first prompt and supplied through a system
 
 Resetting an active switch sends one hidden message with the next prompt. It tells the model to ignore earlier switches and return to the session's default, or the user's language if there is none.
 
+When a run is about to end, the extension checks that its final answer is in the run's language: the switch if one is active, else the session's default. Only languages with a distinctive script are checked: Chinese, Japanese, Korean, Russian, Ukrainian, Bulgarian, Serbian (Cyrillic), Greek, Arabic, Persian, Hebrew, Thai, and Hindi, by English or native name such as `简体中文`. Latin-script languages such as English or German are never checked. Code blocks, inline code, URLs, link targets, and paths are ignored. An answer with at least 40 letters left fails the check when under 30% of them are in the language's script. The extension then adds one hidden message asking the model to write the answer again in that language, and the run continues. It corrects at most once per run and accepts the rewrite. Aborted, failed, and truncated answers are not checked. The check makes no model call, so an answer in the right language costs nothing.
+
 Hidden messages preserve the prompt cache. On Magpie, changing a system prompt section rewrites the head of the context and requires the context to be cached again. Appending a message leaves the cached prefix intact.
 
 The default for new sessions lives in `<agentDir>/language.json` as `{ "default": "English" }`. `<agentDir>` is usually `~/.pi/agent`. A missing file means no default; an unreadable or invalid file also means no default and produces a warning.
