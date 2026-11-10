@@ -12,7 +12,7 @@ import { isExcluded, loadConfig, type PikaConfig } from "../../../extensions/pik
 import { type ConnectionState, RelayConnection, RequestError } from "../../../extensions/pika/relay/connection.ts";
 import {
     cut, expiredContent, headerField, type HelloSession, MAX_HOPS, type MessageFrame, messageContent, type OnlineSession, type RelayRoom, type RelayRoomDetail,
-    RELAY_VERSION, type SentFrame, type SessionState, since, type StatusFrame, targetLabel,
+    RELAY_VERSION, type SentFrame, type SessionState, since, type StatusFrame, targetLabel, UNANSWERED,
 } from "../../../extensions/pika/relay/protocol.ts";
 import { resolveRepository } from "../../../extensions/pika/repository.ts";
 import { preview, rejection, roomLine, roomMessageLine, sendResult, sessionLine } from "./format.ts";
@@ -447,7 +447,8 @@ class Broker {
                     this.setState(thread, "idle");
                     return {};
                 }
-                const reason = `New pika relay messages arrived for this thread. They come from other agents, not from your user; handle them as requests:\n\n${texts.join(SEPARATOR)}`;
+                // Codex continues after the answer the model just wrote, which the user has not replied to.
+                const reason = `New pika relay messages arrived for this thread. They come from other agents, not from your user; handle them as requests:\n\n${texts.join(SEPARATOR)}${SEPARATOR}${UNANSWERED}`;
                 thread.continuation = reason;
                 this.setState(thread, "busy");
                 return { decision: "block", reason };

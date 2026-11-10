@@ -170,6 +170,8 @@ describe("receiving", () => {
         const context: string = during.output.hookSpecificOutput.additionalContext;
         expect(context).toContain(`[relay] Message ${first} from pi session sender-session ("Sender") on desktop, project elsewhere:\n\nplease draw a cat\n\n`);
         expect(context).toContain(`To answer, call relay_send with to "sender-session" and replyTo "${first}".`);
+        // The turn's answer is still to come.
+        expect(context).not.toContain("Your user has not written");
         expect(existsSync(pendingPath(env.stateDir, A))).toBe(false);
         expect(existsSync(inboxPath(env.stateDir, A))).toBe(false);
         expect(await runHook(env, "PostToolUse", { session_id: A, cwd: env.cwd })).toMatchObject({ code: 0, stdout: "" });
@@ -188,6 +190,8 @@ describe("receiving", () => {
         expect(stop.output.reason).toMatch(/^New pika relay messages arrived for this thread\. They come from other agents, not from your user; handle them as requests:\n\n\[relay\] Message /);
         expect(stop.output.reason).toContain(`[relay] Message ${second} from pi session sender-session ("Sender") on desktop, project elsewhere, marked urgent:\n\nand a dog`);
         expect(stop.output.reason).toContain(`\n\n---\n\n[relay] Message ${third} `);
+        // The turn continues after an answer the user has not replied to.
+        expect(stop.output.reason.endsWith("do not reply just to say so.\n\n---\n\nYour user has not written since your last answer to them, so do not take that answer as read. If it still holds something they need (a question, a decision, a result), repeat that in full, not as a summary, in the answer that ends this turn, then say what changed since.")).toBe(true);
         await waitFor(() => relay.online(A)?.session?.state === "busy", "busy after a blocking Stop");
         expect((await runHook(env, "Stop", { session_id: A, cwd: env.cwd, stop_hook_active: true })).output).toEqual({});
         await waitFor(() => relay.online(A)?.session?.state === "idle", "idle");

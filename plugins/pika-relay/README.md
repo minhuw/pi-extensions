@@ -28,7 +28,7 @@ Codex installs a copy of the plugin directory into its cache, keyed by the `vers
   - `SessionStart` puts the thread on the relay and tells the model its relay name and id.
   - `UserPromptSubmit` marks the thread busy and adds messages that arrived while it was idle to the prompt's context.
   - `PostToolUse` adds messages that arrived during the turn, after the next tool call (like Pi's steering).
-  - `Stop` continues the turn with waiting messages as a new prompt (like Pi's follow-ups), or marks the thread idle.
+  - `Stop` continues the turn with waiting messages as a new prompt (like Pi's follow-ups), or marks the thread idle. The prompt ends by telling the model that you have not replied to the answer it just wrote, so the answer that ends the turn repeats in full whatever in it you still need, instead of summarizing it.
   - `SessionEnd` takes the thread offline.
 - **Skill** `pika-relay`: how to treat messages from other agents, how to stand by, and how to address sessions and chatrooms.
 

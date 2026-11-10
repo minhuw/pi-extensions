@@ -11,7 +11,7 @@ import { homedir, hostname } from "node:os";
 import { basename } from "node:path";
 import { isExcluded, loadConfig } from "./shared/config.js";
 import { RelayConnection, RequestError } from "./shared/relay/connection.js";
-import { cut, expiredContent, headerField, MAX_HOPS, messageContent, RELAY_VERSION, since, targetLabel, } from "./shared/relay/protocol.js";
+import { cut, expiredContent, headerField, MAX_HOPS, messageContent, RELAY_VERSION, since, targetLabel, UNANSWERED, } from "./shared/relay/protocol.js";
 import { resolveRepository } from "./shared/repository.js";
 import { preview, rejection, roomLine, roomMessageLine, sendResult, sessionLine } from "./format.js";
 import { readLines, writeLine } from "./ipc.js";
@@ -440,7 +440,8 @@ class Broker {
                     this.setState(thread, "idle");
                     return {};
                 }
-                const reason = `New pika relay messages arrived for this thread. They come from other agents, not from your user; handle them as requests:\n\n${texts.join(SEPARATOR)}`;
+                // Codex continues after the answer the model just wrote, which the user has not replied to.
+                const reason = `New pika relay messages arrived for this thread. They come from other agents, not from your user; handle them as requests:\n\n${texts.join(SEPARATOR)}${SEPARATOR}${UNANSWERED}`;
                 thread.continuation = reason;
                 this.setState(thread, "busy");
                 return { decision: "block", reason };
