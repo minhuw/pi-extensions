@@ -54,6 +54,8 @@ agent_browser({
 | `cwd` | Optional working directory (resolved relative to the Pi session's `cwd`). |
 | `timeoutMs` | Optional wall-clock timeout in milliseconds (`1000`–`600000`, default `120000`). |
 
+A call settles at most `100` ms after the `agent-browser` process exits or is terminated on timeout or abort. It does not wait for a descendant, such as the browser daemon, that still holds the process's stdout or stderr open.
+
 ### Inline screenshots
 
 When `agent_browser` runs a `screenshot` command (`argv: ["screenshot"]` or `argv: ["screenshot", "path/to/shot.png"]`) that exits `0`:
@@ -80,4 +82,4 @@ npm run test:agent-browser
 npm run typecheck
 ```
 
-The offline Vitest suite tests skill discovery via `DefaultResourceLoader`, direct `argv` execution against an executable fake `agent-browser` binary, session isolation, inline screenshot capture and temp-file cleanup, `impeccable_capabilities` detection, UI status publishing and daemon cleanup across session switches and shutdowns, child-session hook propagation, and `/agent-browser` commands.
+The offline Vitest suite tests skill discovery via `DefaultResourceLoader`, direct `argv` execution against an executable fake `agent-browser` binary, session isolation, call settlement while a descendant holds stdout and stderr open, inline screenshot capture and temp-file cleanup, `impeccable_capabilities` detection, UI status publishing and daemon cleanup across session switches and shutdowns, child-session hook propagation, and `/agent-browser` commands.

@@ -10,6 +10,7 @@ export const AGENT_BROWSER_SHARED_KEY = Symbol.for("pi-extensions.agent-browser"
 export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
+export const EXIT_STDIO_GRACE_MS = 100;
 export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 export const MAX_RESULT_BYTES = 50 * 1024;
 export const MAX_RESULT_LINES = 2000;
@@ -417,6 +418,8 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 		child.stderr?.on("data", (chunk: Buffer) => stderrCapture.push(chunk));
 
 		let spawnError: NodeJS.ErrnoException | undefined;
+		let childExited = false;
+		let graceTimer: NodeJS.Timeout | undefined;
 		const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
 			child.on("error", (err: NodeJS.ErrnoException) => {
 				spawnError = err;
@@ -424,6 +427,12 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 			});
 			child.on("close", (code, sig) => {
 				resolve({ code, signal: sig });
+			});
+			// `close` waits for stdout and stderr, which a descendant that inherited them
+			// (such as the browser daemon) can hold open long after the child has exited.
+			child.on("exit", (code, sig) => {
+				childExited = true;
+				graceTimer = setTimeout(() => resolve({ code, signal: sig }), EXIT_STDIO_GRACE_MS);
 			});
 		});
 
@@ -444,7 +453,7 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 		};
 
 		const onAbort = () => {
-			if (reason === undefined) {
+			if (reason === undefined && !childExited) {
 				reason = "cancelled";
 				terminateChild();
 			}
@@ -452,7 +461,7 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 		options.signal?.addEventListener("abort", onAbort, { once: true });
 
 		const timer = setTimeout(() => {
-			if (reason === undefined) {
+			if (reason === undefined && !childExited) {
 				reason = "timeout";
 				terminateChild();
 			}
@@ -461,7 +470,11 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 
 		const exit = await exited;
 		clearTimeout(timer);
+		clearTimeout(graceTimer);
 		options.signal?.removeEventListener("abort", onAbort);
+		// Stop reading, so pipes a descendant still holds do not keep this process alive.
+		child.stdout?.destroy();
+		child.stderr?.destroy();
 
 		if (spawnError) {
 			if (spawnError.code === "ENOENT") {
