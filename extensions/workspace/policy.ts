@@ -14,6 +14,8 @@ export interface ProjectPolicy {
 export interface PathAccessOptions {
 	targetPath: string;
 	cwd: string;
+	/** Take `targetPath` as written, as `resolveLiteralPath` does, instead of as a shell word. */
+	literal?: boolean;
 	sessionAllowed?: Iterable<string>;
 	projectAllowed?: Iterable<string>;
 	extraAllowed?: Iterable<string>;
@@ -42,15 +44,10 @@ function expandHomeTokens(input: string): string {
 }
 
 /**
- * Resolves `targetPath` to a canonical absolute path, expanding `~` / `$HOME` and
- * resolving symlinks via the deepest existing ancestor on disk so symlinks inside
- * `<cwd>` pointing outside `<cwd>` (and `/tmp` -> `/private/tmp` on macOS) are caught.
+ * Resolves symlinks in the absolute `absPath` via the deepest existing ancestor on disk. A link's
+ * target is read the way the OS reads it: as written, relative to the link's directory.
  */
-export function resolveCanonicalPath(targetPath: string, baseCwd?: string, seen = new Set<string>()): string {
-	const expanded = expandHomeTokens(targetPath);
-	const base = baseCwd !== undefined ? resolveCanonicalPath(baseCwd, undefined, seen) : process.cwd();
-	const absPath = path.resolve(base, expanded);
-
+function resolveSymlinks(absPath: string, seen: Set<string>): string {
 	const trailing: string[] = [];
 	let current = absPath;
 
@@ -64,7 +61,8 @@ export function resolveCanonicalPath(targetPath: string, baseCwd?: string, seen 
 				if (stat.isSymbolicLink() && !seen.has(current)) {
 					seen.add(current);
 					const linkTarget = fs.readlinkSync(current);
-					const resolvedTarget = resolveCanonicalPath(linkTarget, path.dirname(current), seen);
+					const linkDir = resolveSymlinks(path.dirname(current), seen);
+					const resolvedTarget = resolveSymlinks(path.resolve(linkDir, linkTarget), seen);
 					return trailing.length > 0 ? path.join(resolvedTarget, ...trailing) : resolvedTarget;
 				}
 			} catch {
@@ -79,6 +77,26 @@ export function resolveCanonicalPath(targetPath: string, baseCwd?: string, seen 
 		trailing.unshift(path.basename(current));
 		current = parent;
 	}
+}
+
+/**
+ * Resolves `targetPath` to a canonical absolute path, expanding `~` / `$HOME` and
+ * resolving symlinks via the deepest existing ancestor on disk so symlinks inside
+ * `<cwd>` pointing outside `<cwd>` (and `/tmp` -> `/private/tmp` on macOS) are caught.
+ */
+export function resolveCanonicalPath(targetPath: string, baseCwd?: string, seen = new Set<string>()): string {
+	const expanded = expandHomeTokens(targetPath);
+	const base = baseCwd !== undefined ? resolveCanonicalPath(baseCwd, undefined, seen) : process.cwd();
+	return resolveSymlinks(path.resolve(base, expanded), seen);
+}
+
+/**
+ * Resolves `targetPath` against `baseCwd` like `resolveCanonicalPath`, but takes it as written: no
+ * trimming, no quote stripping, and no `~` / `$HOME` expansion. Pi's `write` and `edit` tools read a
+ * `path` this way once `normalizeFileToolPath` has run.
+ */
+export function resolveLiteralPath(targetPath: string, baseCwd: string): string {
+	return resolveSymlinks(path.resolve(resolveCanonicalPath(baseCwd), targetPath), new Set<string>());
 }
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
@@ -127,12 +145,15 @@ export async function ensureWorkspacesClosure(cwd: string): Promise<string> {
 	return dir;
 }
 
-export function isSubpath(parentPath: string, candidatePath: string): boolean {
-	const parent = resolveCanonicalPath(parentPath);
-	const candidate = resolveCanonicalPath(candidatePath);
+/** Whether the canonical path `candidate` is `parent` or lies under it. */
+function containsPath(parent: string, candidate: string): boolean {
 	if (candidate === parent) return true;
 	const rel = path.relative(parent, candidate);
 	return rel !== "" && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !rel.startsWith("../") && !path.isAbsolute(rel);
+}
+
+export function isSubpath(parentPath: string, candidatePath: string): boolean {
+	return containsPath(resolveCanonicalPath(parentPath), resolveCanonicalPath(candidatePath));
 }
 
 async function writeJsonAtomic(filePath: string, data: unknown): Promise<void> {
@@ -233,27 +254,32 @@ function resolveGitCommonDirs(canonicalCwd: string): string[] {
 	return dirs;
 }
 
-function isRelativeParentTraversal(rawTarget: string): boolean {
-	const expanded = expandHomeTokens(rawTarget);
+function isRelativeParentTraversal(rawTarget: string, literal = false): boolean {
+	const expanded = literal ? rawTarget : expandHomeTokens(rawTarget);
 	return !path.isAbsolute(expanded) && (expanded === ".." || expanded.startsWith("../") || expanded.startsWith("..\\"));
 }
 
 export function evaluatePathAccess(options: PathAccessOptions): PathAccessEvaluation {
 	const canonicalCwd = resolveCanonicalPath(options.cwd);
-	const resolvedPath = resolveCanonicalPath(options.targetPath, canonicalCwd);
+	const resolvedPath = options.literal
+		? resolveLiteralPath(options.targetPath, canonicalCwd)
+		: resolveCanonicalPath(options.targetPath, canonicalCwd);
+	// A literal path is already canonical, and `isSubpath` would read it as a shell word again.
+	const isInside = (root: string): boolean =>
+		options.literal ? containsPath(resolveCanonicalPath(root), resolvedPath) : isSubpath(root, resolvedPath);
 
 	if (resolvedPath === "/dev/null") {
 		return { allowed: true, resolvedPath, matchedRoot: "/dev/null" };
 	}
 
 	// 1. Always allow paths inside <cwd> (including <cwd>/.pi/workspaces).
-	if (isSubpath(canonicalCwd, resolvedPath)) {
+	if (isInside(canonicalCwd)) {
 		return { allowed: true, resolvedPath, matchedRoot: canonicalCwd };
 	}
 
 	// 2. Always allow git common dir of <cwd> when <cwd> is a git repo/worktree.
 	for (const gitDir of resolveGitCommonDirs(canonicalCwd)) {
-		if (isSubpath(gitDir, resolvedPath)) {
+		if (isInside(gitDir)) {
 			return { allowed: true, resolvedPath, matchedRoot: gitDir };
 		}
 	}
@@ -263,7 +289,7 @@ export function evaluatePathAccess(options: PathAccessOptions): PathAccessEvalua
 		if (!group) continue;
 		for (const allowedEntry of group) {
 			const canonicalAllowed = resolveCanonicalPath(allowedEntry, canonicalCwd);
-			if (isSubpath(canonicalAllowed, resolvedPath)) {
+			if (isInside(canonicalAllowed)) {
 				return { allowed: true, resolvedPath, matchedRoot: canonicalAllowed };
 			}
 		}
@@ -271,19 +297,19 @@ export function evaluatePathAccess(options: PathAccessOptions): PathAccessEvalua
 
 	// 4. Allow /tmp and os.tmpdir() unless the path is a sibling of <cwd> inside a test sandbox under tmpdir
 	// or a relative "../" traversal escaping <cwd>.
-	if (!isRelativeParentTraversal(options.targetPath)) {
+	if (!isRelativeParentTraversal(options.targetPath, options.literal)) {
 		const tmpRoots = new Set<string>([
 			resolveCanonicalPath(os.tmpdir()),
 			resolveCanonicalPath("/tmp"),
 		]);
 		for (const tmpRoot of tmpRoots) {
-			if (!isSubpath(tmpRoot, resolvedPath)) continue;
+			if (!isInside(tmpRoot)) continue;
 			if (isSubpath(tmpRoot, canonicalCwd)) {
 				const relCwd = path.relative(tmpRoot, canonicalCwd);
 				const firstSegment = relCwd.split(/[\\/]/)[0];
 				if (firstSegment) {
 					const sandboxRoot = path.join(tmpRoot, firstSegment);
-					if (isSubpath(sandboxRoot, resolvedPath)) {
+					if (isInside(sandboxRoot)) {
 						// Sibling of <cwd> inside the same tmpdir sandbox (e.g. <root>/outside vs <root>/project).
 						continue;
 					}
@@ -302,11 +328,12 @@ export function evaluatePathAccess(options: PathAccessOptions): PathAccessEvalua
 
 /**
  * If `targetPath` resolves inside `<cwd>/.pi/workspaces/<name>`, returns `<name>`
- * (excluding metadata files starting with `.` or `policy.json`).
+ * (excluding metadata files starting with `.` or `policy.json`). `literal` takes `targetPath`
+ * as written, as `resolveLiteralPath` does.
  */
-export function extractWorkspaceNameFromPath(targetPath: string, cwd: string): string | undefined {
+export function extractWorkspaceNameFromPath(targetPath: string, cwd: string, literal = false): string | undefined {
 	const wsRoot = workspacesDir(cwd);
-	const resolved = resolveCanonicalPath(targetPath, cwd);
+	const resolved = literal ? resolveLiteralPath(targetPath, cwd) : resolveCanonicalPath(targetPath, cwd);
 	const rel = path.relative(wsRoot, resolved);
 	if (!rel || rel === "." || rel === ".." || rel.startsWith(`..${path.sep}`) || rel.startsWith("../") || path.isAbsolute(rel)) {
 		return undefined;

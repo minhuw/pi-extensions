@@ -33,9 +33,9 @@ The extension inspects `write`, `edit`, and mutating `bash` tool calls (`mkdir`,
 
 All candidate paths are canonicalized before evaluation:
 
-- `~` and `$HOME` are expanded.
-- A `write` or `edit` `path` is first normalized the way Pi's file tools resolve it: Unicode spaces become plain spaces, one leading `@` is dropped, and a `file://` URL becomes its filesystem path, so `@/x/f` and `file:///x/f` are judged as `/x/f`. A `file://` URL that names no local file is blocked. Words in `bash` commands keep `@` and `file:` literal.
-- Symlinks are resolved through the deepest existing ancestor on disk, so a symlink inside `<cwd>` that points outside `<cwd>` is evaluated by its real external target.
+- `~` is expanded. `$HOME` and `${HOME}` are expanded in words of `bash` commands, not in a `write` or `edit` `path`.
+- A `write` or `edit` `path` is first normalized the way Pi's file tools resolve it: Unicode spaces become plain spaces, one leading `@` is dropped, and a `file://` URL becomes its filesystem path, so `@/x/f` and `file:///x/f` are judged as `/x/f`. A `file://` URL that names no local file is blocked. After that normalization the path is taken literally, with no trimming, quote stripping, or `$HOME` expansion, as in Pi: `$HOME/f` is a file in a directory named `$HOME` under `<cwd>`, and ` f` is a file whose name starts with a space. Words in `bash` commands keep `@` and `file:` literal.
+- Symlinks are resolved through the deepest existing ancestor on disk, so a symlink inside `<cwd>` that points outside `<cwd>` is evaluated by its real external target. A link's target text is read literally, as the OS reads it.
 - Writes inside `<cwd>` (including `<cwd>/.pi/workspaces/<name>`), the repository's git common directory, `/tmp` (and `os.tmpdir()`), and paths in the session or project allowlist succeed without prompting, except for the two [guard state files](#guard-state-files).
 
 When a tool call targets an unapproved path outside `<cwd>` and `/tmp`:

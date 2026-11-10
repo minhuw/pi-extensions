@@ -15,6 +15,7 @@ import {
 	policyFilePath,
 	readProjectPolicy,
 	resolveCanonicalPath,
+	resolveLiteralPath,
 	workspacesDir,
 } from "./policy.ts";
 import {
@@ -164,10 +165,12 @@ function addSessionAllowedPath(ctx: ExtensionContext, targetPath: string): void 
 
 /**
  * Returns `policy.json` or `.registry.json` when one of `targetPaths` resolves to it. Letter case is
- * ignored: macOS resolves `POLICY.JSON` to the same file.
+ * ignored: macOS resolves `POLICY.JSON` to the same file. `literal` takes each path as written.
  */
-function findManagedStateFile(targetPaths: string[], cwd: string): string | undefined {
-	const resolvedTargets = targetPaths.map((targetPath) => resolveCanonicalPath(targetPath, cwd).toLowerCase());
+function findManagedStateFile(targetPaths: string[], cwd: string, literal: boolean): string | undefined {
+	const resolvedTargets = targetPaths.map((targetPath) =>
+		(literal ? resolveLiteralPath(targetPath, cwd) : resolveCanonicalPath(targetPath, cwd)).toLowerCase(),
+	);
 	return [policyFilePath(cwd), registryFilePath(cwd)].find((file) =>
 		resolvedTargets.includes(resolveCanonicalPath(file).toLowerCase()),
 	);
@@ -288,8 +291,9 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 		if (isFileTool) {
 			const input = event.input as { path?: unknown; file_path?: unknown } | undefined;
 			const rawPath = typeof input?.path === "string" ? input.path : typeof input?.file_path === "string" ? input.file_path : undefined;
-			if (!rawPath || !rawPath.trim()) return undefined;
+			if (!rawPath) return undefined;
 			// Judge the file Pi's tool will touch, not the raw argument (`@/x` and `file:///x` both mean `/x`).
+			// Past this normalization Pi takes the path as written, so every check below reads it literally.
 			let filePath: string;
 			try {
 				filePath = normalizeFileToolPath(rawPath);
@@ -312,7 +316,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 		}
 
 		// The guard's own state is never a tool's to write: no prompt, and no allow list unblocks it.
-		const managedFile = findManagedStateFile(workspaceTouchPaths, ctx.cwd);
+		const managedFile = findManagedStateFile(workspaceTouchPaths, ctx.cwd, isFileTool);
 		if (managedFile) {
 			return {
 				block: true,
@@ -327,6 +331,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			const check = evaluatePathAccess({
 				targetPath: rawTarget,
 				cwd: ctx.cwd,
+				literal: isFileTool,
 				sessionAllowed,
 				projectAllowed: policy.allowedPaths,
 			});
@@ -375,7 +380,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 
 		// Auto-register any workspace touched under <cwd>/.pi/workspaces/<name>.
 		for (const touchPath of workspaceTouchPaths) {
-			const wsName = extractWorkspaceNameFromPath(touchPath, ctx.cwd);
+			const wsName = extractWorkspaceNameFromPath(touchPath, ctx.cwd, isFileTool);
 			if (wsName) {
 				try {
 					await createOrTouchWorkspace(ctx.cwd, {

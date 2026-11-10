@@ -509,3 +509,127 @@ describe("workspace write guard — the guard's own policy.json and .registry.js
 		}
 	});
 });
+
+describe("workspace write guard — state-file spellings only Pi's literal reading resolves", () => {
+	let prevHome: string | undefined;
+
+	// `$HOME` is one path segment for Pi and several once expanded, so every test here pins the home directory.
+	beforeEach(async () => {
+		prevHome = process.env.HOME;
+		process.env.HOME = path.join(sandboxRoot, "home", "user");
+		await mkdir(process.env.HOME, { recursive: true });
+	});
+
+	afterEach(() => {
+		if (prevHome === undefined) {
+			delete process.env.HOME;
+		} else {
+			process.env.HOME = prevHome;
+		}
+	});
+
+	/** Pi takes `$HOME` and " " as one directory name each, so `..` climbs straight back out of them. */
+	function literalSpellings(): [spelling: string, file: string][] {
+		return [
+			["x/$HOME/../../.pi/workspaces/policy.json", path.join(workspacesDir(projectCwd), "policy.json")],
+			["@x/$HOME/../../.pi/workspaces/.registry.json", path.join(workspacesDir(projectCwd), ".registry.json")],
+			[" /../.pi/workspaces/policy.json", path.join(workspacesDir(projectCwd), "policy.json")],
+		];
+	}
+
+	it("blocks $HOME and leading-space spellings of either file in every kind of session, without a prompt", async () => {
+		const toolCall = loadToolCallHandler();
+		const policyFile = policyFilePath(projectCwd);
+		const registryFile = registryFilePath(projectCwd);
+		await mkdir(workspacesDir(projectCwd), { recursive: true });
+
+		// Neither file exists until the extension first writes it, and a write would create it.
+		for (const exists of [false, true]) {
+			if (exists) {
+				await writeFile(policyFile, "{}\n", "utf8");
+				await writeFile(registryFile, "{}\n", "utf8");
+			}
+			for (const [spelling, file] of literalSpellings()) {
+				for (const toolName of ["write", "edit"]) {
+					for (const kind of SESSION_KINDS) {
+						const prompts: string[] = [];
+						const result = await toolCall({ toolName, input: { path: spelling } }, handlerContext(kind, prompts));
+						const label = `${toolName} ${spelling} (${kind} session, file ${exists ? "exists" : "absent"})`;
+						expectManagedFileBlock(result, file, label);
+						expect(prompts, label).toEqual([]);
+					}
+				}
+			}
+		}
+		expect(await readFile(policyFile, "utf8")).toBe("{}\n");
+		expect(await readFile(registryFile, "utf8")).toBe("{}\n");
+	});
+
+	it("blocks a dangling symlink whose target text reaches policy.json through $HOME", async () => {
+		const toolCall = loadToolCallHandler();
+		const policyFile = policyFilePath(projectCwd);
+		await mkdir(workspacesDir(projectCwd), { recursive: true });
+		// The OS reads link text literally: `x/$HOME` is a directory, and `../..` leads back to the project.
+		await mkdir(path.join(projectCwd, "x", "$HOME"), { recursive: true });
+		await symlink("$HOME/../../.pi/workspaces/policy.json", path.join(projectCwd, "x", "policy-link"));
+
+		const calls: [toolName: string, input: unknown][] = [
+			["write", { path: "x/policy-link" }],
+			["edit", { path: "x/policy-link" }],
+			["bash", { command: "echo '{}' > x/policy-link" }],
+		];
+		for (const [toolName, input] of calls) {
+			for (const kind of SESSION_KINDS) {
+				const prompts: string[] = [];
+				const result = await toolCall({ toolName, input }, handlerContext(kind, prompts));
+				expectManagedFileBlock(result, policyFile, `${toolName} (${kind} session)`);
+				expect(prompts, toolName).toEqual([]);
+			}
+		}
+
+		// Writing through the link creates exactly the file the guard named.
+		await writeFile(path.join(projectCwd, "x", "policy-link"), "{}\n", "utf8");
+		expect(await readFile(policyFile, "utf8")).toBe("{}\n");
+	});
+
+	it("keeps both files unchanged when a real UI session tries those spellings", async () => {
+		const h = await startUiSession();
+		try {
+			const policyFile = policyFilePath(projectCwd);
+			const registryFile = registryFilePath(projectCwd);
+			await mkdir(workspacesDir(projectCwd), { recursive: true });
+			await writeFile(policyFile, '{"allowedPaths":[]}\n', "utf8");
+			await writeFile(registryFile, '{"workspaces":[]}\n', "utf8");
+
+			const spellings = literalSpellings();
+			h.faux.setResponses([
+				fauxAssistantMessage(
+					spellings.flatMap(([spelling]) => [
+						fauxToolCall("write", { path: spelling, content: JSON.stringify({ allowedPaths: [outsideDir] }) }),
+						fauxToolCall("edit", {
+							path: spelling,
+							edits: [{ oldText: "[]", newText: `[${JSON.stringify(outsideDir)}]` }],
+						}),
+					]),
+				),
+				fauxAssistantMessage("done"),
+			]);
+			await h.session.prompt("rewrite the workspace state files");
+
+			const results = h.toolResults();
+			expect(results).toHaveLength(6);
+			for (const [index, result] of results.entries()) {
+				const [spelling, file] = spellings[Math.floor(index / 2)]!;
+				expect(result.text, spelling).toContain(`Blocked write to "${file}"`);
+				expect(result.text, spelling).toContain("managed by the workspace extension");
+				expect(result.isError, spelling).toBe(true);
+			}
+			expect(h.prompts).toEqual([]);
+			expect(await readFile(policyFile, "utf8")).toBe('{"allowedPaths":[]}\n');
+			expect(await readFile(registryFile, "utf8")).toBe('{"workspaces":[]}\n');
+			expect(h.errors).toEqual([]);
+		} finally {
+			await h.dispose();
+		}
+	});
+});

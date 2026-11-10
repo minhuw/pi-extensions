@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -338,5 +338,268 @@ describe("workspace write guard — paths Pi's write and edit tools resolve diff
 		} finally {
 			await h.dispose();
 		}
+	});
+});
+
+describe("workspace write guard — a write or edit path is taken literally once Pi has normalized it", () => {
+	let prevHome: string | undefined;
+	let canonicalRoot: string;
+
+	// `$HOME` is one path segment for Pi and several once expanded, so every test here pins the home directory.
+	beforeEach(async () => {
+		prevHome = process.env.HOME;
+		process.env.HOME = path.join(sandboxRoot, "home", "user");
+		await mkdir(process.env.HOME, { recursive: true });
+		canonicalRoot = resolveCanonicalPath(sandboxRoot);
+	});
+
+	afterEach(() => {
+		if (prevHome === undefined) {
+			delete process.env.HOME;
+		} else {
+			process.env.HOME = prevHome;
+		}
+	});
+
+	/** Spellings Pi resolves to `<sandbox>/outside/<name>`: `$HOME` is one directory name, and `..` climbs back out of it. */
+	function homeTokenSpellings(name: string): string[] {
+		return [
+			`a/$HOME/../../../outside/${name}`,
+			`a/\${HOME}/../../../outside/${name}`,
+			`@a/$HOME/../../../outside/${name}`,
+		];
+	}
+
+	it("blocks $HOME spellings of an outside file in a real session, creating and changing nothing", async () => {
+		const existing = path.join(outsideDir, "existing.txt");
+		await writeFile(existing, "original\n", "utf8");
+		const h = await startHeadlessSession();
+		try {
+			h.faux.setResponses([
+				fauxAssistantMessage([
+					...homeTokenSpellings("created.txt").map((spelling) =>
+						fauxToolCall("write", { path: spelling, content: "escaped\n" }),
+					),
+					...homeTokenSpellings("existing.txt").map((spelling) =>
+						fauxToolCall("edit", { path: spelling, edits: [{ oldText: "original", newText: "escaped" }] }),
+					),
+				]),
+				fauxAssistantMessage("done"),
+			]);
+			await h.session.prompt("write and edit outside the project");
+
+			const results = h.toolResults();
+			expect(results).toHaveLength(6);
+			for (const [index, result] of results.entries()) {
+				const target = path.join(canonicalRoot, "outside", index < 3 ? "created.txt" : "existing.txt");
+				expect(result.text, `call ${index}`).toContain(
+					`Blocked write outside project working directory: "${target}"`,
+				);
+				expect(result.isError, `call ${index}`).toBe(true);
+			}
+			expect(await readFile(existing, "utf8")).toBe("original\n");
+			expect(fs.readdirSync(outsideDir)).toEqual(["existing.txt"]);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it.each(["write", "edit"] as const)(
+		"blocks %s calls with $HOME spellings of an outside file, or prompts with the real target",
+		async (toolName) => {
+			const toolCall = loadToolCallHandler();
+			const target = path.join(canonicalRoot, "outside", "f.txt");
+			for (const spelling of homeTokenSpellings("f.txt")) {
+				const blocked = await toolCall({ toolName, input: { path: spelling } }, handlerContext());
+				expect(blocked, spelling).toMatchObject({ block: true });
+				expect(blocked?.reason, spelling).toContain(
+					`Blocked write outside project working directory: "${target}"`,
+				);
+
+				const titles: string[] = [];
+				const denied = await toolCall(
+					{ toolName, input: { path: spelling } },
+					handlerContext(async (title) => {
+						titles.push(title);
+						return "Deny";
+					}),
+				);
+				expect(denied, spelling).toMatchObject({ block: true });
+				expect(titles, spelling).toEqual([`Allow write outside workspace (${target})?`]);
+			}
+		},
+	);
+
+	it("judges a leading space or wrapping quotes as part of the path, not as a /tmp path", async () => {
+		const toolCall = loadToolCallHandler();
+		// The first segment is a directory named " ", "'", or '"' inside the project, and `..` climbs out of it.
+		for (const [spelling, target] of [
+			[" /../../tmp/probe/f.txt", path.join(canonicalRoot, "tmp", "probe", "f.txt")],
+			["'/../../tmp/probe/q.txt'", path.join(canonicalRoot, "tmp", "probe", "q.txt'")],
+			['"/../../tmp/probe/d.txt"', path.join(canonicalRoot, "tmp", "probe", 'd.txt"')],
+		] as const) {
+			for (const toolName of ["write", "edit"]) {
+				const result = await toolCall({ toolName, input: { path: spelling } }, handlerContext());
+				expect(result, `${toolName} ${spelling}`).toMatchObject({ block: true });
+				expect(result?.reason, `${toolName} ${spelling}`).toContain(
+					`Blocked write outside project working directory: "${target}"`,
+				);
+			}
+		}
+	});
+
+	it("judges a path that is only a space, or ends in one, as the file of that name", async () => {
+		// Links named " ": Pi opens the name as written, so a write lands on the link's target.
+		await mkdir(path.join(projectCwd, "dir"), { recursive: true });
+		await symlink(path.join(outsideDir, "via-blank.txt"), path.join(projectCwd, " "));
+		await symlink(path.join(outsideDir, "via-trailing.txt"), path.join(projectCwd, "dir", " "));
+		const cases: [spelling: string, target: string][] = [
+			[" ", path.join(canonicalRoot, "outside", "via-blank.txt")],
+			// Pi turns a Unicode space into a plain one.
+			["\u00A0", path.join(canonicalRoot, "outside", "via-blank.txt")],
+			["dir/ ", path.join(canonicalRoot, "outside", "via-trailing.txt")],
+		];
+		const h = await startHeadlessSession();
+		try {
+			h.faux.setResponses([
+				fauxAssistantMessage(cases.map(([spelling]) => fauxToolCall("write", { path: spelling, content: "escaped\n" }))),
+				fauxAssistantMessage("done"),
+			]);
+			await h.session.prompt("write through the links");
+
+			const results = h.toolResults();
+			expect(results).toHaveLength(cases.length);
+			for (const [index, [spelling, target]] of cases.entries()) {
+				expect(results[index]!.text, JSON.stringify(spelling)).toContain(
+					`Blocked write outside project working directory: "${target}"`,
+				);
+				expect(results[index]!.isError, JSON.stringify(spelling)).toBe(true);
+			}
+			expect(fs.readdirSync(outsideDir)).toEqual([]);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("allows paths Pi keeps inside the project, without a prompt", async () => {
+		const toolCall = loadToolCallHandler();
+		const inProject: [spelling: string, file: string][] = [
+			[" notes.txt", path.join(projectCwd, " notes.txt")],
+			["$HOME/notes.txt", path.join(projectCwd, "$HOME", "notes.txt")],
+			["${HOME}/notes.txt", path.join(projectCwd, "${HOME}", "notes.txt")],
+			// ` ..` is a directory name, not the parent directory.
+			[" ../notes.txt", path.join(projectCwd, " ..", "notes.txt")],
+			["'quoted.txt'", path.join(projectCwd, "'quoted.txt'")],
+		];
+		const titles: string[] = [];
+		const ctx = handlerContext(async (title) => {
+			titles.push(title);
+			return "Deny";
+		});
+		for (const [spelling] of inProject) {
+			for (const toolName of ["write", "edit"]) {
+				expect(await toolCall({ toolName, input: { path: spelling } }, ctx), `${toolName} ${spelling}`).toBeUndefined();
+			}
+		}
+		expect(titles).toEqual([]);
+
+		const h = await startHeadlessSession();
+		try {
+			h.faux.setResponses([
+				fauxAssistantMessage(inProject.map(([spelling]) => fauxToolCall("write", { path: spelling, content: "v1\n" }))),
+				fauxAssistantMessage(
+					inProject.map(([spelling]) =>
+						fauxToolCall("edit", { path: spelling, edits: [{ oldText: "v1", newText: "v2" }] }),
+					),
+				),
+				fauxAssistantMessage("done"),
+			]);
+			await h.session.prompt("write and edit inside the project");
+
+			expect(h.toolResults().filter((result) => result.isError)).toEqual([]);
+			for (const [spelling, file] of inProject) {
+				expect(await readFile(file, "utf8"), spelling).toBe("v2\n");
+			}
+			expect(fs.readdirSync(outsideDir)).toEqual([]);
+			expect(fs.readdirSync(os.homedir())).toEqual([]);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("keeps the ../ rule for the path as Pi reads it", async () => {
+		const toolCall = loadToolCallHandler();
+		const sibling = `${path.basename(sandboxRoot)}-sibling`;
+		const target = path.join(resolveCanonicalPath(os.tmpdir()), sibling, "f.txt");
+
+		// A temp path outside this sandbox is allowed by its absolute spelling, but not by climbing out with `../`.
+		expect(await toolCall({ toolName: "write", input: { path: target } }, handlerContext())).toBeUndefined();
+		for (const spelling of [`../../${sibling}/f.txt`, `@../../${sibling}/f.txt`]) {
+			for (const toolName of ["write", "edit"]) {
+				const result = await toolCall({ toolName, input: { path: spelling } }, handlerContext());
+				expect(result, `${toolName} ${spelling}`).toMatchObject({ block: true });
+				expect(result?.reason, `${toolName} ${spelling}`).toContain(
+					`Blocked write outside project working directory: "${target}"`,
+				);
+			}
+		}
+		// With a leading space the first segment is a directory named ` ..`, so Pi stays inside the project.
+		expect(
+			await toolCall({ toolName: "write", input: { path: ` ../../${sibling}/f.txt` } }, handlerContext()),
+		).toBeUndefined();
+	});
+
+	it("follows a dangling symlink's target text the way the OS does", async () => {
+		const toolCall = loadToolCallHandler();
+		// The OS reads link text literally: `$HOME` and " " are directory names to climb out of.
+		await mkdir(path.join(projectCwd, "a", "$HOME"), { recursive: true });
+		await mkdir(path.join(projectCwd, " "), { recursive: true });
+		await mkdir(path.join(sandboxRoot, "tmp", "probe"), { recursive: true });
+		await symlink("$HOME/../../../outside/via-home.txt", path.join(projectCwd, "a", "home-link"));
+		await symlink(" /../../tmp/probe/via-space.txt", path.join(projectCwd, "space-link"));
+		const links: [spelling: string, target: string][] = [
+			["a/home-link", path.join(canonicalRoot, "outside", "via-home.txt")],
+			["space-link", path.join(canonicalRoot, "tmp", "probe", "via-space.txt")],
+		];
+
+		for (const [spelling, target] of links) {
+			for (const toolName of ["write", "edit"]) {
+				const result = await toolCall({ toolName, input: { path: spelling } }, handlerContext());
+				expect(result, `${toolName} ${spelling}`).toMatchObject({ block: true });
+				expect(result?.reason, `${toolName} ${spelling}`).toContain(
+					`Blocked write outside project working directory: "${target}"`,
+				);
+			}
+		}
+		// A shell follows the same links.
+		expect(extractBashExternalWriteTargets("touch a/home-link space-link", projectCwd)).toEqual(
+			links.map(([, target]) => target),
+		);
+
+		// Writing through each link creates exactly the file the guard named.
+		for (const [spelling, target] of links) {
+			await writeFile(path.join(projectCwd, spelling), "followed\n", "utf8");
+			expect(await readFile(target, "utf8"), spelling).toBe("followed\n");
+		}
+	});
+
+	it("still expands ~ and $HOME in bash words", async () => {
+		const toolCall = loadToolCallHandler();
+		const home = path.join(canonicalRoot, "home", "user");
+		expect(extractBashWriteTargets('touch $HOME/a.txt ~/b.txt "${HOME}/c.txt"; mkdir -p ~', projectCwd)).toEqual([
+			path.join(home, "a.txt"),
+			path.join(home, "b.txt"),
+			path.join(home, "c.txt"),
+			home,
+		]);
+		// The spelling `write` and `edit` are blocked for stays inside the project once a shell expands `$HOME`.
+		expect(extractBashExternalWriteTargets("echo shell > a/$HOME/../../../outside/f.txt", projectCwd)).toEqual([]);
+
+		const result = await toolCall(
+			{ toolName: "bash", input: { command: 'mkdir -p "$HOME/d" && touch ~/e.txt' } },
+			handlerContext(),
+		);
+		expect(result).toMatchObject({ block: true });
+		expect(result?.reason).toContain(`Blocked write outside project working directory: "${path.join(home, "d")}"`);
 	});
 });
