@@ -212,6 +212,34 @@ describe("herder_run", () => {
 		expect(h.confirm).not.toHaveBeenCalled();
 	});
 
+	it("propagates a rejection note from the TUI goal review dialog", async () => {
+		const { h, run } = await started();
+		writeFileSync(run.paths.goal, VALID_GOAL);
+		const keys = ["e", "e", "a"];
+		const inputs: Array<string | undefined> = ["  Add a typecheck row to Checks  ", "   "];
+		const keybindings = { matches: (data: string, binding: string) => (binding === "tui.select.cancel" && data === "\x1b") || (binding === "tui.select.confirm" && data === "\r") };
+		const input = vi.fn(async () => inputs.shift());
+		Object.assign(h.ctx, { mode: "tui" });
+		Object.assign(h.ctx.ui, {
+			input,
+			custom: vi.fn((factory: (...args: unknown[]) => { handleInput(data: string): void }) => new Promise((resolve) => {
+				factory({ requestRender() {}, terminal: { rows: 24 } }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, keybindings, resolve).handleInput(keys.shift()!);
+			})),
+		});
+
+		const withNote = await h.tool("herder_run", { action: "approve_goal" });
+		expect(withNote.details).toEqual({ approved: false, note: "Add a typecheck row to Checks" });
+		expect(withNote.content[0].text).toBe("The user did not approve the goal: Add a typecheck row to Checks. Revise goal.md accordingly and call approve_goal again.");
+		expect(input).toHaveBeenCalledWith("What should change in goal.md?", "a note for the agent", expect.objectContaining({ signal: expect.anything() }));
+
+		const blankNote = await h.tool("herder_run", { action: "approve_goal" });
+		expect(blankNote.details).toEqual({ approved: false });
+		expect(blankNote.content[0].text).toBe("The user did not approve the goal. Ask what to change, revise goal.md, and call approve_goal again.");
+		expect(run.journal.read().filter((event) => event.t === "goal.approved")).toHaveLength(0);
+
+		await expect(h.tool("herder_run", { action: "approve_goal" })).resolves.toMatchObject({ details: { approved: true } });
+	});
+
 	it("refuses approval non-interactively", async () => {
 		const { h, run } = await started({ hasUI: false });
 		writeFileSync(run.paths.goal, VALID_GOAL);

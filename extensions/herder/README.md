@@ -32,7 +32,7 @@ Agents work in disposable git worktrees, and writing steps produce commits on hi
 
 1. **Start.** `/herder <goal>` creates a run on the current `HEAD` and writes a draft `goal.md`. It then sends the main model the Herder skill instructions. Each session holds at most one active run at a time, while separate sessions can run concurrent runs in the same repository; within the same session, a new run starts once its held run is finished or [parked](#standing-approval-and-parked-runs) (or `blocked` under a standing authorization). A run whose journal cannot be read also blocks a new one (see [Where state lives](#where-state-lives)).
 2. **Clarify.** The model reads the code and asks at most five questions, each with a recommended answer.
-3. **Goal.** The model completes `goal.md` and calls `herder_run { action: "approve_goal" }`. Herder validates the file and asks you to confirm it. In the TUI, the goal scrolls inside the dialog (↑↓, PgUp/PgDn, Home/End), and the Yes/No choice stays on screen; `y` or `n` answer at any point, and Esc closes the dialog without an answer, which Herder reports to the model separately from a no. The delivery summary uses the same dialog. Once approved, the goal is frozen: its hash is journaled, and Herder's tools refuse to work if `goal.md` changes afterwards. A different goal needs a new run.
+3. **Goal.** The model completes `goal.md` and calls `herder_run { action: "approve_goal" }`. Herder validates the file and asks you to confirm it. In the TUI, `goal.md` scrolls as styled Markdown inside the dialog (↑↓, PgUp/PgDn, Home/End) above `Approve`, `Reject`, and `Reject with a note` (`y`/`a`, `n`/`r`, `e`), so a rejection can hand revision notes straight back to the model; Esc closes the dialog without an answer, which Herder reports separately from a rejection. Once approved, the goal is frozen: its hash is journaled, and Herder's tools refuse to work if `goal.md` changes afterwards. A different goal needs a new run.
 4. **Plan.** The model writes `plan.md` with task lines linked to acceptance criteria.
 5. **Orchestrate.** The model runs direct steps (`herder_step`, then `herder_integrate`) or launches a workflow script in the background. A writing step's commit is integrated as one commit per task on the run's integration line. A step whose gate failed is refused; a fix step built on its commit is integrated once it passes. The integration checks must pass before the line advances.
 6. **Verify.** `herder_verify` runs every check at the integration head. A fresh, read-only verifier also runs when any of these hold:
@@ -46,7 +46,7 @@ Agents work in disposable git worktrees, and writing steps produce commits on hi
    - `not_met`: anything else, including a verifier that fails or does not assess a criterion.
 
    Each verification appends a `## Convergence N` section listing the gaps to `plan.md`.
-7. **Deliver.** `herder_deliver` or `/herder deliver` requires a `met` verdict at the current integration head. It shows you a summary and writes only after you confirm. A verified run you have not delivered yet is parked: it waits for `/herder deliver <runId>` while other runs start.
+7. **Deliver.** `herder_deliver` or `/herder deliver` requires a `met` verdict at the current integration head. It shows you a summary with the diffstat (plus a scrollable colored unified diff in the TUI, toggled with `d`) and writes only after you confirm. A verified run you have not delivered yet is parked: it waits for `/herder deliver <runId>` while other runs start.
 
 ## Commands
 

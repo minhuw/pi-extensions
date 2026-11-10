@@ -9,7 +9,7 @@ import { readLock } from "../run/lock.ts";
 import { AGENT_OPTION_KEYS, type AgentOptions, type DeliveryMode } from "../types.ts";
 import { validateScript } from "../workflow/validate.ts";
 import { DELIVERY_MODES, startRun, statusReport } from "./commands.ts";
-import { confirmLong } from "./confirm.ts";
+import { confirmLong, reviewGoal } from "./confirm.ts";
 import { describeChecks, describeDelivery, describeIntegration, describeStep, describeVerification } from "./format.ts";
 import { requireApproved, requireIdle, type Herder, type Held, type Session } from "./session.ts";
 import { sinceGrant, standingGrant, type StandingApproval } from "./standing.ts";
@@ -116,11 +116,14 @@ async function approveGoal(herder: Herder, s: Session, held: Held, ctx: Extensio
 		herder.refresh(s);
 		return reply(`Goal approved under the user's standing authorization (self-driving mode), without asking (${goal.criteria.length} criteria, ${goal.checks.length} checks). Delivery still waits for the user: never call herder_deliver; once verified, leave the run parked. Next: write plan.md (${held.run.paths.plan}) with task lines, then orchestrate.`, { approved: true, sha256, checks: goal.checks, approvedBy: "standing", grant: grant.id });
 	}
-	const answer = await confirmLong(ctx, `Approve Herder goal: ${goal.title}`, `${source.trim()}\n\nThe goal is frozen once approved.`, signal);
+	const review = await reviewGoal(ctx, `Approve Herder goal: ${goal.title}`, source, "The goal is frozen once approved.", signal);
 	// An abort may have begun while the dialog was open; it must not end with an approved goal.
 	if (held.closing || isFinished(held.run.state())) throw new Error(`Herder run ${held.runId} is being stopped.`);
-	if (answer === undefined) return reply("The approval dialog was closed without an answer; goal.md is unchanged. Do not revise it: ask the user to confirm again, then call approve_goal again.", { approved: false, dismissed: true });
-	if (!answer) return reply("The user did not approve the goal. Ask what to change, revise goal.md, and call approve_goal again.", { approved: false });
+	if (review === undefined) return reply("The approval dialog was closed without an answer; goal.md is unchanged. Do not revise it: ask the user to confirm again, then call approve_goal again.", { approved: false, dismissed: true });
+	if (review.choice !== "approve") {
+		if (review.note) return reply(`The user did not approve the goal: ${review.note}. Revise goal.md accordingly and call approve_goal again.`, { approved: false, note: review.note });
+		return reply("The user did not approve the goal. Ask what to change, revise goal.md, and call approve_goal again.", { approved: false });
+	}
 	if (hashGoal(readFileSync(held.run.paths.goal, "utf8")) !== sha256) throw new Error("goal.md changed while the user was reviewing it; call approve_goal again.");
 	held.run.journal.append({ t: "goal.approved", sha256, checks: goal.checks, approvedBy: "user" });
 	held.run.renderProgress(planTasks(held.run));

@@ -4,14 +4,14 @@ import { LIMITS } from "../config.ts";
 import { integrationRef, refPrefix, runPaths, worktreePath } from "../run/paths.ts";
 import type { RunStore } from "../run/store.ts";
 import type { AgentRunner, CheckResult, CheckSpec, DeliveryCompletedEvent, DeliveryMode, DeliveryStartedEvent, Faults, JournalInput, RoleDefinition, Vcs } from "../types.ts";
-import { GitError, hasHerderTrailer, RefConflictError, removeWorktrees } from "../vcs/git.ts";
+import { DIFF_TRUNCATED_MARKER, GitError, hasHerderTrailer, RefConflictError, removeWorktrees } from "../vcs/git.ts";
 import { acceptCuration } from "./curate.ts";
 
 export interface DeliverDeps {
 	runId: string; store: RunStore; vcs: Vcs; runner: AgentRunner; roles: ReadonlyMap<string, RoleDefinition>; checks: readonly CheckSpec[];
 	title: string; faults?: Faults; signal?: AbortSignal; onProgress?: () => void;
-	/** Interactive approval of the summary; nothing reaches the user's checkout or branches unless it resolves true. */
-	confirm(summary: string): Promise<boolean>;
+	/** Interactive approval of the summary (and unified patch when available); nothing reaches the user's checkout or branches unless it resolves true. */
+	confirm(summary: string, patch?: string): Promise<boolean>;
 }
 export interface DeliveryRequest { mode: DeliveryMode; curate?: boolean }
 /**
@@ -24,6 +24,7 @@ export interface DeliveryOutcome {
 }
 
 const MODES: readonly DeliveryMode[] = ["series", "branch", "squash", "uncommitted"];
+const DELIVERY_PATCH_LIMIT = 200_000;
 export const CURATE_SLOT = "curate";
 export const DELIVER_SLOT = "deliver";
 export const curatedRef = (runId: string) => `${refPrefix(runId)}/curated`;
@@ -31,6 +32,13 @@ export const reviewBranch = (runId: string) => `herder/${runId}`;
 const short = (sha: string) => sha.slice(0, 12);
 const subject = (message: string) => message.split("\n", 1)[0]!;
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+function boundPatch(raw: string): string {
+	if (raw.length <= DELIVERY_PATCH_LIMIT || raw.endsWith(DIFF_TRUNCATED_MARKER)) return raw;
+	const prefix = raw.slice(0, DELIVERY_PATCH_LIMIT);
+	const newline = prefix.lastIndexOf("\n");
+	return `${newline >= 0 ? prefix.slice(0, newline) : prefix}${DIFF_TRUNCATED_MARKER}`;
+}
 
 /** Deletes `refs/herder/<runId>/*` and the run's worktrees; the run directory stays. Attempts both, then throws the first error. */
 export function cleanupRun(vcs: Vcs, commonDir: string, runId: string): void {
@@ -260,8 +268,12 @@ export async function deliver(deps: DeliverDeps, request: DeliveryRequest): Prom
 	if (mode === "branch") lines.push(`Branch ${target} at ${short(tip)}, on the run's base ${short(base)}; the checkout is not touched.`);
 	else if (mode === "squash") lines.push(`One commit "${title}" with the tree of ${short(tip)}, on top of ${short(onto)}.`);
 	else if (mode === "uncommitted") lines.push(`The changes of ${commits.length} commit(s) are applied to the working tree, unstaged.`);
+	const range = `${onto}..${tip}`;
+	const stat = vcs.diffStat(range);
 	lines.push(`Commits (oldest first):`, ...commits.map((commit) => `  ${short(commit)} ${subject(vcs.message(commit))}`));
-	if (!await deps.confirm(lines.join("\n"))) return { status: "cancelled", reason: "the user declined the delivery", mode, ...extra() };
+	if (stat) lines.push("Changes:", stat);
+	const patch = typeof vcs.diff === "function" ? boundPatch(vcs.diff(range)) : undefined;
+	if (!await deps.confirm(lines.join("\n"), patch)) return { status: "cancelled", reason: "the user declined the delivery", mode, ...extra() };
 
 	const moved = guard(vcs, mode, expected) ?? inTheWay(vcs, mode, onto, tip);
 	if (moved) return refuse(moved, extra());

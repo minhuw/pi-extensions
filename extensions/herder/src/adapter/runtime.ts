@@ -43,8 +43,8 @@ export interface HerderRuntime {
 	/** Runs the named checks (default: all) at `commit` (default: the integration head). */
 	check(request: CheckRequest, signal?: AbortSignal): Promise<CheckResult[]>;
 	verify(signal?: AbortSignal): Promise<VerifyOutcome>;
-	/** `confirm` shows the delivery summary to the user; nothing reaches the checkout without a yes. */
-	deliver(request: DeliveryRequest, confirm: (summary: string) => Promise<boolean>, signal?: AbortSignal): Promise<DeliveryOutcome>;
+	/** `confirm` shows the delivery summary (and unified patch when available) to the user; nothing reaches the checkout without a yes. */
+	deliver(request: DeliveryRequest, confirm: (summary: string, patch?: string) => Promise<boolean>, signal?: AbortSignal): Promise<DeliveryOutcome>;
 	/** Stores the script as `scripts/<n>.js`, journals `script.launched`, and runs it in the background. */
 	launch(request: LaunchRequest): LaunchHandle | Promise<LaunchHandle>;
 	/** Journals `run.finished abandoned` and removes the run's refs and worktrees; returns a warning if that removal failed. */

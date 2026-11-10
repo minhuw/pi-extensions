@@ -11,7 +11,7 @@ import type { AgentRunner, Vcs } from "../types.ts";
 import { openVcs, repositoryName, savedProjectName } from "../vcs/git.ts";
 import { ActivityBoard } from "./activity.ts";
 import { BackgroundLaunch, followUpText } from "./background.ts";
-import { confirmLong } from "./confirm.ts";
+import { confirmDelivery } from "./confirm.ts";
 import { StepAgents } from "./external-agents.ts";
 import type { RunState } from "../journal/fold.ts";
 import type { DeliveryOutcome, DeliveryRequest, HerderRuntime, LaunchRequest, RuntimeFactory } from "./runtime.ts";
@@ -409,7 +409,7 @@ export class Herder {
 		requireIdle(held, "Delivery");
 		const ctx = s.ctx;
 		try {
-			return await this.op(held, signal, (combined) => this.runtime(s, held).deliver(request, async (summary) => (await confirmLong(ctx, `Deliver Herder run ${held.runId}?`, summary, combined)) === true, combined), true);
+			return await this.op(held, signal, (combined) => this.runtime(s, held).deliver(request, async (summary, patch) => (await confirmDelivery(ctx, `Deliver Herder run ${held.runId}?`, summary, patch, combined)) === true, combined), true);
 		} finally {
 			this.settle(s, held);
 		}
