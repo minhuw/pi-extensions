@@ -834,6 +834,9 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 		const parent = await startPiSession({
 			selectHandler: async () => choicesQueue.shift() ?? "Deny",
 		});
+		// bash expands the `~` of the home target below, so the home directory is pinned inside the sandbox.
+		const prevHome = process.env.HOME;
+		process.env.HOME = path.join(sandboxRoot, "home");
 
 		try {
 			const symlinkToOutside = path.join(projectCwd, "escape-symlink");
@@ -857,7 +860,7 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 						path: preExistingExternal,
 						edits: [{ oldText: "original line", newText: "mutated line" }],
 					}),
-					fauxToolCall("bash", { command: `mkdir -p "${homeTarget}"` }),
+					fauxToolCall("bash", { command: `mkdir -p ${homeTarget}` }),
 					fauxToolCall("write", { path: deniedSymlinkFile, content: "symlink escape" }),
 				]),
 				fauxAssistantMessage("all four denied"),
@@ -1055,6 +1058,11 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 			}
 		} finally {
 			await parent.dispose();
+			if (prevHome === undefined) {
+				delete process.env.HOME;
+			} else {
+				process.env.HOME = prevHome;
+			}
 		}
 	});
 

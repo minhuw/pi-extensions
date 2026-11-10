@@ -429,6 +429,138 @@ describe("workspace write guard — the guard's own policy.json and .registry.js
 		expect(await readFile(policyFile, "utf8")).toBe("{}\n");
 	});
 
+	describe("bash words, read the way bash reads them", () => {
+		let prevHome: string | undefined;
+
+		// bash expands `~` and `$HOME` to the home directory, so every test here pins it inside the sandbox. It sits one
+		// level deep, so the `..` steps that reach a state file from it miss the file from `<cwd>/$HOME` or `<cwd>/~`.
+		beforeEach(async () => {
+			prevHome = process.env.HOME;
+			process.env.HOME = path.join(sandboxRoot, "home");
+			await mkdir(process.env.HOME, { recursive: true });
+		});
+
+		afterEach(() => {
+			if (prevHome === undefined) {
+				delete process.env.HOME;
+			} else {
+				process.env.HOME = prevHome;
+			}
+		});
+
+		it("blocks either file under spellings bash keeps literal and spellings bash expands, and only those", async () => {
+			const toolCall = loadToolCallHandler();
+			const wsDir = workspacesDir(projectCwd);
+			const policyFile = policyFilePath(projectCwd);
+			const registryFile = registryFilePath(projectCwd);
+			await mkdir(wsDir, { recursive: true });
+			// From the home directory, `<sandbox>/home`, to `<cwd>/.pi/workspaces`.
+			const rest = "../project/.pi/workspaces";
+
+			const blocked: [command: string, file: string][] = [
+				// Quoted or escaped, `$HOME` and a space are directory names, and `..` climbs straight back out of them.
+				["echo x > 'a/$HOME/../../.pi/workspaces/policy.json'", policyFile],
+				["echo x > a/\\$HOME/../../.pi/workspaces/policy.json", policyFile],
+				["rm 'a/$HOME/../../.pi/workspaces/.registry.json'", registryFile],
+				["cp /tmp/grant.json 'a/${HOME}/../../.pi/workspaces/policy.json'", policyFile],
+				["echo x > ' /../.pi/workspaces/policy.json'", policyFile],
+				['sed -i s/a/b/ "a/\\$HOME/../../.pi/workspaces/policy.json"', policyFile],
+				// A heredoc with a quoted delimiter reaches the local shell as written.
+				["bash <<'EOF'\necho x > 'a/$HOME/../../.pi/workspaces/policy.json'\nEOF", policyFile],
+				// Bare or in double quotes, bash expands `$HOME`, `${HOME}`, and a leading `~`, also right after `of=`.
+				[`echo x > "$HOME/${rest}/policy.json"`, policyFile],
+				[`rm \${HOME}/${rest}/.registry.json`, registryFile],
+				[`truncate -s 0 ~/${rest}/policy.json`, policyFile],
+				[`dd if=/dev/null of=~/${rest}/.registry.json`, registryFile],
+				// bash keeps `~` after `--out=`, and the program may expand it.
+				[`python3 tool.py --out=~/${rest}/policy.json`, policyFile],
+				// A backslash-newline is gone before bash reads the word.
+				[`echo x > $HO\\\nME/${rest}/policy.json`, policyFile],
+				[`rm ~\\\n/${rest}/.registry.json`, registryFile],
+				// `$'...'` keeps one, so the name is a directory to climb out of, not `..`.
+				["echo x > $'.\\\n.'/../.pi/workspaces/policy.json", policyFile],
+				// The outer shell expands a here-string, and a heredoc with a bare delimiter, before the local shell reads it.
+				[`bash <<EOF\nrm '$HOME/${rest}/policy.json'\nEOF`, policyFile],
+				[`bash <<< "rm '$HOME/${rest}/.registry.json'"`, registryFile],
+			];
+
+			// Neither file exists until the extension first writes it, and bash needs the directories it climbs out of.
+			for (const exists of [false, true]) {
+				if (exists) {
+					await writeFile(policyFile, "{}\n", "utf8");
+					await writeFile(registryFile, "{}\n", "utf8");
+					for (const dir of ["a/$HOME", "a/${HOME}", " ", ".\\\n."]) {
+						await mkdir(path.join(projectCwd, dir), { recursive: true });
+					}
+				}
+				for (const [command, file] of blocked) {
+					for (const kind of SESSION_KINDS) {
+						const prompts: string[] = [];
+						const result = await toolCall({ toolName: "bash", input: { command } }, handlerContext(kind, prompts));
+						const label = `${command} (${kind} session, files ${exists ? "exist" : "absent"})`;
+						expectManagedFileBlock(result, file, label);
+						expect(prompts, label).toEqual([]);
+					}
+				}
+			}
+			expect(fs.readdirSync(wsDir).sort()).toEqual([".registry.json", "policy.json"]);
+
+			// The directory those spellings climb out of, and a same-named file in the project root, are not the state files.
+			for (const command of ["mkdir -p 'a/$HOME'", "echo x > 'policy.json'"]) {
+				for (const kind of SESSION_KINDS) {
+					const prompts: string[] = [];
+					const result = await toolCall({ toolName: "bash", input: { command } }, handlerContext(kind, prompts));
+					expect(result, `${command} (${kind} session)`).toBeUndefined();
+					expect(prompts, command).toEqual([]);
+				}
+			}
+		});
+
+		it("keeps both files unchanged when a real UI session runs the literal spellings", async () => {
+			const h = await startUiSession();
+			try {
+				const policyFile = policyFilePath(projectCwd);
+				const registryFile = registryFilePath(projectCwd);
+				await mkdir(workspacesDir(projectCwd), { recursive: true });
+				await writeFile(policyFile, '{"allowedPaths":[]}\n', "utf8");
+				await writeFile(registryFile, '{"workspaces":[]}\n', "utf8");
+
+				const writes: [command: string, file: string][] = [
+					["echo x > 'a/$HOME/../../.pi/workspaces/policy.json'", policyFile],
+					["echo x > a/\\$HOME/../../.pi/workspaces/policy.json", policyFile],
+					["rm 'a/$HOME/../../.pi/workspaces/.registry.json'", registryFile],
+					["echo x > ' /../.pi/workspaces/policy.json'", policyFile],
+				];
+				h.faux.setResponses([
+					// The directories bash climbs out of; making them is allowed.
+					fauxAssistantMessage([fauxToolCall("bash", { command: "mkdir -p 'a/$HOME' ' '" })]),
+					fauxAssistantMessage(writes.map(([command]) => fauxToolCall("bash", { command }))),
+					fauxAssistantMessage("done"),
+				]);
+				await h.session.prompt("rewrite the workspace state files");
+
+				const results = h.toolResults();
+				expect(results).toHaveLength(1 + writes.length);
+				expect(results[0]!.isError).toBe(false);
+				// bash made the directories under the names the guard read.
+				expect(fs.readdirSync(projectCwd).sort()).toEqual([" ", ".pi", "a"]);
+				expect(fs.readdirSync(path.join(projectCwd, "a"))).toEqual(["$HOME"]);
+				for (const [index, [command, file]] of writes.entries()) {
+					expect(results[index + 1]!.text, command).toContain(`Blocked write to "${file}"`);
+					expect(results[index + 1]!.text, command).toContain("managed by the workspace extension");
+					expect(results[index + 1]!.isError, command).toBe(true);
+				}
+				expect(h.prompts).toEqual([]);
+				expect(await readFile(policyFile, "utf8")).toBe('{"allowedPaths":[]}\n');
+				expect(await readFile(registryFile, "utf8")).toBe('{"workspaces":[]}\n');
+				expect(fs.readdirSync(os.homedir())).toEqual([]);
+				expect(h.errors).toEqual([]);
+			} finally {
+				await h.dispose();
+			}
+		});
+	});
+
 	it("does not let a UI session approve its own outside write through policy.json", async () => {
 		const h = await startUiSession();
 		try {

@@ -602,4 +602,99 @@ describe("workspace write guard — a write or edit path is taken literally once
 		expect(result).toMatchObject({ block: true });
 		expect(result?.reason).toContain(`Blocked write outside project working directory: "${path.join(home, "d")}"`);
 	});
+
+	it("judges a quoted or escaped $HOME in a bash word as the directory name bash keeps", async () => {
+		const toolCall = loadToolCallHandler();
+		// For bash `a/$HOME` is two directories deep, so `../../..` leaves the project for the sibling directory.
+		const target = path.join(canonicalRoot, "outside", "f.txt");
+		for (const command of [
+			"touch 'a/$HOME/../../../outside/f.txt'",
+			"touch a/\\$HOME/../../../outside/f.txt",
+			// The directory `cd` entered keeps its name for the words that follow.
+			"cd 'a/$HOME' && touch ../../../outside/f.txt",
+		]) {
+			expect(extractBashWriteTargets(command, projectCwd), command).toEqual([target]);
+			const blocked = await toolCall({ toolName: "bash", input: { command } }, handlerContext());
+			expect(blocked, command).toMatchObject({ block: true });
+			expect(blocked?.reason, command).toContain(`Blocked write outside project working directory: "${target}"`);
+
+			const titles: string[] = [];
+			const denied = await toolCall(
+				{ toolName: "bash", input: { command } },
+				handlerContext(async (title) => {
+					titles.push(title);
+					return "Deny";
+				}),
+			);
+			expect(denied, command).toMatchObject({ block: true });
+			expect(titles, command).toEqual([`Allow write outside workspace (${target})?`]);
+		}
+	});
+
+	it("allows bash words that a quoted or escaped ~, $HOME, or space keeps inside the project, without a prompt", async () => {
+		const toolCall = loadToolCallHandler();
+		const canonicalCwd = resolveCanonicalPath(projectCwd);
+		// Quoted or escaped, `~` and `$HOME` are directory names, and a leading space is part of the file name.
+		const inProject: [command: string, file: string][] = [
+			["touch '~/f.txt'", path.join(canonicalCwd, "~", "f.txt")],
+			['touch "~/f.txt"', path.join(canonicalCwd, "~", "f.txt")],
+			["touch \\~/f.txt", path.join(canonicalCwd, "~", "f.txt")],
+			["touch '$HOME/f'", path.join(canonicalCwd, "$HOME", "f")],
+			["echo x > ' notes.txt'", path.join(canonicalCwd, " notes.txt")],
+			["cd '$HOME' && touch f", path.join(canonicalCwd, "$HOME", "f")],
+		];
+		const titles: string[] = [];
+		const ui = handlerContext(async (title) => {
+			titles.push(title);
+			return "Deny";
+		});
+		for (const [command, file] of inProject) {
+			expect(extractBashWriteTargets(command, projectCwd), command).toEqual([file]);
+			expect(await toolCall({ toolName: "bash", input: { command } }, ui), command).toBeUndefined();
+			expect(await toolCall({ toolName: "bash", input: { command } }, handlerContext()), command).toBeUndefined();
+		}
+		expect(titles).toEqual([]);
+
+		const h = await startHeadlessSession();
+		try {
+			h.faux.setResponses([
+				fauxAssistantMessage([fauxToolCall("bash", { command: "mkdir -p '~' '$HOME'" })]),
+				...inProject.map(([command]) => fauxAssistantMessage([fauxToolCall("bash", { command })])),
+				fauxAssistantMessage("done"),
+			]);
+			await h.session.prompt("create files inside the project");
+
+			expect(h.toolResults().filter((result) => result.isError)).toEqual([]);
+			// bash created exactly the files the guard named.
+			expect(fs.readdirSync(projectCwd).sort()).toEqual([" notes.txt", "$HOME", ".pi", "~"]);
+			expect(fs.readdirSync(path.join(projectCwd, "~"))).toEqual(["f.txt"]);
+			expect(fs.readdirSync(path.join(projectCwd, "$HOME"))).toEqual(["f"]);
+			expect(await readFile(path.join(projectCwd, " notes.txt"), "utf8")).toBe("x\n");
+			expect(fs.readdirSync(outsideDir)).toEqual([]);
+			expect(fs.readdirSync(os.homedir())).toEqual([]);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("judges bash words whose ~, $HOME, or ${HOME} bash expands in the home directory", async () => {
+		const toolCall = loadToolCallHandler();
+		const home = path.join(canonicalRoot, "home", "user");
+		for (const [command, target] of [
+			["touch ~/e.txt", path.join(home, "e.txt")],
+			['mkdir -p "$HOME/d"', path.join(home, "d")],
+			["touch ${HOME}/e.txt", path.join(home, "e.txt")],
+			// A leading `~` also expands right after `of=`, and `cd` alone goes home.
+			["dd if=/dev/zero of=~/x", path.join(home, "x")],
+			["cd && touch f", path.join(home, "f")],
+			// A backslash-newline is gone before bash reads the word.
+			["touch ~\\\n/e.txt", path.join(home, "e.txt")],
+			["touch $HO\\\nME/e.txt", path.join(home, "e.txt")],
+		] as const) {
+			expect(extractBashWriteTargets(command, projectCwd), command).toEqual([target]);
+			const result = await toolCall({ toolName: "bash", input: { command } }, handlerContext());
+			expect(result, command).toMatchObject({ block: true });
+			expect(result?.reason, command).toContain(`Blocked write outside project working directory: "${target}"`);
+		}
+	});
 });

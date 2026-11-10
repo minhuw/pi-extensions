@@ -171,12 +171,10 @@ function managedStateFiles(cwd: string): string[] {
 
 /**
  * Returns `policy.json` or `.registry.json` when one of `targetPaths` resolves to it. Letter case is
- * ignored: macOS resolves `POLICY.JSON` to the same file. `literal` takes each path as written.
+ * ignored: macOS resolves `POLICY.JSON` to the same file. Each path is taken as written.
  */
-function findManagedStateFile(targetPaths: string[], cwd: string, literal: boolean): string | undefined {
-	const resolvedTargets = targetPaths.map((targetPath) =>
-		(literal ? resolveLiteralPath(targetPath, cwd) : resolveCanonicalPath(targetPath, cwd)).toLowerCase(),
-	);
+function findManagedStateFile(targetPaths: string[], cwd: string): string | undefined {
+	const resolvedTargets = targetPaths.map((targetPath) => resolveLiteralPath(targetPath, cwd).toLowerCase());
 	return managedStateFiles(cwd).find((file) => resolvedTargets.includes(resolveCanonicalPath(file).toLowerCase()));
 }
 
@@ -314,6 +312,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			const input = event.input as { command?: unknown } | undefined;
 			const command = typeof input?.command === "string" ? input.command : undefined;
 			if (!command || !command.trim()) return undefined;
+			// The extractors read each word the way bash does and resolve it, so every check below reads these paths literally too.
 			targetPaths = extractBashExternalWriteTargets(command, ctx.cwd);
 			workspaceTouchPaths = extractBashWriteTargets(command, ctx.cwd);
 			// A command that names a state file counts whatever it is, not only the writes the extractor knows.
@@ -323,7 +322,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 		}
 
 		// The guard's own state is never a tool's to write: no prompt, and no allow list unblocks it.
-		const managedFile = findManagedStateFile(workspaceTouchPaths, ctx.cwd, isFileTool) ?? namedStateFile;
+		const managedFile = findManagedStateFile(workspaceTouchPaths, ctx.cwd) ?? namedStateFile;
 		if (managedFile) {
 			return {
 				block: true,
@@ -338,7 +337,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			const check = evaluatePathAccess({
 				targetPath: rawTarget,
 				cwd: ctx.cwd,
-				literal: isFileTool,
+				literal: true,
 				sessionAllowed,
 				projectAllowed: policy.allowedPaths,
 			});
@@ -387,7 +386,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 
 		// Auto-register any workspace touched under <cwd>/.pi/workspaces/<name>.
 		for (const touchPath of workspaceTouchPaths) {
-			const wsName = extractWorkspaceNameFromPath(touchPath, ctx.cwd, isFileTool);
+			const wsName = extractWorkspaceNameFromPath(touchPath, ctx.cwd, true);
 			if (wsName) {
 				try {
 					await createOrTouchWorkspace(ctx.cwd, {

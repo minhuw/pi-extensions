@@ -4,7 +4,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { forEachChild, parse, type Command, type SyntaxNode, type Word } from "unbash";
+import { forEachChild, parse, type Command, type HereDoc, type SyntaxNode, type Word, type WordPart } from "unbash";
 
 export interface ProjectPolicy {
 	allowedPaths: string[];
@@ -353,11 +353,84 @@ const WRITE_REDIRECTS = new Set([">", ">>", ">|", "&>", "&>>", "<>", ">&"]);
 /** Bash pseudo-devices and standard streams, which are not files on disk. */
 const SHELL_PSEUDO_DEVICE = /^\/dev\/(?:null|stdin|stdout|stderr|tty|fd\/\d+|tcp\/.*|udp\/.*)$/;
 
+/** Whether `part` is `$HOME` or `${HOME}`; an operator, prefix, or index (`${HOME:-x}`) makes it another expansion. */
+function isHomeExpansion(part: WordPart): boolean {
+	if (part.type === "SimpleExpansion") return part.text === "$HOME";
+	return part.type === "ParameterExpansion" && part.parameter === "HOME" && !part.operation && !part.prefix && !part.index;
+}
+
+/** The text bash makes of one piece of a word or of an unquoted heredoc body. */
+function partValue(part: WordPart): string {
+	switch (part.type) {
+		case "Literal":
+		case "Glob":
+		case "SingleQuoted":
+		case "AnsiCQuoted":
+			return part.value;
+		case "DoubleQuoted":
+		case "LocaleString":
+			return part.parts.map(partValue).join("");
+		default:
+			return isHomeExpansion(part) ? os.homedir() : part.text;
+	}
+}
+
+/**
+ * bash drops a backslash-newline before it reads a word, except inside single quotes, so
+ * `$HO\<newline>ME` is `$HOME`. Returns `word` parsed again without them. Inside `$'...'` bash keeps
+ * both characters, which the parser reads only when the pair is spelled `\\<newline>`.
+ */
+function joinContinuedLines(word: Word): Word {
+	if (!word.text.includes("\\\n")) return word;
+	const respell = (text: string, continued: string): string =>
+		text.replace(/\\([\s\S])/g, (pair, next: string) => (next === "\n" ? continued : pair));
+	const join = (part: WordPart): string =>
+		part.type === "SingleQuoted" ? part.text : respell(part.text, part.type === "AnsiCQuoted" ? "\\\\\n" : "");
+	const source = word.parts ? word.parts.map(join).join("") : respell(word.text, "");
+	const command = parse(`: ${source}`).commands[0]?.command;
+	const joined = command?.type === "Command" && command.args.length === 1 ? command.args[0] : undefined;
+	return joined?.type === "Word" ? joined : word;
+}
+
+/**
+ * The string bash passes to a command for `source`. Quoted and escaped text is literal, quote characters
+ * inside it included, and nothing is trimmed. `$HOME` and `${HOME}` become the home directory, bare or in
+ * double quotes. So does a `~` that starts the word, or follows `NAME=` at its start (`of=~/x`), when
+ * nothing quotes it and `/` or the end of the word comes next. Every other expansion keeps its source
+ * text: `$VAR`, `${HOME:-x}`, `$(...)`, `~user`, `~+`, globs, and brace lists.
+ */
+function bashWordValue(source: Word): string {
+	const word = joinContinuedLines(source);
+	const value = word.parts ? word.parts.map(partValue).join("") : word.value;
+	// Matched on the source, where a quote or backslash would show: the text up to the `~` is the same in `value`.
+	const tilde = /^(?:[A-Za-z_][A-Za-z0-9_]*=)?~(?=\/|$)/.exec(word.text);
+	return tilde ? value.slice(0, tilde[0].length - 1) + os.homedir() + value.slice(tilde[0].length) : value;
+}
+
+/**
+ * A heredoc body as bash passes it on. Unless the delimiter is quoted, bash expands the body first:
+ * `$HOME` and `${HOME}` become the home directory whatever quotes surround them, and `\$` becomes `$`.
+ */
+function hereDocText(node: HereDoc): string {
+	const { text, parts } = node.body;
+	if (node.delimiter?.quoted) return text;
+	return parts ? parts.map(partValue).join("") : text.replace(/\\([$`\\\n])/g, (_pair, next: string) => (next === "\n" ? "" : next));
+}
+
+/**
+ * Resolves `word`, a bash word as `bashWordValue` reads it, against `effectiveCwd` as `resolveLiteralPath`
+ * does. Both are final: the directory is one the walk has already resolved, so it is not read as a shell
+ * word again, and after `cd '$HOME'` it stays the directory named `$HOME`.
+ */
+function resolveBashWord(word: string, effectiveCwd: string): string {
+	return resolveSymlinks(path.resolve(effectiveCwd, word), new Set<string>());
+}
+
 /** Words of a simple command, past leading `KEY=VALUE` assignments and `sudo`/`env`/`command` wrappers. */
 function commandWords(command: Command): string[] {
 	const words = [command.name, ...command.args]
 		.filter((arg): arg is Word => arg?.type === "Word")
-		.map((word) => word.value);
+		.map((word) => bashWordValue(word));
 	let idx = 0;
 	while (idx < words.length) {
 		const word = words[idx]!;
@@ -401,7 +474,7 @@ function extractGitTargets(args: string[], baseCwd: string): string[] {
 	while (idx < args.length) {
 		const arg = args[idx]!;
 		if (arg === "-C" && args[idx + 1]) {
-			gitCwd = resolveCanonicalPath(args[idx + 1]!, gitCwd);
+			gitCwd = resolveBashWord(args[idx + 1]!, gitCwd);
 			idx += 2;
 			continue;
 		}
@@ -429,11 +502,11 @@ function extractGitTargets(args: string[], baseCwd: string): string[] {
 			positionals.push(token);
 		}
 		if (positionals.length >= 2) {
-			return [resolveCanonicalPath(positionals[1]!, gitCwd)];
+			return [resolveBashWord(positionals[1]!, gitCwd)];
 		}
 		if (positionals.length === 1) {
 			const repoName = path.basename(positionals[0]!.replace(/\/+$/, ""), ".git") || "repo";
-			return [resolveCanonicalPath(repoName, gitCwd)];
+			return [resolveBashWord(repoName, gitCwd)];
 		}
 		return [gitCwd];
 	}
@@ -450,7 +523,7 @@ function extractGitTargets(args: string[], baseCwd: string): string[] {
 			if (token.startsWith("-")) continue;
 			positionals.push(token);
 		}
-		return [positionals[0] ? resolveCanonicalPath(positionals[0], gitCwd) : gitCwd];
+		return [positionals[0] ? resolveBashWord(positionals[0], gitCwd) : gitCwd];
 	}
 
 	if (subcommand === "worktree" && rest[0] === "add") {
@@ -467,7 +540,7 @@ function extractGitTargets(args: string[], baseCwd: string): string[] {
 			positionals.push(token);
 		}
 		if (positionals[0]) {
-			return [resolveCanonicalPath(positionals[0], gitCwd)];
+			return [resolveBashWord(positionals[0], gitCwd)];
 		}
 	}
 
@@ -578,7 +651,7 @@ function walkBashCommands(command: string, canonicalCwd: string, visitor: BashWa
 				return;
 			}
 			case "Redirect": {
-				const target = node.target?.value;
+				const target = node.target && bashWordValue(node.target);
 				if (!target || !WRITE_REDIRECTS.has(node.operator) || SHELL_PSEUDO_DEVICE.test(target)) return;
 				if (node.operator === ">&" && /^(?:\d+|-)$/.test(target)) return;
 				visitor.writeRedirect(target, effectiveCwd);
@@ -588,7 +661,7 @@ function walkBashCommands(command: string, canonicalCwd: string, visitor: BashWa
 			case "HereString": {
 				// Expansions in an unquoted body run in this shell; the body itself is a script only for a local shell.
 				forEachChild(node, visit);
-				const script = node.type === "HereDoc" ? node.body.text : node.target?.value;
+				const script = node.type === "HereDoc" ? hereDocText(node) : node.target && bashWordValue(node.target);
 				if (shellReadsStdin && script) {
 					const saved = effectiveCwd;
 					visit(parse(script));
@@ -606,9 +679,10 @@ function walkBashCommands(command: string, canonicalCwd: string, visitor: BashWa
 				if (!verb) return;
 				visitor.command(words, effectiveCwd);
 				if (verb === "cd" || verb === "pushd") {
-					const dest = args.find((a) => !a.startsWith("-")) ?? "~";
+					// `cd` alone goes home.
+					const dest = args.find((a) => !a.startsWith("-")) ?? os.homedir();
 					if (dest !== "-") {
-						effectiveCwd = resolveCanonicalPath(dest, effectiveCwd);
+						effectiveCwd = resolveBashWord(dest, effectiveCwd);
 					}
 				}
 				return;
@@ -652,7 +726,7 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 				positionals.push(arg);
 			}
 			for (const p of positionals) {
-				targets.push(resolveCanonicalPath(p, effectiveCwd));
+				targets.push(resolveBashWord(p, effectiveCwd));
 			}
 			if (positionals.length === 0 && effectiveCwd !== canonicalCwd) {
 				targets.push(effectiveCwd);
@@ -678,9 +752,9 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 				positionals.push(arg);
 			}
 			if (targetDir) {
-				targets.push(resolveCanonicalPath(targetDir, effectiveCwd));
+				targets.push(resolveBashWord(targetDir, effectiveCwd));
 			} else if (positionals.length >= 2) {
-				targets.push(resolveCanonicalPath(positionals[positionals.length - 1]!, effectiveCwd));
+				targets.push(resolveBashWord(positionals[positionals.length - 1]!, effectiveCwd));
 			} else if (effectiveCwd !== canonicalCwd) {
 				targets.push(effectiveCwd);
 			}
@@ -690,7 +764,7 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 		if (verb === "mv") {
 			const positionals = args.filter((arg) => !arg.startsWith("-"));
 			for (const p of positionals) {
-				targets.push(resolveCanonicalPath(p, effectiveCwd));
+				targets.push(resolveBashWord(p, effectiveCwd));
 			}
 			if (positionals.length === 0 && effectiveCwd !== canonicalCwd) {
 				targets.push(effectiveCwd);
@@ -701,7 +775,7 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 		if (verb === "cargo" && (args[0] === "new" || args[0] === "init")) {
 			const positionals = args.slice(1).filter((arg) => !arg.startsWith("-"));
 			if (positionals[0]) {
-				targets.push(resolveCanonicalPath(positionals[0], effectiveCwd));
+				targets.push(resolveBashWord(positionals[0], effectiveCwd));
 			} else {
 				targets.push(effectiveCwd);
 			}
@@ -715,7 +789,7 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 			: verb === "npm" || verb === "pnpm" || verb === "yarn" ? optionValue(args, ["--prefix", "-C", "--dir", "--cwd"])
 			: undefined;
 		if (explicitTarget) {
-			targets.push(resolveCanonicalPath(explicitTarget, effectiveCwd));
+			targets.push(resolveBashWord(explicitTarget, effectiveCwd));
 			return;
 		}
 
@@ -727,7 +801,7 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 	walkBashCommands(command, canonicalCwd, {
 		command: inspectCommand,
 		writeRedirect: (target, effectiveCwd) => {
-			targets.push(resolveCanonicalPath(target, effectiveCwd));
+			targets.push(resolveBashWord(target, effectiveCwd));
 		},
 	});
 	return [...new Set(targets)];
@@ -736,11 +810,17 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 /** Verbs that only read the files they name. */
 const READ_ONLY_VERBS = new Set(["cat", "head", "tail", "wc", "ls", "stat", "test", "[", "diff", "cmp", "jq", "grep"]);
 
-/** The paths a word can name: itself and, past its first `=`, an option's value (`--file=PATH`, `of=PATH`). */
+/**
+ * The paths a word can name: itself and, past its first `=`, an option's value (`--file=PATH`, `of=PATH`).
+ * bash expands a `~` there only after a variable name, but the program may expand it itself
+ * (`--out=~/x`), so that value also counts with a leading `~` read as the home directory.
+ */
 function wordPathForms(word: string): string[] {
 	const eq = word.indexOf("=");
 	const forms = eq < 0 ? [word] : [word, word.slice(eq + 1)];
-	return forms.filter((form) => form.trim() !== "");
+	const value = forms[1];
+	if (value === "~" || value?.startsWith("~/")) forms.push(os.homedir() + value.slice(1));
+	return forms.filter((form) => form !== "");
 }
 
 /**
@@ -762,7 +842,7 @@ export function findBashNamedStateFile(command: string, cwd: string, stateFiles:
 		command: (words, effectiveCwd) => {
 			if (named || READ_ONLY_VERBS.has(words[0]!)) return;
 			const resolved = words.map((word) =>
-				wordPathForms(word).map((form) => resolveCanonicalPath(form, effectiveCwd).toLowerCase()),
+				wordPathForms(word).map((form) => resolveBashWord(form, effectiveCwd).toLowerCase()),
 			);
 			named = states.find(
 				(state) =>
@@ -787,7 +867,7 @@ export function extractBashExternalWriteTargets(command: string, cwd: string): s
 	const writeTargets = extractBashWriteTargets(command, cwd);
 	const external: string[] = [];
 	for (const targetPath of writeTargets) {
-		const check = evaluatePathAccess({ targetPath, cwd });
+		const check = evaluatePathAccess({ targetPath, cwd, literal: true });
 		if (!check.allowed) {
 			external.push(check.resolvedPath);
 		}
