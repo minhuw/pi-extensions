@@ -992,28 +992,40 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 	pi.on("context", async (event, ctx) => {
 		syncRewriteRecordsFromBranch(ctx);
 		const branch = ctx.sessionManager.getBranch();
-		// Map assistant message entries on the branch (after the latest compaction, if any) in order.
-		let startIdx = 0;
+		// Map assistant message entries on the branch in the order Pi sends them: after the latest
+		// compaction (if any), the entries kept from its firstKeptEntryId, then the entries after it.
+		let contextEntries = branch;
 		for (let i = branch.length - 1; i >= 0; i--) {
-			if (branch[i]!.type === "compaction") {
-				startIdx = i + 1;
-				break;
-			}
+			const entry = branch[i]!;
+			if (entry.type !== "compaction") continue;
+			const firstKeptIdx = branch.findIndex((kept) => kept.id === entry.firstKeptEntryId);
+			contextEntries = [
+				...(firstKeptIdx >= 0 && firstKeptIdx < i ? branch.slice(firstKeptIdx, i) : []),
+				...branch.slice(i + 1),
+			];
+			break;
 		}
-		const branchAssistantEntries = branch
-			.slice(startIdx)
-			.filter(
-				(entry): entry is SessionEntry & { type: "message"; message: AssistantMessage } =>
-					entry.type === "message" && entry.message.role === "assistant",
-			);
+		const branchAssistantEntries = contextEntries.filter(
+			(entry): entry is SessionEntry & { type: "message"; message: AssistantMessage } =>
+				entry.type === "message" && entry.message.role === "assistant",
+		);
 
 		let changed = false;
-		let assistantOrdinal = 0;
+		let nextEntryIdx = 0;
 
 		const messages = event.messages.map((message) => {
 			if (message.role !== "assistant") return message;
 			const assistantMsg = message as AssistantMessage;
-			const branchEntry = branchAssistantEntries[assistantOrdinal++];
+			// Pi sends copies and may leave an entry out, so pair a message with the next entry that
+			// stores the same response. A message without such an entry gets no rewrite.
+			const entryIdx = branchAssistantEntries.findIndex(
+				(entry, idx) =>
+					idx >= nextEntryIdx &&
+					typeof assistantMsg.timestamp === "number" &&
+					entry.message.timestamp === assistantMsg.timestamp,
+			);
+			const branchEntry = entryIdx >= 0 ? branchAssistantEntries[entryIdx] : undefined;
+			if (entryIdx >= 0) nextEntryIdx = entryIdx + 1;
 			if (!Array.isArray(assistantMsg.content)) return message;
 
 			const targetRewrite = branchEntry
