@@ -10,6 +10,7 @@ import {
 	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
 	type CreateAgentSessionRuntimeFactory, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
+import languageExtension from "../index.ts";
 
 // Load by path, as Pi does.
 const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
@@ -119,6 +120,9 @@ async function start(options: { sessionManager?: SessionManager; mode?: Extensio
 		return { ...created, services, diagnostics: services.diagnostics };
 	};
 	const runtime = await createAgentSessionRuntime(createRuntime, { cwd: cwd(), agentDir: agentDir(), sessionManager: options.sessionManager ?? newManager() });
+	/** The texts of the `language` messages in the context of the next request, as Pi builds it. */
+	const visibleMessages = () => runtime.session.sessionManager.buildSessionProjection().messages
+		.flatMap((message) => message.role === "custom" && message.customType === "language" ? [textOf(message as Message)] : []);
 	const errors: unknown[] = [];
 	const bind = () => runtime.session.bindExtensions(options.bindAsChild ? {} : {
 		mode: options.mode ?? "rpc",
@@ -151,6 +155,13 @@ async function start(options: { sessionManager?: SessionManager; mode?: Extensio
 		/** The session's `language` entries on the current branch. */
 		entries: () => runtime.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom" && entry.customType === "language" ? [entry.data] : []),
 		hiddenMessages: () => runtime.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom_message" && entry.customType === "language" ? [entry] : []),
+		visibleMessages,
+		/** Compact for real, and check that the compaction left no `language` message in the context. */
+		async compactAway() {
+			await runtime.session.compact();
+			expect(runtime.session.sessionManager.getBranch().some((entry) => entry.type === "compaction")).toBe(true);
+			expect(visibleMessages()).toEqual([]);
+		},
 		entryOf(text: string) {
 			const found = runtime.session.sessionManager.getBranch().find((entry) => entry.type === "message" && entry.message.role === "user" && textOf(entry.message as Message) === text);
 			if (!found) throw new Error(`no user message ${text}`);
@@ -242,7 +253,7 @@ describe("switching", () => {
 		});
 	});
 
-	it("AC-5 adds one hidden message after the starting message of each run", async () => {
+	it("AC-5 adds one hidden message after the starting message of the next run, and none while the model can see it", async () => {
 		await writeConfig({ default: "English" });
 		const h = await start();
 		await h.run("one");
@@ -250,9 +261,11 @@ describe("switching", () => {
 		expect(h.status).toBe("Deutsch");
 		expect(afterPrompt(await h.run("two"), "two")).toEqual([switchMessage("Deutsch")]);
 		const third = await h.run("three");
-		expect(afterPrompt(third, "three")).toEqual([switchMessage("Deutsch")]);
-		expect(languageMessages(third)).toEqual([switchMessage("Deutsch"), switchMessage("Deutsch")]);
-		expect(h.hiddenMessages().map((entry) => entry.display)).toEqual([false, false]);
+		expect(afterPrompt(third, "three")).toEqual([]);
+		expect(languageMessages(third)).toEqual([switchMessage("Deutsch")]);
+		expect(afterPrompt(await h.run("four"), "four")).toEqual([]);
+		expect(h.status).toBe("Deutsch");
+		expect(h.hiddenMessages().map((entry) => entry.display)).toEqual([false]);
 	});
 
 	it("AC-5 adds the message to runs started by a custom message", async () => {
@@ -263,19 +276,76 @@ describe("switching", () => {
 		expect(afterPrompt(h.requests.at(-1)!, "nudge")).toEqual([switchMessage("Deutsch")]);
 	});
 
-	it("AC-5 adds the message to the first run after a real compaction", async () => {
+	it("AC-5 sends the message again, once, after a real compaction drops it", async () => {
 		await writeConfig({ default: "English" });
 		const h = await start();
 		await h.command("/language Deutsch");
 		const before = await h.run("one");
-		await h.run("two");
-		await h.session.compact();
-		expect(h.session.sessionManager.getBranch().some((entry) => entry.type === "compaction")).toBe(true);
+		expect(afterPrompt(before, "one")).toEqual([switchMessage("Deutsch")]);
+		expect(afterPrompt(await h.run("two"), "two")).toEqual([]);
+		await h.compactAway();
 		const after = await h.run("three");
 		expect(after.system).toBe(before.system);
 		expect(after.system).toContain(section("English"));
 		expect(afterPrompt(after, "three")).toEqual([switchMessage("Deutsch")]);
+		expect(languageMessages(after)).toEqual([switchMessage("Deutsch")]);
+		expect(afterPrompt(await h.run("four"), "four")).toEqual([]);
 		expect(h.errors).toEqual([]);
+	});
+
+	it("AC-5 sends nothing after a real compaction that keeps the message", async () => {
+		await writeConfig({ default: "English" });
+		let keepFrom = "";
+		const h = await start({ register: (pi) => {
+			pi.on("session_before_compact", ({ preparation }) => ({ compaction: { summary: "summary", firstKeptEntryId: keepFrom, tokensBefore: preparation.tokensBefore } }));
+		} });
+		await h.run("one");
+		await h.command("/language Deutsch");
+		await h.run("two");
+		keepFrom = h.entryOf("two").id;
+		await h.session.compact();
+		expect(h.session.sessionManager.getBranch().at(-1)).toMatchObject({ type: "compaction", firstKeptEntryId: keepFrom });
+		expect(h.visibleMessages()).toEqual([switchMessage("Deutsch")]);
+		const after = await h.run("three");
+		expect(afterPrompt(after, "three")).toEqual([]);
+		expect(languageMessages(after)).toEqual([switchMessage("Deutsch")]);
+		expect(h.errors).toEqual([]);
+	});
+
+	it("AC-5 sends the message again, once, after a context edit omits it", async () => {
+		let omit = true;
+		const h = await start({ register: (pi) => {
+			pi.on("agent_before_settle", ({ entries, context }) => {
+				const target = context.contextEntries.findLast(({ sourceEntry }) => sourceEntry.type === "custom_message" && sourceEntry.customType === "language");
+				if (!omit || !target) return undefined;
+				omit = false;
+				return { entries: [...entries, { type: "context_edit", targetId: target.sourceEntry.id, replacement: null }] };
+			});
+		} });
+		await h.command("/language Deutsch");
+		expect(afterPrompt(await h.run("one"), "one")).toEqual([switchMessage("Deutsch")]);
+		expect(h.visibleMessages()).toEqual([]);
+		const after = await h.run("two");
+		expect(afterPrompt(after, "two")).toEqual([switchMessage("Deutsch")]);
+		expect(languageMessages(after)).toEqual([switchMessage("Deutsch")]);
+		expect(afterPrompt(await h.run("three"), "three")).toEqual([]);
+		expect(h.errors).toEqual([]);
+	});
+
+	it("AC-5 goes by the latest message the model can see, not by how often the language changed", async () => {
+		await writeConfig({ default: "English" });
+		const h = await start();
+		await h.command("/language Deutsch");
+		await h.run("one");
+		await h.command("/language Français");
+		await h.command("/language Deutsch");
+		expect(afterPrompt(await h.run("two"), "two")).toEqual([]);
+		await h.command("/language reset");
+		expect(afterPrompt(await h.run("three"), "three")).toEqual([resetMessage("English")]);
+		await h.command("/language Deutsch");
+		const back = await h.run("four");
+		expect(afterPrompt(back, "four")).toEqual([switchMessage("Deutsch")]);
+		expect(languageMessages(back)).toEqual([switchMessage("Deutsch"), resetMessage("English"), switchMessage("Deutsch")]);
 	});
 
 	it("AC-6 sends one reset message to the next run and none later", async () => {
@@ -492,7 +562,11 @@ describe("restoring a session", () => {
 		expect(h.status).toBe("Deutsch");
 		const run = await h.run("three");
 		expect(run.system).toBe(first.system);
-		expect(afterPrompt(run, "three")).toEqual([switchMessage("Deutsch")]);
+		// Run two's message is still in the context.
+		expect(afterPrompt(run, "three")).toEqual([]);
+		expect(languageMessages(run)).toEqual([switchMessage("Deutsch")]);
+		await h.compactAway();
+		expect(afterPrompt(await h.run("four"), "four")).toEqual([switchMessage("Deutsch")]);
 		expect(h.errors).toEqual([]);
 	});
 
@@ -505,13 +579,16 @@ describe("restoring a session", () => {
 		expect(h.status).toBe("Deutsch");
 		const run = await h.run("three");
 		expect(run.system).toBe(first.system);
-		expect(afterPrompt(run, "three")).toEqual([switchMessage("Deutsch")]);
+		expect(afterPrompt(run, "three")).toEqual([]);
+		expect(languageMessages(run)).toEqual([switchMessage("Deutsch")]);
+		await h.compactAway();
 
 		const resumed = await reopen(h);
 		expect(resumed.status).toBe("Deutsch");
 		const later = await resumed.run("four");
 		expect(later.system).toBe(first.system);
 		expect(afterPrompt(later, "four")).toEqual([switchMessage("Deutsch")]);
+		expect(afterPrompt(await resumed.run("five"), "five")).toEqual([]);
 	});
 
 	it("AC-9 follows the branch through /tree", async () => {
@@ -530,7 +607,18 @@ describe("restoring a session", () => {
 		expect(h.status).toBe("Deutsch");
 		const back = await h.run("three");
 		expect(back.system).toBe(first.system);
-		expect(afterPrompt(back, "three")).toEqual([switchMessage("Deutsch")]);
+		// Run two's message is on this branch.
+		expect(afterPrompt(back, "three")).toEqual([]);
+		expect(languageMessages(back)).toEqual([switchMessage("Deutsch")]);
+
+		// Editing prompt two leaves its message off the new branch, but not the switch before it.
+		await h.session.navigateTree(h.entryOf("two").id);
+		expect(h.status).toBe("Deutsch");
+		expect(h.visibleMessages()).toEqual([]);
+		const edited = await h.run("two again");
+		expect(afterPrompt(edited, "two again")).toEqual([switchMessage("Deutsch")]);
+		expect(languageMessages(edited)).toEqual([switchMessage("Deutsch")]);
+		expect(afterPrompt(await h.run("four"), "four")).toEqual([]);
 		expect(h.errors).toEqual([]);
 	});
 
@@ -540,7 +628,9 @@ describe("restoring a session", () => {
 		await h.command("/language reset");
 		await h.session.navigateTree(switchedLeaf);
 		expect(h.status).toBe("Deutsch");
-		expect(afterPrompt(await h.run("three"), "three")).toEqual([switchMessage("Deutsch")]);
+		const run = await h.run("three");
+		expect(afterPrompt(run, "three")).toEqual([]);
+		expect(languageMessages(run)).toEqual([switchMessage("Deutsch")]);
 	});
 
 	it("AC-9 shows the session's pin when /tree moves before it, not the configured default", async () => {
@@ -635,7 +725,8 @@ describe("sessions that predate the extension", () => {
 		expect(h.entries()).toEqual([{ base: null, fallback: "English" }]);
 		const second = await h.run("two");
 		expectSamePrefix(second, first);
-		expect(afterPrompt(second, "two")).toEqual([switchMessage("English")]);
+		expect(afterPrompt(second, "two")).toEqual([]);
+		expect(languageMessages(second)).toEqual([switchMessage("English")]);
 		expect(h.status).toBe("English");
 	});
 
@@ -763,6 +854,15 @@ describe("a default sent as a message", () => {
 		expect(h.status).toBe(sent === switchMessage("Deutsch") ? "Deutsch" : "English");
 		return run;
 	};
+	/** The run gets no hidden message and no section: the latest language message the model sees is still `seen`. */
+	const expectSeen = async (h: Harness, prompt: string, seen: string) => {
+		const run = await h.run(prompt);
+		expect(afterPrompt(run, prompt)).toEqual([]);
+		expect(languageMessages(run).at(-1)).toBe(seen);
+		expect(run.system).not.toContain("<language>");
+		expect(h.status).toBe(seen === switchMessage("Deutsch") ? "Deutsch" : "English");
+		return run;
+	};
 
 	it("AC-10 returns to the default after a reset once the first run has happened", async () => {
 		const h = await fallbackSession();
@@ -777,7 +877,7 @@ describe("a default sent as a message", () => {
 		expectSamePrefix(reset, switched);
 		const after = await expectSent(h, "four", switchMessage("English"));
 		expectSamePrefix(after, reset);
-		await expectSent(h, "five", switchMessage("English"));
+		await expectSeen(h, "five", switchMessage("English"));
 		expect(h.hiddenMessages().filter((entry) => entry.content === resetMessage("English")).length).toBe(1);
 		expect(h.errors).toEqual([]);
 	});
@@ -801,8 +901,8 @@ describe("a default sent as a message", () => {
 		expect(h.lastNote).toEqual({ message: "No language switch is active.", type: "info" });
 		expect(h.entries()).toEqual(entries);
 		expect(h.status).toBe("English");
-		await expectSent(h, "two", switchMessage("English"));
-		await expectSent(h, "three", switchMessage("English"));
+		await expectSeen(h, "two", switchMessage("English"));
+		await expectSeen(h, "three", switchMessage("English"));
 	});
 
 	it("AC-6 keeps a pending reset when such a session is resumed before the next run", async () => {
@@ -851,7 +951,7 @@ describe("a default sent as a message", () => {
 		await h.command("/language english");
 		expect(h.lastNote).toEqual({ message: "No language switch is active.", type: "info" });
 		expect(h.entries()).toEqual(entries);
-		await expectSent(h, "two", switchMessage("English"));
+		await expectSeen(h, "two", switchMessage("English"));
 	});
 
 	it("AC-12 reports the default as the session default", async () => {
@@ -868,10 +968,10 @@ describe("a default sent as a message", () => {
 		const h = await fallbackSession();
 		await h.command("/language default Italiano");
 		expect(h.status).toBe("English");
-		const changed = await expectSent(h, "two", switchMessage("English"));
+		const changed = await expectSeen(h, "two", switchMessage("English"));
 		await h.command("/language default off");
 		expect(h.status).toBe("English");
-		const removed = await expectSent(h, "three", switchMessage("English"));
+		const removed = await expectSeen(h, "three", switchMessage("English"));
 		expectSamePrefix(removed, changed);
 		await h.command("/language Deutsch");
 		await h.run("four");
@@ -880,7 +980,7 @@ describe("a default sent as a message", () => {
 		await expectSent(h, "six", switchMessage("English"));
 		await h.session.reload();
 		expect(h.status).toBe("English");
-		await expectSent(h, "seven", switchMessage("English"));
+		await expectSeen(h, "seven", switchMessage("English"));
 	});
 
 	it.each<[string, (h: Harness) => string]>([
@@ -896,7 +996,7 @@ describe("a default sent as a message", () => {
 		expect(h.lastNote?.message).toBe("Active language: English\nSession default: English\nDefault for new sessions: Italiano");
 		await expectSent(h, "other", switchMessage("English"));
 		expect(h.entries()).toEqual([{ base: null, fallback: "English" }]);
-		await expectSent(h, "later", switchMessage("English"));
+		await expectSeen(h, "later", switchMessage("English"));
 	});
 
 	it("AC-9 returns to the default after a switch and a reset on a branch that leaves before the pin", async () => {
@@ -947,7 +1047,7 @@ describe("a default sent as a message", () => {
 		await h.command("/language reset");
 		await h.session.navigateTree(switchedLeaf);
 		expect(h.status).toBe("Deutsch");
-		await expectSent(h, "three", switchMessage("Deutsch"));
+		await expectSeen(h, "three", switchMessage("Deutsch"));
 	});
 
 	it.each<[string, (h: Harness) => Promise<Harness>]>([
@@ -964,7 +1064,7 @@ describe("a default sent as a message", () => {
 		await writeConfig({ default: "Italiano" });
 		const defaulted = await restore(h);
 		expect(defaulted.status).toBe("English");
-		const kept = await expectSent(defaulted, "two", switchMessage("English"));
+		const kept = await expectSeen(defaulted, "two", switchMessage("English"));
 		await defaulted.command("/language Deutsch");
 		const switched = await restore(defaulted);
 		expect(switched.status).toBe("Deutsch");
@@ -985,9 +1085,9 @@ describe("a default sent as a message", () => {
 		if (name) await h.command(`/language ${name}`);
 		await h.run("two");
 		await h.run("three");
-		await h.session.compact();
+		await h.compactAway();
 		await expectSent(h, "four", switchMessage(sent!));
-		await expectSent(h, "five", switchMessage(sent!));
+		await expectSeen(h, "five", switchMessage(sent!));
 		expect(h.errors).toEqual([]);
 	});
 
@@ -1065,15 +1165,15 @@ describe("a default sent as a message", () => {
 	it("AC-6 sends the reset to the next run when it is used during a run that carries the switch", async () => {
 		const h = await fallbackSession();
 		await h.command("/language Deutsch");
-		await h.run("two");
 		script(h, async (call) => {
 			if (call === 1) await h.command("/language reset");
 			return fauxAssistantMessage("ok");
 		});
-		expect(afterPrompt(await h.run("three"), "three")).toEqual([switchMessage("Deutsch")]);
+		expect(afterPrompt(await h.run("two"), "two")).toEqual([switchMessage("Deutsch")]);
 		expect(h.status).toBe("English");
-		await expectSent(h, "four", resetMessage("English"));
-		await expectSent(h, "five", switchMessage("English"));
+		await expectSent(h, "three", resetMessage("English"));
+		await expectSent(h, "four", switchMessage("English"));
+		await expectSeen(h, "five", switchMessage("English"));
 	});
 
 	// The extension registered after Language runs its handler between Language's return and the hidden message reaching the branch.
@@ -1610,8 +1710,8 @@ describe("contract edges", () => {
 	it("AC-6 sends the reset once when it is used during a run that carries the switch", async () => {
 		await writeConfig({ default: "English" });
 		const h = await start();
-		await h.command("/language Deutsch");
 		await h.run("one");
+		await h.command("/language Deutsch");
 		duringNextRequest(h, "/language reset");
 		expect(afterPrompt(await h.run("two"), "two")).toEqual([switchMessage("Deutsch")]);
 		expect(afterPrompt(await h.run("three"), "three")).toEqual([resetMessage("English")]);
@@ -1897,7 +1997,8 @@ describe("sessions that name a parent", () => {
 		expect(afterPrompt(first, "forked")).toEqual([switchMessage("English")]);
 		const second = await h.run("later");
 		expectSamePrefix(second, first);
-		expect(afterPrompt(second, "later")).toEqual([switchMessage("English")]);
+		expect(afterPrompt(second, "later")).toEqual([]);
+		expect(languageMessages(second)).toEqual([switchMessage("English")]);
 		expect(h.errors).toEqual([]);
 	});
 
@@ -1974,7 +2075,10 @@ describe("sessions that name a parent", () => {
 		expect(resumed.status).toBe("English");
 		const run = await resumed.run("later");
 		expect(run.system).not.toContain("<language>");
-		expect(afterPrompt(run, "later")).toEqual([switchMessage("English")]);
+		expect(afterPrompt(run, "later")).toEqual([]);
+		expect(languageMessages(run)).toEqual([switchMessage("English")]);
+		await resumed.compactAway();
+		expect(afterPrompt(await resumed.run("compacted"), "compacted")).toEqual([switchMessage("English")]);
 	});
 
 	it("AC-9 restores a clone's switch after a resume", async () => {
@@ -2086,6 +2190,47 @@ describe("control characters in a name", () => {
 		expect(h.entries()).toEqual([]);
 		expect(h.status).toBe("Italiano");
 		expect(JSON.parse(await readFile(configPath(), "utf8"))).toEqual({ default: "Italiano" });
+	});
+});
+
+describe("a Pi without session projections", () => {
+	/** `pi` whose handlers get a session manager with no `buildSessionProjection`, as in Pi 1.3 and 1.4. Pi keeps its own. */
+	const withoutProjection = (pi: ExtensionAPI, hidden: { count: number }): ExtensionAPI => {
+		const bound = <T extends object>(target: T, key: string | symbol) => {
+			const value = Reflect.get(target, key) as unknown;
+			return typeof value === "function" ? value.bind(target) : value;
+		};
+		const hide = (ctx: ExtensionContext) => new Proxy(ctx, {
+			get: (target, key) => key !== "sessionManager" ? bound(target, key) : new Proxy(target.sessionManager, {
+				get: (manager, name) => {
+					if (name !== "buildSessionProjection") return bound(manager, name);
+					hidden.count++;
+					return undefined;
+				},
+			}),
+		});
+		return new Proxy(pi, {
+			get: (target, key) => key !== "on" ? bound(target, key)
+				: (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => target.on(event as never, ((payload: unknown, ctx: ExtensionContext) => handler(payload, hide(ctx))) as never),
+		});
+	};
+
+	it("sends the switch message to every run, and the reset once", async () => {
+		await writeConfig({ default: "English" });
+		const hidden = { count: 0 };
+		const h = await start({ extension: false, register: (pi) => { languageExtension(withoutProjection(pi, hidden)); } });
+		await h.run("one");
+		await h.command("/language Deutsch");
+		expect(afterPrompt(await h.run("two"), "two")).toEqual([switchMessage("Deutsch")]);
+		const third = await h.run("three");
+		expect(afterPrompt(third, "three")).toEqual([switchMessage("Deutsch")]);
+		expect(languageMessages(third)).toEqual([switchMessage("Deutsch"), switchMessage("Deutsch")]);
+		expect(hidden.count).toBeGreaterThanOrEqual(2);
+		await h.command("/language reset");
+		expect(afterPrompt(await h.run("four"), "four")).toEqual([resetMessage("English")]);
+		expect(afterPrompt(await h.run("five"), "five")).toEqual([]);
+		expect(third.system).toContain(section("English"));
+		expect(h.errors).toEqual([]);
 	});
 });
 

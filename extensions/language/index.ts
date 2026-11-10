@@ -6,6 +6,7 @@ import { getAgentDir, type AgentBeforeSettleEvent, type CustomEntry, type Extens
 const ENTRY = "language";
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
 const KEEP_CODE = "Keep code, identifiers, commands, and file paths unchanged.";
+const SWITCH_TEXT = "Respond in ";
 const RESET_TEXT = "Ignore earlier language overrides.";
 
 type LanguagePin = { base: string | null; fallback?: string };
@@ -24,7 +25,7 @@ interface LanguageState {
 }
 
 const sectionText = (base: string) => `Default response language: ${base}. A later language message overrides it. ${KEEP_CODE}`;
-const switchText = (active: string) => `Respond in ${active}, whatever language the user writes in. This overrides the default language. ${KEEP_CODE}`;
+const switchText = (active: string) => `${SWITCH_TEXT}${active}, whatever language the user writes in. This overrides the default language. ${KEEP_CODE}`;
 const resetText = (base: string | undefined) => `${RESET_TEXT} Respond in ${base ?? "the user's language"}.`;
 const correctionText = (language: string) => `Your last answer was not in ${language}. Write it again in ${language}, in full; keep code, identifiers, commands, and paths unchanged.`;
 const hidden = (content: string) => ({ message: { customType: ENTRY, content, display: false } });
@@ -35,6 +36,8 @@ const sessionDefault = ({ base, fallback }: Pick<LanguageState, "base" | "fallba
 const isSwitched = ({ active, base }: Pick<LanguageState, "active" | "base">) => active !== undefined && !sameName(active, base ?? "");
 const isPin = (entry: SessionEntry): entry is CustomEntry<LanguagePin> => entry.type === "custom" && entry.customType === ENTRY && "base" in (entry.data as LanguageEntry);
 const isResetMessage = (entry: SessionEntry) => entry.type === "custom_message" && entry.customType === ENTRY && typeof entry.content === "string" && entry.content.startsWith(RESET_TEXT);
+/** A switch or reset message: what the model was last told to answer in. A correction is neither. */
+const isStateText = (content: string) => content.startsWith(SWITCH_TEXT) || content.startsWith(RESET_TEXT);
 const isConversation = (entry: SessionEntry) => entry.type === "message"
 	? entry.message.role !== "system"
 	: entry.type === "custom_message" || entry.type === "compaction" || entry.type === "branch_summary";
@@ -152,6 +155,21 @@ function readBranch(ctx: ExtensionContext): LanguageState {
 }
 
 /**
+ * The text of the latest switch or reset message the model can see. Pi's projection is the context of the next request:
+ * the current branch, with the entries before the latest compaction's kept boundary replaced by its summary and with
+ * context edits applied. A message on another branch, or one that a compaction or an edit dropped, is not in it.
+ * Pi 1.3 and 1.4 have no projection; there nothing counts as visible, so every run gets the message, as it did before.
+ */
+function visibleStateText(ctx: ExtensionContext): string | undefined {
+	const manager: Partial<Pick<ExtensionContext["sessionManager"], "buildSessionProjection">> = ctx.sessionManager;
+	if (typeof manager.buildSessionProjection !== "function") return undefined;
+	for (const message of manager.buildSessionProjection().messages.toReversed()) {
+		if (message.role === "custom" && message.customType === ENTRY && typeof message.content === "string" && isStateText(message.content)) return message.content;
+	}
+	return undefined;
+}
+
+/**
  * Top-level TUI and RPC sessions. Live children bind extensions with no mode, which Pi runs as print, and persisted
  * children carry a session link when child-session hooks are registered. `parentSession` cannot identify a child: Pi
  * also sets it on forks.
@@ -218,7 +236,7 @@ async function changeDefault(value: string, ctx: ExtensionContext): Promise<stri
 	return name;
 }
 
-/** `/language`: hidden per-run messages switch the response language, so a switch never touches the cached prompt. */
+/** `/language`: hidden messages switch the response language, so a switch never touches the cached prompt. */
 export default function languageExtension(pi: ExtensionAPI): void {
 	async function writePin({ base, fallback }: LanguageState, ctx: ExtensionContext): Promise<void> {
 		if (base !== undefined) {
@@ -297,8 +315,10 @@ export default function languageExtension(pi: ExtensionAPI): void {
 		// Set on every run: Pi diffs each run's sections against the transcript, so a missing one would be removed.
 		if (state.base) event.systemPromptOptions.sections.language = sectionText(state.base);
 		if (state.resetPending) return hidden(resetText(sessionDefault(state)));
-		if (isSwitched(state)) return hidden(switchText(state.active!));
-		return undefined;
+		if (!isSwitched(state)) return undefined;
+		// Once, and again only when the model can no longer see it: every copy would stay in each later request.
+		const text = switchText(state.active!);
+		return visibleStateText(ctx) === text ? undefined : hidden(text);
 	});
 
 	pi.on("agent_start", () => {
