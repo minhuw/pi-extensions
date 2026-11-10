@@ -10,6 +10,7 @@ import {
 	extractBashExternalWriteTargets,
 	extractBashWriteTargets,
 	extractWorkspaceNameFromPath,
+	findBashNamedStateFile,
 	isSubpath,
 	normalizeFileToolPath,
 	policyFilePath,
@@ -163,6 +164,11 @@ function addSessionAllowedPath(ctx: ExtensionContext, targetPath: string): void 
 	set.add(resolveCanonicalPath(targetPath, ctx.cwd));
 }
 
+/** The guard's own state files: the project allowlist and the workspace registry. */
+function managedStateFiles(cwd: string): string[] {
+	return [policyFilePath(cwd), registryFilePath(cwd)];
+}
+
 /**
  * Returns `policy.json` or `.registry.json` when one of `targetPaths` resolves to it. Letter case is
  * ignored: macOS resolves `POLICY.JSON` to the same file. `literal` takes each path as written.
@@ -171,9 +177,7 @@ function findManagedStateFile(targetPaths: string[], cwd: string, literal: boole
 	const resolvedTargets = targetPaths.map((targetPath) =>
 		(literal ? resolveLiteralPath(targetPath, cwd) : resolveCanonicalPath(targetPath, cwd)).toLowerCase(),
 	);
-	return [policyFilePath(cwd), registryFilePath(cwd)].find((file) =>
-		resolvedTargets.includes(resolveCanonicalPath(file).toLowerCase()),
-	);
+	return managedStateFiles(cwd).find((file) => resolvedTargets.includes(resolveCanonicalPath(file).toLowerCase()));
 }
 
 export function buildWorkspaceSystemPromptSection(cwd: string): string {
@@ -286,6 +290,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 
 		let targetPaths: string[] = [];
 		let workspaceTouchPaths: string[] = [];
+		let namedStateFile: string | undefined;
 		const isFileTool = event.toolName === "write" || event.toolName === "edit";
 
 		if (isFileTool) {
@@ -311,12 +316,14 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			if (!command || !command.trim()) return undefined;
 			targetPaths = extractBashExternalWriteTargets(command, ctx.cwd);
 			workspaceTouchPaths = extractBashWriteTargets(command, ctx.cwd);
+			// A command that names a state file counts whatever it is, not only the writes the extractor knows.
+			namedStateFile = findBashNamedStateFile(command, ctx.cwd, managedStateFiles(ctx.cwd));
 		} else {
 			return undefined;
 		}
 
 		// The guard's own state is never a tool's to write: no prompt, and no allow list unblocks it.
-		const managedFile = findManagedStateFile(workspaceTouchPaths, ctx.cwd, isFileTool);
+		const managedFile = findManagedStateFile(workspaceTouchPaths, ctx.cwd, isFileTool) ?? namedStateFile;
 		if (managedFile) {
 			return {
 				block: true,

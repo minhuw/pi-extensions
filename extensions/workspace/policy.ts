@@ -528,6 +528,99 @@ function extractTarTarget(args: string[]): string | undefined {
 	return directory;
 }
 
+interface BashWalkVisitor {
+	/** A simple command's words and the directory it runs in; its own `cd` or `pushd` has not applied yet. */
+	command(words: string[], effectiveCwd: string): void;
+	/** The target word of a write redirection onto a file, and the directory it opens in. */
+	writeRedirect(target: string, effectiveCwd: string): void;
+}
+
+/**
+ * Walks the simple commands and write redirections of a shell command, following `cd` and `pushd`.
+ * A heredoc body is data unless a local shell reads it (`bash <<EOF`, `cat <<EOF | sh`).
+ */
+function walkBashCommands(command: string, canonicalCwd: string, visitor: BashWalkVisitor): void {
+	let effectiveCwd = canonicalCwd;
+	let shellReadsStdin = false;
+
+	const visit = (node: SyntaxNode): void => {
+		switch (node.type) {
+			case "Subshell":
+			case "CommandExpansion":
+			case "ProcessSubstitution":
+			case "ArithmeticCommandExpansion": {
+				// Subshells keep their `cd` to themselves.
+				const saved = effectiveCwd;
+				forEachChild(node, visit);
+				effectiveCwd = saved;
+				return;
+			}
+			case "Pipeline": {
+				// Every stage runs in its own subshell; a local shell in any stage reads the heredocs.
+				const saved = { cwd: effectiveCwd, shellReadsStdin };
+				shellReadsStdin ||= node.commands.some(isLocalShell);
+				for (const stage of node.commands) {
+					effectiveCwd = saved.cwd;
+					visit(stage);
+				}
+				effectiveCwd = saved.cwd;
+				shellReadsStdin = saved.shellReadsStdin;
+				return;
+			}
+			case "Redirected": {
+				// Redirections of a compound command open before its body runs.
+				const before = effectiveCwd;
+				visit(node.command);
+				const after = effectiveCwd;
+				effectiveCwd = before;
+				for (const redirect of node.redirects) visit(redirect);
+				effectiveCwd = after;
+				return;
+			}
+			case "Redirect": {
+				const target = node.target?.value;
+				if (!target || !WRITE_REDIRECTS.has(node.operator) || SHELL_PSEUDO_DEVICE.test(target)) return;
+				if (node.operator === ">&" && /^(?:\d+|-)$/.test(target)) return;
+				visitor.writeRedirect(target, effectiveCwd);
+				return;
+			}
+			case "HereDoc":
+			case "HereString": {
+				// Expansions in an unquoted body run in this shell; the body itself is a script only for a local shell.
+				forEachChild(node, visit);
+				const script = node.type === "HereDoc" ? node.body.text : node.target?.value;
+				if (shellReadsStdin && script) {
+					const saved = effectiveCwd;
+					visit(parse(script));
+					effectiveCwd = saved;
+				}
+				return;
+			}
+			case "Command": {
+				const saved = shellReadsStdin;
+				shellReadsStdin ||= isLocalShell(node);
+				forEachChild(node, visit);
+				shellReadsStdin = saved;
+				const words = commandWords(node);
+				const [verb, ...args] = words;
+				if (!verb) return;
+				visitor.command(words, effectiveCwd);
+				if (verb === "cd" || verb === "pushd") {
+					const dest = args.find((a) => !a.startsWith("-")) ?? "~";
+					if (dest !== "-") {
+						effectiveCwd = resolveCanonicalPath(dest, effectiveCwd);
+					}
+				}
+				return;
+			}
+			default:
+				forEachChild(node, visit);
+		}
+	};
+
+	visit(parse(command));
+}
+
 /**
  * Extracts all resolved filesystem write/creation target paths from a shell command.
  * Commands for other machines (`ssh host mkdir /x`) and heredoc bodies are data unless a
@@ -535,20 +628,10 @@ function extractTarTarget(args: string[]): string | undefined {
  */
 export function extractBashWriteTargets(command: string, cwd: string): string[] {
 	const canonicalCwd = resolveCanonicalPath(cwd);
-	let effectiveCwd = canonicalCwd;
-	let shellReadsStdin = false;
 	const targets: string[] = [];
 
-	const inspectCommand = ([verb, ...args]: string[]): void => {
-		if (!verb) return;
-
-		if (verb === "cd" || verb === "pushd") {
-			const dest = args.find((a) => !a.startsWith("-")) ?? "~";
-			if (dest !== "-") {
-				effectiveCwd = resolveCanonicalPath(dest, effectiveCwd);
-			}
-			return;
-		}
+	const inspectCommand = ([verb, ...args]: string[], effectiveCwd: string): void => {
+		if (!verb || verb === "cd" || verb === "pushd") return;
 
 		if (verb === "git") {
 			const gitTargets = extractGitTargets(args, effectiveCwd);
@@ -641,74 +724,59 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 		}
 	};
 
-	const visit = (node: SyntaxNode): void => {
-		switch (node.type) {
-			case "Subshell":
-			case "CommandExpansion":
-			case "ProcessSubstitution":
-			case "ArithmeticCommandExpansion": {
-				// Subshells keep their `cd` to themselves.
-				const saved = effectiveCwd;
-				forEachChild(node, visit);
-				effectiveCwd = saved;
-				return;
-			}
-			case "Pipeline": {
-				// Every stage runs in its own subshell; a local shell in any stage reads the heredocs.
-				const saved = { cwd: effectiveCwd, shellReadsStdin };
-				shellReadsStdin ||= node.commands.some(isLocalShell);
-				for (const stage of node.commands) {
-					effectiveCwd = saved.cwd;
-					visit(stage);
-				}
-				effectiveCwd = saved.cwd;
-				shellReadsStdin = saved.shellReadsStdin;
-				return;
-			}
-			case "Redirected": {
-				// Redirections of a compound command open before its body runs.
-				const before = effectiveCwd;
-				visit(node.command);
-				const after = effectiveCwd;
-				effectiveCwd = before;
-				for (const redirect of node.redirects) visit(redirect);
-				effectiveCwd = after;
-				return;
-			}
-			case "Redirect": {
-				const target = node.target?.value;
-				if (!target || !WRITE_REDIRECTS.has(node.operator) || SHELL_PSEUDO_DEVICE.test(target)) return;
-				if (node.operator === ">&" && /^(?:\d+|-)$/.test(target)) return;
-				targets.push(resolveCanonicalPath(target, effectiveCwd));
-				return;
-			}
-			case "HereDoc":
-			case "HereString": {
-				// Expansions in an unquoted body run in this shell; the body itself is a script only for a local shell.
-				forEachChild(node, visit);
-				const script = node.type === "HereDoc" ? node.body.text : node.target?.value;
-				if (shellReadsStdin && script) {
-					const saved = effectiveCwd;
-					visit(parse(script));
-					effectiveCwd = saved;
-				}
-				return;
-			}
-			case "Command": {
-				const saved = shellReadsStdin;
-				shellReadsStdin ||= isLocalShell(node);
-				forEachChild(node, visit);
-				shellReadsStdin = saved;
-				inspectCommand(commandWords(node));
-				return;
-			}
-			default:
-				forEachChild(node, visit);
-		}
-	};
-
-	visit(parse(command));
+	walkBashCommands(command, canonicalCwd, {
+		command: inspectCommand,
+		writeRedirect: (target, effectiveCwd) => {
+			targets.push(resolveCanonicalPath(target, effectiveCwd));
+		},
+	});
 	return [...new Set(targets)];
+}
+
+/** Verbs that only read the files they name. */
+const READ_ONLY_VERBS = new Set(["cat", "head", "tail", "wc", "ls", "stat", "test", "[", "diff", "cmp", "jq", "grep"]);
+
+/** The paths a word can name: itself and, past its first `=`, an option's value (`--file=PATH`, `of=PATH`). */
+function wordPathForms(word: string): string[] {
+	const eq = word.indexOf("=");
+	const forms = eq < 0 ? [word] : [word, word.slice(eq + 1)];
+	return forms.filter((form) => form.trim() !== "");
+}
+
+/**
+ * Returns the first of `stateFiles` that a simple command of `command` names, whatever that command is,
+ * unless its verb only reads: one of its words resolves to the file, or one resolves to the file's
+ * directory while another word's last path segment is the file's name (`cp /tmp/policy.json .pi/workspaces/`).
+ * Words resolve as write targets do, and letter case is ignored.
+ */
+export function findBashNamedStateFile(command: string, cwd: string, stateFiles: string[]): string | undefined {
+	const states = stateFiles.map((file) => ({
+		file,
+		resolved: resolveCanonicalPath(file).toLowerCase(),
+		dir: resolveCanonicalPath(path.dirname(file)).toLowerCase(),
+		name: path.basename(file).toLowerCase(),
+	}));
+	let named: string | undefined;
+
+	walkBashCommands(command, resolveCanonicalPath(cwd), {
+		command: (words, effectiveCwd) => {
+			if (named || READ_ONLY_VERBS.has(words[0]!)) return;
+			const resolved = words.map((word) =>
+				wordPathForms(word).map((form) => resolveCanonicalPath(form, effectiveCwd).toLowerCase()),
+			);
+			named = states.find(
+				(state) =>
+					resolved.some((forms) => forms.includes(state.resolved)) ||
+					resolved.some(
+						(forms, index) =>
+							forms.includes(state.dir) &&
+							words.some((other, otherIndex) => otherIndex !== index && path.basename(other).toLowerCase() === state.name),
+					),
+			)?.file;
+		},
+		writeRedirect: () => {},
+	});
+	return named;
 }
 
 /**

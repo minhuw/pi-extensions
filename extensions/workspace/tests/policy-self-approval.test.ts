@@ -346,6 +346,89 @@ describe("workspace write guard — the guard's own policy.json and .registry.js
 		}
 	});
 
+	it("blocks bash commands that name either file or drop one into the directory, whatever the command", async () => {
+		const toolCall = loadToolCallHandler();
+		const wsDir = workspacesDir(projectCwd);
+		const policyFile = policyFilePath(projectCwd);
+		const registryFile = registryFilePath(projectCwd);
+		await mkdir(wsDir, { recursive: true });
+		await symlink(wsDir, path.join(projectCwd, "dir-link"));
+
+		const blocked: [command: string, file: string][] = [
+			// Commands the write extractor does not know, or whose target it does not see.
+			["sed -i s/a/b/ .pi/workspaces/policy.json", policyFile],
+			["truncate -s 0 .pi/workspaces/.registry.json", registryFile],
+			["rsync /tmp/policy.json .pi/workspaces/policy.json", policyFile],
+			["python3 tool.py --out=.pi/workspaces/policy.json", policyFile],
+			["git checkout -- .pi/workspaces/policy.json", policyFile],
+			["echo .pi/workspaces/policy.json | xargs truncate -s 0", policyFile],
+			[`sed -i s/a/b/ "${policyFile}"`, policyFile],
+			["sed -i s/a/b/ .pi/workspaces/POLICY.JSON", policyFile],
+			["sudo env LC_ALL=C truncate -s 0 .pi/workspaces/policy.json", policyFile],
+			// A same-named file dropped into the directory.
+			["cp /tmp/policy.json .pi/workspaces/", policyFile],
+			["mv /tmp/policy.json .pi/workspaces", policyFile],
+			["cd .pi/workspaces && cp /tmp/policy.json .", policyFile],
+			["install -t .pi/workspaces /tmp/.registry.json", registryFile],
+			["ln -sf /tmp/policy.json .pi/workspaces/", policyFile],
+			["rsync -a /tmp/policy.json dir-link/", policyFile],
+			// Subshells, substitutions, and a heredoc that a local shell reads are walked with the same `cd` scoping.
+			["(cd .pi/workspaces; rsync /tmp/.registry.json .)", registryFile],
+			['echo "$(truncate -s 0 .pi/workspaces/policy.json)"', policyFile],
+			["bash <<'EOF'\nsed -i s/a/b/ .pi/workspaces/policy.json\nEOF", policyFile],
+			// A write redirection stays blocked whatever the verb.
+			["cat grant.json > .pi/workspaces/policy.json", policyFile],
+		];
+
+		// Neither file exists until the extension first writes it.
+		for (const exists of [false, true]) {
+			if (exists) {
+				await writeFile(policyFile, "{}\n", "utf8");
+				await writeFile(registryFile, "{}\n", "utf8");
+			}
+			for (const [command, file] of blocked) {
+				for (const kind of SESSION_KINDS) {
+					const prompts: string[] = [];
+					const result = await toolCall({ toolName: "bash", input: { command } }, handlerContext(kind, prompts));
+					const label = `${command} (${kind} session, files ${exists ? "exist" : "absent"})`;
+					expectManagedFileBlock(result, file, label);
+					expect(prompts, label).toEqual([]);
+				}
+			}
+		}
+		expect(fs.readdirSync(wsDir).sort()).toEqual([".registry.json", "policy.json"]);
+		expect(await readFile(registryFile, "utf8")).toBe("{}\n");
+
+		// Reading either file, working inside a workspace, and a same-named file elsewhere stay allowed.
+		for (const command of [
+			"cat .pi/workspaces/policy.json .pi/workspaces/.registry.json",
+			"cat .pi/workspaces/policy.json > policy-copy.json",
+			"jq . .pi/workspaces/policy.json",
+			"ls -la .pi/workspaces",
+			"head -n 1 .pi/workspaces/policy.json | wc -c && tail -n 1 dir-link/.registry.json",
+			"stat .pi/workspaces/policy.json && test -f .pi/workspaces/.registry.json && [ -s .pi/workspaces/policy.json ]",
+			"diff .pi/workspaces/policy.json /tmp/policy.json || cmp .pi/workspaces/policy.json /tmp/policy.json",
+			"sudo env LC_ALL=C grep -c allowedPaths .pi/workspaces/policy.json",
+			"mkdir -p .pi/workspaces/side && echo notes > .pi/workspaces/side/policy.json",
+			"cp /tmp/policy.json .pi/workspaces/side/",
+			"cd .pi/workspaces/side && cp /tmp/policy.json .",
+			"rm -rf .pi/workspaces/side",
+			"cp a.json policy.json",
+			"sed -i s/a/b/ policy.json",
+			// A subshell keeps its `cd`, and a heredoc that no local shell reads is data.
+			"(cd .pi/workspaces) && cp /tmp/policy.json .",
+			"tee notes.txt <<'EOF'\nsed -i s/a/b/ .pi/workspaces/policy.json\nEOF",
+		]) {
+			for (const kind of SESSION_KINDS) {
+				const prompts: string[] = [];
+				const result = await toolCall({ toolName: "bash", input: { command } }, handlerContext(kind, prompts));
+				expect(result, `${command} (${kind} session)`).toBeUndefined();
+				expect(prompts, command).toEqual([]);
+			}
+		}
+		expect(await readFile(policyFile, "utf8")).toBe("{}\n");
+	});
+
 	it("does not let a UI session approve its own outside write through policy.json", async () => {
 		const h = await startUiSession();
 		try {
