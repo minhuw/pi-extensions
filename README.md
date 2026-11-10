@@ -30,6 +30,7 @@ The [pika server](services/pika/README.md) serves this documentation publicly at
 | [Loop](extensions/loop/README.md) | Repeats a prompt on a fixed interval, a cron schedule, or a delay the model picks. |
 | [Molt](extensions/molt/README.md) | `/molt` starts a new session with the current model and thinking level; `/handoff [task]` has the model write a handover and continues in a new session that starts from it. |
 | [Language](extensions/language/README.md) | `/language` sets the language the model responds in, with a default for new sessions and switches that leave the cached prompt alone. |
+| [Soul](extensions/soul/README.md) | Injects core development principles by default into sessions and delegated subagents, with `/soul` switches that leave the cached prompt alone. |
 | [Spokesman](extensions/spokesman/README.md) | `/spokesman` rewrites dense or cryptic model replies with a secondary communicator model, folding the original response and showing the rewrite below a model separator. |
 | [Boom](extensions/boom/README.md) | `/boom` turns on boom mode 💥 for the session: the model fans work out to parallel subagents, background agents included, to develop faster, without disturbing the cached prompt. |
 | [Always-on](extensions/alwayson/README.md) | `/alwayson` turns on always-on mode 📡 for the session: the model runs long tasks in background subagents and ends its turns, so it keeps answering you and relay messages, without disturbing the cached prompt. |
