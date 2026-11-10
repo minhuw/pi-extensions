@@ -4,6 +4,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { runWorkspaceGc } from "./gc.ts";
 import {
 	allowProjectPath,
+	containsPath,
 	denyProjectPath,
 	ensureWorkspacesClosure,
 	evaluatePathAccess,
@@ -11,7 +12,6 @@ import {
 	extractBashWriteTargets,
 	extractWorkspaceNameFromPath,
 	findBashNamedStateFile,
-	isSubpath,
 	normalizeFileToolPath,
 	policyFilePath,
 	readProjectPolicy,
@@ -153,7 +153,7 @@ function getEffectiveSessionAllowedPaths(ctx: ExtensionContext): Set<string> {
 	return allowed;
 }
 
-function addSessionAllowedPath(ctx: ExtensionContext, targetPath: string): void {
+function addSessionAllowedPath(ctx: ExtensionContext, allowedPath: string): void {
 	const state = getSharedState();
 	const sessionId = ctx.sessionManager?.getSessionId?.() ?? "__default__";
 	let set = state.sessionAllowedPaths.get(sessionId);
@@ -161,7 +161,7 @@ function addSessionAllowedPath(ctx: ExtensionContext, targetPath: string): void 
 		set = new Set<string>();
 		state.sessionAllowedPaths.set(sessionId, set);
 	}
-	set.add(resolveCanonicalPath(targetPath, ctx.cwd));
+	set.add(allowedPath);
 }
 
 /** The guard's own state files: the project allowlist and the workspace registry. */
@@ -371,7 +371,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			}
 
 			if (choice === "Allow for this project" || choice === "Allow for project") {
-				const saved = await allowProjectPath(ctx.cwd, resolvedPath);
+				const saved = await allowProjectPath(ctx.cwd, resolvedPath, true);
 				policy.allowedPaths.push(saved);
 				addSessionAllowedPath(ctx, saved);
 				sessionAllowed.add(saved);
@@ -561,7 +561,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 				const state = getSharedState();
 				for (const set of state.sessionAllowedPaths.values()) {
 					for (const entry of [...set]) {
-						if (entry === canonical || isSubpath(canonical, entry)) {
+						if (containsPath(canonical, resolveLiteralPath(entry, ctx.cwd))) {
 							set.delete(entry);
 						}
 					}

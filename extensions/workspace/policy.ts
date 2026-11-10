@@ -146,7 +146,7 @@ export async function ensureWorkspacesClosure(cwd: string): Promise<string> {
 }
 
 /** Whether the canonical path `candidate` is `parent` or lies under it. */
-function containsPath(parent: string, candidate: string): boolean {
+export function containsPath(parent: string, candidate: string): boolean {
 	if (candidate === parent) return true;
 	const rel = path.relative(parent, candidate);
 	return rel !== "" && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !rel.startsWith("../") && !path.isAbsolute(rel);
@@ -176,7 +176,13 @@ export async function readProjectPolicy(cwd: string): Promise<ProjectPolicy> {
 			defaultTtlMs?: unknown;
 		} | null;
 		const allowedPaths = Array.isArray(raw?.allowedPaths)
-			? [...new Set(raw.allowedPaths.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => resolveCanonicalPath(item, cwd)))]
+			? [
+					...new Set(
+						raw.allowedPaths
+							.filter((item): item is string => typeof item === "string" && item.length > 0)
+							.map((item) => resolveLiteralPath(item, cwd)),
+					),
+				]
 			: [];
 		const defaultTtlMs = typeof raw?.defaultTtlMs === "number" && Number.isFinite(raw.defaultTtlMs) && raw.defaultTtlMs >= 0
 			? raw.defaultTtlMs
@@ -187,8 +193,8 @@ export async function readProjectPolicy(cwd: string): Promise<ProjectPolicy> {
 	}
 }
 
-export async function allowProjectPath(cwd: string, targetPath: string): Promise<string> {
-	const canonical = resolveCanonicalPath(targetPath, cwd);
+export async function allowProjectPath(cwd: string, targetPath: string, literal = false): Promise<string> {
+	const canonical = literal ? resolveLiteralPath(targetPath, cwd) : resolveCanonicalPath(targetPath, cwd);
 	await ensureWorkspacesClosure(cwd);
 	const policy = await readProjectPolicy(cwd);
 	const allowedPaths = [...new Set([...policy.allowedPaths, canonical])];
@@ -264,9 +270,8 @@ export function evaluatePathAccess(options: PathAccessOptions): PathAccessEvalua
 	const resolvedPath = options.literal
 		? resolveLiteralPath(options.targetPath, canonicalCwd)
 		: resolveCanonicalPath(options.targetPath, canonicalCwd);
-	// A literal path is already canonical, and `isSubpath` would read it as a shell word again.
-	const isInside = (root: string): boolean =>
-		options.literal ? containsPath(resolveCanonicalPath(root), resolvedPath) : isSubpath(root, resolvedPath);
+	// `resolvedPath` and every root checked below are already canonical; `isSubpath` would expand them again.
+	const isInside = (root: string): boolean => containsPath(root, resolvedPath);
 
 	if (resolvedPath === "/dev/null") {
 		return { allowed: true, resolvedPath, matchedRoot: "/dev/null" };
@@ -288,8 +293,8 @@ export function evaluatePathAccess(options: PathAccessOptions): PathAccessEvalua
 	for (const group of [options.sessionAllowed, options.projectAllowed, options.extraAllowed]) {
 		if (!group) continue;
 		for (const allowedEntry of group) {
-			const canonicalAllowed = resolveCanonicalPath(allowedEntry, canonicalCwd);
-			if (isInside(canonicalAllowed)) {
+			const canonicalAllowed = resolveLiteralPath(allowedEntry, canonicalCwd);
+			if (containsPath(canonicalAllowed, resolvedPath)) {
 				return { allowed: true, resolvedPath, matchedRoot: canonicalAllowed };
 			}
 		}
@@ -304,7 +309,7 @@ export function evaluatePathAccess(options: PathAccessOptions): PathAccessEvalua
 		]);
 		for (const tmpRoot of tmpRoots) {
 			if (!isInside(tmpRoot)) continue;
-			if (isSubpath(tmpRoot, canonicalCwd)) {
+			if (containsPath(tmpRoot, canonicalCwd)) {
 				const relCwd = path.relative(tmpRoot, canonicalCwd);
 				const firstSegment = relCwd.split(/[\\/]/)[0];
 				if (firstSegment) {
