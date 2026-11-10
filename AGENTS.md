@@ -55,6 +55,7 @@ Run from the repository root with Node `>=22.19.0` (SDK baseline Pi 1.5.0; peer 
 - Use conventional commits with a scope (`fix(subagents): ...`, `test(extensions): ...`).
 - TypeScript is strict (`noEmit`). Commit, Quality, and Writer tests use `node --test`; all other extension suites use Vitest.
 - Keep `extensions/pika/index.ts` last in `package.json` `pi.extensions` so payload capture runs last.
+- Keep `systemPromptOptions.sections` fixed after a session's first request so Magpie's prefix cache holds; send mid-session mode or language switches as hidden custom messages appended to the conversation, re-sent only when compaction or branching drops them.
 - Cross-extension isolation: extensions never import each other (`plugins/pika-relay` copies its shared pika modules into `dist/shared/` at build time); share runtime hooks only via `Symbol.for("pi-extensions.child-session-hooks")`, `Symbol.for("pi-extensions.pika.credentials")`, `Symbol.for("pi-extensions.session-modes")` (always-on mode publishes, relay reads), `pi-extensions.session-link` entries, and `herder:run` events.
 - Subagents workflows run only on explicit orchestration requests; use `isolation: "worktree"` when parallel writers conflict, and await writers before verification.
 - Impeccable activation, `npm ci`, and default/scoped/package tests stay offline and never download the engine or browser. Regenerate `skills/` and `prompts/` via `scripts/transform.mjs`; never commit binaries, caches, or credentials.
