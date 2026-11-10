@@ -7,11 +7,12 @@
  * a powerline bar on theme bands. Metrics remain ours: TTFT/TTFB, aggregate
  * throughput, cache ratio, session cost, and working-tree diff.
  *
- * Full mode: the bar, with the telemetry, Git, and status rows on a rail.
- *   ▌✻ model ▶ HIGH  (provider) ▶ ──────── ◀ ▉▉▉░░░  8.2%  78.9k/1.05M ▐
- *    ├ # 13  ⏱ 1h 28m  ❯  ⏱ 4.2s  » 28.9 tok/s     $0.75  $0.06/turn  ❮  ↑ 65k  ↓ 31k  ❮  ~2.4k memory
- *    ├ ⎇ main  +42 −17         ⇌ 3 in · 2 out  ❮  ▤ 5 touched  ❮  ⌂ ~/…/my-project
- *    ╰ herder: T2 integrate · 3/5 tasks  ❯  ↻ build · next 4m   (while any status but the language is set)
+ * Full mode: identity bar; optional activity/collaboration; performance;
+ * resources; workspace. Detail rows share a rail that closes at workspace.
+ *    ├ herder: T2 integrate · 3/5 tasks                  📣 rep #dev  ⇌ #ops · 3 in · 2 out
+ *    ├ # 13  ⏱ 1h 28m  ❯  tools 42                 ⏱ 4.2s  » 28.9 tok/s
+ *    ├ $0.75  $0.06/turn                 ↑ 65k  ↓ 31k  ❮  ~2.4k memory
+ *    ╰ ⎇ main  +42 −17                        ▤ 5 touched  ❮  ⌂ ~/…/my-project
  *
  * Compact mode: the bar alone.
  *   ▌✻ model ▶ HIGH ▶ ──────── ◀ ▉▉▉░░░  42%  $1.23  12m ▐
@@ -392,22 +393,59 @@ export function statusTone(segment: string): "problem" | "attention" | "calm" {
 	return "calm";
 }
 
-// Known extensions keep a fixed slot so their color does not move as others come and go.
-const STATUS_ORDER = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language", "spokesman", "boom", "alwayson", "selfdrive", "representative"];
-/** Session modes that change how the model works; they ride the bar before the context, not the status row. */
-const MODE_KEYS = ["boom", "alwayson", "selfdrive", "representative"];
-// Pika publishes sorted, sanitized room labels as plain text; clearing the key leaves no rooms.
-const RELAY_ROOMS_STATUS_KEY = "relay-rooms";
-const STATUS_ICONS: Record<string, string> = {
-	autoresearch: "\u{F0093}", // md-flask
-	herder: "\u{F0CC6}", // md-sheep
-	loop: "\u{F04E6}", // md-sync
-	[PROCESS_STATUS_KEY]: "\u{F018D}", // md-console
-	subagents: "\u{F06A9}", // md-robot
-	"impeccable-live": "\u{F03D8}", // md-palette
-	language: "\u{F05CA}", // md-translate
-	spokesman: "\u{F05CB}", // md-account-voice
+// Placement, compact-summary role, icon, and historical color slot live together.
+// Keep slots explicit: moving a status between rows must never change its hue.
+type StatusDescriptor = {
+	placement: "activity" | "language" | "spokesman" | "mode" | "representative" | "rooms";
+	colorSlot?: number;
+	icon?: string;
+	compact?: "workflow" | "process";
 };
+const STATUS_DESCRIPTORS: Record<string, StatusDescriptor> = {
+	autoresearch: { placement: "activity", colorSlot: 0, icon: "\u{F0093}", compact: "workflow" },
+	herder: { placement: "activity", colorSlot: 1, icon: "\u{F0CC6}", compact: "workflow" },
+	loop: { placement: "activity", colorSlot: 2, icon: "\u{F04E6}", compact: "workflow" },
+	[PROCESS_STATUS_KEY]: { placement: "activity", colorSlot: 3, icon: "\u{F018D}", compact: "process" },
+	subagents: { placement: "activity", colorSlot: 4, icon: "\u{F06A9}" },
+	"impeccable-live": { placement: "activity", colorSlot: 5, icon: "\u{F03D8}" },
+	language: { placement: "language", colorSlot: 6, icon: "\u{F05CA}" },
+	spokesman: { placement: "spokesman", colorSlot: 7, icon: "\u{F05CB}" },
+	boom: { placement: "mode", colorSlot: 8 },
+	alwayson: { placement: "mode", colorSlot: 9 },
+	selfdrive: { placement: "mode", colorSlot: 10 },
+	representative: { placement: "representative", colorSlot: 11 },
+	"relay-rooms": { placement: "rooms" },
+};
+
+function statusKeys(placement: StatusDescriptor["placement"]): string[] {
+	return Object.keys(STATUS_DESCRIPTORS).filter(key => STATUS_DESCRIPTORS[key]!.placement === placement);
+}
+
+function statusText(statuses: ReadonlyMap<string, string>, placement: StatusDescriptor["placement"]): string | undefined {
+	return statuses.get(statusKeys(placement)[0]!);
+}
+
+/** Joined rooms already named by a plain representative status need no second label. */
+function additionalRooms(statuses: ReadonlyMap<string, string>): string | undefined {
+	const rooms = statusText(statuses, "rooms");
+	const representative = statusText(statuses, "representative");
+	if (!rooms || !representative || representative.includes("\x1b[")) return rooms;
+	const named = new Set(representative.split(/\s+/));
+	return rooms.split(/\s+/).filter(room => !named.has(room)).join(" ") || undefined;
+}
+
+/** Rank only the published text; no hidden state or extension-specific parsing. */
+function statusRank(text: string): number {
+	const tone = statusTone(text.replace(/\x1b\[[0-9;]*m/g, ""));
+	return tone === "problem" ? 3 : tone === "attention" ? 2 : 1;
+}
+
+function activityStatuses(statuses: ReadonlyMap<string, string>): [string, string][] {
+	return [
+		...statusKeys("activity").flatMap((key): [string, string][] => statuses.get(key) ? [[key, statuses.get(key)!]] : []),
+		...[...statuses].filter(([key, text]) => !Object.hasOwn(STATUS_DESCRIPTORS, key) && Boolean(text)),
+	];
+}
 const STATUS_DEFAULT_ICON = "\u{F0431}"; // md-puzzle
 const STATUS_HUES: ThemeToken[] = [
 	"mdLink", "syntaxVariable", "success", "syntaxType", "syntaxFunction",
@@ -456,8 +494,8 @@ export function statusPalette(theme: Theme): ThemeToken[] {
 
 export function statusHue(theme: Theme, key: string): ThemeToken {
 	const palette = statusPalette(theme);
-	let slot = STATUS_ORDER.indexOf(key);
-	if (slot < 0) slot = [...key].reduce((sum, char) => (sum * 31 + char.codePointAt(0)!) >>> 0, 7);
+	let slot = STATUS_DESCRIPTORS[key]?.colorSlot;
+	if (slot == null) slot = [...key].reduce((sum, char) => (sum * 31 + char.codePointAt(0)!) >>> 0, 7);
 	return palette[slot % palette.length]!;
 }
 
@@ -466,7 +504,7 @@ export function renderStatus(theme: Theme, text: string, key = "", withIcon = fa
 	const identity = statusHue(theme, key);
 	// A status that leads with its own symbol (such as Loop's ↻) needs no second icon.
 	const icon = withIcon && /^[\p{L}\p{N}]/u.test(text)
-		? `${theme.fg(identity, STATUS_ICONS[key] ?? STATUS_DEFAULT_ICON)} `
+		? `${theme.fg(identity, STATUS_DESCRIPTORS[key]?.icon ?? STATUS_DEFAULT_ICON)} `
 		: "";
 	return icon + text.split(/( · |, )/).map((part, index) => {
 		if (index % 2) return theme.fg("dim", part);
@@ -489,9 +527,9 @@ function renderSpokesman(theme: Theme, statuses: ReadonlyMap<string, string>): s
 	return spokesman ? renderStatus(theme, spokesman, "spokesman", hasNerdFonts()) : undefined;
 }
 
-/** Boom, always-on, self-driving, and representative modes for the bar, in that order; each status leads with its own symbol. */
+/** Session modes for the bar; each status leads with its own symbol. */
 function renderModes(theme: Theme, statuses: ReadonlyMap<string, string>): string | undefined {
-	return cluster(MODE_KEYS.map((key) => statuses.get(key) && renderStatus(theme, statuses.get(key)!, key)), "  ") || undefined;
+	return cluster(statusKeys("mode").map((key) => statuses.get(key) && renderStatus(theme, statuses.get(key)!, key)), "  ") || undefined;
 }
 
 // ── model marks ─────────────────────────────────────────────────────
@@ -1142,7 +1180,7 @@ function renderIdentityRow(
 	workflowStatus?: string,
 	spokesmanStatus?: string,
 	modeStatus?: string,
-	relayRooms?: string,
+	collaborationStatus?: string,
 ): string {
 	const set = icons();
 	const { chrome } = skin;
@@ -1156,7 +1194,7 @@ function renderIdentityRow(
 	const tail = compactMode ? [
 		renderPrice(ctx, s, theme, set),
 		theme.fg("dim", fmtDuration(s.durationMs)),
-		...(relayRooms ? [`${glyph(theme, set.relay, "dim")} ${theme.fg("muted", relayRooms)}`] : []),
+		...(collaborationStatus ? [collaborationStatus] : []),
 	] : [];
 	const minimumContext = usage?.percent != null ? visibleWidth(`${usage.percent.toFixed(1)}%`) : 0;
 	// Compact already renders the provider-free label, so it is the fallback identity too.
@@ -1208,11 +1246,18 @@ function renderCompact(
 	footerData: ReadonlyFooterDataProvider,
 ): string {
 	const statuses = footerData.getExtensionStatuses();
-	const workflowKey = ["autoresearch", "herder", "loop"].find((key) => statuses.get(key));
+	const workflowKey = Object.keys(STATUS_DESCRIPTORS).find(key => STATUS_DESCRIPTORS[key]!.compact === "workflow" && statuses.get(key));
+	const processKey = Object.keys(STATUS_DESCRIPTORS).find(key => STATUS_DESCRIPTORS[key]!.compact === "process");
+	const representative = statusText(statuses, "representative");
+	const rooms = additionalRooms(statuses);
+	const collaboration = cluster([
+		representative && renderStatus(theme, representative, "representative"),
+		rooms && `${glyph(theme, icons().relay, "dim")} ${theme.fg("muted", rooms)}`,
+	], "  ");
 	return renderIdentityRow(ctx, theme, skin, width, state, collectStats(ctx, state), true, renderLanguage(theme, statuses), cluster([
 		workflowKey && renderStatus(theme, statuses.get(workflowKey)!, workflowKey),
-		statuses.get(PROCESS_STATUS_KEY) && renderStatus(theme, statuses.get(PROCESS_STATUS_KEY)!, PROCESS_STATUS_KEY),
-	], "  "), renderSpokesman(theme, statuses), renderModes(theme, statuses), statuses.get(RELAY_ROOMS_STATUS_KEY));
+		processKey && statuses.get(processKey) && renderStatus(theme, statuses.get(processKey)!, processKey),
+	], "  "), renderSpokesman(theme, statuses), renderModes(theme, statuses), collaboration);
 }
 
 /** Cached reads as a share of all input, and the color that rates it. */
@@ -1256,21 +1301,11 @@ function renderFull(
 		renderModes(theme, extensionStatuses),
 	);
 
-	// Extension statuses get their own row, present only while one is published:
-	// workflows first (research, Herder, Loop, processes), then the rest. The
-	// language and spokesman are nearly always set, so they ride the bar and keep the row away;
-	// the boom, always-on, and self-driving modes ride it too, beside the context they spend.
-	const workflowKeys = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY];
-	const statuses = [
-		...workflowKeys.map((key): [string, string | undefined] => [key, extensionStatuses.get(key)]),
-		...[...extensionStatuses.entries()].filter(([key]) => key !== "language" && key !== "spokesman" && key !== RELAY_ROOMS_STATUS_KEY && !MODE_KEYS.includes(key) && !workflowKeys.includes(key)),
-	].flatMap(([key, status]) => status ? [renderStatus(theme, status, key, hasNerdFonts())] : []);
-
-	return [line1, ...renderDetailRows(ctx, theme, footerData, width, state, s, statuses)];
+	return [line1, ...renderDetailRows(ctx, theme, footerData, width, state, s)];
 }
 
 // ── detail rows ────────────────────────────────────────────────────
-// Under the bar, the telemetry, Git, and status rows hang from the
+// Under the bar, activity, performance, resources, and workspace hang from the
 // chip on a rail. Facts come in groups split by thin chevrons that echo the
 // bar's arrows. Icons carry the hue and values stay muted, unless a value
 // reports a state such as a slow first token or failed tool calls. A row that
@@ -1335,7 +1370,6 @@ function renderDetailRows(
 	width: number,
 	state: SessionState,
 	s: Stats,
-	statuses: string[],
 ): string[] {
 	const set = icons();
 	const item = (icon: string, hue: ThemeToken, value: string, tone: ThemeToken = "muted") =>
@@ -1386,13 +1420,28 @@ function renderDetailRows(
 	const memory = s.memoryTokens > 0 ? theme.fg("dim", `~${fmtTokens(s.memoryTokens)} memory`) : "";
 	const think = s.reasoning > 0 ? theme.fg("dim", `${fmtTokens(s.reasoning)} think`) : "";
 
-	const statusRail = statuses.length > 0;
-	const row2 = railRow(theme, "├", [
+	const statuses = footerData.getExtensionStatuses();
+	const leftStatuses = activityStatuses(statuses).map(([key, text], index) => ({
+		text: renderStatus(theme, text, key, hasNerdFonts()), rank: statusRank(text) * (statuses.size + 1) - index,
+	}));
+	const representative = statusText(statuses, "representative");
+	const relay = cluster([
+		additionalRooms(statuses),
+		s.relayIn > 0 && `${s.relayIn} in`,
+		s.relayOut > 0 && `${s.relayOut} out`,
+	], " · ");
+	// Keep collaboration ahead of routine summaries, below attention and problems.
+	const collaboration: Group[] = [
+		...(representative ? [{ text: renderStatus(theme, representative, "representative"), rank: statusRank(representative) * (statuses.size + 1) + 1 }] : []),
+		...(relay ? [{ text: item(set.relay, "dim", relay), rank: statuses.size + 2 }] : []),
+	];
+	const activityRows = leftStatuses.length || collaboration.length
+		? [railRow(theme, "├", leftStatuses, collaboration, width)] : [];
+	const performance = railRow(theme, "├", [
 		{ text: activity, rank: 3 },
-		{ text: latency, rank: 5 },
 		{ text: tools, rank: 2 },
-	], [
-		{ text: cost, rank: 6 },
+	], [{ text: latency, rank: 5 }], width);
+	const resources = railRow(theme, "├", [{ text: cost, rank: 6 }], [
 		{ text: tokens, rank: 4 },
 		...(memory ? [{ text: memory, rank: 0 }] : []),
 		...(think ? [{ text: think, rank: 1 }] : []),
@@ -1418,40 +1467,15 @@ function renderDetailRows(
 			(ahead > 0 || behind > 0) && `${theme.fg("success", `↑${ahead}`)} ${theme.fg("warning", `↓${behind}`)}`,
 		], "  ")
 		: item(set.branch, "dim", "no git", "dim");
-	const relayCounts = cluster([s.relayIn > 0 && `${s.relayIn} in`, s.relayOut > 0 && `${s.relayOut} out`], " · ");
-	const relayRooms = footerData.getExtensionStatuses().get(RELAY_ROOMS_STATUS_KEY);
-	const rooms = relayRooms ? item(set.relay, "dim", relayRooms) : "";
-	const counts = relayCounts ? item(set.relay, "dim", relayCounts) : "";
 	const touched = s.files > 0 ? item(set.file, "dim", `${s.files} touched`) : "";
-	const rail3 = statusRail ? "├" : "╰";
-	// Reserve room labels before touched files and message counts. The path keeps
-	// at least twelve columns, and counts-only sessions keep their old drop order.
-	const pathRoom = railRoom(width) - visibleWidth(git) - visibleWidth(`${set.cwd} `);
-	const minimumPath = 12;
-	const roomsWidth = rooms ? visibleWidth(rooms) + RAIL_SEP_WIDTH : 0;
-	const keepRooms = Boolean(rooms) && pathRoom - roomsWidth >= minimumPath;
-	const afterRooms = keepRooms ? pathRoom - roomsWidth : pathRoom;
-	const touchedWidth = touched ? visibleWidth(touched) + RAIL_SEP_WIDTH : 0;
-	const keepTouched = Boolean(touched) && afterRooms - touchedWidth >= minimumPath;
-	const afterTouched = keepTouched ? afterRooms - touchedWidth : afterRooms;
-	// Counts extend the same group when rooms are present, sharing its icon.
-	const countsWidth = keepRooms ? visibleWidth(` · ${relayCounts}`) : counts ? visibleWidth(counts) + RAIL_SEP_WIDTH : 0;
-	const keepCounts = Boolean(counts) && (keepTouched || !touched) && afterTouched - countsWidth >= minimumPath;
-	const relay = keepRooms
-		? rooms + (keepCounts ? theme.fg("muted", ` · ${relayCounts}`) : "")
-		: keepCounts ? counts : "";
-	const room = keepCounts ? afterTouched - countsWidth : afterTouched;
-	const cwd = item(set.cwd, "dim", shortenPath(formatPath(ctx.cwd), Math.max(minimumPath, room)));
-	const row3 = railRow(theme, rail3, [{ text: git, rank: 4 }], [
-		...(relay ? [{ text: relay, rank: keepRooms ? 2 : 0 }] : []),
-		...(keepTouched ? [{ text: touched, rank: 1 }] : []),
+	const pathRoom = railRoom(width) - visibleWidth(git) - visibleWidth(`${set.cwd} `)
+		- (touched ? visibleWidth(touched) + RAIL_SEP_WIDTH : 0);
+	const cwd = item(set.cwd, "dim", shortenPath(formatPath(ctx.cwd), Math.max(12, pathRoom)));
+	const workspace = railRow(theme, "╰", [{ text: git, rank: 4 }], [
+		...(touched ? [{ text: touched, rank: 1 }] : []),
 		{ text: cwd, rank: 3 },
 	], width);
-
-	if (!statusRail) return [row2, row3];
-	// Statuses come in priority order, so the last ones drop first.
-	const row4 = railRow(theme, "╰", statuses.map((text, index) => ({ text, rank: -index })), [], width);
-	return [row2, row3, row4];
+	return [...activityRows, performance, resources, workspace];
 }
 
 // ── extension ───────────────────────────────────────────────────────
