@@ -343,3 +343,52 @@ it("says which mentions reached nobody, and never adds a session it mentions to 
 	await waitFor(() => texts(b.session, "assistant").includes("b saw the thanks"), 5_000, "b's second turn");
 	expect(a.errors).toEqual([]);
 });
+
+it("treats blank or zero placeholder optional arguments as omitted across relay tools", async () => {
+	const a = await online();
+	const b = await online();
+	await a.session.prompt("/relay join ops");
+	await b.session.prompt("/relay join ops");
+
+	// Models constrained to emit every schema key pass room: "", replyTo: "", and mentions: [] on 1:1 sends.
+	b.faux.setResponses([fauxAssistantMessage("b got direct")]);
+	callTool(a, "relay_send", { to: b.session.sessionId, room: "", replyTo: "  ", mentions: [""], urgent: false, text: "direct handoff" });
+	await a.session.prompt("send direct");
+	expect(results(a, "relay_send")[0]).toEqual({
+		text: `Delivered message msg-1 to pi session ${b.session.sessionId} on laptop. ${ANSWER_HINT}`,
+		isError: false,
+	});
+	expect(relay.frames(a.session.sessionId, "send")[0]).toMatchObject({ to: b.session.sessionId, text: "direct handoff", hops: 1 });
+	expect(relay.frames(a.session.sessionId, "send")[0]).not.toHaveProperty("room");
+	expect(relay.frames(a.session.sessionId, "send")[0]).not.toHaveProperty("replyTo");
+	expect(relay.frames(a.session.sessionId, "send")[0]).not.toHaveProperty("mentions");
+	await waitFor(() => texts(b.session, "assistant").includes("b got direct"), 5_000, "b's direct turn");
+
+	// `to: "#ops"` still routes to the room when `room` is an empty placeholder.
+	callTool(a, "relay_send", { to: "#ops", room: "   ", replyTo: "", mentions: [], urgent: false, text: "room via to" });
+	await a.session.prompt("send room via to");
+	expect(results(a, "relay_send")[1]!.isError).toBe(false);
+	expect(results(a, "relay_send")[1]!.text).toContain("Posted message msg-2 to room #ops");
+
+	// Blank targets on both fields are rejected before hitting the wire.
+	const framesBefore = relay.frames(a.session.sessionId, "send").length;
+	callTool(a, "relay_send", { to: "  ", room: " # ", text: "nowhere" });
+	await a.session.prompt("blank target");
+	expect(results(a, "relay_send")[2]).toEqual({
+		text: "relay_send requires either `to` (a session id) or `room` (a chatroom name).",
+		isError: true,
+	});
+	expect(relay.frames(a.session.sessionId, "send")).toHaveLength(framesBefore);
+
+	// Zero-filled history limits and blank filters/ids behave like omitted arguments.
+	callTool(b, "relay_room", { action: "history", room: "ops", limit: 0, after: 0, mentions: [], replyTo: "", text: "", urgent: false });
+	callTool(a, "relay_list", { device: " ", project: "", query: " " });
+	callTool(a, "relay_status", { id: " " });
+	await b.session.prompt("history");
+	await a.session.prompt("list");
+	await a.session.prompt("status");
+	expect(results(b, "relay_room")[0]!.isError).toBe(false);
+	expect(results(b, "relay_room")[0]!.text).toContain("room via to");
+	expect(results(a, "relay_list")[0]!.text.split("\n")[0]).toBe("1 online pi session:");
+	expect(results(a, "relay_status")[0]!.text).toContain("msg-2 to room #ops: delivered");
+});

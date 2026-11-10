@@ -284,13 +284,13 @@ describe("MCP tools", () => {
         expect(list.text.split("\n")[1]).toMatch(new RegExp(`^${B} · laptop · project project · "codex-bbbb2222" · idle · gpt-5\\.5 · online \\d+s$`));
         expect((await server.call(A, "relay_list", { project: "elsewhere" })).text).toBe("No other pi session is online that matches.");
 
-        const sent = await server.call(A, "relay_send", { to: B, text: "Can you render the slides?" });
+        const sent = await server.call(A, "relay_send", { to: B, room: "", replyTo: " ", mentions: [""], urgent: false, text: "Can you render the slides?" });
         expect(sent).toEqual({ text: `Delivered message msg-1 to pi session ${B} ("codex-bbbb2222") on laptop. ${ANSWER_HINT}`, isError: false });
         const stop = await runHook(env, "Stop", { session_id: B, cwd: env.cwd });
         expect(stop.output.reason).toContain(`[relay] Message msg-1 from pi session ${A} ("codex-aaaa1111") on laptop`);
         expect(stop.output.reason).toContain("Can you render the slides?");
 
-        expect(await server.call(A, "relay_send", { text: "x" })).toEqual({ text: "relay_send requires either `to` (a session id) or `room` (a chatroom name).", isError: true });
+        expect(await server.call(A, "relay_send", { to: " ", room: "#", text: "x" })).toEqual({ text: "relay_send requires either `to` (a session id) or `room` (a chatroom name).", isError: true });
         expect(await server.call(A, "relay_send", { to: "nobody", text: "hi" })).toEqual({
             text: "relay rejected the message (unknown_session): no online or recorded pi session has that id; call relay_list for the online sessions.", isError: true,
         });
@@ -309,7 +309,7 @@ describe("MCP tools", () => {
         );
         const posted = await server.call(A, "relay_room", { action: "send", room: "design", text: "deck is ready", mentions: [B] });
         expect(posted.text).toMatch(new RegExp(`^Posted message msg-\\d+ to room #design \\(notified pi session ${B} \\("codex-bbbb2222"\\) on laptop\\)\\. `));
-        const history = await server.call(B, "relay_room", { action: "history", room: "design" });
+        const history = await server.call(B, "relay_room", { action: "history", room: "design", limit: 0, after: 0 });
         expect(history.text).toMatch(/\n\n\[#1 · msg-\d+ · \d+s ago\] codex-aaaa1111 \(.+\) \[notified: bbbb2222-.*\]: deck is ready$/);
         const roomMessage = await server.call(B, "relay_wait", { timeoutSeconds: 0 });
         expect(roomMessage.text).toContain(`in room #design from pi session ${A}`);

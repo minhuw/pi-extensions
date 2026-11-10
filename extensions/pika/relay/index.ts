@@ -47,7 +47,7 @@ export interface RelayMessageDetails { id: string; room?: string; mentions?: str
 export interface RelayNoticeDetails { id: string; to: Target; status: "expired"; at: string | number }
 
 const REJECTIONS: Record<string, string> = {
-	invalid: "the message is invalid: empty text, a malformed session id, or bad hops",
+	invalid: "the message is invalid: empty text, a malformed session id, room name, replyTo, or mention, or bad hops",
 	self: "that is this session's own id",
 	too_large: "the text is too large",
 	rate_limited: "this session sent too many messages in the last minute; wait before sending more",
@@ -59,7 +59,7 @@ const REJECTIONS: Record<string, string> = {
 };
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
-const roomKey = (name: string) => name.trim().replace(/^#/, "");
+const roomKey = (name: string) => name.trim().replace(/^#/, "").trim();
 const supportedMode = (context: ExtensionContext) => context.mode === "tui" || context.mode === "rpc";
 const preview = (text: string) => { const line = text.replace(/\s+/g, " ").trim(); return line.length > 60 ? `${line.slice(0, 59)}…` : line; };
 
@@ -74,7 +74,7 @@ const firstLine = (text: string) => text.split("\n").find((line) => line.trim())
  * model's, and a send it repeats may carry another device's text.
  */
 function sendCall(args: SendArgs, theme: Theme, expanded: boolean): Text {
-	const room = headerField(args.room).replace(/^#/, "");
+	const room = roomKey(headerField(args.room));
 	const target = room ? `#${room}` : headerField(args.to) || "?";
 	const replyTo = headerField(args.replyTo);
 	const text = sanitize(args.text);
@@ -818,9 +818,12 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		const current = connection;
 		const reason = offlineReason();
 		if (reason || !current) throw new Error(`This session is not connected to pika relay: ${reason ?? "it is not connected"}.`);
-		const rawRoom = options.room ?? (to.startsWith("#") ? to.slice(1) : undefined);
-		const room = rawRoom?.trim().replace(/^#/, "");
-		const targetKey = room ? `#${room}` : to;
+		const cleanTo = to.trim();
+		const room = (options.room ? roomKey(options.room) : "") || (cleanTo.startsWith("#") ? roomKey(cleanTo) : "") || undefined;
+		const targetTo = room ? "" : cleanTo;
+		const targetKey = room ? `#${room}` : targetTo;
+		const mentions = options.mentions?.map((item) => item.trim()).filter(Boolean);
+		const replyTo = options.replyTo?.trim() || undefined;
 		// The model's send to a peer whose newer message it has not read would cross it: refused once per message.
 		const missed = options.checkUnread ? [...unread].filter(([, entry]) => entry.peer === targetKey && !entry.told) : [];
 		if (missed.length) {
@@ -837,12 +840,12 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		let answer: SentFrame;
 		try {
 			answer = await current.request({
-				...(room !== undefined ? { room } : { to }),
-				...(options.mentions?.length ? { mentions: options.mentions } : {}),
+				...(room ? { room } : { to: targetTo }),
+				...(mentions?.length ? { mentions } : {}),
 				text,
 				hops: options.hops,
 				...(options.urgent ? { urgent: true } : {}),
-				...(options.replyTo ? { replyTo: options.replyTo } : {}),
+				...(replyTo ? { replyTo } : {}),
 			}, signal);
 		} catch (error) {
 			record.status = error instanceof RequestError && error.outcome === "unsent" ? "failed" : "unknown";
@@ -861,17 +864,17 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		if (answer.room) exchanged.set(`#${answer.room}`, now);
 		else if (answer.to?.sessionId) exchanged.set(answer.to.sessionId, now);
 		record.id = answer.id;
-		record.label = answer.room ? `room #${headerField(answer.room)}` : targetLabel(answer.to, to);
+		record.label = answer.room ? `room #${headerField(answer.room)}` : targetLabel(answer.to, targetTo);
 		// A status frame may already have reported it delivered.
 		record.status = answer.status;
 		remember();
 		// The branch's record of what was sent, for /relay log and the footer's count; never in the model's context.
 		guard(() => pi.appendEntry<RelaySentData>(SENT_TYPE, {
 			id: answer.id,
-			...(answer.room ? { room: answer.room } : { to: answer.to?.sessionId ?? to, label: peerLabel(answer.to ?? { sessionId: to }) }),
-			...(options.mentions?.length ? { mentions: options.mentions } : {}),
+			...(answer.room ? { room: answer.room } : { to: answer.to?.sessionId ?? targetTo, label: peerLabel(answer.to ?? { sessionId: targetTo }) }),
+			...(mentions?.length ? { mentions } : {}),
 			text,
-			...(options.replyTo ? { replyTo: options.replyTo } : {}),
+			...(replyTo ? { replyTo } : {}),
 			urgent: options.urgent === true,
 			status: answer.status,
 			at: new Date(record.at).toISOString(),
@@ -907,12 +910,14 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			async execute(_id, params) {
 				const all = (await onlineSessions()).filter((session) => session.id !== sessionId);
 				const lower = (value: string | undefined) => value?.toLowerCase() ?? "";
-				const query = lower(params.query);
+				const device = params.device?.trim() || undefined;
+				const project = params.project?.trim() || undefined;
+				const query = lower(params.query?.trim());
 				const matches = all.filter((session) =>
-					(!params.device || [session.deviceName, session.device].some((value) => lower(value) === lower(params.device)))
-					&& (!params.project || lower(session.project) === lower(params.project))
+					(!device || [session.deviceName, session.device].some((value) => lower(value) === lower(device)))
+					&& (!project || lower(session.project) === lower(project))
 					&& (!query || [session.id, session.name, session.title, session.cwd].some((value) => lower(value).includes(query))));
-				const filtered = params.device || params.project || params.query;
+				const filtered = device || project || query;
 				const text = matches.length
 					? `${matches.length} online pi session${matches.length === 1 ? "" : "s"}${filtered ? " matching" : ""}:\n${matches.map(sessionLine).join("\n")}`
 					: `No other pi session is online${filtered && all.length ? " that matches" : ""}.`;
@@ -937,9 +942,12 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				replyTo: Type.Optional(Type.String({ description: "The id of the relay message this answers" })),
 			}),
 			async execute(_id, params, signal) {
-				if (!params.to && !params.room) throw new Error("relay_send requires either `to` (a session id) or `room` (a chatroom name).");
-				const { text, answer } = await send(params.to ?? "", params.text, {
-					room: params.room,
+				const rawTo = params.to?.trim() ?? "";
+				const room = (params.room ? roomKey(params.room) : "") || (rawTo.startsWith("#") ? roomKey(rawTo) : "") || undefined;
+				const to = room || rawTo.startsWith("#") ? "" : rawTo;
+				if (!to && !room) throw new Error("relay_send requires either `to` (a session id) or `room` (a chatroom name).");
+				const { text, answer } = await send(to, params.text, {
+					room,
 					mentions: params.mentions,
 					urgent: params.urgent,
 					replyTo: params.replyTo,
@@ -959,7 +967,8 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				+ "It never shows answers: those arrive as [relay] messages after your turn ends.",
 			parameters: Type.Object({ id: Type.Optional(Type.String({ description: "A message id from relay_send" })) }),
 			async execute(_id, params) {
-				return { content: [{ type: "text", text: statusLines(params.id) }], details: { messages: sent.filter((record) => !params.id || record.id === params.id).slice(-SENT_SHOWN).reverse() } };
+				const id = params.id?.trim() || undefined;
+				return { content: [{ type: "text", text: statusLines(id) }], details: { messages: sent.filter((record) => !id || record.id === id).slice(-SENT_SHOWN).reverse() } };
 			},
 		});
 		pi.registerTool({
@@ -982,8 +991,8 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				mentions: Type.Optional(Type.Array(Type.String(), { description: "Members' session ids or names (or 'all') to notify when action is 'send'" })),
 				urgent: Type.Optional(Type.Boolean({ description: "Steer into mentioned members' active turns when action is 'send', even when it would otherwise wait until those turns end" })),
 				replyTo: Type.Optional(Type.String({ description: "Message id being answered when action is 'send'" })),
-				limit: Type.Optional(Type.Integer({ description: "Max messages to read in 'history' (default 50, max 200)" })),
-				after: Type.Optional(Type.Integer({ description: "Only return messages with seq > after in 'history'" })),
+				limit: Type.Optional(Type.Integer({ minimum: 0, maximum: 200, description: "Max messages to read in 'history' (default 50, max 200)" })),
+				after: Type.Optional(Type.Integer({ minimum: 0, description: "Only return messages with seq > after in 'history'" })),
 			}),
 			async execute(_id, params, signal) {
 				type RoomToolDetails = { rooms?: RelayRoom[]; detail?: RelayRoomDetail; sent?: SentFrame };
@@ -995,10 +1004,12 @@ export default function relayExtension(pi: ExtensionAPI): void {
 						: "No active chatrooms; your user creates them with /relay join.";
 					return { content: [{ type: "text", text }], details: { rooms: items } as RoomToolDetails };
 				}
-				const room = params.room?.trim().replace(/^#/, "");
+				const room = params.room ? roomKey(params.room) : "";
 				if (!room) throw new Error(`relay_room (${params.action}) requires a \`room\` name.`);
 				if (params.action === "history") {
-					const detail = await roomDetail(room, params.limit ?? 50, params.after ?? 0);
+					const limit = params.limit && params.limit > 0 ? Math.min(200, params.limit) : 50;
+					const after = params.after && params.after > 0 ? params.after : 0;
+					const detail = await roomDetail(room, limit, after);
 					const header = roomLine(detail.room);
 					const body = detail.messages.length
 						? detail.messages.map(roomMessageLine).join("\n")

@@ -2,7 +2,7 @@
 /** Tool result lines, as the Pi relay tools word them (`extensions/pika/relay/index.ts`). */
 import { deviceLabel, headerField, sanitize, since, targetLabel, ttlText, } from "./shared/relay/protocol.js";
 export const REJECTIONS = {
-    invalid: "the message is invalid: empty text, a malformed session id, or bad hops",
+    invalid: "the message is invalid: empty text, a malformed session id, room name, replyTo, or mention, or bad hops",
     self: "that is this session's own id",
     too_large: "the text is too large",
     rate_limited: "this session sent too many messages in the last minute; wait before sending more",

@@ -498,9 +498,13 @@ class Broker {
         const reason = this.offlineReason(thread);
         if (reason || !connection)
             throw new Error(`This session is not connected to pika relay: ${reason ?? "it is not connected"}.`);
-        const rawRoom = options.room ?? (to.startsWith("#") ? to.slice(1) : undefined);
-        const room = rawRoom?.trim().replace(/^#/, "");
-        const targetKey = room ? `#${room}` : to;
+        const roomKey = (name) => name.trim().replace(/^#/, "").trim();
+        const cleanTo = to.trim();
+        const room = (options.room ? roomKey(options.room) : "") || (cleanTo.startsWith("#") ? roomKey(cleanTo) : "") || undefined;
+        const targetTo = room ? "" : cleanTo;
+        const targetKey = room ? `#${room}` : targetTo;
+        const mentions = options.mentions?.map((item) => item.trim()).filter(Boolean);
+        const replyTo = options.replyTo?.trim() || undefined;
         const record = { to: targetKey, label: targetLabel(undefined, targetKey), status: "queued", at: Date.now(), text: body };
         const remember = () => { thread.sent.push(record); if (thread.sent.length > SENT_KEPT)
             thread.sent.splice(0, thread.sent.length - SENT_KEPT); };
@@ -514,12 +518,12 @@ class Broker {
         let answer;
         try {
             answer = await connection.request({
-                ...(room !== undefined ? { room } : { to }),
-                ...(options.mentions?.length ? { mentions: options.mentions } : {}),
+                ...(room ? { room } : { to: targetTo }),
+                ...(mentions?.length ? { mentions } : {}),
                 text: body,
                 hops: thread.hops + 1,
                 ...(options.urgent ? { urgent: true } : {}),
-                ...(options.replyTo ? { replyTo: options.replyTo } : {}),
+                ...(replyTo ? { replyTo } : {}),
             }, signal);
         }
         catch (error) {
@@ -535,7 +539,7 @@ class Broker {
             throw new Error(`relay rejected the message (${answer.reason}): ${rejection(answer.reason, thread.limits.maxHops) ?? "see the reason"}.`);
         }
         record.id = answer.id;
-        record.label = answer.room ? `room #${headerField(answer.room)}` : targetLabel(answer.to, to);
+        record.label = answer.room ? `room #${headerField(answer.room)}` : targetLabel(answer.to, targetTo);
         record.status = answer.status;
         remember();
         return sendResult(answer, record.label, thread.limits.ttlSeconds);
@@ -555,7 +559,7 @@ class Broker {
                 const body = await this.relayFetch(thread, "/api/relay/v1/sessions");
                 const all = (Array.isArray(body.items) ? body.items : []).filter((session) => session.id !== thread.id);
                 const lower = (value) => value?.toLowerCase() ?? "";
-                const device = str("device"), project = str("project"), query = lower(str("query"));
+                const device = str("device")?.trim() || undefined, project = str("project")?.trim() || undefined, query = lower(str("query")?.trim());
                 const matches = all.filter((session) => (!device || [session.deviceName, session.device].some((value) => lower(value) === lower(device)))
                     && (!project || lower(session.project) === lower(project))
                     && (!query || [session.id, session.name, session.title, session.cwd].some((value) => lower(value).includes(query))));
@@ -565,16 +569,19 @@ class Broker {
                     : `No other pi session is online${filtered && all.length ? " that matches" : ""}.`;
             }
             case "relay_send": {
-                const to = str("to"), room = str("room"), body = str("text");
+                const roomKey = (name) => name.trim().replace(/^#/, "").trim();
+                const rawTo = str("to")?.trim() ?? "", rawRoom = str("room"), body = str("text");
+                const room = (rawRoom ? roomKey(rawRoom) : "") || (rawTo.startsWith("#") ? roomKey(rawTo) : "") || undefined;
+                const to = room || rawTo.startsWith("#") ? "" : rawTo;
                 if (!to && !room)
                     throw new Error("relay_send requires either `to` (a session id) or `room` (a chatroom name).");
                 if (body === undefined)
                     throw new Error("relay_send requires `text`.");
-                const result = await this.send(thread, to ?? "", body, { room, mentions: list("mentions"), urgent: args.urgent === true, replyTo: str("replyTo") }, signal);
+                const result = await this.send(thread, to, body, { room, mentions: list("mentions"), urgent: args.urgent === true, replyTo: str("replyTo") }, signal);
                 return `${result} ${ANSWER_HINT}`;
             }
             case "relay_status":
-                return this.statusLines(thread, str("id"));
+                return this.statusLines(thread, str("id")?.trim() || undefined);
             case "relay_room": {
                 const action = str("action");
                 if (action === "list") {
@@ -587,11 +594,13 @@ class Broker {
                 // Only the user adds a thread to a room (in the pika web UI); the model never joins or leaves.
                 if (action !== "history" && action !== "send")
                     throw new Error("relay_room requires `action`: list, history, or send.");
-                const room = str("room")?.trim().replace(/^#/, "");
+                const room = str("room")?.trim().replace(/^#/, "").trim();
                 if (!room)
                     throw new Error(`relay_room (${action}) requires a \`room\` name.`);
                 if (action === "history") {
-                    const limit = int("limit") ?? 50, after = int("after") ?? 0;
+                    const rawLimit = int("limit"), rawAfter = int("after");
+                    const limit = rawLimit && rawLimit > 0 ? Math.min(200, rawLimit) : 50;
+                    const after = rawAfter && rawAfter > 0 ? rawAfter : 0;
                     const params = new URLSearchParams({ limit: String(limit), ...(after > 0 ? { after: String(after) } : {}) });
                     const detail = await this.relayFetch(thread, `/api/relay/v1/rooms/${encodeURIComponent(room)}?${params}`);
                     const body = detail.messages.length ? detail.messages.map(roomMessageLine).join("\n") : "No messages in this room yet.";

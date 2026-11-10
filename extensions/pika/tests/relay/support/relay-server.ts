@@ -164,6 +164,7 @@ export class FakeRelay {
 			const query = new URL(request.url ?? "", "http://localhost").searchParams;
 			const after = Number(query.get("after") ?? 0);
 			const limit = Number(query.get("limit") ?? 50);
+			if (!Number.isInteger(limit) || limit < 1 || !Number.isInteger(after) || after < 0) return json(response, 400, { error: "invalid" });
 			const messages = room.messages.filter((m) => m.seq > after).slice(-limit);
 			return json(response, 200, { room: this.roomSummary(name), messages });
 		}
@@ -284,7 +285,15 @@ export class FakeRelay {
 	}
 
 	private async route(from: Connection, frame: Frame): Promise<SentAnswer> {
+		if (frame.replyTo !== undefined && frame.replyTo !== null && (typeof frame.replyTo !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(frame.replyTo))) {
+			return { status: "rejected", reason: "invalid" };
+		}
+		if (frame.mentions !== undefined && frame.mentions !== null
+			&& (!Array.isArray(frame.mentions) || frame.mentions.some((m) => typeof m !== "string" || !m.trim().replace(/^@/, "")))) {
+			return { status: "rejected", reason: "invalid" };
+		}
 		if (typeof frame.room === "string") {
+			if (frame.to !== undefined && frame.to !== null) return { status: "rejected", reason: "invalid" };
 			const roomName = frame.room.trim().replace(/^#/, "");
 			const text = String(frame.text ?? "");
 			const hops = frame.hops as number;
@@ -367,9 +376,9 @@ export class FakeRelay {
 				to: { sessionId: `#${roomName}`, name: `#${roomName}` },
 			};
 		}
-		const to = String(frame.to);
+		const to = typeof frame.to === "string" ? frame.to : "";
 		const hops = frame.hops as number;
-		if (!String(frame.text ?? "") || !Number.isInteger(hops) || hops < 1) return { status: "rejected", reason: "invalid" };
+		if (!/^[A-Za-z0-9._-]{1,128}$/.test(to) || !String(frame.text ?? "") || !Number.isInteger(hops) || hops < 1) return { status: "rejected", reason: "invalid" };
 		if (to === from.session?.id) return { status: "rejected", reason: "self" };
 		if (hops > this.limits.maxHops) return { status: "rejected", reason: "hop_limit" };
 		const target = this.online(to);

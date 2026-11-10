@@ -49,6 +49,7 @@ it("renders a relay_send call as one line with its target and size, and the text
 	expect(call(args)).toEqual(["✉ relay → s-1 urgent reply to msg-1 · 7 chars"]);
 	expect(call(args, true)).toEqual(["✉ relay → s-1 urgent reply to msg-1 · 7 chars", "  one", "  two"]);
 	expect(call({ to: "#ops", text: "hi" })).toEqual(["✉ relay → #ops · 2 chars"]);
+	expect(call({ to: "s-1", room: " # ", replyTo: "  ", text: "hi" })).toEqual(["✉ relay → s-1 · 2 chars"]);
 	expect(call({ room: "#ops", to: "ignored", text: "x".repeat(2500) })).toEqual(["✉ relay → #ops · 2.5k chars"]);
 	// Arguments still streaming in.
 	expect(call({})).toEqual(["✉ relay → ? · 0 chars"]);

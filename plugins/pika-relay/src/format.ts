@@ -4,7 +4,7 @@ import {
 } from "../../../extensions/pika/relay/protocol.ts";
 
 export const REJECTIONS: Record<string, string> = {
-    invalid: "the message is invalid: empty text, a malformed session id, or bad hops",
+    invalid: "the message is invalid: empty text, a malformed session id, room name, replyTo, or mention, or bad hops",
     self: "that is this session's own id",
     too_large: "the text is too large",
     rate_limited: "this session sent too many messages in the last minute; wait before sending more",
