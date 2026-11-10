@@ -3,7 +3,9 @@ import { loadMemorySettings, type MemorySettings } from "../../config.ts";
 import { credentialsRegistry } from "../../credentials.ts";
 import { resolveRepository } from "../../repository.ts";
 import { disabledCause, MemoryServerError } from "../client.ts";
+import { DREAM_ENTRY, type DreamRecord } from "../entries.ts";
 import type { MemoryView } from "../format.ts";
+import { memoryLogItems, showMemoryLog } from "../log.ts";
 import { cwdOf, where } from "../tools.ts";
 import { SESSION_LINK_TYPE, spawnDreamChild } from "./child.ts";
 import { kickoffText } from "./prompt.ts";
@@ -21,8 +23,8 @@ const INDEX_TIMEOUT_MS = 5_000;
 /** How long a lease request waits for the last release, which it would otherwise race and find the lease still held. */
 const RELEASE_WAIT_MS = 5_000;
 const STATUS_KEY = "pika-memory";
-const USAGE = "Usage: /memory [status|dream|stop]";
-const SUBCOMMANDS = ["status", "dream", "stop"];
+const USAGE = "Usage: /memory [status|dream|stop|log]";
+const SUBCOMMANDS = ["status", "dream", "stop", "log"];
 
 // One dream per process, whichever module copy started it.
 const SHARED = Symbol.for("pi-extensions.pika.memory.dream");
@@ -115,6 +117,8 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 	/** Open dialogs. */
 	let uiDepth = 0;
 	let settledCtx: ExtensionContext | undefined;
+	/** Set once this session is being replaced by another (`/new`, `/resume`, `/fork`): a dream it asked for that ends now records nothing. */
+	let replaced = false;
 
 	const cancelIdle = () => {
 		clearTimeout(timer);
@@ -152,6 +156,17 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 		const state = shared();
 		if (state.starting?.owner === self) state.starting.cancelled ??= reason;
 		if (state.running?.owner === self) state.running.stop("stopped", reason);
+	}
+
+	/**
+	 * Records how a dream ended in the session that asked for it, while that session is still the current one: never
+	 * after the user switched sessions, whose old context is stale then, and never in a child. Never throws.
+	 */
+	function record(ctx: ExtensionContext, run: DreamRun): void {
+		try {
+			if (replaced || run.owner !== self || !isTopLevel(ctx) || ctx.sessionManager.getSessionId() !== run.options.parentSessionId) return;
+			pi.appendEntry<DreamRecord>(DREAM_ENTRY, run.record());
+		} catch { /* a stale context: the session was replaced */ }
 	}
 
 	/** Requests a lease and starts a dream; the text says why not when it did not start. */
@@ -215,6 +230,7 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 					if (now.running === ended) now.running = undefined;
 					now.last = ended;
 					now.released = ended.released;
+					record(ctx, ended);
 				},
 			});
 			state.running = run;
@@ -285,9 +301,11 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 		return undefined;
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (event) => {
 		cancelIdle();
 		settledCtx = undefined;
+		// Quitting or reloading keeps the session; the others switch to another one.
+		if (event.reason !== "quit" && event.reason !== "reload") replaced = true;
 		const run = shared().running;
 		preempt("the session ended");
 		// The child's own shutdown is bounded; the lease's release is never waited for.
@@ -299,7 +317,7 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("memory", {
-		description: "Show memory dream status, start a dream now, or stop the running one",
+		description: "Show memory dream status, start a dream now, stop the running one, or browse this branch's memory activity",
 		getArgumentCompletions: (prefix) => {
 			const typed = prefix.trim();
 			const items = SUBCOMMANDS.filter((name) => name.startsWith(typed) && name !== typed).map((name) => ({ value: name, label: name }));
@@ -322,6 +340,11 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 					ctx.ui.notify("pika memory: the dream being requested will not start.", "info");
 				} else if (run) ctx.ui.notify("pika memory: the dream is stopping; it waits for its commit's answer.", "info");
 				else ctx.ui.notify("pika memory: no dream is running.", "info");
+			} else if (command === "log") {
+				if (ctx.mode !== "tui" || !ctx.hasUI) { ctx.ui.notify("/memory log opens only in the interactive TUI.", "info"); return; }
+				const items = memoryLogItems(ctx.sessionManager.getBranch());
+				if (!items.length) { ctx.ui.notify("No memory activity on this branch.", "info"); return; }
+				await showMemoryLog(ctx, items);
 			} else ctx.ui.notify(USAGE, "error");
 		},
 	});

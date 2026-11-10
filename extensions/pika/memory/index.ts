@@ -2,18 +2,15 @@ import type { CustomEntry, ExtensionAPI, ExtensionContext, SessionEntry } from "
 import { resolveRepository } from "../repository.ts";
 import { request, timing } from "./client.ts";
 import dreamExtension from "./dream/index.ts";
+import { type MemoryPin, PIN_ENTRY } from "./entries.ts";
 import { type MemoryView, sectionText } from "./format.ts";
 import { cwdOf, memoryForgetTool, memoryReadTool, memorySaveTool, where } from "./tools.ts";
 
 export { timing } from "./client.ts";
+export { DREAM_ENTRY, type DreamRecord, type MemoryPin, PIN_ENTRY } from "./entries.ts";
 export type { ReadDetails, WriteDetails } from "./tools.ts";
 
-/** The custom entry that pins a session's memory index at its first run. */
-export const PIN_ENTRY = "pika-memory";
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
-
-/** The pin: `index` is null when the fetch failed, timed out, or pika was logged out, so the session never gains a section. */
-export interface MemoryPin { index: string | null; fetchedAt: string; project?: string; repository?: string; error?: string }
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 

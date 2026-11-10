@@ -2,6 +2,7 @@ import type { CreateAgentSessionOptions, ModelRuntime, ToolDefinition } from "@e
 import { credentialsRegistry, type PikaCredentials } from "../../credentials.ts";
 import type { RepositoryInfo } from "../../repository.ts";
 import { MemoryServerError } from "../client.ts";
+import type { DreamRecord } from "../entries.ts";
 import type { Category, Scope, ScopeKind } from "../format.ts";
 import { type LeaseServer, send } from "./server.ts";
 
@@ -328,6 +329,21 @@ export class DreamRun {
 			`  Lease ${this.lease.id}${this.child ? `, session ${this.child.sessionId} on ${this.child.model}` : ""}.`,
 		];
 		return lines.join("\n");
+	}
+
+	/** The `pika-memory-dream` entry of an ended dream. */
+	record(): DreamRecord {
+		const { model } = this.options;
+		return {
+			leaseId: this.lease.id, mode: this.mode, outcome: this.outcome ?? "aborted", reason: this.reason ?? "", startedAt: this.startedAt, endedAt: this.endedAt ?? new Date().toISOString(),
+			...(this.lease.scope?.label ? { scope: this.lease.scope.label } : {}),
+			sessions: this.sessions.map((session) => session.id),
+			batches: this.batches.length, notesChanged: this.notesChanged, discarded: this.discarded, uncertain: this.uncertain, turns: this.turns, tokens: this.tokens,
+			...(this.child ? { childSessionId: this.child.sessionId } : {}),
+			model: this.child?.model ?? `${model.provider}/${model.id}`,
+			// Not the titles: the server shows this entry where it omits memory.
+			changes: this.batches.flatMap((batch) => batch.changes.map(({ noteId, revision, action, created }) => ({ noteId, revision, action, created }))),
+		};
 	}
 
 	/** The end proper: once no commit is in flight. */

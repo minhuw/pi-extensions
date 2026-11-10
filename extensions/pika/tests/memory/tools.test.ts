@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import { request, timing, withoutCredentials } from "../../memory/client.ts";
 import { FakePika } from "./support/pika-server.ts";
 import { callTool, type Harness, note, PROJECT, PROJECT_SCOPE, REPOSITORY, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
@@ -145,6 +146,39 @@ it("memory_forget posts the revision, repository, and session id", async () => {
 	expect(conflict).toMatchObject({ isError: true });
 	expect(conflict.text).toContain("is at revision 5, not 1");
 	expect(conflict.text).toContain("If it should still go, call memory_forget again with expectedRevision 5.");
+});
+
+it("collapses a successful save or forget to its action, revision, and scope, since the call line shows the title", async () => {
+	const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
+	const last = (name: string) => h.session.messages.filter((message) => message.role === "toolResult" && message.toolName === name).at(-1);
+	const render = (name: string, args: object, { expanded = false, isError = false, result = last(name) as unknown } = {}) =>
+		h.session.extensionRunner.getToolDefinition(name)!.renderResult!(result as never, { expanded, isPartial: false }, plainTheme, { args, expanded, isError } as never)
+			.render(500).map((line) => line.trimEnd());
+	const created = note({ title: "Pitfall", hook: "Run npm ci first" });
+	pika.routes.set("POST memory/notes", (request) => ({ body: written((request.body as { id?: string }).id ? { ...created, scope: USER_SCOPE, revision: 4 } : created) }));
+	const save = { expectedRevision: 0, scope: "project", category: "project", title: "Pitfall", hook: "Run npm ci first", body: "b" };
+	const first = await callTool(h, "memory_save", save);
+	expect(render("memory_save", save)).toEqual([`created · rev 1 · project ${PROJECT}`]);
+	expect(render("memory_save", save, { expanded: true })).toEqual(first.text.split("\n"));
+	const update = { ...save, id: `[${created.id}]`, expectedRevision: 3, scope: "user" };
+	await callTool(h, "memory_save", update);
+	expect(render("memory_save", update)).toEqual(["updated · rev 4 · user"]);
+
+	const gone = note({ revision: 3, deletedAt: "2026-11-08T10:00:00Z" });
+	pika.routes.set(`POST memory/notes/${gone.id}/forget`, { body: written(gone) });
+	const forgot = await callTool(h, "memory_forget", { id: gone.id, expectedRevision: 2 });
+	expect(render("memory_forget", { id: gone.id })).toEqual([`forgot · rev 3 · project ${PROJECT}`]);
+	expect(render("memory_forget", { id: gone.id }, { expanded: true })).toEqual(forgot.text.split("\n"));
+	// A result without the note in its details shows its first line.
+	const bare = { content: [{ type: "text", text: "Forgot note x (now revision 3) in user: T — H\nmore" }], details: {} };
+	expect(render("memory_forget", { id: "x" }, { result: bare })).toEqual(["Forgot note x (now revision 3) in user: T — H"]);
+	expect(render("memory_save", save, { result: { ...bare, details: undefined } })).toEqual(["Forgot note x (now revision 3) in user: T — H"]);
+
+	// Errors render as before: their first line, and the whole text expanded.
+	pika.routes.set("POST memory/notes", { status: 409, body: { error: "revision_conflict", note: { ...created, revision: 5 } } });
+	const refused = await callTool(h, "memory_save", update);
+	expect(render("memory_save", update, { isError: true })).toEqual([refused.text.split("\n")[0]]);
+	expect(render("memory_save", update, { isError: true, expanded: true })).toEqual(refused.text.split("\n"));
 });
 
 it("without a git repository, project saves fail and user saves still work", async () => {

@@ -251,7 +251,7 @@ describe("/memory", () => {
 	it("rejects unknown subcommands", async () => {
 		const h = await start();
 		await h.session.prompt("/memory nap");
-		expect(ui.notes.at(-1)).toEqual({ message: "Usage: /memory [status|dream|stop]", type: "error" });
+		expect(ui.notes.at(-1)).toEqual({ message: "Usage: /memory [status|dream|stop|log]", type: "error" });
 	});
 });
 

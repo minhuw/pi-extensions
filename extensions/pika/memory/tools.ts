@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { resolveRepository, type RepositoryInfo } from "../repository.ts";
 import { MemoryServerError, noMemoryApi, request } from "./client.ts";
 import {
-	type Category, formatConflict, type FullAnswer, formatFull, formatRead, formatWrite, type MemoryView, type Note, type ScopeKind, type WriteAnswer,
+	type Category, formatConflict, type FullAnswer, formatFull, formatRead, formatWrite, type MemoryView, type Note, type Scope, type ScopeKind, type WriteAnswer,
 } from "./format.ts";
 
 export interface ReadDetails { noteIds: string[]; total: number }
@@ -15,6 +15,25 @@ export const cwdOf = (ctx: ExtensionContext) => ctx.sessionManager.getCwd() || c
 export const firstLine = (text: string) => text.split("\n").find((line) => line.trim())?.trim() ?? "";
 /** A note id as the model may copy it from the index, `[id]`, without its brackets. */
 const noteId = (text: string) => text.trim().replace(/^\[|\]$/g, "");
+
+/** `memory_read`'s filters as its call line shows them; empty for none. */
+export const readFilters = (args: { ids?: string[]; query?: string; category?: string; scope?: string }): string =>
+	[args.ids?.length ? `ids ${args.ids.join(", ")}` : "", args.query ? JSON.stringify(args.query) : "", args.category ?? "", args.scope ? `${args.scope} scope` : ""].filter(Boolean).join(" · ");
+
+export type WriteAction = "created" | "updated" | "forgot";
+/** What a `memory_save` with these arguments does: it updates the note its id names, else creates one. */
+export const saveAction = (args: { id?: unknown }): WriteAction => typeof args.id === "string" && noteId(args.id) ? "updated" : "created";
+
+const scopeText = (scope: Partial<Scope> | undefined) => scope?.kind === "user" ? "user" : scope?.kind === "project" ? `project ${scope.label ?? ""}`.trim() : "";
+/**
+ * A successful save or forget in brief, from the note in its details: "created · rev 1 · user", or without `withScope`
+ * "created · rev 1". Without that note, the result's first line.
+ */
+export function writeSummary(action: WriteAction, details: unknown, text: string, withScope = true): string {
+	const note = (details as WriteDetails | undefined)?.note;
+	if (typeof note?.revision !== "number") return firstLine(text);
+	return [action, `rev ${note.revision}`, withScope ? scopeText(note.scope) : ""].filter(Boolean).join(" · ");
+}
 
 /** The repository fields every request names, empty ones left out. */
 export const where = (info: RepositoryInfo): RepositoryInfo => ({
@@ -112,8 +131,7 @@ export function memoryReadTool() {
 			}
 		},
 		renderCall(args, theme) {
-			const filters = [args.ids?.length ? `ids ${args.ids.join(", ")}` : "", args.query ? JSON.stringify(args.query) : "", args.category ?? "", args.scope ? `${args.scope} scope` : ""].filter(Boolean);
-			return new Text(`${theme.fg("toolTitle", theme.bold("memory_read "))}${theme.fg("muted", filters.join(" · ") || "all notes")}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("memory_read "))}${theme.fg("muted", readFilters(args) || "all notes")}`, 0, 0);
 		},
 		renderResult(result, { expanded, isPartial }, theme, context) {
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
@@ -175,7 +193,8 @@ export function memorySaveTool() {
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			if (isPartial) return new Text(theme.fg("dim", "saving…"), 0, 0);
 			if (context.isError) return new Text(theme.fg("error", expanded ? text : firstLine(text)), 0, 0);
-			return new Text(expanded ? text : theme.fg("success", firstLine(text)), 0, 0);
+			// The call line shows the title already.
+			return new Text(expanded ? text : theme.fg("success", writeSummary(saveAction(context.args ?? {}), result.details, text)), 0, 0);
 		},
 	});
 }
@@ -214,7 +233,7 @@ export function memoryForgetTool() {
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			if (isPartial) return new Text(theme.fg("dim", "forgetting…"), 0, 0);
 			if (context.isError) return new Text(theme.fg("error", expanded ? text : firstLine(text)), 0, 0);
-			return new Text(expanded ? text : theme.fg("success", firstLine(text)), 0, 0);
+			return new Text(expanded ? text : theme.fg("success", writeSummary("forgot", result.details, text)), 0, 0);
 		},
 	});
 }
