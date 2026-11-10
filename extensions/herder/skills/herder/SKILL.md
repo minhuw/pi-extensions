@@ -92,6 +92,8 @@ max_agents: 40
 max_fix_attempts: 3
 ```
 
+**Headings**: the `# Goal:` title and the section names above are the only headings; any other heading, at any level and outside code fences and HTML comments, fails validation, so structure a section with lists or plain text.
+
 **Acceptance criteria**
 - Number them `AC-1`, `AC-2`, …. Write each as one observable outcome in EARS style: `WHEN <trigger> THE SYSTEM SHALL <outcome>`, `WHILE <state> …`, `IF <condition> THEN …`, or a plain `THE SYSTEM SHALL …`.
 - Map every criterion to evidence: `verify: check:<id>` (one or more check ids, comma separated) or `verify: judge — rubric: "<statement>"`. Prefer checks: they are deterministic and cheap. Add a test to the plan when no existing check covers a criterion, then map the criterion to the check that runs it.

@@ -147,6 +147,7 @@ max_agents: 40
 max_fix_attempts: 3
 ```
 
+- **Headings:** the `# Goal:` title and the section names above are the only headings; any other heading, at any level and outside code fences and HTML comments, fails validation.
 - **Acceptance criteria:** at least one is required. Each criterion maps to one or more checks (`verify: check:<id>`) or to `verify: judge` with a binary rubric.
 - **Checks:**
   - An `id` contains lowercase letters, digits, and hyphens, and must be unique.

@@ -66,7 +66,7 @@ describe("parseGoal", () => {
 			"1. AC-4: fourth. verify: judge — rubric: “curly”.",
 			"", "## Checks", "| ID | Command | Timeout | Integrate? |", "|:--|:--|--:|:-:|",
 			"| `a` | `grep -c x \\| wc -l` | 1h30m | true |", "| b | echo \\\\n ok |  | No |", "| c | true | 30s | |",
-			"## Constraints", "- one", "  wrapped", "- two", "## Out-of-scope", "- nothing", "## Notes", "- AC-9: ignored. verify: check:zzz",
+			"## Constraints", "- one", "  wrapped", "- two", "## Out-of-scope", "- nothing",
 			"## Budget", "- max-fix-attempts: 2",
 		].join("\r\n"));
 		expect(goal.title).toBe("Variants");
@@ -88,7 +88,10 @@ describe("parseGoal", () => {
 	});
 
 	it("rejects a missing or empty title", () => {
-		expect(problemsOf(withCriteria("- AC-1: x. verify: check:unit-tests").replace("# Goal: t", "# Something"))).toEqual(["missing title: the first heading must be `# Goal: <one line>`"]);
+		expect(problemsOf(withCriteria("- AC-1: x. verify: check:unit-tests").replace("# Goal: t", "# Something"))).toEqual([
+			"missing title: the first heading must be `# Goal: <one line>`",
+			"line 1: unknown heading `# Something`; the only headings are the `# Goal:` title and the sections intent, acceptance criteria, criteria, checks, constraints, out of scope, budget",
+		]);
 		expect(problemsOf(withCriteria("- AC-1: x. verify: check:unit-tests").replace("# Goal: t", "# Goal:"))).toEqual(["line 1: the `# Goal:` title is empty"]);
 	});
 

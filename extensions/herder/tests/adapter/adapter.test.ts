@@ -187,7 +187,7 @@ describe("herder_run", () => {
 		expect(h.statuses.get(STATUS_KEY)).toBe("herder: ready");
 		await expect(h.tool("herder_run", { action: "approve_goal" })).resolves.toMatchObject({ details: { approved: true } });
 		expect(h.confirm).toHaveBeenCalledTimes(2);
-		writeFileSync(run.paths.goal, `${VALID_GOAL}\n## Notes\nchanged\n`);
+		writeFileSync(run.paths.goal, `${VALID_GOAL}\n## Constraints\n- changed\n`);
 		await expect(h.tool("herder_run", { action: "approve_goal" })).rejects.toThrow(/frozen/);
 	});
 

@@ -48,6 +48,7 @@ export function parseGoal(text: string): Goal {
 			const first = section && headings.get(section);
 			if (first) structure.push(`line ${line.n}: duplicate \`${line.text.trim()}\` section (first on line ${first}); merge them into one`);
 			else if (section) { headings.set(section, line.n); sections.set(section, []); }
+			else structure.push(`line ${line.n}: unknown heading \`${line.text.trim()}\`; the only headings are the \`# Goal:\` title and the sections ${Object.keys(SECTIONS).join(", ")}`);
 			current = first ? undefined : section && sections.get(section);
 			continue;
 		}
