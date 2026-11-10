@@ -23,20 +23,22 @@ Full mode is enabled by default when Pi starts.
 Full mode shows the identity bar, a telemetry row, and a Git row. A fourth row appears while an extension publishes a status other than language or spokesman. Primary facts sit on the left; capacity, cost, and path sit on the right. The example uses ASCII/Unicode icons; the bar's groups sit on colored bands:
 
 ```text
- ● ☾ k3   HIGH  (moonshot)  English  ──────────────────────────────  × 2×  ▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉  8.2%  79k/1.1M
- ├ # 13  ⏱ 1h 28m  │  ⏱ 302ms ↺ 301ms  » 92 tok/s ↺ 91 tok/s      $0.750  $0.058/turn  │  ↑ 65k  ↓ 31k  ⚡ 120k 65%
- ├ ⎇ main  +42 −17  ↑2 ↓1                                  ⇌ 3 in · 2 out  │  ▤ 5 touched  │  ⌂ ~/code/my-project
+ ● ☾ k3   HIGH  (moonshot)  English  ─────────────────────────────────────────────  × 2×  ▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉  8.2%  79k/1.1M
+ ├ # 13  ⏱ 1h 28m  │  ⏱ 302ms ↺ 301ms  » 92 tok/s ↺ 91 tok/s    $0.750  $0.058/turn  │  ↑ 65k  ↓ 31k  ⚡ 120k 65%  │  ~2.4k memory
+ ├ ⎇ main  +42 −17  ↑2 ↓1                                                 ⇌ 3 in · 2 out  │  ▤ 5 touched  │  ⌂ ~/code/my-project
  ╰ herder: T2 integrate · 3/5 tasks  │  ↻ build · next 4m  │  bg 1 running
 ```
 
 | Row | Left | Right |
 | --- | --- | --- |
 | 1 | Live pulse, queued chip, model, Fast or non-standard service tier, thinking, provider, language, spokesman | Compactions, gradient bar, percent, used/window |
-| 2 | Turns and elapsed time; TTFT, TTFB, and throughput; tool calls and errors | Cost and cost per turn; input / output / cached-input tokens and cache hit rate; reasoning tokens |
+| 2 | Turns and elapsed time; TTFT, TTFB, and throughput; tool calls and errors | Cost and cost per turn; input / output / cached-input tokens and cache hit rate; Pika memory's context share; reasoning tokens |
 | 3 | Git branch, working-tree diff, ahead/behind | Relay messages received and sent, files touched, current directory |
 | 4 | Extension statuses except the language and spokesman: research, Herder, Loop, background processes, then the rest; shown only while one of these is set | |
 
 The message counts on the Git row (`⇌ 3 in · 2 out`) tally [Pika](../pika/README.md) relay messages received and sent on the current session branch, read from Pika relay's `relay-received` and `relay-sent` session entries. A side with no messages is left out (`⇌ 2 out`), and the group disappears when both are zero. Compact mode does not show them.
+
+The `~2.4k memory` group on the telemetry row shows how much of the context [Pika](../pika/README.md) memory uses: its memory section pinned in the system prompt, plus the `memory_read`, `memory_save`, and `memory_forget` results still in context, estimated at four characters per token. The footer reads the section's index from Pika memory's `pika-memory` session entry and the tool results from the current session branch; results that a compaction summarized away stop counting. The group disappears at zero, and compact mode does not show it.
 
 The model name starts with its vendor's mark in the vendor's color. These are the OpenAI and Claude logos (Nerd Fonts 3.5 or later), the Google logo for Gemini, and related symbols for Kimi, DeepSeek, Grok, Llama, Mistral, and Qwen; with `STATUSLINE_NERD_FONTS=0`, Unicode marks such as `✻` (Claude), `⊛` (OpenAI), `✦` (Gemini), and `☾` (Kimi) take their place. The model id is matched before the provider, so Claude served through Vertex or Magpie still gets the Claude mark; an unrecognized model has none.
 
@@ -61,9 +63,9 @@ The `language` status from [Language](../language/README.md) and the `spokesman`
 ### The rows below
 
 - The telemetry, Git, and status rows hang from the bar on a `├`/`╰` rail in the theme's `borderMuted` color, the last row closing it. They are not filled, so the bar leads.
-- Each row's facts come in groups: activity, latency, and tools on the left of the telemetry row, cost, tokens, and reasoning on its right. Thin chevrons in `borderMuted` separate the groups and point the way the bar's arrows do; without Nerd Fonts they are `│`.
+- Each row's facts come in groups: activity, latency, and tools on the left of the telemetry row, cost, tokens, memory, and reasoning on its right. Thin chevrons in `borderMuted` separate the groups and point the way the bar's arrows do; without Nerd Fonts they are `│`.
 - Icons carry the color and values stay `muted`, with the cost in `text` so it reads first. A value turns colored only to report a state: a first token slower than two seconds, failed tool calls, or the cache hit rate. The cache hit rate sits beside the cached-token count.
-- A row that does not fit drops whole groups, least important first, instead of cutting text: reasoning tokens, then tools, activity, token counts, and latency, keeping the cost. On the Git row the path shortens from the middle (`~/…/project`), keeping as many trailing directories as fit; the relay message counts give way first, then the touched-file count, before the path would drop below twelve columns. The status row drops statuses from the end.
+- A row that does not fit drops whole groups, least important first, instead of cutting text: the memory estimate, then reasoning tokens, tools, activity, token counts, and latency, keeping the cost. On the Git row the path shortens from the middle (`~/…/project`), keeping as many trailing directories as fit; the relay message counts give way first, then the touched-file count, before the path would drop below twelve columns. The status row drops statuses from the end.
 
 Each extension status keeps one identity color, drawn from the theme's link, syntax, success, and border colors, for its icon and its first segment (split at ` · ` and `, `); the details stay `muted`. The footer never picks a red hue or one close to the theme's error or warning colors, so a routine status cannot look like a failure. Known extensions keep fixed colors; others get a stable color from their key. The status row also gives each status an icon: a flask for research, a sheep for Herder, a console for background processes, a robot for subagents, a palette for Impeccable, and a puzzle piece for other extensions. The language and spokesman get translate and voice icons in the bar in both modes, because a bare name does not say what it is. A status that starts with its own symbol, such as Loop's `↻`, gets no second icon, and compact mode shows no other status icons. Only the segments that report a problem stand out, and none of them in red: `failed`, `stuck`, `error`, `blocked`, or `not_met` use bold `warning`, and `paused`, `awaiting`, `stopping`, `killed`, or `for you` use `warning`; for example, in `bg 2 running · 1 failed` only `1 failed` turns amber. Matching is whole-word, so a loop named `fix-errors` stays calm. A status that already contains ANSI colors keeps them.
 
@@ -116,7 +118,8 @@ For a single status display, leave pi-processes' **status widget** disabled in `
 
 ## Metric sources
 
-- Context usage comes from Pi's context API; cost, turns, cache usage, compactions, errors, touched files, and relay message counts are derived from the active session branch.
+- Context usage comes from Pi's context API; cost, turns, cache usage, compactions, errors, touched files, relay message counts, and the memory estimate are derived from the active session branch.
+- The memory estimate counts the index in Pika memory's `pika-memory` entry plus the fixed text Pika and Pi wrap around it in the system prompt, and the text of memory tool results that the latest compaction kept in context or that came after it. The characters are divided by four and rounded up, the heuristic Pi's compaction uses. The section's size mirrors Pika's section text rather than reading the system prompt, so it is approximate.
 - TTFT spans the provider request marker to the first nonempty streamed content, with `message_start` as a fallback request marker for providers that hide HTTP events. Empty block starts and empty deltas do not count as tokens.
 - TTFB uses Pi's provider-response event when the provider exposes it.
 - Token throughput divides exact output-token usage by the duration of the whole call, from the request marker to the last token. Requests without observed content, failed or aborted requests, and calls under 50 ms are excluded. The displayed average is total output tokens divided by total call time. Including the time to first token avoids inflated rates when responses arrive in a single burst or include hidden reasoning tokens. This measures whole-call throughput and reads lower than pure decoding speed.

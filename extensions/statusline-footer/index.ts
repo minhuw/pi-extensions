@@ -9,7 +9,7 @@
  *
  * Full mode: the bar, with the telemetry, Git, and status rows on a rail.
  *   ▌✻ model ▶ HIGH  (provider) ▶ ──────── ◀ ▉▉▉░░░  8.2%  78.9k/1.05M ▐
- *    ├ # 13  ⏱ 1h 28m  ❯  ⏱ 4.2s  » 28.9 tok/s     $0.75  $0.06/turn  ❮  ↑ 65k  ↓ 31k
+ *    ├ # 13  ⏱ 1h 28m  ❯  ⏱ 4.2s  » 28.9 tok/s     $0.75  $0.06/turn  ❮  ↑ 65k  ↓ 31k  ❮  ~2.4k memory
  *    ├ ⎇ main  +42 −17         ⇌ 3 in · 2 out  ❮  ▤ 5 touched  ❮  ⌂ ~/…/my-project
  *    ╰ herder: T2 integrate · 3/5 tasks  ❯  ↻ build · next 4m   (while any status but the language is set)
  *
@@ -547,8 +547,20 @@ interface Stats {
 	/** Pika relay messages received and sent, from its `relay-received` and `relay-sent` entries. */
 	relayIn: number;
 	relayOut: number;
+	/** Estimated context tokens of Pika memory: its pinned section and memory tool results still in context. */
+	memoryTokens: number;
 	durationMs: number;
 }
+
+/** Pika memory's pinned index entry; `index` is null when the session has no memory section. */
+const MEMORY_PIN_ENTRY = "pika-memory";
+const MEMORY_TOOLS = new Set(["memory_read", "memory_save", "memory_forget"]);
+/**
+ * Characters Pika's memory section adds around its index: the 425-character preamble of Pika's
+ * `sectionText` and the 19 of Pi's `<memory>\n` … `\n</memory>` wrapping. It mirrors Pika's text, so
+ * the section size is an estimate; the escaping of `<` and `>` in the index is not counted.
+ */
+const MEMORY_SECTION_OVERHEAD = 444;
 
 function addUsage(stats: Stats, usage: Usage | undefined, provider?: string): void {
 	if (!usage) return;
@@ -611,12 +623,23 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 		files: 0,
 		relayIn: 0,
 		relayOut: 0,
+		memoryTokens: 0,
 		durationMs: 0,
 	};
 	const files = new Set<string>();
 	let firstTs: number | undefined;
+	let memorySectionChars = 0;
+	/** Memory tool results by branch position; the latest compaction drops those before its first kept entry, as Pi does. */
+	const memoryResults: { at: number; chars: number }[] = [];
+	let memoryKeptFrom = 0;
 
-	for (const e of ctx.sessionManager.getBranch()) {
+	const branch = ctx.sessionManager.getBranch();
+	for (const [at, e] of branch.entries()) {
+		if (e.type === "custom" && e.customType === MEMORY_PIN_ENTRY) {
+			const index = (e.data as { index?: unknown } | undefined)?.index;
+			memorySectionChars = typeof index === "string" ? index.length + MEMORY_SECTION_OVERHEAD : 0;
+			continue;
+		}
 		if (e.type === "custom" && e.customType === "magpie-fast") {
 			const enabled = (e.data as { enabled?: unknown } | undefined)?.enabled;
 			if (typeof enabled === "boolean") s.magpieFastEnabled = enabled;
@@ -644,6 +667,9 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 		if (e.type === "compaction") {
 			s.compactions++;
 			addUsage(s, e.usage);
+			// A first kept entry missing before the compaction keeps nothing from before it.
+			const kept = branch.findIndex((entry, i) => i < at && entry.id === e.firstKeptEntryId);
+			memoryKeptFrom = kept >= 0 ? kept : at;
 			continue;
 		}
 		if (e.type === "branch_summary") {
@@ -668,10 +694,18 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 		} else if (m.role === "toolResult") {
 			addUsage(s, m.usage);
 			if (m.isError) s.errors++;
+			if (MEMORY_TOOLS.has(m.toolName)) {
+				let chars = 0;
+				for (const block of m.content ?? []) if (block.type === "text") chars += block.text.length;
+				memoryResults.push({ at, chars });
+			}
 		}
 	}
 
 	s.files = files.size;
+	const memoryChars = memoryResults.reduce((sum, result) => sum + (result.at >= memoryKeptFrom ? result.chars : 0), memorySectionChars);
+	// Pi's estimate: four characters per token.
+	s.memoryTokens = Math.ceil(memoryChars / 4);
 	s.durationMs = firstTs ? Math.max(0, Date.now() - firstTs) : 0;
 	state.statsCache = { leafId, firstTs, stats: s };
 	return s;
@@ -1331,6 +1365,7 @@ function renderDetailRows(
 		s.cacheRead > 0 && item(set.cache, cacheColor, fmtTokens(s.cacheRead))
 			+ (cachePct != null ? ` ${theme.fg(cacheColor === "dim" ? "muted" : cacheColor, `${cachePct}%`)}` : ""),
 	], "  ");
+	const memory = s.memoryTokens > 0 ? theme.fg("dim", `~${fmtTokens(s.memoryTokens)} memory`) : "";
 	const think = s.reasoning > 0 ? theme.fg("dim", `${fmtTokens(s.reasoning)} think`) : "";
 
 	const statusRail = statuses.length > 0;
@@ -1341,6 +1376,7 @@ function renderDetailRows(
 	], [
 		{ text: cost, rank: 6 },
 		{ text: tokens, rank: 4 },
+		...(memory ? [{ text: memory, rank: 0 }] : []),
 		...(think ? [{ text: think, rank: 1 }] : []),
 	], width);
 

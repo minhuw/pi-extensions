@@ -1617,6 +1617,156 @@ describe("statusline footer powerline style", () => {
 			}
 		});
 
+		const memoryPin = (id: string, index: string | null) =>
+			({ id, type: "custom", customType: "pika-memory", data: { index, fetchedAt: "2026-11-09T00:00:00.000Z" } });
+		const toolResult = (id: string, toolName: string, text: string) => ({
+			id,
+			type: "message",
+			message: { role: "toolResult", toolCallId: `call-${id}`, toolName, content: [{ type: "text", text }], isError: false, timestamp: Date.now() },
+		});
+		const userEntry = (id: string) => ({ id, type: "message", message: { role: "user", content: "next", timestamp: Date.now() } });
+		const compaction = (id: string, firstKeptEntryId: string) =>
+			({ id, type: "compaction", summary: "earlier work", firstKeptEntryId, tokensBefore: 50_000 });
+		const ids = (entries: object[], prefix: string) => entries.map((entry, index) => ({ ...entry, id: `${prefix}-${index}` }));
+
+		it("counts Pika's pinned memory section and memory tool results after the tokens, styled like the reasoning count", async () => {
+			const branch: object[] = [
+				...ids(activeBranch, "active"),
+				// 1,356 index characters and the section's 444 around them.
+				memoryPin("pin", "i".repeat(1_356)),
+				toolResult("read-1", "memory_read", "r".repeat(2_000)),
+				toolResult("bash-1", "bash", "b".repeat(40_000)),
+				toolResult("save-1", "memory_save", "s".repeat(600)),
+				toolResult("forget-1", "memory_forget", "f".repeat(400)),
+			];
+			const harness = createHarness("detail-memory", "tui", {
+				model: claude,
+				branch,
+				// Off the active branch: never counted.
+				entries: [memoryPin("off-pin", "o".repeat(100_000)), toolResult("off-read", "memory_read", "o".repeat(100_000))],
+				extensionStatuses: [],
+				theme: tagged,
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			try {
+				vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+				// 1,800 + 2,000 + 600 + 400 characters at four per token; the bash output is not memory.
+				const telemetry = harness.getFooter()!.render(200)[1]!;
+				expect(strip(telemetry)).toContain("65%  \u{E0B3}  ~1.2k memory  \u{E0B3}  12k think");
+				expect(telemetry).toContain(`${tone("dim")}\x1b[2m~1.2k memory`);
+				expect(telemetry).toContain(`${tone("dim")}\x1b[2m12k think`);
+				expect(harness.ctx.sessionManager.getEntries).not.toHaveBeenCalled();
+
+				// A new result moves the leaf, so the cached count refreshes.
+				branch.push(toolResult("read-2", "memory_read", "r".repeat(1_200)));
+				expect(strip(harness.getFooter()!.render(200)[1]!)).toContain("~1.5k memory");
+
+				// Compact mode has no telemetry row and shows no memory.
+				await harness.runCommand("footer", "compact");
+				const compact = harness.getFooter()!.render(200).map(strip);
+				expect(compact).toHaveLength(1);
+				expect(compact[0]).not.toContain("memory");
+			} finally {
+				vi.unstubAllEnvs();
+				harness.disposeFooter();
+			}
+		});
+
+		it.each([
+			// 3 + 444 characters round up to 112 tokens.
+			["an index", [memoryPin("pin", "abc")], "~112 memory"],
+			["a null index", [memoryPin("pin", null)], undefined],
+			["no pin", [], undefined],
+			["only other tools' results", [memoryPin("pin", null), toolResult("bash-1", "bash", "b".repeat(4_000))], undefined],
+		])("shows Pika memory only when it has a size (%s)", async (label, memory, expected) => {
+			const harness = createHarness(`detail-memory-${label}`, "tui", {
+				model: claude,
+				branch: [...ids(activeBranch, "active"), ...memory],
+				entries: [memoryPin("off-pin", "o".repeat(4_000)), toolResult("off-read", "memory_read", "o".repeat(4_000))],
+				extensionStatuses: [],
+				theme: tagged,
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			try {
+				vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+				const telemetry = strip(harness.getFooter()!.render(200)[1]!);
+				if (expected) expect(telemetry).toContain(`│  ${expected}  │  12k think`);
+				else expect(telemetry).not.toContain("memory");
+				expect(telemetry).not.toContain("~0");
+				expect(telemetry).toContain("12k think");
+			} finally {
+				vi.unstubAllEnvs();
+				harness.disposeFooter();
+			}
+		});
+
+		it("stops counting memory tool results that the latest compaction leaves out of context", async () => {
+			const branch: object[] = [
+				userEntry("user-1"),
+				// 356 index characters and 444 around them: the section stays in the prompt through compactions.
+				memoryPin("pin", "p".repeat(356)),
+				toolResult("read-old", "memory_read", "a".repeat(4_000)),
+				userEntry("kept"),
+				toolResult("read-kept", "memory_read", "k".repeat(800)),
+				compaction("compaction-1", "kept"),
+				toolResult("read-new", "memory_save", "n".repeat(400)),
+			];
+			const harness = createHarness("detail-memory-compaction", "tui", { model: claude, branch, extensionStatuses: [] });
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			try {
+				const telemetry = () => harness.getFooter()!.render(200)[1]!;
+				// 800 + 800 + 400 characters; the 4,000 before the first kept entry are summarized away.
+				expect(telemetry()).toContain("~500 memory");
+
+				// A compaction that keeps nothing before it leaves only the section.
+				branch.push(compaction("compaction-2", "compaction-2"));
+				expect(telemetry()).toContain("~200 memory");
+
+				// Results after the latest compaction count again.
+				branch.push(toolResult("read-after", "memory_read", "z".repeat(400)));
+				expect(telemetry()).toContain("~300 memory");
+				expect(harness.ctx.sessionManager.getEntries).not.toHaveBeenCalled();
+			} finally {
+				harness.disposeFooter();
+			}
+		});
+
+		it("drops the memory estimate before every other telemetry group", async () => {
+			const harness = createHarness("detail-memory-fit", "tui", {
+				model: claude,
+				// 156 index characters and 444 around them.
+				branch: [...ids(activeBranch, "active"), memoryPin("pin", "i".repeat(156))],
+				extensionStatuses: [],
+				theme: tagged,
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			try {
+				vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+				const markers = { memory: "~150 memory", ...nerd };
+				const narrowest: Record<string, number> = {};
+				for (let width = 200; width >= 30; width--) {
+					const telemetry = strip(harness.getFooter()!.render(width)[1]!);
+					expect(visibleWidth(telemetry), `${width}`).toBeLessThanOrEqual(width);
+					expect(telemetry, `${width}`).not.toContain("...");
+					for (const [group, marker] of Object.entries(markers)) if (telemetry.includes(marker)) narrowest[group] = width;
+				}
+				const order = ["memory", "think", "tools", "activity", "tokens", "latency", "cost"].map(group => narrowest[group]!);
+				expect(order).toEqual([...order].sort((a, b) => b - a));
+				expect(new Set(order).size).toBe(order.length);
+				// The estimate yields while the reasoning count still fits.
+				const between = strip(harness.getFooter()!.render(narrowest.memory! - 1)[1]!);
+				expect(between).toContain("12k think");
+				expect(between).not.toContain("memory");
+			} finally {
+				vi.unstubAllEnvs();
+				harness.disposeFooter();
+			}
+		});
+
 		it("shortens a path from the middle and keeps its last directory", () => {
 			expect(shortenPath("~/a/b/c/project", 20)).toBe("~/a/b/c/project");
 			expect(shortenPath("~/a/b/c/project", 14)).toBe("~/…/c/project");
