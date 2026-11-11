@@ -19,7 +19,7 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:continue-session && npm run test:quality && npm run test:statusline && npm run test:goal && npm run test:molt && npm run test:language && npm run test:soul && npm run test:spokesman && npm run test:delegation && npm run test:selfdrive && npm run test:benchmark && npm run test:autoresearch && npm run test:subagents && npm run test:council && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:codex-relay && npm run test:impeccable && npm run test:workspace && npm run test:agent-browser && npm run test:agents-md && npm run test:fff && npm run test:processes && npm run test:session-name",
+		"test": "npm run test:orca-bridge && npm run test:pika-node-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:continue-session && npm run test:quality && npm run test:statusline && npm run test:goal && npm run test:molt && npm run test:language && npm run test:soul && npm run test:spokesman && npm run test:delegation && npm run test:selfdrive && npm run test:benchmark && npm run test:autoresearch && npm run test:subagents && npm run test:council && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:codex-relay && npm run test:impeccable && npm run test:workspace && npm run test:agent-browser && npm run test:agents-md && npm run test:fff && npm run test:processes && npm run test:session-name",
 		"test:agent-browser": "vitest run extensions/agent-browser",
 		"test:agents-md": "vitest run extensions/agents-md",
 		"test:fff": "vitest run extensions/fff",
@@ -33,6 +33,7 @@
 		"test:impeccable:engine": "vitest run --config extensions/impeccable/vitest.engine.config.ts",
 		"test:impeccable:contracts": "vitest run --config extensions/impeccable/vitest.config.ts extensions/impeccable/tests/contracts.test.ts",
 		"test:orca-bridge": "vitest run --config extensions/orca-bridge/vitest.config.ts",
+		"test:pika-node-bridge": "vitest run extensions/pika-node-bridge",
 		"test:magpie-provider": "vitest run extensions/magpie-provider",
 		"test:commit": "node --experimental-strip-types --test extensions/commit/tests/*.test.ts",
 		"test:continue-session": "node --experimental-strip-types --test extensions/continue-session/tests/*.test.ts",
@@ -51,7 +52,7 @@
 		"test:benchmark": "vitest run extensions/benchmark",
 		"test:autoresearch": "vitest run extensions/autoresearch",
 		"test:subagents": "vitest run --config extensions/subagents/vitest.config.ts",
-		"test:pika": "vitest run extensions/pika",
+		"test:pika": "vitest run extensions/pika/",
 		"test:relay": "vitest run extensions/pika/tests/relay",
 		"test:recall": "vitest run extensions/pika/tests/recall",
 		"test:codex-relay": "vitest run plugins/pika-relay",
@@ -144,6 +145,7 @@
 		],
 		"extensions": [
 			"./extensions/orca-bridge/index.ts",
+			"./extensions/pika-node-bridge/index.ts",
 			"./extensions/magpie-provider/index.ts",
 			"./extensions/statusline-footer/index.ts",
 			"./extensions/goal/index.ts",

@@ -250,7 +250,7 @@ PaneView      = { state: "idle" | "busy" | "waiting", program?: ProgramStatus, b
 3. Else `busy` if the root is `busy` or `activityCount > 0`. Background activities keep a pane busy after pi's own turn is done.
 4. Else `idle`.
 
-- `bridgeConnected` is false after the bridge's socket closes. The last `bridge` stays until the terminal exits.
+- `bridgeConnected` is false after the bridge's socket closes. The last `bridge` stays until the terminal exits, for its session, but a closed bridge no longer counts in the merged `state` (pi may have been killed while busy).
 - **Unread** is the daemon's "done" flag: it becomes true when the merged state goes from `busy` or `waiting` to `idle`. `pane.seen { terminalId }` from any client clears it, and the daemon sends the new `pane.status` to every channel. A program status of `error` also sets it.
 - Activities follow the Orca bridge's activity protocol (sources and ids 1–64 / 1–160 characters, labels ≤ 240, at most 128 activities per pane).
 
@@ -264,7 +264,7 @@ The daemon listens on `~/.pika-node/run/daemon.sock` (directory mode 0700). It s
 
 Bridge → daemon:
 - `hello`, first: `{ type: "hello", role: "bridge", paneId, pid, version, protocolVersion }`. An unknown `paneId` answers `{ type: "reply", id: "hello", error: { code: "not_found" } }` and the daemon closes the socket.
-- `status`: `{ type: "status", status: BridgeStatus }`, the complete status, latest wins. Its `state` is the root agent as the extension sees it: `busy` from `agent_start` to `agent_end`, and `waiting` while a `ui_prompt_*` dialog is open. The bridge sends it on connect and after every change, at most every 100 ms, always ending on the latest. A new bridge connection for the same pane replaces the older one.
+- `status`: `{ type: "status", status: BridgeStatus }`, the complete status, latest wins. Its `state` is the root agent as the extension sees it: `busy` from `agent_start` to `agent_settled` (not `agent_end`: retries, compaction, and queued messages follow it), and `waiting` while a `ui_prompt_*` dialog is open. The bridge sends it on connect and after every change, at most every 100 ms, always ending on the latest. A new bridge connection for the same pane replaces the older one.
 - `open`: `{ type: "open", id, path, line?, column? }`.
 - `diff`: `{ type: "diff", id, path, staged? }`.
 
