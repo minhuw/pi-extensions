@@ -2,7 +2,7 @@
  * default-agents.ts — Embedded default agent configurations.
  *
  * Model-visible fleet: recon, worker.
- * Model-hidden council advisors: council-argon, council-astra, council-opus.
+ * Model-hidden council advisors: council-carbon, council-astra, council-fable.
  * User .md files with the same name override these.
  */
 

@@ -1,9 +1,9 @@
 ---
-name: council-opus
-display_name: Council (Opus)
-description: Read-only council advisor pinned to magpie/claude-opus-5-5 for multi-model technical deliberation.
+name: council-carbon
+display_name: Council (Carbon)
+description: Read-only council advisor pinned to magpie/gemini-4-carbon for multi-model technical deliberation.
 tools: read, bash, grep, find, ls
-model: magpie/claude-opus-5-5
+model: magpie/gemini-4-carbon
 thinking: high
 model_visible: false
 isolation: off

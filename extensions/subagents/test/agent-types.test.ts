@@ -128,10 +128,10 @@ describe("agent type registry", () => {
 
     it("loads hidden read-only council advisors from extensions/council/agents", () => {
       expect(getAgentConfig("expert")).toBeUndefined();
-      expect(getAgentConfig("council-argon")).toMatchObject({
-        name: "council-argon",
-        displayName: "Council (Argon)",
-        model: "magpie/gemini-4-argon",
+      expect(getAgentConfig("council-carbon")).toMatchObject({
+        name: "council-carbon",
+        displayName: "Council (Carbon)",
+        model: "magpie/gemini-4-carbon",
         thinking: "high",
         modelVisible: false,
         isolation: "off",
@@ -154,10 +154,10 @@ describe("agent type registry", () => {
         promptMode: "replace",
         isDefault: true,
       });
-      expect(getAgentConfig("council-opus")).toMatchObject({
-        name: "council-opus",
-        displayName: "Council (Opus)",
-        model: "magpie/claude-opus-5-5",
+      expect(getAgentConfig("council-fable")).toMatchObject({
+        name: "council-fable",
+        displayName: "Council (Fable)",
+        model: "magpie/claude-fable-5-2",
         thinking: "high",
         modelVisible: false,
         isolation: "off",

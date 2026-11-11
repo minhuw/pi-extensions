@@ -250,9 +250,9 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 
 describe("council agent definitions in extensions/council/agents/", () => {
 	it.each([
-		["council-argon", "magpie/gemini-4-argon", "high"],
+		["council-carbon", "magpie/gemini-4-carbon", "high"],
 		["council-astra", "magpie/gpt-6-astra", "xhigh"],
-		["council-opus", "magpie/claude-opus-5-5", "high"],
+		["council-fable", "magpie/claude-fable-5-2", "high"],
 	] as const)("validates %s frontmatter and read-only deliberation sections", async (name, model, thinking) => {
 		const filePath = path.join(agentsDir, `${name}.md`);
 		const raw = await readFile(filePath, "utf8");
@@ -280,38 +280,38 @@ describe("council agent definitions in extensions/council/agents/", () => {
 });
 
 describe("pure council helpers", () => {
-	it("resolveCouncilMembers defaults to argon, astra, opus and rejects invalid inputs", () => {
-		expect(resolveCouncilMembers().map((m) => m.id)).toEqual(["argon", "astra", "opus"]);
-		expect(resolveCouncilMembers(["opus", "argon"]).map((m) => m.id)).toEqual(["opus", "argon"]);
+	it("resolveCouncilMembers defaults to carbon, astra, fable and rejects invalid inputs", () => {
+		expect(resolveCouncilMembers().map((m) => m.id)).toEqual(["carbon", "astra", "fable"]);
+		expect(resolveCouncilMembers(["fable", "carbon"]).map((m) => m.id)).toEqual(["fable", "carbon"]);
 
-		expect(() => resolveCouncilMembers(["argon"])).toThrow(/at least 2 distinct members/i);
+		expect(() => resolveCouncilMembers(["carbon"])).toThrow(/at least 2 distinct members/i);
 		expect(() => resolveCouncilMembers([])).toThrow(/at least 2 distinct members/i);
-		expect(() => resolveCouncilMembers(["argon", "argon"])).toThrow(/Duplicate council member "argon"/i);
-		expect(() => resolveCouncilMembers(["argon", "unknown"])).toThrow(/Unknown council member "unknown"/i);
+		expect(() => resolveCouncilMembers(["carbon", "carbon"])).toThrow(/Duplicate council member "carbon"/i);
+		expect(() => resolveCouncilMembers(["carbon", "unknown"])).toThrow(/Unknown council member "unknown"/i);
 	});
 
 	it("rotatePeersForMember counterbalances Peer A and Peer B positions across 3 members and 2 members", () => {
 		const proposals: Array<{ member: CouncilMemberId; proposal: string }> = [
-			{ member: "argon", proposal: "Argon proposal" },
+			{ member: "carbon", proposal: "Carbon proposal" },
 			{ member: "astra", proposal: "Astra proposal" },
-			{ member: "opus", proposal: "Opus proposal" },
+			{ member: "fable", proposal: "Fable proposal" },
 		];
 
-		// selfIndex = 0 (argon) -> Peer A = astra, Peer B = opus
+		// selfIndex = 0 (carbon) -> Peer A = astra, Peer B = fable
 		expect(rotatePeersForMember(proposals, 0)).toEqual([
 			{ label: "Peer A", member: "astra", proposal: "Astra proposal" },
-			{ label: "Peer B", member: "opus", proposal: "Opus proposal" },
+			{ label: "Peer B", member: "fable", proposal: "Fable proposal" },
 		]);
 
-		// selfIndex = 1 (astra) -> Peer A = opus, Peer B = argon
+		// selfIndex = 1 (astra) -> Peer A = fable, Peer B = carbon
 		expect(rotatePeersForMember(proposals, 1)).toEqual([
-			{ label: "Peer A", member: "opus", proposal: "Opus proposal" },
-			{ label: "Peer B", member: "argon", proposal: "Argon proposal" },
+			{ label: "Peer A", member: "fable", proposal: "Fable proposal" },
+			{ label: "Peer B", member: "carbon", proposal: "Carbon proposal" },
 		]);
 
-		// selfIndex = 2 (opus) -> Peer A = argon, Peer B = astra
+		// selfIndex = 2 (fable) -> Peer A = carbon, Peer B = astra
 		expect(rotatePeersForMember(proposals, 2)).toEqual([
-			{ label: "Peer A", member: "argon", proposal: "Argon proposal" },
+			{ label: "Peer A", member: "carbon", proposal: "Carbon proposal" },
 			{ label: "Peer B", member: "astra", proposal: "Astra proposal" },
 		]);
 
@@ -321,7 +321,7 @@ describe("pure council helpers", () => {
 			{ label: "Peer A", member: "astra", proposal: "Astra proposal" },
 		]);
 		expect(rotatePeersForMember(pair, 1)).toEqual([
-			{ label: "Peer A", member: "argon", proposal: "Argon proposal" },
+			{ label: "Peer A", member: "carbon", proposal: "Carbon proposal" },
 		]);
 	});
 
@@ -346,7 +346,7 @@ describe("pure council helpers", () => {
 				},
 				{
 					label: "Peer B",
-					text: "Proposal from council-opus on magpie/claude-opus-5-5: WAL snapshots at `src/journal.ts:88`.",
+					text: "Proposal from council-fable on magpie/claude-fable-5-2: WAL snapshots at `src/journal.ts:88`.",
 				},
 			],
 		});
@@ -360,7 +360,7 @@ describe("pure council helpers", () => {
 		expect(r2).toContain("### 3. Revised Design & Verdict");
 		expect(r2).toContain("`converged`");
 		expect(r2).toContain("`tradeoff`");
-		expect(r2).not.toMatch(/argon|astra|opus|gemini|gpt|claude/i);
+		expect(r2).not.toMatch(/carbon|astra|fable|gemini|gpt|claude/i);
 	});
 });
 
@@ -390,9 +390,9 @@ describe("council tool execution and RPC deliberation", () => {
 
 		expect(harness.spawns).toHaveLength(3);
 		expect(harness.spawns.map((s) => s.type)).toEqual([
-			"council-argon",
+			"council-carbon",
 			"council-astra",
-			"council-opus",
+			"council-fable",
 		]);
 		for (const spawn of harness.spawns) {
 			expect(spawn.options.notifyParent).toBe(false);
@@ -406,37 +406,37 @@ describe("council tool execution and RPC deliberation", () => {
 		expect(harness.sends).toHaveLength(3);
 		const sendByType = new Map(harness.sends.map((s) => [s.type, s.text]));
 
-		// argon (index 0) gets Peer A = astra, Peer B = opus
-		const argonR2 = sendByType.get("council-argon")!;
-		expect(argonR2.indexOf("## Peer A")).toBeLessThan(argonR2.indexOf("R1_PROPOSAL_ASTRA_CONTENT"));
-		expect(argonR2.indexOf("R1_PROPOSAL_ASTRA_CONTENT")).toBeLessThan(argonR2.indexOf("## Peer B"));
-		expect(argonR2.indexOf("## Peer B")).toBeLessThan(argonR2.indexOf("R1_PROPOSAL_OPUS_CONTENT"));
-		expect(argonR2).not.toContain("R1_PROPOSAL_ARGON_CONTENT");
+		// carbon (index 0) gets Peer A = astra, Peer B = fable
+		const carbonR2 = sendByType.get("council-carbon")!;
+		expect(carbonR2.indexOf("## Peer A")).toBeLessThan(carbonR2.indexOf("R1_PROPOSAL_ASTRA_CONTENT"));
+		expect(carbonR2.indexOf("R1_PROPOSAL_ASTRA_CONTENT")).toBeLessThan(carbonR2.indexOf("## Peer B"));
+		expect(carbonR2.indexOf("## Peer B")).toBeLessThan(carbonR2.indexOf("R1_PROPOSAL_FABLE_CONTENT"));
+		expect(carbonR2).not.toContain("R1_PROPOSAL_CARBON_CONTENT");
 
-		// astra (index 1) gets Peer A = opus, Peer B = argon
+		// astra (index 1) gets Peer A = fable, Peer B = carbon
 		const astraR2 = sendByType.get("council-astra")!;
-		expect(astraR2.indexOf("## Peer A")).toBeLessThan(astraR2.indexOf("R1_PROPOSAL_OPUS_CONTENT"));
-		expect(astraR2.indexOf("R1_PROPOSAL_OPUS_CONTENT")).toBeLessThan(astraR2.indexOf("## Peer B"));
-		expect(astraR2.indexOf("## Peer B")).toBeLessThan(astraR2.indexOf("R1_PROPOSAL_ARGON_CONTENT"));
+		expect(astraR2.indexOf("## Peer A")).toBeLessThan(astraR2.indexOf("R1_PROPOSAL_FABLE_CONTENT"));
+		expect(astraR2.indexOf("R1_PROPOSAL_FABLE_CONTENT")).toBeLessThan(astraR2.indexOf("## Peer B"));
+		expect(astraR2.indexOf("## Peer B")).toBeLessThan(astraR2.indexOf("R1_PROPOSAL_CARBON_CONTENT"));
 		expect(astraR2).not.toContain("R1_PROPOSAL_ASTRA_CONTENT");
 
-		// opus (index 2) gets Peer A = argon, Peer B = astra
-		const opusR2 = sendByType.get("council-opus")!;
-		expect(opusR2.indexOf("## Peer A")).toBeLessThan(opusR2.indexOf("R1_PROPOSAL_ARGON_CONTENT"));
-		expect(opusR2.indexOf("R1_PROPOSAL_ARGON_CONTENT")).toBeLessThan(opusR2.indexOf("## Peer B"));
-		expect(opusR2.indexOf("## Peer B")).toBeLessThan(opusR2.indexOf("R1_PROPOSAL_ASTRA_CONTENT"));
-		expect(opusR2).not.toContain("R1_PROPOSAL_OPUS_CONTENT");
+		// fable (index 2) gets Peer A = carbon, Peer B = astra
+		const fableR2 = sendByType.get("council-fable")!;
+		expect(fableR2.indexOf("## Peer A")).toBeLessThan(fableR2.indexOf("R1_PROPOSAL_CARBON_CONTENT"));
+		expect(fableR2.indexOf("R1_PROPOSAL_CARBON_CONTENT")).toBeLessThan(fableR2.indexOf("## Peer B"));
+		expect(fableR2.indexOf("## Peer B")).toBeLessThan(fableR2.indexOf("R1_PROPOSAL_ASTRA_CONTENT"));
+		expect(fableR2).not.toContain("R1_PROPOSAL_FABLE_CONTENT");
 
 		// Ensure no model or advisor brand names leaked into any Round 2 prompt
 		for (const send of harness.sends) {
 			const strippedPlaceholder = send.text
-				.replaceAll("R1_PROPOSAL_ARGON_CONTENT", "P0")
+				.replaceAll("R1_PROPOSAL_CARBON_CONTENT", "P0")
 				.replaceAll("R1_PROPOSAL_ASTRA_CONTENT", "P1")
-				.replaceAll("R1_PROPOSAL_OPUS_CONTENT", "P2")
-				.replaceAll("src/argon.ts", "src/p0.ts")
+				.replaceAll("R1_PROPOSAL_FABLE_CONTENT", "P2")
+				.replaceAll("src/carbon.ts", "src/p0.ts")
 				.replaceAll("src/astra.ts", "src/p1.ts")
-				.replaceAll("src/opus.ts", "src/p2.ts");
-			expect(strippedPlaceholder).not.toMatch(/argon|astra|opus|gemini|gpt|claude/i);
+				.replaceAll("src/fable.ts", "src/p2.ts");
+			expect(strippedPlaceholder).not.toMatch(/carbon|astra|fable|gemini|gpt|claude/i);
 		}
 
 		// 3 settles in Round 1 + 3 settles in Round 2 = 6 synchronous consumes
@@ -448,9 +448,9 @@ describe("council tool execution and RPC deliberation", () => {
 		expect(text).toContain("## Round 1 — Independent Proposals");
 		expect(text).toContain("## Round 2 — Cross-Examination & Revised Designs");
 		expect(text).toContain("## Stake-Free Parent Synthesis Instructions");
-		expect(text).toContain(COUNCIL_MEMBERS.argon.label);
+		expect(text).toContain(COUNCIL_MEMBERS.carbon.label);
 		expect(text).toContain(COUNCIL_MEMBERS.astra.label);
-		expect(text).toContain(COUNCIL_MEMBERS.opus.label);
+		expect(text).toContain(COUNCIL_MEMBERS.fable.label);
 		expect(result.details.round1).toHaveLength(3);
 		expect(result.details.round2).toHaveLength(3);
 		expect(result.details.failures).toEqual([]);
@@ -463,7 +463,7 @@ describe("council tool execution and RPC deliberation", () => {
 			{
 				topic: "Single-round design check",
 				rounds: 1,
-				members: ["argon", "opus"],
+				members: ["carbon", "fable"],
 			},
 			undefined,
 			undefined,
@@ -471,7 +471,7 @@ describe("council tool execution and RPC deliberation", () => {
 		);
 
 		expect(harness.spawns).toHaveLength(2);
-		expect(harness.spawns.map((s) => s.type)).toEqual(["council-argon", "council-opus"]);
+		expect(harness.spawns.map((s) => s.type)).toEqual(["council-carbon", "council-fable"]);
 		for (const spawn of harness.spawns) {
 			expect(spawn.options.retain).toBe(false);
 			expect(spawn.options.notifyParent).toBe(false);
@@ -508,7 +508,7 @@ describe("council tool execution and RPC deliberation", () => {
 		await expect(
 			harness.tool.execute(
 				"tc-err-members-1",
-				{ topic: "Valid topic", members: ["argon"] as any },
+				{ topic: "Valid topic", members: ["carbon"] as any },
 				undefined,
 				undefined,
 				{} as ExtensionContext,
@@ -575,8 +575,8 @@ describe("council tool execution and RPC deliberation", () => {
 
 		const r2PartialHarness = bootCouncilHarness({
 			round2Handler: ({ type }) => {
-				if (type === "council-opus") {
-					return { event: "failed", status: "error", error: "Opus R2 rate limit" };
+				if (type === "council-fable") {
+					return { event: "failed", status: "error", error: "Fable R2 rate limit" };
 				}
 				return {
 					event: "completed",
@@ -598,20 +598,20 @@ describe("council tool execution and RPC deliberation", () => {
 		expect(r2PartialResult.details.round2).toHaveLength(2);
 		expect(r2PartialResult.details.failures).toEqual([
 			{
-				member: "opus",
-				agentType: "council-opus",
-				model: "magpie/claude-opus-5-5",
+				member: "fable",
+				agentType: "council-fable",
+				model: "magpie/claude-fable-5-2",
 				round: 2,
-				error: "Opus R2 rate limit",
+				error: "Fable R2 rate limit",
 			},
 		]);
 
 		const r1TwoFailedHarness = bootCouncilHarness({
 			round1Handler: ({ type }) => {
-				if (type !== "council-argon") {
+				if (type !== "council-carbon") {
 					return { event: "failed", status: "error", error: `${type} unavailable` };
 				}
-				return { event: "completed", status: "completed", result: "Argon proposal" };
+				return { event: "completed", status: "completed", result: "Carbon proposal" };
 			},
 		});
 
@@ -662,9 +662,9 @@ describe("/council command and package contracts", () => {
 		await harness.command.handler("", ctx);
 		expect(notify).toHaveBeenCalledTimes(1);
 		expect(notify.mock.calls[0][0]).toContain("/council <topic or design question>");
-		expect(notify.mock.calls[0][0]).toContain("magpie/gemini-4-argon");
+		expect(notify.mock.calls[0][0]).toContain("magpie/gemini-4-carbon");
 		expect(notify.mock.calls[0][0]).toContain("magpie/gpt-6-astra");
-		expect(notify.mock.calls[0][0]).toContain("magpie/claude-opus-5-5");
+		expect(notify.mock.calls[0][0]).toContain("magpie/claude-fable-5-2");
 		expect(harness.sendUserMessage).not.toHaveBeenCalled();
 
 		await harness.command.handler("help", ctx);
@@ -718,9 +718,9 @@ describe("/council command and package contracts", () => {
 		expect(exts.at(-1)).toBe("./extensions/pika/index.ts");
 		expect(manifest.pi.prompts.some((p) => p.includes("council"))).toBe(false);
 
-		expect(councilReadme).toContain("council-argon");
+		expect(councilReadme).toContain("council-carbon");
 		expect(councilReadme).toContain("council-astra");
-		expect(councilReadme).toContain("council-opus");
+		expect(councilReadme).toContain("council-fable");
 		expect(councilReadme).toContain("rotatePeersForMember");
 
 		expect(rootReadme).toContain("[Council](extensions/council/README.md)");
@@ -733,7 +733,7 @@ describe("/council command and package contracts", () => {
 		const formatted = formatCouncilReport({
 			topic: "Test topic",
 			rounds: 1,
-			members: ["argon", "astra"],
+			members: ["carbon", "astra"],
 			round1: [],
 			round2: [],
 			failures: [],

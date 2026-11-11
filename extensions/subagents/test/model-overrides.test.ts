@@ -292,9 +292,9 @@ describe("model-overrides", () => {
         JSON.stringify({
           recon: "magpie/deepseek-v3.2",
           worker: "inherit",
-          "council-argon": "openai/gpt-5",
+          "council-carbon": "openai/gpt-5",
           "COUNCIL-ASTRA": "inherit",
-          "council-opus": "anthropic/claude-haiku-4-5",
+          "council-fable": "anthropic/claude-haiku-4-5",
           badNoSlash: "gpt-5",
           badEmptyProvider: "/gpt-5",
           badEmptyModel: "openai/",

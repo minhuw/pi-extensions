@@ -1,9 +1,9 @@
 ---
-name: council-argon
-display_name: Council (Argon)
-description: Read-only council advisor pinned to magpie/gemini-4-argon for multi-model technical deliberation.
+name: council-fable
+display_name: Council (Fable)
+description: Read-only council advisor pinned to magpie/claude-fable-5-2 for multi-model technical deliberation.
 tools: read, bash, grep, find, ls
-model: magpie/gemini-4-argon
+model: magpie/claude-fable-5-2
 thinking: high
 model_visible: false
 isolation: off

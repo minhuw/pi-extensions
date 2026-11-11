@@ -5,7 +5,7 @@
  * Precedence (for non-council agents):
  *   session override > persistent override > custom .md frontmatter > DEFAULT_AGENTS
  *
- * Built-in council advisors (`council-argon`, `council-astra`, `council-opus`)
+ * Built-in council advisors (`council-carbon`, `council-astra`, `council-fable`)
  * have pinned models for multi-model deliberation and can never be overridden.
  */
 
