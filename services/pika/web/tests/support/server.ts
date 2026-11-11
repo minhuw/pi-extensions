@@ -4,6 +4,7 @@ import { normalizePairingCode } from "../../src/lib/devices";
 import { bareModel, bareModelOf } from "../../src/lib/model";
 import type {
 	AuthMode,
+	SwarmBoard,
 	BrowserSession,
 	Device,
 	DeviceRef,
@@ -371,6 +372,7 @@ export function createFakeServer({
 	online = [],
 	relayEvents = [],
 	relayRooms = [],
+	swarmBoards = [],
 	trace = true,
 	traces,
 	tree = true,
@@ -414,6 +416,8 @@ export function createFakeServer({
 	relayEvents?: RelayEvent[];
 	/** Active chatrooms, newest first. */
 	relayRooms?: { room: RelayRoom; messages: RelayRoomMessage[] }[];
+	/** Swarm boards of coordinator sessions; a room lists those of its members. */
+	swarmBoards?: SwarmBoard[];
 	/** Serves `sessions/:id/trace`; older servers answer 404. */
 	trace?: boolean;
 	/** Traces served as given instead of derived, by session id: malformed or partial ones. */
@@ -442,6 +446,7 @@ export function createFakeServer({
 		online: [...online],
 		relayEvents: [...relayEvents],
 		relayRooms: relayRooms.map((item) => ({ room: { ...item.room, members: [...item.room.members] }, messages: [...item.messages] })),
+		swarmBoards: [...swarmBoards],
 		/** The reason the next web sends are refused with, if any. */
 		relayFailure: undefined as string | undefined,
 		/** Whether online targets acknowledge in time, so sends report `delivered`; otherwise `queued`. */
@@ -749,6 +754,15 @@ export function createFakeServer({
 				const entry = state.relayRooms.find((r) => r.room.name === clean);
 				if (!entry) return json(404, { error: "not_found" });
 				return json(200, entry);
+			}
+			if (parts[1] === "rooms" && parts.length === 4 && parts[3] === "boards" && method === "GET") {
+				const entry = state.relayRooms.find((r) => r.room.name === parts[2].replace(/^#/, ""));
+				if (!entry) return json(404, { error: "not_found" });
+				const items = entry.room.members.flatMap((m) => {
+					const board = state.swarmBoards.find((b) => b.sessionId === m.sessionId);
+					return board ? [{ ...board, online: m.online }] : [];
+				});
+				return json(200, { room: entry.room.name, items });
 			}
 			if (parts[1] === "rooms" && parts.length === 3 && method === "DELETE") {
 				const clean = parts[2].replace(/^#/, "");

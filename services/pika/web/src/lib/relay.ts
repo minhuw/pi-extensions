@@ -21,6 +21,7 @@ export const RELAY_SESSIONS_KEY = ["relay", "sessions"] as const;
 export const RELAY_EVENTS_KEY = ["relay", "events"] as const;
 export const RELAY_ROOMS_KEY = ["relay", "rooms"] as const;
 export const relayRoomKey = (name: string) => ["relay", "room", name.replace(/^#/, "")] as const;
+export const relayRoomBoardsKey = (name: string) => ["relay", "room", name.replace(/^#/, ""), "boards"] as const;
 
 /**
  * `on`, or why the dashboard can't show anything: `off` when the server runs with `PIKA_RELAY=off`, `unsupported`
