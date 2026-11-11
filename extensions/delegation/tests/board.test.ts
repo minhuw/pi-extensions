@@ -243,6 +243,89 @@ describe("telemetry", () => {
 		expect(h.snapshots()).toHaveLength(1);
 	});
 
+	it("logs a timed persistence failure and retries the unchanged board on a later tool call only once", async () => {
+		const h = await start();
+		const failure = Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+		const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+		const manager = h.session.sessionManager;
+		const append = manager.appendCustomEntry.bind(manager);
+		const attempted: SwarmBoard[] = [];
+		let full = true;
+		vi.spyOn(manager, "appendCustomEntry").mockImplementation((type, data) => {
+			if (type === "swarm-board") {
+				attempted.push(data as SwarmBoard);
+				if (full) throw failure;
+			}
+			return append(type, data);
+		});
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			h.telemetry({ phase: "started", agentId: "a1", description: "Fix parser" });
+			await vi.advanceTimersByTimeAsync(100);
+			expect(logged).toHaveBeenCalledExactlyOnceWith("swarm board: could not persist:", failure);
+			expect(h.snapshots()).toEqual([]);
+			// A failed flush stays dirty without starting an automatic retry loop.
+			await vi.advanceTimersByTimeAsync(5_000);
+			expect(attempted).toEqual([h.board]);
+		} finally {
+			vi.useRealTimers();
+		}
+
+		const pending = h.board!;
+		full = false;
+		expect((await h.call({ action: "list" })).isError).toBe(false);
+		expect(h.board).toBe(pending);
+		expect(attempted).toHaveLength(2);
+		expect(attempted[0]).toBe(pending);
+		expect(attempted[1]).toBe(pending);
+		expect(h.snapshots()).toEqual([pending]);
+		await h.call({ action: "list" });
+		await h.dispose();
+		started.splice(started.indexOf(h), 1);
+		expect(attempted).toHaveLength(2);
+		expect(h.snapshots()).toHaveLength(1);
+		expect(h.errors).toEqual([]);
+	});
+
+	it("retries on shutdown and cleans up even when persistence still fails", async () => {
+		const h = await start();
+		await h.run();
+		const child = await startChild(h, { agentId: "a1" });
+		expect(registry().members?.get(child.sessionId)).toBe(h.sessionId);
+		const failure = Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+		const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+		const manager = h.session.sessionManager;
+		const append = manager.appendCustomEntry.bind(manager);
+		const attempted: SwarmBoard[] = [];
+		vi.spyOn(manager, "appendCustomEntry").mockImplementation((type, data) => {
+			if (type === "swarm-board") {
+				attempted.push(data as SwarmBoard);
+				throw failure;
+			}
+			return append(type, data);
+		});
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			h.telemetry({ phase: "started", agentId: "a1", description: "Fix parser" });
+			await vi.advanceTimersByTimeAsync(100);
+		} finally {
+			vi.useRealTimers();
+		}
+		const pending = h.board!;
+		await expect(h.dispose()).resolves.toBeUndefined();
+		started.splice(started.indexOf(h), 1);
+		expect(attempted).toHaveLength(2);
+		expect(attempted[0]).toBe(pending);
+		expect(attempted[1]).toBe(pending);
+		expect(logged).toHaveBeenCalledTimes(2);
+		expect(logged).toHaveBeenLastCalledWith("swarm board: could not persist:", failure);
+		expect(h.snapshots()).toEqual([]);
+		expect(registry().boards.has(h.sessionId)).toBe(false);
+		expect(registry().members?.has(child.sessionId)).toBe(false);
+		expect(registry().listeners.size).toBe(0);
+		expect(h.errors).toEqual([]);
+	});
+
 	it("moves a linked todo card to doing, keeps a blocked card blocked on a normal end, and leaves dropped cards", async () => {
 		const h = await start();
 		await h.call({ action: "add", title: "Planned" });

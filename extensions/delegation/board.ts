@@ -378,8 +378,12 @@ export function registerBoard(pi: ExtensionAPI, isOn: (ctx: ExtensionContext) =>
 		timer = undefined;
 		const board = sessionId === undefined ? undefined : swarmBoards().boards.get(sessionId);
 		if (!board || board.updatedAt === persisted) return;
-		persisted = board.updatedAt;
-		pi.appendEntry<SwarmBoard>(ENTRY_TYPE, board);
+		try {
+			pi.appendEntry<SwarmBoard>(ENTRY_TYPE, board);
+			persisted = board.updatedAt;
+		} catch (error) {
+			console.error("swarm board: could not persist:", error);
+		}
 	}
 
 	const listener = (board: SwarmBoard) => {
@@ -429,7 +433,7 @@ export function registerBoard(pi: ExtensionAPI, isOn: (ctx: ExtensionContext) =>
 
 	pi.on("session_shutdown", async () => {
 		if (sessionId !== undefined) {
-			try { flush(); } catch (error) { console.error("swarm board: could not persist at shutdown:", error); }
+			flush();
 			swarmBoards().listeners.delete(listener);
 			swarmBoards().boards.delete(sessionId);
 			for (const [child, board] of members()) if (board === sessionId) members().delete(child);
