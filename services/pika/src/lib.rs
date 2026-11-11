@@ -12,6 +12,7 @@ pub mod hidden;
 pub mod http;
 pub mod ingest;
 pub mod memory;
+pub mod nodes;
 pub mod pairing;
 pub mod pricing;
 pub mod ratelimit;

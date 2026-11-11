@@ -133,6 +133,18 @@ pub struct Outbox {
 }
 
 impl Outbox {
+    /// An empty outbox that holds at most `max` bytes, and its writer's end.
+    pub fn new(max: usize) -> (Outbox, Frames) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        (Outbox { tx, queued: queued.clone(), max }, Frames { rx, queued })
+    }
+
+    /// Bytes of frames queued and not yet written.
+    pub fn queued(&self) -> usize {
+        self.queued.load(Ordering::Relaxed)
+    }
+
     /// Queues a frame, or returns false when it would take the queue past its maximum.
     pub fn push(&self, frame: String) -> bool {
         let len = frame.len();
@@ -2090,14 +2102,12 @@ impl Relay {
         }
         *count += 1;
         let id = self.next_conn.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::unbounded_channel();
-        let queued = Arc::new(AtomicUsize::new(0));
-        let outbox = Outbox { tx, queued: queued.clone(), max: self.config.max_outgoing_bytes };
+        let (outbox, frames) = Outbox::new(self.config.max_outgoing_bytes);
         let (closing, closing_rx) = oneshot::channel();
         let conn =
             Conn { device: device.to_owned(), token_hash, outbox: outbox.clone(), closing: Some(closing), session: None };
         inner.conns.insert(id, conn);
-        Some(Connection { id, outbox, frames: Frames { rx, queued }, closing: closing_rx })
+        Some(Connection { id, outbox, frames, closing: closing_rx })
     }
 
     /// Forgets a connection that ended, and takes its session offline if it still held it.

@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use crate::auth::NoPassword;
-use crate::config::{self, AuthMode, CookieSecure, RelayConfig, ServerConfig, VisitorAnalytics};
+use crate::config::{self, AuthMode, CookieSecure, NodesConfig, RelayConfig, ServerConfig, VisitorAnalytics};
 use crate::store::Store;
 
 #[derive(Parser)]
@@ -56,6 +56,16 @@ enum Command {
         /// Most hops a relay message may travel between sessions without the user.
         #[arg(long, env = "PIKA_RELAY_MAX_HOPS", default_value_t = config::DEFAULT_MAX_HOPS, value_parser = clap::value_parser!(u64).range(1..))]
         relay_max_hops: u64,
+        /// Route terminals and files between the web UI and pika-node daemons: on or off (see docs/NODE.md).
+        #[arg(long, env = "PIKA_NODES", value_parser = parse_switch)]
+        nodes: bool,
+        /// Allow the node browser socket with --auth none, where anyone who reaches pika can open it.
+        #[arg(long, env = "PIKA_NODES_INSECURE", value_parser = parse_switch)]
+        nodes_insecure: bool,
+        /// The URL browsers use to reach pika, such as https://pika.example.com/; the node browser socket accepts its
+        /// origin besides the request's own.
+        #[arg(long, env = "PIKA_PUBLIC_URL")]
+        public_url: Option<String>,
         /// Prices for Magpie calls that recorded no cost: a models.dev-format catalog URL or file, or off.
         #[arg(long, env = "PIKA_PRICES", default_value = crate::pricing::DEFAULT_SOURCE)]
         prices: String,
@@ -70,6 +80,11 @@ enum Command {
     Token {
         #[command(subcommand)]
         action: TokenAction,
+    },
+    /// Manage pika-node credentials.
+    Node {
+        #[command(subcommand)]
+        action: NodeAction,
     },
     /// Manage the stored login password.
     Password {
@@ -123,6 +138,18 @@ enum TokenAction {
     Rename { device: String, name: String },
     /// Grant or withdraw agents' read access on a device. DEVICE is a device id, or a name that only one device has.
     ReadAccess { device: String, access: Switch },
+}
+
+#[derive(Subcommand)]
+enum NodeAction {
+    /// Create a node named NAME (1-64 characters; quote it in the shell) and print its credential once.
+    Create { name: String },
+    /// List nodes: id, name, creation time, last seen, last host, and key fingerprint.
+    List,
+    /// Revoke a node's credential and forget the node. NODE is a node id, or a name that only one node has.
+    Revoke { node: String },
+    /// Rename a node. NODE is a node id, or a name that only one node has.
+    Rename { node: String, name: String },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -183,6 +210,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             visitor_analytics,
             max_body,
             relay,
+            nodes,
+            nodes_insecure,
+            public_url,
             prices,
             relay_max_hops,
             relay_ttl_secs,
@@ -195,6 +225,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
             if let Some(secs) = relay_heartbeat_secs {
                 relay_config.heartbeat = Duration::from_secs(secs);
             }
+            let public_origin = match public_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+                Some(url) => Some(config::origin_of(url).with_context(|| format!("invalid public URL {url:?}"))?),
+                None => None,
+            };
+            let nodes = NodesConfig { enabled: nodes, insecure: nodes_insecure, public_origin, ..NodesConfig::default() };
             let config = ServerConfig {
                 bind,
                 base_path: config::normalize_base_path(&base_path)?,
@@ -207,6 +242,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 visitor_analytics,
                 max_body: config::parse_size(&max_body)?,
                 relay: relay_config,
+                nodes,
                 prices: config::price_source(&prices),
             };
             let level = if std::env::var_os("PIKA_DEBUG").is_some() { tracing::Level::DEBUG } else { tracing::Level::INFO };
@@ -254,6 +290,43 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     match crate::auth::update_device(&store, &id, None, Some(on))? {
                         Some((name, _)) => eprintln!("read access {} for {name} ({id})", if on { "on" } else { "off" }),
                         None => bail!("no device {device:?}"),
+                    }
+                }
+            }
+        }
+        Command::Node { action } => {
+            let store = Store::open(&cli.data_dir)?;
+            match action {
+                NodeAction::Create { name } => {
+                    let node = crate::nodes::create_node(&store, &name)?;
+                    println!("{}", node.credential);
+                    eprintln!("created node {} ({})", node.id, node.name);
+                }
+                NodeAction::List => {
+                    for n in crate::nodes::list_nodes(&store)? {
+                        let seen = n.last_seen_at.map_or_else(|| "never".into(), crate::util::format_iso_ms);
+                        let created = crate::util::format_iso_ms(n.created_at);
+                        let host = n.last_host.as_deref().unwrap_or("-");
+                        let fingerprint = n.public_key.as_deref().and_then(crate::nodes::fingerprint);
+                        let fingerprint = fingerprint.map_or_else(|| "-".into(), |f| crate::nodes::display_fingerprint(&f));
+                        println!("{}\t{}\t{created}\t{seen}\t{host}\t{fingerprint}", n.id, n.name);
+                    }
+                }
+                NodeAction::Revoke { node } => {
+                    let id = crate::nodes::resolve_node(&store, &node, "revoke")?;
+                    if !crate::nodes::revoke_node(&store, &id)? {
+                        bail!("no node {node:?}");
+                    }
+                    eprintln!("revoked {id}");
+                }
+                NodeAction::Rename { node, name } => {
+                    if crate::nodes::node_name(&name).is_none() {
+                        bail!("node names use 1-64 characters, without control characters");
+                    }
+                    let id = crate::nodes::resolve_node(&store, &node, "rename")?;
+                    match crate::nodes::rename_node(&store, &id, &name)? {
+                        Some(name) => eprintln!("renamed {id} to {name}"),
+                        None => bail!("no node {node:?}"),
                     }
                 }
             }
@@ -435,6 +508,19 @@ mod tests {
         assert!(matches!(cli.command, Command::Delete { what: DeleteAction::Session { ref id, yes: true } } if id == "abc"));
         let cli = Cli::try_parse_from(["pika", "delete", "project", "my widgets"]).unwrap();
         assert!(matches!(cli.command, Command::Delete { what: DeleteAction::Project { ref name, yes: false } } if name == "my widgets"));
+    }
+
+    #[test]
+    fn nodes_are_off_by_default() {
+        let nodes = |extra: &[&str]| match Cli::try_parse_from([&["pika", "serve"][..], extra].concat()) {
+            Ok(Cli { command: Command::Serve { nodes, nodes_insecure, .. }, .. }) => Some((nodes, nodes_insecure)),
+            _ => None,
+        };
+        assert_eq!(nodes(&[]), Some((false, false)));
+        assert_eq!(nodes(&["--nodes"]), Some((true, false)));
+        let cli = Cli::try_parse_from(["pika", "node", "rename", "node01", "build box"]).unwrap();
+        assert!(matches!(cli.command, Command::Node { action: NodeAction::Rename { ref node, ref name } }
+            if node == "node01" && name == "build box"));
     }
 
     #[test]

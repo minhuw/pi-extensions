@@ -3,6 +3,7 @@ mod devices;
 mod ingest;
 mod manage;
 mod memory;
+mod nodes;
 mod read;
 mod relay;
 mod ui;
@@ -23,6 +24,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::auth::Auth;
 use crate::config::ServerConfig;
+use crate::nodes::Nodes;
 use crate::relay::Relay;
 use crate::ratelimit::{
     LoginLimiter, MAX_PASSWORD_CHECKS, PAIR_START_WINDOW, PAIR_STARTS_PER_IP, PASSWORD_CHECK_QUEUE, SlidingWindow,
@@ -78,6 +80,7 @@ pub struct AppState {
     pub config: Arc<ServerConfig>,
     pub limits: Arc<Limits>,
     pub relay: Arc<Relay>,
+    pub nodes: Arc<Nodes>,
 }
 
 impl AppState {
@@ -89,7 +92,8 @@ impl AppState {
         visitor::cleanup(&store)?;
         let auth = Auth::new(&store, &config)?;
         let relay = Relay::open(config.relay.clone(), store.clone())?;
-        Ok(AppState { store, auth: Arc::new(auth), config: Arc::new(config), limits: Arc::default(), relay })
+        let nodes = Arc::new(Nodes::new(config.nodes.clone()));
+        Ok(AppState { store, auth: Arc::new(auth), config: Arc::new(config), limits: Arc::default(), relay, nodes })
     }
 }
 
@@ -109,7 +113,14 @@ pub async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 
 }
 
 async fn health(State(state): State<AppState>) -> Response {
-    let features: &[&str] = if state.relay.enabled() { &["relay", "agent"] } else { &["agent"] };
+    let mut features = Vec::new();
+    if state.relay.enabled() {
+        features.push("relay");
+    }
+    features.push("agent");
+    if state.nodes.enabled() {
+        features.push("nodes");
+    }
     let (version, base_path) = (env!("CARGO_PKG_VERSION"), &state.config.base_path);
     let mut health = json!({ "ok": true, "version": version, "basePath": base_path, "features": features });
     if !crate::REVISION.is_empty() {
@@ -143,7 +154,8 @@ pub fn router(state: AppState) -> Router {
         .route("/login", post(auth::login))
         .route("/me", get(auth::me))
         .merge(login(protected))
-        .merge(relay::browser_routes(&state, login));
+        .merge(relay::browser_routes(&state, login))
+        .merge(nodes::browser_routes(&state, login));
     let inner = Router::new()
         .route("/api/health", get(health))
         .route("/api/ingest/v1/batch", post(ingest::batch))
@@ -151,6 +163,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pair/v1/poll", post(devices::poll))
         .route("/api/pair/v1/bind", post(devices::bind))
         .merge(relay::device_routes(&state))
+        .merge(nodes::node_routes(&state))
         .nest("/api/v1", v1)
         .nest("/api/public/v1", read::public_routes())
         .nest("/api/agent/v1", read::agent_routes(&state))
@@ -196,19 +209,25 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
             }
         }
     });
-    let relay = state.relay.clone();
+    let (relay, nodes) = (state.relay.clone(), state.nodes.clone());
     let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
     let shutdown = {
-        let relay = relay.clone();
+        let (relay, nodes) = (relay.clone(), nodes.clone());
         async move {
             shutdown_signal().await;
             relay.close_all(crate::relay::close::GOING_AWAY, "server stopping");
+            nodes.close_all(crate::nodes::close::GOING_AWAY, "server stopping");
         }
     };
     axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
-    // Upgraded relay connections outlive the HTTP server; let them finish their close handshakes.
-    if !relay.drained(std::time::Duration::from_secs(3)).await {
+    // Upgraded relay and node sockets outlive the HTTP server; let them finish their close handshakes.
+    let drain = std::time::Duration::from_secs(3);
+    let (relay_drained, nodes_drained) = tokio::join!(relay.drained(drain), nodes.drained(drain));
+    if !relay_drained {
         tracing::warn!("relay: stopping with connections still closing");
+    }
+    if !nodes_drained {
+        tracing::warn!("nodes: stopping with sockets still closing");
     }
     relay.flush().await;
     Ok(())

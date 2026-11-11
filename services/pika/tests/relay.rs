@@ -2101,7 +2101,7 @@ fn schema_v18_migrates_from_v17_without_a_reindex() {
     drop(conn);
 
     let store = Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(20));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(21));
     assert_eq!(store.setting(pika::store::NEEDS_REINDEX).unwrap(), None);
     assert!(!pika::store::DERIVED_TABLES.iter().any(|t| t.starts_with("relay_")));
     for table in ["relay_rooms", "relay_room_members", "relay_room_messages", "relay_events", "relay_mailbox"] {

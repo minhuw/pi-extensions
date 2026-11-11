@@ -69,6 +69,7 @@ pub struct ServerConfig {
     pub visitor_analytics: VisitorAnalytics,
     pub max_body: usize,
     pub relay: RelayConfig,
+    pub nodes: NodesConfig,
     /// The models.dev-format catalog that prices Magpie calls without a recorded cost (`crate::pricing`): an http(s)
     /// URL or a file. `None` counts recorded costs only.
     pub prices: Option<String>,
@@ -148,6 +149,77 @@ impl Default for RelayConfig {
     }
 }
 
+/// Node settings (`docs/NODE.md`). Only `enabled`, `insecure`, and `public_origin` come from the environment; every
+/// other field keeps its default outside tests.
+#[derive(Clone, Debug)]
+pub struct NodesConfig {
+    pub enabled: bool,
+    /// Allows the browser socket in `PIKA_AUTH=none`.
+    pub insecure: bool,
+    /// The origin of the configured public URL, which the browser socket accepts besides the request's own.
+    pub public_origin: Option<String>,
+    /// How often the server sends `ping` and records that a node was seen.
+    pub heartbeat: Duration,
+    /// A socket without any frame for this long is closed.
+    pub dead_after: Duration,
+    /// A node's `hello` must arrive this soon after the upgrade.
+    pub hello_timeout: Duration,
+    /// A socket write that takes longer closes the socket as dead.
+    pub write_timeout: Duration,
+    /// How often a socket re-checks its node credential or owner session, so that a revocation from another process
+    /// closes it with 4401, and a browser socket re-reads the node list.
+    pub revalidate: Duration,
+    pub max_frame_bytes: usize,
+    /// Bytes of frames a socket may have queued and not yet written; more closes it with 1008.
+    pub max_outgoing_bytes: usize,
+    pub max_channels_per_node: usize,
+    pub max_channels_per_client: usize,
+    /// Channel opens per browser socket in a sliding minute.
+    pub opens_per_minute: usize,
+    pub max_online: usize,
+    pub max_sockets_per_session: usize,
+}
+
+impl Default for NodesConfig {
+    fn default() -> Self {
+        NodesConfig {
+            enabled: false,
+            insecure: false,
+            public_origin: None,
+            heartbeat: Duration::from_secs(20),
+            dead_after: Duration::from_secs(45),
+            hello_timeout: Duration::from_secs(10),
+            write_timeout: Duration::from_secs(45),
+            revalidate: Duration::from_secs(2),
+            max_frame_bytes: 2 << 20,
+            max_outgoing_bytes: 16 << 20,
+            max_channels_per_node: 64,
+            max_channels_per_client: 16,
+            opens_per_minute: 30,
+            max_online: 32,
+            max_sockets_per_session: 4,
+        }
+    }
+}
+
+/// The origin of an http(s) URL as a browser sends it in `Origin`: the scheme and host in lowercase, with the port
+/// unless it is the scheme's default, without a path. `None` for anything else.
+pub fn origin_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.trim().split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    let default_port = match scheme.as_str() {
+        "http" => ":80",
+        "https" => ":443",
+        _ => return None,
+    };
+    let authority = rest.split(['/', '?', '#']).next()?.to_ascii_lowercase();
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    let authority = authority.strip_suffix(default_port).unwrap_or(&authority);
+    Some(format!("{scheme}://{authority}"))
+}
+
 impl ServerConfig {
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
         ServerConfig {
@@ -162,6 +234,7 @@ impl ServerConfig {
             visitor_analytics: VisitorAnalytics::default(),
             max_body: DEFAULT_MAX_BODY,
             relay: RelayConfig::default(),
+            nodes: NodesConfig::default(),
             prices: Some(crate::pricing::DEFAULT_SOURCE.into()),
         }
     }
@@ -214,6 +287,16 @@ mod tests {
         assert_eq!(normalize_base_path("/a/b").unwrap(), "/a/b");
         assert!(normalize_base_path("/a/../b").is_err());
         assert!(normalize_base_path("/a\"b").is_err());
+    }
+
+    #[test]
+    fn origins() {
+        assert_eq!(origin_of("https://Pika.Example.com/pika/").as_deref(), Some("https://pika.example.com"));
+        assert_eq!(origin_of("https://pika.example.com:443").as_deref(), Some("https://pika.example.com"));
+        assert_eq!(origin_of("http://127.0.0.1:7171").as_deref(), Some("http://127.0.0.1:7171"));
+        for bad in ["null", "ftp://x", "https://", "https://user@host", "pika.example.com"] {
+            assert_eq!(origin_of(bad), None, "{bad}");
+        }
     }
 
     #[test]

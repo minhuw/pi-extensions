@@ -33,6 +33,7 @@ pika [--data-dir DIR] <command>
 pika serve [--bind ADDR] [--base-path PATH] [--auth password|proxy|none] [--password-file FILE]
            [--password PASSWORD] [--cookie-secure auto|always|never] [--trust-proxy] [--max-body SIZE]
            [--relay] [--visitor-analytics off|auto|direct|proxy|cloudflare] [--prices SOURCE]
+           [--nodes] [--nodes-insecure] [--public-url URL]
 pika password set
 pika password clear
 pika token create <name> [--no-read-access]
@@ -40,6 +41,10 @@ pika token list
 pika token revoke <device>
 pika token rename <device> <name>
 pika token read-access <device> on|off
+pika node create <name>
+pika node list
+pika node revoke <node>
+pika node rename <node> <name>
 pika reindex
 pika export <sessionId>
 pika delete session <sessionId> [--yes]
@@ -56,14 +61,18 @@ pika delete project <name> [--yes]
 | `token revoke <device>` | Revokes a device's token at once and prints `revoked <name> (<id>)`. Its uploaded data, name, and id stay. |
 | `token rename <device> <name>` | Renames a device, with or without a token, and prints `renamed <id> to <name>`. Its id, and everything recorded under it, stay. |
 | `token read-access <device> on\|off` | Turns agent read access on or off for a device (see [Agent read access](#agent-read-access)) and prints `read access on for <name> (<id>)` or `read access off for <name> (<id>)`. |
+| `node create <name>` | Creates a [node](#nodes) named `<name>` and prints its credential (`pkn_…`) once on stdout; stderr says `created node <id> (<name>)`. Only the credential's SHA-256 is stored. Names follow the device name rule. |
+| `node list` | Lists nodes, tab-separated: id, name, creation time, last seen (`never`), last host (`-`), and the first 32 hex characters of the node key's fingerprint in groups of 4 (`-` before its first connection), sorted by name. |
+| `node revoke <node>` | Deletes a node and its credential and prints `revoked <id>`. A running server closes the node's socket with 4401 within 2 seconds. |
+| `node rename <node> <name>` | Renames a node and prints `renamed <id> to <name>`. |
 | `reindex` | Rebuilds every derived table (sessions, entries, turns, model and tool calls, links, Herder runs, search index) from the stored verbatim lines. |
 | `export <sessionId>` | Writes a session's JSONL to stdout, byte-identical to the original file. |
 | `delete session <sessionId>` | Deletes a session and every session it started (subagents, Herder steps, tickets), for good; see [Deleting and hiding](#deleting-and-hiding). Says what it will delete and asks `Delete? [y/N]` on a terminal; `--yes` (`-y`) skips the question. Without a terminal and without `--yes` it refuses. Prints the counts afterwards. |
 | `delete project <name>` | Deletes every session of a project, the sessions they started, and the project's Herder runs, and unpublishes it, asking as `delete session` does. |
 
-`<device>` is a device id, or a name that exactly one device has; when several share it, the command fails and lists their ids, so use one of those. `revoke` considers only devices that have a token.
+`<device>` is a device id, or a name that exactly one device has; when several share it, the command fails and lists their ids, so use one of those. `revoke` considers only devices that have a token. `<node>` works the same way for nodes.
 
-Every command opens the data directory and creates it if needed. Use the same `--data-dir` or `PIKA_DATA_DIR` as the server when running administrative commands. `password`, `token`, `reindex`, `export`, and `delete` can run while the server is running; a new stored password, revoked tokens, and deletions apply at once.
+Every command opens the data directory and creates it if needed. Use the same `--data-dir` or `PIKA_DATA_DIR` as the server when running administrative commands. `password`, `token`, `node`, `reindex`, `export`, and `delete` can run while the server is running; a new stored password, revoked tokens, and deletions apply at once.
 
 | Flag | Environment variable | Default | Meaning |
 | --- | --- | --- | --- |
@@ -79,6 +88,9 @@ Every command opens the data directory and creates it if needed. Use the same `-
 | `--max-body` | `PIKA_MAX_BODY` | `32MiB` | Largest ingest body, both as sent and after gzip decompression. Accepts bytes or `K`/`KiB`, `M`/`MiB`, `G`/`GiB` (all binary). |
 | `--relay` | `PIKA_RELAY` | `on` | Relay between Pi sessions (see [Relay](#relay)). `--relay` is a boolean flag with no value; to disable relay, set `PIKA_RELAY=off` (in `PIKA_RELAY`, `1`, `true`, `yes`, `on`, or empty turn it on, `0`, `false`, `no`, or `off` turn it off, and any other value stops `serve` with an error). When off, every relay route answers 404 `{ "error": "relay_disabled" }`. |
 | `--relay-max-hops` | `PIKA_RELAY_MAX_HOPS` | `128` | Most hops a relay message may travel between sessions without the user (see [Relay](#relay)); a positive integer. |
+| `--nodes` | `PIKA_NODES` | off | Terminals, files, and pane status on your machines through `pika-node` daemons (see [Nodes](#nodes)). A boolean flag like `--trust-proxy`. When off, every node route answers 404 `{ "error": "nodes_disabled" }`. |
+| `--nodes-insecure` | `PIKA_NODES_INSECURE` | off | With `--auth none`, allows the browser's node socket, which then needs no login. Without it, that socket answers 404 in `none` mode. |
+| `--public-url` | `PIKA_PUBLIC_URL` | none | The URL browsers open pika at, such as `https://pika.example.com/pika/`. The browser's node socket accepts its origin besides the origin the request itself names (`Host`, and HTTPS from a trusted proxy). |
 | `--prices` | `PIKA_PRICES` | `https://models.dev/api.json` | Where pika finds prices for Magpie calls that recorded no cost (see [Usage statistics](#usage-statistics-and-performance)): a models.dev-format catalog URL or file, fetched daily and kept in `prices.json` in the data directory. `off` counts recorded costs only; empty means the default. |
 
 Flags win over environment variables. `PIKA_DEBUG=1` turns on debug logging. In `password` mode the password comes from `--password-file`, else `--password`, else `pika password set`; the server logs when a configured password overrides a stored one. Prefer `pika password set` or a password file over `--password` and `PIKA_PASSWORD`, which other users can see in the process list or the container's configuration.
@@ -87,12 +99,13 @@ Flags win over environment variables. `PIKA_DEBUG=1` turns on debug logging. In 
 
 Every route is under the base path:
 
-- `GET api/health` returns `{ "ok": true, "version", "basePath", "features", "revision" }`, without authentication. `features` lists `"relay"` when relay is on and `"agent"` always; `revision` is the commit the server was built from, which the published images record and a plain `cargo build` leaves out (set `PIKA_REVISION` to record one).
+- `GET api/health` returns `{ "ok": true, "version", "basePath", "features", "revision" }`, without authentication. `features` lists `"relay"` when relay is on, `"agent"` always, and `"nodes"` when nodes are on; `revision` is the commit the server was built from, which the published images record and a plain `cargo build` leaves out (set `PIKA_REVISION` to record one).
 - `POST api/ingest/v1/batch` takes uploads from devices with `Authorization: Bearer <token>`.
 - `POST api/pair/v1/start` and `poll` let a device ask for a token, without authentication; you approve it in the UI. `POST api/pair/v1/bind` lets a device with a token register its device key.
 - `GET api/relay/v1/connect` (a WebSocket) and `GET api/relay/v1/sessions` are the relay's device routes, with `Authorization: Bearer <token>`.
+- `GET api/node/v1/connect` (a WebSocket) is the `pika-node` daemons' route, with `Authorization: Bearer <node credential>` (see [Nodes](#nodes)).
 - `api/agent/v1/*` is the read API for pi agents on devices with read access, with `Authorization: Bearer <token>` and credentials scrubbed (see [Agent read access](#agent-read-access)).
-- `api/v1/*` is the read API used by the UI (including the owner-only `extension-usage` aggregate of tool calls and extension commands), plus login, browser sessions (`auth/sessions`), devices, pairing approval, and the relay dashboard (`relay/sessions`, `relay/messages`, `relay/events`).
+- `api/v1/*` is the read API used by the UI (including the owner-only `extension-usage` aggregate of tool calls and extension commands), plus login, browser sessions (`auth/sessions`), devices, pairing approval, the relay dashboard (`relay/sessions`, `relay/messages`, `relay/events`), and the browser's node socket (`node/connect`).
 - `api/public/v1/*` provides anonymous read access to published projects only (see [Publishing projects](#publishing-projects)), plus anonymous usage aggregates that any site may query (see [Usage API for other sites](#usage-api-for-other-sites)).
 - `docs` and `docs/*` serve the public documentation without a pika login.
 - Every other path serves the UI. The server injects `<meta name="pika-base">` into `index.html`, so one build works under any base path.
@@ -236,6 +249,18 @@ Relay lets a running Pi session send a text message to any other running Pi sess
 pi agents can search and read your past trajectories, from every machine and project, to recall how something was done before, earlier decisions, and past errors and their fixes. They use the token pika's extension already has, so every device can read by default, with no extra step. You can turn it off per device: turn off **Agents can read** for the device on the Devices page, or run `pika token read-access <device> off` (`pika token create <name> --no-read-access` creates a device without it). Revoking a device's token stops its agents, as the token is gone, but leaves the switch as it was; a pairing that continues a device keeps it.
 
 Agents read under `api/agent/v1/`: the session list, sessions, their trees, turns, entries, and traces, and search, as the UI reads them under `api/v1/`, unpublished and hidden trajectories included. Every text is scrubbed of credentials as on the public pages (see [Redaction](#redaction)), and images come without their bytes. A device whose read access is off gets 403 `{ "error": "read_access_denied" }`; a missing or revoked token gets 401. These routes always take device tokens, whatever `PIKA_AUTH` says, so an authenticating proxy must leave `/api/agent/` open (see [Reverse proxy](#reverse-proxy)). The switch is stored in schema version 13, which the server adds when it first opens the database, on for every existing device and without a reindex; older binaries cannot open the database afterwards. The API is specified in [`docs/SPEC.md`](docs/SPEC.md#agent-read-api).
+
+### Nodes
+
+Nodes let you use terminals, files, and pi pane status on your machines from the UI. Each machine runs a `pika-node` daemon (see [`services/pika-node`](../pika-node/)), which owns the terminals; pika only authenticates the daemons and your browser, tracks which nodes are online, and forwards traffic between them. The browser and the daemon encrypt it end to end, so pika cannot read or type into a terminal. The protocol, and what a compromised server could still do, are in [`docs/NODE.md`](docs/NODE.md).
+
+- **Off by default:** start the server with `PIKA_NODES=on`. Health then lists `"nodes"`, and every UI response carries a strict `Content-Security-Policy`.
+- **Credentials:** `pika node create <name>` prints a node credential (`pkn_…`) for the daemon. It is not a device token: node routes accept only node credentials, and ingest, relay, agent, and pairing routes refuse them. `pika node revoke` cuts a node off.
+- **The browser:** its node socket needs your login session and an `Origin` equal to pika's own. Behind a TLS proxy, run with `PIKA_TRUST_PROXY=1` or set `PIKA_PUBLIC_URL`, so that pika knows its HTTPS origin. Signing out closes the socket.
+- **Limits:** 32 online nodes, 64 open channels per node, 16 per browser tab, 30 channel opens a minute per tab, and 4 tabs per login session.
+- **Behind a proxy:** `/api/node/` must stay open to daemons and needs WebSocket upgrades, like `/api/relay/` (see [Reverse proxy](#reverse-proxy)). The browser's socket is under `api/v1/` and stays behind the proxy's login.
+
+Nodes are stored in schema version 21, which the server adds when it first opens the database, without a reindex; older binaries cannot open the database afterwards.
 
 ### Upgrading from 0.8.1
 
@@ -384,7 +409,7 @@ Then use `pika` in place of `ghcr.io/minhuw/pika:latest` in the commands here.
 
 ### Configuration
 
-The image sets `PIKA_BIND=0.0.0.0:7171`, `PIKA_DATA_DIR=/data`, and `PIKA_BASE_PATH=/`, declares `/data` as a volume, and exposes 7171. Its entrypoint is `pika` and its default command is `serve`, so `docker run … ghcr.io/minhuw/pika:latest token list` runs any other command against the same volume. Pass `PIKA_AUTH`, `PIKA_PASSWORD_FILE`, `PIKA_TRUST_PROXY`, `PIKA_COOKIE_SECURE`, `PIKA_MAX_BODY`, `PIKA_RELAY`, `PIKA_PRICES`, `PIKA_VISITOR_ANALYTICS`, or `PIKA_BASE_PATH` with `-e`. The image keeps the default `PIKA_TRUST_PROXY` (off); turn it on when the published port is reachable only by your proxy, as with `-p 127.0.0.1:7171:7171`.
+The image sets `PIKA_BIND=0.0.0.0:7171`, `PIKA_DATA_DIR=/data`, and `PIKA_BASE_PATH=/`, declares `/data` as a volume, and exposes 7171. Its entrypoint is `pika` and its default command is `serve`, so `docker run … ghcr.io/minhuw/pika:latest token list` runs any other command against the same volume. Pass `PIKA_AUTH`, `PIKA_PASSWORD_FILE`, `PIKA_TRUST_PROXY`, `PIKA_COOKIE_SECURE`, `PIKA_MAX_BODY`, `PIKA_RELAY`, `PIKA_NODES`, `PIKA_PUBLIC_URL`, `PIKA_PRICES`, `PIKA_VISITOR_ANALYTICS`, or `PIKA_BASE_PATH` with `-e`. The image keeps the default `PIKA_TRUST_PROXY` (off); turn it on when the published port is reachable only by your proxy, as with `-p 127.0.0.1:7171:7171`.
 
 The `HEALTHCHECK` requests `http://127.0.0.1:<port from PIKA_BIND><PIKA_BASE_PATH>/api/health` with `curl` every 30 s, normalizing the base path as the server does (`pika`, `pika/`, and `/pika/` all mean `/pika`). It reads only the environment, so set the base path and bind address with `-e PIKA_BASE_PATH` and `-e PIKA_BIND`, not as `serve --base-path` or `--bind` arguments: with a flag the server moves but the health check does not, and the container stays unhealthy. `docker ps` shows the result, and you can check it by hand:
 
@@ -420,7 +445,7 @@ Every example:
 - allows request bodies of at least the server's `--max-body` (32 MiB by default) with `request_body max_size` or `client_max_body_size`; raise both together;
 - allows slow uploads: devices send gzip batches of up to 8 MiB uncompressed and give up on a batch after 30 s, then retry;
 - forwards `X-Forwarded-For` and `X-Forwarded-Proto`, so that with `PIKA_TRUST_PROXY=1` pika sees each client's address (for the login and pairing limits and the session list) and marks cookies `Secure` over HTTPS. Caddy sends both headers by default; nginx needs the two `proxy_set_header` lines;
-- passes WebSocket upgrades on `api/relay/`, for [Relay](#relay). Caddy does this as is. nginx needs a `location` for it with `proxy_http_version 1.1` and the `Upgrade` and `Connection` headers; because a `location` with its own `proxy_set_header` inherits none from the enclosing block, that location repeats `Host`, `X-Forwarded-For`, and `X-Forwarded-Proto`. The default 120 s read timeout is enough, since the server sends a heartbeat every 20 s;
+- passes WebSocket upgrades on `api/relay/`, for [Relay](#relay), and, with [Nodes](#nodes) on, on `api/node/` and `api/v1/node/` in the same way. Caddy does this as is. nginx needs a `location` for it with `proxy_http_version 1.1` and the `Upgrade` and `Connection` headers; because a `location` with its own `proxy_set_header` inherits none from the enclosing block, that location repeats `Host`, `X-Forwarded-For`, and `X-Forwarded-Proto`. The default 120 s read timeout is enough, since the server sends a heartbeat every 20 s;
 - with a path prefix, redirects `/pika` to `/pika/`, because the UI loads its assets by relative URL.
 
 Run pika behind a proxy with `PIKA_TRUST_PROXY=1`, and keep its port reachable only by the proxy (the examples bind it to `127.0.0.1`): when trusted, `X-Forwarded-For` decides the client address, and a client that reaches pika directly could set it.
@@ -466,7 +491,7 @@ homelab.example {
 
 The proxy can handle viewer authentication with basic auth, forward auth through Authelia or Authentik, or restricted access through a VPN. Start pika with `PIKA_AUTH=proxy` and exempt these paths from the proxy's login, including your base path (for example `/pika/api/ingest/`):
 
-- `api/ingest/`, `api/relay/`, and `api/agent/`: devices authenticate with their own `Authorization: Bearer` tokens.
+- `api/ingest/`, `api/relay/`, and `api/agent/`: devices authenticate with their own `Authorization: Bearer` tokens; `api/node/` likewise for node daemons.
 - `api/pair/`: a device requesting pairing has no login yet; approval remains in the owner UI.
 - `api/health`: monitoring needs no login.
 - `public`, `public/*`, `api/public/*`, `docs`, `docs/*`, and `assets/*`: the public gallery, documentation, and their assets.

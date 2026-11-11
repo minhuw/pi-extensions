@@ -427,7 +427,7 @@ impl Auth {
             AuthMode::Proxy => {
                 tracing::warn!(
                     "PIKA_AUTH=proxy: pika does not authenticate viewers; the reverse proxy must authenticate every \
-                     path except api/ingest/, api/pair/, api/relay/, api/agent/, and api/health"
+                     path except api/ingest/, api/pair/, api/relay/, api/agent/, api/node/, and api/health"
                 );
                 return Ok(Auth { mode: config.auth, password: None, checks: CheckCounters::default() });
             }
@@ -556,6 +556,17 @@ pub fn session_for_cookie(store: &Store, value: &str) -> Result<Option<String>> 
         store.write(|tx| tx.execute("UPDATE auth_sessions SET last_seen_at = ?2 WHERE id_hash = ?1", params![hash, now]))?;
     }
     Ok(Some(hash))
+}
+
+/// Whether the session whose id hash is `id_hash` exists and has not expired, without recording a visit.
+pub fn session_alive(store: &Store, id_hash: &str) -> Result<bool> {
+    let now = now_ms();
+    Ok(store.read(|conn| {
+        conn.prepare_cached("SELECT 1 FROM auth_sessions WHERE id_hash = ?1 AND expires_at > ?2")?
+            .query_row(params![id_hash, now], |_| Ok(()))
+            .optional()
+    })?
+    .is_some())
 }
 
 /// Live sessions, newest first.

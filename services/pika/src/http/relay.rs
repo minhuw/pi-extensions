@@ -521,7 +521,7 @@ impl Drop for Registered<'_> {
     }
 }
 
-fn close_frame(code: u16, reason: &str) -> Message {
+pub(super) fn close_frame(code: u16, reason: &str) -> Message {
     Message::Close(Some(CloseFrame { code, reason: reason.into() }))
 }
 
@@ -613,12 +613,12 @@ async fn run(state: AppState, socket: WebSocket, device: String, token: String) 
 }
 
 /// How long a closing connection waits for the peer to answer its close frame.
-const CLOSE_HANDSHAKE: Duration = Duration::from_secs(2);
+pub(super) const CLOSE_HANDSHAKE: Duration = Duration::from_secs(2);
 
 /// Writes a connection's frames, each within `timeout`, until the reader asks it to close; then it skips the frames
 /// still queued and sends the close frame, also within `timeout`. A write that fails or does not finish in time ends
 /// it early, which the reader takes as a dead connection.
-async fn write(
+pub(super) async fn write(
     mut sink: SplitSink<WebSocket, Message>,
     mut frames: Frames,
     mut closing: oneshot::Receiver<Closing>,

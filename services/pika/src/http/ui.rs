@@ -1,5 +1,5 @@
 use axum::extract::State;
-use axum::http::{Method, StatusCode, Uri, header};
+use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
@@ -93,7 +93,20 @@ fn asset(path: &str) -> Option<(&str, rust_embed::EmbeddedFile)> {
         .find_map(|suffix| Assets::get(suffix).map(|file| (suffix, file)))
 }
 
+/// The Content-Security-Policy of every UI response while nodes are on (see "Server hardening" in `docs/NODE.md`).
+pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+    img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; \
+    form-action 'self'";
+
 pub async fn serve(State(state): State<AppState>, method: Method, uri: Uri) -> Response {
+    let mut response = respond(&state, method, uri);
+    if state.nodes.enabled() {
+        response.headers_mut().insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(CONTENT_SECURITY_POLICY));
+    }
+    response
+}
+
+fn respond(state: &AppState, method: Method, uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     if path == "api" || path.starts_with("api/") {
         return error(StatusCode::NOT_FOUND, "not_found");
@@ -106,7 +119,7 @@ pub async fn serve(State(state): State<AppState>, method: Method, uri: Uri) -> R
         return ([(header::CONTENT_TYPE, content_type(path)), (header::CACHE_CONTROL, cache)], file.data.into_owned())
             .into_response();
     }
-    index(&state)
+    index(state)
 }
 
 #[cfg(test)]
