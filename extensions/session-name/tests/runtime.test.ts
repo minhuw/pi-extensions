@@ -54,11 +54,17 @@ it("names a real top-level session after its first run without changing the conv
 		expect(faux.state.callCount).toBe(2);
 		expect(runtime.session.messages.map((message) => message.role).filter((role) => role !== "system")).toEqual(["user", "assistant"]);
 
-		// The name stays, and later runs never ask again.
-		faux.setResponses([fauxAssistantMessage("Done.")]);
+		const recorded = runtime.session.sessionManager.getEntries().filter((entry) => entry.type === "custom" && entry.customType === "session-name.auto");
+		expect(recorded.map((entry) => (entry as { data?: { name?: string } }).data?.name)).toEqual(["Rename the parser helper"]);
+
+		// The name stays, later runs below the refresh step never ask again, and the record never reaches the model.
+		let sent: unknown[] = [];
+		faux.setResponses([(context) => { sent = context.messages; return fauxAssistantMessage("Done."); }]);
 		await runtime.session.prompt("Thanks");
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(faux.state.callCount).toBe(3);
+		expect(sent.map((message) => (message as { role: string }).role).filter((role) => role !== "system")).toEqual(["user", "assistant", "user"]);
+		expect(JSON.stringify(sent)).not.toContain("session-name.auto");
 		expect(runtime.session.sessionManager.getSessionName()).toBe("Rename the parser helper");
 		expect(errors).toEqual([]);
 	} finally {
