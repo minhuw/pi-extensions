@@ -7,6 +7,7 @@
 
 import { createCodingTools, createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_AGENTS } from "./default-agents.js";
+import { applyModelOverridesToRegistry, getActiveModelOverride, isCouncilAgentName } from "./model-overrides.js";
 import type { AgentConfig } from "./types.js";
 
 /**
@@ -53,13 +54,8 @@ export function getFallbackSubagent(): string | undefined { return fallbackSubag
 /** Set the configured fallback agent type. undefined = worker. */
 export function setFallbackSubagent(v: string | undefined): void { fallbackSubagent = v; }
 
-/**
- * Build a registry map: DEFAULT_AGENTS first (unless disabled via settings),
- * then user agents overlaid on top (same name overrides the default).
- * Pure — callers that must not disturb the process-wide registry (nested
- * delegation resolving agents from its own config root) build their own map.
- */
-export function buildAgentRegistry(userAgents: Map<string, AgentConfig>): Map<string, AgentConfig> {
+/** Build the un-overridden base map (`DEFAULT_AGENTS` overlaid with `userAgents`). */
+function buildBaseAgentRegistry(userAgents: Map<string, AgentConfig>): Map<string, AgentConfig> {
   const registry = new Map<string, AgentConfig>();
   if (!disableDefaults) {
     for (const [name, config] of DEFAULT_AGENTS) registry.set(name, config);
@@ -69,13 +65,27 @@ export function buildAgentRegistry(userAgents: Map<string, AgentConfig>): Map<st
 }
 
 /**
+ * Build a registry map: DEFAULT_AGENTS first (unless disabled via settings),
+ * then user agents overlaid on top (same name overrides the default), then
+ * active model overrides (`session` > `persistent`).
+ * Pure over its inputs + current override state — callers that must not disturb
+ * the process-wide registry (nested delegation resolving agents from its own
+ * config root) build their own map.
+ */
+export function buildAgentRegistry(userAgents: Map<string, AgentConfig>): Map<string, AgentConfig> {
+  return applyModelOverridesToRegistry(buildBaseAgentRegistry(userAgents));
+}
+
+/**
  * Register agents into the unified registry.
- * Starts with DEFAULT_AGENTS, then overlays user agents (overrides defaults with same name).
+ * Stores the un-overridden base configs (DEFAULT_AGENTS + userAgents) so
+ * in-session set/clear of model overrides takes effect immediately on
+ * `getAgentConfig` even before `reloadCustomAgents()` runs.
  * Disabled agents (enabled === false) are kept in the registry but excluded from spawning.
  */
 export function registerAgents(userAgents: Map<string, AgentConfig>): void {
   agents.clear();
-  for (const [name, config] of buildAgentRegistry(userAgents)) {
+  for (const [name, config] of buildBaseAgentRegistry(userAgents)) {
     agents.set(name, config);
   }
 }
@@ -274,9 +284,18 @@ export function resolveType(name: string): string | undefined {
   return resolveKey(name);
 }
 
-/** Get the agent config for a type (case-insensitive). */
+/** Get the agent config for a type (case-insensitive), with active model overrides applied. */
 export function getAgentConfig(name: string): AgentConfig | undefined {
-  return getAgentConfigIn(agents, name);
+  const key = resolveKey(name);
+  if (!key) return undefined;
+  const base = agents.get(key);
+  if (!base || isCouncilAgentName(key)) return base;
+  const override = getActiveModelOverride(key);
+  if (!override) return base;
+  return {
+    ...base,
+    model: override.value.mode === "inherit" ? undefined : override.value.model,
+  };
 }
 
 /** Enabled, model-visible type names — what a model may name (tool descriptions, mentions). */

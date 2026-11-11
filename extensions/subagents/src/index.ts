@@ -8,12 +8,13 @@
  *
  * Commands:
  *   /agents                 — Interactive agent management menu
+ *   /agents model           — Configure persistent or session subagent model overrides
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
+import { type AutocompleteItem, Container, isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
@@ -36,6 +37,14 @@ import { registerSubagentHost, releaseSubagentHost, resolveSubagentHostModel, ty
 import { isolationParam, MODEL_OVERRIDE_ERROR, MODEL_SELECTION_GUIDANCE, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
+import {
+  clearAgentModelOverride,
+  clearSessionModelOverrides,
+  getActiveModelOverride,
+  isCouncilAgentName,
+  type ModelOverrideScope,
+  setAgentModelOverride,
+} from "./model-overrides.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
@@ -853,9 +862,13 @@ export default function (pi: ExtensionAPI) {
       if (scopeVerdict.kind === "error") throw new Error(scopeVerdict.message);
       if (scopeVerdict.kind === "warn") scopeCtx.ui.notify(scopeVerdict.message, "warning");
       const effectiveThinking = config?.thinking ?? request.thinking;
-      const effectiveServiceTier = config?.serviceTier ?? request.serviceTier;
+      let effectiveServiceTier = config?.serviceTier ?? request.serviceTier;
       if (effectiveServiceTier && effectiveModel && !modelSupportsServiceTier(effectiveModel)) {
-        throw new Error(`Model "${effectiveModel.provider}/${effectiveModel.id}" does not support service tier "${effectiveServiceTier}".`);
+        if (!request.serviceTier && getActiveModelOverride(descriptor.name)) {
+          effectiveServiceTier = undefined;
+        } else {
+          throw new Error(`Model "${effectiveModel.provider}/${effectiveModel.id}" does not support service tier "${effectiveServiceTier}".`);
+        }
       }
       const effectiveMaxTurns = normalizeMaxTurns(config?.maxTurns ?? request.maxTurns ?? getDefaultMaxTurns());
       const { record } = await manager.spawnAndWait(piRef, ctx, descriptor.name, request.prompt, {
@@ -1118,6 +1131,7 @@ export default function (pi: ExtensionAPI) {
     // resumed session all land here, and any of them may follow a `pi install`
     // that added a package the cached root list predates.
     invalidatePackageCache();
+    clearSessionModelOverrides();
     reloadCustomAgents();
     if (ctx.hasUI) {
       widget.setUICtx(ctx.ui);
@@ -1429,6 +1443,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_before_switch", () => {
+    clearSessionModelOverrides();
+    reloadCustomAgents();
     manager.clearCompleted(true);
     scheduler.stop();
   });
@@ -1437,6 +1453,7 @@ export default function (pi: ExtensionAPI) {
   // If the session is going down, there's nothing left to consume agent results.
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
+    clearSessionModelOverrides();
     unsubscribeActivity();
     if (hostRegistration) {
       pi.events.emit("pi-extensions:activity", { source: "subagents", activities: [] });
@@ -2397,7 +2414,9 @@ Terse command-style prompts produce shallow, generic work.
       const isolation = resolvedConfig.isolation;
 
       // Service tier only applies to OpenAI-compatible APIs. Params → hard error;
-      // frontmatter pin → warn and proceed without tier.
+      // frontmatter pin → warn and proceed without tier (unless a user model
+      // override switched the agent onto a non-OpenAI model without an explicit
+      // caller service_tier param, in which case drop the inherited tier quietly).
       if (serviceTier && model && !modelSupportsServiceTier(model)) {
         const label = `${model.provider}/${model.id}`;
         if (resolvedConfig.serviceTierFromParams) {
@@ -2405,11 +2424,15 @@ Terse command-style prompts produce shallow, generic work.
             `Model "${label}" (api: ${model.api ?? "unknown"}) does not support service_tier "${serviceTier}".`,
           );
         }
-        ctx.ui.notify(
-          `Agent "${customConfig?.displayName ?? subagentType}" service_tier "${serviceTier}" ignored — model ${label} does not support service tiers`,
-          "warning",
-        );
-        serviceTier = undefined;
+        if (!toolServiceTier && getActiveModelOverride(subagentType)) {
+          serviceTier = undefined;
+        } else {
+          ctx.ui.notify(
+            `Agent "${customConfig?.displayName ?? subagentType}" service_tier "${serviceTier}" ignored — model ${label} does not support service tiers`,
+            "warning",
+          );
+          serviceTier = undefined;
+        }
       }
       // Whether this spawn writes its .output transcript. Per-agent
       // frontmatter (`output_transcript`) wins; otherwise the project/global
@@ -3677,7 +3700,7 @@ Terse command-style prompts produce shallow, generic work.
     // it: the `▪` badge says a package won, not which one.
     const items: SettingItem[] = allNames.map((name, i) => {
       const cfg = configs[i];
-      const model = getModelLabel(name, ctx.modelRegistry);
+      const model = `${getModelLabel(name, ctx.modelRegistry)}${formatOverrideBadge(name)}`;
       const invocation = [
         model,
         `thinking: ${cfg?.thinking ?? "inherit"}`,
@@ -3812,6 +3835,113 @@ Terse command-style prompts produce shallow, generic work.
     );
   }
 
+  function formatOverrideBadge(name: string): string {
+    const active = getActiveModelOverride(name);
+    if (!active) return "";
+    return active.scope === "session" ? " [session override]" : " [override]";
+  }
+
+  function formatAgentModelRow(name: string): string {
+    const cfg = getAgentConfig(name);
+    const effective = cfg?.model ?? "inherit";
+    return `${name} — ${effective}${formatOverrideBadge(name)}`;
+  }
+
+  async function promptAgentModelPicker(
+    ctx: ExtensionCommandContext,
+    name: string,
+    scope: ModelOverrideScope = "persistent",
+  ): Promise<void> {
+    const cfg = getAgentConfig(name);
+    const currentModel = cfg?.model;
+    const resolvedCurrent = currentModel && ctx.modelRegistry
+      ? resolveModel(currentModel, ctx.modelRegistry)
+      : undefined;
+    const effectiveCurrent = resolvedCurrent && typeof resolvedCurrent !== "string"
+      ? `${resolvedCurrent.provider}/${resolvedCurrent.id}`
+      : currentModel;
+    const activeOverride = getActiveModelOverride(name);
+    const available = (ctx.modelRegistry?.getAvailable?.() ?? []) as Array<{ provider: string; id: string }>;
+
+    const seen = new Set<string>();
+    const modelSpecs: string[] = [];
+    for (const entry of available) {
+      if (!entry?.provider || !entry?.id) continue;
+      const spec = `${entry.provider}/${entry.id}`;
+      const lower = spec.toLowerCase();
+      if (seen.has(lower)) continue;
+      seen.add(lower);
+      modelSpecs.push(spec);
+    }
+
+    const currentIdx = effectiveCurrent
+      ? modelSpecs.findIndex(spec => spec.toLowerCase() === effectiveCurrent.toLowerCase())
+      : -1;
+    if (currentIdx > 0) {
+      const [currentSpec] = modelSpecs.splice(currentIdx, 1);
+      modelSpecs.unshift(currentSpec);
+    }
+
+    type PickerAction =
+      | { kind: "model"; model: string }
+      | { kind: "inherit" }
+      | { kind: "reset" };
+    const actionByOption = new Map<string, PickerAction>();
+    const options: string[] = [];
+
+    for (const spec of modelSpecs) {
+      const isCurrent = effectiveCurrent !== undefined && spec.toLowerCase() === effectiveCurrent.toLowerCase();
+      const label = isCurrent ? `${spec} (current)` : spec;
+      options.push(label);
+      actionByOption.set(label, { kind: "model", model: spec });
+    }
+
+    const inheritLabel = "Inherit parent session model";
+    options.push(inheritLabel);
+    actionByOption.set(inheritLabel, { kind: "inherit" });
+
+    if (activeOverride) {
+      const resetLabel = "Reset to agent default";
+      options.push(resetLabel);
+      actionByOption.set(resetLabel, { kind: "reset" });
+    }
+
+    const title = `Select model for ${name}${scope === "session" ? " (this session)" : ""}`;
+    const choice = await ctx.ui.select(title, options);
+    if (!choice) return;
+
+    const normalizedChoice = choice.endsWith(" (current)")
+      ? choice.slice(0, -" (current)".length)
+      : choice;
+    const action = actionByOption.get(choice)
+      ?? (modelSpecs.some(spec => spec === normalizedChoice)
+        ? { kind: "model" as const, model: normalizedChoice }
+        : undefined);
+    if (!action) return;
+
+    if (action.kind === "model") {
+      setAgentModelOverride(name, { mode: "model", model: action.model }, scope);
+      reloadCustomAgents();
+      ctx.ui.notify(
+        `${name} model set to ${action.model}${scope === "session" ? " (this session)" : ""}`,
+        "info",
+      );
+    } else if (action.kind === "inherit") {
+      setAgentModelOverride(name, { mode: "inherit" }, scope);
+      reloadCustomAgents();
+      ctx.ui.notify(`${name} model set to inherit parent model (${scope})`, "info");
+    } else {
+      clearAgentModelOverride(name, scope === "session" ? "session" : "all");
+      reloadCustomAgents();
+      const effectiveLabel = getAgentConfig(name)?.model ?? "inherit parent model";
+      if (scope === "session" && getActiveModelOverride(name)) {
+        ctx.ui.notify(`${name} session model override cleared (now using ${effectiveLabel})`, "info");
+      } else {
+        ctx.ui.notify(`${name} model reset to default (${effectiveLabel})`, "info");
+      }
+    }
+  }
+
   async function showAgentDetail(ctx: ExtensionCommandContext, name: string) {
     const cfg = getAgentConfig(name);
     if (!cfg) {
@@ -3851,6 +3981,13 @@ Terse command-style prompts produce shallow, generic work.
       menuOptions = ["Edit", "Disable", "Delete", "Back"];
     }
 
+    if (!isCouncilAgentName(name)) {
+      const modelOptions = getActiveModelOverride(name)
+        ? ["Change model", "Reset model override"]
+        : ["Change model"];
+      menuOptions = [...modelOptions, ...menuOptions];
+    }
+
     // Name the package in the title: this menu's options are the read-only set,
     // and "which package do I have to uninstall or allowlist away" is the
     // question they raise.
@@ -3858,7 +3995,14 @@ Terse command-style prompts produce shallow, generic work.
     const choice = await ctx.ui.select(pkgName ? `${name} — ${pkgName}` : name, menuOptions);
     if (!choice || choice === "Back") return;
 
-    if (choice === "Edit" && file) {
+    if (choice === "Change model") {
+      await promptAgentModelPicker(ctx, name);
+    } else if (choice === "Reset model override") {
+      clearAgentModelOverride(name, "all");
+      reloadCustomAgents();
+      const restored = getAgentConfig(name)?.model ?? "inherit parent model";
+      ctx.ui.notify(`${name} model reset to default (${restored})`, "info");
+    } else if (choice === "Edit" && file) {
       const content = readFileSync(file.path, "utf-8");
       const edited = await ctx.ui.editor(`Edit ${name}`, content);
       if (edited !== undefined && edited !== content) {
@@ -4785,9 +4929,286 @@ Write the file using the write tool. Only write the file, nothing else.`;
     ctx.ui.notify(message, level);
   }
 
+  function getVisibleNonCouncilAgents(): string[] {
+    return getAllTypes().filter(name => !isCouncilAgentName(name));
+  }
+
+  function validateConfigurableAgent(
+    rawAgent: string,
+    ctx: ExtensionCommandContext,
+  ): string | undefined {
+    if (isCouncilAgentName(rawAgent)) {
+      ctx.ui.notify(
+        `Council advisor "${rawAgent.trim().toLowerCase()}" has a pinned model and cannot be overridden.`,
+        "warning",
+      );
+      return undefined;
+    }
+    const resolved = resolveType(rawAgent);
+    if (!resolved || isCouncilAgentName(resolved)) {
+      const available = getVisibleNonCouncilAgents();
+      ctx.ui.notify(
+        `Unknown agent "${rawAgent}". Available agents: ${available.join(", ") || "(none)"}.`,
+        "warning",
+      );
+      return undefined;
+    }
+    return resolved;
+  }
+
+  function resolveModelOverrideSpec(
+    rawInput: string,
+    registry?: ModelRegistry,
+  ): { ok: true; model: string } | { ok: false; message: string } {
+    const input = rawInput.trim();
+    const available = (registry?.getAvailable?.() ?? []) as Array<{ provider: string; id: string }>;
+
+    if (input.includes("/")) {
+      const slashIdx = input.indexOf("/");
+      const providerPart = input.slice(0, slashIdx).trim();
+      const modelPart = input.slice(slashIdx + 1).trim();
+      if (!providerPart || !modelPart || !modelPart.replace(/\//g, "").trim()) {
+        return { ok: false, message: `Invalid model "${input}": expected "provider/model".` };
+      }
+      if (available.length === 0) {
+        return { ok: true, model: `${providerPart}/${modelPart}` };
+      }
+      const exact = available.find(m => `${m.provider}/${m.id}` === input)
+        ?? available.find(m => `${m.provider}/${m.id}`.toLowerCase() === input.toLowerCase());
+      if (exact) {
+        return { ok: true, model: `${exact.provider}/${exact.id}` };
+      }
+      const lowerInput = input.toLowerCase();
+      const lowerModelPart = modelPart.toLowerCase();
+      const suggestions = available
+        .map(m => `${m.provider}/${m.id}`)
+        .filter(full => {
+          const lowerFull = full.toLowerCase();
+          return lowerFull.includes(lowerInput) || lowerFull.includes(lowerModelPart);
+        })
+        .slice(0, 5);
+      const suffix = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(", ")}?` : "";
+      return {
+        ok: false,
+        message: `Model "${input}" was not found in available models.${suffix}`,
+      };
+    }
+
+    const lowerInput = input.toLowerCase();
+    const matches = available.filter(m => m.id?.toLowerCase() === lowerInput);
+    if (matches.length === 1) {
+      return { ok: true, model: `${matches[0].provider}/${matches[0].id}` };
+    }
+    if (matches.length > 1) {
+      const candidates = matches.map(m => `${m.provider}/${m.id}`).join(", ");
+      return {
+        ok: false,
+        message: `Model "${input}" matches multiple providers: ${candidates}. Specify provider/model explicitly.`,
+      };
+    }
+    const suggestions = available
+      .map(m => `${m.provider}/${m.id}`)
+      .filter(full => full.toLowerCase().includes(lowerInput))
+      .slice(0, 5);
+    const suffix = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(", ")}?` : "";
+    return {
+      ok: false,
+      message: `Model "${input}" was not found in available models.${suffix}`,
+    };
+  }
+
+  async function handleAgentsModelCommand(
+    tokensAfterModel: string[],
+    ctx: ExtensionCommandContext,
+  ): Promise<void> {
+    reloadCustomAgents();
+
+    let hasSessionFlag = false;
+    const positionals: string[] = [];
+    for (const tok of tokensAfterModel) {
+      if (tok === "--session" || tok === "-s") {
+        hasSessionFlag = true;
+      } else if (tok.startsWith("-")) {
+        ctx.ui.notify(`Unknown flag "${tok}". Supported flags: --session (-s).`, "warning");
+        return;
+      } else {
+        positionals.push(tok);
+      }
+    }
+
+    if (positionals.length > 2) {
+      ctx.ui.notify(
+        "Usage: /agents model [<agent> [<provider/model> | inherit | default]] [--session]",
+        "warning",
+      );
+      return;
+    }
+
+    const scope: ModelOverrideScope = hasSessionFlag ? "session" : "persistent";
+
+    if (positionals.length === 0) {
+      const names = getVisibleNonCouncilAgents();
+      if (names.length === 0) {
+        ctx.ui.notify("No configurable agents found.", "info");
+        return;
+      }
+      if (!ctx.hasUI) {
+        ctx.ui.notify(names.map(formatAgentModelRow).join("\n"), "info");
+        return;
+      }
+      const rowByLabel = new Map<string, string>();
+      const options = names.map(name => {
+        const row = formatAgentModelRow(name);
+        rowByLabel.set(row, name);
+        return row;
+      });
+      const chosen = await ctx.ui.select("Select agent to configure model", options);
+      if (!chosen) return;
+      const chosenAgent = rowByLabel.get(chosen)
+        ?? names.find(name => chosen === name || chosen.startsWith(`${name} — `));
+      if (!chosenAgent) return;
+      await promptAgentModelPicker(ctx, chosenAgent, scope);
+      return;
+    }
+
+    const agentName = validateConfigurableAgent(positionals[0], ctx);
+    if (!agentName) return;
+
+    if (positionals.length === 1) {
+      if (ctx.hasUI) {
+        await promptAgentModelPicker(ctx, agentName, scope);
+      } else {
+        ctx.ui.notify(formatAgentModelRow(agentName), "info");
+      }
+      return;
+    }
+
+    const target = positionals[1].trim();
+    const lowerTarget = target.toLowerCase();
+
+    if (lowerTarget === "default" || lowerTarget === "reset" || lowerTarget === "clear") {
+      clearAgentModelOverride(agentName, hasSessionFlag ? "session" : "all");
+      reloadCustomAgents();
+      const effectiveLabel = getAgentConfig(agentName)?.model ?? "inherit parent model";
+      if (hasSessionFlag && getActiveModelOverride(agentName)) {
+        ctx.ui.notify(`${agentName} session model override cleared (now using ${effectiveLabel})`, "info");
+      } else {
+        ctx.ui.notify(`${agentName} model reset to default (${effectiveLabel})`, "info");
+      }
+      return;
+    }
+
+    if (lowerTarget === "inherit" || lowerTarget === "parent") {
+      setAgentModelOverride(agentName, { mode: "inherit" }, scope);
+      reloadCustomAgents();
+      ctx.ui.notify(`${agentName} model set to inherit parent model (${scope})`, "info");
+      return;
+    }
+
+    const resolved = resolveModelOverrideSpec(target, ctx.modelRegistry);
+    if (!resolved.ok) {
+      ctx.ui.notify(resolved.message, "warning");
+      return;
+    }
+
+    try {
+      setAgentModelOverride(agentName, { mode: "model", model: resolved.model }, scope);
+    } catch (err) {
+      ctx.ui.notify(err instanceof Error ? err.message : String(err), "warning");
+      return;
+    }
+    reloadCustomAgents();
+    ctx.ui.notify(
+      `${agentName} model set to ${resolved.model}${scope === "session" ? " (this session)" : ""}`,
+      "info",
+    );
+  }
+
+  function getAgentsArgumentCompletions(prefix: string): AutocompleteItem[] | null {
+    const words = prefix.trimStart().split(/\s+/);
+    const last = words.pop() ?? "";
+    const lowerLast = last.toLowerCase();
+
+    if (words.length === 0) {
+      if (lowerLast === "model") return null;
+      if ("model".startsWith(lowerLast)) {
+        return [{ value: "model", label: "model", description: "Configure subagent model overrides" }];
+      }
+      return null;
+    }
+
+    if (words[0]?.toLowerCase() !== "model") return null;
+
+    const afterModel = words.slice(1);
+    const hasSessionAlready = afterModel.includes("--session") || afterModel.includes("-s");
+    const positionals = afterModel.filter(w => w !== "--session" && w !== "-s");
+
+    if (positionals.length === 0) {
+      reloadCustomAgents();
+      const agents = getVisibleNonCouncilAgents();
+      if (agents.some(a => a.toLowerCase() === lowerLast)) return null;
+      const matches = agents.filter(a => a.toLowerCase().startsWith(lowerLast));
+      return matches.length > 0
+        ? matches.map(a => ({ value: [...words, a].join(" "), label: a }))
+        : null;
+    }
+
+    if (positionals.length === 1) {
+      const keywords = ["default", "inherit", ...(hasSessionAlready ? [] : ["--session"])];
+      const available = (currentCtx?.modelRegistry?.getAvailable?.() ?? []) as Array<{ provider: string; id: string }>;
+      const seen = new Set<string>(keywords);
+      const modelSpecs: string[] = [];
+      for (const entry of available) {
+        if (!entry?.provider || !entry?.id) continue;
+        const spec = `${entry.provider}/${entry.id}`;
+        if (seen.has(spec)) continue;
+        seen.add(spec);
+        modelSpecs.push(spec);
+      }
+      const candidates = [...keywords, ...modelSpecs];
+      if (candidates.some(c => c.toLowerCase() === lowerLast)) return null;
+
+      const prefixMatches = candidates.filter(c => c.toLowerCase().startsWith(lowerLast));
+      const substringMatches = lowerLast
+        ? modelSpecs.filter(
+            c => !c.toLowerCase().startsWith(lowerLast) && c.toLowerCase().includes(lowerLast),
+          )
+        : [];
+      const matches = [...prefixMatches, ...substringMatches];
+      return matches.length > 0
+        ? matches.map(c => ({ value: [...words, c].join(" "), label: c }))
+        : null;
+    }
+
+    if (positionals.length === 2 && !hasSessionAlready) {
+      if (lowerLast === "--session" || lowerLast === "-s") return null;
+      if ("--session".startsWith(lowerLast)) {
+        return [{ value: [...words, "--session"].join(" "), label: "--session" }];
+      }
+    }
+
+    return null;
+  }
+
   pi.registerCommand("agents", {
     description: "Manage agents",
-    handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
+    getArgumentCompletions: getAgentsArgumentCompletions,
+    handler: async (args, ctx) => {
+      const trimmed = args.trim();
+      if (!trimmed) {
+        await showAgentsMenu(ctx);
+        return;
+      }
+      const tokens = trimmed.split(/\s+/);
+      if (tokens[0].toLowerCase() === "model") {
+        await handleAgentsModelCommand(tokens.slice(1), ctx);
+        return;
+      }
+      ctx.ui.notify(
+        `Unknown /agents subcommand "${tokens[0]}". Usage: /agents [model [<agent> [<provider/model> | inherit | default]] [--session]]`,
+        "warning",
+      );
+    },
   });
 
   /**

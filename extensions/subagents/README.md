@@ -57,7 +57,7 @@ Settings live in the global or project `subagents.json`; see [upstream configura
 
 Default tools: `Agent`, `get_subagent_result`, and `steer_subagent`. Use `/agents` for the fleet and settings. Custom agent definitions can override embedded names; upstream also supports mentions. `SubagentWorkflow` and its inspector are available only after explicit configuration opt-in.
 
-Select an existing agent type with `subagent_type` (`agentType` in workflows). The resolved agent definition’s `model` is authoritative, including the embedded defaults below. If the definition has no model, the child inherits the current parent model. Agent tools and workflow scripts reject `model` overrides, including stale saved scripts. To change a type’s model, edit its agent definition. Trusted external hosts retain their own model bindings.
+Select an existing agent type with `subagent_type` (`agentType` in workflows). The resolved agent definition’s `model` is authoritative, including the embedded defaults below. If the definition has no model, the child inherits the current parent model. Agent tools and workflow scripts reject LLM `model` overrides, including stale saved scripts. Users can override any non-council agent’s model without ejecting a `.md` file via `/agents model <agent> [provider/model | inherit | default] [--session]` (or interactively through `/agents model` and `/agents` → `Agent types` → `<agent>` → `Change model` / `Reset model override`): persistent overrides are saved in `<agentDir>/subagent-models.json`, `--session` (`-s`) overrides apply to the current session only, and session overrides beat persistent overrides, which beat `.md` frontmatter and embedded defaults. Council advisors keep pinned models and cannot be overridden; registered `Agent` tool descriptions remain static mid-session to preserve prompt-cache prefixes. Trusted external hosts retain their own model bindings.
 
 | Type | Job | Tools | Model defaults |
 | --- | --- | --- | --- |
@@ -83,7 +83,7 @@ thinking: max
 service_tier: fast
 ```
 
-Otherwise the `Agent` tool can pass `service_tier`. `fast` maps to provider `priority`; `standard` maps to `default`. Raw `priority`, `default`, `flex`, and `auto` are also supported. Compatible APIs are `openai-responses`, `openai-codex-responses`, and `cliproxyapi-codex-responses`. An unsupported explicit tool override is rejected; an incompatible frontmatter default is warned about and not applied. See `src/service-tier.ts`.
+Otherwise the `Agent` tool can pass `service_tier`. `fast` maps to provider `priority`; `standard` maps to `default`. Raw `priority`, `default`, `flex`, and `auto` are also supported. Compatible APIs are `openai-responses`, `openai-codex-responses`, and `cliproxyapi-codex-responses`. An unsupported explicit tool override is rejected; an incompatible frontmatter default is warned about and not applied (or dropped silently when an active user model override switched the agent onto a non-OpenAI model without an explicit `service_tier` argument). See `src/service-tier.ts`.
 
 ### Workflows
 
