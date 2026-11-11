@@ -24,3 +24,15 @@ export function splitInput(data: string, maxBytes: number = LIMITS.maxInputBytes
 	if (start < data.length) chunks.push(data.slice(start));
 	return chunks;
 }
+
+/** Focus reports (DECSET 1004) and mouse reports: SGR (1006), URXVT (1015), and X10/default (`CSI M` + 3 bytes). */
+const REPORTS = /^(?:\x1b\[[IO]|\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[\d+;\d+;\d+M|\x1b\[M[\s\S]{3})+$/;
+
+/**
+ * Whether `onData` output is the user typing or pasting, which claims the size (NODE.md, "Resize"). Reports the
+ * terminal sends by itself are not: a window that gains or loses focus, or a pointer moving over it, must not take
+ * the size from the window the user types in.
+ */
+export function claimsSize(data: string): boolean {
+	return data.length > 0 && !REPORTS.test(data);
+}

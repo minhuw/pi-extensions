@@ -10,7 +10,7 @@ beforeAll(() => {
 	vi.stubGlobal("crypto", webcrypto);
 });
 
-const shell: TerminalInfo = { terminalId: "t1", title: "bash", cwd: "/home/me", cols: 80, rows: 24, pid: 7, createdAt: 1, argv: [] };
+const shell: TerminalInfo = { terminalId: "t1", title: "bash", cwd: "/home/me", cols: 80, rows: 24, pid: 7, createdAt: 1, argv: ["/bin/bash", "-l"] };
 
 /** The pika server in memory: one browser socket, routing channels to fake nodes, frames verbatim. */
 class FakeServer {
@@ -161,6 +161,47 @@ describe("the Nodes page client", () => {
 		await settle();
 		const terminals = client.getSnapshot().nodes[0]!.terminals;
 		expect(orderTerminals(terminals).map((item) => item.terminalId)).toEqual(["t2", "t1"]);
+	});
+
+	it("lists terminals once per channel and then follows term.created and term.removed", async () => {
+		const { node, client: c } = await setup();
+		const other = { ...shell, terminalId: "t2", title: "pi", createdAt: 2 };
+		node.onMessage = (message, fake) => {
+			if (message.type === "term.list") void fake.send({ type: "reply", id: message.id, result: { terminals: [shell] } });
+			if (message.type === "term.create") {
+				void fake.send({ type: "reply", id: message.id, result: { terminal: other } }).then(() => fake.send({ type: "term.created", terminal: other }));
+			}
+			if (message.type === "term.kill") void fake.send({ type: "reply", id: message.id, result: {} });
+		};
+		node.allowed.add(c.getSnapshot().fingerprint!);
+		c.pair("node-1");
+		await settle();
+		await c.confirmPin("node-1");
+		await settle();
+		const ids = () => c.getSnapshot().nodes[0]!.terminals.map((item) => item.terminalId);
+		expect(ids()).toEqual(["t1"]);
+
+		// Another tab creates a terminal: it arrives as an event, first in the list, with its text cleaned.
+		await node.send({ type: "term.created", terminal: { ...shell, terminalId: "t3", title: "x\u001b[31my", createdAt: 3 } });
+		await settle();
+		expect(ids()).toEqual(["t3", "t1"]);
+		expect(c.getSnapshot().nodes[0]!.terminals[0]!.title).not.toContain("\u001b");
+
+		// This tab creates one: its reply and its own term.created leave one entry.
+		await c.createTerminal("node-1", { cols: 80, rows: 24 });
+		await settle();
+		expect(ids()).toEqual(["t2", "t3", "t1"]);
+
+		await c.killTerminal("node-1", "t3");
+		await node.send({ type: "term.removed", terminalId: "t3" });
+		await settle();
+		expect(ids()).toEqual(["t2", "t1"]);
+
+		// Status for a terminal the list does not hold is dropped, not answered with another term.list.
+		await node.send({ type: "term.title", terminalId: "t9", title: "ghost" });
+		await settle();
+		expect(ids()).toEqual(["t2", "t1"]);
+		expect(node.received.filter((message) => message.type === "term.list")).toHaveLength(1);
 	});
 
 	it("shows node_key_changed and does not reconnect or send", async () => {

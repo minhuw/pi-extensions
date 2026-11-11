@@ -73,4 +73,31 @@ describe("input frames", () => {
 		for (const chunk of chunks) expect(new TextEncoder().encode(chunk).length).toBeLessThanOrEqual(4);
 		expect(chunks).toContain("😀");
 	});
+
+	it("claims the size for typing and pasting, not for focus or mouse reports", async () => {
+		const { claimsSize } = await import("../src/nodes/input");
+		for (const typed of ["a", "ls\r", "\x1b", "\x1b[A", "\x1bOA", "\x1b[200~paste\x1b[201~", "\x1b[I typed"]) expect(claimsSize(typed), JSON.stringify(typed)).toBe(true);
+		for (const report of ["", "\x1b[I", "\x1b[O", "\x1b[O\x1b[I", "\x1b[<35;10;4M", "\x1b[<0;120;40m", "\x1b[32;10;4M", "\x1b[M#!!"]) {
+			expect(claimsSize(report), JSON.stringify(report)).toBe(false);
+		}
+	});
+
+	it("matches the focus reports a real xterm.js sends", async () => {
+		const { claimsSize } = await import("../src/nodes/input");
+		const { Terminal } = await import("@xterm/xterm");
+		const host = document.createElement("div");
+		document.body.append(host);
+		const term = new Terminal({ cols: 20, rows: 4 });
+		term.open(host);
+		const sent: string[] = [];
+		term.onData((data) => sent.push(data));
+		await new Promise<void>((resolve) => term.write("\x1b[?1004h", resolve));
+		term.textarea!.dispatchEvent(new FocusEvent("focus"));
+		term.textarea!.dispatchEvent(new FocusEvent("blur"));
+		// Turning focus reporting on reports the current focus at once: an attach whose snapshot restores 1004 sends one.
+		expect(sent).toEqual(["\x1b[O", "\x1b[I", "\x1b[O"]);
+		expect(sent.some(claimsSize)).toBe(false);
+		term.dispose();
+		host.remove();
+	});
 });

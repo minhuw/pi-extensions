@@ -3,9 +3,6 @@ import { sanitize, type Identity, type NodeEvent, type NodeInfo, type PaneView, 
 import { clientIdentity, webCryptoAvailable, type KeyStore, type PinnedNode } from "./identity";
 import { NodeSocket, OpenRefused, type NodeSocketOptions, type SocketStatus } from "./socket";
 
-/** How often a ready node's terminal list refreshes: the contract has no event for terminals other tabs create or kill. */
-export const TERMINAL_LIST_MS = 10_000;
-
 /** Channel closes after which the page opens a new channel on its own; any other close waits for the user. */
 const TRANSIENT = new Set(["disconnected", "node_offline", "client_gone"]);
 
@@ -19,7 +16,7 @@ export interface NodeView {
 	info: NodeInfo;
 	pin?: PinnedNode;
 	link: NodeLink;
-	/** Newest first, as `term.list` orders them. */
+	/** Newest first, as `term.list` orders them; kept current by `term.created` and `term.removed`. */
 	terminals: TerminalInfo[];
 	/** The last `error` event or failed request, for display. */
 	error?: string;
@@ -49,7 +46,6 @@ interface NodeEntry {
 	terminals: TerminalInfo[];
 	error?: string;
 	epoch: number;
-	refresh?: ReturnType<typeof setInterval>;
 }
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -101,10 +97,7 @@ export class NodesClient {
 
 	dispose(): void {
 		this.#disposed = true;
-		for (const entry of this.#entries.values()) {
-			clearInterval(entry.refresh);
-			entry.channel?.close("closed");
-		}
+		for (const entry of this.#entries.values()) entry.channel?.close("closed");
 		this.#socket?.dispose();
 	}
 
@@ -169,13 +162,12 @@ export class NodesClient {
 
 	async createTerminal(node: string, size: { cols: number; rows: number }): Promise<TerminalInfo> {
 		const { terminal } = await this.#request(node, (channel) => channel.request("term.create", size));
-		await this.refreshTerminals(node);
+		this.#added(node, terminal);
 		return terminal;
 	}
 
 	async killTerminal(node: string, terminalId: string): Promise<void> {
 		await this.#request(node, (channel) => channel.request("term.kill", { terminalId }));
-		await this.refreshTerminals(node);
 	}
 
 	/** `pane.seen`: clears the terminal's unread flag on the node, for every client. */
@@ -184,6 +176,7 @@ export class NodesClient {
 		channel?.notify({ type: "pane.seen", terminalId }).catch((error: unknown) => this.#fail(node, error));
 	}
 
+	/** The one `term.list` per channel; events keep the list current after it. */
 	async refreshTerminals(node: string): Promise<void> {
 		const { terminals } = await this.#request(node, (channel) => channel.request("term.list", {}));
 		const entry = this.#entry(node);
@@ -274,8 +267,6 @@ export class NodesClient {
 	}
 
 	#drop(entry: NodeEntry, code: string): void {
-		clearInterval(entry.refresh);
-		entry.refresh = undefined;
 		const channel = entry.channel;
 		entry.channel = undefined;
 		channel?.close(code);
@@ -285,14 +276,7 @@ export class NodesClient {
 		const entry = this.#entry(node);
 		if (entry.channel !== channel) return;
 		entry.link = state;
-		if (state.kind === "ready") {
-			void this.refreshTerminals(node).catch(() => {});
-			clearInterval(entry.refresh);
-			entry.refresh = setInterval(() => void this.refreshTerminals(node).catch(() => {}), TERMINAL_LIST_MS);
-		} else {
-			clearInterval(entry.refresh);
-			entry.refresh = undefined;
-		}
+		if (state.kind === "ready") void this.refreshTerminals(node).catch(() => {});
 		if (state.kind === "closed") {
 			entry.channel = undefined;
 			// A transient close reconnects once the node is back; `#sync` does it now if it already is.
@@ -305,15 +289,19 @@ export class NodesClient {
 		const entry = this.#entry(node);
 		const update = (terminalId: string, change: (info: TerminalInfo) => TerminalInfo): void => {
 			const index = entry.terminals.findIndex((item) => item.terminalId === terminalId);
-			if (index < 0) {
-				// A terminal another tab created: the contract has no event for it, so list again.
-				void this.refreshTerminals(node).catch(() => {});
-				return;
-			}
+			// Unknown before the channel's `term.list` answers, which then includes it.
+			if (index < 0) return;
 			entry.terminals = entry.terminals.map((item, i) => (i === index ? change(item) : item));
 			this.#emit();
 		};
 		switch (event.type) {
+			case "term.created":
+				this.#added(node, event.terminal);
+				return;
+			case "term.removed":
+				entry.terminals = entry.terminals.filter((item) => item.terminalId !== event.terminalId);
+				this.#emit();
+				return;
 			case "pane.status": {
 				const status: PaneView | undefined = event.status ?? undefined;
 				update(event.terminalId, (info) => {
@@ -340,6 +328,15 @@ export class NodesClient {
 			default:
 				return;
 		}
+	}
+
+	/** A new terminal goes first (newest first); the creator sees it twice, from its reply and from `term.created`. */
+	#added(node: string, terminal: TerminalInfo): void {
+		const entry = this.#entry(node);
+		const info = cleanTerminal(terminal);
+		const index = entry.terminals.findIndex((item) => item.terminalId === info.terminalId);
+		entry.terminals = index < 0 ? [info, ...entry.terminals] : entry.terminals.map((item, i) => (i === index ? info : item));
+		this.#emit();
 	}
 
 	#emit(): void {

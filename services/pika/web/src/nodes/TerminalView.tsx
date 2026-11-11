@@ -8,7 +8,7 @@ import type { Theme } from "../lib/theme";
 import { AttachStream, type ScreenOp } from "./attach";
 import type { NodeChannel } from "./channel";
 import { LIMITS, type TerminalInfo } from "./contract";
-import { splitInput } from "./input";
+import { claimsSize, splitInput } from "./input";
 import { swallowQueries } from "./queries";
 import { SizeOwner } from "./size";
 
@@ -162,7 +162,7 @@ export function TerminalView({
 		});
 
 		const onData = term.onData((data) => {
-			owner.input();
+			if (claimsSize(data)) owner.input();
 			for (const chunk of splitInput(data)) channel.notify({ type: "term.input", terminalId, data: chunk }).catch(() => {});
 			publish();
 		});
