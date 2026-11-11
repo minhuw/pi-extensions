@@ -7,6 +7,7 @@ import { hashGoal } from "../artifacts/goal.ts";
 import { ACTIVITY_EVENT, ACTIVITY_REQUEST_EVENT, LOCK_HEARTBEAT_MS, LOCK_STALE_MS, RUN_EVENT, RUN_EVENT_DEBOUNCE_MS, STATUS_KEY } from "../config.ts";
 import { acquireLock, type LockOptions, type RunLock } from "../run/lock.ts";
 import { activeRun, listRuns, openRun, unfinishedRuns, type RunStore } from "../run/store.ts";
+import { releaseRunPoolWorktrees } from "../steps/worktrees.ts";
 import type { AgentRunner, Vcs } from "../types.ts";
 import { openVcs, repositoryName, savedProjectName } from "../vcs/git.ts";
 import { ActivityBoard } from "./activity.ts";
@@ -409,6 +410,9 @@ export class Herder {
 		}
 		this.refresh(s);
 		held?.unannounce?.();
+		if (held) {
+			try { releaseRunPoolWorktrees(held.vcs, held.runId); } catch {}
+		}
 		try { held?.lock.release(); } catch {}
 	}
 
@@ -534,6 +538,9 @@ export class Herder {
 		if (s) s.held = undefined;
 		const release = () => {
 			held?.unannounce?.();
+			if (held) {
+				try { releaseRunPoolWorktrees(held.vcs, held.runId); } catch {}
+			}
 			try { held?.lock.release(); } catch {}
 		};
 		if (settled) release();

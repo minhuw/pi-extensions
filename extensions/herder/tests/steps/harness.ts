@@ -1,4 +1,5 @@
 import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { expect } from "vitest";
 import { LIMITS } from "../../src/config.ts";
 import { findIntegration } from "../../src/journal/fold.ts";
@@ -6,6 +7,7 @@ import { integrationKey } from "../../src/journal/keys.ts";
 import { baseRef, integrationRef } from "../../src/run/paths.ts";
 import { createRun, openRun, type RunStore } from "../../src/run/store.ts";
 import { createStepExecutor, type StepDeps } from "../../src/steps/executor.ts";
+import { POOL_SLOT } from "../../src/steps/worktrees.ts";
 import type { LaunchDeps } from "../../src/steps/launch.ts";
 import type { CheckSpec, IntegrateOptions, IntegrateResult, JournalEvent, Limits, RoleDefinition, StepResult, Vcs } from "../../src/types.ts";
 import { openVcs } from "../../src/vcs/git.ts";
@@ -56,8 +58,14 @@ export function withRun(fn: (h: Harness) => Promise<void>): Promise<void> {
 			types: () => store.journal.read().map((event) => event.t),
 			assertClean() {
 				const dir = store.paths.worktrees;
-				expect(existsSync(dir) ? readdirSync(dir) : []).toEqual([]);
-				expect(fixture.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
+				const slots = existsSync(dir) ? readdirSync(dir) : [];
+				for (const slot of slots) {
+					expect(slot).toMatch(POOL_SLOT);
+					const wt = join(dir, slot);
+					expect(vcs.isClean(wt)).toBe(true);
+					if (slot.startsWith("ro-")) expect(vcs.worktreeHead(wt).startsWith(slot.slice(3))).toBe(true);
+				}
+				expect(fixture.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1 + slots.length);
 				expect(fixture.status()).toBe("");
 				expect(fixture.head()).toBe(head);
 			},

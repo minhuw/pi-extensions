@@ -212,7 +212,7 @@ export function removeWorktrees(vcs: Vcs, dir: string): void {
 }
 
 /** Opens the repository containing `cwd`; "the user's checkout" is that cwd's top level (a linked worktree's own). */
-export function openVcs(cwd: string): Vcs {
+export function openVcs(cwd: string): Vcs & { resetWorktree(path: string, commit: string): void } {
 	requireGit();
 	let top: string;
 	let common: string;
@@ -295,6 +295,13 @@ export function openVcs(cwd: string): Vcs {
 			const sha = resolveCommit(commit);
 			mkdirSync(dirname(target), { recursive: true });
 			git(["worktree", "add", "--detach", "--quiet", target, sha]);
+		},
+		resetWorktree(path, commit) {
+			const dir = requireWorktree(path);
+			const sha = resolveCommit(commit);
+			text(dir, ["clean", "-ffdx", "--quiet"]);
+			text(dir, ["checkout", "-f", "--detach", "--quiet", sha]);
+			text(dir, ["clean", "-ffdx", "--quiet"]);
 		},
 		/** Also removes every worktree below `path`, so a run's directory goes in one call. */
 		removeWorktree(path) {

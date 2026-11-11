@@ -3,6 +3,7 @@ import { runChecks } from "../checks/runner.ts";
 import { LIMITS } from "../config.ts";
 import { integrationRef, refPrefix, runPaths, worktreePath } from "../run/paths.ts";
 import type { RunStore } from "../run/store.ts";
+import { clearRunWorktreeState } from "../steps/worktrees.ts";
 import type { AgentRunner, CheckResult, CheckSpec, DeliveryCompletedEvent, DeliveryMode, DeliveryStartedEvent, Faults, JournalInput, RoleDefinition, Vcs } from "../types.ts";
 import { GitError, hasHerderTrailer, RefConflictError, removeWorktrees } from "../vcs/git.ts";
 import { acceptCuration } from "./curate.ts";
@@ -38,6 +39,7 @@ export function cleanupRun(vcs: Vcs, commonDir: string, runId: string): void {
 	for (const step of [() => vcs.deleteRefs(refPrefix(runId)), () => removeWorktrees(vcs, runPaths(commonDir, runId).worktrees)]) {
 		try { step(); } catch (error) { errors.push(error); }
 	}
+	clearRunWorktreeState(commonDir, runId);
 	if (errors.length) throw errors[0];
 }
 

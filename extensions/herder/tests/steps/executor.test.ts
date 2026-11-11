@@ -1,14 +1,19 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { hashGoal, parseGoal } from "../../src/artifacts/goal.ts";
 import { INLINE_TEXT_LIMIT } from "../../src/config.ts";
+import { cleanupRun } from "../../src/deliver/deliver.ts";
 import { Occurrences, stepId, stepKey } from "../../src/journal/keys.ts";
-import { stepRef, worktreePath } from "../../src/run/paths.ts";
+import { refPrefix, stepRef, worktreePath } from "../../src/run/paths.ts";
+import { launchScript } from "../../src/steps/launch.ts";
 import { AgentError } from "../../src/types.ts";
 import type { AgentRunRequest, FaultPoint, StepCompletedEvent, StepFailedEvent } from "../../src/types.ts";
-import { CHECKS, deferred, until, withRun } from "./harness.ts";
+import { verifyRun } from "../../src/verify/verify.ts";
+import { fakeRole } from "../support/fake-runner.ts";
+import { CHECKS, deferred, fakeIntegrator, until, withRun } from "./harness.ts";
 
 const FEATURE = { match: "add the feature", files: { "feature.txt": "feature\n" }, text: "added" };
 const crashAt = (point: FaultPoint) => ({ hit(at: FaultPoint) { if (at === point) throw new Error(`crash at ${at}`); } });
@@ -34,7 +39,7 @@ describe("writing steps", () => {
 		const [started] = h.events().filter((event) => event.t === "step.started");
 		expect(started).toMatchObject({ key: result.key, occurrence: 0, attempt: 1, role: "worker", write: true, base: h.head });
 		expect(completions(h.events())[0]).toMatchObject({ status: "ok", commit: result.commit, ref: stepRef(h.store.runId, result.key), text: "added" });
-		expect(h.runner.calls[0]!.cwd).toContain(join(h.store.paths.worktrees, `step-${result.key}`));
+		expect(h.runner.calls[0]!.cwd).toBe(worktreePath(h.vcs.commonDir(), h.store.runId, "rw-0"));
 		h.assertClean();
 	}));
 
@@ -507,5 +512,165 @@ describe("crash recovery", () => {
 		expect(h.runner.calls).toHaveLength(runnerCalls);
 		expect(completions(h.events())).toHaveLength(1);
 		h.assertClean();
+	}));
+});
+
+describe("worktree reuse", () => {
+	it("shares one ro-<sha> worktree across concurrent explorer steps and verifyRun at the same commit", () => withRun(async (h) => {
+		const gate = deferred();
+		h.runner.add(
+			{ match: /^explore /, role: "explorer", waitFor: gate.promise, text: (req) => req.prompt },
+			{ match: "Verify the change", role: "verifier", data: { criteria: [{ id: "AC-1", status: "met", evidence: "ok" }], gaps: [], blocked: [] } },
+		);
+		const addSpy = vi.spyOn(h.vcs, "addWorktree");
+		const expectedRo = worktreePath(h.vcs.commonDir(), h.store.runId, `ro-${h.head.slice(0, 12)}`);
+		const handle = launchScript(h.launchDeps(), {
+			source: `return await parallel([
+				() => agent("explore 1", { id: "e1", role: "explorer" }),
+				() => agent("explore 2", { id: "e2", role: "explorer" }),
+				() => agent("explore 3", { id: "e3", role: "explorer" }),
+			]).then((rs) => rs.map((r) => r.text));`,
+		});
+		await until(() => h.runner.calls.length === 3);
+		expect(h.runner.maxConcurrent).toBe(3);
+		gate.resolve();
+		const outcome = await handle.done;
+		expect(outcome).toMatchObject({ status: "completed", value: ["explore 1", "explore 2", "explore 3"] });
+		expect(h.runner.calls.slice(0, 3).map((call) => call.cwd)).toEqual([expectedRo, expectedRo, expectedRo]);
+		expect(addSpy).toHaveBeenCalledTimes(1);
+
+		const goal = "# Goal: Judge\n\n## Intent\nTest.\n\n## Acceptance criteria\n- AC-1: Judge it. verify: judge — rubric: \"ok\"\n";
+		writeFileSync(h.store.paths.goal, goal);
+		writeFileSync(h.store.paths.plan, "");
+		h.store.journal.append({ t: "goal.approved", sha256: hashGoal(goal), checks: parseGoal(goal).checks, approvedBy: "user" });
+		const roles = new Map([...h.roles, ["verifier", fakeRole("verifier")]]);
+		const verified = await verifyRun({ runId: h.store.runId, store: h.store, vcs: h.vcs, runner: h.runner, roles, checks: [] });
+		expect(verified).toMatchObject({ verdict: "met", verifierRan: true });
+		expect(h.runner.calls[3]!.cwd).toBe(expectedRo);
+		expect(addSpy).toHaveBeenCalledTimes(1);
+		h.assertClean();
+	}));
+
+	it("reuses rw-0 across sequential writable steps via resetWorktree with no untracked or ignored leakage", () => withRun(async (h) => {
+		const baseWithIgnore = h.fixture.commit("ignore logs", { ".gitignore": "*.log\n" });
+		h.fixture.git("reset", "-q", "--hard", h.head);
+		const integrator = fakeIntegrator(h.store, h.vcs);
+		const seen: Array<{ step: string; hasA: boolean; hasB: boolean; hasLeak: boolean; hasIgnored: boolean }> = [];
+		h.runner.add(
+			{ match: "task 1", files: { "untracked-leak.txt": "leak\n", "build.log": "ignored\n" }, fail: "transient", times: 1 },
+			{
+				match: "task 1",
+				edit(cwd) {
+					seen.push({
+						step: "t1-retry",
+						hasA: existsSync(join(cwd, "a.txt")),
+						hasB: existsSync(join(cwd, "b.txt")),
+						hasLeak: existsSync(join(cwd, "untracked-leak.txt")),
+						hasIgnored: existsSync(join(cwd, "build.log")),
+					});
+					writeFileSync(join(cwd, "a.txt"), "a\n");
+					writeFileSync(join(cwd, "build.log"), "ignored\n");
+				},
+			},
+			{
+				match: "task 2",
+				edit(cwd) {
+					seen.push({
+						step: "t2",
+						hasA: existsSync(join(cwd, "a.txt")),
+						hasB: existsSync(join(cwd, "b.txt")),
+						hasLeak: existsSync(join(cwd, "untracked-leak.txt")),
+						hasIgnored: existsSync(join(cwd, "build.log")),
+					});
+					writeFileSync(join(cwd, "b.txt"), "b\n");
+				},
+			},
+			{
+				match: "task 3",
+				edit(cwd) {
+					seen.push({
+						step: "t3",
+						hasA: existsSync(join(cwd, "a.txt")),
+						hasB: existsSync(join(cwd, "b.txt")),
+						hasLeak: existsSync(join(cwd, "untracked-leak.txt")),
+						hasIgnored: existsSync(join(cwd, "build.log")),
+					});
+					writeFileSync(join(cwd, "c.txt"), "c\n");
+				},
+			},
+		);
+
+		const addSpy = vi.spyOn(h.vcs, "addWorktree");
+		const resetSpy = vi.spyOn(h.vcs, "resetWorktree");
+		const removeSpy = vi.spyOn(h.vcs, "removeWorktree");
+		const expectedRw0 = worktreePath(h.vcs.commonDir(), h.store.runId, "rw-0");
+
+		const executor = h.executor();
+		const r1 = await executor.run("task 1", { id: "t1", base: baseWithIgnore });
+		expect(r1.status).toBe("ok");
+		const i1 = await integrator.integrate(r1, { message: "add a", task: "T1" });
+		expect(i1.status).toBe("integrated");
+
+		const r2 = await executor.run("task 2", { id: "t2", base: i1.head });
+		expect(r2.status).toBe("ok");
+
+		const r3 = await executor.run("task 3", { id: "t3", base: baseWithIgnore });
+		expect(r3.status).toBe("ok");
+
+		expect(h.runner.calls.map((call) => call.cwd)).toEqual([expectedRw0, expectedRw0, expectedRw0, expectedRw0]);
+		expect(seen).toEqual([
+			{ step: "t1-retry", hasA: false, hasB: false, hasLeak: false, hasIgnored: false },
+			{ step: "t2", hasA: true, hasB: false, hasLeak: false, hasIgnored: false },
+			{ step: "t3", hasA: false, hasB: false, hasLeak: false, hasIgnored: false },
+		]);
+		expect(addSpy).toHaveBeenCalledTimes(1);
+		expect(resetSpy.mock.calls.length).toBeGreaterThanOrEqual(3);
+		expect(removeSpy).not.toHaveBeenCalledWith(expectedRw0);
+		h.assertClean();
+	}));
+
+	it("falls back to removeWorktree + addWorktree when resetWorktree is absent", () => withRun(async (h) => {
+		h.runner.add({ match: "one", files: { "one.txt": "1\n" } }, { match: "two", files: { "two.txt": "2\n" } });
+		const { resetWorktree: _omit, ...vcsWithoutReset } = h.vcs;
+		const executor = h.executor({ vcs: vcsWithoutReset });
+		const first = await executor.run("one", { id: "one" });
+		const second = await executor.run("two", { id: "two" });
+		expect([first.status, second.status]).toEqual(["ok", "ok"]);
+		const rw0 = worktreePath(h.vcs.commonDir(), h.store.runId, "rw-0");
+		expect(h.runner.calls.map((call) => call.cwd)).toEqual([rw0, rw0]);
+		expect(h.fixture.git("ls-tree", "--name-only", second.commit!)).not.toContain("one.txt");
+		h.assertClean();
+	}));
+
+	it("leases rw-0 and rw-1 for concurrent writers and cleanupRun removes all ro-* and rw-* worktrees cleanly", () => withRun(async (h) => {
+		const gate = deferred();
+		h.runner.add(
+			{ match: /^write /, waitFor: gate.promise, files: (req) => ({ [`${req.prompt.slice(6)}.txt`]: "x\n" }) },
+			{ match: "explore", role: "explorer", text: "seen" },
+		);
+		const handle = launchScript(h.launchDeps(), {
+			source: `await parallel([
+				() => agent("write one", { id: "w1" }),
+				() => agent("write two", { id: "w2" }),
+				() => agent("explore", { id: "e1", role: "explorer" }),
+			]);
+			return "ok";`,
+		});
+		await until(() => h.runner.calls.length === 3);
+		gate.resolve();
+		expect((await handle.done).status).toBe("completed");
+
+		const rw0 = worktreePath(h.vcs.commonDir(), h.store.runId, "rw-0");
+		const rw1 = worktreePath(h.vcs.commonDir(), h.store.runId, "rw-1");
+		const ro = worktreePath(h.vcs.commonDir(), h.store.runId, `ro-${h.head.slice(0, 12)}`);
+		const writerCwds = h.runner.calls.filter((call) => call.role === "worker").map((call) => call.cwd).sort();
+		expect(writerCwds).toEqual([rw0, rw1].sort());
+		expect(h.runner.calls.find((call) => call.role === "explorer")!.cwd).toBe(ro);
+		expect(readdirSync(h.store.paths.worktrees).sort()).toEqual([`ro-${h.head.slice(0, 12)}`, "rw-0", "rw-1"].sort());
+
+		cleanupRun(h.vcs, h.vcs.commonDir(), h.store.runId);
+		expect(existsSync(h.store.paths.worktrees)).toBe(false);
+		expect(h.fixture.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
+		expect(h.fixture.git("for-each-ref", "--format=%(refname)", refPrefix(h.store.runId))).toBe("");
 	}));
 });

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Worker } from "node:worker_threads";
@@ -374,6 +374,45 @@ describe("worktrees", () => {
 			vcs.fastForward(second);
 			expect(existsSync(log)).toBe(true);
 		}));
+
+	it("resets an existing worktree in-place to a clean detached HEAD without running hooks", () =>
+		withGitFixture((fixture) => {
+			const first = fixture.head();
+			rmSync(join(fixture.dir, "old.txt"));
+			fixture.write("new.txt", "new\n");
+			const second = fixture.commit("second", {});
+			const hooks = join(fixture.commonDir, "reset-hooks");
+			mkdirSync(hooks);
+			writeFileSync(join(hooks, "post-checkout"), `#!/bin/sh\ntouch "${hooks}/ran"\nexit 1\n`, { mode: 0o755 });
+			const vcs = openVcs(fixture.dir);
+			const path = slot(fixture, "rw-0");
+			vcs.addWorktree(path, first);
+			const keepIno = statSync(join(path, "keep.txt")).ino;
+			const agent = (...args: string[]) => fixture.git("-C", path, ...args);
+			agent("checkout", "-q", "-b", "agent-branch");
+			writeFileSync(join(path, "README.md"), "dirty\n");
+			mkdirSync(join(path, "new.txt"), { recursive: true });
+			writeFileSync(join(path, "new.txt", "blocker.txt"), "untracked dir blocking tracked file\n");
+			writeFileSync(join(path, "staged.txt"), "staged\n");
+			agent("add", "staged.txt");
+			writeFileSync(join(path, "build.log"), "ignored\n");
+			fixture.git("config", "core.hooksPath", hooks);
+
+			vcs.resetWorktree(path, second);
+			expect(vcs.worktreeHead(path)).toBe(second);
+			expect(openVcs(path).currentBranch()).toBeNull();
+			expect(vcs.isClean(path)).toBe(true);
+			expect(readFileSync(join(path, "README.md"), "utf8")).toBe("# r\n");
+			expect(readFileSync(join(path, "new.txt"), "utf8")).toBe("new\n");
+			expect(existsSync(join(path, "old.txt"))).toBe(false);
+			expect(existsSync(join(path, "staged.txt"))).toBe(false);
+			expect(existsSync(join(path, "build.log"))).toBe(false);
+			expect(statSync(join(path, "keep.txt")).ino).toBe(keepIno);
+			expect(existsSync(join(hooks, "ran"))).toBe(false);
+
+			vcs.removeWorktree(path);
+			fixture.git("branch", "-q", "-D", "agent-branch");
+		}, { "README.md": "# r\n", "keep.txt": "keep\n", "old.txt": "old\n", ".gitignore": "*.log\n" }));
 });
 
 describe("worktree allowlist", () => {
@@ -395,7 +434,7 @@ describe("worktree allowlist", () => {
 			vi.spyOn(process, "cwd").mockReturnValue(join(fixture.dir, "src"));
 			try {
 				for (const path of outside(fixture, linked)) {
-					for (const call of [() => vcs.removeWorktree(path), () => vcs.snapshot(path, "x\n"), () => vcs.snapshot(path, "x\n", before.head), () => vcs.isClean(path), () => vcs.addWorktree(path, before.head)]) {
+					for (const call of [() => vcs.removeWorktree(path), () => vcs.resetWorktree!(path, before.head), () => vcs.snapshot(path, "x\n"), () => vcs.snapshot(path, "x\n", before.head), () => vcs.isClean(path), () => vcs.addWorktree(path, before.head)]) {
 						expect(call, JSON.stringify(path)).toThrow(/only operates on worktrees inside/);
 					}
 				}
@@ -421,6 +460,7 @@ describe("worktree allowlist", () => {
 			writeFileSync(join(path, ".git"), `gitdir: ${fixture.commonDir}\n`);
 			expect(() => vcs.snapshot(path, "x\n")).toThrow(/not a Herder worktree/);
 			expect(() => vcs.isClean(path)).toThrow(/not a Herder worktree/);
+			expect(() => vcs.resetWorktree!(path, fixture.head())).toThrow(/not a Herder worktree/);
 			vcs.removeWorktree(path);
 			expect(existsSync(path)).toBe(false);
 		}));

@@ -11,6 +11,7 @@ import type {
 	StepCompletedEvent, StepResult, StepSessionInfo, Vcs,
 } from "../types.ts";
 import { lookupStep, resolveIdentity, stepMessage, TRAILER_REPLY, type StepIdentity } from "./cache.ts";
+import { acquireReadOnlyWorktree, acquireWriteWorktree, resetOrRecreateWorktree } from "./worktrees.ts";
 
 /**
  * A live step for the activity board and the external-agent registry. A running attempt carries its live agent session
@@ -147,21 +148,19 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 	async function adopt(key: string, identity: StepIdentity, commit: string, reply: AgentRunResult | undefined, signal: AbortSignal, opts: AgentOptions, ctx: StepContext): Promise<StepResult> {
 		let checks: CheckResult[] | undefined;
 		if (identity.gates.length > 0) {
-			const path = worktreePath(vcs.commonDir(), runId, `step-${key}`);
-			removeWorktree(path);
-			vcs.addWorktree(path, commit);
+			const lease = acquireWriteWorktree(vcs, runId, commit);
 			const phase = opts.phase ?? ctx.phase?.();
 			const view = { key, label: opts.label ?? key, phase, task: opts.task, role: identity.role.name, ...(opts.phase === undefined && phase !== undefined && { phaseIsGlobal: true }) };
 			let status: StepResult["status"] = "failed";
 			try {
-				checks = await runGates(identity.gates, path, commit, key, signal, (id) => activity({ ...view, state: "running", stage: `gate ${id}` }));
+				checks = await runGates(identity.gates, lease.path, commit, key, signal, (id) => activity({ ...view, state: "running", stage: `gate ${id}` }));
 				status = checks.some((check) => !check.passed) ? "gate_failed" : "ok";
 			} catch (error) {
 				if (signal.aborted) { status = "stopped"; return { status, key, reused: false }; }
 				throw error;
 			} finally {
 				activity({ ...view, state: "settled", status });
-				removeWorktree(path);
+				lease.release();
 			}
 		}
 		const status = checks?.some((check) => !check.passed) ? "gate_failed" : "ok";
@@ -177,7 +176,7 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 	async function live(prompt: string, opts: AgentOptions, ctx: StepContext, identity: StepIdentity, key: string, occurrence: number, signal: AbortSignal): Promise<StepResult> {
 		const { fingerprint, role, write, base, gates } = identity;
 		const ref = stepRef(runId, key);
-		const path = worktreePath(vcs.commonDir(), runId, `step-${key}`);
+		const useWriteSlot = write || gates.length > 0;
 		const label = opts.label ?? key;
 		const phase = opts.phase ?? ctx.phase?.();
 		const phaseIsGlobal = opts.phase === undefined && phase !== undefined;
@@ -206,13 +205,13 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 			return { errorClass: error.errorClass, message, transcriptRef: error.transcriptRef };
 		};
 
-		/** One attempt in a fresh worktree at `base`; resolves to the step's result or the attempt's failure. */
+		/** One attempt in a clean worktree at `base`; resolves to the step's result or the attempt's failure. */
 		async function attempt(number: number): Promise<StepResult | Failure> {
 			stage = undefined;
 			let session: StepSessionInfo | undefined;
 			const failure = (error: unknown): Failure => ({ ...classify(error), session });
-			removeWorktree(path);
-			vcs.addWorktree(path, base);
+			const lease = useWriteSlot ? acquireWriteWorktree(vcs, runId, base) : acquireReadOnlyWorktree(vcs, runId, base);
+			const { path } = lease;
 			try {
 				store.journal.append({
 					t: "step.started", key, id: identity.id, occurrence, fingerprint, attempt: number, role: role.name, write, base,
@@ -252,10 +251,7 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 					}
 				} else if (!vcs.isClean(path) || vcs.worktreeHead(path) !== base) {
 					warning = READ_ONLY_WARNING;
-					if (gates.length > 0) {
-						removeWorktree(path);
-						vcs.addWorktree(path, base);
-					}
+					if (gates.length > 0) resetOrRecreateWorktree(vcs, path, base);
 				}
 				let checks: CheckResult[] | undefined;
 				if (gates.length > 0) {
@@ -278,7 +274,7 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 				if (error instanceof Crash) throw error;
 				return failure(error);
 			} finally {
-				removeWorktree(path);
+				lease.release();
 			}
 		}
 

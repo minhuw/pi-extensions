@@ -47,7 +47,10 @@ export interface Vcs {
 	isClean(path?: string): boolean;
 	/** Tree of the user's working tree (tracked and untracked files, honouring .gitignore), built through a temporary index; leaves the checkout and its index untouched. */
 	checkoutTree(): string;
-	addWorktree(path: string, commit: string): void; removeWorktree(path: string): void;
+	addWorktree(path: string, commit: string): void;
+	/** Resets an existing Herder worktree in-place to a clean detached HEAD at `commit`. */
+	resetWorktree?(path: string, commit: string): void;
+	removeWorktree(path: string): void;
 	/** HEAD commit of a Herder worktree (e.g. the tip a curator committed on its detached HEAD). */
 	worktreeHead(path: string): string;
 	/**

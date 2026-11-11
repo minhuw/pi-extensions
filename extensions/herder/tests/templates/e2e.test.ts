@@ -6,6 +6,7 @@ import { createIntegrator } from "../../src/integrate/integrate.ts";
 import { baseRef, integrationRef } from "../../src/run/paths.ts";
 import { createRun, openRun, type RunStore } from "../../src/run/store.ts";
 import { launchScript, type LaunchOutcome } from "../../src/steps/launch.ts";
+import { POOL_SLOT } from "../../src/steps/worktrees.ts";
 import type { CheckSpec, ScriptSettledEvent, Vcs } from "../../src/types.ts";
 import { openVcs } from "../../src/vcs/git.ts";
 import { isolateGitConfig } from "../integrate/support.ts";
@@ -56,8 +57,14 @@ function assertClean(env: Env) {
 	expect(env.fixture.status()).toBe("");
 	expect(env.fixture.head()).toBe(env.base);
 	const dir = env.store.paths.worktrees;
-	expect(existsSync(dir) ? readdirSync(dir) : []).toEqual([]);
-	expect(env.fixture.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
+	const slots = existsSync(dir) ? readdirSync(dir) : [];
+	for (const slot of slots) {
+		expect(slot).toMatch(POOL_SLOT);
+		const wt = join(dir, slot);
+		expect(env.vcs.isClean(wt)).toBe(true);
+		if (slot.startsWith("ro-")) expect(env.vcs.worktreeHead(wt).startsWith(slot.slice(3))).toBe(true);
+	}
+	expect(env.fixture.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1 + slots.length);
 }
 
 /** Relaunching launch 1 with `resume` reuses every step and integration: no agent runs and the head stays. */

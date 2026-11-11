@@ -1,12 +1,13 @@
 // Runs a launch's script in the sandbox against the step executor and the integrator (§6, §7).
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { DEFAULT_ROLE, LIMITS } from "../config.ts";
 import { Occurrences, sha256Hex } from "../journal/keys.ts";
-import { integrationRef, worktreePath } from "../run/paths.ts";
+import { integrationRef } from "../run/paths.ts";
 import type { IntegrateContext } from "../integrate/integrate.ts";
 import type { IntegrateOptions, IntegrateResult, LaunchStatus, StepResult, WorkflowBridge } from "../types.ts";
 import { runScript } from "../workflow/sandbox.ts";
 import { createStepExecutor, type LaunchStats, type StepDeps } from "./executor.ts";
+import { healRunWorktrees } from "./worktrees.ts";
 
 export interface LaunchDeps extends StepDeps {
 	integrator: { integrate(source: StepResult | string, opts: IntegrateOptions, ctx?: IntegrateContext): Promise<IntegrateResult> };
@@ -41,12 +42,8 @@ export function launchScript(deps: LaunchDeps, request: LaunchRequest): LaunchHa
 	active.add(runDir);
 	let launch: number;
 	try {
-		// No step of this run is running when a launch starts, so any step slot is a crashed process's leftover.
-		const slots = existsSync(store.paths.worktrees) ? readdirSync(store.paths.worktrees) : [];
-		for (const slot of slots) {
-			if (!slot.startsWith("step-")) continue;
-			try { vcs.removeWorktree(worktreePath(vcs.commonDir(), runId, slot)); } catch {}
-		}
+		// No step of this run is running when a launch starts, so heal or drop any leftover step worktrees.
+		healRunWorktrees(vcs, runId);
 		launch = store.writeScript(request.source).launch;
 		if (existsSync(store.paths.plan)) {
 			const sha256 = sha256Hex(readFileSync(store.paths.plan));

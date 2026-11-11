@@ -204,7 +204,7 @@ All state lives under the repository's git common directory (`git rev-parse --gi
     outputs/         large step outputs, transcripts, and check logs
     sessions/        each agent session as a Pi session file
     lock             the holding session and its heartbeat
-  worktrees/<runId>/ disposable worktrees for steps, integration, checks, and delivery
+  worktrees/<runId>/ disposable worktrees (shared ro-<sha> for read-only steps, pooled rw-<n> for writers, plus integration, check, and delivery slots)
 refs/herder/<runId>/base             the commit the run started from
 refs/herder/<runId>/integration      the integration head
 refs/herder/<runId>/steps/<stepKey>  each completed writing step's commit
@@ -301,7 +301,7 @@ Each step attempt is also published as an external agent, which [Subagents](../s
 
 Every agent session of a run is saved as a Pi session file in `runs/<runId>/sessions/`, whose header names the orchestrating session's file as `parentSession` when that session has one. Before its first prompt, the session gets a `pi-extensions.session-link` custom entry with `kind: "herder-step"`, the orchestrating session id and file, and the run id, step key and id, task, role, attempt, launch, and repository name (`herder.repo`, the same name as `herder:run`'s `repo`). Verifier and curator sessions use their role name as the step key. `run.started` records the orchestrating session id; `step.completed` and `step.failed` record the attempt's `sessionId` and `sessionFile`, unless Pi never wrote that file (it does so with the first message, so an attempt that fails before its prompt, for example without an API key, records none).
 
-Another extension can load itself into step sessions without Herder importing it. It adds `{ name, extensionFactory }` to the Set at `globalThis[Symbol.for("pi-extensions.child-session-hooks")]`, creating the Set if it is missing. Herder appends each registered factory to the step session's extensions, binds them so they see `session_start`, and emits `session_shutdown` before it disposes the session. Steps load no other extensions.
+Another extension can load itself into step sessions without Herder importing it. It adds `{ name, extensionFactory }` to the Set at `globalThis[Symbol.for("pi-extensions.child-session-hooks")]`, creating the Set if it is missing. Herder appends each registered factory to the step session's extensions, binds them so they see `session_start`, and emits `session_shutdown` before it disposes the session. When a hooked extension registers `fffind` or `ffgrep`, Herder keeps them active alongside `find` or `grep` whenever the step's role allows those tools. Steps load no other extensions.
 
 While a session holds a run, Herder emits `herder:run` on `pi.events` with `{ runId, runDir, journalPath, goalPath, planPath, repo, title }`, where `repo` is the repository's name, as pika files its sessions: the name saved with pika's `/pika project` in the main checkout's `.pi/pika/project.json`, else the main checkout's folder name, also when the run starts in a linked worktree (derived from git's common dir; a bare repository or submodule is named after the common dir without its `.git`). It emits when the run starts or is resumed, and within 250 ms after journal appends.
 

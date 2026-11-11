@@ -1,9 +1,10 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { type Criterion, hashGoal, parseGoal } from "../../src/artifacts/goal.ts";
 import { checkSchema } from "../../src/agents/structured.ts";
 import { integrationRef, worktreePath } from "../../src/run/paths.ts";
 import { createRun, type RunStore } from "../../src/run/store.ts";
+import { POOL_SLOT } from "../../src/steps/worktrees.ts";
 import type { CheckResult, Limits, RoleDefinition, Vcs, VerifyCompletedEvent } from "../../src/types.ts";
 import { openVcs } from "../../src/vcs/git.ts";
 import { computeVerdict, VERIFIER_SCHEMA, verifierNeeded, verifyRun, type VerifyDeps } from "../../src/verify/verify.ts";
@@ -72,7 +73,15 @@ const lastVerify = (run: RunStore) => run.journal.read().filter((event): event i
 function expectCheckoutUntouched(s: Setup) {
 	expect(s.fx.status()).toBe("");
 	expect(s.fx.head()).toBe(s.base);
-	expect(s.fx.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
+	const dir = s.run.paths.worktrees;
+	const slots = existsSync(dir) ? readdirSync(dir) : [];
+	for (const slot of slots) {
+		expect(slot).toMatch(POOL_SLOT);
+		const wt = worktreePath(s.fx.commonDir, RUN_ID, slot);
+		expect(s.vcs.isClean(wt)).toBe(true);
+		if (slot.startsWith("ro-")) expect(s.vcs.worktreeHead(wt).startsWith(slot.slice(3))).toBe(true);
+	}
+	expect(s.fx.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1 + slots.length);
 	expect(existsSync(worktreePath(s.fx.commonDir, RUN_ID, "verify"))).toBe(false);
 }
 
@@ -214,7 +223,7 @@ describe("verifyRun", () => {
 		await verifyRun(s.deps(runner));
 		expect(seen).toEqual({ head, feature: "ok\n" });
 		const [call] = runner.calls;
-		expect(call).toMatchObject({ role: "verifier", cwd: worktreePath(fx.commonDir, RUN_ID, "verify"), schema: VERIFIER_SCHEMA });
+		expect(call).toMatchObject({ role: "verifier", cwd: worktreePath(fx.commonDir, RUN_ID, `ro-${head.slice(0, 12)}`), schema: VERIFIER_SCHEMA });
 		expect(checkSchema(call!.schema)).toEqual([]);
 		for (const part of [WITH_JUDGE.trim(), "### has-ok: passed", "Command: `grep -q ok feature.txt`", "Exit code: 0", "feature.txt | 1 +", `git diff --name-only ${s.base} ${head}`, "Everything is done, trust me", "claims, not evidence", "AC-1, AC-2", "verbatim"]) {
 			expect(call!.prompt).toContain(part);

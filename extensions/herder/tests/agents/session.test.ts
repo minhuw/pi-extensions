@@ -5,6 +5,7 @@ import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxProviderHandle, type FauxResponseStep } from "@earendil-works/pi-ai/providers/faux";
 import { AgentSession, ModelRegistry, ModelRuntime, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPiAgentRunner, modelRuntimeOf, type PiRunnerOptions } from "../../src/agents/session.ts";
 import { createRun } from "../../src/run/store.ts";
@@ -361,6 +362,45 @@ describe("Pi agent runner", () => {
 			expect(seen[0]).toBe("start:file");
 			expect(seen).toContain("turn");
 			expect(seen.at(-1)).toBe("shutdown");
+		} finally {
+			if (previous === undefined) delete global[key];
+			else global[key] = previous;
+		}
+	});
+
+	it("keeps fffind and ffgrep active alongside role.allowedTools when registered by child-session hooks", async () => {
+		const key = Symbol.for("pi-extensions.child-session-hooks");
+		const global = globalThis as Record<symbol, unknown>;
+		const previous = global[key];
+		const noopTool = (name: string) => ({
+			name, label: name, description: name, parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }], details: {} }),
+		});
+		const hook = (pi: ExtensionAPI) => {
+			for (const name of ["fffind", "ffgrep", "fff_extra"]) pi.registerTool(noopTool(name));
+			pi.on("session_start", () => {
+				pi.setActiveTools([...new Set([...pi.getActiveTools(), "fffind", "ffgrep", "fff_extra"])]);
+			});
+		};
+		global[key] = new Set<unknown>([{ name: "fff", extensionFactory: hook }]);
+		try {
+			const seen: string[][] = [];
+			const record: FauxResponseStep = (context) => { seen.push(toolNames(context)); return fauxAssistantMessage("ok"); };
+			faux.setResponses([
+				record,
+				(context) => { seen.push(toolNames(context)); return fauxAssistantMessage([fauxToolCall("StructuredOutput", {})]); },
+				fauxAssistantMessage("ok"),
+				record,
+				record,
+			]);
+			await runner().run(request({ role: { ...fakeRole("explorer"), write: false, tools: ["read", "grep", "find", "ls", "bash"] } }));
+			await runner().run(request({ role: { ...fakeRole("worker"), write: true, tools: ["read", "edit", "write", "bash", "grep", "find", "ls"] }, schema: { type: "object", properties: {} } }));
+			await runner().run(request({ role: { ...fakeRole("reviewer"), write: false, tools: ["read", "grep"] } }));
+			await runner().run(request({ role: fakeRole("reviewer") }));
+			expect(seen[0]).toEqual(["bash", "fffind", "ffgrep", "find", "grep", "ls", "read"]);
+			expect(seen[1]).toEqual(["StructuredOutput", "bash", "edit", "fffind", "ffgrep", "find", "grep", "ls", "read", "write"]);
+			expect(seen[2]).toEqual(["ffgrep", "grep", "read"]);
+			expect(seen[3]).toEqual(["bash", "read"]);
 		} finally {
 			if (previous === undefined) delete global[key];
 			else global[key] = previous;

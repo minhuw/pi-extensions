@@ -6,6 +6,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { baseRef, integrationRef, stepRef } from "../../src/run/paths.ts";
 import { createRun, type RunStore } from "../../src/run/store.ts";
 import type { LaunchOutcome } from "../../src/steps/launch.ts";
+import { POOL_SLOT } from "../../src/steps/worktrees.ts";
 import type { JournalEvent, JournalEventType, Vcs } from "../../src/types.ts";
 import { openVcs } from "../../src/vcs/git.ts";
 import { isolateGitConfig } from "../integrate/support.ts";
@@ -122,11 +123,17 @@ async function resume(env: Env): Promise<{ outcome: LaunchOutcome; calls: string
 	return { outcome, calls: tasks(runner) };
 }
 
-/** No worktree is left. */
+/** Only clean pooled step worktrees remain, with no leaked ephemeral or dirty worktrees. */
 function assertNoWorktrees(env: Env) {
 	const dir = env.store.paths.worktrees;
-	expect(existsSync(dir) ? readdirSync(dir) : []).toEqual([]);
-	expect(env.fixture.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
+	const slots = existsSync(dir) ? readdirSync(dir) : [];
+	for (const slot of slots) {
+		expect(slot).toMatch(POOL_SLOT);
+		const wt = join(dir, slot);
+		expect(env.vcs.isClean(wt)).toBe(true);
+		if (slot.startsWith("ro-")) expect(env.vcs.worktreeHead(wt).startsWith(slot.slice(3))).toBe(true);
+	}
+	expect(env.fixture.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1 + slots.length);
 }
 
 /** §16 invariants 3, 5, 6, and 7 after the resume, plus the baseline's tree and a clean checkout. */

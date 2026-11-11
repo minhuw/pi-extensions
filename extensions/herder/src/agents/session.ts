@@ -103,6 +103,12 @@ async function runAgent(request: AgentRunRequest, context: RunContext): Promise<
 	let session: AgentSession | undefined;
 	let unsubscribe: (() => void) | undefined;
 	const hooks = childSessionHooks();
+	const baseTools = allowedTools(role.write, role.tools);
+	const fffTools = [
+		...(baseTools.includes("find") ? ["fffind"] : []),
+		...(baseTools.includes("grep") ? ["ffgrep"] : []),
+	];
+	const sessionTools = [...baseTools, ...fffTools, ...(capture ? [STRUCTURED_OUTPUT_TOOL] : [])];
 	try {
 		session = await watch.race((async () => {
 			const runtime = await context.modelRuntime();
@@ -115,11 +121,10 @@ async function runAgent(request: AgentRunRequest, context: RunContext): Promise<
 				appendSystemPromptOverride: (base) => [...base, role.prompt],
 			});
 			await loader.reload();
-			const tools = allowedTools(role.write, role.tools);
 			const created = await createAgentSession({
 				cwd: request.cwd, agentDir: context.agentDir, modelRuntime: runtime, resourceLoader: loader,
 				sessionManager: context.sessions ? stepSessionManager(request.cwd, context.sessions) : SessionManager.inMemory(request.cwd), settingsManager,
-				tools: capture ? [...tools, STRUCTURED_OUTPUT_TOOL] : tools,
+				tools: sessionTools,
 				customTools: schema && capture ? [createStructuredOutputTool(schema, capture)] : [],
 				...(model && { model }), ...(thinkingLevel && { thinkingLevel }),
 			});
@@ -129,7 +134,11 @@ async function runAgent(request: AgentRunRequest, context: RunContext): Promise<
 		const live = session;
 		request.onSession?.({ id: live.sessionId, ...(live.sessionFile !== undefined && { file: live.sessionFile }) });
 		// Hooked extensions see `session_start` like in a main session; without hooks there is nothing to bind.
-		if (hooks.length) await watch.race(live.bindExtensions({}));
+		if (hooks.length) {
+			await watch.race(live.bindExtensions({}));
+			const registered = new Set(live.getAllTools().map((tool) => tool.name));
+			live.setActiveToolsByName(sessionTools.filter((name) => registered.has(name)));
+		}
 		unsubscribe = live.subscribe((event) => {
 			watch.touch();
 			request.onEvent?.(event.type);

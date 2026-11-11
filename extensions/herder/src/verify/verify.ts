@@ -9,6 +9,7 @@ import { LIMITS, VERIFIER_DIFF_LINES } from "../config.ts";
 import { writeAtomic } from "../run/files.ts";
 import { integrationRef, worktreePath } from "../run/paths.ts";
 import type { RunStore } from "../run/store.ts";
+import { acquireReadOnlyWorktree } from "../steps/worktrees.ts";
 import type { AgentRunner, CheckResult, CheckSpec, CriterionResult, CriterionStatus, Gap, Limits, RoleDefinition, Vcs, Verdict } from "../types.ts";
 
 export interface VerifyDeps { runId: string; store: RunStore; vcs: Vcs; runner: AgentRunner; roles: ReadonlyMap<string, RoleDefinition>; checks: readonly CheckSpec[]; limits?: Limits; signal?: AbortSignal; onProgress?: () => void; onStage?: (stage: string) => void }
@@ -151,38 +152,45 @@ export async function verifyRun(deps: VerifyDeps): Promise<VerifyOutcome> {
 	if (!base || !head) throw new Error("cannot verify: the run has no base commit");
 	const limits = deps.limits ?? LIMITS;
 	const signal = deps.signal ?? new AbortController().signal;
-	const path = worktreePath(vcs.commonDir(), runId, VERIFY_SLOT);
-	vcs.removeWorktree(path);
+	const checkPath = worktreePath(vcs.commonDir(), runId, VERIFY_SLOT);
+	vcs.removeWorktree(checkPath);
 	const checks: CheckResult[] = [];
+	if (deps.checks.length > 0) {
+		try {
+			vcs.addWorktree(checkPath, head);
+			for (const spec of deps.checks) {
+				const result = await runCheck(spec, { cwd: checkPath, commit: head, outputs: store.outputs, signal, onCheck: (id) => deps.onStage?.(`check ${id}`) });
+				checks.push(result);
+				const { id: checkId, commit, exitCode, timedOut, durationMs, logRef, tail } = result;
+				store.journal.append({ t: "check.completed", checkId, commit, exitCode, timedOut, durationMs, logRef, tail, purpose: "verify" });
+			}
+		} finally {
+			vcs.removeWorktree(checkPath);
+		}
+	}
 	let verifier: VerifierOutcome;
 	let verifierRan = false;
-	try {
-		vcs.addWorktree(path, head);
-		for (const spec of deps.checks) {
-			const result = await runCheck(spec, { cwd: path, commit: head, outputs: store.outputs, signal, onCheck: (id) => deps.onStage?.(`check ${id}`) });
-			checks.push(result);
-			const { id: checkId, commit, exitCode, timedOut, durationMs, logRef, tail } = result;
-			store.journal.append({ t: "check.completed", checkId, commit, exitCode, timedOut, durationMs, logRef, tail, purpose: "verify" });
-		}
-		const range = `${base}..${head}`;
-		if (verifierNeeded({ integrations: state.integrations, changedLines: vcs.changedLines(range), criteria: goal.criteria })) {
-			deps.onStage?.("verifier");
-			verifierRan = true;
-			const role = deps.roles.get("verifier");
-			const plan = readFileSync(store.paths.plan, "utf8");
-			const prompt = verifierPrompt({ goal: goalText, criteria: goal.criteria, checks, specs: deps.checks, base, head, diffStat: vcs.diffStat(range), plan });
+	const range = `${base}..${head}`;
+	if (verifierNeeded({ integrations: state.integrations, changedLines: vcs.changedLines(range), criteria: goal.criteria })) {
+		deps.onStage?.("verifier");
+		verifierRan = true;
+		const role = deps.roles.get("verifier");
+		const plan = readFileSync(store.paths.plan, "utf8");
+		const prompt = verifierPrompt({ goal: goalText, criteria: goal.criteria, checks, specs: deps.checks, base, head, diffStat: vcs.diffStat(range), plan });
+		try {
+			if (!role) throw new Error("the verifier role is not defined");
+			const lease = acquireReadOnlyWorktree(vcs, runId, head);
 			try {
-				if (!role) throw new Error("the verifier role is not defined");
-				const result = await deps.runner.run({ role, prompt, cwd: path, schema: VERIFIER_SCHEMA, signal, timeoutMs: limits.timeoutMs, stallMs: limits.stallMs });
+				const result = await deps.runner.run({ role, prompt, cwd: lease.path, schema: VERIFIER_SCHEMA, signal, timeoutMs: limits.timeoutMs, stallMs: limits.stallMs });
 				verifier = parseVerifierReport(result.data);
-			} catch (error) {
-				// A stop is not a verdict: nothing is journaled.
-				if (signal.aborted) throw error;
-				verifier = { error: error instanceof Error ? error.message : String(error) };
+			} finally {
+				lease.release();
 			}
+		} catch (error) {
+			// A stop is not a verdict: nothing is journaled.
+			if (signal.aborted) throw error;
+			verifier = { error: error instanceof Error ? error.message : String(error) };
 		}
-	} finally {
-		vcs.removeWorktree(path);
 	}
 	const { verdict, criteria, gaps, reason } = computeVerdict({ criteria: goal.criteria, checks, verifier });
 	const appended = appendConvergence(readFileSync(store.paths.plan, "utf8"), gaps);
