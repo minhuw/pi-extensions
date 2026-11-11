@@ -54,6 +54,88 @@ export { SCAN_TIMEOUT_MS } from "./client.ts";
 
 const HOME_DIR = nodePath.resolve(nodeOs.homedir());
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
+export const CHILD_SESSION_HOOKS = Symbol.for(
+	"pi-extensions.child-session-hooks",
+);
+const FFF_SHARED_SESSION_STATE_KEY = Symbol.for(
+	"pi-extensions.fff.session-state",
+);
+const LOAD_PROBE_EVENT = "pi-extensions.fff.load-probe";
+
+export interface ChildSessionHook {
+	name: string;
+	extensionFactory: (pi: ExtensionAPI) => void;
+}
+
+interface FffSharedSessionState {
+	boundApis: WeakSet<object>;
+	openInstances: Set<object>;
+	hook?: ChildSessionHook;
+}
+
+function getSharedSessionState(): FffSharedSessionState {
+	const store = globalThis as unknown as Record<symbol, unknown>;
+	let state = store[FFF_SHARED_SESSION_STATE_KEY] as
+		| FffSharedSessionState
+		| undefined;
+	if (!state) {
+		state = {
+			boundApis: new WeakSet<object>(),
+			openInstances: new Set<object>(),
+		};
+		store[FFF_SHARED_SESSION_STATE_KEY] = state;
+	}
+	return state;
+}
+
+function getChildHooksSet(): Set<ChildSessionHook> {
+	const store = globalThis as unknown as Record<symbol, unknown>;
+	let hooks = store[CHILD_SESSION_HOOKS] as Set<ChildSessionHook> | undefined;
+	if (!(hooks instanceof Set)) {
+		hooks = new Set<ChildSessionHook>();
+		store[CHILD_SESSION_HOOKS] = hooks;
+	}
+	return hooks;
+}
+
+function syncChildSessionHook(nextHook?: ChildSessionHook): void {
+	const state = getSharedSessionState();
+	if (nextHook) {
+		state.hook = nextHook;
+	}
+	const hooks = getChildHooksSet();
+	for (const item of [...hooks]) {
+		if (item.name === "fff" && item !== state.hook) {
+			hooks.delete(item);
+		}
+	}
+	if (state.openInstances.size > 0 && state.hook) {
+		hooks.add(state.hook);
+	} else if (state.hook) {
+		hooks.delete(state.hook);
+	}
+}
+
+function hasRegisteredFffTools(pi: ExtensionAPI): boolean {
+	try {
+		const allTools = (
+			pi as { getAllTools?: () => Array<{ name?: unknown }> }
+		).getAllTools?.();
+		if (
+			Array.isArray(allTools) &&
+			allTools.some(
+				(tool) =>
+					tool?.name === FFF_TOOL_NAMES.find ||
+					tool?.name === FFF_TOOL_NAMES.grep,
+			)
+		) {
+			return true;
+		}
+	} catch {
+		// Action methods throw during DefaultResourceLoader's load phase; expected.
+	}
+	return false;
+}
 
 const DEFAULT_GREP_LIMIT = 20;
 const DEFAULT_FIND_LIMIT = 30;
@@ -364,14 +446,71 @@ export interface FffExtensionOptions {
 export function createFffExtension(
 	options?: FffExtensionOptions,
 ): (pi: ExtensionAPI) => void {
-	return function setupFffExtension(pi: ExtensionAPI): void {
+	const childHook: ChildSessionHook = {
+		name: "fff",
+		extensionFactory: (childPi: ExtensionAPI) => {
+			activateFffExtension(childPi, true);
+		},
+	};
+
+	function activateFffExtension(
+		pi: ExtensionAPI,
+		fromChildHook: boolean,
+	): void {
+		const sharedState = getSharedSessionState();
+		if (sharedState.boundApis.has(pi)) return;
+		if (fromChildHook && hasRegisteredFffTools(pi)) return;
+
+		// Deduplicate when a child session loads `fff` both by discovered path and via `CHILD_SESSION_HOOKS`.
+		let inLoadPass = true;
+		const events = (
+			pi as {
+				events?: {
+					emit?: (channel: string, data: unknown) => void;
+					on?: (channel: string, handler: (data: unknown) => void) => unknown;
+				};
+			}
+		).events;
+		if (
+			events &&
+			typeof events.emit === "function" &&
+			typeof events.on === "function"
+		) {
+			const probe = { alreadyLoaded: false };
+			events.emit(LOAD_PROBE_EVENT, probe);
+			if (probe.alreadyLoaded) return;
+			events.on(LOAD_PROBE_EVENT, (data) => {
+				if (inLoadPass && data && typeof data === "object") {
+					(data as { alreadyLoaded: boolean }).alreadyLoaded = true;
+				}
+			});
+		}
+
+		sharedState.boundApis.add(pi);
+		const instanceToken = {};
+
 		const backend = options?.backend ?? getSharedFffBackend();
 		const config = loadConfig(options?.agentDir ?? piDataDir());
 
 		let activeCwd = process.cwd();
 		let currentWorkspaceRoot: string | null = null;
-		let childSession = false;
+		let childSession = fromChildHook;
 		let startupConfigResolved = false;
+
+		function hasAdmittedFffTool(): boolean {
+			const getAllTools = (
+				pi as { getAllTools?: () => Array<{ name?: unknown }> }
+			).getAllTools;
+			if (typeof getAllTools !== "function") return true;
+			try {
+				const admitted = new Set(
+					getAllTools().map((t) => (typeof t?.name === "string" ? t.name : "")),
+				);
+				return toolNameList(toolNames).some((name) => admitted.has(name));
+			} catch {
+				return true;
+			}
+		}
 
 		// All startup options use the same flag > env > file > fallback order.
 		function getConfigValue<T>(
@@ -431,13 +570,15 @@ export function createFffExtension(
 
 		function resolveStartupConfig(): void {
 			setMode(
-				getConfigValue(
-					"fff-mode",
-					"PI_FFF_MODE",
-					config.mode,
-					"tools-and-ui",
-					parseMode,
-				),
+				fromChildHook
+					? "tools-only"
+					: getConfigValue(
+							"fff-mode",
+							"PI_FFF_MODE",
+							config.mode,
+							"tools-and-ui",
+							parseMode,
+						),
 			);
 			resolvedDbPaths = resolveDbPaths(
 				{
@@ -959,7 +1100,7 @@ export function createFffExtension(
 
 		function prepareSession(ctx: ExtensionContext): void {
 			activeCwd = ctx.cwd;
-			childSession = isChildSession(ctx);
+			childSession = fromChildHook || isChildSession(ctx);
 			uiCtx = ctx;
 			if (toolsRegistered) return;
 
@@ -974,11 +1115,13 @@ export function createFffExtension(
 
 			// Restore persisted mode before registering tools so a saved override
 			// can safely change their names after /reload or session resume.
-			const modes = sessionModes(ctx.sessionManager?.getEntries?.());
-			if (modes.length > 0) {
-				const restored = modes[modes.length - 1]!;
-				if (restored !== currentMode) setMode(restored);
-				usedOverride = usedOverride || modes.includes("override");
+			if (!fromChildHook) {
+				const modes = sessionModes(ctx.sessionManager?.getEntries?.());
+				if (modes.length > 0) {
+					const restored = modes[modes.length - 1]!;
+					if (restored !== currentMode) setMode(restored);
+					usedOverride = usedOverride || modes.includes("override");
+				}
 			}
 
 			// `override` replaces pi's built-in grep/find. With the cwd opted out of
@@ -998,12 +1141,20 @@ export function createFffExtension(
 		}
 
 		pi.on("session_start", async (_event, ctx) => {
+			inLoadPass = false;
+			const isChild = fromChildHook || isChildSession(ctx);
+			sharedState.openInstances.add(instanceToken);
+			syncChildSessionHook(
+				!isChild || !sharedState.hook ? childHook : undefined,
+			);
 			currentWorkspaceRoot = null;
 			stopHomeScanStatus();
 			try {
 				prepareSession(ctx);
 				if (!childSession) {
 					registerAutocompleteProvider(ctx);
+				} else if (!hasAdmittedFffTool()) {
+					return;
 				}
 
 				// The user opted out of indexing this cwd, so skip the picker entirely
@@ -1048,6 +1199,8 @@ export function createFffExtension(
 
 		pi.on("session_shutdown", async () => {
 			stopHomeScanStatus();
+			sharedState.openInstances.delete(instanceToken);
+			syncChildSessionHook();
 		});
 
 		// --- Shared render helpers ---
@@ -1868,6 +2021,10 @@ export function createFffExtension(
 				}
 			},
 		});
+	}
+
+	return function setupFffExtension(pi: ExtensionAPI): void {
+		activateFffExtension(pi, false);
 	};
 }
 

@@ -15,8 +15,12 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { type AutocompleteProvider, visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type FffBackend, SidecarFffBackend } from "../client.ts";
-import { createFffExtension } from "../index.ts";
+import { type FffBackend, SHARED_BACKEND_KEY, SidecarFffBackend } from "../client.ts";
+import fffExtension, {
+	CHILD_SESSION_HOOKS,
+	type ChildSessionHook,
+	createFffExtension,
+} from "../index.ts";
 
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
 type ExtensionMode = ExtensionContext["mode"];
@@ -88,7 +92,11 @@ interface HarnessOptions {
 	flags?: Record<string, boolean | string>;
 	entries?: SessionEntryRecord[];
 	initialActiveTools?: string[];
-	extensionSetup?: (pi: ExtensionAPI) => void;
+	extensionSetup?: ((pi: ExtensionAPI) => void) | false;
+	events?: {
+		emit: (channel: string, data: unknown) => void;
+		on: (channel: string, handler: (data: unknown) => void) => () => void;
+	};
 }
 
 function createSessionHarness(options: HarnessOptions) {
@@ -101,6 +109,7 @@ function createSessionHarness(options: HarnessOptions) {
 	const notifications: NotificationRecord[] = [];
 	const statuses = new Map<string, string | undefined>();
 	const fallbackSuggestionsCalls: { lines: string[]; cursorLine: number; cursorCol: number }[] = [];
+	let registerToolCalls = 0;
 
 	const makeBuiltinTool = (name: string): ToolDefinition =>
 		({
@@ -226,6 +235,7 @@ function createSessionHarness(options: HarnessOptions) {
 			handlers.set(event, list);
 		},
 		registerTool(definition: ToolDefinition) {
+			registerToolCalls += 1;
 			tools.set(definition.name, definition);
 			if (!activeTools.includes(definition.name)) {
 				activeTools.push(definition.name);
@@ -252,13 +262,18 @@ function createSessionHarness(options: HarnessOptions) {
 		appendEntry(customType: string, data?: unknown) {
 			entries.push({ type: "custom", customType, data });
 		},
+		...(options.events ? { events: options.events } : {}),
 	} as unknown as ExtensionAPI;
 
-	const setup = options.extensionSetup ?? createFffExtension({
-		backend: options.backend,
-		agentDir: options.agentDir,
-	});
-	setup(pi);
+	if (options.extensionSetup !== false) {
+		const setup =
+			options.extensionSetup ??
+			createFffExtension({
+				backend: options.backend,
+				agentDir: options.agentDir,
+			});
+		setup(pi);
+	}
 
 	async function emit(eventName: string, eventPayload: unknown = {}): Promise<void> {
 		for (const handler of handlers.get(eventName) ?? []) {
@@ -301,6 +316,8 @@ function createSessionHarness(options: HarnessOptions) {
 		statuses,
 		fallbackSuggestionsCalls,
 		getActiveTools: () => [...activeTools],
+		getRegisterToolCalls: () => registerToolCalls,
+		getHandlerCount: (eventName: string) => handlers.get(eventName)?.length ?? 0,
 		getAutocompleteRegistrations: () => autocompleteRegistrations,
 		getAutocompleteProvider: () => autocompleteProvider,
 		emit,
@@ -1503,6 +1520,253 @@ describe("pi-fff extension integration", () => {
 			expect(session.notifications.at(-1)?.message).toContain("FFF not initialized:");
 
 			await session.emit("session_shutdown");
+		});
+	});
+
+	describe("5. child-session-hooks registration and deduplication", () => {
+		it("exposes the 'fff' child-session hook, activates fffind/ffgrep on a noExtensions child session, and never double-registers", async () => {
+			const parentRepo = path.join(sandboxDir, "hook-parent-repo");
+			const stepWorktree = path.join(sandboxDir, "hook-herder-step");
+			initGitRepo(parentRepo, {
+				"src/parent-main.ts": "export const PARENT_HOOK_TOKEN = 'PARENT_HOOK_789';\n",
+			});
+			git(parentRepo, "worktree", "add", "-q", "--detach", stepWorktree, "HEAD");
+			writeFileSync(
+				path.join(stepWorktree, "src", "step-local.ts"),
+				"export const STEP_HOOK_TOKEN = 'HERDER_STEP_SHARED_FFF';\n",
+				"utf8",
+			);
+
+			const backend = trackBackend();
+			const globalStore = globalThis as unknown as Record<symbol, unknown>;
+			const prevSharedBackend = globalStore[SHARED_BACKEND_KEY];
+			globalStore[SHARED_BACKEND_KEY] = backend;
+
+			try {
+				// 1) Activate default fffExtension on parent session, then simulate /reload -> single idempotent "fff" hook.
+				const parent1 = createSessionHarness({
+					backend,
+					agentDir,
+					cwd: parentRepo,
+					mode: "tui",
+					extensionSetup: fffExtension,
+				});
+				await parent1.emit("session_start");
+
+				const getFffHooks = (): ChildSessionHook[] => {
+					const set = globalStore[CHILD_SESSION_HOOKS];
+					expect(set).toBeInstanceOf(Set);
+					return [...(set as Set<ChildSessionHook>)].filter((h) => h.name === "fff");
+				};
+
+				expect(getFffHooks()).toHaveLength(1);
+
+				// Simulate /reload on parent: second fffExtension activation replaces rather than duplicating "fff".
+				const parent2 = createSessionHarness({
+					backend,
+					agentDir,
+					cwd: parentRepo,
+					mode: "tui",
+					extensionSetup: fffExtension,
+				});
+				await parent2.emit("session_start");
+				await parent1.emit("session_shutdown");
+
+				const fffHooks = getFffHooks();
+				expect(fffHooks).toHaveLength(1);
+				const fffHook = fffHooks[0]!;
+				expect(typeof fffHook.extensionFactory).toBe("function");
+
+				const parentPid = backend.getPid();
+				expect(typeof parentPid).toBe("number");
+
+				// 2) Fresh `noExtensions: true` child ExtensionAPI (Herder step): ONLY child-session-hooks run.
+				const herderChild = createSessionHarness({
+					backend,
+					agentDir,
+					cwd: stepWorktree,
+					mode: "print",
+					entries: [
+						{
+							type: "custom",
+							customType: SESSION_LINK_TYPE,
+							data: { kind: "herder-step", parentSessionId: "parent-2" },
+						},
+					],
+					extensionSetup: false,
+				});
+				expect(herderChild.tools.has("fffind")).toBe(false);
+				expect(herderChild.tools.has("ffgrep")).toBe(false);
+
+				fffHook.extensionFactory(herderChild.pi);
+				await herderChild.emit("session_start");
+
+				expect(herderChild.tools.has("fffind")).toBe(true);
+				expect(herderChild.tools.has("ffgrep")).toBe(true);
+				expect(herderChild.notifications).toEqual([]);
+				expect(herderChild.getAutocompleteRegistrations()).toBe(0);
+
+				const stepFind = await herderChild.callTool("fffind", { pattern: "step-local.ts" });
+				expect(stepFind.text).toContain("src/step-local.ts");
+
+				const stepGrep = await herderChild.callTool("ffgrep", {
+					pattern: "HERDER_STEP_SHARED_FFF",
+				});
+				expect(stepGrep.text).toContain("src/step-local.ts");
+				expect(backend.getPid()).toBe(parentPid);
+
+				await herderChild.emit("session_shutdown");
+				// Parent is still open, so "fff" hook stays registered.
+				expect(getFffHooks()).toHaveLength(1);
+
+				// 3a) Deduplication on the SAME ExtensionAPI when both normal loading and child-session-hooks run.
+				const sameApiChild = createSessionHarness({
+					backend,
+					agentDir,
+					cwd: parentRepo,
+					mode: "print",
+					extensionSetup: fffExtension,
+				});
+				const callsAfterNormalLoad = sameApiChild.getRegisterToolCalls();
+				const handlersAfterNormalLoad = sameApiChild.getHandlerCount("session_start");
+				expect(callsAfterNormalLoad).toBeGreaterThanOrEqual(2);
+				expect(handlersAfterNormalLoad).toBe(1);
+
+				// Invoking child-session-hooks on the same ExtensionAPI must be a complete no-op!
+				fffHook.extensionFactory(sameApiChild.pi);
+				expect(sameApiChild.getRegisterToolCalls()).toBe(callsAfterNormalLoad);
+				expect(sameApiChild.getHandlerCount("session_start")).toBe(1);
+				await sameApiChild.emit("session_shutdown");
+
+				// 3b) Deduplication across two ExtensionAPI wrappers sharing one DefaultResourceLoader eventBus (subagents `extensions: true`).
+				const busListeners = new Map<string, Set<(data: unknown) => void>>();
+				const sharedEvents = {
+					emit(channel: string, data: unknown) {
+						for (const fn of busListeners.get(channel) ?? []) {
+							fn(data);
+						}
+					},
+					on(channel: string, handler: (data: unknown) => void) {
+						let set = busListeners.get(channel);
+						if (!set) {
+							set = new Set();
+							busListeners.set(channel, set);
+						}
+						set.add(handler);
+						return () => {
+							set?.delete(handler);
+						};
+					},
+				};
+
+				const discoveredExtApi = createSessionHarness({
+					backend,
+					agentDir,
+					cwd: parentRepo,
+					mode: "print",
+					events: sharedEvents,
+					extensionSetup: fffExtension,
+				});
+				const inlineHookExtApi = createSessionHarness({
+					backend,
+					agentDir,
+					cwd: parentRepo,
+					mode: "print",
+					events: sharedEvents,
+					extensionSetup: false,
+				});
+				fffHook.extensionFactory(inlineHookExtApi.pi);
+
+				expect(discoveredExtApi.getRegisterToolCalls()).toBeGreaterThanOrEqual(2);
+				expect(inlineHookExtApi.getRegisterToolCalls()).toBe(0);
+				expect(inlineHookExtApi.getHandlerCount("session_start")).toBe(0);
+
+				// 4) Discarded discovered load (e.g. filtered out by subagent extensionsOverride before session_start)
+				// must NOT leak an open instance or keep the hook registered after active sessions shut down.
+				createSessionHarness({
+					backend,
+					agentDir,
+					cwd: parentRepo,
+					mode: "print",
+					extensionSetup: fffExtension,
+				});
+
+				// 5) Child-hook invocation stays on fffind/ffgrep even when pi-fff.json sets mode="override",
+				// and skips warming roots when pi.getAllTools() admitted no FFF tools.
+				writeFileSync(
+					path.join(agentDir, "pi-fff.json"),
+					JSON.stringify({ mode: "override" }),
+					"utf8",
+				);
+				const overrideHookChild = createSessionHarness({
+					backend,
+					agentDir,
+					cwd: stepWorktree,
+					mode: "print",
+					entries: [
+						{ type: "custom", customType: SESSION_LINK_TYPE, data: { kind: "herder-step" } },
+						{ type: "custom", customType: "fff-mode", data: { mode: "override" } },
+					],
+					extensionSetup: false,
+				});
+				fffHook.extensionFactory(overrideHookChild.pi);
+				await overrideHookChild.emit("session_start");
+				expect(overrideHookChild.getActiveTools()).toContain("fffind");
+				expect(overrideHookChild.getActiveTools()).toContain("ffgrep");
+				expect((await overrideHookChild.callTool("grep", {})).text).toBe("builtin:grep");
+				expect((await overrideHookChild.callTool("find", {})).text).toBe("builtin:find");
+				await overrideHookChild.emit("session_shutdown");
+
+				let ensureCalls = 0;
+				const countingBackend: FffBackend = {
+					ensureRoot: async (opts, sig) => {
+						ensureCalls++;
+						return backend.ensureRoot(opts, sig);
+					},
+					getScanProgress: (r, s) => backend.getScanProgress(r, s),
+					grep: (r, q, o, s) => backend.grep(r, q, o, s),
+					multiGrep: (r, o, s) => backend.multiGrep(r, o, s),
+					fileSearch: (r, q, o, s) => backend.fileSearch(r, q, o, s),
+					mixedSearch: (r, q, o, s) => backend.mixedSearch(r, q, o, s),
+					healthCheck: (r, s) => backend.healthCheck(r, s),
+					scanFiles: (r, s) => backend.scanFiles(r, s),
+					getPid: () => backend.getPid(),
+					dispose: () => backend.dispose(),
+				};
+				const gatedParent = createSessionHarness({
+					backend: countingBackend,
+					agentDir: path.join(sandboxDir, "gated-agent"),
+					cwd: os.homedir(),
+					mode: "tui",
+					flags: { "fff-enable-home-scan": false, "fff-warn-home-scan": false },
+				});
+				await gatedParent.emit("session_start");
+				const gatedHook = getFffHooks()[0]!;
+				const verifierLikeChild = createSessionHarness({
+					backend: countingBackend,
+					agentDir: path.join(sandboxDir, "gated-agent"),
+					cwd: stepWorktree,
+					mode: "print",
+					extensionSetup: false,
+				});
+				(verifierLikeChild.pi as unknown as { getAllTools: () => Array<{ name: string }> }).getAllTools =
+					() => [{ name: "read" }, { name: "bash" }];
+				gatedHook.extensionFactory(verifierLikeChild.pi);
+				await verifierLikeChild.emit("session_start");
+				expect(ensureCalls).toBe(0);
+				await verifierLikeChild.emit("session_shutdown");
+				await gatedParent.emit("session_shutdown");
+
+				await discoveredExtApi.emit("session_shutdown");
+				await parent2.emit("session_shutdown");
+				expect(getFffHooks()).toHaveLength(0);
+			} finally {
+				if (prevSharedBackend === undefined) {
+					delete globalStore[SHARED_BACKEND_KEY];
+				} else {
+					globalStore[SHARED_BACKEND_KEY] = prevSharedBackend;
+				}
+			}
 		});
 	});
 });

@@ -610,4 +610,227 @@ describe("SidecarFffBackend", () => {
 			expect(respawnedSearch.value.items.map((i) => i.relativePath)).toContain("survivor.ts");
 		}
 	});
+
+	it("triggers HEAD-change scanFiles() automatically when a reused git worktree switches commits", async () => {
+		const baseDir = makeTempDir("worktree-head-rescan");
+		const repoDir = path.join(baseDir, "repo");
+		const worktreeDir = path.join(baseDir, "rw-0");
+		fs.mkdirSync(path.join(repoDir, "src"), { recursive: true });
+		fs.writeFileSync(
+			path.join(repoDir, "src", "commit1.ts"),
+			"export const COMMIT_1_MARKER = 'COMMIT_1_ONLY';\n",
+		);
+
+		const gitEnv: NodeJS.ProcessEnv = {
+			...process.env,
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_AUTHOR_NAME: "FFF Test",
+			GIT_AUTHOR_EMAIL: "fff@test.local",
+			GIT_COMMITTER_NAME: "FFF Test",
+			GIT_COMMITTER_EMAIL: "fff@test.local",
+		};
+
+		execFileSync("git", ["init", "-q"], { cwd: repoDir, env: gitEnv });
+		execFileSync("git", ["add", "."], { cwd: repoDir, env: gitEnv });
+		execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "commit 1"], {
+			cwd: repoDir,
+			env: gitEnv,
+		});
+		const commit1 = execFileSync("git", ["rev-parse", "HEAD"], {
+			cwd: repoDir,
+			env: gitEnv,
+			encoding: "utf8",
+		}).trim();
+
+		fs.writeFileSync(
+			path.join(repoDir, "src", "commit2-added.ts"),
+			"export const COMMIT_2_MARKER = 'COMMIT_2_EXCLUSIVE_TOKEN';\n",
+		);
+		execFileSync("git", ["add", "."], { cwd: repoDir, env: gitEnv });
+		execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "commit 2"], {
+			cwd: repoDir,
+			env: gitEnv,
+		});
+		const commit2 = execFileSync("git", ["rev-parse", "HEAD"], {
+			cwd: repoDir,
+			env: gitEnv,
+			encoding: "utf8",
+		}).trim();
+
+		// Create a pooled detached git worktree slot at commit1 (`.git` is a `gitdir:` file).
+		execFileSync("git", ["worktree", "add", "-q", "--detach", worktreeDir, commit1], {
+			cwd: repoDir,
+			env: gitEnv,
+		});
+		expect(fs.statSync(path.join(worktreeDir, ".git")).isFile()).toBe(true);
+
+		const backend = makeBackend();
+		const initialEnsure = await backend.ensureRoot({
+			basePath: worktreeDir,
+			kind: "workspace",
+		});
+		const pid = trackPid(backend.getPid());
+		expect(initialEnsure.created).toBe(true);
+
+		const beforeSearch = await backend.fileSearch(initialEnsure.root, "commit2-added.ts");
+		expect(beforeSearch.ok).toBe(true);
+		if (beforeSearch.ok) {
+			expect(beforeSearch.value.items.map((i) => i.relativePath)).not.toContain(
+				"src/commit2-added.ts",
+			);
+		}
+
+		// Switch the reused worktree slot directly to commit2 via git checkout.
+		execFileSync("git", ["checkout", "-q", commit2], {
+			cwd: worktreeDir,
+			env: gitEnv,
+		});
+
+		// Re-ensure concurrently across 5 callers to verify coalesced HEAD-change refresh.
+		const reusedResults = await Promise.all(
+			Array.from({ length: 5 }, () =>
+				backend.ensureRoot({
+					basePath: worktreeDir,
+					kind: "workspace",
+				}),
+			),
+		);
+		for (const res of reusedResults) {
+			expect(res.root).toBe(initialEnsure.root);
+			expect(res.created).toBe(false);
+		}
+		expect(backend.getPid()).toBe(pid);
+
+		// New commit's file and content must be found immediately on the reused FileFinder.
+		const afterSearch = await backend.fileSearch(initialEnsure.root, "commit2-added.ts");
+		expect(afterSearch.ok).toBe(true);
+		if (afterSearch.ok) {
+			expect(afterSearch.value.items.map((i) => i.relativePath)).toContain(
+				"src/commit2-added.ts",
+			);
+		}
+
+		const afterGrep = await backend.grep(
+			initialEnsure.root,
+			"COMMIT_2_EXCLUSIVE_TOKEN",
+			{ mode: "plain" },
+		);
+		expect(afterGrep.ok).toBe(true);
+		if (afterGrep.ok) {
+			expect(afterGrep.value.items.map((m) => m.relativePath)).toContain(
+				"src/commit2-added.ts",
+			);
+		}
+
+		const health = await backend.healthCheck(initialEnsure.root);
+		expect(health.ok).toBe(true);
+		if (health.ok) {
+			expect(health.value.pid).toBe(pid);
+			expect(health.value.sharedRoots).toBe(1);
+		}
+	});
+
+	it("prunes deleted worktree entries and transparently recycles the idle sidecar once PI_FFF_MAX_DEAD_HANDLES is reached", async () => {
+		const baseDir = makeTempDir("dead-worktree-recycle");
+		const mainRepo = path.join(baseDir, "main-repo");
+		const wt1 = path.join(baseDir, "temp-wt-1");
+		const wt2 = path.join(baseDir, "temp-wt-2");
+
+		initTempGitRepo(mainRepo);
+		const gitEnv: NodeJS.ProcessEnv = {
+			...process.env,
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_CONFIG_GLOBAL: "/dev/null",
+		};
+		execFileSync("git", ["worktree", "add", "-q", "--detach", wt1, "HEAD"], {
+			cwd: mainRepo,
+			env: gitEnv,
+		});
+		execFileSync("git", ["worktree", "add", "-q", "--detach", wt2, "HEAD"], {
+			cwd: mainRepo,
+			env: gitEnv,
+		});
+
+		const backend = makeBackend({
+			env: {
+				...process.env,
+				PI_FFF_MAX_DEAD_HANDLES: "2",
+			},
+		});
+
+		const mainEnsure = await backend.ensureRoot({
+			basePath: mainRepo,
+			kind: "workspace",
+		});
+		const wt1Ensure = await backend.ensureRoot({
+			basePath: wt1,
+			kind: "workspace",
+		});
+		const wt2Ensure = await backend.ensureRoot({
+			basePath: wt2,
+			kind: "workspace",
+		});
+		const oldPid = trackPid(backend.getPid());
+
+		const healthInitial = await backend.healthCheck(mainEnsure.root);
+		expect(healthInitial.ok).toBe(true);
+		if (healthInitial.ok) {
+			expect(healthInitial.value.pid).toBe(oldPid);
+			expect(healthInitial.value.sharedRoots).toBe(3);
+		}
+
+		// Delete first temporary worktree: pruned (sharedRoots drops to 2), deadHandleCount=1 < 2 -> no recycle yet.
+		fs.rmSync(wt1, { recursive: true, force: true });
+		const healthAfterFirstDelete = await backend.healthCheck(mainEnsure.root);
+		expect(healthAfterFirstDelete.ok).toBe(true);
+		if (healthAfterFirstDelete.ok) {
+			expect(healthAfterFirstDelete.value.pid).toBe(oldPid);
+			expect(healthAfterFirstDelete.value.sharedRoots).toBe(2);
+		}
+		expect(isPidAlive(oldPid)).toBe(true);
+
+		// Delete second temporary worktree: pruned (sharedRoots drops to 1), deadHandleCount=2 >= 2 -> idle sidecar recycles!
+		fs.rmSync(wt2, { recursive: true, force: true });
+		const healthTriggerRecycle = await backend.healthCheck(mainEnsure.root);
+		expect(healthTriggerRecycle.ok).toBe(true);
+		if (healthTriggerRecycle.ok) {
+			expect(healthTriggerRecycle.value.sharedRoots).toBe(1);
+		}
+
+		// Immediately issue search/grep on main workspace (even racing the setImmediate exit) — must succeed transparently!
+		const raceSearch = await backend.fileSearch(mainEnsure.root, "alpha.ts");
+		expect(raceSearch.ok).toBe(true);
+		if (raceSearch.ok) {
+			expect(raceSearch.value.items.map((i) => i.relativePath)).toContain("src/alpha.ts");
+		}
+
+		expect(await waitForPidExit(oldPid)).toBe(true);
+
+		const postRecycleGrep = await backend.grep(mainEnsure.root, "SHARED_MARKER_TOKEN", {
+			mode: "plain",
+		});
+		expect(postRecycleGrep.ok).toBe(true);
+		if (postRecycleGrep.ok) {
+			expect(postRecycleGrep.value.items.length).toBeGreaterThan(0);
+		}
+
+		const newPid = trackPid(backend.getPid());
+		expect(newPid).not.toBe(oldPid);
+		expect(isPidAlive(newPid)).toBe(true);
+
+		// Verify deleted worktrees were pruned from rememberedRoots and NOT resurrected on the recycled sidecar.
+		const healthPostRecycle = await backend.healthCheck(mainEnsure.root);
+		expect(healthPostRecycle.ok).toBe(true);
+		if (healthPostRecycle.ok) {
+			expect(healthPostRecycle.value.pid).toBe(newPid);
+			expect(healthPostRecycle.value.sharedRoots).toBe(1);
+		}
+		await expect(backend.fileSearch(wt1Ensure.root, "alpha.ts")).rejects.toThrow(
+			/FFF root not initialized/,
+		);
+		await expect(backend.fileSearch(wt2Ensure.root, "alpha.ts")).rejects.toThrow(
+			/FFF root not initialized/,
+		);
+	});
 });

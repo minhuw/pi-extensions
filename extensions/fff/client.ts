@@ -1,4 +1,6 @@
 import { type ChildProcess, fork } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
 	GrepOptions,
@@ -70,6 +72,7 @@ export interface SidecarBackendOptions {
 	sidecarPath?: string;
 	ensureTimeoutMs?: number;
 	callTimeoutMs?: number;
+	env?: NodeJS.ProcessEnv;
 }
 
 interface IpcSuccessMessage {
@@ -110,6 +113,7 @@ export class SidecarFffBackend implements FffBackend {
 	private readonly sidecarPath: string;
 	private readonly ensureTimeoutMs: number;
 	private readonly callTimeoutMs: number;
+	private readonly env: NodeJS.ProcessEnv | undefined;
 	private readonly pending = new Map<number, PendingRequest>();
 	private readonly rememberedRoots = new Map<string, EnsureRootOptions>();
 	private child: ChildSession | null = null;
@@ -119,15 +123,38 @@ export class SidecarFffBackend implements FffBackend {
 		this.sidecarPath = options.sidecarPath ?? DEFAULT_SIDECAR_PATH;
 		this.ensureTimeoutMs = options.ensureTimeoutMs ?? DEFAULT_ENSURE_TIMEOUT_MS;
 		this.callTimeoutMs = options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
+		this.env = options.env;
 	}
 
 	async ensureRoot(options: EnsureRootOptions, signal?: AbortSignal): Promise<EnsureRootResult> {
-		const { value, session } = await this.sendRequest<EnsureRootResult>(
-			"ensure",
-			options as unknown as Record<string, unknown>,
-			this.ensureTimeoutMs,
-			signal,
-		);
+		this.pruneRememberedRoots(options.basePath);
+
+		let response: { value: EnsureRootResult; session: ChildSession };
+		try {
+			response = await this.sendRequest<EnsureRootResult>(
+				"ensure",
+				options as unknown as Record<string, unknown>,
+				this.ensureTimeoutMs,
+				signal,
+			);
+		} catch (err) {
+			if (
+				!signal?.aborted &&
+				err instanceof Error &&
+				/FFF sidecar exited unexpectedly/.test(err.message)
+			) {
+				response = await this.sendRequest<EnsureRootResult>(
+					"ensure",
+					options as unknown as Record<string, unknown>,
+					this.ensureTimeoutMs,
+					signal,
+				);
+			} else {
+				throw err;
+			}
+		}
+
+		const { value, session } = response;
 		session.ensuredRoots.add(value.root);
 
 		const previous = this.rememberedRoots.get(value.root);
@@ -228,6 +255,21 @@ export class SidecarFffBackend implements FffBackend {
 		}
 	}
 
+	private pruneRememberedRoots(preservePath?: string): void {
+		const preservedResolved = preservePath ? path.resolve(preservePath) : undefined;
+		for (const rememberedPath of this.rememberedRoots.keys()) {
+			if (
+				rememberedPath === preservePath ||
+				(preservedResolved !== undefined && path.resolve(rememberedPath) === preservedResolved)
+			) {
+				continue;
+			}
+			if (!fs.existsSync(rememberedPath)) {
+				this.rememberedRoots.delete(rememberedPath);
+			}
+		}
+	}
+
 	private async callWithRoot<T>(
 		method: string,
 		root: string,
@@ -240,6 +282,7 @@ export class SidecarFffBackend implements FffBackend {
 
 		const session = this.getOrSpawnChild();
 		if (!session.ensuredRoots.has(root)) {
+			this.pruneRememberedRoots();
 			const remembered = this.rememberedRoots.get(root);
 			if (remembered) {
 				await this.ensureRoot(remembered, signal);
@@ -250,14 +293,19 @@ export class SidecarFffBackend implements FffBackend {
 			const { value } = await this.sendRequest<T>(method, params, this.callTimeoutMs, signal);
 			return value;
 		} catch (err) {
-			const remembered = this.rememberedRoots.get(root);
 			if (
-				remembered &&
 				!signal?.aborted &&
 				err instanceof Error &&
-				err.message.includes("FFF root not initialized:")
+				(err.message.includes("FFF root not initialized:") ||
+					/FFF sidecar exited unexpectedly/.test(err.message))
 			) {
-				await this.ensureRoot(remembered, signal);
+				this.pruneRememberedRoots();
+				const remembered = this.rememberedRoots.get(root);
+				if (remembered) {
+					await this.ensureRoot(remembered, signal);
+				} else if (err.message.includes("FFF root not initialized:")) {
+					throw err;
+				}
 				const { value } = await this.sendRequest<T>(
 					method,
 					params,
@@ -293,6 +341,7 @@ export class SidecarFffBackend implements FffBackend {
 		const proc = fork(this.sidecarPath, [], {
 			execArgv: [],
 			stdio: ["ignore", "ignore", "ignore", "ipc"],
+			...(this.env ? { env: this.env } : {}),
 		});
 
 		const session: ChildSession = {

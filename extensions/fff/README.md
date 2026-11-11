@@ -14,10 +14,11 @@ Configuration at `<agentDir>/pi-fff.json` (`~/.pi/agent/pi-fff.json` or `$PI_COD
 
 ## Architecture
 
-Compared to upstream `@ff-labs/pi-fff@0.11.0`, this port makes two runtime changes (see `LOCAL-PATCHES.md`):
+Compared to upstream `@ff-labs/pi-fff@0.11.0`, this port makes three runtime changes (see `LOCAL-PATCHES.md`):
 
-1. **Out-of-process IPC sidecar (`sidecar.mjs`):** `@ff-labs/fff-node` invokes `libfff_c` synchronously via `ffi-rs`. Running FFI calls in a dedicated Node child process keeps scans, greps, and `@`-mention queries off Pi's main V8 event loop, bounds stuck calls with a watchdog timeout + automatic crash/hang respawn, and exits cleanly on IPC disconnect instead of calling `fff_destroy` (avoiding native teardown deadlocks).
-2. **Process-wide canonical-`cwd` shared pool (`Symbol.for("pi-extensions.fff.backend")`):** top-level sessions, `/reload`, and in-process subagents targeting the same canonical workspace share one warm `FileFinder` backend instead of re-scanning the repository or contending on LMDB locks.
+1. **Out-of-process IPC sidecar (`sidecar.mjs`):** `@ff-labs/fff-node` invokes `libfff_c` synchronously via `ffi-rs`. Running FFI calls in a dedicated Node child process keeps scans, greps, and `@`-mention queries off Pi's main V8 event loop, bounds stuck calls with a watchdog timeout + automatic crash/hang respawn, exits cleanly on IPC disconnect instead of calling `fff_destroy` (avoiding native teardown deadlocks), and recycles idle sidecars after pruning deleted temporary worktrees (`PI_FFF_MAX_DEAD_HANDLES`, default `8`) so the OS reclaims native watchers and mmaps with zero downtime.
+2. **Process-wide canonical-`cwd` shared pool (`Symbol.for("pi-extensions.fff.backend")`):** top-level sessions, `/reload`, and in-process child sessions targeting the same canonical workspace or pooled git worktree share one warm `FileFinder` backend instead of re-scanning the repository or contending on LMDB locks. Reused git worktree slots that switch `HEAD` (`git checkout` / `git reset`) automatically trigger a coalesced `scanFiles()` refresh on `ensureRoot`.
+3. **Child-session propagation (`Symbol.for("pi-extensions.child-session-hooks")`):** while active, `fff` registers an idempotent `"fff"` child-session hook so isolated child sessions (`noExtensions: true`, such as Herder steps) receive `fffind` and `ffgrep` backed by the shared sidecar, while deduplicating when a child also loads discovered extensions.
 
 ## Tools & commands
 

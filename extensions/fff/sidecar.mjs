@@ -3,6 +3,14 @@ import path from "node:path";
 
 const MAX_AUX = 16;
 const DEFAULT_WAIT_TIMEOUT_MS = 15_000;
+const parsedMaxDeadHandles = Number.parseInt(
+	process.env.PI_FFF_MAX_DEAD_HANDLES ?? "",
+	10,
+);
+const MAX_DEAD_HANDLES =
+	Number.isFinite(parsedMaxDeadHandles) && parsedMaxDeadHandles >= 1
+		? parsedMaxDeadHandles
+		: 8;
 
 process.on("disconnect", () => process.exit(0));
 process.on("SIGTERM", () => process.exit(0));
@@ -15,6 +23,9 @@ let lastDbFallbackError = undefined;
 let lastDbPathsKey = null;
 let lastTick = 0;
 let fileFinderPromise = null;
+let deadHandleCount = 0;
+let inFlightRpcCount = 0;
+let recycleScheduled = false;
 
 function makeConfigKey(params) {
 	return JSON.stringify({
@@ -74,6 +85,69 @@ function coversRoot(entryRoot, target) {
 	);
 }
 
+function readGitHeadState(root) {
+	try {
+		const dotGit = path.join(root, ".git");
+		const stat = fs.statSync(dotGit);
+		let gitdir;
+		if (stat.isDirectory()) {
+			gitdir = dotGit;
+		} else if (stat.isFile()) {
+			const content = fs.readFileSync(dotGit, "utf8");
+			const match = content.match(/^gitdir:\s*(.+)$/m);
+			if (!match || !match[1]) {
+				return null;
+			}
+			gitdir = path.resolve(root, match[1].trim());
+		} else {
+			return null;
+		}
+		return fs.readFileSync(path.join(gitdir, "HEAD"), "utf8").trim();
+	} catch {
+		return null;
+	}
+}
+
+function sweepMissingRoots() {
+	for (const [root, entry] of entries.entries()) {
+		if (!fs.existsSync(entry.root)) {
+			entries.delete(root);
+			deadHandleCount++;
+		}
+	}
+}
+
+async function refreshEntryIfHeadChanged(entry, waitTimeoutMs) {
+	const currentHead = readGitHeadState(entry.root);
+	if (
+		currentHead !== null &&
+		entry.headState !== null &&
+		currentHead !== entry.headState
+	) {
+		entry.headState = currentHead;
+		if (entry.refreshPromise) {
+			await entry.refreshPromise;
+			return refreshEntryIfHeadChanged(entry, waitTimeoutMs);
+		}
+		const task = (async () => {
+			entry.finder.scanFiles();
+			await entry.finder.waitForScan(waitTimeoutMs);
+		})();
+		entry.refreshPromise = task;
+		try {
+			await task;
+		} finally {
+			if (entry.refreshPromise === task) {
+				entry.refreshPromise = null;
+			}
+		}
+		return;
+	}
+	if (entry.refreshPromise) {
+		await entry.refreshPromise;
+	}
+}
+
 function evictAuxIfNeeded() {
 	while (true) {
 		let unpinnedCount = 0;
@@ -98,12 +172,15 @@ async function ensureEntry(params) {
 		throw new Error("ensure requires a non-empty basePath");
 	}
 
+	sweepMissingRoots();
+
 	const target = canonicalizeRoot(params.basePath);
 	const isWorkspace = params.kind === "workspace";
 	const exact = isWorkspace || params.exact === true;
 	const configKey = makeConfigKey(params);
 	const dbPathsKey = makeDbPathsKey(params);
 	const hasDbPaths = Boolean(params.frecencyDbPath || params.historyDbPath);
+	const waitTimeoutMs = params.waitTimeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
 
 	if (exact) {
 		const inflight = pending.get(target);
@@ -116,6 +193,7 @@ async function ensureEntry(params) {
 				if (isWorkspace) {
 					entry.pinned = true;
 				}
+				await refreshEntryIfHeadChanged(entry, waitTimeoutMs);
 				entry.lastUsed = nextTick();
 				return buildEnsureResult(entry.root, false);
 			}
@@ -128,6 +206,7 @@ async function ensureEntry(params) {
 				if (isWorkspace) {
 					existing.pinned = true;
 				}
+				await refreshEntryIfHeadChanged(existing, waitTimeoutMs);
 				existing.lastUsed = nextTick();
 				return buildEnsureResult(existing.root, false);
 			}
@@ -164,11 +243,13 @@ async function ensureEntry(params) {
 
 		if (bestPending) {
 			const entry = await bestPending.promise;
+			await refreshEntryIfHeadChanged(entry, waitTimeoutMs);
 			entry.lastUsed = nextTick();
 			return buildEnsureResult(entry.root, false);
 		}
 
 		if (bestEntry) {
+			await refreshEntryIfHeadChanged(bestEntry, waitTimeoutMs);
 			bestEntry.lastUsed = nextTick();
 			return buildEnsureResult(bestEntry.root, false);
 		}
@@ -225,7 +306,7 @@ async function ensureEntry(params) {
 		}
 
 		const finder = res.value;
-		await finder.waitForScan(params.waitTimeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS);
+		await finder.waitForScan(waitTimeoutMs);
 
 		const entry = {
 			root: target,
@@ -234,6 +315,8 @@ async function ensureEntry(params) {
 			lastUsed: nextTick(),
 			configKey,
 			dbPathsKey,
+			headState: readGitHeadState(target),
+			refreshPromise: null,
 			options: usedDbPaths
 				? {
 						...baseOptions,
@@ -289,6 +372,7 @@ async function handleMethod(method, params = {}) {
 		case "mixedSearch":
 			return requireEntry(params.root).finder.mixedSearch(params.query, params.options);
 		case "healthCheck": {
+			sweepMissingRoots();
 			const res = requireEntry(params.root).finder.healthCheck();
 			if (res.ok) {
 				return {
@@ -326,6 +410,7 @@ process.on("message", (msg) => {
 		return;
 	}
 	const { id, method, params } = msg;
+	inFlightRpcCount++;
 	void (async () => {
 		try {
 			const value = await handleMethod(method, params);
@@ -333,6 +418,22 @@ process.on("message", (msg) => {
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			sendReply({ id, ok: false, error: message });
+		} finally {
+			inFlightRpcCount--;
+			if (
+				!recycleScheduled &&
+				deadHandleCount >= MAX_DEAD_HANDLES &&
+				inFlightRpcCount === 0 &&
+				pending.size === 0
+			) {
+				recycleScheduled = true;
+				setImmediate(() => {
+					recycleScheduled = false;
+					if (inFlightRpcCount === 0 && pending.size === 0) {
+						process.exit(0);
+					}
+				});
+			}
 		}
 	})();
 });
