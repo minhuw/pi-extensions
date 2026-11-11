@@ -84,6 +84,29 @@ describe("GroupJoinManager", () => {
     expect(mgr.isGrouped("c")).toBe(true);
   });
 
+  it("does not add a later execution to an earlier group", () => {
+    const deliver = vi.fn();
+    const mgr = new GroupJoinManager(deliver);
+    mgr.registerGroup("g", [{ id: "a", executionId: "one" }, { id: "b", executionId: "b1" }]);
+    expect(mgr.onAgentComplete(makeRecord("a", { executionId: "one" }))).toBe("held");
+    expect(mgr.onAgentComplete(makeRecord("a", { executionId: "one" }))).toBe("held");
+    expect(mgr.onAgentComplete(makeRecord("a", { executionId: "two" }))).toBe("pass");
+    mgr.onAgentComplete(makeRecord("b", { executionId: "b1" }));
+    expect(deliver.mock.calls[0][0].map((r: AgentRecord) => r.executionId)).toEqual(["one", "b1"]);
+  });
+
+  it("retains captured data through a partial timeout, including an old record without an execution ID", () => {
+    const deliver = vi.fn();
+    const mgr = new GroupJoinManager(deliver, 30_000, (record) => ({ id: record.id, executionId: record.executionId, result: record.result }));
+    mgr.registerGroup("g", ["a", "b"]);
+    const record = makeRecord("a", { result: "first" });
+    mgr.onAgentComplete(record);
+    record.executionId = "new-run";
+    record.result = "second";
+    vi.advanceTimersByTime(30_000);
+    expect(deliver).toHaveBeenCalledExactlyOnceWith([{ id: "a", executionId: undefined, result: "first" }], true);
+  });
+
   it("uses the shorter straggler timeout (15s) regardless of the configured group timeout", () => {
     const deliver = vi.fn();
     const mgr = new GroupJoinManager(deliver, 30_000);

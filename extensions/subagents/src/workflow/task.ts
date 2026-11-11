@@ -289,6 +289,7 @@ export function formatWorkflowNotification(task: WorkflowTask, now = Date.now())
   return [
     `<task-notification>`,
     `<task-id>${task.id}</task-id>`,
+    `<execution-id>${escapeXml(task.id)}</execution-id>`,
     task.toolCallId ? `<tool-use-id>${escapeXml(task.toolCallId)}</tool-use-id>` : null,
     task.scriptPath ? `<script>${escapeXml(task.scriptPath)}</script>` : null,
     `<status>${escapeXml(status)}</status>`,

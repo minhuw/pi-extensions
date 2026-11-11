@@ -24,6 +24,7 @@ export const AGENT_RECORD_ENTRY_TYPE = "subagents:record";
 /** The persisted snapshot of a finished agent. */
 export interface AgentRecordEntryData {
   id: string;
+  executionId?: string;
   type: AgentRecord["type"];
   description: string;
   status: AgentRecord["status"];
@@ -65,6 +66,7 @@ export function agentRecordEntryData(record: AgentRecord): AgentRecordEntryData 
   const spawningToolCallId = record.parentToolCallId ?? record.toolCallId;
   return {
     id: record.id,
+    ...(record.executionId !== undefined ? { executionId: record.executionId } : {}),
     type: record.type,
     description: record.description,
     status: record.status,

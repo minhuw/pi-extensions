@@ -39,6 +39,8 @@ Your next message ends the mode before it is processed, and the report comes wit
 
 The mode survives `/reload`. Any other restart, resume, or fork ends it, and `/selfdrive report` shows what it did.
 
+While engaged, Selfdrive publishes `selfdrive` for its session in the process-wide `Symbol.for("pi-extensions.session-modes")` registry. The mode remains published after `done` and is removed on disengagement; other session modes are preserved and registry listeners are notified of changes.
+
 While the mode is on, [Statusline Footer](../statusline-footer/README.md) shows `🚗 selfdrive 2h13m` in its bar, with `· waiting 20m` or `· done`.
 
 Run `npm run test:selfdrive` for offline tests that drive real Pi sessions on a local faux provider.

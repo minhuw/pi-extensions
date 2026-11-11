@@ -14,9 +14,9 @@ import { BackgroundLaunch, followUpText } from "./background.ts";
 import { confirmDelivery } from "./confirm.ts";
 import { StepAgents } from "./external-agents.ts";
 import type { RunState } from "../journal/fold.ts";
-import type { DeliveryOutcome, DeliveryRequest, HerderRuntime, LaunchRequest, RuntimeFactory } from "./runtime.ts";
+import type { DeliveryOutcome, DeliveryRequest, HerderRuntime, LaunchRequest, LiveOperation, RuntimeFactory, StatusReport, StepActivity } from "./runtime.ts";
 import { hasStandingGrants, standingGrant, type StandingApproval } from "./standing.ts";
-import { isFinished, planTasks, severalRunsText, statusText, type RunEntry } from "./status.ts";
+import { isFinished, planTasks, severalRunsText, statusPart, statusText, type RunEntry } from "./status.ts";
 
 export const FOLLOW_UP_TYPE = "herder:launch";
 
@@ -44,8 +44,10 @@ export interface RunAnnouncement { runId: string; runDir: string; journalPath: s
 export interface Held {
 	runId: string; run: RunStore; lock: RunLock; vcs: Vcs;
 	controller: AbortController; ops: Set<Promise<unknown>>; exclusive: Set<Promise<unknown>>; closing?: boolean;
+	live: Map<symbol, { text: string; owner?: object }>;
 	runtime?: HerderRuntime; runner?: AgentRunner;
 	launch?: BackgroundLaunch; launching?: boolean;
+	workflow?: { accepting: boolean; stopping: boolean; phase?: string; log?: string };
 	/** Stops announcing journal appends, first sending one that is still pending. */
 	unannounce?: () => void;
 }
@@ -166,7 +168,7 @@ export class Herder {
 			throw new Error(`Herder run ${runId} is in use: ${message(error)}. Another session can take it over once that heartbeat is older than ${LOCK_STALE_MS / 60_000} minutes.`, { cause: error });
 		}
 		if (s.held) this.release(s);
-		s.held = { runId, run, lock, vcs, controller: new AbortController(), ops: new Set(), exclusive: new Set() };
+		s.held = { runId, run, lock, vcs, controller: new AbortController(), ops: new Set(), exclusive: new Set(), live: new Map() };
 		s.held.unannounce = this.#announce(s.held);
 		this.#heartbeat(s);
 		this.refresh(s);
@@ -231,17 +233,16 @@ export class Herder {
 		return held.runtime ??= this.options.createRuntime({
 			cwd: s.ctx.cwd, sessionId: s.id, vcs: held.vcs, run: held.run, signal: held.controller.signal,
 			runner: () => held.runner ??= this.#runner(s, held.run),
-			onActivity: (activity) => {
-				if (s.closed) return;
-				// A stopping run's steps still report until they see the abort; their entries are already gone.
-				if (!held.closing && s.held === held) {
-					this.board.update(held.runId, activity);
-					(s.agents ??= new StepAgents()).update(activity, { ownerSessionId: s.id, runId: held.runId, launch: held.launch?.launch });
-				}
-				this.refresh(s);
-			},
-			onProgress: () => this.refresh(s),
+			onActivity: (activity) => this.activity(s, held, activity),
+			onProgress: () => { if (s.held === held && !held.closing) this.refresh(s); },
 		});
+	}
+
+	private activity(s: Session, held: Held, activity: StepActivity): void {
+		if (s.closed || held.closing || s.held !== held) return;
+		this.board.update(held.runId, activity);
+		(s.agents ??= new StepAgents()).update(activity, { ownerSessionId: s.id, runId: held.runId, launch: held.launch?.launch });
+		this.refresh(s);
 	}
 
 	#runner(s: Session, run: RunStore): AgentRunner {
@@ -289,18 +290,36 @@ export class Herder {
 		};
 	}
 
+	/** Each live operation owns its status independently of other calls and launches. */
+	private live(s: Session, held: Held, text: string, owner?: object): LiveOperation {
+		const token = Symbol();
+		if (!s.closed && !held.closing && s.held === held) {
+			held.live.set(token, { text: statusPart(text), owner });
+			this.refresh(s);
+		}
+		return {
+			update: (next) => {
+				const entry = held.live.get(token);
+				if (!entry || s.closed || held.closing || s.held !== held) return;
+				entry.text = statusPart(next);
+				this.refresh(s);
+			},
+			end: () => { if (held.live.delete(token) && s.held === held) this.refresh(s); },
+		};
+	}
+
 	/**
-	 * Runs a direct tool call as tracked work of `held`: abort waits for it, delivery and clean refuse meanwhile, and
-	 * abort, shutdown, or a lost lock cancel it through the signal, which also follows the tool call's own. An
-	 * `exclusive` op also keeps checks out.
+	 * Tracks a direct call for abort, delivery, and cleanup. The signal follows the run and the tool call;
+	 * `exclusive` also keeps checks out.
 	 */
-	op<T>(held: Held, signal: AbortSignal | undefined, fn: (signal: AbortSignal) => T | Promise<T>, exclusive = false): Promise<T> {
+	op<T>(s: Session, held: Held, signal: AbortSignal | undefined, fn: (signal: AbortSignal, report: StatusReport) => T | Promise<T>, exclusive = false, label?: string): Promise<T> {
 		if (held.closing) return Promise.reject(new Error(`Herder run ${held.runId} is being stopped.`));
 		const combined = signal ? AbortSignal.any([held.controller.signal, signal]) : held.controller.signal;
-		const promise = (async () => fn(combined))();
+		const live = label ? this.live(s, held, label) : undefined;
+		const promise = Promise.resolve().then(() => fn(combined, live?.update ?? (() => {})));
 		held.ops.add(promise);
 		if (exclusive) held.exclusive.add(promise);
-		const forget = () => { held.ops.delete(promise); held.exclusive.delete(promise); };
+		const forget = () => { held.ops.delete(promise); held.exclusive.delete(promise); live?.end(); };
 		promise.then(forget, forget);
 		return promise;
 	}
@@ -310,9 +329,36 @@ export class Herder {
 		if (held.launch || held.launching) throw new Error(`Launch ${held.launch?.launch ?? "(starting)"} is still running. Wait for its follow-up message or stop it with herder_workflow { mode: "stop" }.`);
 		if (held.ops.size) throw new Error("A launch waits until the running Herder tool call finishes.");
 		held.launching = true;
+		// Allocate ownership before calling the runtime: asynchronous launch factories may emit before returning a handle.
+		const workflow = { accepting: true, stopping: false, phase: undefined as string | undefined, log: undefined as string | undefined };
+		held.workflow = workflow;
+		const active = () => workflow.accepting && !s.closed && !held.closing && s.held === held && held.workflow === workflow;
+		const clear = () => {
+			workflow.accepting = false;
+			for (const [token, entry] of held.live) if (entry.owner === workflow) held.live.delete(token);
+			if (held.workflow === workflow) held.workflow = undefined;
+			if (s.held === held) { this.board.clearRun(held.runId); this.refresh(s); }
+		};
+		const stop = () => {
+			workflow.accepting = false;
+			workflow.stopping = true;
+			workflow.phase = workflow.log = undefined;
+			for (const [token, entry] of held.live) if (entry.owner === workflow) held.live.delete(token);
+			if (s.held === held) { this.board.clearRun(held.runId); this.refresh(s); }
+		};
+		this.refresh(s);
+		let started = false;
 		try {
-			const handle = await this.op(held, undefined, async () => {
-				const handle = await this.runtime(s, held).launch(request);
+			const handle = await this.op(s, held, undefined, async () => {
+				const handle = await this.runtime(s, held).launch(request, {
+					phase: (title) => { if (active()) { workflow.phase = statusPart(title); this.refresh(s); } },
+					log: (text) => { if (active()) { workflow.log = statusPart(text); this.refresh(s); } },
+					activity: (activity) => {
+						// A stopping step must still settle its external-agent entry, without reviving footer activity.
+						if (active() || (workflow.stopping && activity.state === "settled" && held.workflow === workflow)) this.activity(s, held, activity);
+					},
+					integrate: (task) => active() ? this.live(s, held, `${task ? `${task} ` : ""}integrating`, workflow) : { update() {}, end() {} },
+				});
 				if (s.closed || held.closing || s.held !== held) {
 					try { handle.stop("the session closed"); } catch {}
 					await handle.done.catch(() => {});
@@ -322,16 +368,18 @@ export class Herder {
 			});
 			const launch: BackgroundLaunch = new BackgroundLaunch(handle, (outcome, silenced) => {
 				if (held.launch === launch) held.launch = undefined;
-				this.board.clearRun(held.runId);
-				this.refresh(s);
-				if (silenced || s.closed) return;
+				clear();
+				if (silenced || s.closed || s.held !== held) return;
 				this.pi.sendMessage({ customType: FOLLOW_UP_TYPE, display: true, content: followUpText(outcome, { runId: held.runId, dir: held.run.paths.dir }), details: { runId: held.runId, ...outcome } }, { triggerTurn: true, deliverAs: "followUp" });
-			});
+			}, stop);
 			held.launch = launch;
+			started = true;
 			this.refresh(s);
 			return handle.launch;
 		} finally {
 			held.launching = false;
+			if (!started) clear();
+			else this.refresh(s);
 		}
 	}
 
@@ -340,7 +388,7 @@ export class Herder {
 		const held = s.held;
 		let text: string | undefined;
 		try {
-			text = held && statusText({ state: held.run.state(), tasks: planTasks(held.run), running: this.board.running(held.runId), launch: held.launch?.launch });
+			text = held && statusText({ state: held.run.state(), tasks: planTasks(held.run), running: this.board.running(held.runId), operations: [...held.live.values()].map((entry) => entry.text), launch: held.launch?.launch, launching: held.launching, stopping: held.workflow?.stopping, phase: held.workflow?.phase, log: held.workflow?.log });
 		} catch {
 			text = held && `herder: ${held.runId}`;
 		}
@@ -409,7 +457,11 @@ export class Herder {
 		requireIdle(held, "Delivery");
 		const ctx = s.ctx;
 		try {
-			return await this.op(held, signal, (combined) => this.runtime(s, held).deliver(request, async (summary) => (await confirmDelivery(ctx, `Deliver Herder run ${held.runId}?`, summary, combined)) === true, combined), true);
+			return await this.op(s, held, signal, (combined, report) => this.runtime(s, held).deliver(request, async (summary) => {
+				report("awaiting delivery confirmation");
+				try { return (await confirmDelivery(ctx, `Deliver Herder run ${held.runId}?`, summary, combined)) === true; }
+				finally { report("delivering"); }
+			}, combined, report), true, "delivering");
 		} finally {
 			this.settle(s, held);
 		}

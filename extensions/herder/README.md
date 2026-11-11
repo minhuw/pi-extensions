@@ -289,7 +289,7 @@ The `herder` skill holds the orchestration decision table, the `goal.md` and `pl
 
 ## Footer and activity
 
-While a session holds a run, the footer shows a status such as `herder: T2 integrate · 3/5 tasks`. Running steps are published as activity snapshots, which [Orca Bridge](../orca-bridge/README.md) shows in its pane activity. Both are cleared on shutdown.
+While a session holds a run, the footer shows live work and the number of integrated tasks. Parallel steps are summarized with their tasks, phases and labels; additional steps are counted. Direct checks, integrations, verification and delivery are shown while running, including the current check or verifier where available and confirmation waits. During a workflow, the latest script `phase()` and `log()` appear as separate, single-line progress; a phase is global to the script and may not describe every parallel step. Progress updates change the footer without sending messages or triggering model turns. Once work settles, the footer returns to the run's ready or verified state. Running steps are also published as activity snapshots, which [Orca Bridge](../orca-bridge/README.md) shows in its pane activity. Both are cleared on shutdown.
 
 Each step attempt is also published as an external agent, which [Subagents](../subagents/README.md) lists in its widget and `/agents` list and opens in its live conversation viewer. Extensions do not import each other, so the registry lives on `globalThis[Symbol.for("pi-extensions.external-agents")]` as `{ agents: Map<id, ExternalAgent>, listeners: Set<(id) => void> }`; whoever needs it first creates it. Herder's copy of the contract is `src/adapter/external-agents.ts`; Subagents keeps an identical one.
 

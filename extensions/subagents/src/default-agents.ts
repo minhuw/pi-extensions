@@ -50,7 +50,8 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
       extSelectors: ["ext:fff"],
       extensions: ["fff", "selfdrive"],
       skills: true,
-      model: "deepseek-flash",
+      model: "magpie/codex/gpt-6-luna",
+      serviceTier: "fast",
       thinking: "max",
       systemPrompt: `# READ-ONLY RECON
 

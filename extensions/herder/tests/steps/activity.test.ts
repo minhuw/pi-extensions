@@ -30,6 +30,22 @@ describe("step activity", () => {
 		expect(second[0]!.startedAt).toBeGreaterThanOrEqual(first.startedAt!);
 	}));
 
+	it("reports gate checks for live and adopted steps, then settles each activity", () => withRun(async (h) => {
+		h.runner.add({ match: "gated", files: { "feature.txt": "feature\n" }, text: "added" });
+		const activities: StepActivity[] = [];
+		const opts = { task: "T1", label: "implement", gate: "has-feature" };
+		await expect(h.executor({ faults: { hit: (point) => { if (point === "after-ref") throw new Error("crash"); } } }).run("gated", opts)).rejects.toThrow("crash");
+		const adopted = await h.executor({ store: h.reopen(), onActivity: (activity) => activities.push(activity) }).run("gated", opts);
+		expect(adopted).toMatchObject({ status: "ok", reused: true });
+		expect(activities).toEqual(expect.arrayContaining([expect.objectContaining({ task: "T1", label: "implement", state: "running", stage: "gate has-feature" })]));
+		expect(activities.at(-1)).toMatchObject({ state: "settled", status: "ok" });
+		activities.length = 0;
+		const result = await h.executor({ onActivity: (activity) => activities.push(activity) }).run("gated again", opts);
+		expect(result.status).toBe("ok");
+		expect(activities).toEqual(expect.arrayContaining([expect.objectContaining({ state: "running", stage: "gate has-feature", attempt: 1 })]));
+		expect(activities.at(-1)).toMatchObject({ state: "settled", status: "ok" });
+	}));
+
 	it("settles a failed step with its status", () => withRun(async (h) => {
 		const activities: StepActivity[] = [];
 		h.runner.add({ match: "broken", fail: "fatal" });

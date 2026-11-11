@@ -28,6 +28,7 @@
 import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
@@ -381,7 +382,7 @@ export function skinFor(theme: Theme): Skin {
 // the details stay muted. Hues come from the theme but never sit near its
 // error or warning color, so a routine status cannot read as a failure.
 // Segments that report a problem or wait on the user use the warning color
-// (bold for problems), never red; whole words only, so a loop named
+// (bold for problems), never red; whole words only, so a status named
 // "fix-errors" stays calm. A publisher that styles its own text keeps it.
 
 const STATUS_PROBLEM = /(?:^|[\s:])(?:fail(?:ed|ure|s)?|errors?|stuck|blocked|not_met)(?=$|[\s,.;:)])/i;
@@ -405,7 +406,7 @@ const STATUS_DESCRIPTORS: Record<string, StatusDescriptor> = {
 	"magpie-quota": { placement: "activity", colorSlot: 12, icon: "\u{F0954}", compact: "workflow" },
 	autoresearch: { placement: "activity", colorSlot: 0, icon: "\u{F0093}", compact: "workflow" },
 	herder: { placement: "activity", colorSlot: 1, icon: "\u{F0CC6}", compact: "workflow" },
-	loop: { placement: "activity", colorSlot: 2, icon: "\u{F04E6}", compact: "workflow" },
+	goal: { placement: "activity", colorSlot: 2, icon: "\u{F0E6F}", compact: "workflow" },
 	[PROCESS_STATUS_KEY]: { placement: "activity", colorSlot: 3, icon: "\u{F018D}", compact: "process" },
 	subagents: { placement: "activity", colorSlot: 4, icon: "\u{F06A9}" },
 	"impeccable-live": { placement: "activity", colorSlot: 5, icon: "\u{F03D8}" },
@@ -437,7 +438,7 @@ function additionalRooms(statuses: ReadonlyMap<string, string>): string | undefi
 
 /** Rank only the published text; no hidden state or extension-specific parsing. */
 function statusRank(text: string): number {
-	const tone = statusTone(text.replace(/\x1b\[[0-9;]*m/g, ""));
+	const tone = statusTone(stripVTControlCharacters(text));
 	return tone === "problem" ? 3 : tone === "attention" ? 2 : 1;
 }
 
@@ -503,7 +504,7 @@ export function statusHue(theme: Theme, key: string): ThemeToken {
 export function renderStatus(theme: Theme, text: string, key = "", withIcon = false): string {
 	if (text.includes("\x1b[")) return text;
 	const identity = statusHue(theme, key);
-	// A status that leads with its own symbol (such as Loop's ↻) needs no second icon.
+	// A status that leads with its own symbol needs no second icon.
 	const icon = withIcon && /^[\p{L}\p{N}]/u.test(text)
 		? `${theme.fg(identity, STATUS_DESCRIPTORS[key]?.icon ?? STATUS_DEFAULT_ICON)} `
 		: "";
@@ -1172,6 +1173,47 @@ function renderPrice(ctx: ExtensionContext, s: Stats, theme: Theme, set: IconSet
 	return theme.fg("warning", `${icon}${amount}`);
 }
 
+interface CompactStatus {
+	text: string;
+	shortText?: string;
+	fallbackText?: string;
+	abbreviate?: boolean;
+	abbreviateAbove?: number;
+	severityMarker?: string;
+	rank: number;
+}
+
+/** Fit higher-priority statuses first, then restore their details when space permits. */
+function fitCompactStatuses(statuses: CompactStatus[], fits: (text: string) => boolean): string {
+	const selected = new Map<CompactStatus, string>();
+	const ordered = [...statuses].sort((a, b) => b.rank - a.rank);
+	const summary = () => cluster(statuses.map(status => selected.get(status)), "  ");
+	for (const status of ordered) {
+		selected.set(status, status.shortText ?? status.text);
+		if (!fits(summary()) && status.abbreviate && visibleWidth(status.shortText ?? status.text) > (status.abbreviateAbove ?? 24)) {
+			const source = status.shortText ?? status.text;
+			const suffix = status.severityMarker ? ` ${status.severityMarker}` : "";
+			for (let width = visibleWidth(source) - 1; width >= 16; width--) {
+				selected.set(status, truncateToWidth(source, width, "…") + suffix);
+				if (fits(summary())) break;
+			}
+		}
+		if (!fits(summary()) && status.fallbackText) selected.set(status, status.fallbackText);
+		if (!fits(summary())) selected.delete(status);
+	}
+	for (const status of ordered) {
+		const previous = selected.get(status);
+		if (!previous) continue;
+		for (const candidate of [status.text, status.shortText]) {
+			if (!candidate) continue;
+			selected.set(status, candidate);
+			if (fits(summary())) break;
+			selected.set(status, previous);
+		}
+	}
+	return summary();
+}
+
 function renderIdentityRow(
 	ctx: ExtensionContext,
 	theme: Theme,
@@ -1181,7 +1223,7 @@ function renderIdentityRow(
 	s: Stats,
 	compactMode: boolean,
 	languageStatus?: string,
-	workflowStatus?: string,
+	workflowStatus?: string | CompactStatus[],
 	spokesmanStatus?: string,
 	modeStatus?: string,
 	collaborationStatus?: string,
@@ -1214,11 +1256,12 @@ function renderIdentityRow(
 	const context = renderContext(theme, usage, barWidth, s.compactions, set.compact);
 	const right = cluster([modes, context, ...tail], "  ");
 	const fitsBeside = (status: string) => visibleWidth(compactIdentity) + visibleWidth(status) + minimumContext + chrome + 2 + reserved <= width;
+	const workflow = Array.isArray(workflowStatus) ? fitCompactStatuses(workflowStatus, fitsBeside) : workflowStatus;
 	// The spokesman goes first, then the language, each whole; what stays then lays out as if they had never been set.
 	const candidates = [
-		cluster([workflowStatus, languageStatus, spokesmanStatus], "  "),
-		cluster([workflowStatus, languageStatus], "  "),
-		workflowStatus ?? "",
+		cluster([workflow, languageStatus, spokesmanStatus], "  "),
+		cluster([workflow, languageStatus], "  "),
+		workflow ?? "",
 	].filter(Boolean);
 	const loop = candidates.find(fitsBeside) ?? "";
 	if (loop && visibleWidth(left) + visibleWidth(loop) + visibleWidth(right) + chrome + 2 <= width) {
@@ -1250,18 +1293,51 @@ function renderCompact(
 	footerData: ReadonlyFooterDataProvider,
 ): string {
 	const statuses = footerData.getExtensionStatuses();
-	const workflowKey = Object.keys(STATUS_DESCRIPTORS).find(key => STATUS_DESCRIPTORS[key]!.compact === "workflow" && statuses.get(key));
-	const processKey = Object.keys(STATUS_DESCRIPTORS).find(key => STATUS_DESCRIPTORS[key]!.compact === "process");
+	const compactKeys = Object.keys(STATUS_DESCRIPTORS).filter(key => STATUS_DESCRIPTORS[key]!.compact && statuses.get(key));
+	const workflowKey = compactKeys.find(key => STATUS_DESCRIPTORS[key]!.compact === "workflow");
+	const processKey = compactKeys.find(key => STATUS_DESCRIPTORS[key]!.compact === "process");
+	const workflow = statuses.get("herder") || statuses.get("goal")
+		? compactKeys.map((key, index): CompactStatus => {
+			const text = statuses.get(key)!;
+			const severity = statusRank(text);
+			let short = text;
+			if (!text.includes("\x1b[")) {
+				// Herder's operation precedes its optional task count.
+				if (key === "herder") short = text.replace(/ · \d+\/\d+ tasks$/, "");
+				else if (key === "goal" && severity === 1 && compactKeys.length > 1 && visibleWidth(text) > 24) {
+					short = truncateToWidth(text, 24, "…");
+				}
+				// Keep research's current phase, but never discard attention or problem details.
+				else if (key === "autoresearch" && severity === 1 && text.startsWith("research · ")) {
+					short = text.split(" · ").slice(0, 2).join(" · ");
+				}
+			}
+			return {
+				text: renderStatus(theme, text, key),
+				shortText: short !== text ? renderStatus(theme, short, key) : undefined,
+				fallbackText: key === "magpie-quota" && severity > 1
+					? renderStatus(theme, `quota ${stripVTControlCharacters(text).match(severity === 3 ? STATUS_PROBLEM : STATUS_ATTENTION)![0].trim()}`, key)
+					: undefined,
+				abbreviate: key === "herder" || key === "goal",
+				abbreviateAbove: key === "goal" ? 16 : undefined,
+				severityMarker: (key === "herder" || key === "goal") && severity > 1
+					? stripVTControlCharacters(text).match(severity === 3 ? STATUS_PROBLEM : STATUS_ATTENTION)?.[0].trim()
+					: undefined,
+				rank: severity * (compactKeys.length + 2) + (key === "herder" ? compactKeys.length + 1 : key === "goal" ? compactKeys.length : compactKeys.length - index - 1),
+			};
+		})
+		: cluster([
+			workflowKey && renderStatus(theme, statuses.get(workflowKey)!, workflowKey),
+			processKey && renderStatus(theme, statuses.get(processKey)!, processKey),
+		], "  ");
 	const representative = statusText(statuses, "representative");
 	const rooms = additionalRooms(statuses);
 	const collaboration = cluster([
 		representative && renderStatus(theme, representative, "representative"),
 		rooms && `${glyph(theme, icons().relay, "dim")} ${theme.fg("muted", rooms)}`,
 	], "  ");
-	return renderIdentityRow(ctx, theme, skin, width, state, collectStats(ctx, state), true, renderLanguage(theme, statuses), cluster([
-		workflowKey && renderStatus(theme, statuses.get(workflowKey)!, workflowKey),
-		processKey && statuses.get(processKey) && renderStatus(theme, statuses.get(processKey)!, processKey),
-	], "  "), renderSpokesman(theme, statuses), renderModes(theme, statuses), collaboration);
+	return renderIdentityRow(ctx, theme, skin, width, state, collectStats(ctx, state), true, renderLanguage(theme, statuses),
+		workflow, renderSpokesman(theme, statuses), renderModes(theme, statuses), collaboration);
 }
 
 /** Cached reads as a share of all input, and the color that rates it. */
@@ -1318,6 +1394,8 @@ function renderFull(
 
 interface Group {
 	text: string;
+	severityMarker?: string;
+	statusKey?: string;
 	/** Lower ranks drop first when the row is short of space. */
 	rank: number;
 }
@@ -1359,9 +1437,27 @@ function railRow(theme: Theme, branch: string, left: Group[], right: Group[], wi
 	right = [...right];
 	while (visibleWidth(join(left, "left")) + visibleWidth(join(right, "right")) > room && left.length + right.length > 1) {
 		const weakest = [...left, ...right].reduce((a, b) => (b.rank < a.rank ? b : a));
+		if (weakest.statusKey === "goal" && !weakest.severityMarker) {
+			const excess = visibleWidth(join(left, "left")) + visibleWidth(join(right, "right")) - room;
+			const available = visibleWidth(weakest.text) - excess;
+			if (available >= 16) {
+				weakest.text = truncateToWidth(weakest.text, available, "…");
+				break;
+			}
+		}
 		for (const groups of [left, right]) {
 			const index = groups.indexOf(weakest);
 			if (index >= 0) groups.splice(index, 1);
+		}
+	}
+	const remaining = [...left, ...right];
+	if (remaining.length === 1 && remaining[0]!.severityMarker && visibleWidth(remaining[0]!.text) > room) {
+		const group = remaining[0]!;
+		const marker = group.severityMarker!;
+		if (visibleWidth(marker) <= room) {
+			const prefixRoom = room - visibleWidth(marker) - 1;
+			const prefix = prefixRoom > 1 ? truncateToWidth(group.text, prefixRoom, "…") : "";
+			group.text = cluster([prefix, renderStatus(theme, marker, group.statusKey ?? "herder")], " ");
 		}
 	}
 	return alignRow(rail + join(left, "left"), join(right, "right"), width);
@@ -1425,19 +1521,33 @@ function renderDetailRows(
 	const think = s.reasoning > 0 ? theme.fg("dim", `${fmtTokens(s.reasoning)} think`) : "";
 
 	const statuses = footerData.getExtensionStatuses();
-	const leftStatuses = activityStatuses(statuses).map(([key, text], index) => ({
-		text: renderStatus(theme, text, key, hasNerdFonts()), rank: statusRank(text) * (statuses.size + 1) - index,
-	}));
+	// Leave room between severity levels for Herder and collaboration tie-breakers.
+	const rankStep = statuses.size + 3;
+	const activityEntries = activityStatuses(statuses);
+	const herderText = statuses.get("herder");
 	const representative = statusText(statuses, "representative");
+	const fittingPeer = herderText && statusRank(herderText) > 1 && visibleWidth(renderStatus(theme, herderText, "herder", hasNerdFonts())) > railRoom(width)
+		&& (activityEntries.some(([key, text]) => key !== "herder" && statusRank(text) === statusRank(herderText)
+			&& visibleWidth(renderStatus(theme, text, key, hasNerdFonts())) <= railRoom(width))
+			|| Boolean(representative && statusRank(representative) === statusRank(herderText)
+				&& visibleWidth(renderStatus(theme, representative, "representative")) <= railRoom(width)));
+	const leftStatuses = activityEntries.map(([key, text], index) => ({
+		text: renderStatus(theme, text, key, hasNerdFonts()),
+		severityMarker: (key === "herder" || key === "goal") && statusRank(text) > 1
+			? stripVTControlCharacters(text).match(statusRank(text) === 3 ? STATUS_PROBLEM : STATUS_ATTENTION)?.[0].trim()
+			: undefined,
+		statusKey: key,
+		rank: statusRank(text) * rankStep + (key === "herder" ? (fittingPeer ? -activityEntries.length : 3) : key === "goal" && statusRank(text) === 1 ? 2 : -index),
+	}));
 	const relay = cluster([
 		additionalRooms(statuses),
 		s.relayIn > 0 && `${s.relayIn} in`,
 		s.relayOut > 0 && `${s.relayOut} out`,
 	], " · ");
-	// Keep collaboration ahead of routine summaries, below attention and problems.
+	// Collaboration outlasts other routine summaries, while Herder keeps its operation visible.
 	const collaboration: Group[] = [
-		...(representative ? [{ text: renderStatus(theme, representative, "representative"), rank: statusRank(representative) * (statuses.size + 1) + 1 }] : []),
-		...(relay ? [{ text: item(set.relay, "dim", relay), rank: statuses.size + 2 }] : []),
+		...(representative ? [{ text: renderStatus(theme, representative, "representative"), rank: statusRank(representative) * rankStep + 1 }] : []),
+		...(relay ? [{ text: item(set.relay, "dim", relay), rank: rankStep + 1 }] : []),
 	];
 	const activityRows = leftStatuses.length || collaboration.length
 		? [railRow(theme, "├", leftStatuses, collaboration, width)] : [];

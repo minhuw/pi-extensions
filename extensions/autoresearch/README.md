@@ -141,7 +141,7 @@ Noise check for Compile (objective): outside noise.
 
 The verdict is `within noise` when the baseline and latest ranges overlap, including ranges that only touch; that is no measurable difference. It is `outside noise` when the ranges do not overlap, and `noise unknown` when either side has fewer than 2 samples. The iteration prompt tells the agent that a result within noise is not an improvement. This is a coarse check, not a significance test: with 3 independent samples per side, two identical versions produce non-overlapping ranges by chance about 1 time in 10.
 
-[Statusline Footer](../statusline-footer/README.md) displays research status on a separate row below Git in full mode. In compact mode, research takes priority over Herder, then Loop. Clearing the report reveals the next available summary. Model identity and context percentage take priority at narrow widths. Pi's default footer can also display the status.
+[Statusline Footer](../statusline-footer/README.md) displays research status on a separate row below Git in full mode. In compact mode, research shares limited space with Herder and Goal statuses; urgency and available width affect what is shown. Clearing the report reveals the next available summary. Model identity and context percentage take priority at narrow widths. Pi's default footer can also display the status.
 
 ## Session lifecycle
 
@@ -175,7 +175,6 @@ pi -e ./extensions/autoresearch/index.ts
 npm run test:autoresearch
 npm run test:benchmark
 npm run test:statusline
-npm run test:loop
 npm run typecheck
 ```
 

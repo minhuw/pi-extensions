@@ -17,7 +17,7 @@ const homeHeadings: DocHeading[] = [
 	{ id: "extensions", title: "Extensions", depth: 2 },
 ];
 const noHeadings: DocHeading[] = [];
-const featured = ["/commit", "/review", "/herder", "/benchmark", "/autoresearch", "/loop"];
+const featured = ["/commit", "/review", "/herder", "/benchmark", "/autoresearch", "/goal"];
 const featuredDescriptions: Record<string, string> = {
 	"/commit": "Commit changes as self-contained patches",
 	"/review": "Find bugs without changing code",
@@ -26,7 +26,7 @@ const featuredDescriptions: Record<string, string> = {
 	"/herder": "Run a task in isolated worktrees",
 	"/benchmark": "Measure a performance claim",
 	"/autoresearch": "Optimize through approved experiments",
-	"/loop": "Schedule recurring prompts in the current session",
+	"/goal": "Work toward an objective in the current session",
 	"/recap": "Summarize session progress and next steps",
 };
 
@@ -36,7 +36,7 @@ const commandCategories: { id: CommandCategory; label: string; match: (cmd: DocC
 	{ id: "quality", label: "Quality & Git", match: (cmd) => ["commit", "quality"].includes(cmd.extension) },
 	{ id: "delegation", label: "Delegation", match: (cmd) => ["herder", "subagents"].includes(cmd.extension) },
 	{ id: "performance", label: "Performance", match: (cmd) => ["benchmark", "autoresearch"].includes(cmd.extension) },
-	{ id: "runtime", label: "Runtime & Pika", match: (cmd) => ["loop", "molt", "language", "recap", "pika", "orca-bridge", "statusline-footer", "magpie-provider"].includes(cmd.extension) },
+	{ id: "runtime", label: "Runtime & Pika", match: (cmd) => ["goal", "molt", "language", "recap", "pika", "orca-bridge", "statusline-footer", "magpie-provider"].includes(cmd.extension) },
 	{ id: "writing", label: "Writing", match: (cmd) => cmd.extension === "writer" },
 	{ id: "design", label: "Design", match: (cmd) => cmd.extension === "impeccable" },
 ];

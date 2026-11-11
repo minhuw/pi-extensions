@@ -567,6 +567,7 @@ export class AgentManager {
     const abortController = new AbortController();
     const record: AgentRecord = {
       id,
+      executionId: randomUUID(),
       type,
       // Owned children — nested, or a workflow's — are filtered out of every
       // top-level surface, so no handle: nothing can address them and they must
@@ -1326,6 +1327,7 @@ export class AgentManager {
     if (!record || !this.canResume(record)) return undefined;
     if (record.status === "running" || record.status === "queued") return undefined;
 
+    record.executionId = randomUUID();
     record.turnCount = 0;
     record.activeTools = [];
     record.responseText = "";

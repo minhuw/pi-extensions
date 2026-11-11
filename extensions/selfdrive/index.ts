@@ -9,6 +9,7 @@ import { buildReport, costOf, countByStatus, elapsed, foldLedger, isOpen, nextTa
 const ENTRY = "selfdrive";
 const TASK_ENTRY = "selfdrive-task";
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
+const SESSION_MODES = Symbol.for("pi-extensions.session-modes");
 const OFF_ERROR = "self-driving mode is off";
 const TEXT_CAP = 300;
 
@@ -103,6 +104,30 @@ interface Runtime {
 	/** A compaction happened: the next continuation repeats the rules. */
 	compacted: boolean;
 	closed: boolean;
+}
+
+/** Shared with other mode publishers and consumers in this process. */
+function publishMode(id: string, active: boolean): void {
+	const shared = globalThis as Record<symbol, unknown>;
+	const registry = (shared[SESSION_MODES] ??= { modes: new Map(), listeners: new Set() }) as {
+		modes: Map<string, Set<string>>;
+		listeners: Set<(sessionId: string) => void>;
+	};
+	const modes = registry.modes.get(id);
+	if (active === (modes?.has(ENTRY) ?? false)) return;
+	if (active) {
+		if (modes) modes.add(ENTRY);
+		else registry.modes.set(id, new Set([ENTRY]));
+	} else if (modes) {
+		modes.delete(ENTRY);
+		if (!modes.size) registry.modes.delete(id);
+	}
+	for (const listener of [...registry.listeners]) {
+		try {
+			const result: unknown = listener(id);
+			if (result instanceof Promise) result.catch(() => {});
+		} catch {}
+	}
 }
 
 /** Same as alwayson: top-level TUI and RPC sessions, not children (no mode, or a session link). */
@@ -268,6 +293,7 @@ export default function selfdriveExtension(pi: ExtensionAPI): void {
 	// --- Mode: engage on activation or reload; disengage on the end or a teardown.
 	function engage(r: Runtime, ctx: ExtensionContext, kickoff: boolean): boolean {
 		r.on = true;
+		publishMode(r.id, true);
 		const repo = repositoryOf(ctx.cwd);
 		if (repo) publishGrant({ id: r.id, ...repo, text: grantText(r.since, r.focus), since: r.since });
 		try { r.awake?.kill(); } catch {}
@@ -283,6 +309,7 @@ export default function selfdriveExtension(pi: ExtensionAPI): void {
 	}
 	function disengage(r: Runtime): void {
 		r.on = false;
+		publishMode(r.id, false);
 		if (r.timer) clearTimeout(r.timer);
 		if (r.interval) clearInterval(r.interval);
 		r.timer = r.interval = r.dueAt = r.waitUntil = r.run = r.decision = r.unstarted = undefined;

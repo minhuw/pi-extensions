@@ -12,6 +12,7 @@ import { DELIVERY_MODES, startRun, statusReport } from "./commands.ts";
 import { confirmLong, reviewGoal } from "./confirm.ts";
 import { describeChecks, describeDelivery, describeIntegration, describeStep, describeVerification } from "./format.ts";
 import { requireApproved, requireIdle, type Herder, type Held, type Session } from "./session.ts";
+import type { StatusReport } from "./runtime.ts";
 import { sinceGrant, standingGrant, type StandingApproval } from "./standing.ts";
 import { describeRun, isFinished, isParked, planTasks, runDetails } from "./status.ts";
 
@@ -91,7 +92,7 @@ function scriptSource(ctx: ExtensionContext, params: { script?: string; scriptPa
 /** The standing grant covering the held run's repository. */
 const grantFor = (held: Held): StandingApproval | undefined => standingGrant(held.vcs.commonDir());
 
-async function approveGoal(herder: Herder, s: Session, held: Held, ctx: ExtensionContext, signal: AbortSignal) {
+async function approveGoal(herder: Herder, s: Session, held: Held, ctx: ExtensionContext, signal: AbortSignal, report: StatusReport) {
 	const state = held.run.state();
 	if (isFinished(state)) throw new Error(`Herder run ${held.runId} is ${state.status}.`);
 	// Under the user's standing authorization (self-driving mode) nobody is there to answer a dialog.
@@ -116,6 +117,7 @@ async function approveGoal(herder: Herder, s: Session, held: Held, ctx: Extensio
 		herder.refresh(s);
 		return reply(`Goal approved under the user's standing authorization (self-driving mode), without asking (${goal.criteria.length} criteria, ${goal.checks.length} checks). Delivery still waits for the user: never call herder_deliver; once verified, leave the run parked. Next: write plan.md (${held.run.paths.plan}) with task lines, then orchestrate.`, { approved: true, sha256, checks: goal.checks, approvedBy: "standing", grant: grant.id });
 	}
+	report("awaiting goal approval");
 	const review = await reviewGoal(ctx, `Approve Herder goal: ${goal.title}`, source, "The goal is frozen once approved.", signal);
 	// An abort may have begun while the dialog was open; it must not end with an approved goal.
 	if (held.closing || isFinished(held.run.state())) throw new Error(`Herder run ${held.runId} is being stopped.`);
@@ -156,11 +158,11 @@ async function abortRun(herder: Herder, s: Session, held: Held, ctx: ExtensionCo
 	});
 	const title = `Abort Herder run ${held.runId}${state.title ? `: ${state.title}` : ""}?`;
 	const body = `${summary}\n\nAborting stops the run, marks it abandoned, and removes its refs/herder/${held.runId}/ refs and worktrees.`;
-	const answer = await herder.op(held, signal, async (combined) => {
+	const answer = await herder.op(s, held, signal, async (combined) => {
 		const confirmed = await confirmLong(ctx, title, body, combined);
 		if (held.closing || isFinished(held.run.state())) throw new Error(`Herder run ${held.runId} is being stopped.`);
 		return confirmed;
-	}, true);
+	}, true, "awaiting abort confirmation");
 	if (answer === undefined) return reply(`The abort dialog was closed without an answer; Herder run ${held.runId} is still active.`, { runId: held.runId, aborted: false, dismissed: true });
 	if (!answer) return reply(`The user did not abort Herder run ${held.runId}; the run is still active.`, { runId: held.runId, aborted: false });
 	const { runId, warning } = await herder.abort(s, held.runId);
@@ -190,7 +192,7 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 				return reply(statusReport(herder, s, params.runId, unfinished), { ...runDetails(run, state, planTasks(run)), parked, ...(otherUnfinished.length ? { otherUnfinished } : {}) });
 			}
 			const held = params.runId ? herder.hold(s, params.runId) : herder.current(s);
-			if (params.action === "approve_goal") return herder.op(held, signal, (combined) => approveGoal(herder, s, held, ctx, combined), true);
+			if (params.action === "approve_goal") return herder.op(s, held, signal, (combined, report) => approveGoal(herder, s, held, ctx, combined, report), true, "reviewing goal");
 			if (params.action === "abort") return abortRun(herder, s, held, ctx, signal);
 			const question = params.question?.trim();
 			const answer = params.answer?.trim();
@@ -244,7 +246,7 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 			const { prompt, ...rest } = params;
 			checkIds(state, typeof rest.gate === "string" ? [rest.gate] : rest.gate);
 			const opts = Object.fromEntries(Object.entries(rest).filter(([, value]) => value !== undefined)) as AgentOptions;
-			const result = await herder.op(held, signal, (combined) => herder.runtime(s, held).step(prompt, opts, combined));
+			const result = await herder.op(s, held, signal, (combined) => herder.runtime(s, held).step(prompt, opts, combined));
 			herder.refresh(s);
 			return reply(describeStep(result), result);
 		},
@@ -265,7 +267,7 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 			if (step && !step.completed?.commit) throw new Error(`Step ${params.source} has no commit to integrate (status ${step.status}).`);
 			const source = step?.completed?.commit ?? params.source;
 			const opts = { message: params.message, ...(params.task ? { task: params.task } : {}), ...(params.checks ? { checks: params.checks } : {}) };
-			const result = await herder.op(held, signal, (combined) => herder.runtime(s, held).integrate(source, opts, combined));
+			const result = await herder.op(s, held, signal, (combined, report) => herder.runtime(s, held).integrate(source, opts, combined, report), false, `${params.task ? `${params.task} ` : ""}integrating`);
 			herder.refresh(s);
 			return reply(describeIntegration(result), result);
 		},
@@ -282,7 +284,7 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 			// Beside a launch or a step is fine; not beside work that may finish or clean up the run.
 			if (held.exclusive.size) throw new Error("A check waits until the running Herder tool call finishes.");
 			const request = { ...(params.checks ? { checks: params.checks } : {}), ...(params.commit ? { commit: params.commit } : {}) };
-			const results = await herder.op(held, signal, (combined) => herder.runtime(s, held).check(request, combined));
+			const results = await herder.op(s, held, signal, (combined, report) => herder.runtime(s, held).check(request, combined, report), false, "checking");
 			return reply(describeChecks(results), { checks: results });
 		},
 	});
@@ -296,7 +298,7 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 			const held = herder.current(s);
 			requireApproved(held);
 			requireIdle(held, "Verification");
-			const outcome = await herder.op(held, signal, (combined) => herder.runtime(s, held).verify(combined), true);
+			const outcome = await herder.op(s, held, signal, (combined, report) => herder.runtime(s, held).verify(combined, report), true, "verifying");
 			herder.refresh(s);
 			return reply(describeVerification(outcome), outcome);
 		},

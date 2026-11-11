@@ -108,7 +108,7 @@ describe("CompletionOutbox", () => {
       outbox.add({ ids: ["a", "b"], build });
       outbox.cancel("a");
       vi.advanceTimersByTime(NOTIFICATION_HOLD_MS);
-      expect(build).toHaveBeenCalledExactlyOnceWith(["b"]);
+      expect(build).toHaveBeenCalledExactlyOnceWith(["b"], [undefined]);
       expect(send).toHaveBeenCalledExactlyOnceWith({ content: "b", details: details("b") });
     });
 
@@ -128,6 +128,41 @@ describe("CompletionOutbox", () => {
     outbox.add({ ids: ["a"], build: () => ({ content: "<done a again>", details: details("a") }) });
     vi.advanceTimersByTime(NOTIFICATION_HOLD_MS);
     expect(send).toHaveBeenCalledExactlyOnceWith({ content: "<done a again>", details: details("a") });
+  });
+
+  it("preserves execution IDs when the same completion is delivered again and grouped", () => {
+    const completion = { content: "same", details: { ...details("a"), executionId: "run-a" } };
+    const repeated = { ids: ["a"], build: () => completion };
+    outbox.add(repeated);
+    outbox.onTurnEnd("stop");
+    outbox.add(repeated);
+    outbox.add({ ids: ["b"], build: () => ({ content: "b", details: { ...details("b"), executionId: "run-b" } }) });
+    outbox.onTurnEnd("stop");
+    expect(send.mock.calls[0][0].details.executionId).toBe("run-a");
+    expect(send.mock.calls[1][0].details.executionId).toBe("run-a");
+    expect(send.mock.calls[1][0].details.others[0].executionId).toBe("run-b");
+  });
+
+  it("keeps distinct executions, deduplicates pending pairs, and cancels only the consumed execution", () => {
+    const run = (executionId: string) => ({ ids: ["a"], executionIds: [executionId], build: () => ({ content: executionId, details: { ...details("a"), executionId } }) });
+    outbox.add(run("one"));
+    outbox.add(run("two"));
+    outbox.add(run("one"));
+    outbox.cancel("a", "two");
+    outbox.onTurnEnd("stop");
+    expect(send).toHaveBeenCalledExactlyOnceWith({ content: "one", details: { ...details("a"), executionId: "one" } });
+    outbox.add(run("one")); // redelivery after a send is still permitted
+    outbox.onTurnEnd("stop");
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("replaces legacy entries by agent ID and cancels a legacy entry on consumption", () => {
+    outbox.add(item("a"));
+    outbox.add({ ids: ["a"], executionIds: ["new"], build: () => message("new") });
+    outbox.add(item("a"));
+    outbox.cancel("a", "new");
+    outbox.onTurnEnd("stop");
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("flattens a group's agents into one list of details", () => {

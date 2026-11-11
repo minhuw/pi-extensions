@@ -8,12 +8,18 @@
 
 import type { AgentRecord } from "./types.js";
 
-export type DeliveryCallback = (records: AgentRecord[], partial: boolean) => void;
+export type DeliveryCallback<T = AgentRecord> = (records: T[], partial: boolean) => void;
 
-interface AgentGroup {
+export type GroupMember = { id: string; executionId?: string };
+
+export function completionKey(member: GroupMember): string {
+  return JSON.stringify([member.id, member.executionId ?? null]);
+}
+
+interface AgentGroup<T> {
   groupId: string;
   agentIds: Set<string>;
-  completedRecords: Map<string, AgentRecord>;
+  completedRecords: Map<string, T>;
   timeoutHandle?: ReturnType<typeof setTimeout>;
   delivered: boolean;
   /** Shorter timeout for stragglers after a partial delivery. */
@@ -25,18 +31,20 @@ const DEFAULT_TIMEOUT = 30_000;
 /** Straggler re-batch timeout: 15s. */
 const STRAGGLER_TIMEOUT = 15_000;
 
-export class GroupJoinManager {
-  private groups = new Map<string, AgentGroup>();
+export class GroupJoinManager<T = AgentRecord> {
+  private groups = new Map<string, AgentGroup<T>>();
   private agentToGroup = new Map<string, string>();
 
   constructor(
-    private deliverCb: DeliveryCallback,
+    private deliverCb: DeliveryCallback<T>,
     private groupTimeout = DEFAULT_TIMEOUT,
+    private snapshot: (record: AgentRecord) => T = (record) => record as unknown as T,
   ) {}
 
   /** Register a group of agent IDs that should be joined. */
-  registerGroup(groupId: string, agentIds: string[]): void {
-    const group: AgentGroup = {
+  registerGroup(groupId: string, members: (string | GroupMember)[]): void {
+    const agentIds = members.map(member => completionKey(typeof member === "string" ? { id: member } : member));
+    const group: AgentGroup<T> = {
       groupId,
       agentIds: new Set(agentIds),
       completedRecords: new Map(),
@@ -56,14 +64,15 @@ export class GroupJoinManager {
    * - 'held'      — result held, waiting for group completion
    * - 'delivered'  — this completion triggered the group notification
    */
-  onAgentComplete(record: AgentRecord): 'delivered' | 'held' | 'pass' {
-    const groupId = this.agentToGroup.get(record.id);
+  onAgentComplete(record: AgentRecord, captured?: T): 'delivered' | 'held' | 'pass' {
+    const key = completionKey(record);
+    const groupId = this.agentToGroup.get(key);
     if (!groupId) return 'pass';
 
     const group = this.groups.get(groupId);
     if (!group || group.delivered) return 'pass';
 
-    group.completedRecords.set(record.id, record);
+    if (!group.completedRecords.has(key)) group.completedRecords.set(key, captured ?? this.snapshot(record));
 
     // All done — deliver immediately
     if (group.completedRecords.size >= group.agentIds.size) {
@@ -82,7 +91,7 @@ export class GroupJoinManager {
     return 'held';
   }
 
-  private onTimeout(group: AgentGroup): void {
+  private onTimeout(group: AgentGroup<T>): void {
     if (group.delivered) return;
     group.timeoutHandle = undefined;
 
@@ -107,7 +116,7 @@ export class GroupJoinManager {
     // Timeout will be started when the next straggler completes
   }
 
-  private deliver(group: AgentGroup, partial: boolean): void {
+  private deliver(group: AgentGroup<T>, partial: boolean): void {
     if (group.timeoutHandle) {
       clearTimeout(group.timeoutHandle);
       group.timeoutHandle = undefined;
@@ -128,7 +137,7 @@ export class GroupJoinManager {
 
   /** Check if an agent is in a group. */
   isGrouped(agentId: string): boolean {
-    return this.agentToGroup.has(agentId);
+    return [...this.agentToGroup.keys()].some(key => JSON.parse(key)[0] === agentId);
   }
 
   dispose(): void {

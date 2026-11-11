@@ -546,6 +546,70 @@ describe("user return", () => {
 	});
 });
 
+describe("session modes registry", () => {
+	it("publishes changes, preserves other modes, and keeps done published across reload", async () => {
+		const symbol = Symbol.for("pi-extensions.session-modes");
+		const shared = globalThis as Record<symbol, unknown>;
+		const registry = (shared[symbol] ??= { modes: new Map(), listeners: new Set() }) as { modes: Map<string, Set<string>>; listeners: Set<(id: string) => void> };
+		const h = await start({ script: [calls(next("done")), fauxAssistantMessage("finished")] });
+		const id = h.session.sessionManager.getSessionId();
+		registry.modes.set(id, new Set(["alwayson"]));
+		const changes: string[] = [];
+		const listener = (changed: string) => { changes.push(`${changed}:${[...(registry.modes.get(changed) ?? [])].sort().join(",")}`); };
+		const broken = () => { throw new Error("listener failure"); };
+		registry.listeners.add(broken);
+		registry.listeners.add(listener);
+		try {
+			await h.command("/selfdrive");
+			await h.settle(2);
+			expect(h.status).toContain("done");
+			expect(registry.modes.get(id)).toEqual(new Set(["alwayson", "selfdrive"]));
+			await h.session.reload();
+			expect(registry.modes.get(id)).toEqual(new Set(["alwayson", "selfdrive"]));
+			await h.command("/selfdrive off");
+			expect(registry.modes.get(id)).toEqual(new Set(["alwayson"]));
+			expect(changes).toEqual([`${id}:alwayson,selfdrive`, `${id}:alwayson`, `${id}:alwayson,selfdrive`, `${id}:alwayson`]);
+		} finally {
+			registry.listeners.delete(listener);
+			registry.listeners.delete(broken);
+			registry.modes.delete(id);
+		}
+	});
+
+	it("isolates sessions and removes only the departing session on fork, switch, and shutdown", async () => {
+		const symbol = Symbol.for("pi-extensions.session-modes");
+		const shared = globalThis as Record<symbol, unknown>;
+		const registry = (shared[symbol] ??= { modes: new Map(), listeners: new Set() }) as { modes: Map<string, Set<string>>; listeners: Set<(id: string) => void> };
+		const a = await start({ script: [calls(next("wait", { seconds: 60 }))] });
+		const b = await start({ script: [calls(next("wait", { seconds: 60 }))] });
+		await a.command("/selfdrive");
+		await a.settle(2);
+		await b.command("/selfdrive");
+		await b.settle(2);
+		const aId = a.session.sessionManager.getSessionId();
+		const bId = b.session.sessionManager.getSessionId();
+		expect(registry.modes.get(aId)?.has("selfdrive")).toBe(true);
+		expect(registry.modes.get(bId)?.has("selfdrive")).toBe(true);
+		await a.runtime.fork(a.session.sessionManager.getLeafId()!, { position: "at" });
+		expect(registry.modes.has(aId)).toBe(false);
+		expect(registry.modes.get(bId)?.has("selfdrive")).toBe(true);
+		const bFile = b.session.sessionManager.getSessionFile()!;
+		await b.runtime.newSession();
+		expect(registry.modes.has(bId)).toBe(false);
+		await b.command("/selfdrive");
+		const newId = b.session.sessionManager.getSessionId();
+		expect(registry.modes.get(newId)?.has("selfdrive")).toBe(true);
+		await b.runtime.switchSession(bFile);
+		expect(registry.modes.has(newId)).toBe(false);
+		expect(registry.modes.has(bId)).toBe(false);
+		await a.command("/selfdrive");
+		const forkId = a.session.sessionManager.getSessionId();
+		expect(registry.modes.get(forkId)?.has("selfdrive")).toBe(true);
+		await a.dispose();
+		expect(registry.modes.has(forkId)).toBe(false);
+	});
+});
+
 describe("lifecycle", () => {
 	it("withdraws the grant and stops keep-awake on shutdown", async () => {
 		execFileSync("git", ["init", "-q"], { cwd: cwd() });

@@ -28,6 +28,12 @@ export interface RuntimeEnv {
 }
 
 export interface CheckRequest { checks?: string[]; commit?: string }
+export type StatusReport = (text: string) => void;
+export interface LiveOperation { update: StatusReport; end: () => void }
+export interface LaunchProgress {
+	phase: (title: string) => void; log: (message: string) => void; activity: (activity: StepActivity) => void;
+	integrate: (task?: string) => LiveOperation;
+}
 
 export interface HerderRuntime {
 	/** Role names available to `agent()`. */
@@ -39,14 +45,14 @@ export interface HerderRuntime {
 	/** One direct `agent()` step; `base` defaults to the real integration head. */
 	step(prompt: string, opts: AgentOptions, signal?: AbortSignal): Promise<StepResult>;
 	/** `source` is a commit-ish; the adapter resolves step keys to their commits. */
-	integrate(source: string, opts: IntegrateOptions, signal?: AbortSignal): Promise<IntegrateResult>;
+	integrate(source: string, opts: IntegrateOptions, signal?: AbortSignal, report?: StatusReport): Promise<IntegrateResult>;
 	/** Runs the named checks (default: all) at `commit` (default: the integration head). */
-	check(request: CheckRequest, signal?: AbortSignal): Promise<CheckResult[]>;
-	verify(signal?: AbortSignal): Promise<VerifyOutcome>;
+	check(request: CheckRequest, signal?: AbortSignal, report?: StatusReport): Promise<CheckResult[]>;
+	verify(signal?: AbortSignal, report?: StatusReport): Promise<VerifyOutcome>;
 	/** `confirm` shows the delivery summary to the user; nothing reaches the checkout without a yes. */
-	deliver(request: DeliveryRequest, confirm: (summary: string) => Promise<boolean>, signal?: AbortSignal): Promise<DeliveryOutcome>;
+	deliver(request: DeliveryRequest, confirm: (summary: string) => Promise<boolean>, signal?: AbortSignal, report?: StatusReport): Promise<DeliveryOutcome>;
 	/** Stores the script as `scripts/<n>.js`, journals `script.launched`, and runs it in the background. */
-	launch(request: LaunchRequest): LaunchHandle | Promise<LaunchHandle>;
+	launch(request: LaunchRequest, progress?: LaunchProgress): LaunchHandle | Promise<LaunchHandle>;
 	/** Journals `run.finished abandoned` and removes the run's refs and worktrees; returns a warning if that removal failed. */
 	abandon(reason: string): string | void | Promise<string | void>;
 }
@@ -61,6 +67,8 @@ export interface RuntimeOptions {
 }
 
 export const CHECK_SLOT = "check";
+/** Checks may overlap a launch, a step, or another manual check. Never remove another live check's worktree. */
+const activeCheckSlots = new Set<string>();
 
 export function createRuntimeFactory(options: RuntimeOptions = {}): RuntimeFactory {
 	return (env) => {
@@ -104,8 +112,8 @@ export function createRuntimeFactory(options: RuntimeOptions = {}): RuntimeFacto
 				vcs.updateRef(integrationRef(runId), base, null);
 			},
 			step: (prompt, opts, signal) => createStepExecutor(stepDeps(combine(signal))).run(prompt, opts),
-			integrate: (source, opts, signal) => integrator(combine(signal)).integrate(source, opts),
-			async check(request, signal) {
+			integrate: (source, opts, signal, report) => integrator(combine(signal)).integrate(source, opts, { onCheck: (id) => report?.(`${opts.task ? `${opts.task} ` : ""}integrating · check ${id}`) }),
+			async check(request, signal, report) {
 				const all = goal().checks;
 				const specs = request.checks ? request.checks.map((id) => {
 					const spec = all.find((check) => check.id === id);
@@ -114,29 +122,47 @@ export function createRuntimeFactory(options: RuntimeOptions = {}): RuntimeFacto
 				}) : all;
 				const commit = request.commit ? vcs.resolve(request.commit) : integrationHead();
 				if (!specs.length) return [];
-				const path = worktreePath(vcs.commonDir(), runId, CHECK_SLOT);
-				vcs.removeWorktree(path);
+				let slot = 0;
+				let path = worktreePath(vcs.commonDir(), runId, CHECK_SLOT);
+				while (activeCheckSlots.has(path)) path = worktreePath(vcs.commonDir(), runId, `${CHECK_SLOT}-${++slot}`);
+				activeCheckSlots.add(path);
 				try {
+					vcs.removeWorktree(path);
 					vcs.addWorktree(path, commit);
-					const results = await runChecks(specs, { cwd: path, commit, outputs: run.outputs, signal: combine(signal) });
+					const results = await runChecks(specs, { cwd: path, commit, outputs: run.outputs, signal: combine(signal), onCheck: (id) => report?.(`checking ${id}`) });
 					for (const r of results) run.journal.append({ t: "check.completed", checkId: r.id, commit, exitCode: r.exitCode, timedOut: r.timedOut, durationMs: r.durationMs, logRef: r.logRef, tail: r.tail, purpose: "manual" });
 					progress();
 					return results;
 				} finally {
 					// The next check removes a leftover worktree first; the journaled results matter more.
 					try { vcs.removeWorktree(path); } catch {}
+					activeCheckSlots.delete(path);
 				}
 			},
-			verify(signal) {
+			verify(signal, report) {
 				const { checks } = goal();
-				return verifyRun({ runId, store: run, vcs, runner: env.runner(), roles: roles(), checks, limits: options.limits, signal: combine(signal), onProgress: progress });
+				return verifyRun({ runId, store: run, vcs, runner: env.runner(), roles: roles(), checks, limits: options.limits, signal: combine(signal), onProgress: progress, onStage: (stage) => report?.(`verifying · ${stage}`) });
 			},
-			deliver(request, confirm, signal) {
+			deliver(request, confirm, signal, report) {
 				const { checks, title } = goal();
-				return deliver({ runId, store: run, vcs, runner: env.runner(), roles: roles(), checks, title, faults: options.faults, signal: combine(signal), onProgress: progress, confirm }, request);
+				return deliver({ runId, store: run, vcs, runner: env.runner(), roles: roles(), checks, title, faults: options.faults, signal: combine(signal), onProgress: progress, onStage: (stage) => report?.(`delivering · ${stage}`), confirm }, request);
 			},
-			// The launch cancels its own steps and integrations when it stops or settles.
-			launch: (request) => launchScript({ ...stepDeps(env.signal), integrator: integrator(env.signal) }, request),
+			// Each launch owns its callbacks and integration status independently of direct calls.
+			launch(request, live) {
+				const base = integrator(env.signal);
+				return launchScript({
+					...stepDeps(env.signal),
+					onActivity: live?.activity ?? env.onActivity, onPhase: live?.phase, onLog: live?.log,
+					integrator: {
+						async integrate(source, opts, ctx) {
+							const op = live?.integrate(opts.task);
+							try {
+								return await base.integrate(source, opts, { ...ctx, onCheck: (id) => op?.update(`${opts.task ? `${opts.task} ` : ""}integrating · check ${id}`) });
+							} finally { op?.end(); }
+						},
+					},
+				}, request);
+			},
 			abandon(reason) {
 				run.journal.append({ t: "run.finished", status: "abandoned", reason });
 				try {

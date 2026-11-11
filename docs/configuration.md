@@ -11,7 +11,7 @@ Start with the defaults, then configure the services and workflows you need. Eac
 | Magpie models | Discovers a gateway at `http://127.0.0.1:3425` by default; needs a running gateway. | Run `/login magpie`, then `/model`. |
 | pika uploads, relay, and recall | Inactive until configured. | Run `/pika login` and pair with a server you control. |
 | Subagents scripted workflows | Disabled; package agent/workflow discovery is also off. | Explicitly set `workflowsEnabled: true` in `subagents.json`, then reload with no agents running. |
-| Recurring work and optimization | Installation starts no loops or optimization campaigns. | Start `/loop` explicitly; `/autoresearch` measures a baseline and waits for `/autoresearch approve`. |
+| Goal work and optimization | Installation starts no goals or optimization campaigns. | Start `/goal <objective>` explicitly; `/autoresearch` measures a baseline and waits for `/autoresearch approve`. |
 | Herder | Starts only when requested. | Requires Git 2.38+, goal approval, and delivery confirmation in TUI or RPC. |
 
 ## Appearance and language
@@ -56,4 +56,4 @@ The [pika extension reference](../extensions/pika/README.md#configuration) docum
 
 [Subagents](../extensions/subagents/README.md) reads global and project `subagents.json` settings, with project settings taking precedence; its reference lists the supported locations. Individual `recon`, `worker`, and `reviewer` agents (as well as the three-model [Council](../extensions/council/README.md) via `/council` or the `council` tool) do not require scripted workflows. Enabling `workflowsEnabled` only makes the workflow tool available: orchestration still requires an explicit user request. Package discovery and nested delegation have separate opt-ins.
 
-Use the [Delegation guide](guides/delegation.md) to choose between an individual agent, a scripted workflow, and a durable Herder run. The [Performance guide](guides/performance.md) helps you choose between measurement, approved optimization, and recurring prompts.
+Use the [Delegation guide](guides/delegation.md) to choose between an individual agent, a scripted workflow, and a durable Herder run. The [Performance guide](guides/performance.md) helps you choose between measurement, approved optimization, and objective-driven work.

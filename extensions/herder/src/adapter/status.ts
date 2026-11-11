@@ -15,6 +15,8 @@ export const isBlocked = (state: RunState) => state.goal !== undefined && !isFin
 	&& state.verification?.verdict === "blocked" && state.verification.head === state.integrationHead;
 const short = (sha: string | undefined) => (sha ? sha.slice(0, 12) : "—");
 const clip = (text: string, max: number) => (text.length <= max ? text : `${text.slice(0, max - 1)}…`);
+/** Terminal-safe, single-line, bounded text, including values supplied by workflow scripts. */
+export const statusPart = (text: string, max = 48) => clip(text.replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim(), max);
 
 export interface RunEntry { runId: string; state: RunState }
 const titled = ({ runId, state }: RunEntry) => `${runId}${state.title ? ` ${clip(state.title, 80)}` : ""}`;
@@ -68,19 +70,48 @@ function taskCounts(state: RunState, tasks: readonly PlanTask[]): { done: number
 	return { done: [...ids].filter((id) => state.tasks.get(id)?.status === "integrated").length, total: ids.size };
 }
 
-export interface StatusInput { state: RunState; tasks: readonly PlanTask[]; running: readonly StepActivity[]; launch?: number }
+export interface StatusInput {
+	state: RunState; tasks: readonly PlanTask[]; running: readonly StepActivity[]; operations?: readonly string[];
+	launch?: number; launching?: boolean; stopping?: boolean; phase?: string; log?: string;
+}
 
-/** Footer text such as `herder: T2 integrate · 3/5 tasks`; undefined once the run is finished. */
-export function statusText({ state, tasks, running, launch }: StatusInput): string | undefined {
+function stepText(step: StepActivity, showStage = true): string {
+	const task = statusPart(step.task ?? "", 16);
+	let phase = statusPart(step.phase ?? "", 28);
+	// A script phase is global. Attribute it to a step only when it explicitly names that task.
+	if (step.phaseIsGlobal) {
+		const prefix = task && phase.startsWith(`${task}:`) ? `${task}:` : "";
+		phase = prefix ? phase.slice(prefix.length).trim() : "";
+	} else if (task && phase.startsWith(`${task}:`)) phase = phase.slice(task.length + 1).trim();
+	const label = step.label === step.key && phase ? "" : statusPart(step.label || step.key, 24);
+	return statusPart([task, showStage ? statusPart(step.stage ?? "") : "", phase, label && label !== phase ? label : ""].filter(Boolean).join(" ") || step.key, 48);
+}
+
+/** Footer text; live work takes precedence over the last journaled verification. */
+export function statusText({ state, tasks, running, operations = [], launch, launching, stopping, phase, log }: StatusInput): string | undefined {
 	if (state.runId === undefined || isFinished(state)) return undefined;
-	const step = running.at(-1);
+	const parts: string[] = [];
+	parts.push(...operations.slice(0, 2).map((op) => statusPart(op)));
+	if (operations.length > 2) parts.push(`+${operations.length - 2} operations`);
+	if (running.length > 1 || (running.length && operations.length)) parts.push(`${running.length} ${running.length === 1 ? "step" : "steps"}`);
+	const showLog = !stopping && (launch !== undefined || launching) && log;
+	if (showLog) {
+		for (const step of running) {
+			if (step.stage) parts.push([statusPart(step.task ?? "", 16), statusPart(step.stage)].filter(Boolean).join(" "));
+		}
+		if (!running.length && !operations.length) parts.push(launch === undefined ? "starting launch" : `launch ${launch}`);
+		parts.push(`log: ${statusPart(showLog)}`);
+	}
+	if (running.length) parts.push(...running.slice(0, 2).map((step) => stepText(step, !showLog)));
+	if (stopping) parts.push(`stopping launch${launch === undefined ? "" : ` ${launch}`}`);
+	else if (launch !== undefined || launching) {
+		if (!showLog && !running.length && !operations.length) parts.push(launch === undefined ? "starting launch" : `launch ${launch}`);
+		if (phase) parts.push(`phase: ${statusPart(phase)}`);
+	}
 	const verified = state.verification?.head === state.integrationHead ? state.verification : undefined;
-	const now = step ? [step.task, step.phase || step.label || step.key].filter(Boolean).join(" ")
-		: launch !== undefined ? `launch ${launch}`
-		: state.status === "drafting" ? "drafting goal"
-		: verified ? `verified ${verified.verdict}` : "ready";
+	if (!parts.length) parts.push(state.status === "drafting" ? "drafting goal" : verified ? `verified ${verified.verdict}` : "ready");
 	const { done, total } = taskCounts(state, tasks);
-	return `herder: ${clip(now, 40)}${total ? ` · ${done}/${total} tasks` : ""}`;
+	return `herder: ${parts.join(" · ")}${total ? ` · ${done}/${total} tasks` : ""}`;
 }
 
 export interface DescribeOptions { lock: LockInfo | null; sessionId: string; launch?: number; now: Date }

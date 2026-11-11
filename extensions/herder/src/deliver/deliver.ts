@@ -9,7 +9,7 @@ import { acceptCuration } from "./curate.ts";
 
 export interface DeliverDeps {
 	runId: string; store: RunStore; vcs: Vcs; runner: AgentRunner; roles: ReadonlyMap<string, RoleDefinition>; checks: readonly CheckSpec[];
-	title: string; faults?: Faults; signal?: AbortSignal; onProgress?: () => void;
+	title: string; faults?: Faults; signal?: AbortSignal; onProgress?: () => void; onStage?: (stage: string) => void;
 	/** Interactive approval of the summary; nothing reaches the user's checkout or branches unless it resolves true. */
 	confirm(summary: string): Promise<boolean>;
 }
@@ -108,7 +108,7 @@ async function deliveryChecks(deps: DeliverDeps, tip: string, signal: AbortSigna
 	vcs.removeWorktree(path);
 	try {
 		vcs.addWorktree(path, tip);
-		const results = await runChecks(deps.checks, { cwd: path, commit: tip, outputs: store.outputs, signal });
+		const results = await runChecks(deps.checks, { cwd: path, commit: tip, outputs: store.outputs, signal, onCheck: (id) => deps.onStage?.(`check ${id}`) });
 		for (const r of results) store.journal.append({ t: "check.completed", checkId: r.id, commit: tip, exitCode: r.exitCode, timedOut: r.timedOut, durationMs: r.durationMs, logRef: r.logRef, tail: r.tail, purpose: "deliver" });
 		deps.onProgress?.();
 		return results;
@@ -221,7 +221,9 @@ export async function deliver(deps: DeliverDeps, request: DeliveryRequest): Prom
 
 	let series = head, curated = false, curation: string | undefined;
 	if (request.curate) {
+		deps.onStage?.("curating");
 		const result = await curate(deps, base, head, signal);
+		deps.onStage?.("preparing");
 		if (result.tip) { series = result.tip; curated = true; } else curation = result.reason;
 	}
 	const extra = (): Partial<DeliveryOutcome> => ({ curated, ...(curation ? { curation } : {}) });

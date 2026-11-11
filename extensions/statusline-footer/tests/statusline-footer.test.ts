@@ -232,16 +232,16 @@ describe("statusline footer visual language", () => {
 		expect(renderStatus(theme, "herder: T2 integrate · 3/5 tasks", "herder")).toBe(`<${herder}>herder: T2 integrate<dim> · <muted>3/5 tasks`);
 		expect(renderStatus(theme, "bg 2 running · 1 failed", PROCESS_STATUS_KEY))
 			.toBe(`<${statusHue(theme, PROCESS_STATUS_KEY)}>bg 2 running<dim> · <warning>*1 failed*`);
-		expect(renderStatus(theme, "↻ build · paused", "loop")).toBe(`<${statusHue(theme, "loop")}>↻ build<dim> · <warning>paused`);
+		expect(renderStatus(theme, "↻ build · paused", "goal")).toBe(`<${statusHue(theme, "goal")}>↻ build<dim> · <warning>paused`);
 		expect(renderStatus(theme, "\x1b[32mpainted\x1b[0m", "x")).toBe("\x1b[32mpainted\x1b[0m");
-		expect(new Set(["autoresearch", "herder", "loop", PROCESS_STATUS_KEY].map(key => statusHue(theme, key))).size).toBe(4);
+		expect(new Set(["autoresearch", "herder", "goal", PROCESS_STATUS_KEY].map(key => statusHue(theme, key))).size).toBe(4);
 		expect(statusHue(theme, "custom")).toBe(statusHue(theme, "custom"));
 		// Explicit slots keep existing colors when a new status takes priority.
 		const palette = statusPalette(theme);
 		expect(statusHue(theme, "impeccable-live")).toBe(palette[5 % palette.length]);
 		expect(statusHue(theme, "language")).toBe(palette[6 % palette.length]);
 		expect(statusHue(theme, "spokesman")).toBe(palette[7 % palette.length]);
-		for (const [slot, key] of ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language", "spokesman", "boom", "alwayson", "selfdrive", "representative", "magpie-quota"].entries()) {
+		for (const [slot, key] of ["autoresearch", "herder", "goal", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language", "spokesman", "boom", "alwayson", "selfdrive", "representative", "magpie-quota"].entries()) {
 			expect(statusHue(theme, key)).toBe(palette[slot % palette.length]);
 		}
 		for (const state of ["awaiting", "paused"]) {
@@ -644,9 +644,70 @@ describe("statusline footer rendering", () => {
 		harness.getFooter()?.dispose?.();
 	});
 
-	it("shows changing loop status in compact mode only while identity and percent fit", async () => {
-		const harness = createHarness("compact-loop-status", "tui", {
-			keyedExtensionStatuses: { loop: "↻ build · next 4m", other: "SYNC" },
+	it.each(["full", "compact"])("renders and clears a plain goal in %s mode", async (mode) => {
+		const harness = createHarness(`plain-goal-${mode}`, "tui", { extensionStatuses: [] });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", mode);
+		try {
+			const baseline = harness.getFooter()!.render(160);
+			harness.setStatus("goal", "goal: finish the migration");
+			const lines = harness.getFooter()!.render(160);
+			expect(lines[mode === "full" ? 1 : 0]).toContain("goal: finish the migration");
+			if (mode === "full") expect(lines[1]).toContain("\u{F0E6F}");
+			for (let width = 0; width <= 80; width++) {
+				const narrow = harness.getFooter()!.render(width);
+				for (const line of narrow) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+				if (width >= 24) expect(narrow[0]).toContain("42.5%");
+			}
+			harness.setStatus("goal");
+			expect(harness.getFooter()!.render(160)).toEqual(baseline);
+		} finally { harness.disposeFooter(); }
+	});
+
+	it.each(["full", "compact"])("fits goal with Herder, research and quota in %s mode", async (mode) => {
+		const harness = createHarness(`goal-concurrent-${mode}`, "tui", { extensionStatuses: [], keyedExtensionStatuses: {
+			goal: "goal: migrate the entire application safely", herder: "herder: T2 integrate",
+			autoresearch: "research · measuring · iteration 12", "magpie-quota": "quota checking",
+		} });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", mode);
+		try {
+			const row = mode === "full" ? 1 : 0;
+			const wide = harness.getFooter()!.render(160)[row]!;
+			for (const text of ["goal: migrate", "herder: T2 integrate", "research · measuring", "quota checking"]) expect(wide).toContain(text);
+			const ordinary = harness.getFooter()!.render(80)[row]!;
+			expect(ordinary).toContain("herder: T2 integrate");
+			expect(ordinary).toContain("goal: migrate");
+			harness.setStatus("goal", "goal: migration blocked · needs input");
+			const attention = harness.getFooter()!.render(60)[row]!;
+			expect(attention).toContain("blocked");
+			harness.setStatus("goal", "goal: migration paused · needs input");
+			expect(harness.getFooter()!.render(60)[row]).toContain("paused");
+			harness.setStatus("goal");
+			expect(harness.getFooter()!.render(160).join("\n")).not.toContain("goal:");
+		} finally { harness.disposeFooter(); }
+	});
+
+	it("keeps an abbreviated goal beside routine research without Herder", async () => {
+		const harness = createHarness("goal-research", "tui", { extensionStatuses: [], keyedExtensionStatuses: {
+			goal: "goal: migrate the entire application safely", autoresearch: "research · measuring · iteration 12",
+		} });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", "compact");
+		try {
+			const line = harness.getFooter()!.render(80)[0]!;
+			expect(line).toContain("goal: migrate");
+			expect(line).toContain("research · measuring");
+			expect(visibleWidth(line)).toBeLessThanOrEqual(80);
+		} finally { harness.disposeFooter(); }
+	});
+
+	it("shows changing goal status in compact mode only while identity and percent fit", async () => {
+		const harness = createHarness("compact-goal-status", "tui", {
+			keyedExtensionStatuses: { goal: "↻ build · next 4m", other: "SYNC" },
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
@@ -663,10 +724,10 @@ describe("statusline footer rendering", () => {
 				}
 				expect(line).not.toContain("SYNC");
 			}
-			harness.setStatus("loop", "↻ paused");
+			harness.setStatus("goal", "↻ paused");
 			expect(harness.getFooter()!.render(60)[0]).toContain("↻ paused");
 			expect(harness.getFooter()!.render(60)[0]).not.toContain("↻ build");
-			harness.setStatus("loop");
+			harness.setStatus("goal");
 			expect(harness.getFooter()!.render(120)[0]).not.toContain("↻ paused");
 			expect(harness.getFooter()!.render(120)[0]).toContain("42.5%");
 		} finally {
@@ -674,10 +735,10 @@ describe("statusline footer rendering", () => {
 		}
 	});
 
-	it("fits wide Unicode loop status without clipping model or context", async () => {
-		const harness = createHarness("compact-unicode-loop", "tui", {
+	it("fits wide Unicode goal status without clipping model or context", async () => {
+		const harness = createHarness("compact-unicode-goal", "tui", {
 			model: { id: "模型模型", reasoning: true },
-			keyedExtensionStatuses: { loop: "↻ 構築 · 次 4m" },
+			keyedExtensionStatuses: { goal: "↻ 構築 · 次 4m" },
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
@@ -696,10 +757,10 @@ describe("statusline footer rendering", () => {
 		}
 	});
 
-	it("gives loop and generic statuses their own row beside a long cwd in full mode", async () => {
-		const harness = createHarness("full-loop-status", "tui", {
+	it("gives goal and generic statuses their own row beside a long cwd in full mode", async () => {
+		const harness = createHarness("full-goal-status", "tui", {
 			cwd: `/tmp/${"深い階層/".repeat(30)}project`,
-			keyedExtensionStatuses: { loop: "↻ build · next 4m", other: "SYNC" },
+			keyedExtensionStatuses: { goal: "↻ build · next 4m", other: "SYNC" },
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
@@ -717,25 +778,25 @@ describe("statusline footer rendering", () => {
 				expect(lines[1]).toContain("READY");
 				expect(lines[1]).toContain("SYNC");
 			}
-			harness.setStatus("loop", "↻ wait · next 4m");
+			harness.setStatus("goal", "↻ wait · next 4m");
 			expect(harness.getFooter()!.render(80)[1]).toContain("↻ wait · next 4m");
-			for (const key of ["loop", "other", "READY"]) harness.setStatus(key);
+			for (const key of ["goal", "other", "READY"]) harness.setStatus(key);
 			expect(harness.getFooter()!.render(80)).toHaveLength(4);
 		} finally {
 			harness.disposeFooter();
 		}
 	});
 
-	it("orders full-mode statuses research, Herder, loop, then the rest", async () => {
+	it("orders full-mode statuses research, Herder, goal, then the rest", async () => {
 		const harness = createHarness("full-herder-status", "tui", {
-			keyedExtensionStatuses: { other: "SYNC", loop: "loop build", herder: "herder: T2 integrate · 3/5 tasks", autoresearch: "research 2/5" },
+			keyedExtensionStatuses: { other: "SYNC", goal: "goal build", herder: "herder: T2 integrate · 3/5 tasks", autoresearch: "research 2/5" },
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
 			const line = harness.getFooter()!.render(200)[1]!;
 			expect(line.split("herder: T2 integrate · 3/5 tasks")).toHaveLength(2);
-			const order = ["research 2/5", "herder: T2", "loop build", "SYNC"].map(text => line.indexOf(text));
+			const order = ["research 2/5", "herder: T2", "goal build", "SYNC"].map(text => line.indexOf(text));
 			expect(order.every(index => index >= 0)).toBe(true);
 			expect(order).toEqual([...order].sort((a, b) => a - b));
 		} finally {
@@ -766,43 +827,309 @@ describe("statusline footer rendering", () => {
 		}
 	});
 
-	it("ranks Herder below research and above loop in compact mode", async () => {
-		const harness = createHarness("compact-herder-status", "tui", {
-			keyedExtensionStatuses: { loop: "loop build", herder: "herder: T2 integrate · 3/5 tasks" },
+	it.each(["0", "1"])("fits Herder alongside concurrent workflows in compact mode (Nerd Fonts %s)", async (nerdFonts) => {
+		const research = "research · run 3/20 · measured · Compile 182 ms (-14.554%)";
+		const quota = "quota · checking reset time";
+		const herder = "herder: T2 integrate · 3/5 tasks";
+		const harness = createHarness(`compact-herder-status-${nerdFonts}`, "tui", {
+			extensionStatuses: [],
+			keyedExtensionStatuses: { "magpie-quota": quota, autoresearch: research, herder },
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		await harness.runCommand("footer", "compact");
 		try {
-			let line = harness.getFooter()!.render(160)[0]!;
-			expect(line).toContain("herder: T2 integrate · 3/5 tasks");
-			expect(line).not.toContain("loop build");
-			harness.setStatus("autoresearch", "research 2/5");
-			line = harness.getFooter()!.render(160)[0]!;
-			expect(line).toContain("research 2/5");
-			expect(line).not.toContain("herder:");
-			harness.setStatus("autoresearch");
+			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+			const wide = harness.getFooter()!.render(160)[0]!;
+			for (const text of [quota, research, herder]) expect(wide).toContain(text);
+			const ordinary = harness.getFooter()!.render(80)[0]!;
+			expect(ordinary).toContain(quota);
+			expect(ordinary).toContain("herder: T2 integrate");
+			expect(ordinary).not.toContain("3/5 tasks");
+			expect(ordinary).not.toContain(research);
+			const narrow = harness.getFooter()!.render(50)[0]!;
+			expect(narrow).toContain("herder: T2 integrate");
+			expect(narrow).not.toContain(quota);
+			for (let width = 0; width <= 160; width++) {
+				const line = harness.getFooter()!.render(width)[0]!;
+				expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
+				if (width >= 24) {
+					expect(line, `${width}`).toContain("k3");
+					expect(line, `${width}`).toContain("42.5%");
+				}
+			}
+			const operation = "herder: T2 構築 · verify changes";
+			harness.setStatus("herder", `${operation} · 3/5 tasks`);
+			const shortened = Array.from({ length: 120 }, (_, width) => harness.getFooter()!.render(width + 1)[0]!)
+				.find(line => line.includes(operation) && !line.includes("3/5 tasks"));
+			expect(shortened).toBeDefined();
+			harness.setStatus("herder", herder);
+			// With quota cleared, both current operations fit at 80 columns even if the metric does not.
+			harness.setStatus("magpie-quota");
+			const twoWorkflows = harness.getFooter()!.render(80)[0]!;
+			expect(twoWorkflows).toContain("research · run 3/20");
+			expect(twoWorkflows).toContain("herder: T2 integrate");
+			expect(twoWorkflows).not.toContain("Compile 182 ms");
+			expect(harness.getFooter()!.render(160)[0]).toContain(research);
+			// Once Herder clears, compact mode retains its established single-workflow order.
+			harness.setStatus("magpie-quota", quota);
 			harness.setStatus("herder");
+			let line = harness.getFooter()!.render(160)[0]!;
+			expect(line).toContain(quota);
+			expect(line).not.toContain(research);
+			harness.setStatus("magpie-quota");
 			line = harness.getFooter()!.render(160)[0]!;
-			expect(line).toContain("loop build");
+			expect(line).toContain(research);
 			expect(line).not.toContain("herder:");
-			for (const width of [24, 30]) {
-				harness.setStatus("herder", "herder: T2 integrate · 3/5 tasks");
-				const narrow = harness.getFooter()!.render(width)[0]!;
-				expect(visibleWidth(narrow)).toBeLessThanOrEqual(width);
-				expect(narrow).toContain("k3");
-				expect(narrow).toContain("42.5%");
-				expect(narrow).not.toContain("herder:");
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it.each(["0", "1"])("keeps Herder ahead of routine full-row activity but below attention and problems (Nerd Fonts %s)", async (nerdFonts) => {
+		const harness = createHarness(`full-herder-priority-${nerdFonts}`, "tui", {
+			extensionStatuses: [],
+			keyedExtensionStatuses: {
+				autoresearch: "research · run 3/20 · measured · Compile 182 ms",
+				herder: "herder: T2 integrate · 3/5 tasks",
+				goal: "↻ build · next 4m", representative: "📣 rep #dev", "relay-rooms": "#ops",
+			},
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+			for (const width of [40, 80, 160]) {
+				const lines = harness.getFooter()!.render(width);
+				for (const line of lines) expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
+				expect(lines[0], `${width}`).toContain("k3");
+				expect(lines[0], `${width}`).toContain("42.5%");
+				expect(lines[1], `${width}`).toContain("herder: T2 integrate · 3/5 tasks");
+			}
+			const narrow = () => harness.getFooter()!.render(40)[1]!;
+			expect(narrow()).not.toContain("rep #dev");
+			expect(narrow()).not.toContain("#ops");
+			harness.setStatus("magpie-quota", "quota paused · resume manually");
+			expect(narrow()).toContain("quota paused · resume manually");
+			expect(narrow()).not.toContain("herder:");
+			harness.setStatus("custom", "build blocked");
+			expect(narrow()).toContain("build blocked");
+			expect(narrow()).not.toContain("quota paused");
+			harness.setStatus("custom");
+			harness.setStatus("magpie-quota");
+			expect(narrow()).toContain("herder: T2 integrate");
+			harness.setStatus("herder");
+			expect(narrow()).toContain("↻ build");
+			expect(narrow()).not.toContain("research");
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it.each(["0", "1"])("keeps compact attention and problem statuses ahead of routine Herder (Nerd Fonts %s)", async (nerdFonts) => {
+		const harness = createHarness(`compact-herder-severity-${nerdFonts}`, "tui", {
+			extensionStatuses: [],
+			keyedExtensionStatuses: {
+				"magpie-quota": "quota paused · resume manually", autoresearch: "research · run 3/20",
+				herder: "herder: T2 integrate · 3/5 tasks", goal: "↻ build",
+			},
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", "compact");
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+			const wide = harness.getFooter()!.render(160)[0]!;
+			for (const text of ["quota paused · resume manually", "research · run 3/20", "herder: T2 integrate", "↻ build"]) expect(wide).toContain(text);
+			const ordinary = harness.getFooter()!.render(80)[0]!;
+			expect(ordinary).toContain("quota paused · resume manually");
+			expect(ordinary).toContain("herder: T2 integrate");
+			const narrow = () => harness.getFooter()!.render(50)[0]!;
+			expect(narrow()).toContain("quota paused · resume manually");
+			expect(narrow()).not.toContain("herder:");
+			harness.setStatus("autoresearch", "research · paused · state error");
+			const problem = harness.getFooter()!.render(60)[0]!;
+			expect(problem).toContain("research · paused · state error");
+			expect(problem).not.toContain("quota paused");
+			expect(problem).not.toContain("herder:");
+			harness.setStatus("autoresearch");
+			harness.setStatus("herder", "herder: verified blocked · 3/5 tasks");
+			const blocked = harness.getFooter()!.render(55)[0]!;
+			expect(blocked).toContain("herder: verified blocked");
+			expect(blocked).not.toContain("quota paused");
+			harness.setStatus("magpie-quota");
+			harness.setStatus("herder", "herder: T2 integrate · 3/5 tasks");
+			harness.setStatus(PROCESS_STATUS_KEY, "bg 1 failed");
+			expect(narrow()).toContain("bg 1 failed");
+			expect(narrow()).not.toContain("herder:");
+			harness.setStatus(PROCESS_STATUS_KEY, "bg 1 running");
+			expect(narrow()).toContain("herder: T2 integrate");
+			expect(narrow()).not.toContain("bg 1 running");
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it("keeps routine Herder calm beside a warning and leaves publisher ANSI intact", async () => {
+		const theme = { fg: (token: string, text: string) => `<${token}>${text}`, bold: (text: string) => text };
+		const harness = createHarness("compact-herder-colors", "tui", {
+			extensionStatuses: [], theme,
+			keyedExtensionStatuses: { "magpie-quota": "quota paused · resume manually", herder: "herder: T2 integrate · 3/5 tasks" },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", "compact");
+		try {
+			const wide = harness.getFooter()!.render(240)[0]!;
+			expect(wide).toContain("<warning>quota paused");
+			expect(wide).toContain(`<${statusHue(theme as unknown as Parameters<typeof statusHue>[0], "herder")}>herder: T2 integrate`);
+			expect(wide).not.toContain("<warning>herder:");
+			const styled = "\x1b[36mherder: T2 inspect · add tests · 3/5 tasks\x1b[0m";
+			harness.setStatus("herder", styled);
+			expect(harness.getFooter()!.render(240)[0]).toContain(styled);
+			for (let width = 24; width <= 160; width++) {
+				const line = harness.getFooter()!.render(width)[0]!;
+				expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
+				if (line.includes("herder:")) expect(line, `${width}`).toContain("\x1b[36mherder:");
 			}
 		} finally {
 			harness.disposeFooter();
 		}
 	});
 
+	it.each(["0", "1"])("abbreviates long and multi-segment Herder statuses while retaining later severity (Nerd Fonts %s)", async (nerdFonts) => {
+		const operation = "herder: T2 verify integration across all modules · 3/5 tasks";
+		const multi = "herder: T1 implement worker one · T2 fix worker two · +1 steps · checking unit · phase: T2: fix · log: waiting · 0/3 tasks";
+		const harness = createHarness(`herder-long-${nerdFonts}`, "tui", {
+			model: { id: "claude-opus-4-6" }, extensionStatuses: [],
+			keyedExtensionStatuses: { boom: "💥 boom", herder: operation },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", "compact");
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+			for (const status of [operation, multi, `\x1b[36m${multi}\x1b[0m`, "herder: T2 構築と検証 across all modules · 3/5 tasks"]) {
+				harness.setStatus("herder", status);
+				const line = harness.getFooter()!.render(80)[0]!;
+				expect(line).toContain("herder: T");
+				expect(line).toContain("💥 boom");
+				expect(line).toContain("claude-opus-4-6");
+				expect(line).toContain("42.5%");
+				expect(visibleWidth(line)).toBeLessThanOrEqual(80);
+				expect(harness.getFooter()!.render(240)[0]).toContain(status);
+			}
+			harness.setStatus("herder", `${multi} · state failed`);
+			const failed = harness.getFooter()!.render(80)[0]!;
+			expect(failed).toContain("herder: T1");
+			expect(failed).toContain("failed");
+			harness.setStatus("herder", `${multi} · paused`);
+			expect(harness.getFooter()!.render(80)[0]).toContain("paused");
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it.each(["0", "1"])("keeps fitting errors visible and ranks colon ANSI severity (Nerd Fonts %s)", async (nerdFonts) => {
+		const quota = "quota \x1b[38:2::255:0:0mfailed\x1b[0m";
+		const harness = createHarness(`herder-errors-${nerdFonts}`, "tui", {
+			extensionStatuses: [], keyedExtensionStatuses: { "magpie-quota": quota, herder: "herder: T2 test operation failed · 3/5 tasks" },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+			const full = harness.getFooter()!.render(35)[1]!;
+			expect(full).toContain(quota);
+			expect(visibleWidth(full)).toBeLessThanOrEqual(35);
+			harness.setStatus("herder", "herder: T2 integrate · 3/5 tasks");
+			await harness.runCommand("footer", "compact");
+			const compact = harness.getFooter()!.render(45)[0]!;
+			expect(compact).toContain(quota);
+			expect(compact).not.toContain("herder:");
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it.each(["0", "1"])("keeps later fitting problems and lone Herder severity visible in full mode (Nerd Fonts %s)", async (nerdFonts) => {
+		const herder = "herder: T2 test operation across all modules failed · 3/5 tasks";
+		const harness = createHarness(`full-herder-later-${nerdFonts}`, "tui", {
+			extensionStatuses: [], keyedExtensionStatuses: { herder },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+			for (const [key, text] of [["custom", "build failed"], ["goal", "goal failed"], ["representative", "rep failed"]]) {
+				harness.setStatus(key!, text!);
+				const line = harness.getFooter()!.render(35)[1]!;
+				expect(line).toContain(text);
+				expect(line).not.toContain("herder:");
+				expect(visibleWidth(line)).toBeLessThanOrEqual(35);
+				harness.setStatus(key!);
+			}
+			for (const marker of ["failed", "awaiting"]) {
+				harness.setStatus("herder", `herder: T2 test operation across all modules ${marker} · 3/5 tasks`);
+				const line = harness.getFooter()!.render(35)[1]!;
+				expect(line).toContain("herder:");
+				expect(line).toContain(marker);
+				expect(visibleWidth(line)).toBeLessThanOrEqual(35);
+			}
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it.each(["full", "compact"])("restores the exact %s layout after Herder clears", async (mode) => {
+		const statuses = {
+			"magpie-quota": "quota · checking reset time", autoresearch: "research · run 3/20", loop: "↻ build",
+			language: "English", representative: "📣 rep #dev", "relay-rooms": "#dev #ops",
+		};
+		const start = async (id: string, withHerder: boolean) => {
+			const harness = createHarness(id, "tui", {
+				extensionStatuses: [], keyedExtensionStatuses: { ...statuses, ...(withHerder ? { herder: "herder: T2 integrate · 3/5 tasks" } : {}) },
+			});
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			await harness.runCommand("footer", mode);
+			harness.setStatus(PROCESS_STATUS_KEY, "bg 1 running");
+			return harness;
+		};
+		const harness = await start(`herder-clear-${mode}`, true);
+		const baseline = await start(`herder-absent-${mode}`, false);
+		try {
+			harness.setStatus("herder");
+			for (const nerdFonts of ["0", "1"]) {
+				vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+				for (const width of [24, 40, 60, 80, 120, 160, 240]) {
+					expect(harness.getFooter()!.render(width), `${nerdFonts} at ${width}`).toEqual(baseline.getFooter()!.render(width));
+				}
+			}
+			if (mode === "compact") {
+				const wide = harness.getFooter()!.render(240)[0]!;
+				expect(wide).toContain(statuses["magpie-quota"]);
+				expect(wide).toContain("bg 1 running");
+				expect(wide).not.toContain(statuses.autoresearch);
+				expect(wide).not.toContain(statuses.loop);
+			}
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+			baseline.disposeFooter();
+		}
+	});
+
 	it.each(["full", "compact"])("prioritizes Magpie quota waits and restores workflows in %s mode", async (mode) => {
 		vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
 		const workflows = [
-			["autoresearch", "research 2/5"], ["herder", "herder: T2 integrate"], ["loop", "↻ build"],
+			["autoresearch", "research 2/5"], ["herder", "herder: T2 integrate"], ["goal", "↻ build"],
 		] as const;
 		const harness = createHarness(`quota-priority-${mode}`, "tui", {
 			extensionStatuses: [],
@@ -834,7 +1161,7 @@ describe("statusline footer rendering", () => {
 					expect(order).toEqual([...order].sort((a, b) => a - b));
 				} else {
 					expect(summary).not.toContain("\u{F0954}");
-					for (const [, text] of workflows) expect(summary).not.toContain(text);
+					for (const [, text] of workflows) expect(summary).toContain(text);
 				}
 			}
 			harness.ctx.ui.setStatus("magpie-quota", undefined);
@@ -842,9 +1169,6 @@ describe("statusline footer rendering", () => {
 			for (const [key, text] of workflows) {
 				const summary = harness.getFooter()!.render(240)[summaryRow]!;
 				expect(summary).toContain(text);
-				if (mode === "compact") {
-					for (const [otherKey, otherText] of workflows) if (otherKey !== key) expect(summary).not.toContain(otherText);
-				}
 				harness.ctx.ui.setStatus(key, undefined);
 			}
 			expect(harness.getFooter()!.render(240)).toHaveLength(mode === "full" ? 4 : 1);
@@ -862,7 +1186,7 @@ describe("statusline footer rendering", () => {
 				model: { id: "gpt-5.4", provider: "magpie", reasoning: true, magpiePricing: "estimate" },
 				extensionStatuses: [],
 				keyedExtensionStatuses: {
-					herder: "herder: T2 integrate", autoresearch: "research 2/5", loop: "↻ build", "magpie-quota": status,
+					herder: "herder: T2 integrate", autoresearch: "research 2/5", goal: "↻ build", "magpie-quota": status,
 				},
 			});
 			statuslineFooter(harness.pi);
@@ -876,18 +1200,45 @@ describe("statusline footer rendering", () => {
 						expect(lines[0], `${width}`).toContain("gpt-5.4");
 						expect(lines[0], `${width}`).toContain("42.5%");
 					}
-					if (mode === "compact" && lines[0]!.includes("quota")) expect(lines[0], `${width}`).toContain(status);
+					if (mode === "compact" && lines[0]!.includes("quota")) expect(lines[0], `${width}`).toContain("awaiting");
 				}
 				const narrow = harness.getFooter()!.render(60)[mode === "full" ? 1 : 0]!;
-				if (mode === "full") expect(narrow).toContain(status);
-				else expect(narrow).not.toContain("quota");
-				for (const text of ["research 2/5", "herder: T2 integrate", "↻ build"]) expect(narrow).not.toContain(text);
-				expect(harness.getFooter()!.render(160)[mode === "full" ? 1 : 0]).toContain(status);
+				if (mode === "full") {
+					expect(narrow).toContain(status);
+					for (const text of ["research 2/5", "herder: T2 integrate", "↻ build"]) expect(narrow).not.toContain(text);
+				} else {
+					// Keep the quota state visible even when its full countdown cannot fit.
+					expect(narrow).toContain("quota awaiting");
+				}
+				const wide = harness.getFooter()!.render(160)[mode === "full" ? 1 : 0]!;
+				expect(wide).toContain(status);
+				expect(wide).toContain("herder: T2 integrate");
 			} finally {
 				harness.disposeFooter();
 				vi.unstubAllEnvs();
 			}
 		}
+	});
+
+	it.each(["0", "1"])("keeps compact quota severity ahead of routine work with styled Unicode text (Nerd Fonts %s)", async (nerdFonts) => {
+		vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+		const harness = createHarness(`quota-marker-${nerdFonts}`, "tui", { extensionStatuses: [], keyedExtensionStatuses: {
+			herder: "herder: T2 integrate", goal: "goal: migrate the application", autoresearch: "research · measuring",
+		} });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", "compact");
+		try {
+			for (const marker of ["awaiting", "paused", "failed", "blocked"]) {
+				const status = `\x1b[36mquota 配額 ${marker} · retry after the next availability window\x1b[0m`;
+				harness.setStatus("magpie-quota", status);
+				const narrow = harness.getFooter()!.render(60)[0]!;
+				expect(narrow).toContain(`quota ${marker}`);
+				expect(visibleWidth(narrow)).toBeLessThanOrEqual(60);
+				expect(narrow).toContain("42.5%");
+				expect(harness.getFooter()!.render(240)[0]).toContain(status);
+			}
+		} finally { harness.disposeFooter(); vi.unstubAllEnvs(); }
 	});
 
 	it.each(["full", "compact"])("shows the language in the %s bar and never on a status row", async (mode) => {
@@ -922,7 +1273,7 @@ describe("statusline footer rendering", () => {
 
 	it("keeps the other statuses on their row beside the language in full mode", async () => {
 		const harness = createHarness("language-beside-row", "tui", {
-			keyedExtensionStatuses: { language: "English", loop: "↻ build · next 4m", other: "SYNC" },
+			keyedExtensionStatuses: { language: "English", goal: "↻ build · next 4m", other: "SYNC" },
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
@@ -954,19 +1305,21 @@ describe("statusline footer rendering", () => {
 		const harness = await start("language-order", { ...statuses, language: "English" });
 		const baseline = await start("language-order-baseline", statuses);
 		try {
-			const narrowest = { language: Infinity, workflow: Infinity };
+			const seen = { languageWithBoth: false, bothWithoutLanguage: false, herderWithoutProcess: false };
 			for (let width = 160; width >= 1; width--) {
 				const line = harness.getFooter()!.render(width)[0]!;
-				if (line.includes("English")) {
-					narrowest.language = width;
-					expect(line, `${width}`).toContain("herder: T2 integrate  bg 1");
-				} else {
-					expect(line, `${width}`).toBe(baseline.getFooter()!.render(width)[0]);
+				const plain = baseline.getFooter()!.render(width)[0]!;
+				const hasHerder = line.includes("herder: T2 integrate");
+				const hasProcess = line.includes("bg 1");
+				if (line.includes("English") && hasHerder && hasProcess) seen.languageWithBoth = true;
+				if (!line.includes("English") && hasHerder && hasProcess) seen.bothWithoutLanguage = true;
+				if (hasHerder && !hasProcess) seen.herderWithoutProcess = true;
+				if (!line.includes("English")) expect(line, `${width}`).toBe(plain);
+				for (const status of ["herder: T2 integrate", "bg 1"]) {
+					if (plain.includes(status)) expect(line, `${width}`).toContain(status);
 				}
-				if (line.includes("herder: T2 integrate")) narrowest.workflow = width;
 			}
-			expect(narrowest.language).toBeGreaterThan(narrowest.workflow);
-			expect(narrowest.workflow).toBeLessThan(160);
+			expect(seen).toEqual({ languageWithBoth: true, bothWithoutLanguage: true, herderWithoutProcess: true });
 		} finally {
 			harness.disposeFooter();
 			baseline.disposeFooter();
@@ -1144,15 +1497,18 @@ describe("statusline footer rendering", () => {
 				providerWithoutSpokesman: false,
 			});
 
-			const narrowestCompact = { spokesman: Infinity, language: Infinity, workflow: Infinity };
+			const seenCompact = { all: false, languageAndHerder: false, herderOnly: false };
 			for (let width = 160; width >= 24; width--) {
 				const line = compactHarness.getFooter()!.render(width)[0]!;
-				if (line.includes("gpt-4o-mini")) narrowestCompact.spokesman = width;
-				if (line.includes("English")) narrowestCompact.language = width;
-				if (line.includes("herder: T2")) narrowestCompact.workflow = width;
+				const spokesman = line.includes("gpt-4o-mini");
+				const language = line.includes("English");
+				const herder = line.includes("herder: T2");
+				if (spokesman) expect(language, `${width}`).toBe(true);
+				if (spokesman && language && herder) seenCompact.all = true;
+				if (!spokesman && language && herder) seenCompact.languageAndHerder = true;
+				if (!spokesman && !language && herder) seenCompact.herderOnly = true;
 			}
-			expect(narrowestCompact.spokesman).toBeGreaterThan(narrowestCompact.language);
-			expect(narrowestCompact.language).toBeGreaterThan(narrowestCompact.workflow);
+			expect(seenCompact).toEqual({ all: true, languageAndHerder: true, herderOnly: true });
 		} finally {
 			fullHarness.disposeFooter();
 			fullLangOnly.disposeFooter();
@@ -1211,7 +1567,7 @@ describe("statusline footer rendering", () => {
 
 	it("paints extension statuses by identity and tone instead of the theme accent", async () => {
 		const harness = createHarness("status-tone", "tui", {
-			keyedExtensionStatuses: { herder: "herder: T2 integrate", loop: "↻ build", other: "SYNC" },
+			keyedExtensionStatuses: { herder: "herder: T2 integrate", goal: "↻ build", other: "SYNC" },
 			theme: { fg: (token, text) => `<${token}>${text}`, bold: (text) => text },
 		});
 		statuslineFooter(harness.pi);
@@ -1433,7 +1789,7 @@ describe("statusline footer powerline style", () => {
 				model,
 				isIdle: index !== 0,
 				hasPendingMessages: index === 1,
-				keyedExtensionStatuses: { loop: status },
+				keyedExtensionStatuses: { goal: status },
 				theme: rgbTheme(),
 			});
 			statuslineFooter(harness.pi);
@@ -1469,6 +1825,35 @@ describe("statusline footer powerline style", () => {
 				vi.unstubAllEnvs();
 				harness.disposeFooter();
 			}
+		}
+	});
+
+	it.each(["0", "1"])("fits concurrent compact workflows on a powerline band without leaking ANSI backgrounds (Nerd Fonts %s)", async (nerdFonts) => {
+		const harness = createHarness(`powerline-herder-${nerdFonts}`, "tui", {
+			model: claude, theme: rgbTheme(), extensionStatuses: [],
+			keyedExtensionStatuses: {
+				"magpie-quota": "quota paused · resume manually", autoresearch: "research · run 3/20 · measured · Compile 182 ms",
+				herder: "\x1b[36mherder: T2 integrate · 3/5 tasks\x1b[0m",
+			},
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", "compact");
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+			for (let width = 1; width <= 200; width++) {
+				const line = harness.getFooter()!.render(width)[0]!;
+				expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
+				expect(backgroundAt(line), `${width}`).toBeUndefined();
+				for (const marker of ["quota paused", "research", "herder: T2 integrate"]) {
+					if (line.includes(marker)) expect(backgroundAt(line, line.indexOf(marker)), `${marker} at ${width}`).toBe(SURFACE_SGR);
+				}
+			}
+			const wide = harness.getFooter()!.render(160)[0]!.replace(/\x1b\[[0-9;]*m/g, "");
+			for (const marker of ["quota paused", "research · run 3/20", "herder: T2 integrate · 3/5 tasks"]) expect(wide).toContain(marker);
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
 		}
 	});
 
@@ -1622,7 +2007,7 @@ describe("statusline footer powerline style", () => {
 				model: claude,
 				branch: activeBranch,
 				extensionStatuses: [],
-				keyedExtensionStatuses: { herder: "herder: T2 integrate · 3/5 tasks", loop: "↻ build · next 4m" },
+				keyedExtensionStatuses: { herder: "herder: T2 integrate · 3/5 tasks", goal: "↻ build · next 4m" },
 				theme: tagged,
 			});
 			statuslineFooter(harness.pi);
@@ -1652,7 +2037,7 @@ describe("statusline footer powerline style", () => {
 				expect(strip(statuses)).toContain("↻ build · next 4m");
 				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(160);
 
-				for (const key of ["herder", "loop"]) harness.setStatus(key);
+				for (const key of ["herder", "goal"]) harness.setStatus(key);
 				lines = harness.getFooter()!.render(160);
 				expect(lines).toHaveLength(4);
 				expect(strip(lines.at(-1)!).slice(0, 3)).toBe(" ╰ ");
@@ -2038,7 +2423,7 @@ describe("statusline footer powerline style", () => {
 			const harness = createHarness(`all-features-${nerdFonts}`, "tui", {
 				model: claude, branch, extensionStatuses: [], theme: tagged,
 				keyedExtensionStatuses: {
-					autoresearch: "research 2/5", herder: "herder: T2 integrate · 3/5 tasks", loop: "↻ build · next 4m",
+					autoresearch: "research 2/5", herder: "herder: T2 integrate · 3/5 tasks", goal: "↻ build · next 4m",
 					subagents: "subagents: on", "impeccable-live": "impeccable: editing", other: "SYNC",
 					language: "English", spokesman: "gpt-4o-mini", boom: "💥 boom", alwayson: "📡 alwayson",
 					selfdrive: "🚗 selfdrive", representative: "📣 rep #dev", "relay-rooms": "#dev #dev-old #ops",
@@ -2147,7 +2532,7 @@ describe("statusline footer powerline style", () => {
 
 		it("keeps unknown status icons and hues, prioritizes severity, and clears statuses live", async () => {
 			const harness = createHarness("activity-severity", "tui", { extensionStatuses: [], theme: tagged, keyedExtensionStatuses: {
-				autoresearch: "research running", loop: "↻ paused", custom: "custom blocked",
+				autoresearch: "research running", goal: "↻ paused", custom: "custom blocked",
 			} });
 			statuslineFooter(harness.pi);
 			await harness.emit("session_start", { reason: "startup" });
@@ -2163,7 +2548,7 @@ describe("statusline footer powerline style", () => {
 				harness.setStatus("custom");
 				expect(strip(harness.getFooter()!.render(30)[1]!)).toContain("↻ paused");
 				expect(strip(harness.getFooter()!.render(30)[1]!)).not.toContain("research running");
-				harness.setStatus("loop");
+				harness.setStatus("goal");
 				expect(strip(harness.getFooter()!.render(30)[1]!)).toContain("research running");
 				harness.setStatus("autoresearch");
 				expect(harness.getFooter()!.render(140)).toHaveLength(4);

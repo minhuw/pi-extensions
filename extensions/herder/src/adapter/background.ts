@@ -42,12 +42,14 @@ export class BackgroundLaunch {
 	readonly launch: number;
 	readonly settled: Promise<LaunchOutcome>;
 	readonly #handle: LaunchHandle;
+	readonly #onStop?: () => void;
 	#outcome: LaunchOutcome | undefined;
 	#silenced = false;
 
-	constructor(handle: LaunchHandle, onSettled: (outcome: LaunchOutcome, silenced: boolean) => void) {
+	constructor(handle: LaunchHandle, onSettled: (outcome: LaunchOutcome, silenced: boolean) => void, onStop?: () => void) {
 		this.launch = handle.launch;
 		this.#handle = handle;
+		this.#onStop = onStop;
 		this.settled = handle.done.catch((error: unknown) => failure(handle.launch, error)).then((outcome) => {
 			this.#outcome = outcome;
 			try { onSettled(outcome, this.#silenced); } catch {}
@@ -60,6 +62,7 @@ export class BackgroundLaunch {
 	/** Stops the launch and waits up to `waitMs` for it to settle; the outcome is then the caller's to report. */
 	async stop(reason: string, waitMs: number, silence: "always" | "if-settled"): Promise<LaunchOutcome | undefined> {
 		this.#silenced = true;
+		this.#onStop?.();
 		try { this.#handle.stop(reason); } catch {}
 		await this.wait(waitMs);
 		// Read the field, not wait()'s value: the outcome may land between the timeout and this line, already silenced.

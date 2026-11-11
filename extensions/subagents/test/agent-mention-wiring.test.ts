@@ -246,8 +246,12 @@ describe("messaging a finished agent", () => {
     await new Promise(r => setTimeout(r, 400));
 
     const [message] = vi.mocked(pi.sendMessage).mock.calls[0];
-    expect(message.content).toContain("second answer");
-    expect(message.content).not.toContain("<tool-use-id>");
+    const notifications = String(message.content).match(/<task-notification>[\s\S]*?<\/task-notification>/g)!;
+    const first = notifications.find(text => text.includes("first answer"));
+    const second = notifications.find(text => text.includes("second answer"));
+    expect(first).toContain("<tool-use-id>tc-spawn</tool-use-id>");
+    expect(second).toBeDefined();
+    expect(second).not.toContain("<tool-use-id>");
 
   });
 

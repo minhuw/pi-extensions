@@ -1,12 +1,12 @@
 # Performance work
 
-Use Benchmark to test a performance claim, Autoresearch to improve a metric through approved experiments, and Loop to revisit a task as its state changes.
+Use Benchmark to test a performance claim, Autoresearch to improve a metric through approved experiments, and Goal to work toward a specific objective.
 
 | Need | Start with | Expected result |
 | --- | --- | --- |
 | Check whether a change is faster | `/benchmark` | Measurements and a verdict on a stated claim. |
 | Improve one metric within a defined scope | `/autoresearch` | A measured baseline for approval, then bounded experiments. |
-| Revisit a task as its state changes | `/loop` | Recurring prompts in the current session. |
+| Work toward a specific objective | `/goal` | Continued work until the objective is completed, blocked, or paused. |
 
 ## Measure a claim
 
@@ -50,14 +50,14 @@ Autoresearch also reports medians, ranges, and counts. Its range comparison is a
 /autoresearch stop
 ```
 
-## Revisit changing state
+## Work toward an objective
 
-Use [Loop](../../extensions/loop/README.md) for recurring observations, such as watching a build:
+Use Goal for a specific outcome, such as investigating a slow build:
 
 ```text
-/loop 5m check the build and report changes --name build --max 6
-/loop list
-/loop stop build
+/goal --budget 100000 Investigate the slow build and identify its largest bottleneck with evidence
+/goal status
+/goal pause
 ```
 
-A loop is due immediately unless a fixed or cron schedule uses `--wait`; it starts when the session is idle. Pi must stay running. The scheduler repeats the prompt; it supplies no measurement methodology or independent proof of success. Include concrete checks when the task needs an acceptance criterion. To test a performance claim discovered during a loop, use Benchmark; to make a bounded series of measured changes, use Autoresearch.
+Goal continues working toward the objective until it is completed, blocked, or paused. The optional token budget is soft; reaching it pauses the goal. Goal can also wait for external work, and does not schedule periodic monitoring. Include concrete checks in the objective, and use Benchmark to test a performance claim or Autoresearch for a bounded series of measured changes.

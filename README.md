@@ -27,7 +27,7 @@ The [pika server](services/pika/README.md) serves this documentation publicly at
 | [Orca Bridge](extensions/orca-bridge/README.md) | Shows Pi activity in Orca panes, opens files and diffs, and offers an optional native activity panel and status bar. |
 | [Autoresearch](extensions/autoresearch/README.md) | `/autoresearch <target>` measures a baseline, waits for your approval, then runs a bounded number of optimization passes. |
 | [Benchmark](extensions/benchmark/README.md) | `/benchmark <what>` measures a performance claim. Its `benchmark_compare` tool runs one command, or two alternately, and reports medians, ranges, run counts, and a verdict. |
-| [Loop](extensions/loop/README.md) | Repeats a prompt on a fixed interval, a cron schedule, or a delay the model picks. |
+| [Goal](extensions/goal/README.md) | `/goal` starts an objective-driven session mode. |
 | [Molt](extensions/molt/README.md) | `/molt` starts a new session with the current model and thinking level; `/handoff [task]` has the model write a handover and continues in a new session that starts from it. |
 | [Language](extensions/language/README.md) | `/language` sets the language the model responds in, with a default for new sessions and switches that leave the cached prompt alone. |
 | [Soul](extensions/soul/README.md) | Injects core development principles by default into sessions and delegated subagents, with `/soul` switches that leave the cached prompt alone. |

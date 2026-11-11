@@ -69,7 +69,7 @@ describe("agent type registry", () => {
     it("case-insensitive lookup works for getAgentConfig", () => {
       const config = getAgentConfig("recon");
       expect(config?.name).toBe("recon");
-      expect(config?.model).toBe("deepseek-flash");
+      expect(config?.model).toBe("magpie/codex/gpt-6-luna");
     });
 
     it("resolveType returns canonical key or undefined", () => {
@@ -93,11 +93,11 @@ describe("agent type registry", () => {
       expect(config.builtinToolNames).not.toContain("write");
     });
 
-    it("recon uses DeepSeek Flash with max thinking and no tier override", () => {
+    it("recon uses GPT-6 Luna with max thinking and fast tier", () => {
       const cfg = getAgentConfig("recon");
-      expect(cfg?.model).toBe("deepseek-flash");
+      expect(cfg?.model).toBe("magpie/codex/gpt-6-luna");
       expect(cfg?.thinking).toBe("max");
-      expect(cfg?.serviceTier).toBeUndefined();
+      expect(cfg?.serviceTier).toBe("fast");
     });
 
     it("serializeAgentFile round-trips recon and worker extension scoping and serviceTier", () => {

@@ -11,7 +11,7 @@ import { integrationRef, worktreePath } from "../run/paths.ts";
 import type { RunStore } from "../run/store.ts";
 import type { AgentRunner, CheckResult, CheckSpec, CriterionResult, CriterionStatus, Gap, Limits, RoleDefinition, Vcs, Verdict } from "../types.ts";
 
-export interface VerifyDeps { runId: string; store: RunStore; vcs: Vcs; runner: AgentRunner; roles: ReadonlyMap<string, RoleDefinition>; checks: readonly CheckSpec[]; limits?: Limits; signal?: AbortSignal; onProgress?: () => void }
+export interface VerifyDeps { runId: string; store: RunStore; vcs: Vcs; runner: AgentRunner; roles: ReadonlyMap<string, RoleDefinition>; checks: readonly CheckSpec[]; limits?: Limits; signal?: AbortSignal; onProgress?: () => void; onStage?: (stage: string) => void }
 export interface VerifyOutcome { verdict: Verdict; head: string; checks: CheckResult[]; criteria: CriterionResult[]; gaps: Gap[]; verifierRan: boolean; convergence?: number; reason?: string }
 
 export interface BlockedClaim { id: string; quote: string; reason: string }
@@ -159,13 +159,14 @@ export async function verifyRun(deps: VerifyDeps): Promise<VerifyOutcome> {
 	try {
 		vcs.addWorktree(path, head);
 		for (const spec of deps.checks) {
-			const result = await runCheck(spec, { cwd: path, commit: head, outputs: store.outputs, signal });
+			const result = await runCheck(spec, { cwd: path, commit: head, outputs: store.outputs, signal, onCheck: (id) => deps.onStage?.(`check ${id}`) });
 			checks.push(result);
 			const { id: checkId, commit, exitCode, timedOut, durationMs, logRef, tail } = result;
 			store.journal.append({ t: "check.completed", checkId, commit, exitCode, timedOut, durationMs, logRef, tail, purpose: "verify" });
 		}
 		const range = `${base}..${head}`;
 		if (verifierNeeded({ integrations: state.integrations, changedLines: vcs.changedLines(range), criteria: goal.criteria })) {
+			deps.onStage?.("verifier");
 			verifierRan = true;
 			const role = deps.roles.get("verifier");
 			const plan = readFileSync(store.paths.plan, "utf8");

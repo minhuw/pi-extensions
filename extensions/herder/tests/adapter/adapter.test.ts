@@ -436,10 +436,10 @@ describe("activity and shutdown", () => {
 		const runtime = h.runtime();
 		runtime.env.onActivity({ key: "impl-0", label: "implement greeting", task: "T2", phase: "integrate", state: "running", startedAt: 1_700_000_000_000 });
 		expect(h.snapshots.at(-1)).toEqual({ source: "herder", activities: [{ id: "step:impl-0", label: "Herder T2 · implement greeting", kind: "step", startedAt: 1_700_000_000_000 }] });
-		expect(h.statuses.get(STATUS_KEY)).toBe("herder: T2 integrate");
+		expect(h.statuses.get(STATUS_KEY)).toBe("herder: T2 integrate implement greeting");
 		writeFileSync(run.paths.plan, "- [ ] T1 (AC-1) one\n- [ ] T2 (AC-1) two\n");
 		runtime.env.onProgress();
-		expect(h.statuses.get(STATUS_KEY)).toBe("herder: T2 integrate · 0/2 tasks");
+		expect(h.statuses.get(STATUS_KEY)).toBe("herder: T2 integrate implement greeting · 0/2 tasks");
 		const count = h.snapshots.length;
 		h.events.emit(ACTIVITY_REQUEST_EVENT, {});
 		expect(h.snapshots).toHaveLength(count + 1);
@@ -877,7 +877,7 @@ describe("concurrent active runs across sessions", () => {
 			source: "herder",
 			activities: [{ id: "step:impl-0", label: "Herder T1 · implement one", kind: "step", startedAt: 100 }],
 		});
-		expect(a.statuses.get(STATUS_KEY)).toBe("herder: T1 implement");
+		expect(a.statuses.get(STATUS_KEY)).toBe("herder: T1 implement implement one");
 		expect(b.statuses.get(STATUS_KEY)).toBe("herder: launch 1");
 
 		runtime2.env.onActivity({ key: "impl-0", label: "implement two", task: "T2", phase: "verify", state: "running", startedAt: 200 });
@@ -888,8 +888,8 @@ describe("concurrent active runs across sessions", () => {
 				{ id: `step:${r2}:impl-0`, label: `Herder ${r2} · T2 · implement two`, kind: "step", startedAt: 200 },
 			],
 		});
-		expect(a.statuses.get(STATUS_KEY)).toBe("herder: T1 implement");
-		expect(b.statuses.get(STATUS_KEY)).toBe("herder: T2 verify");
+		expect(a.statuses.get(STATUS_KEY)).toBe("herder: T1 implement implement one");
+		expect(b.statuses.get(STATUS_KEY)).toBe("herder: T2 verify implement two");
 
 		// Shutting down an idle session never wipes running steps of other sessions.
 		const beforeIdleShutdown = a.snapshots.length;
@@ -904,7 +904,7 @@ describe("concurrent active runs across sessions", () => {
 		expect(readLock(run1.paths.lock)).toBeNull();
 		expect(readLock(run2.paths.lock)?.sessionId).toMatch(/^session-b#/);
 		expect(a.statuses.has(STATUS_KEY)).toBe(false);
-		expect(b.statuses.get(STATUS_KEY)).toBe("herder: T2 verify");
+		expect(b.statuses.get(STATUS_KEY)).toBe("herder: T2 verify implement two");
 		expect(a.snapshots.at(-1)).toEqual({
 			source: "herder",
 			activities: [{ id: "step:impl-0", label: "Herder T2 · implement two", kind: "step", startedAt: 200 }],

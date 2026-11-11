@@ -29,13 +29,15 @@ export interface OutboxMessage {
 }
 
 /**
- * A notification for one or more agents, built when they finished: a resume
- * before the send must not rewrite it. Reading an agent's result cancels its
- * id, and an item left with none is dropped; `build` gets the ids still pending.
+ * A notification for one or more executions, built when they finish. Parallel
+ * `ids` and `executionIds` identify its members; a missing execution ID uses
+ * legacy agent-level identity. Consuming a result removes its matching member,
+ * and an empty item is dropped. `build` receives the remaining members.
  */
 export interface OutboxItem {
   ids: string[];
-  build(ids: readonly string[]): OutboxMessage;
+  executionIds?: (string | undefined)[];
+  build(ids: readonly string[], executionIds: readonly (string | undefined)[]): OutboxMessage;
 }
 
 export class CompletionOutbox {
@@ -49,9 +51,17 @@ export class CompletionOutbox {
     private parentRunning: () => boolean,
   ) {}
 
-  /** A newer completion of the same agent (a resume) replaces its pending one. */
+  /**
+   * Replace a pending duplicate (agent ID and execution ID). Distinct executions
+   * coexist; if either entry lacks an execution ID, agent ID alone replaces it.
+   * A completion added after a flush remains eligible for redelivery.
+   */
   add(item: OutboxItem): void {
-    for (const id of item.ids) this.cancel(id);
+    item.ids.forEach((id, index) => {
+      const executionId = item.executionIds?.[index];
+      this.removeWhere((otherId, otherExecutionId) => otherId === id &&
+        (executionId === undefined || otherExecutionId === undefined || executionId === otherExecutionId));
+    });
     this.items.push(item);
     if (!this.parentRunning()) this.arm();
   }
@@ -64,9 +74,18 @@ export class CompletionOutbox {
     if (stopReason !== "aborted" && stopReason !== "error") this.flush();
   }
 
-  /** The agent's result was read: it must not also be notified. */
-  cancel(id: string): void {
-    for (const item of this.items) item.ids = item.ids.filter(i => i !== id);
+  /** Cancel the consumed execution; a missing ID on either side matches by agent ID. */
+  cancel(id: string, executionId?: string): void {
+    this.removeWhere((otherId, otherExecutionId) => otherId === id &&
+      (executionId === undefined || otherExecutionId === undefined || otherExecutionId === executionId));
+  }
+
+  private removeWhere(matches: (id: string, executionId: string | undefined) => boolean): void {
+    for (const item of this.items) {
+      const keep = item.ids.map((id, i) => !matches(id, item.executionIds?.[i]));
+      item.ids = item.ids.filter((_, i) => keep[i]);
+      if (item.executionIds) item.executionIds = item.executionIds.filter((_, i) => keep[i]);
+    }
     this.items = this.items.filter(item => item.ids.length > 0);
   }
 
@@ -97,7 +116,7 @@ export class CompletionOutbox {
     this.timer = undefined;
     const items = this.items;
     this.items = [];
-    const messages = items.map(item => item.build(item.ids));
+    const messages = items.map(item => item.build(item.ids, item.executionIds ?? item.ids.map(() => undefined)));
     if (messages.length === 0) return;
     // A send from a timer can outlive the session it was meant for (pi -p
     // tearing down): pi throws on the stale context, and nothing is left to tell.

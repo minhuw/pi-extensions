@@ -34,7 +34,7 @@ async function heldLaunch() {
 	await a.tool("herder_workflow", { mode: "run", script: SCRIPT, args: { attempt: 1 } });
 	await until(() => runner.callsMatching("Document the greeting").length === 1, "the T2 writer to start");
 	expect(started.run.state().tasks.get("T1")?.status).toBe("integrated");
-	expect(a.statuses.get("herder")).toBe("herder: T2 implement · 1/2 tasks");
+	expect(a.statuses.get("herder")).toBe("herder: T2 readme · phase: implement · 1/2 tasks");
 	expectUntouched(fixture, before);
 	return { fixture, before, hold, runner, a, ...started };
 }

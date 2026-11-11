@@ -32,7 +32,7 @@ import { inChildSessionContext } from "./child-context.js";
 import { CompletionOutbox, NOTIFICATION_HOLD_MS } from "./completion-outbox.js";
 import { type RpcHandle, registerRpcHandlers, type SendDelivery } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
-import { GroupJoinManager } from "./group-join.js";
+import { completionKey, GroupJoinManager, type GroupMember } from "./group-join.js";
 import { registerSubagentHost, releaseSubagentHost, resolveSubagentHostModel, type SubagentHost, type SubagentTelemetry, type SubagentTypeDescriptor } from "./host-registry.js";
 import { isolationParam, MODEL_OVERRIDE_ERROR, MODEL_SELECTION_GUIDANCE, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
@@ -226,6 +226,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number, showC
   return [
     `<task-notification>`,
     `<task-id>${record.id}</task-id>`,
+    record.executionId ? `<execution-id>${escapeXml(record.executionId)}</execution-id>` : null,
     record.toolCallId ? `<tool-use-id>${escapeXml(record.toolCallId)}</tool-use-id>` : null,
     record.outputFile ? `<output-file>${escapeXml(record.outputFile)}</output-file>` : null,
     `<status>${escapeXml(status)}</status>`,
@@ -269,6 +270,7 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
 
   return {
     id: record.id,
+    executionId: record.executionId,
     type: record.type,
     displayName: getDisplayName(record.type),
     description: record.description,
@@ -534,26 +536,47 @@ export default function (pi: ExtensionAPI) {
         content: formatTaskNotification(record, 500, showCost) + footer,
         details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
       };
-      outbox.add({ ids: [record.id], build: () => message });
+      outbox.add({ ids: [record.id], executionIds: [record.executionId], build: () => message });
     } catch { /* ignore stale completion side-effect errors */ }
     widget.update();
   }
 
+  const consumedCompletions = new Set<string>();
+  function cancelCompletion(member: GroupMember): void {
+    consumedCompletions.add(completionKey(member));
+    outbox.cancel(member.id, member.executionId);
+  }
+
+  type CapturedCompletion = { record: AgentRecord; executionId?: string; member?: { id: string; text: string; details: NotificationDetails }; individual?: { content: string; details: NotificationDetails } };
+  function captureCompletion(record: AgentRecord): CapturedCompletion {
+    try {
+      const footer = record.outputFile ? `\nFull transcript available at: ${record.outputFile}` : '';
+      return { record, executionId: record.executionId,
+        member: { id: record.id, text: formatTaskNotification(record, 300, showCost), details: buildNotificationDetails(record, 300) },
+        individual: { content: formatTaskNotification(record, 500, showCost) + footer, details: buildNotificationDetails(record, 500) } };
+    } catch { return { record, executionId: record.executionId }; }
+  }
+  function wasConsumed(captured: CapturedCompletion): boolean {
+    return consumedCompletions.has(completionKey({ id: captured.record.id, executionId: captured.executionId })) ||
+      (captured.record.executionId === captured.executionId && !!captured.record.resultConsumed);
+  }
+
   // ---- Group join manager (`group` join mode only) ----
   const groupJoin = new GroupJoinManager(
-    (records, partial) => {
-      for (const r of records) { agentActivity.delete(r.id); widget.markFinished(r.id); fleet.onAgentFinished(r.id); }
+    (records: CapturedCompletion[], partial) => {
+      for (const { record: r, executionId } of records) {
+        if (r.executionId === executionId) { agentActivity.delete(r.id); widget.markFinished(r.id); fleet.onAgentFinished(r.id); }
+      }
 
-      const members = records.filter(r => !r.resultConsumed && r.notifyParent !== false).flatMap(r => {
-        try {
-          return [{ id: r.id, text: formatTaskNotification(r, 300, showCost), details: buildNotificationDetails(r, 300, agentActivity.get(r.id)) }];
-        } catch { return []; /* as in sendIndividualNudge */ }
-      });
+      const members = records.flatMap(({ record, member }) =>
+        !wasConsumed({ record, executionId: member?.details.executionId }) && record.notifyParent !== false && member ? [member] : [],
+      );
       if (members.length > 0) {
         outbox.add({
           ids: members.map(m => m.id),
-          build: (ids) => {
-            const unread = members.filter(m => ids.includes(m.id));
+          executionIds: members.map(m => m.details.executionId),
+          build: (ids, executionIds) => {
+            const unread = members.filter(m => ids.some((id, i) => id === m.id && executionIds[i] === m.details.executionId));
             const notifications = unread.map(m => m.text).join('\n\n');
             const label = partial
               ? `${unread.length} agent(s) finished (partial — others still running)`
@@ -572,6 +595,7 @@ export default function (pi: ExtensionAPI) {
       widget.update();
     },
     30_000,
+    captureCompletion,
   );
 
   /** Helper: build event data for lifecycle events from an AgentRecord. */
@@ -711,6 +735,15 @@ export default function (pi: ExtensionAPI) {
     // Skip notification if result was already consumed via get_subagent_result,
     // or the spawner asked never to be notified (`notifyParent: false`).
     if (record.resultConsumed || record.notifyParent === false) {
+      // A resume resets the mutable record's flag, so retain consumption for
+      // this execution before holding it for a sibling.
+      if (record.resultConsumed) consumedCompletions.add(completionKey(record));
+      // A suppressed completion still satisfies its group's wait.
+      if (turnGroupSpawns.some(member => completionKey(member) === completionKey(record))) {
+        deferredCompletions.set(completionKey(record), captureCompletion(record));
+      } else {
+        groupJoin.onAgentComplete(record);
+      }
       agentActivity.delete(record.id);
       widget.markFinished(record.id);
       fleet.onAgentFinished(record.id);
@@ -720,7 +753,8 @@ export default function (pi: ExtensionAPI) {
 
     // A `group` spawn whose turn has not ended yet: its group is registered at
     // that turn's end, which picks this completion up retroactively.
-    if (turnGroupSpawns.includes(record.id)) {
+    if (turnGroupSpawns.some(member => completionKey(member) === completionKey(record))) {
+      deferredCompletions.set(completionKey(record), captureCompletion(record));
       widget.update();
       return;
     }
@@ -1163,7 +1197,7 @@ export default function (pi: ExtensionAPI) {
             if (!record || record.owner || !isTopLevelAgent(record)) return false;
             if (record.status === "running" || record.status === "queued") return false;
             record.resultConsumed = true;
-            outbox.cancel(record.id);
+            cancelCompletion(record);
             return true;
           },
           steer: (id, message) => manager.steer(id, message),
@@ -1484,6 +1518,8 @@ export default function (pi: ExtensionAPI) {
     // `session_before_switch` deliberately keeps both: a vetoed switch continues
     // this session, where the live UI and group state must survive.
     groupJoin.dispose();
+    deferredCompletions.clear();
+    consumedCompletions.clear();
     externalAgentTracker.dispose();
     widget.dispose();
     outbox.dispose();
@@ -1692,40 +1728,56 @@ export default function (pi: ExtensionAPI) {
 
   // ---- Turn batches for `group` join mode ----
   // Background spawns the parent made in its current turn. The turn's end is
-  // the batch boundary: every `Agent` call of the batch has returned by then,
-  // so a spawn whose startup failed has already thrown and was never recorded,
-  // and a slow worktree copy cannot split the batch.
-  let turnGroupSpawns: string[] = [];
+  // the batch boundary: every `Agent` call of the batch has returned by then.
+  // Enroll before awaiting startup so immediate completions are captured; remove
+  // failed startups before the turn ends.
+  let turnGroupSpawns: GroupMember[] = [];
+  const deferredCompletions = new Map<string, CapturedCompletion>();
   let turnGroupCounter = 0;
 
   /** Record a `group`-mode spawn made inside a parent turn. */
-  function joinTurnGroup(id: string, joinMode: JoinMode | undefined) {
+  function joinTurnGroup(id: string, joinMode: JoinMode | undefined): GroupMember | undefined {
     // Outside a parent turn (an `@handle` mention) no turn end is coming, and a
     // group of one is delivered exactly like a single completion.
-    if (joinMode === 'group' && currentCtx?.signal !== undefined) turnGroupSpawns.push(id);
+    if (joinMode === 'group' && currentCtx?.signal !== undefined) {
+      const record = manager.getRecord(id);
+      const member = { id, executionId: record?.executionId };
+      turnGroupSpawns.push(member);
+      return member;
+    }
+  }
+
+  function undoTurnGroupJoin(member: GroupMember | undefined): void {
+    if (!member) return;
+    turnGroupSpawns = turnGroupSpawns.filter(candidate => candidate !== member);
+    deferredCompletions.delete(completionKey(member));
   }
 
   /** Register the ending turn's `group` spawns, two or more, as one group. */
   function registerTurnGroup() {
-    const ids = turnGroupSpawns;
+    const members = turnGroupSpawns;
     turnGroupSpawns = [];
-    // One spawn is no group: it reports like any single completion.
-    if (ids.length < 2) {
-      const record = ids.length === 1 ? manager.getRecord(ids[0]) : undefined;
-      if (record?.completedAt != null && !record.resultConsumed) sendIndividualNudge(record);
+    if (members.length < 2) {
+      const captured = members.length === 1 ? deferredCompletions.get(completionKey(members[0])) : undefined;
+      if (captured) {
+        deferredCompletions.delete(completionKey(members[0]));
+        if (captured.record.executionId === captured.executionId) {
+          agentActivity.delete(captured.record.id); widget.markFinished(captured.record.id); fleet.onAgentFinished(captured.record.id);
+        }
+        if (!wasConsumed(captured) && captured.record.notifyParent !== false && captured.individual) {
+          outbox.add({ ids: [members[0].id], executionIds: [members[0].executionId], build: () => captured.individual! });
+        }
+      }
       return;
     }
     const groupId = `turn-${++turnGroupCounter}`;
-    groupJoin.registerGroup(groupId, ids);
-    // Members that finished before their turn ended had their completion
-    // deferred (see the manager's onComplete); feed them in now.
-    for (const id of ids) {
-      const record = manager.getRecord(id);
-      if (!record) continue;
-      record.groupId = groupId;
-      if (record.completedAt != null && !record.resultConsumed) {
-        groupJoin.onAgentComplete(record);
-      }
+    groupJoin.registerGroup(groupId, members);
+    for (const member of members) {
+      const captured = deferredCompletions.get(completionKey(member));
+      deferredCompletions.delete(completionKey(member));
+      const record = manager.getRecord(member.id);
+      if (record && record.executionId === member.executionId) record.groupId = groupId;
+      if (captured) groupJoin.onAgentComplete({ ...captured.record, ...member }, captured);
     }
   }
 
@@ -1786,7 +1838,8 @@ export default function (pi: ExtensionAPI) {
     // resume must behave the same. Passing it would abort this agent when
     // the parent turn is interrupted (user Esc), while agents started with
     // run_in_background in that same turn keep going.
-    const record = await manager.resume(id, prompt, undefined, {
+    const previousExecutionId = existing.executionId;
+    const resumePromise = manager.resume(id, prompt, undefined, {
       isBackground: true,
       maxTurns: opts.maxTurns,
       onTurnEnd: bgCallbacks.onTurnEnd,
@@ -1816,10 +1869,18 @@ export default function (pi: ExtensionAPI) {
         }
       },
     });
-    if (!record) return undefined;
-
-    // Only a resume from an Agent call belongs to that call's turn.
-    if (opts.toolCallId !== undefined) joinTurnGroup(id, joinMode);
+    // resume() assigns the new execution synchronously, before its promise can
+    // settle. Enroll that execution before yielding to its completion callback.
+    const member = opts.toolCallId !== undefined && existing.executionId !== previousExecutionId
+      ? joinTurnGroup(id, joinMode) : undefined;
+    let record: AgentRecord | undefined;
+    try {
+      record = await resumePromise;
+    } catch (err) {
+      undoTurnGroupJoin(member);
+      throw err;
+    }
+    if (!record) { undoTurnGroupJoin(member); return undefined; }
 
     agentActivity.set(id, bgState);
     // This agent already finished once, so the widget holds a finished-age
@@ -2617,12 +2678,13 @@ Terse command-style prompts produce shallow, generic work.
           return textResult(
             `Agent ${isQueued ? "queued" : "resumed"} in background.\n` +
             `Agent ID: ${id}\n` +
+            (record.executionId ? `Execution ID: ${record.executionId}\n` : "") +
             `Type: ${existing.type}\n` +
             (record.outputFile ? `Output file: ${record.outputFile}\n` : "") +
             (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
             `\nYou will be notified when this agent completes.\n` +
             `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.`,
-            { ...detailBaseFor(record), toolUses: record.toolUses, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
+            { ...detailBaseFor(record), toolUses: record.toolUses, tokens: "", durationMs: 0, status: "background" as const, agentId: id, ...(record.executionId ? { executionId: record.executionId } : {}) },
           );
         }
 
@@ -2685,6 +2747,7 @@ Terse command-style prompts produce shallow, generic work.
         return textResult(
           `${fallbackNote}Agent ${isQueued ? "queued" : reopenOptions ? "resumed from its saved session" : "started"} in background.\n` +
           `Agent ID: ${id}\n` +
+          (record?.executionId ? `Execution ID: ${record.executionId}\n` : "") +
           `Type: ${displayName}\n` +
           `Model: ${detailBaseFor(record).modelName ?? "inherit"}\n` +
           `Thinking: ${detailBaseFor(record).thinking ?? "inherit"}\n` +
@@ -2695,7 +2758,7 @@ Terse command-style prompts produce shallow, generic work.
           `\nYou will be notified when this agent completes.\n` +
           `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
           `Do not duplicate this agent's work.`,
-          { ...detailBaseFor(record), toolUses: 0, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
+          { ...detailBaseFor(record), toolUses: 0, tokens: "", durationMs: 0, status: "background" as const, agentId: id, ...(record?.executionId ? { executionId: record.executionId } : {}) },
         );
       };
 
@@ -2751,9 +2814,13 @@ Terse command-style prompts produce shallow, generic work.
         // copy is an awaited git call. Wait for it here, after the synchronous
         // wiring above, so a strict-isolation failure still fails THIS tool
         // call instead of being reported as a subagent that ran (#179).
-        await manager.awaitStartup(id);
-
-        joinTurnGroup(id, joinMode);
+        const member = joinTurnGroup(id, joinMode);
+        try {
+          await manager.awaitStartup(id);
+        } catch (err) {
+          undoTurnGroupJoin(member);
+          throw err;
+        }
 
         agentActivity.set(id, bgState);
         widget.ensureTimer();
@@ -3072,6 +3139,7 @@ Terse command-style prompts produce shallow, generic work.
       content: formatWorkflowNotification(task),
       details: {
         id: task.id,
+        executionId: task.id, // Workflow task IDs already identify individual runs.
         type: "workflow",
         displayName: "Workflow",
         description: `Workflow ${task.workflowName ?? task.id}`,
@@ -3085,7 +3153,7 @@ Terse command-style prompts produce shallow, generic work.
         resultPreview: result.length > 500 ? `${result.slice(0, 500)}…` : result,
       },
     };
-    outbox.add({ ids: [task.id], build: () => message });
+    outbox.add({ ids: [task.id], executionIds: [task.id], build: () => message });
   }
 
   // Defined unconditionally, registered only when the feature is on — the same
@@ -3448,7 +3516,7 @@ Terse command-style prompts produce shallow, generic work.
         const savedId = tombstone?.kind === "tombstone" ? tombstone.entry.id : params.agent_id;
         const saved = findAgentRecordEntry(ctx, savedId, tombstone === undefined);
         if (saved) {
-          outbox.cancel(saved.id);
+          cancelCompletion(saved);
           return textResult(formatSavedAgentRecord(saved));
         }
       }
@@ -3507,7 +3575,7 @@ Terse command-style prompts produce shallow, generic work.
       // Mark result as consumed — suppresses the completion notification
       if (record.status !== "running" && record.status !== "queued") {
         record.resultConsumed = true;
-        outbox.cancel(record.id);
+        cancelCompletion(record);
       }
 
       // Verbose: include full conversation

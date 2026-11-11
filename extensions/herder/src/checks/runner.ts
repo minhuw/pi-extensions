@@ -7,7 +7,7 @@ import type { CheckResult, CheckSpec, OutputStore } from "../types.ts";
 export interface OutputLimits { headBytes: number; tailBytes: number }
 export const CHECK_OUTPUT_LIMITS: Readonly<OutputLimits> = Object.freeze({ headBytes: 1024 * 1024, tailBytes: 8 * 1024 * 1024 });
 
-export interface CheckRunOptions { cwd: string; commit: string; outputs: OutputStore; signal?: AbortSignal; outputLimits?: OutputLimits }
+export interface CheckRunOptions { cwd: string; commit: string; outputs: OutputStore; signal?: AbortSignal; outputLimits?: OutputLimits; onCheck?: (id: string) => void }
 
 /** SIGTERM → SIGKILL grace on timeout or abort. */
 const KILL_GRACE_MS = 1_000;
@@ -74,6 +74,7 @@ type Outcome = { exitCode: number | null; timedOut: boolean; aborted: boolean };
 export async function runCheck(spec: CheckSpec, options: CheckRunOptions): Promise<CheckResult> {
 	const { signal } = options;
 	signal?.throwIfAborted();
+	options.onCheck?.(spec.id);
 	const started = performance.now();
 	const output = new OutputCapture(options.outputLimits ?? CHECK_OUTPUT_LIMITS);
 	let outcome: Outcome = { exitCode: null, timedOut: false, aborted: false };

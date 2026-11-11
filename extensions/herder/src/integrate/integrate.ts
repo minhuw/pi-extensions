@@ -12,7 +12,7 @@ export interface IntegrateDeps { runId: string; store: RunStore; vcs: Vcs; check
  * `from`: a launch's logical head (it keys replayed integrations); default: the real integration head.
  * `signal`: cancels this call as well as `deps.signal` (a launch that settles or stops cancels its integrations).
  */
-export interface IntegrateContext { from?: string; signal?: AbortSignal }
+export interface IntegrateContext { from?: string; signal?: AbortSignal; onCheck?: (id: string) => void }
 export interface Integrator { integrate(source: StepResult | string, opts: IntegrateOptions, ctx?: IntegrateContext): Promise<IntegrateResult>; head(): string }
 
 export const INTEGRATION_SLOT = "integration";
@@ -61,13 +61,13 @@ export function createIntegrator(deps: IntegrateDeps): Integrator {
 	};
 	const append = (event: JournalInput) => { store.journal.append(event); deps.onProgress?.(); };
 
-	async function runIntegrationChecks(specs: readonly CheckSpec[], commit: string, key: string, signal: AbortSignal | undefined): Promise<CheckResult[]> {
+	async function runIntegrationChecks(specs: readonly CheckSpec[], commit: string, key: string, signal: AbortSignal | undefined, onCheck?: (id: string) => void): Promise<CheckResult[]> {
 		if (!specs.length) return [];
 		const path = worktreePath(vcs.commonDir(), runId, INTEGRATION_SLOT);
 		vcs.removeWorktree(path);
 		try {
 			vcs.addWorktree(path, commit);
-			const results = await runChecks(specs, { cwd: path, commit, outputs: store.outputs, signal });
+			const results = await runChecks(specs, { cwd: path, commit, outputs: store.outputs, signal, onCheck });
 			for (const r of results) append({ t: "check.completed", checkId: r.id, commit, exitCode: r.exitCode, timedOut: r.timedOut, durationMs: r.durationMs, logRef: r.logRef, tail: r.tail, purpose: "integrate", key });
 			return results;
 		} finally {
@@ -75,7 +75,7 @@ export function createIntegrator(deps: IntegrateDeps): Integrator {
 		}
 	}
 
-	async function integrateLocked(source: string, opts: IntegrateOptions, specs: CheckSpec[], logicalFrom: string, signal: AbortSignal | undefined): Promise<IntegrateResult> {
+	async function integrateLocked(source: string, opts: IntegrateOptions, specs: CheckSpec[], logicalFrom: string, signal: AbortSignal | undefined, onCheck?: (id: string) => void): Promise<IntegrateResult> {
 		const { message, task } = opts;
 		const key = integrationKey(logicalFrom, source, message);
 		const recorded = findIntegration(store.state(), key);
@@ -107,7 +107,7 @@ export function createIntegrator(deps: IntegrateDeps): Integrator {
 		}
 		const commit = vcs.commitTree(merged.tree, [from], message);
 		faults.hit("after-merge-commit", key);
-		const checks = await runIntegrationChecks(specs, commit, key, signal);
+		const checks = await runIntegrationChecks(specs, commit, key, signal, onCheck);
 		if (checks.some((check) => !check.passed)) {
 			append({ t: "integrate.failed", key, from, source, reason: "checks_failed", checks, message, task });
 			return { status: "checks_failed", checks };
@@ -138,7 +138,7 @@ export function createIntegrator(deps: IntegrateDeps): Integrator {
 			const refused = [...store.state().steps.values()].find((step) => step.status === "gate_failed" && step.completed?.commit === commit);
 			if (refused) throw gateFailed(refused.key);
 			const signal = deps.signal && ctx.signal ? AbortSignal.any([deps.signal, ctx.signal]) : ctx.signal ?? deps.signal;
-			return serialize(store.paths.dir, () => integrateLocked(commit, opts, specs, ctx.from ?? realHead(), signal));
+			return serialize(store.paths.dir, () => integrateLocked(commit, opts, specs, ctx.from ?? realHead(), signal, ctx.onCheck));
 		},
 	};
 }

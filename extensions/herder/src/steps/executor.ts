@@ -18,6 +18,8 @@ import { lookupStep, resolveIdentity, stepMessage, TRAILER_REPLY, type StepIdent
  */
 export interface StepActivity {
 	key: string; label: string; phase?: string; task?: string; state: "running" | "settled";
+	/** Script phases are global; they need not describe every concurrent step. */
+	phaseIsGlobal?: boolean; stage?: string;
 	role?: string; prompt?: string; attempt?: number; startedAt?: number; session?: object; status?: StepResult["status"];
 }
 
@@ -110,8 +112,8 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 		if (!head) throw new Error(`run ${runId} has no integration ref`);
 		return head;
 	};
-	const runGates = async (gates: readonly CheckSpec[], path: string, commit: string, key: string, signal: AbortSignal) => {
-		const results = await runChecks(gates, { cwd: path, commit, outputs: store.outputs, signal });
+	const runGates = async (gates: readonly CheckSpec[], path: string, commit: string, key: string, signal: AbortSignal, onCheck?: (id: string) => void) => {
+		const results = await runChecks(gates, { cwd: path, commit, outputs: store.outputs, signal, onCheck });
 		for (const result of results) {
 			const { id, exitCode, timedOut, durationMs, logRef, tail } = result;
 			store.journal.append({ t: "check.completed", checkId: id, commit, exitCode, timedOut, durationMs, logRef, tail, purpose: "gate", key });
@@ -142,18 +144,23 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 		return result;
 	}
 
-	async function adopt(key: string, identity: StepIdentity, commit: string, reply: AgentRunResult | undefined, signal: AbortSignal): Promise<StepResult> {
+	async function adopt(key: string, identity: StepIdentity, commit: string, reply: AgentRunResult | undefined, signal: AbortSignal, opts: AgentOptions, ctx: StepContext): Promise<StepResult> {
 		let checks: CheckResult[] | undefined;
 		if (identity.gates.length > 0) {
 			const path = worktreePath(vcs.commonDir(), runId, `step-${key}`);
 			removeWorktree(path);
 			vcs.addWorktree(path, commit);
+			const phase = opts.phase ?? ctx.phase?.();
+			const view = { key, label: opts.label ?? key, phase, task: opts.task, role: identity.role.name, ...(opts.phase === undefined && phase !== undefined && { phaseIsGlobal: true }) };
+			let status: StepResult["status"] = "failed";
 			try {
-				checks = await runGates(identity.gates, path, commit, key, signal);
+				checks = await runGates(identity.gates, path, commit, key, signal, (id) => activity({ ...view, state: "running", stage: `gate ${id}` }));
+				status = checks.some((check) => !check.passed) ? "gate_failed" : "ok";
 			} catch (error) {
-				if (signal.aborted) return { status: "stopped", key, reused: false };
+				if (signal.aborted) { status = "stopped"; return { status, key, reused: false }; }
 				throw error;
 			} finally {
+				activity({ ...view, state: "settled", status });
 				removeWorktree(path);
 			}
 		}
@@ -173,13 +180,15 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 		const path = worktreePath(vcs.commonDir(), runId, `step-${key}`);
 		const label = opts.label ?? key;
 		const phase = opts.phase ?? ctx.phase?.();
+		const phaseIsGlobal = opts.phase === undefined && phase !== undefined;
+		let stage: string | undefined;
 		let current: { attempt: number; startedAt: number; session?: object } | undefined;
 		/** Reports `attempt` as running, with its live session; `update` replaces the session, a new attempt starts without one. */
 		const running = (attempt: number, update?: { session: object | undefined }) => {
 			if (current?.attempt !== attempt) current = { attempt, startedAt: Date.now() };
 			if (update) current = { attempt, startedAt: current.startedAt, ...(update.session && { session: update.session }) };
 			const { startedAt, session } = current;
-			activity({ key, label, phase, task: opts.task, state: "running", role: role.name, prompt, attempt, startedAt, ...(session && { session }) });
+			activity({ key, label, phase, ...(phaseIsGlobal && { phaseIsGlobal }), ...(stage && { stage }), task: opts.task, state: "running", role: role.name, prompt, attempt, startedAt, ...(session && { session }) });
 		};
 		const failed = (attempt: number, failure: Failure, final: boolean) => {
 			store.journal.append({ t: "step.failed", key, fingerprint, attempt, errorClass: failure.errorClass, message: failure.message, final, transcriptRef: failure.transcriptRef, ...sessionFields(failure.session) });
@@ -199,6 +208,7 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 
 		/** One attempt in a fresh worktree at `base`; resolves to the step's result or the attempt's failure. */
 		async function attempt(number: number): Promise<StepResult | Failure> {
+			stage = undefined;
 			let session: StepSessionInfo | undefined;
 			const failure = (error: unknown): Failure => ({ ...classify(error), session });
 			removeWorktree(path);
@@ -250,7 +260,7 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 				let checks: CheckResult[] | undefined;
 				if (gates.length > 0) {
 					try {
-						checks = await runGates(gates, path, commit ?? base, key, signal);
+						checks = await runGates(gates, path, commit ?? base, key, signal, (id) => { stage = `gate ${id}`; running(number); });
 					} catch (error) {
 						if (error instanceof Crash) throw error;
 						return failure(error);
@@ -322,7 +332,7 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 		// Without its reply, a schema step's adopted result would lack `data` and stay cached that way; rerun it instead.
 		if (found.kind === "adopt" && (reply || opts.schema === undefined)) {
 			if (stats) stats.reused++;
-			return adopt(key, identity, found.commit, reply, signal);
+			return adopt(key, identity, found.commit, reply, signal, opts, ctx);
 		}
 		if (stats) found.changed ? stats.changed++ : stats.new++;
 		if (ctx.launch !== undefined && usageLimited.has(ctx.launch)) {

@@ -1,7 +1,7 @@
 import { createEventBus, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { vi } from "vitest";
 import { registerHerder } from "../../src/adapter/extension.ts";
-import type { HerderRuntime, LaunchOutcome, LaunchRequest, RuntimeEnv, RuntimeFactory, StepActivity } from "../../src/adapter/runtime.ts";
+import type { HerderRuntime, LaunchOutcome, LaunchProgress, LaunchRequest, RuntimeEnv, RuntimeFactory, StatusReport, StepActivity } from "../../src/adapter/runtime.ts";
 import type { Herder, HerderOptions } from "../../src/adapter/session.ts";
 import { ACTIVITY_EVENT } from "../../src/config.ts";
 import type { AgentOptions, IntegrateOptions } from "../../src/types.ts";
@@ -32,6 +32,8 @@ export class FakeRuntime implements HerderRuntime {
 	stepGate: Promise<unknown> | undefined;
 	/** While set, `launch` waits for it before starting the launch. */
 	launchGate: Promise<unknown> | undefined;
+	launchProgress?: LaunchProgress;
+	onLaunching?: (progress: LaunchProgress) => void;
 	/** A stop does not settle the launch; the test settles it. */
 	holdOnStop = false;
 	readonly signals: AbortSignal[] = [];
@@ -52,12 +54,12 @@ export class FakeRuntime implements HerderRuntime {
 		if (this.stepActivity) this.env.onActivity({ ...this.stepActivity, state: "settled" });
 		return { status: "ok" as const, key: "step-0", commit: "c".repeat(40), reused: false };
 	}
-	async integrate(source: string, opts: IntegrateOptions) {
+	async integrate(source: string, opts: IntegrateOptions, _signal?: AbortSignal, _report?: StatusReport) {
 		this.calls.push(["integrate", source, opts]);
 		return { status: "integrated" as const, head: "d".repeat(40), checks: [] };
 	}
-	async check(request: { checks?: string[]; commit?: string }) { this.calls.push(["check", request]); return []; }
-	async verify() {
+	async check(request: { checks?: string[]; commit?: string }, _signal?: AbortSignal, _report?: StatusReport) { this.calls.push(["check", request]); return []; }
+	async verify(_signal?: AbortSignal, _report?: StatusReport) {
 		this.calls.push(["verify"]);
 		return { verdict: "met" as const, head: "d".repeat(40), checks: [], criteria: [], gaps: [], verifierRan: false };
 	}
@@ -68,8 +70,10 @@ export class FakeRuntime implements HerderRuntime {
 		this.env.run.journal.append({ t: "delivery.completed", mode, target: "main", tip: "d".repeat(40), commits: ["d".repeat(40)] });
 		return { status: "delivered" as const, mode, target: "main", tip: "d".repeat(40), commits: ["d".repeat(40)] };
 	}
-	async launch(request: LaunchRequest) {
+	async launch(request: LaunchRequest, progress?: LaunchProgress) {
 		this.calls.push(["launch", request]);
+		this.launchProgress = progress;
+		if (progress) this.onLaunching?.(progress);
 		if (this.launchGate) await this.launchGate;
 		const { launch } = this.env.run.writeScript(request.source);
 		this.env.run.journal.append({ t: "script.launched", launch, scriptSha256: "0".repeat(64), args: request.args ?? null, head: this.env.run.state().integrationHead!, ...(request.resume ? { resumes: request.resume } : {}) });

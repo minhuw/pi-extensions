@@ -94,14 +94,15 @@ describe("published documentation content", () => {
 	let data: DocsData;
 	beforeAll(async () => { data = await loadDocsData(); });
 
-	it("includes exactly the 17 extension READMEs and eight other approved sources", () => {
-		const names = ["commit", "recap", "quality", "writer", "impeccable", "subagents", "herder", "orca-bridge", "autoresearch", "benchmark", "loop", "molt", "language", "workspace", "statusline-footer", "pika", "magpie-provider"];
+	it("includes exactly the 19 extension READMEs and eight other approved sources", () => {
+		const names = ["commit", "recap", "continue-session", "agents-md", "quality", "writer", "impeccable", "subagents", "herder", "orca-bridge", "autoresearch", "benchmark", "goal", "molt", "language", "workspace", "statusline-footer", "pika", "magpie-provider"];
 		expect(data.pages.map((page) => page.source).sort()).toEqual([
 			"README.md", ...names.map((name) => `extensions/${name}/README.md`),
 			"services/pika/README.md", "docs/installation.md", "docs/configuration.md", "docs/development.md",
 			"docs/guides/performance.md", "docs/guides/delegation.md", "docs/guides/code-review.md",
 		].sort());
-		expect(new Set(data.pages.map((page) => page.slug)).size).toBe(25);
+		expect(data.pages.find((page) => page.source === "extensions/goal/README.md")?.slug).toBe("extensions/goal");
+		expect(new Set(data.pages.map((page) => page.slug)).size).toBe(27);
 		for (const page of data.pages) {
 			expect(page.slug).not.toBe("");
 			expect(page.title).toBeTruthy();
@@ -123,10 +124,10 @@ describe("published documentation content", () => {
 		const registeredPrompts = new Map(manifest.pi.prompts.map((path) => [`/${basename(path, ".md")}`, path]));
 		expect(data.commands.map((command) => command.command)).toEqual(expect.arrayContaining([...registeredPrompts.keys()]));
 		expect(data.groups.map((group) => group.title)).toEqual(["Getting started", "Reference", "Guides", "pika", "Development"]);
-		expect(data.groups.find((group) => group.title === "Reference")?.items).toHaveLength(17);
+		expect(data.groups.find((group) => group.title === "Reference")?.items).toHaveLength(19);
 		expect(data.groups.find((group) => group.title === "Guides")?.items).toHaveLength(3);
 		expect(data.groups.flatMap((group) => group.items.map((item) => item.slug)).sort()).toEqual(data.pages.map((page) => page.slug).sort());
-		expect(data.commands.map((command) => command.command)).toEqual(expect.arrayContaining(["/commit", "/review", "/herder", "/benchmark", "/autoresearch"]));
+		expect(data.commands.map((command) => command.command)).toEqual(expect.arrayContaining(["/commit", "/review", "/herder", "/benchmark", "/autoresearch", "/goal"]));
 		for (const command of data.commands) {
 			const [slug, hash] = command.slug.split("#");
 			const page = data.pages.find((page) => page.slug === slug);

@@ -199,6 +199,8 @@ export type Pool = "background" | "foreground";
 
 export interface AgentRecord {
   id: string;
+  /** Unique to the current accepted run, including queued or aborted attempts. */
+  executionId?: string;
   type: SubagentType;
   /**
    * Typeable name for the `@handle message` prompt mention, derived from the
@@ -400,6 +402,8 @@ export interface AgentInvocation {
 /** Details attached to custom notification messages for visual rendering. */
 export interface NotificationDetails {
   id: string;
+  /** Identifies one execution; absent on notifications persisted by older versions. */
+  executionId?: string;
   type: string;
   displayName: string;
   description: string;
