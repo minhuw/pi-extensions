@@ -972,16 +972,19 @@ describe("spokesman extension in real Pi sessions", () => {
 		expect(linked.statuses.has(SPOKESMAN_STATE_ENTRY)).toBe(false);
 	});
 
-	it("is registered in package.json after language and before pika, wired into npm test, and documented", async () => {
+	it("is registered in package.json after language and soul and before pika, wired into npm test, and documented", async () => {
 		const manifest = JSON.parse(
 			await readFile(new URL("../../../package.json", import.meta.url), "utf8"),
 		) as { pi: { extensions: string[] }; scripts: Record<string, string> };
 		const { extensions } = manifest.pi;
-		expect(extensions.indexOf("./extensions/spokesman/index.ts")).toBe(
-			extensions.indexOf("./extensions/language/index.ts") + 1,
-		);
+		const languageIndex = extensions.indexOf("./extensions/language/index.ts");
+		expect(extensions.slice(languageIndex, languageIndex + 3)).toEqual([
+			"./extensions/language/index.ts",
+			"./extensions/soul/index.ts",
+			"./extensions/spokesman/index.ts",
+		]);
 		expect(extensions.at(-1)).toBe("./extensions/pika/index.ts");
 		expect(manifest.scripts["test:spokesman"]).toBe("vitest run extensions/spokesman");
-		expect(manifest.scripts.test).toContain("npm run test:language && npm run test:spokesman &&");
+		expect(manifest.scripts.test).toContain("npm run test:language && npm run test:soul && npm run test:spokesman &&");
 	});
 });
