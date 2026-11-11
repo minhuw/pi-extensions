@@ -553,7 +553,7 @@ describe("session modes registry", () => {
 		const registry = (shared[symbol] ??= { modes: new Map(), listeners: new Set() }) as { modes: Map<string, Set<string>>; listeners: Set<(id: string) => void> };
 		const h = await start({ script: [calls(next("done")), fauxAssistantMessage("finished")] });
 		const id = h.session.sessionManager.getSessionId();
-		registry.modes.set(id, new Set(["alwayson"]));
+		registry.modes.set(id, new Set(["swarm"]));
 		const changes: string[] = [];
 		const listener = (changed: string) => { changes.push(`${changed}:${[...(registry.modes.get(changed) ?? [])].sort().join(",")}`); };
 		const broken = () => { throw new Error("listener failure"); };
@@ -563,12 +563,12 @@ describe("session modes registry", () => {
 			await h.command("/selfdrive");
 			await h.settle(2);
 			expect(h.status).toContain("done");
-			expect(registry.modes.get(id)).toEqual(new Set(["alwayson", "selfdrive"]));
+			expect(registry.modes.get(id)).toEqual(new Set(["swarm", "selfdrive"]));
 			await h.session.reload();
-			expect(registry.modes.get(id)).toEqual(new Set(["alwayson", "selfdrive"]));
+			expect(registry.modes.get(id)).toEqual(new Set(["swarm", "selfdrive"]));
 			await h.command("/selfdrive off");
-			expect(registry.modes.get(id)).toEqual(new Set(["alwayson"]));
-			expect(changes).toEqual([`${id}:alwayson,selfdrive`, `${id}:alwayson`, `${id}:alwayson,selfdrive`, `${id}:alwayson`]);
+			expect(registry.modes.get(id)).toEqual(new Set(["swarm"]));
+			expect(changes).toEqual([`${id}:selfdrive,swarm`, `${id}:swarm`, `${id}:selfdrive,swarm`, `${id}:swarm`]);
 		} finally {
 			registry.listeners.delete(listener);
 			registry.listeners.delete(broken);

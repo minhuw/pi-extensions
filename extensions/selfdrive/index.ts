@@ -130,7 +130,7 @@ function publishMode(id: string, active: boolean): void {
 	}
 }
 
-/** Same as alwayson: top-level TUI and RPC sessions, not children (no mode, or a session link). */
+/** Same as swarm mode: top-level TUI and RPC sessions, not children (no mode, or a session link). */
 function isEligible(ctx: ExtensionContext): boolean {
 	if (ctx.mode !== "tui" && ctx.mode !== "rpc") return false;
 	return !ctx.sessionManager.getEntries().some((entry) => entry.type === "custom" && entry.customType === SESSION_LINK_TYPE);
