@@ -23,6 +23,7 @@ function registration(provider: string, overrides: Partial<NativeCompactionConfi
 	const pi = {
 		on: (name: string, handler: any) => { handlers[name] = handler; },
 		registerCommand: (name: string, command: any) => { commands[name] = command; },
+		appendEntry: () => {},
 		getAllTools: () => [],
 	} as unknown as ExtensionAPI;
 	registerNativeCompaction(pi, {

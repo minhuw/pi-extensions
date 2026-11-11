@@ -343,6 +343,7 @@ export default function languageExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("language", {
 		description: "Show or switch the response language: /language [<name> | reset | default [<name> | off]]",
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "language", kind: "extension", extension: "language" });
 			if (!isEligible(ctx)) {
 				ctx.ui.notify("/language works only in top-level TUI and RPC sessions.", "warning");
 				return;

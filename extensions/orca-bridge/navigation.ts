@@ -204,10 +204,16 @@ async function navigate(pi: ExtensionAPI, input: string, ctx: ExtensionCommandCo
 export function registerNavigationCommands(pi: ExtensionAPI): void {
 	pi.registerCommand("orca-open", {
 		description: "Open a file or existing review report in the pane's Orca workspace; --focus switches view",
-		handler: (args, ctx) => navigate(pi, args, ctx, "open"),
+		handler: (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "orca-open", kind: "extension", extension: "orca-bridge" });
+			return navigate(pi, args, ctx, "open");
+		},
 	});
 	pi.registerCommand("orca-diff", {
 		description: "Open a file diff in the pane's Orca workspace; --staged selects staged changes, --focus switches view",
-		handler: (args, ctx) => navigate(pi, args, ctx, "diff"),
+		handler: (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "orca-diff", kind: "extension", extension: "orca-bridge" });
+			return navigate(pi, args, ctx, "diff");
+		},
 	});
 }

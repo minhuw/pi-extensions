@@ -33,6 +33,7 @@ async function setup(credentials = new InMemoryCredentialStore(), getSettings = 
 	await magpie({
 		registerProvider: (provider: Provider) => runtime.registerNativeProvider(provider),
 		registerCommand: (name: string, command: Command) => { commands.set(name, command); },
+		appendEntry: vi.fn(),
 		registerMcpServer: vi.fn(), unregisterMcpServer: vi.fn(), on: vi.fn(), getSettings,
 	} as unknown as ExtensionAPI);
 	// Native registration schedules an offline refresh; finish it before invoking the command.

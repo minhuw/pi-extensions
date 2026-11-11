@@ -5262,6 +5262,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
     description: "Manage agents",
     getArgumentCompletions: getAgentsArgumentCompletions,
     handler: async (args, ctx) => {
+      pi.appendEntry("pi-extensions.command", { command: "agents", kind: "extension", extension: "subagents" });
       const trimmed = args.trim();
       if (!trimmed) {
         await showAgentsMenu(ctx);

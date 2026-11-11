@@ -129,6 +129,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
   goal.state = "active"; goal.reason = "expected background work reported a result"; save(ctx); return true;
  }
  pi.registerCommand("goal", { description: "Work toward an objective: /goal <objective> | status | pause | resume | stop | budget <tokens>", handler: async (args, ctx) => {
+  pi.appendEntry("pi-extensions.command", { command: "goal", kind: "extension", extension: "goal" });
   try {
    const text = args.trim();
    if (text === "help") { ctx.ui.notify(HELP, "info"); return; }

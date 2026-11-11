@@ -1194,6 +1194,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			return items.length ? items : null;
 		},
 		handler: async (args, context) => {
+			pi.appendEntry("pi-extensions.command", { command: "relay", kind: "extension", extension: "pika" });
 			// A command runs only in a live session, so a replacement that was about to happen did not.
 			guard(stay);
 			const trimmed = args.trim();

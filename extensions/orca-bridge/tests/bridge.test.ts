@@ -36,6 +36,7 @@ function harness(bus = new Bus(), mode = "tui") {
 			return () => { handlers.get(name)?.delete(fn); };
 		},
 		registerCommand: (name: string, command: unknown) => commands.set(name, command as never),
+		appendEntry: () => {},
 	} as unknown as ExtensionAPI;
 	bridge(api);
 	return {

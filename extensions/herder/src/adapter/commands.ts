@@ -245,6 +245,7 @@ export function registerCommands(pi: ExtensionAPI, herder: Herder): void {
 			return items.length ? items.map((item) => ({ value: [...words, item].join(" "), label: item })) : null;
 		},
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
+			pi.appendEntry("pi-extensions.command", { command: "herder", kind: "extension", extension: "herder" });
 			try {
 				const command = parseCommand(args);
 				if (command.action === "help") { ctx.ui.notify(USAGE, "info"); return; }
@@ -287,6 +288,7 @@ export function registerCommands(pi: ExtensionAPI, herder: Herder): void {
 				return items.length ? items.map((word) => ({ value: [...typed, word].join(" "), label: word })) : null;
 			},
 			handler: async (args: string, ctx: ExtensionCommandContext) => {
+				pi.appendEntry("pi-extensions.command", { command: `herder-${kind}`, kind: "extension", extension: "herder" });
 				try {
 					if (!ctx.hasUI) throw new Error(`/herder-${kind} needs an interactive session (TUI or RPC): the audit ends in a run you approve.`);
 					ctx.ui.notify(audit(herder, herder.session(ctx), kind, args), "info");

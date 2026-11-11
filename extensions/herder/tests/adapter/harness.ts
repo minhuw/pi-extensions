@@ -130,6 +130,7 @@ export function harness({ cwd, sessionId = "session-a", sessionFile, hasUI = tru
 	const pi = {
 		on: (name: string, handler: Handler) => { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
 		registerCommand: (name: string, command: unknown) => commands.set(name, command),
+		appendEntry: vi.fn(),
 		registerTool: (tool: { name: string }) => tools.set(tool.name, tool),
 		sendMessage: vi.fn((message: unknown) => { sent.push(message); }),
 		getThinkingLevel: () => "medium",

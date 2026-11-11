@@ -316,7 +316,7 @@ it("restores the latest snapshot when display entries follow it and approves the
 		await h.run("/autoresearch optimize compilation speed --max 1");
 		const proposed = h.snapshot()!; const key = approvalKey(proposed);
 		await h.session.prompt("/autoresearch status"); await h.session.prompt("/research-report");
-		expect(h.session.sessionManager.getBranch().slice(-2)).toMatchObject([{ type: "custom", customType: DISPLAY }, { type: "custom", customType: DISPLAY }]);
+		expect(h.session.sessionManager.getBranch().filter(entry => !(entry.type === "custom" && entry.customType === "pi-extensions.command")).slice(-2)).toMatchObject([{ type: "custom", customType: DISPLAY }, { type: "custom", customType: DISPLAY }]);
 		await h.session.reload();
 		expect(h.notes.filter(note => note.type !== "info")).toEqual([]);
 		expect(h.statuses.get("autoresearch")).toContain("awaiting approval");

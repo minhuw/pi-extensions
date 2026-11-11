@@ -862,6 +862,7 @@ export default function agentBrowserExtension(pi: ExtensionAPI): void {
 		description:
 			"Inspect or control the session's agent-browser daemon: /agent-browser [status | close | doctor]",
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "agent-browser", kind: "extension", extension: "agent-browser" });
 			lastCtx = ctx;
 			const piKey = deriveBrowserSessionId(ctx);
 			lastPiKey = piKey;

@@ -1864,6 +1864,7 @@ export function createFffExtension(
 			description:
 				"Show or set FFF mode: /fff-mode [tools-and-ui | tools-only | override]",
 			handler: async (args, ctx) => {
+				pi.appendEntry("pi-extensions.command", { command: "fff-mode", kind: "extension", extension: "fff" });
 				if (!toolsRegistered) {
 					try {
 						prepareSession(ctx);
@@ -1915,6 +1916,7 @@ export function createFffExtension(
 		pi.registerCommand("fff-health", {
 			description: "Show FFF file finder health and status",
 			handler: async (_args, ctx) => {
+				pi.appendEntry("pi-extensions.command", { command: "fff-health", kind: "extension", extension: "fff" });
 				if (!toolsRegistered) {
 					try {
 						prepareSession(ctx);
@@ -1982,6 +1984,7 @@ export function createFffExtension(
 		pi.registerCommand("fff-rescan", {
 			description: "Trigger FFF to rescan files",
 			handler: async (_args, ctx) => {
+				pi.appendEntry("pi-extensions.command", { command: "fff-rescan", kind: "extension", extension: "fff" });
 				if (!toolsRegistered) {
 					try {
 						prepareSession(ctx);

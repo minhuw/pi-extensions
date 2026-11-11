@@ -261,6 +261,20 @@ const registry: {
 
 Herder emits `herder:run` on `pi.events` with `{ runId, runDir, journalPath, goalPath, planPath, repo, title }` when a run starts or resumes and after journal appends. pika tails `journalPath` as stream `herder:<runId>` and uploads `goal.md` and `plan.md` as documents whenever their sha256 changes. The uploaded versions are recorded with the server URL, like the acknowledged hashes, so after `/pika login` switches to another server the new server gets each run's goal and plan again without waiting for them to change. Versions recorded by pika 0.1, without a URL, count as the server's that the acknowledged hashes were recorded for. Only runs started from a captured session are uploaded.
 
+### Command usage entries
+
+Each time the user runs an extension command, prompt template, or skill, the session gets a `pi-extensions.command` custom entry (never sent to the model), uploaded like every other entry:
+
+```ts
+pi.appendEntry("pi-extensions.command", { command, kind, extension });
+```
+
+- `command` is the name without its leading slash; for a skill, the name without `skill:`.
+- `kind` is `"extension"`, `"template"`, or `"skill"`.
+- `extension` is the `extensions/<dir>` directory that ships it, omitted when unknown.
+
+Extension commands write their own entry as the first statement of their handler; pika's `/pika`, `/relay`, and `/memory` do. pika's `input` handler (`usage.ts`) records templates and skills: typed or RPC input (not input an extension sent) that starts with `/skill:<name>` or `/<name>`, where `pi.getCommands()` lists `skill:<name>` as a skill or `<name>` as a prompt template. `extension` comes from the command's `sourceInfo.path` when it contains `/extensions/<dir>/`. Since pika loads last, it sees input after other extensions' `input` transforms; it never changes or blocks input.
+
 ## Relay
 
 relay lets running Pi sessions send text messages to each other across your machines through the pika server. Connected sessions appear on the server's **Active sessions** page, where you can also send them messages.

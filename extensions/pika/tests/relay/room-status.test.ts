@@ -37,8 +37,11 @@ it("shows joins and leaves without a representative and clears the last membersh
 	await waitFor(() => joined() === "#dev");
 	await h.session.prompt("/relay leave dev");
 	await waitFor(() => joined() === undefined);
-	// Status publication does not write counters, messages, or other session entries.
-	expect(h.session.sessionManager.getBranch()).toEqual(before);
+	// Status publication does not write counters, messages, or other session entries; only each /relay records its use.
+	const branch = h.session.sessionManager.getBranch();
+	expect(branch.slice(0, before.length)).toEqual(before);
+	expect(branch.slice(before.length).map((entry) => entry.type === "custom" ? [entry.customType, entry.data] : entry.type))
+		.toEqual(Array(4).fill(["pi-extensions.command", { command: "relay", kind: "extension", extension: "pika" }]));
 	expect(h.errors).toEqual([]);
 });
 

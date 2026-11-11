@@ -288,6 +288,7 @@ export function registerMagpieAutoContinue(pi: ExtensionAPI): void {
 	pi.registerCommand("magpie-auto-continue", {
 		description: "Show, disable, cancel, or resume Magpie quota waits",
 		async handler(args, ctx) {
+			pi.appendEntry("pi-extensions.command", { command: "magpie-auto-continue", kind: "extension", extension: "magpie-provider" });
 			const r = ensure(ctx);
 			if (!r) { ctx.ui.notify("Magpie auto-continue requires a top-level TUI or RPC session.", "warning"); return; }
 			const action = args.trim().toLowerCase() || "status";

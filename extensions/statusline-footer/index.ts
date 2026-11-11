@@ -1760,6 +1760,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("footer", {
 		description: "Statusline footer: /footer [full|compact|off|debug]",
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "footer", kind: "extension", extension: "statusline-footer" });
 			const next = args.trim().toLowerCase();
 			if (next === "debug") {
 				const metrics = getSessionState(ctx)?.metrics;

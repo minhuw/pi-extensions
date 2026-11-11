@@ -245,6 +245,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("research-report", {
 		description: "Show research methodology and metrics: /research-report [status|results|clear|help]",
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "research-report", kind: "extension", extension: "autoresearch" });
 			const action = args.trim().toLowerCase();
 			if (action === "help") { ctx.ui.notify(HELP, "info"); return; }
 			if (!["", "status", "results", "clear"].includes(action)) throw new Error("Usage: /research-report [status|results|clear|help]");
@@ -261,6 +262,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("autoresearch", {
 		description: "Prepare a baseline for review, then optimize after approval: /autoresearch <target> | approve|revise|pause|resume|stop|status",
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "autoresearch", kind: "extension", extension: "autoresearch" });
 			if (ctx.mode !== "tui" && ctx.mode !== "rpc") throw new Error("/autoresearch requires a TUI or RPC session.");
 			const r = get(ctx); const input = args.trim(); const action = input.toLowerCase();
 			if (!input || action === "help") { ctx.ui.notify(HELP, "info"); return; }

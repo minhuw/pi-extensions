@@ -773,6 +773,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 		description:
 			"Convene the 3-model technical council (caspar, melchior, balthasar) for 2-round deliberation: /council <topic or design question>",
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "council", kind: "extension", extension: "council" });
 			const trimmed = (args ?? "").trim();
 			const lower = trimmed.toLowerCase();
 			if (!trimmed || lower === "help" || lower === "status") {

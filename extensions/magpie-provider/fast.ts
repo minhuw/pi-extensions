@@ -27,6 +27,7 @@ export function registerMagpieFast(pi: ExtensionAPI): void {
 	pi.registerCommand("fast", {
 		description: "Toggle Fast for supported Magpie Responses models in this session",
 		async handler(args, ctx) {
+			pi.appendEntry("pi-extensions.command", { command: "fast", kind: "extension", extension: "magpie-provider" });
 			const action = args.trim().toLowerCase();
 			const enabled = fastEnabled(ctx);
 			if (action === "status") {

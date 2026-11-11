@@ -326,6 +326,7 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 			return items.length ? items : null;
 		},
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "memory", kind: "extension", extension: "pika" });
 			const [command = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
 			if (rest.length) { ctx.ui.notify(USAGE, "error"); return; }
 			if (command === "status") ctx.ui.notify(statusText(ctx), "info");

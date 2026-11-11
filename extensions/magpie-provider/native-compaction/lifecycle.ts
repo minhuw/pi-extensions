@@ -189,6 +189,7 @@ export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompac
 	pi.registerCommand(options.command, {
 		description: `Show whether native ${options.label} compaction is active for the selected model.`,
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: options.command, kind: "extension", extension: "magpie-provider" });
 			if (args.trim()) {
 				ctx.ui.notify(`Usage: /${options.command}`, "error");
 				return;

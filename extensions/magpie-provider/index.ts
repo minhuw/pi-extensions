@@ -295,6 +295,7 @@ export default async function magpie(pi: ExtensionAPI): Promise<void> {
 	pi.registerCommand("magpie-refresh", {
 		description: "Refresh Magpie's model list immediately",
 		async handler(_args, ctx) {
+			pi.appendEntry("pi-extensions.command", { command: "magpie-refresh", kind: "extension", extension: "magpie-provider" });
 			try {
 				const result = await ctx.modelRegistry.refresh({
 					providers: ["magpie"], allowNetwork: true, force: true, signal: ctx.signal,

@@ -61,7 +61,7 @@ describe("Magpie Fast", () => {
 		h.models.splice(0);
 		h.command("on");
 		expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("advertises priority"), "warning");
-		expect(h.session.getBranch().some(entry => entry.type === "custom")).toBe(false);
+		expect(h.session.getBranch().some(entry => entry.type === "custom" && entry.customType !== "pi-extensions.command")).toBe(false);
 	});
 
 	it("does not change requests for a different model, API, or removed tier", () => {

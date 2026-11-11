@@ -230,6 +230,7 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 		events: bus,
 		registerTool: vi.fn((tool: any) => tools.set(tool.name, tool)),
 		registerCommand: vi.fn((name: string, cmd: any) => commands.set(name, cmd)),
+		appendEntry: vi.fn(),
 		sendUserMessage,
 	} as unknown as ExtensionAPI;
 
@@ -711,8 +712,8 @@ describe("/council command and package contracts", () => {
 		const subagentsIdx = exts.indexOf("./extensions/subagents/src/index.ts");
 		const councilIdx = exts.indexOf("./extensions/council/index.ts");
 		const workspaceIdx = exts.indexOf("./extensions/workspace/index.ts");
-		const pikaIdx = exts.indexOf("./extensions/pika/index.ts");
 		const processesIdx = exts.indexOf("./extensions/processes/index.ts");
+		const pikaIdx = exts.indexOf("./extensions/pika/index.ts");
 
 		expect(councilIdx).toBe(subagentsIdx + 1);
 		expect(workspaceIdx).toBe(processesIdx - 1);

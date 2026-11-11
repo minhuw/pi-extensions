@@ -161,6 +161,7 @@ export default function orcaBridge(pi: ExtensionAPI): void {
 	pi.registerCommand("orca-status", {
 		description: "Show Orca bridge mode, activity and redacted delivery status",
 		handler: async (_args, context) => {
+			pi.appendEntry("pi-extensions.command", { command: "orca-status", kind: "extension", extension: "orca-bridge" });
 			const coords = endpoint();
 			const mode = activation.mode === "inactive" ? `inactive (${activation.reason})` : activation.mode;
 			const rows = activities.entries();

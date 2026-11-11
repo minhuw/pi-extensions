@@ -94,6 +94,7 @@ export default function moltExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("molt", {
 		description: "Start a new session that keeps the current model and thinking level",
 		handler: async (_args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "molt", kind: "extension", extension: "molt" });
 			await replaceSession(ctx, false);
 		},
 	});
@@ -135,6 +136,7 @@ export default function moltExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("handoff", {
 		description: "Have the model write a handover, then continue in a new session that starts from it",
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "handoff", kind: "extension", extension: "molt" });
 			const ready = pending;
 			if (ready?.ready && ready.document && args.trim() === ready.token) {
 				pending = undefined;

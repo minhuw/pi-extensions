@@ -1260,6 +1260,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 			return matches.length > 0 ? matches : null;
 		},
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "spokesman", kind: "extension", extension: "spokesman" });
 			if (!isEligible(ctx)) {
 				ctx.ui.notify("/spokesman works only in top-level TUI and RPC sessions.", "warning");
 				return;

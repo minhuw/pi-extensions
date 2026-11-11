@@ -147,6 +147,7 @@ export function createPi(bus = createBus()): FakePi {
 	fake.api = {
 		registerTool: (tool: any) => fake.tools.set(tool.name, tool),
 		registerCommand: (name: string, command: any) => fake.commands.set(name, command),
+		appendEntry: vi.fn(),
 		registerMessageRenderer: vi.fn(),
 		on: (event: string, handler: Handler) => fake.handlers.set(event, [...(fake.handlers.get(event) ?? []), handler]),
 		sendMessage: (message: unknown, options: unknown) => fake.sent.push({ message, options }),

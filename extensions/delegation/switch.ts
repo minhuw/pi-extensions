@@ -141,6 +141,7 @@ export function registerMode(pi: ExtensionAPI, mode: ModeSpec): (ctx: ExtensionC
 	pi.registerCommand(name, {
 		description: mode.description,
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: name, kind: "extension", extension: "delegation" });
 			if (!isEligible(ctx)) {
 				ctx.ui.notify(`/${name} works only in top-level TUI and RPC sessions.`, "warning");
 				return;

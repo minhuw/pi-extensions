@@ -438,6 +438,7 @@ export default function selfdriveExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("selfdrive", {
 		description: "Self-driving mode 🚗, work on likely-wanted proposals while you are away: /selfdrive [on] [focus] | off | status | report",
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "selfdrive", kind: "extension", extension: "selfdrive" });
 			if (!isEligible(ctx)) {
 				ctx.ui.notify("/selfdrive works only in top-level TUI and RPC sessions.", "warning");
 				return;

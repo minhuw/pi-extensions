@@ -82,6 +82,7 @@ export function registerPsCommand(pi: ExtensionAPI, manager: () => ProcessManage
 	pi.registerCommand("ps", {
 		description: "Managed processes: logs, restart, stop, clear finished",
 		handler: async (_args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "ps", kind: "extension", extension: "processes" });
 			const processes = manager().list();
 			if (!ctx.hasUI) {
 				ctx.ui.notify(processTable(processes), "info");

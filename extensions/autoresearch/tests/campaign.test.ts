@@ -31,7 +31,8 @@ async function fixture(mode: "tui" | "rpc" | "print" = "tui") {
 		registerTool: (tool: any) => tools.set(tool.name, tool),
 		registerCommand: (name: string, command: any) => commands.set(name, command),
 		registerMessageRenderer() {}, registerEntryRenderer() {},
-		appendEntry: vi.fn((customType: string, data: unknown) => entries.push({ type: "custom", customType, data: structuredClone(data) })),
+		// Command-usage telemetry is not campaign state; keep the branch to autoresearch's own entries so length checks count saves.
+		appendEntry: vi.fn((customType: string, data: unknown) => { if (customType !== "pi-extensions.command") entries.push({ type: "custom", customType, data: structuredClone(data) }); }),
 		sendMessage: vi.fn((message: any, options: any) => { messages.push(message); if (options?.triggerTurn) idle = false; }),
 	} as unknown as ExtensionAPI;
 	extension(pi);
@@ -767,7 +768,8 @@ it("stop aborts an owned pass even if recording the stop fails", async () => {
 	vi.useFakeTimers(); const h = await fixture();
 	try {
 		await h.command("compile faster"); await vi.advanceTimersByTimeAsync(1); await h.enter();
-		vi.mocked(h.pi.appendEntry).mockImplementationOnce(() => { throw new Error("disk full"); });
+		// The first append is the command's usage telemetry; the second records the stop.
+		vi.mocked(h.pi.appendEntry).mockImplementationOnce(() => {}).mockImplementationOnce(() => { throw new Error("disk full"); });
 		await expect(h.command("stop")).rejects.toThrow("disk full");
 		expect(h.ctx.abort).toHaveBeenCalledOnce();
 		expect(vi.getTimerCount()).toBe(0);

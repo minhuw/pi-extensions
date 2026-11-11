@@ -431,6 +431,7 @@ export default function soulExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("soul", {
 		description: "Toggle or configure core soul principles (inherited by subagents): /soul [on | off | reset | status | default [on | off]]",
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "soul", kind: "extension", extension: "soul" });
 			if (!isTopLevelSession(ctx)) {
 				notify(ctx, "/soul works only in top-level TUI and RPC sessions.", "warning");
 				return;

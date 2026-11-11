@@ -129,6 +129,7 @@ function harness(selectedModel = model, catalog = [selectedModel]) {
 	registerMagpieCompaction({
 		on: (name: string, handler: any) => { handlers.set(name, handler); },
 		registerCommand: (name: string, command: any) => { commands.set(name, command); },
+		appendEntry: () => {},
 		getAllTools: () => [],
 	} as unknown as ExtensionAPI);
 	const session = SessionManager.inMemory();

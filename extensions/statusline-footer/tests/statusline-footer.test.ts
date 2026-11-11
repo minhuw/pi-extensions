@@ -63,6 +63,11 @@ type HarnessOptions = {
 	theme?: { fg: (token: string, text: string) => string; bg?: (token: string, text: string) => string; bold: (text: string) => string };
 };
 
+// /footer records command-usage telemetry; only the footer's own entries count as persisted state.
+function persistedEntries(pi: ExtensionAPI): unknown[] {
+	return vi.mocked(pi.appendEntry).mock.calls.filter(([customType]) => customType !== "pi-extensions.command");
+}
+
 function createHarness(sessionId: string, mode: "tui" | "print", options: HarnessOptions = {}) {
 	const handlers = new Map<string, Handler[]>();
 	const events = options.events ?? createEventBus();
@@ -3529,7 +3534,7 @@ describe("statusline footer session isolation", () => {
 		expect(harness.ctx.sessionManager.getEntries).not.toHaveBeenCalled();
 		harness.disposeFooter();
 		await harness.emit("session_shutdown", { type: "session_shutdown", reason: reason === "startup" ? "quit" : reason });
-		expect(harness.pi.appendEntry).not.toHaveBeenCalled();
+		expect(persistedEntries(harness.pi)).toEqual([]);
 	});
 
 	it("never restores or persists print-session snapshots, even with the TUI session ID", async () => {
@@ -3549,7 +3554,7 @@ describe("statusline footer session isolation", () => {
 		expect(root.notifications.at(-1)).toContain("requests=1");
 		root.disposeFooter();
 		await root.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
-		expect(root.pi.appendEntry).not.toHaveBeenCalled();
+		expect(persistedEntries(root.pi)).toEqual([]);
 	});
 
 	it("persists completed metrics across an actual module reload and drops in-flight timing", async () => {
@@ -3630,6 +3635,6 @@ describe("statusline footer session isolation", () => {
 
 		afterReload.disposeFooter();
 		await afterReload.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
-		expect(afterReload.pi.appendEntry).not.toHaveBeenCalled();
+		expect(persistedEntries(afterReload.pi)).toEqual([]);
 	});
 });

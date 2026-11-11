@@ -15,7 +15,8 @@ function harness(cwd = "/Workspace/Project/nested") {
 	const exec = vi.fn<ExtensionAPI["exec"]>().mockImplementation(async (_command, args) => args[0] === "worktree" ? current() : opened());
 	const notify = vi.fn<ExtensionCommandContext["ui"]["notify"]>();
 	const registerCommand = vi.fn<ExtensionAPI["registerCommand"]>((name, command) => { commands.set(name, command); });
-	const api = { exec, registerCommand } satisfies Pick<ExtensionAPI, "exec" | "registerCommand">;
+	const appendEntry = vi.fn<ExtensionAPI["appendEntry"]>();
+	const api = { exec, registerCommand, appendEntry } satisfies Pick<ExtensionAPI, "exec" | "registerCommand" | "appendEntry">;
 	const ctx = { cwd, ui: { notify } } as unknown as ExtensionCommandContext;
 	registerNavigationCommands(api as unknown as ExtensionAPI);
 	return {

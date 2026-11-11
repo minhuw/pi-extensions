@@ -142,6 +142,7 @@ export function registerLive(pi: ExtensionAPI) {
 	pi.registerCommand("impeccable-live", {
 		description: "Immediate live status, stop or explicit resume (no model call)",
 		async handler(args, ctx) {
+			pi.appendEntry("pi-extensions.command", { command: "impeccable-live", kind: "extension", extension: "impeccable" });
 			const live = await get(ctx);
 			const action = args.trim() || "status";
 			if (action === "stop") await pause("Human live stop", true);

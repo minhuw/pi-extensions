@@ -11,6 +11,7 @@ import memoryExtension from "./memory/index.ts";
 import recallExtension from "./recall/index.ts";
 import relayExtension from "./relay/index.ts";
 import { acquireUploader, currentUploader, releaseUploader, type Uploader, type UploaderOptions } from "./uploader.ts";
+import { usageExtension } from "./usage.ts";
 
 export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
 export const SHUTDOWN_FLUSH_MS = 2_000;
@@ -71,6 +72,7 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 	relayExtension(pi);
 	recallExtension(pi);
 	memoryExtension(pi);
+	usageExtension(pi);
 }
 
 /** What the rest of pika asks of a session's capture. */
@@ -425,6 +427,7 @@ export function captureExtension(pi: ExtensionAPI): Capture {
 			return items.length ? items : null;
 		},
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "pika", kind: "extension", extension: "pika" });
 			const [command = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
 			if (command === "status" && !rest.length) ctx.ui.notify(statusText(config ?? loadConfig(getAgentDir()), joined, sessionId, skipped), "info");
 			else if (command === "login" && rest.length <= 1) await loginCommand(ctx, rest[0]);

@@ -503,6 +503,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 		description:
 			"Manage project workspaces and external path permissions: /workspace [list | gc [--dry-run] [--yes] [--all] | allow <path> | deny <path> | pin <name> | unpin <name>]",
 		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "workspace", kind: "extension", extension: "workspace" });
 			const trimmed = args.trim();
 			const tokens = trimmed ? trimmed.split(/\s+/) : [];
 			const subcommand = (tokens[0] ?? "list").toLowerCase();
