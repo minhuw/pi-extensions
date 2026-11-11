@@ -101,6 +101,10 @@ export class MockIngest {
 	readonly binds: MockBind[] = [];
 	/** Bind requests get no answer; each one is counted in `hungBinds`, and in `closedBinds` once the client gives up on it. */
 	hangBinds = false;
+	/** Every board upload (`PUT /api/relay/v1/boards/<id>`): its session id, body, Authorization header, and answer. */
+	readonly boardUploads: { sessionId: string; body: Record<string, unknown>; authorization?: string; status: number }[] = [];
+	/** Answers board uploads with this status (200 stores them); the body is `{ error: "test" }` for anything else. */
+	boardStatus = 200;
 	hungBinds = 0;
 	closedBinds = 0;
 	/** Answers `start` like a pika server older than 0.4: names limited to the old characters, and no recognition. */
@@ -357,6 +361,14 @@ export class MockIngest {
 			try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { /* refused below */ }
 			if (!body || typeof body !== "object" || Array.isArray(body)) return this.reply(response, 400, { error: "invalid_json" });
 			return this.pair(path.slice("/pika/api/pair/v1/".length), body as Record<string, unknown>, request.socket.remoteAddress, request.headers.authorization, response);
+		}
+		const board = request.method === "PUT" ? /^\/pika\/api\/relay\/v1\/boards\/([^/]+)$/.exec(path ?? "") : null;
+		if (board) {
+			const sessionId = decodeURIComponent(board[1]!);
+			const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+			this.boardUploads.push({ sessionId, body, authorization: request.headers.authorization, status: this.boardStatus });
+			if (this.boardStatus !== 200) return this.reply(response, this.boardStatus, { error: "test" });
+			return this.reply(response, 200, { sessionId, status: "stored", updatedAt: new Date(body.updatedAt as number).toISOString() });
 		}
 		if (request.method !== "POST" || path !== "/pika/api/ingest/v1/batch") return this.reply(response, 404, { error: "not found" });
 		this.batchRequests++;

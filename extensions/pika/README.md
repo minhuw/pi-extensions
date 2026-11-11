@@ -348,6 +348,10 @@ A chatroom is a named group of sessions. Only you add a session to one: `/relay 
 
 The footer's `relay-rooms` status lists this session's joined rooms in sorted order, such as `#dev #ops`, whether or not they have a representative. It clears when the session has no joined rooms or shuts down; [statusline-footer](../statusline-footer/README.md) shows it alongside the representative status.
 
+### Swarm boards
+
+A coordinator session that runs a swarm publishes its kanban board in process on `globalThis[Symbol.for("pi-extensions.swarm-boards")]` (`board.ts`; pika creates the registry with `??=` when it loads first). pika uploads the board of each top-level session it captures (TUI or RPC mode, no parent session) to `PUT /api/relay/v1/boards/<sessionId>` with the device token: the full snapshot, at most one request per board per second, always the latest one, and the last one again when the session ends (waiting at most 2 s). The web UI's chatroom view shows the boards of the room's members. A failed upload is recorded once as `/pika`'s last error: a network error, 429, or 5xx retries after 5 s, doubling up to 60 s; a refusal (400, 401, 403, 404, 413) stops that board's uploads until the login changes. Contract: "Boards" in [RELAY.md](../../services/pika/docs/RELAY.md).
+
 ### Representatives
 
 A chatroom can have one representative: a member session that talks to you for the room. The other members take it that you do not read them and report to it in the room; it passes on to you what they need you to know or decide, and sends your answers back.

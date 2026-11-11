@@ -283,6 +283,18 @@ Register a message renderer for `relay-message` that shows one line, `✉ relay 
 
 **Untrusted fields:** every field of a message comes from another device or the web UI. Before rendering, strip ESC sequences and C0/C1 control characters except `\n` and `\t` from the text and every sender field. In the model-facing header, also collapse whitespace (including newlines) in `name`, `title`, `device`, `deviceName`, and `project` and remove double quotes, so a field cannot forge a second header line.
 
+### Swarm boards
+
+Client-only (`extensions/pika/board.ts`). A coordinator's extension publishes its board in process:
+
+```ts
+globalThis[Symbol.for("pi-extensions.swarm-boards")] ??= { version: 1, boards: new Map(), listeners: new Set() }
+boards: Map<sessionId, Board>        // Board as in "Boards"
+listeners: Set<(board: Board) => void>
+```
+
+pika adds a listener while a top-level session (TUI or RPC mode, no `parentSession` in its header) that it captures is open, and uploads that session's board with `PUT boards/{sessionId}`: the snapshot's `version`, `sessionId`, `updatedAt`, and `cards`, at most once per board per second, always the latest snapshot, and once more at `session_shutdown` (waiting at most 2 s). A failure is recorded as `/pika`'s last error, once until it changes: a network error, 429, or 5xx retries after 5 s, doubling up to 60 s; 400, 401, 403, 404, or 413 stops the board's uploads until the credentials change.
+
 ### Side answers
 
 Client-only (`extensions/pika/relay/side.ts`); the wire format is unchanged. A busy session that leaves a message from another session unread for `relay.sideAnswerSeconds` of `pika.json` (60 s; `relay.sideAnswers: false` or `/relay side off` turns it off) answers it with one model request beside the turn:
