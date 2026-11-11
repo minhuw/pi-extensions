@@ -381,9 +381,12 @@ describe("worktree", () => {
 describe("cleanupWorktree — failure path", () => {
   let repoDir: string;
   let pi: ExtensionAPI;
+  // Worktrees a failed preservation deliberately left on disk.
+  const kept: string[] = [];
 
   beforeEach(() => { repoDir = initGitRepo(); pi = mockPi(); });
   afterEach(async () => {
+    for (const path of kept.splice(0)) rmSync(path, { recursive: true, force: true });
     try { await pruneWorktrees(pi, repoDir); } catch { /* ignore */ }
     rmSync(repoDir, { recursive: true, force: true });
   });
@@ -402,38 +405,58 @@ describe("cleanupWorktree — failure path", () => {
     expect(result.branch).toBeUndefined();
   });
 
-  it("swallows a git failure inside a still-present worktree and reports no changes", async () => {
-    // The outer catch. The directory exists — so the existsSync guard above
-    // does not fire — but git cannot operate in it, which is what a corrupted
-    // or externally-detached worktree looks like. The agent's work is lost
-    // either way; what matters is that cleanup does not reject out of the
-    // manager's settle path and take the whole record down with it.
+  it("keeps a still-present worktree and reports the error when git cannot operate in it", async () => {
+    // The directory exists — so the existsSync guard above does not fire — but
+    // git cannot operate in it, which is what a corrupted or externally-detached
+    // worktree looks like. Removing it would destroy the agent's work, and
+    // reporting "no changes" would tell the caller there was none.
     const wt = (await createWorktree(pi, repoDir, "corrupt"))!;
+    kept.push(wt.path);
     writeFileSync(join(wt.path, "work.txt"), "agent output");
     // Break the worktree's link back to the repo.
     writeFileSync(join(wt.path, ".git"), "gitdir: /nonexistent/path/that/is/not/a/repo");
 
     const result = await cleanupWorktree(pi, repoDir, wt, "corrupted agent");
 
-    expect(result.hasChanges).toBe(false);
+    expect(result.hasChanges).toBe(true);
     expect(result.branch).toBeUndefined();
+    expect(result.error).toBeTruthy();
+    expect(result.path).toBe(wt.path);
+    expect(existsSync(join(wt.path, "work.txt"))).toBe(true);
   });
 
-  it("reports no changes when the preservation commit fails", async () => {
+  it("keeps the worktree and reports the error when the preservation commit fails", async () => {
     // `git commit` failing resolves with a non-zero code rather than throwing,
-    // so the outer catch is only reached if the result is inspected.
+    // so the failure is only seen if the result is inspected.
     const wt = (await createWorktree(pi, repoDir, "commit-fails"))!;
+    kept.push(wt.path);
     writeFileSync(join(wt.path, "work.txt"), "agent output");
+    const failing = failingPi(args => args[0] === "commit", { code: 1, killed: false });
 
-    const result = await cleanupWorktree(
-      failingPi(args => args[0] === "commit", { code: 1, killed: false }),
-      repoDir,
-      wt,
-      "commit fails",
-    );
+    const result = await cleanupWorktree(failing, repoDir, wt, "commit fails");
 
-    expect(result.hasChanges).toBe(false);
+    expect(result).toEqual({ hasChanges: true, path: wt.path, error: "boom" });
+    expect(existsSync(join(wt.path, "work.txt"))).toBe(true);
+    expect(vi.mocked(failing.exec).mock.calls.some(([, args]) => args[0] === "worktree" && args[1] === "remove")).toBe(false);
+  });
+
+  it("keeps the worktree when both the branch and its suffixed retry fail", async () => {
+    const wt = (await createWorktree(pi, repoDir, "branch-fails"))!;
+    kept.push(wt.path);
+    writeFileSync(join(wt.path, "work.txt"), "agent output");
+    const failing = failingPi(args => args[0] === "branch", { code: 128, killed: false });
+
+    const result = await cleanupWorktree(failing, repoDir, wt, "branch fails");
+
+    expect(result.hasChanges).toBe(true);
     expect(result.branch).toBeUndefined();
+    expect(result.error).toBe("boom");
+    expect(result.path).toBe(wt.path);
+    // Both the plain and the suffixed name were tried before giving up.
+    expect(vi.mocked(failing.exec).mock.calls.filter(([, args]) => args[0] === "branch")).toHaveLength(2);
+    // The agent's commit is still reachable from the kept worktree.
+    const files = execFileSync("git", ["ls-tree", "--name-only", "HEAD"], { cwd: wt.path, stdio: "pipe" }).toString();
+    expect(files).toContain("work.txt");
   });
 
   it("creates the branch BEFORE removing the worktree, so a removal failure cannot lose commits", async () => {

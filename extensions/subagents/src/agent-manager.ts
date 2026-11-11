@@ -25,6 +25,7 @@ import { getAgentConfig } from "./agent-types.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
 import { modelSupportsServiceTier } from "./service-tier.js";
+import { worktreeResultNote } from "./status-note.js";
 import type { ServiceTierInput, AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, Pool, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
@@ -890,6 +891,8 @@ export class AgentManager {
         this.chargePool(record.chargedPool, -1);
         detach();
         record.worktreeResult = await cleanupWorktree(pi, baseCwd, wt, options.description);
+        const note = worktreeResultNote(record.worktreeResult, customCwd !== undefined ? baseCwd : undefined);
+        if (note) record.result = (record.result ?? "") + `\n\n---\n${note}`;
         this.drainQueue();
         return;
       }
@@ -1042,16 +1045,13 @@ export class AgentManager {
           }
           const wtResult = await cleanupWorktree(pi, baseCwd, record.worktree, options.description);
           record.worktreeResult = wtResult;
-          if (wtResult.hasChanges && wtResult.branch) {
-            // With a caller-supplied cwd the branch lives in THAT repo, not the
-            // parent session's — say so, or the orchestrator merges in the wrong repo.
-            const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
-            // Appended to the prose only. A structured child's caller parses
-            // `structuredJson`, which stays untouched — but `result` is also
-            // what a human reads, so the note still belongs on it.
-            record.result = (record.result ?? "") +
-              `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
-          }
+          // With a caller-supplied cwd the branch lives in THAT repo, not the
+          // parent session's — say so, or the orchestrator merges in the wrong repo.
+          // Appended to the prose only. A structured child's caller parses
+          // `structuredJson`, which stays untouched — but `result` is also
+          // what a human reads, so the note still belongs on it.
+          const note = worktreeResultNote(wtResult, customCwd !== undefined ? baseCwd : undefined);
+          if (note) record.result = (record.result ?? "") + `\n\n---\n${note}`;
         }
 
         this.abortOwnedChildren(id);
@@ -1082,6 +1082,10 @@ export class AgentManager {
           try {
             const wtResult = await cleanupWorktree(pi, baseCwd, record.worktree, options.description);
             record.worktreeResult = wtResult;
+            // record.error is the failed run's headline; the branch or
+            // preservation failure must reach the parent with it.
+            const note = worktreeResultNote(wtResult, customCwd !== undefined ? baseCwd : undefined);
+            if (note) record.error = `${record.error}\n\n${note}`;
           } catch { /* ignore cleanup errors */ }
         }
 

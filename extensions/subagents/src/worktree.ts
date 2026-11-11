@@ -53,12 +53,20 @@ export function isWorktreeIsolationEnabled(): boolean {
 }
 
 export interface WorktreeCleanupResult {
-  /** Whether changes were found in the worktree. */
+  /**
+   * Whether changes were found in the worktree. `true` whenever `error` is set:
+   * a failed preservation cannot prove the agent changed nothing.
+   */
   hasChanges: boolean;
   /** Branch name if changes were committed. */
   branch?: string;
-  /** Worktree path if it was kept. */
+  /** Worktree path; when `error` is set, the worktree is still on disk here. */
   path?: string;
+  /**
+   * Set when preserving the agent's work failed (a git step threw). The
+   * worktree is kept, unremoved, at `path`, and no branch is reported.
+   */
+  error?: string;
 }
 
 /**
@@ -121,6 +129,7 @@ export async function createWorktree(
  * Clean up a worktree after agent completion.
  * - If no changes: remove worktree entirely.
  * - If changes exist: create a branch, commit changes, return branch info.
+ * - If any git step fails: keep the worktree and return `error` with its path.
  */
 export async function cleanupWorktree(
   pi: ExtensionAPI,
@@ -132,6 +141,8 @@ export async function cleanupWorktree(
     return { hasChanges: false };
   }
 
+  // Any failure below leaves the worktree on disk: removing it before a branch
+  // holds its commit would destroy the agent's work.
   try {
     // Check for uncommitted changes in the worktree
     const status = await git(pi, worktree.path, ["status", "--porcelain"], 10000);
@@ -153,6 +164,8 @@ export async function cleanupWorktree(
       }
     }
 
+    const head = await git(pi, worktree.path, ["rev-parse", "HEAD"], 5000);
+
     // Create a branch pointing to the worktree's HEAD.
     // If the branch already exists, append a suffix to avoid overwriting previous work.
     let branchName = worktree.branch;
@@ -162,6 +175,10 @@ export async function cleanupWorktree(
       // Branch already exists — use a unique suffix
       branchName = `${worktree.branch}-${Date.now()}`;
       await git(pi, worktree.path, ["branch", branchName], 5000);
+    }
+    const branchSha = await git(pi, worktree.path, ["rev-parse", "--verify", `refs/heads/${branchName}^{commit}`], 5000);
+    if (branchSha !== head) {
+      throw new Error(`branch ${branchName} points at ${branchSha}, not the worktree's commit ${head}`);
     }
     // Update branch name in worktree info for the caller
     worktree.branch = branchName;
@@ -174,10 +191,12 @@ export async function cleanupWorktree(
       branch: worktree.branch,
       path: worktree.path,
     };
-  } catch {
-    // Best effort cleanup on error
-    try { await removeWorktree(pi, cwd, worktree.path); } catch { /* ignore */ }
-    return { hasChanges: false };
+  } catch (err) {
+    return {
+      hasChanges: true,
+      path: worktree.path,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 

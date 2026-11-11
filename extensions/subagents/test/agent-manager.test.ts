@@ -1069,6 +1069,45 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     expect(record.result).toContain("Changes saved to branch");
   });
 
+  it("surfaces a failed worktree preservation in the completed result", async () => {
+    const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
+    const wt = { path: "/wt/p", branch: "pi-agent-p", baseSha: "abc", workPath: "/wt/p" };
+    vi.mocked(createWorktree).mockResolvedValueOnce(wt as never);
+    vi.mocked(cleanupWorktree).mockResolvedValueOnce({ hasChanges: true, path: "/wt/p", error: "commit failed" });
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "I edited two files", session: mockSession(), aborted: false, steered: false,
+    } as never);
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "X", "go", {
+      description: "go", isBackground: true, isolation: "worktree",
+    });
+    await manager.awaitStartup(id);
+    await vi.waitFor(() => expect(manager.getRecord(id)!.status).toBe("completed"));
+
+    const record = manager.getRecord(id)!;
+    expect(record.worktreeResult).toEqual({ hasChanges: true, path: "/wt/p", error: "commit failed" });
+    expect(record.result).toContain("Worktree preservation failed: commit failed; work kept at `/wt/p`.");
+  });
+
+  it("surfaces a failed worktree preservation in a failed run's error", async () => {
+    const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
+    const wt = { path: "/wt/q", branch: "pi-agent-q", baseSha: "abc", workPath: "/wt/q" };
+    vi.mocked(createWorktree).mockResolvedValueOnce(wt as never);
+    vi.mocked(cleanupWorktree).mockResolvedValueOnce({ hasChanges: true, path: "/wt/q", error: "index.lock exists" });
+    vi.mocked(runAgent).mockRejectedValueOnce(new Error("provider exploded"));
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "X", "go", {
+      description: "go", isBackground: true, isolation: "worktree",
+    });
+    await manager.awaitStartup(id);
+    await vi.waitFor(() => expect(manager.getRecord(id)!.status).toBe("error"));
+
+    const record = manager.getRecord(id)!;
+    expect(record.error).toBe("provider exploded\n\nWorktree preservation failed: index.lock exists; work kept at `/wt/q`.");
+  });
+
   it("a stop that lands during the copy discards the worktree instead of running", async () => {
     // Window that did not exist when creation was synchronous: abort() can mark
     // the record stopped while the repo is still being copied.

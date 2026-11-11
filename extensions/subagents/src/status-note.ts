@@ -88,3 +88,19 @@ export function partialOutputSuffix(record: Pick<AgentRecord, "result">): string
   const partial = record.result?.trim();
   return partial ? `\n\nPartial output before the failure:\n${partial}` : "";
 }
+
+/**
+ * Model-visible note describing a cleanup result, or "" when there is nothing
+ * to report (no changes). `repo` names the repository the branch lives in when
+ * it differs from the parent session's.
+ */
+export function worktreeResultNote(result: NonNullable<AgentRecord["worktreeResult"]>, repo?: string): string {
+  if (result.error !== undefined) {
+    return `Worktree preservation failed: ${result.error}; work kept at \`${result.path}\`.`;
+  }
+  if (result.hasChanges && result.branch) {
+    const repoNote = repo !== undefined ? ` in \`${repo}\`` : "";
+    return `Changes saved to branch \`${result.branch}\`${repoNote}. Merge with: \`git merge ${result.branch}\`${repo !== undefined ? ` (run in \`${repo}\`)` : ""}`;
+  }
+  return "";
+}
