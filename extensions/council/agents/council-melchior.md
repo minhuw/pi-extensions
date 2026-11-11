@@ -1,10 +1,10 @@
 ---
-name: council-carbon
-display_name: Council (Carbon)
-description: Read-only council advisor pinned to magpie/gemini-4-carbon for multi-model technical deliberation.
+name: council-melchior
+display_name: Council (Melchior)
+description: Read-only council advisor pinned to magpie/gpt-6-astra for multi-model technical deliberation.
 tools: read, bash, grep, find, ls
-model: magpie/gemini-4-carbon
-thinking: high
+model: magpie/gpt-6-astra
+thinking: xhigh
 model_visible: false
 isolation: off
 ---

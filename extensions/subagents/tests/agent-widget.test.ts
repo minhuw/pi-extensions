@@ -31,11 +31,11 @@ it("scopes extensions on recon and worker while retaining built-in search tools 
     "pika",
   ]);
 
-  for (const name of ["council-carbon", "council-astra", "council-fable"]) {
+  for (const name of ["council-caspar", "council-melchior", "council-balthasar"]) {
     expect(DEFAULT_AGENTS.get(name)?.extensions).toBe(true);
     expect(DEFAULT_AGENTS.get(name)?.excludeExtensions).toBeUndefined();
   }
-  for (const name of ["recon", "council-carbon", "council-astra", "council-fable"]) {
+  for (const name of ["recon", "council-caspar", "council-melchior", "council-balthasar"]) {
     expect(DEFAULT_AGENTS.get(name)?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
   }
 });

@@ -1,6 +1,6 @@
 ---
-name: council-fable
-display_name: Council (Fable)
+name: council-balthasar
+display_name: Council (Balthasar)
 description: Read-only council advisor pinned to magpie/claude-fable-5-2 for multi-model technical deliberation.
 tools: read, bash, grep, find, ls
 model: magpie/claude-fable-5-2

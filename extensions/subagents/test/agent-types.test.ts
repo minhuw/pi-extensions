@@ -63,7 +63,7 @@ describe("agent type registry", () => {
       expect(isValidType("recon")).toBe(true);
       expect(isValidType("RECON")).toBe(true);
       expect(isValidType("Worker")).toBe(true);
-      expect(isValidType("COUNCIL-ASTRA")).toBe(true);
+      expect(isValidType("COUNCIL-MELCHIOR")).toBe(true);
     });
 
     it("case-insensitive lookup works for getAgentConfig", () => {
@@ -128,9 +128,9 @@ describe("agent type registry", () => {
 
     it("loads hidden read-only council advisors from extensions/council/agents", () => {
       expect(getAgentConfig("expert")).toBeUndefined();
-      expect(getAgentConfig("council-carbon")).toMatchObject({
-        name: "council-carbon",
-        displayName: "Council (Carbon)",
+      expect(getAgentConfig("council-caspar")).toMatchObject({
+        name: "council-caspar",
+        displayName: "Council (Caspar)",
         model: "magpie/gemini-4-carbon",
         thinking: "high",
         modelVisible: false,
@@ -141,9 +141,9 @@ describe("agent type registry", () => {
         promptMode: "replace",
         isDefault: true,
       });
-      expect(getAgentConfig("council-astra")).toMatchObject({
-        name: "council-astra",
-        displayName: "Council (Astra)",
+      expect(getAgentConfig("council-melchior")).toMatchObject({
+        name: "council-melchior",
+        displayName: "Council (Melchior)",
         model: "magpie/gpt-6-astra",
         thinking: "xhigh",
         modelVisible: false,
@@ -154,9 +154,9 @@ describe("agent type registry", () => {
         promptMode: "replace",
         isDefault: true,
       });
-      expect(getAgentConfig("council-fable")).toMatchObject({
-        name: "council-fable",
-        displayName: "Council (Fable)",
+      expect(getAgentConfig("council-balthasar")).toMatchObject({
+        name: "council-balthasar",
+        displayName: "Council (Balthasar)",
         model: "magpie/claude-fable-5-2",
         thinking: "high",
         modelVisible: false,
@@ -175,14 +175,14 @@ describe("agent type registry", () => {
         expect(cfg?.sourcePath).toBeUndefined();
         expect(getAvailableTypes()).not.toContain(name);
       }
-      expect(resolveSpawnType("council-astra")).toEqual({
+      expect(resolveSpawnType("council-melchior")).toEqual({
         ok: true,
         type: "worker",
-        fellBackFrom: "council-astra",
+        fellBackFrom: "council-melchior",
       });
-      expect(resolveSpawnType("council-astra", { includeHidden: true })).toEqual({
+      expect(resolveSpawnType("council-melchior", { includeHidden: true })).toEqual({
         ok: true,
-        type: "council-astra",
+        type: "council-melchior",
       });
     });
 

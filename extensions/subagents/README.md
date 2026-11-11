@@ -29,7 +29,7 @@ Do **not** also install `npm:@tintinweb/pi-subagents` in the same Pi profile. Af
 ## Local defaults and compatibility
 
 - **Foreground by default:** `Agent` waits for completion unless background execution is selected. An agent’s frontmatter takes precedence over the tool’s `run_in_background` argument, which takes precedence over `backgroundByDefault` (default `false`).
-- **Default fleet:** `recon` and `worker` replace upstream Explore/Plan/general-purpose as the model-visible fleet, alongside three model-hidden council advisors (`council-carbon`, `council-astra`, `council-fable`) loaded from `extensions/council/agents/` for cross-extension RPC deliberation. Unknown types fall back to `worker`; set `fallbackSubagent: "none"` to reject unknown types instead.
+- **Default fleet:** `recon` and `worker` replace upstream Explore/Plan/general-purpose as the model-visible fleet, alongside three model-hidden council advisors (`council-caspar`, `council-melchior`, `council-balthasar`) loaded from `extensions/council/agents/` for cross-extension RPC deliberation. Unknown types fall back to `worker`; set `fallbackSubagent: "none"` to reject unknown types instead.
 - **Package discovery is opt-in:** `packageAgents` and `packageWorkflows` default to `false`. Enable either in `subagents.json` (or specify a package allowlist) to discover explicitly declared resources from configured packages. Project trust still applies.
 - **Nested delegation is opt-in per agent:** the new upstream delegation controls are available, but the embedded fleet does not gain recursive delegation automatically.
 - **Scripted workflows are disabled by default pending reliability fixes:** `SubagentWorkflow`, the workflow inspector menu entry, and startup workflow execution are off unless `workflowsEnabled: true` is explicitly configured. Existing explicit opt-ins remain supported; set `workflowsEnabled: false` to disable them. Reload while no agents are running to apply changes to tool registration. When enabled, orchestration still requires an explicit user request.
@@ -63,9 +63,9 @@ Select an existing agent type with `subagent_type` (`agentType` in workflows). T
 | --- | --- | --- | --- |
 | `recon` | Read-only reconnaissance; compressed handoff | read-only; must call a tool | `magpie/codex/gpt-6-luna`, thinking `max`, tier `fast` |
 | `worker` | Bounded implementation and verification | coding tools; must call a tool | inherit parent |
-| `council-carbon` | Read-only council advisor (`model_visible: false`, `isolation: off`) | read-only | `magpie/gemini-4-carbon`, thinking `high`, no tier override |
-| `council-astra` | Read-only council advisor (`model_visible: false`, `isolation: off`) | read-only | `magpie/gpt-6-astra`, thinking `xhigh`, no tier override |
-| `council-fable` | Read-only council advisor (`model_visible: false`, `isolation: off`) | read-only | `magpie/claude-fable-5-2`, thinking `high`, no tier override |
+| `council-caspar` | Read-only council advisor (`model_visible: false`, `isolation: off`) | read-only | `magpie/gemini-4-carbon`, thinking `high`, no tier override |
+| `council-melchior` | Read-only council advisor (`model_visible: false`, `isolation: off`) | read-only | `magpie/gpt-6-astra`, thinking `xhigh`, no tier override |
+| `council-balthasar` | Read-only council advisor (`model_visible: false`, `isolation: off`) | read-only | `magpie/claude-fable-5-2`, thinking `high`, no tier override |
 
 The three council advisors are loaded from `extensions/council/agents/` and have `model_visible: false`, so they remain hidden from model-facing `Agent`, workflow, and nested delegation surfaces while remaining spawnable over cross-extension RPC. Custom `.md` files with the same name override embedded defaults through normal agent discovery; `disableDefaultAgents: true` hides all built-in defaults while leaving custom agents available.
 

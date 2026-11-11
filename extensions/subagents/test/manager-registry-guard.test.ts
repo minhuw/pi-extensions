@@ -63,7 +63,7 @@ describe("local host registry lifecycle", () => {
     });
     expect(host.resolveType("worker")).toMatchObject({ readOnly: false });
     expect(host.resolveType("reviewer")).toBeUndefined();
-    expect(host.resolveType("council-astra")).toBeUndefined();
+    expect(host.resolveType("council-melchior")).toBeUndefined();
     for (const capability of ["spawn", "abort", "steer", "getRecord"]) expect(host).not.toHaveProperty(capability);
   });
 

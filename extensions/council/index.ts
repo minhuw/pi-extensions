@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-export const COUNCIL_MEMBER_IDS = ["carbon", "astra", "fable"] as const;
+export const COUNCIL_MEMBER_IDS = ["caspar", "melchior", "balthasar"] as const;
 export type CouncilMemberId = (typeof COUNCIL_MEMBER_IDS)[number];
 
 export interface CouncilMemberSpec {
@@ -14,26 +14,26 @@ export interface CouncilMemberSpec {
 }
 
 export const COUNCIL_MEMBERS: Record<CouncilMemberId, CouncilMemberSpec> = {
-	carbon: {
-		id: "carbon",
-		agentType: "council-carbon",
+	caspar: {
+		id: "caspar",
+		agentType: "council-caspar",
 		model: "magpie/gemini-4-carbon",
 		thinking: "high",
-		label: "Carbon (magpie/gemini-4-carbon)",
+		label: "Caspar (magpie/gemini-4-carbon)",
 	},
-	astra: {
-		id: "astra",
-		agentType: "council-astra",
+	melchior: {
+		id: "melchior",
+		agentType: "council-melchior",
 		model: "magpie/gpt-6-astra",
 		thinking: "xhigh",
-		label: "Astra (magpie/gpt-6-astra)",
+		label: "Melchior (magpie/gpt-6-astra)",
 	},
-	fable: {
-		id: "fable",
-		agentType: "council-fable",
+	balthasar: {
+		id: "balthasar",
+		agentType: "council-balthasar",
 		model: "magpie/claude-fable-5-2",
 		thinking: "high",
-		label: "Fable (magpie/claude-fable-5-2)",
+		label: "Balthasar (magpie/claude-fable-5-2)",
 	},
 };
 
@@ -105,10 +105,10 @@ export const CouncilParameters = Type.Object({
 		}),
 	),
 	members: Type.Optional(
-		Type.Array(Type.Union([Type.Literal("carbon"), Type.Literal("astra"), Type.Literal("fable")]), {
+		Type.Array(Type.Union([Type.Literal("caspar"), Type.Literal("melchior"), Type.Literal("balthasar")]), {
 			minItems: 2,
 			maxItems: 3,
-			description: "Distinct council members to convene (minimum 2). Defaults to all three: carbon, astra, fable.",
+			description: "Distinct council members to convene (minimum 2). Defaults to all three: caspar, melchior, balthasar.",
 		}),
 	),
 });
@@ -116,14 +116,14 @@ export const CouncilParameters = Type.Object({
 export function resolveCouncilMembers(members?: readonly string[]): CouncilMemberSpec[] {
 	const rawList = members === undefined ? [...COUNCIL_MEMBER_IDS] : members;
 	if (!Array.isArray(rawList)) {
-		throw new Error("Council members must be an array of at least 2 distinct member IDs (carbon, astra, fable).");
+		throw new Error("Council members must be an array of at least 2 distinct member IDs (caspar, melchior, balthasar).");
 	}
 	const seen = new Set<CouncilMemberId>();
 	const resolved: CouncilMemberSpec[] = [];
 	for (const raw of rawList) {
 		const id = typeof raw === "string" ? raw.trim() : "";
 		if (!Object.prototype.hasOwnProperty.call(COUNCIL_MEMBERS, id)) {
-			throw new Error(`Unknown council member "${String(raw)}". Valid members: carbon, astra, fable.`);
+			throw new Error(`Unknown council member "${String(raw)}". Valid members: caspar, melchior, balthasar.`);
 		}
 		const memberId = id as CouncilMemberId;
 		if (seen.has(memberId)) {
@@ -167,9 +167,9 @@ const IDENTITY_LEAK_PATTERNS: readonly RegExp[] = [
 	/\bmagpie\/gemini-4-carbon\b/gi,
 	/\bmagpie\/gpt-6-astra\b/gi,
 	/\bmagpie\/claude-fable-5-2\b/gi,
-	/\bcouncil-carbon\b/gi,
-	/\bcouncil-astra\b/gi,
-	/\bcouncil-fable\b/gi,
+	/\bcouncil-caspar\b/gi,
+	/\bcouncil-melchior\b/gi,
+	/\bcouncil-balthasar\b/gi,
 	/\bgemini-4-carbon\b/gi,
 	/\bgpt-6-astra\b/gi,
 	/\bclaude-fable-5-2\b/gi,
@@ -352,9 +352,9 @@ const DEFAULT_PING_TIMEOUT_MS = 1000;
 export const COUNCIL_USAGE = [
 	"Usage: /council <topic or design question>",
 	"Pinned council members:",
-	`  - carbon: ${COUNCIL_MEMBERS.carbon.agentType} (${COUNCIL_MEMBERS.carbon.model}, thinking: ${COUNCIL_MEMBERS.carbon.thinking})`,
-	`  - astra: ${COUNCIL_MEMBERS.astra.agentType} (${COUNCIL_MEMBERS.astra.model}, thinking: ${COUNCIL_MEMBERS.astra.thinking})`,
-	`  - fable:  ${COUNCIL_MEMBERS.fable.agentType} (${COUNCIL_MEMBERS.fable.model}, thinking: ${COUNCIL_MEMBERS.fable.thinking})`,
+	`  - caspar: ${COUNCIL_MEMBERS.caspar.agentType} (${COUNCIL_MEMBERS.caspar.model}, thinking: ${COUNCIL_MEMBERS.caspar.thinking})`,
+	`  - melchior: ${COUNCIL_MEMBERS.melchior.agentType} (${COUNCIL_MEMBERS.melchior.model}, thinking: ${COUNCIL_MEMBERS.melchior.thinking})`,
+	`  - balthasar:  ${COUNCIL_MEMBERS.balthasar.agentType} (${COUNCIL_MEMBERS.balthasar.model}, thinking: ${COUNCIL_MEMBERS.balthasar.thinking})`,
 ].join("\n");
 
 export default function councilExtension(pi: ExtensionAPI): void {
@@ -396,9 +396,9 @@ export default function councilExtension(pi: ExtensionAPI): void {
 		name: "council",
 		label: "Council",
 		description:
-			"Convene a 3-model read-only technical council (Carbon on magpie/gemini-4-carbon, Astra on magpie/gpt-6-astra, Fable on magpie/claude-fable-5-2) for a 2-round deliberation on difficult architecture, design, or tradeoff questions. Round 1 gathers independent codebase-grounded proposals in parallel; Round 2 resumes each advisor with anonymized, position-swapped peer proposals (Peer A, Peer B) and a verbosity-normalized rubric before returning the full deliberation for stake-free synthesis.",
+			"Convene a 3-model read-only technical council (Caspar on magpie/gemini-4-carbon, Melchior on magpie/gpt-6-astra, Balthasar on magpie/claude-fable-5-2) for a 2-round deliberation on difficult architecture, design, or tradeoff questions. Round 1 gathers independent codebase-grounded proposals in parallel; Round 2 resumes each advisor with anonymized, position-swapped peer proposals (Peer A, Peer B) and a verbosity-normalized rubric before returning the full deliberation for stake-free synthesis.",
 		promptSnippet:
-			"Convene the 3-model read-only technical council (Carbon, Astra, Fable) for 2-round architectural deliberation",
+			"Convene the 3-model read-only technical council (Caspar, Melchior, Balthasar) for 2-round architectural deliberation",
 		promptGuidelines: [
 			"Use `council` when the user invokes `/council`, asks for the council, or faces a high-stakes architectural or design tradeoff that benefits from multi-model deliberation.",
 			"Never pass a `model` override to `council`; council advisors are pinned to their dedicated agent definitions.",
@@ -771,7 +771,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 
 	pi.registerCommand("council", {
 		description:
-			"Convene the 3-model technical council (carbon, astra, fable) for 2-round deliberation: /council <topic or design question>",
+			"Convene the 3-model technical council (caspar, melchior, balthasar) for 2-round deliberation: /council <topic or design question>",
 		handler: async (args, ctx) => {
 			const trimmed = (args ?? "").trim();
 			const lower = trimmed.toLowerCase();

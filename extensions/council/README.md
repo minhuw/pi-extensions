@@ -15,9 +15,9 @@ The council's three advisor definitions live in `extensions/council/agents/` and
 
 | Member ID | Agent definition | Pinned model | Thinking | Tools |
 | --- | --- | --- | --- | --- |
-| `carbon` | `council-carbon` | `magpie/gemini-4-carbon` | `high` | `read, bash, grep, find, ls` (read-only) |
-| `astra` | `council-astra` | `magpie/gpt-6-astra` | `xhigh` | `read, bash, grep, find, ls` (read-only) |
-| `fable` | `council-fable` | `magpie/claude-fable-5-2` | `high` | `read, bash, grep, find, ls` (read-only) |
+| `caspar` | `council-caspar` | `magpie/gemini-4-carbon` | `high` | `read, bash, grep, find, ls` (read-only) |
+| `melchior` | `council-melchior` | `magpie/gpt-6-astra` | `xhigh` | `read, bash, grep, find, ls` (read-only) |
+| `balthasar` | `council-balthasar` | `magpie/claude-fable-5-2` | `high` | `read, bash, grep, find, ls` (read-only) |
 
 Because `model_visible: false` is set on all three definitions, ordinary `Agent` calls, nested subagent tools, `@type` mentions, and workflows cannot spawn them directly or fall back to them. They are spawned exclusively over Subagents' cross-extension RPC (`subagents:rpc:spawn` and `subagents:rpc:send`, protocol >= 3). Raw `model` overrides on the `council` tool are rejected so the panel's model diversity is always preserved.
 
@@ -28,7 +28,7 @@ council({
   topic: "Design the retry and idempotency contract for batch ingestion",
   paths: ["src/ingest/batch.ts", "src/ingest/types.ts"],
   rounds: 2,
-  members: ["carbon", "astra", "fable"]
+  members: ["caspar", "melchior", "balthasar"]
 })
 ```
 
@@ -37,7 +37,7 @@ council({
 | `topic` | Required non-empty design question, architecture problem, or technical tradeoff. |
 | `paths` | Optional list of repository files or directories for advisors to inspect first. |
 | `rounds` | `1` (independent proposals only) or `2` (independent proposals + anonymized peer cross-examination). Defaults to `2`. |
-| `members` | Optional subset of `["carbon", "astra", "fable"]` with at least 2 distinct members. Defaults to all three. |
+| `members` | Optional subset of `["caspar", "melchior", "balthasar"]` with at least 2 distinct members. Defaults to all three. |
 
 1. **Round 1 — Independent Proposals:** `council` verifies Subagents RPC protocol `>= 3` (`subagents:rpc:ping`), then spawns the selected `council-<member>` agents in parallel via `subagents:rpc:spawn` (`notifyParent: false`, `retain: rounds === 2`, `isBackground: true`, `bypassQueue: true`). Each advisor inspects the codebase with read-only tools and produces a structured proposal (`### 1. Proposed Design / API Contract`, `### 2. Key Tradeoffs & Assumptions`, `### 3. Edge Cases & Failure Modes`).
 2. **Round 2 — Anonymized Cross-Examination:** When `rounds` is `2`, each surviving advisor session is resumed in parallel via `subagents:rpc:send` with the other advisors' Round 1 proposals labeled only as `Peer A` and `Peer B`. Each advisor responds with `### 1. Adopt`, `### 2. Critique`, and `### 3. Revised Design & Verdict` (`Stance: converged` or `Stance: tradeoff`).

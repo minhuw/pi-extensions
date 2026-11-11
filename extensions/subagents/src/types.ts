@@ -17,7 +17,7 @@ export type SubagentType = string;
 export const DEFAULT_AGENT_NAMES = ["recon", "worker"] as const;
 
 /** Names of the three model-hidden embedded council agents. */
-export const COUNCIL_AGENT_NAMES = ["council-carbon", "council-astra", "council-fable"] as const;
+export const COUNCIL_AGENT_NAMES = ["council-caspar", "council-melchior", "council-balthasar"] as const;
 
 /** Memory scope for persistent agent memory. */
 export type MemoryScope = "user" | "project" | "local";

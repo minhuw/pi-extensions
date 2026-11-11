@@ -313,15 +313,15 @@ describe("/agents model command & interactive Change model UI", () => {
       },
     });
 
-    const pinnedBefore = getAgentConfig("council-fable")?.model;
+    const pinnedBefore = getAgentConfig("council-balthasar")?.model;
     expect(pinnedBefore).toBe("magpie/claude-fable-5-2");
 
-    await command.handler("model council-fable magpie/deepseek-v3.2", context);
+    await command.handler("model council-balthasar magpie/deepseek-v3.2", context);
 
-    expect(getAgentConfig("council-fable")?.model).toBe("magpie/claude-fable-5-2");
+    expect(getAgentConfig("council-balthasar")?.model).toBe("magpie/claude-fable-5-2");
     expect(existsSync(join(getAgentDir(), SUBAGENT_MODELS_FILENAME))).toBe(false);
     expect(notes.at(-1)).toEqual({
-      text: 'Council advisor "council-fable" has a pinned model and cannot be overridden.',
+      text: 'Council advisor "council-balthasar" has a pinned model and cannot be overridden.',
       level: "warning",
     });
   });
