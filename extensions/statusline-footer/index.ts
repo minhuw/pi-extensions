@@ -7,19 +7,24 @@
  * a powerline bar on theme bands. Metrics remain ours: TTFT/TTFB, aggregate
  * throughput, cache ratio, session cost, and working-tree diff.
  *
- * Full mode: identity bar; optional activity/collaboration; performance;
- * resources; workspace. Detail rows share a rail that closes at workspace.
+ * Full mode picks a tier from the render width alone (FOOTER_TIERS), so the
+ * row count never jitters while streaming. Detail rows share a rail that
+ * closes at the last row.
+ *   desk (>= 175): identity bar; optional activity; telemetry; workspace.
  *    ├ herder: T2 integrate · 3/5 tasks                  📣 rep #dev  ⇌ #ops · 3 in · 2 out
- *    ├ # 13  ⏱ 1h 28m  ❯  tools 42                 ⏱ 4.2s  » 28.9 tok/s
- *    ├ $0.75  $0.06/turn                 ↑ 65k  ↓ 31k  ❮  ~2.4k memory
+ *    ├ # 13  ⏱ 1h 28m  ❯  ⚙ 42  ❯  ⏱ 4.2s  » 28.9 tok/s     $0.75  $0.06/turn  ❮  ↑ 65k  ↓ 31k
  *    ╰ ⎇ main  +42 −17                        ▤ 5 touched  ❮  ⌂ ~/…/my-project
+ *   laptop: identity bar; optional activity; essentials.
+ *    ╰ ⎇ main  +42 −17  ❯  $0.75  ❯  # 13  ⏱ 1h 28m      ⏱ 4.2s  » 28.9 tok/s  ❮  ⚡ 65%  ❮  ⌂ ~/…/my-project
+ *   phone (<= 71): one plain-text row.
+ *    opus-5-5 · HIGH · 42.5% · $0.75 · herder blocked
  *
  * Compact mode: the bar alone.
  *   ▌✻ model ▶ HIGH ▶ ──────── ◀ ▉▉▉░░░  42%  $1.23  12m ▐
  *
  * Usage:
  *   /footer            toggle on/off
- *   /footer full       multi-line layout (default)
+ *   /footer full       width-adaptive multi-line layout (default)
  *   /footer compact    1-line layout
  *   /footer off        restore pi's default footer
  *   /footer debug      show metric-collection internals
@@ -1356,6 +1361,26 @@ function ttftColor(ms: number): "success" | "warning" | "error" {
 	return "error";
 }
 
+/**
+ * Full mode's width tiers. The tier comes from the render width alone, never from the
+ * content's width, so the row count holds still while metrics and Git state change.
+ */
+export const FOOTER_TIERS = { deskMin: 175, phoneMax: 71 } as const;
+
+export type FooterTier = "desk" | "laptop" | "phone";
+
+/**
+ * How long each group of a tier's rows lasts when the row is short of space; lower ranks drop first.
+ * Actionable facts outlast diagnostics, and failed tool calls outlast all but the most actionable.
+ */
+export const DESK_RANKS = { memory: 0, think: 1, tools: 2, tokens: 3, latency: 4, turns: 5, toolErrors: 6, cost: 7 } as const;
+export const LAPTOP_RANKS = { cache: 0, latency: 1, turns: 2, cwd: 3, cost: 4, errors: 5, git: 6 } as const;
+
+export function footerTier(width: number): FooterTier {
+	if (width >= FOOTER_TIERS.deskMin) return "desk";
+	return width <= FOOTER_TIERS.phoneMax ? "phone" : "laptop";
+}
+
 function renderFull(
 	ctx: ExtensionContext,
 	theme: Theme,
@@ -1366,6 +1391,8 @@ function renderFull(
 ): string[] {
 	const s = collectStats(ctx, state);
 	const extensionStatuses = footerData.getExtensionStatuses();
+	const tier = footerTier(width);
+	if (tier === "phone") return [renderPhone(ctx, theme, width, s, extensionStatuses)];
 	const line1 = renderIdentityRow(
 		ctx,
 		theme,
@@ -1380,12 +1407,73 @@ function renderFull(
 		renderModes(theme, extensionStatuses),
 	);
 
-	return [line1, ...renderDetailRows(ctx, theme, footerData, width, state, s)];
+	return [line1, ...renderDetailRows(ctx, theme, footerData, width, state, s, tier)];
+}
+
+/** A model id without its vendor prefix, keeping the version: `claude-opus-5-5` reads `opus-5-5`. */
+export function shortModelName(id: string): string {
+	return id.replace(/^.*\//, "").replace(/^(?:claude|anthropic)-/i, "") || id;
+}
+
+/**
+ * `herder blocked`, `quota awaiting`, `bg 1 failed`: a status's leading word and its marker, with the
+ * marker's count. A status that opens with a symbol or with the marker itself is named by its key.
+ */
+export function phoneAlert(plain: string, key = ""): string | undefined {
+	const rank = statusRank(plain);
+	if (rank < 2) return undefined;
+	const match = (rank === 3 ? STATUS_PROBLEM : STATUS_ATTENTION).exec(plain)!;
+	const marker = match[0].replace(/^[\s:]/, "");
+	const count = /(?:^|\s)(\d+)\s+$/.exec(plain.slice(0, match.index + match[0].length - marker.length))?.[1];
+	const word = /^\p{L}[\p{L}\p{N}_-]*/u.exec(plain)?.[0];
+	const label = word && word.toLowerCase() !== marker.toLowerCase() ? word : key.replace(/^(?:magpie|pi)-/, "");
+	return cluster([label, count, marker], " ");
+}
+
+/**
+ * The phone tier: one row of plain text joined by ` · `, without Nerd Font glyphs, bands, or caps,
+ * because the font support of Orca's mobile WebView is unknown. The tail drops from the end; the
+ * model and context percentage stay, and the model is truncated before the percentage goes.
+ */
+function renderPhone(
+	ctx: ExtensionContext,
+	theme: Theme,
+	width: number,
+	s: Stats,
+	statuses: ReadonlyMap<string, string>,
+): string {
+	const model = ctx.model;
+	const usage = ctx.getContextUsage();
+	const sep = theme.fg("dim", " · ");
+	const name = theme.fg("accent", theme.bold(model ? shortModelName(model.id) : "no-model"));
+	let thinking = model?.reasoning ? renderThinking(theme, ctx.thinkingLevel ?? "off") : undefined;
+	const context = usage?.percent != null ? theme.fg("muted", `${usage.percent.toFixed(1)}%`) : undefined;
+	const unpriced = s.priceUnavailable || priceUnavailableForModel(ctx);
+	const cost = unpriced
+		? theme.fg("warning", "price?")
+		: theme.fg("text", `${s.priceEstimated ? "~" : ""}${fmtCost(s.cost)}`);
+	// Only statuses that need the user; problems before attention.
+	const alerts = activityStatuses(statuses)
+		.map(([key, text]) => ({ key, plain: stripVTControlCharacters(text) }))
+		.sort((a, b) => statusRank(b.plain) - statusRank(a.plain))
+		.flatMap(({ key, plain }) => {
+			const alert = phoneAlert(plain, key);
+			return alert ? [renderStatus(theme, alert, key)] : [];
+		});
+	const room = Math.max(0, width - 1);
+	const tail = [cost, ...alerts];
+	const line = (head: string) => cluster([head, thinking, context, ...tail], sep);
+	while (tail.length && visibleWidth(line(name)) > room) tail.pop();
+	if (visibleWidth(line(name)) > room) thinking = undefined;
+	const rest = line("");
+	const fitted = truncateToWidth(name, Math.max(0, room - visibleWidth(rest) - (rest ? 3 : 0)), "…");
+	return truncateToWidth(` ${line(fitted)}`, width);
 }
 
 // ── detail rows ────────────────────────────────────────────────────
-// Under the bar, activity, performance, resources, and workspace hang from the
-// chip on a rail. Facts come in groups split by thin chevrons that echo the
+// Under the bar, the optional activity row and the tier's rows hang from the
+// chip on a rail: telemetry and workspace at a desk, one essentials row on a
+// laptop. Facts come in groups split by thin chevrons that echo the
 // bar's arrows. Icons carry the hue and values stay muted, unless a value
 // reports a state such as a slow first token or failed tool calls. A row that
 // does not fit drops whole groups, least important first, instead of cutting
@@ -1469,6 +1557,7 @@ function renderDetailRows(
 	width: number,
 	state: SessionState,
 	s: Stats,
+	tier: Exclude<FooterTier, "phone">,
 ): string[] {
 	const set = icons();
 	const item = (icon: string, hue: ThemeToken, value: string, tone: ThemeToken = "muted") =>
@@ -1482,43 +1571,21 @@ function renderDetailRows(
 		item(set.turns, "dim", `${s.turns}`),
 		item(set.elapsed, "dim", fmtDuration(s.durationMs)),
 	], "  ");
-	const latency = cluster([
-		avgTtft != null
-			? item(set.ttft, ttftColor(avgTtft), fmtTtft(avgTtft), avgTtft < 2_000 ? "muted" : ttftColor(avgTtft))
-				+ (metrics.lastTtftMs != null && metrics.ttftCount > 1 ? theme.fg("dim", ` ${set.last} ${fmtTtft(metrics.lastTtftMs)}`) : "")
-			: item(set.ttft, "dim", "—", "dim"),
-		metrics.lastTtfbMs != null && item(set.ttfb, "dim", fmtTtft(metrics.lastTtfbMs), "dim"),
-		avg != null
-			? item(set.speed, "success", fmtTokPerSec(avg))
-				+ (metrics.lastTokPerSec != null && metrics.requests > 1 ? theme.fg("dim", ` ${set.last} ${fmtTokPerSec(metrics.lastTokPerSec)}`) : "")
-			: item(set.speed, "dim", "—", "dim"),
-	], "  ");
-	const tools = s.toolCalls > 0
-		? cluster([
-			item(set.calls, "syntaxFunction", `${s.toolCalls}`),
-			s.errors > 0
-				? item(set.err, "error", `${s.errors} (${((s.errors / s.toolCalls) * 100).toFixed(1)}%)`, "error")
-				: item(set.ok, "success", "0"),
-		], "  ")
-		: item(set.calls, "dim", "0", "dim");
+	const ttft = avgTtft != null
+		? item(set.ttft, ttftColor(avgTtft), fmtTtft(avgTtft), avgTtft < 2_000 ? "muted" : ttftColor(avgTtft))
+		: item(set.ttft, "dim", "—", "dim");
+	const speed = avg != null ? item(set.speed, "success", fmtTokPerSec(avg)) : item(set.speed, "dim", "—", "dim");
+	const errors = s.errors > 0
+		? item(set.err, "error", `${s.errors}${s.toolCalls > 0 ? ` (${((s.errors / s.toolCalls) * 100).toFixed(1)}%)` : ""}`, "error")
+		: "";
 
 	const unpriced = s.priceUnavailable || priceUnavailableForModel(ctx);
 	// The ASCII cost icon is itself a dollar sign, and the amount already has one.
 	const costIcon = (value: string, tone: ThemeToken) =>
 		hasNerdFonts() ? item(set.cost, "warning", value, tone) : theme.fg(tone, value);
-	const cost = unpriced
+	const amount = unpriced
 		? costIcon("price unavailable", "warning")
-		: costIcon(`${s.priceEstimated ? "~" : ""}${fmtCost(s.cost)}`, "text")
-			+ (s.turns > 0 ? theme.fg("dim", `  ${fmtCost(s.cost / s.turns)}/turn`) : "");
-	const tokens = cluster([
-		item(set.input, "toolDiffAdded", fmtTokens(s.input)),
-		item(set.output, "toolDiffRemoved", fmtTokens(s.output)),
-		s.cacheRead > 0 && item(set.cache, cacheColor, fmtTokens(s.cacheRead))
-			+ (cachePct != null ? ` ${theme.fg(cacheColor === "dim" ? "muted" : cacheColor, `${cachePct}%`)}` : ""),
-	], "  ");
-	const memory = s.memoryTokens > 0 ? theme.fg("dim", `~${fmtTokens(s.memoryTokens)} memory`) : "";
-	const think = s.reasoning > 0 ? theme.fg("dim", `${fmtTokens(s.reasoning)} think`) : "";
-
+		: costIcon(`${s.priceEstimated ? "~" : ""}${fmtCost(s.cost)}`, "text");
 	const statuses = footerData.getExtensionStatuses();
 	// Leave room between severity levels for Herder and collaboration tie-breakers.
 	const rankStep = statuses.size + 3;
@@ -1550,15 +1617,6 @@ function renderDetailRows(
 	];
 	const activityRows = leftStatuses.length || collaboration.length
 		? [railRow(theme, "├", leftStatuses, collaboration, width)] : [];
-	const performance = railRow(theme, "├", [
-		{ text: activity, rank: 3 },
-		{ text: tools, rank: 2 },
-	], [{ text: latency, rank: 5 }], width);
-	const resources = railRow(theme, "├", [{ text: cost, rank: 6 }], [
-		{ text: tokens, rank: 4 },
-		...(memory ? [{ text: memory, rank: 0 }] : []),
-		...(think ? [{ text: think, rank: 1 }] : []),
-	], width);
 
 	refreshGitStat(ctx.cwd, state);
 	const branch = footerData.getGitBranch();
@@ -1580,15 +1638,62 @@ function renderDetailRows(
 			(ahead > 0 || behind > 0) && `${theme.fg("success", `↑${ahead}`)} ${theme.fg("warning", `↓${behind}`)}`,
 		], "  ")
 		: item(set.branch, "dim", "no git", "dim");
-	const touched = s.files > 0 ? item(set.file, "dim", `${s.files} touched`) : "";
-	const pathRoom = railRoom(width) - visibleWidth(git) - visibleWidth(`${set.cwd} `)
-		- (touched ? visibleWidth(touched) + RAIL_SEP_WIDTH : 0);
-	const cwd = item(set.cwd, "dim", shortenPath(formatPath(ctx.cwd), Math.max(12, pathRoom)));
-	const workspace = railRow(theme, "╰", [{ text: git, rank: 4 }], [
-		...(touched ? [{ text: touched, rank: 1 }] : []),
-		{ text: cwd, rank: 3 },
+	// The path takes the room the row's other groups leave, so it shortens before they drop.
+	const cwd = (left: Group[], right: Group[]): string => {
+		const others = [...left, ...right];
+		const seps = Math.max(0, left.length - 1) + right.length;
+		const pathRoom = railRoom(width) - visibleWidth(`${set.cwd} `)
+			- others.reduce((sum, group) => sum + visibleWidth(group.text), 0) - seps * RAIL_SEP_WIDTH;
+		return item(set.cwd, "dim", shortenPath(formatPath(ctx.cwd), Math.max(12, pathRoom)));
+	};
+
+	if (tier === "laptop") {
+		// One row of what to act on.
+		const left: Group[] = [
+			{ text: git, rank: LAPTOP_RANKS.git },
+			{ text: amount, rank: LAPTOP_RANKS.cost },
+			{ text: activity, rank: LAPTOP_RANKS.turns },
+			...(errors ? [{ text: errors, rank: LAPTOP_RANKS.errors }] : []),
+		];
+		const right: Group[] = [
+			{ text: cluster([ttft, speed], "  "), rank: LAPTOP_RANKS.latency },
+			...(cachePct != null ? [{ text: item(set.cache, cacheColor, `${cachePct}%`, cacheColor === "dim" ? "muted" : cacheColor), rank: LAPTOP_RANKS.cache }] : []),
+		];
+		return [...activityRows, railRow(theme, "╰", left, [...right, { text: cwd(left, right), rank: LAPTOP_RANKS.cwd }], width)];
+	}
+
+	const latency = cluster([
+		ttft + (avgTtft != null && metrics.lastTtftMs != null && metrics.ttftCount > 1 ? theme.fg("dim", ` ${set.last} ${fmtTtft(metrics.lastTtftMs)}`) : ""),
+		metrics.lastTtfbMs != null && item(set.ttfb, "dim", fmtTtft(metrics.lastTtfbMs), "dim"),
+		speed + (avg != null && metrics.lastTokPerSec != null && metrics.requests > 1 ? theme.fg("dim", ` ${set.last} ${fmtTokPerSec(metrics.lastTokPerSec)}`) : ""),
+	], "  ");
+	const tools = s.toolCalls > 0
+		? cluster([item(set.calls, "syntaxFunction", `${s.toolCalls}`), errors || item(set.ok, "success", "0")], "  ")
+		: item(set.calls, "dim", "0", "dim");
+	const cost = amount + (!unpriced && s.turns > 0 ? theme.fg("dim", `  ${fmtCost(s.cost / s.turns)}/turn`) : "");
+	const tokens = cluster([
+		item(set.input, "toolDiffAdded", fmtTokens(s.input)),
+		item(set.output, "toolDiffRemoved", fmtTokens(s.output)),
+		s.cacheRead > 0 && item(set.cache, cacheColor, fmtTokens(s.cacheRead))
+			+ (cachePct != null ? ` ${theme.fg(cacheColor === "dim" ? "muted" : cacheColor, `${cachePct}%`)}` : ""),
+	], "  ");
+	const memory = s.memoryTokens > 0 ? theme.fg("dim", `~${fmtTokens(s.memoryTokens)} memory`) : "";
+	const think = s.reasoning > 0 ? theme.fg("dim", `${fmtTokens(s.reasoning)} think`) : "";
+	// Performance on the left, resources on the right, in one row.
+	const telemetry = railRow(theme, "├", [
+		{ text: activity, rank: DESK_RANKS.turns },
+		{ text: tools, rank: s.errors > 0 ? DESK_RANKS.toolErrors : DESK_RANKS.tools },
+		{ text: latency, rank: DESK_RANKS.latency },
+	], [
+		{ text: cost, rank: DESK_RANKS.cost },
+		{ text: tokens, rank: DESK_RANKS.tokens },
+		...(memory ? [{ text: memory, rank: DESK_RANKS.memory }] : []),
+		...(think ? [{ text: think, rank: DESK_RANKS.think }] : []),
 	], width);
-	return [...activityRows, performance, resources, workspace];
+	const touched: Group[] = s.files > 0 ? [{ text: item(set.file, "dim", `${s.files} touched`), rank: 1 }] : [];
+	const gitGroup: Group[] = [{ text: git, rank: 4 }];
+	const workspace = railRow(theme, "╰", gitGroup, [...touched, { text: cwd(gitGroup, touched), rank: 3 }], width);
+	return [...activityRows, telemetry, workspace];
 }
 
 // ── extension ───────────────────────────────────────────────────────
@@ -1757,7 +1862,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("footer", {
-		description: "Statusline footer: /footer [full|compact|off|debug]",
+		description: `Statusline footer: /footer [full|compact|off|debug]; full adapts to width (desk >= ${FOOTER_TIERS.deskMin} cols, phone <= ${FOOTER_TIERS.phoneMax}, laptop between)`,
 		handler: async (args, ctx) => {
 			pi.appendEntry("pi-extensions.command", { command: "footer", kind: "extension", extension: "statusline-footer" });
 			const next = args.trim().toLowerCase();

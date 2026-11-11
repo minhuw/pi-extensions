@@ -20,29 +20,47 @@ Full mode is enabled by default when Pi starts.
 
 ## Layout
 
-Full mode has four rows: identity, performance, resources, and workspace. An activity row appears immediately below identity while a workflow, process, other extension status, representative role, joined room, or relay message count is present. Every existing metric remains available by default, with performance and resources on separate rows so they fit together at ordinary terminal widths. The example uses ASCII/Unicode icons; the bar's groups sit on colored bands:
+Full mode picks one of three tiers from the terminal width alone, so the row count never changes while a response streams or Git state settles. An activity row appears immediately below the bar in the desk and laptop tiers while a workflow, process, other extension status, representative role, joined room, or relay message count is present. The examples use ASCII/Unicode icons; on a themed band, the bar's groups sit on colored bands.
+
+**Desk** (175 columns or more): the bar, the optional activity row, one telemetry row, and the workspace row. The desk keeps every metric:
 
 ```text
- ● ☾ k3   HIGH  (moonshot)  English  ─────────────────────────────────────────────  × 2×  ▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉  8.2%  79k/1.1M
- ├ herder: T2 integrate · 3/5 tasks  │  ↻ build · next 4m  │  bg 1 failed           📣 rep #dev  │  ⇌ #ops · 3 in · 2 out
- ├ # 13  ⏱ 1h 28m  │  ⚙ 42  ✕ 1 (2.4%)                                     ⏱ 302ms ↺ 301ms  ⇄ 120ms  » 92 tok/s ↺ 91 tok/s
- ├ $0.750  $0.058/turn                                                   ↑ 65k  ↓ 31k  ⚡ 120k 65%  │  ~2.4k memory  │  12k think
- ╰ ⎇ main  +42 −17  ↑2 ↓1                                                                   ▤ 5 touched  │  ⌂ ~/code/my-project
+ ✻ claude-opus-5-5  HIGH  (anthropic)                                                                                                                  × 0×  ▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉  42.5%  43k/100k
+ ├ herder: T2 verify blocked · 3/5 tasks                                                                                                                                             📣 rep #dev
+ ├ # 2  ⏱ 1h 00m  │  ⚙ 2  ✕ 1 (50.0%)  │  ⏱ 300ms ↺ 400ms  ⇄ 150ms  » 133 tok/s ↺ 150 tok/s                      $0.750  $0.375/turn  │  ↑ 65k  ↓ 31k  ⚡ 120k 65%  │  ~450 memory  │  12k think
+ ╰ ⎇ main  +42 −17  ↑2 ↓1                                                                                                                                    ▤ 2 touched  │  ⌂ ~/code/my-project
+```
+
+**Laptop** (72 to 174 columns): the bar, the optional activity row, and one essentials row:
+
+```text
+ ✻ claude-opus-5-5  HIGH  (anthropic)                                                                       × 0×  ▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉  42.5%  43k/100k
+ ├ herder: T2 verify blocked · 3/5 tasks                                                                                                  📣 rep #dev
+ ╰ ⎇ main  +42 −17  ↑2 ↓1  │  $0.750  │  # 2  ⏱ 1h 00m  │  ✕ 1 (50.0%)                        ⏱ 300ms  » 133 tok/s  │  ⚡ 65%  │  ⌂ ~/code/my-project
+```
+
+**Phone** (71 columns or fewer, such as Orca's iPhone companion): exactly one row of plain text, without Nerd Font glyphs (whatever `STATUSLINE_NERD_FONTS` says), bands, or caps:
+
+```text
+ opus-5-5 · HIGH · 42.5% · $0.750 · herder blocked
 ```
 
 | Row | Left | Right |
 | --- | --- | --- |
-| Identity | Live pulse, queued chip, model, Fast or non-standard service tier, thinking, provider, language, spokesman | Swarm and self-driving modes; compactions, gradient bar, percent, used/window |
-| Activity (optional) | Magpie quota wait, Research, Herder, Goal, background processes, subagents, Impeccable, then other extension statuses | Representative role, joined relay rooms, messages received and sent |
-| Performance | Turns, elapsed time, tool calls, errors and error rate | Average/last TTFT, last TTFB, average/last throughput |
-| Resources | Cost and cost per turn | Input / output / cached-input tokens and cache hit rate; Pika memory's context share; reasoning tokens |
-| Workspace (last) | Git branch, working-tree diff, ahead/behind | Files touched, current directory |
+| Identity (desk, laptop) | Live pulse, queued chip, model, Fast or non-standard service tier, thinking, provider, language, spokesman | Swarm and self-driving modes; compactions, gradient bar, percent, used/window |
+| Activity (desk, laptop; optional) | Magpie quota wait, Research, Herder, Goal, background processes, subagents, Impeccable, then other extension statuses | Representative role, joined relay rooms, messages received and sent |
+| Telemetry (desk) | Turns and elapsed time; tool calls, errors and error rate; average/last TTFT, last TTFB, average/last throughput | Cost and cost per turn; input / output / cached-input tokens and cache hit rate; Pika memory's context share; reasoning tokens |
+| Workspace (desk, last) | Git branch, working-tree diff, ahead/behind | Files touched, current directory |
+| Essentials (laptop, last) | Git branch, working-tree diff, ahead/behind; cost; turns and elapsed time; tool errors and error rate, only when a tool call failed | Average TTFT and average throughput; cache hit rate; current directory |
+| Phone | The model without its vendor prefix (`claude-opus-5-5` reads `opus-5-5`), thinking level in its color, context percentage, cost (`price?` when unpriced), then attention and problem statuses | — |
+
+A laptop leaves out TTFB, the last-request (`↺`) values, cost per turn, the token counts, memory, reasoning, touched files, and the tool count when no call failed. The phone row shows an extension status only when it needs the user, as its leading word and severity marker, problems first: `herder blocked`, `quota awaiting`, `bg 1 failed`. Routine statuses, collaboration, language, spokesman, and modes stay off it.
 
 The collaboration side of the activity row shows the representative role followed by joined [Pika](../pika/README.md) chatrooms and message counts (`📣 rep #dev  │  ⇌ #ops · 3 in · 2 out`). Pika publishes live membership through `ctx.ui.setStatus("relay-rooms", "#dev #ops")`: a plain string of sorted, sanitized room labels, cleared with `undefined` when no rooms are joined. The footer reads that status on every render, including when no messages have been exchanged or no workflow is active. Clearing it removes the room labels immediately. A room already present as an exact whitespace-delimited token in a plain representative status appears only once; `#dev` and `#dev-old` remain separate. Other joined rooms stay visible. Publisher-styled representative text keeps its own ANSI formatting.
 
 The counts tally relay messages received and sent on the current session branch, read from Pika relay's `relay-received` and `relay-sent` session entries. A side with no messages is left out; without joined rooms, the group keeps its count-only form (`⇌ 2 out`). The group disappears only when there are neither rooms nor messages. Compact mode includes the representative role and additional room labels as an optional tail when space allows, with the same room deduplication; it omits the message counts.
 
-The `~2.4k memory` group on the resources row shows how much of the context [Pika](../pika/README.md) memory uses: its memory section pinned in the system prompt, plus the `memory_read`, `memory_save`, and `memory_forget` results still in context, estimated at four characters per token. The footer reads the section's index from Pika memory's `pika-memory` session entry and the tool results from the current session branch; results that a compaction summarized away stop counting. The group disappears at zero, and compact mode does not show it.
+The `~2.4k memory` group on the desk's telemetry row shows how much of the context [Pika](../pika/README.md) memory uses: its memory section pinned in the system prompt, plus the `memory_read`, `memory_save`, and `memory_forget` results still in context, estimated at four characters per token. The footer reads the section's index from Pika memory's `pika-memory` session entry and the tool results from the current session branch; results that a compaction summarized away stop counting. The group disappears at zero, and the laptop, phone, and compact layouts do not show it.
 
 The model name starts with its vendor's mark in the vendor's color. These are the OpenAI and Claude logos (Nerd Fonts 3.5 or later), the Google logo for Gemini, and related symbols for Kimi, DeepSeek, Grok, Llama, Mistral, and Qwen; with `STATUSLINE_NERD_FONTS=0`, Unicode marks such as `✻` (Claude), `⊛` (OpenAI), `✦` (Gemini), and `☾` (Kimi) take their place. The model id is matched before the provider, so Claude served through Vertex or Magpie still gets the Claude mark; an unrecognized model has none.
 
@@ -58,9 +76,9 @@ Magpie publishes `ctx.ui.setStatus("magpie-quota", text)` while checking quota, 
 
 Full mode shows workflow and process statuses together on the left of the activity row, ordered as Magpie quota wait, research, Herder, Goal, background processes, subagents, Impeccable, then unknown extensions. Collaboration sits on the right. When the row is crowded, Herder outlasts routine activity and collaboration, and Goal outlasts routine research and collaboration. Goal can shorten to a useful prefix; attention and problem statuses still take precedence. If an attention or problem Herder status cannot fit alone, a same-severity extension or representative status that fits takes priority. Clearing a status removes it immediately; the row disappears when neither side has content.
 
-At narrow widths, both layouts preserve the model and context percentage. Workflow summaries and secondary details drop out, and the context bar shrinks or disappears before the model is truncated.
+At narrow widths, every layout preserves the model and context percentage. In compact mode and on a laptop's bar, workflow summaries and secondary details drop out, and the context bar shrinks or disappears before the model is truncated. The phone row drops from its end, the thinking level last, and truncates the model before it would drop the context percentage.
 
-The `language` status from [Language](../language/README.md) and the `spokesman` status from [Spokesman](../spokesman/README.md) stay in the bar in both modes, so they do not keep the activity row open. They follow the provider in full mode and any workflow summary in compact mode, with `spokesman` to the right of `language`. The provider, token counts, and compact mode's cost and elapsed time give way before `language` and `spokesman` do. As width narrows further, `spokesman` drops out whole before `language`, and `language` drops out whole when it no longer fits beside the model and context percentage. Compact mode keeps workflow and background-process summaries as long as they fit. Its optional collaboration tail gives way before cost and elapsed time, preserving those summaries and the model and context percentage.
+The `language` status from [Language](../language/README.md) and the `spokesman` status from [Spokesman](../spokesman/README.md) stay in the bar in both modes (the phone row has no bar and omits them), so they do not keep the activity row open. They follow the provider in full mode and any workflow summary in compact mode, with `spokesman` to the right of `language`. The provider, token counts, and compact mode's cost and elapsed time give way before `language` and `spokesman` do. As width narrows further, `spokesman` drops out whole before `language`, and `language` drops out whole when it no longer fits beside the model and context percentage. Compact mode keeps workflow and background-process summaries as long as they fit. Its optional collaboration tail gives way before cost and elapsed time, preserving those summaries and the model and context percentage.
 
 The `swarm` status from [Delegation](../delegation/README.md) and the `selfdrive` status from [Selfdrive](../selfdrive/README.md) stay in the bar in both modes, on the right just before the compaction count, in that order. They outlast every other bar status: the left side's statuses give way to them, and they drop out together only when they no longer fit beside the model and context percentage. The `representative` status from [pika relay](../pika/README.md#representatives) belongs to collaboration on the activity row in full mode and the optional tail in compact mode.
 
@@ -74,10 +92,10 @@ The `swarm` status from [Delegation](../delegation/README.md) and the `selfdrive
 
 ### The rows below
 
-- Activity, performance, resources, and workspace hang from the bar on a `├`/`╰` rail in the theme's `borderMuted` color. Workspace always closes it, whether the optional activity row is present or absent. The rows are not filled, so the bar leads.
-- Each row's facts come in groups, separated by thin chevrons in `borderMuted` that point the way the bar's arrows do; without Nerd Fonts they are `│`. Performance separates turn/time and tool activity from latency and throughput. Resources separates cost from tokens, memory, and reasoning.
+- The activity row and the tier's rows hang from the bar on a `├`/`╰` rail in the theme's `borderMuted` color. The last row, workspace at a desk and essentials on a laptop, always closes it with `╰`, whether the optional activity row is present or absent. The rows are not filled, so the bar leads.
+- Each row's facts come in groups, separated by thin chevrons in `borderMuted` that point the way the bar's arrows do; without Nerd Fonts they are `│`. The telemetry row puts turn/time, tool activity, and latency and throughput on the left, and cost, tokens, memory, and reasoning on the right.
 - Icons carry the color and values stay `muted`, with the cost in `text` so it reads first. A value turns colored only to report a state: a first token slower than two seconds, failed tool calls, or the cache hit rate.
-- At very small widths, rows drop whole secondary groups using the same rank fitter. Performance drops tools, then turn/time before latency; resources drops memory, reasoning, then tokens before cost. On the activity row, problem statuses outlast attention statuses, which outlast routine ones. Herder outlasts routine collaboration and other routine activity, and Goal outlasts routine collaboration and research; otherwise collaboration outlasts routine summaries, and ties among extension summaries keep their established order. Priority reads only published status text and leaves each status's familiar identity color intact. Relay rooms and counts form one optional group. The workspace path shortens from the middle (`~/…/project`); the touched-file count gives way before Git or the path. Both layouts continue to protect the model and context percentage.
+- A row that does not fit drops whole groups, least important first, and never adds a row. The desk's telemetry row drops memory, then reasoning, tokens, latency and throughput, and turn/time before cost; the tool count goes right after reasoning, but once a tool call has failed it outlasts everything except cost. The laptop's essentials row drops the cache rate, then latency and throughput, turn/time, the path, and cost before Git; failed tool calls outlast everything except Git. On the activity row, problem statuses outlast attention statuses, which outlast routine ones. Herder outlasts routine collaboration and other routine activity, and Goal outlasts routine collaboration and research; otherwise collaboration outlasts routine summaries, and ties among extension summaries keep their established order. Priority reads only published status text and leaves each status's familiar identity color intact. Relay rooms and counts form one optional group. The path shortens from the middle (`~/…/project`) before other groups drop; on the workspace row the touched-file count gives way before Git or the path. Every layout continues to protect the model and context percentage.
 
 Each extension status keeps one identity color, drawn from the theme's link, syntax, success, and border colors, for its icon and its first segment (split at ` · ` and `, `); the details stay `muted`. The footer never picks a red hue or one close to the theme's error or warning colors, so a routine status cannot look like a failure. Known extensions keep fixed colors; others get a stable color from their key. The activity row also gives each status an icon: a clock for Magpie quota waits, a flask for research, a sheep for Herder, a target for Goal, a console for background processes, a robot for subagents, a palette for Impeccable, and a puzzle piece for other extensions. The language and spokesman get translate and voice icons in the bar in both modes, because a bare name does not say what it is. A status that starts with its own symbol, such as a publisher’s own `↻`, gets no second icon, and compact mode shows no other status icons. Only the segments that report a problem stand out, and none of them in red: `failed`, `stuck`, `error`, `blocked`, or `not_met` use bold `warning`, and `paused`, `awaiting`, `stopping`, `killed`, or `for you` use `warning`; for example, in `bg 2 running · 1 failed` only `1 failed` turns amber. Matching is whole-word, so a status named `fix-errors` stays calm. A status that already contains ANSI colors keeps them.
 
@@ -104,8 +122,8 @@ For a single status display, leave pi-processes' **status widget** disabled in `
 | Command | Effect |
 | --- | --- |
 | `/footer` | Toggle the custom footer on or off. |
-| `/footer full` | Use the multi-line layout. |
-| `/footer compact` | Use the one-row layout. |
+| `/footer full` | Use the multi-line layout, which adapts to the width: desk, laptop, or phone tier. |
+| `/footer compact` | Use the one-row layout at any width. |
 | `/footer off` | Restore Pi's default footer. |
 | `/footer debug` | Show metric-collection diagnostics for provider latency. |
 
@@ -118,7 +136,7 @@ For a single status display, leave pi-processes' **status widget** disabled in `
 - Streaming metrics are measured passively from Pi's provider and message events rather than estimated. Completed samples survive `/reload` through a small session custom entry; a new, resumed, or restarted session starts fresh streaming metrics.
 - Telemetry is scoped to the interactive TUI session, so programmatic child sessions such as `@tintinweb/pi-subagents` cannot reset or contaminate parent TTFT and token-throughput samples.
 - TTFB and TTFT are shown separately to distinguish connection latency from a silent or buffered stream.
-- Session cost, cost per turn, cache hit ratio, input/output totals, turns, compactions, tool calls, and errors come from session history. Magpie costs use upstream API estimates, displayed with `~$`. An unpriced selected Magpie model or any unpriced session usage shows **price unavailable** in both layouts and hides the dollar-per-turn average. Earlier Magpie messages with tokens but zero recorded cost remain unpriced; historical costs are not recalculated. Explicitly priced zero-cost usage and free models from other providers still display zero. ASCII mode shows a single dollar sign.
+- Session cost, cost per turn, cache hit ratio, input/output totals, turns, compactions, tool calls, and errors come from session history. Magpie costs use upstream API estimates, displayed with `~$`. An unpriced selected Magpie model or any unpriced session usage shows **price unavailable** in both layouts (`price?` on the phone row) and hides the dollar-per-turn average. Earlier Magpie messages with tokens but zero recorded cost remain unpriced; historical costs are not recalculated. Explicitly priced zero-cost usage and free models from other providers still display zero. ASCII mode shows a single dollar sign.
 - Git branch and working-tree additions/deletions refresh asynchronously in the background.
 - Session statistics are cached by the current branch leaf, keeping streaming renders inexpensive.
 - Icons and semantic colors follow the active Pi theme.

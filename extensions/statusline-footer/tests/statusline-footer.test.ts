@@ -7,6 +7,9 @@ import { PROCESS_STATUS_KEY, summarizeProcesses } from "../processes.ts";
 import { execFile } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import statuslineFooter, {
+	DESK_RANKS,
+	FOOTER_TIERS,
+	LAPTOP_RANKS,
 	alignRow,
 	chipInk,
 	contrastRatio,
@@ -366,11 +369,10 @@ describe("statusline footer responsive identity and icons", () => {
 				}
 				const narrow = harness.getFooter()!.render(40)[0]!;
 				expect(narrow).not.toContain("openai");
-				if (mode === "full") {
-					expect(narrow).toContain("43k/100k");
-					expect(narrow).not.toContain("▉");
-				} else expect(narrow).not.toContain("100k");
-				expect([...narrow].filter((char) => char === "▉").length).toBeLessThan(mode === "full" ? 18 : 10);
+				// Full mode is the phone's single plain row at 40 columns: no bar and no token counts.
+				expect(narrow).not.toContain("100k");
+				if (mode === "full") expect(narrow).not.toContain("▉");
+				else expect([...narrow].filter((char) => char === "▉").length).toBeLessThan(10);
 			} finally {
 				harness.disposeFooter();
 				await harness.emit("session_shutdown", { reason: "quit" });
@@ -484,23 +486,27 @@ describe("statusline footer rendering", () => {
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { type: "session_start", reason: "startup" });
 
+		// A laptop: the bar, the READY status, and one essentials row.
 		const lines = harness.getFooter()!.render(100);
-		expect(lines).toHaveLength(5);
+		expect(lines).toHaveLength(3);
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(100);
 		expect(lines[0]).toContain("k3");
 		expect(lines[0]).toContain("HIGH");
 		expect(lines[0]).toContain("42.5%");
-		// The telemetry row hangs from the bar on the rail.
+		// The rows hang from the bar on the rail.
 		expect(lines[1]!.startsWith(" ├ ")).toBe(true);
-		expect(lines.at(-2)).toContain("$1.35");
-		expect(lines.at(-2)).toContain("195 think");
-		// With room for every group, the reasoning count, the first to give way, returns.
-		const wide = harness.getFooter()!.render(200).at(-2)!;
-		for (const fact of ["$1.35", "1.9k", "475", "950", "195 think"]) expect(wide).toContain(fact);
-		expect(lines.at(-1)).toContain("main");
-		expect(lines.at(-1)).toContain("1 touched");
-		expect(lines.at(-1)).not.toContain("READY");
 		expect(lines[1]).toContain("READY");
+		expect(lines[2]!.startsWith(" ╰ ")).toBe(true);
+		// The failed tool result stays; the cache rate is the first to give way.
+		for (const fact of ["main", "$1.35", "1 (100.0%)", "/tmp/project"]) expect(lines[2]).toContain(fact);
+		for (const diagnostic of ["195 think", "1 touched", "/turn", "READY"]) expect(lines[2]).not.toContain(diagnostic);
+		// A desk has room for every group, the reasoning count included, on one telemetry row.
+		const wide = harness.getFooter()!.render(200);
+		expect(wide).toHaveLength(4);
+		for (const fact of ["$1.35", "1.9k", "475", "950", "195 think"]) expect(wide.at(-2)).toContain(fact);
+		expect(wide.at(-1)).toContain("main");
+		expect(wide.at(-1)).toContain("1 touched");
+		expect(wide.at(-1)).not.toContain("READY");
 		harness.getFooter()?.dispose?.();
 	});
 
@@ -645,7 +651,7 @@ describe("statusline footer rendering", () => {
 
 		await harness.runCommand("footer", "full");
 		const full = harness.getFooter()!.render(80);
-		expect(full).toHaveLength(5);
+		expect(full).toHaveLength(3);
 		for (const line of full) expect(visibleWidth(line)).toBeLessThanOrEqual(80);
 		harness.getFooter()?.dispose?.();
 	});
@@ -686,11 +692,13 @@ describe("statusline footer rendering", () => {
 			const ordinary = harness.getFooter()!.render(80)[row]!;
 			expect(ordinary).toContain("herder: T2 integrate");
 			expect(ordinary).toContain("goal: migrate");
+			// Full mode's narrowest activity row is a laptop's.
+			const narrow = mode === "full" ? 72 : 60;
 			harness.setStatus("goal", "goal: migration blocked · needs input");
-			const attention = harness.getFooter()!.render(60)[row]!;
+			const attention = harness.getFooter()!.render(narrow)[row]!;
 			expect(attention).toContain("blocked");
 			harness.setStatus("goal", "goal: migration paused · needs input");
-			expect(harness.getFooter()!.render(60)[row]).toContain("paused");
+			expect(harness.getFooter()!.render(narrow)[row]).toContain("paused");
 			harness.setStatus("goal");
 			expect(harness.getFooter()!.render(160).join("\n")).not.toContain("goal:");
 		} finally { harness.disposeFooter(); }
@@ -771,9 +779,9 @@ describe("statusline footer rendering", () => {
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
-			for (const width of [55, 80, 120]) {
+			for (const width of [72, 80, 120]) {
 				const lines = harness.getFooter()!.render(width);
-				expect(lines).toHaveLength(5);
+				expect(lines).toHaveLength(3);
 				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 				expect(lines.at(-1)).toContain("main");
 				expect(lines.at(-1)).toContain("/…/");
@@ -787,7 +795,7 @@ describe("statusline footer rendering", () => {
 			harness.setStatus("goal", "↻ wait · next 4m");
 			expect(harness.getFooter()!.render(80)[1]).toContain("↻ wait · next 4m");
 			for (const key of ["goal", "other", "READY"]) harness.setStatus(key);
-			expect(harness.getFooter()!.render(80)).toHaveLength(4);
+			expect(harness.getFooter()!.render(80)).toHaveLength(2);
 		} finally {
 			harness.disposeFooter();
 		}
@@ -818,7 +826,7 @@ describe("statusline footer rendering", () => {
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
-			for (const width of [60, 80, 120]) {
+			for (const width of [72, 80, 120]) {
 				const lines = harness.getFooter()!.render(width);
 				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 				expect(lines[1]).toContain("herder: T2 integrate · 3/5 tasks");
@@ -906,21 +914,22 @@ describe("statusline footer rendering", () => {
 		await harness.emit("session_start", { reason: "startup" });
 		try {
 			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
-			for (const width of [40, 80, 160]) {
+			for (const width of [72, 80, 160]) {
 				const lines = harness.getFooter()!.render(width);
 				for (const line of lines) expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
 				expect(lines[0], `${width}`).toContain("k3");
 				expect(lines[0], `${width}`).toContain("42.5%");
 				expect(lines[1], `${width}`).toContain("herder: T2 integrate · 3/5 tasks");
 			}
-			const narrow = () => harness.getFooter()!.render(40)[1]!;
+			const narrow = () => harness.getFooter()!.render(72)[1]!;
 			expect(narrow()).not.toContain("rep #dev");
-			expect(narrow()).not.toContain("#ops");
+			expect(narrow()).not.toContain("research");
 			harness.setStatus("magpie-quota", "quota paused · resume manually");
 			expect(narrow()).toContain("quota paused · resume manually");
 			expect(narrow()).not.toContain("herder:");
-			harness.setStatus("custom", "build blocked");
-			expect(narrow()).toContain("build blocked");
+			// Too long to share a laptop's row with the quota wait.
+			harness.setStatus("custom", "build blocked · waiting on the release lock");
+			expect(narrow()).toContain("build blocked · waiting on the release lock");
 			expect(narrow()).not.toContain("quota paused");
 			harness.setStatus("custom");
 			harness.setStatus("magpie-quota");
@@ -1043,15 +1052,19 @@ describe("statusline footer rendering", () => {
 	it.each(["0", "1"])("keeps fitting errors visible and ranks colon ANSI severity (Nerd Fonts %s)", async (nerdFonts) => {
 		const quota = "quota \x1b[38:2::255:0:0mfailed\x1b[0m";
 		const harness = createHarness(`herder-errors-${nerdFonts}`, "tui", {
-			extensionStatuses: [], keyedExtensionStatuses: { "magpie-quota": quota, herder: "herder: T2 test operation failed · 3/5 tasks" },
+			extensionStatuses: [], keyedExtensionStatuses: {
+				"magpie-quota": quota, herder: "herder: T2 test operation across all modules and integration suites failed · 3/5 tasks",
+			},
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
 			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
-			const full = harness.getFooter()!.render(35)[1]!;
+			// Herder's problem cannot fit a laptop's narrowest activity row; the quota's can.
+			const full = harness.getFooter()!.render(72)[1]!;
 			expect(full).toContain(quota);
-			expect(visibleWidth(full)).toBeLessThanOrEqual(35);
+			expect(full).not.toContain("herder:");
+			expect(visibleWidth(full)).toBeLessThanOrEqual(72);
 			harness.setStatus("herder", "herder: T2 integrate · 3/5 tasks");
 			await harness.runCommand("footer", "compact");
 			const compact = harness.getFooter()!.render(45)[0]!;
@@ -1064,7 +1077,9 @@ describe("statusline footer rendering", () => {
 	});
 
 	it.each(["0", "1"])("keeps later fitting problems and lone Herder severity visible in full mode (Nerd Fonts %s)", async (nerdFonts) => {
-		const herder = "herder: T2 test operation across all modules failed · 3/5 tasks";
+		// Longer than a laptop's narrowest activity row.
+		const operation = "herder: T2 test operation across all modules and integration suites";
+		const herder = `${operation} failed · 3/5 tasks`;
 		const harness = createHarness(`full-herder-later-${nerdFonts}`, "tui", {
 			extensionStatuses: [], keyedExtensionStatuses: { herder },
 		});
@@ -1074,18 +1089,18 @@ describe("statusline footer rendering", () => {
 			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
 			for (const [key, text] of [["custom", "build failed"], ["goal", "goal failed"], ["representative", "rep failed"]]) {
 				harness.setStatus(key!, text!);
-				const line = harness.getFooter()!.render(35)[1]!;
+				const line = harness.getFooter()!.render(72)[1]!;
 				expect(line).toContain(text);
 				expect(line).not.toContain("herder:");
-				expect(visibleWidth(line)).toBeLessThanOrEqual(35);
+				expect(visibleWidth(line)).toBeLessThanOrEqual(72);
 				harness.setStatus(key!);
 			}
 			for (const marker of ["failed", "awaiting"]) {
-				harness.setStatus("herder", `herder: T2 test operation across all modules ${marker} · 3/5 tasks`);
-				const line = harness.getFooter()!.render(35)[1]!;
+				harness.setStatus("herder", `${operation} ${marker} · 3/5 tasks`);
+				const line = harness.getFooter()!.render(72)[1]!;
 				expect(line).toContain("herder:");
 				expect(line).toContain(marker);
-				expect(visibleWidth(line)).toBeLessThanOrEqual(35);
+				expect(visibleWidth(line)).toBeLessThanOrEqual(72);
 			}
 		} finally {
 			vi.unstubAllEnvs();
@@ -1177,7 +1192,7 @@ describe("statusline footer rendering", () => {
 				expect(summary).toContain(text);
 				harness.ctx.ui.setStatus(key, undefined);
 			}
-			expect(harness.getFooter()!.render(240)).toHaveLength(mode === "full" ? 4 : 1);
+			expect(harness.getFooter()!.render(240)).toHaveLength(mode === "full" ? 3 : 1);
 		} finally {
 			harness.disposeFooter();
 			vi.unstubAllEnvs();
@@ -1208,7 +1223,8 @@ describe("statusline footer rendering", () => {
 					}
 					if (mode === "compact" && lines[0]!.includes("quota")) expect(lines[0], `${width}`).toContain("awaiting");
 				}
-				const narrow = harness.getFooter()!.render(60)[mode === "full" ? 1 : 0]!;
+				// Full mode's narrowest activity row is a laptop's.
+				const narrow = harness.getFooter()!.render(mode === "full" ? 72 : 60)[mode === "full" ? 1 : 0]!;
 				if (mode === "full") {
 					expect(narrow).toContain(status);
 					for (const text of ["research 2/5", "herder: T2 integrate", "↻ build"]) expect(narrow).not.toContain(text);
@@ -1255,7 +1271,7 @@ describe("statusline footer rendering", () => {
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		await harness.runCommand("footer", mode);
-		const rows = mode === "full" ? 4 : 1;
+		const rows = mode === "full" ? 2 : 1;
 		try {
 			const lines = harness.getFooter()!.render(120);
 			expect(lines).toHaveLength(rows);
@@ -1285,7 +1301,7 @@ describe("statusline footer rendering", () => {
 		await harness.emit("session_start", { reason: "startup" });
 		try {
 			const lines = harness.getFooter()!.render(120);
-			expect(lines).toHaveLength(5);
+			expect(lines).toHaveLength(3);
 			expect(lines[0]).toContain("English");
 			for (const status of ["↻ build · next 4m", "READY", "SYNC"]) {
 				expect(lines[0]).not.toContain(status);
@@ -1369,7 +1385,7 @@ describe("statusline footer rendering", () => {
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		await harness.runCommand("footer", mode);
-		const rows = mode === "full" ? 4 : 1;
+		const rows = mode === "full" ? 2 : 1;
 		try {
 			const lines = harness.getFooter()!.render(160);
 			expect(lines).toHaveLength(rows);
@@ -1400,7 +1416,7 @@ describe("statusline footer rendering", () => {
 		try {
 			const lines = harness.getFooter()!.render(240);
 			const bar = lines[0]!;
-			expect(lines).toHaveLength(mode === "full" ? 5 : 1);
+			expect(lines).toHaveLength(mode === "full" ? 4 : 1);
 			const order = ["English", "🐝 swarm", "🚗 selfdrive 2h13m", "0×"].map(text => bar.indexOf(text));
 			expect(order.every(index => index >= 0)).toBe(true);
 			expect(order).toEqual([...order].sort((a, b) => a - b));
@@ -1411,7 +1427,7 @@ describe("statusline footer rendering", () => {
 				harness.setStatus(key);
 				expect(harness.getFooter()!.render(240).join("\n")).not.toContain(key === "representative" ? "rep #auth" : key);
 			}
-			expect(harness.getFooter()!.render(240)).toHaveLength(mode === "full" ? 4 : 1);
+			expect(harness.getFooter()!.render(240)).toHaveLength(mode === "full" ? 3 : 1);
 		} finally {
 			harness.disposeFooter();
 		}
@@ -1423,7 +1439,7 @@ describe("statusline footer rendering", () => {
 		await harness.emit("session_start", { reason: "startup" });
 		try {
 			const lines = harness.getFooter()!.render(160);
-			expect(lines).toHaveLength(5);
+			expect(lines).toHaveLength(3);
 			expect(lines[0]).toContain("🐝 swarm");
 			expect(lines[1]).toContain("SYNC");
 			expect(lines[1]).not.toContain("swarm");
@@ -1433,8 +1449,11 @@ describe("statusline footer rendering", () => {
 	});
 
 	it.each(["full", "compact"])("keeps the modes in the %s bar longer than the provider and the language, and drops them whole", async (mode) => {
+		// Full mode draws the bar only above the phone tier, so a longer model name crowds it there.
+		const model = mode === "full" ? { id: "k3-preview-with-a-much-longer-model-name-2026", provider: "moonshot", reasoning: true } : undefined;
+		const narrowest = mode === "full" ? FOOTER_TIERS.phoneMax + 1 : 24;
 		const start = async (id: string, keyedExtensionStatuses: Record<string, string>) => {
-			const harness = createHarness(id, "tui", { extensionStatuses: [], keyedExtensionStatuses });
+			const harness = createHarness(id, "tui", { model, extensionStatuses: [], keyedExtensionStatuses });
 			statuslineFooter(harness.pi);
 			await harness.emit("session_start", { reason: "startup" });
 			await harness.runCommand("footer", mode);
@@ -1444,7 +1463,7 @@ describe("statusline footer rendering", () => {
 		const baseline = await start(`modes-order-baseline-${mode}`, { language: "English" });
 		try {
 			const seen = { modesWithoutLanguage: false, dropped: false };
-			for (let width = 160; width >= 24; width--) {
+			for (let width = 160; width >= narrowest; width--) {
 				const line = harness.getFooter()!.render(width)[0]!;
 				const swarm = line.includes("🐝 swarm");
 				expect(line.includes("🚗 selfdrive"), `${width}`).toBe(swarm);
@@ -1466,8 +1485,10 @@ describe("statusline footer rendering", () => {
 	});
 
 	it("sheds spokesman whole before language as width narrows, and both outlast the provider in full mode", async () => {
+		// Full mode draws the bar only above the phone tier, so a longer model name crowds it there.
+		const longer = { id: "k3-preview-with-a-much-longer-model-name-2026", provider: "moonshot", reasoning: true };
 		const start = async (id: string, mode: "full" | "compact", keyedExtensionStatuses: Record<string, string>) => {
-			const harness = createHarness(id, "tui", { extensionStatuses: [], keyedExtensionStatuses });
+			const harness = createHarness(id, "tui", { model: mode === "full" ? longer : undefined, extensionStatuses: [], keyedExtensionStatuses });
 			statuslineFooter(harness.pi);
 			await harness.emit("session_start", { reason: "startup" });
 			await harness.runCommand("footer", mode);
@@ -1482,7 +1503,7 @@ describe("statusline footer rendering", () => {
 		});
 		try {
 			const seenFull = { all: false, bothNoProvider: false, langOnly: false, providerWithoutSpokesman: false };
-			for (let width = 160; width >= 24; width--) {
+			for (let width = 160; width > FOOTER_TIERS.phoneMax; width--) {
 				const line = fullHarness.getFooter()!.render(width)[0]!;
 				const hasLang = line.includes("English");
 				const hasSpokesman = line.includes("gpt-4o-mini");
@@ -1554,8 +1575,8 @@ describe("statusline footer rendering", () => {
 		try {
 			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
 			const lines = harness.getFooter()!.render(240);
-			expect(lines.at(-3)).toContain("# 1");
 			const row2 = lines.at(-2)!;
+			expect(row2).toContain("# 1");
 
 			expect(row2).toContain("~$0.150");
 			expect(row2).toContain("$0.150/turn");
@@ -1614,7 +1635,7 @@ describe("statusline footer rendering", () => {
 		await harness.emit("session_start", { type: "session_start", reason: "startup" });
 
 		const lines = harness.getFooter()!.render(24);
-		expect(lines).toHaveLength(5);
+		expect(lines).toHaveLength(1);
 		expect(lines[0]).toContain("no-model");
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(24);
 		harness.getFooter()?.dispose?.();
@@ -1764,8 +1785,8 @@ describe("statusline footer powerline style", () => {
 		try {
 			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
 			const lines = harness.getFooter()!.render(100);
-			// The bar, the telemetry and Git rows, and the READY status.
-			expect(lines).toHaveLength(5);
+			// The bar, the READY status, and a laptop's essentials row.
+			expect(lines).toHaveLength(3);
 			const bar = lines[0]!;
 			const chip = `${bgCode(hex("#D97757"))}${fgCode(hex("#1b1b1f"))}\x1b[1m ● \u{EC82} claude-opus-5-5 \x1b[22m`;
 			expect(bar.startsWith(chip)).toBe(true);
@@ -1813,7 +1834,7 @@ describe("statusline footer powerline style", () => {
 						const bar = lines[0]!;
 						if (width >= 40) expect(bar, `${model?.id} at ${width}`).toContain("42.5%");
 						if (width === 160) expect(visibleWidth(bar)).toBe(160);
-						if (nerdFonts === "0") expect(bar).not.toMatch(/[\u{E0B0}\u{E0B2}]/u);
+						if (nerdFonts === "0" || (mode === "full" && width <= FOOTER_TIERS.phoneMax)) expect(bar).not.toMatch(/[\u{E0B0}\u{E0B2}]/u);
 						else if (width >= 64) expect(bar).toContain("\u{E0B0}");
 						// A status's own resets, bare or compound, reopen the band, and its faint is dropped.
 						for (const word of ["next", "soon"]) {
@@ -1909,12 +1930,15 @@ describe("statusline footer powerline style", () => {
 	});
 
 	it("keeps a chip that truncation cuts into on its own color and closes it", async () => {
-		const harness = createHarness("powerline-cut-chip", "tui", { model: longClaude, theme: rgbTheme() });
+		// Long enough to be cut even at the narrowest bar full mode draws.
+		const model = { ...longClaude, id: `${longClaude.id}-and-a-suffix` };
+		const harness = createHarness("powerline-cut-chip", "tui", { model, theme: rgbTheme() });
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
 			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
-			for (const width of [40, 56]) {
+			// The narrowest bars full mode draws, above the phone tier.
+			for (const width of [FOOTER_TIERS.phoneMax + 1, 76]) {
 				const bar = harness.getFooter()!.render(width)[0]!;
 				const cut = bar.indexOf("...");
 				expect(cut, `${width}`).toBeGreaterThan(0);
@@ -1939,11 +1963,11 @@ describe("statusline footer powerline style", () => {
 		try {
 			// No band in the first theme: a flat bar over the same rows.
 			let lines = harness.getFooter()!.render(100);
-			expect(lines).toHaveLength(5);
+			expect(lines).toHaveLength(3);
 			expect(lines[0]).not.toContain("\x1b[48;");
 			current = rgbTheme();
 			lines = harness.getFooter()!.render(100);
-			expect(lines).toHaveLength(5);
+			expect(lines).toHaveLength(3);
 			expect(lines[0]).toContain(bgCode(hex(SURFACE)));
 			current = rgbTheme({ borderMuted: "#aa3355" }, "#20304a");
 			lines = harness.getFooter()!.render(100);
@@ -2020,13 +2044,15 @@ describe("statusline footer powerline style", () => {
 			await harness.emit("session_start", { reason: "startup" });
 			try {
 				vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
-				let lines = harness.getFooter()!.render(160);
-				expect(lines).toHaveLength(5);
-				expect(lines.slice(1).map(line => strip(line).slice(0, 3))).toEqual([" ├ ", " ├ ", " ├ ", " ╰ "]);
-				const [, statuses, performance, telemetry, git] = lines as [string, string, string, string, string];
+				// A desk: performance on the left of one telemetry row, resources on its right.
+				let lines = harness.getFooter()!.render(200);
+				expect(lines).toHaveLength(4);
+				expect(lines.slice(1).map(line => strip(line).slice(0, 3))).toEqual([" ├ ", " ├ ", " ╰ "]);
+				const [, statuses, telemetry, git] = lines as [string, string, string, string];
 				// Chevrons point the way the bar's arrows do on each side.
-				expect(performance).toContain(`${tone("borderMuted")}\u{E0B1}`);
+				expect(telemetry).toContain(`${tone("borderMuted")}\u{E0B1}`);
 				expect(telemetry).toContain(`${tone("borderMuted")}\u{E0B3}`);
+				expect(strip(telemetry).indexOf(nerd.tools)).toBeLessThan(strip(telemetry).indexOf(nerd.cost));
 				expect(statuses).toContain(`${tone("borderMuted")}\u{E0B1}`);
 				// Icons carry the hue, values stay quiet, and the cost leads.
 				const item = (hue: string, icon: string, value: string, valueTone = "muted") =>
@@ -2034,22 +2060,22 @@ describe("statusline footer powerline style", () => {
 				expect(telemetry).toContain(item("warning", nerd.cost, "$0.750", "text"));
 				expect(telemetry).toContain(`${tone("dim")}\x1b[2m  $0.375/turn`);
 				expect(telemetry).toContain(item("toolDiffAdded", nerd.tokens, "65k"));
-				expect(performance).toContain(item("syntaxFunction", nerd.tools, "2"));
+				expect(telemetry).toContain(item("syntaxFunction", nerd.tools, "2"));
 				// 120k of 185k input tokens were cached: 65%, below the 70% that rates success.
 				expect(telemetry).toContain(`${tone("warning")}65%`);
 				expect(strip(telemetry)).not.toContain("(~");
 				expect(strip(git)).toContain("main");
 				expect(strip(git)).toContain("2 touched");
 				expect(strip(statuses)).toContain("↻ build · next 4m");
-				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(160);
+				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(200);
 
 				for (const key of ["herder", "goal"]) harness.setStatus(key);
-				lines = harness.getFooter()!.render(160);
-				expect(lines).toHaveLength(4);
+				lines = harness.getFooter()!.render(200);
+				expect(lines).toHaveLength(3);
 				expect(strip(lines.at(-1)!).slice(0, 3)).toBe(" ╰ ");
 
 				vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
-				const plainFonts = harness.getFooter()!.render(160)[1]!;
+				const plainFonts = harness.getFooter()!.render(200)[1]!;
 				expect(plainFonts).toContain(`${tone("borderMuted")}│`);
 				expect(plainFonts).not.toMatch(/[\u{E0B1}\u{E0B3}]/u);
 			} finally {
@@ -2070,12 +2096,16 @@ describe("statusline footer powerline style", () => {
 					const lines = harness.getFooter()!.render(width).map(strip);
 					for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 					if (width >= 40) {
-						expect(lines[0]).toContain("claude-opus-5-5");
+						// The phone row drops the vendor prefix.
+						expect(lines[0]).toContain(width > FOOTER_TIERS.phoneMax ? "claude-opus-5-5" : "opus-5-5");
 						expect(lines[0]).toContain("42.5%");
 					}
 				}
-				const workspace = strip(harness.getFooter()!.render(80).at(-1)!);
-				expect(workspace).toContain("/…/");
+				const essentials = strip(harness.getFooter()!.render(80).at(-1)!);
+				expect(essentials).toContain("/…/");
+				expect(essentials).toContain("project");
+				expect(essentials).not.toContain("touched");
+				const workspace = strip(harness.getFooter()!.render(200).at(-1)!);
 				expect(workspace).toContain("project");
 				expect(workspace).toContain("2 touched");
 			} finally {
@@ -2109,20 +2139,21 @@ describe("statusline footer powerline style", () => {
 			await harness.emit("session_start", { reason: "startup" });
 			try {
 				vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
-				const git = harness.getFooter()!.render(160)[1]!;
+				// A desk, where the workspace row shows the touched-file count.
+				const git = harness.getFooter()!.render(200)[1]!;
 				const plain = strip(git);
 				expect(plain).toContain(`${relayIcon} 3 in · 2 out`);
-				expect(strip(harness.getFooter()!.render(160).at(-1)!)).toContain(`${fileIcon} 2 touched`);
+				expect(strip(harness.getFooter()!.render(200).at(-1)!)).toContain(`${fileIcon} 2 touched`);
 				expect(plain).not.toContain("main");
 				// Drawn like the file count: the same dim icon and quiet value.
 				const styleBefore = (icon: string, row: string) => /(?:\x1b\[[0-9;]*m)+$/.exec(row.slice(0, row.indexOf(icon)))?.[0];
-				expect(styleBefore(relayIcon, git)).toBe(styleBefore(fileIcon, harness.getFooter()!.render(160).at(-1)!));
+				expect(styleBefore(relayIcon, git)).toBe(styleBefore(fileIcon, harness.getFooter()!.render(200).at(-1)!));
 				expect(git).toContain(`${tone("muted")}3 in · 2 out`);
 				expect(harness.ctx.sessionManager.getEntries).not.toHaveBeenCalled();
 
 				// A new entry moves the leaf, so the cached counts refresh.
 				branch.push(relay("in-4", "relay-received"));
-				expect(strip(harness.getFooter()!.render(160)[1]!)).toContain(`${relayIcon} 4 in · 2 out`);
+				expect(strip(harness.getFooter()!.render(200)[1]!)).toContain(`${relayIcon} 4 in · 2 out`);
 			} finally {
 				vi.unstubAllEnvs();
 				harness.disposeFooter();
@@ -2176,7 +2207,7 @@ describe("statusline footer powerline style", () => {
 				vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
 				const icon = nerdFonts === "1" ? relayIcon : "⇌";
 				let lines = harness.getFooter()!.render(160).map(strip);
-				expect(lines).toHaveLength(5);
+				expect(lines).toHaveLength(3);
 				expect(lines[1]).toContain(`${icon} #dev #ops`);
 				expect(lines.join("\n")).not.toMatch(/\b0 (in|out)\b/);
 				expect(lines.filter(line => line.includes("#dev"))).toHaveLength(1);
@@ -2191,7 +2222,7 @@ describe("statusline footer powerline style", () => {
 				expect(strip(harness.getFooter()!.render(160)[0]!)).not.toContain(icon);
 				await harness.runCommand("footer", "full");
 				lines = harness.getFooter()!.render(160).map(strip);
-				expect(lines).toHaveLength(4);
+				expect(lines).toHaveLength(2);
 				expect(lines.join("\n")).not.toContain("#ops");
 				expect(lines[1]).not.toContain(icon);
 			} finally {
@@ -2407,7 +2438,7 @@ describe("statusline footer powerline style", () => {
 			}
 		});
 
-		it.each(["0", "1"])("keeps every metric visible at 140 columns with concurrent features (Nerd Fonts %s)", async (nerdFonts) => {
+		it.each(["0", "1"])("keeps every metric visible at a desk and the essentials on a laptop with concurrent features (Nerd Fonts %s)", async (nerdFonts) => {
 			let now = Date.now();
 			const started = now;
 			vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -2453,11 +2484,24 @@ describe("statusline footer powerline style", () => {
 					now = started + sample.end;
 					await harness.emit("message_end", assistantEnd(sample.output));
 				}
-				for (const width of [140, 180, 240, 400]) {
+				// A laptop keeps what to act on in one row.
+				const laptop = harness.getFooter()!.render(140).map(strip);
+				expect(laptop).toHaveLength(3);
+				for (const line of laptop) expect(visibleWidth(line)).toBeLessThanOrEqual(140);
+				expect(laptop[1]).toContain("bg 2 running · 1 failed");
+				const essentials = laptop[2]!;
+				expect(essentials.startsWith(" ╰ ")).toBe(true);
+				for (const fact of ["main", "+42", "−17", "↑2", "↓1", "$0.750", "1h 00m", "1 (50.0%)", "300ms", "133 tok/s", "65%", "/tmp/project"]) {
+					expect(essentials).toContain(fact);
+				}
+				for (const diagnostic of ["150ms", "400ms", "150 tok/s", "/turn", "65k", "31k", "120k", "memory", "think", "touched"]) {
+					expect(essentials).not.toContain(diagnostic);
+				}
+				for (const width of [175, 193, 240, 400]) {
 					const lines = harness.getFooter()!.render(width).map(strip);
-					expect(lines).toHaveLength(5);
+					expect(lines).toHaveLength(4);
 					for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-					const [identity, activity, performance, resources, workspace] = lines as [string, string, string, string, string];
+					const [identity, activity, telemetry, workspace] = lines as [string, string, string, string];
 					expect(identity).toContain("claude-opus-5-5");
 					expect(identity).toContain("42.5%");
 					expect(identity).toContain("1×");
@@ -2466,10 +2510,10 @@ describe("statusline footer powerline style", () => {
 					expect(activity).toContain("bg 2 running · 1 failed");
 					expect(activity).toContain("📣 rep #dev");
 					expect(activity).toContain("#dev-old #ops · 2 in · 1 out");
-					expect(performance).toContain(nerdFonts === "1" ? "\u{F05B7} 2" : "⚙ 2");
-					expect(performance).toContain(nerdFonts === "1" ? "\u{F0368} 2" : "# 2");
-					for (const metric of ["1h 00m", "1 (50.0%)", "300ms", "400ms", "150ms", "133 tok/s", "150 tok/s"]) expect(performance).toContain(metric);
-					for (const metric of ["$0.750", "$0.375/turn", "65k", "31k", "120k", "65%", "~612 memory", "12k think"]) expect(resources).toContain(metric);
+					expect(telemetry).toContain(nerdFonts === "1" ? "\u{F05B7} 2" : "⚙ 2");
+					expect(telemetry).toContain(nerdFonts === "1" ? "\u{F0368} 2" : "# 2");
+					for (const metric of ["1h 00m", "1 (50.0%)", "300ms", "400ms", "150ms", "133 tok/s", "150 tok/s"]) expect(telemetry).toContain(metric);
+					for (const metric of ["$0.750", "$0.375/turn", "65k", "31k", "120k", "65%", "~612 memory", "12k think"]) expect(telemetry).toContain(metric);
 					for (const fact of ["main", "+42", "−17", "↑2", "↓1", "2 touched", "/tmp/project"]) expect(workspace).toContain(fact);
 					expect(workspace).not.toContain("rep");
 					expect(workspace).not.toContain("#ops");
@@ -2496,7 +2540,7 @@ describe("statusline footer powerline style", () => {
 			try {
 				vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
 				const lines = harness.getFooter()!.render(140).map(strip);
-				expect(lines).toHaveLength(5);
+				expect(lines).toHaveLength(3);
 				expect(lines[1]).toContain(expected);
 				expect(lines[1]!.startsWith(" ├ ")).toBe(true);
 				expect(lines.at(-1)!.startsWith(" ╰ ")).toBe(true);
@@ -2528,7 +2572,7 @@ describe("statusline footer powerline style", () => {
 				harness.setStatus("representative");
 				expect(summary()).toContain("⇌ #dev #dev-old #ops #qa");
 				harness.setStatus("relay-rooms");
-				expect(harness.getFooter()!.render(240)).toHaveLength(mode === "full" ? 4 : 1);
+				expect(harness.getFooter()!.render(240)).toHaveLength(mode === "full" ? 3 : 1);
 				if (mode === "full") expect(harness.getFooter()!.render(240).at(-1)!.startsWith(" ╰ ")).toBe(true);
 			} finally {
 				vi.unstubAllEnvs();
@@ -2537,62 +2581,33 @@ describe("statusline footer powerline style", () => {
 		});
 
 		it("keeps unknown status icons and hues, prioritizes severity, and clears statuses live", async () => {
+			// Each status alone nearly fills a laptop's narrowest activity row.
+			const blocked = "custom blocked · waiting on the release lock";
+			const paused = "↻ paused · waiting for the user to approve";
+			const running = "research running · iteration 12 of 40";
 			const harness = createHarness("activity-severity", "tui", { extensionStatuses: [], theme: tagged, keyedExtensionStatuses: {
-				autoresearch: "research running", goal: "↻ paused", custom: "custom blocked",
+				autoresearch: running, goal: paused, custom: blocked,
 			} });
 			statuslineFooter(harness.pi);
 			await harness.emit("session_start", { reason: "startup" });
 			try {
 				vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
 				const wide = harness.getFooter()!.render(240)[1]!;
-				expect(wide).toContain(renderStatus(tagged as unknown as Parameters<typeof renderStatus>[0], "custom blocked", "custom", true));
+				expect(wide).toContain(renderStatus(tagged as unknown as Parameters<typeof renderStatus>[0], blocked, "custom", true));
 				expect(wide).toContain("\u{F0431}");
-				const narrow = strip(harness.getFooter()!.render(30)[1]!);
-				expect(narrow).toContain("custom blocked");
-				expect(narrow).not.toContain("research running");
-				expect(narrow).not.toContain("paused");
+				const narrowest = () => strip(harness.getFooter()!.render(FOOTER_TIERS.phoneMax + 1)[1]!);
+				expect(narrowest()).toContain(blocked);
+				expect(narrowest()).not.toContain("research running");
+				expect(narrowest()).not.toContain("paused");
 				harness.setStatus("custom");
-				expect(strip(harness.getFooter()!.render(30)[1]!)).toContain("↻ paused");
-				expect(strip(harness.getFooter()!.render(30)[1]!)).not.toContain("research running");
+				expect(narrowest()).toContain(paused);
+				expect(narrowest()).not.toContain("research running");
 				harness.setStatus("goal");
-				expect(strip(harness.getFooter()!.render(30)[1]!)).toContain("research running");
+				expect(narrowest()).toContain(running);
 				harness.setStatus("autoresearch");
-				expect(harness.getFooter()!.render(140)).toHaveLength(4);
+				expect(harness.getFooter()!.render(140)).toHaveLength(2);
 				harness.setStatus("custom", "custom ready");
 				expect(harness.getFooter()!.render(240)[1]).toContain(renderStatus(tagged as unknown as Parameters<typeof renderStatus>[0], "custom ready", "custom", true));
-			} finally {
-				vi.unstubAllEnvs();
-				harness.disposeFooter();
-			}
-		});
-
-		it("drops the memory estimate before other resource groups", async () => {
-			const harness = createHarness("detail-memory-fit", "tui", {
-				model: claude,
-				// 156 index characters and 444 around them.
-				branch: [...ids(activeBranch, "active"), memoryPin("pin", "i".repeat(156))],
-				extensionStatuses: [],
-				theme: tagged,
-			});
-			statuslineFooter(harness.pi);
-			await harness.emit("session_start", { reason: "startup" });
-			try {
-				vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
-				const markers = { memory: "~150 memory", think: nerd.think, tokens: nerd.tokens, cost: nerd.cost };
-				const narrowest: Record<string, number> = {};
-				for (let width = 200; width >= 30; width--) {
-					const telemetry = strip(harness.getFooter()!.render(width).at(-2)!);
-					expect(visibleWidth(telemetry), `${width}`).toBeLessThanOrEqual(width);
-					expect(telemetry, `${width}`).not.toContain("...");
-					for (const [group, marker] of Object.entries(markers)) if (telemetry.includes(marker)) narrowest[group] = width;
-				}
-				const order = ["memory", "think", "tokens", "cost"].map(group => narrowest[group]!);
-				expect(order).toEqual([...order].sort((a, b) => b - a));
-				expect(new Set(order).size).toBe(order.length);
-				// The estimate yields while the reasoning count still fits.
-				const between = strip(harness.getFooter()!.render(narrowest.memory! - 1).at(-2)!);
-				expect(between).toContain("12k think");
-				expect(between).not.toContain("memory");
 			} finally {
 				vi.unstubAllEnvs();
 				harness.disposeFooter();
@@ -2617,13 +2632,13 @@ describe("statusline footer powerline style", () => {
 		try {
 			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
 			const lines = harness.getFooter()!.render(100);
-			expect(lines).toHaveLength(5);
+			expect(lines).toHaveLength(3);
 			for (const line of lines) expect(line).not.toContain("\x1b[48;");
 			expect(lines[0]).toContain("claude-opus-5-5");
 			expect(lines[0]).toContain("42.5%");
 			expect(lines[0]).not.toMatch(/[\u{E0B0}\u{E0B2}]/u);
 			const rails = lines.slice(1).map(line => line.replace(/\x1b\[[0-9;]*m/g, "").slice(0, 3));
-			expect(rails).toEqual([" ├ ", " ├ ", " ├ ", " ╰ "]);
+			expect(rails).toEqual([" ├ ", " ╰ "]);
 		} finally {
 			vi.unstubAllEnvs();
 			harness.disposeFooter();
@@ -2761,7 +2776,7 @@ describe("statusline footer pi-processes compatibility", () => {
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
-			const full = harness.getFooter()!.render(55);
+			const full = harness.getFooter()!.render(72);
 			expect(full.at(-1)).toContain("main");
 			expect(full[1]).toContain("bg 1 running");
 			expect(full[1]!.split("bg 1 running")).toHaveLength(2);
@@ -3637,5 +3652,347 @@ describe("statusline footer session isolation", () => {
 		afterReload.disposeFooter();
 		await afterReload.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
 		expect(persistedEntries(afterReload.pi)).toEqual([]);
+	});
+});
+
+describe("statusline footer width tiers", () => {
+	const strip = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
+	const claude = { id: "claude-opus-5-5", provider: "anthropic", reasoning: true };
+	// Nerd Font glyphs live in the private-use planes; the phone row never draws one.
+	const PRIVATE_USE = /[\u{E000}-\u{F8FF}\u{F0000}-\u{FFFFD}]/u;
+	const toolResult = (id: string, isError: boolean) =>
+		({ id, type: "message", message: { role: "toolResult", toolCallId: `call-${id}`, toolName: "bash", content: [], isError, timestamp: Date.now() } });
+
+	/** A working session an hour in, with every metric the desk shows. */
+	function session(options: { errors?: number; calls?: number; turns?: number; scale?: number; startedMs?: number } = {}) {
+		const { errors = 1, calls = 2, turns = 2, scale = 1, startedMs = 3_600_000 } = options;
+		return [
+			...Array.from({ length: turns }, (_, index) => ({
+				id: `user-${index}`, type: "message", message: { role: "user", timestamp: Date.now() - (index ? 0 : startedMs) },
+			})),
+			{
+				id: "assistant", type: "message",
+				message: {
+					role: "assistant", provider: "anthropic",
+					usage: { input: 65_200 * scale, output: 31_400 * scale, cacheRead: 120_000 * scale, cacheWrite: 0, reasoning: 12_100 * scale, cost: { total: 0.75 * scale } },
+					content: Array.from({ length: calls }, (_, index) => ({ type: "toolCall", arguments: { path: `src/${index}.ts` } })),
+				},
+			},
+			{ id: "pin", type: "custom", customType: "pika-memory", data: { index: "i".repeat(1_356 * scale), fetchedAt: "2026-11-09T00:00:00.000Z" } },
+			...Array.from({ length: errors }, (_, index) => toolResult(`failed-${index}`, true)),
+		];
+	}
+
+	/** Git reports a dirty tree with a diff and an upstream; `hold` keeps it pending until `release`. */
+	function git(hold = false) {
+		const held: Array<() => void> = [];
+		vi.mocked(execFile).mockImplementation((_file, args, _options, callback) => {
+			const output = args?.[1] === "status" ? " M src/a.ts\n"
+				: args?.[0] === "diff" ? "2 files changed, 42 insertions(+), 17 deletions(-)"
+				: "1\t2";
+			const complete = () => (callback as (error: null, stdout: string) => void)(null, output);
+			if (hold) held.push(complete);
+			else complete();
+			return {} as ReturnType<typeof execFile>;
+		});
+		return { release: () => held.splice(0).forEach(complete => complete()) };
+	}
+
+	async function start(id: string, options: HarnessOptions = {}) {
+		const harness = createHarness(id, "tui", { model: claude, branch: session(), extensionStatuses: [], ...options });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		return harness;
+	}
+
+	/** Two measured requests: TTFT 200 and 400ms, TTFB 150ms last, 133 tok/s on average and 150 last. */
+	async function stream(harness: ReturnType<typeof createHarness>, scale = 1) {
+		let now = Date.now();
+		const started = now;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		for (const sample of [
+			{ start: 1_000, response: 1_100, first: 1_200, end: 3_000, output: 200 },
+			{ start: 4_000, response: 4_150, first: 4_400, end: 8_000, output: 600 },
+		]) {
+			now = started + sample.start * scale;
+			await harness.emit("before_provider_headers", { headers: {} });
+			now = started + sample.response * scale;
+			await harness.emit("after_provider_response", {});
+			now = started + sample.first * scale;
+			await harness.emit("message_update", { assistantMessageEvent: { type: "text_delta", delta: "sample" } });
+			now = started + sample.end * scale;
+			await harness.emit("message_end", assistantEnd(sample.output));
+		}
+	}
+
+	it("picks the tier from the width alone, with and without an activity row", async () => {
+		git();
+		const harness = await start("tier-boundaries");
+		try {
+			const rows = () => Object.fromEntries([71, 72, 174, 175].map(width => [width, harness.getFooter()!.render(width).length]));
+			expect(rows()).toEqual({ 71: 1, 72: 2, 174: 2, 175: 3 });
+			harness.setStatus("goal", "goal: ship the tiers");
+			expect(rows()).toEqual({ 71: 1, 72: 3, 174: 3, 175: 4 });
+			const lines = harness.getFooter()!.render(175).map(strip);
+			expect(lines.slice(1).map(line => line.slice(0, 3))).toEqual([" ├ ", " ├ ", " ╰ "]);
+			expect(strip(harness.getFooter()!.render(174).at(-1)!).slice(0, 3)).toBe(" ╰ ");
+			// Compact mode stays one row at any width; off draws nothing.
+			await harness.runCommand("footer", "compact");
+			for (const width of [40, 71, 72, 174, 175, 400]) expect(harness.getFooter()!.render(width)).toHaveLength(1);
+			await harness.runCommand("footer", "off");
+			expect(harness.getFooter()).toBeUndefined();
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it.each(["0", "1"])("stays within width from 20 to 400 columns in every tier (Nerd Fonts %s)", async (nerdFonts) => {
+		git();
+		const harness = await start(`tier-widths-${nerdFonts}`, {
+			cwd: `/tmp/${"deep/".repeat(12)}project`,
+			keyedExtensionStatuses: { herder: "herder: T2 verify blocked · 3/5 tasks", goal: "goal: ship the tiers", representative: "📣 rep #dev" },
+		});
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+			await stream(harness);
+			for (let width = 20; width <= 400; width++) {
+				const lines = harness.getFooter()!.render(width);
+				expect(lines, `${width}`).toHaveLength(width <= FOOTER_TIERS.phoneMax ? 1 : width >= FOOTER_TIERS.deskMin ? 4 : 3);
+				for (const line of lines) expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
+			}
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it.each(["0", "1"])("keeps every metric at a desk on one telemetry row above the workspace (Nerd Fonts %s)", async (nerdFonts) => {
+		git();
+		const harness = await start(`desk-metrics-${nerdFonts}`, { branch: [...session(), toolResult("ok", false)] });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+			await stream(harness);
+			const lines = harness.getFooter()!.render(193).map(strip);
+			expect(lines).toHaveLength(3);
+			const [, telemetry, workspace] = lines as [string, string, string];
+			expect(telemetry.startsWith(" ├ ")).toBe(true);
+			expect(workspace.startsWith(" ╰ ")).toBe(true);
+			for (const metric of [
+				"1h 00m", nerdFonts === "1" ? "\u{F05B7} 2" : "⚙ 2", "1 (50.0%)", "300ms", "400ms", "150ms", "133 tok/s", "150 tok/s",
+				"$0.750", "$0.375/turn", "65k", "31k", "120k", "65%", "~450 memory", "12k think",
+			]) expect(telemetry).toContain(metric);
+			// Performance on the left, resources on the right.
+			expect(telemetry.indexOf("tok/s")).toBeLessThan(telemetry.indexOf("$0.750"));
+			for (const fact of ["main", "+42", "−17", "↑2", "↓1", "2 touched", "/tmp/project"]) expect(workspace).toContain(fact);
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it("drops desk diagnostics before actionable facts, and keeps failed tool calls longer", async () => {
+		// Lower ranks drop first; failed tool calls outlast all but cost, a clean tool count goes right after think.
+		const order = Object.entries(DESK_RANKS).sort(([, a], [, b]) => a - b).map(([group]) => group);
+		expect(order).toEqual(["memory", "think", "tools", "tokens", "latency", "turns", "toolErrors", "cost"]);
+		// A session whose telemetry outgrows the narrowest desk: the memory estimate goes first.
+		git();
+		const huge = { calls: 12_345, turns: 1234, scale: 1000, startedMs: 1_000 * 3_600_000 };
+		for (const errors of [1234, 0]) {
+			const harness = await start(`desk-order-${errors}`, { branch: session({ ...huge, errors }) });
+			try {
+				vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+				await stream(harness, 1000);
+				const telemetry = (width: number) => strip(harness.getFooter()!.render(width).at(-2)!);
+				expect(telemetry(400)).toContain("memory");
+				const narrowest = telemetry(FOOTER_TIERS.deskMin);
+				expect(narrowest).not.toContain("memory");
+				for (const kept of ["think", "↑ 65M", "300.0s", "# 1234", "$750.00", "⚙ 12345"]) expect(narrowest).toContain(kept);
+				if (errors) expect(narrowest).toContain("✕ 1234 (10.0%)");
+				for (let width = 400; width >= FOOTER_TIERS.deskMin; width--) {
+					const row = telemetry(width);
+					expect(visibleWidth(row), `${width}`).toBeLessThanOrEqual(width);
+					expect(harness.getFooter()!.render(width), `${width}`).toHaveLength(3);
+				}
+			} finally {
+				vi.unstubAllEnvs();
+				harness.disposeFooter();
+			}
+		}
+	});
+
+	it("keeps a laptop's essentials on one row and leaves out the diagnostics at 150 columns", async () => {
+		git();
+		const harness = await start("laptop-content", { keyedExtensionStatuses: { herder: "herder: T2 integrate · 3/5 tasks" } });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			await stream(harness);
+			const lines = harness.getFooter()!.render(150).map(strip);
+			expect(lines).toHaveLength(3);
+			expect(lines[1]).toContain("herder: T2 integrate · 3/5 tasks");
+			const essentials = lines[2]!;
+			expect(essentials.startsWith(" ╰ ")).toBe(true);
+			// Git, then cost, then turns and elapsed, then failed tool calls; latency, throughput, cache, and path on the right.
+			const left = ["⎇ main  +42 −17  ↑2 ↓1", "$0.750", "# 2  ⏱ 1h 00m", "✕ 1 (50.0%)"];
+			const right = ["⏱ 300ms  » 133 tok/s", "⚡ 65%", "⌂ /tmp/project"];
+			const positions = [...left, ...right].map(fact => essentials.indexOf(fact));
+			expect(positions.every(index => index >= 0), essentials).toBe(true);
+			expect(positions).toEqual([...positions].sort((a, b) => a - b));
+			for (const absent of ["⇄", "↺", "/turn", "↑ 65k", "↓ 31k", "120k", "memory", "think", "touched", "⚙"]) {
+				expect(essentials).not.toContain(absent);
+			}
+			// Without failures the tool count stays out too.
+			const clean = await start("laptop-clean", { branch: session({ errors: 0 }) });
+			try {
+				const row = strip(clean.getFooter()!.render(150).at(-1)!);
+				expect(row).not.toContain("✕");
+				expect(row).not.toContain("⚙");
+			} finally {
+				clean.disposeFooter();
+			}
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it("shows price unavailable where a laptop's cost goes", async () => {
+		const harness = await start("laptop-unpriced", {
+			model: { id: "gpt-6.1-terra", provider: "magpie", reasoning: true, magpiePricing: "unavailable" },
+		});
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			const row = strip(harness.getFooter()!.render(150).at(-1)!);
+			expect(row).toContain("main");
+			expect(row.indexOf("price unavailable")).toBeGreaterThan(row.indexOf("main"));
+			expect(row).not.toContain("$0.750");
+			expect(strip(harness.getFooter()!.render(50)[0]!)).toContain("price?");
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it("drops a laptop's groups cache first and Git last, with failed tool calls outlasting all but Git", async () => {
+		git();
+		const harness = await start("laptop-order");
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			await stream(harness);
+			const markers = { cache: "⚡", latency: "»", turns: "#", cwd: "⌂", cost: "$0.750", errors: "✕", git: "⎇ main" };
+			const narrowest: Record<string, number> = {};
+			for (let width = 174; width >= FOOTER_TIERS.phoneMax + 1; width--) {
+				const lines = harness.getFooter()!.render(width).map(strip);
+				expect(lines, `${width}`).toHaveLength(2);
+				const row = lines[1]!;
+				expect(visibleWidth(row), `${width}`).toBeLessThanOrEqual(width);
+				for (const [group, marker] of Object.entries(markers)) if (row.includes(marker)) narrowest[group] = width;
+			}
+			const order = Object.keys(markers).map(group => narrowest[group]!);
+			// Every group fits at 174; under pressure they leave in rank order, and Git always stays.
+			expect(order.every(width => width > 0)).toBe(true);
+			expect(order).toEqual([...order].sort((a, b) => b - a));
+			expect(narrowest.git).toBe(FOOTER_TIERS.phoneMax + 1);
+			expect(Object.entries(LAPTOP_RANKS).sort(([, a], [, b]) => a - b).map(([group]) => group)).toEqual(Object.keys(markers));
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+		// A long branch leaves room for one more group beside Git: the failed tool calls, not the cost.
+		const crowded = await start("laptop-order-branch", { gitBranch: "feature/responsive-footer-tiers" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			const row = strip(crowded.getFooter()!.render(FOOTER_TIERS.phoneMax + 1).at(-1)!);
+			expect(row).toContain("⎇ feature/responsive-footer-tiers");
+			expect(row).toContain("✕ 1 (50.0%)");
+			expect(row).not.toContain("$0.750");
+		} finally {
+			vi.unstubAllEnvs();
+			crowded.disposeFooter();
+		}
+	});
+
+	it("draws the phone row as plain text without Nerd Font glyphs, bands, or caps", async () => {
+		const theme = {
+			fg: (_token: string, text: string) => `\x1b[38;2;200;200;200m${text}\x1b[39m`,
+			bg: (_token: string, text: string) => `\x1b[48;2;58;59;64m${text}\x1b[49m`,
+			bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
+		};
+		const harness = await start("phone-plain", { theme, thinkingLevel: "medium" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+			for (let width = 20; width <= FOOTER_TIERS.phoneMax; width++) {
+				const lines = harness.getFooter()!.render(width);
+				expect(lines, `${width}`).toHaveLength(1);
+				expect(lines[0], `${width}`).not.toMatch(PRIVATE_USE);
+				expect(lines[0], `${width}`).not.toContain("\x1b[48;");
+				expect(lines[0], `${width}`).not.toContain("▉");
+			}
+			expect(strip(harness.getFooter()!.render(50)[0]!)).toBe(" opus-5-5 · MEDIUM · 42.5% · $0.750");
+			// The thinking level keeps its color.
+			expect(harness.getFooter()!.render(50)[0]).toContain(renderThinking(theme as unknown as Parameters<typeof renderThinking>[0], "medium"));
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it("shows only attention and problem statuses on the phone row, problems first", async () => {
+		const harness = await start("phone-alerts", { keyedExtensionStatuses: {
+			autoresearch: "research 2/5", goal: "goal: ship the tiers", subagents: "subagents: on",
+			representative: "📣 rep #dev", "relay-rooms": "#dev #ops", "magpie-quota": "quota awaiting · retry in 2h 10m",
+		} });
+		try {
+			harness.setStatus(PROCESS_STATUS_KEY, "bg 2 running · 1 failed");
+			const row = () => strip(harness.getFooter()!.render(FOOTER_TIERS.phoneMax)[0]!);
+			expect(row()).toBe(" opus-5-5 · HIGH · 42.5% · $0.750 · bg 1 failed · quota awaiting");
+			for (const routine of ["research", "goal", "subagents", "rep", "#dev", "running"]) expect(row()).not.toContain(routine);
+			harness.setStatus("herder", "herder: T2 verify blocked · 3/5 tasks");
+			// Problems first, then attention; what does not fit drops from the end.
+			expect(row()).toBe(" opus-5-5 · HIGH · 42.5% · $0.750 · herder blocked · bg 1 failed");
+			harness.setStatus("goal", "↻ paused");
+			harness.setStatus("herder");
+			harness.setStatus(PROCESS_STATUS_KEY);
+			expect(row()).toBe(" opus-5-5 · HIGH · 42.5% · $0.750 · quota awaiting · goal paused");
+			harness.setStatus("magpie-quota");
+			harness.setStatus("goal");
+			expect(row()).toBe(" opus-5-5 · HIGH · 42.5% · $0.750");
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it("keeps the model and context percentage on a narrow phone, cutting the model before the percentage", async () => {
+		const harness = await start("phone-narrow", { keyedExtensionStatuses: { herder: "herder: T2 verify blocked" } });
+		try {
+			expect(strip(harness.getFooter()!.render(30)[0]!)).toBe(" opus-5-5 · HIGH · 42.5%");
+			expect(strip(harness.getFooter()!.render(20)[0]!)).toBe(" opus-5-5 · 42.5%");
+			expect(strip(harness.getFooter()!.render(14)[0]!)).toBe(" opus… · 42.5%");
+			for (let width = 8; width <= FOOTER_TIERS.phoneMax; width++) {
+				const line = strip(harness.getFooter()!.render(width)[0]!);
+				expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
+				expect(line, `${width}`).toContain("42.5%");
+				if (width >= 12) expect(line, `${width}`).toMatch(/^ o/);
+			}
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it.each([100, 193])("holds the row count at %s columns while Git settles and metrics arrive", async (width) => {
+		const pending = git(true);
+		const harness = await start(`tier-steady-${width}`, { branch: session({ errors: 0 }) });
+		try {
+			const rows = harness.getFooter()!.render(width);
+			expect(strip(rows.join("\n"))).toContain("git …");
+			pending.release();
+			const dirty = harness.getFooter()!.render(width);
+			expect(strip(dirty.join("\n"))).toContain("+42");
+			await stream(harness);
+			const measured = harness.getFooter()!.render(width);
+			expect(strip(measured.join("\n"))).toContain("tok/s");
+			expect(new Set([rows.length, dirty.length, measured.length]).size).toBe(1);
+		} finally {
+			harness.disposeFooter();
+		}
 	});
 });
