@@ -1,0 +1,19 @@
+{
+	"name": "pika-node",
+	"version": "0.1.0",
+	"private": true,
+	"description": "pika node daemon: PTYs, headless screens, files, and pane status, reached end to end through the pika server (services/pika/docs/NODE.md).",
+	"type": "module",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"test": "vitest run",
+		"typecheck": "tsc --noEmit"
+	},
+	"devDependencies": {
+		"@types/node": "^24.12.0",
+		"typescript": "^5.9.3",
+		"vitest": "^4.1.11"
+	}
+}
