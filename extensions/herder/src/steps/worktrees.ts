@@ -1,6 +1,6 @@
 // Shared read-only commit worktrees (ro-<sha12>) and pooled reusable write worktree slots (rw-<n>) per run.
-import { existsSync, readdirSync } from "node:fs";
-import { sep } from "node:path";
+import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { join, sep } from "node:path";
 import { runPaths, worktreePath } from "../run/paths.ts";
 import type { Vcs } from "../types.ts";
 
@@ -21,6 +21,13 @@ const activeWriteSlots = new Map<string, Set<number>>();
 
 export const readOnlySlot = (commit: string): string => `ro-${commit.slice(0, 12)}`;
 export const writeSlot = (slot: number): string => `rw-${slot}`;
+
+/**
+ * A quarantined write slot holds work no step ref captured; its marker file sits next to it, so it goes when the run's
+ * worktrees are removed (abort, delivery, clean). Until then no lease, heal, or pool release touches the slot.
+ */
+const quarantineMarker = (path: string): string => `${path}.quarantined`;
+const isQuarantined = (path: string): boolean => existsSync(quarantineMarker(path));
 
 function recreateWorktree(vcs: Vcs, path: string, commit: string): void {
 	if (!existsSync(path)) {
@@ -99,13 +106,13 @@ export function acquireReadOnlyWorktree(vcs: Vcs, runId: string, commit: string)
  * Leases the lowest free write worktree slot (`rw-0`, `rw-1`, ...) for `(commonDir, runId)`, resetting an existing
  * slot in-place to `base` or creating it on first use.
  */
-export function acquireWriteWorktree(vcs: Vcs, runId: string, base: string): WorktreeLease & { readonly slot: number } {
+export function acquireWriteWorktree(vcs: Vcs, runId: string, base: string): WorktreeLease & { readonly slot: number; quarantine(note: string): void } {
 	const sha = vcs.resolve(base);
 	const dir = runPaths(vcs.commonDir(), runId).worktrees;
 	let active = activeWriteSlots.get(dir);
 	if (!active) activeWriteSlots.set(dir, active = new Set());
 	let slot = 0;
-	while (active.has(slot)) slot++;
+	while (active.has(slot) || isQuarantined(join(dir, writeSlot(slot)))) slot++;
 	active.add(slot);
 	const path = worktreePath(vcs.commonDir(), runId, writeSlot(slot));
 	try {
@@ -117,9 +124,23 @@ export function acquireWriteWorktree(vcs: Vcs, runId: string, base: string): Wor
 		throw error;
 	}
 	let released = false;
+	const free = () => {
+		active.delete(slot);
+		if (active.size === 0) activeWriteSlots.delete(dir);
+	};
 	return {
 		path,
 		slot,
+		/** Releases the lease without resetting the slot and keeps it out of the pool; throws if the marker cannot be written. */
+		quarantine(note) {
+			if (released) throw new Error(`write slot ${path} was already released`);
+			released = true;
+			try {
+				writeFileSync(quarantineMarker(path), `${note}\n`);
+			} finally {
+				free();
+			}
+		},
 		release() {
 			if (released) return;
 			released = true;
@@ -141,8 +162,7 @@ export function acquireWriteWorktree(vcs: Vcs, runId: string, base: string): Wor
 					}
 				}
 			} finally {
-				active.delete(slot);
-				if (active.size === 0) activeWriteSlots.delete(dir);
+				free();
 			}
 		},
 	};
@@ -151,6 +171,7 @@ export function acquireWriteWorktree(vcs: Vcs, runId: string, base: string): Wor
 /**
  * Called at launch startup when no step of the run is active: drops legacy `step-*` leftovers and heals or removes any
  * pooled `ro-*` / `rw-*` worktree left dirty or half-created by a crashed process, keeping valid clean slots warm.
+ * Quarantined slots stay as they are.
  */
 export function healRunWorktrees(vcs: Vcs, runId: string): void {
 	const dir = runPaths(vcs.commonDir(), runId).worktrees;
@@ -162,7 +183,7 @@ export function healRunWorktrees(vcs: Vcs, runId: string): void {
 			try { vcs.removeWorktree(path); } catch {}
 			continue;
 		}
-		if (!POOL_SLOT.test(slot)) continue;
+		if (!POOL_SLOT.test(slot) || isQuarantined(path)) continue;
 		try {
 			const head = vcs.worktreeHead(path);
 			if (slot.startsWith("ro-") && !head.startsWith(slot.slice(3))) vcs.removeWorktree(path);
@@ -183,14 +204,16 @@ export function clearRunWorktreeState(commonDir: string, runId: string): void {
 	}
 }
 
-/** Removes cached `ro-*` and `rw-*` pool worktrees of a run (leaving non-pool slots alone). */
+/** Removes cached `ro-*` and `rw-*` pool worktrees of a run (leaving non-pool and quarantined slots alone). */
 export function releaseRunPoolWorktrees(vcs: Vcs, runId: string): void {
 	const commonDir = vcs.commonDir();
 	const dir = runPaths(commonDir, runId).worktrees;
 	if (existsSync(dir)) {
 		for (const slot of readdirSync(dir)) {
 			if (!POOL_SLOT.test(slot)) continue;
-			try { vcs.removeWorktree(worktreePath(commonDir, runId, slot)); } catch {}
+			const path = worktreePath(commonDir, runId, slot);
+			if (isQuarantined(path)) continue;
+			try { vcs.removeWorktree(path); } catch {}
 		}
 	}
 	clearRunWorktreeState(commonDir, runId);

@@ -210,8 +210,21 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 			stage = undefined;
 			let session: StepSessionInfo | undefined;
 			const failure = (error: unknown): Failure => ({ ...classify(error), session });
-			const lease = useWriteSlot ? acquireWriteWorktree(vcs, runId, base) : acquireReadOnlyWorktree(vcs, runId, base);
+			const writeLease = useWriteSlot ? acquireWriteWorktree(vcs, runId, base) : undefined;
+			const lease = writeLease ?? acquireReadOnlyWorktree(vcs, runId, base);
 			const { path } = lease;
+			/** The agent's work is in the slot but in no step ref: keep the slot out of the pool instead of resetting it. */
+			const kept = (error: unknown, commit: string | null): Failure => {
+				const result = failure(error);
+				const where = `${path}${commit ? `, commit ${commit}` : ""}`;
+				try {
+					writeLease!.quarantine(`step ${key} attempt ${number}: ${result.message}${commit ? `\ncommit ${commit}` : ""}`);
+					return { ...result, message: `${result.message}; work kept at ${where} (slot quarantined)` };
+				} catch (quarantineError) {
+					const reason = quarantineError instanceof Error ? quarantineError.message : String(quarantineError);
+					return { ...result, message: `${result.message}; work left at ${where}, but the slot could not be quarantined (${reason}) and may be reset` };
+				}
+			};
 			try {
 				store.journal.append({
 					t: "step.started", key, id: identity.id, occurrence, fingerprint, attempt: number, role: role.name, write, base,
@@ -242,12 +255,17 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 				let warning: string | undefined;
 				if (write) {
 					const { text, data, usage, transcriptRef } = reply;
-					const replyRef = store.outputs.put(JSON.stringify({ text, data, usage, transcriptRef }));
-					commit = vcs.snapshot(path, stepMessage(key, fingerprint, replyRef), base);
-					if (commit) {
-						hit("after-commit", key);
-						vcs.updateRef(ref, commit, null);
-						hit("after-ref", key);
+					try {
+						const replyRef = store.outputs.put(JSON.stringify({ text, data, usage, transcriptRef }));
+						commit = vcs.snapshot(path, stepMessage(key, fingerprint, replyRef), base);
+						if (commit) {
+							hit("after-commit", key);
+							vcs.updateRef(ref, commit, null);
+							hit("after-ref", key);
+						}
+					} catch (error) {
+						if (error instanceof Crash) throw error;
+						return kept(error, commit);
 					}
 				} else if (!vcs.isClean(path) || vcs.worktreeHead(path) !== base) {
 					warning = READ_ONLY_WARNING;

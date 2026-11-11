@@ -210,6 +210,8 @@ refs/herder/<runId>/integration      the integration head
 refs/herder/<runId>/steps/<stepKey>  each completed writing step's commit
 ```
 
+If a writing step fails after its agent ran but before its commit is pinned under `refs/herder/<runId>/steps/`, Herder does not reset its `rw-<n>` slot. It quarantines the slot (`rw-<n>.quarantined` next to it), and the step's error names the slot path and, if one was made, the commit. Later steps use other slots, and launches and session release leave the slot alone. `/herder abort`, delivery, and `/herder clean` remove it with the run's other worktrees.
+
 Run ids look like `20261025-141500-a3f9` (UTC). `/herder clean` deletes finished runs. Do not edit the journal, `progress.md`, or the refs by hand.
 
 A run whose journal cannot be read (corrupt before its last line, or written by a newer Herder) still counts as a run: no new run starts while it exists. A readable unfinished run next to it stays usable. Without one, `/herder <goal>`, `herder_run { action: "start" }`, the other tools, and `/herder resume`, `/herder status`, and `/herder abort` without a run id report the unreadable run and its journal error. Update Herder if a newer version wrote the journal; otherwise delete the run, with its refs and worktrees, using `/herder clean <runId>`.
