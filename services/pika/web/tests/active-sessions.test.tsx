@@ -564,7 +564,7 @@ describe("active sessions in the band", () => {
 		const links = within(main)
 			.getAllByRole("link")
 			.map((link) => link.getAttribute("href"));
-		expect(links.slice(0, 7)).toEqual(["/", "/statistics", "/runs", "/active", "/devices", "/memory", "/search"]);
+		expect(links.slice(0, 8)).toEqual(["/", "/statistics", "/runs", "/active", "/chatrooms", "/devices", "/memory", "/search"]);
 
 		server.state.online.push(onlineSession("s-c"));
 		await advance(RELAY_BADGE_POLL_MS);
@@ -598,9 +598,11 @@ describe("active sessions in the band", () => {
 		await advance(1_000 + 2_000);
 		await waitFor(() => expect(count(down, "/api/health")).toBe(3));
 		expect(within(main).queryByRole("link", { name: /Active sessions/ })).toBeNull();
+		expect(within(main).queryByRole("link", { name: "Chatrooms" })).toBeNull();
 		// Back up: the slow retry brings the item and its badge back without a reload.
 		await advance(HEALTH_RETRY_MS);
 		const item = await within(main).findByRole("link", { name: /^Active sessions/ });
+		expect(within(main).getByRole("link", { name: "Chatrooms" })).toBeTruthy();
 		await waitFor(() => expect(item.querySelector("[data-online-count]")?.textContent).toBe("1 online"));
 		// Once health answers, it stops asking.
 		const asked = count(down, "/api/health");
@@ -626,6 +628,7 @@ describe("active sessions in the band", () => {
 		const callout = await screen.findByText("Relay is turned off on this server");
 		expect(callout.closest("[data-callout]")?.textContent).toContain("PIKA_RELAY=off");
 		expect(within(await nav()).queryByRole("link", { name: /Active sessions/ })).toBeNull();
+		expect(within(await nav()).queryByRole("link", { name: "Chatrooms" })).toBeNull();
 		expect(within(await nav()).getByRole("link", { name: "Devices" })).toBeTruthy();
 		expect(relayCalls(server)).toEqual([]);
 	});
@@ -636,6 +639,7 @@ describe("active sessions in the band", () => {
 		const callout = await screen.findByText("This pika server has no relay");
 		expect(callout.closest("[data-callout]")?.textContent).toContain("too old");
 		expect(within(await nav()).queryByRole("link", { name: /Active sessions/ })).toBeNull();
+		expect(within(await nav()).queryByRole("link", { name: "Chatrooms" })).toBeNull();
 		expect(relayCalls(server)).toEqual([]);
 	});
 
@@ -645,11 +649,13 @@ describe("active sessions in the band", () => {
 		renderApp("/active", server.fetch);
 		await waitFor(() => expect(rowIds()).toEqual(["s-a"]));
 		expect(within(await nav()).getByRole("link", { name: /^Active sessions/ })).toBeTruthy();
+		expect(within(await nav()).getByRole("link", { name: "Chatrooms" })).toBeTruthy();
 
 		server.state.relay = false;
 		await advance(RELAY_POLL_MS);
 		expect(await screen.findByText("Relay is turned off on this server")).toBeTruthy();
 		expect(within(await nav()).queryByRole("link", { name: /Active sessions/ })).toBeNull();
+		expect(within(await nav()).queryByRole("link", { name: "Chatrooms" })).toBeNull();
 		expect(document.querySelector("[data-online-session]")).toBeNull();
 		const before = relayCalls(server).length;
 		await advance(RELAY_POLL_MS * 3);
@@ -693,197 +699,36 @@ describe("session page", () => {
 	});
 });
 
-describe("iMessage messenger and chatrooms", () => {
-	it("supports 1:1 direct threads and explicit multi-repo chatrooms with @mention notifications", async () => {
+describe("links into chatrooms", () => {
+	it("keeps /active focused on online sessions and events and links into /chatrooms", async () => {
+		const at = new Date().toISOString();
 		const server = createFakeServer({
-			online: [
-				onlineSession("s-backend", { name: "Backend", project: "pika-server", deviceName: "Studio Mac" }),
-				onlineSession("s-web", { name: "Frontend", project: "pika-web", device: "laptop", deviceName: "MacBook" }),
+			online: [onlineSession("s-a", { name: "Alpha" })],
+			relayRooms: [{ room: { name: "auth-sync", createdAt: at, updatedAt: at, messageCount: 0, members: [] }, messages: [] }],
+			relayEvents: [
+				relayEvent("m-room", 5_000, {
+					from: { kind: "web" },
+					to: { sessionId: "#auth-sync", name: "#auth-sync" },
+					room: "auth-sync",
+					text: "Syncing schema.",
+				}),
 			],
 		});
 		renderApp("/active", server.fetch);
-		await waitFor(() => expect(rowIds()).toHaveLength(2));
+		await waitFor(() => expect(rowIds()).toEqual(["s-a"]));
+		expect(document.querySelector("[data-imessage]")).toBeNull();
 
-		const messenger = document.querySelector<HTMLElement>("[data-imessage]")!;
-		expect(messenger).toBeTruthy();
+		// Recent messages link #room targets directly to /chatrooms/:room.
+		const roomLink = within(event("m-room")).getByRole("link", { name: "#auth-sync" });
+		expect(roomLink.getAttribute("href")).toBe("/chatrooms/auth-sync");
 
-		// 1. Direct 1:1 chat in the iMessage interface.
-		const webThreadBtn = messenger.querySelector<HTMLElement>('[data-imessage-thread="dm:s-web"]')!;
-		fireEvent.click(webThreadBtn);
-		expect(messenger.querySelector("[data-imessage-active-title]")?.textContent).toBe("Frontend");
+		// MessageDialog offers an Open in Chatrooms link to the session's DM thread.
+		const { dialog } = await openComposer("Alpha");
+		const dmLink = within(dialog).getByRole("link", { name: "Open in Chatrooms" });
+		expect(dmLink.getAttribute("href")).toBe("/chatrooms?dm=s-a");
+		fireEvent.click(dmLink);
 
-		const input = messenger.querySelector<HTMLTextAreaElement>("[data-imessage-input]")!;
-		fireEvent.change(input, { target: { value: "Check the CSS tokens." } });
-		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-send]")!);
-
-		await waitFor(() =>
-			expect(server.mutations).toContainEqual({
-				method: "POST",
-				path: "/api/v1/relay/messages",
-				body: { to: "s-web", text: "Check the CSS tokens.", urgent: false },
-				json: true,
-			}),
-		);
-		await waitFor(() => expect(messenger.querySelector("[data-imessage-bubble]")?.textContent).toContain("Check the CSS tokens."));
-
-		// 2. Create an explicit topic chatroom syncing agents across different repos (pika-server & pika-web).
-		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-new-room]")!);
-		const form = messenger.querySelector<HTMLElement>("[data-imessage-room-form]")!;
-		fireEvent.change(within(form).getByLabelText("Room name"), { target: { value: "#auth-sync" } });
-		fireEvent.change(within(form).getByLabelText("Topic (optional)"), { target: { value: "Sync token schema across repos" } });
-		for (const checkbox of within(form).getAllByRole("checkbox")) {
-			fireEvent.click(checkbox);
-		}
-		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-create-room]")!);
-
-		await waitFor(() => expect(messenger.querySelector("[data-imessage-active-title]")?.textContent).toBe("#auth-sync"));
-		const members = [...messenger.querySelectorAll("[data-imessage-room-members] li")].map((li) => li.textContent);
-		expect(members).toEqual(expect.arrayContaining([expect.stringContaining("Backendpika-server"), expect.stringContaining("Frontendpika-web")]));
-
-		// 3. Post to the room without @mentions (saved to room history without waking agents).
-		const roomInput = messenger.querySelector<HTMLTextAreaElement>("[data-imessage-input]")!;
-		fireEvent.change(roomInput, { target: { value: "Shared schema v2 draft." } });
-		fireEvent.keyDown(roomInput, { key: "Enter" });
-		await waitFor(() =>
-			expect(messenger.querySelector("[data-imessage-stream]")?.textContent).toContain("Room history only; no one notified"),
-		);
-
-		// 4. Select @Frontend pill in the Notify bar and post: notifies only s-web.
-		fireEvent.click(messenger.querySelector<HTMLButtonElement>('[data-imessage-mention="s-web"]')!);
-		fireEvent.change(roomInput, { target: { value: "Please update the client types." } });
-		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-send]")!);
-		await waitFor(() =>
-			expect(messenger.querySelector("[data-imessage-stream]")?.textContent).toContain("Notified Frontend"),
-		);
-		expect(server.mutations.at(-1)).toEqual({
-			method: "POST",
-			path: "/api/v1/relay/messages",
-			body: { room: "auth-sync", text: "Please update the client types.", mentions: ["s-web"], urgent: false },
-			json: true,
-		});
-	});
-
-	const report = ["# Handoff", "", "## Summary", "", ...Array.from({ length: 30 }, (_, i) => `- point ${i + 1}`), "", "```md", "## not a section", "```", "", "## Risks", "", "The final line."].join("\n");
-	const longThread = () =>
-		createFakeServer({
-			online: [onlineSession("s-web", { name: "Frontend", project: "pika-web" })],
-			relayEvents: [relayEvent("e-long", 60_000, { from: { kind: "session", sessionId: "s-web", device: "mini", name: "Frontend" }, to: { sessionId: "s-b", name: "Reviewer" }, text: report })],
-		});
-
-	it("previews a long message with its size and sections and expands it in place on narrow screens", async () => {
-		const server = longThread();
-		renderApp("/active", server.fetch);
-		const record = await waitFor(() => { const node = document.querySelector<HTMLElement>('[data-imessage-bubble="e-long"]')!; expect(node).toBeTruthy(); return node; });
-		expect(record.textContent).toContain("42 lines");
-		expect(record.textContent).toContain("Handoff · Summary · Risks");
-		expect(record.querySelector("[data-message-body]")?.textContent).not.toContain("The final line.");
-		const read = within(record).getByRole("button", { name: "Show all" });
-		expect(read.getAttribute("aria-expanded")).toBe("false");
-		fireEvent.click(read);
-		expect(record.querySelector("[data-message-body]")?.textContent).toContain("The final line.");
-		expect(within(record).getByRole("button", { name: "Show less" }).getAttribute("aria-expanded")).toBe("true");
-		expect(document.querySelector("[data-imessage-reader]")).toBeNull();
-	});
-
-	it("opens a long message in the reader on wide screens, with sections, raw text, and close", async () => {
-		const matchMedia = window.matchMedia;
-		window.matchMedia = ((query: string) => ({ ...matchMedia(query), matches: query.includes("min-width: 1280px") })) as typeof window.matchMedia;
-		const server = longThread();
-		renderApp("/active", server.fetch);
-		const record = await waitFor(() => { const node = document.querySelector<HTMLElement>('[data-imessage-bubble="e-long"]')!; expect(node).toBeTruthy(); return node; });
-		fireEvent.click(within(record).getByRole("button", { name: "Read in full" }));
-		const reader = screen.getByRole("complementary", { name: "Message reader" });
-		expect(within(reader).getByRole("navigation", { name: "Sections" }).textContent).toBe("HandoffSummaryRisks");
-		expect(reader.querySelector("[data-imessage-reader-body]")?.textContent).toContain("The final line.");
-		fireEvent.click(within(reader).getByRole("button", { name: "Raw" }));
-		expect(reader.querySelector("pre")?.textContent).toBe(report);
-		expect(within(record).getByRole("button", { name: "Close reader" }).getAttribute("aria-pressed")).toBe("true");
-		fireEvent.click(within(reader).getByRole("button", { name: "Close reader" }));
-		expect(screen.queryByRole("complementary", { name: "Message reader" })).toBeNull();
-	});
-
-	it("marks the room's representative wherever members are listed", async () => {
-		const at = new Date().toISOString();
-		const member = (sessionId: string, name: string) => ({ sessionId, device: "mini", name, project: "pika", state: "idle" as const, online: true, joinedAt: at });
-		const server = createFakeServer({
-			online: [onlineSession("s-lead", { name: "Lead" }), onlineSession("s-web", { name: "Frontend" })],
-			relayRooms: [{
-				room: { name: "ops", createdAt: at, updatedAt: at, messageCount: 0, members: [member("s-lead", "Lead"), member("s-web", "Frontend")], representative: "s-lead" },
-				messages: [],
-			}],
-		});
-		renderApp("/active", server.fetch);
-		const messenger = await waitFor(() => { const node = document.querySelector<HTMLElement>("[data-imessage-room-members]")!; expect(node).toBeTruthy(); return node.closest<HTMLElement>("[data-imessage]")!; });
-		const badged = (selector: string) =>
-			[...messenger.querySelectorAll<HTMLElement>(selector)].filter((node) => node.querySelector("[data-imessage-representative]")).map((node) => node.textContent);
-
-		expect(badged("[data-imessage-room-members] li")).toEqual(["LeadreppikaIdle"]);
-		const badge = messenger.querySelector<HTMLElement>("[data-imessage-representative]")!;
-		expect(badge.textContent).toBe("rep");
-		expect(badge.title).toBe("Representative");
-		expect(badged("[data-imessage-mention]")).toEqual(["Leadrep"]);
-
-		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-manage-members]")!);
-		expect(badged("[data-imessage-member-drawer] li")).toHaveLength(1);
-		expect(messenger.querySelector("[data-imessage-member-drawer] li [data-imessage-representative]")?.closest("li")?.querySelector("[data-imessage-toggle-member]")?.getAttribute("data-imessage-toggle-member")).toBe("s-lead");
-
-		// Removed, the representative is no longer one, and no member carries the badge.
-		fireEvent.click(messenger.querySelector<HTMLButtonElement>('[data-imessage-toggle-member="s-lead"]')!);
-		await waitFor(() => expect(messenger.querySelectorAll("[data-imessage-room-members] li")).toHaveLength(1));
-		expect(messenger.querySelector("[data-imessage-representative]")).toBeNull();
-	});
-
-	it("asks before deleting a room", async () => {
-		const server = createFakeServer({
-			relayRooms: [{ room: { name: "ops", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), messageCount: 0, members: [] }, messages: [] }],
-		});
-		renderApp("/active", server.fetch);
-		const ask = await waitFor(() => { const node = document.querySelector<HTMLButtonElement>("[data-imessage-delete-room-ask]")!; expect(node).toBeTruthy(); return node; });
-		fireEvent.click(ask);
-		expect(server.mutations).toEqual([]);
-		fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-		fireEvent.click(document.querySelector<HTMLButtonElement>("[data-imessage-delete-room-ask]")!);
-		fireEvent.click(document.querySelector<HTMLButtonElement>("[data-imessage-delete-room]")!);
-		await waitFor(() => expect(server.mutations.map((m) => `${m.method} ${m.path}`)).toEqual(["DELETE /api/v1/relay/rooms/ops"]));
-	});
-
-	it("says plainly that a room is gone, and posting does not create it again", async () => {
-		const at = new Date().toISOString();
-		const server = createFakeServer({ relayRooms: [{ room: { name: "ops", createdAt: at, updatedAt: at, messageCount: 0, members: [] }, messages: [] }] });
-		renderApp("/active", server.fetch);
-		const messenger = await waitFor(() => { const node = document.querySelector<HTMLElement>("[data-imessage-active-title]")!; expect(node?.textContent).toBe("#ops"); return node.closest<HTMLElement>("[data-imessage]")!; });
-		server.state.relayRooms.splice(0);
-		fireEvent.change(messenger.querySelector<HTMLTextAreaElement>("[data-imessage-input]")!, { target: { value: "Anyone here?" } });
-		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-send]")!);
-		const feedback = await waitFor(() => { const node = messenger.querySelector<HTMLElement>('[data-imessage-feedback="error"]')!; expect(node).toBeTruthy(); return node; });
-		expect(feedback.textContent).toBe("No such room. Create it here or with /relay join.");
-		expect(server.state.relayRooms).toEqual([]);
-	});
-
-	it("wakes only members: a mentioned non-member is named in the feedback and is not added", async () => {
-		const at = new Date().toISOString();
-		const lead = { sessionId: "s-lead", device: "mini", name: "Lead", project: "pika-server", state: "idle" as const, online: true, joinedAt: at };
-		const server = createFakeServer({
-			online: [onlineSession("s-lead", { name: "Lead", project: "pika-server" }), onlineSession("s-bob", { name: "Bob", project: "pika-web" })],
-			relayRooms: [{ room: { name: "ops", createdAt: at, updatedAt: at, messageCount: 0, members: [lead] }, messages: [] }],
-		});
-		renderApp("/active", server.fetch);
-		const messenger = await waitFor(() => { const node = document.querySelector<HTMLElement>("[data-imessage-active-title]")!; expect(node?.textContent).toBe("#ops"); return node.closest<HTMLElement>("[data-imessage]")!; });
-		fireEvent.change(messenger.querySelector<HTMLTextAreaElement>("[data-imessage-input]")!, { target: { value: "@Bob can you check?" } });
-		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-send]")!);
-		await waitFor(() => expect(messenger.querySelector('[data-imessage-feedback="ok"]')?.textContent).toBe("Posted to the room's history. Not members: @Bob"));
-		await waitFor(() => expect(messenger.querySelector("[data-notified]")?.textContent).toBe("Room history only; no one notified"));
-		expect(server.state.relayRooms[0]!.room.members.map((m) => m.sessionId)).toEqual(["s-lead"]);
-
-		// Only the user adds members.
-		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-manage-members]")!);
-		fireEvent.click(messenger.querySelector<HTMLButtonElement>('[data-imessage-toggle-member="s-bob"]')!);
-		await waitFor(() => expect(messenger.querySelectorAll("[data-imessage-room-members] li")).toHaveLength(2));
-		expect(server.mutations.at(-1)).toEqual({
-			method: "POST",
-			path: "/api/v1/relay/rooms/ops/members",
-			body: { sessionId: "s-bob", action: "add" },
-			json: true,
-		});
+		expect(await screen.findByRole("heading", { name: "Chatrooms", level: 1 })).toBeTruthy();
+		await waitFor(() => expect(document.querySelector("[data-imessage-active-title]")?.textContent).toBe("Alpha"));
 	});
 });

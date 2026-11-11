@@ -1,5 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { Link } from "react-router";
 import { ApiError, useApi } from "../lib/api";
 import { deviceLabel } from "../lib/devices";
 import { MAX_TEXT_BYTES, reasonMessage, RELAY_EVENTS_KEY, sessionLabel, targetLabel, utf8Length } from "../lib/relay";
@@ -103,7 +104,7 @@ export function MessageDialog({ session, onClose }: { session: OnlineSession; on
 			}}
 		>
 			<div data-message-dialog={session.id}>
-				<div className="mt-0.5 flex min-w-0 flex-wrap gap-x-3 text-[13px] text-muted">
+				<div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-muted">
 					<span className="flex items-center gap-1">
 						<Icon name="device" size={13} />
 						{deviceLabel(session)}
@@ -115,6 +116,14 @@ export function MessageDialog({ session, onClose }: { session: OnlineSession; on
 						</span>
 					)}
 					<span className="mono !text-[12px] break-all">{session.id}</span>
+					<Link
+						to={`/chatrooms?dm=${encodeURIComponent(session.id)}`}
+						onClick={onClose}
+						className="ml-auto inline-flex items-center gap-1 text-[12.5px] font-medium text-ink underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink"
+					>
+						<Icon name="message" size={13} />
+						Open in Chatrooms
+					</Link>
 				</div>
 				<label htmlFor={textId} className="sr-only">
 					Message text

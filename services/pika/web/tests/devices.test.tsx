@@ -54,14 +54,16 @@ afterEach(() => {
 });
 
 describe("devices page", () => {
-	it("is linked from the band between Active sessions and Search", async () => {
+	it("is linked from the band between Chatrooms and Search", async () => {
 		renderApp("/", createFakeServer({}).fetch);
 		const nav = await screen.findByRole("navigation", { name: "Main" });
 		await within(nav).findByRole("link", { name: "Active sessions" });
 		// By accessible name: the Search link also shows its `/` shortcut, hidden from assistive technology.
 		const links = within(nav).getAllByRole("link");
-		const order = ["Sessions", "Statistics", "Herder runs", "Active sessions", "Devices", "Memory", "Search"].map((name) => links.indexOf(within(nav).getByRole("link", { name })));
-		expect(order).toEqual([0, 1, 2, 3, 4, 5, 6]);
+		const order = ["Sessions", "Statistics", "Herder runs", "Active sessions", "Chatrooms", "Devices", "Memory", "Search"].map((name) =>
+			links.indexOf(within(nav).getByRole("link", { name })),
+		);
+		expect(order).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
 		fireEvent.click(within(nav).getByRole("link", { name: "Devices" }));
 		expect(await screen.findByRole("heading", { name: "Devices", level: 1 })).toBeTruthy();
 	});

@@ -282,6 +282,41 @@ export const Icons = {
 			<path d="M8 1.8 9.4 6.6 14.2 8 9.4 9.4 8 14.2 6.6 9.4 1.8 8l4.8-1.4z" />
 		</Svg>
 	),
+	reply: (p: IconProps) => (
+		<Svg {...p}>
+			<path d="M6.5 4.5 3 8l3.5 3.5" />
+			<path d="M3 8h6.5a3.5 3.5 0 0 1 3.5 3.5v1" />
+		</Svg>
+	),
+	edit: (p: IconProps) => (
+		<Svg {...p}>
+			<path d="m10.8 2.5 2.7 2.7L6 12.7H3.3V10z" />
+			<path d="M2.5 14h11" />
+		</Svg>
+	),
+	users: (p: IconProps) => (
+		<Svg {...p}>
+			<circle cx="6" cy="5.5" r="2.2" />
+			<path d="M1.8 13c.5-2 2.1-3.2 4.2-3.2s3.7 1.2 4.2 3.2" />
+			<circle cx="11.2" cy="5.8" r="1.7" />
+			<path d="M11.6 9.9c1.4.2 2.4 1.1 2.8 2.6" />
+		</Svg>
+	),
+	arrowLeft: (p: IconProps) => (
+		<Svg {...p}>
+			<path d="M13 8H3M6.5 4.5 3 8l3.5 3.5" />
+		</Svg>
+	),
+	arrowDown: (p: IconProps) => (
+		<Svg {...p}>
+			<path d="M8 3v10M4.5 9.5 8 13l3.5-3.5" />
+		</Svg>
+	),
+	trash: (p: IconProps) => (
+		<Svg {...p}>
+			<path d="M3 4.5h10M6 4.5V3c0-.3.2-.5.5-.5h3c.3 0 .5.2.5.5v1.5M4.5 4.5l.6 8.5c0 .6.4 1 1 1h3.8c.6 0 1-.4 1-1l.6-8.5" />
+		</Svg>
+	),
 };
 
 export type IconName = keyof typeof Icons;

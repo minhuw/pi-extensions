@@ -225,6 +225,16 @@ function ActiveSessionsItem() {
 	);
 }
 
+/** Chatrooms in the band; hidden when the server has no relay or it is off. */
+function ChatroomsItem() {
+	const { availability } = useOnlineSessions(false);
+	if (availability !== "on") return null;
+	return (
+		<NavItem to="/chatrooms" icon="message" end within={["/chatrooms/"]}>
+			Chatrooms
+		</NavItem>
+	);
+}
 /** Opens this page as a visitor who isn't signed in sees it: published trajectories only, loaded anonymously. */
 function GuestViewLink() {
 	const { pathname, search } = useLocation();
@@ -298,8 +308,9 @@ export function Layout({ children }: { children?: ReactNode }) {
 	const signingOutValue = useMemo(() => ({ signingOut, setSigningOut }), [signingOut]);
 	const { pathname } = useLocation();
 	const searchRef = useRef<HTMLInputElement>(null);
-	// Keeps the band's badge and the session page's Online badge fresh; the Active sessions page polls faster itself.
-	useOnlineSessions(signingOut || pathname === "/active" ? false : RELAY_BADGE_POLL_MS);
+	// Keeps the band's badge and the session page's Online badge fresh; Active sessions and Chatrooms poll faster themselves.
+	const onRelayPage = pathname === "/active" || pathname === "/chatrooms" || pathname.startsWith("/chatrooms/");
+	useOnlineSessions(signingOut || onRelayPage ? false : RELAY_BADGE_POLL_MS);
 	useBandSearchShortcut("/search", searchRef);
 
 	return (
@@ -326,6 +337,7 @@ export function Layout({ children }: { children?: ReactNode }) {
 							Herder runs
 						</NavItem>
 						<ActiveSessionsItem />
+						<ChatroomsItem />
 						<NavItem to="/devices" icon="device">
 							Devices
 						</NavItem>

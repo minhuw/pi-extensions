@@ -219,15 +219,25 @@ export function Segmented<T extends string>({
 	options,
 	onChange,
 	size = "md",
+	fullWidth = false,
 }: {
 	label: string;
 	value: T;
 	options: readonly (readonly [T, string])[];
 	onChange: (value: T) => void;
 	size?: "sm" | "md";
+	fullWidth?: boolean;
 }) {
 	return (
-		<div role="group" aria-label={label} className={cx("flex shrink-0 items-stretch overflow-hidden rounded-sm border border-ink", size === "sm" ? "h-7" : "h-8")}>
+		<div
+			role="group"
+			aria-label={label}
+			className={cx(
+				fullWidth ? "flex w-full" : "inline-flex",
+				"shrink-0 items-stretch overflow-hidden rounded-sm border border-ink",
+				size === "sm" ? "h-7" : "h-8",
+			)}
+		>
 			{options.map(([key, text]) => (
 				<button
 					key={key}
@@ -236,9 +246,10 @@ export function Segmented<T extends string>({
 					onClick={() => onChange(key)}
 					className={cx(
 						// The group clips its corners, so the focus ring sits inside each segment, in the segment's own text colour.
-						"font-medium whitespace-nowrap transition-colors duration-150 not-first:border-l not-first:border-ink focus-visible:outline-current focus-visible:outline-offset-[-4px]",
+						"inline-flex items-center justify-center font-medium whitespace-nowrap not-first:border-l not-first:border-ink focus-visible:outline-current focus-visible:outline-offset-[-4px]",
+						fullWidth && "min-w-0 flex-1",
 						size === "sm" ? "px-2.5 text-[12.5px]" : "px-3 text-[13px]",
-						value === key ? "bg-ink text-page" : "text-ink hover:bg-hover",
+						value === key ? "bg-ink text-page" : "bg-page text-ink hover:bg-hover",
 					)}
 				>
 					{text}
@@ -249,7 +260,7 @@ export function Segmented<T extends string>({
 }
 
 const BUTTON_BASE =
-	"inline-flex h-8 items-center gap-1.5 rounded-sm px-3 text-[13px] font-medium whitespace-nowrap transition-colors duration-150 disabled:cursor-default disabled:opacity-45";
+	"inline-flex h-8 items-center gap-1.5 rounded-sm px-3 text-[13px] font-medium whitespace-nowrap disabled:cursor-default disabled:opacity-45";
 
 /** Actions are black and white; only a destructive action is red. */
 export const BUTTON = {

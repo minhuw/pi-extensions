@@ -709,17 +709,18 @@ export function createFakeServer({
 				return json(200, { items: state.relayRooms.map((r) => r.room) });
 			}
 			if (parts[1] === "rooms" && parts.length === 2 && method === "POST") {
-				const req = (body ?? {}) as { name?: string; topic?: string; members?: string[] };
+				const req = (body ?? {}) as { name?: string; topic?: string | null; members?: string[] };
 				const clean = (req.name ?? "").trim().replace(/^#/, "");
 				if (!/^[A-Za-z0-9._-]{1,64}$/.test(clean)) return json(400, { error: "invalid" });
 				const now = new Date().toISOString();
 				let entry = state.relayRooms.find((r) => r.room.name === clean);
 				const members = (req.members ?? []).map((sid) => buildMember(sid, now));
+				const trimmedTopic = typeof req.topic === "string" ? req.topic.trim() : undefined;
 				if (!entry) {
 					entry = {
 						room: {
 							name: clean,
-							...(req.topic ? { topic: req.topic } : {}),
+							...(trimmedTopic ? { topic: trimmedTopic } : {}),
 							createdAt: now,
 							updatedAt: now,
 							messageCount: 0,
@@ -729,7 +730,11 @@ export function createFakeServer({
 					};
 					state.relayRooms.unshift(entry);
 				} else {
-					if (req.topic) entry.room.topic = req.topic;
+					if (req.topic === null || req.topic === "" || trimmedTopic === "") {
+						delete entry.room.topic;
+					} else if (trimmedTopic) {
+						entry.room.topic = trimmedTopic;
+					}
 					for (const m of members) {
 						if (!entry.room.members.some((existing) => existing.sessionId === m.sessionId)) {
 							entry.room.members.push(m);
@@ -754,7 +759,7 @@ export function createFakeServer({
 			}
 			if (parts[1] === "rooms" && parts.length === 4 && parts[3] === "members" && method === "POST") {
 				const clean = parts[2].replace(/^#/, "");
-				const req = (body ?? {}) as { sessionId?: string; action?: "add" | "remove" };
+				const req = (body ?? {}) as { sessionId?: string; action?: "add" | "remove" | "represent" | "unrepresent" };
 				const sid = req.sessionId ?? "";
 				const now = new Date().toISOString();
 				let entry = state.relayRooms.find((r) => r.room.name === clean);
@@ -764,7 +769,16 @@ export function createFakeServer({
 					// A representative that leaves the room stops being its representative.
 					if (entry.room.representative === sid) delete entry.room.representative;
 					entry.room.updatedAt = now;
+				} else if (req.action === "represent") {
+					if (!entry || !entry.room.members.some((m) => m.sessionId === sid)) return json(400, { error: "not_member" });
+					entry.room.representative = sid;
+					entry.room.updatedAt = now;
+				} else if (req.action === "unrepresent") {
+					if (!entry) return json(400, { error: "invalid" });
+					if (!sid || entry.room.representative === sid) delete entry.room.representative;
+					entry.room.updatedAt = now;
 				} else {
+					if (!sid) return json(400, { error: "invalid" });
 					if (!entry) {
 						entry = {
 							room: { name: clean, createdAt: now, updatedAt: now, messageCount: 0, members: [] },
@@ -781,7 +795,8 @@ export function createFakeServer({
 			}
 			if (parts[1] === "messages" && method === "POST") {
 				if (state.relayHold) await state.relayHold;
-				const request = (body ?? {}) as { to?: string; room?: string; mentions?: string[]; text?: string; urgent?: boolean };
+				const request = (body ?? {}) as { to?: string; room?: string; mentions?: string[]; text?: string; urgent?: boolean; replyTo?: string };
+				const replyTo = typeof request.replyTo === "string" && request.replyTo.trim() ? request.replyTo.trim() : undefined;
 				if (typeof request.room === "string") {
 					// Posting never creates a room or adds a member; the web may post to any existing room.
 					const cleanRoom = request.room.trim().replace(/^#/, "");
@@ -806,6 +821,7 @@ export function createFakeServer({
 							status: "rejected",
 							reason,
 							urgent: request.urgent === true,
+							...(replyTo ? { replyTo } : {}),
 							hops: 0,
 							text,
 						});
@@ -842,6 +858,7 @@ export function createFakeServer({
 						mentions: notified.map((n) => n.sessionId),
 						notified,
 						urgent: request.urgent === true,
+						...(replyTo ? { replyTo } : {}),
 						hops: 0,
 						at,
 					};
@@ -859,6 +876,7 @@ export function createFakeServer({
 						status: "delivered",
 						deliveredAt: at,
 						urgent: request.urgent === true,
+						...(replyTo ? { replyTo } : {}),
 						hops: 0,
 						text,
 					});
@@ -898,6 +916,7 @@ export function createFakeServer({
 					reason,
 					deliveredAt: status === "delivered" ? at : undefined,
 					urgent: request.urgent === true,
+					...(replyTo ? { replyTo } : {}),
 					hops: 0,
 					text,
 				});

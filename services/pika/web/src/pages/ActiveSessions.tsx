@@ -5,7 +5,6 @@ import { Icon } from "../components/icons";
 import { ModelMark } from "../components/ModelName";
 import { useSigningOut } from "../components/Layout";
 import { MessageDialog } from "../components/MessageDialog";
-import { Messenger } from "../components/Messenger";
 import { BUTTON, Callout, cx, EmptyState, ErrorState, Page, PageTitle, Pill, SkeletonLines } from "../components/ui";
 import { useApi } from "../lib/api";
 import { formatDateTime, formatRelative, plural } from "../lib/format";
@@ -210,6 +209,7 @@ function EventItem({
 	// A bare id has no spaces to wrap at, so a long one ends in an ellipsis; names and titles wrap.
 	const bareSender = from.kind === "session" && !from.name && !from.title;
 	const bareTarget = !event.to.name && !event.to.title;
+	const roomName = event.room || (event.to.sessionId.startsWith("#") ? event.to.sessionId.slice(1) : undefined);
 	return (
 		<li className="border-b border-line px-1.5 py-2 last:border-b-0" data-relay-event={event.id} data-status={event.status}>
 			<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px]">
@@ -225,13 +225,24 @@ function EventItem({
 					→
 				</span>
 				<span className="sr-only">to</span>
-				<span
-					className={cx("max-w-full min-w-0 font-medium", bareTarget ? "truncate" : "break-words")}
-					data-target=""
-					title={event.to.sessionId}
-				>
-					{targetLabel(event.to)}
-				</span>
+				{roomName ? (
+					<Link
+						to={`/chatrooms/${encodeURIComponent(roomName)}`}
+						className="mono max-w-full min-w-0 truncate font-medium underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink"
+						data-target=""
+						title={`#${roomName}`}
+					>
+						{targetLabel(event.to)}
+					</Link>
+				) : (
+					<span
+						className={cx("max-w-full min-w-0 font-medium", bareTarget ? "truncate" : "break-words")}
+						data-target=""
+						title={event.to.sessionId}
+					>
+						{targetLabel(event.to)}
+					</span>
+				)}
 				{event.urgent && <Pill tone="red">urgent</Pill>}
 				{event.replyTo && (
 					<span className="text-[13px] text-muted" title={`Replying to ${event.replyTo}`}>
@@ -270,7 +281,7 @@ function EventItem({
 	);
 }
 
-function RelayOff({ availability }: { availability: Exclude<RelayAvailability, "on" | "loading" | "error"> }) {
+export function RelayOff({ availability }: { availability: Exclude<RelayAvailability, "on" | "loading" | "error"> }) {
 	return (
 		<div className="mt-8" data-relay-off={availability}>
 			{availability === "off" ? (
@@ -336,7 +347,6 @@ export function ActiveSessionsPage() {
 	else
 		body = (
 			<>
-				<Messenger sessions={items} events={eventItems} now={now} />
 				<H2 aside={items.length > 0 && <Pill tone="accent">{items.length}</Pill>}>Online</H2>
 				{sessions.isPending ? (
 					<SkeletonLines lines={3} />
@@ -386,7 +396,15 @@ export function ActiveSessionsPage() {
 
 	return (
 		<Page className="pb-24">
-			<PageTitle>Active sessions</PageTitle>
+			<div className="flex flex-wrap items-center justify-between gap-3">
+				<PageTitle>Active sessions</PageTitle>
+				{availability === "on" && (
+					<Link to="/chatrooms" className={BUTTON.secondary}>
+						<Icon name="message" size={14} />
+						Chatrooms
+					</Link>
+				)}
+			</div>
 			<p className="mt-2 max-w-[72ch] text-[14px] text-pretty text-muted">
 				pi sessions running right now on machines logged into pika. Send one a message, or follow what sessions send each other.
 			</p>

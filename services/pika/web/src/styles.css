@@ -311,18 +311,19 @@
 	.prose-pika table {
 		border-collapse: collapse;
 		font-size: 0.93em;
-		display: block;
-		overflow-x: auto;
 	}
 	.prose-pika th,
 	.prose-pika td {
 		border: 1px solid var(--color-line);
 		padding: 0.3em 0.6em;
 		text-align: left;
+		overflow-wrap: normal;
+		word-break: normal;
 	}
 	.prose-pika th {
 		font-weight: 600;
 		background: var(--color-soft);
+		white-space: nowrap;
 	}
 	.prose-pika input[type="checkbox"] {
 		margin-right: 0.4em;

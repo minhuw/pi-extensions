@@ -402,11 +402,14 @@ export class PikaApi {
 		return this.request(`relay/rooms/${encodeURIComponent(name.replace(/^#/, ""))}`, { limit, after });
 	}
 
-	saveRelayRoom(body: { name: string; topic?: string; members?: string[] }): Promise<RelayRoomDetail> {
+	saveRelayRoom(body: { name: string; topic?: string | null; members?: string[] }): Promise<RelayRoomDetail> {
 		return this.send("relay/rooms", "POST", body);
 	}
 
-	setRelayRoomMember(name: string, body: { sessionId: string; action: "add" | "remove" }): Promise<RelayRoomDetail> {
+	setRelayRoomMember(
+		name: string,
+		body: { sessionId: string; action: "add" | "remove" | "represent" | "unrepresent" },
+	): Promise<RelayRoomDetail> {
 		return this.send(`relay/rooms/${encodeURIComponent(name.replace(/^#/, ""))}/members`, "POST", body);
 	}
 
