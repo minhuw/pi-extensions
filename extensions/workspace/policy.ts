@@ -700,21 +700,50 @@ function walkBashCommands(command: string, canonicalCwd: string, visitor: BashWa
 	visit(parse(command));
 }
 
+/** A resolved write target of a shell command; `deletes` marks a target only a deleting verb (`rm`, `rmdir`) names. */
+export interface BashWriteTarget {
+	path: string;
+	deletes: boolean;
+}
+
+/** Verbs that only delete what they name. */
+const DELETING_VERBS = new Set(["rm", "rmdir"]);
+
 /**
  * Extracts all resolved filesystem write/creation target paths from a shell command.
  * Commands for other machines (`ssh host mkdir /x`) and heredoc bodies are data unless a
  * local shell reads them (`bash <<EOF`, `cat <<EOF | sh`).
  */
 export function extractBashWriteTargets(command: string, cwd: string): string[] {
+	return [...new Set(extractTaggedBashWriteTargets(command, cwd).map((target) => target.path))];
+}
+
+/**
+ * The targets of `extractBashWriteTargets`, each tagged with whether it is only deleted. A path both deleted and
+ * written in one command (`rm -rf d; mkdir d`) is tagged as written.
+ */
+export function extractTaggedBashWriteTargets(command: string, cwd: string): BashWriteTarget[] {
 	const canonicalCwd = resolveCanonicalPath(cwd);
 	const targets: string[] = [];
+	const written = new Set<string>();
+	let deleting = false;
+	const push = (target: string) => {
+		targets.push(target);
+		if (!deleting) written.add(target);
+	};
 
-	const inspectCommand = ([verb, ...args]: string[], effectiveCwd: string): void => {
+	const inspectCommand = (words: string[], effectiveCwd: string): void => {
+		deleting = DELETING_VERBS.has(words[0] ?? "");
+		inspectWords(words, effectiveCwd);
+		deleting = false;
+	};
+
+	const inspectWords = ([verb, ...args]: string[], effectiveCwd: string): void => {
 		if (!verb || verb === "cd" || verb === "pushd") return;
 
 		if (verb === "git") {
 			const gitTargets = extractGitTargets(args, effectiveCwd);
-			targets.push(...gitTargets);
+			for (const target of gitTargets) push(target);
 			return;
 		}
 
@@ -731,10 +760,10 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 				positionals.push(arg);
 			}
 			for (const p of positionals) {
-				targets.push(resolveBashWord(p, effectiveCwd));
+				push(resolveBashWord(p, effectiveCwd));
 			}
 			if (positionals.length === 0 && effectiveCwd !== canonicalCwd) {
-				targets.push(effectiveCwd);
+				push(effectiveCwd);
 			}
 			return;
 		}
@@ -757,11 +786,11 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 				positionals.push(arg);
 			}
 			if (targetDir) {
-				targets.push(resolveBashWord(targetDir, effectiveCwd));
+				push(resolveBashWord(targetDir, effectiveCwd));
 			} else if (positionals.length >= 2) {
-				targets.push(resolveBashWord(positionals[positionals.length - 1]!, effectiveCwd));
+				push(resolveBashWord(positionals[positionals.length - 1]!, effectiveCwd));
 			} else if (effectiveCwd !== canonicalCwd) {
-				targets.push(effectiveCwd);
+				push(effectiveCwd);
 			}
 			return;
 		}
@@ -769,10 +798,10 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 		if (verb === "mv") {
 			const positionals = args.filter((arg) => !arg.startsWith("-"));
 			for (const p of positionals) {
-				targets.push(resolveBashWord(p, effectiveCwd));
+				push(resolveBashWord(p, effectiveCwd));
 			}
 			if (positionals.length === 0 && effectiveCwd !== canonicalCwd) {
-				targets.push(effectiveCwd);
+				push(effectiveCwd);
 			}
 			return;
 		}
@@ -780,9 +809,9 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 		if (verb === "cargo" && (args[0] === "new" || args[0] === "init")) {
 			const positionals = args.slice(1).filter((arg) => !arg.startsWith("-"));
 			if (positionals[0]) {
-				targets.push(resolveBashWord(positionals[0], effectiveCwd));
+				push(resolveBashWord(positionals[0], effectiveCwd));
 			} else {
-				targets.push(effectiveCwd);
+				push(effectiveCwd);
 			}
 			return;
 		}
@@ -794,22 +823,22 @@ export function extractBashWriteTargets(command: string, cwd: string): string[] 
 			: verb === "npm" || verb === "pnpm" || verb === "yarn" ? optionValue(args, ["--prefix", "-C", "--dir", "--cwd"])
 			: undefined;
 		if (explicitTarget) {
-			targets.push(resolveBashWord(explicitTarget, effectiveCwd));
+			push(resolveBashWord(explicitTarget, effectiveCwd));
 			return;
 		}
 
 		if (MUTATING_VERBS.has(verb) && effectiveCwd !== canonicalCwd) {
-			targets.push(effectiveCwd);
+			push(effectiveCwd);
 		}
 	};
 
 	walkBashCommands(command, canonicalCwd, {
 		command: inspectCommand,
 		writeRedirect: (target, effectiveCwd) => {
-			targets.push(resolveBashWord(target, effectiveCwd));
+			push(resolveBashWord(target, effectiveCwd));
 		},
 	});
-	return [...new Set(targets)];
+	return [...new Set(targets)].map((target) => ({ path: target, deletes: !written.has(target) }));
 }
 
 /** Verbs that only read the files they name. */

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import { Type, type Static } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { runWorkspaceGc } from "./gc.ts";
+import { releaseAndCollectWorkspace, runScheduledSweep, runWorkspaceGc, summarizeGc, type GcResult } from "./gc.ts";
 import {
 	allowProjectPath,
 	containsPath,
@@ -9,7 +9,7 @@ import {
 	ensureWorkspacesClosure,
 	evaluatePathAccess,
 	extractBashExternalWriteTargets,
-	extractBashWriteTargets,
+	extractTaggedBashWriteTargets,
 	extractWorkspaceNameFromPath,
 	findBashNamedStateFile,
 	normalizeFileToolPath,
@@ -20,18 +20,25 @@ import {
 	workspacesDir,
 } from "./policy.ts";
 import {
-	createOrTouchWorkspace,
+	assertWorkspaceQuota,
+	heldWorkspaceNames,
 	inspectWorkspaceSafety,
 	markSessionWorkspacesClosed,
+	readRegistry,
 	registryFilePath,
-	releaseWorkspace,
 	setWorkspacePin,
 	syncWorkspaces,
+	touchWorkspace,
+	validateWorkspaceName,
+	WORKSPACE_LIMITS,
+	WorkspaceQuotaError,
+	type WorkspaceTouchResult,
 } from "./registry.ts";
 
 export const WORKSPACE_SHARED_KEY = Symbol.for("pi-extensions.workspace");
 export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
 export const SESSION_LINK_TYPE = "pi-extensions.session-link";
+export const TELEMETRY_TYPE = "pi-extensions.workspace";
 
 export interface ChildSessionHook {
 	name: string;
@@ -43,6 +50,8 @@ export interface WorkspaceSharedState {
 	sessionAllowedPaths: Map<string, Set<string>>;
 	openInstances: Set<object>;
 	sessionByFile: Map<string, string>;
+	/** In-flight automatic sweeps by canonical project directory: one per project in this process. */
+	sweeps: Map<string, Promise<void>>;
 	hook?: ChildSessionHook;
 }
 
@@ -57,9 +66,12 @@ function getSharedState(): WorkspaceSharedState {
 			sessionAllowedPaths: new Map<string, Set<string>>(),
 			openInstances: new Set<object>(),
 			sessionByFile: new Map<string, string>(),
+			sweeps: new Map<string, Promise<void>>(),
 		};
 		g[WORKSPACE_SHARED_KEY] = state;
 	}
+	// State published by an older load of this module in the same process.
+	state.sweeps ??= new Map<string, Promise<void>>();
 	return state;
 }
 
@@ -91,6 +103,11 @@ function syncChildSessionHook(): void {
 			}
 		}
 	}
+}
+
+/** Resolves when every automatic sweep running in this process has finished. */
+export async function settleWorkspaceSweeps(): Promise<void> {
+	await Promise.all([...getSharedState().sweeps.values()]);
 }
 
 export function isChildSession(ctx: ExtensionContext): boolean {
@@ -197,6 +214,40 @@ export const WorkspaceToolParameters = Type.Object({
 
 export type WorkspaceToolInput = Static<typeof WorkspaceToolParameters>;
 
+export type WorkspaceTelemetry =
+	| { event: "create"; name: string; source: "tool" | "guard"; held: number; projectTotal: number }
+	| { event: "quota_refused"; name: string; held: string[]; limit: number }
+	| {
+			event: "release";
+			name: string;
+			status: string;
+			removed: boolean;
+			reasons: string[];
+			sizeBytes: number;
+			ageMs: number;
+	  }
+	| {
+			event: "sweep";
+			trigger: "session_start" | "manual";
+			removed: string[];
+			bytesFreed: number;
+			counts: Record<string, number>;
+			durationMs: number;
+	  }
+	| { event: "session_end"; reason: string; held: string[] };
+
+function sweepTelemetry(trigger: "session_start" | "manual", result: GcResult, durationMs: number): WorkspaceTelemetry {
+	const { counts, bytesFreed } = summarizeGc(result);
+	return {
+		event: "sweep",
+		trigger,
+		removed: result.removed.map((report) => report.entry.name),
+		bytesFreed,
+		counts,
+		durationMs,
+	};
+}
+
 function formatBytes(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
@@ -221,9 +272,72 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 	}
 
 	const instanceToken = {};
+	// Whether a session is bound to this instance: telemetry and background notices need one.
+	let bound = false;
+
+	const emitTelemetry = (data: WorkspaceTelemetry) => {
+		if (!bound) return;
+		try {
+			pi.appendEntry(TELEMETRY_TYPE, data);
+		} catch (error) {
+			// Telemetry never breaks the operation it records.
+			console.error(`[workspace] telemetry entry "${data.event}" failed:`, error);
+		}
+	};
+
+	const recordTouch = (result: WorkspaceTouchResult, source: "tool" | "guard") => {
+		if (!result.acquired) return;
+		emitTelemetry({
+			event: "create",
+			name: result.entry.name,
+			source,
+			held: result.held.length,
+			projectTotal: result.projectTotal,
+		});
+	};
+
+	const recordQuotaRefusal = (error: WorkspaceQuotaError) => {
+		emitTelemetry({ event: "quota_refused", name: error.requested[0]!, held: error.held, limit: error.limit });
+	};
+
+	/** Starts the project's automatic sweep in the background, at most one per project in this process. */
+	const startSweep = (ctx: ExtensionContext) => {
+		const state = getSharedState();
+		const projectCwd = resolveCanonicalPath(ctx.cwd);
+		if (state.sweeps.has(projectCwd)) return;
+		const sweep = (async () => {
+			try {
+				const outcome = await runScheduledSweep({
+					cwd: projectCwd,
+					intervalMs: WORKSPACE_LIMITS.sweepIntervalMs,
+					activeSessionIds: state.activeSessionIds,
+				});
+				if (!outcome) return;
+				emitTelemetry(sweepTelemetry("session_start", outcome.result, outcome.durationMs));
+				const { counts, reviewBytes } = summarizeGc(outcome.result);
+				if (counts.REVIEW >= WORKSPACE_LIMITS.reviewNoticeThreshold && bound && ctx.hasUI) {
+					ctx.ui.notify(
+						`${counts.REVIEW} workspaces in ${workspacesDir(projectCwd)} need review (${formatBytes(reviewBytes)}); run /workspace gc to review them.`,
+						"info",
+					);
+				}
+			} catch (error) {
+				const message = `Workspace sweep of ${workspacesDir(projectCwd)} failed: ${error instanceof Error ? error.message : String(error)}`;
+				if (bound && ctx.hasUI) {
+					ctx.ui.notify(message, "error");
+				} else {
+					console.error(`[workspace] ${message}`);
+				}
+			} finally {
+				state.sweeps.delete(projectCwd);
+			}
+		})();
+		state.sweeps.set(projectCwd, sweep);
+	};
 
 	pi.on("session_start", async (_event, ctx) => {
 		inLoadPass = false;
+		bound = true;
 		const state = getSharedState();
 		state.openInstances.add(instanceToken);
 		const sessionId = ctx.sessionManager?.getSessionId?.();
@@ -241,14 +355,28 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			}
 		} catch {
 			// Ignore read-only or missing cwd on startup.
+			return;
+		}
+		// Child sessions never sweep: their parent's session owns the project's cleanup.
+		if (ctx.cwd && fs.existsSync(ctx.cwd) && !isChildSession(ctx)) {
+			startSweep(ctx);
 		}
 	});
 
-	pi.on("session_shutdown", async (_event, ctx) => {
+	pi.on("session_shutdown", async (event, ctx) => {
 		const state = getSharedState();
 		state.openInstances.delete(instanceToken);
 		const sessionId = ctx.sessionManager?.getSessionId?.();
-		if (sessionId) {
+		if (sessionId && fs.existsSync(registryFilePath(ctx.cwd))) {
+			emitTelemetry({
+				event: "session_end",
+				reason: event.reason,
+				held: heldWorkspaceNames(await readRegistry(ctx.cwd), sessionId),
+			});
+		}
+		bound = false;
+		// A reloaded session starts again with the same id and still uses its workspaces: it stays active, unclosed.
+		if (sessionId && event.reason !== "reload") {
 			state.activeSessionIds.delete(sessionId);
 			try {
 				await markSessionWorkspacesClosed(ctx.cwd, sessionId);
@@ -287,6 +415,9 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 		}
 
 		let targetPaths: string[] = [];
+		// Every local write target, deletions included: the state-file block sees them all.
+		let localWritePaths: string[] = [];
+		// Targets that create or change files; a deletion (`rm`, `rmdir`) never registers a workspace.
 		let workspaceTouchPaths: string[] = [];
 		let namedStateFile: string | undefined;
 		const isFileTool = event.toolName === "write" || event.toolName === "edit";
@@ -307,6 +438,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 				};
 			}
 			targetPaths = [filePath];
+			localWritePaths = [filePath];
 			workspaceTouchPaths = [filePath];
 		} else if (event.toolName === "bash") {
 			const input = event.input as { command?: unknown } | undefined;
@@ -314,7 +446,9 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			if (!command || !command.trim()) return undefined;
 			// The extractors read each word the way bash does and resolve it, so every check below reads these paths literally too.
 			targetPaths = extractBashExternalWriteTargets(command, ctx.cwd);
-			workspaceTouchPaths = extractBashWriteTargets(command, ctx.cwd);
+			const tagged = extractTaggedBashWriteTargets(command, ctx.cwd);
+			localWritePaths = tagged.map((target) => target.path);
+			workspaceTouchPaths = tagged.filter((target) => !target.deletes).map((target) => target.path);
 			// A command that names a state file counts whatever it is, not only the writes the extractor knows.
 			namedStateFile = findBashNamedStateFile(command, ctx.cwd, managedStateFiles(ctx.cwd));
 		} else {
@@ -322,12 +456,43 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 		}
 
 		// The guard's own state is never a tool's to write: no prompt, and no allow list unblocks it.
-		const managedFile = findManagedStateFile(workspaceTouchPaths, ctx.cwd) ?? namedStateFile;
+		const managedFile = findManagedStateFile(localWritePaths, ctx.cwd) ?? namedStateFile;
 		if (managedFile) {
 			return {
 				block: true,
 				reason: `Blocked write to "${managedFile}": this file is managed by the workspace extension and tool calls cannot change it. The user changes it with "/workspace allow <path>" or "/workspace deny <path>".`,
 			};
+		}
+
+		// Workspaces this call touches; a path whose first segment is no valid workspace name registers nothing.
+		const touchedWorkspaces = [
+			...new Set(
+				workspaceTouchPaths.flatMap((touchPath) => {
+					const wsName = extractWorkspaceNameFromPath(touchPath, ctx.cwd, true);
+					if (!wsName) return [];
+					try {
+						return [validateWorkspaceName(wsName)];
+					} catch {
+						return [];
+					}
+				}),
+			),
+		];
+		// Refuse before any approval prompt: a call that would hold too many workspaces never runs.
+		if (sessionId && touchedWorkspaces.length > 0) {
+			try {
+				assertWorkspaceQuota(
+					await readRegistry(ctx.cwd),
+					sessionId,
+					touchedWorkspaces,
+					WORKSPACE_LIMITS.maxHeldPerSession,
+					{ activeSessionIds: state.activeSessionIds },
+				);
+			} catch (error) {
+				if (!(error instanceof WorkspaceQuotaError)) throw error;
+				recordQuotaRefusal(error);
+				return { block: true, reason: error.message };
+			}
 		}
 
 		const policy = await readProjectPolicy(ctx.cwd);
@@ -385,19 +550,15 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 		}
 
 		// Auto-register any workspace touched under <cwd>/.pi/workspaces/<name>.
-		for (const touchPath of workspaceTouchPaths) {
-			const wsName = extractWorkspaceNameFromPath(touchPath, ctx.cwd, true);
-			if (wsName) {
-				try {
-					await createOrTouchWorkspace(ctx.cwd, {
-						name: wsName,
-						sessionId,
-						sessionTitle: typeof pi.getSessionName === "function" ? pi.getSessionName() : undefined,
-					});
-				} catch {
-					// Ignore invalid workspace names in arbitrary paths.
-				}
-			}
+		for (const wsName of touchedWorkspaces) {
+			const result = await touchWorkspace(ctx.cwd, {
+				name: wsName,
+				sessionId,
+				sessionTitle: typeof pi.getSessionName === "function" ? pi.getSessionName() : undefined,
+				pid: process.pid,
+				activeSessionIds: state.activeSessionIds,
+			});
+			recordTouch(result, "guard");
 		}
 
 		return undefined;
@@ -419,18 +580,29 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 					throw new Error('Workspace "name" is required for action "create".');
 				}
 				const ttlMs = typeof params.ttlHours === "number" ? Math.round(params.ttlHours * 3600_000) : undefined;
-				const entry = await createOrTouchWorkspace(ctx.cwd, {
-					name: params.name,
-					purpose: params.purpose,
-					sessionId,
-					sessionTitle,
-					ttlMs,
-				});
+				let result: WorkspaceTouchResult;
+				try {
+					result = await touchWorkspace(ctx.cwd, {
+						name: params.name,
+						purpose: params.purpose,
+						sessionId,
+						sessionTitle,
+						pid: process.pid,
+						ttlMs,
+						maxHeld: WORKSPACE_LIMITS.maxHeldPerSession,
+						activeSessionIds: getSharedState().activeSessionIds,
+					});
+				} catch (error) {
+					if (error instanceof WorkspaceQuotaError) recordQuotaRefusal(error);
+					throw error;
+				}
+				recordTouch(result, "tool");
+				const entry = result.entry;
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Workspace "${entry.name}" ready at ${entry.path}${entry.purpose ? ` (${entry.purpose})` : ""}.`,
+							text: `Workspace "${entry.name}" ready at ${entry.path}${entry.purpose ? ` (${entry.purpose})` : ""}.${result.ownedByOther ? " Another active session owns it; it does not count toward this session's quota." : ""}`,
 						},
 					],
 					details: { action: "create", workspace: entry },
@@ -441,18 +613,31 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 				if (!params.name) {
 					throw new Error('Workspace "name" is required for action "release".');
 				}
-				const entry = await releaseWorkspace(ctx.cwd, params.name);
-				if (!entry) {
+				const outcome = await releaseAndCollectWorkspace({
+					cwd: ctx.cwd,
+					name: params.name,
+					activeSessionIds: getSharedState().activeSessionIds,
+				});
+				if (!outcome) {
 					throw new Error(`Workspace "${params.name}" does not exist.`);
 				}
+				const { entry, report, removed } = outcome;
+				const createdAt = Date.parse(entry.createdAt);
+				emitTelemetry({
+					event: "release",
+					name: entry.name,
+					status: report.status,
+					removed,
+					reasons: report.reasons,
+					sizeBytes: report.sizeBytes,
+					ageMs: Number.isFinite(createdAt) ? Date.now() - createdAt : 0,
+				});
+				const text = removed
+					? `Released and removed workspace "${entry.name}" (${entry.path}).`
+					: `Released workspace "${entry.name}" but kept it (${entry.path}): ${report.status} — ${report.reasons.join(", ")}. It no longer counts toward this session's quota. To have it removed, commit and push its work or delete its scratch files, then release it again; or pin it to keep it.`;
 				return {
-					content: [
-						{
-							type: "text",
-							text: `Released workspace "${entry.name}" (${entry.path}).`,
-						},
-					],
-					details: { action: "release", workspace: entry },
+					content: [{ type: "text", text }],
+					details: { action: "release", workspace: entry, status: report.status, reasons: report.reasons, removed },
 				};
 			}
 
@@ -593,6 +778,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 				const allProjects = rest.includes("--all");
 				const activeIds = getSharedState().activeSessionIds;
 
+				const started = Date.now();
 				const result = await runWorkspaceGc({
 					cwd: ctx.cwd,
 					allProjects,
@@ -613,6 +799,9 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 							: undefined,
 				});
 
+				if (!dryRun) {
+					emitTelemetry(sweepTelemetry("manual", result, Date.now() - started));
+				}
 				const removedNames = result.removed.map((r) => r.entry.name).join(", ") || "none";
 				const keptNames = result.kept.map((r) => `${r.entry.name} (${r.status})`).join(", ") || "none";
 				const pinnedNames = result.pinned.map((r) => r.entry.name).join(", ");

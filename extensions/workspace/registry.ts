@@ -15,6 +15,16 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+/** Lifecycle tunables. These are starting guesses; the `pi-extensions.workspace` telemetry entries exist to tune them. */
+export const WORKSPACE_LIMITS = {
+	/** Workspaces one session may hold (own, not released, not pinned) at once. */
+	maxHeldPerSession: 3,
+	/** Minimum time between automatic sweeps of one project. */
+	sweepIntervalMs: 6 * 3600_000,
+	/** REVIEW workspaces left after a sweep at which the user is told to run `/workspace gc`. */
+	reviewNoticeThreshold: 10,
+} as const;
+
 export interface WorkspaceEntry {
 	name: string;
 	path: string;
@@ -51,6 +61,21 @@ export interface CreateOrTouchWorkspaceInput {
 	ttlMs?: number;
 	pinned?: boolean;
 	now?: Date;
+	/** Refuse with `WorkspaceQuotaError` when the session would start holding more than this many workspaces. */
+	maxHeld?: number;
+	/** Open sessions of this process: a workspace another of them holds keeps its owner. */
+	activeSessionIds?: ReadonlySet<string>;
+}
+
+export interface WorkspaceTouchResult {
+	entry: WorkspaceEntry;
+	/** The registry entry is new, or the session did not hold it before this call. */
+	acquired: boolean;
+	/** Another live owner holds the workspace, so the call only updated `lastAccessedAt`. */
+	ownedByOther: boolean;
+	/** Names the session holds after this call. */
+	held: string[];
+	projectTotal: number;
 }
 
 export interface InspectWorkspaceSafetyOptions {
@@ -75,10 +100,11 @@ export function validateWorkspaceName(name: string): string {
 		trimmed === "policy.json" ||
 		/[\\/]/.test(trimmed) ||
 		trimmed.includes("..") ||
-		/[\x00-\x1f\x7f]/.test(trimmed)
+		/[\x00-\x1f\x7f]/.test(trimmed) ||
+		/[*?[\]{}]/.test(trimmed)
 	) {
 		throw new Error(
-			`Invalid workspace name "${name}": must be a single non-hidden directory name without path separators or "..".`,
+			`Invalid workspace name "${name}": must be a single non-hidden directory name without path separators, "..", or glob characters (* ? [ ] { }).`,
 		);
 	}
 	return trimmed;
@@ -134,11 +160,22 @@ export async function pruneProjectsIndex(agentDir?: string): Promise<{ kept: str
 	return { kept: uniqueKept, removed };
 }
 
+export interface RegistryState {
+	entries: WorkspaceEntry[];
+	/** When the automatic sweep last finished for this project (ISO time). */
+	lastSweepAt?: string;
+}
+
 export async function readRegistry(cwd: string): Promise<WorkspaceEntry[]> {
+	return (await readRegistryState(cwd)).entries;
+}
+
+export async function readRegistryState(cwd: string): Promise<RegistryState> {
 	const file = registryFilePath(cwd);
 	try {
-		const raw = JSON.parse(await readFile(file, "utf8")) as { workspaces?: unknown } | unknown[] | null;
+		const raw = JSON.parse(await readFile(file, "utf8")) as { workspaces?: unknown; lastSweepAt?: unknown } | unknown[] | null;
 		const list = Array.isArray(raw) ? raw : Array.isArray(raw?.workspaces) ? raw.workspaces : [];
+		const lastSweepAt = !Array.isArray(raw) && typeof raw?.lastSweepAt === "string" ? raw.lastSweepAt : undefined;
 		const entries: WorkspaceEntry[] = [];
 		for (const item of list) {
 			if (!item || typeof item !== "object") continue;
@@ -165,16 +202,84 @@ export async function readRegistry(cwd: string): Promise<WorkspaceEntry[]> {
 				ttlMs: typeof record.ttlMs === "number" && Number.isFinite(record.ttlMs) && record.ttlMs >= 0 ? record.ttlMs : 0,
 			});
 		}
-		return entries;
+		return { entries, ...(lastSweepAt ? { lastSweepAt } : {}) };
 	} catch {
-		return [];
+		return { entries: [] };
 	}
 }
 
 export async function writeRegistry(cwd: string, entries: WorkspaceEntry[], agentDir?: string): Promise<void> {
 	await ensureWorkspacesClosure(cwd);
-	await writeJsonAtomic(registryFilePath(cwd), { workspaces: entries });
+	const { lastSweepAt } = await readRegistryState(cwd);
+	await writeJsonAtomic(registryFilePath(cwd), { ...(lastSweepAt ? { lastSweepAt } : {}), workspaces: entries });
 	await registerProjectInIndex(cwd, agentDir);
+}
+
+/** Stamps the automatic sweep without indexing the project: a project with no workspaces stays out of the index. */
+export async function recordWorkspaceSweep(cwd: string, at: Date): Promise<void> {
+	await ensureWorkspacesClosure(cwd);
+	const { entries } = await readRegistryState(cwd);
+	await writeJsonAtomic(registryFilePath(cwd), { lastSweepAt: at.toISOString(), workspaces: entries });
+}
+
+/** A session holds a workspace it owns that is neither released nor pinned; held workspaces count toward its quota. */
+export function isHeldBy(entry: WorkspaceEntry, sessionId: string): boolean {
+	return entry.sessionId === sessionId && !entry.releasedAt && !entry.pinned;
+}
+
+export function heldWorkspaceNames(entries: readonly WorkspaceEntry[], sessionId: string): string[] {
+	return entries.filter((entry) => isHeldBy(entry, sessionId)).map((entry) => entry.name);
+}
+
+/**
+ * Whether a session other than `sessionId` holds `entry` and is still alive: open in this process, or recorded
+ * with another process's pid that is still running. Such a workspace keeps its owner when `sessionId` touches it.
+ */
+export function hasLiveOtherOwner(
+	entry: WorkspaceEntry,
+	sessionId: string,
+	activeSessionIds: ReadonlySet<string> = new Set(),
+): boolean {
+	if (!entry.sessionId || entry.sessionId === sessionId || !isHeldBy(entry, entry.sessionId)) return false;
+	if (activeSessionIds.has(entry.sessionId)) return true;
+	return !entry.closedAt && entry.pid !== undefined && entry.pid !== process.pid && isPidAlive(entry.pid);
+}
+
+export class WorkspaceQuotaError extends Error {
+	constructor(
+		readonly requested: string[],
+		readonly held: string[],
+		readonly limit: number,
+	) {
+		super(
+			`Workspace quota reached: this session already holds ${held.length} of ${limit} workspaces (${held.join(", ")}), so it cannot start holding ${requested.map((name) => `"${name}"`).join(", ")}. Call workspace({action: "release", name}) for one you no longer need (release deletes it when it is clean) or workspace({action: "pin", name}) to keep it outside the quota, then retry.`,
+		);
+		this.name = "WorkspaceQuotaError";
+	}
+}
+
+/**
+ * Throws `WorkspaceQuotaError` when holding `names` would put `sessionId` over `limit`. Re-touching a held
+ * workspace never counts, and neither does touching one a live session holds (it keeps its owner).
+ */
+export function assertWorkspaceQuota(
+	entries: readonly WorkspaceEntry[],
+	sessionId: string,
+	names: readonly string[],
+	limit: number,
+	options?: { pinned?: boolean; activeSessionIds?: ReadonlySet<string> },
+): void {
+	if (options?.pinned) return;
+	const held = heldWorkspaceNames(entries, sessionId);
+	const requested = [...new Set(names)].filter((name) => {
+		const existing = entries.find((entry) => entry.name === name);
+		// Touching keeps a pinned workspace pinned, so it is never held.
+		if (held.includes(name) || existing?.pinned) return false;
+		return !(existing && hasLiveOtherOwner(existing, sessionId, options?.activeSessionIds));
+	});
+	if (requested.length > 0 && held.length + requested.length > limit) {
+		throw new WorkspaceQuotaError(requested, held, limit);
+	}
 }
 
 export async function createOrTouchWorkspace(
@@ -182,19 +287,43 @@ export async function createOrTouchWorkspace(
 	input: CreateOrTouchWorkspaceInput,
 	agentDir?: string,
 ): Promise<WorkspaceEntry> {
+	return (await touchWorkspace(cwd, input, agentDir)).entry;
+}
+
+export async function touchWorkspace(
+	cwd: string,
+	input: CreateOrTouchWorkspaceInput,
+	agentDir?: string,
+): Promise<WorkspaceTouchResult> {
 	const name = validateWorkspaceName(input.name);
+	const entries = await readRegistry(cwd);
+	const sessionId = input.sessionId;
+	if (sessionId !== undefined && input.maxHeld !== undefined) {
+		assertWorkspaceQuota(entries, sessionId, [name], input.maxHeld, {
+			pinned: input.pinned === true,
+			activeSessionIds: input.activeSessionIds,
+		});
+	}
+	const wasHeld = sessionId !== undefined && entries.some((entry) => entry.name === name && isHeldBy(entry, sessionId));
 	const wsRoot = await ensureWorkspacesClosure(cwd);
 	const wsPath = path.join(wsRoot, name);
 	await mkdir(wsPath, { recursive: true });
 
-	const entries = await readRegistry(cwd);
 	const policy = await readProjectPolicy(cwd);
 	const nowIso = (input.now ?? new Date()).toISOString();
 
 	const existingIndex = entries.findIndex((entry) => entry.name === name);
+	const ownedByOther =
+		existingIndex >= 0 &&
+		sessionId !== undefined &&
+		hasLiveOtherOwner(entries[existingIndex]!, sessionId, input.activeSessionIds);
 	let updatedEntry: WorkspaceEntry;
 
-	if (existingIndex >= 0) {
+	if (ownedByOther) {
+		// No transfer away from a live owner: only the access time moves.
+		updatedEntry = { ...entries[existingIndex]!, lastAccessedAt: nowIso };
+		entries[existingIndex] = updatedEntry;
+	} else if (existingIndex >= 0) {
 		const prev = entries[existingIndex]!;
 		updatedEntry = {
 			...prev,
@@ -228,7 +357,13 @@ export async function createOrTouchWorkspace(
 	}
 
 	await writeRegistry(cwd, entries, agentDir);
-	return updatedEntry;
+	return {
+		entry: updatedEntry,
+		acquired: existingIndex < 0 || (sessionId !== undefined && !wasHeld && !ownedByOther),
+		ownedByOther,
+		held: sessionId !== undefined ? heldWorkspaceNames(entries, sessionId) : [],
+		projectTotal: entries.length,
+	};
 }
 
 export async function syncWorkspaces(cwd: string, now?: Date, agentDir?: string): Promise<WorkspaceEntry[]> {
@@ -544,7 +679,14 @@ export async function inspectWorkspaceSafety(
 				reasons: ["used by an active session"],
 			};
 		}
-		if (!entry.closedAt && entry.pid && options?.checkPid !== false && isPidAlive(entry.pid)) {
+		// Another pi process may own the workspace. This process's own pid says nothing: its sessions are in activeSessionIds.
+		if (
+			!entry.closedAt &&
+			entry.pid &&
+			entry.pid !== process.pid &&
+			options?.checkPid !== false &&
+			isPidAlive(entry.pid)
+		) {
 			return {
 				...baseReport,
 				status: "ACTIVE",

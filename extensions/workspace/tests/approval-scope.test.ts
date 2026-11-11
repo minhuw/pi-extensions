@@ -19,7 +19,7 @@ import {
 	type ExtensionUIContext,
 	type ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
-import workspaceExtension, { CHILD_SESSION_HOOKS, WORKSPACE_SHARED_KEY } from "../index.ts";
+import workspaceExtension, { CHILD_SESSION_HOOKS, settleWorkspaceSweeps, WORKSPACE_SHARED_KEY } from "../index.ts";
 import { evaluatePathAccess, policyFilePath, readProjectPolicy, resolveCanonicalPath } from "../policy.ts";
 
 const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
@@ -170,6 +170,8 @@ async function startUiSession(choices: string[] = []) {
 			reload: () => runtime.session.reload(),
 		},
 	});
+	// The automatic sweep stamps .registry.json; let it finish before a test seeds or compares state files.
+	await settleWorkspaceSweeps();
 
 	return {
 		session: runtime.session,

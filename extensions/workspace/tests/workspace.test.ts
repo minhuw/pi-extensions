@@ -21,6 +21,7 @@ import { runWorkspaceGc } from "../gc.ts";
 import workspaceExtension, {
 	CHILD_SESSION_HOOKS,
 	SESSION_LINK_TYPE,
+	settleWorkspaceSweeps,
 	WORKSPACE_SHARED_KEY,
 	type ChildSessionHook,
 } from "../index.ts";
@@ -330,14 +331,15 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 			(await inspectWorkspaceSafety(activeSessionEntry, { activeSessionIds: new Set(["sess-live"]) })).status,
 		).toBe("ACTIVE");
 
+		// Another live process (the test runner's parent) owns it.
 		const activePidEntry = await createOrTouchWorkspace(
 			projectCwd,
-			{ name: "active-pid-ws", pid: process.pid },
+			{ name: "active-pid-ws", pid: process.ppid },
 			agentDir,
 		);
 		const pidReport = await inspectWorkspaceSafety(activePidEntry);
 		expect(pidReport.status).toBe("ACTIVE");
-		expect(pidReport.reasons[0]).toContain(`owning process (pid ${process.pid}) is still running`);
+		expect(pidReport.reasons[0]).toContain(`owning process (pid ${process.ppid}) is still running`);
 
 		const ttlEntry = await createOrTouchWorkspace(
 			projectCwd,
@@ -670,6 +672,7 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 			);
 		runtime.setRebindSession(bind);
 		await bind();
+		await settleWorkspaceSweeps();
 
 		return {
 			runtime,
@@ -1097,13 +1100,14 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 			expect(toolOutputs.some((t) => t.includes('Pinned workspace "exp-alpha"'))).toBe(true);
 			expect(toolOutputs.some((t) => t.includes("- exp-alpha [PINNED] (pinned)"))).toBe(true);
 			expect(toolOutputs.some((t) => t.includes('Unpinned workspace "exp-alpha"'))).toBe(true);
-			expect(toolOutputs.some((t) => t.includes('Released workspace "exp-alpha"'))).toBe(true);
-			expect(toolOutputs.some((t) => t.includes("- exp-alpha [SAFE] (empty workspace directory)"))).toBe(true);
+			// Releasing the empty, now-unpinned workspace removes it.
+			expect(toolOutputs.some((t) => t.includes('Released and removed workspace "exp-alpha"'))).toBe(true);
+			expect(toolOutputs.some((t) => t.includes("No workspaces in"))).toBe(true);
+			expect((await readRegistry(projectCwd)).some((e) => e.name === "exp-alpha")).toBe(false);
+			expect(fs.existsSync(path.join(workspacesDir(projectCwd), "exp-alpha"))).toBe(false);
 
-			const entries = await readRegistry(projectCwd);
-			expect(entries.some((e) => e.name === "exp-alpha" && e.pinned === false && Boolean(e.releasedAt))).toBe(
-				true,
-			);
+			// An empty workspace no session owns: SAFE for the commands below.
+			await createOrTouchWorkspace(projectCwd, { name: "exp-alpha" }, agentDir);
 
 			// 2. Create two REVIEW workspaces ("exp-dirty-pin" and "exp-dirty-remove") and a linked git worktree ("exp-wt")
 			initGitRepo(projectCwd);

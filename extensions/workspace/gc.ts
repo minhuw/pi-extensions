@@ -8,10 +8,15 @@ import {
 	inspectWorkspaceSafety,
 	pruneProjectsIndex,
 	readRegistry,
+	readRegistryState,
+	recordWorkspaceSweep,
+	releaseWorkspace,
 	setWorkspacePin,
 	syncWorkspaces,
 	writeRegistry,
+	type WorkspaceEntry,
 	type WorkspaceSafetyReport,
+	type WorkspaceSafetyStatus,
 } from "./registry.ts";
 
 const execFileAsync = promisify(execFile);
@@ -45,7 +50,7 @@ function isRemovableWorkspacePath(projectCwd: string, entryPath: string): boolea
 	return path.dirname(entryPath) === wsRoot && resolveCanonicalPath(entryPath) === entryPath;
 }
 
-async function removeWorkspaceDirectory(projectCwd: string, report: WorkspaceSafetyReport): Promise<void> {
+export async function removeWorkspaceDirectory(projectCwd: string, report: WorkspaceSafetyReport): Promise<void> {
 	if (!isRemovableWorkspacePath(projectCwd, report.entry.path)) {
 		throw new Error(
 			`Refusing to remove "${report.entry.path}": it is not a workspace directory in ${workspacesDir(projectCwd)}.`,
@@ -171,4 +176,86 @@ export async function runWorkspaceGc(options: GcOptions): Promise<GcResult> {
 		prunedProjects,
 		dryRun,
 	};
+}
+
+export interface ReleaseOutcome {
+	entry: WorkspaceEntry;
+	report: WorkspaceSafetyReport;
+	removed: boolean;
+}
+
+/** Marks `name` released, then removes it when it is SAFE; otherwise keeps it and reports why. */
+export async function releaseAndCollectWorkspace(options: {
+	cwd: string;
+	name: string;
+	agentDir?: string;
+	activeSessionIds?: ReadonlySet<string>;
+	now?: number;
+}): Promise<ReleaseOutcome | undefined> {
+	const projectCwd = resolveCanonicalPath(options.cwd);
+	const entry = await releaseWorkspace(
+		projectCwd,
+		options.name,
+		options.now !== undefined ? new Date(options.now) : undefined,
+		options.agentDir,
+	);
+	if (!entry) return undefined;
+	const report = await inspectWorkspaceSafety(entry, { activeSessionIds: options.activeSessionIds, now: options.now });
+	if (report.status !== "SAFE") {
+		return { entry, report, removed: false };
+	}
+	await removeWorkspaceDirectory(projectCwd, report);
+	const remaining = (await readRegistry(projectCwd)).filter((item) => item.name !== entry.name);
+	await writeRegistry(projectCwd, remaining, options.agentDir);
+	return { entry, report, removed: true };
+}
+
+export type GcStatusCounts = Record<WorkspaceSafetyStatus, number>;
+
+/** Status counts and freed bytes of a GC run; `pinned` repeats entries of `kept`, so it is not counted again. */
+export function summarizeGc(result: GcResult): { counts: GcStatusCounts; bytesFreed: number; reviewBytes: number } {
+	const counts: GcStatusCounts = { PINNED: 0, ACTIVE: 0, SAFE: 0, REVIEW: 0 };
+	for (const report of [...result.removed, ...result.kept]) {
+		counts[report.status] += 1;
+	}
+	const bytesFreed = result.removed.reduce((sum, report) => sum + report.sizeBytes, 0);
+	const reviewBytes = result.kept
+		.filter((report) => report.status === "REVIEW")
+		.reduce((sum, report) => sum + report.sizeBytes, 0);
+	return { counts, bytesFreed, reviewBytes };
+}
+
+export interface ScheduledSweepOutcome {
+	result: GcResult;
+	durationMs: number;
+}
+
+/**
+ * The automatic sweep: at most once per `intervalMs` per project, removes SAFE workspaces and never REVIEW ones.
+ * Returns undefined when the project was swept within the interval. The stamp is written only after a sweep succeeds.
+ */
+export async function runScheduledSweep(options: {
+	cwd: string;
+	intervalMs: number;
+	agentDir?: string;
+	activeSessionIds?: ReadonlySet<string>;
+	now?: number;
+}): Promise<ScheduledSweepOutcome | undefined> {
+	const projectCwd = resolveCanonicalPath(options.cwd);
+	const now = options.now ?? Date.now();
+	const { lastSweepAt } = await readRegistryState(projectCwd);
+	const last = lastSweepAt !== undefined ? Date.parse(lastSweepAt) : Number.NaN;
+	if (Number.isFinite(last) && now - last < options.intervalMs) {
+		return undefined;
+	}
+	const started = Date.now();
+	const result = await runWorkspaceGc({
+		cwd: projectCwd,
+		agentDir: options.agentDir,
+		yes: true,
+		activeSessionIds: options.activeSessionIds,
+		now: options.now,
+	});
+	await recordWorkspaceSweep(projectCwd, new Date(now));
+	return { result, durationMs: Date.now() - started };
 }

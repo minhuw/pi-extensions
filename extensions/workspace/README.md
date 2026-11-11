@@ -25,7 +25,7 @@ At `before_agent_start`, the extension adds a `<workspace>` system prompt sectio
 - use `/tmp` for ephemeral temporary files, and
 - never create or modify directories in `~/projects` or other paths outside `<cwd>` without explicit user approval.
 
-Touching any path under `<cwd>/.pi/workspaces/<name>` through `write`, `edit`, or `bash` automatically ensures `<cwd>/.pi/workspaces/.gitignore` (`*`) exists and registers `<name>` in `<cwd>/.pi/workspaces/.registry.json`.
+Touching any path under `<cwd>/.pi/workspaces/<name>` through `write`, `edit`, or `bash` (other than deleting it with `rm` or `rmdir`) automatically ensures `<cwd>/.pi/workspaces/.gitignore` (`*`) exists and registers `<name>` in `<cwd>/.pi/workspaces/.registry.json` for the calling session, subject to the [per-session quota](#lifecycle-quota-release-sweep-and-telemetry). A first path segment that is not a valid workspace name (such as an unexpanded glob) registers nothing.
 
 ## External path confirmation
 
@@ -98,11 +98,32 @@ workspace({
 | Parameter | Accepts |
 | --- | --- |
 | `action` | `"create"`, `"list"`, `"pin"`, `"unpin"`, or `"release"`. |
-| `name` | Required for `"create"`, `"pin"`, `"unpin"`, and `"release"`. Single directory name (1–120 characters, not starting with `.`, not `policy.json`, no path separators or `..`). |
+| `name` | Required for `"create"`, `"pin"`, `"unpin"`, and `"release"`. Single directory name (1–120 characters, not starting with `.`, not `policy.json`, no path separators, `..`, or glob characters `* ? [ ] { }`). |
 | `purpose` | Optional short description (up to 500 characters) recorded with `"create"`. |
 | `ttlHours` | Optional retention window in hours (`>= 0`) after the workspace is last accessed or its owning session closes. |
 
-Metadata for each workspace is stored in `<cwd>/.pi/workspaces/.registry.json`, and projects that create workspaces are indexed in `<agentDir>/workspaces-index.json` so `/workspace gc --all` can find them across repositories.
+`"release"` marks the workspace released, then removes it (as garbage collection does, including `git worktree remove` and `prune`) when it is `SAFE`. Otherwise it keeps the workspace and returns its state and reasons, so the model can commit and push, delete scratch files, and release again, or pin it.
+
+Metadata for each workspace is stored in `<cwd>/.pi/workspaces/.registry.json` (which also holds `lastSweepAt`), and projects that create workspaces are indexed in `<agentDir>/workspaces-index.json` so `/workspace gc --all` can find them across repositories.
+
+## Lifecycle: quota, release, sweep, and telemetry
+
+The limits are `WORKSPACE_LIMITS` in `registry.ts`: `maxHeldPerSession` 3, `sweepIntervalMs` 6 hours, and `reviewNoticeThreshold` 10.
+
+- **Lease.** Every registration (the `workspace` tool's `"create"` and the guard's automatic registration) records the session id and `process.pid`. A workspace is `ACTIVE` while its session is open in this process, or while its `pid` is another live process. This process's own pid counts only through its open sessions. `/reload` keeps the session open: its workspaces are neither closed nor collected.
+- **Ownership.** Touching a workspace that another live session holds (open in this process, or recorded with another live process's pid) updates only its `lastAccessedAt`: the owner stays, and the toucher's quota is unaffected. Ownership moves to the toucher only when the workspace is released or its owner is gone.
+- **Quota.** A session holds a workspace it owns that is neither released nor pinned. A call that would make a session hold more than `maxHeldPerSession` fails: `"create"` throws, and the guard blocks the `write`, `edit`, or `bash` call before any approval prompt. The error lists the held workspaces and asks to release or pin one first. Touching a workspace the session already holds never counts; child sessions have their own quota.
+- **Removal is not a touch.** A target only `rm` or `rmdir` names neither registers a workspace nor counts toward the quota, so a session at its limit can still `rm -rf .pi/workspaces/<name>`. The external-path checks and the [guard state file](#guard-state-files) block still apply to it.
+- **Sweep.** At `session_start` of a top-level `tui` or `rpc` session (not a child session or a `print`/`json` run), the extension runs `/workspace gc --yes` for the project in the background, at most once per `sweepIntervalMs` per project and once at a time per project in the process. It removes `SAFE` workspaces only. A failure is shown with an error notification. When `reviewNoticeThreshold` or more `REVIEW` workspaces remain, one notification gives their count and size and suggests `/workspace gc`. The system prompt never changes.
+- **Telemetry.** Bound sessions append `pi-extensions.workspace` custom entries with `data.event`:
+
+| `event` | Fields |
+| --- | --- |
+| `create` | `name`, `source` (`"tool"` or `"guard"`), `held` (count after), `projectTotal`; only when the session starts holding the workspace. |
+| `quota_refused` | `name`, `held` (names), `limit`. |
+| `release` | `name`, `status`, `removed`, `reasons`, `sizeBytes`, `ageMs`. |
+| `sweep` | `trigger` (`"session_start"` or `"manual"` for a non-dry-run `/workspace gc`), `removed` (names), `bytesFreed`, `counts` (`PINNED`, `ACTIVE`, `SAFE`, `REVIEW`), `durationMs`. |
+| `session_end` | `reason` (the `session_shutdown` reason), `held` (names the session still holds). |
 
 ## Safety states and garbage collection
 
@@ -111,7 +132,7 @@ Workspace inspection classifies each `<cwd>/.pi/workspaces/<name>` directory int
 | State | Meaning | GC behavior |
 | --- | --- | --- |
 | `PINNED` | Explicitly pinned via `/workspace pin <name>`, the `workspace` tool, or interactive GC review. | Always kept. |
-| `ACTIVE` | Owned by a currently active session, a running process (`pid`), or still within its configured `ttlMs` retention window (and not explicitly `release`d). | Always kept. |
+| `ACTIVE` | Owned by a currently active session, another running pi process (`pid`), or still within its configured `ttlMs` retention window (and not explicitly `release`d). | Always kept. |
 | `SAFE` | Empty directory, clean remote git clone with all commits pushed to a remote, or clean linked `git worktree` with no uncommitted/untracked files, no stashes, and no unmerged/unpushed commits. | Removed automatically by `/workspace gc`. |
 | `REVIEW` | Contains non-git files, files outside nested git repositories, uncommitted or untracked changes, git stash entries, a local-only git repository with no remote, or unpushed/unmerged commits. | Kept by default; interactive `/workspace gc` prompts whether to `Keep for now`, `Pin permanently`, or `Remove anyway`. |
 
@@ -138,4 +159,4 @@ npm run test:workspace
 npm run typecheck
 ```
 
-The offline Vitest suite covers path canonicalization, symlink escape detection, bash write target extraction, `.pi/workspaces` closure and registry persistence, `PINNED` / `ACTIVE` / `SAFE` / `REVIEW` safety classification, linked `git worktree` cleanup, symlinked `.pi/workspaces/<name>` entries that garbage collection must not follow, and real Pi session runs on the faux provider.
+The offline Vitest suite covers path canonicalization, symlink escape detection, bash write target extraction, `.pi/workspaces` closure and registry persistence, `PINNED` / `ACTIVE` / `SAFE` / `REVIEW` safety classification, pid leases, ownership, the per-session quota, deletions that never register, release removal, sweep gating, telemetry entries, linked `git worktree` cleanup, symlinked `.pi/workspaces/<name>` entries that garbage collection must not follow, and real Pi session runs on the faux provider.
