@@ -124,7 +124,7 @@ describe("pane status", () => {
         pane.setBridge({ state: "waiting", activities: [], activityCount: 0, updatedAt: at });
         expect(pane.view()?.state).toBe("waiting");
         pane.bridgeClosed();
-        expect(pane.view()).toMatchObject({ bridgeConnected: false, bridge: { state: "waiting" } });
+        expect(pane.view()).toMatchObject({ state: "idle", bridgeConnected: false, bridge: { state: "waiting" } });
         pane.exit();
         expect(pane.view()).toBeNull();
     });

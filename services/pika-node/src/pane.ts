@@ -28,7 +28,8 @@ export class Pane {
 
     /** Recomputes the merged state and unread flag; true when the view changed. */
     #update(): boolean {
-        const next = mergeState(this.program, this.bridge);
+        // A closed bridge keeps its session in the view, but no longer holds the pane busy or waiting: pi may have died.
+        const next = mergeState(this.program, this.bridgeConnected ? this.bridge : undefined);
         if (becameDone(this.#state, next)) this.unread = true;
         this.#state = next;
         const text = JSON.stringify(this.view());
