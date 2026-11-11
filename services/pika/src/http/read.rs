@@ -63,6 +63,7 @@ pub fn routes() -> Router<AppState> {
         .route("/requests/{id}", get(request))
         .route("/herder/runs", get(herder_runs))
         .route("/herder/runs/{id}", get(herder_run))
+        .route("/extension-usage", get(extension_usage))
         .layer(Extension(OWNER))
 }
 
@@ -294,6 +295,11 @@ async fn statistics(State(state): State<AppState>, Extension(scope): Extension<S
 async fn usage(State(state): State<AppState>, Extension(scope): Extension<Scope>, Query(params): QueryParams) -> Response {
     // Like statistics: private activity is counted, and only the owner sees unpublished project names.
     json(&state, move |_, conn| read::statistics::usage::usage_scoped(conn, &Params(params), scope.public)).await
+}
+
+/// Owner only: tool and command names of every session, hidden ones included.
+async fn extension_usage(State(state): State<AppState>, Query(params): QueryParams) -> Response {
+    json(&state, move |store, conn| read::extension_usage::extension_usage(conn, &store.blobs, &Params(params))).await
 }
 
 async fn facets(State(state): State<AppState>, Extension(scope): Extension<Scope>) -> Response {

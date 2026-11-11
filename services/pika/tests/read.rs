@@ -1212,7 +1212,7 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
     std::fs::rename(&blob, &aside).unwrap();
     assert!(pika::store::Store::open(&data).is_err());
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 18);
+    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 19);
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM settings WHERE key = 'needs_reindex'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     drop(conn);
@@ -2602,7 +2602,7 @@ fn statistics_version_10_upgrade_backfills_ledger_without_changing_source_lines(
         BEGIN SELECT RAISE(ABORT, 'source deleted'); END;").unwrap();
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 18);
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 19);
     assert_eq!(dump_derived(&store), expected);
     assert!(store.setting(pika::store::NEEDS_REINDEX).unwrap().is_none());
     assert!(store.setting(pika::store::DERIVED_GENERATION).unwrap().is_some());
@@ -2785,4 +2785,107 @@ async fn spokesman_reads_blob_backed_rewrites_and_assistants_without_cutting_tex
     let raw = app.get(&format!("{path}/entries/3/raw")).await.json();
     assert_eq!(raw["data"]["originalText"], original);
     assert_eq!(raw["data"]["rewrittenText"], rewritten);
+}
+
+/// A session that calls `tools` (name, error) at `at` and records each command payload in `commands` at `at`.
+fn extension_session(id: &str, at: i64, tools: &[(&str, bool)], commands: &[Value]) -> Vec<String> {
+    let mut values = vec![
+        json!({ "type": "session", "id": id, "cwd": "/w/ext", "timestamp": at }),
+        json!({ "type": "message", "timestamp": at, "message": { "role": "user", "content": "go" } }),
+    ];
+    for (i, (name, is_error)) in tools.iter().enumerate() {
+        let call_id = format!("{id}-call-{i}");
+        values.push(json!({ "type": "message", "timestamp": at, "message": { "role": "assistant", "stopReason": "toolUse",
+            "content": [{ "type": "toolCall", "id": call_id, "name": name, "arguments": {} }] } }));
+        values.push(json!({ "type": "message", "timestamp": at + 1, "message": { "role": "toolResult", "toolCallId": call_id,
+            "toolName": name, "isError": is_error, "content": [{ "type": "text", "text": "ok" }] } }));
+    }
+    for data in commands {
+        values.push(json!({ "type": "custom", "customType": "pi-extensions.command", "timestamp": at, "data": data }));
+    }
+    lines(&values)
+}
+
+#[tokio::test]
+async fn extension_usage_counts_tools_and_commands_for_the_owner_only() {
+    let app = app(None);
+    let now = pika::util::now_ms();
+    let (recent, old) = (now - 2 * 86_400_000, now - 10 * 86_400_000);
+    let recap = json!({ "command": "recap", "kind": "template" });
+    let ps = json!({ "command": "ps", "kind": "extension", "extension": "processes" });
+    // A line over 1 MiB lives in the blob store and is read from there.
+    let big = json!({ "command": "ps", "kind": "extension", "extension": "processes", "pad": "x".repeat(1_100_000) });
+    let malformed = [json!({ "command": "x", "kind": "macro" }), json!({ "kind": "template" }), json!("recap"),
+        json!({ "command": "y", "kind": "skill", "extension": 3 })];
+    let mut first_commands = vec![recap.clone(), ps.clone(), big];
+    first_commands.extend(malformed);
+    let sessions = [
+        ("ext-a", recent, extension_session("ext-a", recent, &[("ffgrep", false), ("ffgrep", true), ("bash", false)], &first_commands)),
+        ("ext-b", recent + 5, extension_session("ext-b", recent + 5, &[("ffgrep", false)], &[recap.clone()])),
+        ("ext-old", old, extension_session("ext-old", old, &[("bash", false), ("bash", false), ("bash", false)],
+            &[json!({ "command": "skill-x", "kind": "skill", "extension": null })])),
+    ];
+    for (id, _, source) in &sessions {
+        app.upload(DEVICE, &skey(id), "session", source).await;
+    }
+    assert!(one(&app.env.store, "SELECT COUNT(*) AS n FROM lines WHERE blob IS NOT NULL")["n"].as_i64().unwrap() >= 1);
+    // Hidden sessions count for the owner.
+    app.env.store.write(|tx| pika::hidden::set(tx, "ext-b", true, now)).unwrap();
+
+    let usage = app.json("extension-usage?days=5").await;
+    assert_eq!(usage["days"], 5);
+    let since = usage["since"].as_i64().unwrap();
+    assert!(since > old && since <= recent && (now - 5 * 86_400_000 - since).abs() < 60_000, "{since}");
+    assert_eq!(usage["tools"], json!([
+        { "name": "ffgrep", "calls": 3, "sessions": 2, "errors": 1, "lastAt": recent + 5 },
+        { "name": "bash", "calls": 1, "sessions": 1, "errors": 0, "lastAt": recent },
+    ]));
+    assert_eq!(usage["commands"], json!([
+        { "command": "ps", "kind": "extension", "extension": "processes", "uses": 2, "sessions": 1, "lastAt": recent },
+        { "command": "recap", "kind": "template", "extension": null, "uses": 2, "sessions": 2, "lastAt": recent + 5 },
+    ]));
+
+    // The default window, 90 days, reaches the old session.
+    let all = app.json("extension-usage").await;
+    assert_eq!(all["days"], 90);
+    assert_eq!(all["tools"][0], json!({ "name": "bash", "calls": 4, "sessions": 2, "errors": 0, "lastAt": recent }));
+    assert_eq!(all["tools"][1]["name"], "ffgrep");
+    assert_eq!(all["commands"][2], json!({ "command": "skill-x", "kind": "skill", "extension": null, "uses": 1,
+        "sessions": 1, "lastAt": old }));
+    pika::reindex::reindex(&app.env.store).unwrap();
+    // `since` moves with the clock; the rest derives the same after a reindex.
+    let without_since = |mut v: Value| {
+        v.as_object_mut().unwrap().remove("since");
+        v
+    };
+    assert_eq!(without_since(app.json("extension-usage").await), without_since(all.clone()));
+
+    for query in ["days=0", "days=3651", "days=-1", "days=1.5", "days=all", "days=%2B5", "days=wat"] {
+        assert_eq!(app.status(&format!("extension-usage?{query}")).await, StatusCode::BAD_REQUEST, "{query}");
+    }
+    assert_eq!(app.status("extension-usage?days=3650").await, StatusCode::OK);
+    // Neither the public nor the agent namespace offers it.
+    assert_eq!(public(&app, "extension-usage").await.status, StatusCode::NOT_FOUND);
+    let agent = app.get_abs(&format!("{BASE}/api/agent/v1/extension-usage"), None).await;
+    assert_eq!(agent.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn extension_usage_is_behind_the_login() {
+    let app = app(Some("extension-password"));
+    assert_eq!(app.status("extension-usage").await, StatusCode::UNAUTHORIZED);
+}
+
+#[test]
+fn schema_v19_adds_the_extension_usage_indexes_without_a_reindex() {
+    let env = env();
+    let data = env.dir.path().join("data");
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    conn.execute_batch(&format!("{UNDO_V19} PRAGMA user_version = 18;")).unwrap();
+    drop(conn);
+    let store = pika::store::Store::open(&data).unwrap();
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 19);
+    assert_eq!(store.setting(pika::store::NEEDS_REINDEX).unwrap(), None);
+    let indexes = query(&store, "SELECT name FROM sqlite_master WHERE name IN ('entries_custom_type', 'tool_calls_started') ORDER BY name");
+    assert_eq!(indexes.len(), 2);
 }

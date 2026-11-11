@@ -372,3 +372,16 @@ fn the_trace_reads_primary_keys() {
         );
     });
 }
+
+#[test]
+fn extension_usage_reads_its_window_through_indexes() {
+    use super::extension_usage::{COMMANDS_SQL, TOOLS_SQL};
+    with_conn(|conn| {
+        let plan = |sql| plan(conn, sql, None).join("\n");
+        let tools = plan(TOOLS_SQL);
+        assert!(tools.contains("USING INDEX tool_calls_started (started_at>?)"), "{tools}");
+        let commands = plan(COMMANDS_SQL);
+        assert!(commands.contains("SEARCH e USING INDEX entries_custom_type (custom_type=? AND ts>?)"), "{commands}");
+        assert!(commands.contains("SEARCH l USING INDEX lines_position (stream_id=? AND offset=?)"), "{commands}");
+    });
+}

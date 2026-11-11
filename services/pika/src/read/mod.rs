@@ -2,6 +2,7 @@
 //! response. Lists page with keyset cursors: an opaque base64url encoding of the last item's sort key.
 
 pub mod entries;
+pub mod extension_usage;
 pub mod herder;
 pub mod publishing;
 pub mod redaction;

@@ -92,7 +92,7 @@ Every route is under the base path:
 - `POST api/pair/v1/start` and `poll` let a device ask for a token, without authentication; you approve it in the UI. `POST api/pair/v1/bind` lets a device with a token register its device key.
 - `GET api/relay/v1/connect` (a WebSocket) and `GET api/relay/v1/sessions` are the relay's device routes, with `Authorization: Bearer <token>`.
 - `api/agent/v1/*` is the read API for pi agents on devices with read access, with `Authorization: Bearer <token>` and credentials scrubbed (see [Agent read access](#agent-read-access)).
-- `api/v1/*` is the read API used by the UI, plus login, browser sessions (`auth/sessions`), devices, pairing approval, and the relay dashboard (`relay/sessions`, `relay/messages`, `relay/events`).
+- `api/v1/*` is the read API used by the UI (including the owner-only `extension-usage` aggregate of tool calls and extension commands), plus login, browser sessions (`auth/sessions`), devices, pairing approval, and the relay dashboard (`relay/sessions`, `relay/messages`, `relay/events`).
 - `api/public/v1/*` provides anonymous read access to published projects only (see [Publishing projects](#publishing-projects)), plus anonymous usage aggregates that any site may query (see [Usage API for other sites](#usage-api-for-other-sites)).
 - `docs` and `docs/*` serve the public documentation without a pika login.
 - Every other path serves the UI. The server injects `<meta name="pika-base">` into `index.html`, so one build works under any base path.
