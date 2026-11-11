@@ -712,9 +712,11 @@ describe("/council command and package contracts", () => {
 		const councilIdx = exts.indexOf("./extensions/council/index.ts");
 		const workspaceIdx = exts.indexOf("./extensions/workspace/index.ts");
 		const pikaIdx = exts.indexOf("./extensions/pika/index.ts");
+		const processesIdx = exts.indexOf("./extensions/processes/index.ts");
 
 		expect(councilIdx).toBe(subagentsIdx + 1);
-		expect(workspaceIdx).toBe(pikaIdx - 1);
+		expect(workspaceIdx).toBe(processesIdx - 1);
+		expect(processesIdx).toBe(pikaIdx - 1);
 		expect(exts.at(-1)).toBe("./extensions/pika/index.ts");
 		expect(manifest.pi.prompts.some((p) => p.includes("council"))).toBe(false);
 

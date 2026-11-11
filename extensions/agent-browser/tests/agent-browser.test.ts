@@ -672,11 +672,13 @@ describe("AC-5 — Repository manifest and documentation contracts", () => {
 		const exts = manifest.pi.extensions;
 		const agentBrowserIdx = exts.indexOf("./extensions/agent-browser/index.ts");
 		const workspaceIdx = exts.indexOf("./extensions/workspace/index.ts");
+		const processesIdx = exts.indexOf("./extensions/processes/index.ts");
 		const pikaIdx = exts.indexOf("./extensions/pika/index.ts");
 
 		expect(agentBrowserIdx).toBeGreaterThanOrEqual(0);
 		expect(agentBrowserIdx).toBeLessThan(workspaceIdx);
-		expect(workspaceIdx).toBe(pikaIdx - 1);
+		expect(workspaceIdx).toBe(processesIdx - 1);
+		expect(processesIdx).toBe(pikaIdx - 1);
 		expect(exts.at(-1)).toBe("./extensions/pika/index.ts");
 
 		for (const expected of [

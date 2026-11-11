@@ -1236,7 +1236,8 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 		const exts = manifest.pi.extensions;
 		expect(exts).toContain("./extensions/workspace/index.ts");
 		expect(exts.at(-1)).toBe("./extensions/pika/index.ts");
-		expect(exts.indexOf("./extensions/workspace/index.ts")).toBe(exts.indexOf("./extensions/pika/index.ts") - 1);
+		expect(exts.indexOf("./extensions/workspace/index.ts")).toBe(exts.indexOf("./extensions/processes/index.ts") - 1);
+		expect(exts.indexOf("./extensions/processes/index.ts")).toBe(exts.indexOf("./extensions/pika/index.ts") - 1);
 
 		for (const expected of [
 			".pi/workspaces/<name>",
