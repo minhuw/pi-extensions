@@ -1,0 +1,490 @@
+/**
+ * The daemon's inner-protocol core (NODE.md §4–5): terminals, attachments with per-client backlogs, the size
+ * owner, pane status, and bridge requests. Transports (an E2E channel, or `pika-node attach` over the unix
+ * socket) are `Peer`s; this file does no networking.
+ */
+import { randomBytes } from "node:crypto";
+import { realpathSync, statSync } from "node:fs";
+import { hostname } from "node:os";
+import { basename, dirname, join, sep } from "node:path";
+import { asNodeError, NodeError } from "./errors.ts";
+import { Files } from "./files.ts";
+import { Pane } from "./pane.ts";
+import type { Paths } from "./paths.ts";
+import { VERSION } from "./paths.ts";
+import {
+    LIMITS, parseClientMessage, PROTOCOL_VERSION, timing, utf8Length,
+    type BridgeStatus, type ClientMessage, type NodeEvent, type NodeMessage, type Notice, type Request,
+    type Snapshot, type TerminalInfo, type Welcome,
+} from "./protocol.ts";
+import { account, spawnCommand, spawnEnv, SpawnError, type Account } from "./spawn.ts";
+import { loadConfig, roots, type Config } from "./store.ts";
+import { Terminal } from "./terminal.ts";
+
+/** One inner-protocol endpoint. `send` is ordered and never throws; after `closed`, messages are dropped. */
+export interface Peer {
+    readonly name: string;
+    readonly closed: boolean;
+    send(message: NodeMessage): void;
+    /** Bytes handed to the transport but not yet written out (for channels: sealing plus the server socket's buffer). */
+    buffered(): number;
+}
+
+
+const KiB = 1024;
+const MiB = 1024 * KiB;
+/** Stop handing a peer more once its transport holds this much. */
+const PUMP_HIGH = 256 * KiB;
+/** Leave resync (send a fresh snapshot) once the transport is below this. */
+const RESYNC_BELOW = 256 * KiB;
+/** The server socket's own buffer past which a channel resyncs its terminals. */
+const TRANSPORT_LIMIT = 4 * MiB;
+const MAX_TERMINALS = 128;
+
+interface Item { message: NodeMessage; bytes: number; seq?: number }
+
+/** One peer attached to one terminal: its output queue and resync state. */
+interface Attachment {
+    peer: Peer;
+    queue: Item[];
+    queuedBytes: number;
+    /** `live` streams; `resync` drops output until the backlog drains; `snapshotting` queues until a snapshot is sent. */
+    mode: "live" | "resync" | "snapshotting";
+    /** Output with a smaller `seq` is covered by the last snapshot. */
+    minSeq: number;
+}
+
+interface Pty {
+    id: string;
+    terminal: Terminal;
+    pane: Pane;
+    cwd: string;
+    argv: string[];
+    createdAt: number;
+    owner: Peer | undefined;
+    attachments: Map<Peer, Attachment>;
+    bridge: object | undefined;
+}
+
+export interface DaemonOptions {
+    paths: Paths;
+    /** The node id once the server assigned one; `local` before (ssh attach still works). */
+    nodeId?: () => string;
+    nodeName?: () => string | undefined;
+    log?: (line: string) => void;
+    account?: Account;
+}
+
+const newId = (): string => randomBytes(9).toString("base64url");
+
+export class Daemon {
+    readonly paths: Paths;
+    readonly account: Account;
+    readonly files: Files;
+    #terminals = new Map<string, Pty>();
+    #peers = new Set<Peer>();
+    #options: DaemonOptions;
+    #log: (line: string) => void;
+    #pumpTimer: NodeJS.Timeout | undefined;
+    #foregroundTimer: NodeJS.Timeout;
+    onTerminalsChanged: () => void = () => {};
+
+    constructor(options: DaemonOptions) {
+        this.#options = options;
+        this.paths = options.paths;
+        this.account = options.account ?? account();
+        this.#log = options.log ?? (() => {});
+        this.files = new Files({ home: this.account.home, uploads: join(this.paths.home, "uploads"), config: () => this.config(), terminalCwds: () => [...this.#terminals.values()].filter(t => !t.terminal.exited).map(t => t.cwd), log: this.#log });
+        this.#foregroundTimer = setInterval(() => this.#pollForeground(), timing.foregroundPollMs);
+        this.#foregroundTimer.unref();
+    }
+
+    config(): Config { return loadConfig(this.paths); }
+
+    get terminalCount(): number { return this.#terminals.size; }
+    get liveTerminals(): number { return [...this.#terminals.values()].filter(t => !t.terminal.exited).length; }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Peers
+
+    welcome(): Welcome {
+        return {
+            type: "welcome",
+            node: this.#options.nodeId?.() ?? "local",
+            name: this.#options.nodeName?.() || hostname().slice(0, 64) || "pika-node",
+            host: hostname().slice(0, 255) || "localhost",
+            home: this.account.home,
+            version: VERSION,
+            protocolVersion: PROTOCOL_VERSION,
+            capabilities: ["terminal", "files", "projects", "status"],
+            limits: {
+                maxRecordBytes: LIMITS.maxRecordBytes, maxSnapshotBytes: LIMITS.maxSnapshotBytes, maxReadBytes: LIMITS.maxReadBytes,
+                maxUploadBytes: LIMITS.maxUploadBytes, maxUploadChunkBytes: LIMITS.maxUploadChunkBytes,
+            },
+        };
+    }
+
+    addPeer(peer: Peer): void {
+        this.#peers.add(peer);
+        peer.send(this.welcome());
+    }
+
+    removePeer(peer: Peer): void {
+        if (!this.#peers.delete(peer)) return;
+        for (const pty of this.#terminals.values()) {
+            pty.attachments.delete(peer);
+            if (pty.owner === peer) pty.owner = undefined;
+        }
+        this.files.closePeer(peer);
+    }
+
+    /** Sends to every peer; to an attached one through its terminal queue, so it stays ordered with output. */
+    #broadcast(message: NodeEvent, pty?: Pty): number {
+        let delivered = 0;
+        for (const peer of this.#peers) {
+            const attachment = pty?.attachments.get(peer);
+            if (attachment) this.#enqueue(pty!, attachment, { message, bytes: messageBytes(message) });
+            else peer.send(message);
+            delivered++;
+        }
+        return delivered;
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Messages
+
+    /** Handles one inner message from a peer (already decrypted and JSON-parsed). */
+    handle(peer: Peer, value: unknown): void {
+        const parsed = parseClientMessage(value);
+        if (!parsed.ok) {
+            if (parsed.id) {
+                const code = parsed.reason === "unknown" ? "unsupported" : "invalid";
+                peer.send({ type: "reply", id: parsed.id, error: { code, message: parsed.reason === "unknown" ? `unknown request ${parsed.type ?? ""}`.trim() : `invalid ${parsed.type} parameters` } });
+            } else if (parsed.reason === "invalid") {
+                peer.send({ type: "error", code: "invalid", message: `invalid ${parsed.type} message` });
+            }
+            return;
+        }
+        const message = parsed.message as ClientMessage;
+        if (!("id" in message)) {
+            try { this.#notice(peer, message); }
+            catch (error) {
+                const failure = asNodeError(error);
+                peer.send({ type: "error", code: failure.code, message: failure.message, terminalId: message.terminalId });
+            }
+            return;
+        }
+        const request = message as Request;
+        void (async () => {
+            try { return { type: "reply", id: request.id, result: await this.#request(peer, request) } as NodeMessage; }
+            catch (error) {
+                const failure = asNodeError(error);
+                if (failure.code === "io" && !(error instanceof NodeError)) this.#log(`request ${request.type} failed: ${(error as Error).stack ?? error}`);
+                return { type: "reply", id: request.id, error: { code: failure.code, message: failure.message, ...(failure.current ? { current: failure.current } : {}) } } as NodeMessage;
+            }
+        })().then(reply => peer.send(reply));
+    }
+
+    async #request(peer: Peer, request: Request): Promise<object> {
+        switch (request.type) {
+            case "term.create": {
+                const pty = this.create(request, peer);
+                // The reply goes out after this returns; every other channel learns of the terminal now.
+                const terminal = this.#info(pty);
+                for (const other of this.#peers) if (other !== peer) other.send({ type: "term.created", terminal });
+                setImmediate(() => { if (!peer.closed) peer.send({ type: "term.created", terminal: this.#info(pty) }); });
+                return { terminal };
+            }
+            case "term.list": return { terminals: [...this.#terminals.values()].sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : -1)).map(pty => this.#info(pty)) };
+            case "term.attach": {
+                const pty = this.#terminal(request.terminalId);
+                return { terminal: this.#info(pty), snapshot: await this.#attach(pty, peer) };
+            }
+            case "term.detach": {
+                const pty = this.#terminal(request.terminalId);
+                pty.attachments.delete(peer);
+                return {};
+            }
+            case "term.kill": {
+                const pty = this.#terminal(request.terminalId);
+                if (pty.terminal.exited) this.#remove(pty);
+                else pty.terminal.kill(request.signal ?? "SIGTERM");
+                return {};
+            }
+            default: return this.files.request(peer, request);
+        }
+    }
+
+    #notice(peer: Peer, notice: Notice): void {
+        const pty = this.#terminal(notice.terminalId);
+        switch (notice.type) {
+            case "term.input":
+                if (pty.terminal.exited) throw new NodeError("exited", "the terminal has exited");
+                pty.terminal.write(notice.data);
+                return;
+            case "term.resize": return this.#resize(pty, peer, notice.cols, notice.rows, notice.claim === true);
+            case "pane.seen":
+                if (pty.pane.seen()) this.#paneChanged(pty);
+                return;
+        }
+    }
+
+    #terminal(id: string): Pty {
+        const pty = this.#terminals.get(id);
+        if (!pty) throw new NodeError("not_found", `no terminal ${id}`);
+        return pty;
+    }
+
+    #info(pty: Pty): TerminalInfo {
+        const status = pty.pane.view();
+        return {
+            terminalId: pty.id, title: pty.terminal.title, cwd: pty.cwd, cols: pty.terminal.cols, rows: pty.terminal.rows,
+            pid: pty.terminal.pid, createdAt: pty.createdAt, argv: pty.argv,
+            ...(pty.terminal.exited ? { exited: pty.terminal.exited } : {}),
+            ...(status ? { status } : {}),
+        };
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Terminals
+
+    create(params: { cols: number; rows: number; cwd?: string; argv?: string[]; env?: Record<string, string> }, owner?: Peer): Pty {
+        if (this.#terminals.size >= MAX_TERMINALS) throw new NodeError("limit", `at most ${MAX_TERMINALS} terminals`);
+        const cwd = params.cwd ?? this.account.home;
+        let stat;
+        try { stat = statSync(cwd); }
+        catch { throw new NodeError("not_found", `no directory ${cwd}`); }
+        if (!stat.isDirectory()) throw new NodeError("not_a_directory", `${cwd} is not a directory`);
+        const id = newId();
+        let env;
+        try { env = spawnEnv({ account: this.account, socket: this.paths.socket, paneId: id, env: params.env, lang: process.env.LANG }); }
+        catch (error) {
+            if (error instanceof SpawnError) throw new NodeError("invalid", error.message);
+            throw error;
+        }
+        const { file, args } = spawnCommand(this.account.shell, params.argv);
+        const pane = new Pane();
+        let pty: Pty | undefined;
+        const terminal = new Terminal({
+            file, args, cwd, env, cols: params.cols, rows: params.rows, logPath: join(this.paths.logs, `${id}.log`),
+            hooks: {
+                output: (seq, data) => { if (pty) this.#output(pty, seq, data); },
+                title: title => { if (pty) this.#broadcast({ type: "term.title", terminalId: id, title }, pty); },
+                program: status => { if (pty && pty.pane.setProgram(status, pty.terminal.foreground)) this.#paneChanged(pty); },
+                exit: (code, signal) => {
+                    if (!pty) return;
+                    this.#broadcast({ type: "term.exit", terminalId: id, code, signal }, pty);
+                    if (pty.pane.exit()) this.#paneChanged(pty);
+                    this.onTerminalsChanged();
+                },
+            },
+        });
+        pty = { id, terminal, pane, cwd, argv: params.argv ?? [this.account.shell, "-l"], createdAt: Date.now(), owner, attachments: new Map(), bridge: undefined };
+        this.#terminals.set(id, pty);
+        this.#log(`terminal ${id} pid ${terminal.pid}: ${[file, ...args].join(" ")}`);
+        this.onTerminalsChanged();
+        return pty;
+    }
+
+    #remove(pty: Pty): void {
+        this.#terminals.delete(pty.id);
+        pty.terminal.dispose();
+        this.#broadcast({ type: "term.removed", terminalId: pty.id });
+        this.onTerminalsChanged();
+    }
+
+    #output(pty: Pty, seq: number, data: string): void {
+        if (pty.attachments.size === 0) return;
+        const message: NodeMessage = { type: "term.output", terminalId: pty.id, seq, data };
+        const bytes = messageBytes(message);
+        for (const attachment of pty.attachments.values()) this.#enqueue(pty, attachment, { message, bytes, seq });
+    }
+
+    #resize(pty: Pty, peer: Peer, cols: number, rows: number, claim: boolean): void {
+        if (claim || !pty.owner || pty.owner.closed) pty.owner = peer;
+        if (pty.owner !== peer) {
+            // A non-owner learns the size it must render at instead.
+            const attachment = pty.attachments.get(peer);
+            const message: NodeMessage = { type: "term.resized", terminalId: pty.id, cols: pty.terminal.cols, rows: pty.terminal.rows, owned: false };
+            if (attachment) this.#enqueue(pty, attachment, { message, bytes: messageBytes(message) });
+            else peer.send(message);
+            return;
+        }
+        if (cols !== pty.terminal.cols || rows !== pty.terminal.rows) pty.terminal.resize(cols, rows);
+        for (const attachment of pty.attachments.values()) {
+            const message: NodeMessage = { type: "term.resized", terminalId: pty.id, cols, rows, owned: attachment.peer === pty.owner };
+            this.#enqueue(pty, attachment, { message, bytes: messageBytes(message) });
+        }
+        if (!pty.attachments.has(peer)) peer.send({ type: "term.resized", terminalId: pty.id, cols, rows, owned: true });
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Attachments and backpressure
+
+    async #attach(pty: Pty, peer: Peer): Promise<Snapshot> {
+        let attachment = pty.attachments.get(peer);
+        if (!attachment) {
+            attachment = { peer, queue: [], queuedBytes: 0, mode: "snapshotting", minSeq: 1 };
+            pty.attachments.set(peer, attachment);
+        }
+        attachment.mode = "snapshotting";
+        let snapshot: Snapshot;
+        try { snapshot = await pty.terminal.snapshot(); }
+        catch (error) {
+            pty.attachments.delete(peer);
+            throw new NodeError("too_large", (error as Error).message);
+        }
+        // The reply goes out through `handle`, after this resolves; the queue is released on the next tick, after it.
+        setImmediate(() => this.#resume(pty, attachment, snapshot));
+        return snapshot;
+    }
+
+    /** Drops queued output the snapshot covers and streams again. */
+    #resume(pty: Pty, attachment: Attachment, snapshot: Snapshot): void {
+        attachment.minSeq = snapshot.outputSequence + 1;
+        attachment.queue = attachment.queue.filter(item => item.seq === undefined || item.seq >= attachment.minSeq);
+        attachment.queuedBytes = attachment.queue.reduce((total, item) => total + item.bytes, 0);
+        attachment.mode = "live";
+        this.#pump(pty, attachment);
+    }
+
+    #enqueue(pty: Pty, attachment: Attachment, item: Item): void {
+        if (item.seq !== undefined && (attachment.mode === "resync" || item.seq < attachment.minSeq)) return;
+        attachment.queue.push(item);
+        attachment.queuedBytes += item.bytes;
+        if (item.seq !== undefined && attachment.mode === "live"
+            && (attachment.queuedBytes > LIMITS.maxClientBacklogBytes || attachment.peer.buffered() > TRANSPORT_LIMIT)) {
+            this.#log(`terminal ${pty.id}: ${attachment.peer.name} fell behind (${attachment.queuedBytes} bytes queued); resyncing`);
+            attachment.mode = "resync";
+            attachment.queue = attachment.queue.filter(row => row.seq === undefined);
+            attachment.queuedBytes = attachment.queue.reduce((total, row) => total + row.bytes, 0);
+        }
+        this.#pump(pty, attachment);
+    }
+
+    #pump(pty: Pty, attachment: Attachment): void {
+        const { peer } = attachment;
+        if (peer.closed || pty.attachments.get(peer) !== attachment) return;
+        if (attachment.mode === "snapshotting") return;
+        while (attachment.queue.length && peer.buffered() < PUMP_HIGH) {
+            const item = attachment.queue.shift()!;
+            attachment.queuedBytes -= item.bytes;
+            peer.send(item.message);
+        }
+        if (attachment.mode === "resync" && attachment.queue.length === 0 && peer.buffered() < RESYNC_BELOW) {
+            attachment.mode = "snapshotting";
+            pty.terminal.snapshot().then(snapshot => {
+                if (peer.closed || pty.attachments.get(peer) !== attachment) return;
+                peer.send({ type: "term.snapshot", terminalId: pty.id, snapshot });
+                this.#resume(pty, attachment, snapshot);
+            }, (error: Error) => {
+                this.#log(`terminal ${pty.id}: resync snapshot failed: ${error.message}`);
+                pty.attachments.delete(peer);
+                peer.send({ type: "error", code: "too_large", message: error.message, terminalId: pty.id });
+            });
+            return;
+        }
+        if (attachment.queue.length || attachment.mode === "resync") this.#schedulePump();
+    }
+
+    #schedulePump(): void {
+        this.#pumpTimer ??= setTimeout(() => {
+            this.#pumpTimer = undefined;
+            for (const pty of this.#terminals.values()) for (const attachment of pty.attachments.values()) this.#pump(pty, attachment);
+        }, 10);
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Pane status
+
+    #paneChanged(pty: Pty): void {
+        this.#broadcast({ type: "pane.status", terminalId: pty.id, status: pty.pane.view() });
+    }
+
+    #pollForeground(): void {
+        for (const pty of this.#terminals.values()) {
+            if (pty.terminal.exited || !pty.pane.program) continue;
+            if (pty.pane.foreground(pty.terminal.foreground)) this.#paneChanged(pty);
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Bridge (§5)
+
+    /** A bridge `hello` for `paneId`; the token identifies this connection, and a newer one replaces it. */
+    bridgeHello(paneId: string, token: object): void {
+        const pty = this.#terminals.get(paneId);
+        if (!pty || pty.terminal.exited) throw new NodeError("not_found", `no live terminal ${paneId}`);
+        pty.bridge = token;
+    }
+
+    #bridgePane(paneId: string, token: object): Pty | undefined {
+        const pty = this.#terminals.get(paneId);
+        return pty && pty.bridge === token ? pty : undefined;
+    }
+
+    bridgeStatus(paneId: string, token: object, status: BridgeStatus): void {
+        const pty = this.#bridgePane(paneId, token);
+        if (pty && !pty.terminal.exited && pty.pane.setBridge(status)) this.#paneChanged(pty);
+    }
+
+    bridgeClosed(paneId: string, token: object): void {
+        const pty = this.#bridgePane(paneId, token);
+        if (!pty) return;
+        pty.bridge = undefined;
+        if (pty.pane.bridgeClosed()) this.#paneChanged(pty);
+    }
+
+    /** `open` / `diff` from a bridge: contains the path in the roots, then sends `pane.open` / `pane.diff` everywhere. */
+    bridgeRequest(paneId: string, token: object, request: { type: "open"; path: string; line?: number; column?: number } | { type: "diff"; path: string; staged?: boolean }): number {
+        if (!this.#bridgePane(paneId, token)) throw new NodeError("not_found", "this bridge connection was replaced");
+        const resolved = this.contain(request.path, request.type === "diff");
+        if (request.type === "open") {
+            let stat;
+            try { stat = statSync(resolved); }
+            catch { throw new NodeError("not_found", `no file ${request.path}`); }
+            if (stat.isDirectory()) throw new NodeError("is_a_directory", `${request.path} is a directory`);
+            if (!stat.isFile()) throw new NodeError("not_found", `${request.path} is not a regular file`);
+            return this.#broadcast({ type: "pane.open", terminalId: paneId, path: resolved, ...(request.line ? { line: request.line } : {}), ...(request.column ? { column: request.column } : {}) });
+        }
+        return this.#broadcast({ type: "pane.diff", terminalId: paneId, path: resolved, staged: request.staged === true });
+    }
+
+    /** The real path of `path`, which must lie inside a configured root (`outside_roots`). */
+    contain(path: string, allowMissing: boolean): string {
+        let resolved: string;
+        try { resolved = realpathSync(path); }
+        catch {
+            if (!allowMissing) throw new NodeError("not_found", `no file ${path}`);
+            try { resolved = join(realpathSync(dirname(path)), basename(path)); }
+            catch { throw new NodeError("not_found", `no directory ${dirname(path)}`); }
+        }
+        const inside = roots(this.config()).some(root => {
+            let real: string;
+            try { real = realpathSync(root); }
+            catch { return false; }
+            return resolved === real || resolved.startsWith(real.endsWith(sep) ? real : real + sep);
+        });
+        if (!inside) throw new NodeError("outside_roots", `${path} is outside the configured roots`);
+        return resolved;
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+
+    /** Hangs up every PTY (daemon stop) and deletes the raw logs once they exited. */
+    async shutdown(): Promise<void> {
+        clearInterval(this.#foregroundTimer);
+        if (this.#pumpTimer) clearTimeout(this.#pumpTimer);
+        this.files.shutdown();
+        const ptys = [...this.#terminals.values()];
+        for (const pty of ptys) pty.terminal.kill("SIGHUP");
+        for (let waited = 0; waited < 2_000 && ptys.some(pty => !pty.terminal.exited); waited += 50) await new Promise(resolve => setTimeout(resolve, 50));
+        for (const pty of ptys) {
+            if (!pty.terminal.exited) pty.terminal.kill("SIGKILL");
+            this.#terminals.delete(pty.id);
+            pty.terminal.dispose();
+        }
+    }
+}
+
+const messageBytes = (message: NodeMessage): number => utf8Length(JSON.stringify(message));

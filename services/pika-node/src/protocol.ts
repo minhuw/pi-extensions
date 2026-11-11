@@ -17,9 +17,9 @@ export const LIMITS = {
     maxRecords: 2 ** 32,
     maxOutputChunkBytes: 64 * KiB,
     maxInputBytes: 64 * KiB,
-    /** Pending Orca confirmation. */
+    /** Scrollback is 1000 rows, oldest dropped to fit; full history is the raw log. */
     maxSnapshotBytes: 512 * KiB,
-    /** Pending Orca confirmation. */
+    /** Overflow drops the client's backlog and resyncs it with a snapshot; the PTY never pauses. */
     maxClientBacklogBytes: 1 * MiB,
     maxReadBytes: 512 * KiB,
     maxReadDirEntries: 5_000,
@@ -237,6 +237,8 @@ export interface Welcome {
 export type NodeEvent =
     | Welcome
     | { type: "error"; code: string; message: string; terminalId?: string }
+    | { type: "term.created"; terminal: TerminalInfo }
+    | { type: "term.removed"; terminalId: string }
     | { type: "term.output"; terminalId: string; seq: number; data: string }
     | { type: "term.snapshot"; terminalId: string; snapshot: Snapshot }
     | { type: "term.resized"; terminalId: string; cols: number; rows: number; owned: boolean }
@@ -490,6 +492,12 @@ export const parseClientMessage = parser<ClientMessage>({
 }, "type", { "fs.write": writeData });
 
 const snapshot = object({ data: str(LIMITS.maxSnapshotBytes), cols, rows, outputSequence: int(0) });
+const terminalInfo = object({
+    terminalId, title: str(4 * KiB), cwd: isAbsolutePath, cols, rows, pid: int(0), createdAt: time,
+    argv: arrayOf(value => typeof value === "string", LIMITS.maxArgv + 2, 1),
+    "?exited": object({ code: nullable(int(-(2 ** 31), 2 ** 31)), signal: nullable(label(32)) }),
+    "?status": paneView,
+});
 const replyError = object({ code: label(64), message: str(4 * KiB), "?current": object({ size: time, mtimeMs: time, "?hash": hex64 }) });
 
 /** Validates node messages; `reply.result` is checked only for being an object, its shape is the request's. */
@@ -501,6 +509,8 @@ export const parseNodeMessage = parser<NodeMessage>({
         limits: object({ maxRecordBytes: int(1), maxSnapshotBytes: int(1), maxReadBytes: int(1), maxUploadBytes: int(1), maxUploadChunkBytes: int(1) }),
     },
     error: { code: label(64), message: str(4 * KiB), "?terminalId": terminalId },
+    "term.created": { terminal: terminalInfo },
+    "term.removed": { terminalId },
     "term.output": { terminalId, seq: int(1), data: str(LIMITS.maxOutputChunkBytes) },
     "term.snapshot": { terminalId, snapshot },
     "term.resized": { terminalId, cols, rows, owned: bool },

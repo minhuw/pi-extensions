@@ -13,7 +13,17 @@
 	},
 	"devDependencies": {
 		"@types/node": "^24.12.0",
+		"@types/ws": "^8.18.2",
 		"typescript": "^5.9.3",
 		"vitest": "^4.1.11"
+	},
+	"dependencies": {
+		"@xterm/addon-serialize": "0.14.0",
+		"@xterm/headless": "6.0.0",
+		"node-pty": "^1.1.0",
+		"ws": "^8.22.2"
+	},
+	"allowScripts": {
+		"node-pty@1.1.0": true
 	}
 }

@@ -1,0 +1,21 @@
+#!/bin/sh
+# pika-node launcher. It runs src/cli.ts with the node binary that scripts/install.sh recorded in .node-path
+# (a real path, so a nix profile switch or GC cannot silently retarget it), and fails loudly when that binary is gone.
+set -eu
+self=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
+dir=$(cd "$(dirname "$self")/.." && pwd)
+if [ -n "${PIKA_NODE_NODE:-}" ]; then
+    node=$PIKA_NODE_NODE
+elif [ -f "$dir/.node-path" ]; then
+    node=$(cat "$dir/.node-path")
+    if [ ! -x "$node" ]; then
+        echo "pika-node: the recorded node binary $node is gone; run $dir/scripts/install.sh again" >&2
+        exit 127
+    fi
+elif node=$(command -v node); then
+    :
+else
+    echo "pika-node: no node in PATH and no $dir/.node-path; run $dir/scripts/install.sh" >&2
+    exit 127
+fi
+exec "$node" "$dir/src/cli.ts" "$@"
