@@ -2,7 +2,7 @@ import type { CustomEntry, ExtensionAPI, ExtensionContext, SessionEntry } from "
 
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
 
-/** A session-only mode, switched by `/<name>` without disturbing the cached prompt. */
+/** A session mode, switched by `/<name>` without disturbing the cached prompt. */
 export interface ModeSpec {
 	/** The command, and the key of the mode's entries, hidden messages, system prompt section, and footer status. */
 	name: string;
@@ -15,6 +15,12 @@ export interface ModeSpec {
 	sectionText: string;
 	/** Replies to `/<name> status`, to a switch, and to a switch to the state the mode is already in. */
 	notes: { isOn: string; isOff: string; on: string; off: string; alreadyOn: string; alreadyOff: string };
+	/**
+	 * The state of fresh sessions, set by `/<name> default [on | off]`; off when absent. A session gets it when its first
+	 * run has no conversation before it; a session with earlier conversation starts off. `read` warns about an invalid
+	 * setting when given a context.
+	 */
+	defaults?: { read(ctx?: ExtensionContext): Promise<boolean>; write(on: boolean): Promise<void> };
 	/** Called with the branch's state at session start and `/tree`, and with each switch, in eligible sessions only. */
 	onState?: (ctx: ExtensionContext, active: boolean) => void;
 }
@@ -49,7 +55,11 @@ function isEligible(ctx: ExtensionContext): boolean {
  * Returns whether the mode applies to a context's session and branch.
  */
 export function registerMode(pi: ExtensionAPI, mode: ModeSpec): (ctx: ExtensionContext) => boolean {
-	const { name, notes } = mode;
+	const { name, notes, defaults } = mode;
+	const usage = `Usage: /${name} [on | off | status${defaults ? " | default [on | off]" : ""}]`;
+	/** The configured default, read at each session start and before a session's first run. */
+	let configured = false;
+	const refreshDefault = async () => { if (defaults) configured = await defaults.read(); };
 	const hidden = (content: string) => ({ message: { customType: name, content, display: false } });
 	const isPin = (entry: SessionEntry): entry is CustomEntry<{ base: boolean }> => entry.type === "custom" && entry.customType === name && "base" in (entry.data as ModeEntry);
 
@@ -65,7 +75,9 @@ export function registerMode(pi: ExtensionAPI, mode: ModeSpec): (ctx: ExtensionC
 		}
 		// Off the branch only for this: a session's first run fixes its prompt on every branch, even one that leaves before the pin.
 		const base = pin ?? ctx.sessionManager.getEntries().find(isPin)?.data?.base;
-		return { base, pinned: pin !== undefined, active: active ?? base ?? false };
+		// Before the first run, a fresh session follows the default, and a session with earlier conversation stays off.
+		const unpinned = () => configured && !ctx.sessionManager.getEntries().some(isConversation);
+		return { base, pinned: pin !== undefined, active: active ?? base ?? unpinned() };
 	}
 
 	/**
@@ -110,18 +122,22 @@ export function registerMode(pi: ExtensionAPI, mode: ModeSpec): (ctx: ExtensionC
 		pi.appendEntry<ModeEntry>(name, { base: pinned });
 	}
 
-	async function showBranch(_event: unknown, ctx: ExtensionContext): Promise<void> {
-		if (!isEligible(ctx)) return;
+	function showBranch(ctx: ExtensionContext): void {
 		const { active } = readBranch(ctx);
 		setStatus(ctx, active);
 		mode.onState?.(ctx, active);
 	}
 
-	pi.on("session_start", showBranch);
-	pi.on("session_tree", showBranch);
+	pi.on("session_start", async (_event, ctx) => {
+		if (!isEligible(ctx)) return;
+		await refreshDefault();
+		showBranch(ctx);
+	});
+	pi.on("session_tree", async (_event, ctx) => { if (isEligible(ctx)) showBranch(ctx); });
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (!isEligible(ctx)) return undefined;
+		if (readBranch(ctx).base === undefined) await refreshDefault();
 		let state = readBranch(ctx);
 		if (!state.pinned) {
 			writePin(state, ctx);
@@ -146,14 +162,32 @@ export function registerMode(pi: ExtensionAPI, mode: ModeSpec): (ctx: ExtensionC
 				ctx.ui.notify(`/${name} works only in top-level TUI and RPC sessions.`, "warning");
 				return;
 			}
-			const action = args.trim().toLowerCase();
+			const action = args.trim().toLowerCase().replace(/\s+/g, " ");
+			if (defaults && (action === "default" || action.startsWith("default "))) {
+				const value = action.slice("default".length).trim();
+				if (value === "") {
+					const on = await defaults.read(ctx);
+					ctx.ui.notify(`Default for new sessions: ${on ? "on" : "off"}.`, "info");
+					return;
+				}
+				if (value !== "on" && value !== "off") {
+					ctx.ui.notify(usage, "warning");
+					return;
+				}
+				await defaults.write(value === "on");
+				configured = value === "on";
+				// A session before its first run follows the new default unless switched.
+				showBranch(ctx);
+				ctx.ui.notify(`Default for new sessions: ${value}. Sessions that have had a first run keep their ${name} setting.`, "info");
+				return;
+			}
 			const { active } = readBranch(ctx);
 			if (action === "status") {
 				ctx.ui.notify(active ? notes.isOn : notes.isOff, "info");
 				return;
 			}
 			if (!["", "on", "off"].includes(action)) {
-				ctx.ui.notify(`Usage: /${name} [on | off | status]`, "warning");
+				ctx.ui.notify(usage, "warning");
 				return;
 			}
 			const next = action === "" ? !active : action === "on";

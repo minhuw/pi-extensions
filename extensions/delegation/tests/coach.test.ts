@@ -1,26 +1,20 @@
-// The boom delegation coach in real Pi sessions on the faux provider, asserting on what the provider receives.
+// The swarm coach in real Pi sessions on the faux provider, asserting on what the provider receives.
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Type } from "typebox";
 import { getCurrentSystemPrompt, InMemoryCredentialStore, type AssistantMessage } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import {
 	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
 	type CreateAgentSessionRuntimeFactory, type ExtensionAPI, type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
-import { COACH, contextText, streakText } from "../coach.ts";
+import { COACH, contextText, registerCoach, stallText } from "../coach.ts";
+import { registerSwarm } from "../swarm.ts";
 
 // Load by path, as Pi does.
 const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
-const ON_MESSAGE = "Boom mode 💥 is on: the user wants maximum development speed and explicitly opts in to background agents and, when available, SubagentWorkflow. "
-	+ "Work as an orchestrator: split each task into independent pieces and launch them together in one message, recon for any lookup beyond one known file and worker for implementation, tests, and verification. "
-	+ 'Give concurrent writers isolation: "worktree" when their files could overlap, and apply the branches they report. '
-	+ "Run agents in the background while you have other work, and keep your own context for planning, integration, and review. "
-	+ "Use direct tools only for a known target or a short sequential edit. Check agents' changes before reporting them. This overrides more conservative subagent guidance.";
-const OFF_MESSAGE = "Boom mode is off. Ignore earlier boom mode instructions: the user no longer opts in to background agents or SubagentWorkflow, and the standard subagent guidance applies.";
 const CONTEXT_WINDOW = 20_000;
 
 type Message = { role: string; content: unknown };
@@ -32,7 +26,7 @@ const capture = (messages: Parameters<typeof getCurrentSystemPrompt>[0]): Captur
 	return { system: getCurrentSystemPrompt(messages), conversation: copy.filter((message) => message.role !== "system") };
 };
 const textOf = ({ content }: Message) => typeof content === "string" ? content : (content as { text?: string }[]).map((part) => part.text ?? "").join("");
-const isCoach = (text: string) => text.startsWith("Boom mode: ");
+const isCoach = (text: string) => text.startsWith("Swarm mode: ");
 const coachTexts = (request: Captured) => request.conversation.map(textOf).filter(isCoach);
 /** What followed the run's starting message in a request. */
 const afterPrompt = (request: Captured, prompt: string) => {
@@ -55,7 +49,6 @@ const argumentsOf = (tool: string): Parameters<typeof fauxToolCall>[1] => {
 		default: return {};
 	}
 };
-const lookups = (count: number) => Array.from({ length: count }, (_, index) => ["read", "grep", "find", "ls", "ffgrep", "fffind", "bash"][index % 7]!);
 
 let root: string;
 let previousAgentDir: string | undefined;
@@ -65,7 +58,7 @@ const sessionDir = () => join(root, "sessions");
 const cwd = () => join(root, "work");
 
 beforeEach(async () => {
-	root = await mkdtemp(join(tmpdir(), "pi-boom-coach-"));
+	root = await mkdtemp(join(tmpdir(), "pi-swarm-coach-"));
 	await Promise.all([agentDir(), sessionDir(), cwd()].map((path) => mkdir(path)));
 	await writeFile(join(cwd(), "notes.txt"), "a note\n");
 	previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -94,26 +87,18 @@ function quietUi() {
 	} as unknown as ExtensionUIContext;
 }
 
-/** Stub delegation tools, and `script`, a tool that makes nested lookups as a codemode script does. */
-function stubTools(pi: ExtensionAPI): void {
-	for (const name of ["Agent", "SubagentWorkflow", "herder_step", "herder_workflow"]) {
-		pi.registerTool({
-			name, label: name, description: `Stub ${name}`, parameters: Type.Object({}),
-			async execute() { return { content: [{ type: "text", text: "delegated" }], details: undefined }; },
-		});
-	}
-	pi.registerTool({
-		name: "script", label: "Script", description: "Makes nested lookups", parameters: Type.Object({}),
-		async execute(_id, _params, _signal, _update, ctx) {
-			for (let index = 0; index < COACH.lookupStreak + 1; index++) await ctx.executeTool("read", { path: "notes.txt" });
-			return { content: [{ type: "text", text: "looked" }], details: undefined };
-		},
-	});
-}
+const SUBAGENTS_TELEMETRY = "subagents:telemetry";
+const STALL_MS = 10 * 60_000;
 
-async function start() {
+/**
+ * A session with the extension loaded by path, or, with `clock`, with swarm mode and a coach built here on a clock the
+ * test moves, checking every few milliseconds. `emit` sends telemetry on the session's event bus as pi-subagents does.
+ */
+async function start(options: { clock?: { now: number } } = {}) {
+	let events: ExtensionAPI["events"] | undefined;
+	const { clock } = options;
 	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-	const faux = fauxProvider({ api: "boom-coach-test-api", provider: "boom-coach-test", models: [{ id: "test", contextWindow: CONTEXT_WINDOW }] });
+	const faux = fauxProvider({ api: "swarm-coach-test-api", provider: "swarm-coach-test", models: [{ id: "test", contextWindow: CONTEXT_WINDOW }] });
 	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false, keepRecentTokens: 1 } });
 	const requests: Captured[] = [];
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd: runtimeCwd, agentDir: runtimeAgentDir, sessionManager, sessionStartEvent }) => {
@@ -121,8 +106,11 @@ async function start() {
 			cwd: runtimeCwd, agentDir: runtimeAgentDir, settingsManager, modelRuntime,
 			resourceLoaderOptions: {
 				noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-				additionalExtensionPaths: [extensionPath],
-				extensionFactories: [(pi) => { pi.registerProvider(faux.provider); stubTools(pi); }],
+				additionalExtensionPaths: clock ? [] : [extensionPath],
+				extensionFactories: [
+					(pi) => { pi.registerProvider(faux.provider); events = pi.events; },
+					...clock ? [(pi: ExtensionAPI) => { registerCoach(pi, registerSwarm(pi), { stallMs: STALL_MS, checkMs: 5, now: () => clock.now }); }] : [],
+				],
 			},
 		});
 		expect(services.resourceLoader.getExtensions().errors).toEqual([]);
@@ -165,80 +153,21 @@ async function start() {
 			return requests.slice(before);
 		},
 		command: (text: string) => runtime.session.prompt(text),
-		coachEntries: () => runtime.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom_message" && entry.customType === "boom-coach" ? [entry] : []),
-		boomMessages: () => runtime.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom_message" && entry.customType === "boom" ? [entry.content] : []),
+		/** Telemetry for a top-level agent of this session, running with no active tool unless `fields` says otherwise. */
+		emit(agentId: string, fields: Record<string, unknown> = {}) {
+			events!.emit(SUBAGENTS_TELEMETRY, {
+				phase: "updated", agentId, status: "running", displayName: "Worker", type: "worker", description: `task ${agentId}`,
+				turnCount: 1, toolUses: 0, lifetimeTokens: 0, contextPercent: null, compactionCount: 0, activeTools: [], startedAt: 0,
+				parentSessionId: runtime.session.sessionManager.getSessionId(), ...fields,
+			});
+		},
+		coachEntries: () => runtime.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom_message" && entry.customType === "swarm-coach" ? [entry] : []),
+		swarmMessages: () => runtime.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom_message" && entry.customType === "swarm" ? [entry.content] : []),
 		dispose: () => runtime.dispose(),
 	};
 	started.push(harness);
 	return harness;
 }
-
-describe("the lookup streak", () => {
-	it("puts a hidden coach message into the request after five lookups in a row", async () => {
-		const h = await start();
-		await h.command("/boom on");
-		const [first, second, ...rest] = await h.run("explore", calls(...lookups(COACH.lookupStreak)), "done");
-		expect(rest).toEqual([]);
-		expect(coachTexts(first)).toEqual([]);
-		expect(coachTexts(second)).toEqual([streakText(5)]);
-		expect(second.conversation.map(textOf).at(-1)).toBe(streakText(5));
-		expect(second.system).toBe(first.system);
-		expect(h.coachEntries().map(({ display }) => display)).toEqual([false]);
-		expect(h.errors).toEqual([]);
-	});
-
-	it("counts across turns and runs, and starts again after it steers", async () => {
-		const h = await start();
-		await h.command("/boom on");
-		const one = await h.run("one", calls("read", "grep"), calls("bash"), "done");
-		expect(one.flatMap(coachTexts)).toEqual([]);
-		const two = await h.run("two", calls("ls", "fffind"), calls(...lookups(4)), calls("read"), "done");
-		expect(two.map((request) => coachTexts(request).length)).toEqual([0, 1, 1, 2]);
-		expect(h.coachEntries()).toHaveLength(2);
-	});
-
-	it.each(["Agent", "SubagentWorkflow", "herder_step", "herder_workflow"])("is reset by %s", async (tool) => {
-		const h = await start();
-		await h.command("/boom on");
-		const requests = await h.run("explore", calls(...lookups(4)), calls(tool), calls(...lookups(4)), calls("read"), "done");
-		expect(requests.map((request) => coachTexts(request).length)).toEqual([0, 0, 0, 0, 1]);
-	});
-
-	it("neither counts nor resets on edits and other tools", async () => {
-		const h = await start();
-		await h.command("/boom on");
-		const requests = await h.run("explore", calls("read", "read", "edit", "write", "unknown_tool", "read", "read"), calls("edit", "write", "edit", "write", "edit"), calls("read"), "done");
-		expect(requests.map((request) => coachTexts(request).length)).toEqual([0, 0, 0, 1]);
-	});
-
-	it("ignores lookups that another tool makes", async () => {
-		const h = await start();
-		await h.command("/boom on");
-		const requests = await h.run("explore", calls("script", "script"), "done");
-		expect(requests.flatMap(coachTexts)).toEqual([]);
-	});
-
-	it("sends nothing while boom mode is off, in the section or switched", async () => {
-		const h = await start();
-		expect((await h.run("one", calls(...lookups(6)), "done")).flatMap(coachTexts)).toEqual([]);
-		await h.command("/boom on");
-		await h.run("two", "ok");
-		await h.command("/boom off");
-		expect((await h.run("three", calls(...lookups(6)), "done")).flatMap(coachTexts)).toEqual([]);
-		expect(h.coachEntries()).toEqual([]);
-	});
-
-	it("is reset by /tree", async () => {
-		const h = await start();
-		await h.command("/boom on");
-		await h.run("zero", "ok");
-		const answer = h.session.sessionManager.getLeafId()!;
-		await h.run("one", calls(...lookups(4)), "done");
-		await h.session.navigateTree(answer);
-		expect((await h.run("two", calls("read"), "done")).flatMap(coachTexts)).toEqual([]);
-		expect(h.coachEntries()).toEqual([]);
-	});
-});
 
 describe("the context nudge", () => {
 	/** A prompt that alone fills `percent` of the context window, at the faux provider's four characters a token. */
@@ -248,13 +177,12 @@ describe("the context nudge", () => {
 
 	it("steers once at the threshold and again only after a compaction", async () => {
 		const h = await start();
-		await h.command("/boom on");
 		expect(nudges(await h.run("small", calls("edit"), "done"), "small")).toEqual([[], []]);
 		expect(h.session.getContextUsage()!.percent!).toBeLessThan(COACH.contextShare);
 
 		const big = filler(COACH.contextShare);
 		const full = nudges(await h.run(big, calls("edit"), "done"), big);
-		expect(full).toEqual([[], [expect.stringMatching(/^Boom mode: your context is \d+% full\./)]]);
+		expect(full).toEqual([[], [expect.stringMatching(/^Swarm mode: your context is \d+% full\./)]]);
 		const percent = Number(/(\d+)%/.exec(full[1][0])![1]);
 		expect(percent).toBeGreaterThanOrEqual(COACH.contextShare);
 		expect(percent).toBeLessThan(100);
@@ -273,30 +201,158 @@ describe("the context nudge", () => {
 
 	it("waits for a turn that is followed by another rather than add a request", async () => {
 		const h = await start();
-		await h.command("/boom on");
 		expect(await h.run(filler(COACH.contextShare + 5), "done")).toHaveLength(1);
 		expect(h.coachEntries()).toEqual([]);
 		expect(nudges(await h.run("next", calls("edit"), "done"), "next").map((texts) => texts.length)).toEqual([0, 1]);
 	});
 
-	it("sends nothing while boom mode is off", async () => {
+	it("sends nothing while swarm mode is off", async () => {
 		const h = await start();
+		await h.command("/swarm off");
 		expect((await h.run(filler(COACH.contextShare + 5), calls("edit"), "done")).flatMap(coachTexts)).toEqual([]);
 		expect(h.coachEntries()).toEqual([]);
 	});
 });
 
-it("leaves boom's own messages unchanged", async () => {
+describe("stall detection", () => {
+	const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
+	async function waitFor(condition: () => boolean) {
+		for (let tries = 0; tries < 200 && !condition(); tries++) await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(condition()).toBe(true);
+	}
+	/** A session idle after one run, with swarm mode on by default. */
+	async function idle() {
+		const clock = { now: 1_000 };
+		const h = await start({ clock });
+		await h.run("start", "ok");
+		return { h, clock };
+	}
+
+	it("wakes an idle session once for a running agent with no active tool and no telemetry for the stall time", async () => {
+		const { h, clock } = await idle();
+		h.reply("checking");
+		h.emit("a1", { phase: "started" });
+		h.emit("a2", { activeTools: ["bash"] });
+		clock.now += STALL_MS - 1;
+		await settle();
+		expect(h.coachEntries()).toEqual([]);
+		clock.now += 60_001;
+		await waitFor(() => h.requests.length === 2);
+		await h.session.waitForIdle();
+		const text = stallText([{ agentId: "a1", type: "worker", description: "task a1", idleMs: STALL_MS + 60_000 }]);
+		expect(text).toBe('Swarm mode: a background agent has run no tool and reported nothing for a while: a1 (worker, "task a1", idle 11 min). Check each with get_subagent_result, redirect it with steer_subagent, or stop and relaunch it.');
+		expect(h.requests[1]!.conversation.map(textOf).at(-1)).toBe(text);
+		expect(h.coachEntries().map(({ display }) => display)).toEqual([false]);
+
+		clock.now += STALL_MS * 3;
+		await settle();
+		expect(h.requests).toHaveLength(2);
+		expect(h.coachEntries()).toHaveLength(1);
+		expect(h.errors).toEqual([]);
+	});
+
+	it("names every agent stalled at once in one message", async () => {
+		const { h, clock } = await idle();
+		h.reply("checking");
+		h.emit("a1");
+		h.emit("a2", { type: "recon", description: "survey" });
+		clock.now += STALL_MS;
+		await waitFor(() => h.coachEntries().length === 1);
+		await h.session.waitForIdle();
+		expect(h.coachEntries()[0]!.content).toBe(stallText([
+			{ agentId: "a1", type: "worker", description: "task a1", idleMs: STALL_MS },
+			{ agentId: "a2", type: "recon", description: "survey", idleMs: STALL_MS },
+		]));
+		expect(h.coachEntries()[0]!.content).toContain("2 background agents have");
+	});
+
+	it("re-arms for an agent only after new telemetry, and forgets a completed one", async () => {
+		const { h, clock } = await idle();
+		h.reply("checking", "checking again");
+		h.emit("a1");
+		clock.now += STALL_MS;
+		await waitFor(() => h.coachEntries().length === 1);
+		await h.session.waitForIdle();
+		h.emit("a1", { turnCount: 2 });
+		clock.now += STALL_MS - 1;
+		await settle();
+		expect(h.coachEntries()).toHaveLength(1);
+		clock.now += 1;
+		await waitFor(() => h.coachEntries().length === 2);
+		await h.session.waitForIdle();
+		expect(h.requests).toHaveLength(3);
+
+		h.emit("a1");
+		h.emit("a1", { phase: "completed", status: "completed", completedAt: clock.now });
+		clock.now += STALL_MS * 2;
+		await settle();
+		expect(h.coachEntries()).toHaveLength(2);
+		expect(h.errors).toEqual([]);
+	});
+
+	it.each([
+		["has an active tool", { activeTools: ["bash"] }],
+		["is queued", { status: "queued" }],
+		["belongs to another session", { parentSessionId: "other-session" }],
+		["has an owner", { owner: "workflow" }],
+		["is nested in another agent", { parentAgentId: "a0" }],
+	] as const)("ignores an agent that %s", async (_name, fields) => {
+		const { h, clock } = await idle();
+		h.emit("a1", fields);
+		clock.now += STALL_MS * 2;
+		await settle();
+		expect(h.coachEntries()).toEqual([]);
+		expect(h.requests).toHaveLength(1);
+	});
+
+	it("sends nothing while swarm mode is off", async () => {
+		const { h, clock } = await idle();
+		await h.command("/swarm off");
+		h.emit("a1");
+		clock.now += STALL_MS * 2;
+		await settle();
+		expect(h.coachEntries()).toEqual([]);
+		expect(h.requests).toHaveLength(1);
+	});
+
+	it("steers a streaming run instead of starting another", async () => {
+		const clock = { now: 1_000 };
+		const h = await start({ clock });
+		const made = await h.run("work", async () => {
+			h.emit("a1");
+			clock.now += STALL_MS;
+			// The stall check runs while this request is in flight.
+			await settle();
+			return calls("edit");
+		}, "done");
+		expect(made).toHaveLength(2);
+		expect(coachTexts(made[1]!)).toEqual([stallText([{ agentId: "a1", type: "worker", description: "task a1", idleMs: STALL_MS }])]);
+		await settle();
+		expect(h.coachEntries()).toHaveLength(1);
+		expect(h.requests).toHaveLength(2);
+	});
+
+	it("stops checking at shutdown", async () => {
+		const { h, clock } = await idle();
+		h.emit("a1");
+		await h.dispose();
+		started.splice(started.indexOf(h), 1);
+		clock.now += STALL_MS * 2;
+		await settle();
+		expect(h.requests).toHaveLength(1);
+	});
+});
+
+it("leaves swarm's own messages unchanged", async () => {
 	const h = await start();
+	await h.command("/swarm off");
 	await h.run("one", "ok");
-	await h.command("/boom on");
-	const on = await h.run("two", calls(...lookups(5)), "done");
-	expect(afterPrompt(on[0], "two")).toEqual([ON_MESSAGE]);
-	expect(coachTexts(on[1])).toEqual([streakText(5)]);
-	expect(afterPrompt((await h.run("three", "ok"))[0], "three")).toEqual([]);
-	await h.command("/boom off");
-	expect(afterPrompt((await h.run("four", "ok"))[0], "four")).toEqual([OFF_MESSAGE]);
-	expect(afterPrompt((await h.run("five", "ok"))[0], "five")).toEqual([]);
-	expect(h.boomMessages()).toEqual([ON_MESSAGE, OFF_MESSAGE]);
-	expect(COACH).toEqual({ lookupStreak: 5, contextShare: 50 });
+	expect(h.swarmMessages()).toEqual([]);
+	await h.command("/swarm on");
+	await h.run("two", "ok");
+	await h.command("/swarm off");
+	await h.run("three", "ok");
+	expect(h.swarmMessages().map((text) => (text as string).split(/[:.]/)[0])).toEqual(["Swarm mode 🐝 is on", "Swarm mode is off"]);
+	expect(h.coachEntries()).toEqual([]);
+	expect(COACH).toEqual({ contextShare: 50, stallMs: 10 * 60_000, checkMs: 60_000 });
 });

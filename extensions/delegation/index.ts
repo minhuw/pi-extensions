@@ -1,9 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { registerAlwaysOn } from "./alwayson.ts";
-import { registerBoom } from "./boom.ts";
+import { registerCoach } from "./coach.ts";
+import { registerSwarm } from "./swarm.ts";
 
-/** `/boom` and `/alwayson`: two independent session-only delegation modes on one cache-safe switch. */
+/** `/swarm`: background-agent coordination on a cache-safe switch, on by default, with a coach for context and stalled agents. */
 export default function delegationExtension(pi: ExtensionAPI): void {
-	registerBoom(pi);
-	registerAlwaysOn(pi);
+	const isSwarmOn = registerSwarm(pi);
+	registerCoach(pi, isSwarmOn);
 }
