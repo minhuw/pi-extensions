@@ -15,6 +15,7 @@ import { isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, truncateToWidt
 import { hasAgentBadge, renderAgentName, renderAgentNameLabel } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import { type ExternalAgentView, externalRecord } from "../external-agents.js";
+import { hasRecordConversation, openViewerSession } from "../session-transcript.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { buildInvocationTags, buildRecordInvocation, formatAgentIdentity, formatAgentNameIdentity, formatTokenUsage, type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
@@ -253,10 +254,15 @@ export class FleetList {
   private agentRecords(): AgentRecord[] {
     const now = Date.now();
     return this.manager.listAgents()
-      .filter(a => !a.owner && isTopLevelAgent(a) && a.session && (
-        a.status === "running" || a.status === "queued"
-        || a.id === this.viewingAgentId
-        || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
+      .filter(a => !a.owner && isTopLevelAgent(a) && (
+        a.id === this.viewingAgentId
+        || (
+          (a.status === "running" || a.status === "queued" ? Boolean(a.session) : hasRecordConversation(a))
+          && (
+            a.status === "running" || a.status === "queued"
+            || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
+          )
+        )
       ))
       .sort((a, b) => a.startedAt - b.startedAt);
   }
@@ -433,11 +439,11 @@ export class FleetList {
     }
     const record = entry.record;
     if (!this.ui) return;
-    if (!record.session) {
+    const session = openViewerSession(record);
+    if (!session) {
       this.ui.notify(`Agent is ${record.status} — no session available.`, "info");
       return;
     }
-    const session = record.session;
     const activity = this.agentActivity.get(record.id);
     this.viewingAgentId = record.id;
     let overlayOptions = getConversationOverlayOptions({ mode: "regular" });

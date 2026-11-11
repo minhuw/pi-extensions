@@ -19,11 +19,12 @@ import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager, assertValidSpawnCwd, isTopLevelAgent } from "./agent-manager.js";
-import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, reopenTarget } from "./agent-record-entry.js";
+import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, reopenTarget, worktreeLost } from "./agent-record-entry.js";
 import { resolveChildSessionRoot } from "./agent-runner.js";
 import { validateReopenSessionFile } from "./reopen.js";
 import { validateLinkData } from "./child-session-hooks.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
+import { getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
+import { getRecordConversation, openViewerSession } from "./session-transcript.js";
 import { rowDescription, sourceIndicator, sourceLegend } from "./agent-source-badge.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getEnabledTypes, getFallbackSubagent, isDefaultsDisabled, isModelVisible, NO_FALLBACK, registerAgents, resolveEnabledType, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
@@ -199,7 +200,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number, showC
   ].filter(Boolean).join("");
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
-  const contextPercent = getSessionContextPercent(record.session);
+  const contextPercent = getSessionContextPercent(record.session) ?? record.contextPercent ?? null;
   const ctxXml = contextPercent !== null ? `<context_percent>${Math.round(contextPercent)}</context_percent>` : "";
   const compactXml = record.compactionCount ? `<compactions>${record.compactionCount}</compactions>` : "";
   // Only under `showCost`: this is LLM context, and a figure the orchestrator
@@ -661,7 +662,7 @@ export default function (pi: ExtensionAPI) {
       maxTurns: record.maxTurns,
       toolUses: record.toolUses,
       lifetimeTokens: getLifetimeTotal(record.lifetimeUsage),
-      contextPercent: getSessionContextPercent(record.session),
+      contextPercent: getSessionContextPercent(record.session) ?? record.contextPercent ?? null,
       compactionCount: record.compactionCount,
       activeTools,
       activity: describeActivity(activityMap, record.responseText),
@@ -889,7 +890,7 @@ export default function (pi: ExtensionAPI) {
         maxTurns: record.maxTurns,
         toolUses: record.toolUses,
         lifetimeTokens: getLifetimeTotal(record.lifetimeUsage),
-        contextPercent: getSessionContextPercent(record.session),
+        contextPercent: getSessionContextPercent(record.session) ?? record.contextPercent ?? null,
         compactionCount: record.compactionCount,
         sessionId: record.sessionId,
         parentSessionId: record.parentSessionId,
@@ -996,7 +997,7 @@ export default function (pi: ExtensionAPI) {
     }
     const ctx = currentCtx;
     if (!ctx) throw new Error("No active session");
-    if (!record.session) throw new Error(`Agent "${id}" has no session to resume`);
+    if (!manager.canResume(record)) throw new Error(`Agent "${id}" has no session to resume`);
     const resumed = await startBackgroundResume(ctx, record, text, {
       outputTranscript: getAgentConfig(record.type)?.outputTranscript ?? getOutputTranscriptDefault(),
       maxTurns: resumeTurnLimit(record),
@@ -1272,7 +1273,7 @@ export default function (pi: ExtensionAPI) {
         return { action: "handled" };
       }
 
-      if (record.session) {
+      if (manager.canResume(record)) {
         // Both derived from the record's OWN type: a mention names an existing
         // agent, so its frontmatter is what governs — `output_transcript: false`
         // must keep holding, since record.outputFile is the sole gate every
@@ -1285,6 +1286,14 @@ export default function (pi: ExtensionAPI) {
           resumedRecord ? `Resuming ${target}` : `Could not resume ${target} — it is still running.`,
           resumedRecord ? "info" : "warning",
         );
+        return { action: "handled" };
+      }
+      if (worktreeLost(record)) {
+        ctx.ui.notify(`Could not resume ${target} — its worktree no longer exists.`, "warning");
+        return { action: "handled" };
+      }
+      if (record.sessionFile && !existsSync(record.sessionFile)) {
+        ctx.ui.notify(`Could not resume ${target} — its session is gone.`, "warning");
         return { action: "handled" };
       }
       // A live record with no session never got far enough to continue, so it
@@ -1749,11 +1758,11 @@ export default function (pi: ExtensionAPI) {
     // Anchor streaming past the turns already on disk, captured BEFORE the
     // run starts. The resumed prompt lands as an ordinary user message at
     // this index, so it is written exactly once.
-    const transcriptAnchor = existing.session?.messages.length ?? 0;
+    const transcriptAnchor = existing.session?.messages?.length ?? existing.messageCount ?? 0;
 
     const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(opts.maxTurns);
-    // resumeAgent has no onSessionCreated — the session predates this run —
-    // so seed it directly, or the widget shows no context % for the agent.
+    // In-memory sessions predate the resume; reopened persisted sessions report
+    // via onSessionCreated below once runAgent opens the saved file.
     bgState.session = existing.session;
 
     // No `signal`: a background spawn deliberately omits it, and a detached
@@ -1766,13 +1775,26 @@ export default function (pi: ExtensionAPI) {
       onTurnEnd: bgCallbacks.onTurnEnd,
       onToolActivity: bgCallbacks.onToolActivity,
       onAssistantUsage: bgCallbacks.onAssistantUsage,
+      onSessionCreated: (session) => {
+        bgState.session = session;
+        const rec = manager.getRecord(id);
+        if (rec?.outputFile && !rec.outputCleanup) {
+          rec.outputCleanup = streamToOutputFile(
+            session,
+            rec.outputFile,
+            id,
+            ctx.cwd,
+            session.messages?.length || transcriptAnchor,
+          );
+        }
+      },
       // Fires when the run actually starts — immediately, or on queue
       // drain. Wiring it here (rather than after resume() returns) means a
       // resume stopped while still queued never started streaming, so
       // there is no subscription left behind for a later run to trip over.
       onStarted: () => {
         const rec = manager.getRecord(id);
-        if (rec?.session && rec.outputFile) {
+        if (rec?.session && rec.outputFile && !rec.outputCleanup) {
           rec.outputCleanup = streamToOutputFile(rec.session, rec.outputFile, id, ctx.cwd, transcriptAnchor);
         }
       },
@@ -2530,7 +2552,22 @@ Terse command-style prompts produce shallow, generic work.
         if (!existing || existing.owner || !isTopLevelAgent(existing)) {
           return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
         }
-        if (!existing.session) {
+        if (existing.status === "running" || existing.status === "queued") {
+          if (runInBackground) {
+            return textResult(
+              `Agent "${params.resume}" is still ${existing.status} — it can only be resumed once its current run finishes.\n` +
+              `Use steer_subagent to send it a message mid-run, or get_subagent_result to wait for it.`,
+            );
+          }
+          return textResult(`Failed to resume agent "${params.resume}".`);
+        }
+        if (!manager.canResume(existing)) {
+          if (worktreeLost(existing)) {
+            return textResult(`Agent "${params.resume}" cannot be resumed — its worktree no longer exists.`);
+          }
+          if (existing.sessionFile && !existsSync(existing.sessionFile)) {
+            return textResult(`Agent "${params.resume}" cannot be resumed — its session is gone.`);
+          }
           return textResult(`Agent "${params.resume}" has no active session to resume.`);
         }
         // Not `effectiveMaxTurns`: that was resolved for `subagent_type`, which
@@ -2543,17 +2580,6 @@ Terse command-style prompts produce shallow, generic work.
         // so a resumed agent always blocked the main loop until it finished.
         if (runInBackground) {
           const id = existing.id;
-          // A detached resume hands control back while the record stays
-          // "running", so nothing stops the model from resuming the same agent
-          // again mid-run. manager.resume() refuses that (it would orphan the
-          // live run's abort controller); say why here, where the model can act
-          // on it, instead of letting it read as a generic failure.
-          if (existing.status === "running" || existing.status === "queued") {
-            return textResult(
-              `Agent "${params.resume}" is still ${existing.status} — it can only be resumed once its current run finishes.\n` +
-              `Use steer_subagent to send it a message mid-run, or get_subagent_result to wait for it.`,
-            );
-          }
 
           const record = await startBackgroundResume(ctx, existing, params.prompt, {
             outputTranscript,
@@ -2579,9 +2605,11 @@ Terse command-style prompts produce shallow, generic work.
 
         // Tracked like a foreground spawn, so the widget row and the result
         // card show THIS run's `↻N≤M` and tool activity rather than the
-        // previous run's. The session predates this run, so it is seeded here.
+        // previous run's. Seeded here when still in memory, or via onSessionCreated
+        // when reopening a persisted session file.
         const { state: resumeState, callbacks: resumeCallbacks } = createActivityTracker(resumeMaxTurns);
         resumeState.session = existing.session;
+        const fgAnchor = existing.session?.messages?.length ?? existing.messageCount ?? 0;
         agentActivity.set(existing.id, resumeState);
         widget.markRunning(existing.id);
         widget.ensureTimer();
@@ -2593,6 +2621,19 @@ Terse command-style prompts produce shallow, generic work.
             maxTurns: resumeMaxTurns,
             onTurnEnd: resumeCallbacks.onTurnEnd,
             onToolActivity: resumeCallbacks.onToolActivity,
+            onSessionCreated: (session) => {
+              resumeState.session = session;
+              const rec = manager.getRecord(existing.id);
+              if (rec?.outputFile && !rec.outputCleanup) {
+                rec.outputCleanup = streamToOutputFile(
+                  session,
+                  rec.outputFile,
+                  existing.id,
+                  ctx.cwd,
+                  session.messages?.length || fgAnchor,
+                );
+              }
+            },
           });
         } finally {
           agentActivity.delete(existing.id);
@@ -3410,7 +3451,7 @@ Terse command-style prompts produce shallow, generic work.
       const displayName = getDisplayName(record.type);
       const duration = formatDuration(record.startedAt, record.completedAt);
       const tokens = formatLifetimeTokens(record);
-      const contextPercent = getSessionContextPercent(record.session);
+      const contextPercent = getSessionContextPercent(record.session) ?? record.contextPercent ?? null;
       const {
         identity: resultIdentity,
         tags: resultInvocationTags,
@@ -3447,8 +3488,8 @@ Terse command-style prompts produce shallow, generic work.
       }
 
       // Verbose: include full conversation
-      if (params.verbose && record.session) {
-        const conversation = getAgentConversation(record.session);
+      if (params.verbose) {
+        const conversation = getRecordConversation(record);
         if (conversation) {
           output += `\n\n--- Agent Conversation ---\n${conversation}`;
         }
@@ -3495,7 +3536,7 @@ Terse command-style prompts produce shallow, generic work.
         await steerAgent(record.session, params.message);
         pi.events.emit("subagents:steered", { id: record.id, message: params.message });
         const tokens = formatLifetimeTokens(record);
-        const contextPercent = getSessionContextPercent(record.session);
+        const contextPercent = getSessionContextPercent(record.session) ?? record.contextPercent ?? null;
         const stateParts: string[] = [];
         if (tokens) stateParts.push(tokens);
         if (showCost) {
@@ -3746,12 +3787,11 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord) {
-    if (!record.session) {
+    const session = openViewerSession(record);
+    if (!session) {
       ctx.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
       return;
     }
-
-    const session = record.session;
     const activity = agentActivity.get(record.id);
     let overlayOptions = getConversationOverlayOptions({ mode: "regular" });
 

@@ -26,6 +26,7 @@ import {
   writeInitialEntry,
 } from "./output-file.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
+import { getRecordConversation } from "./session-transcript.js";
 import type {
   AgentConfig,
   AgentInvocation,
@@ -380,6 +381,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     parameters: Type.Object({
       agent_id: Type.String(),
       wait: Type.Optional(Type.Boolean()),
+      verbose: Type.Optional(Type.Boolean()),
     }),
     execute: async (_toolCallId, params, signal) => {
       const record = context.manager.getRecord(params.agent_id);
@@ -396,7 +398,14 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }
         if (record.promise) await abortable(record.promise, signal);
       }
-      return textResult(formatRecord(record, "fetched"), record.status === "error");
+      let output = formatRecord(record, "fetched");
+      if (params.verbose) {
+        const conversation = getRecordConversation(record);
+        if (conversation) {
+          output += `\n\n--- Agent Conversation ---\n${conversation}`;
+        }
+      }
+      return textResult(output, record.status === "error");
     },
   });
 

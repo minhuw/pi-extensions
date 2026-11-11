@@ -164,4 +164,190 @@ describe("child session shutdown (#242)", () => {
       process.off("unhandledRejection", onRejection);
     }
   });
+
+  describe("immediate teardown for persisted child sessions", () => {
+    function persistedSession(
+      sessionFile = "/tmp/persisted-child.jsonl",
+      emit: (...args: any[]) => any = vi.fn(async () => {}),
+    ) {
+      return {
+        ...boundSession(emit),
+        messages: [
+          { role: "user", content: "task" },
+          { role: "assistant", content: [{ type: "text", text: "done" }] },
+        ],
+        sessionManager: { getSessionFile: () => sessionFile },
+        getSessionStats: () => ({
+          tokens: { input: 100, output: 50, cacheWrite: 0 },
+          contextUsage: { percent: 37.4 },
+        }),
+      } as any;
+    }
+
+    it("immediately detaches and tears down a persisted session on completion, snapshotting contextPercent and messageCount", async () => {
+      let seenInOnComplete: { session: unknown; contextPercent?: number; messageCount?: number } | undefined;
+      manager = new AgentManager((rec) => {
+        seenInOnComplete = {
+          session: rec.session,
+          contextPercent: rec.contextPercent,
+          messageCount: rec.messageCount,
+        };
+      });
+      const session = persistedSession("/tmp/child-a.jsonl");
+      vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+        opts.onSessionCreated?.(session);
+        return { responseText: "done", session, aborted: false, steered: false };
+      });
+
+      const id = manager.spawn(mockPi, mockCtx, "worker", "test", {
+        description: "test",
+        isBackground: true,
+      });
+      await manager.getRecord(id)!.promise;
+
+      const record = manager.getRecord(id)!;
+      // Detached before onComplete and before record.promise resolves.
+      expect(seenInOnComplete).toEqual({
+        session: undefined,
+        contextPercent: 37.4,
+        messageCount: 2,
+      });
+      expect(record.session).toBeUndefined();
+      expect(record.sessionFile).toBe("/tmp/child-a.jsonl");
+      expect(record.contextPercent).toBe(37.4);
+      expect(record.messageCount).toBe(2);
+
+      await vi.waitFor(() => expect(session.dispose).toHaveBeenCalledOnce());
+      expect(session.extensionRunner.emit).toHaveBeenCalledWith({
+        type: "session_shutdown",
+        reason: "quit",
+      });
+      expect(session.extensionRunner.emit.mock.invocationCallOrder[0])
+        .toBeLessThan(session.dispose.mock.invocationCallOrder[0]);
+    });
+
+    it("also tears down a persisted session immediately when runAgent rejects after session creation", async () => {
+      let seenSessionAtErrorComplete: unknown = "unset";
+      manager = new AgentManager((rec) => {
+        seenSessionAtErrorComplete = rec.session;
+      });
+      const session = persistedSession("/tmp/child-err.jsonl");
+      vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+        opts.onSessionCreated?.(session);
+        throw new Error("provider crashed");
+      });
+
+      const id = manager.spawn(mockPi, mockCtx, "worker", "test", {
+        description: "test",
+        isBackground: true,
+      });
+      await manager.getRecord(id)!.promise;
+
+      expect(seenSessionAtErrorComplete).toBeUndefined();
+      expect(manager.getRecord(id)!.session).toBeUndefined();
+      expect(manager.getRecord(id)!.contextPercent).toBe(37.4);
+      await vi.waitFor(() => expect(session.dispose).toHaveBeenCalledOnce());
+    });
+
+    it("keeps retain: true sessions attached until eviction/dispose", async () => {
+      manager = new AgentManager();
+      const session = persistedSession("/tmp/retained.jsonl");
+      vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+        opts.onSessionCreated?.(session);
+        return { responseText: "done", session, aborted: false, steered: false };
+      });
+
+      const id = manager.spawn(mockPi, mockCtx, "worker", "test", {
+        description: "test",
+        isBackground: true,
+        retain: true,
+      });
+      await manager.getRecord(id)!.promise;
+
+      expect(manager.getRecord(id)!.session).toBe(session);
+      expect(session.dispose).not.toHaveBeenCalled();
+
+      await manager.dispose();
+      expect(session.dispose).toHaveBeenCalledOnce();
+    });
+
+    it("dispose() awaits in-flight shutdown handlers of just-completed persisted children", async () => {
+      manager = new AgentManager();
+      let releaseHandler!: () => void;
+      const session = persistedSession(
+        "/tmp/in-flight.jsonl",
+        () => new Promise<void>((r) => { releaseHandler = r; }),
+      );
+      vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+        opts.onSessionCreated?.(session);
+        return { responseText: "done", session, aborted: false, steered: false };
+      });
+
+      const id = manager.spawn(mockPi, mockCtx, "worker", "test", {
+        description: "test",
+        isBackground: true,
+      });
+      await manager.getRecord(id)!.promise;
+      expect(manager.getRecord(id)!.session).toBeUndefined();
+
+      const disposed = manager.dispose();
+      let settled = false;
+      void disposed.then(() => { settled = true; });
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+
+      expect(settled).toBe(false);
+      expect(session.dispose).not.toHaveBeenCalled();
+
+      releaseHandler();
+      await disposed;
+      expect(settled).toBe(true);
+      expect(session.dispose).toHaveBeenCalledOnce();
+    });
+
+    it("deduplicates shutdown and awaits completion when dispose() aborts a running persisted agent", async () => {
+      manager = new AgentManager();
+      let releaseHandler!: () => void;
+      const session = persistedSession(
+        "/tmp/running-disposed.jsonl",
+        () => new Promise<void>((r) => { releaseHandler = r; }),
+      );
+      let sessionCreated!: () => void;
+      const ready = new Promise<void>((r) => { sessionCreated = r; });
+
+      vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+        opts.onSessionCreated?.(session);
+        sessionCreated();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) resolve();
+          else opts.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return { responseText: "", session, aborted: true, steered: false };
+      });
+
+      const id = manager.spawn(mockPi, mockCtx, "worker", "test", {
+        description: "test",
+        isBackground: true,
+      });
+      const runPromise = manager.getRecord(id)!.promise!;
+      await ready;
+
+      const disposed = manager.dispose();
+      let disposeSettled = false;
+      void disposed.then(() => { disposeSettled = true; });
+      // Allow the aborted run's settle path (`releaseCompletedSession`) to race
+      // against `dispose()`'s own scheduled shutdown on the same `session`.
+      await runPromise;
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+
+      expect(disposeSettled).toBe(false);
+      expect(session.extensionRunner.emit).toHaveBeenCalledOnce();
+      expect(session.dispose).not.toHaveBeenCalled();
+
+      releaseHandler();
+      await disposed;
+      expect(disposeSettled).toBe(true);
+      expect(session.extensionRunner.emit).toHaveBeenCalledOnce();
+      expect(session.dispose).toHaveBeenCalledOnce();
+    });
+  });
 });

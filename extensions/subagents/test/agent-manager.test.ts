@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2846,5 +2846,183 @@ describe("host-owned foreground controls", () => {
     } finally {
       await manager.dispose();
     }
+  });
+});
+
+describe("AgentManager — reopening released persisted sessions on resume", () => {
+  let manager: AgentManager;
+  let dir: string;
+  let sessionFile: string;
+
+  afterEach(async () => {
+    await manager?.dispose();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function setupSessionFile() {
+    dir = mkdtempSync(join(tmpdir(), "pi-mgr-reopen-"));
+    sessionFile = join(dir, "child.jsonl");
+    writeFileSync(sessionFile, "");
+  }
+
+  function makePersistedSession(pct = 24) {
+    return {
+      dispose: vi.fn(),
+      steer: vi.fn(async () => {}),
+      sessionId: "sess-1",
+      messages: [
+        { role: "user", content: "initial" },
+        { role: "assistant", content: [{ type: "text", text: "first" }] },
+      ],
+      sessionManager: { getSessionFile: () => sessionFile },
+      getSessionStats: () => ({
+        tokens: { input: 50, output: 20, cacheWrite: 0 },
+        contextUsage: { percent: pct },
+      }),
+      extensionRunner: {
+        hasHandlers: vi.fn(() => false),
+        emit: vi.fn(async () => {}),
+      },
+    } as any;
+  }
+
+  it("foreground resume reopens record.sessionFile with keepSessionModel: true, preserves id, and tears down again", async () => {
+    setupSessionFile();
+    manager = new AgentManager();
+    const firstSession = makePersistedSession(22);
+
+    vi.mocked(runAgent).mockImplementationOnce(async (_ctx, _type, _prompt, opts: any) => {
+      opts.onSessionCreated?.(firstSession);
+      return { responseText: "first done", session: firstSession, aborted: false, steered: false };
+    });
+
+    const { id, record: initial } = await manager.spawnAndWait(mockPi, mockCtx, "worker", "first prompt", {
+      description: "persisted worker",
+      isolated: true,
+      serviceTier: "fast",
+    });
+    expect(initial.session).toBeUndefined();
+    expect(initial.contextPercent).toBe(22);
+    expect(initial.messageCount).toBe(2);
+    expect(manager.canResume(initial)).toBe(true);
+    await vi.waitFor(() => expect(firstSession.dispose).toHaveBeenCalledOnce());
+
+    const secondSession = makePersistedSession(48);
+    secondSession.messages.push(
+      { role: "user", content: "follow-up" },
+      { role: "assistant", content: [{ type: "text", text: "second done" }] },
+    );
+    let sessionSeenInCallback: unknown;
+    vi.mocked(resumeAgent).mockClear();
+    vi.mocked(runAgent).mockImplementationOnce(async (_ctx, _type, _prompt, opts: any) => {
+      opts.onSessionCreated?.(secondSession);
+      return { responseText: "second done", session: secondSession, aborted: false, steered: false };
+    });
+
+    const resumed = await manager.resume(id, "follow-up", undefined, {
+      maxTurns: 9,
+      onSessionCreated: (s) => { sessionSeenInCallback = s; },
+    });
+
+    expect(resumeAgent).not.toHaveBeenCalled();
+    expect(runAgent).toHaveBeenLastCalledWith(
+      mockCtx,
+      "worker",
+      "follow-up",
+      expect.objectContaining({
+        pi: mockPi,
+        agentId: id,
+        resumeSessionFile: sessionFile,
+        keepSessionModel: true,
+        maxTurns: 9,
+        isolated: true,
+        serviceTier: "fast",
+      }),
+    );
+    expect(sessionSeenInCallback).toBe(secondSession);
+    expect(resumed?.id).toBe(id);
+    expect(resumed?.result).toBe("second done");
+    expect(resumed?.session).toBeUndefined();
+    expect(resumed?.contextPercent).toBe(48);
+    expect(resumed?.messageCount).toBe(4);
+    await vi.waitFor(() => expect(secondSession.dispose).toHaveBeenCalledOnce());
+  });
+
+  it("background resume reopens record.sessionFile, flushes pending steers, and tears down on completion", async () => {
+    setupSessionFile();
+    const onComplete = vi.fn();
+    manager = new AgentManager(onComplete);
+    const firstSession = makePersistedSession(15);
+
+    vi.mocked(runAgent).mockImplementationOnce(async (_ctx, _type, _prompt, opts: any) => {
+      opts.onSessionCreated?.(firstSession);
+      return { responseText: "first", session: firstSession, aborted: false, steered: false };
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "worker", "start", {
+      description: "bg worker",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+    onComplete.mockClear();
+
+    const reopenedSession = makePersistedSession(61);
+    let finishReopen!: () => void;
+    vi.mocked(runAgent).mockImplementationOnce((_ctx, _type, _prompt, opts: any) =>
+      new Promise((resolve) => {
+        finishReopen = () => {
+          opts.onSessionCreated?.(reopenedSession);
+          resolve({ responseText: "bg resumed", session: reopenedSession, aborted: false, steered: false });
+        };
+      }),
+    );
+
+    const record = await manager.resume(id, "continue in bg", undefined, { isBackground: true });
+    expect(record?.id).toBe(id);
+    expect(record?.status).toBe("running");
+
+    // Steer while session is not yet created — should queue onto pendingSteers and flush on creation.
+    expect(manager.steer(id, "check edge case")).toBe(true);
+
+    finishReopen();
+    await record!.promise;
+
+    expect(reopenedSession.steer).toHaveBeenCalledWith("check edge case");
+    expect(record?.status).toBe("completed");
+    expect(record?.result).toBe("bg resumed");
+    expect(record?.session).toBeUndefined();
+    expect(record?.contextPercent).toBe(61);
+    expect(onComplete).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(reopenedSession.dispose).toHaveBeenCalledOnce());
+  });
+
+  it("canResume returns false when sessionFile is deleted or worktreeLost is true", async () => {
+    setupSessionFile();
+    manager = new AgentManager();
+    const firstSession = makePersistedSession();
+    vi.mocked(runAgent).mockImplementationOnce(async (_ctx, _type, _prompt, opts: any) => {
+      opts.onSessionCreated?.(firstSession);
+      return { responseText: "done", session: firstSession, aborted: false, steered: false };
+    });
+
+    const { id, record } = await manager.spawnAndWait(mockPi, mockCtx, "worker", "go", {
+      description: "check canResume",
+    });
+    expect(manager.canResume(id)).toBe(true);
+
+    // Dirty worktree that was removed on settle → cannot resume
+    record.worktree = { path: "/gone", branch: "pi-agent-x", baseSha: "abc", workPath: "/gone" };
+    record.worktreeResult = { hasChanges: true, branch: "pi-agent-x" };
+    expect(manager.canResume(id)).toBe(false);
+    expect(await manager.resume(id, "nope")).toBeUndefined();
+
+    // Clean worktree → can resume
+    record.worktreeResult = { hasChanges: false };
+    expect(manager.canResume(id)).toBe(true);
+
+    // Missing sessionFile → cannot resume
+    rmSync(sessionFile);
+    expect(manager.canResume(id)).toBe(false);
+    expect(await manager.resume(id, "nope")).toBeUndefined();
   });
 });

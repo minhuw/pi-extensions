@@ -303,6 +303,10 @@ export interface AgentRecord {
    * in-memory session, which leaves nothing to reopen.
    */
   sessionFile?: string;
+  /** Last known context-window utilization (0–100) snapshotted before tearing down a persisted session. */
+  contextPercent?: number;
+  /** Message count snapshotted before tearing down a persisted session, for output-transcript anchoring on resume. */
+  messageCount?: number;
   /** Cleanup function for the output file stream subscription. */
   outputCleanup?: () => void;
   /**

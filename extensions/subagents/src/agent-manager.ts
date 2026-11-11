@@ -15,7 +15,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -26,7 +26,7 @@ import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
 import { modelSupportsServiceTier } from "./service-tier.js";
 import type { ServiceTierInput, AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, Pool, SubagentType, ThinkingLevel } from "./types.js";
-import { addUsage, type LifetimeUsage } from "./usage.js";
+import { addUsage, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
 
@@ -357,6 +357,8 @@ interface ResumeOptions {
   onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
   /** Called when the session successfully compacts. */
   onCompaction?: (info: CompactionInfo) => void;
+  /** Called when a resume reopens a persisted session file. */
+  onSessionCreated?: (session: AgentSession) => void;
   /**
    * Background resume only: called synchronously when the run actually starts —
    * immediately, or later from drainQueue. Callers wire per-run side effects
@@ -366,6 +368,15 @@ interface ResumeOptions {
    * torn that subscription down.
    */
   onStarted?: () => void;
+}
+
+interface SpawnReopenContext {
+  pi: ExtensionAPI;
+  ctx: ExtensionContext;
+  customCwd?: string;
+  configCwd?: string;
+  isolated?: boolean;
+  serviceTier?: ServiceTierInput;
 }
 
 /** Best-effort ceiling on one child's shutdown handlers, so teardown can't strand a quit. */
@@ -401,6 +412,9 @@ export async function shutdownChildSession(session: AgentSession | undefined): P
 
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
+  private reopenContexts = new Map<string, SpawnReopenContext>();
+  private sessionShutdowns = new WeakMap<object, Promise<void>>();
+  private pendingShutdowns = new Set<Promise<void>>();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
@@ -619,6 +633,14 @@ export class AgentManager {
       sessionFile: options.resumeSessionFile,
     };
     this.agents.set(id, record);
+    this.reopenContexts.set(id, {
+      pi,
+      ctx,
+      customCwd: options.cwd ?? undefined,
+      configCwd: options.configCwd,
+      isolated: options.isolated,
+      serviceTier: options.serviceTier,
+    });
     // After the insert, so `takenHandles()` already counts this record's own
     // handle — a spawn named after its own type gets `explore-2`, not a
     // duplicate `explore` that would make resolution ambiguous.
@@ -736,6 +758,7 @@ export class AgentManager {
           this.onComplete?.(record);
         } else {
           this.agents.delete(id);
+          this.reopenContexts.delete(id);
         }
         // The agent never kept its slot (startAgent gives it back on failure),
         // so anything queued behind it can go now.
@@ -946,8 +969,8 @@ export class AgentManager {
       description: record.description,
       onSessionCreated: (session) => {
         record.session = session;
-        // Save the path before session eviction; in-memory sessions have none.
-        record.sessionFile = session.sessionManager?.getSessionFile?.();
+        // Save the path before session teardown/eviction; in-memory sessions have none.
+        record.sessionFile = session.sessionManager?.getSessionFile?.() ?? record.sessionFile;
         // Record the effective model and thinking level after Pi applies defaults
         // and clamps the request. Older sessions may omit these fields.
         if (session.model) {
@@ -1031,6 +1054,7 @@ export class AgentManager {
         }
 
         this.abortOwnedChildren(id);
+        this.releaseCompletedSession(record);
 
         this.settleRun(record, true);
         return responseText;
@@ -1061,6 +1085,7 @@ export class AgentManager {
         }
 
         this.abortOwnedChildren(id);
+        this.releaseCompletedSession(record);
 
         this.settleRun(record, false);
         return "";
@@ -1273,6 +1298,22 @@ export class AgentManager {
   }
 
   /**
+   * Whether `recordOrId` can be resumed (either via a live in-memory session or
+   * by reopening its persisted `sessionFile`).
+   */
+  canResume(recordOrId: AgentRecord | string | undefined): boolean {
+    const record = typeof recordOrId === "string" ? this.agents.get(recordOrId) : recordOrId;
+    if (!record || record.owner) return false;
+    if (record.session) return true;
+    return Boolean(
+      record.sessionFile
+      && existsSync(record.sessionFile)
+      && !worktreeLost(record)
+      && this.reopenContexts.has(record.id),
+    );
+  }
+
+  /**
    * Resume an existing agent session with a new prompt.
    */
   async resume(
@@ -1282,7 +1323,7 @@ export class AgentManager {
     options?: ResumeOptions,
   ): Promise<AgentRecord | undefined> {
     const record = this.agents.get(id);
-    if (!record?.session || record.owner) return undefined;
+    if (!record || !this.canResume(record)) return undefined;
     if (record.status === "running" || record.status === "queued") return undefined;
 
     record.turnCount = 0;
@@ -1364,47 +1405,55 @@ export class AgentManager {
     if (signal?.aborted) this.abort(id);
 
     try {
-      this.settleOutcome(record, await resumeAgent(record.session, prompt, {
-        type: record.type,
-        maxTurns: options?.maxTurns ?? record.maxTurns ?? record.invocation?.maxTurns,
-        onTextDelta: (_delta, fullText) => { record.responseText = fullText; },
-        onTurnEnd: (turnCount) => {
-          record.turnCount = turnCount;
-          options?.onTurnEnd?.(turnCount);
-          this.onUpdate?.(record);
-        },
-        onToolActivity: (activity) => {
-          if (activity.type === "start") record.activeTools.push(activity.toolName);
-          else {
-            const index = record.activeTools.indexOf(activity.toolName);
-            if (index >= 0) record.activeTools.splice(index, 1);
-            record.toolUses++;
-            record.runToolUses = (record.runToolUses ?? 0) + 1;
-          }
-          options?.onToolActivity?.(activity);
-          this.onUpdate?.(record);
-        },
-        onAssistantUsage: (usage) => {
-          addUsage(record.lifetimeUsage, usage);
-          this.onUsage?.(record, usage);
-          options?.onAssistantUsage?.(usage);
-          this.onUpdate?.(record);
-        },
-        onCompaction: (info) => {
-          record.compactionCount++;
-          this.onCompact?.(record, info);
-          options?.onCompaction?.(info);
-        },
-        signal: abortController.signal,
-      }));
+      const outcome = record.session
+        ? await resumeAgent(record.session, prompt, {
+            type: record.type,
+            maxTurns: options?.maxTurns ?? record.maxTurns ?? record.invocation?.maxTurns,
+            onTextDelta: (_delta, fullText) => { record.responseText = fullText; },
+            onTurnEnd: (turnCount) => {
+              record.turnCount = turnCount;
+              options?.onTurnEnd?.(turnCount);
+              this.onUpdate?.(record);
+            },
+            onToolActivity: (activity) => {
+              if (activity.type === "start") record.activeTools.push(activity.toolName);
+              else {
+                const index = record.activeTools.indexOf(activity.toolName);
+                if (index >= 0) record.activeTools.splice(index, 1);
+                record.toolUses++;
+                record.runToolUses = (record.runToolUses ?? 0) + 1;
+              }
+              options?.onToolActivity?.(activity);
+              this.onUpdate?.(record);
+            },
+            onAssistantUsage: (usage) => {
+              addUsage(record.lifetimeUsage, usage);
+              this.onUsage?.(record, usage);
+              options?.onAssistantUsage?.(usage);
+              this.onUpdate?.(record);
+            },
+            onCompaction: (info) => {
+              record.compactionCount++;
+              this.onCompact?.(record, info);
+              options?.onCompaction?.(info);
+            },
+            signal: abortController.signal,
+          })
+        : await this.runReopenedResume(id, record, prompt, abortController, options);
+      this.settleOutcome(record, outcome);
     } catch (err) {
       this.failResume(record, err);
     }
     this.detachParentAbort(record);
+    if (record.outputCleanup) {
+      try { record.outputCleanup(); } catch { /* ignore */ }
+      record.outputCleanup = undefined;
+    }
 
     // Same contract as the spawn settle paths: children spawned during the
     // resumed turn must not outlive it — nothing else can see or reach them.
     this.abortOwnedChildren(id);
+    this.releaseCompletedSession(record);
 
     // The inline caller receives this run's result, so its settle notifies no
     // one (as `settleRun` does for a foreground spawn) — it reports lifecycle only.
@@ -1454,12 +1503,152 @@ export class AgentManager {
     this.onUpdate?.(record);
   }
 
+  /** Reopen a completed record's persisted session file to run a resumed prompt. */
+  private async runReopenedResume(
+    id: string,
+    record: AgentRecord,
+    prompt: string,
+    abortController: AbortController,
+    options?: ResumeOptions,
+  ): Promise<Awaited<ReturnType<typeof resumeAgent>>> {
+    const reopenCtx = this.reopenContexts.get(id);
+    const sessionFile = record.sessionFile;
+    if (!reopenCtx || !sessionFile || !existsSync(sessionFile) || worktreeLost(record)) {
+      throw new Error(
+        sessionFile && !existsSync(sessionFile)
+          ? "Cannot resume agent — its session is gone."
+          : worktreeLost(record)
+            ? "Cannot resume agent — its worktree no longer exists."
+            : "Cannot resume agent — no saved session available.",
+      );
+    }
+    const res = await runAgent(reopenCtx.ctx, record.type, prompt, {
+      pi: reopenCtx.pi,
+      agentId: id,
+      resumeSessionFile: sessionFile,
+      keepSessionModel: true,
+      maxTurns: options?.maxTurns ?? record.maxTurns ?? record.invocation?.maxTurns,
+      isolated: reopenCtx.isolated,
+      serviceTier: getAgentConfig(record.type)?.serviceTier ?? record.serviceTier ?? reopenCtx.serviceTier,
+      cwd: reopenCtx.customCwd,
+      configCwd: reopenCtx.configCwd ?? (reopenCtx.customCwd !== undefined ? reopenCtx.ctx.cwd : undefined),
+      nested: record.parentAgentId !== undefined,
+      workflow: record.workflowId !== undefined,
+      nestedRuntime: {
+        manager: this,
+        parentAgentId: id,
+        depth: record.depth ?? 1,
+        maxSubagentDepth: record.maxSubagentDepth,
+      },
+      parentToolCallId: record.parentToolCallId,
+      parentAgentId: record.parentAgentId,
+      workflowId: record.workflowId,
+      description: record.description,
+      signal: abortController.signal,
+      onTextDelta: (_delta, fullText) => { record.responseText = fullText; },
+      onTurnEnd: (turnCount) => {
+        record.turnCount = turnCount;
+        options?.onTurnEnd?.(turnCount);
+        this.onUpdate?.(record);
+      },
+      onToolActivity: (activity) => {
+        if (activity.type === "start") record.activeTools.push(activity.toolName);
+        else {
+          const index = record.activeTools.indexOf(activity.toolName);
+          if (index >= 0) record.activeTools.splice(index, 1);
+          record.toolUses++;
+          record.runToolUses = (record.runToolUses ?? 0) + 1;
+        }
+        options?.onToolActivity?.(activity);
+        this.onUpdate?.(record);
+      },
+      onAssistantUsage: (usage) => {
+        addUsage(record.lifetimeUsage, usage);
+        this.onUsage?.(record, usage);
+        options?.onAssistantUsage?.(usage);
+        this.onUpdate?.(record);
+      },
+      onCompaction: (info) => {
+        record.compactionCount++;
+        this.onCompact?.(record, info);
+        options?.onCompaction?.(info);
+      },
+      onSessionCreated: (session) => {
+        record.session = session;
+        record.sessionFile = session.sessionManager?.getSessionFile?.() ?? record.sessionFile;
+        record.sessionId = session.sessionId;
+        if (session.model) {
+          record.invocation ??= {};
+          const requested = record.invocation.requestedThinking ?? record.invocation.thinking;
+          Object.assign(record.invocation, describeModel(session.model));
+          if (session.thinkingLevel) {
+            record.invocation.thinking = session.thinkingLevel;
+            if (requested && requested !== session.thinkingLevel) {
+              record.invocation.requestedThinking = requested;
+            }
+          }
+        }
+        record.model = session.model ? `${session.model.provider}/${session.model.id}` : record.model;
+        record.thinking = session.thinkingLevel ?? record.thinking ?? record.invocation?.thinking;
+        if (record.pendingSteers?.length) {
+          for (const msg of record.pendingSteers) {
+            session.steer(msg).catch(() => {});
+          }
+          record.pendingSteers = undefined;
+        }
+        options?.onSessionCreated?.(session);
+        this.onUpdate?.(record);
+      },
+    });
+    record.session = res.session ?? record.session;
+    if (res.session?.sessionId) record.sessionId = res.session.sessionId;
+    return {
+      text: res.responseText,
+      failure: res.failure,
+      aborted: res.aborted,
+      steered: res.steered,
+    };
+  }
+
+  /**
+   * Snapshot context-% and message count onto `record` and immediately tear
+   * down its `AgentSession` when persisted on disk (unless `record.retain` is
+   * set). Purely in-memory sessions stay attached so they remain resumable.
+   */
+  private releaseCompletedSession(record: AgentRecord): void {
+    const session = record.session;
+    if (!session || record.retain) return;
+    const sessionFile = session.sessionManager?.getSessionFile?.() ?? record.sessionFile;
+    if (!sessionFile) return;
+    record.sessionFile = sessionFile;
+    record.contextPercent = getSessionContextPercent(session) ?? record.contextPercent;
+    if (Array.isArray(session.messages)) {
+      record.messageCount = session.messages.length;
+    }
+    record.session = undefined;
+    this.scheduleSessionShutdown(session);
+  }
+
+  /**
+   * Schedule an idempotent `shutdownChildSession` per session instance and
+   * track it in `pendingShutdowns` so `dispose()` awaits it before resolving.
+   */
+  private scheduleSessionShutdown(session: AgentSession): Promise<void> {
+    if (!session || typeof session !== "object") return Promise.resolve();
+    const existing = this.sessionShutdowns.get(session);
+    if (existing) return existing;
+    const p = shutdownChildSession(session).finally(() => {
+      this.pendingShutdowns.delete(p);
+    });
+    this.sessionShutdowns.set(session, p);
+    this.pendingShutdowns.add(p);
+    return p;
+  }
+
   /**
    * Start a background resume run: detached, settling and notifying like
    * startAgent's background path. Invoked immediately, or from drainQueue when
-   * a concurrency slot frees. The session already exists (resume reuses it), so
-   * there is no onSessionCreated to hang per-run wiring off — callers use
-   * `options.onStarted`, which fires on both the immediate and the drained path.
+   * a concurrency slot frees.
    */
   private startResume(
     id: string,
@@ -1468,7 +1657,15 @@ export class AgentManager {
     parentSignal: AbortSignal | undefined,
     options: ResumeOptions,
   ) {
-    if (!record.session) return;
+    if (!this.canResume(record)) {
+      record.status = "error";
+      record.error = record.sessionFile && !existsSync(record.sessionFile)
+        ? "Cannot resume agent — its session is gone."
+        : "Cannot resume agent — no active session.";
+      record.completedAt = Date.now();
+      try { this.onComplete?.(record); } catch { /* ignore */ }
+      return;
+    }
 
     record.status = "running";
     record.startedAt = Date.now();
@@ -1500,44 +1697,49 @@ export class AgentManager {
       }
       // Children spawned during the resumed turn must not outlive it.
       this.abortOwnedChildren(id);
+      this.releaseCompletedSession(record);
       if (occupiesPoolSlot(record)) this.runningBackground--;
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       this.drainQueue();
     };
 
-    const promise = resumeAgent(record.session, prompt, {
-      type: record.type,
-      maxTurns: options.maxTurns ?? record.maxTurns ?? record.invocation?.maxTurns,
-      onTextDelta: (_delta, fullText) => { record.responseText = fullText; },
-      onTurnEnd: (turnCount) => {
-        record.turnCount = turnCount;
-        options.onTurnEnd?.(turnCount);
-        this.onUpdate?.(record);
-      },
-      onToolActivity: (activity) => {
-        if (activity.type === "start") record.activeTools.push(activity.toolName);
-        else {
-          const index = record.activeTools.indexOf(activity.toolName);
-          if (index >= 0) record.activeTools.splice(index, 1);
-          record.toolUses++;
-          record.runToolUses = (record.runToolUses ?? 0) + 1;
-        }
-        options.onToolActivity?.(activity);
-        this.onUpdate?.(record);
-      },
-      onAssistantUsage: (usage) => {
-        addUsage(record.lifetimeUsage, usage);
-        this.onUsage?.(record, usage);
-        options.onAssistantUsage?.(usage);
-        this.onUpdate?.(record);
-      },
-      onCompaction: (info) => {
-        record.compactionCount++;
-        this.onCompact?.(record, info);
-        options.onCompaction?.(info);
-      },
-      signal: abortController.signal,
-    })
+    const runPromise = record.session
+      ? resumeAgent(record.session, prompt, {
+          type: record.type,
+          maxTurns: options.maxTurns ?? record.maxTurns ?? record.invocation?.maxTurns,
+          onTextDelta: (_delta, fullText) => { record.responseText = fullText; },
+          onTurnEnd: (turnCount) => {
+            record.turnCount = turnCount;
+            options.onTurnEnd?.(turnCount);
+            this.onUpdate?.(record);
+          },
+          onToolActivity: (activity) => {
+            if (activity.type === "start") record.activeTools.push(activity.toolName);
+            else {
+              const index = record.activeTools.indexOf(activity.toolName);
+              if (index >= 0) record.activeTools.splice(index, 1);
+              record.toolUses++;
+              record.runToolUses = (record.runToolUses ?? 0) + 1;
+            }
+            options.onToolActivity?.(activity);
+            this.onUpdate?.(record);
+          },
+          onAssistantUsage: (usage) => {
+            addUsage(record.lifetimeUsage, usage);
+            this.onUsage?.(record, usage);
+            options.onAssistantUsage?.(usage);
+            this.onUpdate?.(record);
+          },
+          onCompaction: (info) => {
+            record.compactionCount++;
+            this.onCompact?.(record, info);
+            options.onCompaction?.(info);
+          },
+          signal: abortController.signal,
+        })
+      : this.runReopenedResume(id, record, prompt, abortController, options);
+
+    const promise = runPromise
       .then((outcome) => {
         this.settleOutcome(record, outcome);
         settle();
@@ -1715,13 +1917,13 @@ export class AgentManager {
     // nothing can observe a session that is half torn down.
     record.session = undefined;
     this.agents.delete(id);
+    this.reopenContexts.delete(id);
     // A failed startup keeps its (rejected) entry so a late awaitStartup still
     // sees it; drop it with the record so the map can't grow unbounded.
     this.startups.delete(id);
-    // Fire-and-forget is right here and only here: this runs from the 60s cleanup timer
-    // and from `clearCompleted()` on session boundaries, with the process staying alive,
-    // so handlers get their full window. The quit path awaits instead — see dispose().
-    void shutdownChildSession(session);
+    // Tracked in `pendingShutdowns` so a subsequent `dispose()` still awaits any
+    // in-flight `session_shutdown` handler before the process exits.
+    if (session) this.scheduleSessionShutdown(session);
   }
 
   /**
@@ -1842,12 +2044,17 @@ export class AgentManager {
    */
   async dispose(pi?: ExtensionAPI): Promise<void> {
     clearInterval(this.cleanupInterval);
-    // Clear queue — via dequeue, so anyone blocked in spawnAndWait is woken
-    // rather than left awaiting a gate nothing will ever resolve.
-    this.dequeue(() => true);
     const sessions = [...this.agents.values()].map(record => record.session);
+    // Abort running agents and clear the queue (via dequeue, so anyone blocked
+    // in spawnAndWait is woken rather than left awaiting a gate nothing will
+    // ever resolve).
+    this.abortAll();
     this.agents.clear();
+    this.reopenContexts.clear();
     this.startups.clear();
+    for (const session of sessions) {
+      if (session) this.scheduleSessionShutdown(session);
+    }
     if (pi) {
       // Prune any orphaned git worktrees (crash recovery). Detached: dispose runs
       // on the shutdown path, which cannot wait for git. Started before the awaited
@@ -1861,7 +2068,10 @@ export class AgentManager {
     }
     // Awaited, unlike the eviction path: pi awaits this extension's `session_shutdown`
     // handler and the process exits right after it returns, so anything left unawaited
-    // here never runs at all. Bounded — each call carries its own ceiling, concurrently.
-    await Promise.all(sessions.map(session => shutdownChildSession(session)));
+    // here never runs at all. Loop until empty so shutdowns scheduled asynchronously
+    // as aborted runs settle during teardown are awaited too.
+    while (this.pendingShutdowns.size > 0) {
+      await Promise.all([...this.pendingShutdowns]);
+    }
   }
 }

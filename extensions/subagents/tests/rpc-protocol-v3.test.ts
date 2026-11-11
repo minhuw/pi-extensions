@@ -60,8 +60,7 @@ function dispatchingBus() {
   };
 }
 
-function fakeSession(file?: string) {
-  const id = `sess-${++sessionCounter}`;
+function fakeSession(file?: string, id = `sess-${++sessionCounter}`) {
   return {
     sessionId: id,
     sessionManager: { getSessionFile: () => file },
@@ -74,9 +73,22 @@ function fakeSession(file?: string) {
 }
 
 /** runAgent that creates a session, calls `tools` tools, then waits for `hold` (if any). */
-function scriptRun(opts: { tools?: number; hold?: Promise<void>; file?: string } = {}) {
+function scriptRun(opts: { tools?: number; hold?: Promise<void>; file?: string; sessionId?: string } = {}) {
   vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, o: any) => {
-    const session = fakeSession(opts.file);
+    const session = fakeSession(opts.file, opts.sessionId);
+    o.onSessionCreated?.(session);
+    for (let i = 0; i < (opts.tools ?? 0); i++) {
+      o.onToolActivity?.({ type: "start", toolName: "read" });
+      o.onToolActivity?.({ type: "end", toolName: "read" });
+    }
+    await opts.hold;
+    return { responseText: "spawn answer", session, aborted: false, steered: false } as any;
+  });
+}
+
+function scriptRunOnce(opts: { tools?: number; hold?: Promise<void>; file?: string; sessionId?: string } = {}) {
+  vi.mocked(runAgent).mockImplementationOnce(async (_ctx: any, _type: any, _prompt: any, o: any) => {
+    const session = fakeSession(opts.file, opts.sessionId);
     o.onSessionCreated?.(session);
     for (let i = 0; i < (opts.tools ?? 0); i++) {
       o.onToolActivity?.({ type: "start", toolName: "read" });
@@ -473,25 +485,66 @@ describe("lifecycle events", () => {
     const file = join(process.env.PI_CODING_AGENT_DIR!, "sessions", "lc", "s.jsonl");
     mkdirSync(join(process.env.PI_CODING_AGENT_DIR!, "sessions", "lc"), { recursive: true });
     writeFileSync(file, `${JSON.stringify({ type: "session", id: "x", parentSession: "/p.jsonl" })}\n`);
-    scriptRun({ tools: 2, file });
-    scriptResume(3);
+    scriptRunOnce({ tools: 2, file, sessionId: "sess-lc" });
+    scriptRunOnce({ tools: 3, file, sessionId: "sess-lc" });
+    scriptRunOnce({ tools: 2, file, sessionId: "sess-lc" });
 
     const { data } = await rpc("spawn", { type: "worker", prompt: "go", options: { description: "lc" } });
     await vi.waitFor(() => expect(events.filter(e => e.name === "subagents:completed")).toHaveLength(1));
+    // Default persisted spawns detach and dispose `record.session` immediately on completion.
+    expect(rootManager()?.getRecord(data.id)?.session).toBeUndefined();
     expect(events[0]).toEqual({ name: "subagents:started", data: { id: data.id, type: "worker", description: "lc" } });
     expect(events[1].data).toMatchObject({
-      id: data.id, status: "completed", toolUses: 2, runToolUses: 2, sessionFile: file, sessionId: expect.any(String),
+      id: data.id, status: "completed", toolUses: 2, runToolUses: 2, sessionFile: file, sessionId: "sess-lc",
     });
 
     await rpc("send", { agentId: data.id, text: "more" });
     await vi.waitFor(() => expect(events.filter(e => e.name === "subagents:completed")).toHaveLength(2));
+    expect(resumeAgent).not.toHaveBeenCalled();
+    expect(vi.mocked(runAgent).mock.calls[1]?.[3]).toMatchObject({
+      resumeSessionFile: file,
+      keepSessionModel: true,
+    });
     expect(events[2]).toMatchObject({ name: "subagents:started", data: { id: data.id, sessionFile: file, sessionId: events[1].data.sessionId } });
-    expect(events[3].data).toMatchObject({ id: data.id, toolUses: 5, runToolUses: 3, sessionFile: file });
+    expect(events[3].data).toMatchObject({ id: data.id, toolUses: 5, runToolUses: 3, sessionFile: file, sessionId: "sess-lc" });
 
     const reopened = (await rpc("reopen", { sessionFile: file, type: "worker", prompt: "again" })).data.id;
     await vi.waitFor(() => expect(events.filter(e => e.name === "subagents:completed")).toHaveLength(3));
     expect(events[4]).toMatchObject({ name: "subagents:started", data: { id: reopened } });
     expect(events[5].data).toMatchObject({ id: reopened, toolUses: 2, runToolUses: 2, sessionFile: file });
+  });
+
+  it("uses in-memory resumeAgent on send when spawn passes retain: true", async () => {
+    const { rpc, events } = await boot();
+    const file = join(process.env.PI_CODING_AGENT_DIR!, "sessions", "lc-retain", "s.jsonl");
+    mkdirSync(join(process.env.PI_CODING_AGENT_DIR!, "sessions", "lc-retain"), { recursive: true });
+    writeFileSync(file, `${JSON.stringify({ type: "session", id: "x", parentSession: "/p.jsonl" })}\n`);
+    scriptRun({ tools: 2, file });
+    scriptResume(3);
+
+    const { data } = await rpc("spawn", {
+      type: "worker",
+      prompt: "go",
+      options: { description: "lc-retain", retain: true },
+    });
+    await vi.waitFor(() => expect(events.filter(e => e.name === "subagents:completed")).toHaveLength(1));
+    expect(rootManager()?.getRecord(data.id)?.session).toBeDefined();
+
+    await rpc("send", { agentId: data.id, text: "more" });
+    await vi.waitFor(() => expect(events.filter(e => e.name === "subagents:completed")).toHaveLength(2));
+    expect(resumeAgent).toHaveBeenCalledOnce();
+    expect(runAgent).toHaveBeenCalledOnce();
+    expect(events[2]).toMatchObject({
+      name: "subagents:started",
+      data: { id: data.id, sessionFile: file, sessionId: events[1].data.sessionId },
+    });
+    expect(events[3].data).toMatchObject({
+      id: data.id,
+      toolUses: 5,
+      runToolUses: 3,
+      sessionFile: file,
+      sessionId: events[1].data.sessionId,
+    });
   });
 
   it("reports a stop while queued as failed, without notifying the parent", async () => {
