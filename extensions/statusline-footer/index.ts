@@ -1263,15 +1263,15 @@ function renderIdentityRow(
 		cluster([workflow, languageStatus], "  "),
 		workflow ?? "",
 	].filter(Boolean);
-	const loop = candidates.find(fitsBeside) ?? "";
-	if (loop && visibleWidth(left) + visibleWidth(loop) + visibleWidth(right) + chrome + 2 <= width) {
-		return skin.bar(cluster([left, loop], "  "), right, width);
+	const beside = candidates.find(fitsBeside) ?? "";
+	if (beside && visibleWidth(left) + visibleWidth(beside) + visibleWidth(right) + chrome + 2 <= width) {
+		return skin.bar(cluster([left, beside], "  "), right, width);
 	}
-	const showLoop = Boolean(loop) && fitsBeside(loop);
-	if (!showLoop && visibleWidth(left) + visibleWidth(right) + chrome <= width) return skin.bar(left, right, width);
+	const showBeside = Boolean(beside) && fitsBeside(beside);
+	if (!showBeside && visibleWidth(left) + visibleWidth(right) + chrome <= width) return skin.bar(left, right, width);
 
 	// Keep identity and context percent; shed provider, token counts, and compact extras first.
-	left = showLoop ? cluster([compactIdentity, loop], "  ") : compactIdentity;
+	left = showBeside ? cluster([compactIdentity, beside], "  ") : compactIdentity;
 	// A status is optional: never shorten the model or percent to make space for it.
 	left = truncateToWidth(left, Math.max(0, width - minimumContext - chrome - reserved));
 	const budget = Math.max(0, width - visibleWidth(left) - chrome - reserved);

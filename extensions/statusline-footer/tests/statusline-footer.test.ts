@@ -1089,7 +1089,7 @@ describe("statusline footer rendering", () => {
 
 	it.each(["full", "compact"])("restores the exact %s layout after Herder clears", async (mode) => {
 		const statuses = {
-			"magpie-quota": "quota · checking reset time", autoresearch: "research · run 3/20", loop: "↻ build",
+			"magpie-quota": "quota · checking reset time", autoresearch: "research · run 3/20", subagents: "2 running agents",
 			language: "English", representative: "📣 rep #dev", "relay-rooms": "#dev #ops",
 		};
 		const start = async (id: string, withHerder: boolean) => {
@@ -1117,7 +1117,7 @@ describe("statusline footer rendering", () => {
 				expect(wide).toContain(statuses["magpie-quota"]);
 				expect(wide).toContain("bg 1 running");
 				expect(wide).not.toContain(statuses.autoresearch);
-				expect(wide).not.toContain(statuses.loop);
+				expect(wide).not.toContain(statuses.subagents);
 			}
 		} finally {
 			vi.unstubAllEnvs();
@@ -2771,11 +2771,11 @@ describe("statusline footer pi-processes compatibility", () => {
 				if (width === 24) expect(line).not.toContain("bg ");
 			}
 			harness.setStatus("autoresearch", "research 2/5");
-			harness.setStatus("loop", "loop build");
+			harness.setStatus("subagents", "2 running agents");
 			const wide = harness.getFooter()!.render(160)[0]!;
 			expect(wide).toContain("research 2/5");
 			expect(wide).toContain("bg 1 running");
-			expect(wide).not.toContain("loop build");
+			expect(wide).not.toContain("2 running agents");
 		} finally {
 			harness.disposeFooter();
 			await harness.emit("session_shutdown", { reason: "quit" });

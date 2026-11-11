@@ -237,11 +237,11 @@ it.each(["tui", "rpc", "print"] as const)("registers native commands and reports
 	await expect(h.command("surprise")).rejects.toThrow("Usage");
 });
 
-it("renders research and Loop together in full mode, prioritizes research in compact mode, and falls back after clear", async () => {
+it("renders research beside another status in full mode, keeps only research in compact mode, and leaves the other status after clear", async () => {
 	const h = harness();
 	footerExtension(h.pi);
 	await h.emit("session_start", { reason: "startup" });
-	h.statuses.set("loop", "↻ build · next 4m");
+	h.statuses.set("subagents", "2 running agents");
 	await h.update(baseline);
 	try {
 		for (const mode of ["full", "compact"]) {
@@ -249,8 +249,8 @@ it("renders research and Loop together in full mode, prioritizes research in com
 			const rendered = h.getFooter()!.render(220).join("\n");
 			expect(rendered).toContain("research · measuring · reported");
 			expect(rendered.split("research · measuring")).toHaveLength(2);
-			if (mode === "full") expect(rendered).toContain("↻ build");
-			else expect(rendered).not.toContain("↻ build");
+			if (mode === "full") expect(rendered).toContain("2 running agents");
+			else expect(rendered).not.toContain("2 running agents");
 			for (const width of [0, 1, 24, 40, 80, 120]) {
 				const lines = h.getFooter()!.render(width);
 				for (const row of lines) expect(visibleWidth(row)).toBeLessThanOrEqual(width);
@@ -258,7 +258,9 @@ it("renders research and Loop together in full mode, prioritizes research in com
 			}
 		}
 		await h.command("clear");
-		expect(h.getFooter()!.render(220).join("\n")).toContain("↻ build");
+		expect(h.getFooter()!.render(220).join("\n")).not.toContain("research ·");
+		await h.commands.get("footer").handler("full", h.ctx);
+		expect(h.getFooter()!.render(220).join("\n")).toContain("2 running agents");
 		expect(h.getFooter()!.render(220).join("\n")).not.toContain("research ·");
 	} finally { h.getFooter()?.dispose(); await h.emit("session_shutdown", { reason: "quit" }); }
 });

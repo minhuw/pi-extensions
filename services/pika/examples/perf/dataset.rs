@@ -784,7 +784,7 @@ impl SessionGen<'_> {
         }
         match self.rng.below(200) {
             0..=5 => {
-                let custom_type = *self.rng.pick(&["pi.virtual-model-state", "loop.state", "autoresearch.state", "statusline.cache"]);
+                let custom_type = *self.rng.pick(&["pi.virtual-model-state", "goal-state", "autoresearch.state", "statusline.cache"]);
                 let data = json!({ "state": v.word(self.rng), "count": self.rng.below(100), "note": v.phrase(self.rng, 4) });
                 self.entry("custom", json!({ "customType": custom_type, "data": data }));
             }
