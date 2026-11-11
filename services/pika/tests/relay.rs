@@ -2475,3 +2475,146 @@ async fn reindex_preserves_relay_tables() {
     let after: Vec<_> = tables.iter().map(|sql| query(&s.env.store, sql)).collect();
     assert_eq!(after, before);
 }
+
+#[tokio::test]
+async fn browser_member_route_sets_and_clears_representatives_and_persists_across_restarts() {
+    let s = server().await;
+    record(&s.env.store, "sess-rec", OTHER);
+    let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    let (mut b, _) = Client::online(&s, &s.desktop, "sess-b").await;
+    let (mut c, _) = Client::online(&s, &s.laptop, "sess-c").await;
+    let (mut outsider, _) = Client::online(&s, &s.laptop, "sess-x").await;
+
+    let path = "/api/v1/relay/rooms/team/members";
+    for (body, status, reason) in [
+        (json!({ "sessionId": "sess-a", "action": "elect" }), 400, "invalid"),
+        (json!({ "sessionId": "sess-a", "action": 42 }), 400, "invalid"),
+        (json!({ "sessionId": "nobody", "action": "represent" }), 400, "unknown_session"),
+        (json!({ "sessionId": "sess-a", "action": "unrepresent" }), 400, "invalid"),
+    ] {
+        let r = http(&s.app, post(path, body.clone(), None)).await;
+        assert_eq!((r.status.as_u16(), &r.json()["error"]), (status, &json!(reason)), "{body}");
+    }
+
+    create_room(&s, "team", &["sess-a", "sess-b"]).await;
+
+    // Browser elects `sess-b` (desktop) as representative; online members hear `room` frame, outsider does not.
+    let rep_b = http(&s.app, post(path, json!({ "sessionId": "sess-b", "action": "represent" }), None)).await;
+    assert_eq!((rep_b.status, &rep_b.json()["room"]["representative"]), (StatusCode::OK, &json!("sess-b")));
+    heard(&mut [&mut a, &mut b], Some("sess-b")).await;
+
+    // Browser elects `sess-c` (not yet a member): adds `sess-c`, replaces `sess-b`, and notifies all three.
+    let rep_c = http(&s.app, post(path, json!({ "sessionId": "sess-c", "action": "represent" }), None)).await;
+    assert_eq!((rep_c.status, &rep_c.json()["room"]["representative"]), (StatusCode::OK, &json!("sess-c")));
+    assert_eq!(member_ids(&rep_c.json()["room"]), ["sess-a", "sess-b", "sess-c"]);
+    heard(&mut [&mut a, &mut b, &mut c], Some("sess-c")).await;
+
+    // `unrepresent` by a non-representative changes nothing and pushes no frame.
+    let noop = http(&s.app, post(path, json!({ "sessionId": "sess-a", "action": "unrepresent" }), None)).await;
+    assert_eq!((noop.status, &noop.json()["room"]["representative"]), (StatusCode::OK, &json!("sess-c")));
+
+    // Outsider heard nothing at all: its next frame is a 1:1 message sent now.
+    a.send(send("x1", "sess-x", "check outsider")).await;
+    let outsider_frame = outsider.next().await;
+    assert_eq!((&outsider_frame["type"], &outsider_frame["text"]), (&json!("message"), &json!("check outsider")));
+    outsider.send(json!({ "type": "ack", "id": outsider_frame["id"] })).await;
+    assert_eq!(a.next().await["status"], "delivered");
+
+    // Restart and verify `sess-c` remains the persisted representative.
+    drop(a);
+    drop(b);
+    drop(c);
+    drop(outsider);
+    let s = s.restart(|_| {}).await;
+    assert_eq!(room_detail(&s, "team").await["room"]["representative"], "sess-c");
+
+    // Reconnect `sess-a` and `sess-c`, then clear `sess-c` via browser `unrepresent`; both hear `room` with no rep,
+    // `sess-c` remains a member, and clearing persists across another restart.
+    let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    let (mut c, _) = Client::online(&s, &s.laptop, "sess-c").await;
+    let cleared = http(&s.app, post(path, json!({ "sessionId": "sess-c", "action": "unrepresent" }), None)).await;
+    assert_eq!(cleared.status, StatusCode::OK);
+    assert!(cleared.json()["room"].get("representative").is_none(), "{}", cleared.json());
+    assert_eq!(member_ids(&cleared.json()["room"]), ["sess-a", "sess-b", "sess-c"]);
+    heard(&mut [&mut a, &mut c], None).await;
+
+    // Offline recorded session can also be elected and persisted via browser, then cleared.
+    let rep_rec = http(&s.app, post(path, json!({ "sessionId": "sess-rec", "action": "represent" }), None)).await;
+    assert_eq!((rep_rec.status, &rep_rec.json()["room"]["representative"]), (StatusCode::OK, &json!("sess-rec")));
+    heard(&mut [&mut a, &mut c], Some("sess-rec")).await;
+    let clear_rec = http(&s.app, post(path, json!({ "sessionId": "sess-rec", "action": "unrepresent" }), None)).await;
+    assert!(clear_rec.json()["room"].get("representative").is_none());
+    heard(&mut [&mut a, &mut c], None).await;
+
+    drop(a);
+    drop(c);
+    let s = s.restart(|_| {}).await;
+    let detail = room_detail(&s, "team").await;
+    assert!(detail["room"].get("representative").is_none(), "{detail}");
+    assert_eq!(member_ids(&detail["room"]), ["sess-a", "sess-b", "sess-c", "sess-rec"]);
+}
+
+#[tokio::test]
+async fn browser_save_room_edits_preserves_and_clears_topics_across_restarts() {
+    let s = server().await;
+    let (_a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    let (_b, _) = Client::online(&s, &s.desktop, "sess-b").await;
+
+    // Non-string, non-null topic is rejected.
+    let bad = http(&s.app, post("/api/v1/relay/rooms", json!({ "name": "design", "topic": 123 }), None)).await;
+    assert_eq!((bad.status, bad.json()), (StatusCode::BAD_REQUEST, json!({ "error": "invalid" })));
+
+    // Create with initial topic; verify trimmed and bounded.
+    let created = http(
+        &s.app,
+        post("/api/v1/relay/rooms", json!({ "name": "design", "topic": "  Initial spec  ", "members": ["sess-a"] }), None),
+    )
+    .await;
+    assert_eq!((created.status, &created.json()["room"]["topic"]), (StatusCode::OK, &json!("Initial spec")));
+
+    // Update topic to a new string while adding a member.
+    let updated = http(
+        &s.app,
+        post("/api/v1/relay/rooms", json!({ "name": "design", "topic": "Revised API contract", "members": ["sess-b"] }), None),
+    )
+    .await;
+    assert_eq!((updated.status, &updated.json()["room"]["topic"]), (StatusCode::OK, &json!("Revised API contract")));
+    assert_eq!(member_ids(&updated.json()["room"]), ["sess-a", "sess-b"]);
+
+    // Omitting `topic` preserves the existing topic.
+    let preserved = http(&s.app, post("/api/v1/relay/rooms", json!({ "name": "design" }), None)).await;
+    assert_eq!((preserved.status, &preserved.json()["room"]["topic"]), (StatusCode::OK, &json!("Revised API contract")));
+
+    // Updated topic survives restart.
+    drop(_a);
+    drop(_b);
+    let s = s.restart(|_| {}).await;
+    assert_eq!(room_detail(&s, "design").await["room"]["topic"], "Revised API contract");
+
+    // Passing `null` clears the topic and persists NULL across restart.
+    let cleared_null = http(&s.app, post("/api/v1/relay/rooms", json!({ "name": "design", "topic": null }), None)).await;
+    assert_eq!(cleared_null.status, StatusCode::OK);
+    assert!(cleared_null.json()["room"].get("topic").is_none(), "{}", cleared_null.json());
+
+    let s = s.restart(|_| {}).await;
+    assert!(room_detail(&s, "design").await["room"].get("topic").is_none());
+
+    // Set topic again (also testing 200-char truncation), then clear with `""` and whitespace, persisting across restart.
+    let long_topic = "t".repeat(250);
+    let set_again = http(&s.app, post("/api/v1/relay/rooms", json!({ "name": "design", "topic": long_topic }), None)).await;
+    assert_eq!(set_again.json()["room"]["topic"].as_str().unwrap().len(), 200);
+
+    let cleared_empty = http(&s.app, post("/api/v1/relay/rooms", json!({ "name": "design", "topic": "" }), None)).await;
+    assert_eq!(cleared_empty.status, StatusCode::OK);
+    assert!(cleared_empty.json()["room"].get("topic").is_none(), "{}", cleared_empty.json());
+
+    let set_ws = http(&s.app, post("/api/v1/relay/rooms", json!({ "name": "design", "topic": "Temp" }), None)).await;
+    assert_eq!(set_ws.json()["room"]["topic"], "Temp");
+    let cleared_ws = http(&s.app, post("/api/v1/relay/rooms", json!({ "name": "design", "topic": "   " }), None)).await;
+    assert!(cleared_ws.json()["room"].get("topic").is_none());
+
+    let s = s.restart(|_| {}).await;
+    let final_room = room_detail(&s, "design").await["room"].clone();
+    assert!(final_room.get("topic").is_none(), "{final_room}");
+    assert_eq!(member_ids(&final_room), ["sess-a", "sess-b"]);
+}

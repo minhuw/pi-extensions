@@ -262,7 +262,7 @@ pub async fn room_detail(
     room_detail_inner(&state, &name, &query).await
 }
 
-/// `POST relay/rooms` with `{ name, topic?, members?: string[] }` for the browser.
+/// `POST relay/rooms` with `{ name, topic?: string | null, members?: string[] }` for the browser.
 pub async fn save_room(State(state): State<AppState>, body: Result<Json<Value>, JsonRejection>) -> Response {
     let body = match body {
         Ok(Json(body)) => body,
@@ -274,8 +274,9 @@ pub async fn save_room(State(state): State<AppState>, body: Result<Json<Value>, 
         return error(StatusCode::BAD_REQUEST, "invalid");
     };
     let topic = match obj.get("topic") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) => Some(s.clone()),
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(s)) => Some(Some(s.clone())),
         Some(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
     };
     let member_ids: Vec<String> = match obj.get("members") {
@@ -314,7 +315,8 @@ pub async fn save_room(State(state): State<AppState>, body: Result<Json<Value>, 
     }
 }
 
-/// `POST relay/rooms/{name}/members` with `{ sessionId, action?: "add" | "remove" }` for the browser.
+/// `POST relay/rooms/{name}/members` with
+/// `{ sessionId, action?: "add" | "remove" | "represent" | "unrepresent" }` for the browser.
 pub async fn room_member(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -332,9 +334,15 @@ pub async fn room_member(
     if !relay::valid_session_id(session_id) {
         return error(StatusCode::BAD_REQUEST, "invalid");
     }
-    let action = match obj.get("action").and_then(Value::as_str) {
-        None | Some("add") | Some("join") => RoomAction::Join,
-        Some("remove") | Some("leave") => RoomAction::Leave,
+    let action = match obj.get("action") {
+        None | Some(Value::Null) => RoomAction::Join,
+        Some(Value::String(s)) => match s.as_str() {
+            "add" | "join" => RoomAction::Join,
+            "remove" | "leave" => RoomAction::Leave,
+            "represent" => RoomAction::Represent,
+            "unrepresent" => RoomAction::Unrepresent,
+            _ => return error(StatusCode::BAD_REQUEST, "invalid"),
+        },
         Some(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
     };
     refresh_names(&state).await;

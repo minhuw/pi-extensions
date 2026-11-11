@@ -2563,10 +2563,12 @@ impl Relay {
     }
 
     /// Creates or updates a chatroom and adds `members` (each with its optional `Recorded` fallback).
+    /// `topic` is `None` when omitted (preserving an existing room's topic), `Some(None)` or blank `Some(Some(_))`
+    /// to clear it, or `Some(Some(_))` to set it.
     pub fn save_room(
         &self,
         raw_name: &str,
-        topic: Option<String>,
+        topic: Option<Option<String>>,
         members: &[(String, Option<Recorded>)],
     ) -> Result<Value, Reason> {
         let name = normalize_room_name(raw_name);
@@ -2578,7 +2580,8 @@ impl Relay {
             return Err(Reason::MailboxFull);
         }
         let now = now_ms();
-        let clean_topic = topic.map(|t| cut_chars(t.trim(), 200).to_owned()).filter(|t| !t.is_empty());
+        let topic_update =
+            topic.map(|t| t.map(|s| cut_chars(s.trim(), 200).to_owned()).filter(|s| !s.is_empty()));
         let online_snapshot: HashMap<String, Online> =
             inner.online.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         for (sid, rec) in members {
@@ -2592,12 +2595,13 @@ impl Relay {
         }
         let mut upserted_members = Vec::new();
         let room_row = {
+            let initial_topic = topic_update.clone().flatten();
             let room = inner
                 .rooms
                 .entry(name.to_owned())
-                .or_insert_with(|| Room::new(name.to_owned(), clean_topic.clone(), now));
-            if clean_topic.is_some() {
-                room.topic = clean_topic;
+                .or_insert_with(|| Room::new(name.to_owned(), initial_topic, now));
+            if let Some(new_topic) = topic_update {
+                room.topic = new_topic;
             }
             room.updated_at = now;
             for (sid, rec) in members {

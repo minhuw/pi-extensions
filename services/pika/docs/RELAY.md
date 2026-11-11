@@ -139,9 +139,9 @@ A room may have one representative: a member session that stands for the user. T
 
 - `GET relay/sessions` → `{ items: OnlineSession[] }`, the same list.
 - `GET relay/rooms` → `{ items: RelayRoom[] }`, with `representative` as for devices.
-- `POST relay/rooms` with `{ name, topic?, members?: string[] }` → creates or updates an explicit chatroom and its member sessions.
+- `POST relay/rooms` with `{ name, topic?: string | null, members?: string[] }` → creates or updates an explicit chatroom and its member sessions; omitting `topic` keeps an existing room's topic unchanged, while passing `null` or `""` (or whitespace) clears it.
 - `GET relay/rooms/{name}` → `{ room: RelayRoom, messages: RoomMessage[] }`.
-- `POST relay/rooms/{name}/members` with `{ sessionId, action?: "add" | "remove" }` → adds or removes a member session, whichever device owns it; removing the representative clears it.
+- `POST relay/rooms/{name}/members` with `{ sessionId, action?: "add" | "remove" | "represent" | "unrepresent" }` → adds, removes, elects as representative, or clears as representative a member session, whichever device owns it; removing the representative clears it.
 - `DELETE relay/rooms/{name}` → deletes the room (`204 No Content`); if it had a representative, its online members get `room` without one.
 - `POST relay/messages` with body `{ to, text, urgent?: boolean }` (1:1) or `{ room, text, mentions?: string[], urgent?: boolean }` (chatroom) → 200 `{ id, status: "delivered" | "queued", to: Target, room?, notified?, unmatched? }`, or 400, 404, or 429 `{ error: <reason> }` with the same reasons as `send` (no `self` or `hop_limit`; an unknown room is 404 `unknown_room`, and `not_member`, which a web post never gets, would be 403). The sender is `{ kind: "web" }`, with hops 0. In a chatroom, which must exist, only the `@`-mentioned members receive a `message` push that triggers a turn (see Rooms).
 - `GET relay/events?limit=` (default 100, max 500) → `{ items: RelayEvent[] }`, newest first:
