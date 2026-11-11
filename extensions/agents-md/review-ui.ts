@@ -5,9 +5,13 @@ import {
 	Key,
 	type KeybindingsManager,
 	matchesKey,
+	type OverlayOptions,
 	replaceControlCharacters,
 	stripTerminalSequences,
 	truncateToWidth,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { LintFinding } from "./lint.ts";
@@ -34,9 +38,21 @@ const MAX_FINDINGS = 10;
 const NO_NEWLINE_MARKER = "\\ No newline at end of file";
 const REVIEW_CHOICES: readonly ReviewChoice[] = ["Apply", "Reject", "Reject with a note"];
 const HINTS = "←→/tab choose · enter confirm · a apply · r reject · n note · ↑↓/j k scroll · esc cancel";
-/** Lines kept free for Pi's chat tail, footer, and widgets around the dialog. */
-const RESERVED_ROWS = 6;
+/** Rows of chat context kept visible above the bottom-anchored overlay when the terminal is spacious. */
+const TOP_CONTEXT_ROWS = 4;
+const MIN_SPACIOUS_ROWS = 12;
 const MIN_BODY_ROWS = 4;
+
+/**
+ * Full-width bottom-anchored overlay: renders above the dock (`status`, `widgetsAbove`, `footer`) so
+ * tall widgets or large `AGENTS.md` diffs never shrink `editorContainer` and clip the bottom choices.
+ */
+export const REVIEW_OVERLAY_OPTIONS: OverlayOptions = {
+	anchor: "bottom-left",
+	width: "100%",
+	maxHeight: "100%",
+	margin: 0,
+};
 
 const lineText = (t: string): string => {
 	const lf = t.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
@@ -302,7 +318,41 @@ export function renderReviewBody(
 	return lines;
 }
 
+/**
+ * Packs whole choices onto lines within `width`. When cramped vertically or narrower than an option,
+ * falls back to a single row centered on the active choice so it is never truncated out of view.
+ */
+function renderChoiceRows(selectedIndex: number, width: number, maxChoiceRows: number, theme: Theme): string[] {
+	const w = Math.max(1, width);
+	const items = REVIEW_CHOICES.map((label, index) =>
+		index === selectedIndex ? theme.fg("accent", theme.bold(`▸ ${label}`)) : theme.fg("text", `  ${label}`),
+	);
+	const packed: string[] = [];
+	let current = "";
+	let fitsEveryItem = true;
+	for (const item of items) {
+		const candidate = current ? `${current}    ${item}` : ` ${item}`;
+		if (!current) {
+			if (visibleWidth(candidate) > w) fitsEveryItem = false;
+			current = candidate;
+		} else if (visibleWidth(candidate) <= w) {
+			current = candidate;
+		} else {
+			packed.push(truncateToWidth(current, w));
+			if (visibleWidth(` ${item}`) > w) fitsEveryItem = false;
+			current = ` ${item}`;
+		}
+	}
+	if (current) packed.push(truncateToWidth(current, w));
+	if (fitsEveryItem && packed.length <= maxChoiceRows) return packed;
+
+	const active = REVIEW_CHOICES[selectedIndex]!;
+	const compact = ` ${theme.fg("accent", theme.bold(`▸ ${active}`))} ${theme.fg("dim", `(${selectedIndex + 1}/${REVIEW_CHOICES.length} · ←→)`)}`;
+	return [truncateToWidth(compact, w)];
+}
+
 export class ReviewDialog implements Component {
+	readonly capturesViewportInput = true;
 	private offset = 0;
 	private selectedIndex = 0;
 	private page = MIN_BODY_ROWS;
@@ -338,6 +388,17 @@ export class ReviewDialog implements Component {
 		const base = this.maxOffset !== undefined ? Math.min(this.offset, this.maxOffset) : this.offset;
 		const next = Math.max(0, base + delta);
 		this.offset = this.maxOffset === undefined ? next : Math.min(next, this.maxOffset);
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type !== "wheel") return undefined;
+		const delta = event.wheelDelta ?? 0;
+		if (delta !== 0) {
+			const before = this.offset;
+			this.moveOffset(delta);
+			if (this.offset !== before) this.tui.requestRender();
+		}
+		return { handled: true };
 	}
 
 	handleInput(data: string): void {
@@ -385,8 +446,9 @@ export class ReviewDialog implements Component {
 	render(width: number): string[] {
 		const w = Math.max(1, width);
 		const innerWidth = Math.max(1, w - 1);
-		const rows = this.tui.terminal.rows;
-		const maxRows = Math.max(1, rows);
+		const rawRows = this.tui.terminal?.rows;
+		const rows = typeof rawRows === "number" && rawRows > 0 ? Math.floor(rawRows) : 24;
+		const dialogBudget = rows > MIN_SPACIOUS_ROWS ? Math.max(MIN_SPACIOUS_ROWS, rows - TOP_CONTEXT_ROWS) : rows;
 		const { theme, input, stats } = this;
 
 		const action = !input.existed ? "creates" : input.tool === "write" ? "rewrites" : "edits";
@@ -397,27 +459,40 @@ export class ReviewDialog implements Component {
 		const title = `${theme.fg("accent", theme.bold(`Review ${sanitizeText(input.path)}`))}${theme.fg("muted", ` · ${action}`)}${counts}`;
 		const rule = theme.fg("borderMuted", "─".repeat(w));
 
-		const option = (label: ReviewChoice, chosen: boolean) =>
-			chosen ? theme.fg("accent", theme.bold(`▸ ${label}`)) : theme.fg("text", `  ${label}`);
-		const choiceBar = REVIEW_CHOICES.map((label, index) => option(label, index === this.selectedIndex)).join("    ");
-
-		let head = [...wrapTextWithAnsi(title, innerWidth).map((line) => ` ${line}`), rule];
-		let tail = [
-			rule,
-			...wrapTextWithAnsi(choiceBar, innerWidth).map((line) => ` ${line}`),
-			...wrapTextWithAnsi(theme.fg("dim", HINTS), innerWidth).map((line) => ` ${line}`),
-		];
-		if (head.length + tail.length + 2 > maxRows) {
-			head = maxRows >= 5 ? [` ${title}`, rule] : [` ${title}`];
-			tail =
-				maxRows >= 6
-					? [rule, ` ${choiceBar}`, ` ${theme.fg("dim", HINTS)}`]
-					: maxRows >= 4
-						? [` ${choiceBar}`, ` ${theme.fg("dim", HINTS)}`]
-						: maxRows >= 2
-							? [` ${choiceBar}`]
-							: [];
+		// Reserve the choice row(s) first so options stay pinned and visible at every terminal size.
+		const maxChoiceRows = dialogBudget >= 6 ? REVIEW_CHOICES.length : 1;
+		const choiceLines = renderChoiceRows(this.selectedIndex, w, maxChoiceRows, theme);
+		if (dialogBudget <= choiceLines.length) {
+			const minimal = choiceLines.slice(0, dialogBudget).map((line) => truncateToWidth(line, w));
+			this.page = 1;
+			this.maxOffset = 0;
+			this.offset = 0;
+			return minimal;
 		}
+
+		// Keep at least 1 row for the diff body; add title, hints, and rules only as remaining rows permit.
+		let extraBudget = dialogBudget - choiceLines.length - 1;
+
+		let titleLines: string[] = [];
+		if (extraBudget >= 1) {
+			const wrappedTitle = wrapTextWithAnsi(title, innerWidth).map((line) => ` ${line}`);
+			titleLines = wrappedTitle.length <= extraBudget ? wrappedTitle : [truncateToWidth(` ${title}`, w)];
+			extraBudget -= titleLines.length;
+		}
+
+		let hintLines: string[] = [];
+		if (extraBudget >= 2) {
+			const wrappedHints = wrapTextWithAnsi(theme.fg("dim", HINTS), innerWidth).map((line) => ` ${line}`);
+			hintLines =
+				extraBudget - wrappedHints.length >= 1
+					? wrappedHints
+					: [truncateToWidth(` ${theme.fg("dim", HINTS)}`, w)];
+			extraBudget -= hintLines.length;
+		}
+
+		const showRules = extraBudget >= 2 + (dialogBudget >= MIN_SPACIOUS_ROWS ? MIN_BODY_ROWS - 1 : 1);
+		const head = showRules ? [...titleLines, rule] : titleLines;
+		const tail = showRules ? [rule, ...choiceLines, ...hintLines] : [...choiceLines, ...hintLines];
 
 		let body = this.bodyCache?.width === innerWidth ? this.bodyCache.lines : undefined;
 		if (!body) {
@@ -425,10 +500,7 @@ export class ReviewDialog implements Component {
 			this.bodyCache = { width: innerWidth, lines: body };
 		}
 
-		// Keep RESERVED_ROWS free when spacious, while never exceeding terminal.rows on cramped terminals.
-		const desiredRoom = Math.max(MIN_BODY_ROWS, rows - RESERVED_ROWS - head.length - tail.length);
-		const maxRoom = Math.max(1, maxRows - head.length - tail.length);
-		const room = Math.min(desiredRoom, maxRoom);
+		const room = Math.max(1, dialogBudget - head.length - tail.length);
 		const showOverflowStatus = body.length > room && room >= 2;
 		const height = body.length <= room ? body.length : showOverflowStatus ? room - 1 : room;
 		this.page = Math.max(1, height - 1);
@@ -453,7 +525,7 @@ export class ReviewDialog implements Component {
 			lines.push(theme.fg("dim", ` lines ${this.offset + 1}-${last} of ${body.length}${more}`));
 		}
 		lines.push(...tail);
-		const fitted = lines.slice(0, maxRows).map((line) => truncateToWidth(line, w));
+		const fitted = lines.map((line) => truncateToWidth(line, w));
 		this.cache = { width, rows, offset: this.offset, selectedIndex: this.selectedIndex, lines: fitted };
 		return fitted;
 	}
@@ -467,12 +539,22 @@ export async function promptReviewDialog(
 	if (signal?.aborted || typeof ctx.ui.custom !== "function") return undefined;
 	let onAbort: (() => void) | undefined;
 	try {
-		const answer = await ctx.ui.custom<ReviewChoice | undefined>((tui, theme, keybindings, done) => {
-			onAbort = () => done(undefined);
-			if (signal?.aborted) onAbort();
-			else signal?.addEventListener("abort", onAbort, { once: true });
-			return new ReviewDialog(input, tui, theme, keybindings, done);
-		});
+		const answer = await ctx.ui.custom<ReviewChoice | undefined>(
+			(tui, theme, keybindings, done) => {
+				onAbort = () => done(undefined);
+				if (signal?.aborted) onAbort();
+				else signal?.addEventListener("abort", onAbort, { once: true });
+				return new ReviewDialog(input, tui, theme, keybindings, done);
+			},
+			{
+				overlay: true,
+				overlayOptions: REVIEW_OVERLAY_OPTIONS,
+				blocked: {
+					kind: "permission",
+					message: `Review ${sanitizeText(input.path)}`,
+				},
+			},
+		);
 		return signal?.aborted ? undefined : answer;
 	} catch {
 		return undefined;

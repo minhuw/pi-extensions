@@ -12,7 +12,7 @@ The collection loads this extension automatically; use `/reload` after installin
 
 ## Review
 
-When the agent calls `edit` or `write` on a file named `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, or `CLAUDE.MD`, a dialog shows the diff and the lint findings the change adds before the file changes — a scrollable line-numbered and word-diff view in the TUI, falling back to a plain-text selector in RPC mode. Choose **Apply**, **Reject**, or **Reject with a note**; the note goes back to the agent. Dismissing the dialog rejects the change.
+When the agent calls `edit` or `write` on a file named `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, or `CLAUDE.MD`, a dialog shows the diff and the lint findings the change adds before the file changes — a scrollable line-numbered and word-diff overlay in the TUI with the choice bar pinned at the bottom, falling back to a plain-text selector in RPC mode. Choose **Apply**, **Reject**, or **Reject with a note**; the note goes back to the agent. Dismissing the dialog rejects the change.
 
 - Sessions without a UI, subagents, Herder steps, and dreams write without asking.
 - While `/selfdrive` holds a standing approval, the change is blocked: the agent describes it in its report so you can review it when you return.

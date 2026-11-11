@@ -6,12 +6,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionContext, Theme, ThemeBg, ThemeColor, ThemeStyle } from "@earendil-works/pi-coding-agent";
-import { type Component, KeybindingsManager, stripTerminalSequences, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	KeybindingsManager,
+	ScrollView,
+	stripTerminalSequences,
+	type Terminal,
+	Text,
+	TuiAltScreen,
+	TUI_KEYBINDINGS,
+	visibleWidth,
+	VStack,
+} from "@earendil-works/pi-tui";
 import { CHOICES, reasons, reviewToolCall, STANDING_APPROVAL_KEY } from "../gate.ts";
 import {
 	diffStats,
 	promptReviewDialog,
 	renderReviewBody,
+	REVIEW_OVERLAY_OPTIONS,
 	ReviewDialog,
 	type ReviewChoice,
 	type ReviewInput,
@@ -431,17 +444,24 @@ describe("ReviewDialog", () => {
 			expect(full).toContain("Reject with a note");
 		}
 
-		// Never exceeds terminal.rows or width even on cramped terminals with long diffs, and supports invalidate().
+		// Never exceeds terminal.rows or width even on cramped terminals with long diffs, keeps the active choice visible, and supports invalidate().
 		const hugeAfter = Array.from({ length: 150 }, (_, i) => `- Long rule ${i + 1}: ${"word ".repeat(20)}`).join("\n") + "\n";
-		for (const [width, rows] of [[80, 26], [42, 12], [20, 6]] as const) {
-			const { dialog } = mountDialog(makeInput({ before: "", after: hugeAfter, existed: false, tool: "write" }), { rows });
+		for (const [width, rows] of [[80, 26], [42, 12], [28, 6], [20, 3], [18, 1]] as const) {
+			const { dialog, press } = mountDialog(makeInput({ before: "", after: hugeAfter, existed: false, tool: "write" }), { rows });
 			const firstRender = dialog.render(width);
 			expect(firstRender.length).toBeLessThanOrEqual(rows);
 			for (const line of firstRender) {
 				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			}
+			expect(firstRender.map(stripTerminalSequences).join("\n")).toContain("▸ Apply");
 			dialog.invalidate();
 			expect(dialog.render(width)).toEqual(firstRender);
+
+			// Cycling choices on tiny terminals keeps the newly selected choice visible.
+			press(KEYS.right);
+			expect(dialog.render(width).map(stripTerminalSequences).join("\n")).toContain("▸ Reject");
+			press(KEYS.right);
+			expect(dialog.render(width).map(stripTerminalSequences).join("\n")).toContain("▸ Reject");
 		}
 	});
 
@@ -573,7 +593,97 @@ describe("ReviewDialog", () => {
 
 		view.press(KEYS.home);
 		expect(range()).toEqual(initial);
+
+		// Mouse wheel scrolling moves the diff viewport cleanly and clamps at top.
+		const wheel = (wheelDelta: number) => ({
+			type: "wheel" as const,
+			button: "none" as const,
+			x: 5,
+			y: 5,
+			screenX: 5,
+			screenY: 5,
+			width: 80,
+			height: 24,
+			wheelDelta,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		expect(view.dialog.handleMouse(wheel(3))).toEqual({ handled: true });
+		expect(range()!.start).toBe(4);
+		expect(view.dialog.handleMouse(wheel(-10))).toEqual({ handled: true });
+		expect(range()).toEqual(initial);
 		expect(view.tui.requestRender).toHaveBeenCalled();
+	});
+
+	it("keeps Apply, Reject, and Reject with a note visible on a crowded fullscreen TUI viewport for a large AGENTS.md diff", () => {
+		const writes: string[] = [];
+		const fakeTerminal = {
+			columns: 90,
+			rows: 26,
+			kittyProtocolActive: false,
+			start() {},
+			stop() {},
+			async drainInput() {},
+			write(data: string) {
+				writes.push(data);
+			},
+			moveBy() {},
+			hideCursor() {},
+			showCursor() {},
+			clearLine() {},
+			clearFromCursor() {},
+			clearScreen() {},
+			setTitle() {},
+		} as unknown as Terminal;
+
+		const tui = new TuiAltScreen(fakeTerminal);
+		const doc = new Container();
+		for (let i = 1; i <= 40; i++) doc.addChild(new Text(`transcript line ${i}`, 0, 0));
+		const status = new Text("⠋ Editing AGENTS.md...\n", 0, 0);
+		const widgetsAbove = new Container();
+		for (let i = 1; i <= 10; i++) widgetsAbove.addChild(new Text(`subagent widget line ${i}`, 0, 0));
+		const editorSlot = new Container();
+		editorSlot.addChild(new Text("editor placeholder", 0, 0));
+		const footer = new Text("statusline row 1\nstatusline row 2\nstatusline row 3", 0, 0);
+
+		const transcript = new ScrollView(doc, { follow: "end", primary: true });
+		const dock = new VStack([
+			{ component: status, shrink: 1, minSize: 0 },
+			{ component: widgetsAbove, shrink: 1, minSize: 0 },
+			{ component: editorSlot, shrink: 1, minSize: 3 },
+			{ component: footer, shrink: 1, minSize: 0 },
+		]);
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: transcript, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+				{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+			]),
+		);
+
+		const largeBefore = Array.from({ length: 120 }, (_, i) => `- Existing rule ${i + 1}: keep it verified.`).join("\n") + "\n";
+		const largeAfter = Array.from({ length: 160 }, (_, i) => `- Updated rule ${i + 1}: keep \`src/a.ts\` verified.`).join("\n") + "\n";
+		const dialog = new ReviewDialog(
+			makeInput({ before: largeBefore, after: largeAfter }),
+			tui,
+			theme,
+			defaultKeybindings,
+			() => {},
+		);
+
+		tui.start();
+		try {
+			writes.length = 0;
+			tui.showOverlay(dialog, REVIEW_OVERLAY_OPTIONS);
+			tui.renderNow(true);
+			const renderedOutput = stripTerminalSequences(writes.join(""));
+			expect(renderedOutput).toContain("Review AGENTS.md");
+			expect(renderedOutput).toContain("▸ Apply");
+			expect(renderedOutput).toContain("Reject");
+			expect(renderedOutput).toContain("Reject with a note");
+		} finally {
+			tui.stop();
+		}
 	});
 });
 
@@ -656,6 +766,7 @@ describe("promptReviewDialog and reviewToolCall TUI custom UI", () => {
 						kb: KeybindingsManager,
 						done: (choice: ReviewChoice | undefined) => void,
 					) => Component | Promise<Component>,
+					_customOptions?: unknown,
 				) =>
 					new Promise<ReviewChoice | undefined>((resolve) => {
 						void Promise.resolve(
@@ -684,10 +795,15 @@ describe("promptReviewDialog and reviewToolCall TUI custom UI", () => {
 			edits: [{ oldText: "- Run the tests.", newText: "- Read `docs/missing.md` before running tests." }],
 		};
 
-		// 1. TUI + Apply via ReviewDialog ("a")
+		// 1. TUI + Apply via ReviewDialog ("a"), mounted as a bottom-anchored overlay so dock widgets cannot clip choices
 		const applyCase = makeContext({ mode: "tui", pressKey: "a" });
 		await expect(reviewToolCall("edit", editArgs, applyCase.ctx)).resolves.toBeUndefined();
 		expect(applyCase.custom).toHaveBeenCalledTimes(1);
+		expect(applyCase.custom.mock.calls[0]?.[1]).toEqual({
+			overlay: true,
+			overlayOptions: REVIEW_OVERLAY_OPTIONS,
+			blocked: { kind: "permission", message: "Review AGENTS.md" },
+		});
 		expect(applyCase.getMounted()).toBeInstanceOf(ReviewDialog);
 		const renderedText = applyCase.getMounted()!.render(90).map(stripTerminalSequences).join("\n");
 		expect(renderedText).toContain("AGENTS.md");
