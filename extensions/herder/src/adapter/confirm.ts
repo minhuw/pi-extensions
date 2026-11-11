@@ -1,8 +1,8 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Key, type KeybindingsManager, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { capPatch, capPatchText, MAX_PATCH_CHARS, renderGoalMarkdown, renderSummaryLines, renderUnifiedDiff } from "./preview.ts";
+import { renderGoalMarkdown, renderSummaryLines } from "./preview.ts";
 
-export { capPatch, capPatchText, MAX_PATCH_CHARS, renderGoalMarkdown, renderSummaryLines, renderUnifiedDiff };
+export { renderGoalMarkdown, renderSummaryLines };
 
 const HINTS = "↑↓/j k scroll · pgup/pgdn page · home/end · ←→/tab choose · y yes · n no · enter confirm · esc close without answering";
 const GOAL_HINTS = "↑↓/j k scroll · pgup/pgdn page · g/G top/end · ←→/tab choose · y/a approve · n/r reject · e reject with note · enter confirm · esc close";
@@ -92,19 +92,30 @@ export class ScrollableConfirm implements Component {
 	private readonly theme: Theme;
 	private readonly keybindings: DialogKeys;
 	private readonly done: (answer: Answer) => void;
+	private readonly formatBody?: (body: string, width: number, theme: Theme) => string[];
 	private offset = 0;
 	private yes = true;
+	private bodyCache: { width: number; lines: string[] } | undefined;
 	private cache: { width: number; rows: number; offset: number; yes: boolean; lines: string[] } | undefined;
 	/** The body height of the last render; paging moves by it. */
 	private page = MIN_BODY_ROWS;
 
-	constructor(title: string, body: string, tui: DialogTui, theme: Theme, keybindings: DialogKeys, done: (answer: Answer) => void) {
+	constructor(
+		title: string,
+		body: string,
+		tui: DialogTui,
+		theme: Theme,
+		keybindings: DialogKeys,
+		done: (answer: Answer) => void,
+		formatBody?: (body: string, width: number, theme: Theme) => string[],
+	) {
 		this.title = title;
 		this.body = body;
 		this.tui = tui;
 		this.theme = theme;
 		this.keybindings = keybindings;
 		this.done = done;
+		this.formatBody = formatBody;
 	}
 
 	handleInput(data: string): void {
@@ -113,73 +124,6 @@ export class ScrollableConfirm implements Component {
 		if (matchesKey(data, "n")) return this.done(false);
 		if (keybindings.matches(data, "tui.select.cancel")) return this.done(undefined);
 		if (keybindings.matches(data, "tui.select.confirm")) return this.done(this.yes);
-		const scrolled = applyScrollKey(data, keybindings, this.offset, this.page);
-		if (scrolled !== undefined) this.offset = scrolled;
-		else if (matchesKey(data, Key.left) || matchesKey(data, Key.right) || matchesKey(data, Key.tab) || matchesKey(data, "shift+tab")) this.yes = !this.yes;
-		else return;
-		this.tui.requestRender();
-	}
-
-	invalidate(): void { this.cache = undefined; }
-
-	render(width: number): string[] {
-		const w = Math.max(1, width);
-		const rows = this.tui.terminal.rows;
-		const { theme } = this;
-		const body = wrapTextWithAnsi(this.body, Math.max(1, w - 1)).map((line) => ` ${line}`);
-		const option = (label: string, chosen: boolean) => (chosen ? theme.fg("accent", `▸ ${label}`) : theme.fg("text", `  ${label}`));
-		const rendered = renderBoundedDialog(w, rows, theme, this.title, body, [option("Yes", this.yes), option("No", !this.yes)], HINTS, this.offset);
-		this.page = rendered.page;
-		this.offset = rendered.offset;
-		const cached = this.cache;
-		if (cached && cached.width === width && cached.rows === rows && cached.offset === this.offset && cached.yes === this.yes) return cached.lines;
-		this.cache = { width, rows, offset: this.offset, yes: this.yes, lines: rendered.lines };
-		return rendered.lines;
-	}
-}
-
-/**
- * Delivery confirmation dialog with summary + commit list + diffstat at the top, followed by a colored unified diff
- * with intra-line word highlights and `d` to toggle the patch body while keeping `Yes` / `No` pinned at the bottom.
- */
-export class DeliveryConfirmDialog implements Component {
-	readonly title: string;
-	readonly summary: string;
-	readonly patch: string;
-	private readonly tui: DialogTui;
-	private readonly theme: Theme;
-	private readonly keybindings: DialogKeys;
-	private readonly done: (answer: Answer) => void;
-	private readonly hasPatch: boolean;
-	private offset = 0;
-	private yes = true;
-	private showDiff = true;
-	private page = MIN_BODY_ROWS;
-	private contentCache: { width: number; summaryLines: string[]; diffLines: string[]; hiddenLines: string[] } | undefined;
-	private cache: { width: number; rows: number; offset: number; yes: boolean; showDiff: boolean; lines: string[] } | undefined;
-
-	constructor(title: string, summary: string, patch: string, tui: DialogTui, theme: Theme, keybindings: DialogKeys, done: (answer: Answer) => void) {
-		this.title = title;
-		this.summary = summary;
-		this.patch = patch;
-		this.tui = tui;
-		this.theme = theme;
-		this.keybindings = keybindings;
-		this.done = done;
-		this.hasPatch = patch.trim().length > 0;
-	}
-
-	handleInput(data: string): void {
-		const { keybindings } = this;
-		if (matchesKey(data, "y")) return this.done(true);
-		if (matchesKey(data, "n")) return this.done(false);
-		if (keybindings.matches(data, "tui.select.cancel")) return this.done(undefined);
-		if (keybindings.matches(data, "tui.select.confirm")) return this.done(this.yes);
-		if (matchesKey(data, "d") && this.hasPatch) {
-			this.showDiff = !this.showDiff;
-			this.tui.requestRender();
-			return;
-		}
 		const scrolled = applyScrollKey(data, keybindings, this.offset, this.page);
 		if (scrolled !== undefined) this.offset = scrolled;
 		else if (matchesKey(data, Key.left) || matchesKey(data, Key.right) || matchesKey(data, Key.tab) || matchesKey(data, "shift+tab")) this.yes = !this.yes;
@@ -188,7 +132,7 @@ export class DeliveryConfirmDialog implements Component {
 	}
 
 	invalidate(): void {
-		this.contentCache = undefined;
+		this.bodyCache = undefined;
 		this.cache = undefined;
 	}
 
@@ -196,41 +140,19 @@ export class DeliveryConfirmDialog implements Component {
 		const w = Math.max(1, width);
 		const rows = this.tui.terminal.rows;
 		const { theme } = this;
-		if (!this.contentCache || this.contentCache.width !== w) {
-			const summaryLines = renderSummaryLines(this.summary, w, theme);
-			const diffLines = this.hasPatch ? renderUnifiedDiff(this.patch, w, theme) : [];
-			const hiddenLines = this.hasPatch
-				? wrapTextWithAnsi(theme.fg("dim", "Diff hidden — press d to show full diff."), Math.max(1, w - 1)).map((line) => ` ${line}`)
-				: [];
-			this.contentCache = { width: w, summaryLines, diffLines, hiddenLines };
+		if (!this.bodyCache || this.bodyCache.width !== w) {
+			const lines = this.formatBody
+				? this.formatBody(this.body, w, theme)
+				: wrapTextWithAnsi(this.body, Math.max(1, w - 1)).map((line) => ` ${line}`);
+			this.bodyCache = { width: w, lines };
 		}
-		const { summaryLines, diffLines, hiddenLines } = this.contentCache;
-		const body = !this.hasPatch || diffLines.length === 0
-			? summaryLines
-			: this.showDiff
-				? [...summaryLines, "", ...diffLines]
-				: [...summaryLines, "", ...hiddenLines];
-
 		const option = (label: string, chosen: boolean) => (chosen ? theme.fg("accent", `▸ ${label}`) : theme.fg("text", `  ${label}`));
-		const hints = this.hasPatch
-			? `↑↓/j k scroll · pgup/pgdn page · g/G top/end · d ${this.showDiff ? "hide" : "show"} diff · ←→/tab choose · y yes · n no · enter confirm · esc close`
-			: HINTS;
-
-		const rendered = renderBoundedDialog(w, rows, theme, this.title, body, [option("Yes", this.yes), option("No", !this.yes)], hints, this.offset);
+		const rendered = renderBoundedDialog(w, rows, theme, this.title, this.bodyCache.lines, [option("Yes", this.yes), option("No", !this.yes)], HINTS, this.offset);
 		this.page = rendered.page;
 		this.offset = rendered.offset;
 		const cached = this.cache;
-		if (
-			cached &&
-			cached.width === width &&
-			cached.rows === rows &&
-			cached.offset === this.offset &&
-			cached.yes === this.yes &&
-			cached.showDiff === this.showDiff
-		) {
-			return cached.lines;
-		}
-		this.cache = { width, rows, offset: this.offset, yes: this.yes, showDiff: this.showDiff, lines: rendered.lines };
+		if (cached && cached.width === width && cached.rows === rows && cached.offset === this.offset && cached.yes === this.yes) return cached.lines;
+		this.cache = { width, rows, offset: this.offset, yes: this.yes, lines: rendered.lines };
 		return rendered.lines;
 	}
 }
@@ -341,15 +263,14 @@ export async function confirmLong(ctx: ExtensionContext, title: string, body: st
 }
 
 /**
- * Confirms delivery: uses `ctx.ui.confirm` with the summary + diffstat outside TUI, and `DeliveryConfirmDialog`
- * with a colored unified diff preview in TUI.
+ * Confirms delivery: uses `ctx.ui.confirm` outside TUI, and `ScrollableConfirm` with styled summary + diffstat in TUI.
  */
-export async function confirmDelivery(ctx: ExtensionContext, title: string, summary: string, patch?: string, signal?: AbortSignal): Promise<Answer> {
+export async function confirmDelivery(ctx: ExtensionContext, title: string, summary: string, signal?: AbortSignal): Promise<Answer> {
 	if (ctx.mode !== "tui" || typeof ctx.ui.custom !== "function") return ctx.ui.confirm(title, summary, { signal });
 	return runCustomDialog<boolean>(
 		ctx,
 		signal,
-		(tui, theme, keybindings, done) => new DeliveryConfirmDialog(title, summary, patch ?? "", tui, theme, keybindings, done),
+		(tui, theme, keybindings, done) => new ScrollableConfirm(title, summary, tui, theme, keybindings, done, renderSummaryLines),
 	);
 }
 

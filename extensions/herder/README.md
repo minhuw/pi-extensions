@@ -46,7 +46,7 @@ Agents work in disposable git worktrees, and writing steps produce commits on hi
    - `not_met`: anything else, including a verifier that fails or does not assess a criterion.
 
    Each verification appends a `## Convergence N` section listing the gaps to `plan.md`.
-7. **Deliver.** `herder_deliver` or `/herder deliver` requires a `met` verdict at the current integration head. It shows you a summary with the diffstat (plus a scrollable colored unified diff in the TUI, toggled with `d`) and writes only after you confirm. A verified run you have not delivered yet is parked: it waits for `/herder deliver <runId>` while other runs start.
+7. **Deliver.** `herder_deliver` or `/herder deliver` requires a `met` verdict at the current integration head. It shows you a summary with the diffstat and writes only after you confirm. A verified run you have not delivered yet is parked: it waits for `/herder deliver <runId>` while other runs start.
 
 ## Commands
 

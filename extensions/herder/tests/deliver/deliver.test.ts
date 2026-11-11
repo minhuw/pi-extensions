@@ -60,19 +60,18 @@ function crashing(vcs: Vcs, method: "fastForward" | "applyDiff" | "updateRef", b
 /** The run as a new process would see it after a crash. */
 const reopened = (run: Run): Run => ({ ...run, store: openRun(run.fixture.commonDir, run.runId) });
 
-interface Options { runner?: FakeRunner; confirm?: (summary: string, patch?: string) => boolean | Promise<boolean>; vcs?: Vcs; signal?: AbortSignal }
+interface Options { runner?: FakeRunner; confirm?: (summary: string) => boolean | Promise<boolean>; vcs?: Vcs; signal?: AbortSignal }
 function deps(run: Run, options: Options = {}) {
 	const summaries: string[] = [];
-	const patches: Array<string | undefined> = [];
 	const value: DeliverDeps = {
 		runId: run.runId, store: run.store, vcs: options.vcs ?? run.vcs, signal: options.signal, runner: options.runner ?? new FakeRunner(), roles, checks: run.checks, title: "Add a and b",
-		async confirm(summary, patch) { summaries.push(summary); patches.push(patch); return options.confirm ? options.confirm(summary, patch) : true; },
+		async confirm(summary) { summaries.push(summary); return options.confirm ? options.confirm(summary) : true; },
 	};
-	return { deps: value, summaries, patches };
+	return { deps: value, summaries };
 }
 const run_ = (run: Run, request: DeliveryRequest, options?: Options) => {
 	const d = deps(run, options);
-	return deliver(d.deps, request).then((outcome) => ({ outcome, summaries: d.summaries, patches: d.patches }));
+	return deliver(d.deps, request).then((outcome) => ({ outcome, summaries: d.summaries }));
 };
 
 /** HEAD, branch, branch list, index bytes, and status of the user's checkout (invariant 1). */
@@ -118,16 +117,12 @@ describe("deliver", () => {
 		const run = await verifiedRun(fixture);
 		const before = checkout(fixture);
 		let during: ReturnType<typeof checkout> | undefined;
-		const { outcome, summaries, patches } = await run_(run, { mode: "series" }, { confirm: () => { during = checkout(fixture); return true; } });
+		const { outcome, summaries } = await run_(run, { mode: "series" }, { confirm: () => { during = checkout(fixture); return true; } });
 		expect(during).toEqual(before); // untouched until confirmation (invariant 1)
 		expect(outcome).toMatchObject({ status: "delivered", mode: "series", target: "main", tip: run.head, curated: false });
 		expect(summaries[0]).toMatch(/series to main/);
 		expect(summaries[0]).toMatch(/feat: add a[\s\S]*feat: add b/);
 		expect(summaries[0]).toMatch(/Changes:\n a\.txt +\| +1 \+\n b\.txt +\| +1 \+\n 2 files changed, 2 insertions\(\+\)/);
-		expect(patches[0]).toContain("diff --git a/a.txt b/a.txt");
-		expect(patches[0]).toContain("+a");
-		expect(patches[0]).toContain("diff --git a/b.txt b/b.txt");
-		expect(patches[0]).toContain("+b");
 		expect(fixture.head()).toBe(run.head);
 		expect(fixture.git("symbolic-ref", "--short", "HEAD")).toBe("main");
 		const delivered = run.vcs.revList(`${run.base}..HEAD`);

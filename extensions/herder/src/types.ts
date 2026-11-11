@@ -67,7 +67,7 @@ export interface Vcs {
 	/** `mergeBase` overrides the computed merge base (used to replay one commit onto a new parent). */
 	mergeTree(ours: string, theirs: string, mergeBase?: string): { clean: boolean; tree: string; conflicts: string[] };
 	commitTree(tree: string, parents: string[], message: string): string;
-	revList(range: string): string[]; diffStat(range: string): string; diff(range: string): string;
+	revList(range: string): string[]; diffStat(range: string): string;
 	/** Added plus deleted lines in `range` (binary files count as one line each). */
 	changedLines(range: string): number;
 	/**

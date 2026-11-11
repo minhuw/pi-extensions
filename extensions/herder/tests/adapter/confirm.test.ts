@@ -5,12 +5,10 @@ import {
 	type Answer,
 	confirmDelivery,
 	confirmLong,
-	DeliveryConfirmDialog,
 	type GoalChoice,
 	GoalReviewDialog,
-	MAX_PATCH_CHARS,
 	renderGoalMarkdown,
-	renderUnifiedDiff,
+	renderSummaryLines,
 	reviewGoal,
 	ScrollableConfirm,
 } from "../../src/adapter/confirm.ts";
@@ -63,52 +61,6 @@ function createTrackingTheme() {
 
 const plain = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
 const LONG = Array.from({ length: 200 }, (_, index) => `line ${index + 1}`).join("\n");
-
-const MULTI_FILE_PATCH = [
-	"diff --git a/src/server.ts b/src/server.ts",
-	"index 1111111..2222222 100644",
-	"--- a/src/server.ts",
-	"+++ b/src/server.ts",
-	"@@ -10,6 +10,6 @@ export function startServer() {",
-	"     const keep = true;",
-	"-    const port = 3000;",
-	"+    const port = 8080;",
-	"     const host = \"localhost\";",
-	"-    const retries = 1;",
-	"-    const timeoutMs = 500;",
-	"+    const retries = 3;",
-	"+    const timeoutMs = 2000;",
-	" }",
-	"diff --git a/src/added.ts b/src/added.ts",
-	"new file mode 100644",
-	"index 0000000..3333333",
-	"--- /dev/null",
-	"+++ b/src/added.ts",
-	"@@ -0,0 +1,2 @@",
-	"+export const greeting = \"hello from a very long line that wraps cleanly inside narrow viewports without breaking the dual gutter\";",
-	"+export const ready = true;",
-	"diff --git a/src/legacy.ts b/src/legacy.ts",
-	"deleted file mode 100644",
-	"index 4444444..0000000",
-	"--- a/src/legacy.ts",
-	"+++ /dev/null",
-	"@@ -1,1 +0,0 @@",
-	"-export const legacy = false;",
-	"diff --git a/src/old-name.ts b/src/new-name.ts",
-	"similarity index 88%",
-	"rename from src/old-name.ts",
-	"rename to src/new-name.ts",
-	"index 5555555..6666666 100644",
-	"--- a/src/old-name.ts",
-	"+++ b/src/new-name.ts",
-	"@@ -1,1 +1,1 @@",
-	"-export const name = \"old\";",
-	"+export const name = \"new\";",
-	"diff --git a/assets/logo.png b/assets/logo.png",
-	"new file mode 100644",
-	"index 0000000..7777777",
-	"Binary files /dev/null and b/assets/logo.png differ",
-].join("\n");
 
 const SAMPLE_GOAL = `# Goal: Add a --json flag
 
@@ -243,7 +195,7 @@ describe("confirmLong", () => {
 	});
 });
 
-describe("DeliveryConfirmDialog & renderUnifiedDiff", () => {
+describe("confirmDelivery & renderSummaryLines", () => {
 	const SUMMARY = [
 		"Deliver Herder run 20260101-000000-abcd (Update server) as series to main.",
 		"Commits (oldest first):",
@@ -253,133 +205,36 @@ describe("DeliveryConfirmDialog & renderUnifiedDiff", () => {
 		" 5 files changed, 6 insertions(+), 5 deletions(-)",
 	].join("\n");
 
-	it("renders multi-file headers, dual gutters, and 1-to-1 + N-to-N intra-line inverse highlights without inverting indentation", () => {
+	it("styles headings and diffstat bars without showing a unified diff", () => {
 		const { theme: tracked, tokens } = createTrackingTheme();
-		const raw = renderUnifiedDiff(MULTI_FILE_PATCH, 90, tracked);
-		const stripped = raw.map(plain);
-
-		// Per-file headers for modified, new, deleted, renamed, and binary files
-		expect(stripped.some((line) => /── src\/server\.ts  \+3 -3 ─+/.test(line))).toBe(true);
-		expect(stripped.some((line) => /── src\/added\.ts \(new\)  \+2 -0 ─+/.test(line))).toBe(true);
-		expect(stripped.some((line) => /── src\/legacy\.ts \(deleted\)  \+0 -1 ─+/.test(line))).toBe(true);
-		expect(stripped.some((line) => /── src\/old-name\.ts → src\/new-name\.ts  \+1 -1 ─+/.test(line))).toBe(true);
-		expect(stripped.some((line) => /── assets\/logo\.png \(new, binary\) ─+/.test(line))).toBe(true);
-
-		// Hunk header and dual old/new gutter alignment
-		expect(stripped.some((line) => line.includes("@@ -10,6 +10,6 @@ export function startServer() {"))).toBe(true);
-		expect(stripped.some((line) => line.startsWith(" 10 10 │  ") && line.includes("const keep = true;"))).toBe(true);
-		expect(stripped.some((line) => line.startsWith(" 11    │ -") && line.includes("const port = 3000;"))).toBe(true);
-		expect(stripped.some((line) => line.startsWith("    11 │ +") && line.includes("const port = 8080;"))).toBe(true);
-
-		// Theme diff tokens used
-		expect(tokens.get("toolDiffContext")?.some((s) => s.includes("const keep = true;"))).toBe(true);
-		expect(tokens.get("toolDiffRemoved")?.length).toBeGreaterThan(0);
-		expect(tokens.get("toolDiffAdded")?.length).toBeGreaterThan(0);
-
-		// 1-to-1 and N-to-N (2-to-2) intra-line inverse highlights, preserving leading indentation
-		const joinedRaw = raw.join("\n");
-		expect(joinedRaw).toContain("\x1b[7m3000\x1b[27m");
-		expect(joinedRaw).toContain("\x1b[7m8080\x1b[27m");
-		expect(joinedRaw).toContain("\x1b[7m1\x1b[27m");
-		expect(joinedRaw).toContain("\x1b[7m3\x1b[27m");
-		expect(joinedRaw).toContain("\x1b[7m500\x1b[27m");
-		expect(joinedRaw).toContain("\x1b[7m2000\x1b[27m");
-
-		// Even when the very first word after indentation changes, leading indentation is never inverted.
-		const indentPatch = [
-			"diff --git a/a.ts b/a.ts",
-			"--- a/a.ts",
-			"+++ b/a.ts",
-			"@@ -1,1 +1,1 @@",
-			"-    oldCall(x);",
-			"+      newCall(x);",
-		].join("\n");
-		const indentRaw = renderUnifiedDiff(indentPatch, 80, tracked).join("\n");
-		expect(indentRaw).toContain("\x1b[7moldCall\x1b[27m");
-		expect(indentRaw).toContain("\x1b[7mnewCall\x1b[27m");
-		expect(indentRaw).not.toMatch(/\x1b\[7m\s+/);
+		const lines = renderSummaryLines(SUMMARY, 90, tracked).map(plain);
+		expect(lines.some((line) => line.includes("Update server config"))).toBe(true);
+		expect(lines.some((line) => line.includes("src/server.ts | 6 +++---"))).toBe(true);
+		expect(tokens.get("toolDiffAdded")).toEqual(["+++"]);
+		expect(tokens.get("toolDiffRemoved")).toEqual(["---"]);
+		expect(tokens.get("muted")?.some((s) => s.includes("5 files changed"))).toBe(true);
 	});
 
-	it("keeps gutter column alignment when wrapping long diff lines and fits narrow terminals", () => {
-		const lines = renderUnifiedDiff(MULTI_FILE_PATCH, 48, theme);
-		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(48);
-		const stripped = lines.map(plain);
-		const firstWrapIdx = stripped.findIndex((line) => line.includes("+export const greeting ="));
-		expect(firstWrapIdx).toBeGreaterThan(0);
-		// Continuation line keeps blank dual gutter + ` │  ` column alignment
-		expect(stripped[firstWrapIdx]).toMatch(/^ {4} 1 │ \+export const greeting =/);
-		expect(stripped[firstWrapIdx + 1]).toMatch(/^ {7}│ {2}/);
-
-		for (const width of [10, 24, 48, 80]) {
-			const answers: Answer[] = [];
-			const dlg = new DeliveryConfirmDialog("Deliver?", SUMMARY, MULTI_FILE_PATCH, { requestRender() {}, terminal: { rows: 24 } }, theme, keybindings, (a) => answers.push(a));
-			for (const line of dlg.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-		}
-	});
-
-	it("toggles the patch body with d while keeping summary and pinned Yes/No controls", () => {
-		const answers: Answer[] = [];
-		const tui = { requestRender: vi.fn(), terminal: { rows: 60 } };
-		const dlg = new DeliveryConfirmDialog("Deliver Herder run?", SUMMARY, MULTI_FILE_PATCH, tui, theme, keybindings, (a) => answers.push(a));
-
-		const initial = dlg.render(90).map(plain);
-		expect(initial.some((line) => line.includes("Update server config"))).toBe(true);
-		expect(initial.some((line) => line.includes("── src/server.ts"))).toBe(true);
-		expect(initial.some((line) => line.includes("d hide diff"))).toBe(true);
-		expect(initial.some((line) => line.includes("▸ Yes") && line.includes("No"))).toBe(true);
-
-		dlg.handleInput("d");
-		expect(tui.requestRender).toHaveBeenCalledTimes(1);
-		const hidden = dlg.render(90).map(plain);
-		expect(hidden.some((line) => line.includes("Update server config"))).toBe(true);
-		expect(hidden.some((line) => line.includes("5 files changed"))).toBe(true);
-		expect(hidden.some((line) => line.includes("── src/server.ts"))).toBe(false);
-		expect(hidden.some((line) => line.includes("Diff hidden — press d to show full diff."))).toBe(true);
-		expect(hidden.some((line) => line.includes("d show diff"))).toBe(true);
-		expect(hidden.some((line) => line.includes("▸ Yes") && line.includes("No"))).toBe(true);
-
-		dlg.handleInput("d");
-		expect(dlg.render(90).map(plain).some((line) => line.includes("── src/server.ts"))).toBe(true);
-		expect(answers).toEqual([]);
-
-		dlg.handleInput(KEYS.tab);
-		dlg.handleInput(KEYS.enter);
-		expect(answers).toEqual([false]);
-	});
-
-	it("caps giant patches safely mid-hunk and appends a truncation notice", () => {
-		const bodyLines = Array.from({ length: 4000 }, (_, i) => `+export const item_${i} = "${"x".repeat(55)}";`);
-		const giantPatch = [
-			"diff --git a/src/giant.ts b/src/giant.ts",
-			"new file mode 100644",
-			"--- /dev/null",
-			"+++ b/src/giant.ts",
-			`@@ -0,0 +1,${bodyLines.length} @@`,
-			...bodyLines,
-		].join("\n");
-		expect(giantPatch.length).toBeGreaterThan(MAX_PATCH_CHARS);
-
-		const rendered = renderUnifiedDiff(giantPatch, 90, theme).map(plain);
-		expect(rendered.some((line) => line.includes("── src/giant.ts (new)"))).toBe(true);
-		expect(rendered.some((line) => line.includes("item_0"))).toBe(true);
-		expect(rendered.some((line) => line.includes("diff preview truncated"))).toBe(true);
-	});
-
-	it("confirmDelivery uses ui.confirm in RPC and DeliveryConfirmDialog in TUI", async () => {
+	it("confirmDelivery uses ui.confirm in RPC and ScrollableConfirm with styled summary in TUI", async () => {
 		const rpcConfirm = vi.fn(async () => true);
 		const rpcCustom = vi.fn();
 		const rpcCtx = { mode: "rpc", ui: { confirm: rpcConfirm, custom: rpcCustom } } as unknown as ExtensionContext;
-		await expect(confirmDelivery(rpcCtx, "Deliver?", SUMMARY, MULTI_FILE_PATCH)).resolves.toBe(true);
+		await expect(confirmDelivery(rpcCtx, "Deliver?", SUMMARY)).resolves.toBe(true);
 		expect(rpcConfirm).toHaveBeenCalledWith("Deliver?", SUMMARY, { signal: undefined });
 		expect(rpcCustom).not.toHaveBeenCalled();
 
-		const tuiCustom = vi.fn((factory: (...args: unknown[]) => DeliveryConfirmDialog) => new Promise((resolve) => {
-			const comp = factory({ requestRender() {}, terminal: { rows: 30 } }, theme, keybindings, resolve);
-			expect(comp.render(80).map(plain).some((line) => line.includes("── src/server.ts"))).toBe(true);
+		const { theme: tracked, tokens } = createTrackingTheme();
+		const tuiCustom = vi.fn((factory: (...args: unknown[]) => ScrollableConfirm) => new Promise((resolve) => {
+			const comp = factory({ requestRender() {}, terminal: { rows: 30 } }, tracked, keybindings, resolve);
+			const rendered = comp.render(80).map(plain);
+			expect(rendered.some((line) => line.includes("Update server config"))).toBe(true);
+			expect(rendered.some((line) => line.includes("5 files changed"))).toBe(true);
+			expect(tokens.get("toolDiffAdded")).toEqual(["+++"]);
+			expect(tokens.get("toolDiffRemoved")).toEqual(["---"]);
 			comp.handleInput("y");
 		}));
 		const tuiCtx = { mode: "tui", ui: { confirm: rpcConfirm, custom: tuiCustom } } as unknown as ExtensionContext;
-		await expect(confirmDelivery(tuiCtx, "Deliver?", SUMMARY, MULTI_FILE_PATCH)).resolves.toBe(true);
+		await expect(confirmDelivery(tuiCtx, "Deliver?", SUMMARY)).resolves.toBe(true);
 	});
 });
 

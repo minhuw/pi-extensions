@@ -675,11 +675,6 @@ describe("objects", () => {
 			expect(vcs.revList(`${base}..${second}`)).toEqual([first, second]);
 			expect(vcs.revList(`${second}..${second}`)).toEqual([]);
 			expect(vcs.diffStat(`${base}..${second}`)).toMatch(/a\.txt +\| +3 \+\+\+\n bin\.dat +\| Bin 0 -> 5 bytes\n 2 files changed, 3 insertions\(\+\)$/);
-			const patch = vcs.diff(`${first}..${second}`);
-			expect(patch).toContain("diff --git a/a.txt b/a.txt");
-			expect(patch).toContain("-2\n+TWO");
-			expect(patch).toContain("Binary files /dev/null and b/bin.dat differ");
-			expect(vcs.diff(`${second}..${second}`)).toBe("");
 			expect(vcs.changedLines(`${base}..${first}`)).toBe(3);
 			expect(vcs.changedLines(`${first}..${second}`)).toBe(3); // 1 added + 1 deleted + 1 binary
 			expect(vcs.changedLines(`${second}..${second}`)).toBe(0);

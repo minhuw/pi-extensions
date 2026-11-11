@@ -409,7 +409,7 @@ export class Herder {
 		requireIdle(held, "Delivery");
 		const ctx = s.ctx;
 		try {
-			return await this.op(held, signal, (combined) => this.runtime(s, held).deliver(request, async (summary, patch) => (await confirmDelivery(ctx, `Deliver Herder run ${held.runId}?`, summary, patch, combined)) === true, combined), true);
+			return await this.op(held, signal, (combined) => this.runtime(s, held).deliver(request, async (summary) => (await confirmDelivery(ctx, `Deliver Herder run ${held.runId}?`, summary, combined)) === true, combined), true);
 		} finally {
 			this.settle(s, held);
 		}

@@ -36,8 +36,6 @@ export class RefConflictError extends Error {
 // Inherited repository-location variables (e.g. when Pi runs inside a git hook) would redirect every command.
 const LOCATION_VARS = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE"];
 const MAX_BUFFER = 1 << 30;
-const MAX_DIFF_BYTES = 1 << 20;
-export const DIFF_TRUNCATED_MARKER = "\n# herder:diff-truncated";
 // githooks(5) events. Hooks defined in configuration (git >= 2.54) ignore core.hooksPath; `hook.<event>.enabled=false`
 // (git >= 2.55) silences them per event, and older git ignores the unknown keys.
 const HOOK_EVENTS = ["applypatch-msg", "pre-applypatch", "post-applypatch", "pre-commit", "pre-merge-commit", "prepare-commit-msg", "commit-msg", "post-commit", "pre-rebase", "post-checkout", "post-merge", "pre-push", "pre-receive", "update", "proc-receive", "post-receive", "post-update", "reference-transaction", "push-to-checkout", "pre-auto-gc", "post-rewrite", "sendemail-validate", "fsmonitor-watchman", "post-index-change"];
@@ -386,13 +384,6 @@ export function openVcs(cwd: string): Vcs {
 		/** Oldest first (`--reverse --topo-order`), the order a replay applies them. */
 		revList: (range) => lines(git(["rev-list", "--reverse", "--topo-order", "--end-of-options", range])),
 		diffStat: (range) => git(["diff", ...DIFF_FLAGS, "--stat", "--end-of-options", range]),
-		diff(range) {
-			const raw = run(top, ["diff", ...DIFF_FLAGS, "--src-prefix=a/", "--dst-prefix=b/", "--end-of-options", range]).stdout;
-			if (raw.length <= MAX_DIFF_BYTES) return raw.toString("utf8").replace(/\r?\n$/, "");
-			const prefix = raw.subarray(0, MAX_DIFF_BYTES).toString("utf8");
-			const newline = prefix.lastIndexOf("\n");
-			return `${newline >= 0 ? prefix.slice(0, newline) : prefix}${DIFF_TRUNCATED_MARKER}`;
-		},
 		changedLines(range) {
 			let total = 0;
 			for (const line of lines(git(["diff", ...DIFF_FLAGS, "--numstat", "--end-of-options", range]))) {
