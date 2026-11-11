@@ -92,8 +92,8 @@ export function extensionCanonicalName(extPath: string): string {
  * misattribute every co-located file to `pi-subagents`.
  */
 function extensionPackageName(extPath: string): string | undefined {
-  // `builtin:<name>` names no file; climbing from it would read the process cwd's manifest.
-  if (extPath.startsWith("builtin:")) return undefined;
+  // Synthetic paths (`builtin:<name>`, `<inline:...>`) name no file; climbing from them would read cwd's manifest.
+  if (extPath.startsWith("builtin:") || extPath.startsWith("<")) return undefined;
   const entry = resolve(extPath);
   let dir = dirname(extPath);
   for (;;) {
@@ -286,10 +286,25 @@ export function installExtensionToolScope(
     readmitToolNames: Set<string>;
     /** Receives the scope check the child's nested-call gate extension applies. */
     nestedCallGate: NestedCallGate;
+    /**
+     * Resolves a `<inline:name>` child-session hook extension's canonical name when
+     * the agent's `extensions:` / `exclude_extensions:` config admits `name`, `null`
+     * when the hook stays handler-only, and `undefined` for non-hook extensions.
+     */
+    hookToolCanonicalName?: (extPath: string) => string | null | undefined;
   },
 ): void {
-  const { loader, toolNames, disallowedSet, extNames, narrowing, mcpToolPatterns, readmitToolNames, nestedCallGate } =
-    ctx;
+  const {
+    loader,
+    toolNames,
+    disallowedSet,
+    extNames,
+    narrowing,
+    mcpToolPatterns,
+    readmitToolNames,
+    nestedCallGate,
+    hookToolCanonicalName,
+  } = ctx;
 
   // The names allowed right now. Mirrors the `ext:` opt-in flip: when any `ext:`
   // selector is present, extension tools become an explicit allowlist — a loaded
@@ -299,7 +314,9 @@ export function installExtensionToolScope(
     const keep = new Set(toolNames.filter((t) => !disallowedSet?.has(t)));
     const optInActive = extNames.size > 0;
     for (const extension of loader.getExtensions().extensions) {
-      const canons = extensionCanonicalNames(extension.path);
+      const hookCanon = hookToolCanonicalName?.(extension.path);
+      if (hookCanon === null) continue;
+      const canons = hookCanon !== undefined ? [hookCanon] : extensionCanonicalNames(extension.path);
       if (optInActive && !canons.some((c) => extNames.has(c))) continue;
       // First alias that carries a narrowing set — a user won't narrow one
       // extension under two different names, so first-match is correct.
@@ -1009,6 +1026,18 @@ export async function runAgent(
   // Pre-filter discovered set, captured by the override — the exclude-typo warning
   // must compare against this, not the surviving set (absence from survivors is
   // an exclude *succeeding*).
+  const hookToolCanonicalName = (extPath: string): string | null | undefined => {
+    if (!hookExtensionPaths.has(extPath)) return undefined;
+    const hookCanon = extPath.slice("<inline:".length, -1).toLowerCase();
+    return !noExtensions && !excludeNames.has(hookCanon) && (loadAll || keepNames.has(hookCanon))
+      ? hookCanon
+      : null;
+  };
+  const admittedHookNames = new Set(
+    [...hookExtensionPaths]
+      .map((extPath) => hookToolCanonicalName(extPath))
+      .filter((name): name is string => typeof name === "string"),
+  );
   let discoveredNames: Set<string> | undefined;
   const extensionsOverride: ((base: LoadExtensionsResult) => LoadExtensionsResult) | undefined =
     noExtensions || (loadAll && !hasExcludes)
@@ -1148,9 +1177,13 @@ export async function runAgent(
   // Built-in defaults may also target optional ambient extensions (`fff`, `selfdrive`)
   // that are absent in standalone or minimal environments.
   if ((keepNames.size > 0 || extNames.size > 0) && agentConfig?.isDefault !== true) {
-    const survivingNames = new Set(
-      loader.getExtensions().extensions.flatMap((e) => extensionCanonicalNames(e.path)),
-    );
+    const survivingNames = new Set([
+      ...loader
+        .getExtensions()
+        .extensions.filter((e) => !hookExtensionPaths.has(e.path))
+        .flatMap((e) => extensionCanonicalNames(e.path)),
+      ...admittedHookNames,
+    ]);
     for (const name of keepNames) {
       if (!survivingNames.has(name)) {
         options.onToolActivity?.({
@@ -1238,12 +1271,13 @@ export async function runAgent(
   // no tool it can only narrate calls it cannot make. Extension tools register after
   // spawn (MCP once its servers connect), so they count as possible whenever an
   // extension they could come from loaded, or any `mcp__` entry can reach a bridge.
-  const loadedNames = new Set(
-    loader
+  const loadedNames = new Set([
+    ...loader
       .getExtensions()
       .extensions.filter((e) => e.path !== `<inline:${SCOPE_GATE_NAME}>` && !hookExtensionPaths.has(e.path))
       .flatMap((e) => extensionCanonicalNames(e.path)),
-  );
+    ...admittedHookNames,
+  ]);
   const unrecognized = agentConfig?.builtinToolNames?.filter((n) => !BUILTIN_TOOL_NAMES.includes(n)) ?? [];
   const unmatched = [...extNames].filter((n) => !loadedNames.has(n));
   // `extensions: false` and `isolated` load nothing, so `loadedNames` is empty then.
@@ -1444,6 +1478,7 @@ export async function runAgent(
       mcpToolPatterns: isolated ? undefined : agentConfig?.mcpToolPatterns,
       readmitToolNames,
       nestedCallGate,
+      hookToolCanonicalName,
     });
   }
 

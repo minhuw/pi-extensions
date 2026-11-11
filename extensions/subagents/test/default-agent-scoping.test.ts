@@ -387,4 +387,91 @@ describe("default recon and worker extension/MCP scoping (real pi runtime)", () 
       'extension-error:ext:missing-ext referenced by agent "recon" but extension "missing-ext" is not loaded (check extensions:/exclude_extensions:)',
     ]);
   });
+
+  it("admits child-session-hooks fff tools in recon when fff is hook-only, and blocks unadmitted hook tools in allowlisted agents", async () => {
+    writeToolExtension(cwd, "agents-md", ["agents_md_lint"], "agents-md");
+    mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".pi", "agents", "docs-linter.md"),
+      [
+        "---",
+        "description: lint context files only",
+        "tools: read",
+        "extensions: agents-md",
+        "---",
+        "Lint.",
+      ].join("\n"),
+    );
+    registerAgents(loadCustomAgents(cwd));
+
+    const hooks = ((globalThis as Record<symbol, unknown>)[HOOKS_KEY] = new Set()) as Set<unknown>;
+    hooks.add({
+      name: "fff",
+      extensionFactory: (pi: ExtensionAPI) => {
+        for (const name of ["fffind", "ffgrep"]) {
+          pi.registerTool({
+            name,
+            label: name,
+            description: name,
+            parameters: { type: "object", properties: {} } as any,
+            async execute() {
+              return { content: [{ type: "text", text: `${name}:hook-ok` }], details: {} };
+            },
+          });
+        }
+      },
+    });
+    hooks.add({
+      name: "workspace",
+      extensionFactory: (pi: ExtensionAPI) => {
+        pi.registerTool({
+          name: "workspace",
+          label: "workspace",
+          description: "workspace",
+          parameters: { type: "object", properties: {} } as any,
+          async execute() {
+            return { content: [{ type: "text", text: "workspace:ok" }], details: {} };
+          },
+        });
+      },
+    });
+
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("fffind", {})),
+      fauxAssistantMessage(fauxText("recon hook-only done")),
+      fauxAssistantMessage(fauxToolCall("agents_md_lint", {})),
+      fauxAssistantMessage(fauxText("linter done")),
+    ]);
+
+    const { ctx, model } = makeCtx();
+    let reconActiveTools: string[] = [];
+    const reconRes = await runAgent(ctx, "recon", "Find files", {
+      pi: makePi(),
+      model,
+      onSessionCreated: (session) => {
+        openSessions.push(session);
+        reconActiveTools = session.getActiveToolNames();
+      },
+    });
+    expect(reconRes.failure).toBeUndefined();
+    expect(reconActiveTools).toEqual(expect.arrayContaining(["fffind", "ffgrep"]));
+    expect(reconActiveTools).not.toContain("workspace");
+
+    let linterActiveTools: string[] = [];
+    const linterRes = await runAgent(ctx, "docs-linter", "Lint", {
+      pi: makePi(),
+      model,
+      onSessionCreated: (session) => {
+        openSessions.push(session);
+        linterActiveTools = session.getActiveToolNames();
+      },
+    });
+    expect(linterRes.failure).toBeUndefined();
+    expect(linterActiveTools).toEqual(["read", "agents_md_lint"]);
+    const blockedFffCall = await linterRes.session.agent.beforeToolCall?.(
+      { toolCall: { id: "tc-fff", name: "fffind", arguments: {} } } as any,
+      undefined,
+    );
+    expect(blockedFffCall).toMatchObject({ block: true });
+  });
 });
