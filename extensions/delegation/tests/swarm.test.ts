@@ -44,12 +44,12 @@ const listen = () => {
 	return calls;
 };
 
-type Message = { role: string; content: unknown };
-interface Captured { system: string; systems: number; conversation: Message[] }
+type Message = { role: string; content: unknown; sections?: unknown; toolsAdded?: { name: string }[]; toolsRemoved?: unknown };
+interface Captured { system: string; systems: Message[]; conversation: Message[] }
 
 const capture = (messages: Parameters<typeof getCurrentSystemPrompt>[0]): Captured => {
 	const copy = JSON.parse(JSON.stringify(messages)) as Message[];
-	return { system: getCurrentSystemPrompt(messages), systems: copy.filter((message) => message.role === "system").length, conversation: copy.filter((message) => message.role !== "system") };
+	return { system: getCurrentSystemPrompt(messages), systems: copy.filter((message) => message.role === "system"), conversation: copy.filter((message) => message.role !== "system") };
 };
 const textOf = ({ content }: Message) => typeof content === "string" ? content : (content as { text?: string }[]).map((part) => part.text ?? "").join("");
 /** What followed the run's starting message in a request: the swarm message of that run, if any. */
@@ -64,10 +64,16 @@ const expectUntouched = (request: Captured) => {
 	expect(request.system).not.toContain("<swarm>");
 	expect(swarmMessages(request)).toEqual([]);
 };
-/** The system prompt is unchanged, and `later` starts with every conversation message of `earlier`, byte for byte. */
-const expectSamePrefix = (later: Captured, earlier: Captured) => {
+/**
+ * The system prompt is unchanged, and `later` starts with every conversation message of `earlier`, byte for byte.
+ * `toolsAdded` names the tools of the one system message Pi appends when a session gains tools, as one that predates the
+ * extension gains `swarm_board`: it follows the cached prefix and carries no prompt text.
+ */
+const expectSamePrefix = (later: Captured, earlier: Captured, toolsAdded?: string[]) => {
 	expect(later.system).toBe(earlier.system);
-	expect(later.systems).toBeLessThanOrEqual(earlier.systems);
+	expect(JSON.stringify(later.systems.slice(0, earlier.systems.length))).toBe(JSON.stringify(earlier.systems));
+	const added = later.systems.slice(earlier.systems.length).map(({ role, content, sections, toolsAdded: tools, toolsRemoved }) => ({ role, content, sections, toolsAdded: tools?.map(({ name }) => name), toolsRemoved }));
+	expect(added).toEqual(toolsAdded ? [{ role: "system", content: "", sections: undefined, toolsAdded, toolsRemoved: undefined }] : []);
 	expect(JSON.stringify(later.conversation.slice(0, earlier.conversation.length))).toBe(JSON.stringify(earlier.conversation));
 };
 
@@ -341,7 +347,7 @@ describe("the default", () => {
 		expect(h.status).toBeUndefined();
 		expect(h.modes).toEqual([]);
 		const first = await h.run("one");
-		expectSamePrefix(first, before);
+		expectSamePrefix(first, before, ["swarm_board"]);
 		expectUntouched(first);
 		expect(h.entries()).toEqual([{ base: false }]);
 		expect(h.status).toBeUndefined();
@@ -612,7 +618,7 @@ describe("sessions that predate the extension", () => {
 		await h.command("/swarm on");
 		expect(h.status).toBe(STATUS);
 		const first = await h.run("one");
-		expectSamePrefix(first, before);
+		expectSamePrefix(first, before, ["swarm_board"]);
 		expect(first.system).not.toContain("<swarm>");
 		expect(afterPrompt(first, "one")).toEqual([ON_MESSAGE]);
 		expect(h.entries()).toEqual([{ active: true }, { base: false }]);

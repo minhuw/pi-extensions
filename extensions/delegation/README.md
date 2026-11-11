@@ -36,7 +36,11 @@ While swarm mode is on, `coach.ts` sends hidden `swarm-coach` messages:
 
 ## Board
 
-See board section (added separately).
+While swarm mode is on, the session and its subagents share a kanban board through the `swarm_board` tool. The session's model lists, adds, updates, and drops cards, and links one to a launched agent with `agentId`. Agents get cards on their own: an agent that starts opens a `doing` card titled after its description. An agent that finishes moves its card to `done`, or to `failed` after an error, abort, or stop. A card the coordinator marked `blocked` stays blocked when its agent ends normally, and cards already done, failed, or dropped are left alone. Off swarm mode the tool refuses.
+
+Subagents get the board through the child-session hook, and only subagents of a session that has one. Each sees a short system prompt section at its first run: the open cards, its own card, and the rule to read the board before editing files another card may own. A subagent can list the board, post progress on its own card with `note` (`doing`, or `blocked` with the reason when it needs the coordinator), and `add` `todo` cards for follow-up work it finds. It cannot drop or retitle cards or touch other agents' cards. Nested subagents share their root session's board. Herder steps get no board, and neither do agents whose `extensions:` leave out `swarm-board`, such as `recon`.
+
+The session stores the board as `swarm-board` entries, writing a snapshot after its own changes and, batched, after its subagents' changes. The board survives `/reload` and resuming, and follows the branch on `/tree` and forks. Other extensions in the Pi process read live boards in `globalThis[Symbol.for("pi-extensions.swarm-boards")]` (contract in `board.ts`), which [pika](../pika/README.md) uploads and shows in a room's Board view.
 
 ## The prompt cache
 
