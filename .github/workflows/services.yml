@@ -1,0 +1,150 @@
+# Offline gates for the services: the pika-node daemon, the pika web UI, and the pika Rust server.
+# Each job runs only when its inputs change (the `changes` job); workflow_dispatch runs all three.
+# pika-image.yml builds and smoke-tests the release image.
+name: Services CI
+
+on:
+  pull_request:
+    paths:
+      - services/pika/**
+      - services/pika-node/**
+      - README.md
+      - docs/**
+      - extensions/**/README.md
+      - .github/workflows/services.yml
+  push:
+    branches:
+      - master
+    paths:
+      - services/pika/**
+      - services/pika-node/**
+      - README.md
+      - docs/**
+      - extensions/**/README.md
+      - .github/workflows/services.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: services-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect changed services
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pika-node: ${{ steps.filter.outputs.pika-node }}
+      pika-web: ${{ steps.filter.outputs.pika-web }}
+      pika-server: ${{ steps.filter.outputs.pika-server }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            pika-node:
+              - services/pika-node/**
+              - services/pika/docs/NODE.md
+              - .github/workflows/services.yml
+            pika-web:
+              - services/pika/web/**
+              - services/pika/resource/**
+              - services/pika-node/src/**
+              # The docs build reads these (services/pika/web/docs/sources.ts).
+              - README.md
+              - docs/**
+              - extensions/**/README.md
+              - services/pika/README.md
+              - .github/workflows/services.yml
+            pika-server:
+              - services/pika/**
+              - .github/workflows/services.yml
+
+  pika-node:
+    name: Verify pika-node
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.pika-node == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: services/pika-node
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: services/pika-node/package-lock.json
+
+      # node-pty has no Linux prebuild, so its install script compiles it with node-gyp.
+      - name: Install package dependencies
+        run: npm ci
+
+      - name: Check node-pty spawns a PTY
+        run: node scripts/preflight.ts
+
+      - name: Run tests
+        run: npm test
+
+      - name: Run typecheck
+        run: npx tsc --noEmit
+
+  pika-web:
+    name: Verify pika web
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.pika-web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: services/pika/web
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: services/pika/web/package-lock.json
+
+      - name: Install package dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  pika-server:
+    name: Verify pika server
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.pika-server == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services/pika
+
+      # Debug builds serve a placeholder page when web/dist is missing (services/pika/src/http/ui.rs).
+      - name: Run tests
+        run: cargo test --locked --manifest-path services/pika/Cargo.toml
