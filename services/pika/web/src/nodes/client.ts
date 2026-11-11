@@ -1,0 +1,375 @@
+import { ChannelClosed, NodeChannel, NodeRequestError, type ChannelState } from "./channel";
+import { sanitize, type Identity, type NodeEvent, type NodeInfo, type PaneView, type TerminalInfo } from "./contract";
+import { clientIdentity, webCryptoAvailable, type KeyStore, type PinnedNode } from "./identity";
+import { NodeSocket, OpenRefused, type NodeSocketOptions, type SocketStatus } from "./socket";
+
+/** How often a ready node's terminal list refreshes: the contract has no event for terminals other tabs create or kill. */
+export const TERMINAL_LIST_MS = 10_000;
+
+/** Channel closes after which the page opens a new channel on its own; any other close waits for the user. */
+const TRANSIENT = new Set(["disconnected", "node_offline", "client_gone"]);
+
+export type NodeLink =
+	| { kind: "idle" }
+	| { kind: "opening" }
+	| { kind: "refused"; code: string }
+	| ChannelState;
+
+export interface NodeView {
+	info: NodeInfo;
+	pin?: PinnedNode;
+	link: NodeLink;
+	/** Newest first, as `term.list` orders them. */
+	terminals: TerminalInfo[];
+	/** The last `error` event or failed request, for display. */
+	error?: string;
+	/** The current channel's number, which changes with every new channel: terminal views attach again. */
+	epoch: number;
+}
+
+export interface NodesSnapshot {
+	/** `insecure`: no WebCrypto (not a secure context). `failed`: the client key could not be loaded. */
+	status: "loading" | "insecure" | "failed" | SocketStatus;
+	failure?: string;
+	fingerprint?: string;
+	nodes: NodeView[];
+}
+
+export interface NodesClientOptions {
+	socketUrl: string;
+	store: KeyStore;
+	label: string;
+	socket?: NodeSocketOptions;
+}
+
+interface NodeEntry {
+	pin?: PinnedNode;
+	link: NodeLink;
+	channel?: NodeChannel;
+	terminals: TerminalInfo[];
+	error?: string;
+	epoch: number;
+	refresh?: ReturnType<typeof setInterval>;
+}
+
+const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/** Untrusted text from a node, cleaned for display (NODE.md, "Untrusted text"). */
+export function cleanTerminal(info: TerminalInfo): TerminalInfo {
+	return { ...info, title: sanitize(info.title), cwd: sanitize(info.cwd) };
+}
+
+/**
+ * The Nodes page's state outside React: the client key, pins, the browser socket, and one channel per pinned node.
+ * Channels open on their own only to pinned nodes; an unpinned node gets a channel only from `pair`.
+ */
+export class NodesClient {
+	#options: NodesClientOptions;
+	#identity: Identity | undefined;
+	#socket: NodeSocket | undefined;
+	#entries = new Map<string, NodeEntry>();
+	#listeners = new Set<() => void>();
+	#snapshot: NodesSnapshot = { status: "loading", nodes: [] };
+	#status: NodesSnapshot["status"] = "loading";
+	#failure: string | undefined;
+	#disposed = false;
+
+	constructor(options: NodesClientOptions) {
+		this.#options = options;
+	}
+
+	async start(): Promise<void> {
+		if (!webCryptoAvailable()) {
+			this.#status = "insecure";
+			this.#emit();
+			return;
+		}
+		try {
+			this.#identity = await clientIdentity(this.#options.store);
+			for (const pin of await this.#options.store.pins()) this.#entry(pin.node).pin = pin;
+		} catch (error) {
+			this.#status = "failed";
+			this.#failure = messageOf(error);
+			this.#emit();
+			return;
+		}
+		if (this.#disposed) return;
+		this.#socket = new NodeSocket(this.#options.socketUrl, this.#options.socket);
+		this.#socket.subscribe(() => this.#sync());
+		this.#sync();
+	}
+
+	dispose(): void {
+		this.#disposed = true;
+		for (const entry of this.#entries.values()) {
+			clearInterval(entry.refresh);
+			entry.channel?.close("closed");
+		}
+		this.#socket?.dispose();
+	}
+
+	subscribe = (listener: () => void): (() => void) => {
+		this.#listeners.add(listener);
+		return () => this.#listeners.delete(listener);
+	};
+
+	getSnapshot = (): NodesSnapshot => this.#snapshot;
+
+	/** The ready channel to `node`, for terminal views. */
+	channel(node: string): NodeChannel | undefined {
+		const entry = this.#entries.get(node);
+		return entry?.link.kind === "ready" ? entry.channel : undefined;
+	}
+
+	/** Opens an unpinned channel so the user can enrol this browser or confirm the node's key. */
+	pair(node: string): void {
+		this.#connect(node);
+	}
+
+	/** The user confirmed the node fingerprint shown in `confirm`: pin it, then open a new, pinned channel. */
+	async confirmPin(node: string): Promise<void> {
+		const entry = this.#entry(node);
+		const link = entry.link;
+		if (link.kind !== "confirm") throw new Error("There is no node key waiting for confirmation.");
+		const pin: PinnedNode = {
+			node,
+			fingerprint: link.nodeFingerprint,
+			publicKey: link.nodeKey,
+			name: this.#socket?.nodes.find((item) => item.id === node)?.name ?? node,
+			pinnedAt: Date.now(),
+		};
+		await this.#options.store.pin(pin);
+		entry.pin = pin;
+		this.#drop(entry, "closed");
+		this.#connect(node);
+	}
+
+	/** The fingerprints did not match: close without pinning. */
+	rejectPin(node: string): void {
+		const entry = this.#entry(node);
+		this.#drop(entry, "closed");
+		entry.link = { kind: "closed", code: "fingerprint_mismatch" };
+		this.#emit();
+	}
+
+	/** Removes the pin (after `node_key_changed`, when the user knows why the key changed). */
+	async forgetPin(node: string): Promise<void> {
+		await this.#options.store.unpin(node);
+		const entry = this.#entry(node);
+		entry.pin = undefined;
+		this.#drop(entry, "closed");
+		entry.link = { kind: "idle" };
+		this.#emit();
+	}
+
+	/** Tries a node again after a close that does not reconnect on its own. */
+	retry(node: string): void {
+		this.#connect(node);
+	}
+
+	async createTerminal(node: string, size: { cols: number; rows: number }): Promise<TerminalInfo> {
+		const { terminal } = await this.#request(node, (channel) => channel.request("term.create", size));
+		await this.refreshTerminals(node);
+		return terminal;
+	}
+
+	async killTerminal(node: string, terminalId: string): Promise<void> {
+		await this.#request(node, (channel) => channel.request("term.kill", { terminalId }));
+		await this.refreshTerminals(node);
+	}
+
+	/** `pane.seen`: clears the terminal's unread flag on the node, for every client. */
+	seen(node: string, terminalId: string): void {
+		const channel = this.channel(node);
+		channel?.notify({ type: "pane.seen", terminalId }).catch((error: unknown) => this.#fail(node, error));
+	}
+
+	async refreshTerminals(node: string): Promise<void> {
+		const { terminals } = await this.#request(node, (channel) => channel.request("term.list", {}));
+		const entry = this.#entry(node);
+		entry.terminals = terminals.map(cleanTerminal);
+		this.#emit();
+	}
+
+	async #request<T>(node: string, run: (channel: NodeChannel) => Promise<T>): Promise<T> {
+		const channel = this.channel(node);
+		if (!channel) throw new Error("The node is not connected.");
+		try {
+			return await run(channel);
+		} catch (error) {
+			this.#fail(node, error);
+			throw error;
+		}
+	}
+
+	#fail(node: string, error: unknown): void {
+		if (error instanceof ChannelClosed) return;
+		this.#entry(node).error = error instanceof NodeRequestError ? `${error.code}: ${error.message}` : messageOf(error);
+		this.#emit();
+	}
+
+	#entry(node: string): NodeEntry {
+		let entry = this.#entries.get(node);
+		if (!entry) {
+			entry = { link: { kind: "idle" }, terminals: [], epoch: 0 };
+			this.#entries.set(node, entry);
+		}
+		return entry;
+	}
+
+	/** Opens channels to pinned nodes that are online and not connected, after transient closes too. */
+	#sync(): void {
+		const socket = this.#socket;
+		if (!socket) return;
+		this.#status = socket.status;
+		if (socket.status === "open") {
+			for (const info of socket.nodes) {
+				const entry = this.#entry(info.id);
+				if (!entry.pin || !info.online) continue;
+				const link = entry.link;
+				if (link.kind === "idle" || (link.kind === "refused" && TRANSIENT.has(link.code)) || (link.kind === "closed" && TRANSIENT.has(link.code))) {
+					this.#connect(info.id);
+				}
+			}
+		}
+		this.#emit();
+	}
+
+	#connect(node: string): void {
+		const socket = this.#socket;
+		const identity = this.#identity;
+		if (!socket || !identity) return;
+		const entry = this.#entry(node);
+		this.#drop(entry, "closed");
+		entry.link = { kind: "opening" };
+		entry.error = undefined;
+		const epoch = ++entry.epoch;
+		this.#emit();
+		socket.open(node).then(
+			async (route) => {
+				if (entry.epoch !== epoch || this.#disposed) {
+					route.close("closed");
+					return;
+				}
+				const channel = new NodeChannel(route, { identity, pinned: entry.pin?.fingerprint, label: this.#options.label });
+				entry.channel = channel;
+				channel.onState((state) => this.#channelState(node, channel, state));
+				channel.onEvent((event) => this.#event(node, event));
+				entry.link = channel.state;
+				this.#emit();
+				try {
+					await channel.start();
+				} catch (error) {
+					channel.close("handshake_failed");
+					entry.error = messageOf(error);
+					this.#emit();
+				}
+			},
+			(error: unknown) => {
+				if (entry.epoch !== epoch) return;
+				entry.link = { kind: "refused", code: error instanceof OpenRefused ? error.code : messageOf(error) };
+				this.#emit();
+			},
+		);
+	}
+
+	#drop(entry: NodeEntry, code: string): void {
+		clearInterval(entry.refresh);
+		entry.refresh = undefined;
+		const channel = entry.channel;
+		entry.channel = undefined;
+		channel?.close(code);
+	}
+
+	#channelState(node: string, channel: NodeChannel, state: ChannelState): void {
+		const entry = this.#entry(node);
+		if (entry.channel !== channel) return;
+		entry.link = state;
+		if (state.kind === "ready") {
+			void this.refreshTerminals(node).catch(() => {});
+			clearInterval(entry.refresh);
+			entry.refresh = setInterval(() => void this.refreshTerminals(node).catch(() => {}), TERMINAL_LIST_MS);
+		} else {
+			clearInterval(entry.refresh);
+			entry.refresh = undefined;
+		}
+		if (state.kind === "closed") {
+			entry.channel = undefined;
+			// A transient close reconnects once the node is back; `#sync` does it now if it already is.
+			if (TRANSIENT.has(state.code)) queueMicrotask(() => this.#sync());
+		}
+		this.#emit();
+	}
+
+	#event(node: string, event: NodeEvent): void {
+		const entry = this.#entry(node);
+		const update = (terminalId: string, change: (info: TerminalInfo) => TerminalInfo): void => {
+			const index = entry.terminals.findIndex((item) => item.terminalId === terminalId);
+			if (index < 0) {
+				// A terminal another tab created: the contract has no event for it, so list again.
+				void this.refreshTerminals(node).catch(() => {});
+				return;
+			}
+			entry.terminals = entry.terminals.map((item, i) => (i === index ? change(item) : item));
+			this.#emit();
+		};
+		switch (event.type) {
+			case "pane.status": {
+				const status: PaneView | undefined = event.status ?? undefined;
+				update(event.terminalId, (info) => {
+					const next = { ...info };
+					if (status) next.status = status;
+					else delete next.status;
+					return next;
+				});
+				return;
+			}
+			case "term.title":
+				update(event.terminalId, (info) => ({ ...info, title: sanitize(event.title) }));
+				return;
+			case "term.exit":
+				update(event.terminalId, (info) => ({ ...info, exited: { code: event.code, signal: event.signal } }));
+				return;
+			case "term.resized":
+				update(event.terminalId, (info) => ({ ...info, cols: event.cols, rows: event.rows }));
+				return;
+			case "error":
+				entry.error = `${event.code}: ${sanitize(event.message)}`;
+				this.#emit();
+				return;
+			default:
+				return;
+		}
+	}
+
+	#emit(): void {
+		const online = new Map((this.#socket?.nodes ?? []).map((info) => [info.id, info]));
+		// Pinned nodes the server no longer lists stay visible, offline, so their pins can be seen and removed.
+		for (const [id, entry] of this.#entries) {
+			if (!online.has(id) && entry.pin) online.set(id, { id, name: entry.pin.name, online: false });
+		}
+		this.#snapshot = {
+			status: this.#status,
+			...(this.#failure ? { failure: this.#failure } : {}),
+			...(this.#identity ? { fingerprint: this.#identity.fingerprint } : {}),
+			nodes: [...online.values()].map((info) => {
+				const entry = this.#entry(info.id);
+				return {
+					info: { ...info, name: sanitize(info.name), ...(info.host ? { host: sanitize(info.host) } : {}) },
+					...(entry.pin ? { pin: entry.pin } : {}),
+					link: entry.link,
+					terminals: entry.terminals,
+					...(entry.error ? { error: entry.error } : {}),
+					epoch: entry.epoch,
+				};
+			}),
+		};
+		for (const listener of this.#listeners) listener();
+	}
+}
+
+/** Waiting panes first, the rest in the node's order (newest first). */
+export function orderTerminals(terminals: readonly TerminalInfo[]): TerminalInfo[] {
+	const waiting = terminals.filter((item) => item.status?.state === "waiting");
+	return [...waiting, ...terminals.filter((item) => item.status?.state !== "waiting")];
+}

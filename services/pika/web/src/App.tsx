@@ -22,6 +22,8 @@ import { SettingsPage } from "./pages/Settings";
 const DocsPage = lazy(() => import("./pages/Docs").then((module) => ({ default: module.DocsPage })));
 const StatisticsPage = lazy(() => import("./pages/Statistics").then((module) => ({ default: module.StatisticsPage })));
 const SessionViewPage = lazy(() => import("./pages/SessionView").then((module) => ({ default: module.SessionViewPage })));
+// The Nodes page bundles xterm.js and its renderers; it loads on demand too.
+const NodesPage = lazy(() => import("./pages/Nodes").then((module) => ({ default: module.NodesPage })));
 
 function SessionPageLoading() {
 	return (
@@ -87,6 +89,8 @@ export function AppRoutes() {
 					<Route path="chatrooms" element={<ChatroomsPage />} />
 					<Route path="chatrooms/:room" element={<ChatroomsPage />} />
 					<Route path="devices" element={<DevicesPage />} />
+					{/* One route, so picking a node or terminal keeps the page, its socket, and its channels. */}
+					<Route path="nodes/:node?/:terminal?" element={<Suspense fallback={<SessionPageLoading />}><NodesPage /></Suspense>} />
 					<Route path="memory" element={<MemoryPage />} />
 					<Route path="settings" element={<SettingsPage />} />
 					<Route path="search" element={<SearchPage />} />

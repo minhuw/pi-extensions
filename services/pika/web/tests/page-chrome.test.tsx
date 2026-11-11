@@ -2,12 +2,14 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import INDEX_HTML from "../index.html?raw";
 import SOURCE from "../../resource/pika-icon.svg?raw";
+import BOOT_JS from "../public/boot.js?raw";
 import { PikaLogo } from "../src/components/icons";
 import { PAGE_COLUMN } from "../src/components/ui";
 import type { RunDetail } from "../src/lib/types";
 import { TRANSCRIPT_COLUMN, TRAJECTORY_COLUMN } from "../src/pages/SessionView";
 import { onlineSession, summary } from "./support/fixtures";
 import { mockLayout, renderApp } from "./support/render";
+import { installMatchMedia } from "./support/media";
 import { createFakeServer } from "./support/server";
 
 /** The logo's shapes as the source of truth draws them: each fill with its path data or circle. */
@@ -80,6 +82,33 @@ describe("logo", () => {
 		expect(svg).toMatch(/^<svg xmlns='http:\/\/www\.w3\.org\/2000\/svg' viewBox='0 0 1254 1254'>/);
 		expect(svg).not.toMatch(/<title|<desc/);
 		expect(logoShapes(svg)).toEqual(logoShapes(SOURCE));
+	});
+});
+
+describe("the page shell under the nodes Content-Security-Policy", () => {
+	it("has no inline script and no <base>: only same-origin script files run", () => {
+		const scripts = [...INDEX_HTML.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
+		expect(scripts.length).toBeGreaterThan(0);
+		for (const [, attributes, body] of scripts) {
+			expect(attributes).toMatch(/\ssrc="\.\/[^"]+"/);
+			expect(body.trim()).toBe("");
+		}
+		expect(INDEX_HTML).not.toMatch(/<base\b|createElement\(["']base/);
+		// `vite-ignore` keeps it a file of its own: the build copies it from public/ and strips the attribute.
+		expect(INDEX_HTML).toContain('<script vite-ignore src="./boot.js"></script>');
+	});
+
+	it.each([
+		["dark", false, "dark"],
+		["light", true, "light"],
+		[null, true, "dark"],
+		[null, false, "light"],
+		["bogus", true, "dark"],
+	] as const)("boot.js sets the theme from storage %s (system dark: %s) to %s", (stored, systemDark, theme) => {
+		if (stored) localStorage.setItem("pika-theme", stored);
+		installMatchMedia(systemDark);
+		new Function(BOOT_JS)();
+		expect(document.documentElement.dataset.theme).toBe(theme);
 	});
 });
 

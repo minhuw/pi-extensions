@@ -235,6 +235,17 @@ function ChatroomsItem() {
 		</NavItem>
 	);
 }
+/** Nodes in the band; hidden unless the server has nodes on. */
+function NodesItem() {
+	const { data } = useHealth();
+	if (!data?.features?.includes("nodes")) return null;
+	return (
+		<NavItem to="/nodes" icon="terminal">
+			Nodes
+		</NavItem>
+	);
+}
+
 /** Opens this page as a visitor who isn't signed in sees it: published trajectories only, loaded anonymously. */
 function GuestViewLink() {
 	const { pathname, search } = useLocation();
@@ -341,6 +352,7 @@ export function Layout({ children }: { children?: ReactNode }) {
 						</NavItem>
 						<ActiveSessionsItem />
 						<ChatroomsItem />
+						<NodesItem />
 						<NavItem to="/devices" icon="device">
 							Devices
 						</NavItem>

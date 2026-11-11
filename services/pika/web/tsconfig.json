@@ -13,6 +13,8 @@
 		"noUnusedParameters": true,
 		"noFallthroughCasesInSwitch": true,
 		"resolveJsonModule": true,
+		// The pika-node contract (`../../pika-node/src/{protocol,crypto}.ts`) imports with `.ts` extensions.
+		"allowImportingTsExtensions": true,
 		"types": ["vite/client"]
 	},
 	"include": ["src", "tests", "vite.config.ts"]
