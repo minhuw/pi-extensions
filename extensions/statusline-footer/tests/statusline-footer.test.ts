@@ -246,7 +246,8 @@ describe("statusline footer visual language", () => {
 		expect(statusHue(theme, "impeccable-live")).toBe(palette[5 % palette.length]);
 		expect(statusHue(theme, "language")).toBe(palette[6 % palette.length]);
 		expect(statusHue(theme, "spokesman")).toBe(palette[7 % palette.length]);
-		for (const [slot, key] of ["autoresearch", "herder", "goal", PROCESS_STATUS_KEY, "subagents", "impeccable-live", "language", "spokesman", "boom", "alwayson", "selfdrive", "representative", "magpie-quota"].entries()) {
+		const slots = { autoresearch: 0, herder: 1, goal: 2, [PROCESS_STATUS_KEY]: 3, subagents: 4, "impeccable-live": 5, language: 6, spokesman: 7, swarm: 8, selfdrive: 10, representative: 11, "magpie-quota": 12 };
+		for (const [key, slot] of Object.entries(slots)) {
 			expect(statusHue(theme, key)).toBe(palette[slot % palette.length]);
 		}
 		for (const state of ["awaiting", "paused"]) {
@@ -1010,7 +1011,7 @@ describe("statusline footer rendering", () => {
 		const multi = "herder: T1 implement worker one · T2 fix worker two · +1 steps · checking unit · phase: T2: fix · log: waiting · 0/3 tasks";
 		const harness = createHarness(`herder-long-${nerdFonts}`, "tui", {
 			model: { id: "claude-opus-4-6" }, extensionStatuses: [],
-			keyedExtensionStatuses: { boom: "💥 boom", herder: operation },
+			keyedExtensionStatuses: { swarm: "🐝 swarm", herder: operation },
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
@@ -1021,7 +1022,7 @@ describe("statusline footer rendering", () => {
 				harness.setStatus("herder", status);
 				const line = harness.getFooter()!.render(80)[0]!;
 				expect(line).toContain("herder: T");
-				expect(line).toContain("💥 boom");
+				expect(line).toContain("🐝 swarm");
 				expect(line).toContain("claude-opus-4-6");
 				expect(line).toContain("42.5%");
 				expect(visibleWidth(line)).toBeLessThanOrEqual(80);
@@ -1391,7 +1392,7 @@ describe("statusline footer rendering", () => {
 	it.each(["full", "compact"])("keeps modes in the %s bar and representative in the optional collaboration summary", async (mode) => {
 		const harness = createHarness(`modes-bar-${mode}`, "tui", {
 			extensionStatuses: [],
-			keyedExtensionStatuses: { representative: "📣 rep #auth", selfdrive: "🚗 selfdrive 2h13m", alwayson: "📡 alwayson", boom: "💥 boom", language: "English" },
+			keyedExtensionStatuses: { representative: "📣 rep #auth", selfdrive: "🚗 selfdrive 2h13m", swarm: "🐝 swarm", language: "English" },
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
@@ -1400,13 +1401,13 @@ describe("statusline footer rendering", () => {
 			const lines = harness.getFooter()!.render(240);
 			const bar = lines[0]!;
 			expect(lines).toHaveLength(mode === "full" ? 5 : 1);
-			const order = ["English", "💥 boom", "📡 alwayson", "🚗 selfdrive 2h13m", "0×"].map(text => bar.indexOf(text));
+			const order = ["English", "🐝 swarm", "🚗 selfdrive 2h13m", "0×"].map(text => bar.indexOf(text));
 			expect(order.every(index => index >= 0)).toBe(true);
 			expect(order).toEqual([...order].sort((a, b) => a - b));
 			expect(lines[mode === "full" ? 1 : 0]).toContain("📣 rep #auth");
 			if (mode === "full") expect(bar).not.toContain("rep #auth");
-			for (const line of lines.slice(1)) expect(line).not.toMatch(/boom|alwayson|selfdrive/);
-			for (const key of ["boom", "alwayson", "selfdrive", "representative"]) {
+			for (const line of lines.slice(1)) expect(line).not.toMatch(/swarm|selfdrive/);
+			for (const key of ["swarm", "selfdrive", "representative"]) {
 				harness.setStatus(key);
 				expect(harness.getFooter()!.render(240).join("\n")).not.toContain(key === "representative" ? "rep #auth" : key);
 			}
@@ -1417,15 +1418,15 @@ describe("statusline footer rendering", () => {
 	});
 
 	it("keeps the other statuses on their row beside the modes in full mode", async () => {
-		const harness = createHarness("modes-beside-row", "tui", { keyedExtensionStatuses: { boom: "💥 boom", other: "SYNC" } });
+		const harness = createHarness("modes-beside-row", "tui", { keyedExtensionStatuses: { swarm: "🐝 swarm", other: "SYNC" } });
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
 			const lines = harness.getFooter()!.render(160);
 			expect(lines).toHaveLength(5);
-			expect(lines[0]).toContain("💥 boom");
+			expect(lines[0]).toContain("🐝 swarm");
 			expect(lines[1]).toContain("SYNC");
-			expect(lines[1]).not.toContain("boom");
+			expect(lines[1]).not.toContain("swarm");
 		} finally {
 			harness.disposeFooter();
 		}
@@ -1439,15 +1440,15 @@ describe("statusline footer rendering", () => {
 			await harness.runCommand("footer", mode);
 			return harness;
 		};
-		const harness = await start(`modes-order-${mode}`, { boom: "💥 boom", alwayson: "📡 alwayson", language: "English" });
+		const harness = await start(`modes-order-${mode}`, { swarm: "🐝 swarm", selfdrive: "🚗 selfdrive", language: "English" });
 		const baseline = await start(`modes-order-baseline-${mode}`, { language: "English" });
 		try {
 			const seen = { modesWithoutLanguage: false, dropped: false };
 			for (let width = 160; width >= 24; width--) {
 				const line = harness.getFooter()!.render(width)[0]!;
-				const boom = line.includes("💥 boom");
-				expect(line.includes("📡 alwayson"), `${width}`).toBe(boom);
-				if (!boom) {
+				const swarm = line.includes("🐝 swarm");
+				expect(line.includes("🚗 selfdrive"), `${width}`).toBe(swarm);
+				if (!swarm) {
 					seen.dropped = true;
 					expect(line, `${width}`).toBe(baseline.getFooter()!.render(width)[0]);
 					continue;
@@ -1703,7 +1704,7 @@ describe("statusline footer powerline style", () => {
 		}
 	});
 
-	it.each(["0", "1"])("keeps numeric context at 140 columns with the long preview identity (Nerd Fonts %s)", async (nerdFonts) => {
+	it.each(["0", "1"])("keeps numeric context at 127 columns with the long preview identity (Nerd Fonts %s)", async (nerdFonts) => {
 		const harness = createHarness(`context-preview-${nerdFonts}`, "tui", {
 			model: {
 				id: "gpt-6.1-terra", provider: "magpie", api: "openai-responses", reasoning: true,
@@ -1718,22 +1719,22 @@ describe("statusline footer powerline style", () => {
 				{ id: "fast-on", type: "custom", customType: "magpie-fast", data: { enabled: true } },
 			],
 			keyedExtensionStatuses: {
-				language: "English", spokesman: "auto · Kimi", boom: "💥 boom",
-				alwayson: "📡 alwayson", selfdrive: "🚗 selfdrive 2h13m",
+				language: "English", spokesman: "auto · Kimi", swarm: "🐝 swarm",
+				selfdrive: "🚗 selfdrive 2h13m",
 			},
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { reason: "startup" });
 		try {
 			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
-			for (const width of [140, 180, 240]) {
+			for (const width of [127, 180, 240]) {
 				const lines = harness.getFooter()!.render(width);
 				for (const line of lines) expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
 				const identity = lines[0]!.replace(/\x1b\[[0-9;]*m/g, "");
-				for (const value of ["gpt-6.1-terra", "FAST", "queued", "XHIGH", "English", "auto · Kimi", "💥 boom", "📡 alwayson", "🚗 selfdrive 2h13m", "2×", "42.5%", "425k/1.0M"]) {
+				for (const value of ["gpt-6.1-terra", "FAST", "queued", "XHIGH", "English", "auto · Kimi", "🐝 swarm", "🚗 selfdrive 2h13m", "2×", "42.5%", "425k/1.0M"]) {
 					expect(identity, `${width}`).toContain(value);
 				}
-				if (width === 140 && nerdFonts === "1") expect(identity).not.toContain("▉");
+				if (width === 127 && nerdFonts === "1") expect(identity).not.toContain("▉");
 			}
 		} finally {
 			vi.unstubAllEnvs();
@@ -2430,7 +2431,7 @@ describe("statusline footer powerline style", () => {
 				keyedExtensionStatuses: {
 					autoresearch: "research 2/5", herder: "herder: T2 integrate · 3/5 tasks", goal: "↻ build · next 4m",
 					subagents: "subagents: on", "impeccable-live": "impeccable: editing", other: "SYNC",
-					language: "English", spokesman: "gpt-4o-mini", boom: "💥 boom", alwayson: "📡 alwayson",
+					language: "English", spokesman: "gpt-4o-mini", swarm: "🐝 swarm",
 					selfdrive: "🚗 selfdrive", representative: "📣 rep #dev", "relay-rooms": "#dev #dev-old #ops",
 				},
 			});
