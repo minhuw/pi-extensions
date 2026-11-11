@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { parseAgentDefinition, parseAgentFrontmatter } from "../src/agent-definitions.js";
+import { serializeAgentFile } from "../src/agent-file-toggle.js";
 import {
   BUILTIN_TOOL_NAMES,
   getAgentConfig,
@@ -96,6 +98,32 @@ describe("agent type registry", () => {
       expect(cfg?.model).toBe("deepseek-flash");
       expect(cfg?.thinking).toBe("max");
       expect(cfg?.serviceTier).toBeUndefined();
+    });
+
+    it("serializeAgentFile round-trips recon and worker extension scoping and serviceTier", () => {
+      for (const name of ["recon", "worker"] as const) {
+        const original = DEFAULT_AGENTS.get(name)!;
+        const serialized = serializeAgentFile(original);
+        const { frontmatter, body } = parseAgentFrontmatter<Record<string, unknown>>(serialized);
+        const parsed = parseAgentDefinition(frontmatter, body, {
+          filename: name,
+          sourcePath: `/tmp/${name}.md`,
+          source: "project",
+        })!;
+        expect(parsed.extensions).toEqual(original.extensions);
+        expect(parsed.extSelectors).toEqual(original.extSelectors);
+        expect(parsed.excludeExtensions).toEqual(original.excludeExtensions);
+        expect(parsed.serviceTier).toBe(original.serviceTier);
+      }
+      const fastSerialized = serializeAgentFile({ ...DEFAULT_AGENTS.get("recon")!, serviceTier: "fast" });
+      expect(fastSerialized).toContain("service_tier: fast");
+      const { frontmatter: fastFm, body: fastBody } = parseAgentFrontmatter<Record<string, unknown>>(fastSerialized);
+      const parsedFast = parseAgentDefinition(fastFm, fastBody, {
+        filename: "recon",
+        sourcePath: "/tmp/recon.md",
+        source: "project",
+      })!;
+      expect(parsedFast.serviceTier).toBe("fast");
     });
 
     it("loads hidden read-only council advisors from extensions/council/agents", () => {
@@ -553,7 +581,7 @@ describe("resolveSpawnType — fail-closed dispatch (#183)", () => {
 });
 
 describe("local fleet runtime tool selection", () => {
-  it("uses read-only search tools for recon/council advisors and full tools for worker", () => {
+  it("uses read-only search tools for recon/council advisors and scoped extensions for recon/worker", () => {
     registerAgents(new Map());
     setDefaultsDisabled(false);
     expect(getAvailableTypes()).toEqual(DEFAULT_AGENT_NAMES);
@@ -562,7 +590,27 @@ describe("local fleet runtime tool selection", () => {
       expect(getToolNamesForType(name)).toEqual(["read", "bash", "grep", "find", "ls"]);
       expect(getConfig(name).excludeExtensions).toBeUndefined();
     }
+    expect(getConfig("recon").extensions).toEqual(["fff", "selfdrive"]);
+    expect(getAgentConfig("recon")?.extSelectors).toEqual(["ext:fff"]);
+    for (const name of COUNCIL_AGENT_NAMES) {
+      expect(getConfig(name).extensions).toBe(true);
+    }
     expect(getToolNamesForType("worker")).toEqual(BUILTIN_TOOL_NAMES);
-    expect(getConfig("worker").excludeExtensions).toBeUndefined();
+    expect(getConfig("worker").extensions).toBe(true);
+    expect(getConfig("worker").excludeExtensions).toEqual([
+      "pi-fff",
+      "statusline-footer",
+      "orca-bridge",
+      "spokesman",
+      "boom",
+      "alwayson",
+      "molt",
+      "language",
+      "autoresearch",
+      "herder",
+      "council",
+      "goal",
+      "pika",
+    ]);
   });
 });

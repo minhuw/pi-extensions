@@ -47,7 +47,8 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
       description:
         'Fast read-only codebase reconnaissance. Use proactively whenever exploring unfamiliar code, answering "where is X / who calls Y / how does Z work", or gathering context that would read 5+ files — launch multiple recon agents in parallel in a single message for independent areas, and return compressed context another agent can use without re-reading files. Specify breadth: "quick", "medium" (default), or "thorough". Do NOT use for implementation or when the exact target path/symbol is already known.',
       builtinToolNames: READ_ONLY_TOOLS,
-      extensions: true,
+      extSelectors: ["ext:fff"],
+      extensions: ["fff", "selfdrive"],
       skills: true,
       model: "deepseek-flash",
       thinking: "max",
@@ -111,6 +112,21 @@ Do not use emojis. Do not propose large refactors.`,
         "Implementation agent for a clear, bounded coding task. Use proactively to parallelize independent file/module changes or empirical verification in a single message, or with inherit_context: true to fork self-contained implementation or test-writing tasks once the plan is clear in the main conversation. Escalates instead of guessing on ambiguous product decisions. Do NOT use for broad exploration (use recon) or trivial single-file edits.",
       // all built-ins
       extensions: true,
+      excludeExtensions: [
+        "pi-fff",
+        "statusline-footer",
+        "orca-bridge",
+        "spokesman",
+        "boom",
+        "alwayson",
+        "molt",
+        "language",
+        "autoresearch",
+        "herder",
+        "council",
+        "goal",
+        "pika",
+      ],
       skills: true,
       systemPrompt: `# WORKER — implement a bounded task
 

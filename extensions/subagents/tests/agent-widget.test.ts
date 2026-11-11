@@ -9,10 +9,31 @@ import {
   getAgentStatsParts,
 } from "../src/ui/agent-widget.js";
 
-it("allows installed extensions in the default fleet while retaining built-in search tools", () => {
-  for (const agent of DEFAULT_AGENTS.values()) {
-    expect(agent.extensions).toBe(true);
-    expect(agent.excludeExtensions).toBeUndefined();
+it("scopes extensions on recon and worker while retaining built-in search tools across the default fleet", () => {
+  expect(DEFAULT_AGENTS.get("recon")?.extensions).toEqual(["fff", "selfdrive"]);
+  expect(DEFAULT_AGENTS.get("recon")?.extSelectors).toEqual(["ext:fff"]);
+  expect(DEFAULT_AGENTS.get("recon")?.excludeExtensions).toBeUndefined();
+
+  expect(DEFAULT_AGENTS.get("worker")?.extensions).toBe(true);
+  expect(DEFAULT_AGENTS.get("worker")?.excludeExtensions).toEqual([
+    "pi-fff",
+    "statusline-footer",
+    "orca-bridge",
+    "spokesman",
+    "boom",
+    "alwayson",
+    "molt",
+    "language",
+    "autoresearch",
+    "herder",
+    "council",
+    "goal",
+    "pika",
+  ]);
+
+  for (const name of ["council-argon", "council-astra", "council-opus"]) {
+    expect(DEFAULT_AGENTS.get(name)?.extensions).toBe(true);
+    expect(DEFAULT_AGENTS.get(name)?.excludeExtensions).toBeUndefined();
   }
   for (const name of ["recon", "council-argon", "council-astra", "council-opus"]) {
     expect(DEFAULT_AGENTS.get(name)?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);

@@ -266,6 +266,7 @@ export function serializeAgentFile(cfg: AgentConfig): string {
   fmFields.push(`tools: ${formatToolsField(cfg.builtinToolNames, cfg.extSelectors, cfg.mcpToolPatterns)}`);
   if (cfg.model) fmFields.push(`model: ${cfg.model}`);
   if (cfg.thinking) fmFields.push(`thinking: ${cfg.thinking}`);
+  if (cfg.serviceTier) fmFields.push(`service_tier: ${cfg.serviceTier}`);
   if (cfg.maxTurns) fmFields.push(`max_turns: ${cfg.maxTurns}`);
   if (cfg.allowedSubagents !== undefined) {
     fmFields.push(`allowed_subagents: ${cfg.allowedSubagents === "all" ? "all" : cfg.allowedSubagents.join(", ")}`);

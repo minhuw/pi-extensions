@@ -1145,7 +1145,9 @@ export async function runAgent(
       }
     }
   }
-  if (keepNames.size > 0 || extNames.size > 0) {
+  // Built-in defaults may also target optional ambient extensions (`fff`, `selfdrive`)
+  // that are absent in standalone or minimal environments.
+  if ((keepNames.size > 0 || extNames.size > 0) && agentConfig?.isDefault !== true) {
     const survivingNames = new Set(
       loader.getExtensions().extensions.flatMap((e) => extensionCanonicalNames(e.path)),
     );
