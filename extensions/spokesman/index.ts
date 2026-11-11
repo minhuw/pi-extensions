@@ -379,25 +379,33 @@ async function writeConfig(next: {
 	}
 }
 
+type LanguagePin = { base: string | null; fallback?: string };
+type LanguageEntry = LanguagePin | { active: string | null; reset?: true };
+
+const isLanguagePin = (entry: SessionEntry): entry is CustomEntry<LanguagePin> =>
+	entry.type === "custom" &&
+	entry.customType === "language" &&
+	typeof entry.data === "object" &&
+	entry.data !== null &&
+	"base" in entry.data;
+
+/**
+ * The language in effect, as the language extension computes it: the latest switch on the current branch, else the
+ * branch's pin, else the session's first pin, since a branch `/tree` moved to before the pin keeps the session's default.
+ * A reset or a null `active` follows the pin. Mirrors `readBranch` in extensions/language/index.ts, the source of truth.
+ */
 function readActiveLanguage(ctx: ExtensionContext): string | undefined {
-	let pin: { base: string | null; fallback?: string } | undefined;
-	let latest: { active: string | null; reset?: true } | undefined;
+	let pin: LanguagePin | undefined;
+	let latest: Extract<LanguageEntry, { active: unknown }> | undefined;
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type !== "custom" || entry.customType !== "language") continue;
-		const data = entry.data as
-			| { base: string | null; fallback?: string }
-			| { active: string | null; reset?: true }
-			| undefined;
+		const data = entry.data as LanguageEntry | undefined;
 		if (!data || typeof data !== "object") continue;
 		if ("base" in data) pin = data;
 		else latest = data;
 	}
-	const base = pin?.base ?? pin?.fallback ?? undefined;
-	if (latest) {
-		if (latest.reset || latest.active === null) return base;
-		return latest.active;
-	}
-	return base;
+	const { base, fallback }: Partial<LanguagePin> = pin ?? ctx.sessionManager.getEntries().find(isLanguagePin)?.data ?? {};
+	return latest?.active ?? base ?? fallback;
 }
 
 export function resolveSpokesmanModel(

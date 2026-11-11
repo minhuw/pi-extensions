@@ -907,6 +907,43 @@ describe("spokesman extension in real Pi sessions", () => {
 		expect(h.errors).toEqual([]);
 	});
 
+	it("asks for the session's pinned language after /tree moves to before the language pin", async () => {
+		const h = await start();
+		await h.command("/spokesman gpt-5.4 always");
+		h.mainQueue.push("Done.");
+		await h.session.prompt("one");
+		const beforePin = h.assistantMessages().length;
+		expect(beforePin).toBe(1);
+		const beforePinEntry = h.session.sessionManager
+			.getBranch()
+			.findLast((entry) => entry.type === "message" && entry.message.role === "assistant")!;
+		// What the language extension writes at a session's first run: { base, fallback? }.
+		h.session.sessionManager.appendCustomEntry("language", { base: null, fallback: "Simplified Chinese" });
+		const rule = "Write the prose in Simplified Chinese.";
+
+		h.mainQueue.push("Done.");
+		await h.session.prompt("two");
+		expect(h.spokesmanRequests.at(-1)!.system).toContain(rule);
+
+		await h.session.navigateTree(beforePinEntry.id);
+		expect(h.session.sessionManager.getBranch().some((entry) => entry.type === "custom" && entry.customType === "language")).toBe(false);
+		h.mainQueue.push("Done.");
+		await h.session.prompt("three");
+		expect(h.spokesmanRequests).toHaveLength(3);
+		expect(h.spokesmanRequests.at(-1)!.system).toContain(rule);
+
+		// A switch on the branch wins; a reset returns to the session's pin.
+		h.session.sessionManager.appendCustomEntry("language", { active: "Deutsch" });
+		h.mainQueue.push("Done.");
+		await h.session.prompt("four");
+		expect(h.spokesmanRequests.at(-1)!.system).toContain("Write the prose in Deutsch.");
+		h.session.sessionManager.appendCustomEntry("language", { active: null, reset: true });
+		h.mainQueue.push("Done.");
+		await h.session.prompt("five");
+		expect(h.spokesmanRequests.at(-1)!.system).toContain(rule);
+		expect(h.errors).toEqual([]);
+	});
+
 	it("ignores child sessions bound with bindAsChild or carrying pi-extensions.session-link", async () => {
 		await writeConfig({ default: "gpt-5.4", mode: "always" });
 
