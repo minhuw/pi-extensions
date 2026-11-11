@@ -1,8 +1,10 @@
 //! Relay routes: the device WebSocket `{base}/api/relay/v1/connect` and session list (bearer token), and the browser's
-//! `relay/sessions`, `relay/messages`, and `relay/events` under `{base}/api/v1/`. See `docs/RELAY.md`.
+//! `relay/sessions`, `relay/messages`, and `relay/events` under `{base}/api/v1/`, and swarm boards (device upload,
+//! browser reads). See `docs/RELAY.md`.
 
 use std::collections::BTreeMap;
 
+use axum::body::Bytes;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
@@ -10,7 +12,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
@@ -20,6 +22,7 @@ use tokio::time::{Duration, Instant};
 
 use super::ingest::bearer;
 use super::{AppState, blocking, error, internal_error};
+use crate::board::{self, Refusal, Saved};
 use crate::relay::{
     self, Closing, Connection, Draft, Frames, Origin, Outcome, Reason, Reply, RoomAction, SessionInfo, StateUpdate,
     close,
@@ -366,6 +369,130 @@ pub async fn delete_room(State(state): State<AppState>, Path(name): Path<String>
     }
 }
 
+fn refusal_response(refusal: Refusal) -> Response {
+    let (status, code, message) = match refusal {
+        Refusal::TooLarge(message) => (StatusCode::PAYLOAD_TOO_LARGE, "too_large", message),
+        Refusal::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid", message),
+    };
+    (status, Json(json!({ "error": code, "message": message }))).into_response()
+}
+
+/// `PUT {base}/api/relay/v1/boards/{sessionId}` with a full board snapshot, for a session the device owns. A snapshot
+/// older than the stored one is answered `stale` and changes nothing.
+pub async fn device_put_board(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let device = match device(&state, &headers).await {
+        Ok(Some((device, _))) => device,
+        Ok(None) => return error(StatusCode::UNAUTHORIZED, "unauthorized"),
+        Err(e) => return internal_error(e),
+    };
+    if !relay::valid_session_id(&session_id) {
+        return error(StatusCode::BAD_REQUEST, "invalid");
+    }
+    if body.len() > board::MAX_BYTES {
+        return refusal_response(Refusal::TooLarge(format!("a board upload is at most {} bytes", board::MAX_BYTES)));
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return refusal_response(Refusal::Invalid("the body must be JSON".into()));
+    };
+    let snapshot = match board::parse(&body, &session_id) {
+        Ok(snapshot) => snapshot,
+        Err(refusal) => return refusal_response(refusal),
+    };
+    let (store, sid) = (state.store.clone(), session_id.clone());
+    let rec = match blocking(move || relay::recorded(&store, &sid)).await {
+        Ok(rec) => rec,
+        Err(e) => return internal_error(e),
+    };
+    match state.relay.owner(&session_id, rec.as_ref().map(|r| r.device.as_str())) {
+        None => return reason_response(Reason::UnknownSession),
+        Some(owner) if owner != device => return reason_response(Reason::NotOwner),
+        Some(_) => {}
+    }
+    let (store, sid, updated_at) = (state.store.clone(), session_id.clone(), snapshot.updated_at);
+    match blocking(move || board::save(&store, &sid, &device, &snapshot)).await {
+        Ok(Saved::Stored) => Json(json!({ "sessionId": session_id, "status": "stored",
+            "updatedAt": format_iso_ms(updated_at) }))
+        .into_response(),
+        Ok(Saved::Stale { updated_at }) => Json(json!({ "sessionId": session_id, "status": "stale",
+            "updatedAt": format_iso_ms(updated_at) }))
+        .into_response(),
+        Err(e) => internal_error(e),
+    }
+}
+
+/// Copies the session labels `name`, `title`, and `project` from `from` into a board's JSON, where present.
+fn label(board: &mut serde_json::Map<String, Value>, from: &serde_json::Map<String, Value>) {
+    for key in ["name", "title", "project"] {
+        if let Some(value) = from.get(key).filter(|v| v.is_string()) {
+            board.insert(key.into(), value.clone());
+        }
+    }
+}
+
+/// `GET relay/boards/{sessionId}` for the browser: one session's board, 404 `not_found` without one.
+pub async fn board(State(state): State<AppState>, Path(session_id): Path<String>) -> Response {
+    refresh_names(&state).await;
+    let (store, ids) = (state.store.clone(), vec![session_id.clone()]);
+    let found = blocking(move || {
+        let boards = board::load(&store, &ids)?;
+        let rec = if boards.is_empty() { None } else { relay::recorded(&store, &ids[0])? };
+        Ok((boards, rec))
+    })
+    .await;
+    let (mut boards, rec) = match found {
+        Ok(found) => found,
+        Err(e) => return internal_error(e),
+    };
+    let Some(found) = boards.pop() else { return error(StatusCode::NOT_FOUND, "not_found") };
+    let mut object = found.to_json();
+    object.insert("deviceName".into(), state.relay.device_name(&found.device).into());
+    if let Some(rec) = rec {
+        label(&mut object, json!({ "name": rec.name, "title": rec.title, "project": rec.project }).as_object().unwrap());
+    }
+    if let Some(online) = state.relay.online().into_iter().find(|s| s.info.id == session_id) {
+        if let Value::Object(online) = online.to_json(false) {
+            label(&mut object, &online);
+        }
+    }
+    Json(Value::Object(object)).into_response()
+}
+
+/// `GET relay/rooms/{name}/boards` for the browser: `{ room, items }`, the boards of the room's member sessions in
+/// member order, each with the member's labels and `online`; 404 `not_found` for an unknown room.
+pub async fn room_boards(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    refresh_names(&state).await;
+    let Some(detail) = state.relay.room(&name, 1, u64::MAX) else { return error(StatusCode::NOT_FOUND, "not_found") };
+    let members: Vec<serde_json::Map<String, Value>> = detail["room"]["members"]
+        .as_array()
+        .map(|members| members.iter().filter_map(|m| m.as_object().cloned()).collect())
+        .unwrap_or_default();
+    let ids: Vec<String> =
+        members.iter().filter_map(|m| m.get("sessionId").and_then(Value::as_str).map(str::to_owned)).collect();
+    let store = state.store.clone();
+    let boards = match blocking(move || board::load(&store, &ids)).await {
+        Ok(boards) => boards,
+        Err(e) => return internal_error(e),
+    };
+    let items: Vec<Value> = boards
+        .iter()
+        .map(|found| {
+            let mut object = found.to_json();
+            object.insert("deviceName".into(), state.relay.device_name(&found.device).into());
+            if let Some(member) = members.iter().find(|m| m.get("sessionId") == Some(&json!(found.session_id))) {
+                label(&mut object, member);
+                object.insert("online".into(), member.get("online").cloned().unwrap_or(json!(false)));
+            }
+            Value::Object(object)
+        })
+        .collect();
+    Json(json!({ "room": detail["room"]["name"], "items": items })).into_response()
+}
+
 /// `GET {base}/api/relay/v1/connect`: the token is checked before the upgrade.
 pub async fn connect(
     State(state): State<AppState>,
@@ -618,6 +745,7 @@ pub fn device_routes(state: &AppState) -> Router<AppState> {
         .route("/api/relay/v1/sessions", get(device_sessions))
         .route("/api/relay/v1/rooms", get(device_rooms).post(device_update_room))
         .route("/api/relay/v1/rooms/{name}", get(device_room_detail))
+        .route("/api/relay/v1/boards/{session}", put(device_put_board))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_enabled))
 }
 
@@ -629,6 +757,8 @@ pub fn browser_routes(state: &AppState, login: impl Fn(Router<AppState>) -> Rout
         .route("/relay/events", get(events))
         .route("/relay/rooms", get(rooms).post(save_room))
         .route("/relay/rooms/{name}", get(room_detail).delete(delete_room))
-        .route("/relay/rooms/{name}/members", post(room_member));
+        .route("/relay/rooms/{name}/members", post(room_member))
+        .route("/relay/rooms/{name}/boards", get(room_boards))
+        .route("/relay/boards/{session}", get(board));
     login(routes).route_layer(middleware::from_fn_with_state(state.clone(), require_enabled))
 }

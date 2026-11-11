@@ -2053,6 +2053,16 @@ impl Relay {
         inner.names_generation += 1;
     }
 
+    /// The current display name of device `id`, its id when it has none.
+    pub fn device_name(&self, id: &str) -> String {
+        name_of(&self.lock().names, id).to_owned()
+    }
+
+    /// The owner of `session` ("Ownership" in `docs/RELAY.md`), given the device pika's sessions table records for it.
+    pub fn owner(&self, session: &str, recorded_device: Option<&str>) -> Option<String> {
+        self.lock().owner(session, recorded_device).map(str::to_owned)
+    }
+
     /// A target as JSON, with its device's current name.
     pub fn target_json(&self, target: &Target) -> Value {
         target.to_json(&self.lock().names)

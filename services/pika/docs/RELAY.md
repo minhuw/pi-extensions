@@ -150,6 +150,27 @@ A room may have one representative: a member session that stands for the user. T
   ```
   One entry per message, updated in place as its status changes. Rejected sends appear with a generated id.
 
+### Boards
+
+A swarm board is the kanban board of a coordinator session: its cards and their status. The coordinator's pi process publishes it in process (see "Swarm boards" under Extension); pika uploads the full snapshot, and the web UI shows the boards of a room's members. The server keeps one board per session, the latest snapshot, in `relay_boards` (schema version 20, not derived, so `pika reindex` leaves it; deleting the session deletes it). Board routes are relay routes: `PIKA_RELAY=off` answers them 404 `relay_disabled`.
+
+```
+Board = { version: 1, sessionId, updatedAt: number /* Unix ms */, cards: Card[] }
+Card = { id, title, status: "todo" | "doing" | "blocked" | "done" | "failed" | "dropped", agentId?, agent?, note?,
+         createdBy, updatedBy, createdAt: number, updatedAt: number }
+```
+
+- **`PUT {base}/api/relay/v1/boards/{sessionId}`** with the bearer token and a `Board` body → 200 `{ sessionId, status: "stored" | "stale", updatedAt }`.
+  - Only the session's owner (see Ownership) may upload: another device answers 403 `not_owner`, a session nobody owns 400 `unknown_session`.
+  - The body is at most 64 KiB and holds at most 200 cards, else 413 `{ error: "too_large", message }`. A body that is not JSON, has another `version`, a `sessionId` other than the path's, a time that is not an integer of Unix milliseconds, an unknown `status`, a card without `id`, `title`, `createdBy`, or `updatedBy` strings, or two cards with one `id` answers 400 `{ error: "invalid", message }`. Unknown fields are dropped.
+  - A snapshot whose `updatedAt` is older than the stored one's changes nothing and answers `stale` with the stored `updatedAt`; an equal one replaces it.
+- **`GET relay/boards/{sessionId}`** (browser) → `BoardView`, or 404 `not_found` when the session has none.
+- **`GET relay/rooms/{name}/boards`** (browser) → `{ room, items: BoardView[] }`, the boards of the room's member sessions in member order, each with the member's `online`; 404 `not_found` for an unknown room.
+  ```
+  BoardView = { sessionId, device, deviceName, name?, title?, project?, online?, updatedAt, receivedAt, cards: CardView[] }
+  ```
+  Times are ISO strings: `updatedAt` the snapshot's, `receivedAt` when the server stored it; `CardView` is `Card` with ISO `createdAt` and `updatedAt`. `name`, `title`, and `project` come from the online session, else the room member or pika's records.
+
 ### Tests (Rust)
 
 Use a WebSocket client (for example `tokio-tungstenite`) against the real router. Cover:
@@ -166,6 +187,7 @@ Use a WebSocket client (for example `tokio-tungstenite`) against the real router
 - `PIKA_RELAY=off`, health `features`, and the browser routes, including web sends;
 - room posts: `unknown_room`, `not_member` storing and pushing nothing, mentions reaching members only with the rest in `unmatched`, and web posts to any existing room;
 - room actions only for the calling device's sessions: each from the owner, 403 `not_owner` from another device changing nothing, 400 `unknown_session` for an id nobody owns;
+- boards: upload by the owner only, validation and the 200-card and 64 KiB caps, stale snapshots, the room and session reads, and deletion with the session;
 - room representatives: `represent` replacing and joining, `unrepresent` by others changing nothing, leaving, browser removal, and deletion clearing it, the `room` frame reaching exactly the online members, and the summaries in every room route.
 
 ## Credentials registry (`extensions/pika/`, additive)

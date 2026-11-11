@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod blobs;
+pub mod board;
 pub mod cli;
 pub mod config;
 pub mod delete;
