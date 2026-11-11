@@ -150,6 +150,27 @@ A room may have one representative: a member session that stands for the user. T
   ```
   One entry per message, updated in place as its status changes. Rejected sends appear with a generated id.
 
+### Boards
+
+A swarm board is the kanban board of a coordinator session: its cards and their status. The coordinator's pi process publishes it in process (see "Swarm boards" under Extension); pika uploads the full snapshot, and the web UI shows the boards of a room's members. The server keeps one board per session, the latest snapshot, in `relay_boards` (schema version 20, not derived, so `pika reindex` leaves it; deleting the session deletes it). Board routes are relay routes: `PIKA_RELAY=off` answers them 404 `relay_disabled`.
+
+```
+Board = { version: 1, sessionId, updatedAt: number /* Unix ms */, cards: Card[] }
+Card = { id, title, status: "todo" | "doing" | "blocked" | "done" | "failed" | "dropped", agentId?, agent?, note?,
+         createdBy, updatedBy, createdAt: number, updatedAt: number }
+```
+
+- **`PUT {base}/api/relay/v1/boards/{sessionId}`** with the bearer token and a `Board` body → 200 `{ sessionId, status: "stored" | "stale", updatedAt }`.
+  - Only the session's owner (see Ownership) may upload: another device answers 403 `not_owner`, a session nobody owns 400 `unknown_session`.
+  - The body is at most 64 KiB and holds at most 200 cards, else 413 `{ error: "too_large", message }`. A body that is not JSON, has another `version`, a `sessionId` other than the path's, a time that is not an integer of Unix milliseconds, an unknown `status`, a card without `id`, `title`, `createdBy`, or `updatedBy` strings, or two cards with one `id` answers 400 `{ error: "invalid", message }`. Unknown fields are dropped.
+  - A snapshot whose `updatedAt` is older than the stored one's changes nothing and answers `stale` with the stored `updatedAt`; an equal one replaces it.
+- **`GET relay/boards/{sessionId}`** (browser) → `BoardView`, or 404 `not_found` when the session has none.
+- **`GET relay/rooms/{name}/boards`** (browser) → `{ room, items: BoardView[] }`, the boards of the room's member sessions in member order, each with the member's `online`; 404 `not_found` for an unknown room.
+  ```
+  BoardView = { sessionId, device, deviceName, name?, title?, project?, online?, updatedAt, receivedAt, cards: CardView[] }
+  ```
+  Times are ISO strings: `updatedAt` the snapshot's, `receivedAt` when the server stored it; `CardView` is `Card` with ISO `createdAt` and `updatedAt`. `name`, `title`, and `project` come from the online session, else the room member or pika's records.
+
 ### Tests (Rust)
 
 Use a WebSocket client (for example `tokio-tungstenite`) against the real router. Cover:
@@ -166,6 +187,7 @@ Use a WebSocket client (for example `tokio-tungstenite`) against the real router
 - `PIKA_RELAY=off`, health `features`, and the browser routes, including web sends;
 - room posts: `unknown_room`, `not_member` storing and pushing nothing, mentions reaching members only with the rest in `unmatched`, and web posts to any existing room;
 - room actions only for the calling device's sessions: each from the owner, 403 `not_owner` from another device changing nothing, 400 `unknown_session` for an id nobody owns;
+- boards: upload by the owner only, validation and the 200-card and 64 KiB caps, stale snapshots, the room and session reads, and deletion with the session;
 - room representatives: `represent` replacing and joining, `unrepresent` by others changing nothing, leaving, browser removal, and deletion clearing it, the `room` frame reaching exactly the online members, and the summaries in every room route.
 
 ## Credentials registry (`extensions/pika/`, additive)
@@ -261,6 +283,18 @@ Register a message renderer for `relay-message` that shows one line, `✉ relay 
 
 **Untrusted fields:** every field of a message comes from another device or the web UI. Before rendering, strip ESC sequences and C0/C1 control characters except `\n` and `\t` from the text and every sender field. In the model-facing header, also collapse whitespace (including newlines) in `name`, `title`, `device`, `deviceName`, and `project` and remove double quotes, so a field cannot forge a second header line.
 
+### Swarm boards
+
+Client-only (`extensions/pika/board.ts`). A coordinator's extension publishes its board in process:
+
+```ts
+globalThis[Symbol.for("pi-extensions.swarm-boards")] ??= { version: 1, boards: new Map(), listeners: new Set() }
+boards: Map<sessionId, Board>        // Board as in "Boards"
+listeners: Set<(board: Board) => void>
+```
+
+pika adds a listener while a top-level session (TUI or RPC mode, no `parentSession` in its header) that it captures is open, and uploads that session's board with `PUT boards/{sessionId}`: the snapshot's `version`, `sessionId`, `updatedAt`, and `cards`, at most once per board per second, always the latest snapshot, and once more at `session_shutdown` (waiting at most 2 s). A failure is recorded as `/pika`'s last error, once until it changes: a network error, 429, or 5xx retries after 5 s, doubling up to 60 s; 400, 401, 403, 404, or 413 stops the board's uploads until the credentials change.
+
 ### Side answers
 
 Client-only (`extensions/pika/relay/side.ts`); the wire format is unchanged. A busy session that leaves a message from another session unread for `relay.sideAnswerSeconds` of `pika.json` (60 s; `relay.sideAnswers: false` or `/relay side off` turns it off) answers it with one model request beside the turn:
@@ -337,6 +371,7 @@ When the session is idle, the notice starts a turn, and its content ends with th
 - **"Recent messages"** on the same page: the events, newest first. Each shows the sender, the target, the status (with the reason for rejections), the time, and the text collapsed to 3 lines and expandable.
 - **Session page:** shows an "Online" badge and the same Message action when the session is online.
 - **Turns started by a relay message:** `GET sessions/:id/turns` gains `customType?: string`, the `customType` of the `custom_message` that started the turn (absent for user prompts). It is read from the existing `entries.custom_type` at the turn's `startSeq`, so it needs no migration or reindex. The turn list shows a `relay-message` turn as "Relay message" with a message icon instead of "Prompt N" with a person icon, and other extension-started turns as "Extension message"; their text is unchanged.
+- **Room boards:** a chatroom's header has a Messages | Board switch. Board replaces the messages and composer with the swarm boards of the room's members (`GET relay/rooms/{name}/boards`, polled every 3 s like the history): one group per coordinator session, headed by its name, project, device, and when it was updated, with columns To do, Doing, Blocked, and Done. Failed and dropped cards sit under Done with a "Failed" or "Dropped" tag. Each card shows its title, note, agent, and when it was updated. Without boards, one line says so.
 - **No relay:** when the server has relay off, or health lacks `"relay"`, the page explains that relay is off and the sidebar item is hidden.
 - Tests in the existing web suite, in the existing Notion-like style, in light and dark.
 

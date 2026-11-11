@@ -742,6 +742,42 @@ export interface RelayRoomDetail {
 	messages: RelayRoomMessage[];
 }
 
+export type SwarmCardStatus = "todo" | "doing" | "blocked" | "done" | "failed" | "dropped";
+
+/** One card of a coordinator session's swarm board (see "Boards" in `docs/RELAY.md`). */
+export interface SwarmCard {
+	id: string;
+	title: string;
+	status: SwarmCardStatus;
+	agentId?: string;
+	agent?: string;
+	note?: string;
+	createdBy: string;
+	updatedBy: string;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface SwarmBoard {
+	sessionId: string;
+	device: string;
+	deviceName: string;
+	name?: string;
+	title?: string;
+	project?: string;
+	online?: boolean;
+	/** When the coordinator last changed the board. */
+	updatedAt: string;
+	/** When the server stored the snapshot. */
+	receivedAt: string;
+	cards: SwarmCard[];
+}
+
+export interface RelayRoomBoards {
+	room: string;
+	items: SwarmBoard[];
+}
+
 // pi session entry and message shapes (session-format.md, message-types.md).
 
 export interface TextContent {

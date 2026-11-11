@@ -291,6 +291,7 @@ fn delete_session_rows(
         .execute([id])?;
     tx.prepare_cached("DELETE FROM requests WHERE session_id = ?1")?.execute([id])?;
     tx.prepare_cached("DELETE FROM hidden_sessions WHERE id = ?1")?.execute([id])?;
+    tx.prepare_cached("DELETE FROM relay_boards WHERE session_id = ?1")?.execute([id])?;
     crate::memory::dream::delete_checkpoints(tx, id)?;
     Ok(())
 }

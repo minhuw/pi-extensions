@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { getAgentDir, VERSION, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { boardExtension } from "./board.ts";
 import { isAssistant, SessionCapture } from "./capture.ts";
 import { isExcluded, loadConfig, type ConfigResult } from "./config.ts";
 import { publishCredentials } from "./credentials.ts";
@@ -67,6 +68,8 @@ function modelInfo(ctx: ExtensionContext) {
  * sessions from it, and keep memory notes on it. Memory, like relay and recall, never reaches child sessions through the hook.
  */
 export default function pikaExtension(pi: ExtensionAPI): void {
+	// Before capture, so a session's last board upload goes out before its capture ends.
+	boardExtension(pi, { captured: (id) => shared().captures.has(id), noteError: (message) => currentUploader()?.noteError(message) });
 	const capture = captureExtension(pi);
 	projectExtension(pi, capture.refresh);
 	relayExtension(pi);

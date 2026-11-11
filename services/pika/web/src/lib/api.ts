@@ -20,6 +20,7 @@ import type {
 	PairingApproval,
 	RelayEvent,
 	RelayRoom,
+	RelayRoomBoards,
 	RelayRoomDetail,
 	RelaySendResult,
 	RunDetail,
@@ -406,6 +407,10 @@ export class PikaApi {
 
 	relayRoom(name: string, limit?: number, after?: number): Promise<RelayRoomDetail> {
 		return this.request(`relay/rooms/${encodeURIComponent(name.replace(/^#/, ""))}`, { limit, after });
+	}
+
+	relayRoomBoards(name: string): Promise<RelayRoomBoards> {
+		return this.request(`relay/rooms/${encodeURIComponent(name.replace(/^#/, ""))}/boards`);
 	}
 
 	saveRelayRoom(body: { name: string; topic?: string | null; members?: string[] }): Promise<RelayRoomDetail> {

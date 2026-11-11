@@ -40,6 +40,7 @@ import { Icon } from "./icons";
 import { useSigningOut } from "./Layout";
 import { Markdown } from "./Markdown";
 import { ModelMark } from "./ModelName";
+import { RoomBoard } from "./RoomBoard";
 import { BUTTON, cx, Dialog, Pill, Segmented } from "./ui";
 
 export type ThreadSelection =
@@ -1055,6 +1056,9 @@ export function Messenger({
 	const [savingTopic, setSavingTopic] = useState(false);
 	const [topicError, setTopicError] = useState<string | null>(null);
 
+	// A room shows its messages or its members' swarm boards.
+	const [roomView, setRoomView] = useState<"messages" | "board">("messages");
+
 	// Room management & deletion
 	const [managingMembers, setManagingMembers] = useState(false);
 	const [memberBusyId, setMemberBusyId] = useState<string | null>(null);
@@ -1238,6 +1242,7 @@ export function Messenger({
 		setSelectedMentions(new Set());
 		setSendFeedback(null);
 		setManagingMembers(false);
+		setRoomView("messages");
 		setConfirmingDelete(false);
 		setEditingTopic(false);
 		setTopicError(null);
@@ -1698,6 +1703,19 @@ export function Messenger({
 						#{activeRoom.name}
 					</h2>
 					<div className="order-3 ml-auto flex shrink-0 items-center gap-1.5 sm:order-5">
+						<Segmented
+							size="sm"
+							label="Room view"
+							value={roomView}
+							options={[
+								["messages", "Messages"],
+								["board", "Board"],
+							]}
+							onChange={(next) => {
+								setReaderId(null);
+								setRoomView(next);
+							}}
+						/>
 						<button
 							type="button"
 							onClick={() => {
@@ -2051,269 +2069,275 @@ export function Messenger({
 					<>
 						{header}
 
-						<div className="relative flex min-h-0 flex-1 flex-col">
-							<div
-								ref={streamRef}
-								data-imessage-stream=""
-								onScroll={(event) => {
-									const node = event.currentTarget;
-									const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < STICK_PX;
-									stickToBottom.current = atBottom;
-									setScrolledUp(!atBottom);
-								}}
-								className="min-h-0 flex-1 overflow-y-auto"
-							>
-								{messages.length === 0 ? (
-									emptyConversation
-								) : (
-									<ol aria-label="Messages">
-										{messages.map((message) => (
-											<MessageRecord
-												key={message.id}
-												message={message}
-												parentMessage={message.replyTo ? messagesById.get(message.replyTo) : undefined}
-												canLinkSender={message.from.kind === "session" && canLinkSession(message.from.sessionId)}
-												canLinkRecipient={Boolean(message.to && canLinkSession(message.to.sessionId))}
-												now={now}
-												readerMode={readerMode}
-												selected={readerMessage?.id === message.id}
-												highlighted={highlightedId === message.id}
-												expanded={expanded.has(message.id)}
-												onRead={onRead}
-												onInspect={onInspect}
-												onReply={onReply}
-												onJumpToMessage={jumpToMessage}
-											/>
-										))}
-									</ol>
-								)}
-							</div>
-
-							{scrolledUp && messages.length > 0 && (
-								<button
-									type="button"
-									data-imessage-jump-latest=""
-									onClick={() => {
-										stickToBottom.current = true;
-										setScrolledUp(false);
-										streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight, behavior: "smooth" });
-									}}
-									className="absolute bottom-3 left-1/2 z-10 inline-flex h-7 -translate-x-1/2 items-center gap-1.5 rounded-sm border border-ink bg-page px-2.5 text-[12px] font-medium whitespace-nowrap text-ink hover:bg-hover"
-								>
-									<Icon name="arrowDown" size={12} />
-									Jump to latest
-								</button>
-							)}
-						</div>
-
-						{/* Composer */}
-						<div className="shrink-0 border-t border-ink bg-soft px-5 py-3 max-sm:px-4">
-							{replyTo && (
-								<div
-									data-imessage-reply-banner={replyTo.id}
-									className="mb-2 flex items-center gap-2 rounded-sm border border-line border-l border-l-ink bg-page px-3 py-1.5 text-[12.5px]"
-								>
-									<Icon name="reply" size={13} className="shrink-0 text-ink" />
-									<span className="shrink-0 text-muted">Replying to</span>
-									<span className="shrink-0 font-semibold text-ink">{replyTo.sender}</span>
-									<span className="mono shrink-0 !text-[11.5px] text-muted">{shortId(replyTo.id)}</span>
-									<span className="min-w-0 flex-1 truncate text-muted">{replyTo.preview}</span>
-									<button
-										type="button"
-										onClick={() => setReplyTo(null)}
-										aria-label="Cancel reply"
-										data-imessage-cancel-reply=""
-										className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-sm border border-line bg-page text-muted hover:border-ink hover:bg-hover hover:text-ink"
+						{resolvedSelection.kind === "room" && roomView === "board" ? (
+							<RoomBoard room={resolvedSelection.room} now={now} />
+						) : (
+							<>
+								<div className="relative flex min-h-0 flex-1 flex-col">
+									<div
+										ref={streamRef}
+										data-imessage-stream=""
+										onScroll={(event) => {
+											const node = event.currentTarget;
+											const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < STICK_PX;
+											stickToBottom.current = atBottom;
+											setScrolledUp(!atBottom);
+										}}
+										className="min-h-0 flex-1 overflow-y-auto"
 									>
-										<Icon name="close" size={12} />
-									</button>
-								</div>
-							)}
+										{messages.length === 0 ? (
+											emptyConversation
+										) : (
+											<ol aria-label="Messages">
+												{messages.map((message) => (
+													<MessageRecord
+														key={message.id}
+														message={message}
+														parentMessage={message.replyTo ? messagesById.get(message.replyTo) : undefined}
+														canLinkSender={message.from.kind === "session" && canLinkSession(message.from.sessionId)}
+														canLinkRecipient={Boolean(message.to && canLinkSession(message.to.sessionId))}
+														now={now}
+														readerMode={readerMode}
+														selected={readerMessage?.id === message.id}
+														highlighted={highlightedId === message.id}
+														expanded={expanded.has(message.id)}
+														onRead={onRead}
+														onInspect={onInspect}
+														onReply={onReply}
+														onJumpToMessage={jumpToMessage}
+													/>
+												))}
+											</ol>
+										)}
+									</div>
 
-							{resolvedSelection.kind === "room" && activeRoom && (
-								<div className="mb-2 flex flex-wrap items-center gap-1.5 text-[12px]" data-imessage-mention-bar="">
-									<span id={notifyId} className="mr-0.5 font-medium text-muted">
-										Notify
-									</span>
-									<div role="group" aria-labelledby={notifyId} className="flex flex-wrap items-center gap-1.5">
+									{scrolledUp && messages.length > 0 && (
 										<button
 											type="button"
-											onClick={() => toggleMention("all")}
-											data-imessage-mention="all"
-											data-imessage-notify-chip="all"
-											aria-pressed={selectedMentions.has("all")}
-											title="Every member of the room"
-											className={cx(
-												"inline-flex h-6 items-center gap-1 rounded-sm border px-2 font-medium",
-												selectedMentions.has("all")
-													? "border-ink bg-ink text-page"
-													: "border-line bg-page text-ink hover:border-ink hover:bg-hover",
-											)}
+											data-imessage-jump-latest=""
+											onClick={() => {
+												stickToBottom.current = true;
+												setScrolledUp(false);
+												streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight, behavior: "smooth" });
+											}}
+											className="absolute bottom-3 left-1/2 z-10 inline-flex h-7 -translate-x-1/2 items-center gap-1.5 rounded-sm border border-ink bg-page px-2.5 text-[12px] font-medium whitespace-nowrap text-ink hover:bg-hover"
 										>
-											<span>All</span>
-											<span className="mono !text-[11px] opacity-80">@all</span>
+											<Icon name="arrowDown" size={12} />
+											Jump to latest
 										</button>
+									)}
+								</div>
 
-										{activeRoom.representative && activeRoom.members.some((m) => m.sessionId === activeRoom.representative) && (
+								{/* Composer */}
+								<div className="shrink-0 border-t border-ink bg-soft px-5 py-3 max-sm:px-4">
+									{replyTo && (
+										<div
+											data-imessage-reply-banner={replyTo.id}
+											className="mb-2 flex items-center gap-2 rounded-sm border border-line border-l border-l-ink bg-page px-3 py-1.5 text-[12.5px]"
+										>
+											<Icon name="reply" size={13} className="shrink-0 text-ink" />
+											<span className="shrink-0 text-muted">Replying to</span>
+											<span className="shrink-0 font-semibold text-ink">{replyTo.sender}</span>
+											<span className="mono shrink-0 !text-[11.5px] text-muted">{shortId(replyTo.id)}</span>
+											<span className="min-w-0 flex-1 truncate text-muted">{replyTo.preview}</span>
 											<button
 												type="button"
-												onClick={() => toggleMention(activeRoom.representative!)}
-												data-imessage-notify-rep={activeRoom.representative}
-												aria-pressed={selectedMentions.has("all") || selectedMentions.has(activeRoom.representative)}
-												title="Notify the room's representative"
-												className={cx(
-													"inline-flex h-6 items-center gap-1 rounded-sm border px-2 font-medium",
-													selectedMentions.has("all") || selectedMentions.has(activeRoom.representative)
-														? "border-ink bg-ink text-page"
-														: "border-line bg-page text-ink hover:border-ink hover:bg-hover",
-												)}
+												onClick={() => setReplyTo(null)}
+												aria-label="Cancel reply"
+												data-imessage-cancel-reply=""
+												className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-sm border border-line bg-page text-muted hover:border-ink hover:bg-hover hover:text-ink"
 											>
-												Rep
+												<Icon name="close" size={12} />
 											</button>
-										)}
+										</div>
+									)}
 
-										{activeRoom.members.map((m) => {
-											const active = selectedMentions.has("all") || selectedMentions.has(m.sessionId);
-											const isRep = m.sessionId === activeRoom.representative;
-											return (
+									{resolvedSelection.kind === "room" && activeRoom && (
+										<div className="mb-2 flex flex-wrap items-center gap-1.5 text-[12px]" data-imessage-mention-bar="">
+											<span id={notifyId} className="mr-0.5 font-medium text-muted">
+												Notify
+											</span>
+											<div role="group" aria-labelledby={notifyId} className="flex flex-wrap items-center gap-1.5">
 												<button
-													key={m.sessionId}
 													type="button"
-													onClick={() => toggleMention(m.sessionId)}
-													data-imessage-mention={m.sessionId}
-													data-imessage-notify-chip={m.sessionId}
-													aria-pressed={active}
-													title={[m.project, memberDevice(m)].filter(Boolean).join(" · ") || m.sessionId}
+													onClick={() => toggleMention("all")}
+													data-imessage-mention="all"
+													data-imessage-notify-chip="all"
+													aria-pressed={selectedMentions.has("all")}
+													title="Every member of the room"
 													className={cx(
-														"inline-flex h-6 max-w-[22ch] items-center gap-1 rounded-sm border px-2 font-medium",
-														active
+														"inline-flex h-6 items-center gap-1 rounded-sm border px-2 font-medium",
+														selectedMentions.has("all")
 															? "border-ink bg-ink text-page"
 															: "border-line bg-page text-ink hover:border-ink hover:bg-hover",
 													)}
 												>
-													<span className="truncate">{sessionLabel(m)}</span>
-													{isRep && <RepBadge inverted={active} />}
+													<span>All</span>
+													<span className="mono !text-[11px] opacity-80">@all</span>
 												</button>
-											);
-										})}
-									</div>
-									<span className="ml-auto text-muted">{mentionHint}</span>
-								</div>
-							)}
 
-							<div className="relative">
-								{activeMentionMatch && mentionCandidates.length > 0 && (
-									<ul
-										role="listbox"
-										aria-label="Mention a room member"
-										data-imessage-mention-menu=""
-										className="menu-in absolute right-0 bottom-full left-0 z-20 mb-1 max-h-48 overflow-y-auto rounded-sm border border-ink bg-page py-1"
-									>
-										{mentionCandidates.map((candidate, index) => {
-											const active = index === activeMentionIndex;
-											return (
-												<li key={`${candidate.token}-${index}`} role="option" aria-selected={active}>
+												{activeRoom.representative && activeRoom.members.some((m) => m.sessionId === activeRoom.representative) && (
 													<button
 														type="button"
-														onMouseDown={(e) => e.preventDefault()}
-														onClick={() => insertMentionCandidate(candidate)}
-														data-imessage-mention-option={candidate.token}
+														onClick={() => toggleMention(activeRoom.representative!)}
+														data-imessage-notify-rep={activeRoom.representative}
+														aria-pressed={selectedMentions.has("all") || selectedMentions.has(activeRoom.representative)}
+														title="Notify the room's representative"
 														className={cx(
-															"flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px]",
-															active ? "bg-ink text-page" : "text-ink hover:bg-hover",
+															"inline-flex h-6 items-center gap-1 rounded-sm border px-2 font-medium",
+															selectedMentions.has("all") || selectedMentions.has(activeRoom.representative)
+																? "border-ink bg-ink text-page"
+																: "border-line bg-page text-ink hover:border-ink hover:bg-hover",
 														)}
 													>
-														<span className="mono shrink-0 !text-[12px] font-medium">@{candidate.token}</span>
-														<span className="truncate">{candidate.label}</span>
-														{candidate.representative && <RepBadge inverted={active} />}
-														{candidate.detail && (
-															<span className={cx("ml-auto shrink-0 truncate text-[11.5px]", active ? "text-page/75" : "text-muted")}>
-																{candidate.detail}
-															</span>
-														)}
+														Rep
 													</button>
-												</li>
-											);
-										})}
-									</ul>
-								)}
+												)}
 
-								<div className="rounded-sm border border-line bg-page focus-within:border-ink">
-									<label htmlFor={composerId} className="sr-only">
-										Message
-									</label>
-									<textarea
-										ref={inputRef}
-										id={composerId}
-										rows={2}
-										value={text}
-										onChange={(e) => {
-											const val = e.target.value;
-											const pos = e.target.selectionStart ?? val.length;
-											setText(val);
-											setCursorPos(pos);
-											setDismissedMentionAt(null);
-										}}
-										onSelect={(e) => setCursorPos(e.currentTarget.selectionStart ?? e.currentTarget.value.length)}
-										onKeyDown={onComposerKeyDown}
-										placeholder={
-											resolvedSelection.kind === "room"
-												? `Message #${resolvedSelection.room} (type @ to mention)`
-												: `Message ${activeDm?.label ?? "this session"}`
-										}
-										data-imessage-input=""
-										className="block max-h-60 w-full resize-none bg-transparent px-3 py-2 text-[13.5px] leading-5 outline-none placeholder:text-muted"
-									/>
-									<div className="flex flex-wrap items-center gap-2 border-t border-line bg-soft/50 px-2.5 py-1.5">
-										<button
-											type="button"
-											onClick={() => setUrgent((v) => !v)}
-											aria-pressed={urgent}
-											data-imessage-urgent=""
-											title="Steer into a busy session's current turn instead of waiting for it to finish"
-											className={cx(
-												"inline-flex h-7 items-center gap-1.5 rounded-sm border px-2.5 text-[12.5px] font-medium whitespace-nowrap",
-												urgent
-													? "border-red bg-red-soft text-red"
-													: "border-line bg-page text-muted hover:border-ink hover:bg-hover hover:text-ink",
-											)}
-										>
-											<Icon name="alert" size={13} />
-											Urgent
-										</button>
-										<span className="text-[12px] text-muted max-sm:hidden">
-											<kbd className="mono !text-[11px]">Cmd/Ctrl+Enter</kbd> to send
-										</span>
-										<span
-											data-imessage-bytes=""
-											className={cx("tnum ml-auto text-[12px]", tooLong ? "font-medium text-red" : "text-muted")}
-										>
-											{formatBytes(bytes)} / 32 KB
-										</span>
-										<button
-											type="button"
-											onClick={() => void handleSend()}
-											disabled={!canSend}
-											data-imessage-send=""
-											className={cx(BUTTON.primary, "!h-7")}
-										>
-											{sending ? "Sending…" : "Send"}
-										</button>
+												{activeRoom.members.map((m) => {
+													const active = selectedMentions.has("all") || selectedMentions.has(m.sessionId);
+													const isRep = m.sessionId === activeRoom.representative;
+													return (
+														<button
+															key={m.sessionId}
+															type="button"
+															onClick={() => toggleMention(m.sessionId)}
+															data-imessage-mention={m.sessionId}
+															data-imessage-notify-chip={m.sessionId}
+															aria-pressed={active}
+															title={[m.project, memberDevice(m)].filter(Boolean).join(" · ") || m.sessionId}
+															className={cx(
+																"inline-flex h-6 max-w-[22ch] items-center gap-1 rounded-sm border px-2 font-medium",
+																active
+																	? "border-ink bg-ink text-page"
+																	: "border-line bg-page text-ink hover:border-ink hover:bg-hover",
+															)}
+														>
+															<span className="truncate">{sessionLabel(m)}</span>
+															{isRep && <RepBadge inverted={active} />}
+														</button>
+													);
+												})}
+											</div>
+											<span className="ml-auto text-muted">{mentionHint}</span>
+										</div>
+									)}
+
+									<div className="relative">
+										{activeMentionMatch && mentionCandidates.length > 0 && (
+											<ul
+												role="listbox"
+												aria-label="Mention a room member"
+												data-imessage-mention-menu=""
+												className="menu-in absolute right-0 bottom-full left-0 z-20 mb-1 max-h-48 overflow-y-auto rounded-sm border border-ink bg-page py-1"
+											>
+												{mentionCandidates.map((candidate, index) => {
+													const active = index === activeMentionIndex;
+													return (
+														<li key={`${candidate.token}-${index}`} role="option" aria-selected={active}>
+															<button
+																type="button"
+																onMouseDown={(e) => e.preventDefault()}
+																onClick={() => insertMentionCandidate(candidate)}
+																data-imessage-mention-option={candidate.token}
+																className={cx(
+																	"flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px]",
+																	active ? "bg-ink text-page" : "text-ink hover:bg-hover",
+																)}
+															>
+																<span className="mono shrink-0 !text-[12px] font-medium">@{candidate.token}</span>
+																<span className="truncate">{candidate.label}</span>
+																{candidate.representative && <RepBadge inverted={active} />}
+																{candidate.detail && (
+																	<span className={cx("ml-auto shrink-0 truncate text-[11.5px]", active ? "text-page/75" : "text-muted")}>
+																		{candidate.detail}
+																	</span>
+																)}
+															</button>
+														</li>
+													);
+												})}
+											</ul>
+										)}
+
+										<div className="rounded-sm border border-line bg-page focus-within:border-ink">
+											<label htmlFor={composerId} className="sr-only">
+												Message
+											</label>
+											<textarea
+												ref={inputRef}
+												id={composerId}
+												rows={2}
+												value={text}
+												onChange={(e) => {
+													const val = e.target.value;
+													const pos = e.target.selectionStart ?? val.length;
+													setText(val);
+													setCursorPos(pos);
+													setDismissedMentionAt(null);
+												}}
+												onSelect={(e) => setCursorPos(e.currentTarget.selectionStart ?? e.currentTarget.value.length)}
+												onKeyDown={onComposerKeyDown}
+												placeholder={
+													resolvedSelection.kind === "room"
+														? `Message #${resolvedSelection.room} (type @ to mention)`
+														: `Message ${activeDm?.label ?? "this session"}`
+												}
+												data-imessage-input=""
+												className="block max-h-60 w-full resize-none bg-transparent px-3 py-2 text-[13.5px] leading-5 outline-none placeholder:text-muted"
+											/>
+											<div className="flex flex-wrap items-center gap-2 border-t border-line bg-soft/50 px-2.5 py-1.5">
+												<button
+													type="button"
+													onClick={() => setUrgent((v) => !v)}
+													aria-pressed={urgent}
+													data-imessage-urgent=""
+													title="Steer into a busy session's current turn instead of waiting for it to finish"
+													className={cx(
+														"inline-flex h-7 items-center gap-1.5 rounded-sm border px-2.5 text-[12.5px] font-medium whitespace-nowrap",
+														urgent
+															? "border-red bg-red-soft text-red"
+															: "border-line bg-page text-muted hover:border-ink hover:bg-hover hover:text-ink",
+													)}
+												>
+													<Icon name="alert" size={13} />
+													Urgent
+												</button>
+												<span className="text-[12px] text-muted max-sm:hidden">
+													<kbd className="mono !text-[11px]">Cmd/Ctrl+Enter</kbd> to send
+												</span>
+												<span
+													data-imessage-bytes=""
+													className={cx("tnum ml-auto text-[12px]", tooLong ? "font-medium text-red" : "text-muted")}
+												>
+													{formatBytes(bytes)} / 32 KB
+												</span>
+												<button
+													type="button"
+													onClick={() => void handleSend()}
+													disabled={!canSend}
+													data-imessage-send=""
+													className={cx(BUTTON.primary, "!h-7")}
+												>
+													{sending ? "Sending…" : "Send"}
+												</button>
+											</div>
+										</div>
 									</div>
-								</div>
-							</div>
 
-							{tooLong && <p className="mt-1.5 text-[12px] text-red">The message is over the 32 KB limit. Shorten it to send.</p>}
-							{sendFeedback && (
-								<p
-									data-imessage-feedback={sendFeedback.tone}
-									role={sendFeedback.tone === "error" ? "alert" : "status"}
-									className={cx("mt-1.5 text-[12px]", sendFeedback.tone === "error" ? "text-red" : "text-muted")}
-								>
-									{sendFeedback.message}
-								</p>
-							)}
-						</div>
+									{tooLong && <p className="mt-1.5 text-[12px] text-red">The message is over the 32 KB limit. Shorten it to send.</p>}
+									{sendFeedback && (
+										<p
+											data-imessage-feedback={sendFeedback.tone}
+											role={sendFeedback.tone === "error" ? "alert" : "status"}
+											className={cx("mt-1.5 text-[12px]", sendFeedback.tone === "error" ? "text-red" : "text-muted")}
+										>
+											{sendFeedback.message}
+										</p>
+									)}
+								</div>
+							</>
+						)}
 					</>
 				)}
 			</div>

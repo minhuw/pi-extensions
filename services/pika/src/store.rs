@@ -27,6 +27,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_v17.sql"),
     include_str!("schema_v18.sql"),
     include_str!("schema_v19.sql"),
+    include_str!("schema_v20.sql"),
 ];
 /// The schema version that derives `sessions.project` and `sessions.repository` from the stream's `meta`.
 const REPOSITORY_VERSION: usize = 8;
