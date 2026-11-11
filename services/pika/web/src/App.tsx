@@ -9,6 +9,7 @@ import { ApiContext, ApiError, PikaApi } from "./lib/api";
 import { ActiveSessionsPage } from "./pages/ActiveSessions";
 import { ChatroomsPage } from "./pages/Chatrooms";
 import { DevicesPage } from "./pages/Devices";
+import { ExtensionsPage } from "./pages/Extensions";
 import { NotFoundPage } from "./pages/NotFound";
 import { HerderRunPage, HerderRunsPage } from "./pages/HerderRuns";
 import { LoginPage } from "./pages/Login";
@@ -77,6 +78,7 @@ export function AppRoutes() {
 						}
 					/>
 					<Route path="statistics" element={<Suspense fallback={<SessionPageLoading />}><StatisticsPage /></Suspense>} />
+					<Route path="extensions" element={<ExtensionsPage />} />
 					<Route path="runs" element={<HerderRunsPage />} />
 					<Route path="runs/:id" element={<HerderRunPage />} />
 					<Route path="herder" element={<Navigate to="/runs" replace />} />

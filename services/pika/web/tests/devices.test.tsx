@@ -60,10 +60,10 @@ describe("devices page", () => {
 		await within(nav).findByRole("link", { name: "Active sessions" });
 		// By accessible name: the Search link also shows its `/` shortcut, hidden from assistive technology.
 		const links = within(nav).getAllByRole("link");
-		const order = ["Sessions", "Statistics", "Herder runs", "Active sessions", "Chatrooms", "Devices", "Memory", "Search"].map((name) =>
+		const order = ["Sessions", "Statistics", "Extensions", "Herder runs", "Active sessions", "Chatrooms", "Devices", "Memory", "Search"].map((name) =>
 			links.indexOf(within(nav).getByRole("link", { name })),
 		);
-		expect(order).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+		expect(order).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
 		fireEvent.click(within(nav).getByRole("link", { name: "Devices" }));
 		expect(await screen.findByRole("heading", { name: "Devices", level: 1 })).toBeTruthy();
 	});

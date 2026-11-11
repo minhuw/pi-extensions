@@ -333,6 +333,9 @@ export function Layout({ children }: { children?: ReactNode }) {
 						<NavItem to="/statistics" icon="statistics">
 							Statistics
 						</NavItem>
+						<NavItem to="/extensions" icon="tool">
+							Extensions
+						</NavItem>
 						<NavItem to="/runs" icon="herder">
 							Herder runs
 						</NavItem>

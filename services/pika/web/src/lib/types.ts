@@ -88,6 +88,31 @@ export interface UsageReport {
 	periods: UsagePeriod[];
 }
 
+/** `GET /api/v1/extension-usage`: tool calls and slash commands over the last `days` days, since `since` (Unix ms). */
+export interface ExtensionUsage {
+	days: number;
+	since: number;
+	tools: ToolUsage[];
+	commands: CommandUsage[];
+}
+
+export interface ToolUsage {
+	name: string;
+	calls: number;
+	sessions: number;
+	errors: number;
+	lastAt: number | null;
+}
+
+export interface CommandUsage {
+	command: string;
+	kind: "extension" | "template" | "skill";
+	extension: string | null;
+	uses: number;
+	sessions: number;
+	lastAt: number | null;
+}
+
 export interface HerderLink {
 	runId: string;
 	stepKey: string;

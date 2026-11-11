@@ -5,6 +5,7 @@ import type {
 	BrowserSession,
 	Device,
 	Entry,
+	ExtensionUsage,
 	Facets,
 	Health,
 	Me,
@@ -194,6 +195,11 @@ export class PikaApi {
 		excludeUnpublished?: boolean;
 	}): Promise<UsageReport> {
 		return this.request("usage", params);
+	}
+
+	/** Owner only: there is no public variant. */
+	extensionUsage(days = 90): Promise<ExtensionUsage> {
+		return this.request("extension-usage", { days });
 	}
 
 	visitorOrigins(): Promise<VisitorOrigins> {
