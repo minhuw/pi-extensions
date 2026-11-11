@@ -44,7 +44,7 @@ async function room(options: Partial<SessionOptions> = {}): Promise<[Member, Mem
 }
 
 async function represent(member: Member, name = "auth"): Promise<void> {
-	setModes(member.id, "alwayson");
+	setModes(member.id, "swarm");
 	await member.command(`/relay represent ${name}`);
 	expect(member.lastNote()).toBe(`This session now represents you in #${name}: the room's other members report to it.`);
 }
@@ -52,10 +52,10 @@ async function represent(member: Member, name = "auth"): Promise<void> {
 const roleTexts = (h: Harness) => h.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom_message" && entry.customType === ROLE_TYPE ? [entry.content] : []);
 const contentOf = (h: Harness, id: string) => h.sent.find((sent) => (sent.message.details as { id?: string } | undefined)?.id === id)?.message.content as string;
 
-it("refuses a representative without always-on mode, then tells every member which session represents the room", async () => {
+it("refuses a representative without swarm mode, then tells every member which session represents the room", async () => {
 	const [lead, other] = await room();
 	await lead.command("/relay represent auth");
-	expect(lead.notes.last).toEqual({ type: "warning", message: "Turn on /alwayson first: a representative must stay responsive." });
+	expect(lead.notes.last).toEqual({ type: "warning", message: "Turn on /swarm first: a representative must stay responsive." });
 	expect(relay.rooms.get("auth")!.representative).toBeUndefined();
 	// Frame types the session does not know are ignored.
 	relay.send(other.id, { type: "future-frame", room: "auth" });
@@ -106,10 +106,10 @@ it("tells each model its role once, again after a compaction drops it or /tree l
 	expect(roleTexts(other.h)).toEqual([member]);
 	for (const text of [told, member]) expect(Buffer.byteLength(text)).toBeLessThan(400);
 
-	// Always-on mode goes off: the representative stops, says so, and every model hears it once.
+	// Swarm mode goes off: the representative stops, says so, and every model hears it once.
 	setModes(lead.id);
 	await waitFor(() => relay.rooms.get("auth")!.representative === undefined, 5_000, "the unrepresent");
-	await waitFor(() => lead.notes.messages.includes("Always-on mode is off, so this session no longer represents you in #auth."), 5_000, "the note");
+	await waitFor(() => lead.notes.messages.includes("Swarm mode is off, so this session no longer represents you in #auth."), 5_000, "the note");
 	await waitFor(() => lead.status() === undefined && other.status() === undefined, 5_000, "the statuses");
 	await lead.command("five");
 	await lead.command("six");
@@ -169,7 +169,7 @@ it("/relay represent off stops representing one room or all of them", async () =
 	await waitFor(() => lead.status() === undefined, 5_000, "the cleared status");
 
 	// Representing makes the session a member; leaving the room ends it.
-	setModes(other.id, "alwayson");
+	setModes(other.id, "swarm");
 	await other.command("/relay represent fresh");
 	expect([...relay.rooms.get("fresh")!.members]).toEqual([other.id]);
 	await other.command("/relay leave fresh");
@@ -178,19 +178,19 @@ it("/relay represent off stops representing one room or all of them", async () =
 	expect([...lead.h.errors, ...other.h.errors]).toEqual([]);
 });
 
-it("keeps representing through /reload and a quick return of always-on mode, and checks the mode again after the next start", async () => {
-	// Always-on mode loads before relay and leaves the registry at every shutdown, /reload's too.
+it("keeps representing through /reload and a quick return of swarm mode, and checks the mode again after the next start", async () => {
+	// Swarm mode loads before relay and leaves the registry at every shutdown, /reload's too.
 	let on = true;
-	const alwayson: ExtensionFactory = (pi) => {
-		pi.on("session_start", (_event, ctx) => { if (on) setModes(ctx.sessionManager.getSessionId(), "alwayson"); });
+	const swarm: ExtensionFactory = (pi) => {
+		pi.on("session_start", (_event, ctx) => { if (on) setModes(ctx.sessionManager.getSessionId(), "swarm"); });
 		pi.on("session_shutdown", (_event, ctx) => { setModes(ctx.sessionManager.getSessionId()); });
 	};
-	const [lead, other] = await room({ extensionsBefore: [alwayson] });
+	const [lead, other] = await room({ extensionsBefore: [swarm] });
 	await represent(lead);
 	timing.modesGraceMs = 200;
 
 	setModes(lead.id);
-	setModes(lead.id, "alwayson");
+	setModes(lead.id, "swarm");
 	await sleep(400);
 	expect(relay.rooms.get("auth")!.representative).toBe(lead.id);
 
@@ -201,13 +201,13 @@ it("keeps representing through /reload and a quick return of always-on mode, and
 	expect(relay.rooms.get("auth")!.representative).toBe(lead.id);
 	await waitFor(() => lead.status() === "📣 rep #auth", 5_000, "the status after /reload");
 
-	// After this /reload always-on mode stays off, so the session stops once it lists its rooms.
+	// After this /reload swarm mode stays off, so the session stops once it lists its rooms.
 	on = false;
 	await lead.h.session.reload();
 	await waitFor(() => relay.rooms.get("auth")!.representative === undefined, 5_000, "the unrepresent");
-	await waitFor(() => lead.notes.messages.includes("Always-on mode is off, so this session no longer represents you in #auth."), 5_000, "the note");
+	await waitFor(() => lead.notes.messages.includes("Swarm mode is off, so this session no longer represents you in #auth."), 5_000, "the note");
 
-	// A session the server makes representative without always-on mode stops too.
+	// A session the server makes representative without swarm mode stops too.
 	setModes(other.id);
 	relay.setRepresentative("auth", other.id);
 	await waitFor(() => relay.rooms.get("auth")!.representative === undefined, 5_000, "the member's unrepresent");

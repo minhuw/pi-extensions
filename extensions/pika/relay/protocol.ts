@@ -47,7 +47,7 @@ export const timing = {
 	conversationMs: 30 * 60_000,
 	/** How long a side request may take before it counts as failed and the sender gets a busy notice. */
 	sideTimeoutMs: 120_000,
-	/** How long a representative whose always-on mode went off waits for it to come back before it stops representing. */
+	/** How long a representative whose swarm mode went off waits for it to come back before it stops representing. */
 	modesGraceMs: 500,
 };
 

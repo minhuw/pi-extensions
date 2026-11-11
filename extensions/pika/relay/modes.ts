@@ -1,6 +1,6 @@
 /**
- * The session modes registry: the modes ("alwayson") each top-level session's current branch has on, by session id.
- * Always-on mode publishes it and relay reads it; whoever reads it first creates it.
+ * The session modes registry: the modes ("swarm") each top-level session's current branch has on, by session id.
+ * Swarm mode publishes it and relay reads it; whoever reads it first creates it.
  */
 export const SESSION_MODES = Symbol.for("pi-extensions.session-modes");
 

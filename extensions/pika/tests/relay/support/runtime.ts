@@ -51,7 +51,7 @@ export function setCredentials(url: string | undefined, options: { token?: strin
 	for (const listener of [...registry.listeners]) listener();
 }
 
-/** Publishes a session's modes as always-on mode would, telling every listener. */
+/** Publishes a session's modes as swarm mode would, telling every listener. */
 export function setModes(sessionId: string, ...modes: string[]): void {
 	const registry = sessionModes();
 	if (modes.length) registry.modes.set(sessionId, new Set(modes));
@@ -65,7 +65,7 @@ export interface SessionOptions {
 	workspace: Workspace;
 	/** Extension factories loaded after relay. */
 	extensions?: ExtensionFactory[];
-	/** Extension factories loaded before relay, as always-on mode is. */
+	/** Extension factories loaded before relay, as swarm mode is. */
 	extensionsBefore?: ExtensionFactory[];
 	/** Leave relay out, for example when it loads by path instead. */
 	noRelay?: boolean;

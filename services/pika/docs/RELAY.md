@@ -127,7 +127,7 @@ Message ids are server-generated and URL-safe, carrying 72 random bits plus a co
 
 ### Room representatives
 
-A room may have one representative: a member session that stands for the user. The other members take it that the user does not read their own output and report to the representative, which talks to the user. The extension lets only a session with always-on mode represent (see `/relay represent`).
+A room may have one representative: a member session that stands for the user. The other members take it that the user does not read their own output and report to the representative, which talks to the user. The extension lets only a session with swarm mode represent (see `/relay represent`).
 
 - `represent` makes the session a member if it is not one, and replaces any previous representative.
 - `unrepresent` clears the representative only when this session is it; otherwise nothing changes.
@@ -304,7 +304,7 @@ When the session is idle, the notice starts a turn, and its content ends with th
 - `/relay` shows the connection state and reason, the server URL, this session's id, and the online sessions.
 - `/relay send <sessionId> <text>` sends as the user (hops 1).
 - `/relay rooms`, `/relay join <room> [topic]`, and `/relay leave <room>` list, join, or leave chatrooms; `/relay log` lists the branch's relay messages.
-- `/relay represent <room>` makes this session the room's representative, refused unless always-on mode is on; `/relay represent off [<room>]` stops. Turning always-on off stops representing every room.
+- `/relay represent <room>` makes this session the room's representative, refused unless swarm mode is on; `/relay represent off [<room>]` stops. Turning swarm mode off stops representing every room.
 - `/relay side [on|off]` shows side answers, or overrides `relay.sideAnswers` for this session.
 - `/relay off` and `/relay on` disconnect or reconnect this session for its lifetime.
 

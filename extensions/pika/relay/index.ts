@@ -30,7 +30,7 @@ const SUBCOMMANDS = ["status", "send", "join", "leave", "represent", "rooms", "l
 /** The footer status keys, and the session mode a representative needs. */
 const ROLE_STATUS = "representative";
 const ROOMS_STATUS = "relay-rooms";
-const ALWAYSON = "alwayson";
+const SWARM = "swarm";
 
 /**
  * `failed`: the message never left this session; `unknown`: the server never answered (timeout,
@@ -204,7 +204,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	/** The footer's room statuses as last set, cached independently. */
 	let roleShown: string | undefined;
 	let roomsShown: string | undefined;
-	/** Always-on mode is off while this session represents a room: it stops representing once this fires. */
+	/** Swarm mode is off while this session represents a room: it stops representing once this fires. */
 	let unrepresentTimer: ReturnType<typeof setTimeout> | undefined;
 	const isMember = (room: RelayRoom) => Array.isArray(room?.members) && room.members.some((member) => member.sessionId === sessionId);
 	/** The rooms this session represents, as far as it knows. */
@@ -525,11 +525,11 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	}
 
 	/**
-	 * A representative must keep always-on mode on: without it for `modesGraceMs`, this session stops representing.
+	 * A representative must keep swarm mode on: without it for `modesGraceMs`, this session stops representing.
 	 * The wait lets a shutdown, which also takes the mode out of the registry, cancel it first.
 	 */
 	function checkRepresentation(): void {
-		if (!started || leaving || hasMode(sessionId, ALWAYSON) || !represented().length) {
+		if (!started || leaving || hasMode(sessionId, SWARM) || !represented().length) {
 			clearTimeout(unrepresentTimer);
 			unrepresentTimer = undefined;
 			return;
@@ -537,11 +537,11 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		if (unrepresentTimer) return;
 		unrepresentTimer = setTimeout(() => guard(() => {
 			unrepresentTimer = undefined;
-			if (!started || leaving || hasMode(sessionId, ALWAYSON)) return;
+			if (!started || leaving || hasMode(sessionId, SWARM)) return;
 			void stopRepresenting().then(({ done, failed }) => guard(() => {
 				if (!ctx?.hasUI) return;
-				if (done.length) ctx.ui.notify(`Always-on mode is off, so this session no longer represents you in ${done.join(", ")}.`, "info");
-				if (failed.length) ctx.ui.notify(`Always-on mode is off, but this session could not stop representing you in ${failed.join("; ")}.`, "error");
+				if (done.length) ctx.ui.notify(`Swarm mode is off, so this session no longer represents you in ${done.join(", ")}.`, "info");
+				if (failed.length) ctx.ui.notify(`Swarm mode is off, but this session could not stop representing you in ${failed.join("; ")}.`, "error");
 			}));
 		}), timing.modesGraceMs);
 		unrepresentTimer.unref?.();
@@ -700,7 +700,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", () => {
 		guard(() => {
-			// Always-on mode leaves the registry at every shutdown, /reload's too: that is no turning off, so the
+			// Swarm mode leaves the registry at every shutdown, /reload's too: that is no turning off, so the
 			// session keeps its rooms. The full room list after the next connect checks the registry again.
 			clearTimeout(unrepresentTimer);
 			unrepresentTimer = undefined;
@@ -1136,7 +1136,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		const id = sessionId ?? context.sessionManager.getSessionId();
 		try {
 			if (rest[0] !== "off") {
-				if (!hasMode(id, ALWAYSON)) { context.ui.notify("Turn on /alwayson first: a representative must stay responsive.", "warning"); return; }
+				if (!hasMode(id, SWARM)) { context.ui.notify("Turn on /swarm first: a representative must stay responsive.", "warning"); return; }
 				const detail = await updateRoomMembership(rest[0]!, "represent");
 				learnRoom(detail.room);
 				context.ui.notify(`This session now represents you in #${headerField(detail.room.name)}: the room's other members report to it.`, "info");

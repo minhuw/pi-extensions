@@ -20,25 +20,25 @@ const message = (text = "hi"): SessionEntry => ({ type: "message", id: `e${++ids
 const role = (details: unknown): SessionEntry => ({ type: "custom_message", id: `e${++ids}`, parentId: null, timestamp: "", customType: ROLE_TYPE, content: "", display: false, details } as SessionEntry);
 const compaction = (firstKeptEntryId: string): SessionEntry => ({ type: "compaction", id: `e${++ids}`, parentId: null, timestamp: "", summary: "s", firstKeptEntryId, tokensBefore: 1 } as SessionEntry);
 
-it("creates the session modes registry on first read and reads what always-on mode publishes", () => {
+it("creates the session modes registry on first read and reads what swarm mode publishes", () => {
 	expect(global[SESSION_MODES]).toBeUndefined();
-	expect(hasMode(ME, "alwayson")).toBe(false);
+	expect(hasMode(ME, "swarm")).toBe(false);
 	const registry = global[SESSION_MODES]!;
 	expect(registry).toBe(sessionModes());
 	expect(registry.modes.size).toBe(0);
 	expect(registry.listeners.size).toBe(0);
 
-	// Always-on mode may create it first, as any module copy can.
+	// Swarm mode may create it first, as any module copy can.
 	delete global[SESSION_MODES];
-	const published: SessionModesRegistry = { modes: new Map([[ME, new Set(["alwayson"])]]), listeners: new Set() };
+	const published: SessionModesRegistry = { modes: new Map([[ME, new Set(["swarm"])]]), listeners: new Set() };
 	global[SESSION_MODES] = published;
 	expect(sessionModes()).toBe(published);
-	expect(hasMode(ME, "alwayson")).toBe(true);
-	expect(hasMode(LEAD, "alwayson")).toBe(false);
-	expect(hasMode(undefined, "alwayson")).toBe(false);
-	expect(hasMode(ME, "boom")).toBe(false);
-	published.modes.get(ME)!.delete("alwayson");
-	expect(hasMode(ME, "alwayson")).toBe(false);
+	expect(hasMode(ME, "swarm")).toBe(true);
+	expect(hasMode(LEAD, "swarm")).toBe(false);
+	expect(hasMode(undefined, "swarm")).toBe(false);
+	expect(hasMode(ME, "selfdrive")).toBe(false);
+	published.modes.get(ME)!.delete("swarm");
+	expect(hasMode(ME, "swarm")).toBe(false);
 });
 
 it("sees the entries pi keeps in context: those from the latest compaction's first kept entry on", () => {

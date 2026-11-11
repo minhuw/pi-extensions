@@ -78,7 +78,7 @@ it("learns all joined rooms from full lists, sanitizes and sorts them stably, an
 it("publishes memberships and representative changes independently and clears both on shutdown", async () => {
 	const { h, joined, role, publish, notes } = await online();
 	const id = h.session.sessionId;
-	setModes(id, "alwayson");
+	setModes(id, "swarm");
 	await h.session.prompt("/relay represent dev");
 	await waitFor(() => joined() === "#dev" && role() === "📣 rep #dev");
 
