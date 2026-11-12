@@ -589,6 +589,34 @@ describe("spokesman extension in real Pi sessions", () => {
 		expect(h.errors).toEqual([]);
 	});
 
+	it("refuses /spokesman config writes over an invalid spokesman.json and leaves it untouched", async () => {
+		const invalidFiles = ['{ "default": "gpt-5.4", ', JSON.stringify({ default: "gpt-5.4", mode: "sometimes" })];
+		for (const invalid of invalidFiles) {
+			await writeConfig(invalid);
+			const h = await start();
+
+			// Readers fall back to defaults
+			expect(h.status).toBeUndefined();
+			await h.command("/spokesman default");
+			expect(h.lastNote?.message).toBe("Default for new sessions: off (auto).");
+
+			for (const command of [
+				"/spokesman for claude-*",
+				"/spokesman for all",
+				"/spokesman default off",
+				"/spokesman default mode always",
+				"/spokesman default gpt-5.4",
+			]) {
+				await h.command(command);
+				expect(h.lastNote?.type).toBe("warning");
+				expect(h.lastNote?.message).toContain(`Not writing ${configPath()}`);
+				expect(await readFile(configPath(), "utf8")).toBe(invalid);
+			}
+			expect(h.status).toBeUndefined();
+			expect(h.errors).toEqual([]);
+		}
+	});
+
 	it("auto mode skips short clear responses and rewrites complex gpt-6-sol responses", async () => {
 		await writeConfig({ default: "gpt-5.4", mode: "auto" });
 		const h = await start();

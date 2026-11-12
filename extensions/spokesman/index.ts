@@ -97,6 +97,8 @@ interface SpokesmanConfig {
 	mode: SpokesmanMode;
 	/** Main-model patterns spokesman runs for; undefined means every main model. */
 	mainModels: string[] | undefined;
+	/** Set when spokesman.json exists but failed validation; config writes are refused. */
+	invalid?: true;
 }
 
 interface TrackedWorkItem extends TurnWorkItem {
@@ -348,7 +350,7 @@ async function readConfig(ctx: ExtensionContext): Promise<SpokesmanConfig> {
 		`Ignoring ${path}: expected { "default"?: "<model>", "mode"?: "auto" | "always", "mainModels"?: ["<pattern>", ...] }.`,
 		"warning",
 	);
-	return { default: undefined, mode: "auto", mainModels: undefined };
+	return { default: undefined, mode: "auto", mainModels: undefined, invalid: true };
 }
 
 async function writeConfig(next: {
@@ -1268,6 +1270,14 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 
 			const raw = args.trim();
 			let configured = await readConfig(ctx);
+			const refuseWrite = (): boolean => {
+				if (!configured.invalid) return false;
+				ctx.ui.notify(
+					`Not writing ${configPath()}: the file is invalid. Fix or delete it, then retry.`,
+					"warning",
+				);
+				return true;
+			};
 
 			if (!raw || raw.toLowerCase() === "status") {
 				reportStatus(ctx, configured);
@@ -1297,6 +1307,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 						return;
 					}
 				}
+				if (refuseWrite()) return;
 				await writeConfig({ default: configured.default, mode: configured.mode, mainModels });
 				configured = { ...configured, mainModels };
 				ctx.ui.notify(
@@ -1319,6 +1330,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 					return;
 				}
 				if (rest.toLowerCase() === "off") {
+					if (refuseWrite()) return;
 					await writeConfig({ mainModels: configured.mainModels });
 					configured = { default: undefined, mode: "auto", mainModels: configured.mainModels };
 					ctx.ui.notify(
@@ -1338,6 +1350,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 						);
 						return;
 					}
+					if (refuseWrite()) return;
 					configured = { ...configured, mode: nextMode };
 					await writeConfig(configured);
 					ctx.ui.notify(
@@ -1361,6 +1374,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 					);
 					return;
 				}
+				if (refuseWrite()) return;
 				const nextMode = maybeMode ?? configured.mode;
 				configured = { ...configured, default: validSpec, mode: nextMode };
 				await writeConfig(configured);
