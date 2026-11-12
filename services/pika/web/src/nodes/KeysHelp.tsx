@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react"
 import { BUTTON, Callout, cx } from "../components/ui";
 import { ACTIONS, BUILT_IN, formatChord, KEYS_EXAMPLE, KEYS_KEY, keymapFrom, keySettings, saveKeySettings, subscribeKeys, terminalSafe, type ActionSpec, type Keymap } from "./keys";
 
-const GROUPS: readonly ActionSpec["group"][] = ["General", "Panes", "Tabs", "Terminal", "Files", "Diff"];
+const GROUPS: readonly ActionSpec["group"][] = ["General", "Agents", "Panes", "Tabs", "Terminal", "Files", "Diff"];
 
 function useKeySettings() {
 	return useSyncExternalStore(subscribeKeys, keySettings);

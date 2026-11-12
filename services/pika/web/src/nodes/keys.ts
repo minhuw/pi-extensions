@@ -36,7 +36,11 @@ export type ActionId =
 	| "focus.editor"
 	| "files.toggle"
 	| "diff.next"
-	| "diff.previous";
+	| "diff.previous"
+	| "rail.filter"
+	| "rail.find"
+	| "rail.rename"
+	| "rail.remove";
 
 /** "Go to tab N" in the focused group; tab 9 is the last tab, as in browsers. */
 export type TabNumberId = "tab.1" | "tab.2" | "tab.3" | "tab.4" | "tab.5" | "tab.6" | "tab.7" | "tab.8" | "tab.9";
@@ -45,15 +49,15 @@ const TAB_NUMBERS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
 export interface ActionSpec {
 	id: ActionId;
 	label: string;
-	group: "General" | "Panes" | "Tabs" | "Terminal" | "Files" | "Diff";
+	group: "General" | "Agents" | "Panes" | "Tabs" | "Terminal" | "Files" | "Diff";
 	mac: readonly string[];
 	other: readonly string[];
 	/** May fire while focus is in the terminal (then only with a Cmd or Ctrl+Shift chord). */
 	terminal: boolean;
 	/** May fire while focus is in a text field or the editor. */
 	text: boolean;
-	/** Fires only while focus is there. */
-	only?: "terminal" | "diff";
+	/** Fires only while focus is there (the agent list: on its rows, never in its filter). */
+	only?: "terminal" | "diff" | "rail";
 }
 
 export const ACTIONS: readonly ActionSpec[] = [
@@ -61,6 +65,10 @@ export const ACTIONS: readonly ActionSpec[] = [
 	{ id: "quickOpen", label: "Open a file by name", group: "General", mac: ["Cmd+P"], other: ["Ctrl+Shift+P"], terminal: true, text: true },
 	{ id: "sidebar.left", label: "Show or hide the agent list", group: "General", mac: ["Cmd+Shift+\\"], other: ["Ctrl+Shift+Alt+B"], terminal: true, text: true },
 	{ id: "files.toggle", label: "Show or hide the explorer and changes", group: "General", mac: ["Cmd+\\"], other: ["Ctrl+Shift+\\"], terminal: true, text: true },
+	{ id: "rail.filter", label: "Filter the agent list", group: "Agents", mac: ["Cmd+Alt+F"], other: ["Ctrl+Shift+Alt+F"], terminal: true, text: true },
+	{ id: "rail.find", label: "Filter the agent list (in the list)", group: "Agents", mac: ["/"], other: ["/"], terminal: false, text: false, only: "rail" },
+	{ id: "rail.rename", label: "Rename the agent or project", group: "Agents", mac: ["F2"], other: ["F2"], terminal: false, text: false, only: "rail" },
+	{ id: "rail.remove", label: "Remove the project from Deck", group: "Agents", mac: ["Delete", "Backspace"], other: ["Delete", "Backspace"], terminal: false, text: false, only: "rail" },
 	{ id: "pane.next", label: "Next agent in the list", group: "Panes", mac: ["Cmd+Ctrl+ArrowDown"], other: ["Ctrl+Shift+ArrowDown"], terminal: true, text: true },
 	{ id: "pane.previous", label: "Previous agent in the list", group: "Panes", mac: ["Cmd+Ctrl+ArrowUp"], other: ["Ctrl+Shift+ArrowUp"], terminal: true, text: true },
 	{ id: "pane.waiting", label: "Next pane waiting for you", group: "Panes", mac: ["Cmd+Alt+Enter"], other: ["Ctrl+Shift+Enter"], terminal: true, text: true },
@@ -314,16 +322,18 @@ export interface KeyFocus {
 	/** A text field or the editor (the terminal's own text area counts as the terminal). */
 	text: boolean;
 	diff: boolean;
+	/** The agent list (a row or its filter). */
+	rail?: boolean;
 }
 
 export function focusOf(target: EventTarget | null): KeyFocus {
-	if (!(target instanceof Element)) return { terminal: false, text: false, diff: false };
+	if (!(target instanceof Element)) return { terminal: false, text: false, diff: false, rail: false };
 	const terminal = target.closest(".xterm") !== null;
 	const element = target as HTMLElement;
 	const text =
 		!terminal &&
 		(element.tagName === "INPUT" || element.tagName === "TEXTAREA" || element.tagName === "SELECT" || element.isContentEditable || target.closest(".monaco-editor") !== null);
-	return { terminal, text, diff: target.closest("[data-diff-view]") !== null };
+	return { terminal, text, diff: target.closest("[data-diff-view]") !== null, rail: target.closest("[data-agent-list]") !== null };
 }
 
 /** The action `event` asks for with focus at `focus`, if any. */
@@ -331,6 +341,7 @@ export function resolveKey(keymap: Keymap, event: KeyEventLike, focus: KeyFocus)
 	for (const spec of ACTIONS) {
 		if (spec.only === "terminal" && !focus.terminal) continue;
 		if (spec.only === "diff" && !focus.diff) continue;
+		if (spec.only === "rail" && !focus.rail) continue;
 		if (focus.terminal && !spec.terminal) continue;
 		if (focus.text && !spec.text) continue;
 		for (const chord of keymap.bindings.get(spec.id) ?? []) {

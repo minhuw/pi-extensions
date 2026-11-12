@@ -24,6 +24,8 @@ export type MenuEntry =
 			/** The shortcut that does the same, as `actionShortcut` formats it. */
 			shortcut?: string;
 			disabled?: boolean;
+			/** Why a disabled item cannot run (an older pika-node, a node not connected), under its label. */
+			detail?: string;
 			/** Ends or destroys something (Kill, Remove): red text. */
 			danger?: boolean;
 			/** A choice among several (the current project, the theme): a check before it, and focus starts on it. */
@@ -183,7 +185,14 @@ function MenuList({ request, onClose }: { request: MenuRequest; onClose: () => v
 								</svg>
 							)}
 						</span>
-						<span className="min-w-0 flex-1 truncate">{item.label}</span>
+						<span className="min-w-0 flex-1">
+							<span className="block truncate">{item.label}</span>
+							{item.detail && (
+								<span className="block text-[11px] leading-[1.35] whitespace-normal text-dk-ink-3" data-menu-detail="">
+									{item.detail}
+								</span>
+							)}
+						</span>
 						{item.shortcut && <kbd className="dk-menu-keys">{item.shortcut}</kbd>}
 					</button>
 				),

@@ -25,7 +25,7 @@ import {
 import { KeysHelp } from "../src/nodes/KeysHelp";
 
 const key = (value: string, mods: Partial<KeyEventLike> = {}): KeyEventLike => ({ key: value, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, ...mods });
-const nowhere: KeyFocus = { terminal: false, text: false, diff: false };
+const nowhere: KeyFocus = { terminal: false, text: false, diff: false, rail: false };
 const terminal: KeyFocus = { terminal: true, text: false, diff: false };
 const text: KeyFocus = { terminal: false, text: true, diff: false };
 const diff: KeyFocus = { terminal: false, text: true, diff: true };
@@ -183,12 +183,15 @@ describe("where focus is", () => {
 			<div class="xterm"><textarea id="term"></textarea></div>
 			<input id="field" />
 			<div data-diff-view=""><div class="monaco-editor"><div id="code"></div></div><button id="next"></button></div>
-			<button id="plain"></button>`;
+			<button id="plain"></button>
+			<aside data-agent-list=""><button id="row" data-sidebar-row="r"></button><input id="filter" /></aside>`;
 		const at = (id: string) => focusOf(document.getElementById(id));
-		expect(at("term")).toEqual({ terminal: true, text: false, diff: false });
-		expect(at("field")).toEqual({ terminal: false, text: true, diff: false });
-		expect(at("code")).toEqual({ terminal: false, text: true, diff: true });
-		expect(at("next")).toEqual({ terminal: false, text: false, diff: true });
+		expect(at("term")).toEqual({ terminal: true, text: false, diff: false, rail: false });
+		expect(at("field")).toEqual({ terminal: false, text: true, diff: false, rail: false });
+		expect(at("code")).toEqual({ terminal: false, text: true, diff: true, rail: false });
+		expect(at("next")).toEqual({ terminal: false, text: false, diff: true, rail: false });
+		expect(at("row")).toEqual({ terminal: false, text: false, diff: false, rail: true });
+		expect(at("filter")).toEqual({ terminal: false, text: true, diff: false, rail: true });
 		expect(at("plain")).toEqual(nowhere);
 		expect(focusOf(null)).toEqual(nowhere);
 		document.body.innerHTML = "";

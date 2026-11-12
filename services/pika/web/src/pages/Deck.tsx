@@ -21,15 +21,16 @@ import { currentKeymap, focusOf, resolveKey, type PageCommands } from "../nodes/
 import { KeysHelp } from "../nodes/KeysHelp";
 import { clampWidth, LAYOUT_BOUNDS, loadLayout, saveLayout, type NodesLayout } from "../nodes/layout";
 import { ClosedPanes, closePane, paneEvent, splitPane, type PaneHost } from "../nodes/panes/actions";
-import { focusNext, focusPrevious } from "../nodes/panes/pane-tree";
+import { focusNext, focusPrevious, replaceLeaf } from "../nodes/panes/pane-tree";
 import { QuickOpen } from "../nodes/QuickOpen";
 import { nodeSocketUrl } from "../nodes/socket";
 import { Splitter } from "../nodes/Splitter";
 import { BAR_BUTTON, DeckAppBar, DeckStatusBar } from "../nodes/deck/Chrome";
 import { menuBelow, useMenu, type MenuEntry } from "../nodes/deck/Menu";
 import { DECK_ROOT } from "../nodes/deck/tokens";
+import { AddProjectDialog, NewWorktreeDialog, UndoToast, type UndoNotice } from "../nodes/deck/RailDialogs";
 import { DeckTooltips, tip } from "../nodes/deck/Tooltips";
-import { AgentRail, InboxBadge, railAgents, useInbox } from "../nodes/workspace/AgentRail";
+import { AgentRail, InboxBadge, railAgents, useInbox, type RailOps } from "../nodes/workspace/AgentRail";
 import { flatLayout, inboxBadge, inboxKey, nextNeeding, splitKey, stepKey } from "../nodes/workspace/inbox";
 import { markLabel, paneMark, StatusGlyph, type PaneMark } from "../nodes/workspace/status";
 import {
@@ -189,10 +190,33 @@ function useEditors(client: NodesClient | null, snapshot: NodesSnapshot): (node:
 	return editorFor;
 }
 
-/** The projects each ready node lists, asked again when its terminals change (a new terminal's cwd may add one). */
-function useProjects(client: NodesClient | null, snapshot: NodesSnapshot): ReadonlyMap<string, Project[]> {
+/**
+ * The projects each ready node lists, asked again when its terminals change (a new terminal's cwd may add one) and
+ * when the node says its list changed (`projects.changed`: an edit from this or another browser). `refresh` asks now.
+ */
+function useProjects(client: NodesClient | null, snapshot: NodesSnapshot): [ReadonlyMap<string, Project[]>, (node: string) => Promise<void>] {
 	const [projects, setProjects] = useState<ReadonlyMap<string, Project[]>>(new Map());
 	const asked = useRef(new Map<string, string>());
+	const refresh = useCallback(
+		async (node: string) => {
+			const files = client?.files(node);
+			if (!files) return;
+			try {
+				const result = await files.request("projects.list", {});
+				setProjects((current) => new Map(current).set(node, result.projects));
+			} catch {
+				// A node that cannot list projects still shows its terminals, all in "Other".
+				setProjects((current) => (current.has(node) ? current : new Map(current).set(node, [])));
+			}
+		},
+		[client],
+	);
+	useEffect(() => {
+		if (!client) return;
+		return client.onEvent((node, event) => {
+			if (event.type === "projects.changed") void refresh(node);
+		});
+	}, [client, refresh]);
 	useEffect(() => {
 		if (!client) return;
 		const timers: ReturnType<typeof setTimeout>[] = [];
@@ -203,20 +227,13 @@ function useProjects(client: NodesClient | null, snapshot: NodesSnapshot): Reado
 			if (asked.current.get(node) === key) continue;
 			const first = !asked.current.has(node) || !asked.current.get(node)!.startsWith(`${view.epoch}\n`);
 			asked.current.set(node, key);
-			const files = client.files(node);
-			if (!files) continue;
-			const run = () =>
-				files.request("projects.list", {}).then(
-					(result) => setProjects((current) => new Map(current).set(node, result.projects)),
-					// A node that cannot list projects still shows its terminals, all in "Other".
-					() => setProjects((current) => (current.has(node) ? current : new Map(current).set(node, []))),
-				);
-			if (first) void run();
-			else timers.push(setTimeout(() => void run(), 500));
+			if (!client.files(node)) continue;
+			if (first) void refresh(node);
+			else timers.push(setTimeout(() => void refresh(node), 500));
 		}
 		return () => timers.forEach(clearTimeout);
-	}, [client, snapshot]);
-	return projects;
+	}, [client, snapshot, refresh]);
+	return [projects, refresh];
 }
 
 /**
@@ -388,6 +405,12 @@ interface Closing {
 	name: string;
 }
 
+interface RemovingWorktree {
+	node: string;
+	project: Project;
+	error?: string;
+}
+
 function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	const client = useNodesClient();
 	const snapshot = useSnapshot(client);
@@ -401,11 +424,16 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	const hubVersion = useSyncExternalStore(hub.subscribe, hub.getVersion);
 	const registry = useMemo(() => new SlotRegistry(), []);
 	const recentTerminals = useMemo(() => new RecentTerminals(), []);
-	const projects = useProjects(client, snapshot);
+	const [projects, refreshProjects] = useProjects(client, snapshot);
 	const [quickOpen, setQuickOpen] = useState(false);
 	const [help, setHelp] = useState(false);
 	const [killing, setKilling] = useState<Killing | null>(null);
 	const [closing, setClosing] = useState<Closing | null>(null);
+	const [addingProject, setAddingProject] = useState<string | null>(null);
+	const [creatingWorktree, setCreatingWorktree] = useState<{ node: string; project: string } | null>(null);
+	const [removingWorktree, setRemovingWorktree] = useState<RemovingWorktree | null>(null);
+	const [repairing, setRepairing] = useState<string | null>(null);
+	const [notice, setNotice] = useState<UndoNotice | null>(null);
 	const [busy, setBusy] = useState(false);
 	const [actionError, setActionError] = useState<string | null>(null);
 	const [permission, requestPermission] = useNotificationPermission();
@@ -416,9 +444,18 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 
 	const viewOf = useCallback((node: string) => latest.current.snapshot.nodes.find((item) => item.info.id === node), []);
 	const terminalOf = useCallback((node: string, terminalId: string) => viewOf(node)?.terminals.find((item) => item.terminalId === terminalId), [viewOf]);
-	/** Where a terminal goes: the project whose workspace shows it, else the one its cwd is in. */
+	/**
+	 * Where a terminal goes: the project whose workspace shows it while the node still lists that project, else the
+	 * one its cwd is in. A removed project's terminals so fall to "Other" (or an enclosing project) at once, and an
+	 * undo brings them back.
+	 */
 	const projectFor = useCallback(
-		(node: string, terminal: TerminalInfo) => hub.get(node).projectOf(terminal.terminalId) ?? projectOfTerminal(latest.current.projects.get(node) ?? [], terminal),
+		(node: string, terminal: TerminalInfo) => {
+			const list = latest.current.projects.get(node);
+			const shownIn = hub.get(node).projectOf(terminal.terminalId);
+			if (shownIn && (shownIn === OTHER || !list || list.some((item) => item.path === shownIn))) return shownIn;
+			return projectOfTerminal(list ?? [], terminal);
+		},
 		[hub],
 	);
 	const projectShown = useCallback(
@@ -595,15 +632,15 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 		if (latest.current.nodeId !== node) navigate(`/deck/${encodeURIComponent(node)}/${encodeURIComponent(event.terminalId)}`);
 	};
 
-	/** A new terminal in `project`'s root, in `groupId` (the focused group by default), with focus. */
+	/** A new terminal in `project`'s root, in `groupId` (the focused group by default), with focus; `argv` runs in it. */
 	const newTerminal = useCallback(
-		(node: string, project: string, groupId?: string) =>
+		(node: string, project: string, groupId?: string, argv?: string[]) =>
 			void run(async () => {
 				if (!client) return;
 				const ws = hub.get(node);
 				const release = ws.holdNewTerminals();
 				try {
-					const created = await client.createTerminal(node, { cols: 80, rows: 24 }, project === OTHER ? undefined : project);
+					const created = await client.createTerminal(node, { cols: 80, rows: 24 }, project === OTHER ? undefined : project, argv);
 					ws.know(created.terminalId);
 					const tab = terminalTab(created.terminalId);
 					ws.update(project, (current) => addTab(current, tab, groupId ? { groupId } : {}), { tabId: tab.id, terminalId: created.terminalId });
@@ -906,6 +943,112 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 		return owner && tab ? { node, project: owner, tabId: tab.id, terminalId } : undefined;
 	};
 
+	// --- The rail's operations ---------------------------------------------------------------------------------
+
+	/** Shows a node's project in the workspace. */
+	const openProject = (node: string, next: string) => {
+		hub.get(node).setActive(next);
+		revealed.current = undefined;
+		if (latest.current.nodeId !== node) navigate(`/deck/${encodeURIComponent(node)}`);
+	};
+	const nodeFiles = (node: string) => {
+		const files = client?.files(node);
+		if (!files) throw new Error("The node is not connected.");
+		return files;
+	};
+	const removeProject = (node: string, removed: Project) =>
+		void run(async () => {
+			const files = nodeFiles(node);
+			await files.request("projects.remove", { path: removed.path });
+			const ws = hub.get(node);
+			const wasActive = ws.active === removed.path;
+			if (wasActive) ws.setActive(OTHER);
+			await refreshProjects(node);
+			setNotice({
+				id: Date.now(),
+				message: `Removed ${sanitize(removed.name)} from Deck`,
+				undo: async () => {
+					await nodeFiles(node).request("projects.add", { path: removed.path });
+					await refreshProjects(node);
+					if (wasActive) hub.get(node).setActive(removed.path);
+				},
+			});
+		});
+	const ops: RailOps = {
+		can: (node, capability) => client?.capabilities(node).has(capability) ?? false,
+		connected: (node) => Boolean(client?.channel(node)),
+		fingerprint: (node) => viewOf(node)?.pin?.fingerprint,
+		newTerminal: (node, where, agent) => {
+			const listed = where === OTHER || latest.current.projects.get(node)?.some((item) => item.path === where);
+			const target = listed ? where : OTHER;
+			newTerminal(node, target, undefined, agent ? ["pi"] : undefined);
+			if (latest.current.nodeId !== node) navigate(`/deck/${encodeURIComponent(node)}`);
+		},
+		addProject: (node) => setAddingProject(node),
+		newWorktree: (node, where) => setCreatingWorktree({ node, project: where }),
+		revealProject: (node, where) => {
+			openProject(node, where);
+			setPicked(undefined);
+			setLayout({ filesOpen: true, sidebar: "files" });
+		},
+		removeProject,
+		removeWorktree: (node, worktree) => setRemovingWorktree({ node, project: worktree }),
+		renameProject: (node, path, name) =>
+			void run(async () => {
+				await nodeFiles(node).request("projects.rename", { path, name });
+				await refreshProjects(node);
+			}),
+		renameAgent: (key, label) =>
+			void run(async () => {
+				const { node, terminalId } = splitKey(key);
+				await client?.renameTerminal(node, terminalId, label);
+			}),
+		markRead: (key) => {
+			const { node, terminalId } = splitKey(key);
+			client?.seen(node, terminalId);
+		},
+		markUnread: (key) => {
+			const { node, terminalId } = splitKey(key);
+			client?.markUnread(node, terminalId);
+		},
+		split: (key, direction) => {
+			const found = paneTabOf(key);
+			if (!found) return;
+			hub.get(found.node).update(found.project, (current) => focusPane(current, found.terminalId));
+			splitFocused(found.node, found.project, found.tabId, direction);
+		},
+		restart: (key) =>
+			void run(async () => {
+				const { node, terminalId } = splitKey(key);
+				const old = terminalOf(node, terminalId);
+				if (!client || !old?.exited) return;
+				const ws = hub.get(node);
+				const project = projectFor(node, old);
+				const found = paneTabOf(key);
+				// A login shell's own argv (`[shell, "-l"]`) is the default: no argv, so it does not run inside another.
+				const argv = old.argv.length === 2 && old.argv[1] === "-l" ? undefined : old.argv;
+				const release = ws.holdNewTerminals();
+				try {
+					const created = await client.createTerminal(node, { cols: old.cols, rows: old.rows }, old.cwd, argv);
+					ws.know(created.terminalId);
+					if (found) {
+						ws.update(found.project, (current) => {
+							const tab = current.tabs[found.tabId];
+							return tab?.kind === "terminal" ? setPanes(current, found.tabId, replaceLeaf(tab.panes, terminalId, created.terminalId), created.terminalId) : current;
+						}, { tabId: found.tabId, terminalId: created.terminalId });
+					} else {
+						ws.reveal(project, created.terminalId);
+					}
+					if (old.label) await client.renameTerminal(node, created.terminalId, old.label).catch(() => {});
+					await client.killTerminal(node, terminalId);
+					navigate(`/deck/${encodeURIComponent(node)}/${encodeURIComponent(created.terminalId)}`);
+				} finally {
+					release();
+				}
+			}),
+		repair: (node) => setRepairing(node),
+	};
+
 	// --- Drawing ---------------------------------------------------------------------------------------------
 
 	const filesShown = Boolean(ready && layout.filesOpen);
@@ -985,11 +1128,15 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 								const found = paneTabOf(key);
 								if (found) closePaneOf(found.node, found.project, found.tabId, found.terminalId);
 							}}
-							onKill={(key) => {
+							onKill={(key, confirm) => {
 								const agent = agentMap.get(key);
-								if (agent) setKilling({ node: agent.node.info.id, terminal: agent.terminal });
+								if (!agent) return;
+								if (confirm) setKilling({ node: agent.node.info.id, terminal: agent.terminal });
+								else void run(() => client!.killTerminal(agent.node.info.id, agent.terminal.terminalId));
 							}}
 							header={<h1 className="text-[12px] font-semibold text-dk-ink-2">Agents</h1>}
+							ops={ops}
+							commands={commands}
 						/>
 					</aside>
 					<Splitter
@@ -1165,6 +1312,90 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 					Its edits are not saved on {viewOf(closing.node)?.info.name ?? "the node"}.
 				</ConfirmDialog>
 			)}
+			{addingProject && (
+				<AddProjectDialog
+					nodeName={viewOf(addingProject)?.info.name ?? addingProject}
+					home={(() => {
+						const link = viewOf(addingProject)?.link;
+						return link?.kind === "ready" ? link.welcome.home : "/";
+					})()}
+					listFolders={async (dir) => (await nodeFiles(addingProject).readDir(dir)).entries.filter((entry) => entry.kind === "dir").map((entry) => entry.name)}
+					onAdd={async (path) => {
+						const node = addingProject;
+						const { project: added } = await nodeFiles(node).request("projects.add", { path });
+						await refreshProjects(node);
+						setAddingProject(null);
+						openProject(node, added.path);
+					}}
+					onCancel={() => setAddingProject(null)}
+				/>
+			)}
+			{creatingWorktree && (
+				<NewWorktreeDialog
+					projectName={projectName(projects.get(creatingWorktree.node) ?? [], creatingWorktree.project)}
+					onCreate={async ({ branch, base, startAgent }) => {
+						const { node, project: from } = creatingWorktree;
+						const { project: created } = await nodeFiles(node).request("git.worktreeAdd", { project: from, branch, ...(base ? { base } : {}) });
+						await refreshProjects(node);
+						setCreatingWorktree(null);
+						openProject(node, created.path);
+						if (startAgent) newTerminal(node, created.path, undefined, ["pi"]);
+					}}
+					onCancel={() => setCreatingWorktree(null)}
+				/>
+			)}
+			{removingWorktree && (
+				<ConfirmDialog
+					title={`Remove the worktree ${sanitize(removingWorktree.project.name)}?`}
+					confirmLabel="Remove Worktree"
+					busy={busy}
+					onCancel={() => setRemovingWorktree(null)}
+					onConfirm={() => {
+						const { node, project: worktree } = removingWorktree;
+						setBusy(true);
+						void nodeFiles(node)
+							.request("git.worktreeRemove", { path: worktree.path })
+							.then(async () => {
+								if (hub.get(node).active === worktree.path) hub.get(node).setActive(OTHER);
+								await refreshProjects(node);
+								setRemovingWorktree(null);
+							})
+							.catch((error: unknown) => setRemovingWorktree({ node, project: worktree, error: error instanceof Error ? error.message : String(error) }))
+							.finally(() => setBusy(false));
+					}}
+				>
+					<span className="block">
+						Runs <code className="code-chip">git worktree remove</code> on {viewOf(removingWorktree.node)?.info.name ?? "the node"}, which deletes{" "}
+						<span className="font-mono">{homePath(sanitize(removingWorktree.project.path), home)}</span>. git refuses when it has changes or untracked
+						files. Its branch stays.
+					</span>
+					{removingWorktree.error && (
+						<span className="mt-2 block text-red" role="alert" data-dialog-error="">
+							{sanitize(removingWorktree.error)}
+						</span>
+					)}
+				</ConfirmDialog>
+			)}
+			{repairing && (
+				<ConfirmDialog
+					title={`Pair ${viewOf(repairing)?.info.name ?? "the node"} again?`}
+					confirmLabel="Forget the Key"
+					busy={busy}
+					onCancel={() => setRepairing(null)}
+					onConfirm={() => {
+						const node = repairing;
+						void run(async () => {
+							await client?.forgetPin(node);
+							setRepairing(null);
+							navigate(`/deck/${encodeURIComponent(node)}`);
+						});
+					}}
+				>
+					This browser forgets the node's pinned key and closes its channel. Pairing again shows the fingerprint to check. The node's terminals keep
+					running.
+				</ConfirmDialog>
+			)}
+			{notice && <UndoToast key={notice.id} notice={notice} onDone={() => setNotice(null)} />}
 		</DeckFrame>
 	);
 }

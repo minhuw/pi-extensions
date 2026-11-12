@@ -207,6 +207,40 @@ describe("Deck client", () => {
 		expect(node.received.filter((message) => message.type === "term.list")).toHaveLength(1);
 	});
 
+	it("reads the daemon's capabilities, follows term.renamed, and sends renames and unread marks", async () => {
+		const { node, client: c } = await setup();
+		node.onMessage = (message, fake) => {
+			if (message.type === "term.list") void fake.send({ type: "reply", id: message.id, result: { terminals: [shell] } });
+			if (message.type === "term.rename") void fake.send({ type: "reply", id: message.id, result: { terminal: { ...shell, label: "Built" } } });
+		};
+		const welcome = node.welcome.bind(node);
+		node.welcome = () => ({ ...welcome(), capabilities: [...welcome().capabilities, "term.rename", "pane.unread"] });
+		expect(c.capabilities("node-1").size).toBe(0);
+		node.allowed.add(c.getSnapshot().fingerprint!);
+		c.pair("node-1");
+		await settle();
+		await c.confirmPin("node-1");
+		await settle();
+		expect(c.capabilities("node-1").has("term.rename")).toBe(true);
+		expect(c.capabilities("node-1").has("projects.edit")).toBe(false);
+		const first = () => c.getSnapshot().nodes[0]!.terminals[0]!;
+
+		await c.renameTerminal("node-1", "t1", "Built");
+		expect(node.received.find((message) => message.type === "term.rename")).toMatchObject({ terminalId: "t1", label: "Built" });
+		expect(first().label).toBe("Built");
+		// A label with control characters is invalid on the wire (the daemon trims and checks names), so none comes.
+		await node.send({ type: "term.renamed", terminalId: "t1", label: "Other" });
+		await settle();
+		expect(first().label).toBe("Other");
+		await node.send({ type: "term.renamed", terminalId: "t1", label: null });
+		await settle();
+		expect(first()).not.toHaveProperty("label");
+
+		c.markUnread("node-1", "t1");
+		await settle();
+		expect(node.received.some((message) => message.type === "pane.unread" && message.terminalId === "t1")).toBe(true);
+	});
+
 	it("gives each ready channel its own file layer, and passes the bridge's requests to listeners", async () => {
 		const { node, client: c } = await setup();
 		expect(c.files("node-1")).toBeUndefined();

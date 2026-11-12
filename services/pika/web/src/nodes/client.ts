@@ -59,7 +59,9 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 
 /** Untrusted text from a node, cleaned for display (NODE.md, "Untrusted text"). */
 export function cleanTerminal(info: TerminalInfo): TerminalInfo {
-	return { ...info, title: sanitize(info.title), cwd: sanitize(info.cwd) };
+	const label = sanitize(info.label).trim();
+	const { label: _raw, ...rest } = info;
+	return { ...rest, title: sanitize(info.title), cwd: sanitize(info.cwd), ...(label ? { label } : {}) };
 }
 
 /**
@@ -186,9 +188,12 @@ export class NodesClient {
 		this.#connect(node);
 	}
 
-	/** A new terminal on `node`, its login shell started in `cwd` when given (the node's home otherwise). */
-	async createTerminal(node: string, size: { cols: number; rows: number }, cwd?: string): Promise<TerminalInfo> {
-		const { terminal } = await this.#request(node, (channel) => channel.request("term.create", { ...size, ...(cwd ? { cwd } : {}) }));
+	/**
+	 * A new terminal on `node`, its login shell started in `cwd` when given (the node's home otherwise), running `argv`
+	 * through it when given.
+	 */
+	async createTerminal(node: string, size: { cols: number; rows: number }, cwd?: string, argv?: string[]): Promise<TerminalInfo> {
+		const { terminal } = await this.#request(node, (channel) => channel.request("term.create", { ...size, ...(cwd ? { cwd } : {}), ...(argv ? { argv } : {}) }));
 		this.#added(node, terminal);
 		return terminal;
 	}
@@ -201,6 +206,24 @@ export class NodesClient {
 	seen(node: string, terminalId: string): void {
 		const channel = this.channel(node);
 		channel?.notify({ type: "pane.seen", terminalId }).catch((error: unknown) => this.#fail(node, error));
+	}
+
+	/** `pane.unread`: marks the terminal unread on the node, for every client (a daemon with `pane.unread`). */
+	markUnread(node: string, terminalId: string): void {
+		const channel = this.channel(node);
+		channel?.notify({ type: "pane.unread", terminalId }).catch((error: unknown) => this.#fail(node, error));
+	}
+
+	/** `term.rename`: the name every client shows for the terminal; null clears it. */
+	async renameTerminal(node: string, terminalId: string, label: string | null): Promise<void> {
+		const { terminal } = await this.#request(node, (channel) => channel.request("term.rename", { terminalId, label }));
+		this.#added(node, terminal);
+	}
+
+	/** What the node's daemon offers (`welcome.capabilities`); empty while it is not connected. */
+	capabilities(node: string): ReadonlySet<string> {
+		const link = this.#entries.get(node)?.link;
+		return new Set(link?.kind === "ready" ? link.welcome.capabilities : []);
 	}
 
 	/** The one `term.list` per channel; events keep the list current after it. */
@@ -353,6 +376,12 @@ export class NodesClient {
 			case "term.title":
 				update(event.terminalId, (info) => ({ ...info, title: sanitize(event.title) }));
 				return;
+			case "term.renamed":
+				update(event.terminalId, (info) => {
+					const { label: _old, ...rest } = info;
+					return cleanTerminal(event.label === null ? rest : { ...rest, label: event.label });
+				});
+				return;
 			case "term.exit":
 				update(event.terminalId, (info) => ({ ...info, exited: { code: event.code, signal: event.signal } }));
 				return;
@@ -412,9 +441,9 @@ export function liveBridge(status: PaneView | undefined): BridgeStatus | undefin
 	return status?.bridgeConnected ? status.bridge : undefined;
 }
 
-/** A pane's name: its pi session's name, else its terminal title, else its program, else "Shell". */
+/** A pane's name: the user's name for it, else its pi session's name, else its terminal title, else its program, else "Shell". */
 export function paneLabel(terminal: TerminalInfo): string {
-	return sanitize(terminal.status?.bridge?.session?.name) || terminal.title || terminal.argv[0] || "Shell";
+	return terminal.label || sanitize(terminal.status?.bridge?.session?.name) || terminal.title || terminal.argv[0] || "Shell";
 }
 
 /** `path` with the node's home directory as `~`. */

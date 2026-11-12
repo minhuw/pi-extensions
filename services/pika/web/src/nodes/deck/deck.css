@@ -206,7 +206,7 @@
 
 .dk-menu-item {
 	display: flex;
-	height: 24px;
+	min-height: 24px;
 	width: 100%;
 	align-items: center;
 	gap: 4px;
@@ -215,6 +215,11 @@
 	text-align: left;
 	white-space: nowrap;
 	outline: none;
+}
+
+/* An item with a reason under its label (why it is disabled). */
+.dk-menu-item:has([data-menu-detail]) {
+	padding-block: 3px;
 }
 
 .dk-menu-item:focus {
