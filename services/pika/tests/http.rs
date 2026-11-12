@@ -222,6 +222,46 @@ async fn without_authentication_everything_is_open() {
     assert!(r.text().contains(r#"<meta name="pika-base" content="/">"#), "{}", r.text());
 }
 
+/// Every `src` and `href` value of a page.
+fn page_urls(html: &str) -> Vec<String> {
+    let urls = regex::Regex::new(r#"\s(?:src|href)="([^"]*)""#).unwrap();
+    urls.captures_iter(html).map(|c| c[1].to_owned()).collect()
+}
+
+#[tokio::test]
+async fn every_route_links_the_same_absolute_asset_urls() {
+    // Debug builds read web/dist from disk; without a build the placeholder page is served and links nothing.
+    let built = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/dist/index.html").exists();
+    for base in ["/", "/pika"] {
+        let s = server(base, None, None);
+        let prefix = if base == "/" { "" } else { base };
+        let root = get(&s.app, &format!("{prefix}/"), None).await.text();
+        for route in ["/nodes/x", "/nodes/x/t1", "/s/y", "/public/s/y", "/runs/r1", "/docs/a/b.md"] {
+            let page = get(&s.app, &format!("{prefix}{route}"), None).await;
+            assert_eq!(page.status, StatusCode::OK, "{base} {route}");
+            assert_eq!(page.text(), root, "{base} {route}");
+        }
+        let urls = page_urls(&root);
+        assert_eq!(urls.is_empty(), !built, "{urls:?}");
+        for url in urls.iter().filter(|url| !url.starts_with("data:")) {
+            let file = url.strip_prefix(&format!("{prefix}/")).unwrap_or_else(|| panic!("{url} is not under {base}"));
+            assert!(!file.starts_with('.') && !file.contains("//"), "{url}");
+            let r = get(&s.app, url, None).await;
+            assert_eq!(r.status, StatusCode::OK, "{url}");
+            assert!(!r.headers[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"), "{url}");
+            if file.starts_with("assets/") {
+                assert_eq!(r.headers[header::CACHE_CONTROL], "public, max-age=31536000, immutable", "{url}");
+                // A route-relative copy of the same file is no longer a second cache entry.
+                let nested = get(&s.app, &format!("{prefix}/nodes/x/{file}"), None).await;
+                assert!(nested.headers[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"), "{url}");
+            }
+        }
+        // A missing build file answers 404 rather than the page.
+        let r = get(&s.app, &format!("{prefix}/assets/missing-0000.js"), None).await;
+        assert_eq!((r.status, r.json()), (StatusCode::NOT_FOUND, json!({ "error": "not_found" })), "{base}");
+    }
+}
+
 #[tokio::test]
 async fn health_names_the_version_and_the_commit_when_the_build_knew_it() {
     let s = server("/", None, None);
