@@ -940,7 +940,6 @@ function NodesWorkspace() {
 								</button>
 							</div>
 						)}
-						{snapshot.fingerprint && <BrowserKey fingerprint={snapshot.fingerprint} />}
 					</aside>
 					<Splitter
 						name="rail"
@@ -1155,24 +1154,6 @@ function RailHeader({ status, onHelp }: { status: NodesSnapshot["status"]; onHel
 				?<span className="sr-only">Keyboard shortcuts</span>
 			</button>
 		</>
-	);
-}
-
-function BrowserKey({ fingerprint }: { fingerprint: string }) {
-	return (
-		<div className="shrink-0 border-t border-line px-4 py-2.5" data-client-fingerprint={fingerprint}>
-			<div className="text-[11.5px] text-muted">This browser's key</div>
-			{/* Two rows of four groups, rather than wherever the rail's width breaks them. */}
-			<div className="font-mono text-[11.5px] select-all">
-				{displayFingerprint(fingerprint)
-					.match(/(?:\S+\s?){1,4}/g)
-					?.map((row) => (
-						<span key={row} className="block">
-							{row}
-						</span>
-					))}
-			</div>
-		</div>
 	);
 }
 
