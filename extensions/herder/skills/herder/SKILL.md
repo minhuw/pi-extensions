@@ -1,6 +1,7 @@
 ---
 name: herder
 description: Runs coding work as a durable, verified Herder run - an approved goal with checks, agent steps in isolated git worktrees, serial integration, runtime verification, and delivery after user confirmation. Use after /herder or /herder resume, or when a Herder run is active and you need to plan, orchestrate, verify, or deliver it.
+disable-model-invocation: true
 ---
 
 # Herder

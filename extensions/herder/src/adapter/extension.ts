@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerActivation } from "./activation.ts";
 import { registerCommands } from "./commands.ts";
 import { registerPickerTool } from "./picker.ts";
 import { Herder, type HerderOptions } from "./session.ts";
@@ -11,6 +12,7 @@ export function registerHerder(pi: ExtensionAPI, options: HerderOptions): Herder
 	registerCommands(pi, herder);
 	registerTools(pi, herder);
 	registerPickerTool(pi, (ctx) => (hasStandingGrants() ? herder.standing(herder.session(ctx)) : undefined));
+	registerActivation(pi);
 	pi.on("session_shutdown", (_event, ctx) => herder.shutdown(ctx));
 	return herder;
 }

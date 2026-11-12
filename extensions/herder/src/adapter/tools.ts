@@ -171,7 +171,7 @@ async function abortRun(herder: Herder, s: Session, held: Held, ctx: ExtensionCo
 
 export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 	pi.registerTool({
-		name: "herder_run", label: "Herder Run", executionMode: "sequential",
+		name: "herder_run", label: "Herder Run", defaultActive: false, executionMode: "sequential",
 		description: "Herder run control. start: create a run for goal at HEAD, as /herder <goal> does, and return its instructions. status: show the run and unfinished runs. approve_goal: validate goal.md and ask the user to approve it (or apply their standing authorization). record_decision: journal a user decision (question, answer) made between launches. abort: stop and abandon the run after user confirmation.",
 		parameters: RunParameters,
 		async execute(_id, params, signal, _update, ctx) {
@@ -205,7 +205,7 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 	});
 
 	pi.registerTool({
-		name: "herder_workflow", label: "Herder Workflow", executionMode: "sequential",
+		name: "herder_workflow", label: "Herder Workflow", defaultActive: false, executionMode: "sequential",
 		description: "Herder workflow scripts. validate: compile and dry-run a script without agents. run: launch it in the background; returns the launch number at once and a follow-up message reports the result (do not poll). stop: stop the running launch. Requires an approved goal.",
 		parameters: WorkflowParameters,
 		async execute(_id, params, _signal, _update, ctx) {
@@ -235,7 +235,7 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 	});
 
 	pi.registerTool({
-		name: "herder_step", label: "Herder Step", executionMode: "sequential",
+		name: "herder_step", label: "Herder Step", defaultActive: false, executionMode: "sequential",
 		description: "Run one Herder agent() step directly, in its own worktree (for runs that need no script). Writing steps return a commit to pass to herder_integrate. Requires an approved goal.",
 		parameters: StepParameters,
 		async execute(_id, params, signal, _update, ctx) {
@@ -253,7 +253,7 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 	});
 
 	pi.registerTool({
-		name: "herder_integrate", label: "Herder Integrate", executionMode: "sequential",
+		name: "herder_integrate", label: "Herder Integrate", defaultActive: false, executionMode: "sequential",
 		description: "Integrate a step's commit onto the run's integration line (one commit per task). A gate_failed step is refused. Runs integration checks first; conflicts and failing checks are returned, the head does not move. Requires an approved goal.",
 		parameters: IntegrateParameters,
 		async execute(_id, params, signal, _update, ctx) {
@@ -274,7 +274,7 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 	});
 
 	pi.registerTool({
-		name: "herder_check", label: "Herder Check", executionMode: "sequential",
+		name: "herder_check", label: "Herder Check", defaultActive: false, executionMode: "sequential",
 		description: "Run goal.md checks at the integration head or a given commit. Requires an approved goal.",
 		parameters: CheckParameters,
 		async execute(_id, params, signal, _update, ctx) {
@@ -290,7 +290,7 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 	});
 
 	pi.registerTool({
-		name: "herder_verify", label: "Herder Verify", executionMode: "sequential",
+		name: "herder_verify", label: "Herder Verify", defaultActive: false, executionMode: "sequential",
 		description: "Verify the run at its integration head: every check, plus a fresh verifier for non-trivial runs. The runtime computes the verdict (met, not_met, blocked); gaps are appended to plan.md. Requires an approved goal.",
 		parameters: VerifyParameters,
 		async execute(_id, _params, signal, _update, ctx) {
@@ -305,7 +305,7 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 	});
 
 	pi.registerTool({
-		name: "herder_deliver", label: "Herder Deliver", executionMode: "sequential",
+		name: "herder_deliver", label: "Herder Deliver", defaultActive: false, executionMode: "sequential",
 		description: "Deliver a verified run (verdict met at the current head) to the user after their confirmation. runId picks the run, e.g. a parked one. Modes: series (default), branch, squash, uncommitted; curate regroups commits first. Interactive only; refused under a standing authorization.",
 		parameters: DeliverParameters,
 		async execute(_id, params, signal, _update, ctx) {

@@ -7,12 +7,13 @@ import { isStale, readLock } from "../run/lock.ts";
 import { isRunId, refPrefix, runPaths } from "../run/paths.ts";
 import { createRun, listRuns, openRun, type RunStore } from "../run/store.ts";
 import type { DeliveryMode } from "../types.ts";
+import { activateHerderTools } from "./activation.ts";
 import { describeDelivery } from "./format.ts";
-import { auditPrompt, auditSkillDir, resumePrompt, skillText, startPrompt, type AuditInvocation, type AuditKind } from "./prompts.ts";
+import { auditPrompt, auditSkillDir, PROMPT_TYPE, resumePrompt, skillText, startPrompt, type AuditInvocation, type AuditKind } from "./prompts.ts";
 import { busy, message, unreadableRunError, type Herder, type Held, type Session } from "./session.ts";
 import { describeRun, isBlocked, isFinished, isParked, otherUnfinishedLines, parkedLines, planTasks, type RunEntry } from "./status.ts";
 
-export const PROMPT_TYPE = "herder:prompt";
+export { PROMPT_TYPE } from "./prompts.ts";
 export const DELIVERY_MODES: readonly DeliveryMode[] = ["series", "branch", "squash", "uncommitted"];
 const SUBCOMMANDS = ["status", "resume", "deliver", "abort", "clean", "help"] as const;
 
@@ -136,6 +137,7 @@ export function startRun(herder: Herder, s: Session, goal: string, fromTool = fa
 
 function start(herder: Herder, s: Session, goal: string): string {
 	const { runId, prompt } = startRun(herder, s, goal);
+	activateHerderTools(herder.pi);
 	herder.pi.sendMessage({ customType: PROMPT_TYPE, display: true, content: prompt, details: { runId, action: "start" } }, { triggerTurn: true, deliverAs: "followUp" });
 	return `Started Herder run ${runId}.`;
 }
@@ -170,6 +172,7 @@ function audit(herder: Herder, s: Session, kind: AuditKind, args: string): strin
 	startable(herder, s);
 	const invocation = parseAudit(args);
 	const repo = herder.vcs(s).topLevel();
+	activateHerderTools(herder.pi);
 	herder.pi.sendMessage({ customType: PROMPT_TYPE, display: true, content: auditPrompt(kind, invocation, repo, herder.standing(s) !== undefined), details: { action: kind, invocation, skillDir: auditSkillDir(kind) } }, { triggerTurn: true, deliverAs: "followUp" });
 	return `Started the read-only /herder-${kind} audit.`;
 }
@@ -186,6 +189,7 @@ function resume(herder: Herder, s: Session, runId: string | undefined): string {
 	const held = herder.hold(s, id, run);
 	const tasks = planTasks(held.run);
 	held.run.renderProgress(tasks);
+	activateHerderTools(herder.pi);
 	herder.pi.sendMessage({ customType: PROMPT_TYPE, display: true, content: resumePrompt(held.run, held.run.state(), tasks, skill, herder.standing(s) !== undefined), details: { runId: id, action: "resume" } }, { triggerTurn: true, deliverAs: "followUp" });
 	return `Resumed Herder run ${id}.`;
 }

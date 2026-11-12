@@ -7,7 +7,8 @@ import type { RunState } from "../journal/fold.ts";
 import type { RunStore } from "../run/store.ts";
 import { STANDING_NOTE } from "./standing.ts";
 
-const SKILLS_DIR = fileURLToPath(new URL("../../skills/", import.meta.url));
+export const PROMPT_TYPE = "herder:prompt";
+export const SKILLS_DIR = fileURLToPath(new URL("../../skills/", import.meta.url));
 export const SKILL_PATH = join(SKILLS_DIR, "herder", "SKILL.md");
 
 export type AuditKind = "improve" | "simplify";

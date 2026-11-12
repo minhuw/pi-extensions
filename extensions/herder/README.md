@@ -81,6 +81,8 @@ A run is named by `runId` where a tool takes one. Tools that take none use the r
 
 The model gets the full rules and the script API from the bundled `herder` skill (`skills/herder/SKILL.md`). The `/herder` and `/herder resume` commands also send it to the model, and `herder_run { action: "start" }` returns it.
 
+All three Herder skills set `disable-model-invocation: true` and all eight `herder_*` tools register with `defaultActive: false`, so ordinary sessions and subagents pay no skill-listing or tool-schema overhead. Herder activates its tools (and provides skill paths when needed) automatically on `/herder*`, `/skill:herder*`, `/selfdrive`, restored Herder branches, or explicit `herder` mentions.
+
 ## Audits
 
 `/herder-improve` and `/herder-simplify` audit the repository before a run exists:

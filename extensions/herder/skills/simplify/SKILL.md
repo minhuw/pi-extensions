@@ -1,6 +1,7 @@
 ---
 name: herder-simplify
 description: Survey a codebase, read-only, for evidence-backed opportunities to delete or consolidate code, retire obsolete paths and abstractions, reduce state and control-flow complexity, and lower maintenance burden without changing required behavior; then let the user pick findings and start a Herder run for them. Use after /herder-simplify or when asked for a smaller, clearer, easier-to-maintain codebase with the work run by Herder.
+disable-model-invocation: true
 ---
 
 # Simplify

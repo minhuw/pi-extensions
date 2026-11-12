@@ -66,7 +66,10 @@ describe("registration", () => {
 		expect(props(tool("herder_deliver"))).toEqual(["curate", "mode", "runId"]);
 		expect(tool("herder_deliver").parameters.required ?? []).toEqual([]);
 		expect(props(tool("herder_pick_findings"))).toEqual(["findings", "title"]);
-		for (const item of h.tools.values()) expect(item.description.length).toBeLessThan(400);
+		for (const item of h.tools.values()) {
+			expect(item.defaultActive).toBe(false);
+			expect(item.description.length).toBeLessThan(400);
+		}
 	});
 
 	it("completes /herder arguments, keeping earlier words, and offers no menu for a word typed in full", () => {

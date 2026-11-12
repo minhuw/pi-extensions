@@ -1,6 +1,7 @@
 ---
 name: herder-improve
 description: Survey a codebase as a senior advisor, read-only, and present prioritized, verified findings - bugs, security, performance, tests, architecture, dependencies, tooling, docs, and evidence-backed direction - then let the user pick findings and start a Herder run for them. Use after /herder-improve or when asked to audit code or find improvement opportunities to hand to Herder.
+disable-model-invocation: true
 ---
 
 # Improve

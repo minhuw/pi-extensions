@@ -259,7 +259,7 @@ async function pickInEditor(ctx: ExtensionContext, title: string, findings: read
 /** `standing` finds the user's standing authorization for the session's repository; with one, nobody is asked. */
 export function registerPickerTool(pi: ExtensionAPI, standing: (ctx: ExtensionContext) => StandingApproval | undefined = () => undefined): void {
 	pi.registerTool({
-		name: "herder_pick_findings", label: "Herder Pick Findings", executionMode: "sequential",
+		name: "herder_pick_findings", label: "Herder Pick Findings", defaultActive: false, executionMode: "sequential",
 		description: "Let the user pick which audit findings to resolve. Post the findings table and explanations in chat first, then pass the same findings in table order; recommended ones start selected. Returns the selected ids and an optional note: build the Herder run from exactly that selection, and start no run if none is selected or the user cancels. Needs no run.",
 		parameters: PickParameters,
 		async execute(_id, params, signal, _update, ctx) {
