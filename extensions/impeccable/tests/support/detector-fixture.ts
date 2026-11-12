@@ -5,6 +5,7 @@ import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import impeccable from "../../index.ts";
+import { IMPECCABLE_TOOL_NAMES } from "../../src/activation.ts";
 
 /** Offline protocol double, using the exact pinned hook payload/audit shapes. No detector rules are implemented here. */
 export const protocolEngine = `#!/usr/bin/env node
@@ -70,7 +71,7 @@ if(args[0] === 'hook') {
 } else console.log(JSON.stringify({args,provider:process.env.IMPECCABLE_PROVIDER_ID}));
 `;
 
-export async function detectorFixture(extra?: (pi: ExtensionAPI) => void, promptPaths: string[] = [], options: { cwd?: string; cwdAlias?: string; promptDefaults?: boolean; before?: (pi: ExtensionAPI) => void } = {}) {
+export async function detectorFixture(extra?: (pi: ExtensionAPI) => void, promptPaths: string[] = [], options: { cwd?: string; cwdAlias?: string; promptDefaults?: boolean; before?: (pi: ExtensionAPI) => void; activateImpeccableTools?: boolean } = {}) {
 	const directory = await realpath(await mkdtemp(path.join(tmpdir(), "pi impeccable T4 spaces ")));
 	const physicalCwd = path.resolve(directory, options.cwd ?? ".");
 	await mkdir(physicalCwd, { recursive: true });
@@ -86,7 +87,11 @@ export async function detectorFixture(extra?: (pi: ExtensionAPI) => void, prompt
 	await writeFile(path.join(directory, "package.json"), '{}');
 	await writeFile(path.join(directory, "page.html"), '<main>before</main>');
 	await loader.reload();
-	const { session } = await createAgentSession({ cwd, agentDir: path.join(directory, "agent"), modelRuntime: runtime, model: faux.getModel("test")!, resourceLoader: loader, sessionManager: SessionManager.inMemory(cwd), settingsManager: SettingsManager.inMemory({ retry: { enabled: false } }) });
+	const settingsManager = SettingsManager.inMemory({
+		...(options.activateImpeccableTools === false ? {} : { defaultTools: ["read", "bash", "edit", "write", ...IMPECCABLE_TOOL_NAMES] }),
+		retry: { enabled: false },
+	});
+	const { session } = await createAgentSession({ cwd, agentDir: path.join(directory, "agent"), modelRuntime: runtime, model: faux.getModel("test")!, resourceLoader: loader, sessionManager: SessionManager.inMemory(cwd), settingsManager });
 	await session.bindExtensions({ mode: "rpc", onError: (error) => errors.push(error) });
 	return { directory, binary, session, faux, get api() { return api; }, errors,
 		async config(value: unknown) { await mkdir(path.join(directory, ".impeccable"), { recursive: true }); await writeFile(path.join(directory, ".impeccable/config.json"), JSON.stringify(value)); },

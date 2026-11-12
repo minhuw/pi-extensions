@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerActivation } from "./src/activation.ts";
 import { registerLive } from "./src/live-registration.ts";
 import { registerQuestion } from "./src/questions.ts";
 import { registerDelegation } from "./src/delegation.ts";
@@ -108,6 +109,7 @@ function renderResult(result: OperationResult): string {
  * Registers capabilities only. Engine resolution and dialogs are lazy.
  */
 export default function impeccableExtension(pi: ExtensionAPI): void {
+	registerActivation(pi);
 	registerQuestion(pi);
 	registerDelegation(pi);
 	registerCapabilities(pi);
@@ -117,6 +119,7 @@ export default function impeccableExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "impeccable_run",
 		label: "Impeccable Engine",
+		defaultActive: false,
 		description:
 			`Run the pinned Impeccable design engine v${ENGINE_VERSION} with a direct argv array (never a shell string), with Pi adapters for hook controls, ignores, doctor metadata and native prompt pinning. ` +
 			"`argv[0]` is the engine verb (`context`, `detect`, `build-phase`, `doctor`, `hooks`, `pin`, `engine-probe`, …) and the rest are that verb's arguments. " +

@@ -14,7 +14,7 @@ pi install git:github.com/minhuw/pi-extensions
 pi install /absolute/path/to/pi-extensions
 ```
 
-Reload an existing Pi session after installation. The collection exposes the `impeccable` skill for normal discovery, `/impeccable`, its `/design` alias, and 24 `/design-<command>` prompts. Arguments use Pi's native prompt expansion. Existing Writer `/polish`, Quality `/review`, `/simplify`, `/verify`, `/deslop` and `/commit` retain their identities.
+Reload an existing Pi session after installation. The collection exposes `/impeccable`, its `/design` alias, 24 `/design-<command>` prompts, and `/skill:impeccable`. The skill sets `disable-model-invocation: true` and all five `impeccable_*` tools register inactive by default (`defaultActive: false`), so ordinary sessions and non-Impeccable subagents pay no skill, tool-schema or rule prompt overhead until you explicitly invoke `/impeccable`, `/design`, `/design-<command>`, `/i`, `/skill:impeccable`, `/impeccable-live`, a pinned shortcut, or mention `impeccable` in a prompt. Arguments use Pi's native prompt expansion. Existing Writer `/polish`, Quality `/review`, `/simplify`, `/verify`, `/deslop` and `/commit` retain their identities.
 
 ```text
 /impeccable
@@ -29,7 +29,7 @@ Reload an existing Pi session after installation. The collection exposes the `im
 
 With no arguments, the skill offers a menu based on the current context. The design prompts invoke playbooks; their 24 command names are not all native engine verbs. `/design-init` captures product context, whereas native engine `init` has its own CLI meaning. Ask through `/impeccable` or the named design prompt to run a playbook.
 
-Activation only registers tools and lifecycle handlers. It does not download an engine or browser, spawn processes, ask questions, or write project files. Normal `npm ci` and the safe collection tests do not download either runtime.
+Activation only registers inactive tools and lifecycle handlers. It does not download an engine or browser, spawn processes, ask questions, or write project files. Normal `npm ci` and the safe collection tests do not download either runtime.
 
 ## Create a new or replacement visual system
 

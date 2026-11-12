@@ -124,6 +124,7 @@ export async function askQuestions(
 export function registerQuestion(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "impeccable_question", label: "Impeccable Questions",
+		defaultActive: false,
 		description: "Ask 1–5 related design questions via Pi TUI/RPC dialogs. Returns actual partial answers and answered/dismissed/cancelled/unavailable status. No defaults.",
 		parameters: QuestionSchema,
 		outputSchema: QuestionResultSchema,

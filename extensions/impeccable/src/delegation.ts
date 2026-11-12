@@ -173,6 +173,7 @@ export async function delegate(request: Request, ctx: ExtensionToolContext, sign
 export function registerDelegation(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "impeccable_delegate", label: "Impeccable Delegate",
+		defaultActive: false,
 		description: "Send a complete Impeccable role and bounded packet to existing Agent worker/recon, foreground with fresh context and extension tools. Returns actual output or an explicit Agent handoff/fallback.",
 		parameters: DelegateSchema,
 		reachesTools: () => ["Agent"],

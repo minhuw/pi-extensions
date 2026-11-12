@@ -1,8 +1,8 @@
-import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { InMemoryCredentialStore, type ToolResultMessage } from "@earendil-works/pi-ai";
+import { getCurrentSystemPrompt, getCurrentTools, InMemoryCredentialStore, type ToolResultMessage } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import {
 	createAgentSession,
@@ -16,6 +16,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import impeccableExtension from "../index.ts";
+import { IMPECCABLE_TOOL_NAMES, SKILL_LOCATION_MESSAGE } from "../src/activation.ts";
 import { delegate } from "../src/delegation.ts";
 import { getSkillDir } from "../src/resources.ts";
 import { isolateEngineEnvironment } from "./support/engine-environment.ts";
@@ -30,7 +31,7 @@ function deferred() {
 	return { promise, resolve };
 }
 
-async function fixture(options: { subagents?: boolean; nested?: boolean; uiContext?: ExtensionUIContext; agentFrontmatter?: Record<string, string>; fallbackSubagent?: string; extraExtension?: (pi: ExtensionAPI) => void } = {}) {
+async function fixture(options: { subagents?: boolean; nested?: boolean; childImpeccable?: boolean; activateImpeccableTools?: boolean; loadResources?: boolean; sessionManager?: SessionManager; uiContext?: ExtensionUIContext; agentFrontmatter?: Record<string, string>; fallbackSubagent?: string; extraExtension?: (pi: ExtensionAPI) => void } = {}) {
 	const directory = await mkdtemp(join(tmpdir(), "pi-impeccable-runtime-"));
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const previousSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR;
@@ -53,9 +54,9 @@ async function fixture(options: { subagents?: boolean; nested?: boolean; uiConte
 			await mkdir(join(directory, ".pi/agents"), { recursive: true });
 			if (options.fallbackSubagent !== undefined) await writeFile(join(directory, ".pi/subagents.json"), JSON.stringify({ fallbackSubagent: options.fallbackSubagent }));
 			for (const type of ["worker", "recon", ...(options.nested ? ["orchestrator"] : [])]) {
-				await writeFile(join(directory, `.pi/agents/${type}.md`), `---\ndescription: Isolated faux ${type}\nmodel: impeccable-test/test\nextensions: true\nskills: false\n${options.agentFrontmatter?.[type] ?? ""}---\nPerform the bounded supplied task.\n`);
+				await writeFile(join(directory, `.pi/agents/${type}.md`), `---\ndescription: Isolated faux ${type}\nmodel: impeccable-test/test\nextensions: true\nskills: ${options.loadResources ? "true" : "false"}\n${options.agentFrontmatter?.[type] ?? ""}---\nPerform the bounded supplied task.\n`);
 			}
-			if (options.nested) {
+			if (options.nested || options.childImpeccable) {
 				await mkdir(join(directory, ".pi/extensions"), { recursive: true });
 				// Child sessions discover extensions afresh; parent inline factories
 				// are not inherited. Load the actual adapter in this isolated project.
@@ -66,14 +67,24 @@ async function fixture(options: { subagents?: boolean; nested?: boolean; uiConte
 		const subagents = options.subagents ? (await import("../../subagents/src/index.ts")).default : undefined;
 		const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
 		const faux = fauxProvider({ api: "impeccable-test-api", provider: "impeccable-test", models: [{ id: "test" }] });
+		const promptsDir = join(getSkillDir(), "../../prompts");
+		const promptFiles = options.loadResources
+			? (await readdir(promptsDir)).filter((name) => name.endsWith(".md")).map((name) => join(promptsDir, name))
+			: [];
 		const resources = new DefaultResourceLoader({
 			cwd: directory,
 			agentDir: directory,
 			noExtensions: true,
 			noSkills: true,
-			noPromptTemplates: true,
+			noPromptTemplates: !options.loadResources,
 			noThemes: true,
 			noContextFiles: true,
+			...(options.loadResources
+				? {
+						additionalSkillPaths: [join(getSkillDir(), "..")],
+						additionalPromptTemplatePaths: promptFiles,
+					}
+				: {}),
 			extensionFactories: [
 				(pi) => {
 					pi.registerProvider(faux.provider);
@@ -85,14 +96,17 @@ async function fixture(options: { subagents?: boolean; nested?: boolean; uiConte
 		});
 		await resources.reload();
 		expect(resources.getExtensions().errors).toEqual([]);
+		const settingsManager = options.activateImpeccableTools === false
+			? SettingsManager.inMemory({ retry: { enabled: false } })
+			: SettingsManager.inMemory({ defaultTools: [...IMPECCABLE_TOOL_NAMES], retry: { enabled: false } });
 		({ session } = await createAgentSession({
 			cwd: directory,
 			agentDir: directory,
 			modelRuntime: runtime,
 			model: faux.getModel("test")!,
 			resourceLoader: resources,
-			sessionManager: SessionManager.inMemory(directory),
-			settingsManager: SettingsManager.inMemory({ defaultTools: [], retry: { enabled: false } }),
+			sessionManager: options.sessionManager ?? SessionManager.inMemory(directory),
+			settingsManager,
 		}));
 		const errors: unknown[] = [];
 		await session.bindExtensions({ mode: "rpc", uiContext: options.uiContext, onError: (error) => errors.push(error) });
@@ -604,4 +618,285 @@ it("hands off finish continuations because the actual unlimited Agent resume pat
 		expect(continuation?.details.status).toBe("handoff");
 		expect(h.errors).toEqual([]);
 	} finally { await h.cleanup(); }
+});
+
+it("keeps impeccable_* tools, rules, and <available_skills> completely inactive on ordinary UI prompts", async () => {
+	const h = await fixture({ activateImpeccableTools: false, loadResources: true });
+	try {
+		const allToolNames = h.session.getAllTools().map((tool) => tool.name);
+		for (const name of IMPECCABLE_TOOL_NAMES) expect(allToolNames).toContain(name);
+		expect(h.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write"]);
+
+		const observedTools: string[][] = [];
+		const observedPrompts: string[] = [];
+		h.faux.setResponses([
+			(context) => {
+				observedTools.push(getCurrentTools(context.messages).map((tool) => tool.name));
+				observedPrompts.push(getCurrentSystemPrompt(context.messages));
+				return fauxAssistantMessage("Designed a clean settings dashboard.");
+			},
+			(context) => {
+				observedTools.push(getCurrentTools(context.messages).map((tool) => tool.name));
+				observedPrompts.push(getCurrentSystemPrompt(context.messages));
+				return fauxAssistantMessage("Checked the URL and design-system file.");
+			},
+		]);
+
+		await h.session.prompt("Design a settings dashboard and polish the layout");
+		await h.session.prompt("Inspect https://example.com/design and src/design-system/layout.tsx");
+
+		expect(observedTools).toEqual([
+			["read", "bash", "edit", "write"],
+			["read", "bash", "edit", "write"],
+		]);
+		for (const sys of observedPrompts) {
+			for (const name of IMPECCABLE_TOOL_NAMES) expect(sys).not.toContain(name);
+			expect(sys).not.toContain("Use impeccable_run for other Impeccable engine verbs");
+			expect(sys).not.toContain("<name>impeccable</name>");
+			expect(sys).not.toContain(getSkillDir());
+		}
+		expect(h.session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write"]);
+		expect(
+			h.session.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === SKILL_LOCATION_MESSAGE),
+		).toEqual([]);
+		expect(h.errors).toEqual([]);
+	} finally {
+		await h.cleanup();
+	}
+});
+
+it.each([
+	{ label: "plain mention", input: "Use impeccable to critique page.html", expectSkillLocation: true },
+	{ label: "/impeccable", input: "/impeccable critique page.html", expectSkillLocation: true },
+	{ label: "/design-audit", input: "/design-audit page.html", expectSkillLocation: true },
+	{ label: "/i alias", input: "/i critique page.html", expectSkillLocation: true },
+	{ label: "/skill:impeccable", input: "/skill:impeccable critique page.html", expectSkillLocation: false },
+	{ label: "pinned prompt", input: "/pinned-craft page.html", expectSkillLocation: true, pinShortcut: true },
+])("activates all 5 impeccable_* tools on Turn 1 for $label and deduplicates skill-location context", async ({ input, expectSkillLocation, pinShortcut }) => {
+	const h = await fixture({ activateImpeccableTools: false, loadResources: true });
+	try {
+		if (pinShortcut) {
+			const promptsDir = join(h.session.sessionManager.getCwd(), ".pi/prompts");
+			await mkdir(promptsDir, { recursive: true });
+			await writeFile(
+				join(promptsDir, "pinned-craft.md"),
+				"---\ndescription: \"Pinned shortcut\"\n---\n\n<!-- pi-impeccable-owned-prompt:v1 -->\nFollow craft on $ARGUMENTS\n",
+			);
+			await h.session.reload();
+		}
+		for (const name of IMPECCABLE_TOOL_NAMES) {
+			expect(h.session.getActiveToolNames()).not.toContain(name);
+		}
+
+		let turn1Tools: string[] = [];
+		let turn1Prompt = "";
+		let turn1RawContext = "";
+		h.faux.setResponses([
+			(context) => {
+				turn1Tools = getCurrentTools(context.messages).map((tool) => tool.name);
+				turn1Prompt = getCurrentSystemPrompt(context.messages);
+				turn1RawContext = JSON.stringify(context.messages);
+				return fauxAssistantMessage("Handled first Impeccable request.");
+			},
+			fauxAssistantMessage("Handled follow-up Impeccable request."),
+			fauxAssistantMessage("Handled post-compaction Impeccable request."),
+		]);
+
+		await h.session.prompt(input);
+
+		for (const name of IMPECCABLE_TOOL_NAMES) {
+			expect(turn1Tools).toContain(name);
+			expect(h.session.getActiveToolNames()).toContain(name);
+		}
+		expect(turn1Prompt).toContain("impeccable_run");
+		expect(turn1Prompt).toContain("Use impeccable_run for other Impeccable engine verbs");
+		expect(turn1RawContext).toContain(getSkillDir());
+
+		const skillLocationEntries = () =>
+			h.session.sessionManager
+				.getBranch()
+				.filter((entry) => entry.type === "custom_message" && entry.customType === SKILL_LOCATION_MESSAGE);
+
+		if (!expectSkillLocation) {
+			expect(skillLocationEntries()).toHaveLength(0);
+		} else {
+			expect(skillLocationEntries()).toHaveLength(1);
+			expect(skillLocationEntries()[0]).toMatchObject({
+				display: false,
+				content: expect.stringContaining(getSkillDir()),
+			});
+
+			await h.session.prompt("Run impeccable doctor next");
+			expect(skillLocationEntries()).toHaveLength(1);
+
+			const firstId = h.session.sessionManager.getBranch()[0]!.id;
+			h.session.sessionManager.appendCompaction("Compacted earlier context", firstId, 100);
+			await h.session.prompt("Run impeccable context after compaction");
+			expect(skillLocationEntries()).toHaveLength(2);
+		}
+		expect(h.errors).toEqual([]);
+	} finally {
+		await h.cleanup();
+	}
+});
+
+it("restores impeccable_* tools on session_start/session_tree from branch state and activates on /impeccable-live", async () => {
+	const seedManager = SessionManager.inMemory("/tmp");
+	seedManager.appendCustomMessageEntry(SKILL_LOCATION_MESSAGE, `Impeccable skill directory (<skill-base-dir>): ${getSkillDir()}`, false);
+	const resumed = await fixture({ activateImpeccableTools: false, sessionManager: seedManager });
+	try {
+		for (const name of IMPECCABLE_TOOL_NAMES) {
+			expect(resumed.session.getActiveToolNames()).toContain(name);
+		}
+		expect(resumed.errors).toEqual([]);
+	} finally {
+		await resumed.cleanup();
+	}
+
+	const tree = await fixture({ activateImpeccableTools: false });
+	try {
+		tree.faux.setResponses([
+			fauxAssistantMessage("Ordinary response."),
+			fauxAssistantMessage("Impeccable response."),
+		]);
+		await tree.session.prompt("Fix button alignment");
+		const ordinaryAssistantId = tree.session.sessionManager.getLeafId()!;
+		for (const name of IMPECCABLE_TOOL_NAMES) {
+			expect(tree.session.getActiveToolNames()).not.toContain(name);
+		}
+		await tree.session.prompt("Use impeccable to critique page.html");
+		const impeccableLeafId = tree.session.sessionManager.getLeafId()!;
+		for (const name of IMPECCABLE_TOOL_NAMES) {
+			expect(tree.session.getActiveToolNames()).toContain(name);
+		}
+		await tree.session.navigateTree(ordinaryAssistantId);
+		for (const name of IMPECCABLE_TOOL_NAMES) {
+			expect(tree.session.getActiveToolNames()).not.toContain(name);
+		}
+		await tree.session.navigateTree(impeccableLeafId);
+		for (const name of IMPECCABLE_TOOL_NAMES) {
+			expect(tree.session.getActiveToolNames()).toContain(name);
+		}
+		expect(tree.errors).toEqual([]);
+	} finally {
+		await tree.cleanup();
+	}
+
+	const live = await fixture({ activateImpeccableTools: false });
+	try {
+		for (const name of IMPECCABLE_TOOL_NAMES) {
+			expect(live.session.getActiveToolNames()).not.toContain(name);
+		}
+		await live.session.prompt("/impeccable-live status");
+		for (const name of IMPECCABLE_TOOL_NAMES) {
+			expect(live.session.getActiveToolNames()).toContain(name);
+		}
+		expect(live.errors).toEqual([]);
+	} finally {
+		await live.cleanup();
+	}
+});
+
+it("keeps ordinary worker subagents clean while activating impeccable_* in delegated worker subagents on Turn 1", async () => {
+	const h = await fixture({
+		subagents: true,
+		childImpeccable: true,
+		activateImpeccableTools: false,
+		loadResources: true,
+	});
+	try {
+		const cwd = h.session.sessionManager.getCwd();
+		await mkdir(join(cwd, ".pi/skills"), { recursive: true });
+		await symlink(getSkillDir(), join(cwd, ".pi/skills/impeccable"), "dir");
+		await writeFile(join(cwd, "helper.ts"), "export const x = 1;\n");
+		let preActivationWorkerTools: string[] = [];
+		let preActivationWorkerPrompt = "";
+		let delegatedWorkerTools: string[] = [];
+		let delegatedWorkerPrompt = "";
+		let delegatedCapabilitiesResult: ToolResultMessage | undefined;
+		let postActivationWorkerTools: string[] = [];
+
+		h.faux.setResponses([
+			// 1. Ordinary parent prompt spawns an ordinary worker on "Update helper.ts"
+			fauxAssistantMessage([
+				fauxToolCall("Agent", {
+					subagent_type: "worker",
+					description: "Update helper",
+					prompt: "Update helper.ts and polish its formatting.",
+					inherit_context: false,
+					run_in_background: false,
+				}),
+			]),
+			(context) => {
+				preActivationWorkerTools = getCurrentTools(context.messages).map((tool) => tool.name);
+				preActivationWorkerPrompt = getCurrentSystemPrompt(context.messages);
+				return fauxAssistantMessage([fauxToolCall("read", { path: "helper.ts" })]);
+			},
+			fauxAssistantMessage("Checked helper.ts."),
+			fauxAssistantMessage("Ordinary worker finished."),
+
+			// 2. Explicit Impeccable mention in parent activates impeccable_delegate, which spawns a worker for role "documenter"
+			fauxAssistantMessage([
+				fauxToolCall("impeccable_delegate", {
+					role: "documenter",
+					task: "Inspect page.html and report No changes with checked paths.",
+					artifactPaths: ["page.html"],
+				}),
+			]),
+			(context) => {
+				delegatedWorkerTools = getCurrentTools(context.messages).map((tool) => tool.name);
+				delegatedWorkerPrompt = getCurrentSystemPrompt(context.messages);
+				return fauxAssistantMessage([fauxToolCall("impeccable_capabilities", {})]);
+			},
+			(context) => {
+				delegatedCapabilitiesResult = context.messages.find(
+					(msg): msg is ToolResultMessage => msg.role === "toolResult" && msg.toolName === "impeccable_capabilities",
+				);
+				return fauxAssistantMessage("No changes. Checked page.html.");
+			},
+			fauxAssistantMessage("Delegated documenter finished."),
+
+			// 3. Even after parent activated Impeccable, an ordinary worker spawned on "Update helper.ts" stays clean
+			fauxAssistantMessage([
+				fauxToolCall("Agent", {
+					subagent_type: "worker",
+					description: "Second helper check",
+					prompt: "Update helper.ts",
+					inherit_context: false,
+					run_in_background: false,
+				}),
+			]),
+			(context) => {
+				postActivationWorkerTools = getCurrentTools(context.messages).map((tool) => tool.name);
+				return fauxAssistantMessage([fauxToolCall("read", { path: "helper.ts" })]);
+			},
+			fauxAssistantMessage("Checked helper.ts again."),
+			fauxAssistantMessage("Second ordinary worker finished."),
+		]);
+
+		await h.session.prompt("Run a worker to check helper.ts");
+		for (const name of IMPECCABLE_TOOL_NAMES) {
+			expect(preActivationWorkerTools).not.toContain(name);
+			expect(preActivationWorkerPrompt).not.toContain(name);
+			expect(h.session.getActiveToolNames()).not.toContain(name);
+		}
+		expect(preActivationWorkerPrompt).not.toContain("<name>impeccable</name>");
+		expect(preActivationWorkerTools).toContain("read");
+
+		await h.session.prompt("Use impeccable to document page.html");
+		for (const name of IMPECCABLE_TOOL_NAMES) {
+			expect(h.session.getActiveToolNames()).toContain(name);
+			expect(delegatedWorkerTools).toContain(name);
+		}
+		expect(delegatedCapabilitiesResult?.isError).toBeFalsy();
+		expect(delegatedWorkerPrompt).not.toContain("<name>impeccable</name>");
+
+		await h.session.prompt("Run another worker on helper.ts");
+		for (const name of IMPECCABLE_TOOL_NAMES) {
+			expect(postActivationWorkerTools).not.toContain(name);
+		}
+		expect(h.errors).toEqual([]);
+	} finally {
+		await h.cleanup();
+	}
 });

@@ -60,7 +60,7 @@ export default function(pi) {
 					if (event.type === "agent_settled") { clearTimeout(timer); resolve(); }
 				}
 			});
-			send({ type: "prompt", message: "Ask design questions now" });
+			send({ type: "prompt", message: "Ask impeccable design questions now" });
 		});
 		expect(methods).toEqual(["select", "input", "input"]);
 		expect(toolResults).toHaveLength(1);

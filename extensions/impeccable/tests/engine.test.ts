@@ -194,6 +194,7 @@ describe("non-destructive activation", () => {
 			},
 		} as never);
 		expect(registered.map((tool) => (tool as { name: string }).name)).toEqual(["impeccable_question", "impeccable_delegate", "impeccable_capabilities", "impeccable_live", "impeccable_run"]);
+		expect(registered.map((tool) => (tool as { defaultActive?: boolean }).defaultActive)).toEqual([false, false, false, false, false]);
 		const tool = registered[4] as { name: string; execute: unknown };
 		expect(tool.name).toBe("impeccable_run");
 		expect(typeof tool.execute).toBe("function");

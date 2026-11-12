@@ -31,6 +31,7 @@ export function inspectCapabilities(pi: Pick<ExtensionAPI, "getAllTools" | "getA
 export function registerCapabilities(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "impeccable_capabilities", label: "Impeccable Capabilities",
+		defaultActive: false,
 		description: "Inspect current tool metadata for image/browser candidates, discovery, questions, and Agent availability. Reports unknowns; never probes credentials or calls visual services.",
 		parameters: Type.Object({}),
 		annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },

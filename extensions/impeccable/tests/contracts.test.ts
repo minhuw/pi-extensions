@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { DefaultResourceLoader, SettingsManager, type PromptTemplate } from "@earendil-works/pi-coding-agent";
+import { DefaultResourceLoader, formatSkillsForPrompt, SettingsManager, type PromptTemplate, type Skill } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
@@ -191,8 +191,21 @@ describe("skill discovery and portability", () => {
 			const [skill] = matches;
 			expect(skill.filePath).toBe(path.join(skillDir, "SKILL.md"));
 			expect(skill.baseDir).toBe(skillDir);
-			expect(skill.disableModelInvocation).toBe(false);
+			expect(skill.disableModelInvocation).toBe(true);
 			expect(skill.description).toContain("design, redesign, shape, critique, audit, polish");
+			expect(formatSkillsForPrompt(skills)).toBe("");
+			const peerSkill: Skill = {
+				name: "peer-skill",
+				description: "Visible peer skill",
+				filePath: path.join(cwd, "peer/SKILL.md"),
+				baseDir: path.join(cwd, "peer"),
+				sourceInfo: skill.sourceInfo,
+				disableModelInvocation: false,
+			};
+			const formatted = formatSkillsForPrompt([skill, peerSkill]);
+			expect(formatted).toContain("<name>peer-skill</name>");
+			expect(formatted).not.toContain("<name>impeccable</name>");
+			expect(formatted).not.toContain(skill.filePath);
 		} finally {
 			await cleanup();
 		}

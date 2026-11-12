@@ -145,6 +145,11 @@ Every difference between the upstream files and the files under `skills/` and `p
 - **Import:** `skill-v4.8.1` (commit `924bbd194d02e5e15a227e75b5901fb0d7a4ecad`, engine `0.1.19`) replaces the 4.8.0 snapshot in `vendor/impeccable-4.8.1`. Eighteen pristine files changed upstream (SKILL.md version, degraded roles, hooks/init/live/new-work references, VERSION, engine checksums, both launchers, `live-browser.js`, SKILL.src.md and three canonical roles); the manifest keeps its 63 files and order. Every existing transform anchor still matched.
 - **hooks.md step 4:** upstream now reports installed/repaired provider manifests on `on` and sends Hermes users to `npx impeccable install`. Pi installs no manifests, so `transform.mjs` replaces that step with reporting the actual `impeccable_run` result and the Pi delivery boundary.
 
+## Explicit-mention skill and tool gating
+
+- **Skill visibility (`scripts/transform.mjs`):** `localizeSkill` sets `disable-model-invocation: true` in `skills/impeccable/SKILL.md` frontmatter so Pi omits `impeccable` from `<available_skills>` on ordinary prompts and non-Impeccable subagents while `/skill:impeccable` still expands natively. Prompt templates (`freeformTemplate` and `commandTemplate`) resolve `<skill-base-dir>` from the `impeccable:skill-location` context message, an `<available_skills>` entry if present, or `impeccable_run` `["context"]`.
+- **Tool activation (`src/activation.ts`, tool registrations):** all five `impeccable_*` tools register with `defaultActive: false`. `registerActivation` activates them when a user prompt explicitly mentions Impeccable (`/impeccable`, `/design`, `/design-*`, `/i`, `/skill:impeccable`, pinned prompt markers, plain-text `impeccable` mentions, or `impeccable_delegate` child packets), on `/impeccable-live` or live event delivery, and when resuming or navigating to a branch carrying Impeccable live or skill-location entries. When activated by a prompt that does not already contain the skill path, `before_agent_start` injects a hidden `impeccable:skill-location` custom message once per compaction window. Extension load remains pure.
+
 ## Integrated runtime boundaries
 
 - Follow-up T3/T4 supply real-engine detector/direction/live browser evidence; these integrations are no longer deferred.

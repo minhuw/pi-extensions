@@ -61,6 +61,7 @@ function localizeSkill(text, relative) {
 		.replace(SETUP_STEP1_ORIGINAL, SETUP_STEP1_LOCAL)
 		.replaceAll(UPSTREAM_SCRIPTS_DIR, LOCAL_SCRIPTS_DIR);
 	if (relative === "SKILL.md") {
+		localized = replaceRequired(localized, "version: 4.8.1\n", "version: 4.8.1\ndisable-model-invocation: true\n");
 		localized = replaceRequired(localized, "**Pin / Unpin:** `<skill-base-dir>/scripts/impeccable pin <pin|unpin> <command>` creates or removes a standalone `/<command>` shortcut. Report the script's result concisely; relay stderr verbatim on error.", "**Pin / Unpin:** Use impeccable_run with argv: [\"pin\", \"pin\", \"<command>\"] or [\"pin\", \"unpin\", \"<command>\"], optionally --project (default) or --user. The Pi adapter creates native prompt shortcuts with ownership markers in the session cwd's .pi/prompts (project) or the agent prompts directory (user), independently of engine cwd/target/root selection, and checks current commands through Pi discovery; it refuses conflicts such as Writer /polish. Run /reload after a change. Unpin removes only adapter-owned prompts. All /design-* templates remain canonical; never modify package resources or create harness-local skills.");
 		localized = replaceRequired(localized, "## Setup\n", "## Setup\n\nRead [reference/pi-runtime.md](reference/pi-runtime.md) for impeccable_question, impeccable_delegate, impeccable_live and impeccable_capabilities; these adapters apply to every playbook and emitted engine directive.\n");
 	}
@@ -111,7 +112,7 @@ function freeformTemplate(description) {
 		"---",
 		"Use the Impeccable design skill for this request. These instructions apply only to this invocation, not as permanent session rules.",
 		"",
-		"1. Locate the Impeccable skill in your available skills: its `<name>` is `impeccable` and its `<location>` is the path of `SKILL.md`. The skill directory — the parent of `<location>` — is `<skill-base-dir>`.",
+		"1. Resolve `<skill-base-dir>` (the directory containing Impeccable's `SKILL.md`) from the `impeccable:skill-location` context message, an `<available_skills>` entry named `impeccable` if present, or `impeccable_run` with `argv: [\"context\"]`.",
 		"2. Read `<skill-base-dir>/SKILL.md` and follow its Setup and Routing sections for the request below. Run the Impeccable engine once per session as its Setup directs (prefer the `impeccable_run` tool; Setup documents the absolute launcher fallback), and follow the directives it prints.",
 		"3. Route the request:",
 		"   - `pin` or `unpin`: follow the Pin/Unpin section of `<skill-base-dir>/SKILL.md` and run the command it names.",
@@ -145,7 +146,7 @@ function commandTemplate(command, metadata) {
 		"---",
 		"Use the Impeccable design skill for this request. These instructions apply only to this invocation, not as permanent session rules.",
 		"",
-		"1. Locate the Impeccable skill in your available skills: its `<name>` is `impeccable` and its `<location>` is the path of `SKILL.md`. The skill directory — the parent of `<location>` — is `<skill-base-dir>`.",
+		"1. Resolve `<skill-base-dir>` (the directory containing Impeccable's `SKILL.md`) from the `impeccable:skill-location` context message, an `<available_skills>` entry named `impeccable` if present, or `impeccable_run` with `argv: [\"context\"]`.",
 		"2. Read `<skill-base-dir>/SKILL.md` and follow its Setup section, including running the Impeccable engine once per session as it directs (prefer the `impeccable_run` tool; Setup documents the absolute launcher fallback) and following the directives it prints.",
 		`3. Follow the \`${command}\` playbook end-to-end: read \`<skill-base-dir>/reference/${command}.md\` and comply with it completely, including its verification and handoff steps. Do not reduce the playbook to a shortcut.${nativeLine}`,
 		"4. Read `<skill-base-dir>/reference/pi-runtime.md` for impeccable_question, impeccable_delegate and capability guidance; retain visual decision pages and wait for actual answers.",

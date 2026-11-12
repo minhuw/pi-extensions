@@ -3,10 +3,11 @@ import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { expect } from "vitest";
 import impeccableExtension from "../../index.ts";
+import { IMPECCABLE_TOOL_NAMES } from "../../src/activation.ts";
 import { LIVE_SNAPSHOT, type LiveSaved } from "../../src/live.ts";
 
 /** Actual AgentSession + resource loader, with in-memory credentials and only the faux provider. */
-export async function liveSession(root: string, extra?: (pi: ExtensionAPI) => void, manager = SessionManager.inMemory(root), nativeTools = false, agentDir = root) {
+export async function liveSession(root: string, extra?: (pi: ExtensionAPI) => void, manager = SessionManager.inMemory(root), nativeTools = false, agentDir = root, activateImpeccableTools = true) {
 	const faux = fauxProvider({ api: "impeccable-live-test-api", provider: "impeccable-live-test", models: [{ id: "test" }] });
 	let api!: ExtensionAPI;
 	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
@@ -14,7 +15,10 @@ export async function liveSession(root: string, extra?: (pi: ExtensionAPI) => vo
 		extensionFactories: [(pi) => { api = pi; pi.registerProvider(faux.provider); impeccableExtension(pi); extra?.(pi); }],
 	});
 	await resources.reload(); expect(resources.getExtensions().errors).toEqual([]);
-	const { session } = await createAgentSession({ cwd: root, agentDir, modelRuntime, model: faux.getModel("test")!, resourceLoader: resources, sessionManager: manager, settingsManager: SettingsManager.inMemory({ ...(nativeTools ? {} : { defaultTools: [] }), retry: { enabled: false } }) });
+	const defaultTools = activateImpeccableTools
+		? [...(nativeTools ? ["read", "bash", "edit", "write"] : []), ...IMPECCABLE_TOOL_NAMES]
+		: nativeTools ? undefined : [];
+	const { session } = await createAgentSession({ cwd: root, agentDir, modelRuntime, model: faux.getModel("test")!, resourceLoader: resources, sessionManager: manager, settingsManager: SettingsManager.inMemory({ ...(defaultTools !== undefined ? { defaultTools } : {}), retry: { enabled: false } }) });
 	const errors: unknown[] = [];
 	await session.bindExtensions({ mode: "rpc", onError: (error) => errors.push(error) });
 	return {

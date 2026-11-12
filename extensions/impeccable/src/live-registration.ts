@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { activateImpeccableTools } from "./activation.ts";
 import { LiveOwner, LIVE_MESSAGE, LIVE_SNAPSHOT, type LiveSaved } from "./live.ts";
 import { object } from "./project.ts";
 
@@ -49,6 +50,7 @@ export function registerLive(pi: ExtensionAPI) {
 		// Busy delivery uses a supported boundary, never a racing follow-up queue.
 		if (context.isIdle() && !context.hasPendingMessages()) {
 			mark(live);
+			activateImpeccableTools(pi);
 			pi.sendMessage(packet(live), { triggerTurn: true });
 		}
 	};
@@ -95,6 +97,7 @@ export function registerLive(pi: ExtensionAPI) {
 		if (event.outcome !== "completed" || ctx.hasPendingMessages()) { await pause("Busy episode interrupted; explicit resume required"); return; }
 		if (!episodeUsed) {
 			mark(live);
+			activateImpeccableTools(pi);
 			return { entries: [...event.entries, { type: "custom_message" as const, ...packet(live) }], continue: true };
 		}
 	});
@@ -115,7 +118,7 @@ export function registerLive(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async (event) => { await pause(`Pi shutdown: ${event.reason}`); owner = undefined; context = undefined; delivered.clear(); });
 
 	pi.registerTool({
-		name: "impeccable_live", label: "Impeccable Live", executionMode: "sequential",
+		name: "impeccable_live", label: "Impeccable Live", defaultActive: false, executionMode: "sequential",
 		description: "Own the native Impeccable overlay/helper and recovery journal in this Pi session. start/generate return immediately; native CLI waits in background. status inspects, reply acknowledges exactly one owned event, resume explicitly recovers this branch, stop releases owned resources while preserving work. Native instructions that say poll/reply/complete must use this owner. Never run a second poller. Accept verification is separate from native transport acknowledgement; verified requires evidence, carbonize requires complete after cleanup.",
 		parameters: Type.Object({
 			action: stringEnum(["start", "generate", "status", "reply", "resume", "stop"]),
@@ -142,6 +145,7 @@ export function registerLive(pi: ExtensionAPI) {
 	pi.registerCommand("impeccable-live", {
 		description: "Immediate live status, stop or explicit resume (no model call)",
 		async handler(args, ctx) {
+			activateImpeccableTools(pi);
 			pi.appendEntry("pi-extensions.command", { command: "impeccable-live", kind: "extension", extension: "impeccable" });
 			const live = await get(ctx);
 			const action = args.trim() || "status";
