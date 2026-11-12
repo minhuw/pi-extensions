@@ -21,7 +21,7 @@ interface BatchBody {
  * `redirect` answers with a 307 to the same path under `/moved`, which is served as usual; `fail`
  * answers 503; `unauthorized` answers 401 whatever the token.
  */
-export type Mode = "ok" | "hang" | "redirect" | "fail" | "unauthorized";
+export type Mode = "ok" | "hang" | "redirect" | "fail" | "unauthorized" | "page";
 
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 /** The names a pika server older than 0.4 accepted. */
@@ -355,6 +355,13 @@ export class MockIngest {
 			return;
 		}
 		if (this.mode === "fail") return this.reply(response, 503, { error: "unavailable" });
+		// A proxy or login page in front of the server: 200 for anything, and never an ingest answer.
+		if (this.mode === "page") {
+			this.responses.push(200);
+			response.writeHead(200, { "content-type": "text/html" });
+			response.end("<html><body>Sign in</body></html>");
+			return;
+		}
 		const path = moved ? request.url!.slice("/moved".length) : request.url;
 		if (request.method === "POST" && this.pairing && path?.startsWith("/pika/api/pair/v1/")) {
 			let body: unknown;

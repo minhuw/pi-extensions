@@ -115,6 +115,8 @@ it("stops after a refusal until the login changes", async () => {
 	const id = await start();
 	publish(id, 1, [card("c1", "todo")]);
 	await waitFor(() => ingest.boardUploads.length === 1, 3_000, "the refused upload");
+	// The server counts the upload before it answers; the note follows the answer.
+	await waitFor(() => lastError() !== undefined, 3_000, "the noted refusal");
 	expect(lastError()).toContain("HTTP 403 test; not retried until the login changes");
 	publish(id, 2, [card("c1", "done")]);
 	await sleep(400);

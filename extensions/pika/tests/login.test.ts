@@ -100,6 +100,7 @@ describe("/pika login", () => {
 		{ name: "a wrong token (401)", url: () => ingest.url, token: WRONG, message: () => "the server rejected the token" },
 		{ name: "a URL without the base path (404)", url: () => `http://127.0.0.1:${ingest.port}`, token: TOKEN, message: (url) => `no pika ingest API at ${url}; check the base path` },
 		{ name: "an unexpected status", url: () => ingest.url, token: TOKEN, setup: () => { ingest.mode = "fail"; }, message: (url) => `unexpected HTTP 503 from ${url}` },
+		{ name: "a 200 that is not an ingest answer", url: () => ingest.url, token: TOKEN, setup: () => { ingest.mode = "page"; }, message: (url) => `unexpected answer from ${url}; it may not be a pika server` },
 		{ name: "an unreachable server", url: () => ingest.url, token: TOKEN, setup: () => ingest.stop(), message: (url) => `could not reach ${url}` },
 		{ name: "a redirect", url: () => ingest.url, token: TOKEN, setup: () => { ingest.mode = "redirect"; }, message: (url) => `could not reach ${url}` },
 	];

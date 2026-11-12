@@ -32,6 +32,7 @@ export function isPlainRemote(url: string): boolean {
 export async function validateToken(url: string, token: string, options: { piVersion?: string; signal?: AbortSignal } = {}): Promise<string | undefined> {
 	const signal = options.signal ? AbortSignal.any([AbortSignal.timeout(VALIDATE_TIMEOUT_MS), options.signal]) : AbortSignal.timeout(VALIDATE_TIMEOUT_MS);
 	let status: number;
+	let answer: unknown;
 	try {
 		const response = await fetch(`${url}/api/ingest/v1/batch`, {
 			method: "POST",
@@ -41,11 +42,16 @@ export async function validateToken(url: string, token: string, options: { piVer
 			body: JSON.stringify({ client: clientInfo(options.piVersion) }),
 		});
 		status = response.status;
-		await response.body?.cancel().catch(() => {});
+		if (status === 200) answer = await response.json().catch(() => undefined);
+		else await response.body?.cancel().catch(() => {});
 	} catch {
 		return options.signal?.aborted ? "login cancelled" : `could not reach ${url}`;
 	}
-	if (status === 200) return undefined;
+	if (status === 200) {
+		// A proxy or login page answers 200 too; only an ingest answer shows the token works.
+		const streams = answer && typeof answer === "object" ? (answer as { streams?: unknown }).streams : undefined;
+		return streams && typeof streams === "object" && !Array.isArray(streams) ? undefined : `unexpected answer from ${url}; it may not be a pika server`;
+	}
 	if (status === 401) return "the server rejected the token";
 	if (status === 404) return `no pika ingest API at ${url}; check the base path`;
 	return `unexpected HTTP ${status} from ${url}`;

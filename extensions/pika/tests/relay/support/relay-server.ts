@@ -106,7 +106,7 @@ export class FakeRelay {
 		if (route === "/api/health") return json(response, 200, { ok: true, version: this.features ? "0.3.0" : "0.2.0", basePath: this.base, ...(this.features ? { features: this.features } : {}) });
 		if (route === "/api/ingest/v1/batch" && request.method === "POST") {
 			request.resume();
-			return this.authorized(request) ? json(response, 200, { streams: [], requests: [], blobs: [], documents: [] }) : json(response, 401, { error: "unauthorized" });
+			return this.authorized(request) ? json(response, 200, { streams: {}, missingBlobs: [] }) : json(response, 401, { error: "unauthorized" });
 		}
 		if (route === "/api/relay/v1/sessions") {
 			this.sessionRequests.push({ authorization: request.headers.authorization });

@@ -813,7 +813,14 @@ export class Uploader {
 		if (this.closed) return "stop";
 		let parsed: Record<string, unknown> = {};
 		try { const value: unknown = JSON.parse(response.text); if (value && typeof value === "object") parsed = value as Record<string, unknown>; } catch { /* not JSON */ }
-		if (response.status === 200) return await this.accepted(batch, parsed);
+		if (response.status === 200) {
+			// A proxy or login page answers 200 too; only an ingest answer may delete what was sent.
+			if (!parsed.streams || typeof parsed.streams !== "object" || Array.isArray(parsed.streams)) {
+				this.noteError(`${this.options.url} answered 200 without an ingest result; it may not be a pika server`);
+				return "retry";
+			}
+			return await this.accepted(batch, parsed);
+		}
 		if (response.status === 401) {
 			this.halted = "the server rejected the token (401); uploads stopped until /pika login succeeds or a new session starts";
 			this.noteError(this.halted);
@@ -928,7 +935,7 @@ export class Uploader {
 		this.oneItem = false;
 		this.lastSuccess = Date.now();
 		let progressed = batch.requests.length + batch.blobs.length > 0;
-		const lengths = body.streams && typeof body.streams === "object" ? body.streams as Record<string, { length?: unknown }> : {};
+		const lengths = body.streams as Record<string, { length?: unknown }>;
 		for (const item of batch.streams) {
 			const stream = this.streams.get(item.key);
 			if (!stream) continue;

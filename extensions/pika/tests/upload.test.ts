@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
@@ -67,6 +67,32 @@ it("recovers from a 409 gap by resending from the server's length", async () => 
 		expect(h.errors).toEqual([]);
 	} finally { await h.shutdown(); }
 }, 20_000);
+
+it("keeps the spool and the cursor when a 200 is not an ingest answer, and delivers once the server answers", async () => {
+	await workspace.enable(ingest.url);
+	ingest.mode = "page";
+	const spooled = async () => (await readdir(join(workspace.pikaDir, "spool", "requests")).catch(() => [])).filter((name) => !name.endsWith(".tmp"));
+	const h = await startSession({ workspace, extensions: [pikaExtension] });
+	try {
+		h.faux.setResponses([fauxAssistantMessage("one")]);
+		const key = `session:${h.session.sessionId}`;
+		await h.session.prompt("one");
+		await waitFor(() => /answered 200 without an ingest result/.test(currentUploader()?.status().lastError ?? ""), 5_000, "upload error");
+		await waitFor(async () => (await spooled()).length === 1, 3_000, "spooled request");
+		// The request is in at least one refused batch before the server recovers.
+		const sent = ingest.responses.length;
+		await waitFor(() => ingest.responses.length > sent, 5_000, "another refused batch");
+		expect(ingest.responses.every((status) => status === 200)).toBe(true);
+		expect(await spooled()).toHaveLength(1);
+		const cursor = JSON.parse(await readFile(join(workspace.pikaDir, "streams", `${encodeURIComponent(key)}.json`), "utf8")) as { length: number };
+		expect(cursor.length).toBe(0);
+
+		ingest.mode = "ok";
+		await waitFor(async () => ingest.data(key) === await readText(h.session.sessionFile!) && ingest.sessionRequests(h.session.sessionId).length === 1, 10_000, "delivery");
+		await waitFor(async () => (await spooled()).length === 0, 2_000, "empty spool");
+		expect(h.errors).toEqual([]);
+	} finally { await h.shutdown(); }
+}, 30_000);
 
 it("stops a stream on a 409 conflict and reports it", async () => {
 	await workspace.enable(ingest.url);
