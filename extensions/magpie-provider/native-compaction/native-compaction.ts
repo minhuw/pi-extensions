@@ -536,8 +536,9 @@ export function shouldFallbackToBuiltinCompaction(params: {
 }
 
 function parseRetryDelay(response: Response): number | undefined {
-	const milliseconds = Number(response.headers.get("retry-after-ms"));
-	if (Number.isFinite(milliseconds) && milliseconds >= 0) return milliseconds;
+	const retryAfterMs = response.headers.get("retry-after-ms");
+	const milliseconds = Number(retryAfterMs);
+	if (retryAfterMs && Number.isFinite(milliseconds) && milliseconds >= 0) return milliseconds;
 	const retryAfter = response.headers.get("retry-after");
 	if (!retryAfter) return undefined;
 	const seconds = Number(retryAfter);

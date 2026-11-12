@@ -443,6 +443,35 @@ describe("canonical compacted output", () => {
 		expect(calls).toBe(1);
 	});
 
+	it.each([
+		["429 without retry headers", 429, {}, [1000, 2000]],
+		["503 with Retry-After: 2", 503, { "retry-after": "2" }, [2000, 2000]],
+	] as const)("waits before retrying %s", async (_name, status, headers, waits) => {
+		vi.useFakeTimers();
+		const fetchImpl = vi.fn<typeof fetch>(async () => new Response("overloaded", { status, headers }));
+		try {
+			const assertion = expect(
+				callRemoteCompaction({
+					url: "https://proxy.example/backend-api/codex/responses",
+					headers: new Headers(),
+					body: { model: "gpt-6-luna", input: [] },
+					model,
+					fetchImpl,
+				}),
+			).rejects.toThrow(`(${status})`);
+			await vi.advanceTimersByTimeAsync(0);
+			for (const [index, wait] of waits.entries()) {
+				await vi.advanceTimersByTimeAsync(wait - 1);
+				expect(fetchImpl).toHaveBeenCalledTimes(index + 1);
+				await vi.advanceTimersByTimeAsync(1);
+				expect(fetchImpl).toHaveBeenCalledTimes(index + 2);
+			}
+			await assertion;
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("rejects output without exactly one encrypted opaque item", () => {
 		expect(() => parseCompactResponse({ output: [{ type: "message", role: "user", content: "hello" }] })).toThrow(
 			"expected exactly one",
