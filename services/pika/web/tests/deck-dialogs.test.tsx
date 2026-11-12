@@ -145,12 +145,13 @@ describe("Remove Worktree", () => {
 		fireEvent.click(deleteBranch);
 		fireEvent.click(screen.getByRole("button", { name: "Stop 2 terminals and Remove" }));
 		await waitFor(() => expect(document.querySelector("[data-dialog-error]")!.textContent).toContain("modified or untracked files"));
-		fireEvent.click(screen.getByRole("button", { name: "Stop 2 terminals and Remove" }));
+		// git ran, so the forced try stopped the terminals: no more offer to stop them.
+		fireEvent.click(screen.getByRole("button", { name: "Remove Worktree" }));
 		await waitFor(() => expect(onRemove).toHaveBeenCalledTimes(3));
 		expect(requests).toEqual([
 			{ deleteBranch: false, force: false },
 			{ deleteBranch: true, force: true },
-			{ deleteBranch: true, force: true },
+			{ deleteBranch: true, force: false },
 		]);
 	});
 

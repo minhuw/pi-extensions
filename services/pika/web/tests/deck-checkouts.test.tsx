@@ -259,6 +259,33 @@ describe("Deck on checkouts", () => {
 		expect(document.querySelector(`[data-worktree-card='${fix.path}']`)).toBeNull();
 	});
 
+	it("drops the offer to stop terminals once git refuses a forced removal of a worktree with changes", async () => {
+		const fix = worktree(`${HOME}/repo-fix`, "fix");
+		repo = { ...repo, worktrees: [...repo.worktrees, fix] };
+		checkouts = [repo];
+		terminals = [shell("t3", { cwd: fix.path, checkoutId: repo.id, worktreePath: fix.path })];
+		const removals: ClientMessage[] = [];
+		const refusal = `fatal: '${fix.path}' contains modified or untracked files, use --force to delete it`;
+		answer = ((base) => (message: ClientMessage) => {
+			if (message.type !== "worktree.remove") return base(message);
+			removals.push(message);
+			if (removals.length === 1) return { error: { code: "busy", message: `1 live terminal uses ${fix.path}` } };
+			return { error: { code: "conflict", message: refusal } };
+		})(answer);
+		await open();
+		openMenu(document.querySelector(`[data-worktree-card='${fix.path}'] [data-worktree-open]`)!);
+		fireEvent.click(menuItem("data-worktree-menu", "remove-worktree"));
+		const dialog = await screen.findByRole("alertdialog", { name: "Remove the worktree fix?" });
+		fireEvent.click(within(dialog).getByRole("button", { name: "Remove Worktree" }));
+		fireEvent.click(await within(dialog).findByRole("button", { name: "Stop 1 terminal and Remove" }));
+		await waitFor(() => expect(within(dialog).getByRole("alert").textContent).toBe(refusal));
+		// The terminals are stopped; trying again is a plain removal.
+		fireEvent.click(within(dialog).getByRole("button", { name: "Remove Worktree" }));
+		await waitFor(() => expect(removals).toHaveLength(3));
+		expect(removals[1]).toMatchObject({ force: true });
+		expect(removals[2]).not.toHaveProperty("force");
+	});
+
 	it("removes a checkout from Deck with an undo that unhides it", async () => {
 		const hidden: string[] = [];
 		answer = ((base) => (message: ClientMessage) => {

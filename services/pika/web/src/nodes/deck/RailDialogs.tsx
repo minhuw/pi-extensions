@@ -355,8 +355,13 @@ export function RemoveWorktreeDialog({
 				const counted = Number(/\d+/.exec(failure.message)?.[0]);
 				setBusyCount(liveTerminals || (Number.isFinite(counted) && counted > 0 ? counted : 1));
 				setError(failure.message);
-			} else if (failure instanceof NodeRequestError && failure.code === "conflict") setError(failure.message);
-			else setError(failure instanceof NodeRequestError ? `${failure.code}: ${failure.message}` : errorText(failure));
+				return;
+			}
+			if (failure instanceof NodeRequestError && failure.code === "conflict") {
+				// git ran, so no terminal holds the worktree any more (a forced try stopped them): the offer goes.
+				setBusyCount(undefined);
+				setError(failure.message);
+			} else setError(failure instanceof NodeRequestError ? `${failure.code}: ${failure.message}` : errorText(failure));
 		}
 	};
 	return (
@@ -391,7 +396,7 @@ export function RemoveWorktreeDialog({
 						Cancel
 					</AlertDialogClose>
 					<Button variant="destructive" onClick={() => void confirm()} disabled={working} data-confirm="" data-force={busyCount !== undefined ? "" : undefined}>
-						{busyCount !== undefined ? `Stop ${terminalsText(busyCount)} and Remove` : working ? "Removing…" : "Remove Worktree"}
+						{working ? "Removing…" : busyCount !== undefined ? `Stop ${terminalsText(busyCount)} and Remove` : "Remove Worktree"}
 					</Button>
 				</AlertDialogFooter>
 			</AlertDialogContent>
