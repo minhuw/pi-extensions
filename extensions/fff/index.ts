@@ -30,7 +30,7 @@ import type {
 	MixedItem,
 	SearchResult,
 } from "@ff-labs/fff-node";
-import { type Static, Type, type TSchema } from "@sinclair/typebox";
+import { type Static, Type, type TSchema } from "typebox";
 import {
 	type FffBackend,
 	getSharedFffBackend,
