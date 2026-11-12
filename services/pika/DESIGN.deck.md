@@ -21,6 +21,7 @@ colors:
   dk-needs-ink: "#8f4b00"
   dk-failed: "#c4321f"
   dk-failed-ink: "#b02a19"
+  dk-on-failed: "#ffffff"
   dk-done: "#1d8a4a"
   dk-done-ink: "#16703b"
   dk-working: "#2b71b8"
@@ -42,6 +43,7 @@ colors:
   dk-dark-on-accent: "#111417"
   dk-dark-needs: "#f2a33a"
   dk-dark-failed: "#ff7a6b"
+  dk-dark-on-failed: "#111417"
   dk-dark-done: "#4fc47f"
   dk-dark-working: "#6cb0ea"
 typography:
@@ -266,18 +268,21 @@ Deck is an app of its own inside pika: its route renders outside the dashboard's
 
 - **Cursor and selection:** the arrow everywhere, including buttons, tabs, rows and tree items; the I-beam only over text fields and selectable text. Chrome does not select: the root sets `user-select: none`, and inputs, code, `kbd`, and anything marked `data-selectable` select again (commands, fingerprints, the build).
 - **Focus:** rings for the keyboard only (`:focus-visible`); a click leaves none.
-- **One menu (`Menu.tsx`)** for every context menu and drop-down, drawn like a native one (macOS, Zed, VS Code):
+- **Primitives:** menus, tooltips, dialogs, confirmations, the Add Project completion list, the undo notice, buttons inside dialogs, text fields and checkboxes are shadcn/ui components on Base UI (`@base-ui/react`), copied into `web/src/components/ui-shadcn/` and restyled with the `dk-*` utilities; Base UI does the keyboard, focus, dismissal, placement and ARIA. They portal into the Deck root (`PortalContainer`), so the tokens reach them. Nothing hand-rolls a menu, a bubble or a modal frame any more.
+- **One menu (`Menu.tsx`, data drawn by `ui-shadcn/dropdown-menu.tsx`)** for every context menu and drop-down, drawn like a native one (macOS, Zed, VS Code):
   - **Sheet:** `dk-raised`, a 1px `dk-menu-line` hairline, 6px radius, the soft two-layer `dk-shadow`, 4px inside; 220–380px wide.
   - **Rows:** 26px, 13px text in full ink, 6px/8px side padding, 4px radius. A 16px icon column always comes first (the item's 14px icon in ink-2, the check of a chosen one, or blank), then the label, a hint in ink-3 at 12px that truncates first (a project's path), the shortcut right-aligned in ink-3 tabular figures, and a chevron for a submenu.
   - **Highlight:** the accent tint `dk-menu-hi` (13% light, 20% dark) with the text staying ink, whether the pointer or the keyboard put it there; the item whose submenu is open stays highlighted. Destructive items (Kill, Remove, Re-pair…) are failed ink with a failed-ink icon, highlighted or not.
   - **Groups:** separators are inset hairlines with 4px above and below; a header names the items under it (11.5px, 600, ink-3, aligned with the labels) and makes them a `group` for assistive technology. A note is one line of ink-2 text where there is nothing to choose.
   - **Disabled is rare.** A menu is never a list of disabled items. What cannot apply here is left out (splits for a group's only tab, Close Others with nothing to close, a fingerprint never pinned); a node that is not connected leaves out everything that needs it and the menu says so once, in a note ("node01 is not connected"). An item stays disabled only when that teaches something, today only "Update pika-node on X to use this". Disabled text is ink at 40%; the item can still be highlighted (with a hover tint, not the accent), and its reason shows once, in a tooltip bubble beside the menu, and is the item's `aria-describedby`; never a second line under every item.
-  - **Submenus** open beside their item (flipping left at the window's edge) after the pointer rests 120ms, or with Right, Enter or Space; Left or Escape closes one and returns to its item.
-  - **Keyboard:** focus starts on the checked or first enabled item (on the sheet itself when there is only a note, so Escape still works); arrows, Home/End, a letter to jump, Enter/Space, Escape/Tab close and return focus. A press outside the menu and its submenus, a resize or the window losing focus closes it; opening one closes any other; pressing the button that opened it closes it. Context menus exist on tabs, agent rows, project cards, nodes and tree items; the menu key and Shift+F10 open them from the keyboard.
+  - **Placement:** under the button or row that opened it, or with its corner at the pointer for a context menu (a virtual anchor); it flips above or to the left rather than run off the window, 4px from its edge.
+  - **Submenus** open beside their item, first rows level (flipping left at the window's edge), when the pointer rests on it, on a click, or with Right, Enter or Space; Left or Escape closes one and returns to its item.
+  - **Keyboard:** opened from the keyboard (Enter on its button, the menu key, Shift+F10), focus starts on the checked or first enabled item; opened by the pointer, nothing is highlighted until an arrow or the pointer picks a row, as on the desktop. With only a note the sheet itself takes focus, so Escape still works. Arrows wrap, a letter jumps by label, Enter/Space choose, Escape closes and returns focus. A chosen item returns focus where it was before it runs, so the item may move it on (a dialog, a file). A press outside the menu and its submenus (leaving focus where the press puts it), a resize or the window losing focus closes it; opening one closes any other; pressing the button that opened it closes it. Context menus exist on tabs, agent rows, project cards, nodes and tree items.
   - **The rail's "+"** targets a node: the node on screen (or the only connected one) without asking, under a header naming where things land ("atlas · mac") when there is a project or another node; the project on screen is the default, and New Worktree… appears only there. Other connected nodes follow as submenus under "Other nodes". With no node on screen and up to four connected, each is a group under its name, so one choice picks node and action; beyond four, one submenu per node. With none connected, it offers "Pair <node>…" for each unpaired node, or says which nodes are not connected.
-- **Buttons:** the shared `BUTTON` set is re-toned inside the root through its `ui-button*` names: 28px, 4px radius; a dialog's or page's primary action (Add Project, Create Worktree, Pair this browser) in the accent, as a desktop's default button; secondary framed in `dk-line-strong` on `dk-raised`; danger in failed. Text fields in Deck's dialogs are 28px, `dk-line-strong`, turning accent with a soft accent ring on focus; checkboxes take the accent (`accent-color`).
-- **Tooltips (`Tooltips.tsx`)** replace `title`: an inverse bubble (`dk-tip`) after 600ms, at once while another just showed, with the action's shortcut beside the name; hidden on press, key, scroll, or leaving; never on touch. The bubble is `aria-hidden`; every control keeps its own accessible name.
-- **Dialogs** inside the root are sheets like the menus (8px radius, `dk-raised`, the same shadow).
+- **Buttons:** 28px, 4px radius. In dialogs they are `ui-shadcn/button.tsx` (`default` the accent, as a desktop's default button: Add Project, Create Worktree; `outline` framed in `dk-line-strong` on `dk-raised`; `ghost` quiet; `destructive` a `dk-failed` fill with `dk-on-failed` text: Kill, Remove Worktree, Forget the Key). Elsewhere the shared `BUTTON` set is re-toned to the same look through its `ui-button*` names. Text fields are 28px, `dk-line-strong`, turning accent with a soft accent ring on focus; checkboxes are 14px boxes filled with the accent when checked.
+- **Tooltips (`Tooltips.tsx`)** replace `title`: an inverse bubble (`dk-tip`) after 600ms, at once while another just showed, with the action's shortcut beside the name; hidden on press, key, scroll, or leaving; never on touch. One Base UI tooltip, anchored to the control under the pointer, serves every `data-tip`: below it, above at the window's bottom, kept 4px inside the window. The bubble is `aria-hidden`; every control keeps its own accessible name.
+- **Dialogs** are sheets like the menus (8px radius, `dk-raised` framed in `dk-line-strong`, the same shadow) over a 30% (dark: 50%) backdrop, named by their title and described by their first line. Focus goes to the first field, or to Cancel in a confirmation, stays inside, and returns when they close; Deck's shortcuts stand still while one is open (the popup says `aria-modal`). Escape cancels unless an action is in flight. A press on the backdrop cancels a dialog but not a confirmation (`role="alertdialog"`: kill, close unsaved, remove a worktree, forget a key). Add Project lists the node's folders under its field (Base UI Autocomplete): arrows pick, Tab or Enter or a click completes, Enter with nothing picked adds the path.
+- **The undo notice** (after Remove from Deck) is a Base UI toast at the bottom left, above the status bar: the message, Undo in the accent, five seconds held while the pointer or focus is on it, announced politely; a failed undo replaces the message.
 - **Glyphs** are drawn SVG (chevrons, the panel toggles, the diff arrows), never Unicode triangles or arrows.
 - **Scrollbars** are thin, ink at 22%.
 
@@ -286,7 +291,6 @@ Deck is an app of its own inside pika: its route renders outside the dashboard's
 - Tab strips on chrome; the active tab on ground with a 2px accent underline; the focused group's strip has a 2px accent top line. Status glyphs on terminal tabs use the same set.
 - Splitters are 1px lines that turn `dk-line-strong` on hover and accent on focus; drop targets are accent-framed over `dk-accent-soft`.
 - The workspace header shows the focused pane's state as glyph plus label in the state's ink, never a boxed pill. "New terminal" is a quiet framed button; the accent is not spent on it.
-- Dialogs (shortcuts, quick open) frame in `dk-line-strong`.
 - An empty tab group offers "New terminal" once, as a labelled button in its body; its strip has no `+` until it holds a tab.
 
 ## Do's and Don'ts
@@ -306,4 +310,4 @@ Deck is an app of its own inside pika: its route renders outside the dashboard's
 
 ## Sources
 
-Ported, with headers naming the source: T3 Code (`apps/web/src/lib/sidebarTree.ts` → `rail-tree.ts`; inbox ordering and grace semantics from `packages/client-runtime/src/state/threadInbox.ts`), MIT © 2026 T3 Tools Inc., notice in `web/src/nodes/workspace/T3-LICENSE`. Orca (short ages, the stepped working ring, glyph set and badge behaviour), MIT © 2026 Lovecast Inc., notice in `web/src/nodes/workspace/ORCA-LICENSE`.
+Ported, with headers naming the source: T3 Code (`apps/web/src/lib/sidebarTree.ts` → `rail-tree.ts`; inbox ordering and grace semantics from `packages/client-runtime/src/state/threadInbox.ts`), MIT © 2026 T3 Tools Inc., notice in `web/src/nodes/workspace/T3-LICENSE`. Orca (short ages, the stepped working ring, glyph set and badge behaviour), MIT © 2026 Lovecast Inc., notice in `web/src/nodes/workspace/ORCA-LICENSE`. shadcn/ui (the Base UI flavour of `dropdown-menu`, `tooltip`, `dialog`, `alert-dialog`, `button`, `input`, `checkbox`, `toast`, and its combobox for the autocomplete), MIT © 2023 shadcn, notice in `web/src/components/ui-shadcn/SHADCN-LICENSE`, which also records the dependencies: Base UI (`@base-ui/react`, MIT © 2019 Material-UI SAS), clsx and tailwind-merge (MIT), class-variance-authority (Apache-2.0).
