@@ -144,4 +144,40 @@ describe("files", () => {
         git("add", "big.txt");
         expect(await code(show(join(repo, "big.txt"), "index"))).toBe("too_large");
     });
+
+    it("lists a work tree's files with git, and walks anything else, capped", async () => {
+        const repo = join(home.home, "listed");
+        mkdirSync(join(repo, "src", "deep"), { recursive: true });
+        mkdirSync(join(repo, "node_modules", "dep"), { recursive: true });
+        const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" });
+        git("init", "-q");
+        writeFileSync(join(repo, ".gitignore"), "node_modules\n*.log\n");
+        writeFileSync(join(repo, "src", "a.ts"), "a");
+        writeFileSync(join(repo, "src", "deep", "b ç.ts"), "b");
+        writeFileSync(join(repo, "node_modules", "dep", "index.js"), "x");
+        writeFileSync(join(repo, "debug.log"), "x");
+        git("add", ".gitignore", "src/a.ts");
+        git("commit", "-qm", "first");
+        const list = (root: string, limit?: number) => files.request(peer, { type: "fs.list", id: "l", root, ...(limit ? { limit } : {}) });
+
+        // Tracked and untracked, never ignored; relative to the root asked for, also below the top level.
+        expect(await list(repo)).toEqual({ source: "git", truncated: false, paths: [".gitignore", "src/a.ts", "src/deep/b ç.ts"] });
+        expect(await list(join(repo, "src"))).toEqual({ source: "git", truncated: false, paths: ["a.ts", "deep/b ç.ts"] });
+        expect(await list(repo, 2)).toEqual({ source: "git", truncated: true, paths: [".gitignore", "src/a.ts"] });
+
+        // Outside a work tree: a walk, breadth first, without .git and node_modules.
+        const plain = join(home.home, "walked");
+        mkdirSync(join(plain, "sub", "node_modules"), { recursive: true });
+        mkdirSync(join(plain, ".git"));
+        writeFileSync(join(plain, "z.txt"), "z");
+        writeFileSync(join(plain, "sub", "y.txt"), "y");
+        writeFileSync(join(plain, "sub", "node_modules", "skip.js"), "s");
+        writeFileSync(join(plain, ".git", "HEAD"), "h");
+        symlinkSync(join(plain, "sub"), join(plain, "loop"));
+        expect(await list(plain)).toEqual({ source: "walk", truncated: false, paths: ["loop", "z.txt", "sub/y.txt"] });
+        expect(await list(plain, 1)).toEqual({ source: "walk", truncated: true, paths: ["loop"] });
+
+        expect(await code(list(join(plain, "z.txt")))).toBe("not_a_directory");
+        expect(await code(list(join(plain, "missing")))).toBe("not_found");
+    });
 });

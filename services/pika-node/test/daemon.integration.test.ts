@@ -153,6 +153,13 @@ describe("pika-node daemon over the unix socket", () => {
         await a.inbox.waitFor(status("busy"));
         a.send({ type: "term.input", terminalId: id, data: "exit\r" });
         await a.inbox.waitFor(m => m.type === "pane.status" && m.terminalId === id && m.status === null, 10_000, "stale status cleared");
+
+        // The shell's directory now, after a `cd`; the terminal's info keeps where it started.
+        expect((await a.request<{ cwd: string }>("term.cwd", { terminalId: id })).cwd).toBe(terminal.cwd);
+        a.send({ type: "term.input", terminalId: id, data: "cd /\r" });
+        await until(async () => (await a.request<{ cwd: string }>("term.cwd", { terminalId: id })).cwd === "/", 10_000, "cwd after cd");
+        expect((await a.request<{ terminals: TerminalInfo[] }>("term.list")).terminals.find(t => t.terminalId === id)?.cwd).toBe(terminal.cwd);
+
         await a.request("term.kill", { terminalId: id, signal: "SIGKILL" });
         a.close();
         b.close();

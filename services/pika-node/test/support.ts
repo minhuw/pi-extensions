@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { paths, type Paths } from "../src/paths.ts";
-import { encodeLine, LineDecoder, PROTOCOL_VERSION, type NodeMessage, type Snapshot } from "../src/protocol.ts";
+import { encodeLine, LineDecoder, PROTOCOL_VERSION, sanitize, type NodeMessage, type Snapshot } from "../src/protocol.ts";
 
 const require = createRequire(import.meta.url);
 const { Terminal } = require("@xterm/headless") as typeof import("@xterm/headless");
@@ -153,10 +153,19 @@ export const until = async (check: () => boolean | Promise<boolean>, timeoutMs =
     }
 };
 
-/** Waits until a terminal printed something and then stayed quiet for `quietMs` (a shell is at its prompt). */
+/** Whether an attach reply's snapshot shows any text: a prompt printed before the attach is there, not in `term.output`. */
+const snapshotShows = (message: Message, terminalId: string): boolean => {
+    const result = message.type === "reply" ? message.result as { terminal?: { terminalId?: string }; snapshot?: { data?: string } } | undefined : undefined;
+    return result?.terminal?.terminalId === terminalId && sanitize(result.snapshot?.data).trim() !== "";
+};
+
+/**
+ * Waits until a terminal printed something and then stayed quiet for `quietMs` (a shell is at its prompt). What it
+ * printed may be in an attach snapshot already in the inbox, and then no `term.output` need follow.
+ */
 export async function settle(inbox: Inbox, terminalId: string, quietMs = 700, timeoutMs = 20_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
-    const count = () => inbox.messages.filter(message => message.type === "term.output" && message.terminalId === terminalId).length;
+    const count = () => inbox.messages.filter(message => (message.type === "term.output" && message.terminalId === terminalId) || snapshotShows(message, terminalId)).length;
     let seen = count();
     let quietSince = Date.now();
     while (seen === 0 || Date.now() - quietSince < quietMs) {

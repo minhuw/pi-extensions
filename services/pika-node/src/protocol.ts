@@ -23,6 +23,9 @@ export const LIMITS = {
     maxClientBacklogBytes: 1 * MiB,
     maxReadBytes: 512 * KiB,
     maxReadDirEntries: 5_000,
+    /** `fs.list`: at most this many paths, whose UTF-8 bytes together stay under `maxListBytes` (one record). */
+    maxListEntries: 50_000,
+    maxListBytes: 768 * KiB,
     maxUploadBytes: 256 * MiB,
     maxUploadChunkBytes: 512 * KiB,
     maxWatchesPerChannel: 64,
@@ -181,6 +184,7 @@ export interface Requests {
     "term.attach": { terminalId: string };
     "term.detach": { terminalId: string };
     "term.kill": { terminalId: string; signal?: Signal };
+    "term.cwd": { terminalId: string };
     "projects.list": Record<never, never>;
     "fs.readDir": { path: string };
     "fs.read": { path: string };
@@ -188,6 +192,7 @@ export interface Requests {
     "fs.watch": { path: string };
     "fs.unwatch": { watch: string };
     "fs.gitShow": { path: string; ref: GitRef };
+    "fs.list": { root: string; limit?: number };
     "fs.uploadStart": { name: string; size: number; dir?: string };
     "fs.uploadChunk": { upload: string; offset: number; data: string };
     "fs.uploadFinish": { upload: string; hash: string };
@@ -199,6 +204,8 @@ export interface Results {
     "term.attach": { terminal: TerminalInfo; snapshot: Snapshot };
     "term.detach": Record<never, never>;
     "term.kill": Record<never, never>;
+    /** The working directory of the terminal's shell now, which a `cd` changes (`TerminalInfo.cwd` is where it started). */
+    "term.cwd": { cwd: string };
     "projects.list": { projects: Project[] };
     "fs.readDir": { entries: DirEntry[]; truncated: boolean };
     "fs.read": { encoding: Encoding; data: string; stat: Stat };
@@ -206,6 +213,8 @@ export interface Results {
     "fs.watch": { watch: string };
     "fs.unwatch": Record<never, never>;
     "fs.gitShow": { encoding: Encoding; data: string };
+    /** Paths relative to `root`, `/`-separated: git's files when `root` is in a work tree, else a walk. */
+    "fs.list": { paths: string[]; truncated: boolean; source: "git" | "walk" };
     "fs.uploadStart": { upload: string; path: string };
     "fs.uploadChunk": { received: number };
     "fs.uploadFinish": { path: string; stat: Stat };
@@ -478,6 +487,7 @@ export const parseClientMessage = parser<ClientMessage>({
     "term.attach": { id: requestId, terminalId },
     "term.detach": { id: requestId, terminalId },
     "term.kill": { id: requestId, terminalId, "?signal": literal("SIGTERM", "SIGHUP", "SIGINT", "SIGKILL") },
+    "term.cwd": { id: requestId, terminalId },
     "term.input": { terminalId, data: str(LIMITS.maxInputBytes) },
     "term.resize": { terminalId, cols, rows, "?claim": bool },
     "pane.seen": { terminalId },
@@ -488,6 +498,7 @@ export const parseClientMessage = parser<ClientMessage>({
     "fs.watch": { id: requestId, path: isAbsolutePath },
     "fs.unwatch": { id: requestId, watch: id },
     "fs.gitShow": { id: requestId, path: isAbsolutePath, ref: literal("HEAD", "index") },
+    "fs.list": { id: requestId, root: isAbsolutePath, "?limit": int(1, LIMITS.maxListEntries) },
     "fs.uploadStart": { id: requestId, name: baseName, size: int(0, LIMITS.maxUploadBytes), "?dir": isAbsolutePath },
     "fs.uploadChunk": { id: requestId, upload: id, offset: int(0, LIMITS.maxUploadBytes), data: b64url(1, LIMITS.maxUploadChunkBytes) },
     "fs.uploadFinish": { id: requestId, upload: id, hash: hex64 },

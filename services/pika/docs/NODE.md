@@ -55,6 +55,7 @@ Deferred, not in v1: binary frames, multiple owners, port forwarding, a desktop 
 | Per-client output backlog per terminal | 1 MiB, then resync with a fresh snapshot |
 | `fs.read` | ≤ 512 KiB of file content |
 | `fs.readDir` | ≤ 5,000 entries |
+| `fs.list` | ≤ 50,000 paths (20,000 without `limit`), ≤ 768 KiB of them |
 | Upload | ≤ 256 MiB total; chunks ≤ 512 KiB |
 | Watches per channel | 64 |
 | Pending enrolments per node | 16, each expiring after 10 min |
@@ -167,6 +168,9 @@ Requests are `{ type, id, ...params }`. The node answers each with exactly one `
 | `term.attach` | `terminalId` | `{ terminal, snapshot: Snapshot }` |
 | `term.detach` | `terminalId` | `{}` |
 | `term.kill` | `terminalId`, `signal?` (`SIGTERM` default, `SIGHUP`, `SIGINT`, `SIGKILL`) | `{}` |
+| `term.cwd` | `terminalId` | `{ cwd }` |
+
+`term.cwd` answers the working directory of the terminal's shell (the PTY's process) now, which a `cd` changes, while `TerminalInfo.cwd` stays where it started. Shells do not report a `cd` (only some send OSC 7, and not under `TERM_PROGRAM=pika-node`), so the web UI asks when it resolves a relative path printed in the terminal. The daemon reads `/proc/<pid>/cwd` on Linux and `lsof` on macOS, and answers the starting cwd when neither tells; an exited terminal answers `exited`. A daemon without it answers `unsupported`.
 
 Without a reply: `term.input { terminalId, data }` (UTF-8 text, ≤ 64 KiB) writes to the PTY. `term.resize { terminalId, cols, rows, claim? }` resizes it (see "Resize").
 
@@ -217,6 +221,7 @@ Paths are absolute. The daemon follows symlinks and does not limit file access t
 | `fs.watch` | `path` (file or directory, not recursive) | `{ watch }` |
 | `fs.unwatch` | `watch` | `{}` |
 | `fs.gitShow` | `path`, `ref: "HEAD" \| "index"` | `{ encoding: "utf8" \| "base64", data }` |
+| `fs.list` | `root` (a directory), `limit?` (1–50,000) | `{ paths: string[], truncated, source: "git" \| "walk" }` |
 | `fs.uploadStart` | `name` (a base name), `size`, `dir?` | `{ upload, path }` |
 | `fs.uploadChunk` | `upload`, `offset`, `data` (base64url) | `{ received }` |
 | `fs.uploadFinish` | `upload`, `hash` | `{ path, stat }` |
@@ -226,6 +231,7 @@ Paths are absolute. The daemon follows symlinks and does not limit file access t
 - **Write if unchanged:** `fs.write` checks `expected` against the file right before writing. `{ hash }` compares content, `{ mtimeMs, size }` compares stat, and `{ absent: true }` requires that no file exists. A mismatch answers `conflict` and writes nothing; the error carries `current: Stat` (absent when the file is gone). The daemon writes to a temporary file in the same directory, keeps an existing file's mode, and renames it over the target.
 - **Watch:** `fs.changed { watch, path, kind: "change" | "rename" | "gone" }`, coalesced to at most one event per watch per 100 ms. `gone` ends the watch. Closing the channel ends its watches. A file watch follows its path, not its inode: when a rename replaces the file (as `fs.write` and most editors save), the daemon watches the new file, so the watch keeps reporting after a save.
 - **Git content:** `fs.gitShow` answers the file's content at `HEAD` or in the index (staged), for diffs: `pane.diff` with `staged: false` compares the index with the working file, and with `staged: true` compares `HEAD` with the index. The daemon resolves `path` with `realpath` (a deleted file through its parent directory), finds that real path's repository with `git rev-parse --show-toplevel`, and reads `git cat-file blob <ref>:<path inside it>`, so a symlink is read in the repository its target lives in. A path in no work tree, or absent from `ref` (a new or untracked file), answers `not_found`; content over 512 KiB answers `too_large`. Encoding is chosen as for `fs.read`. A daemon without it answers `unsupported`.
+- **Listing:** `fs.list` answers the files under `root` for a fuzzy finder (the web UI's quick open), as paths relative to `root` with `/` separators. When `root` is in a git work tree, they are `git ls-files --cached --others --exclude-standard` (tracked and untracked files, never ignored ones), sorted; otherwise a breadth-first walk, each directory sorted by name, that lists files and symlinks, does not follow symlinked directories, and skips directories named `.git` and `node_modules`. The list stops at `limit` paths (20,000 by default), at 768 KiB of path bytes, or for a walk after 10,000 directories or 5 s, and then says `truncated`. `root` must be a directory (`not_found`, `not_a_directory`). A daemon without it answers `unsupported`.
 - **Upload:** chunks arrive in order (`offset` must equal `received`). The file is written as `<dir or ~/.pika-node/uploads/YYYY-MM-DD>/<name>`; on a name clash, ` (2)`, ` (3)`, … go before the extension. `path` in `uploadStart` is the final path, so the UI can paste it into a pi prompt at once. `uploadFinish` verifies the SHA-256 and renames the partial file into place; a mismatch answers `conflict` and deletes it. An upload idle for 60 s, or whose channel closes, is deleted.
 
 ### Pane status

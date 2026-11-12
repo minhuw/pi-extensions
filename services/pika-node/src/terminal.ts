@@ -4,6 +4,8 @@
  * (`seqIn`); `seqApplied` advances in the headless write callback, and a snapshot is taken inside the callback
  * of the chunk it covers, so `outputSequence` is exact.
  */
+import { execFile } from "node:child_process";
+import { readlink } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { constants } from "node:os";
 import type { Terminal as HeadlessTerminal } from "@xterm/headless";
@@ -19,6 +21,23 @@ const { SerializeAddon } = require("@xterm/addon-serialize") as typeof import("@
 const pty = require("node-pty") as typeof import("node-pty");
 
 export const SCROLLBACK = 1_000;
+
+/**
+ * A process's working directory: `/proc/<pid>/cwd` on Linux, `lsof` on macOS (which has no procfs). Undefined when
+ * the process is gone or the platform tells nothing.
+ */
+export async function processCwd(pid: number): Promise<string | undefined> {
+    if (process.platform === "linux") {
+        try { return await readlink(`/proc/${pid}/cwd`); }
+        catch { return undefined; }
+    }
+    if (process.platform !== "darwin") return undefined;
+    const listed = await new Promise<string | undefined>(resolve => {
+        execFile("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { timeout: 2_000 }, (error, stdout) => resolve(error ? undefined : stdout));
+    });
+    const line = listed?.split("\n").find(row => row.startsWith("n/"));
+    return line?.slice(1);
+}
 const LOG_BYTES = 8 * 1024 * 1024;
 
 export interface TerminalHooks {

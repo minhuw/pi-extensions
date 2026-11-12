@@ -19,7 +19,7 @@ import {
 } from "./protocol.ts";
 import { account, spawnCommand, spawnEnv, SpawnError, type Account } from "./spawn.ts";
 import { loadConfig, roots, type Config } from "./store.ts";
-import { Terminal } from "./terminal.ts";
+import { processCwd, Terminal } from "./terminal.ts";
 
 /** One inner-protocol endpoint. `send` is ordered and never throws; after `closed`, messages are dropped. */
 export interface Peer {
@@ -204,6 +204,12 @@ export class Daemon {
                 const pty = this.#terminal(request.terminalId);
                 pty.attachments.delete(peer);
                 return {};
+            }
+            case "term.cwd": {
+                const pty = this.#terminal(request.terminalId);
+                if (pty.terminal.exited) throw new NodeError("exited", "the terminal has exited");
+                // The shell's own directory: it is the PTY's process, and a program it runs (pi) usually shares it.
+                return { cwd: (await processCwd(pty.terminal.pid)) ?? pty.cwd };
             }
             case "term.kill": {
                 const pty = this.#terminal(request.terminalId);

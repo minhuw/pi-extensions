@@ -58,6 +58,14 @@ function isText(data: Buffer): boolean {
     catch { return false; }
 }
 
+/** `fs.list` without a `limit`. */
+const LIST_DEFAULT = 20_000;
+/** Directories a walk never enters: git's own, and dependency trees no one opens by name. */
+const WALK_SKIP = new Set([".git", "node_modules"]);
+/** A walk stops after reading this many directories, or after this long, and answers `truncated`. */
+const WALK_DIRS = 10_000;
+const WALK_MS = 5_000;
+
 const day = (now: Date): string => `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 
 export class Files {
@@ -75,6 +83,7 @@ export class Files {
             case "fs.write": return { stat: await this.write(request.path, decode(request.encoding, request.data), request.expected, request.mode) };
             case "fs.watch": return { watch: await this.watch(peer, request.path) };
             case "fs.gitShow": return this.gitShow(request.path, request.ref);
+            case "fs.list": return this.list(request.root, request.limit ?? LIST_DEFAULT);
             case "fs.unwatch": {
                 const watch = this.#watches.get(request.watch);
                 if (!watch || watch.peer !== peer) throw new NodeError("not_found", `no watch ${request.watch}`);
@@ -251,6 +260,63 @@ export class Files {
         const data = text ? content.toString("utf8") : toBase64Url(content);
         if (utf8Length(JSON.stringify(data)) + 1_024 > LIMITS.maxRecordBytes) throw new NodeError("too_large", `${path} at ${ref} does not fit one record`);
         return { encoding: text ? "utf8" : "base64", data };
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Listing (quick open)
+
+    /**
+     * The files under `root`, relative to it, for a fuzzy finder: `git ls-files` (tracked and untracked, without
+     * ignored files) when `root` is in a work tree, else a breadth-first walk that skips `.git` and `node_modules`.
+     * Cut at `limit` paths or `maxListBytes` of them, whichever comes first, so the reply fits one record.
+     */
+    async list(root: string, limit: number): Promise<{ paths: string[]; truncated: boolean; source: "git" | "walk" }> {
+        const info = await stat(root);
+        if (!info.isDirectory()) throw new NodeError("not_a_directory", `${root} is not a directory`);
+        const cap = Math.min(limit, LIMITS.maxListEntries);
+        const paths: string[] = [];
+        let bytes = 0;
+        /** False once the list is full. */
+        const add = (path: string): boolean => {
+            const size = utf8Length(path) + 3;
+            if (paths.length >= cap || bytes + size > LIMITS.maxListBytes) return false;
+            paths.push(path);
+            bytes += size;
+            return true;
+        };
+        let listed: Buffer | undefined;
+        try {
+            listed = (await run("git", ["-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"], { encoding: "buffer", maxBuffer: 64 * 1024 * 1024, timeout: 10_000 })).stdout;
+        } catch { /* not a work tree, no git, or too large: walk */ }
+        if (listed) {
+            let truncated = false;
+            let last = "";
+            // Tracked files come before untracked ones; sorted, a file --cached lists once per merge stage is adjacent.
+            for (const path of listed.toString("utf8").split("\0").sort((a, b) => a < b ? -1 : a > b ? 1 : 0)) {
+                if (!path || path === last) continue;
+                last = path;
+                if (!add(path)) { truncated = true; break; }
+            }
+            return { paths, truncated, source: "git" };
+        }
+        const started = Date.now();
+        const queue = [""];
+        let dirs = 0;
+        while (queue.length > 0) {
+            if (dirs++ >= WALK_DIRS || Date.now() - started > WALK_MS) return { paths, truncated: true, source: "walk" };
+            const dir = queue.shift()!;
+            let entries;
+            try { entries = await readdir(dir ? join(root, dir) : root, { withFileTypes: true }); }
+            catch { continue; }
+            entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+            for (const entry of entries) {
+                const path = dir ? `${dir}/${entry.name}` : entry.name;
+                // Symlinked directories are listed, not followed, so a link loop cannot hold the walk.
+                if (entry.isDirectory()) { if (!WALK_SKIP.has(entry.name)) queue.push(path); }
+                else if ((entry.isFile() || entry.isSymbolicLink()) && !add(path)) return { paths, truncated: true, source: "walk" };
+            }
+        }
+        return { paths, truncated: false, source: "walk" };
     }
 
     // -----------------------------------------------------------------------------------------------------------

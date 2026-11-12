@@ -71,6 +71,12 @@ describe("inner messages", () => {
         expect(parseClientMessage({ type: "fs.gitShow", id: "5", path: "/a", ref: "HEAD" }).ok).toBe(true);
         expect(parseClientMessage({ type: "fs.gitShow", id: "5", path: "/a", ref: "index" }).ok).toBe(true);
         expect(parseClientMessage({ type: "fs.gitShow", id: "5", path: "/a", ref: "main" }).ok).toBe(false);
+        expect(parseClientMessage({ type: "fs.list", id: "6", root: "/a" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "term.cwd", id: "7", terminalId: "t1" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "term.cwd", id: "7" }).ok).toBe(false);
+        expect(parseClientMessage({ type: "fs.list", id: "6", root: "/a", limit: LIMITS.maxListEntries }).ok).toBe(true);
+        expect(parseClientMessage({ type: "fs.list", id: "6", root: "/a", limit: LIMITS.maxListEntries + 1 }).ok).toBe(false);
+        expect(parseClientMessage({ type: "fs.list", id: "6", root: "a" }).ok).toBe(false);
         expect(parseClientMessage({ type: "term.input", terminalId: "t1", data: "é".repeat(LIMITS.maxInputBytes / 2 + 1) }).ok).toBe(false);
         expect(parseClientMessage({ type: "term.create", id: "1", cols: 80, rows: 24, env: { "BAD-NAME": "x" } }).ok).toBe(false);
     });
