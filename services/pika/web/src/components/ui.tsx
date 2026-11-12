@@ -262,12 +262,15 @@ export function Segmented<T extends string>({
 const BUTTON_BASE =
 	"inline-flex h-8 items-center gap-1.5 rounded-sm px-3 text-[13px] font-medium whitespace-nowrap disabled:cursor-default disabled:opacity-45";
 
-/** Actions are black and white; only a destructive action is red. */
+/**
+ * Actions are black and white; only a destructive action is red. The `ui-button*` names carry no style here: they let
+ * a scoped design system re-tone the shared buttons (Deck's, in `nodes/deck/deck.css`).
+ */
 export const BUTTON = {
-	primary: `${BUTTON_BASE} bg-ink text-page hover:bg-ink/82`,
-	secondary: `${BUTTON_BASE} border border-ink bg-page text-ink hover:bg-hover`,
-	danger: `${BUTTON_BASE} bg-red text-white hover:bg-red/88`,
-	quiet: `${BUTTON_BASE} text-muted hover:bg-hover hover:text-ink`,
+	primary: `ui-button ui-button-primary ${BUTTON_BASE} bg-ink text-page hover:bg-ink/82`,
+	secondary: `ui-button ui-button-secondary ${BUTTON_BASE} border border-ink bg-page text-ink hover:bg-hover`,
+	danger: `ui-button ui-button-danger ${BUTTON_BASE} bg-red text-white hover:bg-red/88`,
+	quiet: `ui-button ui-button-quiet ${BUTTON_BASE} text-muted hover:bg-hover hover:text-ink`,
 };
 
 /**

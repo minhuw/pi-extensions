@@ -6,7 +6,7 @@
 
 import type { ReactNode } from "react";
 import { useNavigate } from "react-router";
-import { Icon, PikaLogo } from "../../components/icons";
+import { Icon, PikaLogo, type IconName } from "../../components/icons";
 import { cx } from "../../components/ui";
 import { useSignOut } from "../../components/Layout";
 import { useHealth } from "../../lib/relay";
@@ -31,16 +31,16 @@ export interface AppBarProps {
 	files?: { open: boolean; onToggle: () => void };
 }
 
-const SECTIONS: readonly { to: string; label: string; relay?: boolean }[] = [
-	{ to: "/", label: "Sessions" },
-	{ to: "/statistics", label: "Statistics" },
-	{ to: "/extensions", label: "Extensions" },
-	{ to: "/runs", label: "Herder runs" },
-	{ to: "/active", label: "Active sessions", relay: true },
-	{ to: "/chatrooms", label: "Chatrooms", relay: true },
-	{ to: "/devices", label: "Devices" },
-	{ to: "/memory", label: "Memory" },
-	{ to: "/search", label: "Search" },
+const SECTIONS: readonly { to: string; label: string; icon: IconName; relay?: boolean }[] = [
+	{ to: "/", label: "Sessions", icon: "sessions" },
+	{ to: "/statistics", label: "Statistics", icon: "statistics" },
+	{ to: "/extensions", label: "Extensions", icon: "tool" },
+	{ to: "/runs", label: "Herder runs", icon: "herder" },
+	{ to: "/active", label: "Active sessions", icon: "pulse", relay: true },
+	{ to: "/chatrooms", label: "Chatrooms", icon: "message", relay: true },
+	{ to: "/devices", label: "Devices", icon: "device" },
+	{ to: "/memory", label: "Memory", icon: "memory" },
+	{ to: "/search", label: "Search", icon: "search" },
 ];
 
 export function DeckAppBar({ theme, onTheme, onHelp, onQuickOpen, rail, files }: AppBarProps) {
@@ -53,12 +53,12 @@ export function DeckAppBar({ theme, onTheme, onHelp, onQuickOpen, rail, files }:
 
 	const appMenu = (button: HTMLElement) => {
 		const items: MenuEntry[] = [
-			...SECTIONS.filter((section) => !section.relay || relay).map((section) => ({ id: `go:${section.to}`, label: section.label, run: () => navigate(section.to) })),
+			...SECTIONS.filter((section) => !section.relay || relay).map((section) => ({ id: `go:${section.to}`, label: section.label, icon: section.icon, run: () => navigate(section.to) })),
 			"separator",
-			{ id: "go:/settings", label: "Settings", run: () => navigate("/settings") },
-			{ id: "go:/docs", label: "Documentation", run: () => navigate("/docs") },
-			{ id: "help", label: "Keyboard shortcuts", run: onHelp, ...(actionShortcut("help") ? { shortcut: actionShortcut("help")! } : {}) },
-			...(signOut ? (["separator", { id: "sign-out", label: "Sign out", run: () => void signOut() }] as MenuEntry[]) : []),
+			{ id: "go:/settings", label: "Settings", icon: "settings", run: () => navigate("/settings") },
+			{ id: "go:/docs", label: "Documentation", icon: "file", run: () => navigate("/docs") },
+			{ id: "help", label: "Keyboard shortcuts", icon: "keyboard", run: onHelp, ...(actionShortcut("help") ? { shortcut: actionShortcut("help")! } : {}) },
+			...(signOut ? (["separator", { id: "sign-out", label: "Sign out", icon: "signOut", run: () => void signOut() }] as MenuEntry[]) : []),
 		];
 		open({ ...menuBelow(button), items, label: "pika", attrs: { "data-app-menu": "" } });
 	};

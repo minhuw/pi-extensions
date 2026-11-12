@@ -1,7 +1,7 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { menuBelow, useMenu } from "../src/nodes/deck/Menu";
+import { menuBelow, useMenu, type MenuEntry } from "../src/nodes/deck/Menu";
 import { DeckTooltips, tip } from "../src/nodes/deck/Tooltips";
 import { DECK_ROOT } from "../src/nodes/deck/tokens";
 import { renderApp } from "./support/render";
@@ -39,9 +39,10 @@ describe("Deck's frame", () => {
 	});
 });
 
-function MenuHost() {
+function MenuHost({ items }: { items?: (ran: (id: string) => void) => MenuEntry[] }) {
 	const { menu, open, close, openFor } = useMenu();
 	const [ran, setRan] = useState<string[]>([]);
+	const record = (id: string) => setRan((list) => [...list, id]);
 	return (
 		<div {...DECK_ROOT}>
 			<button
@@ -52,11 +53,11 @@ function MenuHost() {
 						: open({
 								...menuBelow(event.currentTarget),
 								label: "Things",
-								items: [
-									{ id: "a", label: "Alpha", run: () => setRan((list) => [...list, "a"]) },
-									{ id: "b", label: "Bravo", disabled: true, run: () => setRan((list) => [...list, "b"]) },
+								items: items?.(record) ?? [
+									{ id: "a", label: "Alpha", icon: "copy", run: () => record("a") },
+									{ id: "b", label: "Bravo", disabled: true, reason: "Update pika-node on mac to use this", run: () => record("b") },
 									"separator",
-									{ id: "c", label: "Charlie", shortcut: "⌘C", danger: true, run: () => setRan((list) => [...list, "c"]) },
+									{ id: "c", label: "Charlie", shortcut: "⌘C", danger: true, run: () => record("c") },
 								],
 							})
 				}
@@ -69,16 +70,28 @@ function MenuHost() {
 	);
 }
 
+const ranList = () => document.querySelector("[data-ran]")?.getAttribute("data-ran");
+
 describe("Deck's menu", () => {
-	it("starts on the first item, skips disabled ones, jumps by letter, and gives focus back on Escape", async () => {
+	it("starts on the first item, highlights a disabled one with its reason, jumps by letter, and gives focus back on Escape", async () => {
 		render(<MenuHost />);
 		const button = screen.getByRole("button", { name: "Open" });
 		button.focus();
 		fireEvent.click(button);
 		const menu = screen.getByRole("menu", { name: "Things" });
 		await waitFor(() => expect(document.activeElement?.textContent).toBe("Alpha"));
+		expect(document.activeElement?.querySelector(".dk-menu-icon svg")).not.toBeNull();
+		// A disabled item can be highlighted, says why beside the menu, and does nothing when chosen.
+		fireEvent.keyDown(menu, { key: "ArrowDown" });
+		expect(document.activeElement?.textContent).toBe("Bravo");
+		expect(document.activeElement?.getAttribute("aria-disabled")).toBe("true");
+		expect(document.querySelector("[data-menu-reason]")?.textContent).toBe("Update pika-node on mac to use this");
+		fireEvent.click(document.activeElement!);
+		expect(ranList()).toBe("");
+		expect(screen.getByRole("menu")).toBeTruthy();
 		fireEvent.keyDown(menu, { key: "ArrowDown" });
 		expect(document.activeElement?.textContent).toContain("Charlie");
+		expect(document.querySelector("[data-menu-reason]")).toBeNull();
 		expect(document.activeElement?.querySelector("kbd")?.textContent).toBe("⌘C");
 		fireEvent.keyDown(menu, { key: "a" });
 		expect(document.activeElement?.textContent).toBe("Alpha");
@@ -93,7 +106,7 @@ describe("Deck's menu", () => {
 		fireEvent.click(button);
 		fireEvent.click(screen.getByRole("menuitem", { name: /Charlie/ }));
 		expect(screen.queryByRole("menu")).toBeNull();
-		expect(document.querySelector("[data-ran]")?.getAttribute("data-ran")).toBe("c");
+		expect(ranList()).toBe("c");
 
 		fireEvent.click(button);
 		expect(screen.getByRole("menu")).toBeTruthy();
@@ -105,6 +118,86 @@ describe("Deck's menu", () => {
 		fireEvent.click(button);
 		fireEvent.pointerDown(document.body);
 		expect(screen.queryByRole("menu")).toBeNull();
+	});
+
+	it("names groups by their headers and opens submenus from the keyboard and the pointer", async () => {
+		render(
+			<MenuHost
+				items={(ran) => [
+					{ kind: "header", label: "atlas · mac" },
+					{ id: "t", label: "New Terminal", run: () => ran("t") },
+					"separator",
+					{ kind: "header", label: "Other nodes" },
+					{
+						id: "node01",
+						label: "node01",
+						icon: "node",
+						submenu: [
+							{ id: "t", label: "New Terminal", run: () => ran("node01:t") },
+							{ id: "p", label: "Add Project…", run: () => ran("node01:p") },
+						],
+					},
+				]}
+			/>,
+		);
+		const button = screen.getByRole("button", { name: "Open" });
+		button.focus();
+		fireEvent.click(button);
+		const menu = screen.getByRole("menu", { name: "Things" });
+		expect(screen.getByRole("group", { name: "atlas · mac" }).textContent).toBe("New Terminal");
+		const parent = screen.getByRole("menuitem", { name: "node01" });
+		expect(within(screen.getByRole("group", { name: "Other nodes" })).getByRole("menuitem")).toBe(parent);
+		expect(parent.getAttribute("aria-haspopup")).toBe("menu");
+
+		// Keyboard: Right opens it with focus inside, Left closes it and returns to its item.
+		await waitFor(() => expect(document.activeElement?.textContent).toBe("New Terminal"));
+		fireEvent.keyDown(menu, { key: "ArrowDown" });
+		expect(document.activeElement).toBe(parent);
+		fireEvent.keyDown(menu, { key: "ArrowRight" });
+		const sub = await screen.findByRole("menu", { name: "node01" });
+		expect(parent.getAttribute("aria-expanded")).toBe("true");
+		await waitFor(() => expect(sub.contains(document.activeElement)).toBe(true));
+		fireEvent.keyDown(sub, { key: "ArrowLeft" });
+		expect(screen.queryByRole("menu", { name: "node01" })).toBeNull();
+		expect(document.activeElement).toBe(parent);
+
+		// Enter opens it too; choosing in it runs the item and closes the whole menu.
+		fireEvent.click(parent);
+		fireEvent.click(within(await screen.findByRole("menu", { name: "node01" })).getByRole("menuitem", { name: "Add Project…" }));
+		expect(screen.queryByRole("menu")).toBeNull();
+		expect(ranList()).toBe("node01:p");
+		expect(document.activeElement).toBe(button);
+
+		// A press inside a submenu is not outside the menu.
+		fireEvent.click(button);
+		fireEvent.click(screen.getByRole("menuitem", { name: "node01" }));
+		fireEvent.pointerDown(await screen.findByRole("menu", { name: "node01" }));
+		expect(screen.getByRole("menu", { name: "Things" })).toBeTruthy();
+
+		// Resting the pointer on the item opens it as well.
+		fireEvent.keyDown(screen.getByRole("menu", { name: "node01" }), { key: "Escape" });
+		vi.useFakeTimers();
+		try {
+			fireEvent.pointerMove(screen.getByRole("menuitem", { name: "node01" }));
+			expect(screen.queryByRole("menu", { name: "node01" })).toBeNull();
+			act(() => vi.advanceTimersByTime(200));
+			expect(screen.getByRole("menu", { name: "node01" })).toBeTruthy();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("takes focus with nothing to choose, so Escape still closes a menu that only explains", async () => {
+		render(<MenuHost items={() => [{ kind: "note", text: "No node is connected" }]} />);
+		const button = screen.getByRole("button", { name: "Open" });
+		button.focus();
+		fireEvent.click(button);
+		const menu = screen.getByRole("menu", { name: "Things" });
+		await waitFor(() => expect(document.activeElement).toBe(menu));
+		expect(menu.querySelector("[data-menu-note]")?.textContent).toBe("No node is connected");
+		fireEvent.keyDown(menu, { key: "Escape" });
+		expect(screen.queryByRole("menu")).toBeNull();
+		expect(document.activeElement).toBe(button);
 	});
 });
 

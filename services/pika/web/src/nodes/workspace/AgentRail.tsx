@@ -248,12 +248,12 @@ export function AgentRail(props: AgentRailProps) {
 					},
 				)
 			: [
-					{ id: "open", label: "Open", run: () => props.onAgent(key) },
-					...(hasPane ? [{ id: "close-pane", label: "Close Pane", run: () => props.onClosePane(key) }] : []),
+					{ id: "open", label: "Open", icon: "terminal", run: () => props.onAgent(key) },
+					...(hasPane ? [{ id: "close-pane", label: "Close Pane", icon: "close" as const, run: () => props.onClosePane(key) }] : []),
 					"separator",
-					{ id: "copy-cwd", label: "Copy Working Directory", run: () => void copyText(cwd) },
+					{ id: "copy-cwd", label: "Copy Working Directory", icon: "copy", run: () => void copyText(cwd) },
 					"separator",
-					{ id: agent.terminal.exited ? "remove" : "kill", label: agent.terminal.exited ? "Remove…" : "Kill…", danger: true, run: () => props.onKill(key, true) },
+					{ id: agent.terminal.exited ? "remove" : "kill", label: agent.terminal.exited ? "Remove…" : "Kill…", icon: agent.terminal.exited ? "trash" : "kill", danger: true, run: () => props.onKill(key, true) },
 				];
 		rowMenu.open({ ...at, items, label, attrs: { "data-agent-menu": key } });
 	};
@@ -317,20 +317,22 @@ export function AgentRail(props: AgentRailProps) {
 	const onAddMenu = (button: HTMLElement) => {
 		if (!ops) return;
 		const node = props.currentNode;
-		const project = props.currentProject ?? OTHER;
+		const project = props.currentProject;
+		const live = props.nodes.filter((view) => connected(view.info.id));
 		const items = addMenu(
 			{
-				...(node ? { nodeName: nodeName(node) } : {}),
-				connected: node ? connected(node) : false,
-				inProject: project !== OTHER,
-				canEdit: node ? can(node, "projects.edit") : false,
-				canWorktree: node ? can(node, "git.worktree") : false,
+				nodes: live.map((view) => ({ id: view.info.id, name: view.info.name, canEdit: can(view.info.id, "projects.edit"), canWorktree: can(view.info.id, "git.worktree") })),
+				offline: props.nodes.filter((view) => view.pin && !connected(view.info.id)).map((view) => view.info.name),
+				unpaired: props.nodes.filter((view) => !view.pin).map((view) => ({ id: view.info.id, name: view.info.name })),
+				...(node
+					? { current: { node, ...(project && project !== OTHER ? { project: { path: project, name: projectName(projectsOf(node), project) } } : {}) } }
+					: {}),
 			},
 			{
-				newTerminal: () => node && ops.newTerminal(node, project, false),
-				newAgent: () => node && ops.newTerminal(node, project, true),
-				addProject: () => node && ops.addProject(node),
-				newWorktree: () => node && ops.newWorktree(node, project),
+				newTerminal: (target, path, agent) => ops.newTerminal(target, path ?? OTHER, agent),
+				addProject: (target) => ops.addProject(target),
+				newWorktree: (target, path) => ops.newWorktree(target, path),
+				pair: (target) => props.onNode(target),
 			},
 		);
 		rowMenu.open({ ...menuBelow(button), items, label: "New", attrs: { "data-add-menu": "" } });

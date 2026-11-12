@@ -6,7 +6,8 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { BUTTON, cx, Dialog } from "../../components/ui";
 
-const FIELD = "h-8 w-full rounded-[3px] border border-line bg-page px-2 font-mono text-[13px] text-ink outline-none focus:border-ink";
+const FIELD =
+	"h-7 w-full rounded-[4px] border border-dk-line-strong bg-dk-raised px-2 font-mono text-[12.5px] text-dk-ink outline-none placeholder:text-dk-ink-3 focus:border-dk-accent focus:shadow-[0_0_0_2px_var(--dk-accent-soft)]";
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /** `~` and `~/…` on the node, under its home; an absolute path as it is; anything else is undefined. */
@@ -144,14 +145,14 @@ export function AddProjectDialog({
 				data-add-project-path=""
 			/>
 			{suggestions.length > 0 && (
-				<ul id={listId} role="listbox" aria-label="Folders" className="mt-1 max-h-[180px] overflow-y-auto rounded-[3px] border border-line py-0.5 font-mono text-[12.5px]" data-folder-suggestions="">
+				<ul id={listId} role="listbox" aria-label="Folders" className="mt-1 max-h-[180px] overflow-y-auto rounded-[4px] border border-dk-line py-0.5 font-mono text-[12.5px]" data-folder-suggestions="">
 					{suggestions.map((name, index) => (
 						<li
 							key={name}
 							id={optionId(index)}
 							role="option"
 							aria-selected={index === picked}
-							className={cx("cursor-default truncate px-2 py-0.5", index === picked ? "bg-ink text-page" : "hover:bg-hover")}
+							className={cx("cursor-default truncate px-2 py-0.5", index === picked ? "bg-[var(--dk-menu-hi)]" : "hover:bg-dk-hover")}
 							onPointerDown={(event) => {
 								event.preventDefault();
 								complete(name);

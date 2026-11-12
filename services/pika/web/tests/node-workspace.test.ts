@@ -23,7 +23,9 @@ import {
 	terminalTab,
 	type Workspace,
 } from "../src/nodes/workspace/model";
+import { menuItems } from "../src/nodes/deck/Menu";
 import { placeOpen } from "../src/nodes/workspace/placement";
+import { tabMenuItems, type WorkspaceActions } from "../src/nodes/workspace/WorkspaceView";
 import { NodeWorkspaces, WORKSPACE_KEY_PREFIX } from "../src/nodes/workspace/store";
 
 const split = (direction: "row" | "column", first: GroupTree, second: GroupTree, ratio = 0.5): GroupTree => ({ type: "split", direction, ratio, first, second });
@@ -295,5 +297,21 @@ describe("a node's workspaces", () => {
 		// a.ts opened before its failure was reported, so it stays; b.ts never opened and goes.
 		const kept = Object.values(again.layout("/p").tabs).map((tab) => tab.kind === "terminal" ? `terminal:${tab.focused}` : tab.id);
 		expect(kept.sort()).toEqual(["file:/p/a.ts", "terminal:t1"]);
+	});
+});
+
+describe("a tab's menu", () => {
+	const ids = (ws: Workspace, tabId: string) => tabMenuItems(ws, tabId, {} as WorkspaceActions).map((entry) => (entry === "separator" ? "|" : "id" in entry ? entry.id : "?"));
+
+	it("leaves out splits for a group's only tab and Close Others with nothing else to close, rather than disabling them", () => {
+		const one = workspace("a");
+		expect(ids(one, Object.keys(one.tabs)[0]!)).toEqual(["pin", "|", "close"]);
+		const two = workspace("a", "/src/x.ts");
+		const [terminal, file] = Object.keys(two.tabs) as [string, string];
+		expect(ids(two, file)).toEqual(["split-right", "split-left", "split-down", "split-up", "|", "pin", "copy-path", "|", "close", "close-others"]);
+		expect(menuItems(tabMenuItems(two, terminal, {} as WorkspaceActions)).every((entry) => !entry.disabled)).toBe(true);
+		// Pinned neighbours are not closed by Close Others.
+		const pinned = setPinned(two, file, true);
+		expect(ids(pinned, terminal)).not.toContain("close-others");
 	});
 });

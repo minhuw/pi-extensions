@@ -1444,7 +1444,7 @@ function WorkspaceHeader({
 	const { menu, open, close, openFor } = useMenu();
 	const choose = (button: HTMLElement) => {
 		const items: MenuEntry[] = [
-			...projects.map((item) => ({ id: `project:${item.path}`, label: `${sanitize(item.name)}  ${homePath(sanitize(item.path), home)}`, checked: item.path === project, run: () => onProject(item.path) })),
+			...projects.map((item) => ({ id: `project:${item.path}`, label: sanitize(item.name), hint: homePath(sanitize(item.path), home), checked: item.path === project, run: () => onProject(item.path) })),
 			...(projects.length ? (["separator"] as const) : []),
 			{ id: `project:${OTHER}`, label: "Other terminals", checked: project === OTHER, run: () => onProject(OTHER) },
 		];

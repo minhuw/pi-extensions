@@ -451,16 +451,19 @@ function TabStrip({ group, view, focused, onMenu }: { group: Group; view: Worksp
 					return tab ? <TabItem key={id} tab={tab} active={group.activeTabId === id} view={view} onKeyDown={keyDown} onMenu={onMenu} /> : null;
 				})}
 			</div>
-			<button
-				type="button"
-				className="flex w-8 shrink-0 items-center justify-center text-muted hover:bg-hover hover:text-ink"
-				aria-label="New terminal here"
-				{...tip("New terminal here")}
-				onClick={() => actions.newTerminal(group.id)}
-				data-group-new-terminal={group.id}
-			>
-				<Icon name="plus" size={13} />
-			</button>
+			{/* An empty group says the same in its body, with a labelled button: one offer, not two. */}
+			{group.tabOrder.length > 0 && (
+				<button
+					type="button"
+					className="flex w-8 shrink-0 items-center justify-center text-muted hover:bg-hover hover:text-ink"
+					aria-label="New terminal here"
+					{...tip("New terminal here")}
+					onClick={() => actions.newTerminal(group.id)}
+					data-group-new-terminal={group.id}
+				>
+					<Icon name="plus" size={13} />
+				</button>
+			)}
 		</div>
 	);
 }
@@ -564,7 +567,11 @@ const SPLITS: readonly [Side, string][] = [
 	["up", "Move Tab to Split Up"],
 ];
 
-/** A tab's context menu entries (Deck's shared menu): the splits, Pin, Copy Path for a file, Close, Close Others. */
+/**
+ * A tab's context menu entries (Deck's shared menu): the splits, Pin, Copy Path for a file, Close, Close Others. A
+ * group's only tab has no splits to move into, and a tab with no unpinned neighbours no others to close: both are left
+ * out rather than shown disabled.
+ */
 export function tabMenuItems(ws: Workspace, tabId: string, actions: WorkspaceActions): MenuEntry[] {
 	const tab = ws.tabs[tabId]!;
 	const group = groupOf(ws, tab.id)!;
@@ -572,12 +579,16 @@ export function tabMenuItems(ws: Workspace, tabId: string, actions: WorkspaceAct
 	const others = group.tabOrder.some((id) => id !== tab.id && !ws.tabs[id]?.pinned);
 	const closeKeys = actionShortcut("tab.close");
 	return [
-		...SPLITS.map(([side, label]) => ({ id: `split-${side}`, label, disabled: alone, run: () => actions.split(tab.id, group.id, side) })),
+		...(alone
+			? []
+			: [
+					...SPLITS.map(([side, label]): MenuEntry => ({ id: `split-${side}`, label, icon: side === "left" || side === "right" ? "split-right" : "split-down", run: () => actions.split(tab.id, group.id, side) })),
+					"separator" as const,
+				]),
+		{ id: "pin", label: tab.pinned ? "Unpin" : "Pin", icon: "pin", run: () => actions.setPinned(tab.id, !tab.pinned) },
+		...(tab.kind !== "terminal" ? [{ id: "copy-path", label: "Copy Path", icon: "copy" as const, run: () => void copyText(tab.path) }] : []),
 		"separator",
-		{ id: "pin", label: tab.pinned ? "Unpin" : "Pin", run: () => actions.setPinned(tab.id, !tab.pinned) },
-		...(tab.kind !== "terminal" ? [{ id: "copy-path", label: "Copy Path", run: () => void copyText(tab.path) }] : []),
-		"separator",
-		{ id: "close", label: "Close", run: () => actions.close(tab.id), ...(closeKeys ? { shortcut: closeKeys } : {}) },
-		{ id: "close-others", label: "Close Others", disabled: !others, run: () => actions.closeOthers(tab.id) },
+		{ id: "close", label: "Close", icon: "close", run: () => actions.close(tab.id), ...(closeKeys ? { shortcut: closeKeys } : {}) },
+		...(others ? [{ id: "close-others", label: "Close Others", run: () => actions.closeOthers(tab.id) }] : []),
 	];
 }

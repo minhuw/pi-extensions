@@ -7,7 +7,8 @@ import type { PaneView, Project, TerminalInfo } from "../src/nodes/contract";
 import { AddProjectDialog, completionParts, expandHome, matchFolders, UNDO_MS, UndoToast } from "../src/nodes/deck/RailDialogs";
 import { buildKeymap, focusOf, resolveKey, type PageCommands } from "../src/nodes/keys";
 import { AgentRail, agentMatches, railAgents, useInbox, type RailOps } from "../src/nodes/workspace/AgentRail";
-import { addMenu, agentMenu, nodeMenu, projectMenu } from "../src/nodes/workspace/rail-menus";
+import { menuItems, type MenuEntry } from "../src/nodes/deck/Menu";
+import { addMenu, agentMenu, nodeMenu, projectMenu, type AddMenuState } from "../src/nodes/workspace/rail-menus";
 import { OTHER } from "../src/nodes/workspace/store";
 
 const pane = (id: string, status?: Partial<PaneView>, extra: Partial<TerminalInfo> = {}): TerminalInfo => ({
@@ -121,14 +122,17 @@ const openMenu = (row: Element) => fireEvent.contextMenu(row, { clientX: 10, cli
 describe("the rail's menus as data", () => {
 	const noop = () => {};
 	const agentRun = { focus: noop, rename: noop, markRead: noop, markUnread: noop, split: noop, restart: noop, copyCwd: noop, copySessionId: noop, closePane: noop, kill: noop, remove: noop };
-	const ids = (entries: ReturnType<typeof agentMenu>) => entries.map((entry) => (entry === "separator" ? "|" : entry.id));
+	/** Items by id, separators as "|", headers as "#label", notes as "!text". */
+	const ids = (entries: readonly MenuEntry[]) =>
+		entries.map((entry) => (entry === "separator" ? "|" : "kind" in entry ? (entry.kind === "header" ? `#${entry.label}` : `!${entry.text}`) : entry.id));
+	const find = (entries: readonly MenuEntry[], id: string) => menuItems(entries).find((entry) => entry.id === id);
 
 	it("offers a live agent focus, rename, unread, splits, copies, close and kill; an exited one restart and remove", () => {
 		const live = { nodeName: "mac", exited: false, hasPane: true, unread: false, section: "working" as const, sessionId: "s1", connected: true, canRename: true, canUnread: true };
 		expect(ids(agentMenu(live, agentRun))).toEqual(["focus", "rename", "mark-unread", "|", "split-right", "split-down", "|", "copy-cwd", "copy-session", "|", "close-pane", "kill"]);
-		const kill = agentMenu(live, agentRun).find((entry) => entry !== "separator" && entry.id === "kill");
+		const kill = find(agentMenu(live, agentRun), "kill");
 		expect(kill).toMatchObject({ label: "Kill…", danger: true });
-		const idle = agentMenu({ ...live, section: "quiet" }, agentRun).find((entry) => entry !== "separator" && entry.id === "kill");
+		const idle = find(agentMenu({ ...live, section: "quiet" }, agentRun), "kill");
 		expect(idle).toMatchObject({ label: "Kill" });
 		expect(ids(agentMenu({ ...live, unread: true }, agentRun))).toContain("mark-read");
 		const exited = { ...live, exited: true, hasPane: false, sessionId: undefined };
@@ -136,23 +140,41 @@ describe("the rail's menus as data", () => {
 		expect(ids(agentMenu(exited, agentRun))).toEqual(["focus", "rename", "|", "restart", "|", "copy-cwd", "|", "remove"]);
 	});
 
-	it("disables what an older pika-node cannot do, saying why", () => {
+	it("disables what an older pika-node cannot do, saying why once", () => {
 		const old = { nodeName: "node01", exited: false, hasPane: true, unread: false, section: "quiet" as const, connected: true, canRename: false, canUnread: false };
-		const rename = agentMenu(old, agentRun).find((entry) => entry !== "separator" && entry.id === "rename");
-		expect(rename).toMatchObject({ disabled: true, detail: "Update pika-node on node01 to use this" });
-		const offline = agentMenu({ ...old, connected: false, canRename: true }, agentRun).find((entry) => entry !== "separator" && entry.id === "rename");
-		expect(offline).toMatchObject({ disabled: true, detail: "The node is not connected" });
+		expect(find(agentMenu(old, agentRun), "rename")).toMatchObject({ disabled: true, reason: "Update pika-node on node01 to use this" });
+		expect(find(agentMenu(old, agentRun), "rename")).not.toHaveProperty("detail");
 		const projectRun = { newTerminal: noop, newAgent: noop, newWorktree: noop, reveal: noop, copyPath: noop, rename: noop, fold: noop, remove: noop, removeWorktree: noop };
 		const card = projectMenu({ nodeName: "node01", other: false, worktree: false, folded: false, connected: true, canEdit: false, canWorktree: false }, projectRun);
-		for (const id of ["new-worktree", "rename", "remove"]) expect(card.find((entry) => entry !== "separator" && entry.id === id)).toMatchObject({ disabled: true });
-		const plus = addMenu({ nodeName: "node01", connected: true, inProject: true, canEdit: false, canWorktree: false }, { newTerminal: noop, newAgent: noop, addProject: noop, newWorktree: noop });
-		expect(plus.find((entry) => entry !== "separator" && entry.id === "add-project")).toMatchObject({ disabled: true });
-		expect(plus.find((entry) => entry !== "separator" && entry.id === "new-terminal")).not.toHaveProperty("disabled");
+		for (const id of ["new-worktree", "rename", "remove"]) expect(find(card, id)).toMatchObject({ disabled: true, reason: "Update pika-node on node01 to use this" });
+		expect(find(card, "new-terminal")).not.toHaveProperty("disabled");
+	});
+
+	it("leaves out what a node that is not connected cannot do, and says so once", () => {
+		const offline = { nodeName: "node01", exited: false, hasPane: true, unread: false, section: "working" as const, sessionId: "s1", connected: false, canRename: true, canUnread: true };
+		expect(ids(agentMenu(offline, agentRun))).toEqual(["focus", "|", "copy-cwd", "copy-session", "|", "!node01 is not connected"]);
+		const projectRun = { newTerminal: noop, newAgent: noop, newWorktree: noop, reveal: noop, copyPath: noop, rename: noop, fold: noop, remove: noop, removeWorktree: noop };
+		expect(ids(projectMenu({ nodeName: "node01", other: false, worktree: false, folded: false, connected: false, canEdit: true, canWorktree: true }, projectRun))).toEqual([
+			"copy-path",
+			"|",
+			"fold",
+			"|",
+			"!node01 is not connected",
+		]);
+		const nodeRun = { newTerminal: noop, addProject: noop, copyFingerprint: noop, repair: noop, fold: noop };
+		expect(ids(nodeMenu({ nodeName: "node01", connected: false, canEdit: true, pinned: true, foldable: false, folded: false }, nodeRun))).toEqual(["repair", "|", "!node01 is not connected"]);
+		// No menu anywhere offers an item disabled only because the node is offline.
+		for (const menu of [agentMenu(offline, agentRun), nodeMenu({ nodeName: "x", connected: false, canEdit: true, pinned: true, foldable: true, folded: false }, nodeRun)]) {
+			expect(menuItems(menu).filter((entry) => entry.disabled)).toEqual([]);
+		}
 	});
 
 	it("gives a node's menu its terminal, project, fingerprint, and re-pair; the Other card no rename or removal", () => {
-		const menu = nodeMenu({ nodeName: "mac", connected: true, canEdit: true, fingerprint: "ab", pinned: true, foldable: true, folded: false }, { newTerminal: noop, addProject: noop, copyFingerprint: noop, repair: noop, fold: noop });
+		const nodeRun = { newTerminal: noop, addProject: noop, copyFingerprint: noop, repair: noop, fold: noop };
+		const menu = nodeMenu({ nodeName: "mac", connected: true, canEdit: true, fingerprint: "ab", pinned: true, foldable: true, folded: false }, nodeRun);
 		expect(ids(menu)).toEqual(["new-terminal", "add-project", "|", "copy-fingerprint", "repair", "|", "fold"]);
+		// A node this browser never pinned has no fingerprint to copy: the item is left out, not disabled.
+		expect(ids(nodeMenu({ nodeName: "mac", connected: true, canEdit: true, pinned: false, foldable: false, folded: false }, nodeRun))).toEqual(["new-terminal", "add-project"]);
 		const projectRun = { newTerminal: noop, newAgent: noop, newWorktree: noop, reveal: noop, copyPath: noop, rename: noop, fold: noop, remove: noop, removeWorktree: noop };
 		expect(ids(projectMenu({ nodeName: "mac", other: true, worktree: false, folded: false, connected: true, canEdit: true, canWorktree: true }, projectRun))).toEqual(["new-terminal", "new-agent", "|", "fold"]);
 		expect(ids(projectMenu({ nodeName: "mac", other: false, worktree: true, folded: true, connected: true, canEdit: true, canWorktree: true }, projectRun))).toEqual([
@@ -168,6 +190,85 @@ describe("the rail's menus as data", () => {
 			"|",
 			"remove-worktree",
 		]);
+	});
+});
+
+describe("the rail's + menu", () => {
+	const made: unknown[][] = [];
+	const run = {
+		newTerminal: (...args: unknown[]) => void made.push(["terminal", ...args]),
+		addProject: (...args: unknown[]) => void made.push(["add", ...args]),
+		newWorktree: (...args: unknown[]) => void made.push(["worktree", ...args]),
+		pair: (...args: unknown[]) => void made.push(["pair", ...args]),
+	};
+	const mac = { id: "m", name: "mac", canEdit: true, canWorktree: true };
+	const node01 = { id: "n", name: "node01", canEdit: true, canWorktree: true };
+	const ids = (entries: readonly MenuEntry[]) =>
+		entries.map((entry) => (entry === "separator" ? "|" : "kind" in entry ? (entry.kind === "header" ? `#${entry.label}` : `!${entry.text}`) : entry.submenu ? `${entry.id}>` : entry.id));
+	const plus = (state: Partial<AddMenuState>) => addMenu({ nodes: [], offline: [], unpaired: [], ...state }, run);
+	beforeEach(() => void made.splice(0));
+
+	it("uses the only connected node without asking, and makes things in its home", () => {
+		const menu = plus({ nodes: [mac] });
+		expect(ids(menu)).toEqual(["new-terminal", "new-agent", "|", "add-project"]);
+		menuItems(menu)[0]!.run!();
+		expect(made).toEqual([["terminal", "m", undefined, false]]);
+	});
+
+	it("defaults to the project on screen, names where things land, and offers its worktree", () => {
+		const menu = plus({ nodes: [mac], current: { node: "m", project: { path: "/p/atlas", name: "atlas" } } });
+		expect(ids(menu)).toEqual(["#atlas · mac", "new-terminal", "new-agent", "new-worktree", "|", "add-project"]);
+		menuItems(menu).find((entry) => entry.id === "new-agent")!.run!();
+		menuItems(menu).find((entry) => entry.id === "new-worktree")!.run!();
+		expect(made).toEqual([
+			["terminal", "m", "/p/atlas", true],
+			["worktree", "m", "/p/atlas"],
+		]);
+	});
+
+	it("groups several connected nodes under their names when none is on screen, so one choice picks both", () => {
+		const menu = plus({ nodes: [mac, node01] });
+		expect(ids(menu)).toEqual(["#mac", "m:new-terminal", "m:new-agent", "m:add-project", "|", "#node01", "n:new-terminal", "n:new-agent", "n:add-project"]);
+		menuItems(menu).find((entry) => entry.id === "n:add-project")!.run!();
+		expect(made).toEqual([["add", "n"]]);
+		// Many nodes become one submenu each.
+		const many = plus({ nodes: ["a", "b", "c", "d", "e"].map((id) => ({ ...mac, id, name: id })) });
+		expect(ids(many)).toEqual(["node:a>", "node:b>", "node:c>", "node:d>", "node:e>"]);
+	});
+
+	it("puts the node on screen first and the other connected nodes in submenus", () => {
+		const menu = plus({ nodes: [mac, node01], current: { node: "n" } });
+		expect(ids(menu)).toEqual(["#node01", "new-terminal", "new-agent", "|", "add-project", "|", "#Other nodes", "node:m>"]);
+		const other = menuItems(menu).find((entry) => entry.id === "node:m")!;
+		expect(ids(other.submenu!)).toEqual(["new-terminal", "new-agent", "|", "add-project"]);
+		menuItems(other.submenu!)[1]!.run!();
+		expect(made).toEqual([["terminal", "m", undefined, true]]);
+	});
+
+	it("offers pairing, or says why, when no node is connected", () => {
+		expect(ids(plus({ unpaired: [{ id: "m", name: "mac" }] }))).toEqual(["!No node is paired with this browser yet", "|", "pair:m"]);
+		expect(ids(plus({ offline: ["mac", "node01"] }))).toEqual(["!mac and node01 are not connected"]);
+		expect(ids(plus({}))).toEqual(["!No node is connected"]);
+		menuItems(plus({ unpaired: [{ id: "m", name: "mac" }] }))[0]!.run!();
+		expect(made).toEqual([["pair", "m"]]);
+	});
+
+	it("is never a list of disabled items, and gives each disabled one its own reason", () => {
+		const old = { ...mac, canEdit: false, canWorktree: false };
+		const states: Partial<AddMenuState>[] = [
+			{},
+			{ offline: ["mac"] },
+			{ unpaired: [{ id: "m", name: "mac" }] },
+			{ nodes: [old] },
+			{ nodes: [old], current: { node: "m", project: { path: "/p", name: "p" } } },
+			{ nodes: [old, node01] },
+			{ nodes: [old, node01], current: { node: "m" } },
+		];
+		for (const state of states) {
+			const items = menuItems(plus(state));
+			if (items.length) expect(items.some((entry) => !entry.disabled), JSON.stringify(state)).toBe(true);
+			for (const entry of items.filter((entry) => entry.disabled)) expect(entry.reason).toBe("Update pika-node on mac to use this");
+		}
 	});
 });
 
@@ -298,7 +399,8 @@ describe("the rail's operations", () => {
 		const { container } = render(<Harness nodes={[node("mac", [])]} calls={calls} projects={[]} />);
 		fireEvent.click(container.querySelector<HTMLElement>("[data-rail-add]")!);
 		const menu = document.querySelector("[data-add-menu]")!;
-		expect(items(menu)).toEqual(["new-terminal", "new-agent", "add-project", "new-worktree"]);
+		expect(items(menu)).toEqual(["new-terminal", "new-agent", "new-worktree", "add-project"]);
+		expect(menu.querySelector("[data-menu-header]")!.textContent).toBe("repo · mac");
 		fireEvent.click(within(menu as HTMLElement).getByRole("menuitem", { name: /Add Project/ }));
 		expect(calls.addProject).toEqual([["mac"]]);
 		projectsView();
@@ -308,15 +410,31 @@ describe("the rail's operations", () => {
 		expect(items(document.querySelector("[data-node-menu]")!)).toEqual(["new-terminal", "add-project", "copy-fingerprint", "repair", "fold"]);
 	});
 
-	it("shows an older daemon's items disabled with the reason", () => {
+	it("shows an older daemon's items disabled, with the reason beside the menu while highlighted", () => {
 		const { container } = render(<Harness nodes={[node("mac", [pane("busy", { state: "busy" })])]} calls={calls} capabilities={[]} />);
 		openMenu(container.querySelector("[data-agent-row='busy']")!);
-		const rename = document.querySelector<HTMLButtonElement>("[data-agent-menu] [data-menu-item='rename']")!;
-		expect(rename.disabled).toBe(true);
-		expect(rename.querySelector("[data-menu-detail]")!.textContent).toBe("Update pika-node on mac to use this");
+		const menu = document.querySelector<HTMLElement>("[data-agent-menu]")!;
+		const rename = menu.querySelector<HTMLButtonElement>("[data-menu-item='rename']")!;
+		expect(rename.getAttribute("aria-disabled")).toBe("true");
+		// Once, not as a line under the item; assistive technology reads it as the item's description.
+		expect(rename.textContent).not.toContain("Update pika-node");
+		expect(document.getElementById(rename.getAttribute("aria-describedby")!)!.textContent).toBe("Update pika-node on mac to use this");
+		expect(document.querySelector("[data-menu-reason]")).toBeNull();
+		fireEvent.keyDown(menu, { key: "ArrowDown" });
+		expect(document.activeElement).toBe(rename);
+		expect(document.querySelector("[data-menu-reason]")!.textContent).toBe("Update pika-node on mac to use this");
 		fireEvent.click(rename);
 		expect(calls.renameAgent).toBeUndefined();
+		expect(document.querySelector("[data-agent-menu]")).not.toBeNull();
+		// Mark as Unread needs the newer daemon too; Split Right does not.
+		fireEvent.keyDown(menu, { key: "ArrowDown" });
+		expect(document.activeElement?.getAttribute("data-menu-item")).toBe("mark-unread");
+		expect(document.querySelector("[data-menu-reason]")).not.toBeNull();
+		fireEvent.keyDown(menu, { key: "ArrowDown" });
+		expect(document.activeElement?.getAttribute("data-menu-item")).toBe("split-right");
+		expect(document.querySelector("[data-menu-reason]")).toBeNull();
 	});
+
 });
 
 describe("Add Project", () => {

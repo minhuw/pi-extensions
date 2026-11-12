@@ -87,12 +87,12 @@ export function Explorer(props: ExplorerProps) {
 		const relative = path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
 		const items: MenuEntry[] = [
 			folder
-				? { id: "toggle", label: treeView.expanded.has(path) ? "Collapse" : "Expand", run: () => void tree?.toggle(path) }
-				: { id: "open", label: "Open", run: () => void openEntry(path, kind, "open") },
+				? { id: "toggle", label: treeView.expanded.has(path) ? "Collapse" : "Expand", icon: "fold", run: () => void tree?.toggle(path) }
+				: { id: "open", label: "Open", icon: "file", run: () => void openEntry(path, kind, "open") },
 			"separator",
-			{ id: "copy-path", label: "Copy Path", run: () => void copyText(path) },
-			{ id: "copy-relative", label: "Copy Relative Path", run: () => void copyText(relative) },
-			...(folder ? (["separator", { id: "refresh", label: "Refresh", run: () => void tree?.refresh(path) }] as MenuEntry[]) : []),
+			{ id: "copy-path", label: "Copy Path", icon: "copy", run: () => void copyText(path) },
+			{ id: "copy-relative", label: "Copy Relative Path", icon: "copy", run: () => void copyText(relative) },
+			...(folder ? (["separator", { id: "refresh", label: "Refresh", icon: "restart", run: () => void tree?.refresh(path) }] as MenuEntry[]) : []),
 		];
 		entryMenu.open({ ...at, items, label: baseName(path), attrs: { "data-tree-menu": path } });
 	};
@@ -120,7 +120,8 @@ export function Explorer(props: ExplorerProps) {
 							...(known ? [] : [{ id: `root:${root}`, label: homePath(sanitize(root), props.home), checked: true, run: () => {} }]),
 							...props.projects.map((project) => ({
 								id: `root:${project.path}`,
-								label: `${sanitize(project.name)}  ${homePath(sanitize(project.path), props.home)}`,
+								label: sanitize(project.name),
+								hint: homePath(sanitize(project.path), props.home),
 								checked: project.path === root,
 								run: () => props.onRoot(project.path),
 							})),

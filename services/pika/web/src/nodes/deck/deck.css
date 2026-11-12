@@ -21,6 +21,8 @@
 	/* Menus and tooltips float over everything: menus a step above the ground, tooltips in inverse ink. */
 	--dk-raised: #ffffff;
 	--dk-shadow: 0 12px 32px -8px rgb(16 20 24 / 0.22), 0 3px 8px -2px rgb(16 20 24 / 0.1);
+	--dk-menu-line: rgb(22 26 31 / 0.16);
+	--dk-menu-hi: rgb(90 70 200 / 0.13);
 	--dk-tip: #23282e;
 	--dk-tip-ink: #f1f3f5;
 
@@ -70,6 +72,7 @@
 	background: var(--dk-ground);
 	color: var(--dk-ink);
 	caret-color: var(--dk-accent);
+	accent-color: var(--dk-accent);
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale;
 	/* A desktop app's chrome: the arrow everywhere, and nothing selects by accident (see "Desktop conventions"). */
@@ -89,6 +92,8 @@
 	--dk-code: #1d2126;
 	--dk-raised: #1f2328;
 	--dk-shadow: 0 14px 36px -8px rgb(0 0 0 / 0.55), 0 3px 10px -2px rgb(0 0 0 / 0.35);
+	--dk-menu-line: #383f47;
+	--dk-menu-hi: rgb(165 150 255 / 0.2);
 	--dk-tip: #e4e7eb;
 	--dk-tip-ink: #111417;
 
@@ -193,59 +198,125 @@
 	}
 }
 
-/* Menus (`Menu.tsx`): a raised sheet; the highlighted item, by pointer or keyboard, takes the accent. */
+/*
+ * Menus (`Menu.tsx`): a raised sheet with a hairline and a soft shadow; 26 px rows with a 16 px icon column, the
+ * label in full ink, hints and shortcuts muted; the highlighted row, by pointer or keyboard, takes the accent tint.
+ */
 .dk-menu {
-	border: 1px solid var(--dk-line-strong);
+	border: 1px solid var(--dk-menu-line);
 	border-radius: 6px;
 	background: var(--dk-raised);
 	color: var(--dk-ink);
 	box-shadow: var(--dk-shadow);
 	font-size: 13px;
-	line-height: 1;
+	line-height: 16px;
+	outline: none;
 }
 
 .dk-menu-item {
 	display: flex;
-	min-height: 24px;
+	height: 26px;
 	width: 100%;
 	align-items: center;
-	gap: 4px;
+	gap: 8px;
 	border-radius: 4px;
-	padding: 0 10px 0 4px;
+	padding: 0 8px 0 6px;
+	color: var(--dk-ink);
 	text-align: left;
 	white-space: nowrap;
 	outline: none;
 }
 
-/* An item with a reason under its label (why it is disabled). */
-.dk-menu-item:has([data-menu-detail]) {
-	padding-block: 3px;
+.dk-menu-icon {
+	display: flex;
+	width: 16px;
+	flex-shrink: 0;
+	justify-content: center;
+	color: var(--dk-ink-2);
 }
 
-.dk-menu-item:focus {
-	background: var(--dk-accent);
-	color: var(--dk-on-accent);
+.dk-menu-item:focus,
+.dk-menu-item[aria-expanded="true"] {
+	background: var(--dk-menu-hi);
 }
 
-.dk-menu-danger {
+.dk-menu-item:focus .dk-menu-icon,
+.dk-menu-item[aria-expanded="true"] .dk-menu-icon {
+	color: var(--dk-ink);
+}
+
+.dk-menu-danger,
+.dk-menu-danger .dk-menu-icon,
+.dk-menu-danger:focus .dk-menu-icon {
 	color: var(--dk-failed-ink);
 }
 
-.dk-menu-item:disabled {
+/* Disabled: 40% ink, highlighted only as a hover is, so it reads as "not this" while its reason shows. */
+.dk-menu-item[aria-disabled="true"],
+.dk-menu-item[aria-disabled="true"] .dk-menu-icon {
+	color: color-mix(in srgb, var(--dk-ink) 40%, transparent);
+}
+
+.dk-menu-item[aria-disabled="true"]:focus {
+	background: var(--dk-hover);
+}
+
+.dk-menu-hint {
+	min-width: 0;
+	flex-shrink: 1000;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	color: var(--dk-ink-3);
+	font-size: 12px;
+}
+
+.dk-menu-keys,
+.dk-menu-chevron {
+	flex-shrink: 0;
 	color: var(--dk-ink-3);
 }
 
 .dk-menu-keys {
-	margin-left: 28px;
 	font: inherit;
 	font-size: 12px;
-	color: var(--dk-ink-3);
+	font-variant-numeric: tabular-nums;
 	letter-spacing: 0.04em;
 }
 
-.dk-menu-item:focus .dk-menu-keys {
-	color: inherit;
-	opacity: 0.8;
+.dk-menu-item:focus :is(.dk-menu-keys, .dk-menu-chevron, .dk-menu-hint),
+.dk-menu-item[aria-expanded="true"] .dk-menu-chevron {
+	color: var(--dk-ink-2);
+}
+
+.dk-menu-separator {
+	height: 1px;
+	margin: 4px 6px;
+	background: var(--dk-line);
+}
+
+/* A group's name, lined up with the labels; and a note where there is nothing to choose. */
+.dk-menu-header {
+	padding: 6px 8px 3px 30px;
+	color: var(--dk-ink-3);
+	font-size: 11.5px;
+	font-weight: 600;
+	line-height: 14px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.dk-menu-header:first-child {
+	padding-top: 4px;
+}
+
+.dk-menu-note {
+	max-width: 300px;
+	padding: 5px 8px 5px 30px;
+	color: var(--dk-ink-2);
+	font-size: 12px;
+	line-height: 16px;
+	white-space: normal;
 }
 
 /* Tooltips (`Tooltips.tsx`): a small inverse bubble with the shortcut beside the name. */
@@ -272,6 +343,45 @@
 	opacity: 0.7;
 	letter-spacing: 0.04em;
 	white-space: nowrap;
+}
+
+/*
+ * The shared buttons (`BUTTON` in components/ui.tsx), re-toned as Deck's controls: 28 px, a 4 px radius; the primary
+ * action of a dialog or a page (Add Project, Pair this browser) in the accent, as a desktop's default button; the
+ * secondary one framed in the strong hairline on the raised ground. Unlayered, so these win over the utilities.
+ */
+[data-deck] .ui-button {
+	height: 28px;
+	border-radius: 4px;
+	padding-inline: 10px;
+}
+
+[data-deck] .ui-button-primary {
+	background: var(--dk-accent);
+	color: var(--dk-on-accent);
+}
+
+[data-deck] .ui-button-primary:not(:disabled):hover {
+	background: color-mix(in srgb, var(--dk-accent) 88%, var(--dk-ink));
+}
+
+[data-deck] .ui-button-secondary {
+	border-color: var(--dk-line-strong);
+	background: var(--dk-raised);
+	color: var(--dk-ink);
+}
+
+[data-deck] .ui-button-secondary:not(:disabled):hover {
+	background: color-mix(in srgb, var(--dk-ink) 5%, var(--dk-raised));
+}
+
+[data-deck] .ui-button-danger {
+	background: var(--dk-failed);
+}
+
+[data-deck] .ui-button:focus-visible {
+	outline: 2px solid var(--dk-accent);
+	outline-offset: 1px;
 }
 
 /* A long rail draws only the rows on screen (T3 Code's sidebar rows). */
