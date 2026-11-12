@@ -4,9 +4,14 @@
  * pause of 600 ms; moving to another control while one shows (or just after) shows the next at once; a press, a key,
  * a scroll, or leaving hides it. Touch never shows one. The tip repeats the control's name, which its `aria-label` or
  * text already gives assistive technology, so the bubble itself is `aria-hidden`.
+ *
+ * The bubble is shadcn/ui's tooltip on Base UI (`components/ui-shadcn/tooltip.tsx`), anchored to the control the
+ * pointer rests on, which places it below (above at the window's bottom) and inside the window. One tooltip serves
+ * every control, so the ~40 controls that carry a tip need no wrapper each.
  */
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { Tooltip, TooltipContent } from "../../components/ui-shadcn/tooltip";
 import { actionShortcut, type ActionId } from "../keys";
 
 /** A control's tooltip, with the shortcut of the action it runs. */
@@ -19,13 +24,11 @@ export function tip(label: string | undefined, action?: ActionId): { "data-tip"?
 const DELAY_MS = 600;
 /** After a tip hides, the next one within this long shows at once. */
 const WARM_MS = 500;
-const GAP = 6;
-const EDGE = 4;
 
 interface Shown {
 	text: string;
 	keys?: string;
-	box: DOMRect;
+	element: HTMLElement;
 }
 
 export function DeckTooltips({ root }: { root: HTMLElement | null }) {
@@ -46,7 +49,7 @@ export function DeckTooltips({ root }: { root: HTMLElement | null }) {
 		const show = (element: HTMLElement) => {
 			if (!element.isConnected || !element.dataset.tip) return;
 			showing = true;
-			setShown({ text: element.dataset.tip, ...(element.dataset.tipKeys ? { keys: element.dataset.tipKeys } : {}), box: element.getBoundingClientRect() });
+			setShown({ text: element.dataset.tip, ...(element.dataset.tipKeys ? { keys: element.dataset.tipKeys } : {}), element });
 		};
 		const over = (event: PointerEvent) => {
 			if (event.pointerType === "touch" || event.buttons !== 0) return;
@@ -82,31 +85,13 @@ export function DeckTooltips({ root }: { root: HTMLElement | null }) {
 			window.removeEventListener("blur", hide);
 		};
 	}, [root]);
-	return shown ? <Bubble shown={shown} /> : null;
-}
-
-function Bubble({ shown }: { shown: Shown }) {
-	const ref = useRef<HTMLDivElement>(null);
-	const [place, setPlace] = useState<{ left: number; top: number }>();
-	useLayoutEffect(() => {
-		const element = ref.current;
-		if (!element) return;
-		const { width, height } = element.getBoundingClientRect();
-		const { box } = shown;
-		const left = Math.max(EDGE, Math.min(box.left + box.width / 2 - width / 2, window.innerWidth - width - EDGE));
-		const below = box.bottom + GAP;
-		setPlace({ left, top: below + height > window.innerHeight - EDGE ? Math.max(EDGE, box.top - GAP - height) : below });
-	}, [shown]);
+	if (!shown) return null;
 	return (
-		<div
-			ref={ref}
-			className="dk-tooltip"
-			aria-hidden="true"
-			style={place ? { left: place.left, top: place.top } : { left: 0, top: 0, visibility: "hidden" }}
-			data-tooltip={shown.text}
-		>
-			{shown.text}
-			{shown.keys && <kbd className="dk-tooltip-keys">{shown.keys}</kbd>}
-		</div>
+		<Tooltip open>
+			<TooltipContent anchor={shown.element} aria-hidden="true" data-tooltip={shown.text}>
+				{shown.text}
+				{shown.keys && <kbd className="font-[inherit] tracking-[0.04em] whitespace-nowrap opacity-70">{shown.keys}</kbd>}
+			</TooltipContent>
+		</Tooltip>
 	);
 }

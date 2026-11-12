@@ -1,27 +1,38 @@
 /**
- * Deck's one menu: context menus (tabs, agent rows, tree items) and menus that drop from a button (the app menu, the
- * project switcher, the rail's "+"), drawn and driven like a desktop app's (macOS, Zed, VS Code).
+ * Deck's menus, as data drawn by shadcn/ui's dropdown menu on Base UI (`components/ui-shadcn/dropdown-menu.tsx`):
+ * context menus (tabs, agent rows, tree items) and menus that drop from a button (the app menu, the project switcher,
+ * the rail's "+"). Base UI does the keyboard (arrows, Home/End, typeahead, Right into a submenu and Left out of it,
+ * Escape), the pointer (hover highlights, resting on a submenu's item opens it, a press outside closes), placement
+ * with collision flipping, and focus. This module keeps Deck's rules on top:
  *
- * - **Rows:** a 16 px icon column (an item's icon, or the check of a chosen one), the label, a muted hint (a path),
- *   the shortcut right-aligned, and a chevron on an item that opens a submenu. Headers name a group of items;
- *   a note is one line of explanation where there is nothing to choose.
+ * - **Rows:** an icon column (an item's icon, or the check of a chosen one), the label, a muted hint (a path), the
+ *   shortcut right-aligned, a chevron on an item that opens a submenu. Headers name a group; a note is one line of
+ *   explanation where there is nothing to choose.
  * - **Disabled items** stay in the list only when that teaches something (an older pika-node). They can be
- *   highlighted but not chosen, and say why once, in a bubble beside the menu while highlighted, never as a second
- *   line under every item.
- * - **Placement:** `position: fixed` at the pointer, or under its button; measured before paint and moved inside the
- *   window, flipping above when it would run off the bottom. A submenu opens beside its item, flipping left.
- * - **Keyboard:** focus starts on the first enabled item (or the checked one); arrows, Home and End move, a letter
- *   jumps to the next item it starts, Enter and Space choose, Right opens a submenu and Left or Escape leaves it;
- *   Escape and Tab close the menu and give focus back.
- * - **Pointer:** the item under the pointer is the highlighted one, as keyboard focus is; resting on a submenu's item
- *   opens it. A press outside, the window losing focus, or a resize closes the menu. Opening one menu closes any other.
- *
- * Each `useMenu` draws its own menu where its owner renders, so the owner must sit outside anything that contains
- * fixed children (`content-visibility`, `transform`): the rail and the workspace render theirs at their top level.
+ *   highlighted but not chosen, and say why once, in a bubble beside the menu while highlighted (and as the item's
+ *   description), never as a second line under every item.
+ * - **Opening:** imperatively, at the pointer or under an element, with no trigger; opening one menu closes any other.
+ *   The window losing focus or resizing closes it, as a desktop menu does.
+ * - **Focus:** a chosen item gets focus back where it was before it runs (it may move focus on: a dialog, a file);
+ *   Escape gives it back too; a press outside leaves it where the press puts it.
  */
 
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
-import { cx } from "../../components/ui";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuGroup,
+	DropdownMenuHint,
+	DropdownMenuIcon,
+	DropdownMenuItem,
+	DropdownMenuLabel,
+	DropdownMenuSeparator,
+	DropdownMenuShortcut,
+	DropdownMenuSub,
+	DropdownMenuSubContent,
+	DropdownMenuSubTrigger,
+} from "../../components/ui-shadcn/dropdown-menu";
+import { Tooltip, TooltipContent } from "../../components/ui-shadcn/tooltip";
 import { Icon, type IconName } from "../../components/icons";
 
 /** An item's icon: one of the shared icons, or a glyph only menus draw. */
@@ -44,7 +55,7 @@ export interface MenuItem {
 	reason?: string;
 	/** Ends or destroys something (Kill, Remove): red text. */
 	danger?: boolean;
-	/** A choice among several (the current project, the theme): a check before it, and focus starts on it. */
+	/** A choice among several (the current project, the theme): a check before it. */
 	checked?: boolean;
 }
 
@@ -66,16 +77,11 @@ export const isMenuItem = (entry: MenuEntry): entry is MenuItem => typeof entry 
 /** A menu's items, without separators, headers and notes. */
 export const menuItems = (entries: readonly MenuEntry[]): MenuItem[] => entries.filter(isMenuItem);
 
+/** Where a menu opens: under an element (a button, or a row opened from the keyboard), or at a point (the pointer). */
+export type MenuAnchor = Element | { x: number; y: number };
+
 export interface MenuRequest {
-	/** The menu's top-left corner: the pointer, or the button's bottom-left. */
-	x: number;
-	y: number;
-	/** Where the menu's bottom goes when it flips above (the button's top); the pointer's `y` without one. */
-	flipY?: number;
-	/** Where the menu's right edge goes when it would run off the right (a submenu's parent item's left). */
-	flipX?: number;
-	/** The button that opened it: pressing it again closes the menu (its owner's toggle) rather than reopening it. */
-	anchor?: Element;
+	anchor: MenuAnchor;
 	items: readonly MenuEntry[];
 	/** The menu's accessible name. */
 	label: string;
@@ -84,21 +90,22 @@ export interface MenuRequest {
 }
 
 /** A menu at a pointer event (a right click), or under an element (a button, or a row opened from the keyboard). */
-export const menuAtPointer = (event: { clientX: number; clientY: number }) => ({ x: event.clientX, y: event.clientY });
-export function menuBelow(element: Element) {
-	const box = element.getBoundingClientRect();
-	return { x: box.left, y: box.bottom + 2, flipY: box.top - 2, anchor: element };
-}
+export const menuAtPointer = (event: { clientX: number; clientY: number }): { anchor: MenuAnchor } => ({ anchor: { x: event.clientX, y: event.clientY } });
+export const menuBelow = (element: Element): { anchor: MenuAnchor } => ({ anchor: element });
 
 /** Whether a key opens a focused element's context menu: the menu key, or Shift+F10. */
 export const isMenuKey = (event: { key: string; shiftKey: boolean }) => event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey);
 
 const OPENED = "pika-deck-menu";
-/** A list's own items: submenus render beside it, not inside it. */
-const ITEMS = "[data-menu-item]";
-const EDGE = 4;
-/** How long the pointer rests on an item before its submenu opens, or on another item before an open one closes. */
-const SUBMENU_MS = 120;
+
+/**
+ * Whether the latest input was a key rather than a press, as for `:focus-visible`: a menu opened from the keyboard
+ * starts on its first item (or its checked one), one opened by the pointer starts with nothing highlighted, as on the
+ * desktop. Base UI does this for menus with a trigger; Deck's menus have none.
+ */
+let fromKeyboard = false;
+window.addEventListener("keydown", () => (fromKeyboard = true), true);
+window.addEventListener("pointerdown", () => (fromKeyboard = false), true);
 
 /** One menu's state and element: `open` shows it (closing any other menu), `menu` is what to render. */
 export function useMenu(): { menu: ReactNode; open: (request: MenuRequest) => void; close: () => void; openFor: string | undefined } {
@@ -118,304 +125,190 @@ export function useMenu(): { menu: ReactNode; open: (request: MenuRequest) => vo
 		window.addEventListener(OPENED, other);
 		return () => window.removeEventListener(OPENED, other);
 	}, [request, close]);
-	return { menu: request ? <RootMenu key={request.serial} request={request} onClose={close} /> : null, open, close, openFor: request?.label };
+	return { menu: request ? <EntryMenu key={request.serial} request={request} onClose={close} /> : null, open, close, openFor: request?.label };
 }
 
-function RootMenu({ request, onClose }: { request: MenuRequest; onClose: () => void }) {
-	const tree = useId();
+/** A point as Base UI's virtual anchor: a zero-size box at it. */
+const pointAnchor = (x: number, y: number) => ({ getBoundingClientRect: () => DOMRect.fromRect({ x, y, width: 0, height: 0 }) });
+
+function EntryMenu({ request, onClose }: { request: MenuRequest; onClose: () => void }) {
 	const restore = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+	const [highlighted, setHighlighted] = useState<HTMLElement>();
+	const reasonIds = useId();
+	const { anchor } = request;
+	const element = anchor instanceof Element ? anchor : undefined;
+	const [virtual] = useState(() => (anchor instanceof Element ? undefined : pointAnchor(anchor.x, anchor.y)));
+	const [keyboard] = useState(fromKeyboard);
+	const popup = useRef<HTMLDivElement>(null);
+	// Base UI can report the menu closed once more after it is gone (focus leaving it for a dialog its item opened);
+	// that late report must not pull focus back. A layout effect, so it is cleared before the dialog's field takes focus.
+	const mounted = useRef(false);
+	useLayoutEffect(() => {
+		mounted.current = true;
+		return () => {
+			mounted.current = false;
+		};
+	}, []);
+
+	// Focusing an item highlights it in Base UI, and the arrows go on from there.
+	useEffect(() => {
+		if (!keyboard) return;
+		const frame = requestAnimationFrame(() => {
+			const items = [...(popup.current?.querySelectorAll<HTMLElement>("[data-menu-item]") ?? [])];
+			(items.find((item) => item.getAttribute("aria-checked") === "true") ?? items.find((item) => !item.hasAttribute("data-disabled")))?.focus();
+		});
+		return () => cancelAnimationFrame(frame);
+	}, [keyboard]);
 
 	useEffect(() => {
-		const away = (event: PointerEvent) => {
-			const target = event.target as Element | null;
-			if (target?.closest?.("[data-menu-tree]")?.getAttribute("data-menu-tree") === tree || request.anchor?.contains(target)) return;
-			onClose();
-		};
-		window.addEventListener("pointerdown", away, true);
 		window.addEventListener("blur", onClose);
 		window.addEventListener("resize", onClose);
 		return () => {
-			window.removeEventListener("pointerdown", away, true);
 			window.removeEventListener("blur", onClose);
 			window.removeEventListener("resize", onClose);
 		};
-	}, [onClose, request.anchor, tree]);
-
-	// Focus goes back where it was, then a chosen item may move it (opening a file, a dialog).
-	const finish = useCallback(() => {
-		onClose();
-		if (restore.current?.isConnected) restore.current.focus();
 	}, [onClose]);
 
-	return <MenuList request={request} tree={tree} finish={finish} focusFirst />;
-}
-
-interface Open {
-	index: number;
-	box: DOMRect;
-	/** Opened from the keyboard: focus moves into it. */
-	focus: boolean;
-}
-
-function MenuList({ request, tree, finish, focusFirst, onBack, onEnter }: {
-	request: MenuRequest;
-	tree: string;
-	/** Closes the whole menu and gives focus back. */
-	finish: () => void;
-	/** Focus the first item once placed (the root, or a submenu opened from the keyboard). */
-	focusFirst: boolean;
-	/** In a submenu: close it and focus its item in the parent. */
-	onBack?: () => void;
-	/** In a submenu: the pointer came in, so a pending close must not happen. */
-	onEnter?: () => void;
-}) {
-	const list = useRef<HTMLDivElement>(null);
-	const reasonId = useId();
-	const [place, setPlace] = useState<{ left: number; top: number }>();
-	const [sub, setSub] = useState<Open>();
-	const [active, setActive] = useState<number>();
-	const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
-	useEffect(() => () => clearTimeout(timer.current), []);
-
-	useLayoutEffect(() => {
-		const element = list.current;
-		if (!element) return;
-		const { width, height } = element.getBoundingClientRect();
-		let left = request.x;
-		if (left + width > window.innerWidth - EDGE) left = request.flipX !== undefined ? request.flipX - width : window.innerWidth - width - EDGE;
-		left = Math.max(EDGE, left);
-		let top = request.y;
-		if (top + height > window.innerHeight - EDGE) top = request.flipY !== undefined ? request.flipY - height : window.innerHeight - height - EDGE;
-		setPlace({ left, top: Math.max(EDGE, top) });
-	}, [request]);
-
-	const elements = () => [...(list.current?.querySelectorAll<HTMLElement>(ITEMS) ?? [])];
-	const enabled = (element: HTMLElement) => element.getAttribute("aria-disabled") !== "true";
-
-	// Focus once placed: a menu measured while hidden takes no focus. With nothing to choose, the menu itself takes it,
-	// so Escape still closes it.
-	const placed = place !== undefined;
-	useLayoutEffect(() => {
-		if (!placed || !focusFirst) return;
-		const items = elements();
-		(items.find((item) => item.getAttribute("aria-checked") === "true") ?? items.find(enabled) ?? items[0] ?? list.current)?.focus();
-	}, [placed, focusFirst]);
-
-	const entries = request.items;
-	const indexOf = (element: Element | null) => (element instanceof HTMLElement && element.dataset.menuIndex ? Number(element.dataset.menuIndex) : undefined);
-
-	const openSub = (index: number, focus: boolean) => {
-		const element = list.current?.querySelector<HTMLElement>(`[data-menu-index="${index}"]`);
-		if (!element) return;
-		clearTimeout(timer.current);
-		setSub({ index, box: element.getBoundingClientRect(), focus });
-	};
-	const closeSub = (refocus: boolean) => {
-		clearTimeout(timer.current);
-		const index = sub?.index;
-		setSub(undefined);
-		if (refocus && index !== undefined) list.current?.querySelector<HTMLElement>(`[data-menu-index="${index}"]`)?.focus();
-	};
-
-	const key = (event: KeyboardEvent<HTMLDivElement>) => {
-		const items = elements();
-		const at = items.indexOf(document.activeElement as HTMLElement);
-		const current = items[at];
-		const entry = current ? entries[indexOf(current) ?? -1] : undefined;
-		const item = entry && isMenuItem(entry) ? entry : undefined;
-		if (event.key === "ArrowDown") items[(at + 1) % items.length]?.focus();
-		else if (event.key === "ArrowUp") items[(at - 1 + items.length) % items.length]?.focus();
-		else if (event.key === "Home" || event.key === "PageUp") items[0]?.focus();
-		else if (event.key === "End" || event.key === "PageDown") items.at(-1)?.focus();
-		else if (event.key === "ArrowRight" && item?.submenu && !item.disabled) openSub(indexOf(current!)!, true);
-		else if ((event.key === "ArrowLeft" || event.key === "Escape") && onBack) onBack();
-		else if (event.key === "Escape" || event.key === "Tab" || isMenuKey(event)) finish();
-		else if (event.key.length === 1 && /\S/.test(event.key) && !event.metaKey && !event.ctrlKey && !event.altKey) {
-			const letter = event.key.toLowerCase();
-			const order = [...items.slice(at + 1), ...items.slice(0, at + 1)];
-			order.find((element) => element.dataset.menuLabel?.toLowerCase().startsWith(letter))?.focus();
-		} else return;
-		event.preventDefault();
-		event.stopPropagation();
-	};
-
-	const choose = (item: MenuItem, index: number) => {
-		if (item.disabled) return;
-		if (item.submenu) return openSub(index, true);
-		finish();
+	// Focus goes back where it was, then the item runs and may move it on (opening a file, a dialog).
+	const choose = (item: MenuItem) => {
+		if (item.disabled || item.submenu) return;
+		if (restore.current?.isConnected) restore.current.focus();
+		onClose();
 		item.run?.();
 	};
 
-	const hover = (element: HTMLElement, item: MenuItem, index: number) => {
-		if (document.activeElement !== element) element.focus();
-		if (sub?.index === index) return clearTimeout(timer.current);
-		clearTimeout(timer.current);
-		if (item.submenu && !item.disabled) timer.current = setTimeout(() => openSub(index, false), SUBMENU_MS);
-		else if (sub) timer.current = setTimeout(() => setSub(undefined), SUBMENU_MS);
-	};
+	const reason = highlighted?.dataset.reason;
+	return (
+		<DropdownMenu
+			open
+			modal={false}
+			onOpenChange={(open, details) => {
+				if (open || !mounted.current) return;
+				if (details.reason === "outside-press") {
+					// The button that opened it toggles it: its own press is not "outside", so its click closes the menu.
+					// Any other press closes it and leaves focus where the press puts it.
+					if (!element?.contains(details.event.target as Node)) onClose();
+					return;
+				}
+				if (restore.current?.isConnected) restore.current.focus();
+				onClose();
+			}}
+			onItemHighlighted={(item) => setHighlighted(item)}
+		>
+			<DropdownMenuContent
+				ref={popup}
+				anchor={element ?? virtual}
+				sideOffset={element ? 2 : 0}
+				// Focus is given back here (the menu unmounts as it closes, before Base UI's own return could run).
+				finalFocus={false}
+				aria-label={request.label}
+				onContextMenu={(event) => event.preventDefault()}
+				data-menu={request.label}
+				{...request.attrs}
+			>
+				<Entries entries={request.items} reasonIds={reasonIds} onChoose={choose} />
+				{/* Disabled items' reasons, as their descriptions: outside the items, so they are not part of their names. */}
+				<div hidden>
+					{reasons(request.items, reasonIds).map(([id, text]) => (
+						<span key={id} id={id}>
+							{text}
+						</span>
+					))}
+				</div>
+			</DropdownMenuContent>
+			{reason && highlighted && (
+				<Tooltip open>
+					<TooltipContent anchor={highlighted} side="inline-end" sideOffset={10} aria-hidden="true" data-menu-reason="">
+						{reason}
+					</TooltipContent>
+				</Tooltip>
+			)}
+		</DropdownMenu>
+	);
+}
 
-	const activeEntry = active !== undefined ? entries[active] : undefined;
-	const reason = activeEntry && isMenuItem(activeEntry) && activeEntry.disabled && activeEntry.reason ? { index: active!, text: activeEntry.reason } : undefined;
-	const subEntry = sub ? entries[sub.index] : undefined;
+/** Every disabled item's reason in a menu and its submenus, with the id its item is described by. */
+function reasons(entries: readonly MenuEntry[], prefix: string): [string, string][] {
+	return entries.flatMap((entry, index): [string, string][] => {
+		if (!isMenuItem(entry)) return [];
+		if (entry.submenu) return reasons(entry.submenu, `${prefix}-${index}`);
+		return entry.disabled && entry.reason ? [[`${prefix}-${index}`, entry.reason]] : [];
+	});
+}
 
-	// Consecutive items under a header form a group named by it.
+/** Entries as rows: consecutive items under a header form a group named by it. */
+function Entries({ entries, reasonIds, onChoose }: { entries: readonly MenuEntry[]; reasonIds: string; onChoose: (item: MenuItem) => void }) {
 	const rendered: ReactNode[] = [];
-	let group: { id: string; label: string; children: ReactNode[] } | undefined;
+	let group: { key: string; label: string; children: ReactNode[] } | undefined;
 	const flush = () => {
 		if (!group) return;
 		rendered.push(
-			<div key={`group-${group.id}`} role="group" aria-labelledby={group.id}>
+			<DropdownMenuGroup key={group.key}>
+				<DropdownMenuLabel data-menu-header="">{group.label}</DropdownMenuLabel>
 				{group.children}
-			</div>,
+			</DropdownMenuGroup>,
 		);
 		group = undefined;
 	};
 	entries.forEach((entry, index) => {
 		if (entry === "separator") {
 			flush();
-			rendered.push(<div key={`separator-${index}`} className="dk-menu-separator" role="separator" />);
+			rendered.push(<DropdownMenuSeparator key={`separator-${index}`} />);
 		} else if (!isMenuItem(entry) && entry.kind === "header") {
 			flush();
-			const id = `${reasonId}-h${index}`;
-			rendered.push(
-				<div key={`header-${index}`} id={id} className="dk-menu-header" data-menu-header="">
-					{entry.label}
-				</div>,
-			);
-			group = { id, label: entry.label, children: [] };
+			group = { key: `group-${index}`, label: entry.label, children: [] };
 		} else if (!isMenuItem(entry)) {
 			(group?.children ?? rendered).push(
-				<div key={`note-${index}`} className="dk-menu-note" data-menu-note="">
+				<div key={`note-${index}`} className="max-w-[300px] py-[5px] pr-2 pl-[30px] text-[12px] leading-4 whitespace-normal text-dk-ink-2" data-menu-note="">
 					{entry.text}
 				</div>,
 			);
 		} else {
-			const row = (
-				<MenuRow
-					key={entry.id}
-					item={entry}
-					index={index}
-					expanded={entry.submenu ? sub?.index === index : undefined}
-					describedBy={entry.disabled && entry.reason ? `${reasonId}-r${index}` : undefined}
-					onHover={hover}
-					onChoose={choose}
-					onFocus={() => setActive(index)}
-				/>
-			);
-			(group?.children ?? rendered).push(row);
+			(group?.children ?? rendered).push(<Row key={entry.id} item={entry} reasonId={`${reasonIds}-${index}`} onChoose={onChoose} />);
 		}
 	});
 	flush();
+	return <>{rendered}</>;
+}
 
-	return (
+function Row({ item, reasonId, onChoose }: { item: MenuItem; reasonId: string; onChoose: (item: MenuItem) => void }) {
+	const content = (
 		<>
-			<div
-				ref={list}
-				role="menu"
-				tabIndex={-1}
-				aria-label={request.label}
-				className="dk-menu fixed z-50 min-w-[220px] max-w-[380px] p-1"
-				style={place ? { left: place.left, top: place.top } : { left: request.x, top: request.y, visibility: "hidden" }}
-				onKeyDown={key}
-				onContextMenu={(event) => event.preventDefault()}
-				onPointerEnter={onEnter}
-				onBlur={(event) => {
-					if (!list.current?.contains(event.relatedTarget as Node)) setActive(undefined);
-				}}
-				data-menu={request.label}
-				data-menu-tree={tree}
-				{...request.attrs}
-			>
-				{rendered}
-				{/* Disabled items' reasons, as their descriptions: outside the items, so they are not part of their names. */}
-				<div hidden>
-					{entries.map((entry, index) =>
-						isMenuItem(entry) && entry.disabled && entry.reason ? (
-							<span key={index} id={`${reasonId}-r${index}`}>
-								{entry.reason}
-							</span>
-						) : null,
-					)}
-				</div>
-			</div>
-			{reason && <Reason menu={list} index={reason.index} text={reason.text} />}
-			{sub && subEntry && isMenuItem(subEntry) && subEntry.submenu && (
-				<MenuList
-					key={sub.index}
-					request={{ x: sub.box.right + 2, y: sub.box.top - 5, flipX: sub.box.left - 2, flipY: sub.box.bottom + 5, items: subEntry.submenu, label: subEntry.label, attrs: { "data-submenu": subEntry.id } }}
-					tree={tree}
-					finish={finish}
-					focusFirst={sub.focus}
-					onBack={() => closeSub(true)}
-					onEnter={() => clearTimeout(timer.current)}
-				/>
-			)}
+			<DropdownMenuIcon>{item.checked ? <MenuIcon glyph="check" /> : item.checked === undefined && item.icon ? <MenuIcon glyph={item.icon} /> : null}</DropdownMenuIcon>
+			<span className="min-w-0 shrink truncate">{item.label}</span>
+			{item.hint && <DropdownMenuHint>{item.hint}</DropdownMenuHint>}
 		</>
 	);
-}
-
-function MenuRow({ item, index, expanded, describedBy, onHover, onChoose, onFocus }: {
-	item: MenuItem;
-	index: number;
-	expanded: boolean | undefined;
-	describedBy: string | undefined;
-	onHover: (element: HTMLElement, item: MenuItem, index: number) => void;
-	onChoose: (item: MenuItem, index: number) => void;
-	onFocus: () => void;
-}) {
+	const data = { "data-menu-item": item.id, "data-menu-label": item.label };
+	if (item.submenu) {
+		return (
+			<DropdownMenuSub>
+				<DropdownMenuSubTrigger label={item.label} disabled={item.disabled} {...data}>
+					{content}
+				</DropdownMenuSubTrigger>
+				<DropdownMenuSubContent aria-label={item.label} data-submenu={item.id}>
+					<Entries entries={item.submenu} reasonIds={reasonId} onChoose={onChoose} />
+				</DropdownMenuSubContent>
+			</DropdownMenuSub>
+		);
+	}
+	const reason = item.disabled ? item.reason : undefined;
 	return (
-		<button
-			type="button"
-			role={item.checked === undefined ? "menuitem" : "menuitemradio"}
-			aria-checked={item.checked}
-			aria-disabled={item.disabled || undefined}
-			aria-haspopup={item.submenu ? "menu" : undefined}
-			aria-expanded={expanded}
-			aria-describedby={describedBy}
-			tabIndex={-1}
-			className={cx("dk-menu-item", item.danger && "dk-menu-danger")}
-			onPointerMove={(event) => onHover(event.currentTarget, item, index)}
-			onFocus={onFocus}
-			onClick={() => onChoose(item, index)}
-			data-menu-item={item.id}
-			data-menu-index={index}
-			data-menu-label={item.label}
+		<DropdownMenuItem
+			label={item.label}
+			disabled={item.disabled}
+			// Disabled wins over red: an older daemon's Remove reads as unavailable, not as a live destructive action.
+			variant={item.danger && !item.disabled ? "destructive" : "default"}
+			// A choice among several reads as one: `menuitemradio` with its state.
+			{...(item.checked !== undefined ? { role: "menuitemradio", "aria-checked": item.checked } : {})}
+			aria-describedby={reason ? reasonId : undefined}
+			onClick={() => onChoose(item)}
+			data-reason={reason}
+			{...data}
 		>
-			<span className="dk-menu-icon" aria-hidden="true">
-				{item.checked ? <MenuIcon glyph="check" /> : item.checked === undefined && item.icon ? <MenuIcon glyph={item.icon} /> : null}
-			</span>
-			<span className="min-w-0 shrink truncate">{item.label}</span>
-			{item.hint && <span className="dk-menu-hint">{item.hint}</span>}
-			<span className="min-w-3 flex-1" />
-			{item.shortcut && <kbd className="dk-menu-keys">{item.shortcut}</kbd>}
-			{item.submenu && (
-				<svg width="10" height="10" viewBox="0 0 10 10" className="dk-menu-chevron" aria-hidden="true">
-					<path d="M3.75 2.25 6.5 5 3.75 7.75" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-				</svg>
-			)}
-		</button>
-	);
-}
-
-/** A disabled item's reason, in a bubble beside the menu, level with the item. */
-function Reason({ menu, index, text }: { menu: RefObject<HTMLDivElement | null>; index: number; text: string }) {
-	const ref = useRef<HTMLDivElement>(null);
-	const [place, setPlace] = useState<{ left: number; top: number }>();
-	useLayoutEffect(() => {
-		const bubble = ref.current;
-		const item = menu.current?.querySelector(`[data-menu-index="${index}"]`);
-		if (!bubble || !item || !menu.current) return;
-		const sheet = menu.current.getBoundingClientRect();
-		const row = item.getBoundingClientRect();
-		const { width, height } = bubble.getBoundingClientRect();
-		const right = sheet.right + 6;
-		const left = right + width > window.innerWidth - EDGE ? Math.max(EDGE, sheet.left - 6 - width) : right;
-		setPlace({ left, top: Math.max(EDGE, Math.min(row.top + row.height / 2 - height / 2, window.innerHeight - height - EDGE)) });
-	}, [menu, index, text]);
-	return (
-		<div ref={ref} className="dk-tooltip" aria-hidden="true" style={place ? place : { left: 0, top: 0, visibility: "hidden" }} data-menu-reason="">
-			{text}
-		</div>
+			{content}
+			{item.shortcut && <DropdownMenuShortcut>{item.shortcut}</DropdownMenuShortcut>}
+		</DropdownMenuItem>
 	);
 }
 

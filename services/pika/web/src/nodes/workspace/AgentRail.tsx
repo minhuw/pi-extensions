@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type MutableRefObject, type ReactNode } from "react";
 import { cx } from "../../components/ui";
 import { copyText } from "../../lib/clipboard";
-import { isMenuKey, menuAtPointer, menuBelow, useMenu, type MenuEntry } from "../deck/Menu";
+import { isMenuKey, menuAtPointer, menuBelow, useMenu, type MenuAnchor, type MenuEntry } from "../deck/Menu";
 import { InlineRename } from "../deck/RailDialogs";
 import { tip } from "../deck/Tooltips";
 import { homePath, paneLabel, paneSession, type NodeView } from "../client";
@@ -210,7 +210,7 @@ export function AgentRail(props: AgentRailProps) {
 	const connected = (node: string) => ops?.connected(node) ?? false;
 
 	// An agent's context menu, from the shared one; it opens outside the rows, whose containment would trap it.
-	const onRowMenu = (key: string, at: { x: number; y: number; flipY?: number }) => {
+	const onRowMenu = (key: string, at: MenuAt) => {
 		const agent = props.agents.get(key);
 		if (!agent) return;
 		const label = paneLabel(agent.terminal);
@@ -260,7 +260,7 @@ export function AgentRail(props: AgentRailProps) {
 
 	const foldCard = (cardKey: string) => setPrefs({ folded: toggled(prefs.folded, cardKey) });
 	// A project card's menu ("Other" included), from a right click, its "⋯" button, or the keyboard.
-	const onCardMenu = (node: string, project: string, at: { x: number; y: number; flipY?: number; anchor?: Element }) => {
+	const onCardMenu = (node: string, project: string, at: MenuAt) => {
 		if (!ops) return;
 		const found = findProject(node, project);
 		const cardKey = `${node}\n${project}`;
@@ -289,7 +289,7 @@ export function AgentRail(props: AgentRailProps) {
 		rowMenu.open({ ...at, items, label: projectName(projectsOf(node), project), attrs: { "data-project-menu": cardKey } });
 	};
 
-	const onNodeMenu = (node: string, at: { x: number; y: number; flipY?: number; anchor?: Element }, foldable: boolean) => {
+	const onNodeMenu = (node: string, at: MenuAt, foldable: boolean) => {
 		if (!ops) return;
 		const view = props.nodes.find((item) => item.info.id === node);
 		const fingerprint = ops.fingerprint(node);
@@ -454,7 +454,7 @@ export function AgentRail(props: AgentRailProps) {
 	);
 }
 
-type MenuAt = { x: number; y: number; flipY?: number; anchor?: Element };
+type MenuAt = { anchor: MenuAnchor };
 
 type ViewProps = AgentRailProps & {
 	prefs: RailPrefs;

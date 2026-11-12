@@ -246,7 +246,9 @@ describe("moving between panes", () => {
 
 describe("the shortcuts overlay", () => {
 	it("lists every action, and shows and saves rebindings with their problems", () => {
-		const { container } = render(<KeysHelp onClose={() => {}} />);
+		// The dialog portals out of the render container, into the document.
+		render(<KeysHelp onClose={() => {}} />);
+		const container = document.body;
 		for (const spec of ACTIONS) expect(container.querySelector(`[data-key-action='${spec.id}']`), spec.id).not.toBeNull();
 		expect(container.querySelector("[data-keys-problems]")).toBeNull();
 

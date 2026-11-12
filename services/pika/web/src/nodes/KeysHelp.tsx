@@ -1,5 +1,7 @@
-import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
-import { BUTTON, Callout, cx } from "../components/ui";
+import { useRef, useState, useSyncExternalStore } from "react";
+import { Callout } from "../components/ui";
+import { Button } from "../components/ui-shadcn/button";
+import { Dialog, DialogClose, DialogContent, DialogTitle } from "../components/ui-shadcn/dialog";
 import { ACTIONS, BUILT_IN, formatChord, KEYS_EXAMPLE, KEYS_KEY, keymapFrom, keySettings, saveKeySettings, subscribeKeys, terminalSafe, type ActionSpec, type Keymap } from "./keys";
 
 const GROUPS: readonly ActionSpec["group"][] = ["General", "Agents", "Panes", "Tabs", "Terminal", "Files", "Diff"];
@@ -22,41 +24,20 @@ function where(spec: ActionSpec, keymap: Keymap, chordIndex: number): string | u
  * settings are plain JSON in `localStorage`, edited here in a text box.
  */
 export function KeysHelp({ onClose }: { onClose: () => void }) {
-	const titleId = useId();
 	const { text, keymap } = useKeySettings();
 	const [draft, setDraft] = useState<string | null>(null);
 	const closeRef = useRef<HTMLButtonElement>(null);
 	const editing = draft !== null;
 	const preview = editing ? keymapFrom(draft, keymap.mac) : keymap;
 
-	useEffect(() => {
-		closeRef.current?.focus();
-		const onKeyDown = (event: KeyboardEvent) => {
-			if (event.key !== "Escape") return;
-			event.preventDefault();
-			onClose();
-		};
-		window.addEventListener("keydown", onKeyDown);
-		return () => window.removeEventListener("keydown", onKeyDown);
-	}, [onClose]);
-
 	return (
-		<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-6 dark:bg-black/50" onClick={onClose}>
-			<div
-				role="dialog"
-				aria-modal="true"
-				aria-labelledby={titleId}
-				data-keys-help=""
-				onClick={(event) => event.stopPropagation()}
-				className="flex max-h-[min(720px,calc(100vh-48px))] w-full max-w-[640px] flex-col rounded-sm border border-dk-line-strong bg-page text-ink shadow-[0_16px_40px_rgba(0,0,0,0.22)]"
-			>
-				<div className="flex shrink-0 items-center gap-3 border-b border-line px-5 py-3">
-					<h2 id={titleId} className="text-[16px] font-semibold">
-						Keyboard shortcuts
-					</h2>
-					<button ref={closeRef} type="button" className={cx(BUTTON.quiet, "ml-auto h-7 px-2")} onClick={onClose}>
+		<Dialog open onOpenChange={(open) => !open && onClose()}>
+			<DialogContent initialFocus={closeRef} className="flex max-h-[min(720px,calc(100vh-48px))] max-w-[640px] flex-col p-0" data-keys-help="">
+				<div className="flex shrink-0 items-center gap-3 border-b border-dk-line px-5 py-3">
+					<DialogTitle>Keyboard shortcuts</DialogTitle>
+					<DialogClose ref={closeRef} render={<Button variant="ghost" className="ml-auto" />}>
 						Close
-					</button>
+					</DialogClose>
 				</div>
 				<div className="min-h-0 overflow-y-auto px-5 pt-2 pb-4 text-[13px]">
 					{preview.problems.length > 0 && (
@@ -145,9 +126,7 @@ export function KeysHelp({ onClose }: { onClose: () => void }) {
 									data-keys-editor=""
 								/>
 								<div className="mt-2 flex gap-2">
-									<button
-										type="button"
-										className={BUTTON.primary}
+									<Button
 										onClick={() => {
 											saveKeySettings(draft);
 											setDraft(null);
@@ -155,14 +134,14 @@ export function KeysHelp({ onClose }: { onClose: () => void }) {
 										data-keys-save=""
 									>
 										Save
-									</button>
-									<button type="button" className={BUTTON.secondary} onClick={() => setDraft(null)}>
+									</Button>
+									<Button variant="outline" onClick={() => setDraft(null)}>
 										Cancel
-									</button>
+									</Button>
 									{text !== null && (
-										<button
-											type="button"
-											className={cx(BUTTON.quiet, "ml-auto")}
+										<Button
+											variant="ghost"
+											className="ml-auto"
 											onClick={() => {
 												saveKeySettings(null);
 												setDraft(null);
@@ -170,18 +149,18 @@ export function KeysHelp({ onClose }: { onClose: () => void }) {
 											data-keys-reset=""
 										>
 											Back to the defaults
-										</button>
+										</Button>
 									)}
 								</div>
 							</>
 						) : (
-							<button type="button" className={cx(BUTTON.secondary, "mt-2")} onClick={() => setDraft(text ?? KEYS_EXAMPLE)} data-keys-edit="">
+							<Button variant="outline" className="mt-2" onClick={() => setDraft(text ?? KEYS_EXAMPLE)} data-keys-edit="">
 								{text === null ? "Rebind keys…" : "Edit your bindings…"}
-							</button>
+							</Button>
 						)}
 					</section>
 				</div>
-			</div>
-		</div>
+			</DialogContent>
+		</Dialog>
 	);
 }

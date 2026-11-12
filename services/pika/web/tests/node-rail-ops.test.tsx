@@ -117,7 +117,11 @@ function runCommand(container: HTMLElement, action: string) {
 
 const menuFor = (attribute: string, value: string) => [...document.querySelectorAll(`[${attribute}]`)].find((element) => element.getAttribute(attribute) === value)!;
 const items = (menu: Element) => [...menu.querySelectorAll("[data-menu-item]")].map((item) => item.getAttribute("data-menu-item"));
-const openMenu = (row: Element) => fireEvent.contextMenu(row, { clientX: 10, clientY: 10 });
+/** A right click: a press, then the context menu at the pointer. */
+const openMenu = (row: Element) => {
+	fireEvent.pointerDown(row, { button: 2 });
+	fireEvent.contextMenu(row, { clientX: 10, clientY: 10 });
+};
 
 describe("the rail's menus as data", () => {
 	const noop = () => {};
@@ -410,7 +414,7 @@ describe("the rail's operations", () => {
 		expect(items(document.querySelector("[data-node-menu]")!)).toEqual(["new-terminal", "add-project", "copy-fingerprint", "repair", "fold"]);
 	});
 
-	it("shows an older daemon's items disabled, with the reason beside the menu while highlighted", () => {
+	it("shows an older daemon's items disabled, with the reason beside the menu while highlighted", async () => {
 		const { container } = render(<Harness nodes={[node("mac", [pane("busy", { state: "busy" })])]} calls={calls} capabilities={[]} />);
 		openMenu(container.querySelector("[data-agent-row='busy']")!);
 		const menu = document.querySelector<HTMLElement>("[data-agent-menu]")!;
@@ -420,9 +424,12 @@ describe("the rail's operations", () => {
 		expect(rename.textContent).not.toContain("Update pika-node");
 		expect(document.getElementById(rename.getAttribute("aria-describedby")!)!.textContent).toBe("Update pika-node on mac to use this");
 		expect(document.querySelector("[data-menu-reason]")).toBeNull();
+		// Opened by the pointer, nothing is highlighted: the first ArrowDown takes Focus, the next the disabled Rename.
+		fireEvent.keyDown(menu, { key: "ArrowDown" });
+		expect(document.activeElement?.getAttribute("data-menu-item")).toBe("focus");
 		fireEvent.keyDown(menu, { key: "ArrowDown" });
 		expect(document.activeElement).toBe(rename);
-		expect(document.querySelector("[data-menu-reason]")!.textContent).toBe("Update pika-node on mac to use this");
+		await waitFor(() => expect(document.querySelector("[data-menu-reason]")!.textContent).toBe("Update pika-node on mac to use this"));
 		fireEvent.click(rename);
 		expect(calls.renameAgent).toBeUndefined();
 		expect(document.querySelector("[data-agent-menu]")).not.toBeNull();
@@ -432,7 +439,19 @@ describe("the rail's operations", () => {
 		expect(document.querySelector("[data-menu-reason]")).not.toBeNull();
 		fireEvent.keyDown(menu, { key: "ArrowDown" });
 		expect(document.activeElement?.getAttribute("data-menu-item")).toBe("split-right");
-		expect(document.querySelector("[data-menu-reason]")).toBeNull();
+		await waitFor(() => expect(document.querySelector("[data-menu-reason]")).toBeNull());
+
+		// A disabled destructive item (Remove from Deck) is drawn disabled, not red; an enabled one stays red.
+		fireEvent.keyDown(menu, { key: "Escape" });
+		projectsView();
+		openMenu(container.querySelector("[data-project-card='/home/me/repo'] [data-project-open]")!);
+		const card = menuFor("data-project-menu", "mac\n/home/me/repo")!;
+		const remove = card.querySelector("[data-menu-item='remove']")!;
+		expect(remove.getAttribute("aria-disabled")).toBe("true");
+		expect(remove.getAttribute("data-variant")).toBe("default");
+		fireEvent.keyDown(card, { key: "Escape" });
+		openMenu(container.querySelector("[data-agent-row='busy']")!);
+		expect(menuFor("data-agent-menu", "mac\nbusy")!.querySelector("[data-menu-item='kill']")!.getAttribute("data-variant")).toBe("destructive");
 	});
 
 });
@@ -495,10 +514,12 @@ describe("the undo notice", () => {
 		const toast = document.querySelector<HTMLElement>("[data-undo-notice]")!;
 		expect(toast.textContent).toContain("Removed repo from Deck");
 		act(() => vi.advanceTimersByTime(UNDO_MS - 1_000));
-		fireEvent.pointerEnter(toast);
+		// Base UI holds every toast's timer while the pointer is on their viewport.
+		const viewport = toast.closest<HTMLElement>("[data-slot='toast-viewport']")!;
+		fireEvent.mouseEnter(viewport);
 		act(() => vi.advanceTimersByTime(10_000));
 		expect(done).not.toHaveBeenCalled();
-		fireEvent.pointerLeave(toast);
+		fireEvent.mouseLeave(viewport);
 		act(() => vi.advanceTimersByTime(1_100));
 		expect(done).toHaveBeenCalledTimes(1);
 	});

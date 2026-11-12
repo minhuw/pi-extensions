@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { cx } from "../components/ui";
+import { Dialog, DialogContent } from "../components/ui-shadcn/dialog";
 import { NodeRequestError } from "./channel";
 import { homePath, paneCwd } from "./client";
 import { sanitize, type TerminalInfo } from "./contract";
@@ -76,8 +77,6 @@ export function QuickOpen({
 		// Listed once per opening: the pane's later status changes do not list again.
 	}, [files, home]);
 
-	useEffect(() => input.current?.focus(), []);
-
 	const paths = listing.status === "ready" ? listing.paths : undefined;
 	const results = useMemo(() => (paths ? rankPaths(query, paths, SHOWN) : []), [paths, query]);
 	const active = Math.min(selected, Math.max(0, results.length - 1));
@@ -95,17 +94,16 @@ export function QuickOpen({
 	const root = listing.status === "loading" ? undefined : listing.root;
 
 	return (
-		<div className="fixed inset-0 z-50 flex justify-center bg-black/30 px-6 pt-[12vh] dark:bg-black/50" onClick={onClose} data-quick-open="">
-			<div
-				role="dialog"
-				aria-modal="true"
+		<Dialog open onOpenChange={(open) => !open && onClose()}>
+			<DialogContent
 				aria-label="Open a file"
-				className="flex max-h-[70vh] w-full max-w-[640px] flex-col self-start rounded-sm border border-dk-line-strong bg-page text-ink shadow-[0_16px_40px_rgba(0,0,0,0.22)]"
-				onClick={(event) => event.stopPropagation()}
+				initialFocus={input}
+				className="top-[12vh] flex max-h-[70vh] max-w-[640px] translate-y-0 flex-col overflow-hidden p-0"
+				data-quick-open=""
 			>
 				<input
 					ref={input}
-					className="h-10 shrink-0 border-b border-line bg-page px-3 text-[14px] outline-none"
+					className="h-10 shrink-0 border-b border-line bg-transparent px-3 text-[14px] outline-none"
 					placeholder={root ? `Open a file in ${homePath(sanitize(root), home)}` : "Open a file"}
 					aria-label="File name"
 					role="combobox"
@@ -171,7 +169,7 @@ export function QuickOpen({
 						Only the first {listing.paths.length.toLocaleString("en")} files are searched.
 					</p>
 				)}
-			</div>
-		</div>
+			</DialogContent>
+		</Dialog>
 	);
 }

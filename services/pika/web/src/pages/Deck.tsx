@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useNavigate, useParams } from "react-router";
 import { Icon } from "../components/icons";
 import { ModelMark } from "../components/ModelName";
-import { BUTTON, Callout, ConfirmDialog, cx } from "../components/ui";
+import { BUTTON, Callout, cx } from "../components/ui";
+import { PortalContainer } from "../components/ui-shadcn/portal";
 import { useApi } from "../lib/api";
 import { withBase } from "../lib/base";
 import { copyText } from "../lib/clipboard";
@@ -28,7 +29,7 @@ import { Splitter } from "../nodes/Splitter";
 import { BAR_BUTTON, DeckAppBar, DeckStatusBar } from "../nodes/deck/Chrome";
 import { menuBelow, useMenu, type MenuEntry } from "../nodes/deck/Menu";
 import { DECK_ROOT } from "../nodes/deck/tokens";
-import { AddProjectDialog, NewWorktreeDialog, UndoToast, type UndoNotice } from "../nodes/deck/RailDialogs";
+import { AddProjectDialog, ConfirmDialog, NewWorktreeDialog, UndoToast, type UndoNotice } from "../nodes/deck/RailDialogs";
 import { DeckTooltips, tip } from "../nodes/deck/Tooltips";
 import { AgentRail, InboxBadge, railAgents, useInbox, type RailOps } from "../nodes/workspace/AgentRail";
 import { flatLayout, inboxBadge, inboxKey, nextNeeding, splitKey, stepKey } from "../nodes/workspace/inbox";
@@ -134,16 +135,19 @@ function DeckEmpty({ title, children }: { title: string; children?: ReactNode })
 
 /**
  * Deck's window: the app bar, the body, and the status bar, filling the viewport without a page scroll. The root
- * carries the Deck tokens, and its tooltips listen on it.
+ * carries the Deck tokens, its tooltips listen on it, and the primitives' popups (menus, dialogs, toasts) portal into
+ * it so they take the tokens too.
  */
 function DeckFrame({ bar, status, children }: { bar: ReactNode; status?: ReactNode; children: ReactNode }) {
 	const [root, setRoot] = useState<HTMLDivElement | null>(null);
 	return (
 		<div ref={setRoot} className="flex h-full min-h-0 flex-col overflow-hidden" data-nodes-page="" {...DECK_ROOT}>
-			{bar}
-			<div className="relative flex min-h-0 flex-1 flex-col">{children}</div>
-			{status}
-			<DeckTooltips root={root} />
+			<PortalContainer.Provider value={root}>
+				{bar}
+				<div className="relative flex min-h-0 flex-1 flex-col">{children}</div>
+				{status}
+				<DeckTooltips root={root} />
+			</PortalContainer.Provider>
 		</div>
 	);
 }

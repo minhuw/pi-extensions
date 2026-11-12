@@ -114,7 +114,7 @@ export function WorkspaceView(props: WorkspaceViewProps) {
 	const start = useRef<{ x: number; y: number } | null>(null);
 	const tabMenu = useMenu();
 	const openMenu = (at: Menu) => {
-		if (ws.tabs[at.tabId]) tabMenu.open({ x: at.x, y: at.y, items: tabMenuItems(ws, at.tabId, actions), label: "Tab", attrs: { "data-tab-menu": at.tabId } });
+		if (ws.tabs[at.tabId]) tabMenu.open({ anchor: { x: at.x, y: at.y }, items: tabMenuItems(ws, at.tabId, actions), label: "Tab", attrs: { "data-tab-menu": at.tabId } });
 	};
 	const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 

@@ -9,7 +9,7 @@ import type { DiffControl } from "./CodeEditor";
 import { sanitize, type Project } from "./contract";
 import { type DiffTab, type EditorStore, type EditorTab, type FileTab } from "./editor";
 import { baseName, dirName, joinPath, READ_LIMIT_LABEL, type NodeFiles } from "./files";
-import { isMenuKey, menuAtPointer, menuBelow, useMenu, type MenuEntry } from "./deck/Menu";
+import { isMenuKey, menuAtPointer, menuBelow, useMenu, type MenuAnchor, type MenuEntry } from "./deck/Menu";
 import { tip } from "./deck/Tooltips";
 import { FileTree, visibleEntries, type TreeSnapshot } from "./tree";
 
@@ -83,7 +83,7 @@ export function Explorer(props: ExplorerProps) {
 	const entryMenu = useMenu();
 	const rootMenu = useMenu();
 	/** A tree item's context menu: open (or fold), copy its path absolute or under the folder, refresh a folder. */
-	const onEntryMenu = (path: string, kind: string, folder: boolean, at: { x: number; y: number; flipY?: number }) => {
+	const onEntryMenu = (path: string, kind: string, folder: boolean, at: { anchor: MenuAnchor }) => {
 		const relative = path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
 		const items: MenuEntry[] = [
 			folder
@@ -262,7 +262,7 @@ function TreeLevel({
 	hidden: boolean;
 	activePath?: string;
 	onOpen: (path: string, kind: string, how: OpenHow) => void;
-	onMenu: (path: string, kind: string, folder: boolean, at: { x: number; y: number; flipY?: number }) => void;
+	onMenu: (path: string, kind: string, folder: boolean, at: { anchor: MenuAnchor }) => void;
 }) {
 	const listing = view.dirs.get(dir);
 	const indent = { paddingLeft: 8 + depth * 14 };

@@ -41,6 +41,8 @@
 	--dk-needs-ink: #8f4b00;
 	--dk-failed: #c4321f;
 	--dk-failed-ink: #b02a19;
+	/* Text on a failed-tone fill (a destructive button). */
+	--dk-on-failed: #ffffff;
 	--dk-done: #1d8a4a;
 	--dk-done-ink: #16703b;
 	--dk-working: #2b71b8;
@@ -109,6 +111,7 @@
 	--dk-needs-ink: #f2a33a;
 	--dk-failed: #ff7a6b;
 	--dk-failed-ink: #ff7a6b;
+	--dk-on-failed: #111417;
 	--dk-done: #4fc47f;
 	--dk-done-ink: #4fc47f;
 	--dk-working: #6cb0ea;
@@ -136,10 +139,18 @@
 	--color-dk-needs-ink: var(--dk-needs-ink);
 	--color-dk-failed: var(--dk-failed);
 	--color-dk-failed-ink: var(--dk-failed-ink);
+	--color-dk-on-failed: var(--dk-on-failed);
 	--color-dk-done: var(--dk-done);
 	--color-dk-done-ink: var(--dk-done-ink);
 	--color-dk-working: var(--dk-working);
 	--color-dk-working-ink: var(--dk-working-ink);
+	/* The floating layer (`components/ui-shadcn`): menus, tooltips, dialogs, toasts. */
+	--color-dk-raised: var(--dk-raised);
+	--color-dk-menu-line: var(--dk-menu-line);
+	--color-dk-menu-hi: var(--dk-menu-hi);
+	--color-dk-tip: var(--dk-tip);
+	--color-dk-tip-ink: var(--dk-tip-ink);
+	--shadow-dk: var(--dk-shadow);
 }
 
 @layer base {
@@ -199,151 +210,9 @@
 }
 
 /*
- * Menus (`Menu.tsx`): a raised sheet with a hairline and a soft shadow; 26 px rows with a 16 px icon column, the
- * label in full ink, hints and shortcuts muted; the highlighted row, by pointer or keyboard, takes the accent tint.
+ * Menus, tooltips, dialogs, and toasts are shadcn/ui components on Base UI (`components/ui-shadcn`), styled with the
+ * utilities above (`bg-dk-raised`, `border-dk-menu-line`, `bg-dk-menu-hi`, `shadow-dk`, ...) in their own files.
  */
-.dk-menu {
-	border: 1px solid var(--dk-menu-line);
-	border-radius: 6px;
-	background: var(--dk-raised);
-	color: var(--dk-ink);
-	box-shadow: var(--dk-shadow);
-	font-size: 13px;
-	line-height: 16px;
-	outline: none;
-}
-
-.dk-menu-item {
-	display: flex;
-	height: 26px;
-	width: 100%;
-	align-items: center;
-	gap: 8px;
-	border-radius: 4px;
-	padding: 0 8px 0 6px;
-	color: var(--dk-ink);
-	text-align: left;
-	white-space: nowrap;
-	outline: none;
-}
-
-.dk-menu-icon {
-	display: flex;
-	width: 16px;
-	flex-shrink: 0;
-	justify-content: center;
-	color: var(--dk-ink-2);
-}
-
-.dk-menu-item:focus,
-.dk-menu-item[aria-expanded="true"] {
-	background: var(--dk-menu-hi);
-}
-
-.dk-menu-item:focus .dk-menu-icon,
-.dk-menu-item[aria-expanded="true"] .dk-menu-icon {
-	color: var(--dk-ink);
-}
-
-.dk-menu-danger,
-.dk-menu-danger .dk-menu-icon,
-.dk-menu-danger:focus .dk-menu-icon {
-	color: var(--dk-failed-ink);
-}
-
-/* Disabled: 40% ink, highlighted only as a hover is, so it reads as "not this" while its reason shows. */
-.dk-menu-item[aria-disabled="true"],
-.dk-menu-item[aria-disabled="true"] .dk-menu-icon {
-	color: color-mix(in srgb, var(--dk-ink) 40%, transparent);
-}
-
-.dk-menu-item[aria-disabled="true"]:focus {
-	background: var(--dk-hover);
-}
-
-.dk-menu-hint {
-	min-width: 0;
-	flex-shrink: 1000;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	color: var(--dk-ink-3);
-	font-size: 12px;
-}
-
-.dk-menu-keys,
-.dk-menu-chevron {
-	flex-shrink: 0;
-	color: var(--dk-ink-3);
-}
-
-.dk-menu-keys {
-	font: inherit;
-	font-size: 12px;
-	font-variant-numeric: tabular-nums;
-	letter-spacing: 0.04em;
-}
-
-.dk-menu-item:focus :is(.dk-menu-keys, .dk-menu-chevron, .dk-menu-hint),
-.dk-menu-item[aria-expanded="true"] .dk-menu-chevron {
-	color: var(--dk-ink-2);
-}
-
-.dk-menu-separator {
-	height: 1px;
-	margin: 4px 6px;
-	background: var(--dk-line);
-}
-
-/* A group's name, lined up with the labels; and a note where there is nothing to choose. */
-.dk-menu-header {
-	padding: 6px 8px 3px 30px;
-	color: var(--dk-ink-3);
-	font-size: 11.5px;
-	font-weight: 600;
-	line-height: 14px;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-
-.dk-menu-header:first-child {
-	padding-top: 4px;
-}
-
-.dk-menu-note {
-	max-width: 300px;
-	padding: 5px 8px 5px 30px;
-	color: var(--dk-ink-2);
-	font-size: 12px;
-	line-height: 16px;
-	white-space: normal;
-}
-
-/* Tooltips (`Tooltips.tsx`): a small inverse bubble with the shortcut beside the name. */
-.dk-tooltip {
-	position: fixed;
-	z-index: 60;
-	display: flex;
-	max-width: 320px;
-	align-items: baseline;
-	gap: 8px;
-	border-radius: 4px;
-	padding: 4px 7px;
-	background: var(--dk-tip);
-	color: var(--dk-tip-ink);
-	font-size: 12px;
-	line-height: 16px;
-	box-shadow: 0 4px 12px -2px rgb(0 0 0 / 0.25);
-	pointer-events: none;
-	overflow-wrap: anywhere;
-}
-
-.dk-tooltip-keys {
-	font: inherit;
-	opacity: 0.7;
-	letter-spacing: 0.04em;
-	white-space: nowrap;
-}
 
 /*
  * The shared buttons (`BUTTON` in components/ui.tsx), re-toned as Deck's controls: 28 px, a 4 px radius; the primary
@@ -388,15 +257,4 @@
 .dk-row {
 	content-visibility: auto;
 	contain-intrinsic-size: auto 40px;
-}
-
-/*
- * Dialogs inside Deck (the shared `Dialog`, shortcuts, quick open) are sheets like the menus: a soft frame, a 8 px
- * radius, the raised ground and its shadow. Unlayered, so it wins over the dashboard's utility classes.
- */
-[data-deck] [role="dialog"] {
-	border-color: var(--dk-line-strong);
-	border-radius: 8px;
-	background: var(--dk-raised);
-	box-shadow: var(--dk-shadow);
 }
