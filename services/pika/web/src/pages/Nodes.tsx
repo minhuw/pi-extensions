@@ -10,12 +10,15 @@ import { shortUserAgent } from "../lib/devices";
 import { bareModelOf } from "../lib/model";
 import { useHealth } from "../lib/relay";
 import { useTheme } from "../lib/theme";
+import { countedTitle, paneCounts, PaneAlerts } from "../nodes/alerts";
 import { homePath, liveBridge, NodesClient, orderTerminals, paneLabel, paneSession, type NodesSnapshot, type NodeView } from "../nodes/client";
 import { displayFingerprint, type Project, type TerminalInfo } from "../nodes/contract";
 import { EditorStore, paneRequest } from "../nodes/editor";
 import { FilePanel } from "../nodes/FilePanel";
 import { IndexedDbKeyStore } from "../nodes/identity";
+import { isQuickOpenKey } from "../nodes/keys";
 import { clampWidth, LAYOUT_BOUNDS, loadLayout, saveLayout, type NodesLayout } from "../nodes/layout";
+import { QuickOpen } from "../nodes/QuickOpen";
 import { nodeSocketUrl } from "../nodes/socket";
 import { Splitter } from "../nodes/Splitter";
 import { TerminalView } from "../nodes/TerminalView";
@@ -102,6 +105,79 @@ function useEditors(client: NodesClient | null, snapshot: NodesSnapshot): (node:
 	return editorFor;
 }
 
+/** Opens a file in a node's editor tab, at a line when given, and shows the file panel. */
+type OpenFile = (node: string, path: string, at?: { line: number; column?: number }) => void;
+
+type Permission = NotificationPermission | "unsupported";
+
+/** The page's notification permission; asked for only from `request`, which a click calls. */
+function useNotificationPermission(): [Permission, () => void] {
+	const supported = typeof Notification !== "undefined";
+	const [permission, setPermission] = useState<Permission>(supported ? Notification.permission : "unsupported");
+	const request = useCallback(() => {
+		if (supported) void Notification.requestPermission().then(setPermission);
+	}, [supported]);
+	return [permission, request];
+}
+
+/**
+ * Browser notifications for panes that start waiting or finish while the page is hidden or shows another pane; a
+ * click brings the page forward on that pane. The tab's title counts waiting and finished panes on every node.
+ */
+function usePaneAlerts(snapshot: NodesSnapshot, nodeId: string | undefined, terminalId: string | undefined) {
+	const navigate = useNavigate();
+	const alerts = useRef(new PaneAlerts());
+	const shown = useRef(new Map<string, Notification>());
+	const baseTitle = useRef(document.title);
+
+	useEffect(() => {
+		const visible = document.visibilityState === "visible";
+		const fired = alerts.current.update(snapshot.nodes, { node: nodeId, terminalId, visible });
+		const onScreen = nodeId && terminalId ? `${nodeId}\n${terminalId}` : undefined;
+		// Looking at the pane answers its notification.
+		if (visible && onScreen) {
+			shown.current.get(onScreen)?.close();
+			shown.current.delete(onScreen);
+		}
+		if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+		for (const alert of fired) {
+			const key = `${alert.node}\n${alert.terminalId}`;
+			let notification: Notification;
+			try {
+				notification = new Notification(alert.title, { body: alert.body, tag: `pika-node:${key}` });
+			} catch (error) {
+				// Android's Chrome allows notifications only from a service worker.
+				console.warn("pika: a notification could not be shown", error);
+				return;
+			}
+			shown.current.get(key)?.close();
+			shown.current.set(key, notification);
+			notification.onclick = () => {
+				window.focus();
+				navigate(`/nodes/${encodeURIComponent(alert.node)}/${encodeURIComponent(alert.terminalId)}`);
+				notification.close();
+			};
+			notification.onclose = () => {
+				if (shown.current.get(key) === notification) shown.current.delete(key);
+			};
+		}
+	}, [snapshot, nodeId, terminalId, navigate]);
+
+	useEffect(() => {
+		document.title = countedTitle(baseTitle.current, paneCounts(snapshot.nodes));
+	}, [snapshot]);
+
+	useEffect(() => {
+		const notifications = shown.current;
+		const base = baseTitle.current;
+		return () => {
+			document.title = base;
+			for (const notification of notifications.values()) notification.close();
+			notifications.clear();
+		};
+	}, []);
+}
+
 function NodesWorkspace() {
 	const client = useNodesClient();
 	const snapshot = useSnapshot(client);
@@ -113,6 +189,19 @@ function NodesWorkspace() {
 	const editorFor = useEditors(client, snapshot);
 	const location = useRef(nodeId);
 	location.current = nodeId;
+	const [quickOpen, setQuickOpen] = useState(false);
+	const [permission, requestPermission] = useNotificationPermission();
+	usePaneAlerts(snapshot, nodeId, terminalId);
+
+	const openFile = useCallback<OpenFile>(
+		(node, path, at) => {
+			const store = editorFor(node);
+			store.setFiles(client?.files(node));
+			void store.open(path, at);
+			setLayout({ filesOpen: true });
+		},
+		[client, editorFor, setLayout],
+	);
 
 	// The bridge's /pika-open and /pika-diff: shown in the node's editor, on screen. A tab in the background ignores
 	// them (NODE.md, "Requests from the bridge"), so only the windows in view open the file.
@@ -151,11 +240,30 @@ function NodesWorkspace() {
 
 	const ready = client && selected && selected.link.kind === "ready" ? selected : undefined;
 	const filesShown = Boolean(ready && layout.filesOpen);
+	const readyFiles = ready && client?.files(ready.info.id);
+	const selectedTerminal = ready?.terminals.find((item) => item.terminalId === terminalId);
 
 	return (
 		// Narrow windows shrink the side panes to their least widths first, then scroll.
-		<div className="flex h-full min-h-0 overflow-x-auto" data-nodes-page="">
-			<NodeRail snapshot={snapshot} nodeId={nodeId} terminalId={terminalId} width={layout.rail} />
+		<div
+			className="flex h-full min-h-0 overflow-x-auto"
+			data-nodes-page=""
+			// Captured before the terminal or Monaco sees it, and only while focus is inside the page's panes.
+			onKeyDownCapture={(event) => {
+				if (!isQuickOpenKey(event.nativeEvent)) return;
+				event.preventDefault();
+				event.stopPropagation();
+				if (readyFiles) setQuickOpen(true);
+			}}
+		>
+			<NodeRail
+				snapshot={snapshot}
+				nodeId={nodeId}
+				terminalId={terminalId}
+				width={layout.rail}
+				permission={permission}
+				onNotify={requestPermission}
+			/>
 			<Splitter
 				name="rail"
 				label="Resize the agent list"
@@ -174,6 +282,7 @@ function NodesWorkspace() {
 						terminalId={terminalId}
 						fingerprint={snapshot.fingerprint}
 						onShowFiles={ready && !layout.filesOpen ? () => setLayout({ filesOpen: true }) : undefined}
+						onOpenFile={openFile}
 					/>
 				) : (
 					<EmptyState title={snapshot.nodes.length ? "Pick a node" : snapshot.status === "open" ? "No nodes yet" : "Connecting…"}>
@@ -211,6 +320,19 @@ function NodesWorkspace() {
 						/>
 					</div>
 				</>
+			)}
+			{quickOpen && ready && readyFiles && (
+				<QuickOpen
+					key={ready.info.id}
+					files={readyFiles}
+					terminal={selectedTerminal}
+					home={ready.link.kind === "ready" ? ready.link.welcome.home : "/"}
+					onClose={() => setQuickOpen(false)}
+					onPick={(path) => {
+						setQuickOpen(false);
+						openFile(ready.info.id, path);
+					}}
+				/>
 			)}
 		</div>
 	);
@@ -319,7 +441,21 @@ function linkLabel(view: NodeView): ReactNode {
 	return null;
 }
 
-function NodeRail({ snapshot, nodeId, terminalId, width }: { snapshot: NodesSnapshot; nodeId?: string; terminalId?: string; width: number }) {
+function NodeRail({
+	snapshot,
+	nodeId,
+	terminalId,
+	width,
+	permission,
+	onNotify,
+}: {
+	snapshot: NodesSnapshot;
+	nodeId?: string;
+	terminalId?: string;
+	width: number;
+	permission: Permission;
+	onNotify: () => void;
+}) {
 	return (
 		<aside className="flex min-w-[200px] flex-col bg-sidebar" style={{ flex: `0 1 ${width}px` }} aria-label="Nodes" data-agent-list="">
 			<div className="flex h-10 shrink-0 items-center gap-2 px-4">
@@ -378,6 +514,13 @@ function NodeRail({ snapshot, nodeId, terminalId, width }: { snapshot: NodesSnap
 					);
 				})}
 			</ul>
+			{permission === "default" && snapshot.nodes.length > 0 && (
+				<div className="shrink-0 border-t border-line px-4 py-2">
+					<button type="button" className={cx(BUTTON.quiet, "-mx-2 h-7 px-2")} onClick={onNotify} data-notify-enable="">
+						Notify me when a pane waits or finishes
+					</button>
+				</div>
+			)}
 			{snapshot.fingerprint && (
 				<div className="shrink-0 border-t border-line px-4 py-2.5" data-client-fingerprint={snapshot.fingerprint}>
 					<div className="text-[11.5px] text-muted">This browser's key</div>
@@ -432,6 +575,7 @@ function NodeMain({
 	terminalId,
 	fingerprint,
 	onShowFiles,
+	onOpenFile,
 }: {
 	client: NodesClient;
 	view: NodeView;
@@ -439,6 +583,7 @@ function NodeMain({
 	fingerprint?: string;
 	/** Shows the file panel, when it is hidden. */
 	onShowFiles?: () => void;
+	onOpenFile: OpenFile;
 }) {
 	const { theme } = useTheme();
 	const navigate = useNavigate();
@@ -579,7 +724,9 @@ function NodeMain({
 					channel={channel}
 					terminal={terminal}
 					theme={theme}
+					home={link.welcome.home}
 					onKill={() => setKilling(terminal)}
+					onOpenFile={(path, at) => onOpenFile(view.info.id, path, at)}
 				/>
 			) : (
 				<EmptyState title={view.terminals.length ? "Pick a terminal" : `No terminals on ${name}`}>

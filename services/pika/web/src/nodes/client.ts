@@ -430,6 +430,22 @@ export interface PaneSessionView {
 	disconnected: boolean;
 }
 
+/**
+ * Where the pane is now, for paths relative to it: pi's session cwd while its bridge is connected, else the shell's
+ * directory from `term.cwd` (a `cd` changes it), else, from a daemon without `term.cwd`, where the terminal started.
+ */
+export async function paneCwd(request: NodeChannel["request"], terminal: TerminalInfo): Promise<string> {
+	const started = paneSession(terminal).cwd;
+	if (terminal.status?.bridgeConnected && terminal.status.bridge?.session) return started;
+	if (terminal.exited) return started;
+	try {
+		const { cwd } = await request("term.cwd", { terminalId: terminal.terminalId });
+		return cwd.startsWith("/") ? cwd : started;
+	} catch {
+		return started;
+	}
+}
+
 /** What a pane's header shows of its pi session, cleaned for display; the terminal's cwd without a bridge. */
 export function paneSession(terminal: TerminalInfo): PaneSessionView {
 	const status = terminal.status;

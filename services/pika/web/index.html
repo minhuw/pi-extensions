@@ -7,8 +7,9 @@
 		<title>pika</title>
 		<!--
 			No inline script: with nodes on, the server's Content-Security-Policy allows only same-origin script files, and
-			`base-uri 'none'` forbids a base element. Relative URLs requested from nested routes resolve through the server's
-			suffix fallback (src/http/ui.rs), and the app reads its base path from the injected `pika-base` meta.
+			`base-uri 'none'` forbids a base element. The server rewrites these relative src and href URLs to absolute ones under
+			its base path (src/http/ui.rs), so nested routes load the same files, and the app reads its base path from the
+			injected `pika-base` meta.
 		-->
 		<script vite-ignore src="./boot.js"></script>
 	</head>

@@ -125,6 +125,13 @@ export class FakeFs {
 			case "fs.unwatch":
 				if (!this.watches.delete(message.watch)) return this.#error(id, "not_found");
 				return this.#reply(id, {});
+			case "fs.list": {
+				if (!this.dirs.has(message.root)) return this.#error(id, this.files.has(message.root) ? "not_a_directory" : "not_found");
+				const prefix = message.root === "/" ? "/" : `${message.root}/`;
+				const paths = [...this.files.keys()].filter((path) => path.startsWith(prefix)).map((path) => path.slice(prefix.length)).sort();
+				const limit = message.limit ?? 20_000;
+				return this.#reply(id, { paths: paths.slice(0, limit), truncated: paths.length > limit, source: "walk" });
+			}
 			case "fs.gitShow": {
 				const content = (message.ref === "HEAD" ? this.head : this.index).get(message.path);
 				if (content === undefined) return this.#error(id, "not_found");
