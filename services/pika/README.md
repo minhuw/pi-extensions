@@ -252,9 +252,9 @@ Agents read under `api/agent/v1/`: the session list, sessions, their trees, turn
 
 ### Nodes
 
-Nodes let you use terminals, files, and pi pane status on your machines from the UI. Each machine runs a `pika-node` daemon (see [`services/pika-node`](../pika-node/)), which owns the terminals; pika only authenticates the daemons and your browser, tracks which nodes are online, and forwards traffic between them. The browser and the daemon encrypt it end to end, so pika cannot read or type into a terminal. The protocol, and what a compromised server could still do, are in [`docs/NODE.md`](docs/NODE.md).
+Nodes let you use terminals, files, and pi pane status on your machines from the UI's **Deck** (`/deck`), which fills the browser window like a desktop app. Each machine runs a `pika-node` daemon (see [`services/pika-node`](../pika-node/)), which owns the terminals; pika only authenticates the daemons and your browser, tracks which nodes are online, and forwards traffic between them. The browser and the daemon encrypt it end to end, so pika cannot read or type into a terminal. The protocol, and what a compromised server could still do, are in [`docs/NODE.md`](docs/NODE.md).
 
-- **Off by default:** start the server with `PIKA_NODES=on`. Health then lists `"nodes"`, and every UI response carries a strict `Content-Security-Policy`.
+- **Off by default:** start the server with `PIKA_NODES=on`. Health then lists `"nodes"`, the band shows the Deck tab, and every UI response carries a strict `Content-Security-Policy`.
 - **Credentials:** `pika node create <name>` prints a node credential (`pkn_…`) for the daemon. It is not a device token: node routes accept only node credentials, and ingest, relay, agent, and pairing routes refuse them. `pika node revoke` cuts a node off.
 - **The browser:** its node socket needs your login session and an `Origin` equal to pika's own. Behind a TLS proxy, run with `PIKA_TRUST_PROXY=1` or set `PIKA_PUBLIC_URL`, so that pika knows its HTTPS origin. Signing out closes the socket.
 - **Limits:** 32 online nodes, 64 open channels per node, 16 per browser tab, 30 channel opens a minute per tab, and 4 tabs per login session.

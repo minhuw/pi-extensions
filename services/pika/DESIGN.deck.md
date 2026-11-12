@@ -1,113 +1,145 @@
 ---
-name: Workbench
-description: The Nodes page's own design system (the Workbench) for /nodes/*; applies to web/src/pages/Nodes.tsx and web/src/nodes/**, scoped under the [data-workbench] root. Excludes /docs/* (DESIGN.md) and the rest of the pika dashboard.
+name: Deck
+description: Deck's own design system, for /deck/* (terminals, files and agents on the owner's nodes); applies to web/src/pages/Deck.tsx and web/src/nodes/**, scoped under the [data-deck] root. Excludes /docs/* (DESIGN.md) and the rest of the pika dashboard.
 colors:
-  wb-ground: "#fcfcfd"
-  wb-chrome: "#f1f3f5"
-  wb-line: "#dde1e6"
-  wb-line-strong: "#c3c9d0"
-  wb-code: "#eceff2"
-  wb-ink: "#161a1f"
-  wb-ink-2: "#4f5863"
-  wb-ink-3: "#626a74"
-  wb-accent: "#5a46c8"
-  wb-on-accent: "#ffffff"
-  wb-needs: "#b25e00"
-  wb-needs-ink: "#8f4b00"
-  wb-failed: "#c4321f"
-  wb-failed-ink: "#b02a19"
-  wb-done: "#1d8a4a"
-  wb-done-ink: "#16703b"
-  wb-working: "#2b71b8"
-  wb-working-ink: "#22609e"
-  wb-dark-ground: "#111417"
-  wb-dark-chrome: "#171a1e"
-  wb-dark-line: "#262b31"
-  wb-dark-line-strong: "#383f47"
-  wb-dark-code: "#1d2126"
-  wb-dark-ink: "#e4e7eb"
-  wb-dark-ink-2: "#a6aeb8"
-  wb-dark-ink-3: "#8a929c"
-  wb-dark-accent: "#a596ff"
-  wb-dark-on-accent: "#111417"
-  wb-dark-needs: "#f2a33a"
-  wb-dark-failed: "#ff7a6b"
-  wb-dark-done: "#4fc47f"
-  wb-dark-working: "#6cb0ea"
+  dk-ground: "#fcfcfd"
+  dk-chrome: "#f1f3f5"
+  dk-line: "#dde1e6"
+  dk-line-strong: "#c3c9d0"
+  dk-code: "#eceff2"
+  dk-raised: "#ffffff"
+  dk-tip: "#23282e"
+  dk-tip-ink: "#f1f3f5"
+  dk-ink: "#161a1f"
+  dk-ink-2: "#4f5863"
+  dk-ink-3: "#626a74"
+  dk-accent: "#5a46c8"
+  dk-on-accent: "#ffffff"
+  dk-needs: "#b25e00"
+  dk-needs-ink: "#8f4b00"
+  dk-failed: "#c4321f"
+  dk-failed-ink: "#b02a19"
+  dk-done: "#1d8a4a"
+  dk-done-ink: "#16703b"
+  dk-working: "#2b71b8"
+  dk-working-ink: "#22609e"
+  dk-dark-ground: "#111417"
+  dk-dark-chrome: "#171a1e"
+  dk-dark-line: "#262b31"
+  dk-dark-line-strong: "#383f47"
+  dk-dark-code: "#1d2126"
+  dk-dark-raised: "#1f2328"
+  dk-dark-tip: "#e4e7eb"
+  dk-dark-tip-ink: "#111417"
+  dk-dark-ink: "#e4e7eb"
+  dk-dark-ink-2: "#a6aeb8"
+  dk-dark-ink-3: "#8a929c"
+  dk-dark-accent: "#a596ff"
+  dk-dark-on-accent: "#111417"
+  dk-dark-needs: "#f2a33a"
+  dk-dark-failed: "#ff7a6b"
+  dk-dark-done: "#4fc47f"
+  dk-dark-working: "#6cb0ea"
 typography:
-  wb-ui:
+  dk-ui:
     fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
     fontSize: "13px"
     fontWeight: 400
     lineHeight: 1.45
-  wb-row-title:
-    fontFamily: "{typography.wb-ui.fontFamily}"
+  dk-row-title:
+    fontFamily: "{typography.dk-ui.fontFamily}"
     fontSize: "13px"
     fontWeight: 500
     lineHeight: 1.45
-  wb-section-label:
-    fontFamily: "{typography.wb-ui.fontFamily}"
+  dk-section-label:
+    fontFamily: "{typography.dk-ui.fontFamily}"
     fontSize: "12px"
     fontWeight: 600
     lineHeight: 1.45
-  wb-meta:
-    fontFamily: "{typography.wb-ui.fontFamily}"
+  dk-meta:
+    fontFamily: "{typography.dk-ui.fontFamily}"
     fontSize: "11.5px"
     fontWeight: 400
     lineHeight: 1.45
-  wb-mono:
+  dk-mono:
     fontFamily: 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace'
     fontSize: "13px"
     fontWeight: 400
     lineHeight: 1.2
 rounded:
-  wb-small: "2px"
-  wb-control: "3px"
+  dk-small: "2px"
+  dk-control: "3px"
+  dk-bar-control: "4px"
+  dk-menu: "6px"
+  dk-dialog: "8px"
 spacing:
-  wb-1: "4px"
-  wb-2: "8px"
-  wb-3: "12px"
-  wb-row-y: "5px"
-  wb-child-indent: "18px"
+  dk-1: "4px"
+  dk-2: "8px"
+  dk-3: "12px"
+  dk-row-y: "5px"
+  dk-child-indent: "18px"
 components:
-  wb-rail-row:
-    textColor: "{colors.wb-ink}"
-    typography: "{typography.wb-row-title}"
+  dk-rail-row:
+    textColor: "{colors.dk-ink}"
+    typography: "{typography.dk-row-title}"
     padding: "5px 12px"
-  wb-section-header:
-    textColor: "{colors.wb-ink-2}"
-    typography: "{typography.wb-section-label}"
+  dk-section-header:
+    textColor: "{colors.dk-ink-2}"
+    typography: "{typography.dk-section-label}"
     height: "28px"
-  wb-row-action:
-    backgroundColor: "{colors.wb-chrome}"
-    textColor: "{colors.wb-ink-2}"
-    rounded: "{rounded.wb-control}"
+  dk-row-action:
+    backgroundColor: "{colors.dk-chrome}"
+    textColor: "{colors.dk-ink-2}"
+    rounded: "{rounded.dk-control}"
     size: "22px"
-  wb-view-toggle:
-    textColor: "{colors.wb-ink-2}"
-    rounded: "{rounded.wb-control}"
+  dk-view-toggle:
+    textColor: "{colors.dk-ink-2}"
+    rounded: "{rounded.dk-control}"
     height: "24px"
-  wb-tab-active:
-    backgroundColor: "{colors.wb-ground}"
-    textColor: "{colors.wb-ink}"
+  dk-tab-active:
+    backgroundColor: "{colors.dk-ground}"
+    textColor: "{colors.dk-ink}"
+  dk-app-bar:
+    backgroundColor: "{colors.dk-chrome}"
+    height: "40px"
+  dk-status-bar:
+    backgroundColor: "{colors.dk-chrome}"
+    textColor: "{colors.dk-ink-2}"
+    typography: "{typography.dk-meta}"
+    height: "24px"
+  dk-bar-button:
+    textColor: "{colors.dk-ink-2}"
+    rounded: "{rounded.dk-bar-control}"
+    size: "28px"
+  dk-menu:
+    backgroundColor: "{colors.dk-raised}"
+    rounded: "{rounded.dk-menu}"
+    padding: "4px"
+  dk-menu-item:
+    height: "24px"
+    rounded: "{rounded.dk-bar-control}"
+  dk-tooltip:
+    backgroundColor: "{colors.dk-tip}"
+    textColor: "{colors.dk-tip-ink}"
+    rounded: "{rounded.dk-bar-control}"
 ---
 
-# Design System: Workbench
+# Design System: Deck
 
 ## Overview
 
 **Creative North Star: "The work is the ground; only status speaks in colour."**
 
-The Workbench is the Nodes page (`/nodes/*`): the owner's agents on every machine, in one rail sorted by what they need, beside split tab groups of terminals, files and diffs, with the Explorer and Changes on the right. It is an Operate surface used for hours at a time, next to a real editor and terminal, in both themes. It takes the density and calm of an IDE, one accent for "where you are", and four status colours that mean exactly one thing each.
+Deck (`/deck/*`) is the owner's agents on every node, in one rail sorted by what they need, beside split tab groups of terminals, files and diffs, with the Explorer and Changes on the right. It is an Operate surface used for hours at a time, next to a real editor and terminal, in both themes, and it should feel like a desktop app (Zed, VS Code, Orca) rather than a web page: it fills the window with its own frame, and its chrome behaves like native chrome. It takes the density and calm of an IDE, one accent for "where you are", and four status colours that mean exactly one thing each.
 
-It is scoped. `services/pika/DESIGN.md` (Swiss Typographic Concordance) owns `/docs/*`; the rest of the pika dashboard keeps its monochrome identity, where red is the only colour. Nothing here applies outside the Workbench root, and nothing from those systems applies inside it except the shared `Icon` set and the shared buttons, which the root re-tones.
+It is scoped. `services/pika/DESIGN.md` (Swiss Typographic Concordance) owns `/docs/*`; the rest of the pika dashboard keeps its monochrome identity, where red is the only colour. Nothing here applies outside the Deck root, and nothing from those systems applies inside it except the shared `Icon` set and the shared buttons, which the root re-tones.
 
-**Name in one place.** The working name "Workbench" lives in `web/src/nodes/workbench/tokens.ts` (`WORKBENCH`), the token prefix is `--wb-` in `web/src/nodes/workbench/workbench.css`, and the root attribute is `data-workbench` (`WORKBENCH_ROOT`). Renaming means renaming those three, this file, and the `wb-` utility classes; the `/nodes` route and the band's "Nodes" tab are not part of the name.
+**Name in one place.** The name "Deck" lives in `web/src/nodes/deck/tokens.ts` (`DECK`), the token prefix is `--dk-` in `web/src/nodes/deck/deck.css`, and the root attribute is `data-deck` (`DECK_ROOT`). The route is `/deck` and the dashboard band's tab says "Deck"; "node" stays the word for a machine.
 
 **Key characteristics**
 
 - Cool neutral grounds: the work (terminal, editor, active tab) on the lightest ground, chrome (rail, Explorer, tab strips) one step down. No shadows for structure; one-pixel lines.
-- One accent, an indigo violet (`wb-accent`), for selection, focus, the active tab and group, splitter focus and drop targets, the terminal's selection and search, and Monaco's cursor. It never marks a status.
+- One accent, an indigo violet (`dk-accent`), for selection, focus, the active tab and group, splitter focus and drop targets, the terminal's selection and search, and Monaco's cursor. It never marks a status.
 - Status colours, reserved: needs you amber, failed red, done green, working blue; idle and quiet are ink. Every status also has its own glyph shape, so colour is never the only cue.
 - The system UI face at 13px, 11.5px metadata, tabular numerals; monospace only for terminals, code, and the browser key.
 
@@ -117,11 +149,11 @@ Restrained strategy: tinted neutrals plus one accent; colour does the status job
 
 | Role | Light | Dark | Use |
 | --- | --- | --- | --- |
-| Ground `wb-ground` | `#fcfcfd` | `#111417` | Terminal and editor background, active tab, page |
-| Chrome `wb-chrome` | `#f1f3f5` | `#171a1e` | Rail, Explorer, tab strips, row-action chips |
-| Line `wb-line` / `wb-line-strong` | `#dde1e6` / `#c3c9d0` | `#262b31` / `#383f47` | Hairlines; strong for control frames and splitter hover |
-| Ink `wb-ink` / `wb-ink-2` / `wb-ink-3` | `#161a1f` / `#4f5863` / `#626a74` | `#e4e7eb` / `#a6aeb8` / `#8a929c` | Text; secondary; receded (quiet rows, times, `project · node`) |
-| Accent `wb-accent` | `#5a46c8` | `#a596ff` | Location and focus only; `wb-accent-soft` (11% / 15%) for the selected row and project |
+| Ground `dk-ground` | `#fcfcfd` | `#111417` | Terminal and editor background, active tab, page |
+| Chrome `dk-chrome` | `#f1f3f5` | `#171a1e` | Rail, Explorer, tab strips, row-action chips |
+| Line `dk-line` / `dk-line-strong` | `#dde1e6` / `#c3c9d0` | `#262b31` / `#383f47` | Hairlines; strong for control frames and splitter hover |
+| Ink `dk-ink` / `dk-ink-2` / `dk-ink-3` | `#161a1f` / `#4f5863` / `#626a74` | `#e4e7eb` / `#a6aeb8` / `#8a929c` | Text; secondary; receded (quiet rows, times, `project · node`) |
+| Accent `dk-accent` | `#5a46c8` | `#a596ff` | Location and focus only; `dk-accent-soft` (11% / 15%) for the selected row and project |
 | Needs you | glyph `#b25e00`, text `#8f4b00` | `#f2a33a` | Waiting dialogs, questions, logins; "Needs you" header when non-empty |
 | Failed | glyph `#c4321f`, text `#b02a19` | `#ff7a6b` | pi's error status, a nonzero exit, a node that needs attention |
 | Done | glyph `#1d8a4a`, text `#16703b` | `#4fc47f` | Finished since last seen; the unread dot |
@@ -129,9 +161,9 @@ Restrained strategy: tinted neutrals plus one accent; colour does the status job
 
 Contrast, measured against ground and chrome: ink 17.0 / 15.7, ink-2 7.0 / 6.5, ink-3 5.3 / 4.9, accent 6.5 / 6.0, the `-ink` status tones ≥ 5.5 in light; in dark every text token is ≥ 5.5 on both grounds. White on the light accent is 6.7:1, ground on the dark accent 7.4:1.
 
-Inside the root the shared names (`--color-page`, `--color-sidebar`, `--color-ink`, `--color-muted`, `--color-line`, `--color-hover`, `--color-red`, …) are pointed at Workbench tokens, so the page's existing classes take this palette; new code uses the `wb-` utilities (`text-wb-needs-ink`, `bg-wb-accent-soft`, …). Text selection is `wb-accent-soft`; focus rings are `wb-accent`; scrollbars are ink at 22%.
+Inside the root the shared names (`--color-page`, `--color-sidebar`, `--color-ink`, `--color-muted`, `--color-line`, `--color-hover`, `--color-red`, …) are pointed at Deck tokens, so the page's existing classes take this palette; new code uses the `dk-` utilities (`text-dk-needs-ink`, `bg-dk-accent-soft`, …). Text selection is `dk-accent-soft`; focus rings are `dk-accent`; scrollbars are ink at 22%.
 
-The terminal and Monaco take the same values as literals from `WB_TOKENS` (`tokens.ts`); `tests/node-rail.test.tsx` fails if they drift from the CSS. Terminal selection is the accent over ground at 20% (light) / 30% (dark); search matches at 22%, the active match at 50%. Monaco adds the accent cursor and focus border, the chrome as current-line highlight, and line numbers at ink-2 over ground at 70%.
+The terminal and Monaco take the same values as literals from `DK_TOKENS` (`tokens.ts`); `tests/node-rail.test.tsx` fails if they drift from the CSS. Terminal selection is the accent over ground at 20% (light) / 30% (dark); search matches at 22%, the active match at 50%. Monaco adds the accent cursor and focus border, the chrome as current-line highlight, and line numbers at ink-2 over ground at 70%.
 
 **Named rule — Status Is Reserved.** Amber, red, green and blue appear only on a status glyph, a status label, the attention line under a row, or a count of those. A control, a selection, a link, or decoration never uses them. The accent never means a status.
 
@@ -151,7 +183,8 @@ No uppercase tracking, no eyebrow labels. Times and counts are `tabular-nums` so
 
 ## Density and layout
 
-- Rail 280px by default, 220–500 resizable; Explorer 300px. Rail header 40px; section headers 28px; agent rows two lines (title, then `project · node` or the attention text) at 5px vertical padding, about 40px; activity rows 24px, indented 18px from their agent's text.
+- App bar 40px, status bar 24px; panel headers (rail, workspace breadcrumb, Explorer/Changes switch) and tab strips 36px, so their bottom lines meet; controls in the bars 28px.
+- Rail 280px by default, 220–500 resizable; Explorer 300px. Rail header 36px; section headers 28px; agent rows two lines (title, then `project · node` or the attention text) at 5px vertical padding, about 40px; activity rows 24px, indented 18px from their agent's text.
 - Spacing steps of 4px; rows use 12px side padding (32px for agents inside a Projects card).
 - Rows draw with `content-visibility: auto` (`contain-intrinsic-size: auto 40px`), so a long rail lays out only what is on screen.
 - Radius 2–3px on controls only; rows, sections, tab strips and panels are square.
@@ -199,18 +232,37 @@ One shape per state, 12px (after Orca's `AgentStateDot`): needs you, a filled qu
 
 The working ring turns in twelve steps per second, every ring in phase (Orca's day-long `steps()` keyframe with each ring's start anchored at 0), and stands still under `prefers-reduced-motion`. There are no spinners and no other looping motion; the chevron rotates 90° on fold (no transition under reduced motion). Elapsed and relative times come from one shared clock: every second while anything works, every 30 s otherwise.
 
+## The frame
+
+Deck is an app of its own inside pika: its route renders outside the dashboard's `Layout`, so the black sign band and the colophon are gone and nothing scrolls the page (`web/src/nodes/deck/Chrome.tsx`).
+
+- **App bar (40px, chrome):** the app menu on the left (the pika mark, "Deck", a chevron), opening every other pika section, Settings, Documentation, Keyboard shortcuts and Sign out; "Go to file…" with its shortcut in the middle (quick open, disabled until a node is connected); on the right the agent-list and explorer toggles (a window glyph whose panel fills while it shows; the list's toggle carries the inbox badge while hidden), a hairline, shortcuts `?`, and the theme.
+- **Status bar (24px, chrome, meta type):** the browser socket (Connected, Connecting…, Reconnecting…), nodes online, "N need you" in needs ink and "N working", then "Turn on notifications" until the browser has been asked, and the server's build.
+- **Workspace breadcrumb (36px):** the project is a menu button listing the node's projects (checked) and "Other terminals"; then the node, the pane's session, the focused pane's state; New terminal as a `+` icon button with its shortcut in the tooltip.
+- **Rail header:** "Agents" and the Status/Projects switch; the shortcuts button and socket state moved to the bars.
+
+## Desktop conventions
+
+- **Cursor and selection:** the arrow everywhere, including buttons, tabs, rows and tree items; the I-beam only over text fields and selectable text. Chrome does not select: the root sets `user-select: none`, and inputs, code, `kbd`, and anything marked `data-selectable` select again (commands, fingerprints, the build).
+- **Focus:** rings for the keyboard only (`:focus-visible`); a click leaves none.
+- **One menu (`Menu.tsx`)** for every context menu and drop-down: a raised sheet (`dk-raised`, 1px `dk-line-strong`, 6px radius, a soft two-layer shadow), 24px items, the highlighted item in the accent with `dk-on-accent` ink whether the pointer or the keyboard put it there, shortcuts right-aligned in ink-3, separators as inset hairlines, destructive items (Kill…, Remove…) in failed ink. Arrows, Home/End, a letter to jump, Enter/Space, Escape/Tab close and return focus; a press outside, a resize or the window losing focus closes it; opening one closes any other; pressing the button that opened it closes it. Context menus exist on tabs (splits, Pin, Copy Path, Close, Close Others), agent rows (Open, Close Pane, Copy Working Directory, Kill…/Remove…), and tree items (Open or Expand/Collapse, Copy Path, Copy Relative Path, Refresh); the menu key and Shift+F10 open them from the keyboard.
+- **Tooltips (`Tooltips.tsx`)** replace `title`: an inverse bubble (`dk-tip`) after 600ms, at once while another just showed, with the action's shortcut beside the name; hidden on press, key, scroll, or leaving; never on touch. The bubble is `aria-hidden`; every control keeps its own accessible name.
+- **Dialogs** inside the root are sheets like the menus (8px radius, `dk-raised`, the same shadow).
+- **Glyphs** are drawn SVG (chevrons, the panel toggles, the diff arrows), never Unicode triangles or arrows.
+- **Scrollbars** are thin, ink at 22%.
+
 ## Chrome outside the rail
 
 - Tab strips on chrome; the active tab on ground with a 2px accent underline; the focused group's strip has a 2px accent top line. Status glyphs on terminal tabs use the same set.
-- Splitters are 1px lines that turn `wb-line-strong` on hover and accent on focus; drop targets are accent-framed over `wb-accent-soft`.
+- Splitters are 1px lines that turn `dk-line-strong` on hover and accent on focus; drop targets are accent-framed over `dk-accent-soft`.
 - The workspace header shows the focused pane's state as glyph plus label in the state's ink, never a boxed pill. "New terminal" is a quiet framed button; the accent is not spent on it.
-- Dialogs (shortcuts, quick open) frame in `wb-line-strong`.
+- Dialogs (shortcuts, quick open) frame in `dk-line-strong`.
 
 ## Do's and Don'ts
 
 **Do**
 
-- Keep every Workbench rule inside `[data-workbench]`; read tokens from CSS, and from `WB_TOKENS` only where a canvas or Monaco needs literals.
+- Keep every Deck rule inside `[data-deck]`; read tokens from CSS, and from `DK_TOKENS` only where a canvas or Monaco needs literals.
 - Give every status both its colour and its shape; keep times tabular.
 - Let quiet things recede (ink-3, regular weight) and let attention carry weight.
 
