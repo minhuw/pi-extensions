@@ -8,7 +8,7 @@ import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { encodeLine, LineDecoder, PROTOCOL_VERSION, type Snapshot, type TerminalInfo } from "../src/protocol.ts";
+import { encodeLine, LineDecoder, PROTOCOL_VERSION, type Checkout, type Snapshot, type TerminalInfo } from "../src/protocol.ts";
 import { BIN, cli, Inbox, outputAfter, ROOT, Screen, settle, socketClient, tempHome, until } from "./support.ts";
 
 const home = tempHome();
@@ -276,11 +276,11 @@ describe("pika-node daemon over the unix socket", () => {
         a.close();
     }, 30_000);
 
-    it("shares names, unread marks, and project edits with every client", async () => {
+    it("shares names, unread marks, and checkout edits with every client", async () => {
         const a = await socketClient(home);
         const b = await socketClient(home);
         const welcome = a.inbox.messages.find(m => m.type === "welcome")!;
-        expect(welcome.capabilities).toEqual(expect.arrayContaining(["projects.edit", "git.worktree", "term.rename", "pane.unread"]));
+        expect(welcome.capabilities).toEqual(expect.arrayContaining(["checkouts", "term.rename", "pane.unread"]));
         const { terminal } = await a.request<Created>("term.create", { cols: 80, rows: 24, argv: ["bash", "--noprofile", "--norc"] });
         const id = terminal.terminalId;
 
@@ -299,19 +299,22 @@ describe("pika-node daemon over the unix socket", () => {
         a.send({ type: "pane.seen", terminalId: id });
         await b.inbox.waitFor(m => m.type === "pane.status" && m.terminalId === id && m.status === null);
 
-        // Project edits persist in config.json and tell every client to list again.
+        // Checkout edits persist in config.json, and every client gets the new list (NODE.md "Checkouts").
         const extra = join(home.home, "extra");
         mkdirSync(extra, { recursive: true });
-        const added = await a.request<{ project: { path: string } }>("projects.add", { path: extra });
-        expect(added.project.path).toBe(realpathSync(extra));
-        await b.inbox.waitFor(m => m.type === "projects.changed");
-        expect(JSON.parse(readFileSync(home.config, "utf8")).projects).toEqual([realpathSync(extra)]);
-        await a.request("projects.rename", { path: extra, name: "Extra" });
-        expect((await b.request<{ projects: { name: string; path: string }[] }>("projects.list")).projects.find(p => p.path === realpathSync(extra))?.name).toBe("Extra");
-        await a.request("projects.remove", { path: extra });
-        expect((await b.request<{ projects: { path: string }[] }>("projects.list")).projects.some(p => p.path === realpathSync(extra))).toBe(false);
-        expect(await a.requestError("projects.add", { path: join(home.home, "missing") })).toMatchObject({ code: "not_found" });
-        expect(await a.requestError("git.worktreeRemove", { path: project })).toMatchObject({ code: "invalid" });
+        const added = (await a.request<{ checkout: Checkout }>("checkout.add", { path: extra })).checkout;
+        expect(added).toMatchObject({ kind: "folder", path: realpathSync(extra), project: "extra", name: "extra", source: "configured", settings: {}, worktrees: [] });
+        expect(added.id).toMatch(/^[0-9a-f]{32}$/);
+        expect(((await b.inbox.waitFor(m => m.type === "checkouts.changed")).checkouts as Checkout[]).some(c => c.id === added.id)).toBe(true);
+        expect(JSON.parse(readFileSync(home.config, "utf8")).checkouts).toEqual([realpathSync(extra)]);
+        expect((await a.request<{ checkout: Checkout }>("checkout.update", { checkoutId: added.id, name: "Extra" })).checkout).toMatchObject({ name: "Extra", named: true, project: "extra" });
+        const listed = async () => (await b.request<{ checkouts: Checkout[] }>("checkouts.list")).checkouts;
+        expect((await listed()).find(c => c.id === added.id)?.name).toBe("Extra");
+        await a.request("checkout.hide", { checkoutId: added.id });
+        expect((await listed()).some(c => c.id === added.id)).toBe(false);
+        expect((await a.request<{ checkout: Checkout }>("checkout.unhide", { checkoutId: added.id })).checkout.id).toBe(added.id);
+        expect(await a.requestError("checkout.add", { path: join(home.home, "missing") })).toMatchObject({ code: "not_found" });
+        expect(await a.requestError("worktree.remove", { checkoutId: added.id, path: extra })).toMatchObject({ code: "not_found" });
 
         await a.request("term.kill", { terminalId: id, signal: "SIGKILL" });
         a.close();

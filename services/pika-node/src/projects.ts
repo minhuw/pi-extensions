@@ -1,6 +1,6 @@
 /**
- * Projects on the node (NODE.md §4 "Projects"): the list every browser shares, and the edits to it that `config.json`
- * keeps (`projects`, `hiddenProjects`, `projectNames`), plus git worktrees made and removed as projects.
+ * The spike's flat project list, replaced by checkouts (NODE.md §4 "Checkouts") and no longer wired into the daemon.
+ * Kept until the checkout implementation lands: its worktree helpers (`worktreeSlug`, `worktreePath`) carry over.
  */
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -8,10 +8,12 @@ import { readdir, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { NodeError } from "./errors.ts";
-import type { Project } from "./protocol.ts";
 import { roots, type Config } from "./store.ts";
 
 const run = promisify(execFile);
+
+/** A project of the spike's list; `worktree` is the main checkout's path for a linked git worktree. */
+export interface Project { name: string; path: string; repository?: string; named?: true; worktree?: string }
 
 export interface ProjectsOptions {
     config: () => Config;

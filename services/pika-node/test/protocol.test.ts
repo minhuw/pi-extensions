@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-    becameDone, displayFingerprint, encodeLine, fromBase64Url, LIMITS, LineDecoder, LineTooLong, matchFingerprint, mergeState,
+    becameDone, CAPABILITIES, displayFingerprint, ERROR_CODES, isCheckout, isWorktree, encodeLine, fromBase64Url, LIMITS, LineDecoder, LineTooLong, matchFingerprint, mergeState,
     parseBridgeMessage, parseChannelBody, parseClientMessage, parseClientToServer, parseDaemonToBridge, parseNodeMessage,
     parseNodeToServer, parseProgramStatus, parseServerToClient, parseServerToNode, toBase64Url, utf8Length,
     type BridgeStatus, type ProgramStatus,
@@ -9,6 +9,7 @@ import {
 const b64 = (length: number, fill = 7) => toBase64Url(new Uint8Array(length).fill(fill));
 const SPKI = b64(91);
 const now = 1_700_000_000_000;
+const CID = "0123456789abcdef0123456789abcdef";
 
 describe("routing frames", () => {
     it("parses node and server frames, dropping unknown fields", () => {
@@ -84,26 +85,45 @@ describe("inner messages", () => {
         expect(parseClientMessage({ type: "term.create", id: "1", cols: 80, rows: 24, env: { "BAD-NAME": "x" } }).ok).toBe(false);
     });
 
-    it("parses the rail's requests and notices: projects, worktrees, names, unread", () => {
-        expect(parseClientMessage({ type: "projects.add", id: "1", path: "/a" }).ok).toBe(true);
-        expect(parseClientMessage({ type: "projects.add", id: "1", path: "a" }).ok).toBe(false);
-        expect(parseClientMessage({ type: "projects.remove", id: "1", path: "/a" }).ok).toBe(true);
-        expect(parseClientMessage({ type: "projects.rename", id: "1", path: "/a", name: "Mine" }).ok).toBe(true);
-        expect(parseClientMessage({ type: "projects.rename", id: "1", path: "/a", name: null }).ok).toBe(true);
-        expect(parseClientMessage({ type: "projects.rename", id: "1", path: "/a" }).ok).toBe(false);
-        expect(parseClientMessage({ type: "projects.rename", id: "1", path: "/a", name: " " }).ok).toBe(false);
-        expect(parseClientMessage({ type: "projects.rename", id: "1", path: "/a", name: "x".repeat(121) }).ok).toBe(false);
-        expect(parseClientMessage({ type: "git.worktreeAdd", id: "1", project: "/a", branch: "feat/x" }).ok).toBe(true);
-        expect(parseClientMessage({ type: "git.worktreeAdd", id: "1", project: "/a", branch: "feat/x", base: "main" }).ok).toBe(true);
-        expect(parseClientMessage({ type: "git.worktreeAdd", id: "1", project: "/a", branch: "a\nb" }).ok).toBe(false);
-        expect(parseClientMessage({ type: "git.worktreeRemove", id: "1", path: "/a" }).ok).toBe(true);
+    it("parses the rail's requests and notices: checkouts, worktrees, names, unread", () => {
+        expect(parseClientMessage({ type: "checkouts.list", id: "1" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "checkout.add", id: "1", path: "/a" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "checkout.add", id: "1", path: "a" }).ok).toBe(false);
+        expect(parseClientMessage({ type: "checkout.hide", id: "1", checkoutId: CID }).ok).toBe(true);
+        expect(parseClientMessage({ type: "checkout.hide", id: "1", checkoutId: CID.toUpperCase() }).ok).toBe(false);
+        expect(parseClientMessage({ type: "checkout.hide", id: "1", checkoutId: CID.slice(1) }).ok).toBe(false);
+        expect(parseClientMessage({ type: "checkout.unhide", id: "1", checkoutId: CID }).ok).toBe(true);
+        expect(parseClientMessage({ type: "checkout.update", id: "1", checkoutId: CID }).ok).toBe(true);
+        expect(parseClientMessage({ type: "checkout.update", id: "1", checkoutId: CID, name: "Mine" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "checkout.update", id: "1", checkoutId: CID, name: null }).ok).toBe(true);
+        expect(parseClientMessage({ type: "checkout.update", id: "1", checkoutId: CID, name: " " }).ok).toBe(false);
+        expect(parseClientMessage({ type: "checkout.update", id: "1", checkoutId: CID, name: "x".repeat(121) }).ok).toBe(false);
+        const settings = { worktreeLocation: "/w", worktreeBase: "origin/main", setupScript: "npm ci\nnpm run build" };
+        expect(parseClientMessage({ type: "checkout.update", id: "1", checkoutId: CID, settings })).toMatchObject({ ok: true, message: { settings } });
+        expect(parseClientMessage({ type: "checkout.update", id: "1", checkoutId: CID, settings: {} }).ok).toBe(true);
+        expect(parseClientMessage({ type: "checkout.update", id: "1", checkoutId: CID, settings: { worktreeLocation: "w" } }).ok).toBe(false);
+        expect(parseClientMessage({ type: "checkout.update", id: "1", checkoutId: CID, settings: { setupScript: " \n " } }).ok).toBe(false);
+        expect(parseClientMessage({ type: "checkout.update", id: "1", checkoutId: CID, settings: { setupScript: "a\u001bb" } }).ok).toBe(false);
+        expect(parseClientMessage({ type: "checkout.update", id: "1", checkoutId: CID, settings: { setupScript: "x".repeat(4_097) } }).ok).toBe(false);
+        // Settings are stored as given, so an unknown field is refused rather than dropped.
+        expect(parseClientMessage({ type: "checkout.update", id: "1", checkoutId: CID, settings: { other: 1 } }).ok).toBe(false);
+        expect(parseClientMessage({ type: "worktree.create", id: "1", checkoutId: CID, name: "feat/x" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "worktree.create", id: "1", checkoutId: CID, name: "feat/x", base: "main", cols: 120, rows: 40 }).ok).toBe(true);
+        expect(parseClientMessage({ type: "worktree.create", id: "1", checkoutId: CID, name: "a\nb" }).ok).toBe(false);
+        expect(parseClientMessage({ type: "worktree.create", id: "1", checkoutId: CID, name: "x", cols: 0 }).ok).toBe(false);
+        expect(parseClientMessage({ type: "worktree.remove", id: "1", checkoutId: CID, path: "/a" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "worktree.remove", id: "1", checkoutId: CID, path: "/a", deleteBranch: true, force: false }).ok).toBe(true);
+        expect(parseClientMessage({ type: "worktree.remove", id: "1", checkoutId: CID, path: "/a", force: "yes" }).ok).toBe(false);
+        for (const type of ["projects.list", "projects.add", "git.worktreeAdd", "git.worktreeRemove"]) {
+            expect(parseClientMessage({ type, id: "1", path: "/a" })).toMatchObject({ ok: false, reason: "unknown" });
+        }
         expect(parseClientMessage({ type: "term.rename", id: "1", terminalId: "t1", label: "Reviewer" }).ok).toBe(true);
         expect(parseClientMessage({ type: "term.rename", id: "1", terminalId: "t1", label: null }).ok).toBe(true);
         expect(parseClientMessage({ type: "term.rename", id: "1", terminalId: "t1", label: "a\u001bb" }).ok).toBe(false);
         expect(parseClientMessage({ type: "pane.unread", terminalId: "t1" }).ok).toBe(true);
         expect(parseNodeMessage({ type: "term.renamed", terminalId: "t1", label: "Reviewer" }).ok).toBe(true);
         expect(parseNodeMessage({ type: "term.renamed", terminalId: "t1", label: null }).ok).toBe(true);
-        expect(parseNodeMessage({ type: "projects.changed" }).ok).toBe(true);
+        expect(parseNodeMessage({ type: "projects.changed" })).toMatchObject({ ok: false, reason: "unknown" });
         expect(parseNodeMessage({ type: "term.created", terminal: { terminalId: "t1", title: "", cwd: "/", cols: 1, rows: 1, pid: 1, createdAt: 1, argv: ["sh"], label: "Mine" } })).toMatchObject({ ok: true, message: { terminal: { label: "Mine" } } });
         expect(parseNodeMessage({ type: "term.created", terminal: { terminalId: "t1", title: "", cwd: "/", cols: 1, rows: 1, pid: 1, createdAt: 1, argv: ["sh"], label: "" } }).ok).toBe(false);
     });
@@ -218,5 +238,63 @@ describe("helpers", () => {
         expect(decoder.push(':2}\n\n')).toEqual(['{"b":2}']);
         expect(() => decoder.push("x".repeat(17))).toThrow(LineTooLong);
         expect(encodeLine({ text: "a\nb" })).toBe('{"text":"a\\nb"}\n');
+    });
+});
+
+describe("checkouts", () => {
+    const main = { path: "/w/repo", branch: "main", head: "a".repeat(40), isMain: true, prunable: false, locked: false, detached: false };
+    const linked = { path: "/w/repo-fix", head: "b".repeat(64), isMain: false, prunable: true, locked: true, detached: true };
+    const git = {
+        id: CID, kind: "git", path: "/w/repo", commonDir: "/w/repo/.git", repository: "https://github.com/me/repo", project: "repo",
+        name: "Repo", named: true, source: "configured", settings: { worktreeBase: "origin/main" }, worktrees: [main, linked],
+    };
+    const folder = { id: "f".repeat(32), kind: "folder", path: "/w/notes", project: "notes", name: "notes", source: "discovered", settings: {}, worktrees: [] };
+    const changed = (checkouts: unknown[]) => parseNodeMessage({ type: "checkouts.changed", checkouts, truncated: false });
+
+    it("parses a checkouts snapshot with git and folder checkouts", () => {
+        expect(changed([git, folder])).toEqual({ ok: true, message: { type: "checkouts.changed", checkouts: [git, folder], truncated: false } });
+        expect(changed([])).toMatchObject({ ok: true });
+        expect(parseNodeMessage({ type: "checkouts.changed", checkouts: [] }).ok).toBe(false);
+        expect(changed([{ ...git, truncated: true }]).ok).toBe(true);
+        expect(changed([{ ...git, source: "terminal" }]).ok).toBe(true);
+    });
+
+    it("refuses malformed checkouts", () => {
+        expect(changed([{ ...git, id: "xyz" }]).ok).toBe(false);
+        expect(changed([{ ...git, commonDir: undefined }]).ok).toBe(false);
+        expect(changed([{ ...folder, commonDir: "/w/notes/.git" }]).ok).toBe(false);
+        expect(changed([{ ...folder, repository: "https://github.com/me/notes" }]).ok).toBe(false);
+        expect(changed([{ ...folder, worktrees: [main] }]).ok).toBe(false);
+        expect(changed([{ ...git, repository: "git@github.com:me/repo.git" }]).ok).toBe(false);
+        expect(changed([{ ...git, project: "" }]).ok).toBe(false);
+        expect(changed([{ ...git, source: "found" }]).ok).toBe(false);
+        expect(changed([{ ...git, named: false }]).ok).toBe(false);
+        expect(changed([{ ...git, settings: { worktreeLocation: "rel" } }]).ok).toBe(false);
+        expect(changed([{ ...git, worktrees: [{ ...main, head: "abc" }] }]).ok).toBe(false);
+        expect(changed([{ ...git, worktrees: [{ ...main, isMain: undefined }] }]).ok).toBe(false);
+        expect(changed([{ ...git, worktrees: Array.from({ length: LIMITS.maxWorktrees + 1 }, () => linked) }]).ok).toBe(false);
+        expect(changed(Array.from({ length: LIMITS.maxCheckouts + 1 }, () => folder)).ok).toBe(false);
+    });
+
+    it("places terminals in a checkout's worktree", () => {
+        const terminal = { terminalId: "t1", title: "", cwd: "/w/repo-fix/src", cols: 1, rows: 1, pid: 1, createdAt: 1, argv: ["sh"], checkoutId: CID, worktreePath: "/w/repo-fix" };
+        expect(parseNodeMessage({ type: "term.created", terminal })).toMatchObject({ ok: true, message: { terminal: { checkoutId: CID, worktreePath: "/w/repo-fix" } } });
+        expect(parseNodeMessage({ type: "term.created", terminal: { ...terminal, worktreePath: "rel" } }).ok).toBe(false);
+        expect(parseNodeMessage({ type: "term.placed", terminalId: "t1", checkoutId: CID, worktreePath: "/w/repo" }).ok).toBe(true);
+        expect(parseNodeMessage({ type: "term.placed", terminalId: "t1", checkoutId: null, worktreePath: null }).ok).toBe(true);
+        expect(parseNodeMessage({ type: "term.placed", terminalId: "t1", checkoutId: CID }).ok).toBe(false);
+    });
+
+    it("validates checkout results with isCheckout and isWorktree", () => {
+        expect(isCheckout(git)).toBe(true);
+        expect(isCheckout(folder)).toBe(true);
+        expect(isCheckout({ ...folder, kind: "dir" })).toBe(false);
+        expect(isWorktree(main)).toBe(true);
+        expect(isWorktree({ ...main, path: "w" })).toBe(false);
+    });
+
+    it("lists the checkouts capability in place of the spike's project capabilities, and the busy error", () => {
+        expect(CAPABILITIES).toEqual(["terminal", "files", "status", "checkouts", "term.rename", "pane.unread"]);
+        expect(ERROR_CODES).toContain("busy");
     });
 });

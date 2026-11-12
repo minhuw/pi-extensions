@@ -10,7 +10,6 @@ import { basename, dirname, join, sep } from "node:path";
 import { asNodeError, NodeError } from "./errors.ts";
 import { Files } from "./files.ts";
 import { Pane } from "./pane.ts";
-import { Projects } from "./projects.ts";
 import type { Paths } from "./paths.ts";
 import { VERSION } from "./paths.ts";
 import {
@@ -84,7 +83,6 @@ export class Daemon {
     readonly paths: Paths;
     readonly account: Account;
     readonly files: Files;
-    readonly projects: Projects;
     #terminals = new Map<string, Pty>();
     #peers = new Set<Peer>();
     #options: DaemonOptions;
@@ -99,11 +97,6 @@ export class Daemon {
         this.account = options.account ?? account();
         this.#log = options.log ?? (() => {});
         this.files = new Files({ home: this.account.home, uploads: join(this.paths.home, "uploads"), log: this.#log });
-        this.projects = new Projects({
-            config: () => this.config(),
-            save: config => saveConfig(this.paths, config),
-            terminalCwds: () => [...this.#terminals.values()].filter(t => !t.terminal.exited).map(t => t.cwd),
-        });
         this.#foregroundTimer = setInterval(() => this.#pollForeground(), timing.foregroundPollMs);
         this.#foregroundTimer.unref();
     }
@@ -229,15 +222,15 @@ export class Daemon {
                 }
                 return { terminal: this.#info(pty) };
             }
-            case "projects.list": return { projects: await this.projects.list() };
-            case "projects.add": return this.#projectsChanged({ project: await this.projects.add(request.path) });
-            case "projects.remove": return this.#projectsChanged(await this.projects.remove(request.path));
-            case "projects.rename": return this.#projectsChanged({ project: await this.projects.rename(request.path, request.name) });
-            case "git.worktreeAdd": return this.#projectsChanged({ project: await this.projects.worktreeAdd(request.project, request.branch, request.base) });
-            case "git.worktreeRemove": {
-                await this.projects.worktreeRemove(request.path);
-                return this.#projectsChanged({});
-            }
+            case "checkouts.list":
+            case "checkout.add":
+            case "checkout.hide":
+            case "checkout.unhide":
+            case "checkout.update":
+            case "worktree.create":
+            case "worktree.remove":
+                // NODE.md "Checkouts": the contract is in protocol.ts; the daemon does not implement it yet.
+                throw new NodeError("unsupported", `${request.type} is not implemented yet`);
             case "term.kill": {
                 const pty = this.#terminal(request.terminalId);
                 if (pty.terminal.exited) this.#remove(pty);
@@ -246,12 +239,6 @@ export class Daemon {
             }
             default: return this.files.request(peer, request);
         }
-    }
-
-    /** Tells every channel that the project list changed (its reply goes to the asker first), then answers `result`. */
-    #projectsChanged<T>(result: T): T {
-        setImmediate(() => { for (const peer of this.#peers) peer.send({ type: "projects.changed" }); });
-        return result;
     }
 
     #notice(peer: Peer, notice: Notice): void {

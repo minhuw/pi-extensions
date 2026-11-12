@@ -28,6 +28,11 @@ export const LIMITS = {
     maxListBytes: 768 * KiB,
     /** `git.status`: at most this many entries, tracked changes before untracked files. */
     maxStatusEntries: 5_000,
+    /** `checkouts.list` and `checkouts.changed`: at most this many checkouts, each with at most `maxWorktrees`. */
+    maxCheckouts: 512,
+    maxWorktrees: 256,
+    /** `CheckoutSettings.setupScript`, in UTF-16 units. */
+    maxSetupScript: 4_096,
     maxUploadBytes: 256 * MiB,
     maxUploadChunkBytes: 512 * KiB,
     maxWatchesPerChannel: 64,
@@ -81,17 +86,17 @@ export type ChannelCloseCode = typeof CHANNEL_CLOSE_CODES[number];
 
 export const ERROR_CODES = [
     "invalid", "unsupported", "not_found", "exists", "conflict", "too_large", "permission_denied",
-    "is_a_directory", "not_a_directory", "outside_roots", "exited", "limit", "io",
+    "is_a_directory", "not_a_directory", "outside_roots", "exited", "busy", "limit", "io",
 ] as const;
 export type ErrorCode = typeof ERROR_CODES[number];
 
 /**
- * What a daemon offers, in `welcome.capabilities`. Past the v1 four, each names requests or notices a client may use
- * only when listed (an older daemon answers `unsupported`, or drops a notice): `projects.edit` (`projects.add`,
- * `projects.remove`, `projects.rename`), `git.worktree` (`git.worktreeAdd`, `git.worktreeRemove`), `term.rename`, and
- * `pane.unread`.
+ * What a daemon offers, in `welcome.capabilities`. Past `terminal`, `files`, and `status`, each names requests, notices,
+ * or fields a client may use only when listed (an older daemon answers `unsupported`, or drops a notice): `checkouts`
+ * (`checkouts.list`, `checkout.*`, `worktree.*`, `checkouts.changed`, `term.placed`, `TerminalInfo.checkoutId` and
+ * `worktreePath`), `term.rename`, and `pane.unread`.
  */
-export const CAPABILITIES = ["terminal", "files", "projects", "status", "projects.edit", "git.worktree", "term.rename", "pane.unread"] as const;
+export const CAPABILITIES = ["terminal", "files", "status", "checkouts", "term.rename", "pane.unread"] as const;
 export type Capability = typeof CAPABILITIES[number];
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -178,14 +183,62 @@ export interface TerminalInfo {
     status?: PaneView;
     /** The name a user gave the terminal (`term.rename`); clients show it before any other. */
     label?: string;
+    /** The listed checkout holding the terminal's cwd (live, else start), the innermost when several do. */
+    checkoutId?: string;
+    /** The innermost of that checkout's worktrees holding the cwd; a `folder` checkout's own path. */
+    worktreePath?: string;
 }
 export interface Stat { size: number; mtimeMs: number; hash?: string }
 export interface DirEntry { name: string; kind: "file" | "dir" | "symlink" | "other"; size: number; mtimeMs: number }
+/** Per-checkout settings (`checkout.update`), kept in `config.json` by checkout id. */
+export interface CheckoutSettings {
+    /** The absolute directory new worktrees go in; default the main worktree's parent. */
+    worktreeLocation?: string;
+    /** The ref new worktrees start from; default `HEAD`. */
+    worktreeBase?: string;
+    /** A shell command run in each new worktree, in a terminal (`worktree.create`'s `setupTerminal`). */
+    setupScript?: string;
+}
+/** One entry of `git worktree list --porcelain -z`, in git's order (the main worktree first). */
+export interface Worktree {
+    path: string;
+    /** The short branch name; absent when detached. */
+    branch?: string;
+    /** The commit id; absent for an unborn branch. */
+    head?: string;
+    isMain: boolean;
+    prunable: boolean;
+    locked: boolean;
+    detached: boolean;
+}
 /**
- * A project on the node. `name` is the user's name for it (`projects.rename`) when `named`, else its folder's name.
- * `worktree` is the main checkout's path when the project is a linked git worktree.
+ * One copy of a repository on the node (by git common dir), or a plain folder. Projects are derived above the node from
+ * `repository` (else `project` and the node id); see NODE.md "Checkouts".
  */
-export interface Project { name: string; path: string; repository?: string; named?: true; worktree?: string }
+export interface Checkout {
+    /** First 32 hex characters of the SHA-256 of the common dir's (or folder's) real path; unique per node. */
+    id: string;
+    kind: "git" | "folder";
+    /** The main worktree, a bare repository's directory, or the folder. */
+    path: string;
+    commonDir?: string;
+    /** The identifying web URL, by `resolveRepository`'s rules (extensions/pika/repository.ts). */
+    repository?: string;
+    /** The name memory and sessions use: `project.json`'s, else the main checkout's folder; never the node rename. */
+    project: string;
+    /** The node's name for it: the `checkout.update` name when `named`, else `project`. */
+    name: string;
+    named?: true;
+    source: "configured" | "discovered" | "terminal";
+    settings: CheckoutSettings;
+    worktrees: Worktree[];
+    /** More than `LIMITS.maxWorktrees` worktrees; the rest are left out. */
+    truncated?: true;
+}
+/** `worktree.remove`'s answer about the branch, present only with `deleteBranch` on a worktree that had one. */
+export interface BranchRemoval { name: string; deleted: boolean; message?: string }
+/** Environment of a `worktree.create` setup terminal. */
+export const SETUP_ENV = { worktree: "PIKA_WORKTREE_PATH", checkout: "PIKA_CHECKOUT_PATH", branch: "PIKA_WORKTREE_BRANCH" } as const;
 export type Expected = { hash: string } | { mtimeMs: number; size: number } | { absent: true };
 export type Encoding = "utf8" | "base64";
 /** `fs.gitShow`'s source: the commit `HEAD`, or the index (the staged content). */
@@ -226,12 +279,13 @@ export interface Requests {
     "term.kill": { terminalId: string; signal?: Signal };
     "term.cwd": { terminalId: string };
     "term.rename": { terminalId: string; label: string | null };
-    "projects.list": Record<never, never>;
-    "projects.add": { path: string };
-    "projects.remove": { path: string };
-    "projects.rename": { path: string; name: string | null };
-    "git.worktreeAdd": { project: string; branch: string; base?: string };
-    "git.worktreeRemove": { path: string };
+    "checkouts.list": Record<never, never>;
+    "checkout.add": { path: string };
+    "checkout.hide": { checkoutId: string };
+    "checkout.unhide": { checkoutId: string };
+    "checkout.update": { checkoutId: string; name?: string | null; settings?: CheckoutSettings };
+    "worktree.create": { checkoutId: string; name: string; base?: string; cols?: number; rows?: number };
+    "worktree.remove": { checkoutId: string; path: string; deleteBranch?: boolean; force?: boolean };
     "fs.readDir": { path: string };
     "fs.read": { path: string };
     "fs.write": { path: string; encoding: Encoding; data: string; expected: Expected; mode?: number };
@@ -254,13 +308,13 @@ export interface Results {
     /** The working directory of the terminal's shell now, which a `cd` changes (`TerminalInfo.cwd` is where it started). */
     "term.cwd": { cwd: string };
     "term.rename": { terminal: TerminalInfo };
-    "projects.list": { projects: Project[] };
-    "projects.add": { project: Project };
-    /** `hidden`: the project was found on its own (a root, a terminal's repository), so the node now hides it. */
-    "projects.remove": { hidden: boolean };
-    "projects.rename": { project: Project };
-    "git.worktreeAdd": { project: Project };
-    "git.worktreeRemove": Record<never, never>;
+    "checkouts.list": { checkouts: Checkout[]; truncated: boolean };
+    "checkout.add": { checkout: Checkout };
+    "checkout.hide": Record<never, never>;
+    "checkout.unhide": { checkout: Checkout };
+    "checkout.update": { checkout: Checkout };
+    "worktree.create": { checkout: Checkout; worktree: Worktree; setupTerminal?: TerminalInfo };
+    "worktree.remove": { checkout: Checkout; branch?: BranchRemoval };
     "fs.readDir": { entries: DirEntry[]; truncated: boolean };
     "fs.read": { encoding: Encoding; data: string; stat: Stat };
     "fs.write": { stat: Stat };
@@ -313,7 +367,8 @@ export type NodeEvent =
     | { type: "term.resized"; terminalId: string; cols: number; rows: number; owned: boolean }
     | { type: "term.title"; terminalId: string; title: string }
     | { type: "term.renamed"; terminalId: string; label: string | null }
-    | { type: "projects.changed" }
+    | { type: "checkouts.changed"; checkouts: Checkout[]; truncated: boolean }
+    | { type: "term.placed"; terminalId: string; checkoutId: string | null; worktreePath: string | null }
     | { type: "term.exit"; terminalId: string; code: number | null; signal: string | null }
     | { type: "fs.changed"; watch: string; path: string; kind: "change" | "rename" | "gone" }
     | { type: "pane.status"; terminalId: string; status: PaneView | null }
@@ -529,9 +584,33 @@ const programStatus = object({
 const paneView = object({ state: literal("idle", "busy", "waiting"), "?program": programStatus, "?bridge": isBridgeStatus, bridgeConnected: bool, unread: bool });
 
 const terminalId = id;
-/** The longest name a user may give a terminal or a project, in UTF-16 units. */
+/** The longest name a user may give a terminal or a checkout, in UTF-16 units. */
 export const TERMINAL_LABEL = 120;
-export const PROJECT_NAME = 120;
+export const CHECKOUT_NAME = 120;
+const CHECKOUT_ID = /^[0-9a-f]{32}$/;
+const COMMIT = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
+const checkoutId: Check = value => typeof value === "string" && CHECKOUT_ID.test(value);
+/** Text from the node's disk (folder and branch names), shown sanitized: nonempty, at most `max` UTF-16 units. */
+const text = (max: number): Check => value => typeof value === "string" && value.length > 0 && value.length <= max;
+/** A shell command: nonblank, may span lines, no control characters but newline and tab. */
+const script: Check = value => typeof value === "string" && value.trim().length > 0 && value.length <= LIMITS.maxSetupScript
+    && !/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(value);
+/** `object` that also rejects unknown fields, for what the node stores as given. */
+const exactObject = (spec: Spec): Check => value => isRecord(value)
+    && Object.keys(value).every(key => Object.hasOwn(spec, key) || Object.hasOwn(spec, `?${key}`)) && fields(spec, value) !== undefined;
+export const isCheckoutSettings: Check = exactObject({ "?worktreeLocation": isAbsolutePath, "?worktreeBase": label(255), "?setupScript": script });
+const worktree = object({
+    path: isAbsolutePath, "?branch": text(1_024), "?head": value => typeof value === "string" && COMMIT.test(value),
+    isMain: bool, prunable: bool, locked: bool, detached: bool,
+});
+const repositoryUrl: Check = value => typeof value === "string" && /^https?:\/\/[^/\s]+\/\S/.test(value) && str(2_048)(value);
+/** Validates a `Checkout` (results are checked only for being objects; clients use this on checkout results). */
+export const isCheckout: Check = object({
+    id: checkoutId, kind: literal("git", "folder"), path: isAbsolutePath, "?commonDir": isAbsolutePath, "?repository": repositoryUrl,
+    project: text(1_024), name: text(1_024), "?named": literal(true), source: literal("configured", "discovered", "terminal"),
+    settings: isCheckoutSettings, worktrees: arrayOf(worktree, LIMITS.maxWorktrees), "?truncated": literal(true),
+}, checkout => checkout.kind === "git" ? checkout.commonDir !== undefined : checkout.commonDir === undefined && checkout.repository === undefined && (checkout.worktrees as unknown[]).length === 0);
+export const isWorktree: Check = worktree;
 const cols = int(1, LIMITS.maxCols);
 const rows = int(1, LIMITS.maxRows);
 const env: Check = value => isRecord(value) && Object.keys(value).length <= LIMITS.maxEnv
@@ -555,12 +634,13 @@ export const parseClientMessage = parser<ClientMessage>({
     "pane.seen": { terminalId },
     "pane.unread": { terminalId },
     "term.rename": { id: requestId, terminalId, label: nullable(label(TERMINAL_LABEL)) },
-    "projects.list": { id: requestId },
-    "projects.add": { id: requestId, path: isAbsolutePath },
-    "projects.remove": { id: requestId, path: isAbsolutePath },
-    "projects.rename": { id: requestId, path: isAbsolutePath, name: nullable(label(PROJECT_NAME)) },
-    "git.worktreeAdd": { id: requestId, project: isAbsolutePath, branch: label(255), "?base": label(255) },
-    "git.worktreeRemove": { id: requestId, path: isAbsolutePath },
+    "checkouts.list": { id: requestId },
+    "checkout.add": { id: requestId, path: isAbsolutePath },
+    "checkout.hide": { id: requestId, checkoutId },
+    "checkout.unhide": { id: requestId, checkoutId },
+    "checkout.update": { id: requestId, checkoutId, "?name": nullable(label(CHECKOUT_NAME)), "?settings": isCheckoutSettings },
+    "worktree.create": { id: requestId, checkoutId, name: label(255), "?base": label(255), "?cols": cols, "?rows": rows },
+    "worktree.remove": { id: requestId, checkoutId, path: isAbsolutePath, "?deleteBranch": bool, "?force": bool },
     "fs.readDir": { id: requestId, path: isAbsolutePath },
     "fs.read": { id: requestId, path: isAbsolutePath },
     "fs.write": { id: requestId, path: isAbsolutePath, encoding: literal("utf8", "base64"), data: value => typeof value === "string", expected, "?mode": int(0, 0o7777) },
@@ -582,6 +662,8 @@ const terminalInfo = object({
     "?exited": object({ code: nullable(int(-(2 ** 31), 2 ** 31)), signal: nullable(label(32)) }),
     "?status": paneView,
     "?label": label(TERMINAL_LABEL),
+    "?checkoutId": checkoutId,
+    "?worktreePath": isAbsolutePath,
 });
 const replyError = object({ code: label(64), message: str(4 * KiB), "?current": object({ size: time, mtimeMs: time, "?hash": hex64 }) });
 
@@ -601,7 +683,8 @@ export const parseNodeMessage = parser<NodeMessage>({
     "term.resized": { terminalId, cols, rows, owned: bool },
     "term.title": { terminalId, title: str(4 * KiB) },
     "term.renamed": { terminalId, label: nullable(label(TERMINAL_LABEL)) },
-    "projects.changed": {},
+    "checkouts.changed": { checkouts: arrayOf(isCheckout, LIMITS.maxCheckouts), truncated: bool },
+    "term.placed": { terminalId, checkoutId: nullable(checkoutId), worktreePath: nullable(isAbsolutePath) },
     "term.exit": { terminalId, code: nullable(int(-(2 ** 31), 2 ** 31)), signal: nullable(label(32)) },
     "fs.changed": { watch: id, path: isAbsolutePath, kind: literal("change", "rename", "gone") },
     "pane.status": { terminalId, status: nullable(paneView) },
