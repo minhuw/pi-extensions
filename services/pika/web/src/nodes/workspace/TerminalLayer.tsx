@@ -1,7 +1,7 @@
 /**
  * The terminal layer: every terminal any workspace shows is drawn here once, keyed by its node and id, and placed
  * over the slot its pane registered (`SlotRegistry`). Moving a tab between groups, splitting, switching tabs or
- * projects only moves (or hides) the drawn terminal; its xterm is never built again. A terminal without a slot on
+ * places only moves (or hides) the drawn terminal; its xterm is never built again. A terminal without a slot on
  * screen is hidden, which gives back its WebGL context (`TerminalView`'s `visible`).
  *
  * The idea is Orca's `TerminalPaneOverlayLayer` (`src/renderer/src/components/terminal-pane/mounting/`, MIT, Copyright

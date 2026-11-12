@@ -13,7 +13,7 @@ describe("the terminal the workspace header describes", () => {
 		expect(recent.shown("n1", "/p", "b", terminals)?.terminalId).toBe("b");
 	});
 
-	it("is the project's last focused pane while an editor or diff has focus", () => {
+	it("is the place's last focused pane while an editor or diff has focus", () => {
 		const recent = new RecentTerminals();
 		recent.shown("n1", "/p", "a", terminals);
 		recent.shown("n1", "/p", "b", terminals);
@@ -22,7 +22,7 @@ describe("the terminal the workspace header describes", () => {
 		expect(recent.shown("n1", "/p", undefined, terminals)?.terminalId).toBe("b");
 	});
 
-	it("is none in a project where no pane had focus yet, whatever other projects and nodes saw", () => {
+	it("is none in a place where no pane had focus yet, whatever other places and nodes saw", () => {
 		const recent = new RecentTerminals();
 		recent.shown("n1", "/p", "a", terminals);
 		recent.shown("n2", "/q", "c", terminals);

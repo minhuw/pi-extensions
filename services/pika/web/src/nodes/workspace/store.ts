@@ -18,24 +18,25 @@ import {
 } from "./model";
 import { placeOpen } from "./placement";
 
-/** The card for a node's terminals that are in none of its projects. */
+/** The place of a node's terminals that are in none of its listed worktrees (the rail's "Other" card). */
 export const OTHER = "other:";
 
 export const WORKSPACE_KEY_PREFIX = "pika.nodes.workspace.";
-export const WORKSPACE_VERSION = 1;
+/** Version 2 keys workspaces by place (`places.ts`); version 1 layouts, by project path, are dropped. */
+export const WORKSPACE_VERSION = 2;
 
 /** Something on screen to take focus once it shows: a tab, and in a terminal tab, one pane. */
 export interface FocusRequest {
 	serial: number;
-	project: string;
+	place: string;
 	tabId: string;
 	terminalId?: string;
 }
 
 export interface WorkspacesSnapshot {
-	/** Each project's workspace, by project path (or `OTHER`). */
+	/** Each place's workspace, by place (`placeKey`: checkout id and worktree path; or `OTHER`). */
 	layouts: ReadonlyMap<string, Workspace>;
-	/** The project on screen. */
+	/** The place on screen. */
 	active?: string;
 	focus?: FocusRequest;
 }
@@ -58,9 +59,9 @@ export interface OpenOptions {
 }
 
 /**
- * One node's workspaces, one per project, kept in `localStorage` per node. It also remembers which of the node's
- * terminals it has placed, so a terminal whose tab was closed is not given a new one: only terminals new to this
- * browser get a tab of their own.
+ * One node's workspaces, one per place (a worktree of a checkout, or "Other"), kept in `localStorage` per node. It
+ * also remembers which of the node's terminals it has placed, so a terminal whose tab was closed is not given a new
+ * one: only terminals new to this browser get a tab of their own.
  */
 export class NodeWorkspaces {
 	readonly node: string;
@@ -96,34 +97,34 @@ export class NodeWorkspaces {
 		return `${WORKSPACE_KEY_PREFIX}${this.node}`;
 	}
 
-	/** A project's workspace, new and empty the first time. */
-	layout(project: string): Workspace {
-		return this.#layouts.get(project) ?? createWorkspace();
+	/** A place's workspace, new and empty the first time. */
+	layout(place: string): Workspace {
+		return this.#layouts.get(place) ?? createWorkspace();
 	}
 
 	get active(): string | undefined {
 		return this.#active;
 	}
 
-	setActive(project: string): void {
-		if (this.#active === project) return;
-		this.#active = project;
+	setActive(place: string): void {
+		if (this.#active === place) return;
+		this.#active = place;
 		this.#commit();
 	}
 
-	/** Changes a project's workspace; `focus` asks for a tab (and pane) to take focus once it shows. */
-	update(project: string, change: (ws: Workspace) => Workspace, focus?: { tabId: string; terminalId?: string }): void {
-		const before = this.layout(project);
+	/** Changes a place's workspace; `focus` asks for a tab (and pane) to take focus once it shows. */
+	update(place: string, change: (ws: Workspace) => Workspace, focus?: { tabId: string; terminalId?: string }): void {
+		const before = this.layout(place);
 		const after = change(before);
 		if (after === before && !focus) return;
-		this.#layouts.set(project, after);
-		if (focus) this.#focus = { serial: ++this.#serial, project, ...focus };
+		this.#layouts.set(place, after);
+		if (focus) this.#focus = { serial: ++this.#serial, place, ...focus };
 		this.#commit();
 	}
 
 	/** Asks for focus on a tab that is already there. */
-	requestFocus(project: string, tabId: string, terminalId?: string): void {
-		this.#focus = { serial: ++this.#serial, project, tabId, ...(terminalId ? { terminalId } : {}) };
+	requestFocus(place: string, tabId: string, terminalId?: string): void {
+		this.#focus = { serial: ++this.#serial, place, tabId, ...(terminalId ? { terminalId } : {}) };
 		this.#emit();
 	}
 
@@ -144,20 +145,20 @@ export class NodeWorkspaces {
 	}
 
 	/**
-	 * The node's terminals now, each with its project. Once the node has listed them (`listed`), terminals that are
+	 * The node's terminals now, each with its place. Once the node has listed them (`listed`), terminals that are
 	 * gone leave every workspace (on the first listing, exited ones too: a restored layout keeps live panes only);
-	 * terminals new to this browser get a tab in their project's active group, shown only where the group had nothing.
+	 * terminals new to this browser get a tab in their place's active group, shown only where the group had nothing.
 	 */
-	reconcile(terminals: readonly { terminalId: string; project: string; exited?: boolean }[], listed: boolean): void {
+	reconcile(terminals: readonly { terminalId: string; place: string; exited?: boolean }[], listed: boolean): void {
 		if (!listed) return;
 		const first = !this.#listed;
 		this.#listed = true;
 		const live = new Set(terminals.filter((item) => !(first && item.exited)).map((item) => item.terminalId));
 		let changed = false;
-		for (const [project, ws] of this.#layouts) {
+		for (const [place, ws] of this.#layouts) {
 			const pruned = pruneTerminals(ws, (id) => live.has(id));
 			if (pruned !== ws) {
-				this.#layouts.set(project, pruned);
+				this.#layouts.set(place, pruned);
 				changed = true;
 			}
 		}
@@ -173,32 +174,32 @@ export class NodeWorkspaces {
 		}
 		if (this.#pending === 0) {
 			// Oldest first, so the newest ends up after the others.
-			for (const { terminalId, project, exited } of [...terminals].reverse()) {
+			for (const { terminalId, place, exited } of [...terminals].reverse()) {
 				if (this.#known.has(terminalId) || exited) continue;
 				this.#known.add(terminalId);
-				this.#layouts.set(project, addTab(this.layout(project), terminalTab(terminalId), { activate: false }));
+				this.#layouts.set(place, addTab(this.layout(place), terminalTab(terminalId), { activate: false }));
 				changed = true;
 			}
 		}
 		if (changed) this.#commit();
 	}
 
-	/** The project whose workspace shows `terminalId`, if any. */
-	projectOf(terminalId: string): string | undefined {
-		for (const [project, ws] of this.#layouts) if (tabOfTerminal(ws, terminalId)) return project;
+	/** The place whose workspace shows `terminalId`, if any. */
+	placeOf(terminalId: string): string | undefined {
+		for (const [place, ws] of this.#layouts) if (tabOfTerminal(ws, terminalId)) return place;
 		return undefined;
 	}
 
 	/**
-	 * Shows `terminalId` in `project`'s workspace: its tab activated and its pane focused, or, when no tab there has
-	 * it, a new tab in the active group (taking it out of another project's workspace, as a terminal shows once).
+	 * Shows `terminalId` in `place`'s workspace: its tab activated and its pane focused, or, when no tab there has
+	 * it, a new tab in the active group (taking it out of another place's workspace, as a terminal shows once).
 	 */
-	reveal(project: string, terminalId: string, { focus = true }: { focus?: boolean } = {}): void {
+	reveal(place: string, terminalId: string, { focus = true }: { focus?: boolean } = {}): void {
 		this.#known.add(terminalId);
-		const elsewhere = this.projectOf(terminalId);
-		if (elsewhere && elsewhere !== project) this.#layouts.set(elsewhere, removeTerminal(this.#layouts.get(elsewhere)!, terminalId));
+		const elsewhere = this.placeOf(terminalId);
+		if (elsewhere && elsewhere !== place) this.#layouts.set(elsewhere, removeTerminal(this.#layouts.get(elsewhere)!, terminalId));
 		let tabId = "";
-		this.update(project, (ws) => {
+		this.update(place, (ws) => {
 			const existing = tabOfTerminal(ws, terminalId);
 			if (existing) {
 				tabId = existing.id;
@@ -208,8 +209,8 @@ export class NodeWorkspaces {
 			tabId = tab.id;
 			return addTab(ws, tab);
 		});
-		this.#active = project;
-		if (focus) this.#focus = { serial: ++this.#serial, project, tabId, terminalId };
+		this.#active = place;
+		if (focus) this.#focus = { serial: ++this.#serial, place, tabId, terminalId };
 		this.#commit();
 	}
 
@@ -217,9 +218,9 @@ export class NodeWorkspaces {
 	 * Opens a file or diff tab by the placement rule (`placeOpen`) from `sourceGroupId`. A preview tab replaces the
 	 * group's preview. Focus goes to it only when `focus` asks.
 	 */
-	openEditor(project: string, tab: FileTab | DiffTab, options: OpenOptions = {}): string {
+	openEditor(place: string, tab: FileTab | DiffTab, options: OpenOptions = {}): string {
 		let groupId = "";
-		this.update(project, (ws) => {
+		this.update(place, (ws) => {
 			const placement = placeOpen(ws, options.sourceGroupId ?? ws.activeGroupId, tab.id);
 			const before = ws.activeGroupId;
 			let next: Workspace;
@@ -236,7 +237,7 @@ export class NodeWorkspaces {
 			next = activate(next, tab.id);
 			return options.focus ? next : { ...next, activeGroupId: ws.groups[before] && next.groups[before] ? before : next.activeGroupId };
 		});
-		if (options.focus) this.requestFocus(project, tab.id);
+		if (options.focus) this.requestFocus(place, tab.id);
 		return groupId;
 	}
 
@@ -252,8 +253,8 @@ export class NodeWorkspaces {
 	/** A restored file that could not be opened: its tabs go, unremembered. */
 	failedToOpen(tabId: string): void {
 		if (!this.#restored.delete(tabId)) return;
-		for (const [project, ws] of this.#layouts) {
-			if (ws.tabs[tabId]) this.#layouts.set(project, closeTab(ws, tabId, { forget: true }));
+		for (const [place, ws] of this.#layouts) {
+			if (ws.tabs[tabId]) this.#layouts.set(place, closeTab(ws, tabId, { forget: true }));
 		}
 		this.#commit();
 	}
@@ -279,10 +280,10 @@ export class NodeWorkspaces {
 		// Another version's layout is not read: the page starts afresh.
 		if (stored.version !== WORKSPACE_VERSION) return;
 		if (stored.layouts && typeof stored.layouts === "object") {
-			for (const [project, value] of Object.entries(stored.layouts as Record<string, unknown>)) {
+			for (const [place, value] of Object.entries(stored.layouts as Record<string, unknown>)) {
 				const ws = restoreWorkspace(value);
 				if (!ws) continue;
-				this.#layouts.set(project, ws);
+				this.#layouts.set(place, ws);
 				for (const tab of Object.values(ws.tabs)) if (tab.kind === "file") this.#restored.add(tab.id);
 			}
 		}
@@ -292,7 +293,7 @@ export class NodeWorkspaces {
 
 	#save(): void {
 		const layouts: Record<string, unknown> = {};
-		for (const [project, ws] of this.#layouts) layouts[project] = storeWorkspace(ws);
+		for (const [place, ws] of this.#layouts) layouts[place] = storeWorkspace(ws);
 		try {
 			this.#storage?.setItem(this.key, JSON.stringify({ version: WORKSPACE_VERSION, ...(this.#active ? { active: this.#active } : {}), known: [...this.#known], layouts }));
 		} catch {

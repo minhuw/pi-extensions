@@ -159,7 +159,7 @@ describe("rebinding", () => {
 		const keymap = buildKeymap({ bindings: { "terminal.new": "Cmd+Ctrl+ArrowDown" } }, true);
 		expect(keymap.bindings.get("terminal.new")!.map(chordId)).toEqual(["Cmd+Ctrl+ArrowDown"]);
 		expect(keymap.bindings.get("pane.next")).toEqual([]);
-		expect(keymap.problems).toEqual([{ action: "pane.next", message: '⌃⌘↓ is bound to both "New terminal in this project" and "Next agent in the list"; "New terminal in this project" keeps it.' }]);
+		expect(keymap.problems).toEqual([{ action: "pane.next", message: '⌃⌘↓ is bound to both "New terminal in this worktree" and "Next agent in the list"; "New terminal in this worktree" keeps it.' }]);
 		// Find works only in the terminal and diff keys only in a diff, so they can share a chord.
 		expect(buildKeymap({ bindings: { "diff.next": "Cmd+F" } }, true).problems).toEqual([]);
 	});

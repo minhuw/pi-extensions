@@ -1,5 +1,6 @@
 /**
- * The agent rail's menus, as data: what each kind of row offers (an agent, a project card, a node, the "+" button).
+ * The agent rail's menus, as data: what each kind of row offers (an agent, a project heading, a checkout, a worktree
+ * card, the "Other" card, a node, the "+" button).
  * The rail draws them with the shared menu (`deck/Menu.tsx`).
  *
  * The rules every builder keeps:
@@ -9,8 +10,8 @@
  * - A node that is not connected leaves out everything that needs it, and the menu says so once, in a note.
  *
  * The items follow Orca's worktree and host menus and T3 Code's thread menu (both MIT; see ORCA-LICENSE and
- * T3-LICENSE): Orca's "Mark Read" / "Mark Unread", "Copy Path", and removing a project from the app rather than from
- * disk; T3's "Rename", "Mark unread", and "Copy path" / "Copy thread id". Destructive items are last and red.
+ * T3-LICENSE): Orca's "Mark Read" / "Mark Unread", "Copy Path", "Copy Branch Name", removing a repository from the app
+ * rather than from disk, and removing a worktree with git; T3's "Rename", "Mark unread", and "Copy path" / "Copy thread id". Destructive items are last and red.
  */
 import type { MenuEntry, MenuItem } from "../deck/Menu";
 import { actionShortcut } from "../keys";
@@ -113,56 +114,147 @@ export function agentMenu(state: AgentMenuState, run: AgentMenuActions): MenuEnt
 	);
 }
 
-// --- A project card -------------------------------------------------------------------------------------------------
+// --- A project heading, a checkout, a worktree card, "Other" ------------------------------------------------------
+
+export interface CheckoutMenuState {
+	nodeName: string;
+	connected: boolean;
+	/** The daemon offers `checkouts` (every checkout and worktree request). */
+	canCheckouts: boolean;
+	kind: "git" | "folder";
+	/** Added by hand (`checkout.add`): it stays listed without a terminal or a root finding it. */
+	configured: boolean;
+}
+
+export interface CheckoutMenuActions {
+	rename: () => void;
+	settings: () => void;
+	reveal: () => void;
+	copyPath: () => void;
+	keep: () => void;
+	hide: () => void;
+}
+
+/** A checkout's items in three groups (names and settings, where it is, keeping or removing it), for its row or its heading. */
+function checkoutParts(state: CheckoutMenuState, run: CheckoutMenuActions): [Part[], Part[], Part[]] {
+	const on = state.connected;
+	const edit = state.canCheckouts ? undefined : updateNode(state.nodeName);
+	return [
+		[
+			on && item("rename-checkout", `Rename on ${state.nodeName}…`, run.rename, { icon: "pencil", ...unless(edit) }),
+			on && state.kind === "git" && item("settings", "Worktree Settings…", run.settings, { icon: "branch", ...unless(edit) }),
+		],
+		[on && item("reveal", "Reveal in Explorer", run.reveal, { icon: "reveal" }), item("copy-path", "Copy Path", run.copyPath, { icon: "copy" })],
+		[
+			on && !state.configured && item("keep", "Keep in Deck", run.keep, { icon: "check", ...unless(edit) }),
+			on && item("hide", "Remove from Deck", run.hide, { danger: true, icon: "close", ...shortcut("rail.remove"), ...unless(edit) }),
+		],
+	];
+}
+
+/** A checkout's row (shown when a node has two or more checkouts of one project). */
+export function checkoutMenu(state: CheckoutMenuState, run: CheckoutMenuActions): MenuEntry[] {
+	const [edit, reach, remove] = checkoutParts(state, run);
+	return groups(edit, reach, remove, [!state.connected && note(notConnected(state.nodeName))]);
+}
 
 export interface ProjectMenuState {
 	nodeName: string;
-	/** The node's "Other" card: terminals in no project, started in the home directory. */
-	other: boolean;
-	/** A linked git worktree: it is removed with git, not just from Deck. */
-	worktree: boolean;
-	folded: boolean;
 	connected: boolean;
-	canEdit: boolean;
-	canWorktree: boolean;
+	canCheckouts: boolean;
+	/** The server has a key for the project, so it keeps a name and folding for it. */
+	persisted: boolean;
+	collapsed: boolean;
+	repository?: string;
+	/** The project's checkouts that can make worktrees, by id, each with a label (its path) for choosing. */
+	worktreeFrom: readonly { id: string; label: string }[];
+	/** The heading stands for the project's only checkout: its items join the heading's. */
+	checkout?: CheckoutMenuState;
 }
 
 export interface ProjectMenuActions {
-	newTerminal: () => void;
-	newAgent: () => void;
-	newWorktree: () => void;
-	reveal: () => void;
-	copyPath: () => void;
+	newWorktree: (checkoutId: string) => void;
 	rename: () => void;
 	fold: () => void;
-	remove: () => void;
-	removeWorktree: () => void;
+	copyRepository: () => void;
+	checkout?: CheckoutMenuActions;
 }
 
 export function projectMenu(state: ProjectMenuState, run: ProjectMenuActions): MenuEntry[] {
 	const on = state.connected;
-	const project = !state.other;
-	const update = updateNode(state.nodeName);
-	const edit = state.canEdit ? undefined : update;
-	const worktree = state.canWorktree ? undefined : update;
+	const worktree = unless(state.canCheckouts ? undefined : updateNode(state.nodeName));
+	const from = state.worktreeFrom;
+	const newWorktree: Part =
+		on &&
+		from.length > 0 &&
+		(from.length === 1
+			? item("new-worktree", "New Worktree…", () => run.newWorktree(from[0]!.id), { icon: "branch", ...worktree })
+			: item("new-worktree", "New Worktree", () => {}, {
+					icon: "branch",
+					...worktree,
+					submenu: from.map((checkout) => item(`new-worktree:${checkout.id}`, `${checkout.label}…`, () => run.newWorktree(checkout.id), { icon: "folder" })),
+				}));
+	const [edit, reach, remove] = state.checkout && run.checkout ? checkoutParts(state.checkout, run.checkout) : [[], [], []];
 	return groups(
+		[newWorktree],
+		[state.persisted && item("rename", "Rename Project…", run.rename, { icon: "pencil", ...shortcut("rail.rename") }), ...edit, item("fold", state.collapsed ? "Expand" : "Collapse", run.fold, { icon: "fold" })],
+		[...reach, state.repository !== undefined && item("copy-repository", "Copy Repository URL", run.copyRepository, { icon: "copy" })],
+		remove,
+		[!on && note(notConnected(state.nodeName))],
+	);
+}
+
+export interface WorktreeMenuState {
+	nodeName: string;
+	connected: boolean;
+	canCheckouts: boolean;
+	/** A linked worktree (not the main one, not a folder): it can be removed. */
+	linked: boolean;
+	branch?: string;
+	/** Its directory is gone: nothing can start in it, and removing it prunes git's entry. */
+	prunable: boolean;
+}
+
+export interface WorktreeMenuActions {
+	newTerminal: () => void;
+	newAgent: () => void;
+	reveal: () => void;
+	copyPath: () => void;
+	copyBranch: () => void;
+	remove: () => void;
+}
+
+export function worktreeMenu(state: WorktreeMenuState, run: WorktreeMenuActions): MenuEntry[] {
+	const on = state.connected;
+	const there = on && !state.prunable;
+	return groups(
+		[there && item("new-terminal", "New Terminal", run.newTerminal, { icon: "terminal", ...shortcut("terminal.new") }), there && item("new-agent", "New pi Agent", run.newAgent, { icon: "agent" })],
 		[
-			on && item("new-terminal", project ? "New Terminal" : "New Terminal in Home", run.newTerminal, { icon: "terminal" }),
-			on && item("new-agent", "New pi Agent", run.newAgent, { icon: "agent" }),
-			on && project && item("new-worktree", "New Worktree…", run.newWorktree, { icon: "branch", ...unless(worktree) }),
-		],
-		[on && project && item("reveal", "Reveal in Explorer", run.reveal, { icon: "reveal" }), project && item("copy-path", "Copy Path", run.copyPath, { icon: "copy" })],
-		[
-			on && project && item("rename", "Rename…", run.rename, { icon: "pencil", ...unless(edit), ...shortcut("rail.rename") }),
-			item("fold", state.folded ? "Expand" : "Collapse", run.fold, { icon: "fold" }),
+			there && item("reveal", "Reveal in Explorer", run.reveal, { icon: "reveal" }),
+			item("copy-path", "Copy Path", run.copyPath, { icon: "copy" }),
+			state.branch !== undefined && item("copy-branch", "Copy Branch Name", run.copyBranch, { icon: "copy" }),
 		],
 		[
 			on &&
-				project &&
-				(state.worktree
-					? item("remove-worktree", "Remove Worktree…", run.removeWorktree, { danger: true, icon: "trash", ...unless(worktree) })
-					: item("remove", "Remove from Deck", run.remove, { danger: true, icon: "close", ...shortcut("rail.remove"), ...unless(edit) })),
+				state.linked &&
+				item("remove-worktree", "Remove Worktree…", run.remove, { danger: true, icon: "trash", ...shortcut("rail.remove"), ...unless(state.canCheckouts ? undefined : updateNode(state.nodeName)) }),
 		],
+		[!on && note(notConnected(state.nodeName))],
+	);
+}
+
+export interface OtherMenuActions {
+	newTerminal: () => void;
+	newAgent: () => void;
+	fold: () => void;
+}
+
+/** The node's "Other" card: terminals in no listed worktree, new ones started in the home directory. */
+export function otherMenu(state: { nodeName: string; connected: boolean; folded: boolean }, run: OtherMenuActions): MenuEntry[] {
+	const on = state.connected;
+	return groups(
+		[on && item("new-terminal", "New Terminal in Home", run.newTerminal, { icon: "terminal" }), on && item("new-agent", "New pi Agent", run.newAgent, { icon: "agent" })],
+		[item("fold", state.folded ? "Expand" : "Collapse", run.fold, { icon: "fold" })],
 		[!on && note(notConnected(state.nodeName))],
 	);
 }
@@ -172,7 +264,7 @@ export function projectMenu(state: ProjectMenuState, run: ProjectMenuActions): M
 export interface NodeMenuState {
 	nodeName: string;
 	connected: boolean;
-	canEdit: boolean;
+	canCheckouts: boolean;
 	/** The pinned key's fingerprint, when this browser pinned one. */
 	fingerprint?: string;
 	pinned: boolean;
@@ -183,7 +275,7 @@ export interface NodeMenuState {
 
 export interface NodeMenuActions {
 	newTerminal: () => void;
-	addProject: () => void;
+	addCheckout: () => void;
 	copyFingerprint: () => void;
 	repair: () => void;
 	fold: () => void;
@@ -194,7 +286,7 @@ export function nodeMenu(state: NodeMenuState, run: NodeMenuActions): MenuEntry[
 	return groups(
 		[
 			on && item("new-terminal", "New Terminal in Home", run.newTerminal, { icon: "terminal" }),
-			on && item("add-project", "Add Project…", run.addProject, { icon: "folder", ...unless(state.canEdit ? undefined : updateNode(state.nodeName)) }),
+			on && item("add-checkout", "Add Repository…", run.addCheckout, { icon: "folder", ...unless(state.canCheckouts ? undefined : updateNode(state.nodeName)) }),
 		],
 		[
 			state.fingerprint !== undefined && item("copy-fingerprint", "Copy Node Fingerprint", run.copyFingerprint, { icon: "key" }),
@@ -210,8 +302,7 @@ export function nodeMenu(state: NodeMenuState, run: NodeMenuActions): MenuEntry[
 export interface AddMenuNode {
 	id: string;
 	name: string;
-	canEdit: boolean;
-	canWorktree: boolean;
+	canCheckouts: boolean;
 }
 
 export interface AddMenuState {
@@ -221,15 +312,18 @@ export interface AddMenuState {
 	offline: readonly string[];
 	/** Nodes this browser has not paired: pairing is the way to them. */
 	unpaired: readonly { id: string; name: string }[];
-	/** The node on screen, and its project when it is a real one (not "Other"). */
-	current?: { node: string; project?: { path: string; name: string } };
+	/**
+	 * The node on screen, and its place when it is a worktree (not "Other"): its name, and the checkout new worktrees
+	 * come from when it can make them.
+	 */
+	current?: { node: string; place?: { place: string; name: string; checkoutId?: string } };
 }
 
 export interface AddMenuActions {
-	/** A terminal (or pi, `agent`) in `project`, or in the node's home without one. */
-	newTerminal: (node: string, project: string | undefined, agent: boolean) => void;
-	addProject: (node: string) => void;
-	newWorktree: (node: string, project: string) => void;
+	/** A terminal (or pi, `agent`) in `place`, or in the node's home without one. */
+	newTerminal: (node: string, place: string | undefined, agent: boolean) => void;
+	addCheckout: (node: string) => void;
+	newWorktree: (node: string, checkoutId: string) => void;
 	pair: (node: string) => void;
 }
 
@@ -259,28 +353,29 @@ export function addMenu(state: AddMenuState, run: AddMenuActions): MenuEntry[] {
 
 	const target = nodes.find((node) => node.id === state.current?.node) ?? (nodes.length === 1 ? nodes[0] : undefined);
 	const isCurrent = target !== undefined && target.id === state.current?.node;
-	const project = isCurrent ? state.current?.project : undefined;
+	const place = isCurrent ? state.current?.place : undefined;
 	const id = (node: AddMenuNode, name: string, prefix: boolean) => (prefix ? `${node.id}:${name}` : name);
-	const create = (node: AddMenuNode, prefix: boolean, here?: { path: string; name: string }): Part[] => [
-		item(id(node, "new-terminal", prefix), "New Terminal", () => run.newTerminal(node.id, here?.path, false), { icon: "terminal", ...(here && isCurrent ? shortcut("terminal.new") : {}) }),
-		item(id(node, "new-agent", prefix), "New pi Agent", () => run.newTerminal(node.id, here?.path, true), { icon: "agent" }),
-		here && item(id(node, "new-worktree", prefix), "New Worktree…", () => run.newWorktree(node.id, here.path), { icon: "branch", ...unless(node.canWorktree ? undefined : updateNode(node.name)) }),
+	const create = (node: AddMenuNode, prefix: boolean, here?: { place: string; name: string; checkoutId?: string }): Part[] => [
+		item(id(node, "new-terminal", prefix), "New Terminal", () => run.newTerminal(node.id, here?.place, false), { icon: "terminal", ...(here && isCurrent ? shortcut("terminal.new") : {}) }),
+		item(id(node, "new-agent", prefix), "New pi Agent", () => run.newTerminal(node.id, here?.place, true), { icon: "agent" }),
+		here?.checkoutId !== undefined &&
+			item(id(node, "new-worktree", prefix), "New Worktree…", () => run.newWorktree(node.id, here.checkoutId!), { icon: "branch", ...unless(node.canCheckouts ? undefined : updateNode(node.name)) }),
 	];
-	const addProject = (node: AddMenuNode, prefix: boolean) =>
-		item(id(node, "add-project", prefix), "Add Project…", () => run.addProject(node.id), { icon: "folder", ...unless(node.canEdit ? undefined : updateNode(node.name)) });
-	const asSubmenu = (node: AddMenuNode) => item(`node:${node.id}`, node.name, () => {}, { icon: "node", submenu: groups(create(node, false), [addProject(node, false)]) });
+	const addCheckout = (node: AddMenuNode, prefix: boolean) =>
+		item(id(node, "add-checkout", prefix), "Add Repository…", () => run.addCheckout(node.id), { icon: "folder", ...unless(node.canCheckouts ? undefined : updateNode(node.name)) });
+	const asSubmenu = (node: AddMenuNode) => item(`node:${node.id}`, node.name, () => {}, { icon: "node", submenu: groups(create(node, false), [addCheckout(node, false)]) });
 
 	if (target) {
 		const others = nodes.filter((node) => node !== target);
-		const named = project !== undefined || others.length > 0;
+		const named = place !== undefined || others.length > 0;
 		return groups(
-			[named && header(project ? `${project.name} · ${target.name}` : target.name), ...create(target, false, project)],
-			[addProject(target, false)],
+			[named && header(place ? `${place.name} · ${target.name}` : target.name), ...create(target, false, place)],
+			[addCheckout(target, false)],
 			others.length ? [header("Other nodes"), ...others.map(asSubmenu)] : [],
 		);
 	}
 	if (nodes.length <= NODE_GROUPS) {
-		return groups(...nodes.map((node) => [header(node.name), ...create(node, true), addProject(node, true)]));
+		return groups(...nodes.map((node) => [header(node.name), ...create(node, true), addCheckout(node, true)]));
 	}
 	return groups(nodes.map(asSubmenu));
 }

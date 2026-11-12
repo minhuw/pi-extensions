@@ -101,7 +101,7 @@ export class FakeNode {
 			home: "/home/me",
 			version: "0.1.0",
 			protocolVersion: 1,
-			capabilities: ["terminal", "files", "projects", "status"],
+			capabilities: ["terminal", "files", "status"],
 			limits: { maxRecordBytes: 1 << 20, maxSnapshotBytes: 512 << 10, maxReadBytes: 512 << 10, maxUploadBytes: 256 << 20, maxUploadChunkBytes: 512 << 10 },
 		};
 	}

@@ -3,13 +3,15 @@ import { useMemo, useRef, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NodeView } from "../src/nodes/client";
 import { cleanTerminal, paneLabel } from "../src/nodes/client";
-import type { PaneView, Project, TerminalInfo } from "../src/nodes/contract";
-import { AddProjectDialog, completionParts, expandHome, matchFolders, UNDO_MS, UndoToast } from "../src/nodes/deck/RailDialogs";
+import type { PaneView, TerminalInfo } from "../src/nodes/contract";
+import { AddCheckoutDialog, completionParts, expandHome, matchFolders, UNDO_MS, UndoToast } from "../src/nodes/deck/RailDialogs";
 import { buildKeymap, focusOf, resolveKey, type PageCommands } from "../src/nodes/keys";
 import { AgentRail, agentMatches, railAgents, useInbox, type RailOps } from "../src/nodes/workspace/AgentRail";
 import { menuItems, type MenuEntry } from "../src/nodes/deck/Menu";
-import { addMenu, agentMenu, nodeMenu, projectMenu, type AddMenuState } from "../src/nodes/workspace/rail-menus";
+import { placeKey, placeOfTerminal, placeWords, type RailNode } from "../src/nodes/workspace/places";
+import { addMenu, agentMenu, checkoutMenu, nodeMenu, otherMenu, projectMenu, worktreeMenu, type AddMenuState } from "../src/nodes/workspace/rail-menus";
 import { OTHER } from "../src/nodes/workspace/store";
+import { gitCheckout, rail, worktree } from "./support/checkouts";
 
 const pane = (id: string, status?: Partial<PaneView>, extra: Partial<TerminalInfo> = {}): TerminalInfo => ({
 	terminalId: id,
@@ -20,6 +22,7 @@ const pane = (id: string, status?: Partial<PaneView>, extra: Partial<TerminalInf
 	pid: 1,
 	createdAt: 1,
 	argv: ["pi"],
+	...placedAt(extra.cwd ?? "/home/me/repo"),
 	...(status ? { status: { state: "idle", bridgeConnected: false, unread: false, ...status } } : {}),
 	...extra,
 });
@@ -34,10 +37,15 @@ const node = (id: string, terminals: TerminalInfo[]): NodeView =>
 		epoch: 1,
 	}) as unknown as NodeView;
 
-const PROJECTS: Project[] = [
-	{ name: "repo", path: "/home/me/repo" },
-	{ name: "repo-fix", path: "/home/me/repo-fix", worktree: "/home/me/repo" },
-];
+// One repository with a linked worktree on branch fix.
+const REPO = gitCheckout("a", "/home/me/repo", { linked: [worktree("/home/me/repo-fix", "fix")] });
+const RAIL = rail("mac", [REPO]);
+const MAIN = placeKey(REPO.id, "/home/me/repo");
+const FIX = placeKey(REPO.id, "/home/me/repo-fix");
+
+/** The node places terminals by their cwd here: the fix worktree, the main one, else nowhere. */
+const placedAt = (cwd: string): Partial<TerminalInfo> =>
+	cwd.startsWith("/home/me/repo-fix") ? { checkoutId: REPO.id, worktreePath: "/home/me/repo-fix" } : cwd.startsWith("/home/me/repo") ? { checkoutId: REPO.id, worktreePath: "/home/me/repo" } : {};
 
 type Calls = Record<string, unknown[][]>;
 
@@ -52,12 +60,16 @@ function makeOps(calls: Calls, capabilities: readonly string[]): RailOps {
 		connected: () => true,
 		fingerprint: () => "f".repeat(64),
 		newTerminal: record("newTerminal"),
-		addProject: record("addProject"),
+		addCheckout: record("addCheckout"),
 		newWorktree: record("newWorktree"),
-		revealProject: record("revealProject"),
-		removeProject: record("removeProject"),
-		removeWorktree: record("removeWorktree"),
+		revealPlace: record("revealPlace"),
 		renameProject: record("renameProject"),
+		setCollapsed: record("setCollapsed"),
+		renameCheckout: record("renameCheckout"),
+		checkoutSettings: record("checkoutSettings"),
+		keepCheckout: record("keepCheckout"),
+		hideCheckout: record("hideCheckout"),
+		removeWorktree: record("removeWorktree"),
 		renameAgent: record("renameAgent"),
 		markRead: record("markRead"),
 		markUnread: record("markUnread"),
@@ -67,11 +79,11 @@ function makeOps(calls: Calls, capabilities: readonly string[]): RailOps {
 	};
 }
 
-const ALL = ["projects.edit", "git.worktree", "term.rename", "pane.unread"];
+const ALL = ["checkouts", "term.rename", "pane.unread"];
 
-function Harness({ nodes, calls, capabilities = ALL, projects = PROJECTS }: { nodes: NodeView[]; calls: Calls; capabilities?: readonly string[]; projects?: Project[] }) {
+function Harness({ nodes, calls, capabilities = ALL, railNode = RAIL, place = MAIN }: { nodes: NodeView[]; calls: Calls; capabilities?: readonly string[]; railNode?: RailNode; place?: string }) {
 	const [hovering, setHovering] = useState(false);
-	const agents = useMemo(() => railAgents(nodes, (_node, terminal) => (terminal.cwd.startsWith("/home/me/repo-fix") ? "/home/me/repo-fix" : terminal.cwd.startsWith("/home/me/repo") ? "/home/me/repo" : OTHER)), [nodes]);
+	const agents = useMemo(() => railAgents(nodes, (_node, terminal) => placeOfTerminal(railNode.places, terminal), (_node, at) => placeWords(railNode.places.get(at))), [nodes, railNode]);
 	const map = useMemo(() => new Map(agents.map((agent) => [agent.key, agent])), [agents]);
 	const inbox = useInbox(agents, undefined, hovering);
 	const commands = useRef<PageCommands>({});
@@ -82,13 +94,13 @@ function Harness({ nodes, calls, capabilities = ALL, projects = PROJECTS }: { no
 				agents={map}
 				inbox={inbox}
 				currentNode="mac"
-				currentProject="/home/me/repo"
-				projectsOf={() => projects}
+				currentPlace={place}
+				railNodeOf={() => railNode}
 				homeOf={() => "/home/me"}
 				onHover={setHovering}
 				onAgent={(key) => (calls.agent ??= []).push([key])}
 				onNode={() => {}}
-				onProject={() => {}}
+				onPlace={(node, at) => (calls.place ??= []).push([node, at])}
 				canClosePane={(key) => !key.endsWith("gone")}
 				onClosePane={(key) => (calls.closePane ??= []).push([key])}
 				onKill={(key, confirm) => (calls.kill ??= []).push([key, confirm])}
@@ -144,56 +156,90 @@ describe("the rail's menus as data", () => {
 		expect(ids(agentMenu(exited, agentRun))).toEqual(["focus", "rename", "|", "restart", "|", "copy-cwd", "|", "remove"]);
 	});
 
+	const checkoutRun = { rename: noop, settings: noop, reveal: noop, copyPath: noop, keep: noop, hide: noop };
+	const worktreeRun = { newTerminal: noop, newAgent: noop, reveal: noop, copyPath: noop, copyBranch: noop, remove: noop };
+	const projectRun = { newWorktree: noop, rename: noop, fold: noop, copyRepository: noop };
+	const checkoutState = { nodeName: "mac", connected: true, canCheckouts: true, kind: "git" as const, configured: false };
+	const projectState = { nodeName: "mac", connected: true, canCheckouts: true, persisted: true, collapsed: false, repository: "https://github.com/me/repo", worktreeFrom: [{ id: "c1", label: "~/repo" }] };
+
+	it("gives a project heading its worktree, rename, folding, and repository URL; with one checkout, the checkout's items too", () => {
+		expect(ids(projectMenu(projectState, projectRun))).toEqual(["new-worktree", "|", "rename", "fold", "|", "copy-repository"]);
+		expect(find(projectMenu(projectState, projectRun), "rename")).toMatchObject({ label: "Rename Project…" });
+		// A project the server has no key for keeps no name: no rename; a folder makes no worktrees and has no URL.
+		expect(ids(projectMenu({ ...projectState, persisted: false, repository: undefined, worktreeFrom: [] }, projectRun))).toEqual(["fold"]);
+		const single = projectMenu({ ...projectState, checkout: checkoutState }, { ...projectRun, checkout: checkoutRun });
+		expect(ids(single)).toEqual(["new-worktree", "|", "rename", "rename-checkout", "settings", "fold", "|", "reveal", "copy-path", "copy-repository", "|", "keep", "hide"]);
+		expect(find(single, "rename-checkout")).toMatchObject({ label: "Rename on mac…" });
+		expect(find(single, "hide")).toMatchObject({ label: "Remove from Deck", danger: true });
+		// Two checkouts that make worktrees: New Worktree asks which.
+		const made: string[] = [];
+		const two = projectMenu({ ...projectState, worktreeFrom: [{ id: "c1", label: "~/repo" }, { id: "c2", label: "~/src/repo" }] }, { ...projectRun, newWorktree: (id) => made.push(id) });
+		const submenu = find(two, "new-worktree")!.submenu!;
+		expect(ids(submenu)).toEqual(["new-worktree:c1", "new-worktree:c2"]);
+		menuItems(submenu)[1]!.run!();
+		expect(made).toEqual(["c2"]);
+	});
+
+	it("gives a checkout its names, settings, place, and Keep or Remove from Deck; a folder has no settings", () => {
+		expect(ids(checkoutMenu(checkoutState, checkoutRun))).toEqual(["rename-checkout", "settings", "|", "reveal", "copy-path", "|", "keep", "hide"]);
+		// One added by hand is kept already.
+		expect(ids(checkoutMenu({ ...checkoutState, kind: "folder", configured: true }, checkoutRun))).toEqual(["rename-checkout", "|", "reveal", "copy-path", "|", "hide"]);
+	});
+
+	it("gives a worktree card terminals, its path and branch, and removal only for a linked worktree", () => {
+		const linked = { nodeName: "mac", connected: true, canCheckouts: true, linked: true, branch: "fix", prunable: false };
+		expect(ids(worktreeMenu(linked, worktreeRun))).toEqual(["new-terminal", "new-agent", "|", "reveal", "copy-path", "copy-branch", "|", "remove-worktree"]);
+		expect(find(worktreeMenu(linked, worktreeRun), "remove-worktree")).toMatchObject({ label: "Remove Worktree…", danger: true });
+		const main = { ...linked, linked: false };
+		expect(ids(worktreeMenu(main, worktreeRun))).toEqual(["new-terminal", "new-agent", "|", "reveal", "copy-path", "copy-branch"]);
+		// A detached worktree has no branch to copy; a prunable one has no folder to start in.
+		const { branch: _branch, ...detached } = linked;
+		expect(ids(worktreeMenu({ ...detached, prunable: true }, worktreeRun))).toEqual(["copy-path", "|", "remove-worktree"]);
+		expect(ids(otherMenu({ nodeName: "mac", connected: true, folded: false }, { newTerminal: noop, newAgent: noop, fold: noop }))).toEqual(["new-terminal", "new-agent", "|", "fold"]);
+	});
+
 	it("disables what an older pika-node cannot do, saying why once", () => {
 		const old = { nodeName: "node01", exited: false, hasPane: true, unread: false, section: "quiet" as const, connected: true, canRename: false, canUnread: false };
 		expect(find(agentMenu(old, agentRun), "rename")).toMatchObject({ disabled: true, reason: "Update pika-node on node01 to use this" });
 		expect(find(agentMenu(old, agentRun), "rename")).not.toHaveProperty("detail");
-		const projectRun = { newTerminal: noop, newAgent: noop, newWorktree: noop, reveal: noop, copyPath: noop, rename: noop, fold: noop, remove: noop, removeWorktree: noop };
-		const card = projectMenu({ nodeName: "node01", other: false, worktree: false, folded: false, connected: true, canEdit: false, canWorktree: false }, projectRun);
-		for (const id of ["new-worktree", "rename", "remove"]) expect(find(card, id)).toMatchObject({ disabled: true, reason: "Update pika-node on node01 to use this" });
-		expect(find(card, "new-terminal")).not.toHaveProperty("disabled");
+		const nodeRun = { newTerminal: noop, addCheckout: noop, copyFingerprint: noop, repair: noop, fold: noop };
+		const node = nodeMenu({ nodeName: "node01", connected: true, canCheckouts: false, pinned: true, foldable: false, folded: false }, nodeRun);
+		expect(find(node, "add-checkout")).toMatchObject({ disabled: true, reason: "Update pika-node on node01 to use this" });
+		expect(find(node, "new-terminal")).not.toHaveProperty("disabled");
 	});
 
 	it("leaves out what a node that is not connected cannot do, and says so once", () => {
 		const offline = { nodeName: "node01", exited: false, hasPane: true, unread: false, section: "working" as const, sessionId: "s1", connected: false, canRename: true, canUnread: true };
 		expect(ids(agentMenu(offline, agentRun))).toEqual(["focus", "|", "copy-cwd", "copy-session", "|", "!node01 is not connected"]);
-		const projectRun = { newTerminal: noop, newAgent: noop, newWorktree: noop, reveal: noop, copyPath: noop, rename: noop, fold: noop, remove: noop, removeWorktree: noop };
-		expect(ids(projectMenu({ nodeName: "node01", other: false, worktree: false, folded: false, connected: false, canEdit: true, canWorktree: true }, projectRun))).toEqual([
-			"copy-path",
-			"|",
+		expect(ids(projectMenu({ ...projectState, nodeName: "node01", connected: false, checkout: { ...checkoutState, connected: false } }, { ...projectRun, checkout: checkoutRun }))).toEqual([
+			"rename",
 			"fold",
+			"|",
+			"copy-path",
+			"copy-repository",
 			"|",
 			"!node01 is not connected",
 		]);
-		const nodeRun = { newTerminal: noop, addProject: noop, copyFingerprint: noop, repair: noop, fold: noop };
-		expect(ids(nodeMenu({ nodeName: "node01", connected: false, canEdit: true, pinned: true, foldable: false, folded: false }, nodeRun))).toEqual(["repair", "|", "!node01 is not connected"]);
+		expect(ids(worktreeMenu({ nodeName: "node01", connected: false, canCheckouts: true, linked: true, branch: "fix", prunable: false }, worktreeRun))).toEqual([
+			"copy-path",
+			"copy-branch",
+			"|",
+			"!node01 is not connected",
+		]);
+		const nodeRun = { newTerminal: noop, addCheckout: noop, copyFingerprint: noop, repair: noop, fold: noop };
+		expect(ids(nodeMenu({ nodeName: "node01", connected: false, canCheckouts: true, pinned: true, foldable: false, folded: false }, nodeRun))).toEqual(["repair", "|", "!node01 is not connected"]);
 		// No menu anywhere offers an item disabled only because the node is offline.
-		for (const menu of [agentMenu(offline, agentRun), nodeMenu({ nodeName: "x", connected: false, canEdit: true, pinned: true, foldable: true, folded: false }, nodeRun)]) {
+		for (const menu of [agentMenu(offline, agentRun), nodeMenu({ nodeName: "x", connected: false, canCheckouts: true, pinned: true, foldable: true, folded: false }, nodeRun), checkoutMenu({ ...checkoutState, connected: false }, checkoutRun)]) {
 			expect(menuItems(menu).filter((entry) => entry.disabled)).toEqual([]);
 		}
 	});
 
-	it("gives a node's menu its terminal, project, fingerprint, and re-pair; the Other card no rename or removal", () => {
-		const nodeRun = { newTerminal: noop, addProject: noop, copyFingerprint: noop, repair: noop, fold: noop };
-		const menu = nodeMenu({ nodeName: "mac", connected: true, canEdit: true, fingerprint: "ab", pinned: true, foldable: true, folded: false }, nodeRun);
-		expect(ids(menu)).toEqual(["new-terminal", "add-project", "|", "copy-fingerprint", "repair", "|", "fold"]);
+	it("gives a node's menu its terminal, Add Repository, fingerprint, and re-pair", () => {
+		const nodeRun = { newTerminal: noop, addCheckout: noop, copyFingerprint: noop, repair: noop, fold: noop };
+		const menu = nodeMenu({ nodeName: "mac", connected: true, canCheckouts: true, fingerprint: "ab", pinned: true, foldable: true, folded: false }, nodeRun);
+		expect(ids(menu)).toEqual(["new-terminal", "add-checkout", "|", "copy-fingerprint", "repair", "|", "fold"]);
 		// A node this browser never pinned has no fingerprint to copy: the item is left out, not disabled.
-		expect(ids(nodeMenu({ nodeName: "mac", connected: true, canEdit: true, pinned: false, foldable: false, folded: false }, nodeRun))).toEqual(["new-terminal", "add-project"]);
-		const projectRun = { newTerminal: noop, newAgent: noop, newWorktree: noop, reveal: noop, copyPath: noop, rename: noop, fold: noop, remove: noop, removeWorktree: noop };
-		expect(ids(projectMenu({ nodeName: "mac", other: true, worktree: false, folded: false, connected: true, canEdit: true, canWorktree: true }, projectRun))).toEqual(["new-terminal", "new-agent", "|", "fold"]);
-		expect(ids(projectMenu({ nodeName: "mac", other: false, worktree: true, folded: true, connected: true, canEdit: true, canWorktree: true }, projectRun))).toEqual([
-			"new-terminal",
-			"new-agent",
-			"new-worktree",
-			"|",
-			"reveal",
-			"copy-path",
-			"|",
-			"rename",
-			"fold",
-			"|",
-			"remove-worktree",
-		]);
+		expect(ids(nodeMenu({ nodeName: "mac", connected: true, canCheckouts: true, pinned: false, foldable: false, folded: false }, nodeRun))).toEqual(["new-terminal", "add-checkout"]);
 	});
 });
 
@@ -201,12 +247,12 @@ describe("the rail's + menu", () => {
 	const made: unknown[][] = [];
 	const run = {
 		newTerminal: (...args: unknown[]) => void made.push(["terminal", ...args]),
-		addProject: (...args: unknown[]) => void made.push(["add", ...args]),
+		addCheckout: (...args: unknown[]) => void made.push(["add", ...args]),
 		newWorktree: (...args: unknown[]) => void made.push(["worktree", ...args]),
 		pair: (...args: unknown[]) => void made.push(["pair", ...args]),
 	};
-	const mac = { id: "m", name: "mac", canEdit: true, canWorktree: true };
-	const node01 = { id: "n", name: "node01", canEdit: true, canWorktree: true };
+	const mac = { id: "m", name: "mac", canCheckouts: true };
+	const node01 = { id: "n", name: "node01", canCheckouts: true };
 	const ids = (entries: readonly MenuEntry[]) =>
 		entries.map((entry) => (entry === "separator" ? "|" : "kind" in entry ? (entry.kind === "header" ? `#${entry.label}` : `!${entry.text}`) : entry.submenu ? `${entry.id}>` : entry.id));
 	const plus = (state: Partial<AddMenuState>) => addMenu({ nodes: [], offline: [], unpaired: [], ...state }, run);
@@ -214,26 +260,28 @@ describe("the rail's + menu", () => {
 
 	it("uses the only connected node without asking, and makes things in its home", () => {
 		const menu = plus({ nodes: [mac] });
-		expect(ids(menu)).toEqual(["new-terminal", "new-agent", "|", "add-project"]);
+		expect(ids(menu)).toEqual(["new-terminal", "new-agent", "|", "add-checkout"]);
 		menuItems(menu)[0]!.run!();
 		expect(made).toEqual([["terminal", "m", undefined, false]]);
 	});
 
-	it("defaults to the project on screen, names where things land, and offers its worktree", () => {
-		const menu = plus({ nodes: [mac], current: { node: "m", project: { path: "/p/atlas", name: "atlas" } } });
-		expect(ids(menu)).toEqual(["#atlas · mac", "new-terminal", "new-agent", "new-worktree", "|", "add-project"]);
+	it("defaults to the worktree on screen, names where things land, and offers a new worktree of its checkout", () => {
+		const menu = plus({ nodes: [mac], current: { node: "m", place: { place: "c:/p/atlas", name: "atlas · main", checkoutId: "c" } } });
+		expect(ids(menu)).toEqual(["#atlas · main · mac", "new-terminal", "new-agent", "new-worktree", "|", "add-checkout"]);
 		menuItems(menu).find((entry) => entry.id === "new-agent")!.run!();
 		menuItems(menu).find((entry) => entry.id === "new-worktree")!.run!();
 		expect(made).toEqual([
-			["terminal", "m", "/p/atlas", true],
-			["worktree", "m", "/p/atlas"],
+			["terminal", "m", "c:/p/atlas", true],
+			["worktree", "m", "c"],
 		]);
+		// A folder makes no worktrees.
+		expect(ids(plus({ nodes: [mac], current: { node: "m", place: { place: "f:/p/notes", name: "notes" } } }))).not.toContain("new-worktree");
 	});
 
 	it("groups several connected nodes under their names when none is on screen, so one choice picks both", () => {
 		const menu = plus({ nodes: [mac, node01] });
-		expect(ids(menu)).toEqual(["#mac", "m:new-terminal", "m:new-agent", "m:add-project", "|", "#node01", "n:new-terminal", "n:new-agent", "n:add-project"]);
-		menuItems(menu).find((entry) => entry.id === "n:add-project")!.run!();
+		expect(ids(menu)).toEqual(["#mac", "m:new-terminal", "m:new-agent", "m:add-checkout", "|", "#node01", "n:new-terminal", "n:new-agent", "n:add-checkout"]);
+		menuItems(menu).find((entry) => entry.id === "n:add-checkout")!.run!();
 		expect(made).toEqual([["add", "n"]]);
 		// Many nodes become one submenu each.
 		const many = plus({ nodes: ["a", "b", "c", "d", "e"].map((id) => ({ ...mac, id, name: id })) });
@@ -242,9 +290,9 @@ describe("the rail's + menu", () => {
 
 	it("puts the node on screen first and the other connected nodes in submenus", () => {
 		const menu = plus({ nodes: [mac, node01], current: { node: "n" } });
-		expect(ids(menu)).toEqual(["#node01", "new-terminal", "new-agent", "|", "add-project", "|", "#Other nodes", "node:m>"]);
+		expect(ids(menu)).toEqual(["#node01", "new-terminal", "new-agent", "|", "add-checkout", "|", "#Other nodes", "node:m>"]);
 		const other = menuItems(menu).find((entry) => entry.id === "node:m")!;
-		expect(ids(other.submenu!)).toEqual(["new-terminal", "new-agent", "|", "add-project"]);
+		expect(ids(other.submenu!)).toEqual(["new-terminal", "new-agent", "|", "add-checkout"]);
 		menuItems(other.submenu!)[1]!.run!();
 		expect(made).toEqual([["terminal", "m", undefined, true]]);
 	});
@@ -258,13 +306,13 @@ describe("the rail's + menu", () => {
 	});
 
 	it("is never a list of disabled items, and gives each disabled one its own reason", () => {
-		const old = { ...mac, canEdit: false, canWorktree: false };
+		const old = { ...mac, canCheckouts: false };
 		const states: Partial<AddMenuState>[] = [
 			{},
 			{ offline: ["mac"] },
 			{ unpaired: [{ id: "m", name: "mac" }] },
 			{ nodes: [old] },
-			{ nodes: [old], current: { node: "m", project: { path: "/p", name: "p" } } },
+			{ nodes: [old], current: { node: "m", place: { place: "c:/p", name: "p", checkoutId: "c" } } },
 			{ nodes: [old, node01] },
 			{ nodes: [old, node01], current: { node: "m" } },
 		];
@@ -333,47 +381,116 @@ describe("the rail's operations", () => {
 		expect(calls.renameAgent).toHaveLength(1);
 	});
 
-	it("gives project cards a menu and a ⋯ button; F2 and double-click rename, Delete removes", () => {
+	const HEADING = `project:mac\nrepo:${REPO.repository}`;
+	const card = (container: HTMLElement, path: string) => container.querySelector<HTMLElement>(`[data-worktree-card='${path}'] [data-worktree-open]`)!;
+
+	it("nests project, worktree cards (main first, branch as meta), and agents; a card opens its place", () => {
 		const { container } = render(<Harness nodes={[node("mac", [pane("a", { state: "busy" }), pane("w", { state: "idle" }, { cwd: "/home/me/repo-fix" })])]} calls={calls} />);
 		projectsView();
-		const card = container.querySelector<HTMLElement>("[data-project-card='/home/me/repo'] [data-project-open]")!;
-		openMenu(card);
-		const menu = menuFor("data-project-menu", "mac\n/home/me/repo")!;
-		expect(items(menu)).toEqual(["new-terminal", "new-agent", "new-worktree", "reveal", "copy-path", "rename", "fold", "remove"]);
-		fireEvent.click(within(menu as HTMLElement).getByRole("menuitem", { name: /New pi Agent/ }));
-		expect(calls.newTerminal).toEqual([["mac", "/home/me/repo", true]]);
-
-		fireEvent.click(container.querySelector<HTMLElement>("[data-project-card='/home/me/repo'] [data-card-more]")!);
-		fireEvent.click(within(document.querySelector("[data-project-menu]") as HTMLElement).getByRole("menuitem", { name: /Remove from Deck/ }));
-		expect(calls.removeProject).toEqual([["mac", PROJECTS[0]]]);
-
-		// The worktree card offers removing the worktree, and shows it is one.
-		const worktree = container.querySelector<HTMLElement>("[data-project-card='/home/me/repo-fix']")!;
-		expect(worktree.querySelector("[data-worktree-badge]")).not.toBeNull();
-		openMenu(worktree.querySelector("[data-project-open]")!);
-		expect(items(document.querySelector("[data-project-menu]")!)).toContain("remove-worktree");
-		fireEvent.keyDown(document.querySelector("[data-project-menu]")!, { key: "Escape" });
-
-		// Keys on the focused card.
-		card.focus();
-		runCommand(container, "rail.remove");
-		expect(calls.removeProject).toEqual([["mac", PROJECTS[0]], ["mac", PROJECTS[0]]]);
-		worktree.querySelector<HTMLElement>("[data-project-open]")!.focus();
-		runCommand(container, "rail.remove");
-		expect(calls.removeWorktree).toEqual([["mac", PROJECTS[1]]]);
-		const renameKey = { key: "F2", metaKey: false, ctrlKey: false, altKey: false, shiftKey: false };
-		expect(resolveKey(buildKeymap(undefined, true), renameKey, focusOf(card))).toBe("rail.rename");
-		expect(resolveKey(buildKeymap(undefined, true), { ...renameKey, key: "Backspace" }, focusOf(card))).toBe("rail.remove");
-
-		fireEvent.doubleClick(card);
-		const field = container.querySelector<HTMLInputElement>("[data-inline-rename]")!;
-		expect(field.value).toBe("repo");
-		fireEvent.change(field, { target: { value: "Main repo" } });
-		fireEvent.blur(field);
-		expect(calls.renameProject).toEqual([["mac", "/home/me/repo", "Main repo"]]);
+		const project = container.querySelector<HTMLElement>("[data-project]")!;
+		expect(project.querySelector("[data-project-name]")!.textContent).toBe("repo");
+		// One checkout of the project on the node: the heading stands for it, with its path; no checkout row.
+		expect(project.querySelector("[data-project-heading]")!.textContent).toContain("~/repo");
+		expect(project.querySelector("[data-checkout-row]")).toBeNull();
+		const cards = [...project.querySelectorAll("[data-worktree-card]")];
+		expect(cards.map((item) => item.getAttribute("data-worktree-card"))).toEqual(["/home/me/repo", "/home/me/repo-fix"]);
+		expect(cards.map((item) => item.querySelector("[data-worktree-meta]")?.textContent)).toEqual(["main", "fix"]);
+		expect(cards[0]!.querySelector("[data-worktree-open]")!.hasAttribute("data-main")).toBe(true);
+		expect([...cards[1]!.querySelectorAll("[data-agent-row]")].map((row) => row.getAttribute("data-agent-row"))).toEqual(["w"]);
+		expect(card(container, "/home/me/repo").getAttribute("aria-current")).toBe("true");
+		fireEvent.click(card(container, "/home/me/repo-fix"));
+		expect(calls.place).toEqual([["mac", FIX]]);
+		// The heading folds the project on the server (the page's operation).
+		fireEvent.click(project.querySelector("[data-project-heading]")!);
+		expect(calls.setCollapsed).toEqual([[RAIL.projects[0], true]]);
 	});
 
-	it("filters by name, project, node, and folder; Escape clears", () => {
+	it("gives the project heading, worktree cards, and Other their menus; F2 renames, Delete removes", () => {
+		const { container } = render(<Harness nodes={[node("mac", [pane("a", { state: "busy" }), pane("x", { state: "idle" }, { cwd: "/srv" })])]} calls={calls} />);
+		projectsView();
+		const heading = container.querySelector<HTMLElement>("[data-project-heading]")!;
+		openMenu(heading);
+		const menu = menuFor("data-project-menu", HEADING)!;
+		expect(items(menu)).toEqual(["new-worktree", "rename", "rename-checkout", "settings", "fold", "reveal", "copy-path", "copy-repository", "keep", "hide"]);
+		fireEvent.click(within(menu as HTMLElement).getByRole("menuitem", { name: /New Worktree/ }));
+		expect(calls.newWorktree).toEqual([["mac", REPO.id]]);
+		fireEvent.click(container.querySelector<HTMLElement>("[data-project] [data-card-more]")!);
+		fireEvent.click(within(document.querySelector("[data-project-menu]") as HTMLElement).getByRole("menuitem", { name: /Worktree Settings/ }));
+		expect(calls.checkoutSettings).toEqual([["mac", REPO]]);
+
+		// The linked worktree offers its removal; the main one does not.
+		openMenu(card(container, "/home/me/repo-fix"));
+		const fixMenu = menuFor("data-worktree-menu", `place:mac\n${FIX}`)!;
+		expect(items(fixMenu)).toEqual(["new-terminal", "new-agent", "reveal", "copy-path", "copy-branch", "remove-worktree"]);
+		fireEvent.click(within(fixMenu as HTMLElement).getByRole("menuitem", { name: /New pi Agent/ }));
+		expect(calls.newTerminal).toEqual([["mac", FIX, true]]);
+		openMenu(card(container, "/home/me/repo"));
+		expect(items(menuFor("data-worktree-menu", `place:mac\n${MAIN}`)!)).not.toContain("remove-worktree");
+		fireEvent.keyDown(document.querySelector("[data-worktree-menu]")!, { key: "Escape" });
+
+		// A terminal in no listed worktree is under Other.
+		const other = container.querySelector<HTMLElement>(`[data-worktree-card='${OTHER}']`)!;
+		expect([...other.querySelectorAll("[data-agent-row]")].map((row) => row.getAttribute("data-agent-row"))).toEqual(["x"]);
+		openMenu(other.querySelector("[data-worktree-open]")!);
+		expect(items(menuFor("data-worktree-menu", `place:mac\n${OTHER}`)!)).toEqual(["new-terminal", "new-agent", "fold"]);
+		fireEvent.keyDown(document.querySelector("[data-worktree-menu]")!, { key: "Escape" });
+
+		// Keys on the focused row.
+		card(container, "/home/me/repo-fix").focus();
+		runCommand(container, "rail.remove");
+		expect(calls.removeWorktree).toHaveLength(1);
+		expect(calls.removeWorktree![0]!.slice(0, 2)).toEqual(["mac", REPO]);
+		expect((calls.removeWorktree![0]![2] as { path: string }).path).toBe("/home/me/repo-fix");
+		heading.focus();
+		runCommand(container, "rail.remove");
+		expect(calls.hideCheckout).toEqual([["mac", REPO]]);
+		const renameKey = { key: "F2", metaKey: false, ctrlKey: false, altKey: false, shiftKey: false };
+		expect(resolveKey(buildKeymap(undefined, true), renameKey, focusOf(heading))).toBe("rail.rename");
+		runCommand(container, "rail.rename");
+		const field = container.querySelector<HTMLInputElement>("[data-inline-rename]")!;
+		expect(field.value).toBe("repo");
+		fireEvent.change(field, { target: { value: "Atlas" } });
+		fireEvent.keyDown(field, { key: "Enter" });
+		expect(calls.renameProject).toEqual([[RAIL.projects[0], "Atlas"]]);
+
+		// Rename on the node, from the heading's menu.
+		openMenu(container.querySelector("[data-project-heading]")!);
+		fireEvent.click(within(document.querySelector("[data-project-menu]") as HTMLElement).getByRole("menuitem", { name: /Rename on mac/ }));
+		const onNode = container.querySelector<HTMLInputElement>("[data-inline-rename]")!;
+		fireEvent.change(onNode, { target: { value: "repo (mac)" } });
+		fireEvent.blur(onNode);
+		expect(calls.renameCheckout).toEqual([["mac", REPO, "repo (mac)"]]);
+	});
+
+	it("shows each checkout's path when two checkouts share a project, and git's markers on cards", () => {
+		const clone = gitCheckout("b", "/home/me/src/repo", {
+			source: "configured",
+			linked: [worktree("/home/me/src/repo-old", undefined, { locked: true }), worktree("/home/me/src/repo-gone", "gone", { prunable: true })],
+		});
+		const two = rail("mac", [REPO, clone]);
+		expect(two.projects).toHaveLength(1);
+		const { container } = render(<Harness nodes={[node("mac", [pane("a", { state: "busy" })])]} calls={calls} railNode={two} />);
+		projectsView();
+		const rows = [...container.querySelectorAll("[data-checkout-row]")];
+		expect(rows.map((row) => row.querySelector("[data-checkout-path]")!.textContent)).toEqual(["~/repo", "~/src/repo"]);
+		expect(container.querySelector("[data-project-heading]")!.textContent).not.toContain("~/");
+		const old = container.querySelector("[data-worktree-card='/home/me/src/repo-old']")!;
+		expect([...old.querySelectorAll("[data-worktree-mark]")].map((mark) => mark.getAttribute("data-worktree-mark"))).toEqual(["detached", "locked"]);
+		expect(old.querySelector("[data-worktree-meta]")!.textContent).toBe("0123456");
+		expect(container.querySelector("[data-worktree-card='/home/me/src/repo-gone'] [data-worktree-mark='prunable']")).not.toBeNull();
+		openMenu(rows[1]!);
+		const menu = menuFor("data-checkout-menu", `checkout:mac\n${clone.id}`)!;
+		// Added by hand: nothing to keep.
+		expect(items(menu)).toEqual(["rename-checkout", "settings", "reveal", "copy-path", "hide"]);
+		fireEvent.click(within(menu as HTMLElement).getByRole("menuitem", { name: /Remove from Deck/ }));
+		expect(calls.hideCheckout).toEqual([["mac", clone]]);
+		// With two checkouts the heading's New Worktree asks which.
+		openMenu(container.querySelector("[data-project-heading]")!);
+		const heading = menuFor("data-project-menu", HEADING)!;
+		expect(items(heading)).toEqual(["new-worktree", "rename", "fold", "copy-repository"]);
+	});
+
+	it("filters by name, worktree and project, node, and folder; Escape clears", () => {
 		const nodes = [node("mac", [pane("alpha", { state: "busy" }), pane("beta", { state: "waiting" }, { cwd: "/srv/data" })]), node("node01", [pane("gamma", { state: "busy" }, { cwd: "/home/me/repo" })])];
 		const { container } = render(<Harness nodes={nodes} calls={calls} />);
 		const filter = container.querySelector<HTMLInputElement>("[data-rail-filter]")!;
@@ -395,23 +512,36 @@ describe("the rail's operations", () => {
 		expect(resolveKey(buildKeymap(undefined, true), { key: "/", metaKey: false, ctrlKey: false, altKey: false, shiftKey: false }, focusOf(filter))).toBeUndefined();
 		const row = container.querySelector<HTMLElement>("[data-agent-row]")!;
 		expect(resolveKey(buildKeymap(undefined, true), { key: "/", metaKey: false, ctrlKey: false, altKey: false, shiftKey: false }, focusOf(row))).toBe("rail.find");
-		const agent = { key: "k", node: nodes[0]!, terminal: nodes[0]!.terminals[0]!, project: "/home/me/repo" };
-		expect(agentMatches(agent, "REPO", "repo")).toBe(true);
+		const agent = { key: "k", node: nodes[0]!, terminal: { ...nodes[0]!.terminals[0]!, cwd: "/x" }, place: MAIN, where: "main · repo" };
+		expect(agentMatches(agent, "REPO")).toBe(true);
+		expect(agentMatches(agent, "MAIN ·")).toBe(true);
+		// The project's name finds the project, with all its agents.
+		fireEvent.change(filter, { target: { value: "fix" } });
+		projectsView();
+		expect(container.querySelector("[data-worktree-card='/home/me/repo-fix']")).not.toBeNull();
 	});
 
-	it("offers New and Add Project from the + menu, and Add Project in a node with no projects", () => {
-		const { container } = render(<Harness nodes={[node("mac", [])]} calls={calls} projects={[]} />);
+	it("offers New and Add Repository from the + menu, and Add Repository in a node with none", () => {
+		const { container, unmount } = render(<Harness nodes={[node("mac", [])]} calls={calls} />);
 		fireEvent.click(container.querySelector<HTMLElement>("[data-rail-add]")!);
 		const menu = document.querySelector("[data-add-menu]")!;
-		expect(items(menu)).toEqual(["new-terminal", "new-agent", "new-worktree", "add-project"]);
-		expect(menu.querySelector("[data-menu-header]")!.textContent).toBe("repo · mac");
-		fireEvent.click(within(menu as HTMLElement).getByRole("menuitem", { name: /Add Project/ }));
-		expect(calls.addProject).toEqual([["mac"]]);
+		expect(items(menu)).toEqual(["new-terminal", "new-agent", "new-worktree", "add-checkout"]);
+		expect(menu.querySelector("[data-menu-header]")!.textContent).toBe("repo · main · mac");
+		fireEvent.click(within(menu as HTMLElement).getByRole("menuitem", { name: /New Worktree/ }));
+		expect(calls.newWorktree).toEqual([["mac", REPO.id]]);
+		unmount();
+		const empty = render(<Harness nodes={[node("mac", [])]} calls={calls} railNode={rail("mac", [])} place={OTHER} />);
+		fireEvent.click(empty.container.querySelector<HTMLElement>("[data-rail-add]")!);
+		const plain = document.querySelector("[data-add-menu]")!;
+		expect(items(plain)).toEqual(["new-terminal", "new-agent", "add-checkout"]);
+		fireEvent.click(within(plain as HTMLElement).getByRole("menuitem", { name: /Add Repository/ }));
+		expect(calls.addCheckout).toEqual([["mac"]]);
+		const container2 = empty.container;
 		projectsView();
-		fireEvent.click(container.querySelector<HTMLElement>("[data-empty-add-project]")!);
-		expect(calls.addProject).toHaveLength(2);
-		openMenu(container.querySelector("[data-node-projects='mac'] [data-node]")!);
-		expect(items(document.querySelector("[data-node-menu]")!)).toEqual(["new-terminal", "add-project", "copy-fingerprint", "repair", "fold"]);
+		fireEvent.click(container2.querySelector<HTMLElement>("[data-empty-add-checkout]")!);
+		expect(calls.addCheckout).toHaveLength(2);
+		openMenu(container2.querySelector("[data-node-projects='mac'] [data-node]")!);
+		expect(items(document.querySelector("[data-node-menu]")!)).toEqual(["new-terminal", "add-checkout", "copy-fingerprint", "repair", "fold"]);
 	});
 
 	it("shows an older daemon's items disabled, with the reason beside the menu while highlighted", async () => {
@@ -444,9 +574,9 @@ describe("the rail's operations", () => {
 		// A disabled destructive item (Remove from Deck) is drawn disabled, not red; an enabled one stays red.
 		fireEvent.keyDown(menu, { key: "Escape" });
 		projectsView();
-		openMenu(container.querySelector("[data-project-card='/home/me/repo'] [data-project-open]")!);
-		const card = menuFor("data-project-menu", "mac\n/home/me/repo")!;
-		const remove = card.querySelector("[data-menu-item='remove']")!;
+		openMenu(container.querySelector("[data-project-heading]")!);
+		const card = menuFor("data-project-menu", HEADING)!;
+		const remove = card.querySelector("[data-menu-item='hide']")!;
 		expect(remove.getAttribute("aria-disabled")).toBe("true");
 		expect(remove.getAttribute("data-variant")).toBe("default");
 		fireEvent.keyDown(card, { key: "Escape" });
@@ -456,7 +586,7 @@ describe("the rail's operations", () => {
 
 });
 
-describe("Add Project", () => {
+describe("Add Repository", () => {
 	it("splits, expands, and matches typed paths", () => {
 		expect(expandHome("~", "/home/me")).toBe("/home/me");
 		expect(expandHome("~/src", "/home/me")).toBe("/home/me/src");
@@ -479,8 +609,8 @@ describe("Add Project", () => {
 			added.push(path);
 			if (path.endsWith("missing")) throw new Error("not_found: no directory /home/me/missing");
 		};
-		render(<AddProjectDialog nodeName="mac" home="/home/me" listFolders={listFolders} onAdd={onAdd} onCancel={() => {}} />);
-		const field = document.querySelector<HTMLInputElement>("[data-add-project-path]")!;
+		render(<AddCheckoutDialog nodeName="mac" home="/home/me" listFolders={listFolders} onAdd={onAdd} onCancel={() => {}} />);
+		const field = document.querySelector<HTMLInputElement>("[data-add-checkout-path]")!;
 		await waitFor(() => expect(document.querySelectorAll("[data-folder]")).toHaveLength(2));
 		expect(listed).toEqual(["/home/me"]);
 		fireEvent.change(field, { target: { value: "~/C" } });

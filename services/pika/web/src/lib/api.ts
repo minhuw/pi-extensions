@@ -92,6 +92,21 @@ export interface Deletion {
 	deletedHerderRuns: number;
 }
 
+/** What Deck asks a project key for: one checkout's repository and project name on a node (SPEC.md, "Deck"). */
+export interface DeckKeyItem {
+	repository?: string;
+	project?: string;
+	node: string;
+}
+
+/** How the owner presents one Deck project; keys without a row have `name: null`, `collapsed: false`. */
+export interface DeckProjectRow {
+	key: string;
+	name: string | null;
+	collapsed: boolean;
+	updatedAt: string;
+}
+
 export interface SessionFilters {
 	device?: string;
 	project?: string;
@@ -426,6 +441,23 @@ export class PikaApi {
 
 	deleteRelayRoom(name: string): Promise<void> {
 		return this.send(`relay/rooms/${encodeURIComponent(name.replace(/^#/, ""))}`, "DELETE");
+	}
+
+	/** One project key per item, in order (`null`: no key); 1–1,024 items. */
+	deckProjectKeys(items: readonly DeckKeyItem[]): Promise<{ keys: (string | null)[] }> {
+		return this.send("deck/project-keys", "POST", { items });
+	}
+
+	deckProjects(): Promise<{ projects: DeckProjectRow[] }> {
+		return this.request("deck/projects");
+	}
+
+	patchDeckProject(key: string, body: { name?: string | null; collapsed?: boolean }): Promise<DeckProjectRow> {
+		return this.send(`deck/projects/${encodeURIComponent(key)}`, "PATCH", body);
+	}
+
+	deleteDeckProject(key: string): Promise<{ deleted: boolean }> {
+		return this.send(`deck/projects/${encodeURIComponent(key)}`, "DELETE");
 	}
 }
 

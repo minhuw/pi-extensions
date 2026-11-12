@@ -430,15 +430,14 @@ describe("QuickOpen", () => {
 		return { files: new NodeFiles(channel), fs, node: fakeNode };
 	}
 
-	it("lists the pane's project with fs.list and opens the best match", async () => {
+	it("lists the worktree holding the pane with fs.list and opens the best match", async () => {
 		const { files, fs, node: fakeNode } = await connected();
-		fs.projects.push({ name: "pika", path: "/home/me/pika" });
 		fs.put("/home/me/pika/src/nodes/paste.ts", "x", { silent: true });
 		fs.put("/home/me/pika/src/pages/Nodes.tsx", "x", { silent: true });
 		fs.put("/home/me/other/paste.ts", "x", { silent: true });
 		const onPick = vi.fn();
-		// The node has no term.cwd here, so the pane's starting cwd picks the project.
-		render(<QuickOpen files={files} terminal={term("t1", undefined, { cwd: "/home/me/pika/src" })} home="/home/me" onPick={onPick} onClose={() => {}} />);
+		// The node has no term.cwd here, so the pane's starting cwd picks the worktree.
+		render(<QuickOpen files={files} terminal={term("t1", undefined, { cwd: "/home/me/pika/src" })} roots={["/home/me/other", "/home/me/pika"]} home="/home/me" onPick={onPick} onClose={() => {}} />);
 		await screen.findByText("Nodes.tsx");
 		expect(fakeNode.received.find((message) => message.type === "fs.list")).toMatchObject({ root: "/home/me/pika" });
 		const input = screen.getByRole("combobox");

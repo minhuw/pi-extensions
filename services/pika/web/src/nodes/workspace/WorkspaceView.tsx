@@ -1,5 +1,5 @@
 /**
- * One project's workspace on screen: its group split tree with dividers, and each group's tab strip and active tab.
+ * One place's workspace (a worktree, or a node's "Other") on screen: its group split tree with dividers, and each group's tab strip and active tab.
  * Terminal tabs draw only slots (`TerminalSplitView`); the terminal layer draws the terminals over them.
  *
  * - **Dividers** follow the pointer live and commit their ratio on release, which is also when terminals send their

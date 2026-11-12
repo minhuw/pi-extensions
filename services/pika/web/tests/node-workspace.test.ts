@@ -26,6 +26,7 @@ import {
 import { menuItems } from "../src/nodes/deck/Menu";
 import { placeOpen } from "../src/nodes/workspace/placement";
 import { tabMenuItems, type WorkspaceActions } from "../src/nodes/workspace/WorkspaceView";
+import { placeKey } from "../src/nodes/workspace/places";
 import { NodeWorkspaces, WORKSPACE_KEY_PREFIX } from "../src/nodes/workspace/store";
 
 const split = (direction: "row" | "column", first: GroupTree, second: GroupTree, ratio = 0.5): GroupTree => ({ type: "split", direction, ratio, first, second });
@@ -234,58 +235,75 @@ class MemoryStorage {
 }
 
 describe("a node's workspaces", () => {
-	it("give new terminals a tab in their project, once, and drop gone ones once listed", () => {
+	// Places: a worktree of a checkout (`placeKey`).
+	const P = placeKey("a".repeat(32), "/p");
+	const Q = placeKey("b".repeat(32), "/q");
+
+	it("drops the layouts of version 1, which were keyed by project path", () => {
+		const storage = new MemoryStorage();
+		storage.setItem(`${WORKSPACE_KEY_PREFIX}n1`, JSON.stringify({ version: 1, active: "/p", known: ["t1"], layouts: { "/p": storeWorkspace(workspace("t1")) } }));
+		const store = new NodeWorkspaces("n1", { storage });
+		expect(store.getSnapshot().layouts.size).toBe(0);
+		expect(store.active).toBeUndefined();
+		// The terminal is new to this layout, so it gets a tab in its place.
+		store.reconcile([{ terminalId: "t1", place: P }], true);
+		expect(store.placeOf("t1")).toBe(P);
+		expect(JSON.parse(storage.getItem(`${WORKSPACE_KEY_PREFIX}n1`)!)).toMatchObject({ version: 2, layouts: { [P]: expect.anything() } });
+	});
+
+
+	it("give new terminals a tab in their place, once, and drop gone ones once listed", () => {
 		const storage = new MemoryStorage();
 		const store = new NodeWorkspaces("n1", { storage });
-		store.reconcile([{ terminalId: "t2", project: "/p" }, { terminalId: "t1", project: "/p" }, { terminalId: "t3", project: "/q" }], false);
+		store.reconcile([{ terminalId: "t2", place: P }, { terminalId: "t1", place: P }, { terminalId: "t3", place: Q }], false);
 		expect(store.getSnapshot().layouts.size).toBe(0);
-		store.reconcile([{ terminalId: "t2", project: "/p" }, { terminalId: "t1", project: "/p" }, { terminalId: "t3", project: "/q" }], true);
-		const p = store.layout("/p");
+		store.reconcile([{ terminalId: "t2", place: P }, { terminalId: "t1", place: P }, { terminalId: "t3", place: Q }], true);
+		const p = store.layout(P);
 		expect(order(p).map((id) => p.tabs[id]!.kind === "terminal" && (p.tabs[id] as { focused: string }).focused)).toEqual(["t1", "t2"]);
 		expect(activeTab(p)?.id).toBe(order(p)[0]);
 		// A closed tab does not come back by itself; a terminal that is gone leaves.
-		store.update("/p", (ws) => closeTab(ws, order(ws)[0]!));
-		store.reconcile([{ terminalId: "t2", project: "/p" }, { terminalId: "t1", project: "/p" }], true);
-		expect(order(store.layout("/p"))).toHaveLength(1);
-		expect(order(store.layout("/q"))).toEqual([]);
+		store.update(P, (ws) => closeTab(ws, order(ws)[0]!));
+		store.reconcile([{ terminalId: "t2", place: P }, { terminalId: "t1", place: P }], true);
+		expect(order(store.layout(P))).toHaveLength(1);
+		expect(order(store.layout(Q))).toEqual([]);
 		// It reads back from storage.
 		const again = new NodeWorkspaces("n1", { storage });
-		again.reconcile([{ terminalId: "t2", project: "/p" }, { terminalId: "t1", project: "/p" }], true);
-		expect(order(again.layout("/p"))).toHaveLength(1);
-		expect(JSON.parse(storage.getItem(`${WORKSPACE_KEY_PREFIX}n1`)!).version).toBe(1);
+		again.reconcile([{ terminalId: "t2", place: P }, { terminalId: "t1", place: P }], true);
+		expect(order(again.layout(P))).toHaveLength(1);
+		expect(JSON.parse(storage.getItem(`${WORKSPACE_KEY_PREFIX}n1`)!).version).toBe(2);
 	});
 
-	it("waits for a terminal it is creating, and moves a revealed terminal between projects", () => {
+	it("waits for a terminal it is creating, and moves a revealed terminal between places", () => {
 		const store = new NodeWorkspaces("n1", { storage: new MemoryStorage() });
 		const release = store.holdNewTerminals();
-		store.reconcile([{ terminalId: "t1", project: "/p" }], true);
-		expect(store.projectOf("t1")).toBeUndefined();
-		store.reveal("/p", "t1");
+		store.reconcile([{ terminalId: "t1", place: P }], true);
+		expect(store.placeOf("t1")).toBeUndefined();
+		store.reveal(P, "t1");
 		release();
-		store.reconcile([{ terminalId: "t1", project: "/p" }], true);
-		expect(order(store.layout("/p"))).toHaveLength(1);
-		expect(store.getSnapshot().focus).toMatchObject({ project: "/p", terminalId: "t1" });
-		store.reveal("/q", "t1");
-		expect(store.projectOf("t1")).toBe("/q");
-		expect(order(store.layout("/p"))).toEqual([]);
-		expect(store.active).toBe("/q");
+		store.reconcile([{ terminalId: "t1", place: P }], true);
+		expect(order(store.layout(P))).toHaveLength(1);
+		expect(store.getSnapshot().focus).toMatchObject({ place: P, terminalId: "t1" });
+		store.reveal(Q, "t1");
+		expect(store.placeOf("t1")).toBe(Q);
+		expect(order(store.layout(P))).toEqual([]);
+		expect(store.active).toBe(Q);
 	});
 
 	it("opens files by the placement rule, focusing them only when asked, and forgets restored files that fail", () => {
 		const storage = new MemoryStorage();
 		const store = new NodeWorkspaces("n1", { storage });
-		store.reveal("/p", "t1");
+		store.reveal(P, "t1");
 		const focusBefore = store.getSnapshot().focus;
-		const group = store.openEditor("/p", fileTab("/p/a.ts"));
-		const ws = store.layout("/p");
+		const group = store.openEditor(P, fileTab("/p/a.ts"));
+		const ws = store.layout(P);
 		expect(leaves(ws.root)).toHaveLength(2);
 		expect(order(ws, group)).toEqual(["file:/p/a.ts"]);
 		// The terminal's group keeps focus and still shows the terminal.
 		expect(ws.activeGroupId).not.toBe(group);
 		expect(activeTab(ws)?.kind).toBe("terminal");
 		expect(store.getSnapshot().focus).toBe(focusBefore);
-		store.openEditor("/p", fileTab("/p/b.ts", true), { focus: true });
-		expect(order(store.layout("/p"), group)).toEqual(["file:/p/a.ts", "file:/p/b.ts"]);
+		store.openEditor(P, fileTab("/p/b.ts", true), { focus: true });
+		expect(order(store.layout(P), group)).toEqual(["file:/p/a.ts", "file:/p/b.ts"]);
 		expect(store.getSnapshot().focus).toMatchObject({ tabId: "file:/p/b.ts" });
 		expect([...store.editorKeys()].sort()).toEqual(["file:/p/a.ts", "file:/p/b.ts"]);
 
@@ -295,7 +313,7 @@ describe("a node's workspaces", () => {
 		again.failedToOpen("file:/p/a.ts");
 		again.failedToOpen("file:/p/b.ts");
 		// a.ts opened before its failure was reported, so it stays; b.ts never opened and goes.
-		const kept = Object.values(again.layout("/p").tabs).map((tab) => tab.kind === "terminal" ? `terminal:${tab.focused}` : tab.id);
+		const kept = Object.values(again.layout(P).tabs).map((tab) => tab.kind === "terminal" ? `terminal:${tab.focused}` : tab.id);
 		expect(kept.sort()).toEqual(["file:/p/a.ts", "terminal:t1"]);
 	});
 });

@@ -6,7 +6,7 @@ import type { Theme } from "../lib/theme";
 import { CHANGE_GROUPS, changeMode, type Change, type ChangesSnapshot, type ChangesStore } from "./changes";
 import { homePath } from "./client";
 import type { DiffControl } from "./CodeEditor";
-import { sanitize, type Project } from "./contract";
+import { sanitize } from "./contract";
 import { type DiffTab, type EditorStore, type EditorTab, type FileTab } from "./editor";
 import { baseName, dirName, joinPath, READ_LIMIT_LABEL, type NodeFiles } from "./files";
 import { isMenuKey, menuAtPointer, menuBelow, useMenu, type MenuAnchor, type MenuEntry } from "./deck/Menu";
@@ -57,9 +57,9 @@ export interface ExplorerProps {
 	/** Undefined while the node is not connected. */
 	files: NodeFiles | undefined;
 	home: string;
-	/** The tree's root, and the roots to pick from. */
+	/** The tree's root, and the roots to pick from: the node's worktrees, each named (cleaned for display). */
 	root: string;
-	projects: readonly Project[];
+	roots: readonly { path: string; label: string }[];
 	onRoot: (root: string) => void;
 	hidden: boolean;
 	onHidden: (hidden: boolean) => void;
@@ -68,7 +68,7 @@ export interface ExplorerProps {
 	onOpenFile: (path: string, how: OpenHow) => void;
 }
 
-/** The explorer: a folder picker over the node's projects, and the tree under the folder picked. */
+/** The explorer: a folder picker over the node's worktrees, and the tree under the folder picked. */
 export function Explorer(props: ExplorerProps) {
 	const { files, root, hidden } = props;
 	const expandedRef = useRef<{ root: string; dirs: ReadonlySet<string> }>({ root, dirs: new Set() });
@@ -115,15 +115,15 @@ export function Explorer(props: ExplorerProps) {
 					aria-label={`Folder: ${homePath(sanitize(root), props.home)}`}
 					onClick={(event) => {
 						if (rootMenu.openFor === "Folder") return rootMenu.close();
-						const known = props.projects.some((project) => project.path === root);
+						const known = props.roots.some((item) => item.path === root);
 						const items: MenuEntry[] = [
 							...(known ? [] : [{ id: `root:${root}`, label: homePath(sanitize(root), props.home), checked: true, run: () => {} }]),
-							...props.projects.map((project) => ({
-								id: `root:${project.path}`,
-								label: sanitize(project.name),
-								hint: homePath(sanitize(project.path), props.home),
-								checked: project.path === root,
-								run: () => props.onRoot(project.path),
+							...props.roots.map((item) => ({
+								id: `root:${item.path}`,
+								label: item.label,
+								hint: homePath(sanitize(item.path), props.home),
+								checked: item.path === root,
+								run: () => props.onRoot(item.path),
 							})),
 						];
 						rootMenu.open({ ...menuBelow(event.currentTarget), items, label: "Folder", attrs: { "data-root-menu": "" } });

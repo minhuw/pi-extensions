@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { liveBridge, NodesClient } from "../src/nodes/client";
-import type { Body, TerminalInfo } from "../src/nodes/contract";
+import { compareCheckouts, liveBridge, NodesClient } from "../src/nodes/client";
+import type { Body, Checkout, TerminalInfo } from "../src/nodes/contract";
+import { gitCheckout, worktree } from "./support/checkouts";
 import { MemoryKeyStore } from "../src/nodes/identity";
 import type { WebSocketLike } from "../src/nodes/socket";
 import { FakeNode, nodeCrypto, settle } from "./support/fakeNode";
@@ -222,7 +223,7 @@ describe("Deck client", () => {
 		await c.confirmPin("node-1");
 		await settle();
 		expect(c.capabilities("node-1").has("term.rename")).toBe(true);
-		expect(c.capabilities("node-1").has("projects.edit")).toBe(false);
+		expect(c.capabilities("node-1").has("checkouts")).toBe(false);
 		const first = () => c.getSnapshot().nodes[0]!.terminals[0]!;
 
 		await c.renameTerminal("node-1", "t1", "Built");
@@ -267,6 +268,87 @@ describe("Deck client", () => {
 		expect(c.files("node-1")).toBeDefined();
 		expect(c.files("node-1")).not.toBe(files);
 		expect(c.files("node-1")!.channel).toBe(c.channel("node-1"));
+	});
+
+	it("lists the node's checkouts, follows checkouts.changed and term.placed, and keeps the list in step with its edits", async () => {
+		const { node, client: c } = await setup();
+		const repo = gitCheckout("a", "/home/me/repo");
+		const zed = gitCheckout("b", "/home/me/Zed");
+		const fix = worktree("/home/me/repo-fix", "fix");
+		const withFix: Checkout = { ...repo, worktrees: [...repo.worktrees, fix] };
+		const setupTerminal = { ...shell, terminalId: "t9", argv: ["sh", "-c", "npm ci"], cwd: fix.path, checkoutId: repo.id, worktreePath: fix.path };
+		node.onMessage = (message, fake) => {
+			const reply = (result: object) => void fake.send({ type: "reply", id: (message as { id: string }).id, result } as never);
+			if (message.type === "term.list") reply({ terminals: [shell] });
+			if (message.type === "checkouts.list") reply({ checkouts: [zed, repo], truncated: false });
+			if (message.type === "worktree.create") reply({ checkout: withFix, worktree: fix, setupTerminal });
+			if (message.type === "worktree.remove") reply({ checkout: repo, branch: { name: "fix", deleted: false, message: "not fully merged" } });
+			if (message.type === "checkout.hide") reply({});
+			if (message.type === "checkout.unhide") reply({ checkout: zed });
+			if (message.type === "checkout.update") reply({ checkout: { ...repo, name: "Atlas", named: true } });
+		};
+		const welcome = node.welcome.bind(node);
+		node.welcome = () => ({ ...welcome(), capabilities: [...welcome().capabilities, "checkouts"] });
+		node.allowed.add(c.getSnapshot().fingerprint!);
+		c.pair("node-1");
+		await settle();
+		await c.confirmPin("node-1");
+		await settle();
+		const view = () => c.getSnapshot().nodes[0]!;
+		expect(view().checkouts!.map((item) => item.id)).toEqual([zed.id, repo.id]);
+		expect(view().checkoutsTruncated).toBe(false);
+		expect(node.received.filter((message) => message.type === "checkouts.list")).toHaveLength(1);
+
+		// A full snapshot replaces the list; term.placed moves a terminal, null takes it out of every checkout.
+		await node.send({ type: "checkouts.changed", checkouts: [repo], truncated: true });
+		await node.send({ type: "term.placed", terminalId: "t1", checkoutId: repo.id, worktreePath: repo.path });
+		await settle();
+		expect(view().checkouts!.map((item) => item.id)).toEqual([repo.id]);
+		expect(view().checkoutsTruncated).toBe(true);
+		expect(view().terminals[0]).toMatchObject({ checkoutId: repo.id, worktreePath: repo.path });
+		await node.send({ type: "term.placed", terminalId: "t1", checkoutId: null, worktreePath: null });
+		await settle();
+		expect(view().terminals[0]).not.toHaveProperty("checkoutId");
+		expect(view().terminals[0]).not.toHaveProperty("worktreePath");
+
+		// Each edit's answer shows at once, before its checkouts.changed.
+		const created = await c.createWorktree("node-1", { checkoutId: repo.id, name: "fix", base: "HEAD" });
+		expect(created.setupTerminal?.terminalId).toBe("t9");
+		expect(view().checkouts![0]!.worktrees.map((item) => item.path)).toEqual([repo.path, fix.path]);
+		expect(view().terminals.map((item) => item.terminalId)).toEqual(["t9", "t1"]);
+		const removed = await c.removeWorktree("node-1", { checkoutId: repo.id, path: fix.path, deleteBranch: true });
+		expect(removed.branch).toEqual({ name: "fix", deleted: false, message: "not fully merged" });
+		expect(node.received.find((message) => message.type === "worktree.remove")).toMatchObject({ checkoutId: repo.id, path: fix.path, deleteBranch: true });
+		expect(view().checkouts![0]!.worktrees).toHaveLength(1);
+		await c.updateCheckout("node-1", repo.id, { name: "Atlas" });
+		expect(view().checkouts![0]).toMatchObject({ name: "Atlas", named: true });
+		await c.unhideCheckout("node-1", zed.id);
+		// By name, case aside: Atlas, then Zed.
+		expect(view().checkouts!.map((item) => item.name)).toEqual(["Atlas", "Zed"]);
+		await c.hideCheckout("node-1", zed.id);
+		expect(view().checkouts!.map((item) => item.id)).toEqual([repo.id]);
+		// The node's refusals are the caller's to show, not the node's error line.
+		node.onMessage = (message, fake) => void fake.send({ type: "reply", id: (message as { id: string }).id, error: { code: "busy", message: "1 terminal uses it" } });
+		await expect(c.removeWorktree("node-1", { checkoutId: repo.id, path: fix.path })).rejects.toMatchObject({ code: "busy" });
+		expect(view().error).toBeUndefined();
+	});
+
+	it("has no checkouts to list from a daemon without the capability", async () => {
+		const { node, client: c } = await setup();
+		node.allowed.add(c.getSnapshot().fingerprint!);
+		c.pair("node-1");
+		await settle();
+		await c.confirmPin("node-1");
+		await settle();
+		expect(c.getSnapshot().nodes[0]!.checkouts).toEqual([]);
+		expect(node.received.some((message) => message.type === "checkouts.list")).toBe(false);
+	});
+
+	it("orders checkouts as the node does", () => {
+		const a = gitCheckout("a", "/x/b", { name: "beta" });
+		const b = gitCheckout("b", "/x/a", { name: "Beta" });
+		const c = gitCheckout("c", "/x/c", { name: "alpha" });
+		expect([a, b, c].sort(compareCheckouts).map((item) => item.path)).toEqual(["/x/c", "/x/a", "/x/b"]);
 	});
 
 	it("shows node_key_changed and does not reconnect or send", async () => {

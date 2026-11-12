@@ -16,22 +16,26 @@ type Listing =
 const SHOWN = 50;
 
 /**
- * Quick open: a fuzzy finder over the files of the pane's project (the tree's root, from `projects.list` and the
- * pane's cwd, or the project on screen when given), listed once per opening with `fs.list`. Enter opens the file.
+ * Quick open: a fuzzy finder over the files of the worktree on screen (`root`), or, without one ("Other"), of the
+ * innermost of the node's worktrees (`roots`) holding the pane's cwd, else of that cwd; listed once per opening with
+ * `fs.list`. Enter opens the file.
  */
 export function QuickOpen({
 	files,
 	terminal,
-	root: project,
+	root: place,
+	roots = [],
 	home,
 	onPick,
 	onClose,
 }: {
 	files: NodeFiles;
-	/** The pane on screen, whose project is listed. */
+	/** The pane on screen, whose worktree is listed without `root`. */
 	terminal?: TerminalInfo;
-	/** The folder to list, rather than the pane's project. */
+	/** The folder to list: the worktree on screen. */
 	root?: string;
+	/** The node's worktrees and folders, to find the pane's in. */
+	roots?: readonly string[];
 	home: string;
 	onPick: (path: string) => void;
 	onClose: () => void;
@@ -48,13 +52,10 @@ export function QuickOpen({
 		void (async () => {
 			let root: string | undefined;
 			try {
-				if (project) root = project;
+				if (place) root = place;
 				else {
-					const [{ projects }, cwd] = await Promise.all([
-						files.request("projects.list", {}),
-						terminal ? paneCwd((type, params) => files.request(type, params), terminal) : undefined,
-					]);
-					root = rootFor(projects, cwd, home);
+					const cwd = terminal ? await paneCwd((type, params) => files.request(type, params), terminal) : undefined;
+					root = rootFor(roots.map((path) => ({ path })), cwd, home);
 				}
 				const listed = await files.request("fs.list", { root });
 				if (current) setListing({ status: "ready", root, paths: listed.paths, truncated: listed.truncated });

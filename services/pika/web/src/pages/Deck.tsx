@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MutableRefObject, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MutableRefObject, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router";
 import { Icon } from "../components/icons";
 import { ModelMark } from "../components/ModelName";
 import { BUTTON, Callout, cx } from "../components/ui";
 import { PortalContainer } from "../components/ui-shadcn/portal";
-import { useApi } from "../lib/api";
+import { useApi, type PikaApi } from "../lib/api";
 import { withBase } from "../lib/base";
 import { copyText } from "../lib/clipboard";
 import { shortUserAgent } from "../lib/devices";
@@ -13,8 +13,9 @@ import { useHealth } from "../lib/relay";
 import { useAppliedTheme, useTheme } from "../lib/theme";
 import { countedTitle, paneCounts, PaneAlerts } from "../nodes/alerts";
 import { changeMode, ChangesStore, type Change } from "../nodes/changes";
-import { homePath, liveBridge, NodesClient, paneLabel, paneSession, type NodesSnapshot, type NodeView } from "../nodes/client";
-import { displayFingerprint, sanitize, type NodeEvent, type Project, type TerminalInfo } from "../nodes/contract";
+import { homePath, liveBridge, NodesClient, paneLabel, paneSession, type NodesClientOptions, type NodesSnapshot, type NodeView } from "../nodes/client";
+import { displayFingerprint, sanitize, type Checkout, type NodeEvent, type TerminalInfo } from "../nodes/contract";
+import { DeckProjects, keyItemOf, ProjectKeys, type DeckProjectsSnapshot } from "../nodes/deck-projects";
 import { EditorStore, isDirty, type EditorSnapshot } from "../nodes/editor";
 import { ChangesPanel, diffControlAt, Explorer, useChanges, usePageVisible } from "../nodes/FilePanel";
 import { IndexedDbKeyStore } from "../nodes/identity";
@@ -29,7 +30,7 @@ import { Splitter } from "../nodes/Splitter";
 import { BAR_BUTTON, DeckAppBar, DeckStatusBar } from "../nodes/deck/Chrome";
 import { menuBelow, useMenu, type MenuEntry } from "../nodes/deck/Menu";
 import { DECK_ROOT } from "../nodes/deck/tokens";
-import { AddProjectDialog, ConfirmDialog, NewWorktreeDialog, UndoToast, type UndoNotice } from "../nodes/deck/RailDialogs";
+import { AddCheckoutDialog, CheckoutSettingsDialog, ConfirmDialog, NewWorktreeDialog, RemoveWorktreeDialog, UndoToast, type UndoNotice } from "../nodes/deck/RailDialogs";
 import { DeckTooltips, tip } from "../nodes/deck/Tooltips";
 import { AgentRail, InboxBadge, railAgents, useInbox, type RailOps } from "../nodes/workspace/AgentRail";
 import { flatLayout, inboxBadge, inboxKey, nextNeeding, splitKey, stepKey } from "../nodes/workspace/inbox";
@@ -61,7 +62,7 @@ import {
 	type WorkspaceTab,
 } from "../nodes/workspace/model";
 import { paneLeaves } from "../nodes/workspace/panes";
-import { projectName, projectOfTerminal } from "../nodes/workspace/projects";
+import { placeKey, placeOfTerminal, placePath, placeWords, railNode, splitPlace, worktreeCards, type RailNode, type RailProject, type RailWorktree } from "../nodes/workspace/places";
 import { RecentTerminals } from "../nodes/workspace/recent";
 import { SlotRegistry } from "../nodes/workspace/slots";
 import { OTHER, WorkspaceHub, type NodeWorkspaces } from "../nodes/workspace/store";
@@ -73,22 +74,27 @@ export const enrolCommand = (clientFingerprint: string): string => `pika-node cl
 
 const EMPTY: NodesSnapshot = { status: "loading", nodes: [] };
 
+/** Makes Deck's client; tests give one with an in-memory socket and key store. */
+export const NodesClientFactory = createContext<((options: NodesClientOptions) => NodesClient) | null>(null);
+
 function useNodesClient(): NodesClient | null {
 	const api = useApi();
+	const factory = useContext(NodesClientFactory);
 	const [client, setClient] = useState<NodesClient | null>(null);
 	useEffect(() => {
-		const next = new NodesClient({
+		const options: NodesClientOptions = {
 			socketUrl: nodeSocketUrl(withBase(api.base, "api/v1/node/connect")),
 			store: new IndexedDbKeyStore(),
 			label: shortUserAgent(navigator.userAgent).slice(0, 64),
-		});
+		};
+		const next = factory ? factory(options) : new NodesClient(options);
 		setClient(next);
 		void next.start();
 		return () => {
 			next.dispose();
 			setClient(null);
 		};
-	}, [api.base]);
+	}, [api.base, factory]);
 	return client;
 }
 
@@ -195,49 +201,24 @@ function useEditors(client: NodesClient | null, snapshot: NodesSnapshot): (node:
 }
 
 /**
- * The projects each ready node lists, asked again when its terminals change (a new terminal's cwd may add one) and
- * when the node says its list changed (`projects.changed`: an edit from this or another browser). `refresh` asks now.
+ * Deck's projects on the server (SPEC.md, "Deck"): each node's checkouts' project keys, asked for in batches as
+ * checkouts appear, and the owner's presentation of each project. A server without the routes (an older one) leaves
+ * every checkout a project of its own, unfolded, under its own name.
  */
-function useProjects(client: NodesClient | null, snapshot: NodesSnapshot): [ReadonlyMap<string, Project[]>, (node: string) => Promise<void>] {
-	const [projects, setProjects] = useState<ReadonlyMap<string, Project[]>>(new Map());
-	const asked = useRef(new Map<string, string>());
-	const refresh = useCallback(
-		async (node: string) => {
-			const files = client?.files(node);
-			if (!files) return;
-			try {
-				const result = await files.request("projects.list", {});
-				setProjects((current) => new Map(current).set(node, result.projects));
-			} catch {
-				// A node that cannot list projects still shows its terminals, all in "Other".
-				setProjects((current) => (current.has(node) ? current : new Map(current).set(node, [])));
-			}
-		},
-		[client],
+function useDeckProjects(api: PikaApi, snapshot: NodesSnapshot): { keys: ProjectKeys; keysVersion: number; presentation: DeckProjects; projects: DeckProjectsSnapshot } {
+	const keys = useMemo(() => new ProjectKeys(async (items) => (await api.deckProjectKeys(items)).keys), [api]);
+	const presentation = useMemo(
+		() => new DeckProjects({ list: () => api.deckProjects(), patch: (key, body) => api.patchDeckProject(key, body), remove: (key) => api.deleteDeckProject(key) }),
+		[api],
 	);
+	useEffect(() => () => keys.dispose(), [keys]);
+	useEffect(() => void presentation.load(), [presentation]);
+	const keysVersion = useSyncExternalStore(keys.subscribe, keys.getVersion);
+	const projects = useSyncExternalStore(presentation.subscribe, presentation.getSnapshot);
 	useEffect(() => {
-		if (!client) return;
-		return client.onEvent((node, event) => {
-			if (event.type === "projects.changed") void refresh(node);
-		});
-	}, [client, refresh]);
-	useEffect(() => {
-		if (!client) return;
-		const timers: ReturnType<typeof setTimeout>[] = [];
-		for (const view of snapshot.nodes) {
-			const node = view.info.id;
-			if (view.link.kind !== "ready" || !view.listed) continue;
-			const key = `${view.epoch}\n${view.terminals.map((item) => item.terminalId).join(" ")}`;
-			if (asked.current.get(node) === key) continue;
-			const first = !asked.current.has(node) || !asked.current.get(node)!.startsWith(`${view.epoch}\n`);
-			asked.current.set(node, key);
-			if (!client.files(node)) continue;
-			if (first) void refresh(node);
-			else timers.push(setTimeout(() => void refresh(node), 500));
-		}
-		return () => timers.forEach(clearTimeout);
-	}, [client, snapshot, refresh]);
-	return [projects, refresh];
+		keys.want(snapshot.nodes.flatMap((view) => (view.checkouts ?? []).map((checkout) => keyItemOf(view.info.id, checkout))));
+	}, [keys, snapshot]);
+	return { keys, keysVersion, presentation, projects };
 }
 
 /**
@@ -383,12 +364,17 @@ function usePaneAlerts(snapshot: NodesSnapshot, nodeId: string | undefined, term
 
 const EMPTY_EDITORS: EditorSnapshot = { tabs: [] };
 
-/** The project a node shows: the one picked last, else the first with a terminal, else "Other". */
-function shownProject(ws: NodeWorkspaces, view: NodeView, projects: readonly Project[] | undefined): string {
-	if (ws.active) return ws.active;
+const NO_PLACES: ReadonlyMap<string, unknown> = new Map();
+
+/**
+ * The place a node shows: the one picked last while it is still listed, else the newest terminal's, else the first
+ * worktree's, else "Other".
+ */
+function shownPlace(ws: NodeWorkspaces, view: NodeView, rail: RailNode | undefined): string {
+	if (ws.active && (ws.active === OTHER || !rail || rail.places.has(ws.active))) return ws.active;
 	const first = view.terminals[0];
-	if (!first) return projects?.[0]?.path ?? OTHER;
-	return ws.projectOf(first.terminalId) ?? (projects ? projectOfTerminal(projects, first) : OTHER);
+	if (first) return ws.placeOf(first.terminalId) ?? placeOfTerminal(rail?.places ?? NO_PLACES, first);
+	return rail?.places.keys().next().value ?? OTHER;
 }
 
 /** The pane that has focus in a workspace: the focused group's terminal tab's focused pane. */
@@ -404,15 +390,15 @@ interface Killing {
 
 interface Closing {
 	node: string;
-	project: string;
+	place: string;
 	tabId: string;
 	name: string;
 }
 
 interface RemovingWorktree {
 	node: string;
-	project: Project;
-	error?: string;
+	checkout: Checkout;
+	worktree: RailWorktree;
 }
 
 function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
@@ -428,14 +414,25 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	const hubVersion = useSyncExternalStore(hub.subscribe, hub.getVersion);
 	const registry = useMemo(() => new SlotRegistry(), []);
 	const recentTerminals = useMemo(() => new RecentTerminals(), []);
-	const [projects, refreshProjects] = useProjects(client, snapshot);
+	const api = useApi();
+	const { keys, keysVersion, presentation, projects: deckProjects } = useDeckProjects(api, snapshot);
+	// Each node's checkouts as projects, worktrees, and places, once it has listed them.
+	const railNodes = useMemo(() => {
+		const out = new Map<string, RailNode>();
+		for (const view of snapshot.nodes) {
+			if (view.checkouts) out.set(view.info.id, railNode(view.info.id, view.checkouts, { keyOf: (item) => keys.keyOf(item), rows: deckProjects.rows }));
+		}
+		return out;
+		// keysVersion: a key learned regroups.
+	}, [snapshot, keys, keysVersion, deckProjects]);
 	const [quickOpen, setQuickOpen] = useState(false);
 	const [help, setHelp] = useState(false);
 	const [killing, setKilling] = useState<Killing | null>(null);
 	const [closing, setClosing] = useState<Closing | null>(null);
-	const [addingProject, setAddingProject] = useState<string | null>(null);
-	const [creatingWorktree, setCreatingWorktree] = useState<{ node: string; project: string } | null>(null);
+	const [addingCheckout, setAddingCheckout] = useState<string | null>(null);
+	const [creatingWorktree, setCreatingWorktree] = useState<{ node: string; checkoutId: string } | null>(null);
 	const [removingWorktree, setRemovingWorktree] = useState<RemovingWorktree | null>(null);
+	const [editingSettings, setEditingSettings] = useState<{ node: string; checkoutId: string } | null>(null);
 	const [repairing, setRepairing] = useState<string | null>(null);
 	const [notice, setNotice] = useState<UndoNotice | null>(null);
 	const [busy, setBusy] = useState(false);
@@ -443,71 +440,70 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	const [permission, requestPermission] = useNotificationPermission();
 	const commands = useRef<PageCommands>({});
 	useKeyDispatch(commands);
-	const latest = useRef({ snapshot, projects, nodeId });
-	latest.current = { snapshot, projects, nodeId };
+	const latest = useRef({ snapshot, railNodes, nodeId });
+	latest.current = { snapshot, railNodes, nodeId };
 
 	const viewOf = useCallback((node: string) => latest.current.snapshot.nodes.find((item) => item.info.id === node), []);
 	const terminalOf = useCallback((node: string, terminalId: string) => viewOf(node)?.terminals.find((item) => item.terminalId === terminalId), [viewOf]);
+	const checkoutOf = (node: string, checkoutId: string) => viewOf(node)?.checkouts?.find((item) => item.id === checkoutId);
+	const homeOf = (node: string) => {
+		const link = viewOf(node)?.link;
+		return link?.kind === "ready" ? link.welcome.home : "/";
+	};
 	/**
-	 * Where a terminal goes: the project whose workspace shows it while the node still lists that project, else the
-	 * one its cwd is in. A removed project's terminals so fall to "Other" (or an enclosing project) at once, and an
-	 * undo brings them back.
+	 * Where a terminal is: the worktree its node places it in (`checkoutId`, `worktreePath`, following its shell's cwd),
+	 * else "Other". A hidden checkout's terminals so fall to "Other" at once, and an undo brings them back.
 	 */
-	const projectFor = useCallback(
-		(node: string, terminal: TerminalInfo) => {
-			const list = latest.current.projects.get(node);
-			const shownIn = hub.get(node).projectOf(terminal.terminalId);
-			if (shownIn && (shownIn === OTHER || !list || list.some((item) => item.path === shownIn))) return shownIn;
-			return projectOfTerminal(list ?? [], terminal);
-		},
-		[hub],
-	);
-	const projectShown = useCallback(
+	const placeFor = useCallback((node: string, terminal: TerminalInfo) => placeOfTerminal(latest.current.railNodes.get(node)?.places ?? NO_PLACES, terminal), []);
+	const placeShown = useCallback(
 		(node: string) => {
 			const view = viewOf(node);
-			return view ? shownProject(hub.get(node), view, latest.current.projects.get(node)) : (hub.get(node).active ?? OTHER);
+			return view ? shownPlace(hub.get(node), view, latest.current.railNodes.get(node)) : (hub.get(node).active ?? OTHER);
 		},
 		[hub, viewOf],
 	);
+	/** A place in words, for a row's second line: `branch · project`. */
+	const whereOf = useCallback((node: string, place: string) => placeWords(latest.current.railNodes.get(node)?.places.get(place)), []);
 
 	// --- Placing terminals and opening files ------------------------------------------------------------------
 
 	const revealed = useRef<string | undefined>(undefined);
-	/** Shows a pane: its project, its tab, and focus in it; the address follows. */
+	/** Shows a pane: its place, its tab, and focus in it; the address follows. */
 	const showPane = useCallback(
-		(node: string, terminalId: string, project?: string) => {
+		(node: string, terminalId: string, place?: string) => {
 			const terminal = terminalOf(node, terminalId);
 			if (!terminal) return;
-			hub.get(node).reveal(project ?? projectFor(node, terminal), terminalId);
+			hub.get(node).reveal(place ?? hub.get(node).placeOf(terminalId) ?? placeFor(node, terminal), terminalId);
 			revealed.current = `${node}\n${terminalId}`;
 			navigate(`/deck/${encodeURIComponent(node)}/${encodeURIComponent(terminalId)}`);
 		},
-		[hub, navigate, projectFor, terminalOf],
+		[hub, navigate, placeFor, terminalOf],
 	);
 
 	// A pane named in the address (a link, a notification, a reload) shows once the node lists it.
 	useEffect(() => {
-		if (!nodeId || !routeTerminal || !selected?.listed || !projects.has(nodeId)) return;
+		if (!nodeId || !routeTerminal || !selected?.listed || !railNodes.has(nodeId)) return;
 		const key = `${nodeId}\n${routeTerminal}`;
 		if (revealed.current === key) return;
 		const terminal = selected.terminals.find((item) => item.terminalId === routeTerminal);
 		if (!terminal) return;
 		revealed.current = key;
-		hub.get(nodeId).reveal(projectFor(nodeId, terminal), routeTerminal);
-	}, [nodeId, routeTerminal, selected, projects, hub, projectFor]);
+		const ws = hub.get(nodeId);
+		ws.reveal(ws.placeOf(routeTerminal) ?? placeFor(nodeId, terminal), routeTerminal);
+	}, [nodeId, routeTerminal, selected, railNodes, hub, placeFor]);
 
-	// Each listed node's terminals in its workspaces: gone ones leave, new ones get a tab in their project.
+	// Each listed node's terminals in its workspaces: gone ones leave, new ones get a tab in their place.
 	useEffect(() => {
 		for (const view of snapshot.nodes) {
-			const list = projects.get(view.info.id);
-			if (view.link.kind !== "ready" || !list) continue;
+			const rail = railNodes.get(view.info.id);
+			if (view.link.kind !== "ready" || !rail) continue;
 			const ws = hub.get(view.info.id);
 			ws.reconcile(
-				view.terminals.map((terminal) => ({ terminalId: terminal.terminalId, project: ws.projectOf(terminal.terminalId) ?? projectOfTerminal(list, terminal), exited: Boolean(terminal.exited) })),
+				view.terminals.map((terminal) => ({ terminalId: terminal.terminalId, place: ws.placeOf(terminal.terminalId) ?? placeOfTerminal(rail.places, terminal), exited: Boolean(terminal.exited) })),
 				view.listed,
 			);
 		}
-	}, [snapshot, projects, hub]);
+	}, [snapshot, railNodes, hub]);
 
 	// Every file and diff tab's content in its node's editor store; restored files that cannot be read go.
 	useEffect(() => {
@@ -545,18 +541,18 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	const openEditor = useCallback(
 		(node: string, tab: FileTabSpec | DiffTabSpec, options: { source?: string; focus?: boolean; at?: { line: number; column?: number } } = {}): string => {
 			const ws = hub.get(node);
-			const project = (options.source && ws.projectOf(options.source)) || projectShown(node);
-			const layoutOf = ws.layout(project);
+			const place = (options.source && ws.placeOf(options.source)) || placeShown(node);
+			const layoutOf = ws.layout(place);
 			const sourceTab = options.source ? tabOfTerminal(layoutOf, options.source) : undefined;
 			const sourceGroupId = sourceTab ? groupOf(layoutOf, sourceTab.id)?.id : undefined;
-			ws.openEditor(project, tab, { ...(sourceGroupId ? { sourceGroupId } : {}), ...(options.focus ? { focus: true } : {}) });
+			ws.openEditor(place, tab, { ...(sourceGroupId ? { sourceGroupId } : {}), ...(options.focus ? { focus: true } : {}) });
 			const store = editorFor(node);
 			store.setFiles(client?.files(node));
 			if (tab.kind === "file") void store.open(tab.path, options.at);
 			else void store.openDiff(tab.path, tab.mode, tab.from);
-			return project;
+			return place;
 		},
-		[client, editorFor, hub, projectShown],
+		[client, editorFor, hub, placeShown],
 	);
 
 	const openChange = useCallback(
@@ -582,7 +578,7 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 
 	/** The `PaneHost` for one terminal tab, read fresh each time; `focus` sends focus to the pane it leaves focused. */
 	const paneHost = useCallback(
-		(node: string, project: string, tabId: string, focus = true): PaneHost | undefined => {
+		(node: string, place: string, tabId: string, focus = true): PaneHost | undefined => {
 			if (!client || !closedPanes) return undefined;
 			const ws = hub.get(node);
 			return {
@@ -590,14 +586,14 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 				node,
 				closed: closedPanes,
 				read: () => {
-					const tab = ws.layout(project).tabs[tabId];
+					const tab = ws.layout(place).tabs[tabId];
 					return tab?.kind === "terminal" ? { tree: tab.panes, focused: tab.focused } : undefined;
 				},
 				write: (tab) => {
 					for (const id of paneLeaves(tab.tree)) ws.know(id);
-					ws.update(project, (current) => setPanes(current, tabId, tab.tree, tab.focused), focus ? { tabId, terminalId: tab.focused } : undefined);
+					ws.update(place, (current) => setPanes(current, tabId, tab.tree, tab.focused), focus ? { tabId, terminalId: tab.focused } : undefined);
 				},
-				closeTab: () => ws.update(project, (current) => closeTab(current, tabId, { forget: true })),
+				closeTab: () => ws.update(place, (current) => closeTab(current, tabId, { forget: true })),
 				terminal: (id) => terminalOf(node, id),
 			};
 		},
@@ -620,9 +616,9 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 		if (event.type === "term.exit" || event.type === "term.removed") {
 			closedPanes?.event(node, event);
 			const ws = hub.get(node);
-			const project = ws.projectOf(event.terminalId);
-			const tab = project ? tabOfTerminal(ws.layout(project), event.terminalId) : undefined;
-			const host = project && tab ? paneHost(node, project, tab.id, false) : undefined;
+			const place = ws.placeOf(event.terminalId);
+			const tab = place ? tabOfTerminal(ws.layout(place), event.terminalId) : undefined;
+			const host = place && tab ? paneHost(node, place, tab.id, false) : undefined;
 			if (host) paneEvent(host, event);
 			return;
 		}
@@ -630,25 +626,28 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 		if (document.visibilityState !== "visible") return;
 		const tab = event.type === "pane.open" ? fileTab(event.path) : diffTab(event.path, event.staged ? "staged" : "worktree");
 		const at = event.type === "pane.open" && event.line ? { line: event.line, ...(event.column ? { column: event.column } : {}) } : undefined;
-		const project = openEditor(node, tab, { source: event.terminalId, ...(at ? { at } : {}) });
+		const place = openEditor(node, tab, { source: event.terminalId, ...(at ? { at } : {}) });
 		const ws = hub.get(node);
-		if (ws.active !== project) ws.setActive(project);
+		if (ws.active !== place) ws.setActive(place);
 		if (latest.current.nodeId !== node) navigate(`/deck/${encodeURIComponent(node)}/${encodeURIComponent(event.terminalId)}`);
 	};
 
-	/** A new terminal in `project`'s root, in `groupId` (the focused group by default), with focus; `argv` runs in it. */
+	/**
+	 * A new terminal in `place`'s worktree (the node's home for "Other"), in `groupId` (the focused group by default),
+	 * with focus; `argv` runs in it.
+	 */
 	const newTerminal = useCallback(
-		(node: string, project: string, groupId?: string, argv?: string[]) =>
+		(node: string, place: string, groupId?: string, argv?: string[]) =>
 			void run(async () => {
 				if (!client) return;
 				const ws = hub.get(node);
 				const release = ws.holdNewTerminals();
 				try {
-					const created = await client.createTerminal(node, { cols: 80, rows: 24 }, project === OTHER ? undefined : project, argv);
+					const created = await client.createTerminal(node, { cols: 80, rows: 24 }, placePath(place), argv);
 					ws.know(created.terminalId);
 					const tab = terminalTab(created.terminalId);
-					ws.update(project, (current) => addTab(current, tab, groupId ? { groupId } : {}), { tabId: tab.id, terminalId: created.terminalId });
-					if (ws.active !== project) ws.setActive(project);
+					ws.update(place, (current) => addTab(current, tab, groupId ? { groupId } : {}), { tabId: tab.id, terminalId: created.terminalId });
+					if (ws.active !== place) ws.setActive(place);
 				} finally {
 					release();
 				}
@@ -656,9 +655,9 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 		[client, hub, run],
 	);
 
-	const splitFocused = (node: string, project: string, tabId: string, direction: "row" | "column") =>
+	const splitFocused = (node: string, place: string, tabId: string, direction: "row" | "column") =>
 		void run(async () => {
-			const host = paneHost(node, project, tabId);
+			const host = paneHost(node, place, tabId);
 			if (!host) return;
 			const release = hub.get(node).holdNewTerminals();
 			try {
@@ -668,23 +667,23 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 			}
 		});
 
-	const closePaneOf = (node: string, project: string, tabId: string, terminalId: string) =>
+	const closePaneOf = (node: string, place: string, tabId: string, terminalId: string) =>
 		void run(async () => {
-			const host = paneHost(node, project, tabId);
+			const host = paneHost(node, place, tabId);
 			if (host) await closePane(host, terminalId);
 		});
 
 	/** Closes a tab, asking first when its file has unsaved edits. A terminal tab's terminals keep running. */
-	const requestClose = (node: string, project: string, tabId: string) => {
+	const requestClose = (node: string, place: string, tabId: string) => {
 		const ws = hub.get(node);
-		const tab = ws.layout(project).tabs[tabId];
+		const tab = ws.layout(place).tabs[tabId];
 		if (!tab) return;
 		const editor = tab.kind === "file" ? editorFor(node).tab(tabId) : undefined;
 		if (editor && isDirty(editor)) {
-			setClosing({ node, project, tabId, name: editor.name });
+			setClosing({ node, place, tabId, name: editor.name });
 			return;
 		}
-		ws.update(project, (current) => closeTab(current, tabId));
+		ws.update(place, (current) => closeTab(current, tabId));
 	};
 
 	// --- What is on screen -----------------------------------------------------------------------------------
@@ -692,33 +691,35 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	const ready = client && selected && selected.link.kind === "ready" ? selected : undefined;
 	const home = ready?.link.kind === "ready" ? ready.link.welcome.home : "/";
 	const ws = ready ? hub.get(ready.info.id) : undefined;
-	const nodeProjects = ready ? projects.get(ready.info.id) : undefined;
-	const project = ready && ws ? shownProject(ws, ready, nodeProjects) : undefined;
-	const workspace = ws && project ? ws.layout(project) : undefined;
+	const rail = ready ? railNodes.get(ready.info.id) : undefined;
+	const place = ready && ws ? shownPlace(ws, ready, rail) : undefined;
+	const workspace = ws && place ? ws.layout(place) : undefined;
 	const onScreen = focusedTerminal(workspace);
 	const onScreenInfo = ready && onScreen ? ready.terminals.find((item) => item.terminalId === onScreen) : undefined;
-	// The header's session: the pane on screen, else (an editor or diff in focus) the project's last focused pane.
-	const headerInfo = ready && project ? recentTerminals.shown(ready.info.id, project, onScreen, ready.terminals) : undefined;
+	// The header's session: the pane on screen, else (an editor or diff in focus) the place's last focused pane.
+	const headerInfo = ready && place ? recentTerminals.shown(ready.info.id, place, onScreen, ready.terminals) : undefined;
 	const editors = ready ? editorFor(ready.info.id) : undefined;
 	const editorSnapshot = useSyncExternalStore(editors?.subscribe ?? noop, editors?.getSnapshot ?? (() => EMPTY_EDITORS));
 	const readyFiles = ready && client?.files(ready.info.id);
 	// The rail's inbox: every agent on every node, by what the user has to do; held still while the pointer is on it.
 	const [hovering, setHovering] = useState(false);
-	const agents = useMemo(() => railAgents(snapshot.nodes, projectFor), [snapshot, projects, hubVersion, projectFor]);
+	const agents = useMemo(() => railAgents(snapshot.nodes, placeFor, whereOf), [snapshot, railNodes, placeFor, whereOf]);
 	const agentMap = useMemo(() => new Map(agents.map((agent) => [agent.key, agent])), [agents]);
 	const selectedKey = ready && onScreen ? inboxKey(ready.info.id, onScreen) : undefined;
 	const inbox = useInbox(agents, selectedKey, hovering);
 	const badge = inboxBadge(inbox.layout);
 	usePaneAlerts(snapshot, ready?.info.id, onScreen, showPane, inbox.layout.working.length);
 
-	// The explorer's folder: the project on screen ("Other": the focused or last focused pane's), or one picked by hand until the
-	// project changes.
+	// The explorer's folder: the worktree on screen ("Other": the focused or last focused pane's), or one picked by hand
+	// until the place changes.
 	const [picked, setPicked] = useState<{ key: string; root: string }>();
-	const rootKey = `${ready?.info.id}\n${project}`;
-	// With an editor in focus, the project's last focused pane: opening a file must not move the tree under it.
+	const rootKey = `${ready?.info.id}\n${place}`;
+	// With an editor in focus, the place's last focused pane: opening a file must not move the tree under it.
 	const rootPane = onScreenInfo ?? headerInfo;
-	const projectRoot = project === OTHER || !project ? (rootPane ? paneSession(rootPane).cwd : home) : project;
-	const root = picked?.key === rootKey ? picked.root : projectRoot;
+	const placeRoot = (place && placePath(place)) ?? (rootPane ? paneSession(rootPane).cwd : home);
+	const root = picked?.key === rootKey ? picked.root : placeRoot;
+	// The node's worktrees, for the explorer's folder menu and quick open.
+	const roots = useMemo(() => [...(rail?.places.values() ?? [])].map((info) => ({ path: info.worktree.path, label: placeWords(info) ?? info.worktree.title })), [rail]);
 
 	// git's changes for the folder, polled while the list or a diff of this node shows.
 	const changes = useMemo(() => (readyFiles && editors ? new ChangesStore(readyFiles, root, { onChanged: (paths) => editors.refreshDiffs(paths) }) : undefined), [readyFiles, editors, root]);
@@ -740,7 +741,7 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	// Focus asked for by the workspace (a revealed pane, a new terminal, a file opened from the explorer).
 	const focus = ws?.getSnapshot().focus;
 	useEffect(() => {
-		if (!focus || !ready || focus.project !== project) return;
+		if (!focus || !ready || focus.place !== place) return;
 		const node = ready.info.id;
 		if (focus.terminalId) {
 			const id = focus.terminalId;
@@ -774,7 +775,7 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	const onLayerFocus = useCallback(
 		(node: string, terminalId: string) => {
 			const nodeWs = hub.get(node);
-			const owner = nodeWs.projectOf(terminalId);
+			const owner = nodeWs.placeOf(terminalId);
 			if (owner) nodeWs.update(owner, (current) => focusPane(current, terminalId));
 		},
 		[hub],
@@ -791,30 +792,30 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	// --- Commands --------------------------------------------------------------------------------------------
 
 	const actions: WorkspaceActions | undefined =
-		ready && ws && project && slots
+		ready && ws && place && slots
 			? {
-					activate: (tabId) => ws.update(project, (current) => activate(current, tabId)),
-					focusGroup: (groupId) => ws.update(project, (current) => focusGroup(current, groupId)),
-					close: (tabId) => requestClose(ready.info.id, project, tabId),
+					activate: (tabId) => ws.update(place, (current) => activate(current, tabId)),
+					focusGroup: (groupId) => ws.update(place, (current) => focusGroup(current, groupId)),
+					close: (tabId) => requestClose(ready.info.id, place, tabId),
 					closeOthers: (tabId) => {
-						const current = ws.layout(project);
+						const current = ws.layout(place);
 						const group = groupOf(current, tabId);
 						const dirtyOther = group?.tabOrder.find((id) => id !== tabId && !current.tabs[id]?.pinned && editors?.tab(id) && isDirty(editors.tab(id)!));
-						if (dirtyOther) return requestClose(ready.info.id, project, dirtyOther);
-						ws.update(project, (next) => closeOthers(next, tabId));
+						if (dirtyOther) return requestClose(ready.info.id, place, dirtyOther);
+						ws.update(place, (next) => closeOthers(next, tabId));
 					},
-					setPinned: (tabId, pinned) => ws.update(project, (current) => setPinned(current, tabId, pinned)),
-					move: (tabId, groupId, index) => ws.update(project, (current) => moveTab(current, tabId, groupId, index)),
-					split: (tabId, groupId, side) => ws.update(project, (current) => splitTab(current, tabId, groupId, side)),
-					setRatio: (path, ratio) => ws.update(project, (current) => setSplitRatio(current, path, ratio)),
-					setPanes: (tabId, tree) => ws.update(project, (current) => setPanes(current, tabId, tree)),
-					focusPane: (tabId, terminalId) => ws.update(project, (current) => focusPane(current, terminalId), { tabId, terminalId }),
-					splitPane: (tabId, direction) => splitFocused(ready.info.id, project, tabId, direction),
-					closePane: (tabId, terminalId) => closePaneOf(ready.info.id, project, tabId, terminalId),
-					newTerminal: (groupId) => newTerminal(ready.info.id, project, groupId),
+					setPinned: (tabId, pinned) => ws.update(place, (current) => setPinned(current, tabId, pinned)),
+					move: (tabId, groupId, index) => ws.update(place, (current) => moveTab(current, tabId, groupId, index)),
+					split: (tabId, groupId, side) => ws.update(place, (current) => splitTab(current, tabId, groupId, side)),
+					setRatio: (path, ratio) => ws.update(place, (current) => setSplitRatio(current, path, ratio)),
+					setPanes: (tabId, tree) => ws.update(place, (current) => setPanes(current, tabId, tree)),
+					focusPane: (tabId, terminalId) => ws.update(place, (current) => focusPane(current, terminalId), { tabId, terminalId }),
+					splitPane: (tabId, direction) => splitFocused(ready.info.id, place, tabId, direction),
+					closePane: (tabId, terminalId) => closePaneOf(ready.info.id, place, tabId, terminalId),
+					newTerminal: (groupId) => newTerminal(ready.info.id, place, groupId),
 					promote: (tabId) => {
-						const tab = ws.layout(project).tabs[tabId];
-						if (tab?.kind === "file" && tab.preview) ws.update(project, (current) => promote(current, tabId));
+						const tab = ws.layout(place).tabs[tabId];
+						if (tab?.kind === "file" && tab.preview) ws.update(place, (current) => promote(current, tabId));
 					},
 					resizeEnd: () => slots.resizeEnd(),
 				}
@@ -829,7 +830,7 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 		const at = activeId ? order.indexOf(activeId) : -1;
 		const next = order[(at + step + order.length) % order.length]!;
 		actions.activate(next);
-		ws!.requestFocus(project!, next, ws!.layout(project!).tabs[next]?.kind === "terminal" ? (ws!.layout(project!).tabs[next] as { focused: string }).focused : undefined);
+		ws!.requestFocus(place!, next, ws!.layout(place!).tabs[next]?.kind === "terminal" ? (ws!.layout(place!).tabs[next] as { focused: string }).focused : undefined);
 	};
 	const goKey = (key: string | undefined) => {
 		if (!key) return false;
@@ -845,7 +846,7 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	page["pane.next"] = () => goKey(stepKey(flatLayout(inbox.layout), selectedKey, 1));
 	page["pane.previous"] = () => goKey(stepKey(flatLayout(inbox.layout), selectedKey, -1));
 	page["pane.waiting"] = () => goKey(nextNeeding(inbox.layout, selectedKey));
-	page["terminal.new"] = () => (ready && project && !busy ? newTerminal(ready.info.id, project) : false);
+	page["terminal.new"] = () => (ready && place && !busy ? newTerminal(ready.info.id, place) : false);
 	page["tab.next"] = () => stepTab(1);
 	page["tab.previous"] = () => stepTab(-1);
 	for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9] as const) {
@@ -855,17 +856,17 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 			if (!id || !actions) return false;
 			actions.activate(id);
 			const tab = workspace!.tabs[id];
-			ws!.requestFocus(project!, id, tab?.kind === "terminal" ? tab.focused : undefined);
+			ws!.requestFocus(place!, id, tab?.kind === "terminal" ? tab.focused : undefined);
 		};
 	}
 	page["tab.close"] = () => (actions && activeId ? actions.close(activeId) : false);
 	page["tab.reopen"] = () => {
-		if (!ws || !project || !ready) return false;
+		if (!ws || !place || !ready) return false;
 		const live = new Set(ready.terminals.filter((item) => !item.exited).map((item) => item.terminalId));
-		const usable = (tab: WorkspaceTab) => tabTerminals(tab).every((id) => live.has(id) && !ws.projectOf(id));
-		ws.update(project, (current) => reopenClosed(current, usable));
-		const reopened = activeTab(ws.layout(project));
-		if (reopened) ws.requestFocus(project, reopened.id, reopened.kind === "terminal" ? reopened.focused : undefined);
+		const usable = (tab: WorkspaceTab) => tabTerminals(tab).every((id) => live.has(id) && !ws.placeOf(id));
+		ws.update(place, (current) => reopenClosed(current, usable));
+		const reopened = activeTab(ws.layout(place));
+		if (reopened) ws.requestFocus(place, reopened.id, reopened.kind === "terminal" ? reopened.focused : undefined);
 	};
 	page["sidebar.left"] = () => setLayout({ railOpen: !layout.railOpen });
 	page["files.toggle"] = () => (ready ? setLayout({ filesOpen: !layout.filesOpen }) : false);
@@ -937,20 +938,20 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 		return control ? control.go("previous") : false;
 	};
 
-	/** The workspace tab and project an agent's pane is in, when it has one on a ready node. */
+	/** The workspace tab and place an agent's pane is in, when it has one on a ready node. */
 	const paneTabOf = (key: string) => {
 		const { node, terminalId } = splitKey(key);
 		if (viewOf(node)?.link.kind !== "ready") return undefined;
 		const nodeWs = hub.get(node);
-		const owner = nodeWs.projectOf(terminalId);
+		const owner = nodeWs.placeOf(terminalId);
 		const tab = owner ? tabOfTerminal(nodeWs.layout(owner), terminalId) : undefined;
-		return owner && tab ? { node, project: owner, tabId: tab.id, terminalId } : undefined;
+		return owner && tab ? { node, place: owner, tabId: tab.id, terminalId } : undefined;
 	};
 
 	// --- The rail's operations ---------------------------------------------------------------------------------
 
-	/** Shows a node's project in the workspace. */
-	const openProject = (node: string, next: string) => {
+	/** Shows a node's place in the workspace. */
+	const openPlace = (node: string, next: string) => {
 		hub.get(node).setActive(next);
 		revealed.current = undefined;
 		if (latest.current.nodeId !== node) navigate(`/deck/${encodeURIComponent(node)}`);
@@ -960,21 +961,25 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 		if (!files) throw new Error("The node is not connected.");
 		return files;
 	};
-	const removeProject = (node: string, removed: Project) =>
+	const nodeClient = () => {
+		if (!client) throw new Error("Deck is not connected.");
+		return client;
+	};
+	/** A change that needs no busy state (folding), its failure shown. */
+	const report = (change: Promise<unknown>) => void change.catch((error: unknown) => setActionError(error instanceof Error ? error.message : String(error)));
+	/** "Remove from Deck": the checkout is hidden at once; Undo unhides it, for five seconds. */
+	const hideCheckout = (node: string, checkout: Checkout) =>
 		void run(async () => {
-			const files = nodeFiles(node);
-			await files.request("projects.remove", { path: removed.path });
+			await nodeClient().hideCheckout(node, checkout.id);
 			const ws = hub.get(node);
-			const wasActive = ws.active === removed.path;
+			const wasActive = ws.active && splitPlace(ws.active)?.checkoutId === checkout.id ? ws.active : undefined;
 			if (wasActive) ws.setActive(OTHER);
-			await refreshProjects(node);
 			setNotice({
 				id: Date.now(),
-				message: `Removed ${sanitize(removed.name)} from Deck`,
+				message: `Removed ${sanitize(checkout.name)} from Deck`,
 				undo: async () => {
-					await nodeFiles(node).request("projects.add", { path: removed.path });
-					await refreshProjects(node);
-					if (wasActive) hub.get(node).setActive(removed.path);
+					await nodeClient().unhideCheckout(node, checkout.id);
+					if (wasActive) hub.get(node).setActive(wasActive);
 				},
 			});
 		});
@@ -983,25 +988,28 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 		connected: (node) => Boolean(client?.channel(node)),
 		fingerprint: (node) => viewOf(node)?.pin?.fingerprint,
 		newTerminal: (node, where, agent) => {
-			const listed = where === OTHER || latest.current.projects.get(node)?.some((item) => item.path === where);
-			const target = listed ? where : OTHER;
-			newTerminal(node, target, undefined, agent ? ["pi"] : undefined);
+			const listed = where === OTHER || latest.current.railNodes.get(node)?.places.has(where);
+			newTerminal(node, listed ? where : OTHER, undefined, agent ? ["pi"] : undefined);
 			if (latest.current.nodeId !== node) navigate(`/deck/${encodeURIComponent(node)}`);
 		},
-		addProject: (node) => setAddingProject(node),
-		newWorktree: (node, where) => setCreatingWorktree({ node, project: where }),
-		revealProject: (node, where) => {
-			openProject(node, where);
+		addCheckout: (node) => setAddingCheckout(node),
+		newWorktree: (node, checkoutId) => setCreatingWorktree({ node, checkoutId }),
+		revealPlace: (node, where) => {
+			openPlace(node, where);
 			setPicked(undefined);
 			setLayout({ filesOpen: true, sidebar: "files" });
 		},
-		removeProject,
-		removeWorktree: (node, worktree) => setRemovingWorktree({ node, project: worktree }),
-		renameProject: (node, path, name) =>
-			void run(async () => {
-				await nodeFiles(node).request("projects.rename", { path, name });
-				await refreshProjects(node);
-			}),
+		renameProject: (project: RailProject, name) => {
+			if (project.serverKey) report(presentation.rename(project.serverKey, name));
+		},
+		setCollapsed: (project: RailProject, collapsed) => {
+			if (project.serverKey) report(presentation.setCollapsed(project.serverKey, collapsed));
+		},
+		renameCheckout: (node, checkout, name) => void run(() => nodeClient().updateCheckout(node, checkout.id, { name })),
+		checkoutSettings: (node, checkout) => setEditingSettings({ node, checkoutId: checkout.id }),
+		keepCheckout: (node, checkout) => void run(() => nodeClient().addCheckout(node, checkout.path)),
+		hideCheckout,
+		removeWorktree: (node, checkout, worktree) => setRemovingWorktree({ node, checkout, worktree }),
 		renameAgent: (key, label) =>
 			void run(async () => {
 				const { node, terminalId } = splitKey(key);
@@ -1018,8 +1026,8 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 		split: (key, direction) => {
 			const found = paneTabOf(key);
 			if (!found) return;
-			hub.get(found.node).update(found.project, (current) => focusPane(current, found.terminalId));
-			splitFocused(found.node, found.project, found.tabId, direction);
+			hub.get(found.node).update(found.place, (current) => focusPane(current, found.terminalId));
+			splitFocused(found.node, found.place, found.tabId, direction);
 		},
 		restart: (key) =>
 			void run(async () => {
@@ -1027,7 +1035,7 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 				const old = terminalOf(node, terminalId);
 				if (!client || !old?.exited) return;
 				const ws = hub.get(node);
-				const project = projectFor(node, old);
+				const place = placeFor(node, old);
 				const found = paneTabOf(key);
 				// A login shell's own argv (`[shell, "-l"]`) is the default: no argv, so it does not run inside another.
 				const argv = old.argv.length === 2 && old.argv[1] === "-l" ? undefined : old.argv;
@@ -1036,12 +1044,12 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 					const created = await client.createTerminal(node, { cols: old.cols, rows: old.rows }, old.cwd, argv);
 					ws.know(created.terminalId);
 					if (found) {
-						ws.update(found.project, (current) => {
+						ws.update(found.place, (current) => {
 							const tab = current.tabs[found.tabId];
 							return tab?.kind === "terminal" ? setPanes(current, found.tabId, replaceLeaf(tab.panes, terminalId, created.terminalId), created.terminalId) : current;
 						}, { tabId: found.tabId, terminalId: created.terminalId });
 					} else {
-						ws.reveal(project, created.terminalId);
+						ws.reveal(place, created.terminalId);
 					}
 					if (old.label) await client.renameTerminal(node, created.terminalId, old.label).catch(() => {});
 					await client.killTerminal(node, terminalId);
@@ -1110,19 +1118,16 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 							inbox={inbox}
 							{...(selectedKey ? { selected: selectedKey } : {})}
 							{...(nodeId ? { currentNode: nodeId } : {})}
-							{...(project ? { currentProject: project } : {})}
-							projectsOf={(node) => projects.get(node)}
-							homeOf={(node) => {
-								const link = viewOf(node)?.link;
-								return link?.kind === "ready" ? link.welcome.home : "/";
-							}}
+							{...(place ? { currentPlace: place } : {})}
+							railNodeOf={(node) => railNodes.get(node)}
+							homeOf={homeOf}
 							onHover={setHovering}
 							onAgent={(key) => {
 								const { node, terminalId } = splitKey(key);
-								showPane(node, terminalId, agentMap.get(key)?.project);
+								showPane(node, terminalId, agentMap.get(key)?.place);
 							}}
 							onNode={(node) => navigate(`/deck/${encodeURIComponent(node)}`)}
-							onProject={(node, next) => {
+							onPlace={(node, next) => {
 								hub.get(node).setActive(next);
 								revealed.current = undefined;
 								navigate(`/deck/${encodeURIComponent(node)}`);
@@ -1130,7 +1135,7 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 							canClosePane={(key) => paneTabOf(key) !== undefined}
 							onClosePane={(key) => {
 								const found = paneTabOf(key);
-								if (found) closePaneOf(found.node, found.project, found.tabId, found.terminalId);
+								if (found) closePaneOf(found.node, found.place, found.tabId, found.terminalId);
 							}}
 							onKill={(key, confirm) => {
 								const agent = agentMap.get(key);
@@ -1156,17 +1161,17 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 				</>
 			)}
 			<section className="flex min-w-[360px] flex-1 flex-col" aria-label="Workspace">
-				{ready && project && (
+				{ready && place && (
 					<WorkspaceHeader
 						view={ready}
 						home={home}
-						project={project}
-						projects={nodeProjects ?? []}
+						place={place}
+						{...(rail ? { rail } : {})}
 						terminal={onScreenInfo}
 						session={headerInfo}
 						busy={busy}
-						onNew={() => newTerminal(ready.info.id, project)}
-						onProject={(next) => {
+						onNew={() => newTerminal(ready.info.id, place)}
+						onPlace={(next) => {
 							hub.get(ready.info.id).setActive(next);
 							revealed.current = undefined;
 						}}
@@ -1184,7 +1189,7 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 						</Callout>
 					</div>
 				)}
-				{/* The terminal layer lives here whatever shows, so no terminal is built again for a node or project switch. */}
+				{/* The terminal layer lives here whatever shows, so no terminal is built again for a node or place switch. */}
 				<div className="relative flex min-h-0 flex-1">
 					{ready && workspace && editors && slots && actions ? (
 						<WorkspaceView
@@ -1258,7 +1263,7 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 								files={readyFiles || undefined}
 								home={home}
 								root={root}
-								projects={nodeProjects ?? []}
+								roots={roots}
 								onRoot={(next) => setPicked({ key: rootKey, root: next })}
 								hidden={layout.hidden}
 								onHidden={(hidden) => setLayout({ hidden })}
@@ -1276,7 +1281,8 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 					key={ready.info.id}
 					files={readyFiles}
 					{...(onScreenInfo ? { terminal: onScreenInfo } : {})}
-					{...(project && project !== OTHER ? { root: project } : {})}
+					{...(place && placePath(place) ? { root: placePath(place)! } : {})}
+					roots={roots.map((item) => item.path)}
 					home={home}
 					onClose={() => setQuickOpen(false)}
 					onPick={(path) => {
@@ -1309,76 +1315,97 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 					confirmLabel="Close without saving"
 					onCancel={() => setClosing(null)}
 					onConfirm={() => {
-						hub.get(closing.node).update(closing.project, (current) => closeTab(current, closing.tabId));
+						hub.get(closing.node).update(closing.place, (current) => closeTab(current, closing.tabId));
 						setClosing(null);
 					}}
 				>
 					Its edits are not saved on {viewOf(closing.node)?.info.name ?? "the node"}.
 				</ConfirmDialog>
 			)}
-			{addingProject && (
-				<AddProjectDialog
-					nodeName={viewOf(addingProject)?.info.name ?? addingProject}
-					home={(() => {
-						const link = viewOf(addingProject)?.link;
-						return link?.kind === "ready" ? link.welcome.home : "/";
-					})()}
-					listFolders={async (dir) => (await nodeFiles(addingProject).readDir(dir)).entries.filter((entry) => entry.kind === "dir").map((entry) => entry.name)}
+			{addingCheckout && (
+				<AddCheckoutDialog
+					nodeName={viewOf(addingCheckout)?.info.name ?? addingCheckout}
+					home={homeOf(addingCheckout)}
+					listFolders={async (dir) => (await nodeFiles(addingCheckout).readDir(dir)).entries.filter((entry) => entry.kind === "dir").map((entry) => entry.name)}
 					onAdd={async (path) => {
-						const node = addingProject;
-						const { project: added } = await nodeFiles(node).request("projects.add", { path });
-						await refreshProjects(node);
-						setAddingProject(null);
-						openProject(node, added.path);
+						const node = addingCheckout;
+						const added = await nodeClient().addCheckout(node, path);
+						setAddingCheckout(null);
+						const first = worktreeCards(added)[0];
+						if (first) openPlace(node, first.place);
 					}}
-					onCancel={() => setAddingProject(null)}
+					onCancel={() => setAddingCheckout(null)}
 				/>
 			)}
-			{creatingWorktree && (
+			{creatingWorktree && checkoutOf(creatingWorktree.node, creatingWorktree.checkoutId) && (
 				<NewWorktreeDialog
-					projectName={projectName(projects.get(creatingWorktree.node) ?? [], creatingWorktree.project)}
-					onCreate={async ({ branch, base, startAgent }) => {
-						const { node, project: from } = creatingWorktree;
-						const { project: created } = await nodeFiles(node).request("git.worktreeAdd", { project: from, branch, ...(base ? { base } : {}) });
-						await refreshProjects(node);
-						setCreatingWorktree(null);
-						openProject(node, created.path);
-						if (startAgent) newTerminal(node, created.path, undefined, ["pi"]);
+					projectName={railNodes.get(creatingWorktree.node)?.projects.find((item) => item.checkouts.some((entry) => entry.checkout.id === creatingWorktree.checkoutId))?.name ?? ""}
+					checkout={checkoutOf(creatingWorktree.node, creatingWorktree.checkoutId)!}
+					home={homeOf(creatingWorktree.node)}
+					onCreate={async ({ name, base, startAgent }) => {
+						const { node, checkoutId } = creatingWorktree;
+						const ws = hub.get(node);
+						const release = ws.holdNewTerminals();
+						let created: string;
+						try {
+							const result = await nodeClient().createWorktree(node, { checkoutId, name, base, cols: 80, rows: 24 });
+							created = placeKey(result.checkout.id, result.worktree.path);
+							setCreatingWorktree(null);
+							openPlace(node, created);
+							// The setup script's terminal, so its progress shows.
+							if (result.setupTerminal) ws.reveal(created, result.setupTerminal.terminalId);
+						} finally {
+							release();
+						}
+						if (startAgent) newTerminal(node, created, undefined, ["pi"]);
 					}}
 					onCancel={() => setCreatingWorktree(null)}
 				/>
 			)}
 			{removingWorktree && (
-				<ConfirmDialog
-					title={`Remove the worktree ${sanitize(removingWorktree.project.name)}?`}
-					confirmLabel="Remove Worktree"
-					busy={busy}
-					onCancel={() => setRemovingWorktree(null)}
-					onConfirm={() => {
-						const { node, project: worktree } = removingWorktree;
-						setBusy(true);
-						void nodeFiles(node)
-							.request("git.worktreeRemove", { path: worktree.path })
-							.then(async () => {
-								if (hub.get(node).active === worktree.path) hub.get(node).setActive(OTHER);
-								await refreshProjects(node);
-								setRemovingWorktree(null);
-							})
-							.catch((error: unknown) => setRemovingWorktree({ node, project: worktree, error: error instanceof Error ? error.message : String(error) }))
-							.finally(() => setBusy(false));
+				<RemoveWorktreeDialog
+					nodeName={viewOf(removingWorktree.node)?.info.name ?? "the node"}
+					path={sanitize(removingWorktree.worktree.path)}
+					home={homeOf(removingWorktree.node)}
+					{...(removingWorktree.worktree.branch ? { branch: removingWorktree.worktree.branch } : {})}
+					prunable={removingWorktree.worktree.prunable}
+					liveTerminals={
+						viewOf(removingWorktree.node)?.terminals.filter(
+							(terminal) => !terminal.exited && terminal.checkoutId === removingWorktree.checkout.id && terminal.worktreePath === removingWorktree.worktree.path,
+						).length ?? 0
+					}
+					onRemove={async ({ deleteBranch, force }) => {
+						const { node, checkout, worktree } = removingWorktree;
+						const result = await nodeClient().removeWorktree(node, { checkoutId: checkout.id, path: worktree.path, ...(deleteBranch ? { deleteBranch } : {}), ...(force ? { force } : {}) });
+						const ws = hub.get(node);
+						if (ws.active === worktree.place) {
+							const main = result.checkout.worktrees.find((item) => item.isMain);
+							ws.setActive(main ? placeKey(result.checkout.id, main.path) : OTHER);
+						}
+						setRemovingWorktree(null);
+						const branch = result.branch;
+						if (branch) {
+							const name = sanitize(branch.name);
+							setNotice({
+								id: Date.now(),
+								message: branch.deleted ? `Removed the worktree and the branch ${name}` : `Removed the worktree; kept the branch ${name}: ${sanitize(branch.message ?? "git refused to delete it")}`,
+							});
+						}
 					}}
-				>
-					<span className="block">
-						Runs <code className="code-chip">git worktree remove</code> on {viewOf(removingWorktree.node)?.info.name ?? "the node"}, which deletes{" "}
-						<span className="font-mono">{homePath(sanitize(removingWorktree.project.path), home)}</span>. git refuses when it has changes or untracked
-						files. Its branch stays.
-					</span>
-					{removingWorktree.error && (
-						<span className="mt-2 block text-red" role="alert" data-dialog-error="">
-							{sanitize(removingWorktree.error)}
-						</span>
-					)}
-				</ConfirmDialog>
+					onCancel={() => setRemovingWorktree(null)}
+				/>
+			)}
+			{editingSettings && checkoutOf(editingSettings.node, editingSettings.checkoutId) && (
+				<CheckoutSettingsDialog
+					checkoutName={sanitize(checkoutOf(editingSettings.node, editingSettings.checkoutId)!.name)}
+					checkout={checkoutOf(editingSettings.node, editingSettings.checkoutId)!}
+					home={homeOf(editingSettings.node)}
+					onSave={async (settings) => {
+						await nodeClient().updateCheckout(editingSettings.node, editingSettings.checkoutId, { settings });
+						setEditingSettings(null);
+					}}
+					onCancel={() => setEditingSettings(null)}
+				/>
 			)}
 			{repairing && (
 				<ConfirmDialog
@@ -1419,53 +1446,67 @@ function ActivityButton({ active, onClick, id, children }: { active: boolean; on
 }
 
 /**
- * Above the workspace, a breadcrumb: the project (a menu of the node's projects), the node and the session the
- * header follows, the focused pane's state; New terminal on the right.
+ * Above the workspace, a breadcrumb: the place (a menu of the node's worktrees, by project), the node and the session
+ * the header follows, the focused pane's state; New terminal on the right.
  */
 function WorkspaceHeader({
 	view,
 	home,
-	project,
-	projects,
+	place,
+	rail,
 	terminal,
 	session,
 	busy,
 	onNew,
-	onProject,
+	onPlace,
 }: {
 	view: NodeView;
 	home: string;
-	project: string;
-	projects: readonly Project[];
+	place: string;
+	rail?: RailNode;
 	/** The pane on screen, for its status. */
 	terminal?: TerminalInfo;
 	/** The pane whose session the heading shows (`RecentTerminals`). */
 	session?: TerminalInfo;
 	busy: boolean;
 	onNew: () => void;
-	onProject: (project: string) => void;
+	onPlace: (place: string) => void;
 }) {
 	const { menu, open, close, openFor } = useMenu();
+	const info = rail?.places.get(place);
 	const choose = (button: HTMLElement) => {
-		const items: MenuEntry[] = [
-			...projects.map((item) => ({ id: `project:${item.path}`, label: sanitize(item.name), hint: homePath(sanitize(item.path), home), checked: item.path === project, run: () => onProject(item.path) })),
-			...(projects.length ? (["separator"] as const) : []),
-			{ id: `project:${OTHER}`, label: "Other terminals", checked: project === OTHER, run: () => onProject(OTHER) },
-		];
-		open({ ...menuBelow(button), items, label: "Projects", attrs: { "data-project-menu": "" } });
+		const items: MenuEntry[] = [];
+		for (const project of rail?.projects ?? []) {
+			items.push({ kind: "header", label: project.name });
+			for (const { worktrees } of project.checkouts) {
+				for (const worktree of worktrees) {
+					items.push({
+						id: `place:${worktree.place}`,
+						label: worktree.meta ? `${worktree.title} · ${worktree.meta}` : worktree.title,
+						hint: homePath(sanitize(worktree.path), home),
+						checked: worktree.place === place,
+						run: () => onPlace(worktree.place),
+					});
+				}
+			}
+		}
+		if (items.length) items.push("separator");
+		items.push({ id: `place:${OTHER}`, label: "Other terminals", checked: place === OTHER, run: () => onPlace(OTHER) });
+		open({ ...menuBelow(button), items, label: "Worktrees", attrs: { "data-place-menu": "" } });
 	};
+	const path = placePath(place);
 	return (
-		<header className="flex h-9 shrink-0 items-center gap-2 border-b border-dk-line px-2" data-workspace-header={project}>
+		<header className="flex h-9 shrink-0 items-center gap-2 border-b border-dk-line px-2" data-workspace-header={place}>
 			<button
 				type="button"
 				className={cx(BAR_BUTTON, "px-2 text-[13px] font-medium text-dk-ink")}
 				aria-haspopup="menu"
-				aria-expanded={openFor === "Projects"}
-				onClick={(event) => (openFor === "Projects" ? close() : choose(event.currentTarget))}
-				{...tip(project === OTHER ? "Switch project" : `${project}: switch project`)}
-				data-workspace-project={project}
+				aria-expanded={openFor === "Worktrees"}
+				onClick={(event) => (openFor === "Worktrees" ? close() : choose(event.currentTarget))}
+				{...tip(path ? `${homePath(sanitize(path), home)}: switch worktree` : "Switch worktree")}
+				data-workspace-place={place}
 			>
-				{projectName([...projects], project)}
+				{placeWords(info) ?? (place === OTHER ? "Other" : path ? sanitize(path.slice(path.lastIndexOf("/") + 1)) : "Other")}
 				<svg width="9" height="9" viewBox="0 0 10 10" className="text-dk-ink-3" aria-hidden="true">
 					<path d="M2.5 3.75 5 6.25l2.5-2.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
 				</svg>

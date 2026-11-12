@@ -1,5 +1,5 @@
 import { ChannelClosed, NodeChannel, NodeRequestError, type ChannelState } from "./channel";
-import { sanitize, type BridgeStatus, type Identity, type NodeEvent, type NodeInfo, type PaneView, type TerminalInfo } from "./contract";
+import { sanitize, type BridgeStatus, type Checkout, type CheckoutSettings, type Identity, type NodeEvent, type NodeInfo, type PaneView, type RequestType, type Requests, type Results, type TerminalInfo } from "./contract";
 import { NodeFiles } from "./files";
 import { clientIdentity, webCryptoAvailable, type KeyStore, type PinnedNode } from "./identity";
 import { NodeSocket, OpenRefused, type NodeSocketOptions, type SocketStatus } from "./socket";
@@ -21,6 +21,13 @@ export interface NodeView {
 	terminals: TerminalInfo[];
 	/** The current channel's `term.list` has answered: `terminals` is the node's whole list, not a partial one. */
 	listed: boolean;
+	/**
+	 * The node's checkouts (NODE.md, "Checkouts"), kept current by `checkouts.changed`; the last known ones while it is
+	 * not connected. Undefined until a channel lists them; empty from a daemon without the `checkouts` capability.
+	 */
+	checkouts?: readonly Checkout[];
+	/** The node left checkouts (or worktrees) out of the list. */
+	checkoutsTruncated?: boolean;
 	/** The last `error` event or failed request, for display. */
 	error?: string;
 	/** The current channel's number, which changes with every new channel: terminal views attach again. */
@@ -51,6 +58,8 @@ interface NodeEntry {
 	terminals: TerminalInfo[];
 	/** The channel whose `term.list` answered last. */
 	listedBy?: NodeChannel;
+	checkouts?: Checkout[];
+	checkoutsTruncated?: boolean;
 	error?: string;
 	epoch: number;
 }
@@ -236,6 +245,84 @@ export class NodesClient {
 		this.#emit();
 	}
 
+	/** `checkouts.list`, once per channel to a daemon with `checkouts`; `checkouts.changed` keeps the list after it. */
+	async refreshCheckouts(node: string): Promise<void> {
+		const entry = this.#entry(node);
+		if (!this.capabilities(node).has("checkouts")) {
+			entry.checkouts = [];
+			entry.checkoutsTruncated = false;
+			this.#emit();
+			return;
+		}
+		const { checkouts, truncated } = await this.#ask(node, "checkouts.list", {});
+		this.#setCheckouts(node, checkouts, truncated);
+	}
+
+	/** `checkout.add`: a directory's checkout (its repository's, in a git work tree), kept in the node's list. */
+	async addCheckout(node: string, path: string): Promise<Checkout> {
+		const { checkout } = await this.#ask(node, "checkout.add", { path });
+		this.#upsertCheckout(node, checkout);
+		return checkout;
+	}
+
+	/** `checkout.hide` ("Remove from Deck"); `unhideCheckout` undoes it. Nothing on disk changes. */
+	async hideCheckout(node: string, checkoutId: string): Promise<void> {
+		await this.#ask(node, "checkout.hide", { checkoutId });
+		const entry = this.#entry(node);
+		if (entry.checkouts) entry.checkouts = entry.checkouts.filter((item) => item.id !== checkoutId);
+		this.#emit();
+	}
+
+	async unhideCheckout(node: string, checkoutId: string): Promise<Checkout> {
+		const { checkout } = await this.#ask(node, "checkout.unhide", { checkoutId });
+		this.#upsertCheckout(node, checkout);
+		return checkout;
+	}
+
+	/** `checkout.update`: the node's name for a checkout (null clears it), or its settings, replaced whole. */
+	async updateCheckout(node: string, checkoutId: string, change: { name?: string | null; settings?: CheckoutSettings }): Promise<Checkout> {
+		const { checkout } = await this.#ask(node, "checkout.update", { checkoutId, ...change });
+		this.#upsertCheckout(node, checkout);
+		return checkout;
+	}
+
+	/** `worktree.create`: a new branch in a new worktree, and the terminal running the setup script when there is one. */
+	async createWorktree(node: string, params: Requests["worktree.create"]): Promise<Results["worktree.create"]> {
+		const result = await this.#ask(node, "worktree.create", params);
+		this.#upsertCheckout(node, result.checkout);
+		if (result.setupTerminal) this.#added(node, result.setupTerminal);
+		return result;
+	}
+
+	/** `worktree.remove`: a linked worktree, and its branch with `deleteBranch`; `force` stops the terminals in it first. */
+	async removeWorktree(node: string, params: Requests["worktree.remove"]): Promise<Results["worktree.remove"]> {
+		const result = await this.#ask(node, "worktree.remove", params);
+		this.#upsertCheckout(node, result.checkout);
+		return result;
+	}
+
+	/** A request whose failure its caller shows (a dialog, a notice), not the node's error line. */
+	async #ask<K extends RequestType>(node: string, type: K, params: Requests[K]): Promise<Results[K]> {
+		const channel = this.channel(node);
+		if (!channel) throw new Error("The node is not connected.");
+		return channel.request(type, params);
+	}
+
+	#setCheckouts(node: string, checkouts: Checkout[], truncated: boolean): void {
+		const entry = this.#entry(node);
+		entry.checkouts = checkouts;
+		entry.checkoutsTruncated = truncated;
+		this.#emit();
+	}
+
+	/** A checkout a reply answered, in its place in the list (by name, case aside, then path), as the node orders it. */
+	#upsertCheckout(node: string, checkout: Checkout): void {
+		const entry = this.#entry(node);
+		const rest = (entry.checkouts ?? []).filter((item) => item.id !== checkout.id);
+		entry.checkouts = [...rest, checkout].sort(compareCheckouts);
+		this.#emit();
+	}
+
 	async #request<T>(node: string, run: (channel: NodeChannel) => Promise<T>): Promise<T> {
 		const channel = this.channel(node);
 		if (!channel) throw new Error("The node is not connected.");
@@ -330,7 +417,10 @@ export class NodesClient {
 		const entry = this.#entry(node);
 		if (entry.channel !== channel) return;
 		entry.link = state;
-		if (state.kind === "ready") void this.refreshTerminals(node).catch(() => {});
+		if (state.kind === "ready") {
+			void this.refreshTerminals(node).catch(() => {});
+			void this.refreshCheckouts(node).catch((error: unknown) => this.#fail(node, error));
+		}
 		if (state.kind === "closed") {
 			entry.channel = undefined;
 			entry.files?.dispose();
@@ -385,6 +475,15 @@ export class NodesClient {
 			case "term.exit":
 				update(event.terminalId, (info) => ({ ...info, exited: { code: event.code, signal: event.signal } }));
 				return;
+			case "term.placed":
+				update(event.terminalId, (info) => {
+					const { checkoutId: _checkout, worktreePath: _worktree, ...rest } = info;
+					return event.checkoutId && event.worktreePath ? { ...rest, checkoutId: event.checkoutId, worktreePath: event.worktreePath } : rest;
+				});
+				return;
+			case "checkouts.changed":
+				this.#setCheckouts(node, event.checkouts, event.truncated);
+				return;
 			case "term.resized":
 				update(event.terminalId, (info) => ({ ...info, cols: event.cols, rows: event.rows }));
 				return;
@@ -424,6 +523,7 @@ export class NodesClient {
 					link: entry.link,
 					terminals: entry.terminals,
 					listed: entry.link.kind === "ready" && entry.listedBy !== undefined && entry.listedBy === entry.channel,
+					...(entry.checkouts ? { checkouts: entry.checkouts, checkoutsTruncated: Boolean(entry.checkoutsTruncated) } : {}),
 					...(entry.error ? { error: entry.error } : {}),
 					epoch: entry.epoch,
 				};
@@ -431,6 +531,12 @@ export class NodesClient {
 		};
 		for (const listener of this.#listeners) listener();
 	}
+}
+
+/** The node's order of checkouts: by name, case aside, then by path. */
+export function compareCheckouts(a: Checkout, b: Checkout): number {
+	const byName = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+	return byName || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 }
 
 /**

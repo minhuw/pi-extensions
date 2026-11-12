@@ -130,12 +130,12 @@ export function visibleEntries(entries: readonly DirEntry[], hidden: boolean): D
 
 
 /**
- * The tree's root for a pane: the innermost project holding its cwd (its pi session's, else the terminal's), else
- * the cwd itself; without a pane, the first project, else the node's home.
+ * The tree's root for a pane: the innermost of `roots` (the node's worktrees and folders) holding its cwd, else the
+ * cwd itself; without a pane, the first root, else the node's home.
  */
-export function rootFor(projects: readonly { path: string }[], cwd: string | undefined, home: string): string {
-	if (!cwd) return projects[0]?.path ?? home;
+export function rootFor(roots: readonly { path: string }[], cwd: string | undefined, home: string): string {
+	if (!cwd) return roots[0]?.path ?? home;
 	let best: string | undefined;
-	for (const project of projects) if (within(cwd, project.path) && (!best || project.path.length > best.length)) best = project.path;
+	for (const root of roots) if (within(cwd, root.path) && (!best || root.path.length > best.length)) best = root.path;
 	return best ?? cwd;
 }

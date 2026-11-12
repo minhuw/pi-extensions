@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type MutableRefObject, type ReactNode } from "react";
+import { Icon } from "../../components/icons";
 import { cx } from "../../components/ui";
 import { copyText } from "../../lib/clipboard";
 import { isMenuKey, menuAtPointer, menuBelow, useMenu, type MenuAnchor, type MenuEntry } from "../deck/Menu";
 import { InlineRename } from "../deck/RailDialogs";
 import { tip } from "../deck/Tooltips";
 import { homePath, paneLabel, paneSession, type NodeView } from "../client";
-import { sanitize, type Activity, type Project, type TerminalInfo } from "../contract";
+import { sanitize, type Activity, type Checkout, type TerminalInfo } from "../contract";
 import { actionShortcut, type PageCommands } from "../keys";
 import {
 	attentionText,
@@ -30,18 +31,20 @@ import {
 	type Placement,
 	type Section,
 } from "./inbox";
-import { projectName } from "./projects";
-import { addMenu, agentMenu, killNeedsConfirm, nodeMenu, projectMenu } from "./rail-menus";
+import { makesWorktrees, placeKey, type RailNode, type RailProject, type RailWorktree } from "./places";
+import { addMenu, agentMenu, checkoutMenu, killNeedsConfirm, nodeMenu, otherMenu, projectMenu, worktreeMenu, type CheckoutMenuActions, type CheckoutMenuState } from "./rail-menus";
 import { installRailTree } from "./rail-tree";
 import { markLabel, sectionMark, StatusGlyph, type PaneMark } from "./status";
 import { OTHER } from "./store";
 
-/** One agent as the rail lists it: a terminal on some node, in some project. */
+/** One agent as the rail lists it: a terminal on some node, in some place (a worktree of a checkout, or "Other"). */
 export interface RailAgent {
 	key: string;
 	node: NodeView;
 	terminal: TerminalInfo;
-	project: string;
+	place: string;
+	/** Its place in words (`branch · project`); absent in "Other". */
+	where?: string;
 }
 
 export interface Inbox {
@@ -91,7 +94,10 @@ export interface RailPrefs {
 	view: RailView;
 	/** Status sections the user folded; Quiet starts folded. */
 	collapsed: Section[];
-	/** `node\nproject` cards folded in the Projects view. */
+	/**
+	 * What the Projects view folds in this browser: nodes (by id), `node\n<project id>` for projects the server keeps
+	 * nothing for (no key), and `node\nother:` for the "Other" card. The server keeps the rest's folding.
+	 */
 	folded: string[];
 }
 
@@ -141,13 +147,16 @@ export interface AgentRailProps {
 	/** The pane on screen, as `node\nterminalId`. */
 	selected?: string;
 	currentNode?: string;
-	currentProject?: string;
-	projectsOf: (node: string) => readonly Project[] | undefined;
+	/** The place on screen on `currentNode`. */
+	currentPlace?: string;
+	/** A node's checkouts as projects; undefined until the node has listed its checkouts. */
+	railNodeOf: (node: string) => RailNode | undefined;
 	homeOf: (node: string) => string;
 	onHover: (hovering: boolean) => void;
 	onAgent: (key: string) => void;
 	onNode: (node: string) => void;
-	onProject: (node: string, project: string) => void;
+	/** Shows a place's workspace. */
+	onPlace: (node: string, place: string) => void;
 	/** Closes the agent's pane in its workspace; absent for an agent that has none there. */
 	canClosePane: (key: string) => boolean;
 	onClosePane: (key: string) => void;
@@ -160,21 +169,31 @@ export interface AgentRailProps {
 	commands?: MutableRefObject<PageCommands>;
 }
 
-/** The rail's operations on projects and agents, which the page runs (dialogs, requests, undo). */
+/** The rail's operations on projects, checkouts, worktrees, and agents, which the page runs (dialogs, requests, undo). */
 export interface RailOps {
 	/** Whether the node's daemon offers a capability (`welcome.capabilities`). */
 	can: (node: string, capability: string) => boolean;
 	connected: (node: string) => boolean;
 	/** The node key this browser pinned. */
 	fingerprint: (node: string) => string | undefined;
-	/** A terminal in `project`'s root (the home directory for "Other"), running pi when `agent`. */
-	newTerminal: (node: string, project: string, agent: boolean) => void;
-	addProject: (node: string) => void;
-	newWorktree: (node: string, project: string) => void;
-	revealProject: (node: string, project: string) => void;
-	removeProject: (node: string, project: Project) => void;
-	removeWorktree: (node: string, project: Project) => void;
-	renameProject: (node: string, project: string, name: string | null) => void;
+	/** A terminal in `place`'s worktree (the home directory for "Other"), running pi when `agent`. */
+	newTerminal: (node: string, place: string, agent: boolean) => void;
+	addCheckout: (node: string) => void;
+	newWorktree: (node: string, checkoutId: string) => void;
+	/** Shows a place with its folder in the explorer. */
+	revealPlace: (node: string, place: string) => void;
+	/** The server's name for a project (with a key); null clears it. */
+	renameProject: (project: RailProject, name: string | null) => void;
+	/** Folds a project with a key, on the server. */
+	setCollapsed: (project: RailProject, collapsed: boolean) => void;
+	/** The node's name for a checkout; null clears it. */
+	renameCheckout: (node: string, checkout: Checkout, name: string | null) => void;
+	checkoutSettings: (node: string, checkout: Checkout) => void;
+	/** Records a checkout found on its own (`checkout.add`), so it stays listed. */
+	keepCheckout: (node: string, checkout: Checkout) => void;
+	/** "Remove from Deck" (`checkout.hide`), with an undo. */
+	hideCheckout: (node: string, checkout: Checkout) => void;
+	removeWorktree: (node: string, checkout: Checkout, worktree: RailWorktree) => void;
 	renameAgent: (key: string, label: string | null) => void;
 	markRead: (key: string) => void;
 	markUnread: (key: string) => void;
@@ -183,14 +202,38 @@ export interface RailOps {
 	repair: (node: string) => void;
 }
 
-/** What the filter field matches: an agent's name, project, node, and folder. */
-export function agentMatches(agent: RailAgent, query: string, projectLabel: string): boolean {
+/** What the filter field matches: an agent's name, where it is (branch and project), node, and folder. */
+export function agentMatches(agent: RailAgent, query: string): boolean {
 	const needle = query.trim().toLowerCase();
 	if (!needle) return true;
-	return [paneLabel(agent.terminal), projectLabel, agent.node.info.name, paneSession(agent.terminal).cwd].some((text) => text.toLowerCase().includes(needle));
+	return [paneLabel(agent.terminal), agent.where ?? "Other", agent.node.info.name, paneSession(agent.terminal).cwd].some((text) => text.toLowerCase().includes(needle));
 }
 
-/** The row a rename edits: an agent's key, or `project:<node>\n<path>`. */
+/** Whether the filter names a project: its heading, repository, a checkout's name or path, or a worktree's branch or folder. */
+export function projectMatches(project: RailProject, query: string): boolean {
+	const needle = query.trim().toLowerCase();
+	if (!needle) return true;
+	const texts = [project.name, project.repository ?? ""];
+	for (const { checkout, worktrees } of project.checkouts) {
+		texts.push(sanitize(checkout.name), sanitize(checkout.path));
+		for (const worktree of worktrees) texts.push(worktree.title, worktree.meta ?? "");
+	}
+	return texts.some((text) => text.toLowerCase().includes(needle));
+}
+
+/** Row ids in the Projects view; each names its node and what it is. */
+const projectRow = (node: string, project: RailProject) => `project:${node}\n${project.id}`;
+const checkoutRow = (node: string, checkout: Checkout) => `checkout:${node}\n${checkout.id}`;
+const placeRow = (node: string, place: string) => `place:${node}\n${place}`;
+const OTHER_ROW = (node: string) => placeRow(node, OTHER);
+
+/** A row id split into its kind, node, and the rest (a project id, a checkout id, a place). */
+function parseRow(id: string): { kind: "project" | "checkout" | "place"; node: string; rest: string } | undefined {
+	const match = /^(project|checkout|place):([^\n]*)\n(.*)$/s.exec(id);
+	return match ? { kind: match[1] as "project" | "checkout" | "place", node: match[2]!, rest: match[3]! } : undefined;
+}
+
+/** The row a rename edits: an agent's key, a project's, or a checkout's row id. */
 type Renaming = string | undefined;
 
 /** The left rail: every agent on every node, by what the user has to do (Status), or by node and project (Projects). */
@@ -203,8 +246,11 @@ export function AgentRail(props: AgentRailProps) {
 	useEffect(() => (list.current ? installRailTree(list.current) : undefined), []);
 	const rowMenu = useMenu();
 	const { ops } = props;
-	const projectsOf = (node: string) => props.projectsOf(node) ?? [];
-	const findProject = (node: string, path: string) => projectsOf(node).find((item) => item.path === path);
+	const findProject = (node: string, id: string) => props.railNodeOf(node)?.projects.find((project) => project.id === id);
+	const findCheckout = (node: string, id: string) => {
+		for (const project of props.railNodeOf(node)?.projects ?? []) for (const entry of project.checkouts) if (entry.checkout.id === id) return { project, entry };
+		return undefined;
+	};
 	const nodeName = (node: string) => props.nodes.find((view) => view.info.id === node)?.info.name ?? node;
 	const can = (node: string, capability: string) => ops?.can(node, capability) ?? false;
 	const connected = (node: string) => ops?.connected(node) ?? false;
@@ -258,35 +304,101 @@ export function AgentRail(props: AgentRailProps) {
 		rowMenu.open({ ...at, items, label, attrs: { "data-agent-menu": key } });
 	};
 
-	const foldCard = (cardKey: string) => setPrefs({ folded: toggled(prefs.folded, cardKey) });
-	// A project card's menu ("Other" included), from a right click, its "⋯" button, or the keyboard.
-	const onCardMenu = (node: string, project: string, at: MenuAt) => {
+	const fold = (key: string) => setPrefs({ folded: toggled(prefs.folded, key) });
+	/** Whether a project is folded: on the server for one with a key, in this browser for one without. */
+	const isCollapsed = (node: string, project: RailProject) => (project.serverKey && ops ? project.collapsed : prefs.folded.includes(`${node}\n${project.id}`));
+	const toggleProject = (node: string, project: RailProject) => {
+		if (project.serverKey && ops) ops.setCollapsed(project, !project.collapsed);
+		else fold(`${node}\n${project.id}`);
+	};
+	const canCheckouts = (node: string) => can(node, "checkouts");
+
+	const checkoutState = (node: string, checkout: Checkout): CheckoutMenuState => ({
+		nodeName: nodeName(node),
+		connected: connected(node),
+		canCheckouts: canCheckouts(node),
+		kind: checkout.kind,
+		configured: checkout.source === "configured",
+	});
+	const checkoutActions = (node: string, checkout: Checkout, renameRow: string): CheckoutMenuActions | undefined =>
+		ops && {
+			rename: () => setRenaming(renameRow),
+			settings: () => ops.checkoutSettings(node, checkout),
+			reveal: () => {
+				const main = checkout.kind === "folder" ? checkout.path : checkout.worktrees.find((worktree) => worktree.isMain)?.path;
+				if (main) ops.revealPlace(node, placeKey(checkout.id, main));
+			},
+			copyPath: () => void copyText(checkout.path),
+			keep: () => ops.keepCheckout(node, checkout),
+			hide: () => ops.hideCheckout(node, checkout),
+		};
+
+	// A project heading's menu; with one checkout, the heading stands for it and offers its items too.
+	const onProjectMenu = (node: string, project: RailProject, at: MenuAt) => {
 		if (!ops) return;
-		const found = findProject(node, project);
-		const cardKey = `${node}\n${project}`;
+		const only = project.checkouts.length === 1 ? project.checkouts[0]!.checkout : undefined;
+		const row = projectRow(node, project);
+		const actions = only && checkoutActions(node, only, row);
 		const items = projectMenu(
 			{
 				nodeName: nodeName(node),
-				other: project === OTHER || !found,
-				worktree: Boolean(found?.worktree),
-				folded: prefs.folded.includes(cardKey),
 				connected: connected(node),
-				canEdit: can(node, "projects.edit"),
-				canWorktree: can(node, "git.worktree"),
+				canCheckouts: canCheckouts(node),
+				persisted: project.serverKey !== null,
+				collapsed: isCollapsed(node, project),
+				...(project.repository ? { repository: project.repository } : {}),
+				worktreeFrom: project.checkouts.filter(({ checkout }) => makesWorktrees(checkout)).map(({ checkout }) => ({ id: checkout.id, label: homePath(sanitize(checkout.path), props.homeOf(node)) })),
+				...(only ? { checkout: checkoutState(node, only) } : {}),
 			},
 			{
-				newTerminal: () => ops.newTerminal(node, project, false),
-				newAgent: () => ops.newTerminal(node, project, true),
-				newWorktree: () => ops.newWorktree(node, project),
-				reveal: () => ops.revealProject(node, project),
-				copyPath: () => void copyText(project),
-				rename: () => setRenaming(`project:${cardKey}`),
-				fold: () => foldCard(cardKey),
-				remove: () => found && ops.removeProject(node, found),
-				removeWorktree: () => found && ops.removeWorktree(node, found),
+				newWorktree: (checkoutId) => ops.newWorktree(node, checkoutId),
+				rename: () => setRenaming(row),
+				fold: () => toggleProject(node, project),
+				copyRepository: () => void copyText(project.repository ?? ""),
+				...(actions ? { checkout: { ...actions, rename: () => setRenaming(`${row}\ncheckout`) } } : {}),
 			},
 		);
-		rowMenu.open({ ...at, items, label: projectName(projectsOf(node), project), attrs: { "data-project-menu": cardKey } });
+		rowMenu.open({ ...at, items, label: project.name, attrs: { "data-project-menu": row } });
+	};
+
+	const onCheckoutMenu = (node: string, checkout: Checkout, at: MenuAt) => {
+		const row = checkoutRow(node, checkout);
+		const actions = checkoutActions(node, checkout, row);
+		if (!actions) return;
+		rowMenu.open({ ...at, items: checkoutMenu(checkoutState(node, checkout), actions), label: sanitize(checkout.name), attrs: { "data-checkout-menu": row } });
+	};
+
+	const onWorktreeMenu = (node: string, checkout: Checkout, worktree: RailWorktree, at: MenuAt) => {
+		if (!ops) return;
+		const items = worktreeMenu(
+			{
+				nodeName: nodeName(node),
+				connected: connected(node),
+				canCheckouts: canCheckouts(node),
+				linked: worktree.linked,
+				...(worktree.branch ? { branch: worktree.branch } : {}),
+				prunable: worktree.prunable,
+			},
+			{
+				newTerminal: () => ops.newTerminal(node, worktree.place, false),
+				newAgent: () => ops.newTerminal(node, worktree.place, true),
+				reveal: () => ops.revealPlace(node, worktree.place),
+				copyPath: () => void copyText(worktree.path),
+				copyBranch: () => void copyText(worktree.branch ?? ""),
+				remove: () => ops.removeWorktree(node, checkout, worktree),
+			},
+		);
+		rowMenu.open({ ...at, items, label: worktree.title, attrs: { "data-worktree-menu": placeRow(node, worktree.place) } });
+	};
+
+	const onOtherMenu = (node: string, at: MenuAt) => {
+		if (!ops) return;
+		const key = `${node}\n${OTHER}`;
+		const items = otherMenu(
+			{ nodeName: nodeName(node), connected: connected(node), folded: prefs.folded.includes(key) },
+			{ newTerminal: () => ops.newTerminal(node, OTHER, false), newAgent: () => ops.newTerminal(node, OTHER, true), fold: () => fold(key) },
+		);
+		rowMenu.open({ ...at, items, label: "Other", attrs: { "data-worktree-menu": OTHER_ROW(node) } });
 	};
 
 	const onNodeMenu = (node: string, at: MenuAt, foldable: boolean) => {
@@ -297,7 +409,7 @@ export function AgentRail(props: AgentRailProps) {
 			{
 				nodeName: nodeName(node),
 				connected: connected(node),
-				canEdit: can(node, "projects.edit"),
+				canCheckouts: canCheckouts(node),
 				...(fingerprint ? { fingerprint } : {}),
 				pinned: Boolean(view?.pin),
 				foldable,
@@ -305,10 +417,10 @@ export function AgentRail(props: AgentRailProps) {
 			},
 			{
 				newTerminal: () => ops.newTerminal(node, OTHER, false),
-				addProject: () => ops.addProject(node),
+				addCheckout: () => ops.addCheckout(node),
 				copyFingerprint: () => void copyText(fingerprint ?? ""),
 				repair: () => ops.repair(node),
-				fold: () => setPrefs({ folded: toggled(prefs.folded, node) }),
+				fold: () => fold(node),
 			},
 		);
 		rowMenu.open({ ...at, items, label: nodeName(node), attrs: { "data-node-menu": node } });
@@ -317,25 +429,57 @@ export function AgentRail(props: AgentRailProps) {
 	const onAddMenu = (button: HTMLElement) => {
 		if (!ops) return;
 		const node = props.currentNode;
-		const project = props.currentProject;
+		const info = node && props.currentPlace && props.currentPlace !== OTHER ? props.railNodeOf(node)?.places.get(props.currentPlace) : undefined;
 		const live = props.nodes.filter((view) => connected(view.info.id));
 		const items = addMenu(
 			{
-				nodes: live.map((view) => ({ id: view.info.id, name: view.info.name, canEdit: can(view.info.id, "projects.edit"), canWorktree: can(view.info.id, "git.worktree") })),
+				nodes: live.map((view) => ({ id: view.info.id, name: view.info.name, canCheckouts: canCheckouts(view.info.id) })),
 				offline: props.nodes.filter((view) => view.pin && !connected(view.info.id)).map((view) => view.info.name),
 				unpaired: props.nodes.filter((view) => !view.pin).map((view) => ({ id: view.info.id, name: view.info.name })),
 				...(node
-					? { current: { node, ...(project && project !== OTHER ? { project: { path: project, name: projectName(projectsOf(node), project) } } : {}) } }
+					? {
+							current: {
+								node,
+								...(info
+									? {
+											place: {
+												place: info.worktree.place,
+												name: info.checkout.checkout.kind === "folder" ? info.project.name : `${info.project.name} · ${info.worktree.label}`,
+												...(makesWorktrees(info.checkout.checkout) ? { checkoutId: info.checkout.checkout.id } : {}),
+											},
+										}
+									: {}),
+							},
+						}
 					: {}),
 			},
 			{
-				newTerminal: (target, path, agent) => ops.newTerminal(target, path ?? OTHER, agent),
-				addProject: (target) => ops.addProject(target),
-				newWorktree: (target, path) => ops.newWorktree(target, path),
+				newTerminal: (target, place, agent) => ops.newTerminal(target, place ?? OTHER, agent),
+				addCheckout: (target) => ops.addCheckout(target),
+				newWorktree: (target, checkoutId) => ops.newWorktree(target, checkoutId),
 				pair: (target) => props.onNode(target),
 			},
 		);
 		rowMenu.open({ ...menuBelow(button), items, label: "New", attrs: { "data-add-menu": "" } });
+	};
+
+	/** Commits a rename typed in row `row`: an agent's label, a project's server name, or a checkout's node name. */
+	const commitRename = (row: string, name: string | null) => {
+		setRenaming(undefined);
+		if (!ops) return;
+		if (props.agents.has(row)) return ops.renameAgent(row, name);
+		const checkoutOfHeading = row.endsWith("\ncheckout");
+		const parsed = parseRow(checkoutOfHeading ? row.slice(0, -"\ncheckout".length) : row);
+		if (!parsed) return;
+		if (parsed.kind === "project") {
+			const project = findProject(parsed.node, parsed.rest);
+			if (!project) return;
+			if (project.serverKey && !checkoutOfHeading) ops.renameProject(project, name);
+			else if (project.checkouts.length === 1) ops.renameCheckout(parsed.node, project.checkouts[0]!.checkout, name);
+		} else if (parsed.kind === "checkout") {
+			const found = findCheckout(parsed.node, parsed.rest);
+			if (found) ops.renameCheckout(parsed.node, found.entry.checkout, name);
+		}
 	};
 
 	// The rail's keys (`rail.*` in keys.ts), on the row with focus.
@@ -354,33 +498,61 @@ export function AgentRail(props: AgentRailProps) {
 		commands["rail.rename"] = () => {
 			const row = focusedRow();
 			const id = row?.dataset.sidebarRow;
-			if (!row || !id) return false;
+			if (!row || !id || !ops) return false;
 			if (row.hasAttribute("data-agent-row")) {
 				const node = latest.current.props.agents.get(id)?.node.info.id;
 				if (!node || !can(node, "term.rename") || !connected(node)) return false;
 				setRenaming(id);
 				return;
 			}
-			if (!id.startsWith("project:")) return false;
-			const [node, project] = id.slice("project:".length).split("\n") as [string, string];
-			if (project === OTHER || !findProject(node, project) || !can(node, "projects.edit") || !connected(node)) return false;
+			const parsed = parseRow(id);
+			if (!parsed || parsed.kind === "place" || !connected(parsed.node)) return false;
+			if (parsed.kind === "project") {
+				const project = findProject(parsed.node, parsed.rest);
+				if (!project || (!project.serverKey && (project.checkouts.length !== 1 || !canCheckouts(parsed.node)))) return false;
+			} else if (!findCheckout(parsed.node, parsed.rest) || !canCheckouts(parsed.node)) return false;
 			setRenaming(id);
 		};
 		commands["rail.remove"] = () => {
-			const id = focusedRow()?.dataset.sidebarRow;
-			if (!ops || !id?.startsWith("project:")) return false;
-			const [node, project] = id.slice("project:".length).split("\n") as [string, string];
-			const found = findProject(node, project);
-			if (!found || !can(node, "projects.edit") || !connected(node)) return false;
-			if (found.worktree) ops.removeWorktree(node, found);
-			else ops.removeProject(node, found);
+			const parsed = parseRow(focusedRow()?.dataset.sidebarRow ?? "");
+			if (!ops || !parsed || !canCheckouts(parsed.node) || !connected(parsed.node)) return false;
+			if (parsed.kind === "project") {
+				const project = findProject(parsed.node, parsed.rest);
+				if (project?.checkouts.length !== 1) return false;
+				ops.hideCheckout(parsed.node, project.checkouts[0]!.checkout);
+			} else if (parsed.kind === "checkout") {
+				const found = findCheckout(parsed.node, parsed.rest);
+				if (!found) return false;
+				ops.hideCheckout(parsed.node, found.entry.checkout);
+			} else {
+				const info = props.railNodeOf(parsed.node)?.places.get(parsed.rest);
+				if (!info?.worktree.linked) return false;
+				ops.removeWorktree(parsed.node, info.checkout.checkout, info.worktree);
+			}
 		};
 		return () => {
 			for (const action of ["rail.filter", "rail.find", "rail.rename", "rail.remove"] as const) delete commands[action];
 		};
 	});
 
-	const viewProps = { ...props, prefs, setPrefs, onRowMenu, onCardMenu, onNodeMenu, renaming, setRenaming, filter: filter.trim() };
+	const viewProps = {
+		...props,
+		prefs,
+		setPrefs,
+		onRowMenu,
+		onProjectMenu,
+		onCheckoutMenu,
+		onWorktreeMenu,
+		onOtherMenu,
+		onNodeMenu,
+		isCollapsed,
+		toggleProject,
+		fold,
+		commitRename,
+		renaming,
+		setRenaming,
+		filter: filter.trim(),
+	};
 	const filterShortcut = actionShortcut("rail.filter");
 	return (
 		<>
@@ -404,7 +576,7 @@ export function AgentRail(props: AgentRailProps) {
 					<button
 						type="button"
 						className="flex size-6 shrink-0 items-center justify-center rounded-[3px] text-dk-ink-2 hover:bg-dk-hover hover:text-dk-ink"
-						aria-label="New terminal, agent, project, or worktree"
+						aria-label="New terminal, agent, repository, or worktree"
 						aria-haspopup="menu"
 						aria-expanded={rowMenu.openFor === "New"}
 						{...tip("New…")}
@@ -460,8 +632,16 @@ type ViewProps = AgentRailProps & {
 	prefs: RailPrefs;
 	setPrefs: (change: Partial<RailPrefs>) => void;
 	onRowMenu: (key: string, at: MenuAt) => void;
-	onCardMenu: (node: string, project: string, at: MenuAt) => void;
+	onProjectMenu: (node: string, project: RailProject, at: MenuAt) => void;
+	onCheckoutMenu: (node: string, checkout: Checkout, at: MenuAt) => void;
+	onWorktreeMenu: (node: string, checkout: Checkout, worktree: RailWorktree, at: MenuAt) => void;
+	onOtherMenu: (node: string, at: MenuAt) => void;
 	onNodeMenu: (node: string, at: MenuAt, foldable: boolean) => void;
+	isCollapsed: (node: string, project: RailProject) => boolean;
+	toggleProject: (node: string, project: RailProject) => void;
+	/** Folds or unfolds a key of `RailPrefs.folded`. */
+	fold: (key: string) => void;
+	commitRename: (row: string, name: string | null) => void;
 	renaming: Renaming;
 	setRenaming: (row: Renaming) => void;
 	/** The filter field's text, trimmed; empty shows everything. */
@@ -480,8 +660,7 @@ function Chevron({ open }: { open: boolean }) {
 function shownByFilter(props: ViewProps, agent: RailAgent | undefined): boolean {
 	if (!agent) return false;
 	if (!props.filter) return true;
-	const label = agent.project === OTHER ? "Other" : projectName(props.projectsOf(agent.node.info.id) ?? [], agent.project);
-	return agentMatches(agent, props.filter, label);
+	return agentMatches(agent, props.filter);
 }
 
 /** The Status view: the nodes strip, then the sections, attention first. A filter shows its matches in every section. */
@@ -632,44 +811,75 @@ function MoreButton({ label, rowKey, onOpen }: { label: string; rowKey: string; 
 	);
 }
 
-/** The Projects view: each node, its project cards (foldable), each card's agents in the inbox's order. */
+/** Right-click and the menu key open a row's menu. */
+const menuEvents = (open: (at: MenuAt) => void) => ({
+	onContextMenu: (event: ReactMouseEvent<HTMLElement>) => {
+		event.preventDefault();
+		open(menuAtPointer(event));
+	},
+	onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => {
+		if (!isMenuKey(event)) return;
+		event.preventDefault();
+		open(menuBelow(event.currentTarget));
+	},
+});
+
+/** A worktree card's markers: what git says about it besides its branch. */
+function WorktreeMarkers({ worktree }: { worktree: RailWorktree }) {
+	const marks = [worktree.detached && "detached", worktree.locked && "locked", worktree.prunable && "prunable"].filter((mark): mark is string => Boolean(mark));
+	return (
+		<>
+			{marks.map((mark) => (
+				<span key={mark} className="ml-1.5 rounded-[2px] border border-dk-line px-1 text-[10.5px] text-dk-ink-3" {...tip(MARK_TIPS[mark])} data-worktree-mark={mark}>
+					{mark}
+				</span>
+			))}
+		</>
+	);
+}
+
+const MARK_TIPS: Record<string, string> = {
+	detached: "HEAD is detached: no branch is checked out",
+	locked: "git worktree lock: git keeps it until unlocked",
+	prunable: "Its folder is gone; removing it clears git's record",
+};
+
+/**
+ * The Projects view (NODE.md, "How the web client builds the rail"): each node; its projects, foldable (on the server
+ * for a project with a key); a project's checkouts, each with its path only when there are two or more; each
+ * checkout's worktree cards, the main one first, its branch as the meta line; and each card's agents in the inbox's
+ * order. Terminals in no listed worktree go under the node's "Other". Projects without agents, not on screen, and not
+ * added by hand wait behind "N more projects".
+ */
 function ProjectsView(props: ViewProps) {
-	const { nodes, agents, inbox, prefs, setPrefs, currentNode, currentProject, onNode, onProject, projectsOf, homeOf, ops, filter, renaming, setRenaming, onCardMenu, onNodeMenu } = props;
+	const { nodes, agents, inbox, prefs, currentNode, currentPlace, onNode, railNodeOf, homeOf, ops, filter, onNodeMenu } = props;
 	const [more, setMore] = useState<string | undefined>();
 	const order = useMemo(() => new Map(flatLayout(inbox.layout).map((key, index) => [key, index])), [inbox.layout]);
-	const menuEvents = (open: (at: MenuAt) => void) => ({
-		onContextMenu: (event: ReactMouseEvent<HTMLElement>) => {
-			event.preventDefault();
-			open(menuAtPointer(event));
-		},
-		onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => {
-			if (!isMenuKey(event)) return;
-			event.preventDefault();
-			open(menuBelow(event.currentTarget));
-		},
-	});
 	return (
 		<>
 			{nodes.map((view) => {
 				const node = view.info.id;
 				const state = nodeLinkState(view);
-				const projects = projectsOf(node);
+				const rail = railNodeOf(node);
 				const home = homeOf(node);
-				const known = projects ?? [];
-				const needle = filter.toLowerCase();
-				const projectMatches = (path: string) => Boolean(needle) && path !== OTHER && (projectName(known, path).toLowerCase().includes(needle) || path.toLowerCase().includes(needle));
-				const mine = [...agents.values()]
-					.filter((agent) => agent.node.info.id === node && (projectMatches(agent.project) || shownByFilter(props, agent)))
-					.sort((a, b) => (order.get(a.key) ?? 0) - (order.get(b.key) ?? 0));
-				const byProject = new Map<string, RailAgent[]>();
-				for (const agent of mine) byProject.set(agent.project, [...(byProject.get(agent.project) ?? []), agent]);
-				const cardOrder = [...known.map((item) => item.path), ...[...byProject.keys()].filter((path) => path !== OTHER && !known.some((item) => item.path === path)), OTHER];
-				const active = node === currentNode ? currentProject : undefined;
-				const cards = cardOrder.filter((path) => byProject.has(path) || (!filter && path === active) || projectMatches(path));
-				const rest = filter ? [] : known.filter((item) => !cards.includes(item.path));
+				const mine = [...agents.values()].filter((agent) => agent.node.info.id === node).sort((a, b) => (order.get(a.key) ?? 0) - (order.get(b.key) ?? 0));
+				const byPlace = new Map<string, RailAgent[]>();
+				for (const agent of mine) byPlace.set(agent.place, [...(byPlace.get(agent.place) ?? []), agent]);
+				const active = node === currentNode ? currentPlace : undefined;
+				const agentsOf = (project: RailProject) => project.checkouts.flatMap(({ worktrees }) => worktrees.flatMap((worktree) => byPlace.get(worktree.place) ?? []));
+				const holds = (project: RailProject, place: string | undefined) => place !== undefined && project.checkouts.some(({ worktrees }) => worktrees.some((worktree) => worktree.place === place));
+				const projects = rail?.projects ?? [];
+				const shown = projects.filter((project) =>
+					filter
+						? projectMatches(project, filter) || agentsOf(project).some((agent) => shownByFilter(props, agent))
+						: agentsOf(project).length > 0 || holds(project, active) || project.checkouts.some(({ checkout }) => checkout.source === "configured"),
+				);
+				const rest = filter ? [] : projects.filter((project) => !shown.includes(project));
+				const others = (byPlace.get(OTHER) ?? []).filter((agent) => shownByFilter(props, agent));
 				const nodeRow = `node:${node}`;
 				const nodeFolded = !filter && prefs.folded.includes(node);
 				const ready = view.link.kind === "ready";
+				const block = (project: RailProject) => <ProjectBlock key={project.id} {...props} node={node} home={home} project={project} byPlace={byPlace} active={active} parent={nodeRow} />;
 				return (
 					<section key={node} aria-label={view.info.name} data-node-projects={node}>
 						<button
@@ -691,104 +901,29 @@ function ProjectsView(props: ViewProps) {
 							{nodeFolded && <span className="shrink-0 text-[11.5px] text-dk-ink-3">Collapsed</span>}
 							{state !== "online" && <span className="shrink-0 text-[11.5px] text-dk-ink-3">{NODE_STATE_LABELS[state]}</span>}
 						</button>
-						{!nodeFolded && ready && !projects && (
+						{!nodeFolded && ready && !rail && (
 							<p className="py-1 pr-3 pl-8 text-[12px] text-dk-ink-3" role="status">
-								Listing projects…
+								Listing repositories…
 							</p>
 						)}
-						{!nodeFolded && ready && projects && known.length === 0 && !filter && ops && (
+						{!nodeFolded && ready && rail && projects.length === 0 && !filter && ops && (
 							<div className="py-1 pr-3 pl-8 text-[12px] text-dk-ink-3" data-no-projects={node}>
-								No projects yet.{" "}
-								<button type="button" className="font-medium text-dk-accent hover:underline" onClick={() => ops.addProject(node)} data-empty-add-project="">
-									Add Project…
-								</button>
+								{ops.can(node, "checkouts") ? (
+									<>
+										No repositories yet.{" "}
+										<button type="button" className="font-medium text-dk-accent hover:underline" onClick={() => ops.addCheckout(node)} data-empty-add-checkout="">
+											Add Repository…
+										</button>
+									</>
+								) : (
+									<span data-update-node="">Update pika-node on {view.info.name} to see its repositories and worktrees.</span>
+								)}
 							</div>
 						)}
-						{!nodeFolded &&
-							cards.map((project) => {
-								const cardKey = `${node}\n${project}`;
-								const open = Boolean(filter) || !prefs.folded.includes(cardKey);
-								const list = byProject.get(project) ?? [];
-								const name = projectName(known, project);
-								const cardRow = `project:${cardKey}`;
-								const strongest = strongestSection(list.map((agent) => inbox.placements.get(agent.key)?.section ?? "quiet"));
-								const found = known.find((item) => item.path === project);
-								const editing = renaming === cardRow;
-								return (
-									<section key={project} aria-label={name} data-project-card={project}>
-										<div className="group relative flex items-center">
-											<button
-												type="button"
-												tabIndex={-1}
-												className="absolute left-3 flex size-4 items-center justify-center rounded-[2px] hover:bg-dk-hover"
-												aria-label={open ? `Fold ${name}` : `Unfold ${name}`}
-												onClick={() => setPrefs({ folded: toggled(prefs.folded, cardKey) })}
-												data-sidebar-action-for={cardRow}
-												data-card-fold=""
-											>
-												<Chevron open={open} />
-											</button>
-											{editing && ops ? (
-												<div className="flex h-7 w-full items-center pr-3 pl-8">
-													<InlineRename
-														initial={name}
-														label={`Rename ${name}`}
-														onCommit={(next) => {
-															setRenaming(undefined);
-															ops.renameProject(node, project, next);
-														}}
-														onCancel={() => setRenaming(undefined)}
-													/>
-												</div>
-											) : (
-												<button
-													type="button"
-													aria-current={project === active ? "true" : undefined}
-													aria-expanded={list.length > 0 ? open : undefined}
-													className={cx(
-														"flex h-7 w-full items-center gap-2 pr-3 pl-8 text-left text-[13px] hover:bg-dk-hover",
-														ops && "group-hover:pr-9",
-														project === active && "bg-dk-accent-soft",
-													)}
-													{...tip(project === OTHER ? "Terminals in no project" : found?.worktree ? `${project} (worktree of ${homePath(sanitize(found.worktree), home)})` : project)}
-													onClick={() => onProject(node, project)}
-													onDoubleClick={() => {
-														if (ops && found && ops.can(node, "projects.edit") && ops.connected(node)) setRenaming(cardRow);
-													}}
-													{...(ops ? menuEvents((at) => onCardMenu(node, project, at)) : {})}
-													data-sidebar-row={cardRow}
-													data-sidebar-parent={nodeRow}
-													data-sidebar-toggle="[data-card-fold]"
-													data-project-open=""
-												>
-													<span className="min-w-0 flex-1 truncate">
-														<span className="font-medium" data-project-name="">
-															{name}
-														</span>
-														{found?.worktree && (
-															<span className="ml-1.5 rounded-[2px] border border-dk-line px-1 text-[10.5px] text-dk-ink-3" data-worktree-badge="">
-																worktree
-															</span>
-														)}
-														{project !== OTHER && <span className="ml-1.5 text-[11.5px] text-dk-ink-3">{homePath(sanitize(project), home)}</span>}
-													</span>
-													{!open && strongest && <StatusGlyph mark={STRONGEST_MARK[strongest]} size={11} />}
-													{list.length > 0 && <span className="shrink-0 text-[11.5px] text-dk-ink-3 tabular-nums group-hover:invisible">{list.length}</span>}
-												</button>
-											)}
-											{ops && !editing && <MoreButton label={`${name} actions`} rowKey={cardRow} onOpen={(button) => onCardMenu(node, project, menuBelow(button))} />}
-										</div>
-										{open && list.length > 0 && (
-											<ul aria-label={`Agents in ${name}`}>
-												{list.map((agent) => {
-													const placement = inbox.placements.get(agent.key);
-													return placement ? <AgentRow key={agent.key} agent={agent} placement={placement} parent={cardRow} variant="project" {...props} /> : null;
-												})}
-											</ul>
-										)}
-									</section>
-								);
-							})}
+						{!nodeFolded && shown.map(block)}
+						{!nodeFolded && (others.length > 0 || (!filter && active === OTHER)) && (
+							<OtherCard {...props} node={node} home={home} list={others} byPlace={byPlace} active={active} parent={nodeRow} />
+						)}
 						{!nodeFolded && rest.length > 0 && (
 							<>
 								<button
@@ -802,54 +937,239 @@ function ProjectsView(props: ViewProps) {
 								>
 									{more === node ? "Fewer projects" : `${rest.length} more ${rest.length === 1 ? "project" : "projects"}`}
 								</button>
-								{more === node &&
-									rest.map((project) => {
-										const rowKey = `project:${node}\n${project.path}`;
-										return renaming === rowKey && ops ? (
-											<div key={project.path} className="flex h-7 w-full items-center pr-3 pl-8">
-												<InlineRename
-													initial={sanitize(project.name)}
-													label={`Rename ${sanitize(project.name)}`}
-													onCommit={(next) => {
-														setRenaming(undefined);
-														ops.renameProject(node, project.path, next);
-													}}
-													onCancel={() => setRenaming(undefined)}
-												/>
-											</div>
-										) : (
-											<button
-												key={project.path}
-												type="button"
-												className="flex h-7 w-full items-center gap-2 pr-3 pl-8 text-left text-[13px] text-dk-ink-2 hover:bg-dk-hover hover:text-dk-ink"
-												{...tip(project.path)}
-												onClick={() => onProject(node, project.path)}
-												onDoubleClick={() => {
-													if (ops && ops.can(node, "projects.edit") && ops.connected(node)) setRenaming(rowKey);
-												}}
-												{...(ops ? menuEvents((at) => onCardMenu(node, project.path, at)) : {})}
-												data-sidebar-row={rowKey}
-												data-sidebar-parent={nodeRow}
-												data-project-open=""
-											>
-												<span className="min-w-0 flex-1 truncate">
-													{sanitize(project.name)}
-													{project.worktree && (
-														<span className="ml-1.5 rounded-[2px] border border-dk-line px-1 text-[10.5px] text-dk-ink-3" data-worktree-badge="">
-															worktree
-														</span>
-													)}
-													<span className="ml-1.5 text-[11.5px] text-dk-ink-3">{homePath(sanitize(project.path), home)}</span>
-												</span>
-											</button>
-										);
-									})}
+								{more === node && rest.map(block)}
 							</>
 						)}
 					</section>
 				);
 			})}
 		</>
+	);
+}
+
+type BlockProps = ViewProps & {
+	node: string;
+	home: string;
+	byPlace: ReadonlyMap<string, RailAgent[]>;
+	active: string | undefined;
+	parent: string;
+	/** The filter names the project itself: all its agents show. */
+	projectHit?: boolean;
+};
+
+/** The strongest state of a folded row's agents, and how many there are. */
+function FoldedSummary({ list, inbox, open }: { list: readonly RailAgent[]; inbox: Inbox; open: boolean }) {
+	const strongest = strongestSection(list.map((agent) => inbox.placements.get(agent.key)?.section ?? "quiet"));
+	return (
+		<>
+			{!open && strongest && <StatusGlyph mark={STRONGEST_MARK[strongest]} size={11} />}
+			{list.length > 0 && <span className="shrink-0 text-[11.5px] text-dk-ink-3 tabular-nums group-hover:invisible">{list.length}</span>}
+		</>
+	);
+}
+
+/** One project: its heading, then (unfolded) each checkout's row when it has company, and the worktree cards. */
+function ProjectBlock(props: BlockProps & { project: RailProject }) {
+	const { node, home, project, byPlace, inbox, filter, ops, renaming, setRenaming, commitRename, isCollapsed, toggleProject, onProjectMenu, parent } = props;
+	const row = projectRow(node, project);
+	const open = Boolean(filter) || !isCollapsed(node, project);
+	const list = project.checkouts.flatMap(({ worktrees }) => worktrees.flatMap((worktree) => byPlace.get(worktree.place) ?? []));
+	const only = project.checkouts.length === 1 ? project.checkouts[0]!.checkout : undefined;
+	const editing = renaming === row || renaming === `${row}\ncheckout`;
+	const hint = only ? homePath(sanitize(only.path), home) : project.repository;
+	return (
+		<section aria-label={project.name} data-project={project.id}>
+			<div className="group relative flex items-center">
+				{editing && ops ? (
+					<div className="flex h-7 w-full items-center pr-3 pl-8">
+						<InlineRename
+							initial={renaming === row && project.serverKey ? project.name : sanitize(only?.name ?? project.name)}
+							label={`Rename ${project.name}`}
+							onCommit={(next) => commitRename(renaming!, next)}
+							onCancel={() => setRenaming(undefined)}
+						/>
+					</div>
+				) : (
+					<button
+						type="button"
+						aria-expanded={open}
+						className={cx("flex h-7 w-full items-center gap-1.5 pr-3 pl-3 text-left text-[13px] hover:bg-dk-hover", ops && "group-hover:pr-9")}
+						{...tip(project.repository ? `${project.name} (${project.repository})` : hint)}
+						onClick={() => toggleProject(node, project)}
+						{...(ops ? menuEvents((at) => onProjectMenu(node, project, at)) : {})}
+						data-sidebar-row={row}
+						data-sidebar-parent={parent}
+						data-project-heading=""
+					>
+						<Chevron open={open} />
+						<span className="min-w-0 flex-1 truncate">
+							<span className="font-semibold" data-project-name="">
+								{project.name}
+							</span>
+							{!project.showPaths && hint && only && <span className="ml-1.5 text-[11.5px] text-dk-ink-3">{hint}</span>}
+						</span>
+						<FoldedSummary list={list} inbox={inbox} open={open} />
+					</button>
+				)}
+				{ops && !editing && <MoreButton label={`${project.name} actions`} rowKey={row} onOpen={(button) => onProjectMenu(node, project, menuBelow(button))} />}
+			</div>
+			{open &&
+				project.checkouts.map(({ checkout, worktrees }) => (
+					<CheckoutBlock key={checkout.id} {...props} checkout={checkout} worktrees={worktrees} showPath={project.showPaths} parent={row} projectHit={Boolean(filter) && projectMatches(project, filter)} />
+				))}
+		</section>
+	);
+}
+
+/** A checkout's row (only beside other checkouts of its project), then its worktree cards. */
+function CheckoutBlock(props: BlockProps & { checkout: Checkout; worktrees: readonly RailWorktree[]; showPath: boolean }) {
+	const { node, home, checkout, worktrees, showPath, ops, renaming, setRenaming, commitRename, onCheckoutMenu, onPlace, parent } = props;
+	const row = checkoutRow(node, checkout);
+	const path = homePath(sanitize(checkout.path), home);
+	const main = worktrees.find((worktree) => worktree.isMain) ?? worktrees[0];
+	return (
+		<div data-checkout={checkout.id}>
+			{showPath && (
+				<div className="group relative flex items-center">
+					{renaming === row && ops ? (
+						<div className="flex h-6 w-full items-center pr-3 pl-6">
+							<InlineRename initial={sanitize(checkout.name)} label={`Rename ${sanitize(checkout.name)} on this node`} onCommit={(next) => commitRename(row, next)} onCancel={() => setRenaming(undefined)} />
+						</div>
+					) : (
+						<button
+							type="button"
+							className={cx("flex h-6 w-full items-center gap-1.5 pr-3 pl-6 text-left text-[12px] text-dk-ink-2 hover:bg-dk-hover hover:text-dk-ink", ops && "group-hover:pr-9")}
+							{...tip(checkout.path)}
+							onClick={() => main && onPlace(node, main.place)}
+							onDoubleClick={() => ops?.connected(node) && ops.can(node, "checkouts") && setRenaming(row)}
+							{...(ops ? menuEvents((at) => onCheckoutMenu(node, checkout, at)) : {})}
+							data-sidebar-row={row}
+							data-sidebar-parent={parent}
+							data-checkout-row=""
+						>
+							<Icon name="folder" size={12} className="shrink-0 text-dk-ink-3" />
+							<span className="min-w-0 flex-1 truncate font-mono text-[11.5px]" data-checkout-path="">
+								{path}
+							</span>
+							{checkout.named && <span className="shrink-0 truncate text-[11.5px]">{sanitize(checkout.name)}</span>}
+						</button>
+					)}
+					{ops && renaming !== row && <MoreButton label={`${path} actions`} rowKey={row} onOpen={(button) => onCheckoutMenu(node, checkout, menuBelow(button))} />}
+				</div>
+			)}
+			{worktrees.map((worktree) => (
+				<WorktreeCard key={worktree.place} {...props} checkout={checkout} worktree={worktree} parent={showPath ? row : parent} />
+			))}
+			{checkout.truncated && <p className="py-0.5 pr-3 pl-8 text-[11.5px] text-dk-ink-3">More worktrees than the node lists</p>}
+		</div>
+	);
+}
+
+/** One worktree: its folder, branch (the meta line) and markers; a click shows its workspace. Its agents follow. */
+function WorktreeCard(props: BlockProps & { checkout: Checkout; worktree: RailWorktree }) {
+	const { node, home, checkout, worktree, byPlace, active, inbox, filter, projectHit, ops, onPlace, onWorktreeMenu, parent } = props;
+	const row = placeRow(node, worktree.place);
+	const list = (byPlace.get(worktree.place) ?? []).filter((agent) => !filter || projectHit || shownByFilter(props, agent));
+	const current = worktree.place === active;
+	return (
+		<section aria-label={worktree.title} data-worktree-card={worktree.path}>
+			<div className="group relative flex items-center">
+				<button
+					type="button"
+					aria-current={current ? "true" : undefined}
+					className={cx(
+						"grid w-full grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-2 py-[3px] pr-3 pl-8 text-left text-[13px] hover:bg-dk-hover",
+						ops && "group-hover:pr-9",
+						current && "bg-dk-accent-soft",
+						worktree.prunable && "text-dk-ink-3",
+					)}
+					{...tip(homePath(sanitize(worktree.path), home))}
+					onClick={() => onPlace(node, worktree.place)}
+					{...(ops ? menuEvents((at) => onWorktreeMenu(node, checkout, worktree, at)) : {})}
+					data-sidebar-row={row}
+					data-sidebar-parent={parent}
+					data-worktree-open=""
+					data-main={worktree.isMain ? "" : undefined}
+				>
+					<span className="min-w-0 truncate">
+						<span className="font-medium" data-worktree-title="">
+							{worktree.title}
+						</span>
+						<WorktreeMarkers worktree={worktree} />
+					</span>
+					<span className="flex shrink-0 items-center gap-1.5">
+						<FoldedSummary list={list} inbox={inbox} open />
+					</span>
+					{worktree.meta && (
+						<span className="col-span-2 flex min-w-0 items-center gap-1 text-[11.5px] text-dk-ink-3">
+							<Icon name="branch" size={11} className="shrink-0" />
+							<span className="min-w-0 truncate font-mono" data-worktree-meta="">
+								{worktree.meta}
+							</span>
+						</span>
+					)}
+				</button>
+				{ops && <MoreButton label={`${worktree.title} actions`} rowKey={row} onOpen={(button) => onWorktreeMenu(node, checkout, worktree, menuBelow(button))} />}
+			</div>
+			{list.length > 0 && (
+				<ul aria-label={`Agents in ${worktree.title}`}>
+					{list.map((agent) => {
+						const placement = inbox.placements.get(agent.key);
+						return placement ? <AgentRow key={agent.key} {...props} agent={agent} placement={placement} parent={row} variant="project" /> : null;
+					})}
+				</ul>
+			)}
+		</section>
+	);
+}
+
+/** The node's "Other" card: terminals in no listed worktree. */
+function OtherCard(props: BlockProps & { list: readonly RailAgent[] }) {
+	const { node, list, inbox, filter, prefs, fold, ops, onPlace, onOtherMenu, parent } = props;
+	const active = props.active === OTHER;
+	const row = OTHER_ROW(node);
+	const open = Boolean(filter) || !prefs.folded.includes(`${node}\n${OTHER}`);
+	return (
+		<section aria-label="Other" data-worktree-card={OTHER}>
+			<div className="group relative flex items-center">
+				<button
+					type="button"
+					tabIndex={-1}
+					className="absolute left-3 flex size-4 items-center justify-center rounded-[2px] hover:bg-dk-hover"
+					aria-label={open ? "Fold Other" : "Unfold Other"}
+					onClick={() => fold(`${node}\n${OTHER}`)}
+					data-sidebar-action-for={row}
+					data-card-fold=""
+				>
+					<Chevron open={open} />
+				</button>
+				<button
+					type="button"
+					aria-current={active ? "true" : undefined}
+					aria-expanded={list.length > 0 ? open : undefined}
+					className={cx("flex h-7 w-full items-center gap-2 pr-3 pl-8 text-left text-[13px] hover:bg-dk-hover", ops && "group-hover:pr-9", active && "bg-dk-accent-soft")}
+					{...tip("Terminals in no listed worktree")}
+					onClick={() => onPlace(node, OTHER)}
+					{...(ops ? menuEvents((at) => onOtherMenu(node, at)) : {})}
+					data-sidebar-row={row}
+					data-sidebar-parent={parent}
+					data-sidebar-toggle="[data-card-fold]"
+					data-worktree-open=""
+				>
+					<span className="min-w-0 flex-1 truncate font-medium">Other</span>
+					<FoldedSummary list={list} inbox={inbox} open={open} />
+				</button>
+				{ops && <MoreButton label="Other actions" rowKey={row} onOpen={(button) => onOtherMenu(node, menuBelow(button))} />}
+			</div>
+			{open && list.length > 0 && (
+				<ul aria-label="Agents in Other">
+					{list.map((agent) => {
+						const placement = inbox.placements.get(agent.key);
+						return placement ? <AgentRow key={agent.key} {...props} agent={agent} placement={placement} parent={row} variant="project" /> : null;
+					})}
+				</ul>
+			)}
+		</section>
 	);
 }
 
@@ -892,7 +1212,6 @@ function AgentRow({
 	variant,
 	inbox,
 	selected,
-	projectsOf,
 	homeOf,
 	onAgent,
 	canClosePane,
@@ -912,9 +1231,9 @@ function AgentRow({
 	const label = paneLabel(terminal);
 	const attention = attentionText(terminal, placement, inbox.now);
 	const home = homeOf(node.info.id);
-	// A project's name; outside every project, the folder's own name.
+	// Its worktree's branch and project; outside every listed worktree, the folder's own name.
 	const cwd = paneSession(terminal).cwd;
-	const where = agent.project === OTHER ? (cwd === home ? "~" : cwd.slice(cwd.lastIndexOf("/") + 1) || cwd) : projectName(projectsOf(node.info.id) ?? [], agent.project);
+	const where = agent.where ?? (cwd === home ? "~" : cwd.slice(cwd.lastIndexOf("/") + 1) || cwd);
 	const children = childActivities(terminal);
 	const closable = canClosePane(key);
 	return (
@@ -924,7 +1243,7 @@ function AgentRow({
 				aria-current={current ? "true" : undefined}
 				className={cx(
 					"grid w-full grid-cols-[14px_minmax(0,1fr)_auto] items-baseline gap-x-2 py-[5px] pr-3 text-left",
-					variant === "status" ? "pl-3" : "pl-8",
+					variant === "status" ? "pl-3" : "pl-11",
 					current ? "bg-dk-accent-soft" : "hover:bg-dk-hover",
 					state !== "online" && "opacity-60",
 				)}
@@ -973,7 +1292,7 @@ function AgentRow({
 				)}
 			</button>
 			{renaming === key && ops && (
-				<div className={cx("absolute top-[2px] right-2 flex", variant === "status" ? "left-[34px]" : "left-[54px]")}>
+				<div className={cx("absolute top-[2px] right-2 flex", variant === "status" ? "left-[34px]" : "left-[66px]")}>
 					<InlineRename
 						initial={terminal.label ?? label}
 						label={`Rename ${label}`}
@@ -1007,7 +1326,7 @@ function AgentRow({
 					)}
 				</RowAction>
 			</span>
-			{children.length > 0 && <ActivityRows activities={children} parentKey={key} parentLabel={label} now={inbox.now} indent={variant === "status" ? 30 : 50} onOpen={() => onAgent(key)} />}
+			{children.length > 0 && <ActivityRows activities={children} parentKey={key} parentLabel={label} now={inbox.now} indent={variant === "status" ? 30 : 62} onOpen={() => onAgent(key)} />}
 		</li>
 	);
 }
@@ -1071,9 +1390,18 @@ function ActivityRows({ activities, parentKey, parentLabel, now, indent, onOpen 
 	);
 }
 
-/** Every agent the rail lists: each node's terminals, the last known ones for a node that is not connected. */
-export function railAgents(nodes: readonly NodeView[], projectOf: (node: string, terminal: TerminalInfo) => string): RailAgent[] {
-	return nodes.flatMap((view) => view.terminals.map((terminal) => ({ key: inboxKey(view.info.id, terminal.terminalId), node: view, terminal, project: projectOf(view.info.id, terminal) })));
+/**
+ * Every agent the rail lists: each node's terminals (the last known ones for a node that is not connected), each in
+ * its place (`placeOf`), with that place in words (`whereOf`, nothing for "Other").
+ */
+export function railAgents(nodes: readonly NodeView[], placeOf: (node: string, terminal: TerminalInfo) => string, whereOf: (node: string, place: string) => string | undefined = () => undefined): RailAgent[] {
+	return nodes.flatMap((view) =>
+		view.terminals.map((terminal) => {
+			const place = placeOf(view.info.id, terminal);
+			const where = place === OTHER ? undefined : whereOf(view.info.id, place);
+			return { key: inboxKey(view.info.id, terminal.terminalId), node: view, terminal, place, ...(where ? { where } : {}) };
+		}),
+	);
 }
 
 /** The rail's badge, beside the button that shows it while it is hidden. */

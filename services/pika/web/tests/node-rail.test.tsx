@@ -6,7 +6,11 @@ import type { NodeView } from "../src/nodes/client";
 import type { PaneView, TerminalInfo } from "../src/nodes/contract";
 import { DK_TOKENS } from "../src/nodes/deck/tokens";
 import { AgentRail, loadRailPrefs, RAIL_KEY, railAgents, useInbox } from "../src/nodes/workspace/AgentRail";
-import { OTHER } from "../src/nodes/workspace/store";
+import { placeOfTerminal, placeWords } from "../src/nodes/workspace/places";
+import { gitCheckout, rail } from "./support/checkouts";
+
+const REPO = gitCheckout("a", "/home/me/repo");
+const RAIL = rail("mac", [REPO]);
 
 const pane = (id: string, status?: Partial<PaneView>, extra: Partial<TerminalInfo> = {}): TerminalInfo => ({
 	terminalId: id,
@@ -17,6 +21,8 @@ const pane = (id: string, status?: Partial<PaneView>, extra: Partial<TerminalInf
 	pid: 1,
 	createdAt: 1,
 	argv: ["pi"],
+	checkoutId: REPO.id,
+	worktreePath: "/home/me/repo",
 	...(status ? { status: { state: "idle", bridgeConnected: false, unread: false, ...status } } : {}),
 	...extra,
 });
@@ -39,7 +45,7 @@ interface Calls {
 
 function Harness({ nodes, calls, selected }: { nodes: NodeView[]; calls: Calls; selected?: string }) {
 	const [hovering, setHovering] = useState(false);
-	const agents = useMemo(() => railAgents(nodes, () => "/home/me/repo"), [nodes]);
+	const agents = useMemo(() => railAgents(nodes, (_node, terminal) => placeOfTerminal(RAIL.places, terminal), (_node, place) => placeWords(RAIL.places.get(place))), [nodes]);
 	const map = useMemo(() => new Map(agents.map((agent) => [agent.key, agent])), [agents]);
 	const inbox = useInbox(agents, selected, hovering);
 	return (
@@ -49,12 +55,12 @@ function Harness({ nodes, calls, selected }: { nodes: NodeView[]; calls: Calls; 
 				agents={map}
 				inbox={inbox}
 				{...(selected ? { selected } : {})}
-				projectsOf={() => [{ name: "repo", path: "/home/me/repo" }]}
+				railNodeOf={() => RAIL}
 				homeOf={() => "/home/me"}
 				onHover={setHovering}
 				onAgent={(key) => calls.agent.push(key)}
 				onNode={() => {}}
-				onProject={() => {}}
+				onPlace={() => {}}
 				canClosePane={(key) => key.endsWith("busy")}
 				onClosePane={(key) => calls.close.push(key)}
 				onKill={(key) => calls.kill.push(key)}
@@ -104,7 +110,8 @@ describe("the agent rail", () => {
 		const ask = container.querySelector<HTMLElement>("[data-terminal='ask']")!;
 		expect(within(ask).getByText("Permission")).toBeTruthy();
 		expect(ask.querySelector("[data-attention]")!.textContent).toBe("Import session?");
-		expect(ask.textContent).toContain("repo · mac");
+		// Its worktree's branch, its project, its node.
+		expect(ask.textContent).toContain("main · repo · mac");
 		expect(container.querySelector("[data-terminal='crash'] [data-attention]")!.textContent).toBe("Exited with code 1");
 		expect(container.querySelector("[data-terminal='fin'] [aria-label='Unread']")).not.toBeNull();
 	});
@@ -208,18 +215,23 @@ describe("the agent rail", () => {
 		expect(document.activeElement?.getAttribute("data-section-toggle")).toBe("needs");
 	});
 
-	it("groups by node and project in the Projects view, a folded card showing its strongest state and count", () => {
+	it("groups by node, project, and worktree in the Projects view, a folded project showing its strongest state and count", () => {
 		const nodes = [node("mac", [pane("a", { state: "waiting" }), pane("b", { state: "busy" })])];
 		const { container } = render(<Harness nodes={nodes} calls={calls} />);
 		fireEvent.click(screen.getByRole("button", { name: "Projects" }));
 		expect(loadRailPrefs().view).toBe("projects");
-		const card = container.querySelector<HTMLElement>("[data-project-card='/home/me/repo']")!;
+		const card = container.querySelector<HTMLElement>("[data-worktree-card='/home/me/repo']")!;
 		expect([...card.querySelectorAll("[data-agent-row]")].map((row) => row.getAttribute("data-agent-row"))).toEqual(["a", "b"]);
-		fireEvent.click(within(card).getByRole("button", { name: "Fold repo" }));
-		expect(card.querySelectorAll("[data-agent-row]")).toHaveLength(0);
-		expect(card.querySelector("[data-pane-mark='waiting']")).not.toBeNull();
-		expect(card.textContent).toContain("2");
-		expect(OTHER).toBeTruthy();
+		const project = container.querySelector<HTMLElement>("[data-project]")!;
+		const heading = project.querySelector<HTMLElement>("[data-project-heading]")!;
+		// Without the page's operations the rail folds in this browser.
+		fireEvent.click(heading);
+		expect(heading.getAttribute("aria-expanded")).toBe("false");
+		expect(project.querySelectorAll("[data-agent-row]")).toHaveLength(0);
+		expect(heading.querySelector("[data-pane-mark='waiting']")).not.toBeNull();
+		expect(heading.textContent).toContain("2");
+		expect(loadRailPrefs().folded).toEqual([`mac\nrepo:${REPO.repository}`]);
+		expect(within(project).queryByText("main")).toBeNull();
 	});
 });
 

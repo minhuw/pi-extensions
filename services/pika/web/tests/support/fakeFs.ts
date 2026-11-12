@@ -11,7 +11,7 @@ interface FakeFile {
 const sha = (data: string) => createHash("sha256").update(data).digest("hex");
 
 /**
- * The daemon's files (NODE.md §4 "Files") in memory, answering a fake node's `fs.*` and `projects.list`: a flat map
+ * The daemon's files (NODE.md §4 "Files") in memory, answering a fake node's `fs.*` and `git.status`: a flat map
  * of paths, directories implied by them, watches that report changes, `fs.gitShow` from `head` and `index`, and
  * `git.status` from `status`.
  */
@@ -25,7 +25,6 @@ export class FakeFs {
 	/** `git.status`'s answer; undefined answers `not_found` (no work tree). */
 	status: GitStatus | undefined;
 	readonly watches = new Map<string, string>();
-	readonly projects: { name: string; path: string }[] = [];
 	readonly writes: { path: string; expected: Expected }[] = [];
 	/** `fs.readDir` answers at most this many names, like the daemon's 5,000. */
 	maxEntries = 5_000;
@@ -84,8 +83,6 @@ export class FakeFs {
 		const { id } = message;
 		if (this.unsupported.has(message.type)) return this.#error(id, "unsupported");
 		switch (message.type) {
-			case "projects.list":
-				return this.#reply(id, { projects: this.projects });
 			case "fs.readDir": {
 				if (!this.dirs.has(message.path)) return this.#error(id, this.files.has(message.path) ? "not_a_directory" : "not_found");
 				const prefix = message.path === "/" ? "/" : `${message.path}/`;
