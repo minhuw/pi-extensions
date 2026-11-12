@@ -216,6 +216,7 @@ Paths are absolute. The daemon follows symlinks and does not limit file access t
 | `fs.write` | `path`, `encoding`, `data`, `expected: { hash } \| { mtimeMs, size } \| { absent: true }`, `mode?` (for new files) | `{ stat: Stat }` |
 | `fs.watch` | `path` (file or directory, not recursive) | `{ watch }` |
 | `fs.unwatch` | `watch` | `{}` |
+| `fs.gitShow` | `path`, `ref: "HEAD" \| "index"` | `{ encoding: "utf8" \| "base64", data }` |
 | `fs.uploadStart` | `name` (a base name), `size`, `dir?` | `{ upload, path }` |
 | `fs.uploadChunk` | `upload`, `offset`, `data` (base64url) | `{ received }` |
 | `fs.uploadFinish` | `upload`, `hash` | `{ path, stat }` |
@@ -223,7 +224,8 @@ Paths are absolute. The daemon follows symlinks and does not limit file access t
 
 - **Read:** `utf8` when the content is valid UTF-8 without NUL, else `base64` (base64url without padding, as everywhere; the name is kept short). A file over 512 KiB, or a reply over the record limit, answers `too_large`.
 - **Write if unchanged:** `fs.write` checks `expected` against the file right before writing. `{ hash }` compares content, `{ mtimeMs, size }` compares stat, and `{ absent: true }` requires that no file exists. A mismatch answers `conflict` and writes nothing; the error carries `current: Stat` (absent when the file is gone). The daemon writes to a temporary file in the same directory, keeps an existing file's mode, and renames it over the target.
-- **Watch:** `fs.changed { watch, path, kind: "change" | "rename" | "gone" }`, coalesced to at most one event per watch per 100 ms. `gone` ends the watch. Closing the channel ends its watches.
+- **Watch:** `fs.changed { watch, path, kind: "change" | "rename" | "gone" }`, coalesced to at most one event per watch per 100 ms. `gone` ends the watch. Closing the channel ends its watches. A file watch follows its path, not its inode: when a rename replaces the file (as `fs.write` and most editors save), the daemon watches the new file, so the watch keeps reporting after a save.
+- **Git content:** `fs.gitShow` answers the file's content at `HEAD` or in the index (staged), for diffs: `pane.diff` with `staged: false` compares the index with the working file, and with `staged: true` compares `HEAD` with the index. The daemon resolves `path` with `realpath` (a deleted file through its parent directory), finds that real path's repository with `git rev-parse --show-toplevel`, and reads `git cat-file blob <ref>:<path inside it>`, so a symlink is read in the repository its target lives in. A path in no work tree, or absent from `ref` (a new or untracked file), answers `not_found`; content over 512 KiB answers `too_large`. Encoding is chosen as for `fs.read`. A daemon without it answers `unsupported`.
 - **Upload:** chunks arrive in order (`offset` must equal `received`). The file is written as `<dir or ~/.pika-node/uploads/YYYY-MM-DD>/<name>`; on a name clash, ` (2)`, ` (3)`, … go before the extension. `path` in `uploadStart` is the final path, so the UI can paste it into a pi prompt at once. `uploadFinish` verifies the SHA-256 and renames the partial file into place; a mismatch answers `conflict` and deletes it. An upload idle for 60 s, or whose channel closes, is deleted.
 
 ### Pane status

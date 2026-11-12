@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomBytes, type Hash } from "node:crypto";
 import { existsSync, watch as watchPath, type FSWatcher } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, dirname, extname, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import type { Peer } from "./daemon.ts";
 import { asNodeError, NodeError } from "./errors.ts";
@@ -18,7 +18,7 @@ import { roots, type Config } from "./store.ts";
 
 const run = promisify(execFile);
 
-interface Watch { id: string; peer: Peer; path: string; watcher: FSWatcher; timer: NodeJS.Timeout | undefined; kind: "change" | "rename" | undefined }
+interface Watch { id: string; peer: Peer; path: string; file: boolean; watcher: FSWatcher; timer: NodeJS.Timeout | undefined; kind: "change" | "rename" | undefined }
 interface Upload { id: string; peer: Peer; path: string; partial: string; size: number; received: number; hash: Hash; idle: NodeJS.Timeout }
 
 export interface FilesOptions {
@@ -74,6 +74,7 @@ export class Files {
             case "fs.read": return this.read(request.path);
             case "fs.write": return { stat: await this.write(request.path, decode(request.encoding, request.data), request.expected, request.mode) };
             case "fs.watch": return { watch: await this.watch(peer, request.path) };
+            case "fs.gitShow": return this.gitShow(request.path, request.ref);
             case "fs.unwatch": {
                 const watch = this.#watches.get(request.watch);
                 if (!watch || watch.peer !== peer) throw new NodeError("not_found", `no watch ${request.watch}`);
@@ -177,17 +178,31 @@ export class Files {
         if ([...this.#watches.values()].filter(watch => watch.peer === peer).length >= LIMITS.maxWatchesPerChannel) {
             throw new NodeError("limit", `at most ${LIMITS.maxWatchesPerChannel} watches per channel`);
         }
-        await stat(path);
+        const info = await stat(path);
         const id = randomBytes(9).toString("base64url");
-        const watcher = watchPath(path, { persistent: false });
-        const watch: Watch = { id, peer, path, watcher, timer: undefined, kind: undefined };
+        const watch: Watch = { id, peer, path, file: !info.isDirectory(), watcher: undefined as unknown as FSWatcher, timer: undefined, kind: undefined };
+        this.#arm(watch);
+        this.#watches.set(id, watch);
+        return id;
+    }
+
+    /**
+     * A file watch follows its path, not its inode. kqueue and inotify watch the inode, so a file replaced by a rename
+     * (as `fs.write` and most editors save) would go silent after its first event; the watch moves to the new file.
+     */
+    #arm(watch: Watch): void {
+        const watcher = watchPath(watch.path, { persistent: false });
+        watch.watcher = watcher;
         watcher.on("change", (event: string) => {
             watch.kind = watch.kind === "rename" || event === "rename" ? "rename" : "change";
             watch.timer ??= setTimeout(() => this.#fire(watch), timing.watchCoalesceMs);
+            if (event === "rename" && watch.file && watch.watcher === watcher && existsSync(watch.path)) {
+                watcher.close();
+                try { this.#arm(watch); }
+                catch { /* gone again: the timer reports it */ }
+            }
         });
         watcher.on("error", () => this.#fire(watch, true));
-        this.#watches.set(id, watch);
-        return id;
     }
 
     #fire(watch: Watch, failed = false): void {
@@ -203,6 +218,39 @@ export class Files {
         this.#watches.delete(watch.id);
         if (watch.timer) clearTimeout(watch.timer);
         watch.watcher.close();
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Git
+
+    /**
+     * A file's content at `HEAD` or in the index, for diffs. The path's real path must lie inside its repository's real
+     * top level, so a symlink cannot name another repository's file; a deleted file resolves through its parent.
+     */
+    async gitShow(path: string, ref: "HEAD" | "index"): Promise<{ encoding: Encoding; data: string }> {
+        let real: string;
+        try { real = await realpath(path); }
+        catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            real = join(await realpath(dirname(path)), basename(path));
+        }
+        let top: string;
+        try { top = await realpath((await run("git", ["-C", dirname(real), "rev-parse", "--show-toplevel"], { timeout: 5_000 })).stdout.trim()); }
+        catch { throw new NodeError("not_found", `${path} is not in a git work tree`); }
+        const inside = relative(top, real);
+        if (!inside || inside === ".." || inside.startsWith(`..${sep}`)) throw new NodeError("outside_roots", `${path} is not inside ${top}`);
+        const object = `${ref === "HEAD" ? "HEAD" : ""}:${inside.split(sep).join("/")}`;
+        let content: Buffer;
+        try {
+            content = (await run("git", ["-C", top, "cat-file", "blob", object], { encoding: "buffer", maxBuffer: LIMITS.maxReadBytes, timeout: 10_000 })).stdout;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw new NodeError("too_large", `${path} at ${ref} is over ${LIMITS.maxReadBytes} bytes`);
+            throw new NodeError("not_found", `${path} is not in ${ref}`);
+        }
+        const text = isText(content);
+        const data = text ? content.toString("utf8") : toBase64Url(content);
+        if (utf8Length(JSON.stringify(data)) + 1_024 > LIMITS.maxRecordBytes) throw new NodeError("too_large", `${path} at ${ref} does not fit one record`);
+        return { encoding: text ? "utf8" : "base64", data };
     }
 
     // -----------------------------------------------------------------------------------------------------------

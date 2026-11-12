@@ -170,6 +170,8 @@ export interface DirEntry { name: string; kind: "file" | "dir" | "symlink" | "ot
 export interface Project { name: string; path: string; repository?: string }
 export type Expected = { hash: string } | { mtimeMs: number; size: number } | { absent: true };
 export type Encoding = "utf8" | "base64";
+/** `fs.gitShow`'s source: the commit `HEAD`, or the index (the staged content). */
+export type GitRef = "HEAD" | "index";
 export type Signal = "SIGTERM" | "SIGHUP" | "SIGINT" | "SIGKILL";
 
 /** Client requests that carry an `id` and get exactly one `reply`. */
@@ -185,6 +187,7 @@ export interface Requests {
     "fs.write": { path: string; encoding: Encoding; data: string; expected: Expected; mode?: number };
     "fs.watch": { path: string };
     "fs.unwatch": { watch: string };
+    "fs.gitShow": { path: string; ref: GitRef };
     "fs.uploadStart": { name: string; size: number; dir?: string };
     "fs.uploadChunk": { upload: string; offset: number; data: string };
     "fs.uploadFinish": { upload: string; hash: string };
@@ -202,6 +205,7 @@ export interface Results {
     "fs.write": { stat: Stat };
     "fs.watch": { watch: string };
     "fs.unwatch": Record<never, never>;
+    "fs.gitShow": { encoding: Encoding; data: string };
     "fs.uploadStart": { upload: string; path: string };
     "fs.uploadChunk": { received: number };
     "fs.uploadFinish": { path: string; stat: Stat };
@@ -483,6 +487,7 @@ export const parseClientMessage = parser<ClientMessage>({
     "fs.write": { id: requestId, path: isAbsolutePath, encoding: literal("utf8", "base64"), data: value => typeof value === "string", expected, "?mode": int(0, 0o7777) },
     "fs.watch": { id: requestId, path: isAbsolutePath },
     "fs.unwatch": { id: requestId, watch: id },
+    "fs.gitShow": { id: requestId, path: isAbsolutePath, ref: literal("HEAD", "index") },
     "fs.uploadStart": { id: requestId, name: baseName, size: int(0, LIMITS.maxUploadBytes), "?dir": isAbsolutePath },
     "fs.uploadChunk": { id: requestId, upload: id, offset: int(0, LIMITS.maxUploadBytes), data: b64url(1, LIMITS.maxUploadChunkBytes) },
     "fs.uploadFinish": { id: requestId, upload: id, hash: hex64 },
