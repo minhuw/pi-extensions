@@ -1,13 +1,12 @@
-import { webcrypto } from "node:crypto";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChannelClosed, NodeChannel, NodeRequestError } from "../src/nodes/channel";
 import { generateIdentity, type Identity, type TerminalInfo } from "../src/nodes/contract";
 import { clientIdentity, MemoryKeyStore } from "../src/nodes/identity";
-import { FakeNode, settle } from "./support/fakeNode";
+import { FakeNode, nodeCrypto, settle } from "./support/fakeNode";
 
 // jsdom has no SubtleCrypto; Node's WebCrypto is what browsers implement.
 beforeAll(() => {
-	vi.stubGlobal("crypto", webcrypto);
+	vi.stubGlobal("crypto", nodeCrypto);
 });
 
 let client: Identity;

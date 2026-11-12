@@ -1,13 +1,12 @@
-import { webcrypto } from "node:crypto";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { liveBridge, NodesClient, orderTerminals } from "../src/nodes/client";
 import type { Body, TerminalInfo } from "../src/nodes/contract";
 import { MemoryKeyStore } from "../src/nodes/identity";
 import type { WebSocketLike } from "../src/nodes/socket";
-import { FakeNode, settle } from "./support/fakeNode";
+import { FakeNode, nodeCrypto, settle } from "./support/fakeNode";
 
 beforeAll(() => {
-	vi.stubGlobal("crypto", webcrypto);
+	vi.stubGlobal("crypto", nodeCrypto);
 });
 
 const shell: TerminalInfo = { terminalId: "t1", title: "bash", cwd: "/home/me", cols: 80, rows: 24, pid: 7, createdAt: 1, argv: ["/bin/bash", "-l"] };

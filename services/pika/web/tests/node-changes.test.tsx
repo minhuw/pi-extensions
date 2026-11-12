@@ -1,6 +1,5 @@
 import { fireEvent, render } from "@testing-library/react";
 import { useEffect, useMemo, useSyncExternalStore } from "react";
-import { webcrypto } from "node:crypto";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NodeChannel } from "../src/nodes/channel";
 import { changeMode, ChangesStore, diffSpec, groupChanges } from "../src/nodes/changes";
@@ -10,13 +9,13 @@ import { ChangesPanel, EditorTabBody, useChanges } from "../src/nodes/FilePanel"
 import { NodeFiles } from "../src/nodes/files";
 import { clientIdentity, MemoryKeyStore } from "../src/nodes/identity";
 import { FakeFs } from "./support/fakeFs";
-import { FakeNode, settle } from "./support/fakeNode";
+import { FakeNode, nodeCrypto, settle } from "./support/fakeNode";
 
 // Monaco does not run in jsdom; the panel's diff tab gets a stand-in.
 vi.mock("../src/nodes/CodeEditor", () => ({ default: () => <div data-stub-editor="" /> }));
 
 beforeAll(() => {
-	vi.stubGlobal("crypto", webcrypto);
+	vi.stubGlobal("crypto", nodeCrypto);
 });
 
 let node: FakeNode;

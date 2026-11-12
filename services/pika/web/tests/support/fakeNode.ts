@@ -1,3 +1,4 @@
+import { webcrypto } from "node:crypto";
 import {
 	answerHandshake,
 	finishNodeHandshake,
@@ -134,7 +135,47 @@ export class FakeNode {
 	}
 }
 
-/** Lets every queued microtask and WebCrypto call finish. */
+let cryptoInFlight = 0;
+let cryptoWaiters: (() => void)[] = [];
+
+function trackCrypto<T>(work: Promise<T>): Promise<T> {
+	cryptoInFlight++;
+	const done = () => {
+		if (--cryptoInFlight > 0) return;
+		const waiters = cryptoWaiters;
+		cryptoWaiters = [];
+		for (const wake of waiters) wake();
+	};
+	work.then(done, done);
+	return work;
+}
+
+/**
+ * Node's WebCrypto, which jsdom lacks, with every SubtleCrypto call counted until it settles. Install it with
+ * `vi.stubGlobal("crypto", nodeCrypto)` wherever a test calls `settle`.
+ */
+export const nodeCrypto = {
+	subtle: new Proxy(webcrypto.subtle, {
+		get(target, key) {
+			const value: unknown = Reflect.get(target, key, target);
+			if (typeof value !== "function") return value;
+			return (...args: unknown[]) => trackCrypto((value as (...args: unknown[]) => Promise<unknown>).apply(target, args));
+		},
+	}),
+	getRandomValues: <T extends ArrayBufferView | null>(array: T): T => webcrypto.getRandomValues(array as never) as T,
+	randomUUID: () => webcrypto.randomUUID(),
+} as unknown as Crypto;
+
+/**
+ * Lets every queued microtask and WebCrypto call finish: `rounds` macrotasks that end with no SubtleCrypto call in
+ * flight. WebCrypto runs on libuv's thread pool, so how many event-loop turns a handshake or a record takes depends on
+ * the machine's load; counting turns alone made a loaded run act on a channel still handshaking.
+ */
 export async function settle(rounds = 20): Promise<void> {
-	for (let i = 0; i < rounds; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+	if (globalThis.crypto !== nodeCrypto) throw new Error('settle() waits on WebCrypto it can see: vi.stubGlobal("crypto", nodeCrypto)');
+	for (let quiet = 0; quiet < rounds; ) {
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		if (cryptoInFlight === 0) quiet++;
+		else await new Promise<void>((resolve) => cryptoWaiters.push(resolve));
+	}
 }

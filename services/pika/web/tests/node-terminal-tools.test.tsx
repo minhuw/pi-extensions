@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { SearchAddon } from "@xterm/addon-search";
 import { Terminal } from "@xterm/xterm";
-import { createHash, webcrypto } from "node:crypto";
+import { createHash } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { countedTitle, paneCounts, PaneAlerts } from "../src/nodes/alerts";
 import { NodeChannel, NodeRequestError } from "../src/nodes/channel";
@@ -18,7 +18,7 @@ import { Sha256 } from "../src/nodes/sha256";
 import { TERMINAL_OPTIONS } from "../src/nodes/TerminalView";
 import { UploadCancelled, uploadFiles, uploadName, type UploadRequest } from "../src/nodes/upload";
 import { FakeFs } from "./support/fakeFs";
-import { FakeNode, settle } from "./support/fakeNode";
+import { FakeNode, nodeCrypto, settle } from "./support/fakeNode";
 
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 
@@ -416,7 +416,7 @@ describe("shortcuts", () => {
 
 describe("QuickOpen", () => {
 	beforeAll(() => {
-		vi.stubGlobal("crypto", webcrypto);
+		vi.stubGlobal("crypto", nodeCrypto);
 	});
 
 	async function connected(): Promise<{ files: NodeFiles; fs: FakeFs; node: FakeNode }> {

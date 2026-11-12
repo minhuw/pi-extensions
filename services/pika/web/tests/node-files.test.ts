@@ -1,4 +1,3 @@
-import { webcrypto } from "node:crypto";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NodeChannel } from "../src/nodes/channel";
 import { EditorStore, isDirty, paneRequest, type FileTab } from "../src/nodes/editor";
@@ -8,10 +7,10 @@ import { LAYOUT_DEFAULTS, LAYOUT_KEY, loadLayout, saveLayout } from "../src/node
 import { clientIdentity, MemoryKeyStore } from "../src/nodes/identity";
 import { FileTree, rootFor, TREE_WATCH_BUDGET, visibleEntries } from "../src/nodes/tree";
 import { FakeFs } from "./support/fakeFs";
-import { FakeNode, settle } from "./support/fakeNode";
+import { FakeNode, nodeCrypto, settle } from "./support/fakeNode";
 
 beforeAll(() => {
-	vi.stubGlobal("crypto", webcrypto);
+	vi.stubGlobal("crypto", nodeCrypto);
 });
 
 let node: FakeNode;
@@ -43,7 +42,7 @@ afterEach(() => {
 	for (const dispose of disposers.splice(0)) dispose();
 });
 
-/** Waits, a macrotask at a time, until `check` holds; a loaded machine needs more rounds than `settle` gives. */
+/** Waits, a macrotask at a time, until `check` holds: for what a timer or a watch brings, which `settle` does not wait on. */
 async function until(check: () => boolean, what: string): Promise<void> {
 	for (let round = 0; round < 2_000; round++) {
 		if (check()) return;
