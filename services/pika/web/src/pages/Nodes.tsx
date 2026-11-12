@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type MutableRefObject, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Icon } from "../components/icons";
 import { ModelMark } from "../components/ModelName";
@@ -11,12 +11,13 @@ import { bareModelOf } from "../lib/model";
 import { useHealth } from "../lib/relay";
 import { useTheme } from "../lib/theme";
 import { countedTitle, paneCounts, PaneAlerts } from "../nodes/alerts";
-import { homePath, liveBridge, NodesClient, orderTerminals, paneLabel, paneSession, type NodesSnapshot, type NodeView } from "../nodes/client";
+import { homePath, liveBridge, nextWaiting, NodesClient, orderTerminals, paneLabel, paneOrder, paneSession, stepPane, type NodesSnapshot, type NodeView, type PaneRef } from "../nodes/client";
 import { displayFingerprint, type Project, type TerminalInfo } from "../nodes/contract";
 import { EditorStore, paneRequest } from "../nodes/editor";
 import { FilePanel } from "../nodes/FilePanel";
 import { IndexedDbKeyStore } from "../nodes/identity";
-import { isQuickOpenKey } from "../nodes/keys";
+import { actionShortcut, currentKeymap, focusOf, resolveKey, type ActionId, type PageCommands } from "../nodes/keys";
+import { KeysHelp } from "../nodes/KeysHelp";
 import { clampWidth, LAYOUT_BOUNDS, loadLayout, saveLayout, type NodesLayout } from "../nodes/layout";
 import { QuickOpen } from "../nodes/QuickOpen";
 import { nodeSocketUrl } from "../nodes/socket";
@@ -83,10 +84,14 @@ function useLayout(): [NodesLayout, (change: Partial<NodesLayout>, commit?: bool
 /** One editor store per node, kept while the page is open, so its tabs survive picking another node and reconnects. */
 function useEditors(client: NodesClient | null, snapshot: NodesSnapshot): (node: string) => EditorStore {
 	const editors = useRef(new Map<string, EditorStore>());
+	const latestClient = useRef(client);
+	latestClient.current = client;
 	const editorFor = useCallback((node: string) => {
 		let store = editors.current.get(node);
 		if (!store) {
 			store = new EditorStore();
+			// A store first asked for on a route change, with no new snapshot to run the effect below, has its files now.
+			store.setFiles(latestClient.current?.files(node));
 			editors.current.set(node, store);
 		}
 		return store;
@@ -104,6 +109,54 @@ function useEditors(client: NodesClient | null, snapshot: NodesSnapshot): (node:
 	}, []);
 	return editorFor;
 }
+
+/**
+ * The page's shortcuts (`nodes/keys.ts`): one listener on the window, ahead of the terminal and Monaco, that runs the
+ * action a key resolves to with focus where it is. Nothing runs while a dialog is open.
+ */
+function useKeyDispatch(commands: MutableRefObject<PageCommands>) {
+	useEffect(() => {
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.defaultPrevented || event.isComposing) return;
+			if (document.querySelector("[aria-modal='true']")) return;
+			const action = resolveKey(currentKeymap(), event, focusOf(event.target));
+			const run = action && commands.current[action];
+			if (!run || run() === false) return;
+			event.preventDefault();
+			event.stopPropagation();
+		};
+		window.addEventListener("keydown", onKeyDown, true);
+		return () => window.removeEventListener("keydown", onKeyDown, true);
+	}, [commands]);
+}
+
+/** A button's title with its action's shortcut, when it has one. */
+const withShortcut = (label: string, action: ActionId): string => {
+	const shortcut = actionShortcut(action);
+	return shortcut ? `${label} (${shortcut})` : label;
+};
+
+/** Focuses the first element `selectors` names that is on screen; false when none is. */
+function focusFirst(...selectors: string[]): boolean {
+	for (const selector of selectors) {
+		const element = [...document.querySelectorAll<HTMLElement>(selector)].find((item) => item.getClientRects().length > 0);
+		if (element) {
+			element.focus();
+			return true;
+		}
+	}
+	return false;
+}
+
+const FOCUS_FILES = [
+	"[data-file-panel] [data-changes] [aria-current='true']",
+	"[data-file-panel] [data-changes] button[data-change]:not(:disabled)",
+	"[data-file-panel] [data-file-tree] [aria-selected='true']",
+	"[data-file-panel] [data-file-tree] [role='treeitem']",
+	"[data-file-panel] [data-changes] button",
+	// Nothing listed (not a repository, an empty folder): the switch between the tree and the changes.
+	"[data-file-panel] [role='group'][aria-label='List'] [aria-pressed='true']",
+];
 
 /** Opens a file in a node's editor tab, at a line when given, and shows the file panel. */
 type OpenFile = (node: string, path: string, at?: { line: number; column?: number }) => void;
@@ -190,8 +243,11 @@ function NodesWorkspace() {
 	const location = useRef(nodeId);
 	location.current = nodeId;
 	const [quickOpen, setQuickOpen] = useState(false);
+	const [help, setHelp] = useState(false);
 	const [permission, requestPermission] = useNotificationPermission();
 	usePaneAlerts(snapshot, nodeId, terminalId);
+	const commands = useRef<PageCommands>({});
+	useKeyDispatch(commands);
 
 	const openFile = useCallback<OpenFile>(
 		(node, path, at) => {
@@ -243,19 +299,45 @@ function NodesWorkspace() {
 	const readyFiles = ready && client?.files(ready.info.id);
 	const selectedTerminal = ready?.terminals.find((item) => item.terminalId === terminalId);
 
+	// The page's own actions, current with this render; the terminal's pane and the file panel add theirs.
+	const go = (pane: PaneRef | undefined) => {
+		if (!pane) return false;
+		navigate(`/nodes/${encodeURIComponent(pane.node)}/${encodeURIComponent(pane.terminalId)}`);
+	};
+	const page = commands.current;
+	page.help = () => setHelp(true);
+	// Taken even when there is nothing to open, so the browser's print dialog never shows on this page.
+	page.quickOpen = () => {
+		if (readyFiles) setQuickOpen(true);
+	};
+	page["pane.next"] = () => go(stepPane(paneOrder(snapshot.nodes), nodeId, terminalId, 1));
+	page["pane.previous"] = () => go(stepPane(paneOrder(snapshot.nodes), nodeId, terminalId, -1));
+	page["pane.waiting"] = () => go(nextWaiting(paneOrder(snapshot.nodes), nodeId, terminalId));
+	page["focus.terminal"] = () => focusFirst("[data-terminal-host] .xterm-helper-textarea");
+	page["focus.files"] = () => {
+		if (!ready) return false;
+		if (focusFirst(...FOCUS_FILES)) return;
+		// The panel is hidden: show it, then focus once it has drawn and listed something (or given up, after a second).
+		setLayout({ filesOpen: true });
+		let tries = 0;
+		const retry = () => {
+			if (!focusFirst(...FOCUS_FILES.slice(0, -1)) && ++tries < 20) setTimeout(retry, 50);
+			else if (tries >= 20) focusFirst(...FOCUS_FILES);
+		};
+		setTimeout(retry, 0);
+	};
+	page["focus.editor"] = () => {
+		const editors = [...document.querySelectorAll<HTMLElement>("[data-file-panel] .monaco-editor textarea")].filter((item) => item.getClientRects().length > 0);
+		// In a diff, the right-hand (modified) side.
+		const editor = editors.at(-1);
+		if (editor) return void editor.focus();
+		return focusFirst("[data-file-panel] [role='tab'][aria-selected='true']");
+	};
+	page["files.toggle"] = () => (ready ? setLayout({ filesOpen: !layout.filesOpen }) : false);
+
 	return (
 		// Narrow windows shrink the side panes to their least widths first, then scroll.
-		<div
-			className="flex h-full min-h-0 overflow-x-auto"
-			data-nodes-page=""
-			// Captured before the terminal or Monaco sees it, and only while focus is inside the page's panes.
-			onKeyDownCapture={(event) => {
-				if (!isQuickOpenKey(event.nativeEvent)) return;
-				event.preventDefault();
-				event.stopPropagation();
-				if (readyFiles) setQuickOpen(true);
-			}}
-		>
+		<div className="flex h-full min-h-0 overflow-x-auto" data-nodes-page="">
 			<NodeRail
 				snapshot={snapshot}
 				nodeId={nodeId}
@@ -263,6 +345,7 @@ function NodesWorkspace() {
 				width={layout.rail}
 				permission={permission}
 				onNotify={requestPermission}
+				onHelp={() => setHelp(true)}
 			/>
 			<Splitter
 				name="rail"
@@ -283,6 +366,7 @@ function NodesWorkspace() {
 						fingerprint={snapshot.fingerprint}
 						onShowFiles={ready && !layout.filesOpen ? () => setLayout({ filesOpen: true }) : undefined}
 						onOpenFile={openFile}
+						commands={commands}
 					/>
 				) : (
 					<EmptyState title={snapshot.nodes.length ? "Pick a node" : snapshot.status === "open" ? "No nodes yet" : "Connecting…"}>
@@ -317,10 +401,12 @@ function NodesWorkspace() {
 							theme={theme}
 							layout={layout}
 							setLayout={setLayout}
+							commands={commands}
 						/>
 					</div>
 				</>
 			)}
+			{help && <KeysHelp onClose={() => setHelp(false)} />}
 			{quickOpen && ready && readyFiles && (
 				<QuickOpen
 					key={ready.info.id}
@@ -348,6 +434,7 @@ function NodeFiles({
 	theme,
 	layout,
 	setLayout,
+	commands,
 }: {
 	client: NodesClient;
 	view: NodeView;
@@ -357,6 +444,7 @@ function NodeFiles({
 	theme: ReturnType<typeof useTheme>["theme"];
 	layout: NodesLayout;
 	setLayout: (change: Partial<NodesLayout>, commit?: boolean) => void;
+	commands: MutableRefObject<PageCommands>;
 }) {
 	const files = client.files(view.info.id);
 	const [projects, setProjects] = useState<Project[]>([]);
@@ -394,6 +482,11 @@ function NodeFiles({
 			hidden={layout.hidden}
 			onHidden={(hidden) => setLayout({ hidden })}
 			onCollapse={() => setLayout({ filesOpen: false })}
+			sidebar={layout.sidebar}
+			onSidebar={(sidebar) => setLayout({ sidebar })}
+			diffInline={layout.diffInline}
+			onDiffInline={(diffInline) => setLayout({ diffInline })}
+			commands={commands}
 		/>
 	);
 }
@@ -448,6 +541,7 @@ function NodeRail({
 	width,
 	permission,
 	onNotify,
+	onHelp,
 }: {
 	snapshot: NodesSnapshot;
 	nodeId?: string;
@@ -455,12 +549,22 @@ function NodeRail({
 	width: number;
 	permission: Permission;
 	onNotify: () => void;
+	onHelp: () => void;
 }) {
 	return (
 		<aside className="flex min-w-[200px] flex-col bg-sidebar" style={{ flex: `0 1 ${width}px` }} aria-label="Nodes" data-agent-list="">
 			<div className="flex h-10 shrink-0 items-center gap-2 px-4">
 				<h1 className="text-[15px] font-semibold">Nodes</h1>
 				<SocketStatus status={snapshot.status} />
+				<button
+					type="button"
+					className={cx(BUTTON.quiet, "ml-auto h-7 px-2 font-mono")}
+					title={withShortcut("Keyboard shortcuts", "help")}
+					onClick={onHelp}
+					data-keys-open=""
+				>
+					?<span className="sr-only">Keyboard shortcuts</span>
+				</button>
 			</div>
 			<ul className="min-h-0 flex-1 overflow-y-auto pb-3">
 				{snapshot.nodes.map((view) => {
@@ -576,6 +680,7 @@ function NodeMain({
 	fingerprint,
 	onShowFiles,
 	onOpenFile,
+	commands,
 }: {
 	client: NodesClient;
 	view: NodeView;
@@ -584,6 +689,7 @@ function NodeMain({
 	/** Shows the file panel, when it is hidden. */
 	onShowFiles?: () => void;
 	onOpenFile: OpenFile;
+	commands: MutableRefObject<PageCommands>;
 }) {
 	const { theme } = useTheme();
 	const navigate = useNavigate();
@@ -596,6 +702,17 @@ function NodeMain({
 	const terminal = view.terminals.find((item) => item.terminalId === terminalId);
 	const channel = client.channel(view.info.id);
 	const unread = terminal?.status?.unread === true;
+
+	// New terminal's shortcut, while the node is ready: the same action as the button.
+	const createRef = useRef<(() => void) | undefined>(undefined);
+	createRef.current = undefined;
+	useEffect(() => {
+		const registry = commands.current;
+		registry["terminal.new"] = () => (createRef.current ? createRef.current() : false);
+		return () => {
+			delete registry["terminal.new"];
+		};
+	}, [commands]);
 
 	// A kill confirmation belongs to the terminal on screen: another selection (such as New terminal's) closes it.
 	useEffect(() => setKilling(null), [terminalId]);
@@ -696,18 +813,26 @@ function NodeMain({
 			const created = await client.createTerminal(view.info.id, { cols: 80, rows: 24 });
 			navigate(`${nodePath}/${encodeURIComponent(created.terminalId)}`);
 		});
+	createRef.current = busy ? undefined : create;
 
 	return (
 		<>
 			<header className="flex h-10 shrink-0 items-center gap-3 border-b border-line px-3">
 				<PaneHeading node={name} terminal={terminal} home={link.welcome.home} />
 				{terminal && <PaneDetail terminal={terminal} />}
-				<button type="button" className={cx(BUTTON.secondary, "ml-auto h-7 shrink-0")} disabled={busy} onClick={create} data-new-terminal="">
+				<button
+					type="button"
+					className={cx(BUTTON.secondary, "ml-auto h-7 shrink-0")}
+					disabled={busy}
+					onClick={create}
+					title={withShortcut("New terminal", "terminal.new")}
+					data-new-terminal=""
+				>
 					<Icon name="plus" size={13} />
 					New terminal
 				</button>
 				{onShowFiles && (
-					<button type="button" className={cx(BUTTON.quiet, "h-7 shrink-0 px-2")} onClick={onShowFiles} data-show-files="">
+					<button type="button" className={cx(BUTTON.quiet, "h-7 shrink-0 px-2")} onClick={onShowFiles} title={withShortcut("Show the files", "files.toggle")} data-show-files="">
 						<Icon name="folder" size={13} />
 						Files
 					</button>

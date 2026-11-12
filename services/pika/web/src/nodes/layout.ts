@@ -9,11 +9,15 @@ export interface NodesLayout {
 	filesOpen: boolean;
 	/** Dotfiles in the tree. */
 	hidden: boolean;
+	/** What the file panel's left column lists: the tree, or git's changes. */
+	sidebar: "files" | "changes";
+	/** Diffs one column above the other, rather than side by side. */
+	diffInline: boolean;
 }
 
 export const LAYOUT_KEY = "pika.nodes.layout";
 
-export const LAYOUT_DEFAULTS: NodesLayout = { rail: 288, files: 640, tree: 220, filesOpen: true, hidden: false };
+export const LAYOUT_DEFAULTS: NodesLayout = { rail: 288, files: 640, tree: 220, filesOpen: true, hidden: false, sidebar: "files", diffInline: false };
 
 /** Least and most width of each pane, in CSS pixels. */
 export const LAYOUT_BOUNDS = {
@@ -40,8 +44,17 @@ export function loadLayout(storage: Pick<Storage, "getItem"> | undefined = globa
 		const value = stored[pane];
 		return typeof value === "number" && Number.isFinite(value) ? clampWidth(pane, value) : LAYOUT_DEFAULTS[pane];
 	};
-	const flag = (name: "filesOpen" | "hidden") => (typeof stored[name] === "boolean" ? (stored[name] as boolean) : LAYOUT_DEFAULTS[name]);
-	return { rail: width("rail"), files: width("files"), tree: width("tree"), filesOpen: flag("filesOpen"), hidden: flag("hidden") };
+	const flag = (name: "filesOpen" | "hidden" | "diffInline") => (typeof stored[name] === "boolean" ? (stored[name] as boolean) : LAYOUT_DEFAULTS[name]);
+	const sidebar = stored.sidebar === "changes" || stored.sidebar === "files" ? stored.sidebar : LAYOUT_DEFAULTS.sidebar;
+	return {
+		rail: width("rail"),
+		files: width("files"),
+		tree: width("tree"),
+		filesOpen: flag("filesOpen"),
+		hidden: flag("hidden"),
+		sidebar,
+		diffInline: flag("diffInline"),
+	};
 }
 
 export function saveLayout(layout: NodesLayout, storage: Pick<Storage, "setItem"> | undefined = globalThis.localStorage): void {

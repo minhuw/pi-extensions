@@ -56,6 +56,14 @@ function prune(scope: string, open: ReadonlySet<string>): void {
 	}
 }
 
+/** What the page can do with the diff on screen. */
+export interface DiffControl {
+	/** Moves to the next or previous change, and focuses the diff. */
+	go: (direction: "next" | "previous") => void;
+	/** Changed regions in the diff Monaco computed last. */
+	changes: number;
+}
+
 export interface CodeEditorProps {
 	/** The node, so two nodes' tabs for the same path keep their own models. */
 	scope: string;
@@ -65,6 +73,10 @@ export interface CodeEditorProps {
 	theme: Theme;
 	onChange: (key: string, text: string) => void;
 	onSave: (key: string) => void;
+	/** Diffs one column above the other. */
+	diffInline?: boolean;
+	/** The diff on screen's controls whenever Monaco computes it; null when it goes. */
+	onDiff?: (control: DiffControl | null) => void;
 }
 
 export default function CodeEditor(props: CodeEditorProps) {
@@ -79,7 +91,7 @@ export default function CodeEditor(props: CodeEditorProps) {
 	useEffect(() => prune(scope, new Set(openKey.split("\n"))), [scope, openKey]);
 	useEffect(() => () => prune(scope, new Set()), [scope]);
 
-	if (tab.kind === "diff") return <DiffView key="diff" tab={tab} theme={theme} />;
+	if (tab.kind === "diff") return <DiffView key="diff" tab={tab} theme={theme} inline={props.diffInline === true} onDiff={props.onDiff} />;
 	if (tab.body.kind !== "text") return null;
 	if (tab.compare && tab.disk && tab.disk.kind !== "deleted" && tab.disk.text !== undefined) {
 		return <CompareView key={`compare:${tab.key}`} {...props} tab={tab} disk={tab.disk.text} />;
@@ -186,20 +198,49 @@ function CompareView(props: CodeEditorProps & { tab: FileTab; disk: string }) {
 	return <div ref={host} className="min-h-0 flex-1" data-compare-editor={tab.path} />;
 }
 
-/** A read-only diff of two versions of a file, from git. */
-function DiffView({ tab, theme }: { tab: DiffTab; theme: Theme }) {
+/**
+ * A read-only diff of two versions of a file, from git; it follows the tab's text as the store refreshes it. Side by
+ * side stays side by side however narrow the panel, as the toggle says.
+ */
+function DiffView({ tab, theme, inline, onDiff }: { tab: DiffTab; theme: Theme; inline: boolean; onDiff?: (control: DiffControl | null) => void }) {
 	const host = useRef<HTMLDivElement>(null);
 	const diffRef = useRef<{ diff: monaco.editor.IStandaloneDiffEditor; original: monaco.editor.ITextModel; modified: monaco.editor.ITextModel } | null>(null);
 	const initialTheme = useRef(theme);
+	const initialInline = useRef(inline);
+	const report = useRef(onDiff);
+	report.current = onDiff;
 
 	useEffect(() => {
 		const id = language(tab.path);
 		const original = monaco.editor.createModel("", id);
 		const modified = monaco.editor.createModel("", id);
-		const diff = monaco.editor.createDiffEditor(host.current!, { ...OPTIONS, readOnly: true, originalEditable: false, theme: themeName(initialTheme.current) });
+		const diff = monaco.editor.createDiffEditor(host.current!, {
+			...OPTIONS,
+			readOnly: true,
+			originalEditable: false,
+			renderSideBySide: !initialInline.current,
+			useInlineViewWhenSpaceIsLimited: false,
+			theme: themeName(initialTheme.current),
+		});
 		diff.setModel({ original, modified });
 		diffRef.current = { diff, original, modified };
+		const go = (direction: "next" | "previous") => {
+			diff.goToDiff(direction);
+			diff.getModifiedEditor().focus();
+		};
+		let shown = false;
+		const updates = diff.onDidUpdateDiff(() => {
+			const changes = diff.getLineChanges()?.length ?? 0;
+			// The first change of a file opened, not of each refresh: a refresh keeps the place the reader is at.
+			if (!shown && changes > 0 && (original.getValueLength() > 0 || modified.getValueLength() > 0)) {
+				shown = true;
+				diff.goToDiff("next");
+			}
+			report.current?.({ go, changes });
+		});
 		return () => {
+			updates.dispose();
+			report.current?.(null);
 			diff.setModel(null);
 			diff.dispose();
 			original.dispose();
@@ -207,6 +248,10 @@ function DiffView({ tab, theme }: { tab: DiffTab; theme: Theme }) {
 			diffRef.current = null;
 		};
 	}, [tab.path]);
+
+	useEffect(() => {
+		diffRef.current?.diff.updateOptions({ renderSideBySide: !inline });
+	}, [inline]);
 
 	useEffect(() => {
 		const view = diffRef.current;

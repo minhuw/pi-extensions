@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ClientMessage, DirEntry, Expected, NodeMessage, Stat } from "../../src/nodes/contract";
+import type { ClientMessage, DirEntry, Expected, GitStatus, NodeMessage, Stat } from "../../src/nodes/contract";
 import type { FakeNode } from "./fakeNode";
 
 interface FakeFile {
@@ -12,13 +12,18 @@ const sha = (data: string) => createHash("sha256").update(data).digest("hex");
 
 /**
  * The daemon's files (NODE.md §4 "Files") in memory, answering a fake node's `fs.*` and `projects.list`: a flat map
- * of paths, directories implied by them, watches that report changes, and `fs.gitShow` from `head` and `index`.
+ * of paths, directories implied by them, watches that report changes, `fs.gitShow` from `head` and `index`, and
+ * `git.status` from `status`.
  */
 export class FakeFs {
 	readonly files = new Map<string, FakeFile>();
 	readonly dirs = new Set<string>(["/"]);
 	readonly head = new Map<string, string>();
 	readonly index = new Map<string, string>();
+	/** `HEAD:<path>` or `index:<path>` that `fs.gitShow` answers as binary. */
+	readonly binaryRefs = new Set<string>();
+	/** `git.status`'s answer; undefined answers `not_found` (no work tree). */
+	status: GitStatus | undefined;
 	readonly watches = new Map<string, string>();
 	readonly projects: { name: string; path: string }[] = [];
 	readonly writes: { path: string; expected: Expected }[] = [];
@@ -135,8 +140,13 @@ export class FakeFs {
 			case "fs.gitShow": {
 				const content = (message.ref === "HEAD" ? this.head : this.index).get(message.path);
 				if (content === undefined) return this.#error(id, "not_found");
+				if (content.length > 512 * 1024) return this.#error(id, "too_large");
+				if (this.binaryRefs.has(`${message.ref}:${message.path}`)) return this.#reply(id, { encoding: "base64", data: "AAEC" });
 				return this.#reply(id, { encoding: "utf8", data: content });
 			}
+			case "git.status":
+				if (!this.status) return this.#error(id, "not_found", `${message.root} is not in a git work tree`);
+				return this.#reply(id, this.status);
 			default:
 				return this.#error(id, "unsupported");
 		}

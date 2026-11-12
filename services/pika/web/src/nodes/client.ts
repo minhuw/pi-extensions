@@ -402,6 +402,43 @@ export function orderTerminals(terminals: readonly TerminalInfo[]): TerminalInfo
 	return [...waiting, ...terminals.filter((item) => item.status?.state !== "waiting")];
 }
 
+/** One pane as the agent list shows it, for moving between panes. */
+export interface PaneRef {
+	node: string;
+	terminalId: string;
+	waiting: boolean;
+}
+
+/** Every pane in the agent list's order: nodes as listed, each ready node's panes waiting first. */
+export function paneOrder(nodes: readonly NodeView[]): PaneRef[] {
+	return nodes.flatMap((view) =>
+		view.link.kind === "ready"
+			? orderTerminals(view.terminals).map((terminal) => ({ node: view.info.id, terminalId: terminal.terminalId, waiting: terminal.status?.state === "waiting" }))
+			: [],
+	);
+}
+
+const indexOf = (order: readonly PaneRef[], node?: string, terminalId?: string): number =>
+	order.findIndex((pane) => pane.node === node && pane.terminalId === terminalId);
+
+/** The pane `step` places after (or before) the one on screen, wrapping; from none, the first (or last). */
+export function stepPane(order: readonly PaneRef[], node: string | undefined, terminalId: string | undefined, step: 1 | -1): PaneRef | undefined {
+	if (order.length === 0) return undefined;
+	const at = indexOf(order, node, terminalId);
+	if (at < 0) return step === 1 ? order[0] : order[order.length - 1];
+	return order[(at + step + order.length) % order.length];
+}
+
+/** The next waiting pane after the one on screen, wrapping; undefined when no other pane waits. */
+export function nextWaiting(order: readonly PaneRef[], node: string | undefined, terminalId: string | undefined): PaneRef | undefined {
+	const at = indexOf(order, node, terminalId);
+	for (let offset = 1; offset <= order.length; offset++) {
+		const pane = order[(at + offset + order.length) % order.length]!;
+		if (pane.waiting && !(pane.node === node && pane.terminalId === terminalId)) return pane;
+	}
+	return undefined;
+}
+
 /**
  * The bridge's status while its socket is open. A closed bridge's last status stays for its session (NODE.md, "Pane
  * status"), but its activities and model died with that pi.

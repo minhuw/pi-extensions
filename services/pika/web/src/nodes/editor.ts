@@ -1,4 +1,5 @@
 import { NodeRequestError } from "./channel";
+import { diffSpec, type DiffMode, type DiffSource } from "./changes";
 import type { Expected, NodeEvent, Stat } from "./contract";
 import { baseName, decodeText, type NodeFiles } from "./files";
 
@@ -53,11 +54,17 @@ export interface DiffTab {
 	key: string;
 	path: string;
 	name: string;
+	mode: DiffMode;
+	/** `mode === "staged"`. */
 	staged: boolean;
+	/** A staged rename's source: `HEAD`'s side is read there. */
+	from?: string;
 	status: "loading" | "ready" | "failed";
 	original: string;
 	modified: string;
 	labels: readonly [string, string];
+	/** A side the editor cannot show as text; both sides are then empty. */
+	blocked?: { side: "original" | "modified"; reason: "binary" | "too_large" };
 	error?: string;
 }
 
@@ -71,7 +78,13 @@ export interface EditorSnapshot {
 export type SaveResult = "saved" | "conflict" | "failed" | "skipped";
 
 const fileKey = (path: string): string => `file:${path}`;
-const diffKey = (path: string, staged: boolean): string => `diff:${staged ? "staged" : "worktree"}:${path}`;
+const diffKey = (path: string, mode: DiffMode): string => `diff:${mode}:${path}`;
+
+/** One side of a diff as read from the node. */
+type Side = { kind: "text"; text: string } | { kind: "absent" } | { kind: "binary" } | { kind: "too_large" };
+
+/** Diff tabs that show the file on disk, and so follow its watch. */
+const watchesDisk = (tab: EditorTab, path: string): boolean => tab.path === path && (tab.kind === "file" || tab.mode !== "staged");
 
 export const isDirty = (tab: EditorTab): boolean => tab.kind === "file" && tab.body.kind === "text" && tab.body.text !== tab.body.saved;
 
@@ -102,6 +115,8 @@ export class EditorStore {
 	#watches = new Map<string, () => void>();
 	#echo = new Map<string, Echo>();
 	#serial = 0;
+	/** The latest refresh of each diff tab: an older one's answer is dropped. */
+	#diffRuns = new Map<string, number>();
 	#listeners = new Set<() => void>();
 	#snapshot: EditorSnapshot = { tabs: [] };
 	#echoWindowMs: number;
@@ -140,7 +155,10 @@ export class EditorStore {
 		this.#emit();
 		if (!files) return;
 		for (const tab of this.#tabs) {
-			if (tab.kind !== "file") continue;
+			if (tab.kind === "diff") {
+				void this.refreshDiff(tab.key);
+				continue;
+			}
 			if (tab.body.kind === "text") {
 				this.#watch(tab.path);
 				void this.#verify(tab.path);
@@ -164,37 +182,68 @@ export class EditorStore {
 		await this.#load(path);
 	}
 
-	/** Opens a diff of `path`: the index against the working file, or `HEAD` against the index when `staged`. */
-	async openDiff(path: string, staged: boolean): Promise<void> {
-		const key = diffKey(path, staged);
+	/**
+	 * Opens a diff of `path` (`diffSpec`): the index against the working file, `HEAD` (at `from`, a staged rename's
+	 * source) against the index when staged, or nothing against a new file. `true` and `false` are pane.diff's `staged`.
+	 */
+	async openDiff(path: string, mode: DiffMode | boolean, from?: string): Promise<void> {
+		const diffMode: DiffMode = mode === true ? "staged" : mode === false ? "worktree" : mode;
+		const key = diffKey(path, diffMode);
 		this.#active = key;
-		if (!this.tab(key)) {
-			const labels = staged ? (["HEAD", "Index"] as const) : (["Index", "Working tree"] as const);
-			this.#tabs = [...this.#tabs, { kind: "diff", key, path, name: baseName(path), staged, status: "loading", original: "", modified: "", labels }];
-		}
+		const existing = this.tab(key);
+		if (!existing) {
+			const { labels } = diffSpec(diffMode, path, from);
+			const tab: DiffTab = { kind: "diff", key, path, name: baseName(path), mode: diffMode, staged: diffMode === "staged", status: "loading", original: "", modified: "", labels };
+			if (from) tab.from = from;
+			this.#tabs = [...this.#tabs, tab];
+		} else if (existing.kind === "diff" && existing.from !== from) this.#replace(key, { from });
 		this.#emit();
 		await this.refreshDiff(key);
 	}
 
+	/**
+	 * Reads both sides of a diff again. A diff on screen keeps showing while it does; a refresh started later wins over
+	 * an earlier one still in flight. A diff against the file on disk watches it, so it follows every save.
+	 */
 	async refreshDiff(key: string): Promise<void> {
 		const tab = this.tab(key);
 		const files = this.#files;
 		if (tab?.kind !== "diff") return;
 		if (!files) return this.#replace(key, { status: "failed", error: "The node is not connected." });
-		this.#replace(key, { status: "loading", error: undefined });
+		const run = (this.#diffRuns.get(key) ?? 0) + 1;
+		this.#diffRuns.set(key, run);
+		if (tab.status !== "ready") this.#replace(key, { status: "loading", error: undefined });
+		const spec = diffSpec(tab.mode, tab.path, tab.from);
+		let sides: [Side, Side];
 		try {
-			const [original, modified] = await Promise.all(
-				tab.staged
-					? [files.gitText(tab.path, "HEAD"), files.gitText(tab.path, "index")]
-					: [files.gitText(tab.path, "index"), this.#readText(files, tab.path)],
-			);
-			this.#replace(key, { status: "ready", original, modified });
+			sides = await Promise.all([this.#side(files, spec.original), this.#side(files, spec.modified)]);
 		} catch (error) {
+			if (this.#diffRuns.get(key) !== run || files !== this.#files) return;
 			this.#replace(key, {
 				status: "failed",
 				error: error instanceof NodeRequestError && error.code === "unsupported" ? "This pika-node has no fs.gitShow; update it to see diffs." : messageOf(error),
 			});
+			return;
 		}
+		if (this.#diffRuns.get(key) !== run || files !== this.#files) return;
+		const [original, modified] = sides;
+		const blocked = original.kind === "binary" || original.kind === "too_large" ? { side: "original" as const, reason: original.kind }
+			: modified.kind === "binary" || modified.kind === "too_large" ? { side: "modified" as const, reason: modified.kind }
+				: undefined;
+		this.#replace(key, {
+			status: "ready",
+			error: undefined,
+			blocked,
+			original: !blocked && original.kind === "text" ? original.text : "",
+			modified: !blocked && modified.kind === "text" ? modified.text : "",
+		});
+		if (tab.mode !== "staged" && modified.kind !== "absent") this.#watch(tab.path);
+	}
+
+	/** Refreshes the diffs of `paths` (absolute), as a new git status names them: staging changes no file on disk. */
+	refreshDiffs(paths: Iterable<string>): void {
+		const stale = new Set(paths);
+		for (const tab of this.#tabs) if (tab.kind === "diff" && (stale.has(tab.path) || (tab.from && stale.has(tab.from)))) void this.refreshDiff(tab.key);
 	}
 
 	activate(key: string): void {
@@ -208,7 +257,9 @@ export class EditorStore {
 		if (index < 0) return;
 		const tab = this.#tabs[index]!;
 		this.#tabs = this.#tabs.filter((item) => item.key !== key);
-		if (tab.kind === "file") this.#unwatch(tab.path);
+		this.#diffRuns.delete(key);
+		// A file tab and a diff of it share the path's watch.
+		if (!this.#tabs.some((other) => watchesDisk(other, tab.path))) this.#unwatch(tab.path);
 		if (this.#active === key) this.#active = (this.#tabs[index] ?? this.#tabs[index - 1])?.key;
 		this.#emit();
 	}
@@ -266,17 +317,21 @@ export class EditorStore {
 		this.#watches.clear();
 		for (const echo of this.#echo.values()) clearTimeout(echo.timer);
 		this.#echo.clear();
+		this.#diffRuns.clear();
 		this.#listeners.clear();
 	}
 
 	// ---------------------------------------------------------------------------------------------------------------
 
-	async #readText(files: NodeFiles, path: string): Promise<string> {
+	/** A side's content: not found (a new or deleted file) is absent; binary and too large are named, not shown. */
+	async #side(files: NodeFiles, source: DiffSource): Promise<Side> {
+		if (source.ref === "none") return { kind: "absent" };
 		try {
-			const read = await files.read(path);
-			return decodeText(read.encoding, read.data);
+			const read = source.ref === "working" ? await files.read(source.path) : await files.request("fs.gitShow", { path: source.path, ref: source.ref });
+			return read.encoding === "utf8" ? { kind: "text", text: read.data } : { kind: "binary" };
 		} catch (error) {
-			if (error instanceof NodeRequestError && error.code === "not_found") return "";
+			if (error instanceof NodeRequestError && error.code === "not_found") return { kind: "absent" };
+			if (error instanceof NodeRequestError && error.code === "too_large") return { kind: "too_large" };
 			throw error;
 		}
 	}
@@ -381,6 +436,9 @@ export class EditorStore {
 			const tab = this.tab(fileKey(path));
 			if (tab?.kind === "file") this.#replace(tab.key, { watched: false });
 		}
+		// Diffs follow the file, the save's own echo included: it is a change against the index.
+		for (const tab of this.#tabs) if (tab.kind === "diff" && watchesDisk(tab, path)) void this.refreshDiff(tab.key);
+		if (this.tab(fileKey(path))?.kind !== "file") return;
 		const echo = this.#echo.get(path);
 		if (echo && this.#now() < echo.until) {
 			echo.missed = true;

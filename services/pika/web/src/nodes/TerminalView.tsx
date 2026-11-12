@@ -12,7 +12,7 @@ import { NodeRequestError, type NodeChannel } from "./channel";
 import { homePath, paneCwd } from "./client";
 import { LIMITS, type TerminalInfo } from "./contract";
 import { claimsSize, splitInput } from "./input";
-import { isFindKey, LINK_MODIFIER, shortcutLabel } from "./keys";
+import { actionShortcut, isFindKey, LINK_MODIFIER } from "./keys";
 import { cellRange, findPaths, PathChecker, resolvePath, type CellText, type PathMatch } from "./links";
 import { clipboardImage, pasteText, runsPi } from "./paste";
 import { swallowQueries } from "./queries";
@@ -476,7 +476,7 @@ export function TerminalView({
 						type="button"
 						className={cx(BUTTON.quiet, "h-7 px-2")}
 						onClick={() => openSearch.current()}
-						title={`Find (${shortcutLabel("f")})`}
+						title={actionShortcut("find") ? `Find (${actionShortcut("find")})` : "Find"}
 						data-find-open=""
 					>
 						<Icon name="search" size={13} />

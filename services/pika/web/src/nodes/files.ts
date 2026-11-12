@@ -1,6 +1,5 @@
 import type { NodeChannel } from "./channel";
-import { NodeRequestError } from "./channel";
-import { fromBase64Url, LIMITS, type GitRef, type NodeEvent, type Requests, type RequestType, type Results } from "./contract";
+import { fromBase64Url, LIMITS, type NodeEvent, type Requests, type RequestType, type Results } from "./contract";
 
 export type ChangeKind = "change" | "rename" | "gone";
 
@@ -40,17 +39,6 @@ export class NodeFiles {
 
 	read(path: string) {
 		return this.request("fs.read", { path });
-	}
-
-	/** A file's content at `HEAD` or in the index as text; `""` when the ref has no such file (new or untracked). */
-	async gitText(path: string, ref: GitRef): Promise<string> {
-		try {
-			const shown = await this.request("fs.gitShow", { path, ref });
-			return decodeText(shown.encoding, shown.data);
-		} catch (error) {
-			if (error instanceof NodeRequestError && error.code === "not_found") return "";
-			throw error;
-		}
 	}
 
 	/** Watches currently held on this channel. */
