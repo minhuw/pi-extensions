@@ -6,7 +6,7 @@ import { inGuestView, setGuestView } from "../lib/guestView";
 import { useTheme } from "../lib/theme";
 import { Icon } from "./icons";
 import { useVisitorView } from "./useVisitorView";
-import { BAND_CONTROL, BAND_NAV, BAND_NAV_END, BandSearch, NavItem, ScrollRootContext, SignBand, ThemeToggle, useBandSearchShortcut } from "./Layout";
+import { BAND_CONTROL, BAND_NAV_END, BandNav, BandSearch, NavItem, ScrollRootContext, SignBand, ThemeToggle, useBandSearchShortcut } from "./Layout";
 
 /** Anonymous pages have their own client and cache, even when the browser is also signed in. */
 export function PublicLayout() {
@@ -53,16 +53,16 @@ export function PublicLayout() {
 							</>
 						}
 					>
-						<nav className={BAND_NAV} aria-label="Public">
+						<BandNav label="Public">
 							<NavItem to="/public" icon="sessions" end within={["/public/s/"]}>
 								Public trajectories
 							</NavItem>
 							<NavItem to="/public/statistics" icon="statistics">Statistics</NavItem>
 							<NavItem to="/docs" icon="file">Documentation</NavItem>
-							<div className={BAND_NAV_END}>
+							<div className={BAND_NAV_END} data-band-end="">
 								<BandSearch path="/public/search" label="Search published trajectories" inputRef={searchRef} />
 							</div>
-						</nav>
+						</BandNav>
 					</SignBand>
 					<main ref={setScrollRoot} className="relative min-h-0 min-w-0 flex-1 overflow-y-auto" data-scroll-root="">
 						<ScrollRootContext.Provider value={scrollRoot}><Outlet /></ScrollRootContext.Provider>

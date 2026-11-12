@@ -204,6 +204,34 @@ describe("the Nodes page client", () => {
 		expect(node.received.filter((message) => message.type === "term.list")).toHaveLength(1);
 	});
 
+	it("gives each ready channel its own file layer, and passes the bridge's requests to listeners", async () => {
+		const { node, client: c } = await setup();
+		expect(c.files("node-1")).toBeUndefined();
+		node.allowed.add(c.getSnapshot().fingerprint!);
+		c.pair("node-1");
+		await settle();
+		await c.confirmPin("node-1");
+		await settle();
+		const files = c.files("node-1")!;
+		expect(files).toBeDefined();
+		expect(c.files("node-1")).toBe(files);
+		const seen: string[] = [];
+		const stop = c.onEvent((id, event) => seen.push(`${id}:${event.type}`));
+		await node.send({ type: "pane.open", terminalId: "t1", path: "/home/me/a.ts", line: 4 });
+		await node.send({ type: "pane.diff", terminalId: "t1", path: "/home/me/a.ts", staged: false });
+		await settle();
+		expect(seen).toEqual(["node-1:pane.open", "node-1:pane.diff"]);
+		stop();
+
+		// A transient close reconnects: a new channel, a new file layer, as the old one's watches ended with its channel.
+		node.closeChannel("node_offline");
+		await settle(40);
+		expect(link(c).kind).toBe("ready");
+		expect(c.files("node-1")).toBeDefined();
+		expect(c.files("node-1")).not.toBe(files);
+		expect(c.files("node-1")!.channel).toBe(c.channel("node-1"));
+	});
+
 	it("shows node_key_changed and does not reconnect or send", async () => {
 		const { node, store, client: c } = await setup();
 		await store.pin({ node: "node-1", fingerprint: "f".repeat(64), publicKey: "x", name: "node01", pinnedAt: 1 });

@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { createContext, useContext, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { createContext, useContext, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Link, Outlet, useLocation, useMatch, useNavigate, useResolvedPath } from "react-router";
 import { authModeOf, useApi } from "../lib/api";
 import { guestPath, setGuestView } from "../lib/guestView";
@@ -95,6 +95,7 @@ export function NavItem({
 	className?: string;
 }) {
 	const { pathname } = useLocation();
+	const fit = useContext(BandFitContext);
 	const current = useMatch({ path: useResolvedPath(to).pathname, end: end ?? false }) !== null;
 	const inside = !current && (within?.some((prefix) => pathname.startsWith(prefix)) ?? false);
 	return (
@@ -111,8 +112,9 @@ export function NavItem({
 			)}
 		>
 			{/* Phones keep only the icons; the names stay for assistive technology. */}
-			<Icon name={icon} size={15} className={cx("shrink-0", !compact && "md:max-lg:hidden")} />
-			<span className={compact ? "max-xl:sr-only" : "max-md:sr-only"}>{children}</span>
+			<Icon name={icon} size={15} className={cx("shrink-0", !compact && (fit === "names" ? "md:hidden" : fit !== "icons" && "md:max-lg:hidden"))} />
+			{/* A crowded band drops the names of the compact tabs first, then of the sections. */}
+			<span className={compact ? (fit === "full" ? "max-xl:sr-only" : "sr-only") : fit === "icons" ? "sr-only" : "max-md:sr-only"}>{children}</span>
 			{badge}
 		</Link>
 	);
@@ -127,8 +129,10 @@ export function BandSearch({ path, label, inputRef }: { path: string; label: str
 	const navigate = useNavigate();
 	const open = useMatch({ path: useResolvedPath(path).pathname, end: true }) !== null;
 	const [value, setValue] = useState("");
+	// A crowded band (see `BandNav`) trades the field for the search page's tab, as phones do.
+	const crowded = useContext(BandFitContext) !== "full";
 	const tab = (
-		<NavItem to={path} icon="search" compact className={open ? undefined : "sm:hidden"}>
+		<NavItem to={path} icon="search" compact className={open || crowded ? undefined : "sm:hidden"}>
 			Search
 		</NavItem>
 	);
@@ -149,7 +153,10 @@ export function BandSearch({ path, label, inputRef }: { path: string; label: str
 					leave();
 					navigate(query.trim() ? `${path}?${new URLSearchParams({ q: query })}` : path);
 				}}
-				className="group flex h-8 max-w-[480px] min-w-[104px] flex-1 cursor-text items-center gap-2 self-center rounded-sm border border-band-ink/20 bg-band-hover px-2.5 text-band-muted hover:border-band-ink/40 focus-within:border-band-ink focus-within:text-band-ink max-sm:hidden"
+				className={cx(
+					"group flex h-8 max-w-[480px] min-w-[104px] flex-1 cursor-text items-center gap-2 self-center rounded-sm border border-band-ink/20 bg-band-hover px-2.5 text-band-muted hover:border-band-ink/40 focus-within:border-band-ink focus-within:text-band-ink max-sm:hidden",
+					crowded && "hidden",
+				)}
 				onClick={() => inputRef.current?.focus()}
 				data-band-search=""
 			>
@@ -312,6 +319,85 @@ export function ServerVersion({ className }: { className?: string }) {
 export const BAND_NAV = "flex min-w-0 flex-1 items-stretch overflow-x-auto [scrollbar-width:none]";
 export const BAND_NAV_END = "ml-auto flex min-w-0 flex-1 items-stretch justify-end gap-1 pl-3 sm:gap-1.5 lg:pl-6";
 
+/**
+ * How much the band gives up to fit its tabs, one step at a time: nothing; the search field, which becomes the search
+ * page's tab, and the names of the compact tabs beside it (Search, Settings); the sections' icons, as between the md
+ * and lg breakpoints; or the sections' names instead, leaving icons. Which tabs show depends on the server (relay, nodes), so the band
+ * measures rather than guessing from the screen's width.
+ */
+export type BandFit = "full" | "search" | "names" | "icons";
+const FITS: readonly BandFit[] = ["full", "search", "names", "icons"];
+
+const BandFitContext = createContext<BandFit>("full");
+
+/**
+ * The band's tabs overflow their room, or run under the controls at the right (`data-band-end`), whose content
+ * spills leftwards over the tabs once the field is at its least width.
+ */
+export function bandCrowded(nav: HTMLElement): boolean {
+	if (nav.scrollWidth > nav.clientWidth + 1) return true;
+	const end = nav.querySelector<HTMLElement>(":scope > [data-band-end]");
+	if (!end) return false;
+	const tabs = [...nav.children].filter((child) => child !== end && child.getClientRects().length > 0);
+	const first = [...end.children].find((child) => child.getClientRects().length > 0);
+	const last = tabs.at(-1);
+	if (!last || !first) return false;
+	return last.getBoundingClientRect().right > first.getBoundingClientRect().left;
+}
+
+/**
+ * The band's navigation, fitted to its width: on every resize and every tab that appears or goes it starts from
+ * `full` and gives up one step at a time, before the browser paints, until the tabs fit. Past `icons` it scrolls.
+ */
+export function BandNav({ label, children }: { label: string; children: ReactNode }) {
+	const ref = useRef<HTMLElement>(null);
+	const [fit, setFit] = useState<BandFit>("full");
+	const [round, setRound] = useState(0);
+
+	useLayoutEffect(() => {
+		const nav = ref.current;
+		if (!nav) return;
+		const next = FITS[FITS.indexOf(fit) + 1];
+		if (next && bandCrowded(nav)) setFit(next);
+	}, [fit, round]);
+
+	useLayoutEffect(() => {
+		const nav = ref.current;
+		if (!nav || typeof ResizeObserver === "undefined") return;
+		const again = () => {
+			setFit("full");
+			setRound((value) => value + 1);
+		};
+		// The band's width, and each tab's: a tab changes size when Aileron replaces the fallback font or a badge
+		// appears. A fit runs before the browser paints, so the observer sees only its result, which it saw before.
+		const resize = new ResizeObserver(again);
+		const observe = () => {
+			resize.disconnect();
+			resize.observe(nav);
+			for (const child of nav.querySelectorAll(":scope > *, :scope > [data-band-end] > *")) resize.observe(child);
+		};
+		observe();
+		// Tabs that appear once the server's health or relay answers; a fit changes classes, never children.
+		const mutation = new MutationObserver(() => {
+			observe();
+			again();
+		});
+		mutation.observe(nav, { childList: true, subtree: true });
+		return () => {
+			resize.disconnect();
+			mutation.disconnect();
+		};
+	}, []);
+
+	return (
+		<BandFitContext.Provider value={fit}>
+			<nav ref={ref} className={BAND_NAV} aria-label={label} data-band-fit={fit}>
+				{children}
+			</nav>
+		</BandFitContext.Provider>
+	);
+}
+
 export function Layout({ children }: { children?: ReactNode }) {
 	const { theme, toggle } = useTheme();
 	const [scrollRoot, setScrollRoot] = useState<HTMLElement | null>(null);
@@ -337,7 +423,7 @@ export function Layout({ children }: { children?: ReactNode }) {
 						</>
 					}
 				>
-					<nav className={BAND_NAV} aria-label="Main">
+					<BandNav label="Main">
 						<NavItem to="/" icon="sessions" end within={["/s/"]}>
 							Sessions
 						</NavItem>
@@ -359,13 +445,13 @@ export function Layout({ children }: { children?: ReactNode }) {
 						<NavItem to="/memory" icon="memory">
 							Memory
 						</NavItem>
-						<div className={BAND_NAV_END}>
+						<div className={BAND_NAV_END} data-band-end="">
 							<BandSearch path="/search" label="Search every session" inputRef={searchRef} />
 							<NavItem to="/settings" icon="settings" compact>
 								Settings
 							</NavItem>
 						</div>
-					</nav>
+					</BandNav>
 				</SignBand>
 				<main ref={setScrollRoot} className="relative min-h-0 min-w-0 flex-1 overflow-y-auto" data-scroll-root="">
 					<ScrollRootContext.Provider value={scrollRoot}>{children ?? <Outlet />}</ScrollRootContext.Provider>

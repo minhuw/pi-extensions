@@ -1,5 +1,6 @@
 import { ChannelClosed, NodeChannel, NodeRequestError, type ChannelState } from "./channel";
 import { sanitize, type BridgeStatus, type Identity, type NodeEvent, type NodeInfo, type PaneView, type TerminalInfo } from "./contract";
+import { NodeFiles } from "./files";
 import { clientIdentity, webCryptoAvailable, type KeyStore, type PinnedNode } from "./identity";
 import { NodeSocket, OpenRefused, type NodeSocketOptions, type SocketStatus } from "./socket";
 
@@ -43,6 +44,8 @@ interface NodeEntry {
 	pin?: PinnedNode;
 	link: NodeLink;
 	channel?: NodeChannel;
+	/** The ready channel's file layer, made on first use. */
+	files?: NodeFiles;
 	terminals: TerminalInfo[];
 	error?: string;
 	epoch: number;
@@ -65,6 +68,7 @@ export class NodesClient {
 	#socket: NodeSocket | undefined;
 	#entries = new Map<string, NodeEntry>();
 	#listeners = new Set<() => void>();
+	#eventListeners = new Set<(node: string, event: NodeEvent) => void>();
 	#snapshot: NodesSnapshot = { status: "loading", nodes: [] };
 	#status: NodesSnapshot["status"] = "loading";
 	#failure: string | undefined;
@@ -112,6 +116,24 @@ export class NodesClient {
 	channel(node: string): NodeChannel | undefined {
 		const entry = this.#entries.get(node);
 		return entry?.link.kind === "ready" ? entry.channel : undefined;
+	}
+
+	/** The ready channel's files (NODE.md §4 "Files"); a new channel gets a new one, its watches gone with the old. */
+	files(node: string): NodeFiles | undefined {
+		const entry = this.#entries.get(node);
+		const channel = this.channel(node);
+		if (!entry || !channel) return undefined;
+		if (entry.files?.channel !== channel) {
+			entry.files?.dispose();
+			entry.files = new NodeFiles(channel);
+		}
+		return entry.files;
+	}
+
+	/** Every node event after the client has applied it, for views that act on them (`pane.open`, `pane.diff`). */
+	onEvent(listener: (node: string, event: NodeEvent) => void): () => void {
+		this.#eventListeners.add(listener);
+		return () => this.#eventListeners.delete(listener);
 	}
 
 	/** Opens an unpinned channel so the user can enrol this browser or confirm the node's key. */
@@ -269,6 +291,8 @@ export class NodesClient {
 	#drop(entry: NodeEntry, code: string): void {
 		const channel = entry.channel;
 		entry.channel = undefined;
+		entry.files?.dispose();
+		entry.files = undefined;
 		channel?.close(code);
 	}
 
@@ -279,6 +303,8 @@ export class NodesClient {
 		if (state.kind === "ready") void this.refreshTerminals(node).catch(() => {});
 		if (state.kind === "closed") {
 			entry.channel = undefined;
+			entry.files?.dispose();
+			entry.files = undefined;
 			// A transient close reconnects once the node is back; `#sync` does it now if it already is.
 			if (TRANSIENT.has(state.code)) queueMicrotask(() => this.#sync());
 		}
@@ -286,6 +312,11 @@ export class NodesClient {
 	}
 
 	#event(node: string, event: NodeEvent): void {
+		this.#apply(node, event);
+		for (const listener of this.#eventListeners) listener(node, event);
+	}
+
+	#apply(node: string, event: NodeEvent): void {
 		const entry = this.#entry(node);
 		const update = (terminalId: string, change: (info: TerminalInfo) => TerminalInfo): void => {
 			const index = entry.terminals.findIndex((item) => item.terminalId === terminalId);

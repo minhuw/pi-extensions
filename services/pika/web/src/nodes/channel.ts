@@ -21,6 +21,7 @@ import {
 	type RequestType,
 	type Results,
 	type Session,
+	type Stat,
 	type Welcome,
 } from "./contract";
 import type { ChannelRoute } from "./socket";
@@ -42,9 +43,12 @@ export type ChannelState =
 /** A `reply` with an `error`. */
 export class NodeRequestError extends Error {
 	readonly code: string;
+	/** `fs.write`'s `conflict`: the file as it is now (absent when it is gone). */
+	readonly current?: Stat;
 	constructor(error: ReplyError) {
 		super(error.message || error.code);
 		this.code = error.code;
+		if (error.current) this.current = error.current;
 	}
 }
 

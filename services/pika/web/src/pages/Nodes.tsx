@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Icon } from "../components/icons";
 import { ModelMark } from "../components/ModelName";
@@ -11,10 +11,15 @@ import { bareModelOf } from "../lib/model";
 import { useHealth } from "../lib/relay";
 import { useTheme } from "../lib/theme";
 import { homePath, liveBridge, NodesClient, orderTerminals, paneLabel, paneSession, type NodesSnapshot, type NodeView } from "../nodes/client";
-import { displayFingerprint, type TerminalInfo } from "../nodes/contract";
+import { displayFingerprint, type Project, type TerminalInfo } from "../nodes/contract";
+import { EditorStore, paneRequest } from "../nodes/editor";
+import { FilePanel } from "../nodes/FilePanel";
 import { IndexedDbKeyStore } from "../nodes/identity";
+import { clampWidth, LAYOUT_BOUNDS, loadLayout, saveLayout, type NodesLayout } from "../nodes/layout";
 import { nodeSocketUrl } from "../nodes/socket";
+import { Splitter } from "../nodes/Splitter";
 import { TerminalView } from "../nodes/TerminalView";
+import { rootFor } from "../nodes/tree";
 
 /** The command that moves this browser's pending entry into the node's allowlist (NODE.md, "Enrolment"). */
 export const enrolCommand = (clientFingerprint: string): string => `pika-node clients add ${clientFingerprint.slice(0, 32)}`;
@@ -59,11 +64,70 @@ export function NodesPage() {
 	return <NodesWorkspace />;
 }
 
+/** The page's pane sizes: state while dragging, stored when a drag or key ends. */
+function useLayout(): [NodesLayout, (change: Partial<NodesLayout>, commit?: boolean) => void] {
+	const [layout, setLayout] = useState(loadLayout);
+	const update = useCallback((change: Partial<NodesLayout>, commit = true) => {
+		setLayout((current) => {
+			const next = { ...current, ...change };
+			if (commit) saveLayout(next);
+			return next;
+		});
+	}, []);
+	return [layout, update];
+}
+
+/** One editor store per node, kept while the page is open, so its tabs survive picking another node and reconnects. */
+function useEditors(client: NodesClient | null, snapshot: NodesSnapshot): (node: string) => EditorStore {
+	const editors = useRef(new Map<string, EditorStore>());
+	const editorFor = useCallback((node: string) => {
+		let store = editors.current.get(node);
+		if (!store) {
+			store = new EditorStore();
+			editors.current.set(node, store);
+		}
+		return store;
+	}, []);
+	// Each store follows its node's channel: undefined while disconnected, a new file layer on each new channel.
+	useEffect(() => {
+		for (const [node, store] of editors.current) store.setFiles(client?.files(node));
+	}, [client, snapshot]);
+	useEffect(() => {
+		const stores = editors.current;
+		return () => {
+			for (const store of stores.values()) store.dispose();
+			stores.clear();
+		};
+	}, []);
+	return editorFor;
+}
+
 function NodesWorkspace() {
 	const client = useNodesClient();
 	const snapshot = useSnapshot(client);
+	const navigate = useNavigate();
+	const { theme } = useTheme();
 	const { node: nodeId, terminal: terminalId } = useParams();
 	const selected = snapshot.nodes.find((item) => item.info.id === nodeId);
+	const [layout, setLayout] = useLayout();
+	const editorFor = useEditors(client, snapshot);
+	const location = useRef(nodeId);
+	location.current = nodeId;
+
+	// The bridge's /pika-open and /pika-diff: shown in the node's editor, on screen. A tab in the background ignores
+	// them (NODE.md, "Requests from the bridge"), so only the windows in view open the file.
+	useEffect(() => {
+		if (!client) return;
+		return client.onEvent((node, event) => {
+			if (event.type !== "pane.open" && event.type !== "pane.diff") return;
+			if (document.visibilityState !== "visible") return;
+			const store = editorFor(node);
+			store.setFiles(client.files(node));
+			void paneRequest(store, event);
+			setLayout({ filesOpen: true });
+			if (location.current !== node) navigate(`/nodes/${encodeURIComponent(node)}/${encodeURIComponent(event.terminalId)}`);
+		});
+	}, [client, editorFor, navigate, setLayout]);
 
 	if (snapshot.status === "insecure") {
 		return (
@@ -85,12 +149,32 @@ function NodesWorkspace() {
 		);
 	}
 
+	const ready = client && selected && selected.link.kind === "ready" ? selected : undefined;
+	const filesShown = Boolean(ready && layout.filesOpen);
+
 	return (
-		<div className="flex h-full min-h-0" data-nodes-page="">
-			<NodeRail snapshot={snapshot} nodeId={nodeId} terminalId={terminalId} />
-			<section className="flex min-w-0 flex-1 flex-col" aria-label="Terminal">
+		// Narrow windows shrink the side panes to their least widths first, then scroll.
+		<div className="flex h-full min-h-0 overflow-x-auto" data-nodes-page="">
+			<NodeRail snapshot={snapshot} nodeId={nodeId} terminalId={terminalId} width={layout.rail} />
+			<Splitter
+				name="rail"
+				label="Resize the agent list"
+				side="left"
+				value={layout.rail}
+				min={LAYOUT_BOUNDS.rail[0]}
+				max={LAYOUT_BOUNDS.rail[1]}
+				onChange={(rail) => setLayout({ rail }, false)}
+				onCommit={(rail) => setLayout({ rail })}
+			/>
+			<section className="flex min-w-[320px] flex-1 flex-col" aria-label="Terminal">
 				{client && selected ? (
-					<NodeMain client={client} view={selected} terminalId={terminalId} fingerprint={snapshot.fingerprint} />
+					<NodeMain
+						client={client}
+						view={selected}
+						terminalId={terminalId}
+						fingerprint={snapshot.fingerprint}
+						onShowFiles={ready && !layout.filesOpen ? () => setLayout({ filesOpen: true }) : undefined}
+					/>
 				) : (
 					<EmptyState title={snapshot.nodes.length ? "Pick a node" : snapshot.status === "open" ? "No nodes yet" : "Connecting…"}>
 						{snapshot.nodes.length === 0 && snapshot.status === "open" && (
@@ -101,8 +185,94 @@ function NodesWorkspace() {
 					</EmptyState>
 				)}
 			</section>
-			{/* The files pane (file tree, Monaco, diffs, uploads; NODE.md §4 "Files") goes here, right of the terminal. */}
+			{filesShown && client && ready && ready.link.kind === "ready" && (
+				<>
+					<Splitter
+						name="files"
+						label="Resize the files"
+						side="right"
+						value={layout.files}
+						min={LAYOUT_BOUNDS.files[0]}
+						max={LAYOUT_BOUNDS.files[1]}
+						onChange={(files) => setLayout({ files }, false)}
+						onCommit={(files) => setLayout({ files })}
+					/>
+					<div className="flex min-h-0 min-w-[300px]" style={{ flex: `0 1 ${layout.files}px` }}>
+						<NodeFiles
+							key={ready.info.id}
+							client={client}
+							view={ready}
+							home={ready.link.welcome.home}
+							terminal={ready.terminals.find((item) => item.terminalId === terminalId)}
+							store={editorFor(ready.info.id)}
+							theme={theme}
+							layout={layout}
+							setLayout={setLayout}
+						/>
+					</div>
+				</>
+			)}
 		</div>
+	);
+}
+
+/** The file panel for one node: its projects, and the tree's root for the pane on screen. */
+function NodeFiles({
+	client,
+	view,
+	home,
+	terminal,
+	store,
+	theme,
+	layout,
+	setLayout,
+}: {
+	client: NodesClient;
+	view: NodeView;
+	home: string;
+	terminal?: TerminalInfo;
+	store: EditorStore;
+	theme: ReturnType<typeof useTheme>["theme"];
+	layout: NodesLayout;
+	setLayout: (change: Partial<NodesLayout>, commit?: boolean) => void;
+}) {
+	const files = client.files(view.info.id);
+	const [projects, setProjects] = useState<Project[]>([]);
+	const [picked, setPicked] = useState<string>();
+	const cwd = terminal ? paneSession(terminal).cwd : undefined;
+
+	useEffect(() => {
+		if (!files) return;
+		let current = true;
+		files.request("projects.list", {}).then(
+			(result) => current && setProjects(result.projects),
+			() => current && setProjects([]),
+		);
+		return () => {
+			current = false;
+		};
+	}, [files]);
+
+	// Another pane shows its own project; a folder picked by hand lasts until then.
+	useEffect(() => setPicked(undefined), [terminal?.terminalId]);
+
+	return (
+		<FilePanel
+			node={view.info.id}
+			nodeName={view.info.name}
+			home={home}
+			files={files}
+			store={store}
+			root={picked ?? rootFor(projects, cwd, home)}
+			projects={projects}
+			onRoot={setPicked}
+			theme={theme}
+			treeWidth={layout.tree}
+			onTreeWidth={(tree, commit) => setLayout({ tree: clampWidth("tree", tree) }, commit)}
+			hidden={layout.hidden}
+			onHidden={(hidden) => setLayout({ hidden })}
+			onCollapse={() => setLayout({ filesOpen: false })}
+		/>
 	);
 }
 
@@ -149,9 +319,9 @@ function linkLabel(view: NodeView): ReactNode {
 	return null;
 }
 
-function NodeRail({ snapshot, nodeId, terminalId }: { snapshot: NodesSnapshot; nodeId?: string; terminalId?: string }) {
+function NodeRail({ snapshot, nodeId, terminalId, width }: { snapshot: NodesSnapshot; nodeId?: string; terminalId?: string; width: number }) {
 	return (
-		<aside className="flex w-[288px] shrink-0 flex-col border-r border-line bg-sidebar max-md:w-[220px]" aria-label="Nodes">
+		<aside className="flex min-w-[200px] flex-col bg-sidebar" style={{ flex: `0 1 ${width}px` }} aria-label="Nodes" data-agent-list="">
 			<div className="flex h-10 shrink-0 items-center gap-2 px-4">
 				<h1 className="text-[15px] font-semibold">Nodes</h1>
 				<SocketStatus status={snapshot.status} />
@@ -256,7 +426,20 @@ function Panel({ children }: { children: ReactNode }) {
 	return <div className="w-full max-w-[640px] px-8 pt-8 pb-10 text-[14px] max-sm:px-4">{children}</div>;
 }
 
-function NodeMain({ client, view, terminalId, fingerprint }: { client: NodesClient; view: NodeView; terminalId?: string; fingerprint?: string }) {
+function NodeMain({
+	client,
+	view,
+	terminalId,
+	fingerprint,
+	onShowFiles,
+}: {
+	client: NodesClient;
+	view: NodeView;
+	terminalId?: string;
+	fingerprint?: string;
+	/** Shows the file panel, when it is hidden. */
+	onShowFiles?: () => void;
+}) {
 	const { theme } = useTheme();
 	const navigate = useNavigate();
 	const [killing, setKilling] = useState<TerminalInfo | null>(null);
@@ -374,10 +557,16 @@ function NodeMain({ client, view, terminalId, fingerprint }: { client: NodesClie
 			<header className="flex h-10 shrink-0 items-center gap-3 border-b border-line px-3">
 				<PaneHeading node={name} terminal={terminal} home={link.welcome.home} />
 				{terminal && <PaneDetail terminal={terminal} />}
-				<button type="button" className={cx(BUTTON.secondary, "ml-auto h-7")} disabled={busy} onClick={create} data-new-terminal="">
+				<button type="button" className={cx(BUTTON.secondary, "ml-auto h-7 shrink-0")} disabled={busy} onClick={create} data-new-terminal="">
 					<Icon name="plus" size={13} />
 					New terminal
 				</button>
+				{onShowFiles && (
+					<button type="button" className={cx(BUTTON.quiet, "h-7 shrink-0 px-2")} onClick={onShowFiles} data-show-files="">
+						<Icon name="folder" size={13} />
+						Files
+					</button>
+				)}
 			</header>
 			{(actionError || view.error) && (
 				<div className="shrink-0 px-3 pt-2">
@@ -476,7 +665,9 @@ function PaneDetail({ terminal }: { terminal: TerminalInfo }) {
 	const activities = liveBridge(status)?.activityCount ?? 0;
 	return (
 		<span className="flex min-w-0 items-center gap-2 text-[12.5px] text-muted">
-			<PaneBadge terminal={terminal} />
+			<span className="shrink-0">
+				<PaneBadge terminal={terminal} />
+			</span>
 			{message && <span className="truncate">{message}</span>}
 			{activities > 0 && <span className="shrink-0">{activities === 1 ? "1 background activity" : `${activities} background activities`}</span>}
 		</span>
