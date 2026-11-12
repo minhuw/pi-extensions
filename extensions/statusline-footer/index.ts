@@ -928,8 +928,9 @@ function refreshGitStat(cwd: string, state: SessionState) {
 	const now = Date.now();
 	if (state.gitStatCwd === cwd && now - state.gitStatAt < 15_000) return;
 	state.gitStatAt = now;
+	// The last value for this cwd stays painted until the new one arrives.
+	if (state.gitStatCwd !== cwd) state.gitStat = { status: "pending", ahead: 0, behind: 0 };
 	state.gitStatCwd = cwd;
-	state.gitStat = { status: "pending", ahead: 0, behind: 0 };
 	const opts = { cwd, timeout: 5000 };
 	let status: GitStat["status"] | undefined;
 	let shortstat: Pick<GitStat, "files" | "adds" | "dels"> | undefined;

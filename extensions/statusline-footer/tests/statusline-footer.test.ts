@@ -3995,4 +3995,26 @@ describe("statusline footer width tiers", () => {
 			harness.disposeFooter();
 		}
 	});
+
+	it("keeps the last Git stats painted while a later refresh is pending", async () => {
+		const pending = git(true);
+		const harness = await start("git-second-refresh");
+		try {
+			const render = () => strip(harness.getFooter()!.render(193).join("\n"));
+			expect(render()).toContain("git …");
+			pending.release();
+			expect(render()).toContain("+42");
+			const calls = vi.mocked(execFile).mock.calls.length;
+			const later = Date.now() + 15_000;
+			vi.spyOn(Date, "now").mockImplementation(() => later);
+			const refreshing = render();
+			expect(vi.mocked(execFile).mock.calls.length).toBe(calls + 3);
+			expect(refreshing).toContain("+42");
+			expect(refreshing).not.toContain("git …");
+			pending.release();
+			expect(render()).toContain("+42");
+		} finally {
+			harness.disposeFooter();
+		}
+	});
 });
