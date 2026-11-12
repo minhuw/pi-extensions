@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore, type AssistantMessage } from "@earendil-works/pi-ai";
+import { getCurrentSystemPrompt, getCurrentTools, InMemoryCredentialStore, type AssistantMessage } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type ExtensionUIContext, type KeybindingHints, type Theme } from "@earendil-works/pi-coding-agent";
 import { expect, it } from "vitest";
@@ -364,3 +364,174 @@ it("keeps status displays shown during a running setup pass out of that pass's l
 		expect(h.errors).toEqual([]);
 	} finally { await h.cleanup(); }
 }, 15_000);
+
+const AUTORESEARCH_TOOLS = ["autoresearch_update", "autoresearch_baseline", "autoresearch_measure"] as const;
+function toolsSection(systemPrompt: string): string {
+	const match = /<tools>\n([\s\S]*?)\n<\/tools>/.exec(systemPrompt);
+	expect(match).not.toBeNull();
+	return match![1]!;
+}
+
+it("keeps autoresearch_* tools inactive and out of context.tools and <tools> until /autoresearch starts", async () => {
+	const h = await displaySession("rpc");
+	const requests: { tools: string[]; systemPrompt: string }[] = [];
+	const inspect = (message: AssistantMessage): FauxResponseFactory => context => {
+		requests.push({
+			tools: getCurrentTools(context.messages).map(tool => tool.name),
+			systemPrompt: getCurrentSystemPrompt(context.messages),
+		});
+		return message;
+	};
+	try {
+		expect(h.session.getActiveToolNames()).toEqual(["bash"]);
+		for (const prompt of ["research how caching works", "auto retry"]) {
+			h.faux.setResponses([inspect(fauxAssistantMessage("ok"))]);
+			await h.run(prompt);
+		}
+		expect(requests).toHaveLength(2);
+		for (const req of requests) {
+			expect(req.tools).toEqual(["bash"]);
+			for (const name of AUTORESEARCH_TOOLS) {
+				expect(req.tools).not.toContain(name);
+				expect(toolsSection(req.systemPrompt)).not.toContain(name);
+			}
+		}
+		expect(h.session.getActiveToolNames()).toEqual(["bash"]);
+
+		h.faux.setResponses([
+			inspect(fauxAssistantMessage([fauxToolCall("autoresearch_baseline", BASELINE)])),
+			inspect(fauxAssistantMessage("The baseline is 123 ms. Approve with /autoresearch approve.")),
+		]);
+		await h.run("/autoresearch optimize compilation speed --max 1");
+		expect(h.session.getActiveToolNames()).toEqual(expect.arrayContaining([...AUTORESEARCH_TOOLS]));
+		expect(requests).toHaveLength(4);
+		const firstCampaignReq = requests[2]!;
+		expect(firstCampaignReq.tools).toEqual(expect.arrayContaining(["bash", ...AUTORESEARCH_TOOLS]));
+		expect(toolsSection(firstCampaignReq.systemPrompt)).toContain("autoresearch_update");
+		expect(h.snapshot()?.campaign?.state).toBe("awaiting_approval");
+		expect(h.errors).toEqual([]);
+	} finally { await h.cleanup(); }
+}, 15_000);
+
+it.each([
+	"Use autoresearch to track lookup latency",
+	"Inspect @extensions/autoresearch/ and record a metric",
+])("activates autoresearch_* tools on explicit prompt mention (%s) and runs standalone autoresearch_update", async prompt => {
+	const h = await displaySession("rpc");
+	const requests: { tools: string[]; systemPrompt: string }[] = [];
+	const inspect = (message: AssistantMessage): FauxResponseFactory => context => {
+		requests.push({
+			tools: getCurrentTools(context.messages).map(tool => tool.name),
+			systemPrompt: getCurrentSystemPrompt(context.messages),
+		});
+		return message;
+	};
+	try {
+		expect(h.session.getActiveToolNames()).toEqual(["bash"]);
+		h.faux.setResponses([
+			inspect(fauxAssistantMessage([fauxToolCall("autoresearch_update", {
+				phase: "measuring",
+				message: "Tracking lookup latency.",
+				metrics: [{ name: "lookup_ms", label: "Lookup", unit: "ms", direction: "lower", value: 42 }],
+			})])),
+			inspect(fauxAssistantMessage("Recorded lookup latency.")),
+		]);
+		await h.run(prompt);
+		expect(requests).toHaveLength(2);
+		expect(requests[0]!.tools).toEqual(expect.arrayContaining(["bash", ...AUTORESEARCH_TOOLS]));
+		expect(toolsSection(requests[0]!.systemPrompt)).toContain("autoresearch_update");
+		expect(h.session.getActiveToolNames()).toEqual(expect.arrayContaining([...AUTORESEARCH_TOOLS]));
+		expect(h.snapshot()).toMatchObject({
+			version: 2,
+			campaign: null,
+			report: { phase: "measuring", message: "Tracking lookup latency.", provenance: "model-reported" },
+		});
+		expect(h.errors).toEqual([]);
+	} finally { await h.cleanup(); }
+}, 15_000);
+
+it("restores autoresearch_* tools as active when resuming or switching to a session branch with a saved SNAPSHOT", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-research-restore-active-"));
+	let firstSession: AgentSession | undefined;
+	let resumedSession: AgentSession | undefined;
+	try {
+		const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
+		const faux = fauxProvider({ api: "research-restore-active-api", provider: "research-restore-active", models: [{ id: "test" }] });
+		const makeLoader = async () => {
+			const loader = new DefaultResourceLoader({
+				cwd: directory, agentDir: directory, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+				extensionFactories: [(pi) => { pi.registerProvider(faux.provider); extension(pi); }],
+			});
+			await loader.reload();
+			expect(loader.getExtensions().errors).toEqual([]);
+			return loader;
+		};
+		const manager = SessionManager.create(directory, directory);
+		({ session: firstSession } = await createAgentSession({
+			cwd: directory, agentDir: directory, modelRuntime: runtime, model: faux.getModel("test")!, resourceLoader: await makeLoader(),
+			sessionManager: manager, settingsManager: SettingsManager.inMemory({ defaultTools: ["bash"], retry: { enabled: false } }),
+		}));
+		const errors: unknown[] = [];
+		await firstSession.bindExtensions({ mode: "rpc", onError: error => { errors.push(error); } });
+		const settled = (s: AgentSession) => new Promise<void>(resolve => {
+			const unsubscribe = s.subscribe(event => { if (event.type === "agent_settled") { unsubscribe(); resolve(); } });
+		});
+
+		faux.setResponses([fauxAssistantMessage("Plain greeting.")]);
+		let done = settled(firstSession);
+		await firstSession.prompt("Hello there");
+		await done;
+		const beforeSnapshotLeaf = manager.getLeafId()!;
+		expect(firstSession.getActiveToolNames()).toEqual(["bash"]);
+
+		await firstSession.prompt("/autoresearch optimize compilation speed --max 1");
+		await firstSession.prompt("/autoresearch pause");
+		const snapshotLeaf = manager.getLeafId()!;
+		const sessionFile = manager.getSessionFile()!;
+		expect(sessionFile).toBeTruthy();
+
+		await firstSession.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		firstSession.dispose();
+		firstSession = undefined;
+
+		// Transcript system message only had ["bash"], so before bindExtensions autoresearch_* are inactive;
+		// bindExtensions triggers session_start -> restore(ctx) -> activateTools() from the saved SNAPSHOT.
+		const reopened = SessionManager.open(sessionFile, directory);
+		({ session: resumedSession } = await createAgentSession({
+			cwd: directory, agentDir: directory, modelRuntime: runtime, model: faux.getModel("test")!, resourceLoader: await makeLoader(),
+			sessionManager: reopened, settingsManager: SettingsManager.inMemory({ defaultTools: ["bash"], retry: { enabled: false } }),
+		}));
+		expect(resumedSession.getActiveToolNames()).toEqual(["bash"]);
+		await resumedSession.bindExtensions({ mode: "rpc", onError: error => { errors.push(error); } });
+		expect(resumedSession.getActiveToolNames()).toEqual(expect.arrayContaining(["bash", ...AUTORESEARCH_TOOLS]));
+
+		const requests: string[][] = [];
+		faux.setResponses([context => {
+			requests.push(getCurrentTools(context.messages).map(tool => tool.name));
+			return fauxAssistantMessage("Continuing saved campaign.");
+		}]);
+		done = settled(resumedSession);
+		await resumedSession.prompt("What was the research target?");
+		await done;
+		expect(requests[0]).toEqual(expect.arrayContaining(["bash", ...AUTORESEARCH_TOOLS]));
+
+		// Deactivate manually, verify reload() and navigateTree() onto the SNAPSHOT branch both re-activate.
+		resumedSession.setActiveToolsByName(["bash"]);
+		expect(resumedSession.getActiveToolNames()).toEqual(["bash"]);
+		await resumedSession.reload();
+		expect(resumedSession.getActiveToolNames()).toEqual(expect.arrayContaining(["bash", ...AUTORESEARCH_TOOLS]));
+
+		resumedSession.setActiveToolsByName(["bash"]);
+		await resumedSession.navigateTree(beforeSnapshotLeaf);
+		expect(resumedSession.getActiveToolNames()).toEqual(["bash"]);
+		await resumedSession.navigateTree(snapshotLeaf);
+		expect(resumedSession.getActiveToolNames()).toEqual(expect.arrayContaining(["bash", ...AUTORESEARCH_TOOLS]));
+		expect(errors).toEqual([]);
+	} finally {
+		try {
+			for (const s of [firstSession, resumedSession]) {
+				if (s) { await s.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); s.dispose(); }
+			}
+		} finally { await rm(directory, { recursive: true, force: true }); }
+	}
+}, 20_000);

@@ -63,6 +63,8 @@ Timeouts and interrupted or unmeasured passes pause for explicit recovery. Conti
 
 ## Measurement tools
 
+`autoresearch_update`, `autoresearch_baseline`, and `autoresearch_measure` are registered inactive (`defaultActive: false`) so ordinary sessions incur no tool-schema or system-prompt overhead. They activate automatically when `/autoresearch` starts or resumes a campaign, when a branch restores saved research state, or when a user prompt explicitly mentions `autoresearch` or `research-report`.
+
 During setup, the agent constructs the harness and calls a tool like:
 
 ```ts

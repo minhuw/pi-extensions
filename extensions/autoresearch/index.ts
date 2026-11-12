@@ -8,6 +8,8 @@ import { fingerprint, measure, verifyHarness } from "../benchmark/core.ts";
 import { approvalKey, BaselineParameters, DISPATCH_LIMIT_MS, duration, emptyState, HARNESS_MESSAGES, ITERATION, ITERATION_LIMIT_MS, LIFETIME_MS, measuredReport, prompt, proposal, ranges, restoreState, SETUP_LIMIT_MS, terminal, type Benchmark, type State } from "./campaign.ts";
 
 const DISPLAY = "autoresearch:display";
+const AUTORESEARCH_TOOLS = ["autoresearch_update", "autoresearch_baseline", "autoresearch_measure"] as const;
+const AUTORESEARCH_MENTION = /\b(?:autoresearch(?:_(?:update|baseline|measure))?|research-report)\b/i;
 const HELP = `/autoresearch <target> [--max 25] prepares and measures a baseline. /autoresearch approve starts iterations after review. Other commands: status, revise <feedback>, pause, resume, stop. Limits: 25 iterations by default, ${duration(LIFETIME_MS)} after approval, ${duration(ITERATION_LIMIT_MS)} per iteration (${duration(SETUP_LIMIT_MS)} for setup).`;
 const ITERATION_LIMIT = "Iteration limit reached."; const LIFETIME_LIMIT = "Six-hour research limit reached.";
 interface Active { token: string; kind: "prepare" | "iterate"; dispatchedAt: number; startedAt?: number; measured: boolean; outcome?: string }
@@ -19,6 +21,12 @@ interface Runtime {
 
 export default function autoresearchExtension(pi: ExtensionAPI): void {
 	const runtimes = new Map<string, Runtime>();
+	function activateTools(): void {
+		if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
+		const active = pi.getActiveTools();
+		if (AUTORESEARCH_TOOLS.every(name => active.includes(name))) return;
+		pi.setActiveTools([...new Set([...active, ...AUTORESEARCH_TOOLS])]);
+	}
 	const get = (ctx: ExtensionContext): Runtime => {
 		const runtime = runtimes.get(ctx.sessionManager.getSessionId());
 		if (!runtime || runtime.closed) throw new Error("Autoresearch requires an active session.");
@@ -132,6 +140,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 				}
 			} catch { r.invalid = true; if (ctx.hasUI) ctx.ui.notify("Saved research state is invalid. Use /research-report clear to reset it.", "warning"); }
 		}
+		if (r.state.campaign || r.state.report || r.invalid) activateTools();
 		runtimes.set(ctx.sessionManager.getSessionId(), r); publish(r);
 	}
 	pi.on("session_start", (_event, ctx) => restore(ctx));
@@ -145,11 +154,12 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 	pi.on("ui_prompt_start", (_event, ctx) => { const r = runtimes.get(ctx.sessionManager.getSessionId()); if (r) r.uiDepth++; });
 	pi.on("ui_prompt_end", (_event, ctx) => { const r = runtimes.get(ctx.sessionManager.getSessionId()); if (r) { r.uiDepth = Math.max(0, r.uiDepth - 1); arm(r); } });
 	pi.on("before_agent_start", (event, ctx) => {
+		if (event.messageType === "user" && typeof event.prompt === "string" && AUTORESEARCH_MENTION.test(event.prompt)) activateTools();
 		const r = runtimes.get(ctx.sessionManager.getSessionId()); if (!r) return;
 		if (event.messageType === "custom" && event.message.customType === ITERATION) {
 			const token = (event.message.details as { token?: string } | undefined)?.token;
 			if (!r.active || token !== r.active.token || !["preparing", "running"].includes(r.state.campaign?.state ?? "")) { ctx.abort(); return; }
-			r.active.startedAt = Date.now(); arm(r);
+			activateTools(); r.active.startedAt = Date.now(); arm(r);
 		} else if (r.active || r.pending) { r.active = undefined; pause(r, "Another prompt took over; resume explicitly."); arm(r); }
 	});
 	pi.on("message_start", (event, ctx) => {
@@ -171,7 +181,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerTool({
-		name: "autoresearch_update", label: "Research Update", executionMode: "sequential",
+		name: "autoresearch_update", label: "Research Update", defaultActive: false, executionMode: "sequential",
 		description: "Display a concise research progress message. During /autoresearch, metric values come from autoresearch_baseline and autoresearch_measure; omit metrics here. Phase paused or complete ends automatic continuation. Standalone model-reported metric tables remain supported.",
 		promptSnippet: "Report the hypothesis and outcome during an explicitly started /autoresearch workflow.",
 		parameters: Parameters,
@@ -195,7 +205,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 		},
 	});
 	pi.registerTool({
-		name: "autoresearch_baseline", label: "Research Baseline", executionMode: "sequential", reachesTools: () => ["bash"],
+		name: "autoresearch_baseline", label: "Research Baseline", defaultActive: false, executionMode: "sequential", reachesTools: () => ["bash"],
 		description: "During /autoresearch setup, register the methodology and metric definitions, execute the baseline command through bash, parse METRIC name=value output, and request user review. This does not approve or start optimization. The user must run /autoresearch approve. List every measurement/check harness file to pin its contents.",
 		parameters: BaselineParameters,
 		async execute(_id, params, signal, _update, ctx) {
@@ -215,7 +225,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 		},
 	});
 	pi.registerTool({
-		name: "autoresearch_measure", label: "Research Measurement", executionMode: "sequential", reachesTools: () => ["bash"],
+		name: "autoresearch_measure", label: "Research Measurement", defaultActive: false, executionMode: "sequential", reachesTools: () => ["bash"],
 		description: "Measure a candidate using the user's approved benchmark command, repetitions, metric definitions, checks, and pinned harness. Only callable during an approved /autoresearch iteration. Records parsed measurements; does not automatically commit or revert code.",
 		parameters: Type.Object({}),
 		async execute(_id, _params, signal, _update, ctx) {
@@ -291,7 +301,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 				await verifyHarness(ctx.cwd, c.benchmark, HARNESS_MESSAGES);
 				if (get(ctx) !== r || r.state.campaign !== c || c.state !== "awaiting_approval") throw new Error("Research proposal changed while approving.");
 				const next = structuredClone(r.state); next.campaign!.approved = approvalKey(next); next.campaign!.state = "running"; next.campaign!.deadline = Date.now() + LIFETIME_MS;
-				save(r, next); r.pending = "iterate"; arm(r); return;
+				save(r, next); activateTools(); r.pending = "iterate"; arm(r); return;
 			}
 			if (action === "resume") {
 				if (!c || c.state !== "paused") throw new Error("Research must be paused before resuming.");
@@ -304,14 +314,14 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 					if (get(ctx) !== r || r.state.campaign !== c || c.state !== "paused" || r.active) throw new Error("Research campaign changed while resuming.");
 				}
 				const next = structuredClone(r.state); next.campaign!.state = c.approved ? "running" : "preparing";
-				save(r, next); r.pending = c.approved ? "iterate" : "prepare"; arm(r); return;
+				save(r, next); activateTools(); r.pending = c.approved ? "iterate" : "prepare"; arm(r); return;
 			}
 			if (action.startsWith("revise ")) {
 				if (!c || terminal(c)) throw new Error("No active research campaign to revise.");
 				if (r.active || !ctx.isIdle()) throw new Error("Pause and wait for the current pass before revising.");
 				const feedback = input.slice(7).trim(); if (!feedback || feedback.length > 1000) throw new Error("Feedback must be 1–1000 characters.");
 				const next = emptyState(); next.campaign = { id: randomUUID(), goal: c.goal, state: "preparing", iterations: 0, maxIterations: c.maxIterations, reason: feedback };
-				save(r, next); r.pending = "prepare"; arm(r); return;
+				save(r, next); activateTools(); r.pending = "prepare"; arm(r); return;
 			}
 			if (c && !terminal(c)) throw new Error("Research already exists. Use /autoresearch status, revise <feedback>, or stop.");
 			const match = /\s+--max\s+(\d+)$/.exec(input);
@@ -319,7 +329,7 @@ export default function autoresearchExtension(pi: ExtensionAPI): void {
 			const goal = (match ? input.slice(0, match.index) : input).trim();
 			if (!goal || goal.length > 4000 || !Number.isSafeInteger(maxIterations) || maxIterations < 1 || maxIterations > 1000) throw new Error("Provide a target up to 4000 characters and --max 1–1000.");
 			const next = emptyState(); next.campaign = { id: randomUUID(), goal, state: "preparing", iterations: 0, maxIterations };
-			save(r, next); r.pending = "prepare"; arm(r);
+			save(r, next); activateTools(); r.pending = "prepare"; arm(r);
 		},
 	});
 }
