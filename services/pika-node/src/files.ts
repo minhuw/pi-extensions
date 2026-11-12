@@ -12,7 +12,7 @@ import type { Peer } from "./daemon.ts";
 import { asNodeError, NodeError } from "./errors.ts";
 import {
     fromBase64Url, LIMITS, timing, toBase64Url, utf8Length,
-    type DirEntry, type Encoding, type Expected, type Project, type Request, type Stat,
+    type DirEntry, type Encoding, type Expected, type GitStatus, type GitStatusEntry, type Project, type Request, type Stat,
 } from "./protocol.ts";
 import { roots, type Config } from "./store.ts";
 
@@ -66,6 +66,72 @@ const WALK_SKIP = new Set([".git", "node_modules"]);
 const WALK_DIRS = 10_000;
 const WALK_MS = 5_000;
 
+/** Splits `count` space-separated fields off the front of `record`; the rest (a path, which may hold spaces) is last. */
+function fieldsOf(record: string, count: number): string[] | undefined {
+    const parts: string[] = [];
+    let at = 0;
+    for (let i = 0; i < count; i++) {
+        const space = record.indexOf(" ", at);
+        if (space < 0) return undefined;
+        parts.push(record.slice(at, space));
+        at = space + 1;
+    }
+    parts.push(record.slice(at));
+    return parts;
+}
+
+const STATUS_CHAR = /^[.MTADRCU]$/;
+
+/**
+ * Parses `git status --porcelain=v2 -z --branch` (paths relative to the top level). Ordinary (`1`), renamed or copied
+ * (`2`, whose source is the next NUL-separated field), unmerged (`u`), and untracked (`?`) records become entries, in
+ * git's order: tracked changes first. Stops at `cap` entries or `maxListBytes` of them and says `truncated`. Output it
+ * does not understand throws, rather than showing a wrong status.
+ */
+export function parseGitStatus(text: string, cap: number = LIMITS.maxStatusEntries): { branch?: string; entries: GitStatusEntry[]; truncated: boolean } {
+    const records = text.split("\0");
+    if (records.at(-1) === "") records.pop();
+    let branch: string | undefined;
+    const entries: GitStatusEntry[] = [];
+    let bytes = 0;
+    const bad = (record: string) => new NodeError("io", `unexpected git status record: ${JSON.stringify(record.slice(0, 80))}`);
+    for (let i = 0; i < records.length; i++) {
+        const record = records[i]!;
+        let entry: GitStatusEntry;
+        if (record.startsWith("# ")) {
+            if (record.startsWith("# branch.head ")) {
+                const head = record.slice("# branch.head ".length);
+                branch = head === "(detached)" ? undefined : head;
+            }
+            continue;
+        } else if (record.startsWith("? ")) {
+            entry = { path: record.slice(2), x: "?", y: "?" };
+        } else if (record.startsWith("! ")) {
+            continue;
+        } else {
+            const kind = record[0];
+            // 1 XY sub mH mI mW hH hI path | 2 XY sub mH mI mW hH hI Xscore path | u XY sub m1 m2 m3 mW h1 h2 h3 path
+            const parts = kind === "1" ? fieldsOf(record, 8) : kind === "2" ? fieldsOf(record, 9) : kind === "u" ? fieldsOf(record, 10) : undefined;
+            const xy = parts?.[1];
+            if (!parts || !xy || xy.length !== 2 || !STATUS_CHAR.test(xy[0]!) || !STATUS_CHAR.test(xy[1]!) || !parts.at(-1)) throw bad(record);
+            entry = { path: parts.at(-1)!, x: xy[0]!, y: xy[1]! };
+            if (kind === "2") {
+                const from = records[++i];
+                if (!from) throw bad(record);
+                entry.from = from;
+            }
+            if (kind === "u") entry.conflict = true;
+            else entry.indexHash = parts[7]!;
+            if (parts[2]!.startsWith("S")) entry.submodule = true;
+        }
+        const size = utf8Length(JSON.stringify(entry)) + 1;
+        if (entries.length >= cap || bytes + size > LIMITS.maxListBytes) return { ...(branch ? { branch } : {}), entries, truncated: true };
+        entries.push(entry);
+        bytes += size;
+    }
+    return { ...(branch ? { branch } : {}), entries, truncated: false };
+}
+
 const day = (now: Date): string => `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 
 export class Files {
@@ -84,6 +150,7 @@ export class Files {
             case "fs.watch": return { watch: await this.watch(peer, request.path) };
             case "fs.gitShow": return this.gitShow(request.path, request.ref);
             case "fs.list": return this.list(request.root, request.limit ?? LIST_DEFAULT);
+            case "git.status": return this.gitStatus(request.root);
             case "fs.unwatch": {
                 const watch = this.#watches.get(request.watch);
                 if (!watch || watch.peer !== peer) throw new NodeError("not_found", `no watch ${request.watch}`);
@@ -260,6 +327,28 @@ export class Files {
         const data = text ? content.toString("utf8") : toBase64Url(content);
         if (utf8Length(JSON.stringify(data)) + 1_024 > LIMITS.maxRecordBytes) throw new NodeError("too_large", `${path} at ${ref} does not fit one record`);
         return { encoding: text ? "utf8" : "base64", data };
+    }
+
+    /**
+     * The status of the work tree holding `root`: `git status --porcelain=v2 -z --branch --untracked-files=all`, run
+     * without optional locks so polling it never holds `index.lock` against the user's own git, and capped.
+     */
+    async gitStatus(root: string): Promise<GitStatus> {
+        const info = await stat(root);
+        if (!info.isDirectory()) throw new NodeError("not_a_directory", `${root} is not a directory`);
+        let top: string;
+        try { top = await realpath((await run("git", ["-C", root, "rev-parse", "--show-toplevel"], { timeout: 5_000 })).stdout.trim()); }
+        catch { throw new NodeError("not_found", `${root} is not in a git work tree`); }
+        let output: Buffer;
+        try {
+            output = (await run("git", ["--no-optional-locks", "-C", top, "status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all"], {
+                encoding: "buffer", maxBuffer: 64 * 1024 * 1024, timeout: 10_000,
+            })).stdout;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw new NodeError("too_large", `git status in ${top} printed over 64 MiB`);
+            throw new NodeError("io", `git status in ${top} failed: ${(error as { stderr?: Buffer }).stderr?.toString("utf8").trim() || asNodeError(error).message}`);
+        }
+        return { top, ...parseGitStatus(output.toString("utf8")) };
     }
 
     // -----------------------------------------------------------------------------------------------------------

@@ -77,6 +77,9 @@ describe("inner messages", () => {
         expect(parseClientMessage({ type: "fs.list", id: "6", root: "/a", limit: LIMITS.maxListEntries }).ok).toBe(true);
         expect(parseClientMessage({ type: "fs.list", id: "6", root: "/a", limit: LIMITS.maxListEntries + 1 }).ok).toBe(false);
         expect(parseClientMessage({ type: "fs.list", id: "6", root: "a" }).ok).toBe(false);
+        expect(parseClientMessage({ type: "git.status", id: "8", root: "/a" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "git.status", id: "8", root: "a" }).ok).toBe(false);
+        expect(parseClientMessage({ type: "git.status", id: "8" }).ok).toBe(false);
         expect(parseClientMessage({ type: "term.input", terminalId: "t1", data: "é".repeat(LIMITS.maxInputBytes / 2 + 1) }).ok).toBe(false);
         expect(parseClientMessage({ type: "term.create", id: "1", cols: 80, rows: 24, env: { "BAD-NAME": "x" } }).ok).toBe(false);
     });

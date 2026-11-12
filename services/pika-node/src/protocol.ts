@@ -26,6 +26,8 @@ export const LIMITS = {
     /** `fs.list`: at most this many paths, whose UTF-8 bytes together stay under `maxListBytes` (one record). */
     maxListEntries: 50_000,
     maxListBytes: 768 * KiB,
+    /** `git.status`: at most this many entries, tracked changes before untracked files. */
+    maxStatusEntries: 5_000,
     maxUploadBytes: 256 * MiB,
     maxUploadChunkBytes: 512 * KiB,
     maxWatchesPerChannel: 64,
@@ -176,6 +178,31 @@ export type Encoding = "utf8" | "base64";
 /** `fs.gitShow`'s source: the commit `HEAD`, or the index (the staged content). */
 export type GitRef = "HEAD" | "index";
 export type Signal = "SIGTERM" | "SIGHUP" | "SIGINT" | "SIGKILL";
+/**
+ * One path of `git status --porcelain=v2`. `x` is the index's status against `HEAD` and `y` the working tree's against
+ * the index, each one of `.` (unchanged) `M T A D R C U`; an untracked file has `?` for both.
+ */
+export interface GitStatusEntry {
+    /** Relative to the work tree's top level, `/`-separated. */
+    path: string;
+    x: string;
+    y: string;
+    /** A rename's or copy's source, relative to the top level. */
+    from?: string;
+    /** Unmerged: a merge, rebase, or cherry-pick left a conflict. */
+    conflict?: true;
+    submodule?: true;
+    /** The index's object id for the path, so a file staged again reads as a change. */
+    indexHash?: string;
+}
+export interface GitStatus {
+    /** The work tree's top level, a real path. */
+    top: string;
+    /** The branch checked out; absent when `HEAD` is detached. */
+    branch?: string;
+    entries: GitStatusEntry[];
+    truncated: boolean;
+}
 
 /** Client requests that carry an `id` and get exactly one `reply`. */
 export interface Requests {
@@ -193,6 +220,7 @@ export interface Requests {
     "fs.unwatch": { watch: string };
     "fs.gitShow": { path: string; ref: GitRef };
     "fs.list": { root: string; limit?: number };
+    "git.status": { root: string };
     "fs.uploadStart": { name: string; size: number; dir?: string };
     "fs.uploadChunk": { upload: string; offset: number; data: string };
     "fs.uploadFinish": { upload: string; hash: string };
@@ -215,6 +243,8 @@ export interface Results {
     "fs.gitShow": { encoding: Encoding; data: string };
     /** Paths relative to `root`, `/`-separated: git's files when `root` is in a work tree, else a walk. */
     "fs.list": { paths: string[]; truncated: boolean; source: "git" | "walk" };
+    /** The status of the work tree holding `root`, which may be any directory inside it. */
+    "git.status": GitStatus;
     "fs.uploadStart": { upload: string; path: string };
     "fs.uploadChunk": { received: number };
     "fs.uploadFinish": { path: string; stat: Stat };
@@ -499,6 +529,7 @@ export const parseClientMessage = parser<ClientMessage>({
     "fs.unwatch": { id: requestId, watch: id },
     "fs.gitShow": { id: requestId, path: isAbsolutePath, ref: literal("HEAD", "index") },
     "fs.list": { id: requestId, root: isAbsolutePath, "?limit": int(1, LIMITS.maxListEntries) },
+    "git.status": { id: requestId, root: isAbsolutePath },
     "fs.uploadStart": { id: requestId, name: baseName, size: int(0, LIMITS.maxUploadBytes), "?dir": isAbsolutePath },
     "fs.uploadChunk": { id: requestId, upload: id, offset: int(0, LIMITS.maxUploadBytes), data: b64url(1, LIMITS.maxUploadChunkBytes) },
     "fs.uploadFinish": { id: requestId, upload: id, hash: hex64 },

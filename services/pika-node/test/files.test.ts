@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, statSync, symlinkSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type { Peer } from "../src/daemon.ts";
 import { asNodeError, NodeError } from "../src/errors.ts";
-import { Files } from "../src/files.ts";
+import { Files, parseGitStatus } from "../src/files.ts";
 import { toBase64Url, type NodeMessage } from "../src/protocol.ts";
 import { tempHome, until } from "./support.ts";
 
@@ -179,5 +179,82 @@ describe("files", () => {
 
         expect(await code(list(join(plain, "z.txt")))).toBe("not_a_directory");
         expect(await code(list(join(plain, "missing")))).toBe("not_found");
+    });
+
+    it("answers a work tree's git status: staged, unstaged, untracked, renamed, and conflicted", async () => {
+        const repo = join(home.home, "status");
+        mkdirSync(join(repo, "src"), { recursive: true });
+        const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" });
+        git("init", "-q", "-b", "main");
+        writeFileSync(join(repo, ".gitignore"), "*.log\n");
+        writeFileSync(join(repo, "both.txt"), "one\n");
+        writeFileSync(join(repo, "old name.txt"), "moved\n");
+        writeFileSync(join(repo, "gone.txt"), "x\n");
+        writeFileSync(join(repo, "conflict.txt"), "base\n");
+        git("add", ".");
+        git("commit", "-qm", "first");
+        git("checkout", "-qb", "other");
+        writeFileSync(join(repo, "conflict.txt"), "theirs\n");
+        git("commit", "-qam", "theirs");
+        git("checkout", "-q", "main");
+        writeFileSync(join(repo, "conflict.txt"), "ours\n");
+        git("commit", "-qam", "ours");
+        try { git("merge", "-q", "other"); } catch { /* the conflict is the point */ }
+        writeFileSync(join(repo, "both.txt"), "two\n");
+        git("add", "both.txt");
+        writeFileSync(join(repo, "both.txt"), "three\n");
+        git("mv", "old name.txt", "src/new name.txt");
+        rmSync(join(repo, "gone.txt"));
+        writeFileSync(join(repo, "src", "fresh ç.ts"), "new");
+        writeFileSync(join(repo, "debug.log"), "ignored");
+
+        // Asked from a directory inside the work tree: the whole tree's status, paths from its top level.
+        const status = await files.request(peer, { type: "git.status", id: "s", root: join(repo, "src") }) as Awaited<ReturnType<Files["gitStatus"]>>;
+        expect(status.top).toBe(realpathSync(repo));
+        expect(status.branch).toBe("main");
+        expect(status.truncated).toBe(false);
+        const byPath = new Map(status.entries.map(entry => [entry.path, entry]));
+        expect(byPath.get("both.txt")).toMatchObject({ x: "M", y: "M", indexHash: expect.stringMatching(/^[0-9a-f]{40,64}$/) });
+        expect(byPath.get("src/new name.txt")).toMatchObject({ x: "R", y: ".", from: "old name.txt" });
+        expect(byPath.get("gone.txt")).toMatchObject({ x: ".", y: "D" });
+        expect(byPath.get("conflict.txt")).toMatchObject({ x: "U", y: "U", conflict: true });
+        expect(byPath.get("src/fresh ç.ts")).toEqual({ path: "src/fresh ç.ts", x: "?", y: "?" });
+        expect(byPath.has("debug.log")).toBe(false);
+        // Tracked changes come before untracked files, so a cut keeps them.
+        expect(status.entries.at(-1)!.x).toBe("?");
+
+        // Staging the same file again changes its index object.
+        writeFileSync(join(repo, "both.txt"), "four\n");
+        git("add", "both.txt");
+        const again = await files.gitStatus(repo);
+        expect(again.entries.find(entry => entry.path === "both.txt")!.indexHash).not.toBe(byPath.get("both.txt")!.indexHash);
+
+        expect(await code(files.gitStatus(join(home.home, "walked")))).toBe("not_found");
+        expect(await code(files.gitStatus(join(repo, "both.txt")))).toBe("not_a_directory");
+        expect(await code(files.gitStatus(join(repo, "missing")))).toBe("not_found");
+    });
+
+    it("parses porcelain v2 records, caps them, and refuses output it does not know", () => {
+        const hash = "a".repeat(40);
+        const text = [
+            "# branch.oid (initial)", "# branch.head (detached)",
+            `1 .M N... 100644 100644 100644 ${hash} ${hash} a b.txt`,
+            `2 R. N... 100644 100644 100644 ${hash} ${hash} R100 new`, "old",
+            `1 M. SC.. 160000 160000 160000 ${hash} ${hash} vendor/lib`,
+            "? x", "? y", "",
+        ].join("\0");
+        expect(parseGitStatus(text)).toEqual({
+            truncated: false,
+            entries: [
+                { path: "a b.txt", x: ".", y: "M", indexHash: hash },
+                { path: "new", x: "R", y: ".", from: "old", indexHash: hash },
+                { path: "vendor/lib", x: "M", y: ".", indexHash: hash, submodule: true },
+                { path: "x", x: "?", y: "?" },
+                { path: "y", x: "?", y: "?" },
+            ],
+        });
+        expect(parseGitStatus(text, 2)).toEqual({ truncated: true, entries: [expect.objectContaining({ path: "a b.txt" }), expect.objectContaining({ path: "new" })] });
+        expect(() => parseGitStatus("1 ?? N... broken")).toThrow(/unexpected git status record/);
+        expect(() => parseGitStatus(`2 R. N... 100644 100644 100644 ${hash} ${hash} R100 new`)).toThrow(/unexpected/);
     });
 });
