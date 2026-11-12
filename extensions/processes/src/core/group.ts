@@ -44,8 +44,9 @@ export async function terminateGroup(pgid: number, graceMs: number): Promise<"te
 }
 
 // $1: owner pid, $2: process group id. Exits once the group is gone; kills it if the owner dies first.
-const WATCHDOG = `while kill -0 -- "-$2" 2>/dev/null; do
-	if ! kill -0 "$1" 2>/dev/null; then kill -KILL -- "-$2" 2>/dev/null; exit 0; fi
+// No `--` before the negative pid: dash (Debian's /bin/sh) rejects it, which made the loop exit at once.
+const WATCHDOG = `while kill -0 "-$2" 2>/dev/null; do
+	if ! kill -0 "$1" 2>/dev/null; then kill -KILL "-$2" 2>/dev/null; exit 0; fi
 	sleep 1
 done`;
 
