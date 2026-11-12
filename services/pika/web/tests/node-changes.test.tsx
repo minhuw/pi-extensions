@@ -1,11 +1,12 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render } from "@testing-library/react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { webcrypto } from "node:crypto";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NodeChannel } from "../src/nodes/channel";
 import { changeMode, ChangesStore, diffSpec, groupChanges } from "../src/nodes/changes";
 import type { GitStatus, GitStatusEntry } from "../src/nodes/contract";
 import { EditorStore, type DiffTab } from "../src/nodes/editor";
-import { FilePanel } from "../src/nodes/FilePanel";
+import { ChangesPanel, EditorTabBody, useChanges } from "../src/nodes/FilePanel";
 import { NodeFiles } from "../src/nodes/files";
 import { clientIdentity, MemoryKeyStore } from "../src/nodes/identity";
 import { FakeFs } from "./support/fakeFs";
@@ -272,31 +273,52 @@ describe("the changes store", () => {
 	});
 });
 
-describe("the Changes list", () => {
-	const panel = (store: EditorStore, overrides: Partial<Parameters<typeof FilePanel>[0]> = {}) =>
-		render(
-			<FilePanel
-				node="node-1"
-				nodeName="node01"
-				home="/home/me"
-				files={files}
-				store={store}
+/** The Changes panel and the tab it opens, wired as the Nodes page wires them (its sidebar and a tab group's body). */
+function ChangesHarness({ store, onStore }: { store: EditorStore; onStore?: (changes: ChangesStore) => void }) {
+	const changes = useMemo(() => new ChangesStore(files, "/repo", { onChanged: (paths) => store.refreshDiffs(paths) }), [store]);
+	useEffect(() => {
+		changes.setActive(true);
+		onStore?.(changes);
+		return () => changes.dispose();
+	}, [changes, onStore]);
+	const view = useChanges(changes);
+	const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
+	const active = snapshot.tabs.find((tab) => tab.key === snapshot.active);
+	return (
+		<>
+			<ChangesPanel
+				connected
 				root="/repo"
-				projects={[{ name: "repo", path: "/repo" }]}
-				onRoot={() => {}}
-				theme="light"
-				treeWidth={220}
-				onTreeWidth={() => {}}
-				hidden={false}
-				onHidden={() => {}}
-				onCollapse={() => {}}
-				sidebar="changes"
-				onSidebar={() => {}}
-				diffInline={false}
-				onDiffInline={() => {}}
-				{...overrides}
-			/>,
-		);
+				view={view}
+				home="/home/me"
+				{...(active ? { activeKey: active.key } : {})}
+				onOpen={(change) => {
+					const mode = changeMode(change);
+					if (change.submodule) return;
+					if (mode) void store.openDiff(change.path, mode, change.from);
+					else void store.open(change.path);
+				}}
+				onRefresh={() => void changes.refresh()}
+			/>
+			{active && (
+				<EditorTabBody
+					node="node-1"
+					nodeName="node01"
+					home="/home/me"
+					store={store}
+					tab={active}
+					keys={snapshot.tabs.map((tab) => tab.key)}
+					theme="light"
+					diffInline={false}
+					onDiffInline={() => {}}
+				/>
+			)}
+		</>
+	);
+}
+
+describe("the Changes list", () => {
+	const panel = (store: EditorStore, onStore?: (changes: ChangesStore) => void) => render(<ChangesHarness store={store} {...(onStore ? { onStore } : {})} />);
 
 	it("lists the groups, and opens a diff, a new file, or a conflicted file from them", async () => {
 		fs.put("/repo/src/a.ts", "work\n");
@@ -311,7 +333,8 @@ describe("the Changes list", () => {
 		]);
 		const store = new EditorStore();
 		store.setFiles(files);
-		const { container } = panel(store);
+		let changes: ChangesStore | undefined;
+		const { container } = panel(store, (made) => (changes = made));
 		await until(() => container.querySelector("[data-change]") !== null, "the list");
 		expect([...container.querySelectorAll("[data-change-group]")].map((group) => group.getAttribute("data-change-group"))).toEqual([
 			"conflicts",
@@ -319,7 +342,7 @@ describe("the Changes list", () => {
 			"unstaged",
 			"untracked",
 		]);
-		expect(screen.getByRole("button", { name: /Changes 4/ })).toBeTruthy();
+		expect(changes!.getSnapshot()).toMatchObject({ status: "ready", count: 4 });
 		expect(container.querySelector("[data-changes-branch]")!.textContent).toContain("main");
 		expect((container.querySelector("[data-change='/repo/vendor/lib']") as HTMLButtonElement).disabled).toBe(true);
 

@@ -87,9 +87,9 @@ export default function CodeEditor(props: CodeEditorProps) {
 		monaco.editor.setTheme(themeName(theme));
 	}, [theme]);
 
-	// After the views' effects, which have moved to the tab now shown.
+	// After the views' effects, which have moved to the tab now shown. Several editors show at once (one per group),
+	// so one going away drops nothing: a model goes when no tab on the node has it open.
 	useEffect(() => prune(scope, new Set(openKey.split("\n"))), [scope, openKey]);
-	useEffect(() => () => prune(scope, new Set()), [scope]);
 
 	if (tab.kind === "diff") return <DiffView key="diff" tab={tab} theme={theme} inline={props.diffInline === true} onDiff={props.onDiff} />;
 	if (tab.body.kind !== "text") return null;
@@ -105,7 +105,10 @@ function useHandlers(props: CodeEditorProps) {
 	return handlers;
 }
 
-/** One editor for every file tab: switching tabs swaps its model and keeps each tab's view state. */
+/**
+ * One editor for every file tab: switching tabs swaps its model and keeps each tab's view state. It never takes focus
+ * itself: a file opened from the terminal leaves focus there, and the workspace focuses an editor when asked to.
+ */
 function CodeView(props: CodeEditorProps & { tab: FileTab }) {
 	const { scope, tab, theme } = props;
 	const host = useRef<HTMLDivElement>(null);
@@ -148,7 +151,6 @@ function CodeView(props: CodeEditorProps & { tab: FileTab }) {
 		current.current = tab.key;
 		editor.setModel(entry.model);
 		if (entry.view) editor.restoreViewState(entry.view);
-		editor.focus();
 	}, [scope, tab, text]);
 
 	const reveal = tab.reveal;
@@ -158,7 +160,6 @@ function CodeView(props: CodeEditorProps & { tab: FileTab }) {
 		const position = { lineNumber: reveal.line, column: reveal.column };
 		editor.setPosition(position);
 		editor.revealPositionInCenter(position);
-		editor.focus();
 	}, [reveal]);
 
 	return <div ref={host} className="min-h-0 flex-1" data-code-editor={tab.path} />;

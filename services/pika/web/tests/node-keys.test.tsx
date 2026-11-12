@@ -90,10 +90,16 @@ describe("the default keymap", () => {
 		expect(resolveKey(linux, key("P", { ctrlKey: true, shiftKey: true, code: "KeyP" }), terminal)).toBe("quickOpen");
 		expect(resolveKey(linux, key("p", { ctrlKey: true, code: "KeyP" }), terminal)).toBeUndefined();
 		expect(resolveKey(linux, key("f", { ctrlKey: true, code: "KeyF" }), terminal)).toBeUndefined();
-		// Not in the terminal at all: help, and closing an editor tab.
+		// Not in the terminal at all: help. Ctrl-W and Alt-W are readline's; closing a tab is a Cmd (or Ctrl+Shift) chord.
 		expect(resolveKey(mac, key("/", { metaKey: true, code: "Slash" }), terminal)).toBeUndefined();
 		expect(resolveKey(mac, key("w", { ctrlKey: true, code: "KeyW" }), terminal)).toBeUndefined();
 		expect(resolveKey(linux, key("w", { altKey: true, code: "KeyW" }), terminal)).toBeUndefined();
+		expect(resolveKey(mac, key("w", { metaKey: true, ctrlKey: true, code: "KeyW" }), terminal)).toBe("tab.close");
+		expect(resolveKey(linux, key("W", { ctrlKey: true, shiftKey: true, altKey: true, code: "KeyW" }), terminal)).toBe("tab.close");
+		// Tabs on macOS are ⌘⌃ chords, which neither browser takes.
+		expect(resolveKey(mac, key("ArrowRight", { metaKey: true, ctrlKey: true }), terminal)).toBe("tab.next");
+		expect(resolveKey(mac, key("3", { metaKey: true, ctrlKey: true, code: "Digit3" }), terminal)).toBe("tab.3");
+		expect(resolveKey(mac, key("T", { metaKey: true, ctrlKey: true, shiftKey: true, code: "KeyT" }), terminal)).toBe("tab.reopen");
 	});
 
 	it("never takes a typed character in a text field, and keeps diff keys to diffs and find to the terminal", () => {
@@ -101,13 +107,16 @@ describe("the default keymap", () => {
 		expect(resolveKey(mac, key("?", { shiftKey: true }), nowhere)).toBe("help");
 		expect(resolveKey(mac, key("?", { shiftKey: true }), text)).toBeUndefined();
 		expect(resolveKey(mac, key("/", { metaKey: true }), text)).toBeUndefined();
-		expect(resolveKey(mac, key("w", { ctrlKey: true }), text)).toBe("editor.closeTab");
+		expect(resolveKey(mac, key("w", { ctrlKey: true }), text)).toBeUndefined();
+		expect(resolveKey(mac, key("w", { metaKey: true, ctrlKey: true }), text)).toBe("tab.close");
 		expect(resolveKey(mac, key("F7"), diff)).toBe("diff.next");
 		expect(resolveKey(mac, key("F7", { shiftKey: true }), diff)).toBe("diff.previous");
 		expect(resolveKey(mac, key("F7"), text)).toBeUndefined();
 		expect(resolveKey(mac, key("ArrowDown", { altKey: true }), text)).toBeUndefined();
 		expect(resolveKey(mac, key("f", { metaKey: true }), text)).toBeUndefined();
-		expect(resolveKey(mac, key("ArrowDown", { metaKey: true, altKey: true }), text)).toBe("pane.next");
+		expect(resolveKey(mac, key("ArrowDown", { metaKey: true, ctrlKey: true }), text)).toBe("pane.next");
+		// Firefox switches tabs on ⌘⌥↓ even when the page handles it.
+		expect(resolveKey(mac, key("ArrowDown", { metaKey: true, altKey: true }), text)).toBeUndefined();
 	});
 });
 
@@ -118,7 +127,7 @@ describe("rebinding", () => {
 				bindings: {
 					"pane.next": "Cmd+Alt+N",
 					"diff.next": ["F8", "Alt+N"],
-					"editor.closeTab": [],
+					"tab.close": [],
 					"pane.previous": "Cmd+W",
 					"files.toggle": "Cmd+Banana",
 					"no.such": "F9",
@@ -130,10 +139,10 @@ describe("rebinding", () => {
 		);
 		expect(keymap.bindings.get("pane.next")!.map(chordId)).toEqual(["Cmd+Alt+N"]);
 		expect(keymap.bindings.get("diff.next")!.map(chordId)).toEqual(["F8", "Alt+N"]);
-		expect(keymap.bindings.get("editor.closeTab")).toEqual([]);
-		expect(keymap.bindings.get("pane.previous")!.map(chordId)).toEqual(["Cmd+Alt+ArrowUp"]);
+		expect(keymap.bindings.get("tab.close")).toEqual([]);
+		expect(keymap.bindings.get("pane.previous")!.map(chordId)).toEqual(["Cmd+Ctrl+ArrowUp"]);
 		expect(keymap.bindings.get("files.toggle")!.map(chordId)).toEqual(["Cmd+\\"]);
-		expect([...keymap.custom].sort()).toEqual(["diff.next", "editor.closeTab", "pane.next"]);
+		expect([...keymap.custom].sort()).toEqual(["diff.next", "pane.next", "tab.close"]);
 		const messages = keymap.problems.map((problem) => problem.message).join("\n");
 		expect(messages).toMatch(/Unknown setting "colour"/);
 		expect(messages).toMatch(/⌘W belongs to the browser/);
@@ -141,14 +150,14 @@ describe("rebinding", () => {
 		expect(messages).toMatch(/Unknown action "no.such"/);
 		expect(messages).toMatch(/Find in the terminal: give a chord/);
 		expect(resolveKey(keymap, key("˜", { metaKey: true, altKey: true, code: "KeyN" }), nowhere)).toBe("pane.next");
-		expect(resolveKey(keymap, key("ArrowDown", { metaKey: true, altKey: true }), nowhere)).toBeUndefined();
+		expect(resolveKey(keymap, key("ArrowDown", { metaKey: true, ctrlKey: true }), nowhere)).toBeUndefined();
 	});
 
 	it("gives a contested chord to the rebound action, and reports the one that lost it", () => {
-		const keymap = buildKeymap({ bindings: { "terminal.new": "Cmd+Alt+ArrowDown" } }, true);
-		expect(keymap.bindings.get("terminal.new")!.map(chordId)).toEqual(["Cmd+Alt+ArrowDown"]);
+		const keymap = buildKeymap({ bindings: { "terminal.new": "Cmd+Ctrl+ArrowDown" } }, true);
+		expect(keymap.bindings.get("terminal.new")!.map(chordId)).toEqual(["Cmd+Ctrl+ArrowDown"]);
 		expect(keymap.bindings.get("pane.next")).toEqual([]);
-		expect(keymap.problems).toEqual([{ action: "pane.next", message: '⌥⌘↓ is bound to both "New terminal on this node" and "Next pane in the list"; "New terminal on this node" keeps it.' }]);
+		expect(keymap.problems).toEqual([{ action: "pane.next", message: '⌃⌘↓ is bound to both "New terminal in this project" and "Next agent in the list"; "New terminal in this project" keeps it.' }]);
 		// Find works only in the terminal and diff keys only in a diff, so they can share a chord.
 		expect(buildKeymap({ bindings: { "diff.next": "Cmd+F" } }, true).problems).toEqual([]);
 	});
@@ -156,7 +165,7 @@ describe("rebinding", () => {
 	it("falls back to the defaults on unreadable JSON, and stores what it is given", () => {
 		const broken = keymapFrom("{nope", true);
 		expect(broken.problems[0]!.message).toMatch(/not JSON/);
-		expect(broken.bindings.get("pane.next")!.map(chordId)).toEqual(["Cmd+Alt+ArrowDown"]);
+		expect(broken.bindings.get("pane.next")!.map(chordId)).toEqual(["Cmd+Ctrl+ArrowDown"]);
 		expect(keymapFrom(KEYS_EXAMPLE, true).problems).toEqual([]);
 
 		saveKeySettings('{"bindings":{"help":"F1"}}');

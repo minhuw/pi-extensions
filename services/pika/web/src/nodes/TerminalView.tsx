@@ -16,6 +16,8 @@ import { actionShortcut, isFindKey, LINK_MODIFIER } from "./keys";
 import { cellRange, findPaths, PathChecker, resolvePath, type CellText, type PathMatch } from "./links";
 import { clipboardImage, pasteText, runsPi } from "./paste";
 import { swallowQueries } from "./queries";
+import { WebglRenderer, type Renderer } from "./renderer";
+import { onSettled, whenSettled } from "./resize-gate";
 import { SizeOwner } from "./size";
 import { UploadCancelled, uploadFiles, uploadName, type UploadItem, type UploadProgress } from "./upload";
 
@@ -35,9 +37,6 @@ export const TERMINAL_OPTIONS = {
 	allowProposedApi: true,
 } as const satisfies ITerminalOptions;
 
-/** `webgl`, or why the DOM renderer draws instead (xterm 6 has no canvas renderer). */
-type Renderer = "webgl" | "no-webgl" | "webgl-failed" | "context-lost";
-
 function webgl2Available(): boolean {
 	try {
 		return document.createElement("canvas").getContext("webgl2") !== null;
@@ -47,6 +46,9 @@ function webgl2Available(): boolean {
 }
 
 const clamp = (value: number, max: number): number => Math.max(1, Math.min(max, Math.floor(value)));
+
+/** A host smaller than this is not measured: a box on its way in or out would fit to a sliver of a grid. */
+const MIN_FIT_PX = { width: 48, height: 32 };
 
 /** Search highlights in either theme; the overview ruler colours are required by the addon even without a ruler. */
 const SEARCH_DECORATIONS: Record<Theme, NonNullable<ISearchOptions["decorations"]>> = {
@@ -109,6 +111,10 @@ interface SizeView {
  * One node terminal in xterm.js (NODE.md, "Terminals"). It attaches on mount and again on a sequence gap, swallows
  * every terminal query (the daemon answers them), and renders at the PTY's size: this window claims the size on typing
  * or "Fit here", and otherwise shows the size another window set, letterboxed.
+ *
+ * The workspace's terminal layer mounts it once and only moves it, so `visible` says whether it shows: a hidden view
+ * gives back its WebGL context and measures nothing; showing again takes a context and fits its box. A new fit goes
+ * to the node only once no pointer is down (`resize-gate.ts`), so a divider drag sends one size, on release.
  */
 export function TerminalView({
 	channel,
@@ -117,6 +123,8 @@ export function TerminalView({
 	home,
 	onKill,
 	onOpenFile,
+	visible = true,
+	onFocus,
 }: {
 	channel: NodeChannel;
 	terminal: TerminalInfo;
@@ -126,6 +134,10 @@ export function TerminalView({
 	onKill: () => void;
 	/** Opens a file in the node's editor, at a line when the output named one. */
 	onOpenFile: (path: string, at?: { line: number; column?: number }) => void;
+	/** Whether the view is on screen. */
+	visible?: boolean;
+	/** The terminal took keyboard focus. */
+	onFocus?: () => void;
 }) {
 	const { terminalId } = terminal;
 	const host = useRef<HTMLDivElement>(null);
@@ -154,8 +166,13 @@ export function TerminalView({
 	const [hoverLink, setHoverLink] = useState<string>();
 	const fileInput = useRef<HTMLInputElement>(null);
 	// Read by the link provider and the paste, which outlive renders.
-	const latest = useRef({ terminal, home, onOpenFile, theme });
-	latest.current = { terminal, home, onOpenFile, theme };
+	const latest = useRef({ terminal, home, onOpenFile, theme, onFocus });
+	latest.current = { terminal, home, onOpenFile, theme, onFocus };
+	const visibleRef = useRef(visible);
+	visibleRef.current = visible;
+	const rendererRef = useRef<WebglRenderer<WebglAddon> | null>(null);
+	/** Fits the grid to the host now, when it shows; set while the terminal is mounted. */
+	const measureRef = useRef<() => void>(() => {});
 	/** The shell's directory from OSC 7, when it reports one; else the pane's session or starting cwd. */
 	const reportedCwd = useRef<string | undefined>(undefined);
 
@@ -235,21 +252,12 @@ export function TerminalView({
 		});
 		term.open(element);
 		termRef.current = term;
+		const focused = () => latest.current.onFocus?.();
+		term.textarea?.addEventListener("focus", focused);
 
-		if (!webgl2Available()) setRenderer("no-webgl");
-		else {
-			try {
-				const webgl = new WebglAddon();
-				webgl.onContextLoss(() => {
-					webgl.dispose();
-					setRenderer("context-lost");
-				});
-				term.loadAddon(webgl);
-				setRenderer("webgl");
-			} catch {
-				setRenderer("webgl-failed");
-			}
-		}
+		const renderer = new WebglRenderer<WebglAddon>(term, () => new WebglAddon(), setRenderer, webgl2Available());
+		rendererRef.current = renderer;
+		if (visibleRef.current) renderer.show();
 
 		let disposed = false;
 		let attachToken = 0;
@@ -262,6 +270,7 @@ export function TerminalView({
 		const publish = () => setSize({ ...owner.size, owned: owner.owned, canFitHere: owner.canFitHere, told });
 
 		const measure = () => {
+			if (!visibleRef.current || element.clientWidth < MIN_FIT_PX.width || element.clientHeight < MIN_FIT_PX.height) return;
 			const proposed = fit.proposeDimensions();
 			if (!proposed || !Number.isFinite(proposed.cols) || !Number.isFinite(proposed.rows)) return;
 			owner.fitChanged({ cols: clamp(proposed.cols, LIMITS.maxCols), rows: clamp(proposed.rows, LIMITS.maxRows) });
@@ -319,12 +328,18 @@ export function TerminalView({
 		sendInput.current = send;
 		const onData = term.onData(send);
 
+		measureRef.current = measure;
 		let measureTimer: ReturnType<typeof setTimeout> | undefined;
+		let pendingMeasure = () => {};
 		const observer = new ResizeObserver(() => {
 			clearTimeout(measureTimer);
-			measureTimer = setTimeout(measure, 80);
+			pendingMeasure();
+			measureTimer = setTimeout(() => {
+				pendingMeasure = whenSettled(measure);
+			}, 80);
 		});
 		observer.observe(element);
+		const offSettled = onSettled(measure);
 
 		// Subscribed first, so output from the attach on is buffered.
 		attach();
@@ -332,7 +347,11 @@ export function TerminalView({
 		return () => {
 			disposed = true;
 			clearTimeout(measureTimer);
+			pendingMeasure();
+			offSettled();
 			observer.disconnect();
+			term.textarea?.removeEventListener("focus", focused);
+			measureRef.current = () => {};
 			offEvents();
 			onData.dispose();
 			onResults.dispose();
@@ -343,6 +362,8 @@ export function TerminalView({
 			uploading.current?.abort();
 			channel.request("term.detach", { terminalId }).catch(() => {});
 			swallowing.dispose();
+			renderer.dispose();
+			rendererRef.current = null;
 			term.dispose();
 			termRef.current = null;
 			ownerRef.current = null;
@@ -353,6 +374,27 @@ export function TerminalView({
 	useEffect(() => {
 		if (termRef.current) termRef.current.options.theme = THEMES[theme];
 	}, [theme]);
+
+	// Shown: a WebGL context again, a redraw, and a fit once the box has its size. Hidden: the context goes back.
+	useEffect(() => {
+		const renderer = rendererRef.current;
+		const term = termRef.current;
+		if (!renderer || !term) return;
+		if (!visible) {
+			renderer.hide();
+			return;
+		}
+		renderer.show();
+		let drop = () => {};
+		const frame = requestAnimationFrame(() => {
+			term.refresh(0, term.rows - 1);
+			drop = whenSettled(() => measureRef.current());
+		});
+		return () => {
+			cancelAnimationFrame(frame);
+			drop();
+		};
+	}, [visible]);
 
 	useEffect(() => {
 		if (termRef.current) termRef.current.options.disableStdin = exited;
@@ -456,7 +498,7 @@ export function TerminalView({
 						Fit here
 					</button>
 				)}
-				{renderer && renderer !== "webgl" && (
+				{renderer && renderer !== "webgl" && renderer !== "hidden" && (
 					<span className="text-ink" data-renderer="dom" title="xterm.js draws with DOM elements, which is slower for heavy output">
 						{renderer === "no-webgl"
 							? "WebGL is unavailable here; drawing with the DOM renderer"

@@ -1,17 +1,20 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MutableRefObject, type ReactNode } from "react";
 import { Icon } from "../components/icons";
-import { BUTTON, Callout, ConfirmDialog, cx, Segmented } from "../components/ui";
+import { BUTTON, Callout, cx, Segmented } from "../components/ui";
 import type { Theme } from "../lib/theme";
-import { CHANGE_GROUPS, changeMode, ChangesStore, type Change, type ChangesSnapshot } from "./changes";
+import { CHANGE_GROUPS, changeMode, type Change, type ChangesSnapshot, type ChangesStore } from "./changes";
 import { homePath } from "./client";
 import type { DiffControl } from "./CodeEditor";
 import { sanitize, type Project } from "./contract";
-import { isDirty, type DiffTab, type EditorStore, type EditorTab, type FileTab } from "./editor";
+import { type DiffTab, type EditorStore, type EditorTab, type FileTab } from "./editor";
 import { baseName, dirName, joinPath, READ_LIMIT_LABEL, type NodeFiles } from "./files";
-import { actionShortcut, type PageCommands } from "./keys";
-import { LAYOUT_BOUNDS } from "./layout";
-import { Splitter } from "./Splitter";
+import { actionShortcut } from "./keys";
 import { FileTree, visibleEntries, type TreeSnapshot } from "./tree";
+
+/**
+ * The Nodes page's file views (NODE.md §4 "Files"): the explorer's tree under a project, git's changes, and the body
+ * of an editor tab (a file in Monaco, or a diff) as the workspace's tab groups show it.
+ */
 
 // Monaco and its worker are the page's largest chunk; they load with the first open tab.
 const CodeEditor = lazy(() => import("./CodeEditor"));
@@ -25,11 +28,11 @@ function useTree(tree: FileTree | undefined): TreeSnapshot {
 
 const LOADING_CHANGES: ChangesSnapshot = { status: "loading" };
 
-function useChanges(changes: ChangesStore | undefined): ChangesSnapshot {
+export function useChanges(changes: ChangesStore | undefined): ChangesSnapshot {
 	return useSyncExternalStore(changes?.subscribe ?? noop, changes?.getSnapshot ?? (() => LOADING_CHANGES));
 }
 
-function usePageVisible(): boolean {
+export function usePageVisible(): boolean {
 	return useSyncExternalStore(
 		(listener) => {
 			document.addEventListener("visibilitychange", listener);
@@ -40,53 +43,32 @@ function usePageVisible(): boolean {
 }
 
 /** A diff tab's title words: what it compares. */
-const diffKind = (tab: DiffTab): string => (tab.mode === "staged" ? "staged" : tab.mode === "untracked" ? "new" : "changes");
+export const diffKind = (tab: Pick<DiffTab, "mode">): string => (tab.mode === "staged" ? "staged" : tab.mode === "untracked" ? "new" : "changes");
 
 const SIZE = new Intl.NumberFormat("en", { maximumFractionDigits: 1 });
 const bytes = (size: number) => (size < 1024 ? `${size} bytes` : size < 1024 * 1024 ? `${SIZE.format(size / 1024)} KiB` : `${SIZE.format(size / 1024 / 1024)} MiB`);
 
-export interface FilePanelProps {
-	node: string;
-	nodeName: string;
-	home: string;
+/** How a file opens from the explorer: a preview tab on one click, a tab kept for good on two. */
+export type OpenHow = "preview" | "open";
+
+export interface ExplorerProps {
 	/** Undefined while the node is not connected. */
 	files: NodeFiles | undefined;
-	store: EditorStore;
+	home: string;
 	/** The tree's root, and the roots to pick from. */
 	root: string;
 	projects: readonly Project[];
 	onRoot: (root: string) => void;
-	theme: Theme;
-	treeWidth: number;
-	onTreeWidth: (width: number, commit: boolean) => void;
 	hidden: boolean;
 	onHidden: (hidden: boolean) => void;
-	onCollapse: () => void;
-	/** The left column: the tree, or git's changes. */
-	sidebar: "files" | "changes";
-	onSidebar: (sidebar: "files" | "changes") => void;
-	diffInline: boolean;
-	onDiffInline: (inline: boolean) => void;
-	/** Where the panel registers what its shortcuts do. */
-	commands?: MutableRefObject<PageCommands>;
+	/** The file the focused group shows, marked in the tree. */
+	activePath?: string;
+	onOpenFile: (path: string, how: OpenHow) => void;
 }
 
-/**
- * The Nodes page's right pane (NODE.md §4 "Files"): the tree under the pane's project, and editor tabs for the
- * node's files and diffs.
- */
-export function FilePanel(props: FilePanelProps) {
-	const { files, root, store, hidden, sidebar, commands } = props;
-	const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
-	// The status of the root's work tree, polled while the list or a diff shows: a new status refreshes stale diffs.
-	const changes = useMemo(() => (files ? new ChangesStore(files, root, { onChanged: (paths) => store.refreshDiffs(paths) }) : undefined), [files, root, store]);
-	useEffect(() => () => changes?.dispose(), [changes]);
-	const changesView = useChanges(changes);
-	const visible = usePageVisible();
-	const diffOpen = snapshot.tabs.some((tab) => tab.kind === "diff");
-	useEffect(() => changes?.setActive(visible && (sidebar === "changes" || diffOpen)), [changes, visible, sidebar, diffOpen]);
-	const diffControl = useRef<DiffControl | null>(null);
-	const [diffChanges, setDiffChanges] = useState<number>();
+/** The explorer: a folder picker over the node's projects, and the tree under the folder picked. */
+export function Explorer(props: ExplorerProps) {
+	const { files, root, hidden } = props;
 	const expandedRef = useRef<{ root: string; dirs: ReadonlySet<string> }>({ root, dirs: new Set() });
 	const tree = useMemo(
 		() => (files ? new FileTree(files, root, expandedRef.current.root === root ? expandedRef.current.dirs : []) : undefined),
@@ -95,63 +77,17 @@ export function FilePanel(props: FilePanelProps) {
 	useEffect(() => () => tree?.dispose(), [tree]);
 	const treeView = useTree(tree);
 	expandedRef.current = { root, dirs: treeView.root === root ? treeView.expanded : expandedRef.current.dirs };
-	const [closing, setClosing] = useState<EditorTab | null>(null);
-	const active = snapshot.tabs.find((tab) => tab.key === snapshot.active);
-	const dirty = snapshot.tabs.some(isDirty);
 
-	// Unsaved edits ask before the page goes.
-	useEffect(() => {
-		if (!dirty) return;
-		const warn = (event: BeforeUnloadEvent) => event.preventDefault();
-		window.addEventListener("beforeunload", warn);
-		return () => window.removeEventListener("beforeunload", warn);
-	}, [dirty]);
-
-	const openEntry = async (path: string, kind: string) => {
-		if (kind === "dir") return tree?.toggle(path);
+	const openEntry = async (path: string, kind: string, how: OpenHow) => {
+		if (kind === "dir") return how === "preview" ? tree?.toggle(path) : undefined;
 		// A symlink may name a directory: list it if it is one.
-		if (kind === "symlink" && files && (await files.readDir(path).then(() => true, () => false))) return tree?.toggle(path);
-		void store.open(path);
+		if (kind === "symlink" && files && (await files.readDir(path).then(() => true, () => false))) return how === "preview" ? tree?.toggle(path) : undefined;
+		props.onOpenFile(path, how);
 	};
-
-	const close = (tab: EditorTab) => (isDirty(tab) ? setClosing(tab) : store.close(tab.key));
-
-	const openChange = (change: Change) => {
-		const mode = changeMode(change);
-		if (change.submodule) return;
-		if (mode) void store.openDiff(change.path, mode, change.from);
-		else void store.open(change.path);
-	};
-
-	// The panel's shortcuts, current with every render.
-	useEffect(() => {
-		const registry = commands?.current;
-		if (!registry) return;
-		registry["editor.closeTab"] = () => (active ? close(active) : false);
-		registry["diff.next"] = () => (diffControl.current ? diffControl.current.go("next") : false);
-		registry["diff.previous"] = () => (diffControl.current ? diffControl.current.go("previous") : false);
-		return () => {
-			delete registry["editor.closeTab"];
-			delete registry["diff.next"];
-			delete registry["diff.previous"];
-		};
-	});
 
 	return (
-		<section
-			className="flex min-h-0 min-w-0 flex-1 flex-col"
-			aria-label="Files"
-			data-file-panel=""
-			onKeyDown={(event) => {
-				// Cmd/Ctrl-S anywhere in the panel saves the tab shown, and never opens the browser's own save.
-				if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "s") {
-					event.preventDefault();
-					if (active) void store.save(active.key);
-				}
-			}}
-		>
-			<header className="flex h-10 shrink-0 items-center gap-1.5 border-b border-line px-2">
-				<Icon name="folder" size={14} className="shrink-0 text-muted" />
+		<div className="flex min-h-0 flex-1 flex-col" data-explorer="">
+			<div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-line px-2">
 				<label className="sr-only" htmlFor="node-file-root">
 					Folder
 				</label>
@@ -180,87 +116,98 @@ export function FilePanel(props: FilePanelProps) {
 					<Icon name="eye" size={14} />
 					<span className="sr-only">Show dotfiles</span>
 				</button>
-				<button type="button" className={cx(BUTTON.quiet, "h-7 px-1.5")} title="Hide the files" onClick={props.onCollapse} data-collapse-files="">
-					<Icon name="sidebar" size={14} />
-					<span className="sr-only">Hide the files</span>
-				</button>
-			</header>
-			<div className="flex min-h-0 flex-1">
-				<div className="flex min-h-0 shrink-0 flex-col bg-sidebar" style={{ width: props.treeWidth }}>
-					<div className="shrink-0 px-2 pt-2 pb-1.5">
-						<Segmented
-							label="List"
-							size="sm"
-							fullWidth
-							value={sidebar}
-							options={[
-								["files", "Files"],
-								["changes", changesView.status === "ready" && changesView.count > 0 ? `Changes ${changesView.count.toLocaleString("en")}` : "Changes"],
-							]}
-							onChange={props.onSidebar}
-						/>
-					</div>
-					{sidebar === "changes" ? (
-						<div className="min-h-0 flex-1 overflow-auto" data-changes={root}>
-							{files ? (
-								<ChangesList view={changesView} home={props.home} activeKey={active?.key} onOpen={openChange} onRefresh={() => void changes?.refresh()} />
-							) : (
-								<p className="p-3 text-[12.5px] text-muted">Not connected.</p>
-							)}
-						</div>
-					) : (
-						<div className="min-h-0 flex-1 overflow-auto" role="tree" aria-label={`Files in ${baseName(root)}`} data-file-tree={root}>
-							{files ? (
-								<TreeLevel tree={tree} view={treeView} dir={root} depth={0} hidden={hidden} activePath={active?.path} onOpen={(path, kind) => void openEntry(path, kind)} />
-							) : (
-								<p className="p-3 text-[12.5px] text-muted">Not connected.</p>
-							)}
-						</div>
-					)}
-				</div>
-				<Splitter
-					name="tree"
-					label="Resize the file tree"
-					side="left"
-					value={props.treeWidth}
-					min={LAYOUT_BOUNDS.tree[0]}
-					max={LAYOUT_BOUNDS.tree[1]}
-					onChange={(width) => props.onTreeWidth(width, false)}
-					onCommit={(width) => props.onTreeWidth(width, true)}
-				/>
-				<div className="flex min-h-0 min-w-0 flex-1 flex-col">
-					<Tabs tabs={snapshot.tabs} active={snapshot.active} onActivate={(key) => store.activate(key)} onClose={close} />
-					{active ? (
-						<TabBody
-							{...props}
-							tab={active}
-							keys={snapshot.tabs.map((tab) => tab.key)}
-							diffChanges={diffChanges}
-							onDiff={(control) => {
-								diffControl.current = control;
-								setDiffChanges(control?.changes);
-							}}
-							diffControl={diffControl}
-						/>
-					) : (
-						<Centered>Open a file from the tree, or a diff from Changes. pi's /pika-open and /pika-diff open here too.</Centered>
-					)}
-				</div>
 			</div>
-			{closing && (
-				<ConfirmDialog
-					title={`Close ${sanitize(closing.name)}?`}
-					confirmLabel="Close without saving"
-					onCancel={() => setClosing(null)}
-					onConfirm={() => {
-						store.close(closing.key);
-						setClosing(null);
-					}}
-				>
-					Its edits are not saved on {props.nodeName}.
-				</ConfirmDialog>
-			)}
-		</section>
+			<div className="min-h-0 flex-1 overflow-auto" role="tree" aria-label={`Files in ${baseName(root)}`} data-file-tree={root}>
+				{files ? (
+					<TreeLevel tree={tree} view={treeView} dir={root} depth={0} hidden={hidden} activePath={props.activePath} onOpen={(path, kind, how) => void openEntry(path, kind, how)} />
+				) : (
+					<p className="p-3 text-[12.5px] text-muted">Not connected.</p>
+				)}
+			</div>
+		</div>
+	);
+}
+
+/** git's changes under `root`: each opens its diff (a conflict, its file). */
+export function ChangesPanel({
+	connected,
+	root,
+	view,
+	home,
+	activeKey,
+	onOpen,
+	onRefresh,
+}: {
+	connected: boolean;
+	root: string;
+	view: ChangesSnapshot;
+	home: string;
+	activeKey?: string;
+	onOpen: (change: Change) => void;
+	onRefresh: () => void;
+}) {
+	return (
+		<div className="min-h-0 flex-1 overflow-auto" data-changes={root}>
+			{connected ? <ChangesList view={view} home={home} activeKey={activeKey} onOpen={onOpen} onRefresh={onRefresh} /> : <p className="p-3 text-[12.5px] text-muted">Not connected.</p>}
+		</div>
+	);
+}
+
+export interface EditorTabBodyProps {
+	/** The node, which scopes Monaco's models. */
+	node: string;
+	nodeName: string;
+	home: string;
+	store: EditorStore;
+	tab: EditorTab;
+	/** Every editor key open on the node; Monaco drops the models of others. */
+	keys: readonly string[];
+	theme: Theme;
+	diffInline: boolean;
+	onDiffInline: (inline: boolean) => void;
+	/** The buffer changed: an edited preview is kept. */
+	onEdit?: (key: string) => void;
+}
+
+/** The diffs on screen, by tab key, for the diff shortcuts: the one focus is in moves. */
+const DIFFS = new Map<string, DiffControl>();
+
+/** The diff that `element` (focus, usually) is in. */
+export function diffControlAt(element: Element | null): DiffControl | undefined {
+	const key = element?.closest("[data-diff-view]")?.getAttribute("data-diff-view");
+	return key ? DIFFS.get(key) : undefined;
+}
+
+/** One editor tab's body in its group: the file in Monaco with its status, or a diff. Cmd/Ctrl-S saves it. */
+export function EditorTabBody(props: EditorTabBodyProps) {
+	const { tab, store } = props;
+	const diffControl = useRef<DiffControl | null>(null);
+	const [diffChanges, setDiffChanges] = useState<number>();
+	useEffect(() => () => void DIFFS.delete(tab.key), [tab.key]);
+	return (
+		<div
+			className="flex min-h-0 min-w-0 flex-1 flex-col"
+			data-editor-body={tab.key}
+			onKeyDown={(event) => {
+				// Cmd/Ctrl-S anywhere in the tab saves it, and never opens the browser's own save.
+				if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "s") {
+					event.preventDefault();
+					void store.save(tab.key);
+				}
+			}}
+		>
+			<TabBody
+				{...props}
+				diffChanges={diffChanges}
+				onDiff={(control) => {
+					diffControl.current = control;
+					if (control) DIFFS.set(tab.key, control);
+					else DIFFS.delete(tab.key);
+					setDiffChanges(control?.changes);
+				}}
+				diffControl={diffControl}
+			/>
+		</div>
 	);
 }
 
@@ -279,7 +226,7 @@ function TreeLevel({
 	depth: number;
 	hidden: boolean;
 	activePath?: string;
-	onOpen: (path: string, kind: string) => void;
+	onOpen: (path: string, kind: string, how: OpenHow) => void;
 }) {
 	const listing = view.dirs.get(dir);
 	const indent = { paddingLeft: 8 + depth * 14 };
@@ -333,7 +280,8 @@ function TreeLevel({
 							)}
 							style={indent}
 							title={sanitize(path)}
-							onClick={() => onOpen(path, entry.kind)}
+							onClick={() => onOpen(path, entry.kind, "preview")}
+							onDoubleClick={() => entry.kind !== "dir" && onOpen(path, entry.kind, "open")}
 							data-tree-entry={path}
 							data-kind={entry.kind}
 						>
@@ -356,57 +304,6 @@ function TreeLevel({
 	);
 }
 
-function Tabs({ tabs, active, onActivate, onClose }: { tabs: readonly EditorTab[]; active?: string; onActivate: (key: string) => void; onClose: (tab: EditorTab) => void }) {
-	if (tabs.length === 0) return null;
-	return (
-		<div className="flex h-9 shrink-0 items-stretch overflow-x-auto border-b border-line [scrollbar-width:thin]" role="tablist" aria-label="Open files">
-			{tabs.map((tab) => {
-				const current = tab.key === active;
-				const dirty = isDirty(tab);
-				return (
-					<div
-						key={tab.key}
-						className={cx("group flex shrink-0 items-center border-r border-line text-[12.5px]", current ? "bg-page font-medium shadow-[inset_0_-2px_0_var(--color-ink)]" : "bg-sidebar text-muted")}
-						data-editor-tab={tab.key}
-						data-dirty={dirty || undefined}
-					>
-						<button
-							type="button"
-							role="tab"
-							aria-selected={current}
-							className="flex h-full items-center gap-1.5 pr-1 pl-3"
-							title={sanitize(tab.path)}
-							onClick={() => onActivate(tab.key)}
-							onAuxClick={(event) => {
-								if (event.button === 1) onClose(tab);
-							}}
-						>
-							{tab.kind === "diff" && <Icon name="branch" size={12} className="shrink-0" />}
-							<span className="max-w-[180px] truncate">{sanitize(tab.name)}</span>
-							{tab.kind === "diff" && <span className="text-[11px] text-muted">{diffKind(tab)}</span>}
-						</button>
-						<button
-							type="button"
-							className="mr-1 flex size-5 items-center justify-center rounded-sm hover:bg-hover"
-							aria-label={dirty ? `Close ${sanitize(tab.name)} (unsaved)` : `Close ${sanitize(tab.name)}`}
-							onClick={() => onClose(tab)}
-						>
-							{dirty ? (
-								<>
-									<span className="size-2 rounded-full bg-ink group-hover:hidden" aria-hidden="true" data-dirty-marker="" />
-									<Icon name="close" size={11} className="hidden group-hover:block" />
-								</>
-							) : (
-								<Icon name="close" size={11} />
-							)}
-						</button>
-					</div>
-				);
-			})}
-		</div>
-	);
-}
-
 function Centered({ children }: { children: ReactNode }) {
 	return <div className="flex min-h-0 flex-1 items-center justify-center p-6 text-center text-[13px] text-muted">{children}</div>;
 }
@@ -416,9 +313,7 @@ function EditorLoading() {
 }
 
 function TabBody(
-	props: FilePanelProps & {
-		tab: EditorTab;
-		keys: string[];
+	props: EditorTabBodyProps & {
 		diffChanges?: number;
 		onDiff: (control: DiffControl | null) => void;
 		diffControl: MutableRefObject<DiffControl | null>;
@@ -432,7 +327,10 @@ function TabBody(
 				tab={tab}
 				open={props.keys}
 				theme={props.theme}
-				onChange={(key, text) => store.edit(key, text)}
+				onChange={(key, text) => {
+					store.edit(key, text);
+					props.onEdit?.(key);
+				}}
 				onSave={(key) => void store.save(key)}
 				diffInline={props.diffInline}
 				onDiff={props.onDiff}
@@ -476,7 +374,7 @@ const shortcutHint = (label: string, action: Parameters<typeof actionShortcut>[0
 };
 
 /** A diff tab: what it compares, moving between changes, the layout, and the diff (or why there is none to show). */
-function DiffBody(props: FilePanelProps & { tab: DiffTab; editor: ReactNode; diffChanges?: number; diffControl: MutableRefObject<DiffControl | null> }) {
+function DiffBody(props: EditorTabBodyProps & { tab: DiffTab; editor: ReactNode; diffChanges?: number; diffControl: MutableRefObject<DiffControl | null> }) {
 	const { tab, store, editor, diffChanges } = props;
 	const name = sanitize(tab.name);
 	const sideLabel = tab.blocked ? lowerLabel(tab.labels[tab.blocked.side === "original" ? 0 : 1]) : "";
@@ -579,7 +477,7 @@ function DiffBody(props: FilePanelProps & { tab: DiffTab; editor: ReactNode; dif
 const lowerLabel = (label: string): string => (label === "HEAD" ? label : label.toLowerCase());
 
 /** The work tree's changes in git's groups; each opens its diff (a conflict, its file). */
-function ChangesList({
+export function ChangesList({
 	view,
 	home,
 	activeKey,

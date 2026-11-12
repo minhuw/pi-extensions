@@ -16,11 +16,12 @@ const SHOWN = 50;
 
 /**
  * Quick open: a fuzzy finder over the files of the pane's project (the tree's root, from `projects.list` and the
- * pane's cwd), listed once per opening with `fs.list`. Enter opens the file in the node's editor.
+ * pane's cwd, or the project on screen when given), listed once per opening with `fs.list`. Enter opens the file.
  */
 export function QuickOpen({
 	files,
 	terminal,
+	root: project,
 	home,
 	onPick,
 	onClose,
@@ -28,6 +29,8 @@ export function QuickOpen({
 	files: NodeFiles;
 	/** The pane on screen, whose project is listed. */
 	terminal?: TerminalInfo;
+	/** The folder to list, rather than the pane's project. */
+	root?: string;
 	home: string;
 	onPick: (path: string) => void;
 	onClose: () => void;
@@ -44,11 +47,14 @@ export function QuickOpen({
 		void (async () => {
 			let root: string | undefined;
 			try {
-				const [{ projects }, cwd] = await Promise.all([
-					files.request("projects.list", {}),
-					terminal ? paneCwd((type, params) => files.request(type, params), terminal) : undefined,
-				]);
-				root = rootFor(projects, cwd, home);
+				if (project) root = project;
+				else {
+					const [{ projects }, cwd] = await Promise.all([
+						files.request("projects.list", {}),
+						terminal ? paneCwd((type, params) => files.request(type, params), terminal) : undefined,
+					]);
+					root = rootFor(projects, cwd, home);
+				}
 				const listed = await files.request("fs.list", { root });
 				if (current) setListing({ status: "ready", root, paths: listed.paths, truncated: listed.truncated });
 			} catch (error) {

@@ -8,11 +8,22 @@
  * - **The terminal:** while focus is in it, only a Cmd chord (macOS) or a Ctrl+Shift chord (elsewhere) is intercepted;
  *   every other key goes to the shell or pi. Some actions do not fire there at all.
  * - **Text:** in a text field or the editor, a chord without Cmd, Ctrl, or Alt is typing, never a shortcut.
+ * - **Tabs on macOS:** ⌘⌃ chords (⌘⌃←/→, ⌘⌃1–9, ⌘⌃W), as Chrome and Firefox take ⌘⌥←/→ and ⌘1–9 for their own tabs,
+ *   and Firefox also ⌘⌥↑/↓ (`ShortcutUtils.getSystemActionForEvent`), even from a page that handles them.
  */
+
+import { PANE_ACTIONS, type PaneActionId } from "./panes/keys";
 
 export const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 
 export type ActionId =
+	| PaneActionId
+	| TabNumberId
+	| "tab.next"
+	| "tab.previous"
+	| "tab.close"
+	| "tab.reopen"
+	| "sidebar.left"
 	| "help"
 	| "quickOpen"
 	| "find"
@@ -24,14 +35,17 @@ export type ActionId =
 	| "focus.files"
 	| "focus.editor"
 	| "files.toggle"
-	| "editor.closeTab"
 	| "diff.next"
 	| "diff.previous";
+
+/** "Go to tab N" in the focused group; tab 9 is the last tab, as in browsers. */
+export type TabNumberId = "tab.1" | "tab.2" | "tab.3" | "tab.4" | "tab.5" | "tab.6" | "tab.7" | "tab.8" | "tab.9";
+const TAB_NUMBERS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
 
 export interface ActionSpec {
 	id: ActionId;
 	label: string;
-	group: "General" | "Panes" | "Terminal" | "Files" | "Diff";
+	group: "General" | "Panes" | "Tabs" | "Terminal" | "Files" | "Diff";
 	mac: readonly string[];
 	other: readonly string[];
 	/** May fire while focus is in the terminal (then only with a Cmd or Ctrl+Shift chord). */
@@ -45,16 +59,30 @@ export interface ActionSpec {
 export const ACTIONS: readonly ActionSpec[] = [
 	{ id: "help", label: "Show these shortcuts", group: "General", mac: ["?", "Cmd+/"], other: ["?", "Ctrl+/"], terminal: false, text: false },
 	{ id: "quickOpen", label: "Open a file by name", group: "General", mac: ["Cmd+P"], other: ["Ctrl+Shift+P"], terminal: true, text: true },
-	{ id: "pane.next", label: "Next pane in the list", group: "Panes", mac: ["Cmd+Alt+ArrowDown"], other: ["Ctrl+Shift+ArrowDown"], terminal: true, text: true },
-	{ id: "pane.previous", label: "Previous pane in the list", group: "Panes", mac: ["Cmd+Alt+ArrowUp"], other: ["Ctrl+Shift+ArrowUp"], terminal: true, text: true },
+	{ id: "sidebar.left", label: "Show or hide the agent list", group: "General", mac: ["Cmd+Shift+\\"], other: ["Ctrl+Shift+Alt+B"], terminal: true, text: true },
+	{ id: "files.toggle", label: "Show or hide the explorer and changes", group: "General", mac: ["Cmd+\\"], other: ["Ctrl+Shift+\\"], terminal: true, text: true },
+	{ id: "pane.next", label: "Next agent in the list", group: "Panes", mac: ["Cmd+Ctrl+ArrowDown"], other: ["Ctrl+Shift+ArrowDown"], terminal: true, text: true },
+	{ id: "pane.previous", label: "Previous agent in the list", group: "Panes", mac: ["Cmd+Ctrl+ArrowUp"], other: ["Ctrl+Shift+ArrowUp"], terminal: true, text: true },
 	{ id: "pane.waiting", label: "Next pane waiting for you", group: "Panes", mac: ["Cmd+Alt+Enter"], other: ["Ctrl+Shift+Enter"], terminal: true, text: true },
-	{ id: "terminal.new", label: "New terminal on this node", group: "Panes", mac: ["Cmd+Alt+T"], other: ["Ctrl+Shift+`"], terminal: true, text: true },
+	{ id: "terminal.new", label: "New terminal in this project", group: "Panes", mac: ["Cmd+Alt+T"], other: ["Ctrl+Shift+`"], terminal: true, text: true },
 	{ id: "focus.terminal", label: "Focus the terminal", group: "Panes", mac: ["Cmd+Alt+1"], other: ["Ctrl+Shift+1"], terminal: true, text: true },
 	{ id: "focus.files", label: "Focus the file tree or changes", group: "Panes", mac: ["Cmd+Alt+2"], other: ["Ctrl+Shift+2"], terminal: true, text: true },
 	{ id: "focus.editor", label: "Focus the editor", group: "Panes", mac: ["Cmd+Alt+3"], other: ["Ctrl+Shift+3"], terminal: true, text: true },
+	{ id: "tab.next", label: "Next tab in the group", group: "Tabs", mac: ["Cmd+Ctrl+ArrowRight"], other: ["Ctrl+Shift+Alt+PageDown"], terminal: true, text: true },
+	{ id: "tab.previous", label: "Previous tab in the group", group: "Tabs", mac: ["Cmd+Ctrl+ArrowLeft"], other: ["Ctrl+Shift+Alt+PageUp"], terminal: true, text: true },
+	...TAB_NUMBERS.map((n): ActionSpec => ({
+		id: `tab.${n}`,
+		label: n === 9 ? "Last tab in the group" : `Tab ${n} in the group`,
+		group: "Tabs",
+		mac: [`Cmd+Ctrl+${n}`],
+		other: [`Ctrl+Shift+Alt+${n}`],
+		terminal: true,
+		text: true,
+	})),
+	{ id: "tab.close", label: "Close the tab", group: "Tabs", mac: ["Cmd+Ctrl+W"], other: ["Ctrl+Shift+Alt+W"], terminal: true, text: true },
+	{ id: "tab.reopen", label: "Reopen the closed tab", group: "Tabs", mac: ["Cmd+Ctrl+Shift+T"], other: ["Ctrl+Shift+Alt+T"], terminal: true, text: true },
 	{ id: "find", label: "Find in the terminal", group: "Terminal", mac: ["Cmd+F"], other: ["Ctrl+Shift+F"], terminal: true, text: true, only: "terminal" },
-	{ id: "files.toggle", label: "Show or hide the files", group: "Files", mac: ["Cmd+\\"], other: ["Ctrl+Shift+\\"], terminal: true, text: true },
-	{ id: "editor.closeTab", label: "Close the editor tab", group: "Files", mac: ["Ctrl+W"], other: ["Alt+W"], terminal: false, text: true },
+	...PANE_ACTIONS,
 	{ id: "diff.next", label: "Next change", group: "Diff", mac: ["F7", "Alt+ArrowDown"], other: ["F7", "Alt+ArrowDown"], terminal: false, text: true, only: "diff" },
 	{ id: "diff.previous", label: "Previous change", group: "Diff", mac: ["Shift+F7", "Alt+ArrowUp"], other: ["Shift+F7", "Alt+ArrowUp"], terminal: false, text: true, only: "diff" },
 ];
@@ -77,12 +105,16 @@ export const RESERVED: { readonly mac: readonly string[]; readonly other: readon
 		"Cmd+[", "Cmd+]", "Cmd+Shift+[", "Cmd+Shift+]", "Cmd+Alt+ArrowLeft", "Cmd+Alt+ArrowRight", "Cmd+Alt+I", "Cmd+Alt+J", "Cmd+Alt+B",
 		"Cmd+C", "Cmd+V", "Cmd+X", "Cmd+A", "Cmd+Z", "Cmd+Shift+Z", "Cmd+`", "Cmd+Tab",
 		"Cmd+1", "Cmd+2", "Cmd+3", "Cmd+4", "Cmd+5", "Cmd+6", "Cmd+7", "Cmd+8", "Cmd+9",
+		// Firefox's tab keys, which it acts on even when the page handles them; and its full screen.
+		"Cmd+Alt+ArrowUp", "Cmd+Alt+ArrowDown", "Ctrl+Tab", "Ctrl+Shift+Tab", "Ctrl+PageUp", "Ctrl+PageDown", "Ctrl+Shift+PageUp", "Ctrl+Shift+PageDown",
+		"Cmd+Ctrl+F",
 	],
 	other: [
 		"Ctrl+W", "Ctrl+T", "Ctrl+N", "Ctrl+L", "Ctrl+Shift+T", "Ctrl+Shift+N", "Ctrl+Shift+W", "Ctrl+Shift+Q", "Ctrl+Tab", "Ctrl+Shift+Tab",
 		"Ctrl+Shift+I", "Ctrl+Shift+J", "Ctrl+Shift+C", "Ctrl+Shift+V", "Ctrl+Shift+B", "Ctrl+Shift+Delete", "Alt+ArrowLeft", "Alt+ArrowRight", "Alt+F4",
 		"Ctrl+C", "Ctrl+V", "Ctrl+X", "Ctrl+A", "Ctrl+Z", "Ctrl+Shift+Z",
 		"Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9",
+		"Ctrl+PageUp", "Ctrl+PageDown", "Ctrl+Shift+PageUp", "Ctrl+Shift+PageDown", "Ctrl+F4",
 	],
 };
 
@@ -336,7 +368,7 @@ export const KEYS_EXAMPLE = `{
   "bindings": {
     "pane.next": "${IS_MAC ? "Cmd+Alt+N" : "Ctrl+Shift+Alt+N"}",
     "diff.next": ["F8", "Alt+ArrowDown"],
-    "editor.closeTab": []
+    "tab.close": []
   }
 }`;
 

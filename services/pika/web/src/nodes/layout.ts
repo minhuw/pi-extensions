@@ -2,14 +2,13 @@
 export interface NodesLayout {
 	/** The agent list on the left. */
 	rail: number;
-	/** The file panel on the right. */
+	railOpen: boolean;
+	/** The explorer and changes on the right. */
 	files: number;
-	/** The file tree inside the file panel. */
-	tree: number;
 	filesOpen: boolean;
 	/** Dotfiles in the tree. */
 	hidden: boolean;
-	/** What the file panel's left column lists: the tree, or git's changes. */
+	/** What the right sidebar shows: the explorer's tree, or git's changes. */
 	sidebar: "files" | "changes";
 	/** Diffs one column above the other, rather than side by side. */
 	diffInline: boolean;
@@ -17,14 +16,13 @@ export interface NodesLayout {
 
 export const LAYOUT_KEY = "pika.nodes.layout";
 
-export const LAYOUT_DEFAULTS: NodesLayout = { rail: 288, files: 640, tree: 220, filesOpen: true, hidden: false, sidebar: "files", diffInline: false };
+export const LAYOUT_DEFAULTS: NodesLayout = { rail: 272, railOpen: true, files: 300, filesOpen: true, hidden: false, sidebar: "files", diffInline: false };
 
 /** Least and most width of each pane, in CSS pixels. */
 export const LAYOUT_BOUNDS = {
 	rail: [200, 480],
-	files: [320, 1600],
-	tree: [140, 560],
-} as const satisfies Record<"rail" | "files" | "tree", readonly [number, number]>;
+	files: [200, 720],
+} as const satisfies Record<"rail" | "files", readonly [number, number]>;
 
 export const clampWidth = (pane: keyof typeof LAYOUT_BOUNDS, value: number): number => {
 	const [min, max] = LAYOUT_BOUNDS[pane];
@@ -44,12 +42,12 @@ export function loadLayout(storage: Pick<Storage, "getItem"> | undefined = globa
 		const value = stored[pane];
 		return typeof value === "number" && Number.isFinite(value) ? clampWidth(pane, value) : LAYOUT_DEFAULTS[pane];
 	};
-	const flag = (name: "filesOpen" | "hidden" | "diffInline") => (typeof stored[name] === "boolean" ? (stored[name] as boolean) : LAYOUT_DEFAULTS[name]);
+	const flag = (name: "railOpen" | "filesOpen" | "hidden" | "diffInline") => (typeof stored[name] === "boolean" ? (stored[name] as boolean) : LAYOUT_DEFAULTS[name]);
 	const sidebar = stored.sidebar === "changes" || stored.sidebar === "files" ? stored.sidebar : LAYOUT_DEFAULTS.sidebar;
 	return {
 		rail: width("rail"),
+		railOpen: flag("railOpen"),
 		files: width("files"),
-		tree: width("tree"),
 		filesOpen: flag("filesOpen"),
 		hidden: flag("hidden"),
 		sidebar,

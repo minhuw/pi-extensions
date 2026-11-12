@@ -19,6 +19,8 @@ export interface NodeView {
 	link: NodeLink;
 	/** Newest first, as `term.list` orders them; kept current by `term.created` and `term.removed`. */
 	terminals: TerminalInfo[];
+	/** The current channel's `term.list` has answered: `terminals` is the node's whole list, not a partial one. */
+	listed: boolean;
 	/** The last `error` event or failed request, for display. */
 	error?: string;
 	/** The current channel's number, which changes with every new channel: terminal views attach again. */
@@ -47,6 +49,8 @@ interface NodeEntry {
 	/** The ready channel's file layer, made on first use. */
 	files?: NodeFiles;
 	terminals: TerminalInfo[];
+	/** The channel whose `term.list` answered last. */
+	listedBy?: NodeChannel;
 	error?: string;
 	epoch: number;
 }
@@ -182,8 +186,9 @@ export class NodesClient {
 		this.#connect(node);
 	}
 
-	async createTerminal(node: string, size: { cols: number; rows: number }): Promise<TerminalInfo> {
-		const { terminal } = await this.#request(node, (channel) => channel.request("term.create", size));
+	/** A new terminal on `node`, its login shell started in `cwd` when given (the node's home otherwise). */
+	async createTerminal(node: string, size: { cols: number; rows: number }, cwd?: string): Promise<TerminalInfo> {
+		const { terminal } = await this.#request(node, (channel) => channel.request("term.create", { ...size, ...(cwd ? { cwd } : {}) }));
 		this.#added(node, terminal);
 		return terminal;
 	}
@@ -200,9 +205,11 @@ export class NodesClient {
 
 	/** The one `term.list` per channel; events keep the list current after it. */
 	async refreshTerminals(node: string): Promise<void> {
-		const { terminals } = await this.#request(node, (channel) => channel.request("term.list", {}));
+		const channel = this.channel(node);
+		const { terminals } = await this.#request(node, (current) => current.request("term.list", {}));
 		const entry = this.#entry(node);
 		entry.terminals = terminals.map(cleanTerminal);
+		if (channel && entry.channel === channel) entry.listedBy = channel;
 		this.#emit();
 	}
 
@@ -387,6 +394,7 @@ export class NodesClient {
 					...(entry.pin ? { pin: entry.pin } : {}),
 					link: entry.link,
 					terminals: entry.terminals,
+					listed: entry.link.kind === "ready" && entry.listedBy !== undefined && entry.listedBy === entry.channel,
 					...(entry.error ? { error: entry.error } : {}),
 					epoch: entry.epoch,
 				};

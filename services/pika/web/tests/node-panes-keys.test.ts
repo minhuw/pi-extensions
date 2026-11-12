@@ -18,10 +18,19 @@ describe.each([
         }
     });
 
+    it("are in the page's registry, bound as given", () => {
+        const keymap = buildKeymap(undefined, mac);
+        for (const spec of PANE_ACTIONS) {
+            expect(ACTIONS.some((action) => action.id === spec.id), spec.id).toBe(true);
+            expect(keymap.bindings.get(spec.id)!.map(chordId), spec.id).toEqual(chordsOf(spec).map((text) => chordId(parseChord(text)!)));
+        }
+    });
+
     it("are not the browser's, and clash with no page action or each other", () => {
         const reserved = new Set((mac ? RESERVED.mac : RESERVED.other).map((text) => chordId(parseChord(text)!)));
         const keymap = buildKeymap(undefined, mac);
-        const taken = new Set([...keymap.bindings.values()].flat().map(chordId));
+        const paneIds = new Set<string>(PANE_ACTIONS.map((spec) => spec.id));
+        const taken = new Set([...keymap.bindings].filter(([id]) => !paneIds.has(id)).flatMap(([, chords]) => chords.map(chordId)));
         expect(ACTIONS.length).toBeGreaterThan(0);
         const seen = new Set<string>();
         for (const spec of PANE_ACTIONS) {
