@@ -12,7 +12,7 @@ Layers, outside in:
 1. **Node ↔ server**, a WebSocket per node (node credential).
 2. **Client ↔ server**, a WebSocket per browser tab (owner session).
 3. **Channels:** the server pairs one client with one node in a *channel* and forwards its frames verbatim. Each channel carries one **end-to-end session**: a signed ECDH handshake, then AES-256-GCM records.
-4. **Inner messages:** terminals, files, projects, and pane status, as JSON inside the records.
+4. **Inner messages:** terminals, files, checkouts, and pane status, as JSON inside the records.
 5. **Bridge socket:** NDJSON between the bridge and its daemon on the same machine.
 6. **ssh fallback:** `ssh <node> pika-node attach` speaks the inner messages over stdio without the server.
 
@@ -57,6 +57,7 @@ Deferred, not in v1: binary frames, multiple owners, port forwarding, a desktop 
 | `fs.readDir` | ≤ 5,000 entries |
 | `fs.list` | ≤ 50,000 paths (20,000 without `limit`), ≤ 768 KiB of them |
 | `git.status` | ≤ 5,000 entries, ≤ 768 KiB of them |
+| Checkouts per node / worktrees per checkout | 512 / 256 listed, the snapshot within one record |
 | Upload | ≤ 256 MiB total; chunks ≤ 512 KiB |
 | Watches per channel | 64 |
 | Pending enrolments per node | 16, each expiring after 10 min |
@@ -156,11 +157,11 @@ Other commands: `pika-node clients` (or `clients list`) lists allowed and pendin
 
 Requests are `{ type, id, ...params }`. The node answers each with exactly one `reply`: `{ type: "reply", id, result }` or `{ type: "reply", id, error: { code, message } }`. Events have no `id`. Messages without an `id` (`term.input`, `term.resize`, `pane.seen`, `pane.unread`) get no reply; when one fails, the node sends an `error` event `{ type: "error", code, message, terminalId? }`.
 
-**`welcome`** (node → client, first record): `{ type: "welcome", node, name, host, home, version, protocolVersion, capabilities: string[], limits: { maxRecordBytes, maxSnapshotBytes, maxReadBytes, maxUploadBytes, maxUploadChunkBytes } }`. The v1 capabilities are `terminal`, `files`, `projects`, `status`. A daemon lists more for what it added later, and a client uses those requests and notices only when the capability is listed (an older daemon answers a request it does not know with `unsupported`, and drops such a notice): `projects.edit` (`projects.add`, `projects.remove`, `projects.rename`), `git.worktree` (`git.worktreeAdd`, `git.worktreeRemove`), `term.rename`, and `pane.unread`. Deck shows an item that needs a missing capability disabled, saying to update pika-node.
+**`welcome`** (node → client, first record): `{ type: "welcome", node, name, host, home, version, protocolVersion, capabilities: string[], limits: { maxRecordBytes, maxSnapshotBytes, maxReadBytes, maxUploadBytes, maxUploadChunkBytes } }`. The v1 capabilities are `terminal`, `files`, `status`. A daemon lists more for what it added later, and a client uses those requests, notices, and fields only when the capability is listed (an older daemon answers a request it does not know with `unsupported`, and drops such a notice): `checkouts` (every request and event of "Checkouts", `term.placed`, and `TerminalInfo.checkoutId`/`worktreePath`), `term.rename`, and `pane.unread`. Deck shows an item that needs a missing capability disabled, saying to update pika-node.
 
 ### Terminals
 
-`TerminalInfo = { terminalId, title, cwd, cols, rows, pid, createdAt, argv: string[], exited?: { code: number | null, signal: string | null }, status?: PaneView, label? }`
+`TerminalInfo = { terminalId, title, cwd, cols, rows, pid, createdAt, argv: string[], exited?: { code: number | null, signal: string | null }, status?: PaneView, label?, checkoutId?, worktreePath? }`. `checkoutId` and `worktreePath` place the terminal in a checkout and one of its worktrees (see "Checkouts").
 
 | Request | Params | Result |
 | --- | --- | --- |
@@ -186,6 +187,7 @@ Events:
 - `term.resized { terminalId, cols, rows, owned }`: to all attached clients after any resize, including their own; `owned` is true only on the size owner's channel.
 - `term.title { terminalId, title }`: to every channel (lists show titles).
 - `term.renamed { terminalId, label: string | null }`: to every channel after `term.rename` changed the name.
+- `term.placed { terminalId, checkoutId: string | null, worktreePath: string | null }`: to every channel when the terminal's checkout or worktree changes (see "Checkouts").
 - `term.exit { terminalId, code, signal }`: to every channel. An exited terminal stays in `term.list` with `exited` until `term.kill` removes it, so its last screen can still be attached.
 
 `Snapshot = { data, cols, rows, outputSequence }`. `data` is the headless screen serialized as VT sequences (xterm's serialize addon: scrollback, screen, cursor, modes). Writing it to a fresh terminal of `cols` × `rows` reproduces the screen. `outputSequence` is the `seq` of the last chunk included.
@@ -210,27 +212,71 @@ Events:
 
 **Backpressure:** the daemon queues output per (channel, terminal). When the queue passes 1 MiB, or the server socket's own send buffer passes 4 MiB, the daemon stops sending `term.output` for that terminal to that channel and discards the queue. Once the backlog drains below 256 KiB, it sends `term.snapshot` with a fresh `outputSequence` and resumes. A slow client never slows the PTY or other clients: the PTY is never paused (Orca pauses it, which lets one slow consumer stall everyone).
 
-### Projects
+### Checkouts
 
-`Project = { name, path, repository?, named?: true, worktree? }`. `path` is a real path; `name` is the name a user gave it (`named`), else its folder's name; `worktree` is the main checkout's path when the project is a linked git worktree (its `.git` file points into `<common dir>/worktrees/<name>`).
+A node reports **checkouts**, never projects. A checkout is one copy of a repository on the node (its git common dir) with its worktrees, or a plain folder. The **project** is derived above the node: the pika server computes a key from each checkout's `repository` (or its `project` name and the node id), so clones of one remote on several nodes, or twice on one node, fall under one project (`SPEC.md`, "Deck"). Nothing about projects is stored on a node.
+
+**How the web client builds the rail (Projects view):**
+1. **Node**, from the server's `nodes` frame.
+2. **Project:** the node's checkouts grouped by key. The client sends `POST {base}/api/v1/deck/project-keys` one item per checkout (`{ repository, project: checkout.project, node }`) and groups by the answered key; a checkout whose key is `null` is a project of its own (keyed by node and checkout `id`). The heading is the server's name for the key (`GET {base}/api/v1/deck/projects`) when set, else the first checkout's `name` (by the list order); collapsed state comes from the server too.
+3. **Checkout:** one block per checkout of the project. Its `path` (home as `~`) is shown only when the node has two or more checkouts of the same key; otherwise the project heading stands for it.
+4. **Worktree cards:** `checkout.worktrees` in order, the main worktree first, `branch` (else the short `head`, marked detached) as the card's meta line. A `folder` checkout has one card for its own `path`.
+5. **Agent rows:** each terminal under the card whose `(checkoutId, worktreePath)` it carries; a terminal with neither goes under the node's "Other" card.
+6. **Split layouts** are keyed by `node + checkoutId + worktreePath` and kept in the browser.
+
+The inbox view (Needs you, Failed, Done, Working, Quiet) is unchanged; its row meta uses the project heading and the worktree's branch.
+
+```
+Checkout         = { id, kind: "git" | "folder", path, commonDir?, repository?, project, name, named?: true,
+                     source: "configured" | "discovered" | "terminal", settings: CheckoutSettings, worktrees: Worktree[], truncated?: true }
+Worktree         = { path, branch?, head?, isMain, prunable, locked, detached }
+CheckoutSettings = { worktreeLocation?, worktreeBase?, setupScript? }
+```
+
+- **`id`:** the lowercase hex SHA-256 of the UTF-8 real path of the git common dir (`git`), or of the folder's real path (`folder`), cut to its first 32 characters. It is stable for as long as that directory stays where it is, and unique only on its node: clients scope it by node id.
+- **`kind`, `path`, `commonDir`:** a `git` checkout's `path` is its main worktree (the common dir's parent for a `.git` dir), or, for a bare repository, the repository directory itself; `commonDir` is the common dir's real path. A `folder` checkout is a directory in no git work tree; it has no `commonDir`, no `repository`, and `worktrees: []`. All paths are real paths.
+- **`repository`:** the web URL that identifies the repository, by exactly the rules of `resolveRepository` in `extensions/pika/repository.ts` (which the daemon may copy, citing it; it is Pi-free): the main checkout's `.pi/pika/project.json` `remote` names the remote (`null` pins it to none), else `origin`, else the only remote, after `insteadOf` rewriting, normalized to `https://host/path` (`normalizeRemoteUrl`). Absent when none applies. A fork has its own URL, so it is its own project.
+- **`project`:** the repository's name as pika memory and sessions know it: `project.json`'s `project`, else the main checkout's folder name (`projectFromCommonDir`: a bare repository's directory without one trailing `.git`), or a `folder` checkout's base name. It never changes with a node rename, so the project key stays put. It may be an invalid project name for an odd folder (then its key is `null`).
+- **`name`:** what the node calls the checkout: the name `checkout.update` gave it (then `named: true`), else `project`.
+- **`source`:** why it is listed, the first that applies: `configured` (added with `checkout.add`), `discovered` (a directory holding `.git` one level below one of `config.json`'s `roots`), `terminal` (a live terminal's cwd is inside it).
+- **`settings`:** see below; `{}` when none are set.
+- **`worktrees`:** `git worktree list --porcelain -z` in git's order, so the main worktree comes first; a bare repository lists no main entry. `branch` is the short branch name (without `refs/heads/`), absent when detached; `head` the commit id, absent for an unborn branch; `prunable` and `locked` as git reports them (their reasons are not passed); `detached` when `HEAD` is detached. At most 256 per checkout, then `truncated: true` on the checkout.
+
+**Dedupe:** every path the daemon considers folds into the checkout of its git common dir's real path: a configured path, a repository under a root, a terminal's cwd (through its toplevel), a symlinked path, and every linked worktree. A linked worktree is never a checkout of its own; it is a `Worktree` of its main checkout. Two clones of one remote are two checkouts (two common dirs) with one `repository`. A folder checkout inside a git work tree cannot exist (adding it adds the repository's checkout); a git checkout inside a folder checkout is its own checkout. A checkout whose `id` is in `hiddenCheckouts` is left out of every list and event; its terminals carry no `checkoutId`.
+
+**`CheckoutSettings`**, per checkout, kept in `config.json` by `id`:
+- `worktreeLocation`: an absolute directory new worktrees go in. Default: the main checkout's parent directory.
+- `worktreeBase`: the ref new worktrees start from (1–255 characters, one line). Default `HEAD` of the main worktree.
+- `setupScript`: a shell command (1–4,096 characters; it may span lines, but has no other control characters) run in each new worktree, in a terminal the user can watch (see `worktree.create`).
 
 | Request | Params | Result |
 | --- | --- | --- |
-| `projects.list` | — | `{ projects: Project[] }`, by name |
-| `projects.add` | `path` (a directory) | `{ project: Project }` |
-| `projects.remove` | `path` | `{ hidden: boolean }` |
-| `projects.rename` | `path`, `name: string \| null` (1–120 characters) | `{ project: Project }` |
-| `git.worktreeAdd` | `project`, `branch`, `base?` | `{ project: Project }` |
-| `git.worktreeRemove` | `path` (a linked worktree) | `{}` |
+| `checkouts.list` | — | `{ checkouts: Checkout[], truncated: boolean }` |
+| `checkout.add` | `path` (a directory) | `{ checkout: Checkout }` |
+| `checkout.hide` | `checkoutId` | `{}` |
+| `checkout.unhide` | `checkoutId` | `{ checkout: Checkout }` |
+| `checkout.update` | `checkoutId`, `name?: string \| null` (1–120 characters, one line), `settings?: CheckoutSettings` | `{ checkout: Checkout }` |
+| `worktree.create` | `checkoutId`, `name` (the branch, 1–255 characters, one line), `base?` (1–255), `cols?`, `rows?` | `{ checkout: Checkout, worktree: Worktree, setupTerminal?: TerminalInfo }` |
+| `worktree.remove` | `checkoutId`, `path`, `deleteBranch?: boolean` (default false), `force?: boolean` (default false) | `{ checkout: Checkout, branch?: { name, deleted: boolean, message? } }` |
 
-- **The list:** the `projects` entries of `~/.pika-node/config.json`, plus each directory holding `.git` one level below each configured root, plus the git toplevel of each live terminal's cwd, less the `hiddenProjects`. Duplicates are removed by real path. It is the node's, so every browser shows the same projects.
-- **Edits:** `config.json` keeps them, so they last across restarts and browsers: `projects` (added by hand), `hiddenProjects` (found on their own, then removed), and `projectNames` (real path → name). The daemon makes edits one after another. After each, it sends `projects.changed {}` to every channel (after the asker's reply), and clients list again.
-- **Add:** the real path of a directory (`not_found`, `not_a_directory`) joins `projects` once and leaves `hiddenProjects`. Adding a listed project changes nothing. Undoing a removal is an add.
-- **Remove:** the project leaves `projects`; when it would still be found on its own, its real path joins `hiddenProjects`, and `hidden` says so. Nothing on disk changes. A path that is no project answers `not_found`. Terminals inside a hidden project stay; clients file them under "Other".
-- **Rename:** sets the name every browser shows, trimmed; `null`, or the folder's own name, clears it. Only a listed project (`not_found`).
-- **Worktree add:** Orca's flow. The new worktree goes beside the repository's main checkout as `<parent>/<repo>-<slug>`, the layout Orca uses for repositories on SSH hosts (`computeRemoteWorktreePath`); `<slug>` is the branch with each run of characters other than letters, digits, `.`, `_`, `-` turned into one `-` (Orca's `sanitizeWorktreeName`). The daemon checks `branch` with `git check-ref-format --branch` and refuses one that starts with `-` (`invalid`), an existing branch or folder (`exists`), and a `base` that is no commit (`not_found`; default `HEAD`, the project's current commit). It runs `git worktree add -b <branch> <path> <base>` in the project's repository, adds the worktree as a project, and answers it. A project in no work tree answers `not_found`; git's own failure answers `io` with its message.
-- **Worktree remove:** only a linked worktree, never a main checkout (`invalid`). The daemon runs `git worktree remove <path>` from the main checkout, never with `--force`, so git refuses a worktree with modified or untracked files, or a locked one; that refusal answers `conflict` with git's message. On success the project leaves `projects`, `hiddenProjects`, and `projectNames`. Clients ask before removing.
-- **`config.json`:** `{ version: 1, server?: { url, credential }, roots?: string[] (default [home]), projects?: string[], hiddenProjects?: string[], projectNames?: Record<string, string> }` (mode 0600). `server.url` is the pika server's base URL (`http(s)://…`, the daemon connects to its `ws(s)` form); `credential` is the `pkn_` node credential. Without `server` the daemon serves only `pika-node attach` and checks the file again every 5 s. A daemon that cannot parse `config.json` fails loudly (requests that need it answer `io`).
+- **List:** sorted by `name` case-insensitively, then `path`. At most 512 checkouts; if the encoded reply would still pass the record limit, the daemon drops checkouts from the end until it fits. `truncated` says either happened. It is the node's, so every browser shows the same checkouts.
+- **Add:** the real path of a directory (`not_found`, `not_a_directory`). In a git work tree it adds that repository's checkout (a path inside a linked worktree adds its main checkout) and records the main worktree's path; otherwise it records the folder. Its `id` leaves `hiddenCheckouts`. Adding a listed checkout records it (its `source` becomes `configured`) and changes nothing else.
+- **Hide:** the checkout leaves the list ("Remove from Deck"): its `id` joins `hiddenCheckouts`; `checkouts` is left alone, so `checkout.unhide` undoes it exactly. Nothing on disk changes. A `checkoutId` that is neither listed nor hidden answers `not_found`. (Requests name a checkout `checkoutId`, since `id` is the request's.)
+- **Unhide:** the id leaves `hiddenCheckouts`; it answers the checkout, or `not_found` when the id was not hidden or the checkout is no longer found (its directory is gone, or nothing lists it).
+- **Update:** only a listed checkout (`not_found`). `name` sets the name every browser shows, trimmed; `null`, blank text, or `project` itself clears it. `settings`, when given, replaces the checkout's settings whole (`{}` clears them); `worktreeLocation` must be an existing directory (`not_found`, `not_a_directory`) and is stored as its real path. A `folder` checkout takes no settings (`invalid`).
+- **Worktree create:** Orca's flow, for a `git` checkout with a main worktree (`invalid` for a folder or bare checkout; `not_found` for an unknown `checkoutId`).
+  - **Branch:** `name` is the branch, used as typed, with no prefix. The daemon checks it with `git check-ref-format --branch` and refuses one that starts with `-` (`invalid`), and an existing branch (`exists`).
+  - **Path:** `<settings.worktreeLocation ?? parent of the main worktree>/<repo>-<slug>`, where `<repo>` is the main worktree's folder name and `<slug>` is `name` with each run of characters other than letters, digits, `.`, `_`, `-` turned into one `-`, and leading and trailing `.` and `-` dropped (Orca's `sanitizeWorktreeName`, `src/main/ipc/worktree-logic.ts`; Orca's layout for SSH hosts, `computeRemoteWorktreePath`). An empty slug is `invalid`; an existing path is `exists`.
+  - **Base:** `base ?? settings.worktreeBase ?? "HEAD"`, resolved in the main worktree; one that is no commit, or starts with `-`, answers `not_found` or `invalid`.
+  - **Run:** `git worktree add -b <name> <path> <base>` in the main worktree; git's own failure answers `io` with its message. `worktree` is the new entry as listed afterwards.
+  - **Setup script:** when `settings.setupScript` is set, the daemon then starts a terminal in the new worktree, as `term.create` would with `argv: ["sh", "-c", setupScript]` (through the login shell, see "Spawning"), size `cols` × `rows` (default 80 × 24), and env `PIKA_WORKTREE_PATH` (the new worktree), `PIKA_CHECKOUT_PATH` (the main worktree), and `PIKA_WORKTREE_BRANCH`. It answers it as `setupTerminal` and sends `term.created` as usual. The script's exit code shows as that terminal's `exited`; it never fails the request. A terminal limit (`limit`) leaves the worktree created and answers without `setupTerminal`.
+- **Worktree remove:** `path` must be one of the checkout's linked worktrees (`not_found`), never its main worktree (`invalid`).
+  - **Busy:** while a live terminal's `worktreePath` is `path`, the daemon refuses with `busy` (the message counts the terminals). With `force`, it first sends each of them SIGHUP and waits up to 5 s for them to exit (else `busy`). Exited terminals do not count.
+  - **Run:** `git worktree remove <path>` from the main worktree, never with git's `--force`, so git refuses a worktree with modified or untracked files, or a locked one; that refusal answers `conflict` with git's message. A `prunable` entry (its directory is gone) is cleared with `git worktree prune` instead.
+  - **Branch:** with `deleteBranch` and a worktree on a branch, the daemon then runs `git branch -d <branch>` (never `-D`), and answers `branch: { name, deleted }`; git's refusal (an unmerged branch) gives `deleted: false` and its `message`, and does not fail the removal. Without `deleteBranch` the branch stays, and `branch` is absent.
+- **Events:** `checkouts.changed { checkouts: Checkout[], truncated }` is a full snapshot (latest wins), the same as `checkouts.list` answers. The daemon sends it to every channel whenever the list changes, after the asker's reply for its own edits: `config.json` edits, a terminal created, exited, or moved into another checkout, and changes it notices by watching each listed git checkout's `<commonDir>/worktrees/` directory, `<commonDir>/HEAD`, each linked worktree's `HEAD` (in `<commonDir>/worktrees/<name>/`), `<commonDir>/config` (remotes), and the main worktree's `.pi/pika/project.json`, debounced to 300 ms. Roots are scanned again on `checkouts.list` and every 60 s. It sends nothing when the new snapshot equals the last one sent.
+- **Terminals:** `TerminalInfo.checkoutId` is the listed checkout that holds the terminal's cwd, the innermost by path when several do, and `worktreePath` the path of the innermost of its worktrees that holds the cwd, or the checkout's own `path` for a `folder` checkout. The cwd is the shell's live cwd as last seen (polled with the foreground process, every 2 s, and on `term.cwd`), else the start cwd. Both are absent when no listed checkout holds it, and both stay as they were when the terminal exits. A change of either sends `term.placed { terminalId, checkoutId: string | null, worktreePath: string | null }` to every channel.
+- **`config.json`:** `{ version: 1, server?: { url, credential }, roots?: string[] (default [home]), checkouts?: string[], hiddenCheckouts?: string[], checkoutNames?: Record<string, string>, checkoutSettings?: Record<string, CheckoutSettings> }` (mode 0600). `checkouts` holds the paths `checkout.add` recorded (real paths); `hiddenCheckouts`, `checkoutNames`, and `checkoutSettings` are keyed by checkout `id`. The daemon makes edits one after another. `server.url` is the pika server's base URL (`http(s)://…`, the daemon connects to its `ws(s)` form); `credential` is the `pkn_` node credential. Without `server` the daemon serves only `pika-node attach` and checks the file again every 5 s. A daemon that cannot parse `config.json` fails loudly (requests that need it answer `io`). The spike's `projects`, `hiddenProjects`, and `projectNames` keys are ignored (the feature was never released).
 
 ### Files
 
@@ -331,7 +377,7 @@ The socket admits only the owning user (the directory's mode). Any process of th
 
 **Channel close codes** (`close.code`, `hs_error.code`): `closed` (normal), `node_offline`, `client_gone`, `unknown_node`, `too_many_channels`, `handshake_timeout`, `handshake_failed`, `unsupported_version`, `client_not_allowed`, `client_removed`, `node_key_changed` (client side), `replay`, `out_of_order`, `decrypt_failed`, `rekey_required`, `too_large`, `protocol_error`.
 
-**Inner error codes:** `invalid` (bad params), `unsupported` (unknown request type), `not_found`, `exists`, `conflict`, `too_large`, `permission_denied`, `is_a_directory`, `not_a_directory`, `outside_roots`, `exited` (the terminal has exited), `limit` (too many terminals, watches, or uploads), `io` (any other OS error, with its `errno` name in `message`).
+**Inner error codes:** `invalid` (bad params), `unsupported` (unknown request type), `not_found`, `exists`, `conflict`, `too_large`, `permission_denied`, `is_a_directory`, `not_a_directory`, `outside_roots`, `exited` (the terminal has exited), `busy` (live terminals use the worktree), `limit` (too many terminals, watches, or uploads), `io` (any other OS error, with its `errno` name in `message`).
 
 ## 8. Daemon process and files (spike)
 
