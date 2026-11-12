@@ -8,6 +8,7 @@ on:
   pull_request:
     paths:
       - services/pika/**
+      - services/pika-node/src/**
       - README.md
       - docs/**
       - extensions/**/README.md
@@ -21,6 +22,7 @@ on:
       - pika-v*
     paths:
       - services/pika/**
+      - services/pika-node/src/**
       - README.md
       - docs/**
       - extensions/**/README.md
