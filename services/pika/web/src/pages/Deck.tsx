@@ -1429,7 +1429,11 @@ function PaneDetail({ terminal }: { terminal: TerminalInfo }) {
 			<span className="shrink-0">
 				<PaneBadge terminal={terminal} />
 			</span>
-			{message && <span className="truncate">{message}</span>}
+			{message && (
+				<span className="truncate" {...tip(message)}>
+					{message}
+				</span>
+			)}
 			{activities > 0 && <span className="shrink-0">{activities === 1 ? "1 background activity" : `${activities} background activities`}</span>}
 		</span>
 	);
