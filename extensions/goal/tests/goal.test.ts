@@ -320,3 +320,48 @@ describe("paused completion retention", () => {
   h.start(); await wait(h, "a", "one"); expect(h.statuses.at(-1)).toContain("waiting");
  });
 });
+
+describe("goal_update tool gating", () => {
+ function activeFixture(branch: any[] = [], mode = "rpc") {
+  let active = ["bash"];
+  const sessionId = `goal-active-test-${++sequence}`;
+  const handlers: Record<string, Function> = {}, commands: Record<string, any> = {}, tools: Record<string, any> = {}, statuses: (string | undefined)[] = [], sent: any[] = [];
+  const ctx: any = { mode, sessionManager: { getBranch: () => branch, getSessionId: () => sessionId }, isIdle: () => true, hasPendingMessages: () => false, abort: () => {}, ui: { notify: () => {}, setStatus: (_: string, s: string | undefined) => statuses.push(s) } };
+  goalExtension({ on: (n: string, f: Function) => { handlers[n] = f; }, registerCommand: (n: string, v: any) => { commands[n] = v; }, registerTool: (v: any) => { tools[v.name] = v; }, appendEntry: (customType: string, data: any) => branch.push({ type: "custom", customType, data }), sendMessage: (m: any) => sent.push(m), getActiveTools: () => [...active], setActiveTools: (next: string[]) => { active = [...next]; } } as any);
+  handlers.session_start({ reason: "startup" }, ctx);
+  return { handlers, commands, tools, ctx, statuses, sent, active: () => active, resetActive: () => { active = ["bash"]; } };
+ }
+
+ it("activates on broken snapshot restore, wake notifications, and print mentions while preserving takeover pause", async () => {
+  const broken = activeFixture([{ type: "custom", customType: "goal-state", data: null }]);
+  expect(broken.tools.goal_update.defaultActive).toBe(false);
+  expect(broken.active()).toEqual(["bash", "goal_update"]);
+
+  const print = activeFixture([], "print");
+  expect(print.active()).toEqual(["bash"]);
+  for (const prompt of ["the goal is to fix X", "https://example.com/goal", "/goals"]) {
+   print.handlers.before_agent_start({ messageType: "user", prompt }, print.ctx);
+   expect(print.active()).toEqual(["bash"]);
+  }
+  print.handlers.before_agent_start({ messageType: "user", prompt: "explain /goal status" }, print.ctx);
+  expect(print.active()).toEqual(["bash", "goal_update"]);
+
+  const h = activeFixture();
+  expect(h.active()).toEqual(["bash"]);
+  await h.commands.goal.handler("finish work", h.ctx);
+  expect(h.active()).toEqual(["bash", "goal_update"]);
+  h.handlers.before_agent_start({ messageType: "custom", message: h.sent.at(-1) }, h.ctx);
+  await h.tools.goal_update.execute("", { state: "waiting", reason: "waiting", subagentIds: ["w1"] }, undefined, undefined, h.ctx);
+  h.handlers.agent_settled({ aborted: false }, h.ctx);
+  h.resetActive();
+  const woken = h.handlers.before_agent_start({ messageType: "custom", message: { customType: "subagent-notification", details: { id: "w1" } } }, h.ctx);
+  expect(woken?.message.content).toContain("finish work");
+  expect(h.active()).toEqual(["bash", "goal_update"]);
+
+  // A user prompt mentioning goal_update activates the tool AND still pauses the active goal on takeover.
+  h.resetActive();
+  h.handlers.before_agent_start({ messageType: "user", prompt: "Why didn't you call goal_update?" }, h.ctx);
+  expect(h.active()).toEqual(["bash", "goal_update"]);
+  expect(h.statuses.at(-1)).toContain("paused");
+ });
+});

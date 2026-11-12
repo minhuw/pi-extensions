@@ -5,6 +5,7 @@ import { Type } from "typebox";
 const SNAPSHOT = "goal-state";
 const MESSAGE = "goal-instruction";
 const MODES = Symbol.for("pi-extensions.session-modes");
+const GOAL_MENTION = /(?:^|\s)\/goal(?=\s|$)|\bgoal_update\b|extensions\/goal\b/i;
 type State = "active" | "paused" | "blocked" | "waiting" | "budget" | "completed" | "stopped";
 type Target = { kind: "subagents"; ids: string[] } | { kind: "executions"; executions: { id: string; executionId: string }[] } | { kind: "herder"; runId: string; launch: number };
 interface Goal { version: 1; objective: string; state: State; budget: number | null; usage: number; reason: string }
@@ -77,6 +78,11 @@ export default function goalExtension(pi: ExtensionAPI): void {
  let sessionId: string | undefined, sessionCtx: ExtensionContext | undefined;
  const eligible = (ctx: ExtensionContext) => ctx.mode === "tui" || ctx.mode === "rpc";
  const selfdrive = () => sessionId !== undefined && registry().modes.get(sessionId)?.has("selfdrive") === true;
+ function activateTool() {
+  if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
+  const active = pi.getActiveTools();
+  if (!active.includes("goal_update")) pi.setActiveTools([...active, "goal_update"]);
+ }
  function status(ctx: ExtensionContext) {
   const label = broken ? "goal ERROR · unreadable state" : goal && goal.state !== "stopped" ? `goal ${goal.state} · ${goal.objective.replace(/\s+/g, " ").slice(0, 60)}` : undefined;
   ctx.ui.setStatus("goal", label);
@@ -105,6 +111,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
    goal = readGoal(ctx);
    if (goal?.state === "active" || goal?.state === "waiting") { goal.state = "paused"; goal.reason = "restored after session or branch change; use /goal resume"; save(ctx); }
   } catch (error) { broken = true; ctx.ui.notify(`Goal restore error: ${String(error)}`, "error"); }
+  if ((goal && goal.state !== "stopped") || broken) activateTool();
   status(ctx);
  }
  function dispatch() {
@@ -145,7 +152,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
     if (selfdrive()) throw new Error("Turn off Selfdrive before resuming Goal.");
     if (goal.budget !== null && goal.usage >= goal.budget) throw new Error("Budget exhausted; increase it with /goal budget <tokens> before resuming.");
     if (!ctx.isIdle() || ctx.hasPendingMessages() || uiDepth || preparing || owned) throw new Error("Wait until the agent, queued messages, and dialogs are idle before resuming.");
-    goal.state = "active"; goal.reason = "resumed by user"; waiting = undefined; lastAnswer = ""; repeated = 0; didWork = false; lastFailure = ""; failures = 0; lastInspections = undefined; inspections = ""; save(ctx); dispatch(); return;
+    goal.state = "active"; goal.reason = "resumed by user"; waiting = undefined; lastAnswer = ""; repeated = 0; didWork = false; lastFailure = ""; failures = 0; lastInspections = undefined; inspections = ""; save(ctx); activateTool(); dispatch(); return;
    }
    if (/^budget(?:\s|$)/.test(text)) {
     if (!goal || ["completed", "stopped"].includes(goal.state)) throw new Error("No live goal. " + HELP);
@@ -166,10 +173,10 @@ export default function goalExtension(pi: ExtensionAPI): void {
    if (selfdrive()) throw new Error("Turn off Selfdrive before starting Goal.");
    if (!ctx.isIdle() || ctx.hasPendingMessages() || uiDepth || preparing || owned) throw new Error("Wait until the agent, queued messages, and dialogs are idle before starting a goal.");
    seen.clear(); consumed.clear(); lastFailure = ""; failures = 0; lastInspections = undefined; inspections = "";
-   goal = { version: 1, objective, state: "active", budget, usage: 0, reason: "" }; save(ctx); dispatch();
+   goal = { version: 1, objective, state: "active", budget, usage: 0, reason: "" }; save(ctx); activateTool(); dispatch();
   } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
  } });
- pi.registerTool({ name: "goal_update", label: "Goal Update", executionMode: "sequential", description: "Report the active goal completed, blocked, or waiting for external background work. Give an honest evidence-based summary or reason. For waiting, use subagentExecutions with id and executionId returned by background spawn or resume for exact matching, or herder runId and launch. Legacy subagentIds match any execution of an ID and are ambiguous after resume.", parameters: Type.Object({ state: Type.Union([Type.Literal("completed"), Type.Literal("blocked"), Type.Literal("waiting")]), reason: Type.String({ minLength: 1, maxLength: 2000 }), subagentIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, description: "Legacy agent IDs; ambiguous when an agent is resumed." })), subagentExecutions: Type.Optional(Type.Array(Type.Object({ id: Type.String({ minLength: 1 }), executionId: Type.String({ minLength: 1 }) }), { minItems: 1, description: "Exact agent and execution ID pairs from background spawn or resume; wake on any." })), herder: Type.Optional(Type.Object({ runId: Type.String({ minLength: 1 }), launch: Type.Integer({ minimum: 1 }) })) }), async execute(_id, params, _signal, _update, ctx) {
+ pi.registerTool({ name: "goal_update", label: "Goal Update", defaultActive: false, executionMode: "sequential", description: "Report the active goal completed, blocked, or waiting for external background work. Give an honest evidence-based summary or reason. For waiting, use subagentExecutions with id and executionId returned by background spawn or resume for exact matching, or herder runId and launch. Legacy subagentIds match any execution of an ID and are ambiguous after resume.", parameters: Type.Object({ state: Type.Union([Type.Literal("completed"), Type.Literal("blocked"), Type.Literal("waiting")]), reason: Type.String({ minLength: 1, maxLength: 2000 }), subagentIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, description: "Legacy agent IDs; ambiguous when an agent is resumed." })), subagentExecutions: Type.Optional(Type.Array(Type.Object({ id: Type.String({ minLength: 1 }), executionId: Type.String({ minLength: 1 }) }), { minItems: 1, description: "Exact agent and execution ID pairs from background spawn or resume; wake on any." })), herder: Type.Optional(Type.Object({ runId: Type.String({ minLength: 1 }), launch: Type.Integer({ minimum: 1 }) })) }), async execute(_id, params, _signal, _update, ctx) {
   if (!owned || !goal || goal.state !== "active") throw new Error("No active goal owns this run.");
   if (!params.reason.trim()) throw new Error("An honest summary or reason is required.");
   if ([params.subagentIds, params.subagentExecutions, params.herder].filter(Boolean).length > 1 || params.state !== "waiting" && (params.subagentIds || params.subagentExecutions || params.herder)) throw new Error("Supply one wake target only when waiting.");
@@ -188,14 +195,17 @@ export default function goalExtension(pi: ExtensionAPI): void {
  pi.on("session_start", (_event, ctx) => { if (eligible(ctx)) restore(ctx); });
  pi.on("session_tree", (_event, ctx) => { if (eligible(ctx)) restore(ctx); });
  pi.on("before_agent_start", (event, ctx) => {
+  if (event.messageType === "user" && typeof event.prompt === "string" && GOAL_MENTION.test(event.prompt)) activateTool();
   if (!eligible(ctx)) return;
   if (event.messageType === "custom" && event.message.customType === MESSAGE) {
    if (!preparing || goal?.state !== "active") { ctx.abort(); return; }
+   activateTool();
    preparing = false; owned = true; abortable = true; inactiveSent = false; return;
   }
   const match = event.messageType === "custom" ? observe(event.message.customType, event.message.details) : undefined;
   if (match && (ctx.hasPendingMessages() || uiDepth)) wake = match;
   else if (match && activateWake(ctx, match)) {
+   activateTool();
    owned = true; abortable = true; completedInRun = false; inactiveSent = false;
    return { message: { customType: MESSAGE, content: instruction(goal!), display: false } };
   }
