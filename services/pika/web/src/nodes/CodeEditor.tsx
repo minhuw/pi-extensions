@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { Theme } from "../lib/theme";
 import type { DiffTab, EditorTab, FileTab } from "./editor";
+import { MONO_FONT_FAMILY } from "./fonts";
 import { languageFor } from "./language";
 import { monaco, themeName } from "./monaco/setup";
 
@@ -22,7 +23,8 @@ const entryKey = (scope: string, key: string) => `${scope}\n${key}`;
 
 const OPTIONS: monaco.editor.IEditorOptions = {
 	automaticLayout: true,
-	fontFamily: 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace',
+	// The terminal's fonts, with its Nerd Font icons for files that print them.
+	fontFamily: MONO_FONT_FAMILY,
 	fontSize: 13,
 	minimap: { enabled: false },
 	scrollBeyondLastLine: false,

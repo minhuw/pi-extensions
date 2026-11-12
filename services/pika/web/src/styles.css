@@ -38,6 +38,21 @@
 	font-display: swap;
 	src: url("./assets/fonts/aileron-latin-700-normal.woff2") format("woff2");
 }
+/*
+ * Nerd Font icons for the Nodes terminal and editor: Symbols Nerd Font Mono (MIT and the icon sets' licenses, see
+ * assets/fonts/LICENSE-SymbolsNerdFont.txt), cut to the Private Use Area. pi's footer and other TUIs print these
+ * icons, which no system monospace font has. The unicode-range keeps the face off every other character, so it
+ * only fills in after the monospace fonts and never replaces text. One file answers every weight, so bold icons are
+ * not smeared by synthetic bold; `block` hides an icon rather than flashing tofu while the file loads.
+ */
+@font-face {
+	font-family: "Symbols Nerd Font Mono";
+	font-style: normal;
+	font-weight: 100 900;
+	font-display: block;
+	src: url("./assets/fonts/symbols-nerd-font-mono-pua.woff2") format("woff2");
+	unicode-range: U+E000-F8FF, U+F0000-FFFFD;
+}
 
 @theme {
 	--font-sans: "Aileron", "Helvetica Neue", Helvetica, Arial, sans-serif;

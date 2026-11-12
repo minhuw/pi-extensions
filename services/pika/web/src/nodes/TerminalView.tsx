@@ -11,6 +11,7 @@ import { AttachStream, type ScreenOp } from "./attach";
 import { NodeRequestError, type NodeChannel } from "./channel";
 import { homePath, paneCwd } from "./client";
 import { LIMITS, type TerminalInfo } from "./contract";
+import { documentFonts, followFonts, MONO_FONT_FAMILY } from "./fonts";
 import { claimsSize, splitInput } from "./input";
 import { actionShortcut, isFindKey, LINK_MODIFIER } from "./keys";
 import { cellRange, findPaths, PathChecker, resolvePath, type CellText, type PathMatch } from "./links";
@@ -31,8 +32,14 @@ const THEMES: Record<Theme, ITheme> = {
 export const TERMINAL_OPTIONS = {
 	// The same scrollback as the daemon's headless screen; window reports stay off, as there.
 	scrollback: 1000,
-	fontFamily: 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace',
+	// The system monospace fonts, then the bundled Nerd Font symbols for the icons pi's footer prints (`fonts.ts`).
+	fontFamily: MONO_FONT_FAMILY,
 	fontSize: 13,
+	// The default, pinned: the WebGL renderer draws box, block and powerline characters (U+2570, U+2589, U+E0B0) to the
+	// cell's exact bounds rather than from a font, so the footer's bars and bands join without seams.
+	// `rescaleOverlappingGlyphs` stays off: it spares BMP icons but squeezes the plane-15 Material icons (U+F0001 on),
+	// which the footer uses most, into one cell whenever one is drawn wider than 1.5 cells.
+	customGlyphs: true,
 	cursorBlink: true,
 	// The search addon highlights matches with decorations, a proposed API; no option here changes a reply.
 	allowProposedApi: true,
@@ -257,14 +264,9 @@ export function TerminalView({
 					);
 			},
 		});
-		term.open(element);
 		termRef.current = term;
 		const focused = () => latest.current.onFocus?.();
-		term.textarea?.addEventListener("focus", focused);
-
-		const renderer = new WebglRenderer<WebglAddon>(term, () => new WebglAddon(), setRenderer, webgl2Available());
-		rendererRef.current = renderer;
-		if (visibleRef.current) renderer.show();
+		let renderer: WebglRenderer<WebglAddon> | undefined;
 
 		let disposed = false;
 		let attachToken = 0;
@@ -336,6 +338,24 @@ export function TerminalView({
 		const onData = term.onData(send);
 
 		measureRef.current = measure;
+		let dropOpenMeasure = () => {};
+		// Opened once its fonts load (at once when an earlier terminal loaded them): xterm rasterizes each glyph once.
+		const stopFonts = followFonts(documentFonts(), TERMINAL_OPTIONS.fontSize, {
+			ready: () => {
+				term.open(element);
+				term.textarea?.addEventListener("focus", focused);
+				renderer = new WebglRenderer<WebglAddon>(term, () => new WebglAddon(), setRenderer, webgl2Available());
+				rendererRef.current = renderer;
+				if (!visibleRef.current) return;
+				renderer.show();
+				dropOpenMeasure = whenSettled(measure);
+			},
+			// A face that arrived after the terminal opened: icons drawn without it are blank in the WebGL atlas.
+			changed: () => {
+				term.clearTextureAtlas();
+				measure();
+			},
+		});
 		let measureTimer: ReturnType<typeof setTimeout> | undefined;
 		let pendingMeasure = () => {};
 		const observer = new ResizeObserver(() => {
@@ -353,6 +373,8 @@ export function TerminalView({
 
 		return () => {
 			disposed = true;
+			stopFonts();
+			dropOpenMeasure();
 			clearTimeout(measureTimer);
 			pendingMeasure();
 			offSettled();
@@ -369,7 +391,7 @@ export function TerminalView({
 			uploading.current?.abort();
 			channel.request("term.detach", { terminalId }).catch(() => {});
 			swallowing.dispose();
-			renderer.dispose();
+			renderer?.dispose();
 			rendererRef.current = null;
 			term.dispose();
 			termRef.current = null;
