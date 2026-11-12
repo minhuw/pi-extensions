@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { NodeRequestError } from "../src/nodes/channel";
 import type { NodeEvent, Requests, RequestType, Results, TerminalInfo } from "../src/nodes/contract";
-import { closePane, paneEvent, prunePanes, removePane, splitPane, splitSize, type PaneHost, type PaneTab } from "../src/nodes/panes/actions";
+import { ClosedPanes, closePane, paneEvent, prunePanes, removePane, splitPane, splitSize, type PaneHost, type PaneTab } from "../src/nodes/panes/actions";
 import { leaf, leaves, type PaneTree } from "../src/nodes/panes/pane-tree";
 
 const info = (terminalId: string, more: Partial<TerminalInfo> = {}): TerminalInfo => ({
@@ -23,16 +23,23 @@ interface Call {
     params: unknown;
 }
 
-/** A node with terminals, answering `term.cwd`, `term.create`, and `term.kill` the way the daemon does. */
+/**
+ * A node with terminals, answering `term.cwd`, `term.create`, and `term.kill` the way the daemon does: `term.kill`
+ * on a terminal that has exited (`exit`) removes it.
+ */
 function fakeNode(terminals: TerminalInfo[], live: Record<string, string> = {}) {
     const calls: Call[] = [];
     let next = 1;
     const gates: (() => void)[] = [];
-    let hold = false;
+    let hold: RequestType | undefined;
     const known = new Map(terminals.map((item) => [item.terminalId, item]));
+    const exited = new Set<string>();
     const request = async <K extends RequestType>(type: K, params: Requests[K]): Promise<Results[K]> => {
         calls.push({ type, params });
-        if (hold && type === "term.create") await new Promise<void>((resolve) => gates.push(resolve));
+        // The daemon acts on the request, and the reply comes later.
+        const acted = type === "term.kill" ? kill((params as Requests["term.kill"]).terminalId) : undefined;
+        if (hold === type) await new Promise<void>((resolve) => gates.push(resolve));
+        if (acted) throw acted;
         switch (type) {
             case "term.cwd": {
                 const { terminalId } = params as Requests["term.cwd"];
@@ -45,34 +52,41 @@ function fakeNode(terminals: TerminalInfo[], live: Record<string, string> = {}) 
                 known.set(terminal.terminalId, terminal);
                 return { terminal } as Results[K];
             }
-            case "term.kill": {
-                const { terminalId } = params as Requests["term.kill"];
-                if (!known.has(terminalId)) throw new NodeRequestError({ code: "not_found", message: `no terminal ${terminalId}` });
+            case "term.kill":
                 return {} as Results[K];
-            }
             default:
                 throw new Error(`unexpected ${type}`);
         }
     };
+    function kill(terminalId: string): NodeRequestError | undefined {
+        if (!known.has(terminalId)) return new NodeRequestError({ code: "not_found", message: `no terminal ${terminalId}` });
+        if (exited.has(terminalId)) known.delete(terminalId);
+        return undefined;
+    }
     return {
         calls,
         channel: { request },
-        /** Holds `term.create` replies until `release`. */
-        hold: () => (hold = true),
+        /** Holds the replies to `type` (default `term.create`) until `release`. */
+        hold: (type: RequestType = "term.create") => (hold = type),
         release: () => {
-            hold = false;
+            hold = undefined;
             for (const gate of gates.splice(0)) gate();
         },
         forget: (terminalId: string) => known.delete(terminalId),
+        /** The terminal's process ends: it stays listed, exited. */
+        exit: (terminalId: string) => exited.add(terminalId),
+        listed: (terminalId: string) => known.has(terminalId),
     };
 }
 
 function host(node: ReturnType<typeof fakeNode>, tab: PaneTab | undefined, terminals: TerminalInfo[], connected = true) {
-    const state = { tab, closed: 0 };
+    const state = { tab, closed: 0, errors: [] as unknown[] };
     const byId = new Map(terminals.map((item) => [item.terminalId, item]));
+    const client = { channel: (id: string) => (connected && id === "n1" ? node.channel : undefined) };
     const value: PaneHost = {
-        client: { channel: (id) => (connected && id === "n1" ? node.channel : undefined) },
+        client,
         node: "n1",
+        closed: new ClosedPanes(client, (error) => state.errors.push(error)),
         read: () => state.tab,
         write: (next) => {
             state.tab = next;
@@ -221,6 +235,99 @@ describe("node events", () => {
         paneEvent(h, { type: "term.removed", terminalId: "b" });
         expect(state.tab).toEqual({ tree: leaf("a"), focused: "a" });
         expect(state.closed).toBe(0);
+    });
+});
+
+describe("a closed pane's terminal", () => {
+    /** What the page does with each node event: `ClosedPanes` first, then the tab's panes. */
+    const feed = (h: PaneHost, event: NodeEvent) => {
+        h.closed.event("n1", event);
+        paneEvent(h, event);
+    };
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const exit = (terminalId: string): NodeEvent => ({ type: "term.exit", terminalId, code: null, signal: "SIGHUP" });
+
+    it("leaves the node's list once it exits after the hang-up", async () => {
+        const node = fakeNode([info("a"), info("b")]);
+        const { host: h, state } = host(node, { tree: split("row", leaf("a"), leaf("b")), focused: "a" }, []);
+        await closePane(h, "a");
+        expect(node.listed("a")).toBe(true);
+        node.exit("a");
+        feed(h, exit("a"));
+        await settle();
+        expect(node.calls).toEqual([
+            { type: "term.kill", params: { terminalId: "a", signal: "SIGHUP" } },
+            { type: "term.kill", params: { terminalId: "a" } },
+        ]);
+        expect(node.listed("a")).toBe(false);
+        expect(state.tab).toEqual({ tree: leaf("b"), focused: "b" });
+        expect(state.errors).toEqual([]);
+        // Once: a second exit or the removal sends nothing more.
+        feed(h, exit("a"));
+        feed(h, { type: "term.removed", terminalId: "a" });
+        await settle();
+        expect(node.calls).toHaveLength(2);
+    });
+
+    it("leaves the list when its exit arrives before the hang-up's reply", async () => {
+        const node = fakeNode([info("a"), info("b")]);
+        const { host: h, state } = host(node, { tree: split("row", leaf("a"), leaf("b")), focused: "a" }, []);
+        node.hold("term.kill");
+        const closing = closePane(h, "a");
+        node.exit("a");
+        feed(h, exit("a"));
+        await settle();
+        expect(node.calls.map((call) => call.params)).toEqual([{ terminalId: "a", signal: "SIGHUP" }, { terminalId: "a" }]);
+        expect(node.listed("a")).toBe(false);
+        node.release();
+        await closing;
+        expect(state.tab).toEqual({ tree: leaf("b"), focused: "b" });
+        expect(state.errors).toEqual([]);
+    });
+
+    it("leaves the list when it had exited before the hang-up reached it", async () => {
+        const node = fakeNode([info("a"), info("b")]);
+        const { host: h, state } = host(node, { tree: split("row", leaf("a"), leaf("b")), focused: "a" }, []);
+        // The exit event is still on its way when the user closes the pane: the hang-up itself removes the terminal.
+        node.exit("a");
+        await closePane(h, "a");
+        expect(node.listed("a")).toBe(false);
+        feed(h, exit("a"));
+        await settle();
+        expect(node.calls).toHaveLength(2);
+        expect(state.errors).toEqual([]);
+    });
+
+    it("stays listed, exited, when it ends on its own", async () => {
+        const node = fakeNode([info("a"), info("b")]);
+        const { host: h, state } = host(node, { tree: split("row", leaf("a"), leaf("b")), focused: "a" }, []);
+        node.exit("b");
+        feed(h, { type: "term.exit", terminalId: "b", code: 0, signal: null });
+        await settle();
+        expect(node.calls).toEqual([]);
+        expect(node.listed("b")).toBe(true);
+        expect(state.tab).toEqual({ tree: leaf("a"), focused: "a" });
+    });
+
+    it("is not marked when the hang-up failed", async () => {
+        const node = fakeNode([info("a"), info("b")]);
+        node.forget("b");
+        const { host: h } = host(node, { tree: split("row", leaf("a"), leaf("b")), focused: "a" }, []);
+        await closePane(h, "b");
+        feed(h, exit("b"));
+        await settle();
+        expect(node.calls).toEqual([{ type: "term.kill", params: { terminalId: "b", signal: "SIGHUP" } }]);
+    });
+
+    it("reports a removal that fails", async () => {
+        const node = fakeNode([info("a"), info("b")]);
+        const { host: h, state } = host(node, { tree: split("row", leaf("a"), leaf("b")), focused: "a" }, []);
+        await closePane(h, "a");
+        const failing = new ClosedPanes({ channel: () => ({ request: async () => Promise.reject(new Error("boom")) }) }, (error) => state.errors.push(error));
+        failing.mark("n1", "a");
+        failing.event("n1", exit("a"));
+        await settle();
+        expect(state.errors.map((error) => (error as Error).message)).toEqual(["boom"]);
     });
 });
 

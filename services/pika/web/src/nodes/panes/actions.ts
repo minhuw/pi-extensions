@@ -34,6 +34,49 @@ export interface PaneHost {
     closeTab(): void;
     /** The node's terminal (`NodeView.terminals`), for where it is and its size. */
     terminal(terminalId: string): TerminalInfo | undefined;
+    /** The page's record of the terminals its pane closes hung up, which go from the node's list once they exit. */
+    closed: ClosedPanes;
+}
+
+/**
+ * Terminals this page hung up by closing their pane. Once one exits (`term.exit`), it is removed from the node's list
+ * (`term.kill` on an exited terminal; NODE.md "term.kill"), so it leaves the agent list too; a terminal that exits
+ * on its own stays listed with its last screen until the user removes it. A terminal is marked before its hang-up
+ * is sent, so an exit that arrives before the hang-up's reply is caught all the same. Feed it every node event
+ * (`NodesClient.onEvent`), whether or not a tab still shows the terminal.
+ */
+export class ClosedPanes {
+    readonly #client: PaneClient;
+    readonly #onError: (error: unknown) => void;
+    readonly #marked = new Set<string>();
+
+    constructor(client: PaneClient, onError: (error: unknown) => void) {
+        this.#client = client;
+        this.#onError = onError;
+    }
+
+    /** Marks `terminalId` on `node` as closed by a pane; the returned function takes the mark back. */
+    mark(node: string, terminalId: string): () => void {
+        const key = keyOf(node, terminalId);
+        this.#marked.add(key);
+        return () => this.#marked.delete(key);
+    }
+
+    event(node: string, event: NodeEvent): void {
+        if (event.type !== "term.exit" && event.type !== "term.removed") return;
+        const key = keyOf(node, event.terminalId);
+        if (!this.#marked.delete(key) || event.type === "term.removed") return;
+        const channel = this.#client.channel(node);
+        if (!channel) return this.#onError(new Error("The node is not connected: remove the exited terminal by hand."));
+        // `not_found`: the hang-up reached a terminal that had already exited, which removed it.
+        channel.request("term.kill", { terminalId: event.terminalId }).catch((error: unknown) => {
+            if (!(error instanceof NodeRequestError && error.code === "not_found")) this.#onError(error);
+        });
+    }
+}
+
+function keyOf(node: string, terminalId: string): string {
+    return `${node}\n${terminalId}`;
 }
 
 const DEFAULT_SIZE = { cols: 80, rows: 24 };
@@ -87,14 +130,17 @@ export async function splitPane(host: PaneHost, direction: PaneDirection, place:
 
 /**
  * Closes a pane: hangs up its terminal (`term.kill` with SIGHUP, as closing a terminal window does; an interactive
- * shell ignores SIGTERM), then removes its leaf (`removePane`). A terminal the node no longer has is removed all the
- * same; any other failure throws and the pane stays.
+ * shell ignores SIGTERM), then removes its leaf (`removePane`). The terminal is marked in `host.closed`, so once it
+ * exits it leaves the node's list. A terminal the node no longer has is removed all the same; any other failure
+ * throws and the pane stays.
  */
 export async function closePane(host: PaneHost, terminalId: string): Promise<void> {
     const channel = channelOf(host);
+    const unmark = host.closed.mark(host.node, terminalId);
     try {
         await channel.request("term.kill", { terminalId, signal: "SIGHUP" });
     } catch (error) {
+        unmark();
         if (!(error instanceof NodeRequestError && error.code === "not_found")) throw error;
     }
     removePane(host, terminalId);

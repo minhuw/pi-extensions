@@ -20,7 +20,7 @@ import { IndexedDbKeyStore } from "../nodes/identity";
 import { actionShortcut, currentKeymap, focusOf, resolveKey, type ActionId, type PageCommands } from "../nodes/keys";
 import { KeysHelp } from "../nodes/KeysHelp";
 import { clampWidth, LAYOUT_BOUNDS, loadLayout, saveLayout, type NodesLayout } from "../nodes/layout";
-import { closePane, paneEvent, splitPane, type PaneHost } from "../nodes/panes/actions";
+import { ClosedPanes, closePane, paneEvent, splitPane, type PaneHost } from "../nodes/panes/actions";
 import { focusNext, focusPrevious } from "../nodes/panes/pane-tree";
 import { QuickOpen } from "../nodes/QuickOpen";
 import { nodeSocketUrl } from "../nodes/socket";
@@ -54,6 +54,7 @@ import {
 } from "../nodes/workspace/model";
 import { paneLeaves } from "../nodes/workspace/panes";
 import { projectName, projectOfTerminal } from "../nodes/workspace/projects";
+import { RecentTerminals } from "../nodes/workspace/recent";
 import { SlotRegistry } from "../nodes/workspace/slots";
 import { OTHER, WorkspaceHub, type NodeWorkspaces } from "../nodes/workspace/store";
 import { layerKey, TerminalLayer, type LayerTerminal } from "../nodes/workspace/TerminalLayer";
@@ -361,6 +362,7 @@ function NodesWorkspace() {
 	const hub = useMemo(() => new WorkspaceHub(), []);
 	const hubVersion = useSyncExternalStore(hub.subscribe, hub.getVersion);
 	const registry = useMemo(() => new SlotRegistry(), []);
+	const recentTerminals = useMemo(() => new RecentTerminals(), []);
 	const projects = useProjects(client, snapshot);
 	const [quickOpen, setQuickOpen] = useState(false);
 	const [help, setHelp] = useState(false);
@@ -494,17 +496,20 @@ function NodesWorkspace() {
 		if (!client) return;
 		return client.onEvent((node, event) => onNodeEvent.current(node, event));
 	}, [client]);
+	// Terminals hung up by closing their pane leave the node's list once they exit.
+	const closedPanes = useMemo(() => client && new ClosedPanes(client, (error) => setActionError(error instanceof Error ? error.message : String(error))), [client]);
 
 	// --- Panes -----------------------------------------------------------------------------------------------
 
 	/** The `PaneHost` for one terminal tab, read fresh each time; `focus` sends focus to the pane it leaves focused. */
 	const paneHost = useCallback(
 		(node: string, project: string, tabId: string, focus = true): PaneHost | undefined => {
-			if (!client) return undefined;
+			if (!client || !closedPanes) return undefined;
 			const ws = hub.get(node);
 			return {
 				client,
 				node,
+				closed: closedPanes,
 				read: () => {
 					const tab = ws.layout(project).tabs[tabId];
 					return tab?.kind === "terminal" ? { tree: tab.panes, focused: tab.focused } : undefined;
@@ -517,7 +522,7 @@ function NodesWorkspace() {
 				terminal: (id) => terminalOf(node, id),
 			};
 		},
-		[client, hub, terminalOf],
+		[client, closedPanes, hub, terminalOf],
 	);
 
 	const run = useCallback(async (action: () => Promise<unknown>) => {
@@ -534,6 +539,7 @@ function NodesWorkspace() {
 
 	onNodeEvent.current = (node, event) => {
 		if (event.type === "term.exit" || event.type === "term.removed") {
+			closedPanes?.event(node, event);
 			const ws = hub.get(node);
 			const project = ws.projectOf(event.terminalId);
 			const tab = project ? tabOfTerminal(ws.layout(project), event.terminalId) : undefined;
@@ -612,6 +618,8 @@ function NodesWorkspace() {
 	const workspace = ws && project ? ws.layout(project) : undefined;
 	const onScreen = focusedTerminal(workspace);
 	const onScreenInfo = ready && onScreen ? ready.terminals.find((item) => item.terminalId === onScreen) : undefined;
+	// The header's session: the pane on screen, else (an editor or diff in focus) the project's last focused pane.
+	const headerInfo = ready && project ? recentTerminals.shown(ready.info.id, project, onScreen, ready.terminals) : undefined;
 	const editors = ready ? editorFor(ready.info.id) : undefined;
 	const editorSnapshot = useSyncExternalStore(editors?.subscribe ?? noop, editors?.getSnapshot ?? (() => EMPTY_EDITORS));
 	const readyFiles = ready && client?.files(ready.info.id);
@@ -925,6 +933,7 @@ function NodesWorkspace() {
 						project={project}
 						projects={nodeProjects ?? []}
 						terminal={onScreenInfo}
+						session={headerInfo}
 						busy={busy}
 						railOpen={layout.railOpen}
 						filesOpen={layout.filesOpen}
@@ -1144,6 +1153,7 @@ function WorkspaceHeader({
 	project,
 	projects,
 	terminal,
+	session,
 	busy,
 	railOpen,
 	filesOpen,
@@ -1155,7 +1165,10 @@ function WorkspaceHeader({
 	home: string;
 	project: string;
 	projects: readonly Project[];
+	/** The pane on screen, for its status. */
 	terminal?: TerminalInfo;
+	/** The pane whose session the heading shows (`RecentTerminals`). */
+	session?: TerminalInfo;
 	busy: boolean;
 	railOpen: boolean;
 	filesOpen: boolean;
@@ -1177,7 +1190,7 @@ function WorkspaceHeader({
 			<span className="shrink-0 text-muted" aria-hidden="true">
 				·
 			</span>
-			<PaneHeading node={view.info.name} terminal={terminal} home={home} />
+			<PaneHeading node={view.info.name} terminal={session} home={home} />
 			{terminal && <PaneDetail terminal={terminal} />}
 			<button type="button" className={cx(BUTTON.secondary, "ml-auto h-7 shrink-0")} disabled={busy} onClick={onNew} title={withShortcut("New terminal", "terminal.new")} data-new-terminal="">
 				<Icon name="plus" size={13} />
