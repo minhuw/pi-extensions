@@ -611,6 +611,53 @@ describe("SidecarFffBackend", () => {
 		}
 	});
 
+	it("clears the watchdog of an aborted request so a slow sidecar survives past the call deadline", async () => {
+		const baseDir = makeTempDir("abort-watchdog");
+		const repoDir = path.join(baseDir, "repo");
+		fs.mkdirSync(repoDir, { recursive: true });
+		fs.writeFileSync(path.join(repoDir, "target.ts"), "export const needle = 42;\n");
+
+		const fakeSidecarPath = path.join(baseDir, "fake-sidecar.mjs");
+		fs.writeFileSync(
+			fakeSidecarPath,
+			[
+				'import fs from "node:fs";',
+				'process.on("message", (msg) => {',
+				"\tif (!msg || typeof msg !== 'object') return;",
+				"\tconst { id, method, params } = msg;",
+				"\tif (method === 'ensure') {",
+				"\t\tconst root = fs.realpathSync.native(params.basePath);",
+				"\t\tprocess.send({ id, ok: true, value: { root } });",
+				"\t}",
+				"\t// Slow grep: never reply within the call deadline.",
+				"});",
+			].join("\n"),
+		);
+
+		const callTimeoutMs = 120;
+		const backend = makeBackend({
+			sidecarPath: fakeSidecarPath,
+			callTimeoutMs,
+			ensureTimeoutMs: 2_000,
+		});
+
+		const { root } = await backend.ensureRoot({
+			basePath: repoDir,
+			kind: "workspace",
+		});
+		const pid = trackPid(backend.getPid());
+
+		const controller = new AbortController();
+		const aborted = backend.grep(root, "needle", undefined, controller.signal);
+		controller.abort();
+		await expect(aborted).rejects.toThrow("Operation aborted");
+
+		await new Promise((resolve) => setTimeout(resolve, callTimeoutMs * 3));
+
+		expect(backend.getPid()).toBe(pid);
+		expect(isPidAlive(pid)).toBe(true);
+	});
+
 	it("triggers HEAD-change scanFiles() automatically when a reused git worktree switches commits", async () => {
 		const baseDir = makeTempDir("worktree-head-rescan");
 		const repoDir = path.join(baseDir, "repo");

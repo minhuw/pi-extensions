@@ -415,6 +415,8 @@ export class SidecarFffBackend implements FffBackend {
 					const active = this.pending.get(id);
 					if (!active) return;
 					this.pending.delete(id);
+					clearTimeout(watchdog);
+					session.watchdogs.delete(id);
 					cleanupAbort?.();
 					this.syncRefState(session);
 					reject(new Error("Operation aborted"));
