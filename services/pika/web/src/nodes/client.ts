@@ -1,5 +1,5 @@
 import { ChannelClosed, NodeChannel, NodeRequestError, type ChannelState } from "./channel";
-import { sanitize, type Identity, type NodeEvent, type NodeInfo, type PaneView, type TerminalInfo } from "./contract";
+import { sanitize, type BridgeStatus, type Identity, type NodeEvent, type NodeInfo, type PaneView, type TerminalInfo } from "./contract";
 import { clientIdentity, webCryptoAvailable, type KeyStore, type PinnedNode } from "./identity";
 import { NodeSocket, OpenRefused, type NodeSocketOptions, type SocketStatus } from "./socket";
 
@@ -369,4 +369,12 @@ export class NodesClient {
 export function orderTerminals(terminals: readonly TerminalInfo[]): TerminalInfo[] {
 	const waiting = terminals.filter((item) => item.status?.state === "waiting");
 	return [...waiting, ...terminals.filter((item) => item.status?.state !== "waiting")];
+}
+
+/**
+ * The bridge's status while its socket is open. A closed bridge's last status stays for its session (NODE.md, "Pane
+ * status"), but its activities and title died with that pi.
+ */
+export function liveBridge(status: PaneView | undefined): BridgeStatus | undefined {
+	return status?.bridgeConnected ? status.bridge : undefined;
 }

@@ -1,6 +1,6 @@
 import { webcrypto } from "node:crypto";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { NodesClient, orderTerminals } from "../src/nodes/client";
+import { liveBridge, NodesClient, orderTerminals } from "../src/nodes/client";
 import type { Body, TerminalInfo } from "../src/nodes/contract";
 import { MemoryKeyStore } from "../src/nodes/identity";
 import type { WebSocketLike } from "../src/nodes/socket";
@@ -219,5 +219,24 @@ describe("the Nodes page client", () => {
 		const opens = server.toServer.filter((frame) => frame.type === "open").length;
 		await settle();
 		expect(server.toServer.filter((frame) => frame.type === "open").length).toBe(opens);
+	});
+});
+
+describe("liveBridge", () => {
+	const bridge = {
+		state: "busy" as const,
+		activities: [{ source: "subagents", id: "a1", label: "reviewer", state: "running" as const }],
+		activityCount: 1,
+		title: "pi - review",
+		updatedAt: 1,
+	};
+
+	it("is the bridge's status while its socket is open", () => {
+		expect(liveBridge({ state: "busy", bridge, bridgeConnected: true, unread: false })).toBe(bridge);
+	});
+
+	it("drops a closed bridge's activities and title: pi may have been killed while they ran", () => {
+		expect(liveBridge({ state: "idle", bridge, bridgeConnected: false, unread: false })).toBeUndefined();
+		expect(liveBridge(undefined)).toBeUndefined();
 	});
 });

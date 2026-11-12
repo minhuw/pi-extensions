@@ -250,7 +250,7 @@ PaneView      = { state: "idle" | "busy" | "waiting", program?: ProgramStatus, b
 3. Else `busy` if the root is `busy` or `activityCount > 0`. Background activities keep a pane busy after pi's own turn is done.
 4. Else `idle`.
 
-- `bridgeConnected` is false after the bridge's socket closes. The last `bridge` stays until the terminal exits, for its session, but a closed bridge no longer counts in the merged `state` (pi may have been killed while busy).
+- `bridgeConnected` is false after the bridge's socket closes. The last `bridge` stays until the terminal exits, for its session, but a closed bridge no longer counts in the merged `state` (pi may have been killed while busy). Clients likewise show its session but not its activities or title, which ended with that pi.
 - **Unread** is the daemon's "done" flag: it becomes true when the merged state goes from `busy` or `waiting` to `idle`. `pane.seen { terminalId }` from any client clears it, and the daemon sends the new `pane.status` to every channel. A program status of `error` also sets it.
 - Activities follow the Orca bridge's activity protocol (sources and ids 1–64 / 1–160 characters, labels ≤ 240, at most 128 activities per pane).
 

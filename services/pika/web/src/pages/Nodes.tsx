@@ -8,7 +8,7 @@ import { copyText } from "../lib/clipboard";
 import { shortUserAgent } from "../lib/devices";
 import { useHealth } from "../lib/relay";
 import { useTheme } from "../lib/theme";
-import { NodesClient, orderTerminals, type NodesSnapshot, type NodeView } from "../nodes/client";
+import { liveBridge, NodesClient, orderTerminals, type NodesSnapshot, type NodeView } from "../nodes/client";
 import { displayFingerprint, type TerminalInfo } from "../nodes/contract";
 import { IndexedDbKeyStore } from "../nodes/identity";
 import { nodeSocketUrl } from "../nodes/socket";
@@ -140,7 +140,7 @@ const paneState = (terminal: TerminalInfo): string =>
 	terminal.exited ? "exited" : terminal.status?.state === "idle" && terminal.status.unread ? "unread" : (terminal.status?.state ?? "unknown");
 
 function terminalLabel(terminal: TerminalInfo): string {
-	return terminal.status?.bridge?.title || terminal.title || terminal.argv[0] || "Shell";
+	return liveBridge(terminal.status)?.title || terminal.title || terminal.argv[0] || "Shell";
 }
 
 function linkLabel(view: NodeView): ReactNode {
@@ -430,7 +430,7 @@ function PaneDetail({ terminal }: { terminal: TerminalInfo }) {
 	const status = terminal.status;
 	if (!status) return null;
 	const message = status.state === "waiting" ? status.program?.message : undefined;
-	const activities = status.bridge?.activityCount ?? 0;
+	const activities = liveBridge(status)?.activityCount ?? 0;
 	return (
 		<span className="flex min-w-0 items-center gap-2 text-[12.5px] text-muted">
 			<PaneBadge terminal={terminal} />
