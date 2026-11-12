@@ -55,6 +55,9 @@ type Rgb = { r: number; g: number; b: number };
 
 // ── formatting helpers ──────────────────────────────────────────────
 
+// Before Node 26, stripVTControlCharacters leaves colon-separated SGR parameters (`\x1b[38:2::255:0:0m`) in the text.
+const stripAnsi = (text: string): string => stripVTControlCharacters(text.replace(/\x1b\[[0-9;:]*m/g, ""));
+
 export function fmtTokens(n: number): string {
 	if (n < 1000) return `${n}`;
 	if (n < 10_000) return `${(n / 1000).toFixed(1)}k`;
@@ -442,7 +445,7 @@ function additionalRooms(statuses: ReadonlyMap<string, string>): string | undefi
 
 /** Rank only the published text; no hidden state or extension-specific parsing. */
 function statusRank(text: string): number {
-	const tone = statusTone(stripVTControlCharacters(text));
+	const tone = statusTone(stripAnsi(text));
 	return tone === "problem" ? 3 : tone === "attention" ? 2 : 1;
 }
 
@@ -1321,12 +1324,12 @@ function renderCompact(
 				text: renderStatus(theme, text, key),
 				shortText: short !== text ? renderStatus(theme, short, key) : undefined,
 				fallbackText: key === "magpie-quota" && severity > 1
-					? renderStatus(theme, `quota ${stripVTControlCharacters(text).match(severity === 3 ? STATUS_PROBLEM : STATUS_ATTENTION)![0].trim()}`, key)
+					? renderStatus(theme, `quota ${stripAnsi(text).match(severity === 3 ? STATUS_PROBLEM : STATUS_ATTENTION)![0].trim()}`, key)
 					: undefined,
 				abbreviate: key === "herder" || key === "goal",
 				abbreviateAbove: key === "goal" ? 16 : undefined,
 				severityMarker: (key === "herder" || key === "goal") && severity > 1
-					? stripVTControlCharacters(text).match(severity === 3 ? STATUS_PROBLEM : STATUS_ATTENTION)?.[0].trim()
+					? stripAnsi(text).match(severity === 3 ? STATUS_PROBLEM : STATUS_ATTENTION)?.[0].trim()
 					: undefined,
 				rank: severity * (compactKeys.length + 2) + (key === "herder" ? compactKeys.length + 1 : key === "goal" ? compactKeys.length : compactKeys.length - index - 1),
 			};
@@ -1455,7 +1458,7 @@ function renderPhone(
 		: theme.fg("text", `${s.priceEstimated ? "~" : ""}${fmtCost(s.cost)}`);
 	// Only statuses that need the user; problems before attention.
 	const alerts = activityStatuses(statuses)
-		.map(([key, text]) => ({ key, plain: stripVTControlCharacters(text) }))
+		.map(([key, text]) => ({ key, plain: stripAnsi(text) }))
 		.sort((a, b) => statusRank(b.plain) - statusRank(a.plain))
 		.flatMap(({ key, plain }) => {
 			const alert = phoneAlert(plain, key);
@@ -1601,7 +1604,7 @@ function renderDetailRows(
 	const leftStatuses = activityEntries.map(([key, text], index) => ({
 		text: renderStatus(theme, text, key, hasNerdFonts()),
 		severityMarker: (key === "herder" || key === "goal") && statusRank(text) > 1
-			? stripVTControlCharacters(text).match(statusRank(text) === 3 ? STATUS_PROBLEM : STATUS_ATTENTION)?.[0].trim()
+			? stripAnsi(text).match(statusRank(text) === 3 ? STATUS_PROBLEM : STATUS_ATTENTION)?.[0].trim()
 			: undefined,
 		statusKey: key,
 		rank: statusRank(text) * rankStep + (key === "herder" ? (fittingPeer ? -activityEntries.length : 3) : key === "goal" && statusRank(text) === 1 ? 2 : -index),
