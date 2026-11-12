@@ -1,5 +1,5 @@
 /**
- * Projects and files (NODE.md §4 "Projects" and "Files"): directory listings, reads, writes if unchanged,
+ * Files (NODE.md §4 "Files"): directory listings, reads, writes if unchanged,
  * watches, and uploads. Paths are absolute and not limited to the roots: an allowed client already has a shell.
  */
 import { execFile } from "node:child_process";
@@ -12,9 +12,8 @@ import type { Peer } from "./daemon.ts";
 import { asNodeError, NodeError } from "./errors.ts";
 import {
     fromBase64Url, LIMITS, timing, toBase64Url, utf8Length,
-    type DirEntry, type Encoding, type Expected, type GitStatus, type GitStatusEntry, type Project, type Request, type Stat,
+    type DirEntry, type Encoding, type Expected, type GitStatus, type GitStatusEntry, type Request, type Stat,
 } from "./protocol.ts";
-import { roots, type Config } from "./store.ts";
 
 const run = promisify(execFile);
 
@@ -25,8 +24,6 @@ export interface FilesOptions {
     home: string;
     /** Default upload directory parent (`~/.pika-node/uploads`). */
     uploads: string;
-    config: () => Config;
-    terminalCwds: () => string[];
     log: (line: string) => void;
 }
 
@@ -143,7 +140,6 @@ export class Files {
 
     async request(peer: Peer, request: Request): Promise<object> {
         switch (request.type) {
-            case "projects.list": return { projects: await this.projects() };
             case "fs.readDir": return this.readDir(request.path);
             case "fs.read": return this.read(request.path);
             case "fs.write": return { stat: await this.write(request.path, decode(request.encoding, request.data), request.expected, request.mode) };
@@ -166,32 +162,6 @@ export class Files {
             }
             default: throw new NodeError("unsupported", `unknown request ${(request as { type: string }).type}`);
         }
-    }
-
-    // -----------------------------------------------------------------------------------------------------------
-    // Projects
-
-    async projects(): Promise<Project[]> {
-        const config = this.#options.config();
-        const candidates: string[] = [...(config.projects ?? [])];
-        for (const root of roots(config)) {
-            let entries;
-            try { entries = await readdir(root, { withFileTypes: true }); }
-            catch { continue; }
-            for (const entry of entries) if (entry.isDirectory() && existsSync(join(root, entry.name, ".git"))) candidates.push(join(root, entry.name));
-        }
-        for (const cwd of new Set(this.#options.terminalCwds())) {
-            try { candidates.push((await run("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { timeout: 2_000 })).stdout.trim()); }
-            catch { /* not a repository */ }
-        }
-        const seen = new Map<string, Project>();
-        for (const candidate of candidates) {
-            let real: string;
-            try { real = await realpath(candidate); }
-            catch { continue; }
-            if (!seen.has(real)) seen.set(real, { name: basename(real), path: real });
-        }
-        return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
     }
 
     // -----------------------------------------------------------------------------------------------------------

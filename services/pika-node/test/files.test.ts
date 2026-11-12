@@ -15,7 +15,7 @@ mkdirSync(join(root, "repo", ".git"), { recursive: true });
 mkdirSync(join(root, "plain"), { recursive: true });
 const messages: NodeMessage[] = [];
 const peer: Peer = { name: "test", closed: false, send: message => { messages.push(message); }, buffered: () => 0 };
-const files = new Files({ home: home.home, uploads: join(home.home, "uploads"), config: () => ({ version: 1, roots: [root] }), terminalCwds: () => [], log: () => {} });
+const files = new Files({ home: home.home, uploads: join(home.home, "uploads"), log: () => {} });
 afterAll(() => { files.shutdown(); home.cleanup(); });
 
 const sha = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
@@ -25,8 +25,7 @@ const code = async (promise: Promise<unknown>) => {
 };
 
 describe("files", () => {
-    it("lists projects and directories", async () => {
-        expect((await files.projects()).map(p => p.name)).toEqual(["repo"]);
+    it("lists directories", async () => {
         const listing = await files.readDir(root);
         expect(listing).toEqual({ truncated: false, entries: [expect.objectContaining({ name: "plain", kind: "dir" }), expect.objectContaining({ name: "repo", kind: "dir" })] });
         expect(await code(files.readDir(join(root, "missing")))).toBe("not_found");

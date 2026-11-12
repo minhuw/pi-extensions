@@ -154,13 +154,13 @@ Other commands: `pika-node clients` (or `clients list`) lists allowed and pendin
 
 ## 4. Inner messages (client ↔ node)
 
-Requests are `{ type, id, ...params }`. The node answers each with exactly one `reply`: `{ type: "reply", id, result }` or `{ type: "reply", id, error: { code, message } }`. Events have no `id`. Messages without an `id` (`term.input`, `term.resize`, `pane.seen`) get no reply; when one fails, the node sends an `error` event `{ type: "error", code, message, terminalId? }`.
+Requests are `{ type, id, ...params }`. The node answers each with exactly one `reply`: `{ type: "reply", id, result }` or `{ type: "reply", id, error: { code, message } }`. Events have no `id`. Messages without an `id` (`term.input`, `term.resize`, `pane.seen`, `pane.unread`) get no reply; when one fails, the node sends an `error` event `{ type: "error", code, message, terminalId? }`.
 
-**`welcome`** (node → client, first record): `{ type: "welcome", node, name, host, home, version, protocolVersion, capabilities: string[], limits: { maxRecordBytes, maxSnapshotBytes, maxReadBytes, maxUploadBytes, maxUploadChunkBytes } }`. The v1 capabilities are `terminal`, `files`, `projects`, `status`.
+**`welcome`** (node → client, first record): `{ type: "welcome", node, name, host, home, version, protocolVersion, capabilities: string[], limits: { maxRecordBytes, maxSnapshotBytes, maxReadBytes, maxUploadBytes, maxUploadChunkBytes } }`. The v1 capabilities are `terminal`, `files`, `projects`, `status`. A daemon lists more for what it added later, and a client uses those requests and notices only when the capability is listed (an older daemon answers a request it does not know with `unsupported`, and drops such a notice): `projects.edit` (`projects.add`, `projects.remove`, `projects.rename`), `git.worktree` (`git.worktreeAdd`, `git.worktreeRemove`), `term.rename`, and `pane.unread`. Deck shows an item that needs a missing capability disabled, saying to update pika-node.
 
 ### Terminals
 
-`TerminalInfo = { terminalId, title, cwd, cols, rows, pid, createdAt, argv: string[], exited?: { code: number | null, signal: string | null }, status?: PaneView }`
+`TerminalInfo = { terminalId, title, cwd, cols, rows, pid, createdAt, argv: string[], exited?: { code: number | null, signal: string | null }, status?: PaneView, label? }`
 
 | Request | Params | Result |
 | --- | --- | --- |
@@ -170,8 +170,11 @@ Requests are `{ type, id, ...params }`. The node answers each with exactly one `
 | `term.detach` | `terminalId` | `{}` |
 | `term.kill` | `terminalId`, `signal?` (`SIGTERM` default, `SIGHUP`, `SIGINT`, `SIGKILL`) | `{}` |
 | `term.cwd` | `terminalId` | `{ cwd }` |
+| `term.rename` | `terminalId`, `label: string \| null` (1–120 characters, one line) | `{ terminal: TerminalInfo }` |
 
 `term.cwd` answers the working directory of the terminal's shell (the PTY's process) now, which a `cd` changes, while `TerminalInfo.cwd` stays where it started. Shells do not report a `cd` (only some send OSC 7, and not under `TERM_PROGRAM=pika-node`), so the web UI asks when it resolves a relative path printed in the terminal. The daemon reads `/proc/<pid>/cwd` on Linux and `lsof` on macOS, and answers the starting cwd when neither tells; an exited terminal answers `exited`. A daemon without it answers `unsupported`.
+
+`term.rename` sets the name a user gives a terminal, shared by every client: `TerminalInfo.label`, which clients show before the session name, the title, and the program. The daemon trims it; `null` or blank text clears it. It lasts as long as the terminal, and `term.renamed` tells every channel. An exited terminal can be renamed.
 
 Without a reply: `term.input { terminalId, data }` (UTF-8 text, ≤ 64 KiB) writes to the PTY. `term.resize { terminalId, cols, rows, claim? }` resizes it (see "Resize").
 
@@ -182,6 +185,7 @@ Events:
 - `term.snapshot { terminalId, snapshot }`: replaces the client's screen (see backpressure).
 - `term.resized { terminalId, cols, rows, owned }`: to all attached clients after any resize, including their own; `owned` is true only on the size owner's channel.
 - `term.title { terminalId, title }`: to every channel (lists show titles).
+- `term.renamed { terminalId, label: string | null }`: to every channel after `term.rename` changed the name.
 - `term.exit { terminalId, code, signal }`: to every channel. An exited terminal stays in `term.list` with `exited` until `term.kill` removes it, so its last screen can still be attached.
 
 `Snapshot = { data, cols, rows, outputSequence }`. `data` is the headless screen serialized as VT sequences (xterm's serialize addon: scrollback, screen, cursor, modes). Writing it to a fresh terminal of `cols` × `rows` reproduces the screen. `outputSequence` is the `seq` of the last chunk included.
@@ -208,7 +212,25 @@ Events:
 
 ### Projects
 
-`projects.list` → `{ projects: [{ name, path, repository? }] }`. The list comes from the `projects` entries of `~/.pika-node/config.json` (absolute paths), plus each directory holding `.git` one level below each configured root, plus the git toplevel of each live terminal's cwd. Duplicates are removed by real path. `config.json` is `{ version: 1, server?: { url, credential }, roots?: string[] (default [home]), projects?: string[] }` (mode 0600). `server.url` is the pika server's base URL (`http(s)://…`, the daemon connects to its `ws(s)` form); `credential` is the `pkn_` node credential. Without `server` the daemon serves only `pika-node attach` and checks the file again every 5 s. A daemon that cannot parse `config.json` fails loudly (requests that need it answer `io`).
+`Project = { name, path, repository?, named?: true, worktree? }`. `path` is a real path; `name` is the name a user gave it (`named`), else its folder's name; `worktree` is the main checkout's path when the project is a linked git worktree (its `.git` file points into `<common dir>/worktrees/<name>`).
+
+| Request | Params | Result |
+| --- | --- | --- |
+| `projects.list` | — | `{ projects: Project[] }`, by name |
+| `projects.add` | `path` (a directory) | `{ project: Project }` |
+| `projects.remove` | `path` | `{ hidden: boolean }` |
+| `projects.rename` | `path`, `name: string \| null` (1–120 characters) | `{ project: Project }` |
+| `git.worktreeAdd` | `project`, `branch`, `base?` | `{ project: Project }` |
+| `git.worktreeRemove` | `path` (a linked worktree) | `{}` |
+
+- **The list:** the `projects` entries of `~/.pika-node/config.json`, plus each directory holding `.git` one level below each configured root, plus the git toplevel of each live terminal's cwd, less the `hiddenProjects`. Duplicates are removed by real path. It is the node's, so every browser shows the same projects.
+- **Edits:** `config.json` keeps them, so they last across restarts and browsers: `projects` (added by hand), `hiddenProjects` (found on their own, then removed), and `projectNames` (real path → name). The daemon makes edits one after another. After each, it sends `projects.changed {}` to every channel (after the asker's reply), and clients list again.
+- **Add:** the real path of a directory (`not_found`, `not_a_directory`) joins `projects` once and leaves `hiddenProjects`. Adding a listed project changes nothing. Undoing a removal is an add.
+- **Remove:** the project leaves `projects`; when it would still be found on its own, its real path joins `hiddenProjects`, and `hidden` says so. Nothing on disk changes. A path that is no project answers `not_found`. Terminals inside a hidden project stay; clients file them under "Other".
+- **Rename:** sets the name every browser shows, trimmed; `null`, or the folder's own name, clears it. Only a listed project (`not_found`).
+- **Worktree add:** Orca's flow. The new worktree goes beside the repository's main checkout as `<parent>/<repo>-<slug>`, the layout Orca uses for repositories on SSH hosts (`computeRemoteWorktreePath`); `<slug>` is the branch with each run of characters other than letters, digits, `.`, `_`, `-` turned into one `-` (Orca's `sanitizeWorktreeName`). The daemon checks `branch` with `git check-ref-format --branch` and refuses one that starts with `-` (`invalid`), an existing branch or folder (`exists`), and a `base` that is no commit (`not_found`; default `HEAD`, the project's current commit). It runs `git worktree add -b <branch> <path> <base>` in the project's repository, adds the worktree as a project, and answers it. A project in no work tree answers `not_found`; git's own failure answers `io` with its message.
+- **Worktree remove:** only a linked worktree, never a main checkout (`invalid`). The daemon runs `git worktree remove <path>` from the main checkout, never with `--force`, so git refuses a worktree with modified or untracked files, or a locked one; that refusal answers `conflict` with git's message. On success the project leaves `projects`, `hiddenProjects`, and `projectNames`. Clients ask before removing.
+- **`config.json`:** `{ version: 1, server?: { url, credential }, roots?: string[] (default [home]), projects?: string[], hiddenProjects?: string[], projectNames?: Record<string, string> }` (mode 0600). `server.url` is the pika server's base URL (`http(s)://…`, the daemon connects to its `ws(s)` form); `credential` is the `pkn_` node credential. Without `server` the daemon serves only `pika-node attach` and checks the file again every 5 s. A daemon that cannot parse `config.json` fails loudly (requests that need it answer `io`).
 
 ### Files
 
@@ -262,7 +284,7 @@ PaneView      = { state: "idle" | "busy" | "waiting", program?: ProgramStatus, b
 4. Else `idle`.
 
 - `bridgeConnected` is false after the bridge's socket closes. The last `bridge` stays until the terminal exits, for its session, but a closed bridge no longer counts in the merged `state` (pi may have been killed while busy). Clients likewise show its session, marked as disconnected, but not its activities or model, which ended with that pi.
-- **Unread** is the daemon's "done" flag: it becomes true when the merged state goes from `busy` or `waiting` to `idle`. `pane.seen { terminalId }` from any client clears it, and the daemon sends the new `pane.status` to every channel. A program status of `error` also sets it.
+- **Unread** is the daemon's "done" flag: it becomes true when the merged state goes from `busy` or `waiting` to `idle`. `pane.seen { terminalId }` from any client clears it, and the daemon sends the new `pane.status` to every channel. A program status of `error` also sets it. `pane.unread { terminalId }` sets it by hand (the user's "Mark as Unread"), on a live terminal (`exited` otherwise); a pane with neither source then has a view, `{ state: "idle", bridgeConnected: false, unread: true }`, until `pane.seen` clears the mark.
 - Activities follow the Orca bridge's activity protocol (sources and ids 1–64 / 1–160 characters, labels ≤ 240, at most 128 activities per pane).
 
 ### Requests from the bridge

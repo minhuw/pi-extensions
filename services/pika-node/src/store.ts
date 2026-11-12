@@ -9,7 +9,17 @@ import { writeAtomic, type Paths } from "./paths.ts";
 import { isAbsolutePath, LIMITS, matchFingerprint, timing, type ClientKey, type ClientsFile, type PendingClient } from "./protocol.ts";
 
 export interface ServerConfig { url: string; credential: string }
-export interface Config { version: 1; server?: ServerConfig; roots?: string[]; projects?: string[] }
+export interface Config {
+    version: 1;
+    server?: ServerConfig;
+    roots?: string[];
+    /** Projects added by hand (`projects.add`), real paths. */
+    projects?: string[];
+    /** Projects found on their own (a root's repository, a terminal's) that `projects.remove` hid, real paths. */
+    hiddenProjects?: string[];
+    /** Real path → the name `projects.rename` gave it. */
+    projectNames?: Record<string, string>;
+}
 
 export const CREDENTIAL = /^pkn_[A-Za-z0-9_-]{43}$/;
 
@@ -30,11 +40,19 @@ export function loadConfig(p: Paths): Config {
         if (typeof credential !== "string" || !CREDENTIAL.test(credential)) throw new Error(`${p.config}: server.credential must be a pkn_ node credential`);
         config.server = { url: url.replace(/\/+$/, ""), credential };
     }
-    for (const key of ["roots", "projects"] as const) {
+    for (const key of ["roots", "projects", "hiddenProjects"] as const) {
         const list = raw[key];
         if (list === undefined) continue;
         if (!Array.isArray(list) || !list.every(item => isAbsolutePath(item))) throw new Error(`${p.config}: ${key} must be a list of absolute paths`);
         config[key] = list as string[];
+    }
+    if (raw.projectNames !== undefined) {
+        const names = raw.projectNames as unknown;
+        if (!names || typeof names !== "object" || Array.isArray(names)
+            || !Object.entries(names).every(([path, name]) => isAbsolutePath(path) && typeof name === "string" && name.trim().length > 0)) {
+            throw new Error(`${p.config}: projectNames must map absolute paths to names`);
+        }
+        config.projectNames = { ...(names as Record<string, string>) };
     }
     return config;
 }

@@ -10,15 +10,16 @@ import { basename, dirname, join, sep } from "node:path";
 import { asNodeError, NodeError } from "./errors.ts";
 import { Files } from "./files.ts";
 import { Pane } from "./pane.ts";
+import { Projects } from "./projects.ts";
 import type { Paths } from "./paths.ts";
 import { VERSION } from "./paths.ts";
 import {
-    LIMITS, parseClientMessage, PROTOCOL_VERSION, timing, utf8Length,
+    CAPABILITIES, LIMITS, parseClientMessage, PROTOCOL_VERSION, timing, utf8Length,
     type BridgeStatus, type ClientMessage, type NodeEvent, type NodeMessage, type Notice, type Request,
     type Snapshot, type TerminalInfo, type Welcome,
 } from "./protocol.ts";
 import { account, spawnCommand, spawnEnv, SpawnError, type Account } from "./spawn.ts";
-import { loadConfig, roots, type Config } from "./store.ts";
+import { loadConfig, roots, saveConfig, type Config } from "./store.ts";
 import { processCwd, Terminal } from "./terminal.ts";
 
 /** One inner-protocol endpoint. `send` is ordered and never throws; after `closed`, messages are dropped. */
@@ -64,6 +65,8 @@ interface Pty {
     owner: Peer | undefined;
     attachments: Map<Peer, Attachment>;
     bridge: object | undefined;
+    /** The user's name for it (`term.rename`). */
+    label: string | undefined;
 }
 
 export interface DaemonOptions {
@@ -81,6 +84,7 @@ export class Daemon {
     readonly paths: Paths;
     readonly account: Account;
     readonly files: Files;
+    readonly projects: Projects;
     #terminals = new Map<string, Pty>();
     #peers = new Set<Peer>();
     #options: DaemonOptions;
@@ -94,7 +98,12 @@ export class Daemon {
         this.paths = options.paths;
         this.account = options.account ?? account();
         this.#log = options.log ?? (() => {});
-        this.files = new Files({ home: this.account.home, uploads: join(this.paths.home, "uploads"), config: () => this.config(), terminalCwds: () => [...this.#terminals.values()].filter(t => !t.terminal.exited).map(t => t.cwd), log: this.#log });
+        this.files = new Files({ home: this.account.home, uploads: join(this.paths.home, "uploads"), log: this.#log });
+        this.projects = new Projects({
+            config: () => this.config(),
+            save: config => saveConfig(this.paths, config),
+            terminalCwds: () => [...this.#terminals.values()].filter(t => !t.terminal.exited).map(t => t.cwd),
+        });
         this.#foregroundTimer = setInterval(() => this.#pollForeground(), timing.foregroundPollMs);
         this.#foregroundTimer.unref();
     }
@@ -116,7 +125,7 @@ export class Daemon {
             home: this.account.home,
             version: VERSION,
             protocolVersion: PROTOCOL_VERSION,
-            capabilities: ["terminal", "files", "projects", "status"],
+            capabilities: [...CAPABILITIES],
             limits: {
                 maxRecordBytes: LIMITS.maxRecordBytes, maxSnapshotBytes: LIMITS.maxSnapshotBytes, maxReadBytes: LIMITS.maxReadBytes,
                 maxUploadBytes: LIMITS.maxUploadBytes, maxUploadChunkBytes: LIMITS.maxUploadChunkBytes,
@@ -211,6 +220,24 @@ export class Daemon {
                 // The shell's own directory: it is the PTY's process, and a program it runs (pi) usually shares it.
                 return { cwd: (await processCwd(pty.terminal.pid)) ?? pty.cwd };
             }
+            case "term.rename": {
+                const pty = this.#terminal(request.terminalId);
+                const label = request.label?.trim() || undefined;
+                if (label !== pty.label) {
+                    pty.label = label;
+                    this.#broadcast({ type: "term.renamed", terminalId: pty.id, label: label ?? null }, pty);
+                }
+                return { terminal: this.#info(pty) };
+            }
+            case "projects.list": return { projects: await this.projects.list() };
+            case "projects.add": return this.#projectsChanged({ project: await this.projects.add(request.path) });
+            case "projects.remove": return this.#projectsChanged(await this.projects.remove(request.path));
+            case "projects.rename": return this.#projectsChanged({ project: await this.projects.rename(request.path, request.name) });
+            case "git.worktreeAdd": return this.#projectsChanged({ project: await this.projects.worktreeAdd(request.project, request.branch, request.base) });
+            case "git.worktreeRemove": {
+                await this.projects.worktreeRemove(request.path);
+                return this.#projectsChanged({});
+            }
             case "term.kill": {
                 const pty = this.#terminal(request.terminalId);
                 if (pty.terminal.exited) this.#remove(pty);
@@ -219,6 +246,12 @@ export class Daemon {
             }
             default: return this.files.request(peer, request);
         }
+    }
+
+    /** Tells every channel that the project list changed (its reply goes to the asker first), then answers `result`. */
+    #projectsChanged<T>(result: T): T {
+        setImmediate(() => { for (const peer of this.#peers) peer.send({ type: "projects.changed" }); });
+        return result;
     }
 
     #notice(peer: Peer, notice: Notice): void {
@@ -231,6 +264,10 @@ export class Daemon {
             case "term.resize": return this.#resize(pty, peer, notice.cols, notice.rows, notice.claim === true);
             case "pane.seen":
                 if (pty.pane.seen()) this.#paneChanged(pty);
+                return;
+            case "pane.unread":
+                if (pty.terminal.exited) throw new NodeError("exited", "the terminal has exited");
+                if (pty.pane.markUnread()) this.#paneChanged(pty);
                 return;
         }
     }
@@ -248,6 +285,7 @@ export class Daemon {
             pid: pty.terminal.pid, createdAt: pty.createdAt, argv: pty.argv,
             ...(pty.terminal.exited ? { exited: pty.terminal.exited } : {}),
             ...(status ? { status } : {}),
+            ...(pty.label ? { label: pty.label } : {}),
         };
     }
 
@@ -285,7 +323,7 @@ export class Daemon {
                 },
             },
         });
-        pty = { id, terminal, pane, cwd, argv: params.argv ?? [this.account.shell, "-l"], createdAt: Date.now(), owner, attachments: new Map(), bridge: undefined };
+        pty = { id, terminal, pane, cwd, argv: params.argv ?? [this.account.shell, "-l"], createdAt: Date.now(), owner, attachments: new Map(), bridge: undefined, label: undefined };
         this.#terminals.set(id, pty);
         this.#log(`terminal ${id} pid ${terminal.pid}: ${[file, ...args].join(" ")}`);
         this.onTerminalsChanged();

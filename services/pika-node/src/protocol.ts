@@ -85,7 +85,14 @@ export const ERROR_CODES = [
 ] as const;
 export type ErrorCode = typeof ERROR_CODES[number];
 
-export const CAPABILITIES = ["terminal", "files", "projects", "status"] as const;
+/**
+ * What a daemon offers, in `welcome.capabilities`. Past the v1 four, each names requests or notices a client may use
+ * only when listed (an older daemon answers `unsupported`, or drops a notice): `projects.edit` (`projects.add`,
+ * `projects.remove`, `projects.rename`), `git.worktree` (`git.worktreeAdd`, `git.worktreeRemove`), `term.rename`, and
+ * `pane.unread`.
+ */
+export const CAPABILITIES = ["terminal", "files", "projects", "status", "projects.edit", "git.worktree", "term.rename", "pane.unread"] as const;
+export type Capability = typeof CAPABILITIES[number];
 
 // ---------------------------------------------------------------------------------------------------------------
 // 1–2. Routing frames (node ↔ server, client ↔ server)
@@ -169,10 +176,16 @@ export interface TerminalInfo {
     argv: string[];
     exited?: { code: number | null; signal: string | null };
     status?: PaneView;
+    /** The name a user gave the terminal (`term.rename`); clients show it before any other. */
+    label?: string;
 }
 export interface Stat { size: number; mtimeMs: number; hash?: string }
 export interface DirEntry { name: string; kind: "file" | "dir" | "symlink" | "other"; size: number; mtimeMs: number }
-export interface Project { name: string; path: string; repository?: string }
+/**
+ * A project on the node. `name` is the user's name for it (`projects.rename`) when `named`, else its folder's name.
+ * `worktree` is the main checkout's path when the project is a linked git worktree.
+ */
+export interface Project { name: string; path: string; repository?: string; named?: true; worktree?: string }
 export type Expected = { hash: string } | { mtimeMs: number; size: number } | { absent: true };
 export type Encoding = "utf8" | "base64";
 /** `fs.gitShow`'s source: the commit `HEAD`, or the index (the staged content). */
@@ -212,7 +225,13 @@ export interface Requests {
     "term.detach": { terminalId: string };
     "term.kill": { terminalId: string; signal?: Signal };
     "term.cwd": { terminalId: string };
+    "term.rename": { terminalId: string; label: string | null };
     "projects.list": Record<never, never>;
+    "projects.add": { path: string };
+    "projects.remove": { path: string };
+    "projects.rename": { path: string; name: string | null };
+    "git.worktreeAdd": { project: string; branch: string; base?: string };
+    "git.worktreeRemove": { path: string };
     "fs.readDir": { path: string };
     "fs.read": { path: string };
     "fs.write": { path: string; encoding: Encoding; data: string; expected: Expected; mode?: number };
@@ -234,7 +253,14 @@ export interface Results {
     "term.kill": Record<never, never>;
     /** The working directory of the terminal's shell now, which a `cd` changes (`TerminalInfo.cwd` is where it started). */
     "term.cwd": { cwd: string };
+    "term.rename": { terminal: TerminalInfo };
     "projects.list": { projects: Project[] };
+    "projects.add": { project: Project };
+    /** `hidden`: the project was found on its own (a root, a terminal's repository), so the node now hides it. */
+    "projects.remove": { hidden: boolean };
+    "projects.rename": { project: Project };
+    "git.worktreeAdd": { project: Project };
+    "git.worktreeRemove": Record<never, never>;
     "fs.readDir": { entries: DirEntry[]; truncated: boolean };
     "fs.read": { encoding: Encoding; data: string; stat: Stat };
     "fs.write": { stat: Stat };
@@ -257,7 +283,8 @@ export type Request<K extends RequestType = RequestType> = K extends RequestType
 export type Notice =
     | { type: "term.input"; terminalId: string; data: string }
     | { type: "term.resize"; terminalId: string; cols: number; rows: number; claim?: boolean }
-    | { type: "pane.seen"; terminalId: string };
+    | { type: "pane.seen"; terminalId: string }
+    | { type: "pane.unread"; terminalId: string };
 export type ClientMessage = Request | Notice;
 
 export interface ReplyError { code: ErrorCode | string; message: string; current?: Stat }
@@ -285,6 +312,8 @@ export type NodeEvent =
     | { type: "term.snapshot"; terminalId: string; snapshot: Snapshot }
     | { type: "term.resized"; terminalId: string; cols: number; rows: number; owned: boolean }
     | { type: "term.title"; terminalId: string; title: string }
+    | { type: "term.renamed"; terminalId: string; label: string | null }
+    | { type: "projects.changed" }
     | { type: "term.exit"; terminalId: string; code: number | null; signal: string | null }
     | { type: "fs.changed"; watch: string; path: string; kind: "change" | "rename" | "gone" }
     | { type: "pane.status"; terminalId: string; status: PaneView | null }
@@ -500,6 +529,9 @@ const programStatus = object({
 const paneView = object({ state: literal("idle", "busy", "waiting"), "?program": programStatus, "?bridge": isBridgeStatus, bridgeConnected: bool, unread: bool });
 
 const terminalId = id;
+/** The longest name a user may give a terminal or a project, in UTF-16 units. */
+export const TERMINAL_LABEL = 120;
+export const PROJECT_NAME = 120;
 const cols = int(1, LIMITS.maxCols);
 const rows = int(1, LIMITS.maxRows);
 const env: Check = value => isRecord(value) && Object.keys(value).length <= LIMITS.maxEnv
@@ -521,7 +553,14 @@ export const parseClientMessage = parser<ClientMessage>({
     "term.input": { terminalId, data: str(LIMITS.maxInputBytes) },
     "term.resize": { terminalId, cols, rows, "?claim": bool },
     "pane.seen": { terminalId },
+    "pane.unread": { terminalId },
+    "term.rename": { id: requestId, terminalId, label: nullable(label(TERMINAL_LABEL)) },
     "projects.list": { id: requestId },
+    "projects.add": { id: requestId, path: isAbsolutePath },
+    "projects.remove": { id: requestId, path: isAbsolutePath },
+    "projects.rename": { id: requestId, path: isAbsolutePath, name: nullable(label(PROJECT_NAME)) },
+    "git.worktreeAdd": { id: requestId, project: isAbsolutePath, branch: label(255), "?base": label(255) },
+    "git.worktreeRemove": { id: requestId, path: isAbsolutePath },
     "fs.readDir": { id: requestId, path: isAbsolutePath },
     "fs.read": { id: requestId, path: isAbsolutePath },
     "fs.write": { id: requestId, path: isAbsolutePath, encoding: literal("utf8", "base64"), data: value => typeof value === "string", expected, "?mode": int(0, 0o7777) },
@@ -542,6 +581,7 @@ const terminalInfo = object({
     argv: arrayOf(value => typeof value === "string", LIMITS.maxArgv + 2, 1),
     "?exited": object({ code: nullable(int(-(2 ** 31), 2 ** 31)), signal: nullable(label(32)) }),
     "?status": paneView,
+    "?label": label(TERMINAL_LABEL),
 });
 const replyError = object({ code: label(64), message: str(4 * KiB), "?current": object({ size: time, mtimeMs: time, "?hash": hex64 }) });
 
@@ -560,6 +600,8 @@ export const parseNodeMessage = parser<NodeMessage>({
     "term.snapshot": { terminalId, snapshot },
     "term.resized": { terminalId, cols, rows, owned: bool },
     "term.title": { terminalId, title: str(4 * KiB) },
+    "term.renamed": { terminalId, label: nullable(label(TERMINAL_LABEL)) },
+    "projects.changed": {},
     "term.exit": { terminalId, code: nullable(int(-(2 ** 31), 2 ** 31)), signal: nullable(label(32)) },
     "fs.changed": { watch: id, path: isAbsolutePath, kind: literal("change", "rename", "gone") },
     "pane.status": { terminalId, status: nullable(paneView) },

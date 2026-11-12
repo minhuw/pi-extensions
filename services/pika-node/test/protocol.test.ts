@@ -84,6 +84,30 @@ describe("inner messages", () => {
         expect(parseClientMessage({ type: "term.create", id: "1", cols: 80, rows: 24, env: { "BAD-NAME": "x" } }).ok).toBe(false);
     });
 
+    it("parses the rail's requests and notices: projects, worktrees, names, unread", () => {
+        expect(parseClientMessage({ type: "projects.add", id: "1", path: "/a" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "projects.add", id: "1", path: "a" }).ok).toBe(false);
+        expect(parseClientMessage({ type: "projects.remove", id: "1", path: "/a" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "projects.rename", id: "1", path: "/a", name: "Mine" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "projects.rename", id: "1", path: "/a", name: null }).ok).toBe(true);
+        expect(parseClientMessage({ type: "projects.rename", id: "1", path: "/a" }).ok).toBe(false);
+        expect(parseClientMessage({ type: "projects.rename", id: "1", path: "/a", name: " " }).ok).toBe(false);
+        expect(parseClientMessage({ type: "projects.rename", id: "1", path: "/a", name: "x".repeat(121) }).ok).toBe(false);
+        expect(parseClientMessage({ type: "git.worktreeAdd", id: "1", project: "/a", branch: "feat/x" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "git.worktreeAdd", id: "1", project: "/a", branch: "feat/x", base: "main" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "git.worktreeAdd", id: "1", project: "/a", branch: "a\nb" }).ok).toBe(false);
+        expect(parseClientMessage({ type: "git.worktreeRemove", id: "1", path: "/a" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "term.rename", id: "1", terminalId: "t1", label: "Reviewer" }).ok).toBe(true);
+        expect(parseClientMessage({ type: "term.rename", id: "1", terminalId: "t1", label: null }).ok).toBe(true);
+        expect(parseClientMessage({ type: "term.rename", id: "1", terminalId: "t1", label: "a\u001bb" }).ok).toBe(false);
+        expect(parseClientMessage({ type: "pane.unread", terminalId: "t1" }).ok).toBe(true);
+        expect(parseNodeMessage({ type: "term.renamed", terminalId: "t1", label: "Reviewer" }).ok).toBe(true);
+        expect(parseNodeMessage({ type: "term.renamed", terminalId: "t1", label: null }).ok).toBe(true);
+        expect(parseNodeMessage({ type: "projects.changed" }).ok).toBe(true);
+        expect(parseNodeMessage({ type: "term.created", terminal: { terminalId: "t1", title: "", cwd: "/", cols: 1, rows: 1, pid: 1, createdAt: 1, argv: ["sh"], label: "Mine" } })).toMatchObject({ ok: true, message: { terminal: { label: "Mine" } } });
+        expect(parseNodeMessage({ type: "term.created", terminal: { terminalId: "t1", title: "", cwd: "/", cols: 1, rows: 1, pid: 1, createdAt: 1, argv: ["sh"], label: "" } }).ok).toBe(false);
+    });
+
     it("answers unknown requests by id", () => {
         expect(parseClientMessage({ type: "term.teleport", id: "9" })).toEqual({ ok: false, reason: "unknown", type: "term.teleport", id: "9" });
     });

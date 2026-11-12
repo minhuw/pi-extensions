@@ -13,10 +13,13 @@ export class Pane {
     unread = false;
     exited = false;
     #state: PaneState = "idle";
+    /** The user marked the pane unread (`pane.unread`), until it is seen. */
+    #marked = false;
     #last = "null";
 
     view(): PaneView | null {
-        if (this.exited || (!this.program && !this.bridge)) return null;
+        // Without a source, a pane has a view only while the user's own unread mark (`pane.unread`) stands.
+        if (this.exited || (!this.program && !this.bridge && !(this.#marked && this.unread))) return null;
         return {
             state: this.#state,
             ...(this.program ? { program: this.program } : {}),
@@ -69,6 +72,14 @@ export class Pane {
 
     seen(): boolean {
         this.unread = false;
+        this.#marked = false;
+        return this.#update();
+    }
+
+    /** `pane.unread`: the user marks the pane for later, as if it had just finished. */
+    markUnread(): boolean {
+        this.unread = true;
+        this.#marked = true;
         return this.#update();
     }
 

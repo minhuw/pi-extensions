@@ -4,7 +4,7 @@
  * answerer, OSC 7501 pane status, the size owner, the bridge, and the spawn environment.
  */
 import { spawn } from "node:child_process";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -274,6 +274,48 @@ describe("pika-node daemon over the unix socket", () => {
         expect(JSON.parse(strayInbox.join(""))).toMatchObject({ type: "reply", id: "hello", error: { code: "not_found" } });
         await a.request("term.kill", { terminalId: id, signal: "SIGKILL" });
         a.close();
+    }, 30_000);
+
+    it("shares names, unread marks, and project edits with every client", async () => {
+        const a = await socketClient(home);
+        const b = await socketClient(home);
+        const welcome = a.inbox.messages.find(m => m.type === "welcome")!;
+        expect(welcome.capabilities).toEqual(expect.arrayContaining(["projects.edit", "git.worktree", "term.rename", "pane.unread"]));
+        const { terminal } = await a.request<Created>("term.create", { cols: 80, rows: 24, argv: ["bash", "--noprofile", "--norc"] });
+        const id = terminal.terminalId;
+
+        // A name goes to every client, survives in term.list, and null clears it.
+        const renamed = await a.request<{ terminal: TerminalInfo }>("term.rename", { terminalId: id, label: "  Reviewer " });
+        expect(renamed.terminal.label).toBe("Reviewer");
+        expect(await b.inbox.waitFor(m => m.type === "term.renamed" && m.terminalId === id)).toMatchObject({ label: "Reviewer" });
+        expect((await b.request<{ terminals: TerminalInfo[] }>("term.list")).terminals.find(t => t.terminalId === id)?.label).toBe("Reviewer");
+        await a.request("term.rename", { terminalId: id, label: null });
+        await b.inbox.waitFor(m => m.type === "term.renamed" && m.terminalId === id && m.label === null);
+        expect((await b.request<{ terminals: TerminalInfo[] }>("term.list")).terminals.find(t => t.terminalId === id)?.label).toBeUndefined();
+
+        // A plain shell marked unread gets a status, and pane.seen takes it away.
+        a.send({ type: "pane.unread", terminalId: id });
+        expect((await b.inbox.waitFor(m => m.type === "pane.status" && m.terminalId === id)).status).toMatchObject({ state: "idle", unread: true });
+        a.send({ type: "pane.seen", terminalId: id });
+        await b.inbox.waitFor(m => m.type === "pane.status" && m.terminalId === id && m.status === null);
+
+        // Project edits persist in config.json and tell every client to list again.
+        const extra = join(home.home, "extra");
+        mkdirSync(extra, { recursive: true });
+        const added = await a.request<{ project: { path: string } }>("projects.add", { path: extra });
+        expect(added.project.path).toBe(realpathSync(extra));
+        await b.inbox.waitFor(m => m.type === "projects.changed");
+        expect(JSON.parse(readFileSync(home.config, "utf8")).projects).toEqual([realpathSync(extra)]);
+        await a.request("projects.rename", { path: extra, name: "Extra" });
+        expect((await b.request<{ projects: { name: string; path: string }[] }>("projects.list")).projects.find(p => p.path === realpathSync(extra))?.name).toBe("Extra");
+        await a.request("projects.remove", { path: extra });
+        expect((await b.request<{ projects: { path: string }[] }>("projects.list")).projects.some(p => p.path === realpathSync(extra))).toBe(false);
+        expect(await a.requestError("projects.add", { path: join(home.home, "missing") })).toMatchObject({ code: "not_found" });
+        expect(await a.requestError("git.worktreeRemove", { path: project })).toMatchObject({ code: "invalid" });
+
+        await a.request("term.kill", { terminalId: id, signal: "SIGKILL" });
+        a.close();
+        b.close();
     }, 30_000);
 
     it("answers over `pika-node attach` on stdio", async () => {
