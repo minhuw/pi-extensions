@@ -9,7 +9,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import {
-	createAgentSessionFromServices, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
+	createAgentSessionFromServices, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { publishGrant, repositoryOf, standingRegistry, withdrawGrant, type StandingApproval } from "../grants.ts";
 import { bashBlockReason, blockReason, registerGuard } from "../guard.ts";
@@ -342,6 +342,51 @@ describe("bash", () => {
 	it("survives commands that do not parse", () => {
 		expect(bashBlockReason("echo \"unterminated", repo, [repo])).toBeUndefined();
 		expect(bashBlockReason("if then fi )", repo, [repo])).toBeUndefined();
+	});
+});
+
+describe("process_start", () => {
+	const judge = (command: string, cwd: string, processCwd?: string) =>
+		blockReason("process_start", { command, ...(processCwd === undefined ? {} : { cwd: processCwd }) }, cwd, "some-session", [grant]);
+
+	it.each([
+		["git push origin HEAD", "out"],
+		["npm publish", "out"],
+		["sudo ls", "out"],
+		["ssh host ls", "out"],
+		["echo x > src/a.ts", "repo"],
+		["npm install", "repo"],
+	] as const)("blocks %j in %s with bash's reason", (command, where) => {
+		const cwd = where === "repo" ? repo : outside;
+		const reason = judge(command, cwd);
+		expect(reason).toMatch(/^Blocked by self-driving mode: /);
+		expect(reason).toBe(bashBlockReason(command, cwd, [repo]));
+	});
+
+	it("judges the command in its cwd, relative to the session's", () => {
+		expect(judge("echo x > log.txt", repo, "src")).toBe(bashBlockReason("echo x > log.txt", join(repo, "src"), [repo]));
+		expect(judge("echo x > log.txt", repo, "src")).toContain(join(repo, "src", "log.txt"));
+		expect(judge("npm install", repo, ".pi/workspaces/side")).toBeUndefined();
+		expect(judge("npm install", repo, "nested-wt")).toBeUndefined();
+	});
+
+	it("allows what bash allows", () => {
+		expect(judge("npm run dev", repo)).toBeUndefined();
+		expect(judge("npm install", outside)).toBeUndefined();
+	});
+
+	it("blocks through the hook while a grant exists, and stands aside without one", () => {
+		let hook: ((event: { toolName: string; input: unknown }, ctx: { cwd: string }) => unknown) | undefined;
+		registerGuard({ on: (_event: string, handler: typeof hook) => void (hook = handler) } as unknown as ExtensionAPI);
+		const commands = ["git push", "npm publish", "sudo ls", "ssh host ls", "echo x > src/a.ts"];
+		const call = (command: string) => hook!({ toolName: "process_start", input: { command } }, { cwd: repo });
+
+		publishGrant(grant);
+		for (const command of commands) expect(call(command)).toEqual({ block: true, reason: bashBlockReason(command, repo, [repo]) });
+		expect(call("npm run dev")).toBeUndefined();
+
+		withdrawGrant(grant.id);
+		for (const command of commands) expect(call(command)).toBeUndefined();
 	});
 });
 

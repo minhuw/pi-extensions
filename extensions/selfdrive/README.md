@@ -21,7 +21,7 @@ It may read the code, run tests and benchmarks on this machine, run background s
 
 It changes code only through Herder runs. While the mode is on it publishes a standing approval for this repository, which Herder reads: `approve_goal` approves goals and the findings picker takes the recommended findings without a dialog, and both are journaled with the approval's text. Verified runs are not delivered: they wait for you, and `/herder deliver <runId>` delivers one. Outside a git repository the mode still turns on, but no approval is published and Herder runs are unavailable.
 
-It never delivers, pushes, publishes, opens pull requests or issues, uses sudo or ssh, changes system settings, or edits your checkout. A `tool_call` guard, active in every session of the process while an approval exists (subagent and Herder children included), refuses these and says what to do instead: write in a worktree under `.pi/workspaces/` or through a Herder run. The guard's bash checks are heuristics that prevent accidents; they are not a sandbox.
+It never delivers, pushes, publishes, opens pull requests or issues, uses sudo or ssh, changes system settings, or edits your checkout. A `tool_call` guard, active in every session of the process while an approval exists (subagent and Herder children included), refuses these and says what to do instead: write in a worktree under `.pi/workspaces/` or through a Herder run. The guard's checks on `bash` and `process_start` commands are heuristics that prevent accidents; they are not a sandbox.
 
 ## How it runs
 

@@ -42,6 +42,11 @@ export function blockReason(toolName: string, input: unknown, cwd: string, sessi
 		return target && insideCheckout(target, toplevels) ? reasons.checkout(`${toolName} ${target}`) : undefined;
 	}
 	if (toolName === "bash" && typeof args.command === "string" && args.command.trim()) return bashBlockReason(args.command, cwd, toplevels);
+	if (toolName === "process_start" && typeof args.command === "string" && args.command.trim()) {
+		// The process runs in `cwd` relative to the session's, resolved the way the processes extension resolves it.
+		const dir = typeof args.cwd === "string" ? resolve(cwd, args.cwd.replace(/^@/, "")) : cwd;
+		return bashBlockReason(args.command, dir, toplevels);
+	}
 	return undefined;
 }
 
