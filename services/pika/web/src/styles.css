@@ -1,6 +1,6 @@
 @import "tailwindcss" source(none);
-/* The Nodes page's own design system, scoped under [data-workbench]. */
-@import "./nodes/workbench/workbench.css";
+/* Deck's own design system, scoped under [data-deck]. */
+@import "./nodes/deck/deck.css";
 @source "./";
 
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));

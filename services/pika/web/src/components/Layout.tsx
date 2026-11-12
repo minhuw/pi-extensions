@@ -242,13 +242,13 @@ function ChatroomsItem() {
 		</NavItem>
 	);
 }
-/** Nodes in the band; hidden unless the server has nodes on. */
-function NodesItem() {
+/** Deck in the band; hidden unless the server has nodes on. */
+function DeckItem() {
 	const { data } = useHealth();
 	if (!data?.features?.includes("nodes")) return null;
 	return (
-		<NavItem to="/nodes" icon="terminal">
-			Nodes
+		<NavItem to="/deck" icon="terminal">
+			Deck
 		</NavItem>
 	);
 }
@@ -271,14 +271,15 @@ function GuestViewLink() {
 	);
 }
 
-function SignOutButton() {
+/** Signs this browser out and goes to the login page; undefined unless the server signs in with a password. */
+export function useSignOut(): (() => Promise<void>) | undefined {
 	const api = useApi();
 	const me = useMe();
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
 	const { setSigningOut } = useSigningOut();
-	if (authModeOf(me.data) !== "password" || !me.data?.authenticated) return null;
-	const signOut = async () => {
+	if (authModeOf(me.data) !== "password" || !me.data?.authenticated) return undefined;
+	return async () => {
 		setSigningOut(true);
 		try {
 			await api.logout();
@@ -287,6 +288,11 @@ function SignOutButton() {
 			navigate("/login", { replace: true });
 		}
 	};
+}
+
+function SignOutButton() {
+	const signOut = useSignOut();
+	if (!signOut) return null;
 	return (
 		// Like View as guest: the icon always, and the name only on wide screens.
 		<button type="button" onClick={() => void signOut()} className={BAND_CONTROL} title="Sign out">
@@ -438,7 +444,7 @@ export function Layout({ children }: { children?: ReactNode }) {
 						</NavItem>
 						<ActiveSessionsItem />
 						<ChatroomsItem />
-						<NodesItem />
+						<DeckItem />
 						<NavItem to="/devices" icon="device">
 							Devices
 						</NavItem>

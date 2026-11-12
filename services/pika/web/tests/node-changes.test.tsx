@@ -272,7 +272,7 @@ describe("the changes store", () => {
 	});
 });
 
-/** The Changes panel and the tab it opens, wired as the Nodes page wires them (its sidebar and a tab group's body). */
+/** The Changes panel and the tab it opens, wired as Deck wires them (its sidebar and a tab group's body). */
 function ChangesHarness({ store, onStore }: { store: EditorStore; onStore?: (changes: ChangesStore) => void }) {
 	const changes = useMemo(() => new ChangesStore(files, "/repo", { onChanged: (paths) => store.refreshDiffs(paths) }), [store]);
 	useEffect(() => {

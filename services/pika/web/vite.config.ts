@@ -10,13 +10,13 @@ export default defineConfig(({ mode }) => ({
 	server: {
 		// Herder worktrees live under `.git/`, which Vite's default deny list blocks for test modules.
 		// Tests also read the logo's source of truth, `../resource/pika-icon.svg`. Both modes serve the pika-node
-		// contract (`../../pika-node/src`), which the Nodes page imports by relative path.
+		// contract (`../../pika-node/src`), which Deck imports by relative path.
 		fs:
 			mode === "test"
 				? { deny: [".env", ".env.*", "*.{crt,pem}"], allow: [".", "../resource", "../../pika-node/src"] }
 				: { allow: [".", "../../pika-node/src"] },
 		proxy: {
-			// `ws` for the Nodes page's socket, `/api/v1/node/connect`.
+			// `ws` for Deck's socket, `/api/v1/node/connect`.
 			"/api": { target: "http://127.0.0.1:7171", ws: true },
 		},
 	},

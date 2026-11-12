@@ -1,19 +1,19 @@
 import type { Theme } from "../../lib/theme";
 
 /**
- * The Workbench design system's name, in one place (`services/pika/DESIGN.workbench.md`). Its CSS lives in
- * `workbench.css` under `[data-workbench]` with the `--wb-` prefix.
+ * The Deck design system's name, in one place (`services/pika/DESIGN.deck.md`). Its CSS lives in
+ * `deck.css` under `[data-deck]` with the `--dk-` prefix.
  */
-export const WORKBENCH = "Workbench";
+export const DECK = "Deck";
 
-/** The root element's attribute: everything inside it takes the Workbench tokens. */
-export const WORKBENCH_ROOT = { "data-workbench": "" } as const;
+/** The root element's attribute: everything inside it takes the Deck tokens. */
+export const DECK_ROOT = { "data-deck": "" } as const;
 
 /**
- * The tokens the terminal and Monaco take as literals, as `workbench.css` sets them (a test compares the two). Only
+ * The tokens the terminal and Monaco take as literals, as `deck.css` sets them (a test compares the two). Only
  * what a canvas or a Monaco theme needs is here; the page reads the CSS.
  */
-export const WB_TOKENS = {
+export const DK_TOKENS = {
 	light: { ground: "#fcfcfd", chrome: "#f1f3f5", line: "#dde1e6", ink: "#161a1f", ink2: "#4f5863", accent: "#5a46c8" },
 	dark: { ground: "#111417", chrome: "#171a1e", line: "#262b31", ink: "#e4e7eb", ink2: "#a6aeb8", accent: "#a596ff" },
 } as const satisfies Record<Theme, Record<string, string>>;

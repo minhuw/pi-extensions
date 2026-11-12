@@ -236,7 +236,7 @@ async fn every_route_links_the_same_absolute_asset_urls() {
         let s = server(base, None, None);
         let prefix = if base == "/" { "" } else { base };
         let root = get(&s.app, &format!("{prefix}/"), None).await.text();
-        for route in ["/nodes/x", "/nodes/x/t1", "/s/y", "/public/s/y", "/runs/r1", "/docs/a/b.md"] {
+        for route in ["/deck/x", "/deck/x/t1", "/s/y", "/public/s/y", "/runs/r1", "/docs/a/b.md"] {
             let page = get(&s.app, &format!("{prefix}{route}"), None).await;
             assert_eq!(page.status, StatusCode::OK, "{base} {route}");
             assert_eq!(page.text(), root, "{base} {route}");
@@ -252,7 +252,7 @@ async fn every_route_links_the_same_absolute_asset_urls() {
             if file.starts_with("assets/") {
                 assert_eq!(r.headers[header::CACHE_CONTROL], "public, max-age=31536000, immutable", "{url}");
                 // A route-relative copy of the same file is no longer a second cache entry.
-                let nested = get(&s.app, &format!("{prefix}/nodes/x/{file}"), None).await;
+                let nested = get(&s.app, &format!("{prefix}/deck/x/{file}"), None).await;
                 assert!(nested.headers[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"), "{url}");
             }
         }

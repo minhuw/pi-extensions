@@ -8,7 +8,7 @@ WORKDIR /src/services/pika/web
 COPY services/pika/web/package.json services/pika/web/package-lock.json ./
 RUN npm ci
 COPY services/pika/web/ ./
-# The Nodes page imports the pika-node contract (src/{protocol,crypto}.ts) by relative path.
+# Deck imports the pika-node contract (src/{protocol,crypto}.ts) by relative path.
 COPY services/pika-node/src/ /src/services/pika-node/src/
 # Preserve repository-relative Markdown paths for the docs build's content whitelist.
 COPY README.md /src/README.md

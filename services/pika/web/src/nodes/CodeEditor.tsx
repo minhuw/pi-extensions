@@ -6,7 +6,7 @@ import { languageFor } from "./language";
 import { monaco, themeName } from "./monaco/setup";
 
 /**
- * Monaco for the Nodes page's editor tabs; this module is the page's lazily loaded Monaco chunk. Each file tab keeps
+ * Monaco for Deck's editor tabs; this module is the page's lazily loaded Monaco chunk. Each file tab keeps
  * one text model while it is open (its undo history and view state survive switching tabs); the store holds the
  * buffer's text, which the model follows and reports back to.
  */

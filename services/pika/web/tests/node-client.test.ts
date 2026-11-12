@@ -97,7 +97,7 @@ async function setup() {
 
 const link = (c: NodesClient) => c.getSnapshot().nodes[0]!.link;
 
-describe("the Nodes page client", () => {
+describe("Deck client", () => {
 	it("lists nodes and opens no channel to an unpinned node on its own", async () => {
 		const { server, client: c } = await setup();
 		expect(c.getSnapshot()).toMatchObject({ status: "open", nodes: [{ info: { id: "node-1", online: true }, link: { kind: "idle" } }] });

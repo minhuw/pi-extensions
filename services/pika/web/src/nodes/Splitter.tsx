@@ -78,7 +78,7 @@ export function Splitter({
 			className={cx(
 				// A 1px rule with a wider hit area over it.
 				"relative z-10 -mx-[3px] w-[7px] shrink-0 cursor-col-resize touch-none outline-none",
-				"before:absolute before:inset-y-0 before:left-[3px] before:w-px before:bg-line hover:before:bg-wb-line-strong focus-visible:before:w-[2px] focus-visible:before:bg-wb-accent",
+				"before:absolute before:inset-y-0 before:left-[3px] before:w-px before:bg-line hover:before:bg-dk-line-strong focus-visible:before:w-[2px] focus-visible:before:bg-dk-accent",
 			)}
 			data-splitter={name}
 		/>

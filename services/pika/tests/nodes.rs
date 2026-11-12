@@ -274,7 +274,7 @@ async fn a_node_connects_with_its_credential_and_shows_online() {
     let health = http(&s.app, get("/api/health", None)).await;
     assert_eq!(health.json()["features"], json!(["relay", "agent", "nodes"]));
     // Pages at every depth, and the 404 of a missing build file, carry the policy.
-    for path in ["/sessions/x", "/nodes/x/t1", "/assets/missing-0000.js"] {
+    for path in ["/sessions/x", "/deck/x/t1", "/assets/missing-0000.js"] {
         let page = http(&s.app, get(path, None)).await;
         assert_eq!(
             page.headers.get("content-security-policy").unwrap(),

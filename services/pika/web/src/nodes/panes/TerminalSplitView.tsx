@@ -15,6 +15,7 @@
  * `pane-drag-pointer.ts` (the drag threshold and the nearest-edge drop zone).
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { tip } from "../deck/Tooltips";
 import { cx } from "../../components/ui";
 import { hasLeaf, leaves, MIN_PANE_PX, moveLeaf, sameTree, setRatio, type PaneDirection, type PaneEdge, type PanePath, type PaneTree } from "./pane-tree";
 import { useTerminalSlots, type TerminalSlots } from "./slot-contract";
@@ -186,7 +187,7 @@ export function TerminalSplitView(props: TerminalSplitViewProps) {
             <Node node={props.tree} path={[]} context={context} style={{ flex: "1 1 0%" }} />
             {drop && (
                 <div
-                    className="pointer-events-none absolute z-50 border-2 border-wb-accent bg-wb-accent-soft"
+                    className="pointer-events-none absolute z-50 border-2 border-dk-accent bg-dk-accent-soft"
                     style={{ left: drop.box.left, top: drop.box.top, width: drop.box.width, height: drop.box.height }}
                     data-pane-drop={`${drop.target}:${drop.edge}`}
                 />
@@ -257,7 +258,7 @@ function Pane({ terminalId, context, style }: { terminalId: string; context: Vie
             className={cx(
                 "relative flex min-h-0 min-w-0 flex-col overflow-hidden",
                 multi && "border",
-                multi && (focused ? "border-wb-accent" : "border-line"),
+                multi && (focused ? "border-dk-accent" : "border-line"),
                 context.moving === terminalId && "opacity-50",
             )}
             style={style}
@@ -270,13 +271,13 @@ function Pane({ terminalId, context, style }: { terminalId: string; context: Vie
                     <span
                         className="flex h-5 w-4 shrink-0 cursor-grab touch-none items-center justify-center rounded-sm hover:bg-page"
                         onPointerDown={(event) => context.startMove(terminalId, event)}
-                        title="Drag to another pane's edge to move this pane"
+                        {...tip("Drag to another pane's edge to move this pane")}
                         aria-hidden="true"
                         data-pane-grip={terminalId}
                     >
                         <Glyph name="grip" />
                     </span>
-                    <span className="min-w-0 flex-1 truncate" title={name}>
+                    <span className="min-w-0 flex-1 truncate" {...tip(name)}>
                         {name}
                     </span>
                     <PaneButton label="Split right" onClick={() => context.props().onSplit("row")} glyph="splitRight" />
@@ -291,7 +292,7 @@ function Pane({ terminalId, context, style }: { terminalId: string; context: Vie
 
 function PaneButton({ label, onClick, glyph, ...rest }: { label: string; onClick: () => void; glyph: GlyphName; "data-pane-close"?: string }) {
     return (
-        <button type="button" className="flex h-6 w-6 shrink-0 items-center justify-center hover:bg-page hover:text-ink" onClick={onClick} title={label} aria-label={label} {...rest}>
+        <button type="button" className="flex h-6 w-6 shrink-0 items-center justify-center hover:bg-page hover:text-ink" onClick={onClick} aria-label={label} {...tip(label)} {...rest}>
             <Glyph name={glyph} />
         </button>
     );
@@ -492,7 +493,7 @@ function Divider({ direction, ratio, path, context }: { direction: PaneDirection
             onDoubleClick={() => commitRatio(0.5)}
             className={cx(
                 // A real gap, so the terminal layer drawn over the slots never covers the hit area; a 1px rule in it.
-                "relative shrink-0 touch-none outline-none before:absolute before:bg-line hover:before:bg-wb-line-strong focus-visible:before:bg-wb-accent",
+                "relative shrink-0 touch-none outline-none before:absolute before:bg-line hover:before:bg-dk-line-strong focus-visible:before:bg-dk-accent",
                 row ? "w-[5px] cursor-col-resize before:inset-y-0 before:left-[2px] before:w-px" : "h-[5px] cursor-row-resize before:inset-x-0 before:top-[2px] before:h-px",
             )}
             data-pane-divider={path.join("/")}

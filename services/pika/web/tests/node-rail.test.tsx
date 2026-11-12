@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NodeView } from "../src/nodes/client";
 import type { PaneView, TerminalInfo } from "../src/nodes/contract";
-import { WB_TOKENS } from "../src/nodes/workbench/tokens";
+import { DK_TOKENS } from "../src/nodes/deck/tokens";
 import { AgentRail, loadRailPrefs, RAIL_KEY, railAgents, useInbox } from "../src/nodes/workspace/AgentRail";
 import { OTHER } from "../src/nodes/workspace/store";
 
@@ -43,7 +43,7 @@ function Harness({ nodes, calls, selected }: { nodes: NodeView[]; calls: Calls; 
 	const map = useMemo(() => new Map(agents.map((agent) => [agent.key, agent])), [agents]);
 	const inbox = useInbox(agents, selected, hovering);
 	return (
-		<div data-workbench="">
+		<div data-deck="">
 			<AgentRail
 				nodes={nodes}
 				agents={map}
@@ -223,16 +223,16 @@ describe("the agent rail", () => {
 	});
 });
 
-describe("the Workbench tokens", () => {
-	it("gives the terminal and Monaco the values workbench.css sets", () => {
-		const css = readFileSync("src/nodes/workbench/workbench.css", "utf8");
-		const light = css.slice(css.indexOf("[data-workbench] {"), css.indexOf('[data-theme="dark"] [data-workbench]'));
-		const dark = css.slice(css.indexOf('[data-theme="dark"] [data-workbench]'), css.indexOf("@theme inline"));
-		const value = (block: string, name: string) => block.match(new RegExp(`--wb-${name}: (#[0-9a-f]{6});`))?.[1];
+describe("the Deck tokens", () => {
+	it("gives the terminal and Monaco the values deck.css sets", () => {
+		const css = readFileSync("src/nodes/deck/deck.css", "utf8");
+		const light = css.slice(css.indexOf("[data-deck] {"), css.indexOf('[data-theme="dark"] [data-deck]'));
+		const dark = css.slice(css.indexOf('[data-theme="dark"] [data-deck]'), css.indexOf("@theme inline"));
+		const value = (block: string, name: string) => block.match(new RegExp(`--dk-${name}: (#[0-9a-f]{6});`))?.[1];
 		const names = { ground: "ground", chrome: "chrome", line: "line", ink: "ink", ink2: "ink-2", accent: "accent" } as const;
 		for (const [key, name] of Object.entries(names)) {
-			expect(value(light, name), name).toBe(WB_TOKENS.light[key as keyof typeof names]);
-			expect(value(dark, name), name).toBe(WB_TOKENS.dark[key as keyof typeof names]);
+			expect(value(light, name), name).toBe(DK_TOKENS.light[key as keyof typeof names]);
+			expect(value(dark, name), name).toBe(DK_TOKENS.dark[key as keyof typeof names]);
 		}
 	});
 });

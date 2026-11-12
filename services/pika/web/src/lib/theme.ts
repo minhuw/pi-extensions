@@ -56,7 +56,7 @@ export function useTheme(): { theme: Theme; toggle: () => void } {
 }
 
 /**
- * The theme on `<html data-theme>`, followed as it changes: for views that only read it (the Nodes page's terminals
+ * The theme on `<html data-theme>`, followed as it changes: for views that only read it (Deck's terminals
  * and editors). Each `useTheme` keeps its own state, so a second `useTheme` would not hear the header's toggle.
  */
 export function useAppliedTheme(): Theme {

@@ -1,5 +1,5 @@
 /**
- * The Nodes page's shortcuts, all in one registry: what each action is, its default chords per platform, where it may
+ * Deck's shortcuts, all in one registry: what each action is, its default chords per platform, where it may
  * fire, and the user's rebindings from `localStorage`.
  *
  * - **Platforms:** chords use Cmd on macOS; elsewhere Ctrl+Shift, as Ctrl-F, Ctrl-P, and most other Ctrl letters are

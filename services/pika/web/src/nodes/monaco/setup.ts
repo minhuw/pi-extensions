@@ -1,6 +1,6 @@
 /**
  * Monaco, bundled and set up for pika's Content Security Policy (NODE.md, "Server hardening": `script-src 'self'`,
- * `worker-src 'self' blob:`, no eval). Only the Nodes page's editor imports this module, through a dynamic import, so
+ * `worker-src 'self' blob:`, no eval). Only Deck's editor imports this module, through a dynamic import, so
  * no other page loads it.
  *
  * - **Workers:** the one editor worker (diffs, word suggestions, links) is a Vite `?worker` chunk served from 'self';
@@ -16,7 +16,7 @@ import "monaco-editor/languages/definitions/register.all";
 import * as monaco from "monaco-editor/editor/editor.api";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 import type { Theme } from "../../lib/theme";
-import { blend, WB_TOKENS } from "../workbench/tokens";
+import { blend, DK_TOKENS } from "../deck/tokens";
 
 declare global {
 	interface Window {
@@ -26,9 +26,9 @@ declare global {
 
 window.MonacoEnvironment = { getWorker: () => new EditorWorker() };
 
-// The Workbench's ground, ink, and accent (`workbench/tokens.ts`), as the terminal uses them.
+// Deck's ground, ink, and accent (`deck/tokens.ts`), as the terminal uses them.
 for (const theme of ["light", "dark"] as const) {
-	const tokens = WB_TOKENS[theme];
+	const tokens = DK_TOKENS[theme];
 	monaco.editor.defineTheme(`pika-${theme}`, {
 		base: theme === "dark" ? "vs-dark" : "vs",
 		inherit: true,

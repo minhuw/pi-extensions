@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MutableRefObject, type ReactNode } from "react";
 import { Icon } from "../components/icons";
+import { copyText } from "../lib/clipboard";
 import { BUTTON, Callout, cx, Segmented } from "../components/ui";
 import type { Theme } from "../lib/theme";
 import { CHANGE_GROUPS, changeMode, type Change, type ChangesSnapshot, type ChangesStore } from "./changes";
@@ -8,11 +9,12 @@ import type { DiffControl } from "./CodeEditor";
 import { sanitize, type Project } from "./contract";
 import { type DiffTab, type EditorStore, type EditorTab, type FileTab } from "./editor";
 import { baseName, dirName, joinPath, READ_LIMIT_LABEL, type NodeFiles } from "./files";
-import { actionShortcut } from "./keys";
+import { isMenuKey, menuAtPointer, menuBelow, useMenu, type MenuEntry } from "./deck/Menu";
+import { tip } from "./deck/Tooltips";
 import { FileTree, visibleEntries, type TreeSnapshot } from "./tree";
 
 /**
- * The Nodes page's file views (NODE.md §4 "Files"): the explorer's tree under a project, git's changes, and the body
+ * Deck's file views (NODE.md §4 "Files"): the explorer's tree under a project, git's changes, and the body
  * of an editor tab (a file in Monaco, or a diff) as the workspace's tab groups show it.
  */
 
@@ -78,6 +80,23 @@ export function Explorer(props: ExplorerProps) {
 	const treeView = useTree(tree);
 	expandedRef.current = { root, dirs: treeView.root === root ? treeView.expanded : expandedRef.current.dirs };
 
+	const entryMenu = useMenu();
+	const rootMenu = useMenu();
+	/** A tree item's context menu: open (or fold), copy its path absolute or under the folder, refresh a folder. */
+	const onEntryMenu = (path: string, kind: string, folder: boolean, at: { x: number; y: number; flipY?: number }) => {
+		const relative = path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
+		const items: MenuEntry[] = [
+			folder
+				? { id: "toggle", label: treeView.expanded.has(path) ? "Collapse" : "Expand", run: () => void tree?.toggle(path) }
+				: { id: "open", label: "Open", run: () => void openEntry(path, kind, "open") },
+			"separator",
+			{ id: "copy-path", label: "Copy Path", run: () => void copyText(path) },
+			{ id: "copy-relative", label: "Copy Relative Path", run: () => void copyText(relative) },
+			...(folder ? (["separator", { id: "refresh", label: "Refresh", run: () => void tree?.refresh(path) }] as MenuEntry[]) : []),
+		];
+		entryMenu.open({ ...at, items, label: baseName(path), attrs: { "data-tree-menu": path } });
+	};
+
 	const openEntry = async (path: string, kind: string, how: OpenHow) => {
 		if (kind === "dir") return how === "preview" ? tree?.toggle(path) : undefined;
 		// A symlink may name a directory: list it if it is one.
@@ -88,28 +107,40 @@ export function Explorer(props: ExplorerProps) {
 	return (
 		<div className="flex min-h-0 flex-1 flex-col" data-explorer="">
 			<div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-line px-2">
-				<label className="sr-only" htmlFor="node-file-root">
-					Folder
-				</label>
-				<select
-					id="node-file-root"
-					className="h-7 min-w-0 flex-1 truncate rounded-sm border border-line bg-page px-1.5 text-[12.5px]"
-					value={root}
-					onChange={(event) => props.onRoot(event.target.value)}
+				<button
+					type="button"
+					className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-[4px] px-1.5 text-left text-[12.5px] font-medium hover:bg-dk-hover"
+					aria-haspopup="menu"
+					aria-expanded={rootMenu.openFor === "Folder"}
+					aria-label={`Folder: ${homePath(sanitize(root), props.home)}`}
+					onClick={(event) => {
+						if (rootMenu.openFor === "Folder") return rootMenu.close();
+						const known = props.projects.some((project) => project.path === root);
+						const items: MenuEntry[] = [
+							...(known ? [] : [{ id: `root:${root}`, label: homePath(sanitize(root), props.home), checked: true, run: () => {} }]),
+							...props.projects.map((project) => ({
+								id: `root:${project.path}`,
+								label: `${sanitize(project.name)}  ${homePath(sanitize(project.path), props.home)}`,
+								checked: project.path === root,
+								run: () => props.onRoot(project.path),
+							})),
+						];
+						rootMenu.open({ ...menuBelow(event.currentTarget), items, label: "Folder", attrs: { "data-root-menu": "" } });
+					}}
+					{...tip("Show another folder")}
 					data-file-root={root}
 				>
-					{!props.projects.some((project) => project.path === root) && <option value={root}>{homePath(sanitize(root), props.home)}</option>}
-					{props.projects.map((project) => (
-						<option key={project.path} value={project.path}>
-							{sanitize(project.name)} — {homePath(sanitize(project.path), props.home)}
-						</option>
-					))}
-				</select>
+					<Icon name="folder" size={13} className="shrink-0 text-dk-ink-2" />
+					<span className="min-w-0 flex-1 truncate">{homePath(sanitize(root), props.home)}</span>
+					<svg width="9" height="9" viewBox="0 0 10 10" className="shrink-0 text-dk-ink-3" aria-hidden="true">
+						<path d="M2.5 3.75 5 6.25l2.5-2.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+					</svg>
+				</button>
 				<button
 					type="button"
 					className={cx(BUTTON.quiet, "h-7 px-1.5", hidden && "text-ink")}
 					aria-pressed={hidden}
-					title={hidden ? "Hide dotfiles" : "Show dotfiles"}
+					{...tip(hidden ? "Hide dotfiles" : "Show dotfiles")}
 					onClick={() => props.onHidden(!hidden)}
 					data-show-hidden=""
 				>
@@ -119,11 +150,13 @@ export function Explorer(props: ExplorerProps) {
 			</div>
 			<div className="min-h-0 flex-1 overflow-auto" role="tree" aria-label={`Files in ${baseName(root)}`} data-file-tree={root}>
 				{files ? (
-					<TreeLevel tree={tree} view={treeView} dir={root} depth={0} hidden={hidden} activePath={props.activePath} onOpen={(path, kind, how) => void openEntry(path, kind, how)} />
+					<TreeLevel tree={tree} view={treeView} dir={root} depth={0} hidden={hidden} activePath={props.activePath} onOpen={(path, kind, how) => void openEntry(path, kind, how)} onMenu={onEntryMenu} />
 				) : (
 					<p className="p-3 text-[12.5px] text-muted">Not connected.</p>
 				)}
 			</div>
+			{entryMenu.menu}
+			{rootMenu.menu}
 		</div>
 	);
 }
@@ -219,6 +252,7 @@ function TreeLevel({
 	hidden,
 	activePath,
 	onOpen,
+	onMenu,
 }: {
 	tree: FileTree | undefined;
 	view: TreeSnapshot;
@@ -227,6 +261,7 @@ function TreeLevel({
 	hidden: boolean;
 	activePath?: string;
 	onOpen: (path: string, kind: string, how: OpenHow) => void;
+	onMenu: (path: string, kind: string, folder: boolean, at: { x: number; y: number; flipY?: number }) => void;
 }) {
 	const listing = view.dirs.get(dir);
 	const indent = { paddingLeft: 8 + depth * 14 };
@@ -275,23 +310,36 @@ function TreeLevel({
 							aria-expanded={folder ? open : undefined}
 							aria-selected={path === activePath}
 							className={cx(
-								"flex w-full items-center gap-1.5 py-[3px] pr-2 text-left text-[12.5px] hover:bg-hover",
-								path === activePath && "bg-hover font-medium",
+								"flex h-[22px] w-full items-center gap-1.5 pr-2 text-left text-[12.5px]",
+								path === activePath ? "bg-dk-accent-soft font-medium" : "hover:bg-hover",
 							)}
 							style={indent}
-							title={sanitize(path)}
+							{...tip(sanitize(path))}
 							onClick={() => onOpen(path, entry.kind, "preview")}
+							onContextMenu={(event) => {
+								event.preventDefault();
+								onMenu(path, entry.kind, folder, menuAtPointer(event));
+							}}
+							onKeyDown={(event) => {
+								if (!isMenuKey(event)) return;
+								event.preventDefault();
+								onMenu(path, entry.kind, folder, menuBelow(event.currentTarget));
+							}}
 							onDoubleClick={() => entry.kind !== "dir" && onOpen(path, entry.kind, "open")}
 							data-tree-entry={path}
 							data-kind={entry.kind}
 						>
-							<span className="w-2.5 shrink-0 text-center text-[10px] text-muted" aria-hidden="true">
-								{folder ? (open ? "▾" : "▸") : ""}
+							<span className="flex w-2.5 shrink-0 justify-center text-muted" aria-hidden="true">
+								{folder && (
+									<svg width="9" height="9" viewBox="0 0 10 10" className={cx("motion-safe:transition-transform", open && "rotate-90")}>
+										<path d="M3.5 2 6.5 5l-3 3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+									</svg>
+								)}
 							</span>
 							<Icon name={entry.kind === "dir" ? "folder" : "file"} size={13} className="shrink-0 text-muted" />
 							<span className={cx("min-w-0 truncate", entry.kind === "symlink" && "italic")}>{sanitize(entry.name)}</span>
 						</button>
-						{open && <TreeLevel tree={tree} view={view} dir={path} depth={depth + 1} hidden={hidden} activePath={activePath} onOpen={onOpen} />}
+						{open && <TreeLevel tree={tree} view={view} dir={path} depth={depth + 1} hidden={hidden} activePath={activePath} onOpen={onOpen} onMenu={onMenu} />}
 					</div>
 				);
 			})}
@@ -368,11 +416,6 @@ function TabBody(
 	);
 }
 
-const shortcutHint = (label: string, action: Parameters<typeof actionShortcut>[0]) => {
-	const shortcut = actionShortcut(action);
-	return shortcut ? `${label} (${shortcut})` : label;
-};
-
 /** A diff tab: what it compares, moving between changes, the layout, and the diff (or why there is none to show). */
 function DiffBody(props: EditorTabBodyProps & { tab: DiffTab; editor: ReactNode; diffChanges?: number; diffControl: MutableRefObject<DiffControl | null> }) {
 	const { tab, store, editor, diffChanges } = props;
@@ -386,7 +429,7 @@ function DiffBody(props: EditorTabBodyProps & { tab: DiffTab; editor: ReactNode;
 		<div className="flex min-h-0 flex-1 flex-col" data-diff-view={tab.key}>
 			{/* Wraps in a narrow panel, the controls going to a second line, rather than clipping them. */}
 			<div className="flex min-h-9 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-line px-3 py-1 text-[12px] text-muted" data-diff-header={tab.path}>
-				<span className="min-w-0 max-w-full truncate" title={sanitize(tab.path)}>
+				<span className="min-w-0 max-w-full truncate" {...tip(sanitize(tab.path))}>
 					{homePath(sanitize(tab.path), props.home)}
 				</span>
 				<span className="shrink-0" data-diff-labels="">
@@ -404,23 +447,23 @@ function DiffBody(props: EditorTabBodyProps & { tab: DiffTab; editor: ReactNode;
 							<button
 								type="button"
 								className={cx(BUTTON.quiet, "h-7 px-2")}
-								title={shortcutHint("Previous change", "diff.previous")}
+								{...tip("Previous change", "diff.previous")}
 								disabled={!diffChanges}
 								onClick={() => props.diffControl.current?.go("previous")}
 								data-diff-previous=""
 							>
-								<span aria-hidden="true">↑</span>
+								<Icon name="arrowDown" size={13} className="rotate-180" />
 								<span className="sr-only">Previous change</span>
 							</button>
 							<button
 								type="button"
 								className={cx(BUTTON.quiet, "h-7 px-2")}
-								title={shortcutHint("Next change", "diff.next")}
+								{...tip("Next change", "diff.next")}
 								disabled={!diffChanges}
 								onClick={() => props.diffControl.current?.go("next")}
 								data-diff-next=""
 							>
-								<span aria-hidden="true">↓</span>
+								<Icon name="arrowDown" size={13} />
 								<span className="sr-only">Next change</span>
 							</button>
 							<Segmented
@@ -519,7 +562,7 @@ export function ChangesList({
 		<>
 			<div className="flex items-center gap-1.5 px-3 py-1 text-[12px] text-muted">
 				<Icon name="branch" size={12} className="shrink-0" />
-				<span className="min-w-0 flex-1 truncate" title={sanitize(view.top)} data-changes-branch={view.branch ?? ""}>
+				<span className="min-w-0 flex-1 truncate" {...tip(sanitize(view.top))} data-changes-branch={view.branch ?? ""}>
 					{view.branch ? sanitize(view.branch) : "Detached HEAD"} · {homePath(sanitize(view.top), home)}
 				</span>
 				<button type="button" className="shrink-0 underline-offset-2 hover:text-ink hover:underline" onClick={onRefresh} data-changes-refresh="">
@@ -532,7 +575,7 @@ export function ChangesList({
 				if (items.length === 0) return null;
 				return (
 					<section key={group} aria-label={title} data-change-group={group}>
-						<h3 className="px-3 pt-2 pb-0.5 text-[11.5px] font-medium tracking-[0.02em] text-muted uppercase">
+						<h3 className="px-3 pt-2 pb-0.5 text-[12px] font-semibold text-dk-ink-2">
 							{title} <span className="tabular-nums">{items.length.toLocaleString("en")}</span>
 						</h3>
 						<ul>
@@ -548,7 +591,7 @@ export function ChangesList({
 												"flex w-full items-center gap-2 py-[3px] pr-2 pl-3 text-left text-[12.5px] hover:bg-hover disabled:cursor-default disabled:opacity-60",
 												key === activeKey && "bg-hover font-medium",
 											)}
-											title={change.submodule ? `${sanitize(change.relative)} is a submodule; open it as a project of its own` : sanitize(change.relative)}
+											{...tip(change.submodule ? `${sanitize(change.relative)} is a submodule; open it as a project of its own` : sanitize(change.relative))}
 											disabled={change.submodule}
 											aria-current={key === activeKey ? "true" : undefined}
 											onClick={() => onOpen(change)}

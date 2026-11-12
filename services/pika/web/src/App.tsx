@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { lazy, Suspense, useState, type ReactNode } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router";
 import { AuthGate } from "./components/AuthGate";
+import { DECK_ROOT } from "./nodes/deck/tokens";
 import { Layout } from "./components/Layout";
 import { PublicLayout } from "./components/PublicLayout";
 import { Skeleton, SkeletonLines } from "./components/ui";
@@ -22,8 +23,8 @@ import { SettingsPage } from "./pages/Settings";
 const DocsPage = lazy(() => import("./pages/Docs").then((module) => ({ default: module.DocsPage })));
 const StatisticsPage = lazy(() => import("./pages/Statistics").then((module) => ({ default: module.StatisticsPage })));
 const SessionViewPage = lazy(() => import("./pages/SessionView").then((module) => ({ default: module.SessionViewPage })));
-// The Nodes page bundles xterm.js and its renderers; it loads on demand too.
-const NodesPage = lazy(() => import("./pages/Nodes").then((module) => ({ default: module.NodesPage })));
+// Deck bundles xterm.js and its renderers; it loads on demand too.
+const DeckPage = lazy(() => import("./pages/Deck").then((module) => ({ default: module.DeckPage })));
 
 function SessionPageLoading() {
 	return (
@@ -35,6 +36,15 @@ function SessionPageLoading() {
 			<div className="mt-8">
 				<SkeletonLines lines={4} />
 			</div>
+		</div>
+	);
+}
+
+/** Deck's frame while its chunk loads: the bar's height on the chrome, so nothing jumps when it arrives. */
+function DeckLoading() {
+	return (
+		<div className="flex h-full flex-col bg-dk-ground" aria-busy="true" aria-label="Loading Deck" {...DECK_ROOT}>
+			<div className="h-10 shrink-0 border-b border-dk-line bg-dk-chrome" />
 		</div>
 	);
 }
@@ -69,6 +79,11 @@ export function AppRoutes() {
 				<Route path="*" element={<NotFoundPage />} />
 			</Route>
 			<Route element={<AuthGate />}>
+				{/*
+				 * Deck is an app of its own: it fills the window with its own bar instead of the band. One route, so picking a
+				 * node or terminal keeps the page, its socket, and its channels.
+				 */}
+				<Route path="deck/:node?/:terminal?" element={<Suspense fallback={<DeckLoading />}><DeckPage /></Suspense>} />
 				<Route element={<Layout />}>
 					<Route index element={<SessionListPage />} />
 					<Route
@@ -89,8 +104,6 @@ export function AppRoutes() {
 					<Route path="chatrooms" element={<ChatroomsPage />} />
 					<Route path="chatrooms/:room" element={<ChatroomsPage />} />
 					<Route path="devices" element={<DevicesPage />} />
-					{/* One route, so picking a node or terminal keeps the page, its socket, and its channels. */}
-					<Route path="nodes/:node?/:terminal?" element={<Suspense fallback={<SessionPageLoading />}><NodesPage /></Suspense>} />
 					<Route path="memory" element={<MemoryPage />} />
 					<Route path="settings" element={<SettingsPage />} />
 					<Route path="search" element={<SearchPage />} />

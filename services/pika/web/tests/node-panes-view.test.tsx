@@ -129,7 +129,7 @@ describe("layout", () => {
         const onFocus = vi.fn();
         render(view(slots, props(split("row", leaf("a"), leaf("b")), "a", { onFocus })));
         expect(pane("a").hasAttribute("data-focused")).toBe(true);
-        expect(pane("a").className).toContain("border-wb-accent");
+        expect(pane("a").className).toContain("border-dk-accent");
         expect(pane("b").hasAttribute("data-focused")).toBe(false);
         fireEvent.pointerDown(pane("b"), { pointerId: 1, button: 0 });
         expect(onFocus).toHaveBeenCalledWith("b");

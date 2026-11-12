@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { homePath, paneLabel, paneSession } from "../src/nodes/client";
 import type { BridgeStatus, PaneView, TerminalInfo } from "../src/nodes/contract";
-import { PaneHeading } from "../src/pages/Nodes";
+import { PaneHeading } from "../src/pages/Deck";
 
 const shell: TerminalInfo = { terminalId: "t1", title: "", cwd: "/home/me", cols: 80, rows: 24, pid: 7, createdAt: 1, argv: [] };
 
@@ -83,7 +83,7 @@ describe("PaneHeading", () => {
 		const container = heading(pane({ bridge: bridge() }));
 		expect(container.querySelector("[data-session-name]")?.textContent).toBe("fix the parser");
 		expect(container.querySelector("[data-pane-cwd]")?.textContent).toBe("~/code/pika");
-		expect(container.querySelector("[data-pane-cwd]")?.getAttribute("title")).toBe("/home/me/code/pika");
+		expect(container.querySelector("[data-pane-cwd]")?.getAttribute("data-tip")).toBe("/home/me/code/pika");
 		expect(container.querySelector("[data-pane-model]")?.textContent).toBe("claude-opus-5-5");
 		expect(container.querySelector("[data-bridge-disconnected]")).toBeNull();
 	});

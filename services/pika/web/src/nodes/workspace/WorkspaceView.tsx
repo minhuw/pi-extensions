@@ -14,11 +14,15 @@
  */
 
 import { DndContext, DragOverlay, PointerSensor, useDraggable, useSensor, useSensors, type DragEndEvent, type DragMoveEvent, type DragStartEvent } from "@dnd-kit/core";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Icon } from "../../components/icons";
 import { BUTTON, cx } from "../../components/ui";
+import { copyText } from "../../lib/clipboard";
 import type { Theme } from "../../lib/theme";
 import { paneLabel } from "../client";
+import { isMenuKey, useMenu, type MenuEntry } from "../deck/Menu";
+import { tip } from "../deck/Tooltips";
+import { actionShortcut } from "../keys";
 import { sanitize, type TerminalInfo } from "../contract";
 import { isDirty, type EditorSnapshot, type EditorStore } from "../editor";
 import { EditorTabBody, diffKind } from "../FilePanel";
@@ -108,7 +112,10 @@ export function WorkspaceView(props: WorkspaceViewProps) {
 	const [dragging, setDragging] = useState<string>();
 	const [target, setTarget] = useState<DragTarget>();
 	const start = useRef<{ x: number; y: number } | null>(null);
-	const [menu, setMenu] = useState<Menu>();
+	const tabMenu = useMenu();
+	const openMenu = (at: Menu) => {
+		if (ws.tabs[at.tabId]) tabMenu.open({ x: at.x, y: at.y, items: tabMenuItems(ws, at.tabId, actions), label: "Tab", attrs: { "data-tab-menu": at.tabId } });
+	};
 	const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
 	useLayoutEffect(() => props.onLayout());
@@ -148,7 +155,7 @@ export function WorkspaceView(props: WorkspaceViewProps) {
 		const activator = event.activatorEvent as PointerEvent | MouseEvent;
 		start.current = "clientX" in activator ? { x: activator.clientX, y: activator.clientY } : null;
 		setDragging(String(event.active.id));
-		setMenu(undefined);
+		tabMenu.close();
 	};
 	const onDragMove = (event: DragMoveEvent) => {
 		const point = pointOf(event);
@@ -179,10 +186,10 @@ export function WorkspaceView(props: WorkspaceViewProps) {
 		<TerminalSlotsContext.Provider value={props.slots}>
 			<DndContext sensors={sensors} onDragStart={onDragStart} onDragMove={onDragMove} onDragEnd={onDragEnd} onDragCancel={onDragCancel}>
 				<div ref={root} className="relative flex min-h-0 min-w-0 flex-1" data-workspace="">
-					<SplitNode node={ws.root} path={[]} view={props} groupElements={groupElements} onMenu={setMenu} style={{ flex: "1 1 0%" }} />
+					<SplitNode node={ws.root} path={[]} view={props} groupElements={groupElements} onMenu={openMenu} style={{ flex: "1 1 0%" }} />
 					{target && (
 						<div
-							className={cx("pointer-events-none absolute z-20", target.zone === "strip" ? "bg-wb-accent" : "border-2 border-wb-accent bg-wb-accent-soft")}
+							className={cx("pointer-events-none absolute z-20", target.zone === "strip" ? "bg-dk-accent" : "border-2 border-dk-accent bg-dk-accent-soft")}
 							style={{ left: target.preview.left, top: target.preview.top, width: target.preview.width, height: target.preview.height }}
 							data-tab-drop={`${target.groupId}:${target.zone}`}
 						/>
@@ -196,7 +203,7 @@ export function WorkspaceView(props: WorkspaceViewProps) {
 					)}
 				</DragOverlay>
 			</DndContext>
-			{menu && ws.tabs[menu.tabId] && <TabMenu menu={menu} ws={ws} actions={actions} onClose={() => setMenu(undefined)} />}
+			{tabMenu.menu}
 		</TerminalSlotsContext.Provider>
 	);
 }
@@ -308,7 +315,7 @@ function GroupDivider({ row, ratio, onLive, onCommit }: { row: boolean; ratio: n
 			onDoubleClick={() => onCommit(0.5)}
 			onKeyDown={key}
 			className={cx(
-				"relative shrink-0 touch-none bg-line outline-none hover:bg-wb-line-strong focus-visible:bg-wb-accent",
+				"relative shrink-0 touch-none bg-line outline-none hover:bg-dk-line-strong focus-visible:bg-dk-accent",
 				row ? "w-[5px] cursor-col-resize" : "h-[5px] cursor-row-resize",
 			)}
 			data-group-divider=""
@@ -424,7 +431,7 @@ function TabStrip({ group, view, focused, onMenu }: { group: Group; view: Worksp
 		else if (event.key === "Home") focusTab(0);
 		else if (event.key === "End") focusTab(group.tabOrder.length - 1);
 		else if (event.key === "Delete") actions.close(tabId);
-		else if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+		else if (isMenuKey(event)) {
 			const box = event.currentTarget.getBoundingClientRect();
 			onMenu({ tabId, x: box.left, y: box.bottom });
 		} else return;
@@ -434,7 +441,7 @@ function TabStrip({ group, view, focused, onMenu }: { group: Group; view: Worksp
 	return (
 		<div
 			ref={strip}
-			className={cx("flex shrink-0 items-stretch border-b border-line bg-sidebar", focused && "shadow-[inset_0_2px_0_var(--wb-accent)]")}
+			className={cx("flex shrink-0 items-stretch border-b border-line bg-sidebar", focused && "shadow-[inset_0_2px_0_var(--dk-accent)]")}
 			style={{ height: TAB_STRIP_HEIGHT }}
 			data-tab-strip={group.id}
 		>
@@ -447,8 +454,8 @@ function TabStrip({ group, view, focused, onMenu }: { group: Group; view: Worksp
 			<button
 				type="button"
 				className="flex w-8 shrink-0 items-center justify-center text-muted hover:bg-hover hover:text-ink"
-				title="New terminal here"
 				aria-label="New terminal here"
+				{...tip("New terminal here")}
 				onClick={() => actions.newTerminal(group.id)}
 				data-group-new-terminal={group.id}
 			>
@@ -486,7 +493,7 @@ function TabItem({
 			ref={setNodeRef}
 			className={cx(
 				"group relative flex max-w-[220px] shrink-0 items-center border-r border-line text-[12.5px]",
-				active ? "bg-page font-medium text-ink shadow-[inset_0_-2px_0_var(--wb-accent)]" : "text-muted hover:bg-hover",
+				active ? "bg-page font-medium text-ink shadow-[inset_0_-2px_0_var(--dk-accent)]" : "text-muted hover:bg-hover",
 				isDragging && "opacity-40",
 			)}
 			onKeyDown={(event) => onKeyDown(event, tab.id)}
@@ -508,8 +515,8 @@ function TabItem({
 				role="tab"
 				aria-selected={active}
 				tabIndex={active ? 0 : -1}
-				className="flex h-full min-w-0 items-center gap-1.5 pr-1 pl-2.5 outline-none focus-visible:shadow-[inset_0_0_0_2px_var(--wb-accent)]"
-				title={title}
+				className="flex h-full min-w-0 items-center gap-1.5 pr-1 pl-2.5 outline-none focus-visible:shadow-[inset_0_0_0_2px_var(--dk-accent)]"
+				{...tip(title)}
 				onClick={() => actions.activate(tab.id)}
 				onDoubleClick={() => preview && actions.promote(tab.id)}
 				{...dragAttributes}
@@ -525,6 +532,7 @@ function TabItem({
 				tabIndex={-1}
 				className="mr-1 flex size-5 shrink-0 items-center justify-center rounded-sm hover:bg-hover"
 				aria-label={dirty ? `Close ${name} (unsaved)` : `Close ${name}`}
+				{...tip(dirty ? "Close (unsaved)" : "Close", "tab.close")}
 				onClick={() => actions.close(tab.id)}
 				data-tab-close={tab.id}
 			>
@@ -556,88 +564,20 @@ const SPLITS: readonly [Side, string][] = [
 	["up", "Move Tab to Split Up"],
 ];
 
-/** A tab's context menu, at the pointer (or under the tab, from the keyboard). */
-function TabMenu({ menu, ws, actions, onClose }: { menu: Menu; ws: Workspace; actions: WorkspaceActions; onClose: () => void }) {
-	const list = useRef<HTMLDivElement>(null);
-	const tab = ws.tabs[menu.tabId]!;
+/** A tab's context menu entries (Deck's shared menu): the splits, Pin, Copy Path for a file, Close, Close Others. */
+export function tabMenuItems(ws: Workspace, tabId: string, actions: WorkspaceActions): MenuEntry[] {
+	const tab = ws.tabs[tabId]!;
 	const group = groupOf(ws, tab.id)!;
 	const alone = group.tabOrder.length === 1;
 	const others = group.tabOrder.some((id) => id !== tab.id && !ws.tabs[id]?.pinned);
-	const restore = useRef<HTMLElement | null>(document.activeElement as HTMLElement | null);
-
-	useEffect(() => {
-		list.current?.querySelector<HTMLElement>("[role='menuitem']:not(:disabled)")?.focus();
-		const away = (event: PointerEvent) => {
-			if (!list.current?.contains(event.target as Node)) onClose();
-		};
-		window.addEventListener("pointerdown", away, true);
-		window.addEventListener("blur", onClose);
-		return () => {
-			window.removeEventListener("pointerdown", away, true);
-			window.removeEventListener("blur", onClose);
-		};
-	}, [onClose]);
-
-	const run = (fn: () => void) => () => {
-		onClose();
-		fn();
-	};
-	const items: { label: string; run: () => void; disabled?: boolean; id: string }[] = [
+	const closeKeys = actionShortcut("tab.close");
+	return [
 		...SPLITS.map(([side, label]) => ({ id: `split-${side}`, label, disabled: alone, run: () => actions.split(tab.id, group.id, side) })),
+		"separator",
 		{ id: "pin", label: tab.pinned ? "Unpin" : "Pin", run: () => actions.setPinned(tab.id, !tab.pinned) },
-		{ id: "close", label: "Close", run: () => actions.close(tab.id) },
+		...(tab.kind !== "terminal" ? [{ id: "copy-path", label: "Copy Path", run: () => void copyText(tab.path) }] : []),
+		"separator",
+		{ id: "close", label: "Close", run: () => actions.close(tab.id), ...(closeKeys ? { shortcut: closeKeys } : {}) },
 		{ id: "close-others", label: "Close Others", disabled: !others, run: () => actions.closeOthers(tab.id) },
 	];
-
-	const key = (event: KeyboardEvent<HTMLDivElement>) => {
-		const buttons = [...(list.current?.querySelectorAll<HTMLButtonElement>("[role='menuitem']:not(:disabled)") ?? [])];
-		const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
-		if (event.key === "ArrowDown") buttons[(at + 1) % buttons.length]?.focus();
-		else if (event.key === "ArrowUp") buttons[(at - 1 + buttons.length) % buttons.length]?.focus();
-		else if (event.key === "Home") buttons[0]?.focus();
-		else if (event.key === "End") buttons.at(-1)?.focus();
-		else if (event.key === "Escape" || event.key === "Tab") {
-			onClose();
-			restore.current?.focus();
-		} else return;
-		event.preventDefault();
-		event.stopPropagation();
-	};
-
-	return (
-		<div
-			ref={list}
-			role="menu"
-			aria-label="Tab"
-			className="fixed z-50 min-w-[210px] rounded-sm border border-line bg-page py-1 text-[12.5px] shadow-lg"
-			style={{ left: Math.min(menu.x, window.innerWidth - 220), top: Math.min(menu.y, window.innerHeight - 220) }}
-			onKeyDown={key}
-			data-tab-menu={menu.tabId}
-		>
-			{items.map((item, index) => (
-				<MenuItem key={item.id} separator={index === SPLITS.length} disabled={item.disabled} onClick={run(item.run)} id={item.id}>
-					{item.label}
-				</MenuItem>
-			))}
-		</div>
-	);
-}
-
-function MenuItem({ children, separator, disabled, onClick, id }: { children: ReactNode; separator: boolean; disabled?: boolean; onClick: () => void; id: string }) {
-	return (
-		<>
-			{separator && <div className="my-1 h-px bg-line" role="separator" />}
-			<button
-				type="button"
-				role="menuitem"
-				tabIndex={-1}
-				disabled={disabled}
-				className="block w-full px-3 py-1 text-left outline-none hover:bg-hover focus:bg-hover disabled:text-muted disabled:hover:bg-transparent"
-				onClick={onClick}
-				data-menu-item={id}
-			>
-				{children}
-			</button>
-		</>
-	);
 }

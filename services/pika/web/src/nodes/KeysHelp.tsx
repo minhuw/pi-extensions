@@ -18,7 +18,7 @@ function where(spec: ActionSpec, keymap: Keymap, chordIndex: number): string | u
 }
 
 /**
- * Every shortcut on the Nodes page, from the registry, with what the user's settings changed or could not apply; the
+ * Every shortcut in Deck, from the registry, with what the user's settings changed or could not apply; the
  * settings are plain JSON in `localStorage`, edited here in a text box.
  */
 export function KeysHelp({ onClose }: { onClose: () => void }) {
@@ -48,7 +48,7 @@ export function KeysHelp({ onClose }: { onClose: () => void }) {
 				aria-labelledby={titleId}
 				data-keys-help=""
 				onClick={(event) => event.stopPropagation()}
-				className="flex max-h-[min(720px,calc(100vh-48px))] w-full max-w-[640px] flex-col rounded-sm border border-wb-line-strong bg-page text-ink shadow-[0_16px_40px_rgba(0,0,0,0.22)]"
+				className="flex max-h-[min(720px,calc(100vh-48px))] w-full max-w-[640px] flex-col rounded-sm border border-dk-line-strong bg-page text-ink shadow-[0_16px_40px_rgba(0,0,0,0.22)]"
 			>
 				<div className="flex shrink-0 items-center gap-3 border-b border-line px-5 py-3">
 					<h2 id={titleId} className="text-[16px] font-semibold">
@@ -74,7 +74,7 @@ export function KeysHelp({ onClose }: { onClose: () => void }) {
 						const specs = ACTIONS.filter((spec) => spec.group === group);
 						return (
 							<section key={group} className="mt-3">
-								<h3 className="text-[11.5px] font-medium tracking-[0.02em] text-muted uppercase">{group}</h3>
+								<h3 className="text-[12px] font-semibold text-dk-ink-2">{group}</h3>
 								<table className="mt-1 w-full">
 									<tbody>
 										{specs.map((spec) => {
@@ -109,7 +109,7 @@ export function KeysHelp({ onClose }: { onClose: () => void }) {
 						);
 					})}
 					<section className="mt-3">
-						<h3 className="text-[11.5px] font-medium tracking-[0.02em] text-muted uppercase">Built in</h3>
+						<h3 className="text-[12px] font-semibold text-dk-ink-2">Built in</h3>
 						<table className="mt-1 w-full">
 							<tbody>
 								{BUILT_IN.map((item) => (
@@ -128,7 +128,7 @@ export function KeysHelp({ onClose }: { onClose: () => void }) {
 						browser keeps its own keys, such as {keymap.mac ? "⌘W, ⌘T, ⌘N, and ⌘L" : "Ctrl+W, Ctrl+T, Ctrl+N, and Ctrl+L"}.
 					</p>
 					<section className="mt-4">
-						<h3 className="text-[11.5px] font-medium tracking-[0.02em] text-muted uppercase">Your bindings</h3>
+						<h3 className="text-[12px] font-semibold text-dk-ink-2">Your bindings</h3>
 						<p className="mt-1 text-[12.5px] text-muted">
 							JSON kept in this browser (<code className="code-chip">localStorage["{KEYS_KEY}"]</code>): action names from{" "}
 							<code className="code-chip">{ACTIONS.map((spec) => spec.id).join(", ")}</code>, each a chord such as{" "}

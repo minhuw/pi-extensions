@@ -2,22 +2,22 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useNavigate, useParams } from "react-router";
 import { Icon } from "../components/icons";
 import { ModelMark } from "../components/ModelName";
-import { BUTTON, Callout, ConfirmDialog, cx, EmptyState } from "../components/ui";
+import { BUTTON, Callout, ConfirmDialog, cx } from "../components/ui";
 import { useApi } from "../lib/api";
 import { withBase } from "../lib/base";
 import { copyText } from "../lib/clipboard";
 import { shortUserAgent } from "../lib/devices";
 import { bareModelOf } from "../lib/model";
 import { useHealth } from "../lib/relay";
-import { useAppliedTheme } from "../lib/theme";
+import { useAppliedTheme, useTheme } from "../lib/theme";
 import { countedTitle, paneCounts, PaneAlerts } from "../nodes/alerts";
 import { changeMode, ChangesStore, type Change } from "../nodes/changes";
 import { homePath, liveBridge, NodesClient, paneLabel, paneSession, type NodesSnapshot, type NodeView } from "../nodes/client";
-import { displayFingerprint, type NodeEvent, type Project, type TerminalInfo } from "../nodes/contract";
+import { displayFingerprint, sanitize, type NodeEvent, type Project, type TerminalInfo } from "../nodes/contract";
 import { EditorStore, isDirty, type EditorSnapshot } from "../nodes/editor";
 import { ChangesPanel, diffControlAt, Explorer, useChanges, usePageVisible } from "../nodes/FilePanel";
 import { IndexedDbKeyStore } from "../nodes/identity";
-import { actionShortcut, currentKeymap, focusOf, resolveKey, type ActionId, type PageCommands } from "../nodes/keys";
+import { currentKeymap, focusOf, resolveKey, type PageCommands } from "../nodes/keys";
 import { KeysHelp } from "../nodes/KeysHelp";
 import { clampWidth, LAYOUT_BOUNDS, loadLayout, saveLayout, type NodesLayout } from "../nodes/layout";
 import { ClosedPanes, closePane, paneEvent, splitPane, type PaneHost } from "../nodes/panes/actions";
@@ -25,7 +25,10 @@ import { focusNext, focusPrevious } from "../nodes/panes/pane-tree";
 import { QuickOpen } from "../nodes/QuickOpen";
 import { nodeSocketUrl } from "../nodes/socket";
 import { Splitter } from "../nodes/Splitter";
-import { WORKBENCH_ROOT } from "../nodes/workbench/tokens";
+import { BAR_BUTTON, DeckAppBar, DeckStatusBar } from "../nodes/deck/Chrome";
+import { menuBelow, useMenu, type MenuEntry } from "../nodes/deck/Menu";
+import { DECK_ROOT } from "../nodes/deck/tokens";
+import { DeckTooltips, tip } from "../nodes/deck/Tooltips";
 import { AgentRail, InboxBadge, railAgents, useInbox } from "../nodes/workspace/AgentRail";
 import { flatLayout, inboxBadge, inboxKey, nextNeeding, splitKey, stepKey } from "../nodes/workspace/inbox";
 import { markLabel, paneMark, StatusGlyph, type PaneMark } from "../nodes/workspace/status";
@@ -93,17 +96,55 @@ function useSnapshot(client: NodesClient | null): NodesSnapshot {
 	return useSyncExternalStore(client?.subscribe ?? noop, client?.getSnapshot ?? (() => EMPTY));
 }
 
-export function NodesPage() {
+export function DeckPage() {
 	const health = useHealth();
-	if (health.isPending) return <div className="p-8 text-muted" role="status">Loading…</div>;
-	if (!health.data?.features?.includes("nodes")) {
+	const { theme, toggle } = useTheme();
+	const [help, setHelp] = useState(false);
+	if (health.isPending || !health.data?.features?.includes("nodes")) {
 		return (
-			<EmptyState title="Nodes are off on this server">
-				Start pika with <code className="code-chip">PIKA_NODES=on</code> to reach terminals on your machines.
-			</EmptyState>
+			<DeckFrame bar={<DeckAppBar theme={theme} onTheme={toggle} onHelp={() => setHelp(true)} />}>
+				{health.isPending ? (
+					<div className="p-8 text-dk-ink-2" role="status">
+						Loading…
+					</div>
+				) : (
+					<DeckEmpty title="Nodes are off on this server">
+						Start pika with <code className="code-chip">PIKA_NODES=on</code> to reach terminals on your machines.
+					</DeckEmpty>
+				)}
+				{help && <KeysHelp onClose={() => setHelp(false)} />}
+			</DeckFrame>
 		);
 	}
-	return <NodesWorkspace />;
+	return <NodesWorkspace onTheme={toggle} />;
+}
+
+/** An empty workspace: what is missing and what to do, centred in the space it leaves. */
+function DeckEmpty({ title, children }: { title: string; children?: ReactNode }) {
+	return (
+		<div className="flex min-h-0 flex-1 items-center justify-center p-8" data-empty-state="">
+			<div className="max-w-[420px] text-center">
+				<h2 className="text-[14px] font-semibold text-dk-ink">{title}</h2>
+				{children && <p className="mt-1.5 text-[13px] leading-[1.5] text-dk-ink-2">{children}</p>}
+			</div>
+		</div>
+	);
+}
+
+/**
+ * Deck's window: the app bar, the body, and the status bar, filling the viewport without a page scroll. The root
+ * carries the Deck tokens, and its tooltips listen on it.
+ */
+function DeckFrame({ bar, status, children }: { bar: ReactNode; status?: ReactNode; children: ReactNode }) {
+	const [root, setRoot] = useState<HTMLDivElement | null>(null);
+	return (
+		<div ref={setRoot} className="flex h-full min-h-0 flex-col overflow-hidden" data-nodes-page="" {...DECK_ROOT}>
+			{bar}
+			<div className="relative flex min-h-0 flex-1 flex-col">{children}</div>
+			{status}
+			<DeckTooltips root={root} />
+		</div>
+	);
 }
 
 /** The page's pane sizes: state while dragging, stored when a drag or key ends. */
@@ -197,12 +238,6 @@ function useKeyDispatch(commands: MutableRefObject<PageCommands>) {
 		return () => window.removeEventListener("keydown", onKeyDown, true);
 	}, [commands]);
 }
-
-/** A button's title with its action's shortcut, when it has one. */
-const withShortcut = (label: string, action: ActionId): string => {
-	const shortcut = actionShortcut(action);
-	return shortcut ? `${label} (${shortcut})` : label;
-};
 
 const shown = (element: Element | null | undefined): element is HTMLElement => element instanceof HTMLElement && element.getClientRects().length > 0;
 
@@ -353,7 +388,7 @@ interface Closing {
 	name: string;
 }
 
-function NodesWorkspace() {
+function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	const client = useNodesClient();
 	const snapshot = useSnapshot(client);
 	const navigate = useNavigate();
@@ -404,7 +439,7 @@ function NodesWorkspace() {
 			if (!terminal) return;
 			hub.get(node).reveal(project ?? projectFor(node, terminal), terminalId);
 			revealed.current = `${node}\n${terminalId}`;
-			navigate(`/nodes/${encodeURIComponent(node)}/${encodeURIComponent(terminalId)}`);
+			navigate(`/deck/${encodeURIComponent(node)}/${encodeURIComponent(terminalId)}`);
 		},
 		[hub, navigate, projectFor, terminalOf],
 	);
@@ -557,7 +592,7 @@ function NodesWorkspace() {
 		const project = openEditor(node, tab, { source: event.terminalId, ...(at ? { at } : {}) });
 		const ws = hub.get(node);
 		if (ws.active !== project) ws.setActive(project);
-		if (latest.current.nodeId !== node) navigate(`/nodes/${encodeURIComponent(node)}/${encodeURIComponent(event.terminalId)}`);
+		if (latest.current.nodeId !== node) navigate(`/deck/${encodeURIComponent(node)}/${encodeURIComponent(event.terminalId)}`);
 	};
 
 	/** A new terminal in `project`'s root, in `groupId` (the focused group by default), with focus. */
@@ -635,11 +670,13 @@ function NodesWorkspace() {
 	const badge = inboxBadge(inbox.layout);
 	usePaneAlerts(snapshot, ready?.info.id, onScreen, showPane, inbox.layout.working.length);
 
-	// The explorer's folder: the project on screen ("Other": the focused pane's), or one picked by hand until the
+	// The explorer's folder: the project on screen ("Other": the focused or last focused pane's), or one picked by hand until the
 	// project changes.
 	const [picked, setPicked] = useState<{ key: string; root: string }>();
 	const rootKey = `${ready?.info.id}\n${project}`;
-	const projectRoot = project === OTHER || !project ? (onScreenInfo ? paneSession(onScreenInfo).cwd : home) : project;
+	// With an editor in focus, the project's last focused pane: opening a file must not move the tree under it.
+	const rootPane = onScreenInfo ?? headerInfo;
+	const projectRoot = project === OTHER || !project ? (rootPane ? paneSession(rootPane).cwd : home) : project;
 	const root = picked?.key === rootKey ? picked.root : projectRoot;
 
 	// git's changes for the folder, polled while the list or a diff of this node shows.
@@ -871,31 +908,52 @@ function NodesWorkspace() {
 
 	// --- Drawing ---------------------------------------------------------------------------------------------
 
-	if (snapshot.status === "insecure") {
-		return (
-			<div className="p-8">
-				<Callout tone="red" title="Nodes need a secure context">
-					This page reached pika over plain http, where browsers offer no WebCrypto. Open pika over https (or on localhost) to
-					use nodes.
-				</Callout>
-			</div>
-		);
-	}
-	if (snapshot.status === "failed") {
-		return (
-			<div className="p-8">
-				<Callout tone="red" title="This browser's node key could not be loaded">
-					{snapshot.failure}
-				</Callout>
-			</div>
-		);
-	}
-
 	const filesShown = Boolean(ready && layout.filesOpen);
+	const bar = (
+		<DeckAppBar
+			theme={theme}
+			onTheme={onTheme}
+			onHelp={() => setHelp(true)}
+			{...(readyFiles ? { onQuickOpen: () => setQuickOpen(true) } : {})}
+			rail={{ open: layout.railOpen, onToggle: () => setLayout({ railOpen: !layout.railOpen }), badge: <InboxBadge badge={badge} /> }}
+			{...(ready ? { files: { open: layout.filesOpen, onToggle: () => setLayout({ filesOpen: !layout.filesOpen }) } } : {})}
+		/>
+	);
+	const status = (
+		<DeckStatusBar
+			socket={snapshot.status}
+			online={snapshot.nodes.filter((view) => view.info.online).length}
+			nodes={snapshot.nodes.length}
+			needs={inbox.layout.needs.length}
+			working={inbox.layout.working.length}
+			{...(permission === "default" && snapshot.nodes.length > 0 ? { onNotify: requestPermission } : {})}
+		/>
+	);
+
+	if (snapshot.status === "insecure" || snapshot.status === "failed") {
+		return (
+			<DeckFrame bar={<DeckAppBar theme={theme} onTheme={onTheme} onHelp={() => setHelp(true)} />}>
+				<div className="p-8">
+					{snapshot.status === "insecure" ? (
+						<Callout tone="red" title="Nodes need a secure context">
+							This page reached pika over plain http, where browsers offer no WebCrypto. Open pika over https (or on localhost) to
+							use nodes.
+						</Callout>
+					) : (
+						<Callout tone="red" title="This browser's node key could not be loaded">
+							{snapshot.failure}
+						</Callout>
+					)}
+				</div>
+				{help && <KeysHelp onClose={() => setHelp(false)} />}
+			</DeckFrame>
+		);
+	}
 
 	return (
-		// Narrow windows shrink the sidebars to their least widths first, then scroll.
-		<div className="flex h-full min-h-0 overflow-x-auto" data-nodes-page="" {...WORKBENCH_ROOT}>
+		<DeckFrame bar={bar} status={status}>
+			{/* Narrow windows shrink the sidebars to their least widths first, then scroll. */}
+			<div className="flex min-h-0 flex-1 overflow-x-auto">
 			{layout.railOpen && (
 				<>
 					<aside className="flex min-w-[220px] flex-col bg-sidebar" style={{ flex: `0 1 ${layout.rail}px` }} aria-label="Agents" data-agent-list="">
@@ -916,11 +974,11 @@ function NodesWorkspace() {
 								const { node, terminalId } = splitKey(key);
 								showPane(node, terminalId, agentMap.get(key)?.project);
 							}}
-							onNode={(node) => navigate(`/nodes/${encodeURIComponent(node)}`)}
+							onNode={(node) => navigate(`/deck/${encodeURIComponent(node)}`)}
 							onProject={(node, next) => {
 								hub.get(node).setActive(next);
 								revealed.current = undefined;
-								navigate(`/nodes/${encodeURIComponent(node)}`);
+								navigate(`/deck/${encodeURIComponent(node)}`);
 							}}
 							canClosePane={(key) => paneTabOf(key) !== undefined}
 							onClosePane={(key) => {
@@ -931,15 +989,8 @@ function NodesWorkspace() {
 								const agent = agentMap.get(key);
 								if (agent) setKilling({ node: agent.node.info.id, terminal: agent.terminal });
 							}}
-							header={<RailHeader status={snapshot.status} onHelp={() => setHelp(true)} />}
+							header={<h1 className="text-[12px] font-semibold text-dk-ink-2">Agents</h1>}
 						/>
-						{permission === "default" && snapshot.nodes.length > 0 && (
-							<div className="shrink-0 border-t border-line px-4 py-2">
-								<button type="button" className={cx(BUTTON.quiet, "-mx-2 h-7 px-2")} onClick={requestPermission} data-notify-enable="">
-									Notify me when a pane waits or finishes
-								</button>
-							</div>
-						)}
 					</aside>
 					<Splitter
 						name="rail"
@@ -963,12 +1014,11 @@ function NodesWorkspace() {
 						terminal={onScreenInfo}
 						session={headerInfo}
 						busy={busy}
-						railOpen={layout.railOpen}
-						filesOpen={layout.filesOpen}
 						onNew={() => newTerminal(ready.info.id, project)}
-						onRail={() => setLayout({ railOpen: !layout.railOpen })}
-						onFiles={() => setLayout({ filesOpen: !layout.filesOpen })}
-						badge={badge}
+						onProject={(next) => {
+							hub.get(ready.info.id).setActive(next);
+							revealed.current = undefined;
+						}}
 					/>
 				)}
 				{(actionError || ready?.error) && (
@@ -1006,13 +1056,14 @@ function NodesWorkspace() {
 						<NodeGate client={client} view={selected} fingerprint={snapshot.fingerprint} />
 					) : (
 						<div className="flex flex-1">
-							<EmptyState title={snapshot.nodes.length ? "Pick a node" : snapshot.status === "open" ? "No nodes yet" : "Connecting…"}>
+							<DeckEmpty title={snapshot.nodes.length ? "Pick a node" : snapshot.status === "open" ? "No nodes yet" : "Connecting…"}>
+								{snapshot.nodes.length > 0 && <>Choose a node at the top of the agent list, or an agent under it, to open its workspace.</>}
 								{snapshot.nodes.length === 0 && snapshot.status === "open" && (
 									<>
 										Create a node credential with <code className="code-chip">pika node create &lt;name&gt;</code> and start pika-node with it.
 									</>
 								)}
-							</EmptyState>
+							</DeckEmpty>
 						</div>
 					)}
 					<TerminalLayer registry={registry} terminals={layerTerminals} theme={theme} onFocus={onLayerFocus} onKill={onLayerKill} onOpenFile={onLayerOpen} onSeen={onSeen} />
@@ -1040,16 +1091,6 @@ function NodesWorkspace() {
 								<Icon name="branch" size={13} />
 								{changesView.status === "ready" && changesView.count > 0 ? `Changes ${changesView.count.toLocaleString("en")}` : "Changes"}
 							</ActivityButton>
-							<button
-								type="button"
-								className="ml-auto flex w-8 items-center justify-center text-muted hover:text-ink"
-								title={withShortcut("Hide the sidebar", "files.toggle")}
-								onClick={() => setLayout({ filesOpen: false })}
-								data-collapse-files=""
-							>
-								<Icon name="sidebar" size={14} />
-								<span className="sr-only">Hide the sidebar</span>
-							</button>
 						</div>
 						{layout.sidebar === "changes" ? (
 							<ChangesPanel
@@ -1077,6 +1118,7 @@ function NodesWorkspace() {
 					</aside>
 				</>
 			)}
+			</div>
 			{help && <KeysHelp onClose={() => setHelp(false)} />}
 			{quickOpen && ready && readyFiles && (
 				<QuickOpen
@@ -1123,7 +1165,7 @@ function NodesWorkspace() {
 					Its edits are not saved on {viewOf(closing.node)?.info.name ?? "the node"}.
 				</ConfirmDialog>
 			)}
-		</div>
+		</DeckFrame>
 	);
 }
 
@@ -1132,7 +1174,7 @@ function ActivityButton({ active, onClick, id, children }: { active: boolean; on
 		<button
 			type="button"
 			aria-pressed={active}
-			className={cx("flex items-center gap-1.5 px-3 text-[12.5px]", active ? "font-medium text-ink shadow-[inset_0_-2px_0_var(--wb-accent)]" : "text-muted hover:text-ink")}
+			className={cx("flex items-center gap-1.5 px-3 text-[12.5px]", active ? "font-medium text-ink shadow-[inset_0_-2px_0_var(--dk-accent)]" : "text-muted hover:text-ink")}
 			onClick={onClick}
 			data-activity={id}
 		>
@@ -1141,23 +1183,10 @@ function ActivityButton({ active, onClick, id, children }: { active: boolean; on
 	);
 }
 
-function RailHeader({ status, onHelp }: { status: NodesSnapshot["status"]; onHelp: () => void }) {
-	return (
-		<>
-			<h1 className="text-[13px] font-semibold">Nodes</h1>
-			{status !== "open" && (
-				<span className="truncate text-[12px] text-wb-ink-3" role="status" data-socket-status={status}>
-					{status === "closed" ? "Reconnecting…" : "Connecting…"}
-				</span>
-			)}
-			<button type="button" className={cx(BUTTON.quiet, "h-6 shrink-0 px-1.5 text-[12px]")} title={withShortcut("Keyboard shortcuts", "help")} onClick={onHelp} data-keys-open="">
-				?<span className="sr-only">Keyboard shortcuts</span>
-			</button>
-		</>
-	);
-}
-
-/** Above the workspace: the project, the focused pane's session and status, and New terminal. */
+/**
+ * Above the workspace, a breadcrumb: the project (a menu of the node's projects), the node and the session the
+ * header follows, the focused pane's state; New terminal on the right.
+ */
 function WorkspaceHeader({
 	view,
 	home,
@@ -1166,12 +1195,8 @@ function WorkspaceHeader({
 	terminal,
 	session,
 	busy,
-	railOpen,
-	filesOpen,
 	onNew,
-	onRail,
-	onFiles,
-	badge,
+	onProject,
 }: {
 	view: NodeView;
 	home: string;
@@ -1182,41 +1207,43 @@ function WorkspaceHeader({
 	/** The pane whose session the heading shows (`RecentTerminals`). */
 	session?: TerminalInfo;
 	busy: boolean;
-	railOpen: boolean;
-	filesOpen: boolean;
 	onNew: () => void;
-	onRail: () => void;
-	onFiles: () => void;
-	/** The rail's badge, shown on its button while it is hidden. */
-	badge: ReturnType<typeof inboxBadge>;
+	onProject: (project: string) => void;
 }) {
+	const { menu, open, close, openFor } = useMenu();
+	const choose = (button: HTMLElement) => {
+		const items: MenuEntry[] = [
+			...projects.map((item) => ({ id: `project:${item.path}`, label: `${sanitize(item.name)}  ${homePath(sanitize(item.path), home)}`, checked: item.path === project, run: () => onProject(item.path) })),
+			...(projects.length ? (["separator"] as const) : []),
+			{ id: `project:${OTHER}`, label: "Other terminals", checked: project === OTHER, run: () => onProject(OTHER) },
+		];
+		open({ ...menuBelow(button), items, label: "Projects", attrs: { "data-project-menu": "" } });
+	};
 	return (
-		<header className="flex h-10 shrink-0 items-center gap-3 border-b border-line px-3" data-workspace-header={project}>
-			{!railOpen && (
-				<button type="button" className={cx(BUTTON.quiet, "h-7 shrink-0 px-1.5")} onClick={onRail} title={withShortcut("Show the agent list", "sidebar.left")} data-show-rail="">
-					<Icon name="sidebar" size={14} />
-					<InboxBadge badge={badge} />
-					<span className="sr-only">Show the agent list</span>
-				</button>
-			)}
-			<span className="shrink-0 text-[13.5px] font-medium" title={project === OTHER ? undefined : project} data-workspace-project={project}>
+		<header className="flex h-9 shrink-0 items-center gap-2 border-b border-dk-line px-2" data-workspace-header={project}>
+			<button
+				type="button"
+				className={cx(BAR_BUTTON, "px-2 text-[13px] font-medium text-dk-ink")}
+				aria-haspopup="menu"
+				aria-expanded={openFor === "Projects"}
+				onClick={(event) => (openFor === "Projects" ? close() : choose(event.currentTarget))}
+				{...tip(project === OTHER ? "Switch project" : `${project}: switch project`)}
+				data-workspace-project={project}
+			>
 				{projectName([...projects], project)}
-			</span>
-			<span className="shrink-0 text-muted" aria-hidden="true">
-				·
-			</span>
+				<svg width="9" height="9" viewBox="0 0 10 10" className="text-dk-ink-3" aria-hidden="true">
+					<path d="M2.5 3.75 5 6.25l2.5-2.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+				</svg>
+			</button>
+			<svg width="8" height="8" viewBox="0 0 10 10" className="shrink-0 text-dk-ink-3" aria-hidden="true">
+				<path d="M3.5 2 6.5 5l-3 3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+			</svg>
 			<PaneHeading node={view.info.name} terminal={session} home={home} />
 			{terminal && <PaneDetail terminal={terminal} />}
-			<button type="button" className={cx(BUTTON.quiet, "ml-auto h-7 shrink-0 border border-wb-line-strong text-wb-ink")} disabled={busy} onClick={onNew} title={withShortcut("New terminal", "terminal.new")} data-new-terminal="">
-				<Icon name="plus" size={13} />
-				New terminal
+			<button type="button" className={cx(BAR_BUTTON, "ml-auto")} disabled={busy} onClick={onNew} aria-label="New terminal" {...tip("New terminal", "terminal.new")} data-new-terminal="">
+				<Icon name="plus" size={14} />
 			</button>
-			{!filesOpen && (
-				<button type="button" className={cx(BUTTON.quiet, "h-7 shrink-0 px-2")} onClick={onFiles} title={withShortcut("Show the explorer", "files.toggle")} data-show-files="">
-					<Icon name="folder" size={13} />
-					Files
-				</button>
-			)}
+			{menu}
 		</header>
 	);
 }
@@ -1227,9 +1254,9 @@ function PaneBadge({ terminal }: { terminal: TerminalInfo }) {
 	if (mark === "idle") return null;
 	const kind = terminal.status?.program?.kind;
 	const label = mark === "waiting" ? (kind === "permission" ? "Needs permission" : kind === "auth" ? "Needs login" : "Waiting") : markLabel(mark);
-	const ink: Partial<Record<PaneMark, string>> = { waiting: "text-wb-needs-ink", error: "text-wb-failed-ink", done: "text-wb-done-ink", working: "text-wb-working-ink" };
+	const ink: Partial<Record<PaneMark, string>> = { waiting: "text-dk-needs-ink", error: "text-dk-failed-ink", done: "text-dk-done-ink", working: "text-dk-working-ink" };
 	return (
-		<span className={cx("inline-flex items-center gap-1 text-[12px] font-medium", ink[mark] ?? "text-wb-ink-2")} title={terminal.status?.program?.message} data-pane-badge={mark}>
+		<span className={cx("inline-flex items-center gap-1 text-[12px] font-medium", ink[mark] ?? "text-dk-ink-2")} {...tip(terminal.status?.program?.message)} data-pane-badge={mark}>
 			<StatusGlyph mark={mark} size={11} />
 			{label}
 		</span>
@@ -1371,19 +1398,19 @@ export function PaneHeading({ node, terminal, home }: { node: string; terminal?:
 			{session && (
 				<>
 					<Dot />
-					<span className="min-w-0 truncate text-muted" title={session.cwd} data-pane-cwd="">
+					<span className="min-w-0 truncate text-muted" {...tip(session.cwd)} data-pane-cwd="">
 						{homePath(session.cwd, home)}
 					</span>
 				</>
 			)}
 			{model && (
-				<span className="inline-flex min-w-0 shrink items-center gap-1 text-muted" title={session?.model} data-pane-model="">
+				<span className="inline-flex min-w-0 shrink items-center gap-1 text-muted" {...tip(session?.model)} data-pane-model="">
 					<span className="mono truncate text-[11.5px]">{model}</span>
 					<ModelMark model={model} size={12} className="shrink-0" />
 				</span>
 			)}
 			{session?.disconnected && (
-				<span className="shrink-0 text-[11.5px] text-muted" title="pi's bridge to pika-node closed; this is the last session it reported" data-bridge-disconnected="">
+				<span className="shrink-0 text-[11.5px] text-muted" {...tip("pi's bridge to pika-node closed; this is the last session it reported")} data-bridge-disconnected="">
 					Bridge disconnected
 				</span>
 			)}

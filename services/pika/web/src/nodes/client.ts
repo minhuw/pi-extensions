@@ -63,7 +63,7 @@ export function cleanTerminal(info: TerminalInfo): TerminalInfo {
 }
 
 /**
- * The Nodes page's state outside React: the client key, pins, the browser socket, and one channel per pinned node.
+ * Deck's state outside React: the client key, pins, the browser socket, and one channel per pinned node.
  * Channels open on their own only to pinned nodes; an unpinned node gets a channel only from `pair`.
  */
 export class NodesClient {

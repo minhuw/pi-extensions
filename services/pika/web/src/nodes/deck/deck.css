@@ -1,0 +1,287 @@
+/*
+ * The Deck design system (services/pika/DESIGN.deck.md): Deck's own tokens, scoped under its root
+ * element `[data-deck]`. Everything inside the page reads them; nothing outside it does. `tokens.ts` mirrors the
+ * values the terminal and Monaco need as literals, and a test keeps the two equal.
+ *
+ * Inside the root the shared `--color-*` names point at Deck tokens, so the page's existing Tailwind classes
+ * (`bg-sidebar`, `border-line`, `text-muted`, ...) take the Deck palette without each being rewritten.
+ */
+
+[data-deck] {
+	--dk-font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+	--dk-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+	/* Grounds: the work (terminals, editors, the active tab) on the lightest; chrome (rail, explorer, tab strips) a step down. */
+	--dk-ground: #fcfcfd;
+	--dk-chrome: #f1f3f5;
+	--dk-line: #dde1e6;
+	--dk-line-strong: #c3c9d0;
+	--dk-hover: rgb(22 26 31 / 0.055);
+	--dk-code: #eceff2;
+	/* Menus and tooltips float over everything: menus a step above the ground, tooltips in inverse ink. */
+	--dk-raised: #ffffff;
+	--dk-shadow: 0 12px 32px -8px rgb(16 20 24 / 0.22), 0 3px 8px -2px rgb(16 20 24 / 0.1);
+	--dk-tip: #23282e;
+	--dk-tip-ink: #f1f3f5;
+
+	/* Ink: primary, secondary, and the receded quiet rows. */
+	--dk-ink: #161a1f;
+	--dk-ink-2: #4f5863;
+	--dk-ink-3: #626a74;
+
+	/* The one accent: selection, focus, the active tab and group, the primary action. Never a status. */
+	--dk-accent: #5a46c8;
+	--dk-accent-soft: rgb(90 70 200 / 0.11);
+	--dk-on-accent: #ffffff;
+
+	/* Status, and nothing else: a glyph tone and an ink tone for text (at least 4.5:1 on ground and chrome). */
+	--dk-needs: #b25e00;
+	--dk-needs-ink: #8f4b00;
+	--dk-failed: #c4321f;
+	--dk-failed-ink: #b02a19;
+	--dk-done: #1d8a4a;
+	--dk-done-ink: #16703b;
+	--dk-working: #2b71b8;
+	--dk-working-ink: #22609e;
+
+	--color-page: var(--dk-ground);
+	--color-sidebar: var(--dk-chrome);
+	--color-ink: var(--dk-ink);
+	--color-muted: var(--dk-ink-2);
+	--color-line: var(--dk-line);
+	--color-hover: var(--dk-hover);
+	--color-soft: var(--dk-chrome);
+	--color-code: var(--dk-code);
+	--color-chip: var(--dk-ink);
+	--color-skeleton: var(--dk-line);
+	--color-accent: var(--dk-accent);
+	--color-accent-soft: var(--dk-accent-soft);
+	--color-red: var(--dk-failed-ink);
+	--color-red-soft: rgb(196 50 31 / 0.09);
+	--color-yellow: var(--dk-needs-ink);
+	--color-yellow-soft: rgb(178 94 0 / 0.1);
+	--color-green: var(--dk-done-ink);
+	--color-green-soft: rgb(29 138 74 / 0.1);
+	--font-sans: var(--dk-font);
+
+	font-family: var(--dk-font);
+	font-size: 13px;
+	line-height: 1.45;
+	background: var(--dk-ground);
+	color: var(--dk-ink);
+	caret-color: var(--dk-accent);
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+	/* A desktop app's chrome: the arrow everywhere, and nothing selects by accident (see "Desktop conventions"). */
+	cursor: default;
+	-webkit-user-select: none;
+	user-select: none;
+	overscroll-behavior: none;
+}
+
+[data-theme="dark"] [data-deck],
+[data-theme="dark"][data-deck] {
+	--dk-ground: #111417;
+	--dk-chrome: #171a1e;
+	--dk-line: #262b31;
+	--dk-line-strong: #383f47;
+	--dk-hover: rgb(228 231 235 / 0.06);
+	--dk-code: #1d2126;
+	--dk-raised: #1f2328;
+	--dk-shadow: 0 14px 36px -8px rgb(0 0 0 / 0.55), 0 3px 10px -2px rgb(0 0 0 / 0.35);
+	--dk-tip: #e4e7eb;
+	--dk-tip-ink: #111417;
+
+	--dk-ink: #e4e7eb;
+	--dk-ink-2: #a6aeb8;
+	--dk-ink-3: #8a929c;
+
+	--dk-accent: #a596ff;
+	--dk-accent-soft: rgb(165 150 255 / 0.15);
+	--dk-on-accent: #111417;
+
+	--dk-needs: #f2a33a;
+	--dk-needs-ink: #f2a33a;
+	--dk-failed: #ff7a6b;
+	--dk-failed-ink: #ff7a6b;
+	--dk-done: #4fc47f;
+	--dk-done-ink: #4fc47f;
+	--dk-working: #6cb0ea;
+	--dk-working-ink: #6cb0ea;
+
+	--color-red-soft: rgb(255 122 107 / 0.12);
+	--color-yellow-soft: rgb(242 163 58 / 0.12);
+	--color-green-soft: rgb(79 196 127 / 0.12);
+}
+
+/* Utilities for the Deck tokens: `text-dk-needs`, `bg-dk-accent-soft`, ... */
+@theme inline {
+	--color-dk-ground: var(--dk-ground);
+	--color-dk-chrome: var(--dk-chrome);
+	--color-dk-line: var(--dk-line);
+	--color-dk-line-strong: var(--dk-line-strong);
+	--color-dk-hover: var(--dk-hover);
+	--color-dk-ink: var(--dk-ink);
+	--color-dk-ink-2: var(--dk-ink-2);
+	--color-dk-ink-3: var(--dk-ink-3);
+	--color-dk-accent: var(--dk-accent);
+	--color-dk-accent-soft: var(--dk-accent-soft);
+	--color-dk-on-accent: var(--dk-on-accent);
+	--color-dk-needs: var(--dk-needs);
+	--color-dk-needs-ink: var(--dk-needs-ink);
+	--color-dk-failed: var(--dk-failed);
+	--color-dk-failed-ink: var(--dk-failed-ink);
+	--color-dk-done: var(--dk-done);
+	--color-dk-done-ink: var(--dk-done-ink);
+	--color-dk-working: var(--dk-working);
+	--color-dk-working-ink: var(--dk-working-ink);
+}
+
+@layer base {
+	[data-deck] :focus-visible {
+		outline-color: var(--dk-accent);
+	}
+
+	/* Rings for the keyboard only: a click never leaves one. */
+	[data-deck] :focus:not(:focus-visible) {
+		outline: none;
+	}
+
+	/* Controls keep the arrow, as on the desktop; text fields take the I-beam. */
+	[data-deck] :is(a, button, select, summary, label, [role="button"], [role="tab"], [role="treeitem"], [role="menuitem"]) {
+		cursor: default;
+	}
+
+	/* What the user reads to copy (commands, fingerprints, messages) and what they type into still select. */
+	[data-deck] :is(input, textarea, [contenteditable="true"], code, pre, kbd, [data-selectable], [data-selectable] *) {
+		-webkit-user-select: text;
+		user-select: text;
+	}
+	[data-deck] :is(input:not([type]), input[type="text"], input[type="search"], textarea, [data-selectable]) {
+		cursor: text;
+	}
+
+	[data-deck] ::selection {
+		background: var(--dk-accent-soft);
+		color: inherit;
+	}
+
+	[data-deck] * {
+		scrollbar-color: color-mix(in srgb, var(--dk-ink) 22%, transparent) transparent;
+		scrollbar-width: thin;
+	}
+}
+
+/*
+ * The working ring: twelve steps a second, all rings in phase, still under reduced motion. From Orca,
+ * `src/renderer/src/assets/main.css` (`.agent-working-spinner`, MIT © 2026 Lovecast Inc.): one day per iteration, so
+ * no animation event fires per turn; `status.tsx` anchors each ring's start at 0 so they turn together.
+ */
+@keyframes dk-working-turn {
+	to {
+		transform: rotate(86400turn);
+	}
+}
+
+.dk-working-ring {
+	animation: dk-working-turn 86400s steps(1036800, end) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.dk-working-ring {
+		animation: none;
+	}
+}
+
+/* Menus (`Menu.tsx`): a raised sheet; the highlighted item, by pointer or keyboard, takes the accent. */
+.dk-menu {
+	border: 1px solid var(--dk-line-strong);
+	border-radius: 6px;
+	background: var(--dk-raised);
+	color: var(--dk-ink);
+	box-shadow: var(--dk-shadow);
+	font-size: 13px;
+	line-height: 1;
+}
+
+.dk-menu-item {
+	display: flex;
+	height: 24px;
+	width: 100%;
+	align-items: center;
+	gap: 4px;
+	border-radius: 4px;
+	padding: 0 10px 0 4px;
+	text-align: left;
+	white-space: nowrap;
+	outline: none;
+}
+
+.dk-menu-item:focus {
+	background: var(--dk-accent);
+	color: var(--dk-on-accent);
+}
+
+.dk-menu-danger {
+	color: var(--dk-failed-ink);
+}
+
+.dk-menu-item:disabled {
+	color: var(--dk-ink-3);
+}
+
+.dk-menu-keys {
+	margin-left: 28px;
+	font: inherit;
+	font-size: 12px;
+	color: var(--dk-ink-3);
+	letter-spacing: 0.04em;
+}
+
+.dk-menu-item:focus .dk-menu-keys {
+	color: inherit;
+	opacity: 0.8;
+}
+
+/* Tooltips (`Tooltips.tsx`): a small inverse bubble with the shortcut beside the name. */
+.dk-tooltip {
+	position: fixed;
+	z-index: 60;
+	display: flex;
+	max-width: 320px;
+	align-items: baseline;
+	gap: 8px;
+	border-radius: 4px;
+	padding: 4px 7px;
+	background: var(--dk-tip);
+	color: var(--dk-tip-ink);
+	font-size: 12px;
+	line-height: 16px;
+	box-shadow: 0 4px 12px -2px rgb(0 0 0 / 0.25);
+	pointer-events: none;
+	overflow-wrap: anywhere;
+}
+
+.dk-tooltip-keys {
+	font: inherit;
+	opacity: 0.7;
+	letter-spacing: 0.04em;
+	white-space: nowrap;
+}
+
+/* A long rail draws only the rows on screen (T3 Code's sidebar rows). */
+.dk-row {
+	content-visibility: auto;
+	contain-intrinsic-size: auto 40px;
+}
+
+/*
+ * Dialogs inside Deck (the shared `Dialog`, shortcuts, quick open) are sheets like the menus: a soft frame, a 8 px
+ * radius, the raised ground and its shadow. Unlayered, so it wins over the dashboard's utility classes.
+ */
+[data-deck] [role="dialog"] {
+	border-color: var(--dk-line-strong);
+	border-radius: 8px;
+	background: var(--dk-raised);
+	box-shadow: var(--dk-shadow);
+}

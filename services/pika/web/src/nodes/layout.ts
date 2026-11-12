@@ -1,4 +1,4 @@
-/** The Nodes page's pane sizes, kept per browser. */
+/** Deck's pane sizes, kept per browser. */
 export interface NodesLayout {
 	/** The agent list on the left. */
 	rail: number;

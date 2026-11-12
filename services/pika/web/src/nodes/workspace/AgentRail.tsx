@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cx } from "../../components/ui";
+import { copyText } from "../../lib/clipboard";
+import { isMenuKey, menuAtPointer, menuBelow, useMenu, type MenuEntry } from "../deck/Menu";
+import { tip } from "../deck/Tooltips";
 import { homePath, paneLabel, paneSession, type NodeView } from "../client";
 import { sanitize, type Activity, type Project, type TerminalInfo } from "../contract";
 import {
@@ -154,17 +157,34 @@ export function AgentRail(props: AgentRailProps) {
 	const [prefs, setPrefs] = useRailPrefs();
 	const list = useRef<HTMLDivElement>(null);
 	useEffect(() => (list.current ? installRailTree(list.current) : undefined), []);
+	const rowMenu = useMenu();
+	// An agent's context menu, from the shared one; it opens outside the rows, whose containment would trap it.
+	const onRowMenu = (key: string, at: { x: number; y: number; flipY?: number }) => {
+		const agent = props.agents.get(key);
+		if (!agent) return;
+		const label = paneLabel(agent.terminal);
+		const cwd = paneSession(agent.terminal).cwd;
+		const items: MenuEntry[] = [
+			{ id: "open", label: "Open", run: () => props.onAgent(key) },
+			...(props.canClosePane(key) ? [{ id: "close-pane", label: "Close Pane", run: () => props.onClosePane(key) }] : []),
+			"separator",
+			{ id: "copy-cwd", label: "Copy Working Directory", run: () => void copyText(cwd) },
+			"separator",
+			{ id: agent.terminal.exited ? "remove" : "kill", label: agent.terminal.exited ? "Remove…" : "Kill…", danger: true, run: () => props.onKill(key) },
+		];
+		rowMenu.open({ ...at, items, label: label, attrs: { "data-agent-menu": key } });
+	};
 	return (
 		<>
-			<div className="flex h-10 shrink-0 items-center gap-2 pr-2 pl-3">
+			<div className="flex h-9 shrink-0 items-center gap-2 pr-2 pl-3">
 				{props.header}
-				<div className="ml-auto flex h-6 shrink-0 rounded-[3px] border border-wb-line p-px text-[12px]" role="group" aria-label="Group agents by">
+				<div className="ml-auto flex h-6 shrink-0 rounded-[3px] border border-dk-line p-px text-[12px]" role="group" aria-label="Group agents by">
 					{(["status", "projects"] as const).map((view) => (
 						<button
 							key={view}
 							type="button"
 							aria-pressed={prefs.view === view}
-							className={cx("rounded-[2px] px-2", prefs.view === view ? "bg-wb-ground font-medium text-wb-ink shadow-[0_0_0_1px_var(--wb-line)]" : "text-wb-ink-2 hover:text-wb-ink")}
+							className={cx("rounded-[2px] px-2", prefs.view === view ? "bg-dk-ground font-medium text-dk-ink shadow-[0_0_0_1px_var(--dk-line)]" : "text-dk-ink-2 hover:text-dk-ink")}
 							onClick={() => setPrefs({ view })}
 							data-rail-view={view}
 						>
@@ -180,17 +200,22 @@ export function AgentRail(props: AgentRailProps) {
 				onPointerLeave={() => props.onHover(false)}
 				data-rail-list={prefs.view}
 			>
-				{prefs.view === "status" ? <StatusView {...props} prefs={prefs} setPrefs={setPrefs} /> : <ProjectsView {...props} prefs={prefs} setPrefs={setPrefs} />}
+				{prefs.view === "status" ? <StatusView {...props} prefs={prefs} setPrefs={setPrefs} onRowMenu={onRowMenu} /> : <ProjectsView {...props} prefs={prefs} setPrefs={setPrefs} onRowMenu={onRowMenu} />}
 			</div>
+			{rowMenu.menu}
 		</>
 	);
 }
 
-type ViewProps = AgentRailProps & { prefs: RailPrefs; setPrefs: (change: Partial<RailPrefs>) => void };
+type ViewProps = AgentRailProps & {
+	prefs: RailPrefs;
+	setPrefs: (change: Partial<RailPrefs>) => void;
+	onRowMenu: (key: string, at: { x: number; y: number; flipY?: number }) => void;
+};
 
 function Chevron({ open }: { open: boolean }) {
 	return (
-		<svg width="10" height="10" viewBox="0 0 10 10" className={cx("shrink-0 text-wb-ink-3 transition-transform motion-reduce:transition-none", open && "rotate-90")} aria-hidden="true">
+		<svg width="10" height="10" viewBox="0 0 10 10" className={cx("shrink-0 text-dk-ink-3 transition-transform motion-reduce:transition-none", open && "rotate-90")} aria-hidden="true">
 			<path d="M3.5 2 6.5 5l-3 3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
 		</svg>
 	);
@@ -211,19 +236,19 @@ function StatusView(props: ViewProps) {
 					<section key={section} aria-label={SECTION_LABELS[section]} data-rail-section={section}>
 						<button
 							type="button"
-							className="flex h-7 w-full items-center gap-1.5 pr-3 pl-2.5 text-left text-[12px] font-semibold text-wb-ink-2 hover:text-wb-ink"
+							className="flex h-7 w-full items-center gap-1.5 pr-3 pl-2.5 text-left text-[12px] font-semibold text-dk-ink-2 hover:text-dk-ink"
 							aria-expanded={open}
 							onClick={() => setPrefs({ collapsed: toggled(prefs.collapsed, section) })}
 							data-sidebar-row={id}
 							data-section-toggle={section}
 						>
 							<Chevron open={open} />
-							<span className={cx(section === "needs" && keys.length > 0 && "text-wb-needs-ink")}>{SECTION_LABELS[section]}</span>
-							<span className="font-normal text-wb-ink-3 tabular-nums">{keys.length}</span>
+							<span className={cx(section === "needs" && keys.length > 0 && "text-dk-needs-ink")}>{SECTION_LABELS[section]}</span>
+							<span className="font-normal text-dk-ink-3 tabular-nums">{keys.length}</span>
 						</button>
 						{open &&
 							(keys.length === 0 ? (
-								<p className="pt-0.5 pr-3 pb-2 pl-7 text-[12px] text-wb-ink-3" data-nothing-needs-you="">
+								<p className="pt-0.5 pr-3 pb-2 pl-7 text-[12px] text-dk-ink-3" data-nothing-needs-you="">
 									Nothing needs you
 								</p>
 							) : (
@@ -257,16 +282,16 @@ function NodeStrip({ nodes, currentNode, onNode }: ViewProps) {
 						aria-current={current ? "page" : undefined}
 						className={cx(
 							"flex h-6 max-w-full items-center gap-1.5 rounded-[3px] px-1.5 text-[12px]",
-							current ? "bg-wb-accent-soft text-wb-ink" : "text-wb-ink-2 hover:bg-wb-hover hover:text-wb-ink",
+							current ? "bg-dk-accent-soft text-dk-ink" : "text-dk-ink-2 hover:bg-dk-hover hover:text-dk-ink",
 						)}
-						title={`${view.info.name}: ${NODE_STATE_LABELS[state]}${view.info.host ? ` (${view.info.host})` : ""}`}
+						{...tip(`${view.info.name}: ${NODE_STATE_LABELS[state]}${view.info.host ? ` (${view.info.host})` : ""}`)}
 						onClick={() => onNode(view.info.id)}
 						data-node={view.info.id}
 						data-node-state={state}
 					>
 						<NodeGlyph state={state} labelled={state !== "online" && state !== "offline"} />
 						<span className="truncate">{view.info.name}</span>
-						{state !== "online" && state !== "offline" && <span className="shrink-0 text-wb-ink-3">{NODE_STATE_LABELS[state]}</span>}
+						{state !== "online" && state !== "offline" && <span className="shrink-0 text-dk-ink-3">{NODE_STATE_LABELS[state]}</span>}
 					</button>
 				);
 			})}
@@ -282,22 +307,22 @@ export function NodeGlyph({ state, labelled = false }: { state: NodeLinkState; l
 	return (
 		<span className="inline-flex size-3 shrink-0 items-center justify-center" {...name} data-node-glyph={state}>
 			{state === "online" ? (
-				<span className="size-[7px] rounded-full bg-wb-ink-2" />
+				<span className="size-[7px] rounded-full bg-dk-ink-2" />
 			) : state === "connecting" ? (
-				<span className="wb-working-ring block size-[9px] rounded-full border-[1.5px] border-wb-ink-3 border-t-transparent" />
+				<span className="dk-working-ring block size-[9px] rounded-full border-[1.5px] border-dk-ink-3 border-t-transparent" />
 			) : state === "error" ? (
-				<svg width="12" height="12" viewBox="0 0 12 12" className="text-wb-failed" aria-hidden="true">
+				<svg width="12" height="12" viewBox="0 0 12 12" className="text-dk-failed" aria-hidden="true">
 					<path d="M6 1 11.2 10.4H.8z" fill="currentColor" strokeLinejoin="round" />
-					<path d="M6 4.6v2.6" stroke="var(--wb-ground)" strokeWidth="1.2" strokeLinecap="round" />
-					<circle cx="6" cy="8.75" r=".65" fill="var(--wb-ground)" />
+					<path d="M6 4.6v2.6" stroke="var(--dk-ground)" strokeWidth="1.2" strokeLinecap="round" />
+					<circle cx="6" cy="8.75" r=".65" fill="var(--dk-ground)" />
 				</svg>
 			) : state === "offline" ? (
-				<svg width="10" height="10" viewBox="0 0 10 10" className="text-wb-ink-3" aria-hidden="true">
+				<svg width="10" height="10" viewBox="0 0 10 10" className="text-dk-ink-3" aria-hidden="true">
 					<circle cx="5" cy="5" r="3.6" fill="none" stroke="currentColor" strokeWidth="1.3" />
 					<path d="M1.5 8.5 8.5 1.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
 				</svg>
 			) : (
-				<span className="size-[7px] rounded-full border-[1.5px] border-dashed border-wb-ink-3" />
+				<span className="size-[7px] rounded-full border-[1.5px] border-dashed border-dk-ink-3" />
 			)}
 		</span>
 	);
@@ -329,7 +354,7 @@ function ProjectsView(props: ViewProps) {
 						<button
 							type="button"
 							aria-current={node === currentNode ? "page" : undefined}
-							className={cx("flex h-8 w-full items-center gap-2 pr-3 pl-3 text-left hover:bg-wb-hover", state !== "online" && "text-wb-ink-2")}
+							className={cx("flex h-8 w-full items-center gap-2 pr-3 pl-3 text-left hover:bg-dk-hover", state !== "online" && "text-dk-ink-2")}
 							onClick={() => onNode(node)}
 							data-sidebar-row={nodeRow}
 							data-node={node}
@@ -338,12 +363,12 @@ function ProjectsView(props: ViewProps) {
 							<NodeGlyph state={state} labelled={state !== "online"} />
 							<span className="min-w-0 flex-1 truncate">
 								<span className="text-[13px] font-semibold">{view.info.name}</span>
-								{view.info.host && <span className="ml-1.5 text-[11.5px] text-wb-ink-3">{view.info.host}</span>}
+								{view.info.host && <span className="ml-1.5 text-[11.5px] text-dk-ink-3">{view.info.host}</span>}
 							</span>
-							{state !== "online" && <span className="shrink-0 text-[11.5px] text-wb-ink-3">{NODE_STATE_LABELS[state]}</span>}
+							{state !== "online" && <span className="shrink-0 text-[11.5px] text-dk-ink-3">{NODE_STATE_LABELS[state]}</span>}
 						</button>
 						{view.link.kind === "ready" && !projects && (
-							<p className="py-1 pr-3 pl-8 text-[12px] text-wb-ink-3" role="status">
+							<p className="py-1 pr-3 pl-8 text-[12px] text-dk-ink-3" role="status">
 								Listing projects…
 							</p>
 						)}
@@ -360,7 +385,7 @@ function ProjectsView(props: ViewProps) {
 										<button
 											type="button"
 											tabIndex={-1}
-											className="absolute left-3 flex size-4 items-center justify-center rounded-[2px] hover:bg-wb-hover"
+											className="absolute left-3 flex size-4 items-center justify-center rounded-[2px] hover:bg-dk-hover"
 											aria-label={open ? `Fold ${name}` : `Unfold ${name}`}
 											onClick={() => setPrefs({ folded: toggled(prefs.folded, cardKey) })}
 											data-sidebar-action-for={cardRow}
@@ -373,10 +398,10 @@ function ProjectsView(props: ViewProps) {
 											aria-current={project === active ? "true" : undefined}
 											aria-expanded={list.length > 0 ? open : undefined}
 											className={cx(
-												"flex h-7 w-full items-center gap-2 pr-3 pl-8 text-left text-[13px] hover:bg-wb-hover",
-												project === active && "bg-wb-accent-soft",
+												"flex h-7 w-full items-center gap-2 pr-3 pl-8 text-left text-[13px] hover:bg-dk-hover",
+												project === active && "bg-dk-accent-soft",
 											)}
-											title={project === OTHER ? "Terminals in no project" : project}
+											{...tip(project === OTHER ? "Terminals in no project" : project)}
 											onClick={() => onProject(node, project)}
 											data-sidebar-row={cardRow}
 											data-sidebar-parent={nodeRow}
@@ -385,10 +410,10 @@ function ProjectsView(props: ViewProps) {
 										>
 											<span className="min-w-0 flex-1 truncate">
 												<span className="font-medium">{name}</span>
-												{project !== OTHER && <span className="ml-1.5 text-[11.5px] text-wb-ink-3">{homePath(sanitize(project), home)}</span>}
+												{project !== OTHER && <span className="ml-1.5 text-[11.5px] text-dk-ink-3">{homePath(sanitize(project), home)}</span>}
 											</span>
 											{!open && strongest && <StatusGlyph mark={STRONGEST_MARK[strongest]} size={11} />}
-											{list.length > 0 && <span className="shrink-0 text-[11.5px] text-wb-ink-3 tabular-nums">{list.length}</span>}
+											{list.length > 0 && <span className="shrink-0 text-[11.5px] text-dk-ink-3 tabular-nums">{list.length}</span>}
 										</button>
 									</div>
 									{open && list.length > 0 && (
@@ -406,7 +431,7 @@ function ProjectsView(props: ViewProps) {
 							<>
 								<button
 									type="button"
-									className="flex h-6 w-full items-center gap-1.5 pr-3 pl-8 text-left text-[12px] text-wb-ink-3 hover:text-wb-ink"
+									className="flex h-6 w-full items-center gap-1.5 pr-3 pl-8 text-left text-[12px] text-dk-ink-3 hover:text-dk-ink"
 									aria-expanded={more === node}
 									onClick={() => setMore(more === node ? undefined : node)}
 									data-sidebar-row={`more:${node}`}
@@ -420,8 +445,8 @@ function ProjectsView(props: ViewProps) {
 										<button
 											key={project.path}
 											type="button"
-											className="flex h-7 w-full items-center gap-2 pr-3 pl-8 text-left text-[13px] text-wb-ink-2 hover:bg-wb-hover hover:text-wb-ink"
-											title={project.path}
+											className="flex h-7 w-full items-center gap-2 pr-3 pl-8 text-left text-[13px] text-dk-ink-2 hover:bg-dk-hover hover:text-dk-ink"
+											{...tip(project.path)}
 											onClick={() => onProject(node, project.path)}
 											data-sidebar-row={`project:${node}\n${project.path}`}
 											data-sidebar-parent={nodeRow}
@@ -429,7 +454,7 @@ function ProjectsView(props: ViewProps) {
 										>
 											<span className="min-w-0 flex-1 truncate">
 												{sanitize(project.name)}
-												<span className="ml-1.5 text-[11.5px] text-wb-ink-3">{homePath(sanitize(project.path), home)}</span>
+												<span className="ml-1.5 text-[11.5px] text-dk-ink-3">{homePath(sanitize(project.path), home)}</span>
 											</span>
 										</button>
 									))}
@@ -453,25 +478,25 @@ export function strongestSection(sections: readonly Section[]): Exclude<Section,
 /** A row's right-hand slot: what a waiting agent asks for, and how long ago it came back or how long it has worked. */
 function StatusSlot({ agent, placement, now }: { agent: RailAgent; placement: Placement; now: number }) {
 	const { terminal } = agent;
-	const time = (text: string) => <span className="text-wb-ink-3 tabular-nums">{text}</span>;
+	const time = (text: string) => <span className="text-dk-ink-3 tabular-nums">{text}</span>;
 	switch (placement.section) {
 		case "needs":
 			return (
 				<>
-					<span className="font-medium text-wb-needs-ink">{NEED_LABELS[needKind(terminal)]}</span>
+					<span className="font-medium text-dk-needs-ink">{NEED_LABELS[needKind(terminal)]}</span>
 					{time(shortAgo(placement.since, now))}
 				</>
 			);
 		case "working":
 			return time(placement.stale ? shortAgo(placement.changedAt, now) : elapsed(placement.since, now));
 		case "quiet":
-			return terminal.exited ? <span className="text-wb-ink-3">Exited</span> : time(shortAgo(placement.changedAt, now));
+			return terminal.exited ? <span className="text-dk-ink-3">Exited</span> : time(shortAgo(placement.changedAt, now));
 		default:
 			return time(shortAgo(placement.since, now));
 	}
 }
 
-const ATTENTION_INK: Partial<Record<Section, string>> = { needs: "text-wb-needs-ink", failed: "text-wb-failed-ink" };
+const ATTENTION_INK: Partial<Record<Section, string>> = { needs: "text-dk-needs-ink", failed: "text-dk-failed-ink" };
 
 /** One agent: its glyph, name, where it runs, its status slot, the hover actions, and its background activities. */
 function AgentRow({
@@ -487,6 +512,7 @@ function AgentRow({
 	canClosePane,
 	onClosePane,
 	onKill,
+	onRowMenu,
 }: ViewProps & { agent: RailAgent; placement: Placement; parent: string; variant: "status" | "project" }) {
 	const { terminal, node, key } = agent;
 	const state = nodeLinkState(node);
@@ -503,32 +529,41 @@ function AgentRow({
 	const children = childActivities(terminal);
 	const closable = canClosePane(key);
 	return (
-		<li className="wb-row group relative" data-terminal={terminal.terminalId} data-pane-state={mark} data-section={placement.section}>
+		<li className="dk-row group relative" data-terminal={terminal.terminalId} data-pane-state={mark} data-section={placement.section}>
 			<button
 				type="button"
 				aria-current={current ? "true" : undefined}
 				className={cx(
 					"grid w-full grid-cols-[14px_minmax(0,1fr)_auto] items-baseline gap-x-2 py-[5px] pr-3 text-left",
 					variant === "status" ? "pl-3" : "pl-8",
-					current ? "bg-wb-accent-soft" : "hover:bg-wb-hover",
+					current ? "bg-dk-accent-soft" : "hover:bg-dk-hover",
 					state !== "online" && "opacity-60",
 				)}
-				title={homePath(cwd, home)}
+				{...tip(homePath(cwd, home))}
 				onClick={() => onAgent(key)}
+				onContextMenu={(event) => {
+					event.preventDefault();
+					onRowMenu(key, menuAtPointer(event));
+				}}
+				onKeyDown={(event) => {
+					if (!isMenuKey(event)) return;
+					event.preventDefault();
+					onRowMenu(key, menuBelow(event.currentTarget));
+				}}
 				data-sidebar-row={key}
 				data-sidebar-parent={parent}
 				data-agent-row={terminal.terminalId}
 			>
 				<StatusGlyph mark={mark} className="translate-y-[2px] self-start" />
-				<span className={cx("flex min-w-0 items-center gap-1.5 text-[13px]", unread || current ? "font-semibold" : quiet ? "text-wb-ink-3" : "font-medium")}>
+				<span className={cx("flex min-w-0 items-center gap-1.5 text-[13px]", unread || current ? "font-semibold" : quiet ? "text-dk-ink-3" : "font-medium")}>
 					<span className="min-w-0 truncate">{label}</span>
-					{unread && <span className="size-1.5 shrink-0 rounded-full bg-wb-done" role="img" aria-label="Unread" />}
+					{unread && <span className="size-1.5 shrink-0 rounded-full bg-dk-done" role="img" aria-label="Unread" />}
 				</span>
 				<span className="flex shrink-0 items-baseline gap-1.5 text-[11.5px] group-focus-within:invisible group-hover:invisible" data-status-slot="">
 					<StatusSlot agent={agent} placement={placement} now={inbox.now} />
 				</span>
 				{variant === "status" && (
-					<span className="col-start-2 col-end-4 flex min-w-0 items-center gap-1 text-[11.5px] text-wb-ink-3">
+					<span className="col-start-2 col-end-4 flex min-w-0 items-center gap-1 text-[11.5px] text-dk-ink-3">
 						<span className="min-w-0 truncate">
 							{where} · {node.info.name}
 						</span>
@@ -541,7 +576,7 @@ function AgentRow({
 					</span>
 				)}
 				{attention && (
-					<span className={cx("col-start-2 col-end-4 truncate text-[11.5px]", ATTENTION_INK[placement.section] ?? "text-wb-ink-3")} title={attention} data-attention="">
+					<span className={cx("col-start-2 col-end-4 truncate text-[11.5px]", ATTENTION_INK[placement.section] ?? "text-dk-ink-3")} {...tip(attention)} data-attention="">
 						{attention}
 					</span>
 				)}
@@ -572,9 +607,9 @@ function RowAction({ label, onClick, rowKey, action, children }: { label: string
 	return (
 		<button
 			type="button"
-			className="flex size-[22px] items-center justify-center rounded-[3px] bg-wb-chrome text-wb-ink-2 shadow-[0_0_0_1px_var(--wb-line)] hover:text-wb-ink"
-			title={label}
+			className="flex size-[22px] items-center justify-center rounded-[3px] bg-dk-chrome text-dk-ink-2 shadow-[0_0_0_1px_var(--dk-line)] hover:text-dk-ink"
 			aria-label={label}
+			{...tip(label)}
 			onClick={onClick}
 			data-sidebar-action-for={rowKey}
 			data-row-action={action}
@@ -602,9 +637,9 @@ function ActivityRows({ activities, parentKey, parentLabel, now, indent, onOpen 
 					<li key={`${activity.source}\n${activity.id}`}>
 						<button
 							type="button"
-							className="flex h-6 w-full items-center gap-2 pr-3 text-left text-[12px] text-wb-ink-2 hover:bg-wb-hover hover:text-wb-ink"
+							className="flex h-6 w-full items-center gap-2 pr-3 text-left text-[12px] text-dk-ink-2 hover:bg-dk-hover hover:text-dk-ink"
 							style={{ paddingLeft: indent }}
-							title={`${sanitize(activity.label)} (${markLabel(mark).toLowerCase()})`}
+							{...tip(`${sanitize(activity.label)} (${markLabel(mark).toLowerCase()})`)}
 							onClick={onOpen}
 							data-sidebar-row={`${parentKey}\nactivity:${activity.source}\n${activity.id}`}
 							data-sidebar-parent={parentKey}
@@ -612,14 +647,14 @@ function ActivityRows({ activities, parentKey, parentLabel, now, indent, onOpen 
 						>
 							<StatusGlyph mark={mark} size={11} />
 							<span className="min-w-0 flex-1 truncate">{sanitize(activity.label)}</span>
-							{progress && <span className="shrink-0 text-[11px] text-wb-ink-3 tabular-nums">{progress}</span>}
-							{activity.startedAt !== undefined && <span className="shrink-0 text-[11px] text-wb-ink-3 tabular-nums">{elapsed(activity.startedAt, now)}</span>}
+							{progress && <span className="shrink-0 text-[11px] text-dk-ink-3 tabular-nums">{progress}</span>}
+							{activity.startedAt !== undefined && <span className="shrink-0 text-[11px] text-dk-ink-3 tabular-nums">{elapsed(activity.startedAt, now)}</span>}
 						</button>
 					</li>
 				);
 			})}
 			{hidden > 0 && (
-				<li className="flex h-5 items-center text-[11.5px] text-wb-ink-3" style={{ paddingLeft: indent + 19 }}>
+				<li className="flex h-5 items-center text-[11.5px] text-dk-ink-3" style={{ paddingLeft: indent + 19 }}>
 					{hidden} more
 				</li>
 			)}
@@ -638,7 +673,7 @@ export function InboxBadge({ badge }: { badge: { kind: "attention" | "working"; 
 	return (
 		<span className="inline-flex items-center gap-1 text-[11.5px] tabular-nums" data-inbox-badge={badge.kind}>
 			<StatusGlyph mark={badge.kind === "attention" ? "waiting" : "working"} size={11} />
-			<span className={badge.kind === "attention" ? "font-medium text-wb-needs-ink" : "text-wb-ink-2"}>{badge.count}</span>
+			<span className={badge.kind === "attention" ? "font-medium text-dk-needs-ink" : "text-dk-ink-2"}>{badge.count}</span>
 		</span>
 	);
 }
