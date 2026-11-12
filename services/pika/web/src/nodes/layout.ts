@@ -16,11 +16,11 @@ export interface NodesLayout {
 
 export const LAYOUT_KEY = "pika.nodes.layout";
 
-export const LAYOUT_DEFAULTS: NodesLayout = { rail: 272, railOpen: true, files: 300, filesOpen: true, hidden: false, sidebar: "files", diffInline: false };
+export const LAYOUT_DEFAULTS: NodesLayout = { rail: 280, railOpen: true, files: 300, filesOpen: true, hidden: false, sidebar: "files", diffInline: false };
 
 /** Least and most width of each pane, in CSS pixels. */
 export const LAYOUT_BOUNDS = {
-	rail: [200, 480],
+	rail: [220, 500],
 	files: [200, 720],
 } as const satisfies Record<"rail" | "files", readonly [number, number]>;
 

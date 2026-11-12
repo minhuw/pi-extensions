@@ -2,17 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useNavigate, useParams } from "react-router";
 import { Icon } from "../components/icons";
 import { ModelMark } from "../components/ModelName";
-import { BUTTON, Callout, ConfirmDialog, cx, EmptyState, Pill } from "../components/ui";
+import { BUTTON, Callout, ConfirmDialog, cx, EmptyState } from "../components/ui";
 import { useApi } from "../lib/api";
 import { withBase } from "../lib/base";
 import { copyText } from "../lib/clipboard";
 import { shortUserAgent } from "../lib/devices";
 import { bareModelOf } from "../lib/model";
 import { useHealth } from "../lib/relay";
-import { useTheme } from "../lib/theme";
+import { useAppliedTheme } from "../lib/theme";
 import { countedTitle, paneCounts, PaneAlerts } from "../nodes/alerts";
 import { changeMode, ChangesStore, type Change } from "../nodes/changes";
-import { homePath, liveBridge, nextWaiting, NodesClient, paneLabel, paneOrder, paneSession, stepPane, type NodesSnapshot, type NodeView } from "../nodes/client";
+import { homePath, liveBridge, NodesClient, paneLabel, paneSession, type NodesSnapshot, type NodeView } from "../nodes/client";
 import { displayFingerprint, type NodeEvent, type Project, type TerminalInfo } from "../nodes/contract";
 import { EditorStore, isDirty, type EditorSnapshot } from "../nodes/editor";
 import { ChangesPanel, diffControlAt, Explorer, useChanges, usePageVisible } from "../nodes/FilePanel";
@@ -25,7 +25,10 @@ import { focusNext, focusPrevious } from "../nodes/panes/pane-tree";
 import { QuickOpen } from "../nodes/QuickOpen";
 import { nodeSocketUrl } from "../nodes/socket";
 import { Splitter } from "../nodes/Splitter";
-import { NodeLine, NodeProjects } from "../nodes/workspace/AgentRail";
+import { WORKBENCH_ROOT } from "../nodes/workbench/tokens";
+import { AgentRail, InboxBadge, railAgents, useInbox } from "../nodes/workspace/AgentRail";
+import { flatLayout, inboxBadge, inboxKey, nextNeeding, splitKey, stepKey } from "../nodes/workspace/inbox";
+import { markLabel, paneMark, StatusGlyph, type PaneMark } from "../nodes/workspace/status";
 import {
 	activate,
 	activeTab,
@@ -267,7 +270,7 @@ function useNotificationPermission(): [Permission, () => void] {
  * Browser notifications for panes that start waiting or finish while the page is hidden or shows another pane; a
  * click brings the page forward on that pane. The tab's title counts waiting and finished panes on every node.
  */
-function usePaneAlerts(snapshot: NodesSnapshot, nodeId: string | undefined, terminalId: string | undefined, show: (node: string, terminalId: string) => void) {
+function usePaneAlerts(snapshot: NodesSnapshot, nodeId: string | undefined, terminalId: string | undefined, show: (node: string, terminalId: string) => void, working: number) {
 	const alerts = useRef(new PaneAlerts());
 	const notifications = useRef(new Map<string, Notification>());
 	const baseTitle = useRef(document.title);
@@ -308,8 +311,8 @@ function usePaneAlerts(snapshot: NodesSnapshot, nodeId: string | undefined, term
 	}, [snapshot, nodeId, terminalId]);
 
 	useEffect(() => {
-		document.title = countedTitle(baseTitle.current, paneCounts(snapshot.nodes));
-	}, [snapshot]);
+		document.title = countedTitle(baseTitle.current, paneCounts(snapshot.nodes), working);
+	}, [snapshot, working]);
 
 	useEffect(() => {
 		const open = notifications.current;
@@ -354,7 +357,7 @@ function NodesWorkspace() {
 	const client = useNodesClient();
 	const snapshot = useSnapshot(client);
 	const navigate = useNavigate();
-	const { theme } = useTheme();
+	const theme = useAppliedTheme();
 	const { node: nodeId, terminal: routeTerminal } = useParams();
 	const selected = snapshot.nodes.find((item) => item.info.id === nodeId);
 	const [layout, setLayout] = useLayout();
@@ -623,7 +626,14 @@ function NodesWorkspace() {
 	const editors = ready ? editorFor(ready.info.id) : undefined;
 	const editorSnapshot = useSyncExternalStore(editors?.subscribe ?? noop, editors?.getSnapshot ?? (() => EMPTY_EDITORS));
 	const readyFiles = ready && client?.files(ready.info.id);
-	usePaneAlerts(snapshot, ready?.info.id, onScreen, showPane);
+	// The rail's inbox: every agent on every node, by what the user has to do; held still while the pointer is on it.
+	const [hovering, setHovering] = useState(false);
+	const agents = useMemo(() => railAgents(snapshot.nodes, projectFor), [snapshot, projects, hubVersion, projectFor]);
+	const agentMap = useMemo(() => new Map(agents.map((agent) => [agent.key, agent])), [agents]);
+	const selectedKey = ready && onScreen ? inboxKey(ready.info.id, onScreen) : undefined;
+	const inbox = useInbox(agents, selectedKey, hovering);
+	const badge = inboxBadge(inbox.layout);
+	usePaneAlerts(snapshot, ready?.info.id, onScreen, showPane, inbox.layout.working.length);
 
 	// The explorer's folder: the project on screen ("Other": the focused pane's), or one picked by hand until the
 	// project changes.
@@ -743,15 +753,20 @@ function NodesWorkspace() {
 		actions.activate(next);
 		ws!.requestFocus(project!, next, ws!.layout(project!).tabs[next]?.kind === "terminal" ? (ws!.layout(project!).tabs[next] as { focused: string }).focused : undefined);
 	};
-	const go = (pane: { node: string; terminalId: string } | undefined) => (pane ? showPane(pane.node, pane.terminalId) : false);
+	const goKey = (key: string | undefined) => {
+		if (!key) return false;
+		const { node, terminalId } = splitKey(key);
+		showPane(node, terminalId);
+	};
 	page.help = () => setHelp(true);
 	// Taken even when there is nothing to open, so the browser's print dialog never shows on this page.
 	page.quickOpen = () => {
 		if (readyFiles) setQuickOpen(true);
 	};
-	page["pane.next"] = () => go(stepPane(paneOrder(snapshot.nodes), ready?.info.id, onScreen, 1));
-	page["pane.previous"] = () => go(stepPane(paneOrder(snapshot.nodes), ready?.info.id, onScreen, -1));
-	page["pane.waiting"] = () => go(nextWaiting(paneOrder(snapshot.nodes), ready?.info.id, onScreen));
+	// Agents in the rail's order, attention first.
+	page["pane.next"] = () => goKey(stepKey(flatLayout(inbox.layout), selectedKey, 1));
+	page["pane.previous"] = () => goKey(stepKey(flatLayout(inbox.layout), selectedKey, -1));
+	page["pane.waiting"] = () => goKey(nextNeeding(inbox.layout, selectedKey));
 	page["terminal.new"] = () => (ready && project && !busy ? newTerminal(ready.info.id, project) : false);
 	page["tab.next"] = () => stepTab(1);
 	page["tab.previous"] = () => stepTab(-1);
@@ -844,6 +859,16 @@ function NodesWorkspace() {
 		return control ? control.go("previous") : false;
 	};
 
+	/** The workspace tab and project an agent's pane is in, when it has one on a ready node. */
+	const paneTabOf = (key: string) => {
+		const { node, terminalId } = splitKey(key);
+		if (viewOf(node)?.link.kind !== "ready") return undefined;
+		const nodeWs = hub.get(node);
+		const owner = nodeWs.projectOf(terminalId);
+		const tab = owner ? tabOfTerminal(nodeWs.layout(owner), terminalId) : undefined;
+		return owner && tab ? { node, project: owner, tabId: tab.id, terminalId } : undefined;
+	};
+
 	// --- Drawing ---------------------------------------------------------------------------------------------
 
 	if (snapshot.status === "insecure") {
@@ -870,40 +895,44 @@ function NodesWorkspace() {
 
 	return (
 		// Narrow windows shrink the sidebars to their least widths first, then scroll.
-		<div className="flex h-full min-h-0 overflow-x-auto" data-nodes-page="">
+		<div className="flex h-full min-h-0 overflow-x-auto" data-nodes-page="" {...WORKBENCH_ROOT}>
 			{layout.railOpen && (
 				<>
-					<aside className="flex min-w-[200px] flex-col bg-sidebar" style={{ flex: `0 1 ${layout.rail}px` }} aria-label="Nodes" data-agent-list="">
-						<RailHeader status={snapshot.status} onHelp={() => setHelp(true)} />
-						<ul className="min-h-0 flex-1 overflow-y-auto pb-3">
-							{snapshot.nodes.map((view) => {
-								const node = view.info.id;
-								const nodeWs = hub.get(node);
-								const viewHome = view.link.kind === "ready" ? view.link.welcome.home : "/";
-								const current = node === nodeId;
-								return (
-									<li key={node} data-node={node}>
-										<NodeLine view={view} current={current} label={linkLabel(view)} />
-										{view.link.kind === "ready" && (
-											<NodeProjects
-												view={view}
-												projects={projects.get(node)}
-												home={viewHome}
-												projectOf={(terminal) => projectFor(node, terminal)}
-												{...(current && project ? { activeProject: project } : {})}
-												{...(current && onScreen ? { activeTerminal: onScreen } : {})}
-												onProject={(next) => {
-													nodeWs.setActive(next);
-													revealed.current = undefined;
-													navigate(`/nodes/${encodeURIComponent(node)}`);
-												}}
-												onPane={(owner, terminalId) => showPane(node, terminalId, owner)}
-											/>
-										)}
-									</li>
-								);
-							})}
-						</ul>
+					<aside className="flex min-w-[220px] flex-col bg-sidebar" style={{ flex: `0 1 ${layout.rail}px` }} aria-label="Agents" data-agent-list="">
+						<AgentRail
+							nodes={snapshot.nodes}
+							agents={agentMap}
+							inbox={inbox}
+							{...(selectedKey ? { selected: selectedKey } : {})}
+							{...(nodeId ? { currentNode: nodeId } : {})}
+							{...(project ? { currentProject: project } : {})}
+							projectsOf={(node) => projects.get(node)}
+							homeOf={(node) => {
+								const link = viewOf(node)?.link;
+								return link?.kind === "ready" ? link.welcome.home : "/";
+							}}
+							onHover={setHovering}
+							onAgent={(key) => {
+								const { node, terminalId } = splitKey(key);
+								showPane(node, terminalId, agentMap.get(key)?.project);
+							}}
+							onNode={(node) => navigate(`/nodes/${encodeURIComponent(node)}`)}
+							onProject={(node, next) => {
+								hub.get(node).setActive(next);
+								revealed.current = undefined;
+								navigate(`/nodes/${encodeURIComponent(node)}`);
+							}}
+							canClosePane={(key) => paneTabOf(key) !== undefined}
+							onClosePane={(key) => {
+								const found = paneTabOf(key);
+								if (found) closePaneOf(found.node, found.project, found.tabId, found.terminalId);
+							}}
+							onKill={(key) => {
+								const agent = agentMap.get(key);
+								if (agent) setKilling({ node: agent.node.info.id, terminal: agent.terminal });
+							}}
+							header={<RailHeader status={snapshot.status} onHelp={() => setHelp(true)} />}
+						/>
 						{permission === "default" && snapshot.nodes.length > 0 && (
 							<div className="shrink-0 border-t border-line px-4 py-2">
 								<button type="button" className={cx(BUTTON.quiet, "-mx-2 h-7 px-2")} onClick={requestPermission} data-notify-enable="">
@@ -940,6 +969,7 @@ function NodesWorkspace() {
 						onNew={() => newTerminal(ready.info.id, project)}
 						onRail={() => setLayout({ railOpen: !layout.railOpen })}
 						onFiles={() => setLayout({ filesOpen: !layout.filesOpen })}
+						badge={badge}
 					/>
 				)}
 				{(actionError || ready?.error) && (
@@ -1103,7 +1133,7 @@ function ActivityButton({ active, onClick, id, children }: { active: boolean; on
 		<button
 			type="button"
 			aria-pressed={active}
-			className={cx("flex items-center gap-1.5 px-3 text-[12.5px]", active ? "font-medium text-ink shadow-[inset_0_-2px_0_var(--color-ink)]" : "text-muted hover:text-ink")}
+			className={cx("flex items-center gap-1.5 px-3 text-[12.5px]", active ? "font-medium text-ink shadow-[inset_0_-2px_0_var(--wb-accent)]" : "text-muted hover:text-ink")}
 			onClick={onClick}
 			data-activity={id}
 		>
@@ -1114,17 +1144,17 @@ function ActivityButton({ active, onClick, id, children }: { active: boolean; on
 
 function RailHeader({ status, onHelp }: { status: NodesSnapshot["status"]; onHelp: () => void }) {
 	return (
-		<div className="flex h-10 shrink-0 items-center gap-2 px-4">
-			<h1 className="text-[15px] font-semibold">Nodes</h1>
+		<>
+			<h1 className="text-[13px] font-semibold">Nodes</h1>
 			{status !== "open" && (
-				<span className="text-[12px] text-muted" role="status" data-socket-status={status}>
+				<span className="truncate text-[12px] text-wb-ink-3" role="status" data-socket-status={status}>
 					{status === "closed" ? "Reconnecting…" : "Connecting…"}
 				</span>
 			)}
-			<button type="button" className={cx(BUTTON.quiet, "ml-auto h-7 px-2 font-mono")} title={withShortcut("Keyboard shortcuts", "help")} onClick={onHelp} data-keys-open="">
+			<button type="button" className={cx(BUTTON.quiet, "h-6 shrink-0 px-1.5 text-[12px]")} title={withShortcut("Keyboard shortcuts", "help")} onClick={onHelp} data-keys-open="">
 				?<span className="sr-only">Keyboard shortcuts</span>
 			</button>
-		</div>
+		</>
 	);
 }
 
@@ -1160,6 +1190,7 @@ function WorkspaceHeader({
 	onNew,
 	onRail,
 	onFiles,
+	badge,
 }: {
 	view: NodeView;
 	home: string;
@@ -1175,12 +1206,15 @@ function WorkspaceHeader({
 	onNew: () => void;
 	onRail: () => void;
 	onFiles: () => void;
+	/** The rail's badge, shown on its button while it is hidden. */
+	badge: ReturnType<typeof inboxBadge>;
 }) {
 	return (
 		<header className="flex h-10 shrink-0 items-center gap-3 border-b border-line px-3" data-workspace-header={project}>
 			{!railOpen && (
 				<button type="button" className={cx(BUTTON.quiet, "h-7 shrink-0 px-1.5")} onClick={onRail} title={withShortcut("Show the agent list", "sidebar.left")} data-show-rail="">
 					<Icon name="sidebar" size={14} />
+					<InboxBadge badge={badge} />
 					<span className="sr-only">Show the agent list</span>
 				</button>
 			)}
@@ -1192,7 +1226,7 @@ function WorkspaceHeader({
 			</span>
 			<PaneHeading node={view.info.name} terminal={session} home={home} />
 			{terminal && <PaneDetail terminal={terminal} />}
-			<button type="button" className={cx(BUTTON.secondary, "ml-auto h-7 shrink-0")} disabled={busy} onClick={onNew} title={withShortcut("New terminal", "terminal.new")} data-new-terminal="">
+			<button type="button" className={cx(BUTTON.quiet, "ml-auto h-7 shrink-0 border border-wb-line-strong text-wb-ink")} disabled={busy} onClick={onNew} title={withShortcut("New terminal", "terminal.new")} data-new-terminal="">
 				<Icon name="plus" size={13} />
 				New terminal
 			</button>
@@ -1206,35 +1240,19 @@ function WorkspaceHeader({
 	);
 }
 
+/** The focused pane's state in the header: its glyph and what it means, in the state's own ink. */
 function PaneBadge({ terminal }: { terminal: TerminalInfo }) {
-	if (terminal.exited) return <span className="text-[11.5px] text-muted">Exited</span>;
-	const status = terminal.status;
-	if (!status) return null;
-	if (status.state === "waiting") {
-		const kind = status.program?.kind;
-		return (
-			<Pill tone="yellow" title={status.program?.message}>
-				{kind === "permission" ? "Needs permission" : kind === "auth" ? "Needs login" : "Waiting"}
-			</Pill>
-		);
-	}
-	if (status.state === "busy") return <Pill>Busy</Pill>;
-	if (status.unread)
-		return (
-			<span className="inline-flex items-center gap-1 text-[11.5px] font-medium" title="Finished since you last looked">
-				<span className="size-1.5 rounded-full bg-ink" aria-hidden="true" />
-				Done
-			</span>
-		);
-	return null;
-}
-
-function linkLabel(view: NodeView): ReactNode {
-	const link = view.link;
-	if (!view.pin && link.kind !== "ready") return <Pill>Not paired</Pill>;
-	if (link.kind === "closed" && link.code === "node_key_changed") return <Pill tone="red">Key changed</Pill>;
-	if (link.kind === "opening" || link.kind === "handshaking") return <span className="text-[11.5px] text-muted">Connecting…</span>;
-	return null;
+	const mark = paneMark(terminal);
+	if (mark === "idle") return null;
+	const kind = terminal.status?.program?.kind;
+	const label = mark === "waiting" ? (kind === "permission" ? "Needs permission" : kind === "auth" ? "Needs login" : "Waiting") : markLabel(mark);
+	const ink: Partial<Record<PaneMark, string>> = { waiting: "text-wb-needs-ink", error: "text-wb-failed-ink", done: "text-wb-done-ink", working: "text-wb-working-ink" };
+	return (
+		<span className={cx("inline-flex items-center gap-1 text-[12px] font-medium", ink[mark] ?? "text-wb-ink-2")} title={terminal.status?.program?.message} data-pane-badge={mark}>
+			<StatusGlyph mark={mark} size={11} />
+			{label}
+		</span>
+	);
 }
 
 function Fingerprint({ label, value, attr }: { label: string; value: string; attr: string }) {

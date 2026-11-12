@@ -182,7 +182,7 @@ export function WorkspaceView(props: WorkspaceViewProps) {
 					<SplitNode node={ws.root} path={[]} view={props} groupElements={groupElements} onMenu={setMenu} style={{ flex: "1 1 0%" }} />
 					{target && (
 						<div
-							className={cx("pointer-events-none absolute z-20", target.zone === "strip" ? "bg-ink" : "border-2 border-ink bg-accent-soft")}
+							className={cx("pointer-events-none absolute z-20", target.zone === "strip" ? "bg-wb-accent" : "border-2 border-wb-accent bg-wb-accent-soft")}
 							style={{ left: target.preview.left, top: target.preview.top, width: target.preview.width, height: target.preview.height }}
 							data-tab-drop={`${target.groupId}:${target.zone}`}
 						/>
@@ -308,7 +308,7 @@ function GroupDivider({ row, ratio, onLive, onCommit }: { row: boolean; ratio: n
 			onDoubleClick={() => onCommit(0.5)}
 			onKeyDown={key}
 			className={cx(
-				"relative shrink-0 touch-none bg-line outline-none hover:bg-muted focus-visible:bg-ink",
+				"relative shrink-0 touch-none bg-line outline-none hover:bg-wb-line-strong focus-visible:bg-wb-accent",
 				row ? "w-[5px] cursor-col-resize" : "h-[5px] cursor-row-resize",
 			)}
 			data-group-divider=""
@@ -434,7 +434,7 @@ function TabStrip({ group, view, focused, onMenu }: { group: Group; view: Worksp
 	return (
 		<div
 			ref={strip}
-			className={cx("flex shrink-0 items-stretch border-b border-line bg-sidebar", focused && "shadow-[inset_0_2px_0_var(--color-ink)]")}
+			className={cx("flex shrink-0 items-stretch border-b border-line bg-sidebar", focused && "shadow-[inset_0_2px_0_var(--wb-accent)]")}
 			style={{ height: TAB_STRIP_HEIGHT }}
 			data-tab-strip={group.id}
 		>
@@ -486,7 +486,7 @@ function TabItem({
 			ref={setNodeRef}
 			className={cx(
 				"group relative flex max-w-[220px] shrink-0 items-center border-r border-line text-[12.5px]",
-				active ? "bg-page font-medium text-ink shadow-[inset_0_-2px_0_var(--color-ink)]" : "text-muted hover:bg-hover",
+				active ? "bg-page font-medium text-ink shadow-[inset_0_-2px_0_var(--wb-accent)]" : "text-muted hover:bg-hover",
 				isDragging && "opacity-40",
 			)}
 			onKeyDown={(event) => onKeyDown(event, tab.id)}
@@ -508,7 +508,7 @@ function TabItem({
 				role="tab"
 				aria-selected={active}
 				tabIndex={active ? 0 : -1}
-				className="flex h-full min-w-0 items-center gap-1.5 pr-1 pl-2.5 outline-none focus-visible:shadow-[inset_0_0_0_2px_var(--color-ink)]"
+				className="flex h-full min-w-0 items-center gap-1.5 pr-1 pl-2.5 outline-none focus-visible:shadow-[inset_0_0_0_2px_var(--wb-accent)]"
 				title={title}
 				onClick={() => actions.activate(tab.id)}
 				onDoubleClick={() => preview && actions.promote(tab.id)}

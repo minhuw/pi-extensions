@@ -48,7 +48,7 @@ export function KeysHelp({ onClose }: { onClose: () => void }) {
 				aria-labelledby={titleId}
 				data-keys-help=""
 				onClick={(event) => event.stopPropagation()}
-				className="flex max-h-[min(720px,calc(100vh-48px))] w-full max-w-[640px] flex-col rounded-sm border border-ink bg-page text-ink shadow-[0_16px_40px_rgba(0,0,0,0.22)]"
+				className="flex max-h-[min(720px,calc(100vh-48px))] w-full max-w-[640px] flex-col rounded-sm border border-wb-line-strong bg-page text-ink shadow-[0_16px_40px_rgba(0,0,0,0.22)]"
 			>
 				<div className="flex shrink-0 items-center gap-3 border-b border-line px-5 py-3">
 					<h2 id={titleId} className="text-[16px] font-semibold">

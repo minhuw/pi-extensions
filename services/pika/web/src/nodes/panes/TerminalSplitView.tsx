@@ -186,7 +186,7 @@ export function TerminalSplitView(props: TerminalSplitViewProps) {
             <Node node={props.tree} path={[]} context={context} style={{ flex: "1 1 0%" }} />
             {drop && (
                 <div
-                    className="pointer-events-none absolute z-50 border-2 border-ink bg-accent-soft"
+                    className="pointer-events-none absolute z-50 border-2 border-wb-accent bg-wb-accent-soft"
                     style={{ left: drop.box.left, top: drop.box.top, width: drop.box.width, height: drop.box.height }}
                     data-pane-drop={`${drop.target}:${drop.edge}`}
                 />
@@ -257,7 +257,7 @@ function Pane({ terminalId, context, style }: { terminalId: string; context: Vie
             className={cx(
                 "relative flex min-h-0 min-w-0 flex-col overflow-hidden",
                 multi && "border",
-                multi && (focused ? "border-ink" : "border-line"),
+                multi && (focused ? "border-wb-accent" : "border-line"),
                 context.moving === terminalId && "opacity-50",
             )}
             style={style}
@@ -492,7 +492,7 @@ function Divider({ direction, ratio, path, context }: { direction: PaneDirection
             onDoubleClick={() => commitRatio(0.5)}
             className={cx(
                 // A real gap, so the terminal layer drawn over the slots never covers the hit area; a 1px rule in it.
-                "relative shrink-0 touch-none outline-none before:absolute before:bg-line hover:before:bg-muted focus-visible:before:bg-ink",
+                "relative shrink-0 touch-none outline-none before:absolute before:bg-line hover:before:bg-wb-line-strong focus-visible:before:bg-wb-accent",
                 row ? "w-[5px] cursor-col-resize before:inset-y-0 before:left-[2px] before:w-px" : "h-[5px] cursor-row-resize before:inset-x-0 before:top-[2px] before:h-px",
             )}
             data-pane-divider={path.join("/")}

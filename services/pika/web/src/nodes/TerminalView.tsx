@@ -19,12 +19,13 @@ import { swallowQueries } from "./queries";
 import { WebglRenderer, type Renderer } from "./renderer";
 import { onSettled, whenSettled } from "./resize-gate";
 import { SizeOwner } from "./size";
+import { blend, WB_TOKENS } from "./workbench/tokens";
 import { UploadCancelled, uploadFiles, uploadName, type UploadItem, type UploadProgress } from "./upload";
 
-/** The page's ground and ink, so the terminal reads as part of it in either theme. */
+/** The Workbench's ground and ink (`workbench/tokens.ts`), so the terminal reads as part of the page in either theme. */
 const THEMES: Record<Theme, ITheme> = {
-	light: { background: "#ffffff", foreground: "#0b0b0b", cursor: "#0b0b0b", cursorAccent: "#ffffff", selectionBackground: "rgba(11, 11, 11, 0.18)" },
-	dark: { background: "#121212", foreground: "#ededed", cursor: "#ededed", cursorAccent: "#121212", selectionBackground: "rgba(237, 237, 237, 0.24)" },
+	light: { background: WB_TOKENS.light.ground, foreground: WB_TOKENS.light.ink, cursor: WB_TOKENS.light.ink, cursorAccent: WB_TOKENS.light.ground, selectionBackground: blend(WB_TOKENS.light.accent, WB_TOKENS.light.ground, 0.2) },
+	dark: { background: WB_TOKENS.dark.ground, foreground: WB_TOKENS.dark.ink, cursor: WB_TOKENS.dark.ink, cursorAccent: WB_TOKENS.dark.ground, selectionBackground: blend(WB_TOKENS.dark.accent, WB_TOKENS.dark.ground, 0.3) },
 };
 
 export const TERMINAL_OPTIONS = {
@@ -50,11 +51,17 @@ const clamp = (value: number, max: number): number => Math.max(1, Math.min(max, 
 /** A host smaller than this is not measured: a box on its way in or out would fit to a sliver of a grid. */
 const MIN_FIT_PX = { width: 48, height: 32 };
 
-/** Search highlights in either theme; the overview ruler colours are required by the addon even without a ruler. */
-const SEARCH_DECORATIONS: Record<Theme, NonNullable<ISearchOptions["decorations"]>> = {
-	light: { matchBackground: "#fde68a", matchOverviewRuler: "#d4a72c", activeMatchBackground: "#f59e0b", activeMatchColorOverviewRuler: "#b45309" },
-	dark: { matchBackground: "#5c4a12", matchOverviewRuler: "#a37f1a", activeMatchBackground: "#b7791f", activeMatchColorOverviewRuler: "#f59e0b" },
-};
+/**
+ * Search highlights in the accent, which never means a status; the overview ruler colours are required by the addon
+ * even without a ruler.
+ */
+const searchDecorations = (tokens: (typeof WB_TOKENS)[Theme]): NonNullable<ISearchOptions["decorations"]> => ({
+	matchBackground: blend(tokens.accent, tokens.ground, 0.22),
+	matchOverviewRuler: tokens.accent,
+	activeMatchBackground: blend(tokens.accent, tokens.ground, 0.5),
+	activeMatchColorOverviewRuler: tokens.accent,
+});
+const SEARCH_DECORATIONS: Record<Theme, NonNullable<ISearchOptions["decorations"]>> = { light: searchDecorations(WB_TOKENS.light), dark: searchDecorations(WB_TOKENS.dark) };
 
 const messageOf = (error: unknown): string =>
 	error instanceof NodeRequestError ? `${error.code}: ${error.message}` : error instanceof Error ? error.message : String(error);
@@ -372,7 +379,11 @@ export function TerminalView({
 	}, [channel, terminalId]);
 
 	useEffect(() => {
-		if (termRef.current) termRef.current.options.theme = THEMES[theme];
+		const term = termRef.current;
+		if (!term) return;
+		term.options.theme = THEMES[theme];
+		// The WebGL renderer repaints only rows that change: an idle screen would keep the old theme until it printed.
+		term.refresh(0, term.rows - 1);
 	}, [theme]);
 
 	// Shown: a WebGL context again, a redraw, and a fit once the box has its size. Hidden: the context goes back.
@@ -610,7 +621,7 @@ export function TerminalView({
 						{upload.progress.count > 1 ? ` (${upload.progress.index + 1} of ${upload.progress.count})` : ""}
 					</span>
 					<span className="h-1.5 w-[120px] shrink-0 overflow-hidden rounded-full bg-hover" aria-hidden="true">
-						<span className="block h-full bg-ink" style={{ width: `${percent}%` }} />
+						<span className="block h-full bg-wb-accent" style={{ width: `${percent}%` }} />
 					</span>
 					<span className="shrink-0 tabular-nums text-muted">
 						{bytes(upload.progress.sent)} of {bytes(upload.progress.total)}
@@ -649,7 +660,7 @@ export function TerminalView({
 				<div ref={host} className="min-h-0 flex-1 overflow-auto bg-page" data-terminal-host="" />
 				{dragging && (
 					<div
-						className="pointer-events-none absolute inset-2 flex items-center justify-center rounded-sm border-2 border-dashed border-ink bg-page/85 text-[14px] font-medium"
+						className="pointer-events-none absolute inset-2 flex items-center justify-center rounded-sm border-2 border-dashed border-wb-accent bg-page/85 text-[14px] font-medium"
 						data-drop-target=""
 					>
 						Drop to upload, then paste the paths here

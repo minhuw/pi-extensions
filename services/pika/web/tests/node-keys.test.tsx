@@ -1,6 +1,8 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { nextWaiting, paneOrder, stepPane, type NodeView } from "../src/nodes/client";
+import type { NodeView } from "../src/nodes/client";
+import { flatLayout, InboxTracker, layoutInbox, nextNeeding, stepKey } from "../src/nodes/workspace/inbox";
+import { railAgents } from "../src/nodes/workspace/AgentRail";
 import type { TerminalInfo } from "../src/nodes/contract";
 import {
 	ACTIONS,
@@ -209,26 +211,33 @@ describe("moving between panes", () => {
 		({ info: { id, name: id, online: true }, link: ready ? { kind: "ready" } : { kind: "idle" }, terminals, epoch: 1 }) as unknown as NodeView;
 	const nodes = [view("a", true, [term("a1"), term("a2", "waiting")]), view("off", false, [term("x")]), view("b", true, [term("b1", "busy"), term("b2", "waiting")])];
 
-	it("follows the agent list: ready nodes only, each node's waiting panes first", () => {
-		expect(paneOrder(nodes).map((pane) => `${pane.node}/${pane.terminalId}${pane.waiting ? "*" : ""}`)).toEqual(["a/a2*", "a/a1", "b/b2*", "b/b1"]);
+	/** The rail's order for `nodes`, as the page's shortcuts walk it. */
+	const layoutOf = (list: NodeView[]) => {
+		const entries = railAgents(list, () => "/");
+		const { placements } = new InboxTracker().observe(entries, 10);
+		return layoutInbox(entries, placements);
+	};
+
+	it("follows the rail: agents needing the user first across nodes, then the rest, offline nodes' last known agents too", () => {
+		expect(flatLayout(layoutOf(nodes))).toEqual(["a\na2", "b\nb2", "b\nb1", "a\na1", "off\nx"]);
 	});
 
 	it("steps forward and back with wrapping, and from nothing to the ends", () => {
-		const order = paneOrder(nodes);
-		expect(stepPane(order, "a", "a1", 1)).toMatchObject({ node: "b", terminalId: "b2" });
-		expect(stepPane(order, "b", "b1", 1)).toMatchObject({ node: "a", terminalId: "a2" });
-		expect(stepPane(order, "a", "a2", -1)).toMatchObject({ node: "b", terminalId: "b1" });
-		expect(stepPane(order, undefined, undefined, 1)).toMatchObject({ terminalId: "a2" });
-		expect(stepPane(order, undefined, undefined, -1)).toMatchObject({ terminalId: "b1" });
-		expect(stepPane([], "a", "a1", 1)).toBeUndefined();
+		const order = flatLayout(layoutOf(nodes));
+		expect(stepKey(order, "a\na1", 1)).toBe("off\nx");
+		expect(stepKey(order, "off\nx", 1)).toBe("a\na2");
+		expect(stepKey(order, "a\na2", -1)).toBe("off\nx");
+		expect(stepKey(order, undefined, 1)).toBe("a\na2");
+		expect(stepKey(order, undefined, -1)).toBe("off\nx");
+		expect(stepKey([], "a\na1", 1)).toBeUndefined();
 	});
 
-	it("jumps to the next waiting pane after the one on screen, never to itself", () => {
-		const order = paneOrder(nodes);
-		expect(nextWaiting(order, "a", "a2")).toMatchObject({ node: "b", terminalId: "b2" });
-		expect(nextWaiting(order, "b", "b2")).toMatchObject({ node: "a", terminalId: "a2" });
-		expect(nextWaiting(order, undefined, undefined)).toMatchObject({ terminalId: "a2" });
-		expect(nextWaiting(paneOrder([view("a", true, [term("a1"), term("a2", "waiting")])]), "a", "a2")).toBeUndefined();
+	it("jumps to the next agent needing the user after the one on screen, never to itself", () => {
+		const layout = layoutOf(nodes);
+		expect(nextNeeding(layout, "a\na2")).toBe("b\nb2");
+		expect(nextNeeding(layout, "b\nb2")).toBe("a\na2");
+		expect(nextNeeding(layout, undefined)).toBe("a\na2");
+		expect(nextNeeding(layoutOf([view("a", true, [term("a1"), term("a2", "waiting")])]), "a\na2")).toBeUndefined();
 	});
 });
 

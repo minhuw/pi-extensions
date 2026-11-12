@@ -100,7 +100,7 @@ export function QuickOpen({
 				role="dialog"
 				aria-modal="true"
 				aria-label="Open a file"
-				className="flex max-h-[70vh] w-full max-w-[640px] flex-col self-start rounded-sm border border-ink bg-page text-ink shadow-[0_16px_40px_rgba(0,0,0,0.22)]"
+				className="flex max-h-[70vh] w-full max-w-[640px] flex-col self-start rounded-sm border border-wb-line-strong bg-page text-ink shadow-[0_16px_40px_rgba(0,0,0,0.22)]"
 				onClick={(event) => event.stopPropagation()}
 			>
 				<input

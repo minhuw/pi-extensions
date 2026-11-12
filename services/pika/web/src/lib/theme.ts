@@ -54,3 +54,19 @@ export function useTheme(): { theme: Theme; toggle: () => void } {
 
 	return { theme, toggle };
 }
+
+/**
+ * The theme on `<html data-theme>`, followed as it changes: for views that only read it (the Nodes page's terminals
+ * and editors). Each `useTheme` keeps its own state, so a second `useTheme` would not hear the header's toggle.
+ */
+export function useAppliedTheme(): Theme {
+	const read = (): Theme => (document.documentElement.dataset.theme === "dark" ? "dark" : document.documentElement.dataset.theme === "light" ? "light" : initialTheme());
+	const [theme, setTheme] = useState<Theme>(read);
+	useEffect(() => {
+		const observer = new MutationObserver(() => setTheme(read()));
+		observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+		setTheme(read());
+		return () => observer.disconnect();
+	}, []);
+	return theme;
+}

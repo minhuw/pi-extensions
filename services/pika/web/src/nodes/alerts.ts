@@ -69,8 +69,12 @@ export function paneCounts(nodes: readonly NodeView[]): { waiting: number; done:
 	return { waiting: waitingCount, done: doneCount };
 }
 
-/** The tab's title with the counts in front, so a background tab shows what needs looking at. */
-export function countedTitle(base: string, counts: { waiting: number; done: number }): string {
+/**
+ * The tab's title with the counts in front, so a background tab shows what needs looking at; with nothing to look at,
+ * how many agents work (Orca's activity badge).
+ */
+export function countedTitle(base: string, counts: { waiting: number; done: number }, working = 0): string {
 	const parts = [counts.waiting ? `${counts.waiting} waiting` : "", counts.done ? `${counts.done} done` : ""].filter(Boolean);
-	return parts.length ? `(${parts.join(", ")}) ${base}` : base;
+	if (parts.length) return `(${parts.join(", ")}) ${base}`;
+	return working ? `(${working} working) ${base}` : base;
 }

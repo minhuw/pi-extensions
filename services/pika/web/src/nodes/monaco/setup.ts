@@ -16,6 +16,7 @@ import "monaco-editor/languages/definitions/register.all";
 import * as monaco from "monaco-editor/editor/editor.api";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 import type { Theme } from "../../lib/theme";
+import { blend, WB_TOKENS } from "../workbench/tokens";
 
 declare global {
 	interface Window {
@@ -25,19 +26,29 @@ declare global {
 
 window.MonacoEnvironment = { getWorker: () => new EditorWorker() };
 
-// The page's ground and ink, as the terminal uses them.
-monaco.editor.defineTheme("pika-light", {
-	base: "vs",
-	inherit: true,
-	rules: [],
-	colors: { "editor.background": "#ffffff", "editor.foreground": "#0b0b0b" },
-});
-monaco.editor.defineTheme("pika-dark", {
-	base: "vs-dark",
-	inherit: true,
-	rules: [],
-	colors: { "editor.background": "#121212", "editor.foreground": "#ededed" },
-});
+// The Workbench's ground, ink, and accent (`workbench/tokens.ts`), as the terminal uses them.
+for (const theme of ["light", "dark"] as const) {
+	const tokens = WB_TOKENS[theme];
+	monaco.editor.defineTheme(`pika-${theme}`, {
+		base: theme === "dark" ? "vs-dark" : "vs",
+		inherit: true,
+		rules: [],
+		colors: {
+			"editor.background": tokens.ground,
+			"editor.foreground": tokens.ink,
+			"editorCursor.foreground": tokens.accent,
+			"editor.selectionBackground": blend(tokens.accent, tokens.ground, theme === "dark" ? 0.32 : 0.2),
+			"editor.lineHighlightBackground": tokens.chrome,
+			"editor.lineHighlightBorder": tokens.chrome,
+			"editorLineNumber.foreground": blend(tokens.ink2, tokens.ground, 0.7),
+			"editorLineNumber.activeForeground": tokens.ink,
+			"editorGutter.background": tokens.ground,
+			"editorWidget.background": tokens.chrome,
+			"editorWidget.border": tokens.line,
+			"focusBorder": tokens.accent,
+		},
+	});
+}
 
 export const themeName = (theme: Theme): string => (theme === "dark" ? "pika-dark" : "pika-light");
 

@@ -1,6 +1,6 @@
-import { fireEvent, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { THEME_STORAGE_KEY } from "../src/lib/theme";
+import { THEME_STORAGE_KEY, useAppliedTheme, useTheme } from "../src/lib/theme";
 import { renderApp } from "./support/render";
 import { createFakeServer } from "./support/server";
 import { installMatchMedia } from "./support/media";
@@ -35,5 +35,25 @@ describe("theme", () => {
 		fireEvent.click(toLight);
 		expect(document.documentElement.dataset.theme).toBe("light");
 		expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe("light");
+	});
+
+	it("lets a view that only reads the theme follow another component's toggle", async () => {
+		let toggle = () => {};
+		function Toggler() {
+			toggle = useTheme().toggle;
+			return null;
+		}
+		function Reader() {
+			return <span data-testid="applied">{useAppliedTheme()}</span>;
+		}
+		render(
+			<>
+				<Toggler />
+				<Reader />
+			</>,
+		);
+		expect(screen.getByTestId("applied").textContent).toBe("light");
+		await act(async () => toggle());
+		expect(screen.getByTestId("applied").textContent).toBe("dark");
 	});
 });

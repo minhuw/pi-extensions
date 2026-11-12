@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { liveBridge, NodesClient, orderTerminals } from "../src/nodes/client";
+import { liveBridge, NodesClient } from "../src/nodes/client";
 import type { Body, TerminalInfo } from "../src/nodes/contract";
 import { MemoryKeyStore } from "../src/nodes/identity";
 import type { WebSocketLike } from "../src/nodes/socket";
@@ -131,7 +131,7 @@ describe("the Nodes page client", () => {
 		expect(server.channels).toBe(3);
 	});
 
-	it("reconnects a pinned node by itself, and applies pane status in waiting-first order", async () => {
+	it("reconnects a pinned node by itself, and applies pane status in place", async () => {
 		const { node, store, client: first } = await setup();
 		node.allowed.add(first.getSnapshot().fingerprint!);
 		first.pair("node-1");
@@ -159,7 +159,11 @@ describe("the Nodes page client", () => {
 		});
 		await settle();
 		const terminals = client.getSnapshot().nodes[0]!.terminals;
-		expect(orderTerminals(terminals).map((item) => item.terminalId)).toEqual(["t2", "t1"]);
+		// The node's order stays; the rail sorts by status itself (workspace/inbox.ts).
+		expect(terminals.map((item) => [item.terminalId, item.status?.state])).toEqual([
+			["t1", undefined],
+			["t2", "waiting"],
+		]);
 	});
 
 	it("lists terminals once per channel and then follows term.created and term.removed", async () => {

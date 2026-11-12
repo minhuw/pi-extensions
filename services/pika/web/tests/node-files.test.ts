@@ -390,7 +390,7 @@ describe("the page's layout", () => {
 		saveLayout({ ...LAYOUT_DEFAULTS, rail: 300, filesOpen: false }, storage);
 		expect(loadLayout(storage)).toMatchObject({ rail: 300, filesOpen: false });
 		store.set(LAYOUT_KEY, JSON.stringify({ rail: 5, files: 1e9, tree: "wide", hidden: true }));
-		expect(loadLayout(storage)).toEqual({ ...LAYOUT_DEFAULTS, rail: 200, files: 720, hidden: true });
+		expect(loadLayout(storage)).toEqual({ ...LAYOUT_DEFAULTS, rail: 220, files: 720, hidden: true });
 		store.set(LAYOUT_KEY, "{not json");
 		expect(loadLayout(storage)).toEqual(LAYOUT_DEFAULTS);
 	});
