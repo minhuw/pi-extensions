@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
 
 export const COUNCIL_MEMBER_IDS = ["caspar", "melchior", "balthasar"] as const;
 export type CouncilMemberId = (typeof COUNCIL_MEMBER_IDS)[number];
@@ -357,7 +357,50 @@ export const COUNCIL_USAGE = [
 	`  - balthasar:  ${COUNCIL_MEMBERS.balthasar.agentType} (${COUNCIL_MEMBERS.balthasar.model}, thinking: ${COUNCIL_MEMBERS.balthasar.thinking})`,
 ].join("\n");
 
+export const COUNCIL_MENTION_RE = /\bcouncil(?:-(?:caspar|melchior|balthasar))?\b/i;
+
+function hasCouncilBranchState(branch: readonly SessionEntry[] | undefined): boolean {
+	if (!branch) return false;
+	return branch.some(
+		(entry) =>
+			(entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				entry.message.toolName === "council") ||
+			(entry.type === "custom" &&
+				entry.customType === "pi-extensions.command" &&
+				(entry.data as { command?: unknown } | undefined)?.command === "council"),
+	);
+}
+
 export default function councilExtension(pi: ExtensionAPI): void {
+	function activateCouncilTool(): void {
+		if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
+		const active = pi.getActiveTools();
+		if (!active.includes("council")) pi.setActiveTools([...active, "council"]);
+	}
+
+	if (typeof pi.on === "function") {
+		const restoreFromBranch = (
+			_event: unknown,
+			ctx: { sessionManager?: { getBranch?: () => SessionEntry[] } },
+		) => {
+			if (hasCouncilBranchState(ctx.sessionManager?.getBranch?.())) {
+				activateCouncilTool();
+			}
+		};
+
+		pi.on("session_start", restoreFromBranch);
+		pi.on("session_tree", restoreFromBranch);
+		pi.on("before_agent_start", (event) => {
+			if (
+				event.messageType === "user" &&
+				typeof event.prompt === "string" &&
+				COUNCIL_MENTION_RE.test(event.prompt)
+			) {
+				activateCouncilTool();
+			}
+		});
+	}
 	const callRpc = <T = unknown>(
 		channel: string,
 		payload: Record<string, unknown>,
@@ -395,6 +438,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "council",
 		label: "Council",
+		defaultActive: false,
 		description:
 			"Convene a 3-model read-only technical council (Caspar on magpie/gemini-4-carbon, Melchior on magpie/gpt-6-astra, Balthasar on magpie/claude-fable-5-2) for a 2-round deliberation on difficult architecture, design, or tradeoff questions. Round 1 gathers independent codebase-grounded proposals in parallel; Round 2 resumes each advisor with anonymized, position-swapped peer proposals (Peer A, Peer B) and a verbosity-normalized rubric before returning the full deliberation for stake-free synthesis.",
 		promptSnippet:
@@ -788,6 +832,8 @@ export default function councilExtension(pi: ExtensionAPI): void {
 				"",
 				"Pass any relevant repository `paths` if identified. Once the `council` tool returns the Round 1 and Round 2 deliberation report, synthesize the consensus, tradeoffs, and recommended design as a stake-free judge.",
 			].join("\n");
+
+			activateCouncilTool();
 
 			if (typeof ctx.isIdle === "function" && !ctx.isIdle()) {
 				pi.sendUserMessage(userPrompt, { deliverAs: "followUp" });

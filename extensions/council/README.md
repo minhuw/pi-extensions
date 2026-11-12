@@ -2,7 +2,7 @@
 
 Use `/council <topic>` or the `council` tool to convene a three-model, read-only technical council for difficult architectural, design, and tradeoff decisions. Council replaces the single `expert` subagent with a structured two-round deliberation across three frontier models from distinct model families.
 
-The collection loads this extension automatically after Subagents; use `/reload` after installing or updating it.
+The collection loads this extension automatically after Subagents; use `/reload` after installing or updating it. The `council` tool registers inactive by default (`defaultActive: false`) so ordinary sessions incur no tool-schema, `<tools>`, or `<rules>` overhead, and activates automatically on `/council <topic>`, restored council branches, or when a prompt explicitly mentions `council`.
 
 ```text
 /council                                show usage and the three pinned council advisors

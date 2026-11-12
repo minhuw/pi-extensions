@@ -1,8 +1,30 @@
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	getCurrentSystemPrompt,
+	getCurrentTools,
+	InMemoryCredentialStore,
+	type AssistantMessage,
+} from "@earendil-works/pi-ai";
+import {
+	fauxAssistantMessage,
+	fauxProvider,
+	fauxToolCall,
+	type FauxResponseFactory,
+} from "@earendil-works/pi-ai/providers/faux";
+import {
+	createAgentSession,
+	DefaultResourceLoader,
+	ModelRuntime,
+	SessionManager,
+	SettingsManager,
+	type AgentSession,
+	type ExtensionAPI,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import {
 	parseAgentDefinition,
 	parseAgentFrontmatter,
@@ -11,6 +33,7 @@ import councilExtension, {
 	buildRound1Prompt,
 	buildRound2Prompt,
 	COUNCIL_MEMBERS,
+	COUNCIL_MENTION_RE,
 	formatCouncilReport,
 	resolveCouncilMembers,
 	rotatePeersForMember,
@@ -48,6 +71,7 @@ function createDispatchingBus() {
 }
 
 interface HarnessOptions {
+	minimalPi?: boolean;
 	pingVersion?: number | null;
 	round1Handler?: (req: {
 		id: string;
@@ -226,13 +250,38 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 		});
 	});
 
-	const pi = {
-		events: bus,
-		registerTool: vi.fn((tool: any) => tools.set(tool.name, tool)),
-		registerCommand: vi.fn((name: string, cmd: any) => commands.set(name, cmd)),
-		appendEntry: vi.fn(),
-		sendUserMessage,
-	} as unknown as ExtensionAPI;
+	let activeTools = ["bash"];
+	const eventHandlers = new Map<string, Array<(...args: any[]) => unknown>>();
+	const getActiveTools = vi.fn(() => [...activeTools]);
+	const setActiveTools = vi.fn((next: string[]) => {
+		activeTools = [...next];
+	});
+	const on = vi.fn((event: string, handler: (...args: any[]) => unknown) => {
+		const list = eventHandlers.get(event) ?? [];
+		list.push(handler);
+		eventHandlers.set(event, list);
+	});
+
+	const pi = (
+		opts.minimalPi
+			? {
+					events: bus,
+					registerTool: vi.fn((tool: any) => tools.set(tool.name, tool)),
+					registerCommand: vi.fn((name: string, cmd: any) => commands.set(name, cmd)),
+					appendEntry: vi.fn(),
+					sendUserMessage,
+				}
+			: {
+					events: bus,
+					on,
+					getActiveTools,
+					setActiveTools,
+					registerTool: vi.fn((tool: any) => tools.set(tool.name, tool)),
+					registerCommand: vi.fn((name: string, cmd: any) => commands.set(name, cmd)),
+					appendEntry: vi.fn(),
+					sendUserMessage,
+				}
+	) as unknown as ExtensionAPI;
 
 	councilExtension(pi);
 
@@ -246,6 +295,12 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 		stops,
 		consumes,
 		sendUserMessage,
+		on,
+		getActiveTools,
+		setActiveTools,
+		get activeTools() {
+			return [...activeTools];
+		},
 	};
 }
 
@@ -652,8 +707,18 @@ describe("council tool execution and RPC deliberation", () => {
 });
 
 describe("/council command and package contracts", () => {
-	it("notifies usage and pinned members when called without arguments, and sends a user message with a topic", async () => {
+	it("registers council with defaultActive: false, tolerates minimal mock pi objects, notifies usage without activating on empty/help/status, and activates before sending topic prompts", async () => {
+		const minimalHarness = bootCouncilHarness({ minimalPi: true });
+		expect(minimalHarness.tool.defaultActive).toBe(false);
+		await minimalHarness.command.handler("Topic on minimal mock pi", {
+			ui: { notify: vi.fn() },
+			isIdle: () => true,
+		} as unknown as ExtensionContext);
+		expect(minimalHarness.sendUserMessage).toHaveBeenCalledTimes(1);
+
 		const harness = bootCouncilHarness();
+		expect(harness.tool.defaultActive).toBe(false);
+		expect(harness.activeTools).toEqual(["bash"]);
 		const notify = vi.fn();
 		const ctx = {
 			ui: { notify },
@@ -667,12 +732,16 @@ describe("/council command and package contracts", () => {
 		expect(notify.mock.calls[0][0]).toContain("magpie/gpt-6-astra");
 		expect(notify.mock.calls[0][0]).toContain("magpie/claude-fable-5-2");
 		expect(harness.sendUserMessage).not.toHaveBeenCalled();
+		expect(harness.activeTools).toEqual(["bash"]);
 
 		await harness.command.handler("help", ctx);
 		await harness.command.handler("status", ctx);
 		expect(notify).toHaveBeenCalledTimes(3);
+		expect(harness.activeTools).toEqual(["bash"]);
 
 		await harness.command.handler("Design the distributed lock lease renewal protocol", ctx);
+		expect(harness.activeTools).toEqual(["bash", "council"]);
+		expect(harness.setActiveTools).toHaveBeenCalledTimes(1);
 		expect(harness.sendUserMessage).toHaveBeenCalledTimes(1);
 		expect(harness.sendUserMessage.mock.calls[0][0]).toContain("`council` tool");
 		expect(harness.sendUserMessage.mock.calls[0][0]).toContain(
@@ -685,8 +754,19 @@ describe("/council command and package contracts", () => {
 			isIdle: () => false,
 		} as unknown as ExtensionContext;
 		await harness.command.handler("Follow-up council topic", busyCtx);
+		expect(harness.setActiveTools).toHaveBeenCalledTimes(1);
 		expect(harness.sendUserMessage).toHaveBeenCalledTimes(2);
 		expect(harness.sendUserMessage.mock.calls[1][1]).toEqual({ deliverAs: "followUp" });
+	});
+
+	it("matches explicit council mentions via COUNCIL_MENTION_RE without false positives", () => {
+		expect(COUNCIL_MENTION_RE.test("Convene the council on lock leases")).toBe(true);
+		expect(COUNCIL_MENTION_RE.test("Inspect @extensions/council/ before changing prompts")).toBe(true);
+		expect(COUNCIL_MENTION_RE.test("Ask council-caspar and council-melchior")).toBe(true);
+		expect(COUNCIL_MENTION_RE.test("Check COUNCIL-BALTHASAR config")).toBe(true);
+
+		expect(COUNCIL_MENTION_RE.test("Compare SQLite WAL vs rollback journal tradeoffs")).toBe(false);
+		expect(COUNCIL_MENTION_RE.test("Reconcile councilor notes")).toBe(false);
 	});
 
 	it("registers council in package.json after subagents and before workspace/pika, wires test:council, and documents council", async () => {
@@ -725,6 +805,7 @@ describe("/council command and package contracts", () => {
 		expect(councilReadme).toContain("council-melchior");
 		expect(councilReadme).toContain("council-balthasar");
 		expect(councilReadme).toContain("rotatePeersForMember");
+		expect(councilReadme).toContain("defaultActive: false");
 
 		expect(rootReadme).toContain("[Council](extensions/council/README.md)");
 		expect(agentsMd).toContain("`extensions/council/`");
@@ -743,4 +824,303 @@ describe("/council command and package contracts", () => {
 		});
 		expect(formatted).toContain("Stake-Free Parent Synthesis Instructions");
 	});
+});
+
+function extractPromptSection(systemPrompt: string, tag: "tools" | "rules"): string {
+	const match = new RegExp(`<${tag}>\\n([\\s\\S]*?)\\n<\\/${tag}>`).exec(systemPrompt);
+	expect(match).not.toBeNull();
+	return match![1]!;
+}
+
+async function createCouncilAgentSession(options: { sessionManager?: SessionManager } = {}) {
+	const directory = await mkdtemp(path.join(tmpdir(), "pi-council-runtime-"));
+	let session: AgentSession | undefined;
+	const cleanup = async () => {
+		try {
+			if (session) {
+				await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+				session.dispose();
+			}
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	};
+
+	try {
+		const runtime = await ModelRuntime.create({
+			credentials: new InMemoryCredentialStore(),
+			modelsPath: null,
+			refreshOnCreate: false,
+		});
+		const faux = fauxProvider({
+			api: "council-runtime-api",
+			provider: "council-runtime",
+			models: [{ id: "test" }],
+		});
+		let spawnSeq = 0;
+		const resources = new DefaultResourceLoader({
+			cwd: directory,
+			agentDir: directory,
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			noContextFiles: true,
+			extensionFactories: [
+				(pi) => {
+					pi.registerProvider(faux.provider);
+					pi.events.on("subagents:rpc:ping", (raw: any) => {
+						pi.events.emit(`subagents:rpc:ping:reply:${raw.requestId}`, {
+							success: true,
+							data: { version: 3 },
+						});
+					});
+					pi.events.on("subagents:rpc:consume", (raw: any) => {
+						pi.events.emit(`subagents:rpc:consume:reply:${raw.requestId}`, { success: true });
+					});
+					pi.events.on("subagents:rpc:spawn", (raw: any) => {
+						const id = `runtime-council-${++spawnSeq}`;
+						pi.events.emit("subagents:started", { id, type: raw.type });
+						pi.events.emit(`subagents:rpc:spawn:reply:${raw.requestId}`, {
+							success: true,
+							data: { id },
+						});
+						queueMicrotask(() => {
+							pi.events.emit("subagents:completed", {
+								id,
+								type: raw.type,
+								status: "completed",
+								result: `Proposal from ${raw.type} citing \`src/retry.ts:1\`.`,
+								toolUses: 1,
+								runToolUses: 1,
+								durationMs: 25,
+							});
+						});
+					});
+					councilExtension(pi);
+				},
+			],
+		});
+		await resources.reload();
+		expect(resources.getExtensions().errors).toEqual([]);
+
+		({ session } = await createAgentSession({
+			cwd: directory,
+			agentDir: directory,
+			modelRuntime: runtime,
+			model: faux.getModel("test")!,
+			resourceLoader: resources,
+			sessionManager: options.sessionManager ?? SessionManager.inMemory(directory),
+			settingsManager: SettingsManager.inMemory({ defaultTools: ["bash"], retry: { enabled: false } }),
+		}));
+
+		const errors: unknown[] = [];
+		await session.bindExtensions({
+			mode: "rpc",
+			onError: (err) => {
+				errors.push(err);
+			},
+		});
+
+		const current = session;
+		const runPrompt = async (text: string) => {
+			const settled = new Promise<void>((resolve) => {
+				const unsubscribe = current.subscribe((event) => {
+					if (event.type === "agent_settled") {
+						unsubscribe();
+						resolve();
+					}
+				});
+			});
+			await current.prompt(text);
+			await settled;
+		};
+
+		return { directory, session: current, faux, errors, runPrompt, cleanup };
+	} catch (error) {
+		await cleanup();
+		throw error;
+	}
+}
+
+describe("council tool activation in real AgentSession + fauxProvider", () => {
+	it("omits council from active tools, tool schemas, <tools>, and <rules> on startup and ordinary architecture prompts", async () => {
+		const h = await createCouncilAgentSession();
+		const requests: Array<{ tools: string[]; systemPrompt: string }> = [];
+		const inspect = (message: AssistantMessage): FauxResponseFactory => (context) => {
+			requests.push({
+				tools: getCurrentTools(context.messages).map((tool) => tool.name),
+				systemPrompt: getCurrentSystemPrompt(context.messages),
+			});
+			return message;
+		};
+
+		try {
+			expect(h.session.getActiveToolNames()).toEqual(["bash"]);
+			expect(h.session.getActiveToolNames()).not.toContain("council");
+
+			h.faux.setResponses([inspect(fauxAssistantMessage("SQLite WAL favors concurrent readers."))]);
+			await h.runPrompt("Compare SQLite WAL vs rollback journal tradeoffs");
+
+			expect(requests).toHaveLength(1);
+			expect(requests[0]!.tools).toEqual(["bash"]);
+			expect(requests[0]!.tools).not.toContain("council");
+			expect(extractPromptSection(requests[0]!.systemPrompt, "tools")).not.toContain("council");
+			expect(extractPromptSection(requests[0]!.systemPrompt, "rules")).not.toContain("council");
+			expect(h.session.getActiveToolNames()).toEqual(["bash"]);
+
+			await h.session.prompt("/council");
+			await h.session.prompt("/council help");
+			await h.session.prompt("/council status");
+			expect(h.session.getActiveToolNames()).toEqual(["bash"]);
+			expect(h.faux.state.callCount).toBe(1);
+			expect(h.errors).toEqual([]);
+		} finally {
+			await h.cleanup();
+		}
+	}, 15_000);
+
+	it.each([
+		{
+			label: "/council <topic>",
+			input: "/council Design the retry contract",
+			callTool: true,
+		},
+		{
+			label: "explicit council mention",
+			input: "Convene the council on lock leases",
+			callTool: false,
+		},
+	])("activates council (tool schema, <tools>, and <rules>) before Turn 1 on $label", async ({ input, callTool }) => {
+		const h = await createCouncilAgentSession();
+		const requests: Array<{ tools: string[]; systemPrompt: string }> = [];
+		const inspect = (message: AssistantMessage): FauxResponseFactory => (context) => {
+			requests.push({
+				tools: getCurrentTools(context.messages).map((tool) => tool.name),
+				systemPrompt: getCurrentSystemPrompt(context.messages),
+			});
+			return message;
+		};
+
+		try {
+			expect(h.session.getActiveToolNames()).toEqual(["bash"]);
+
+			if (callTool) {
+				h.faux.setResponses([
+					inspect(
+						fauxAssistantMessage([
+							fauxToolCall("council", {
+								topic: "Design the retry contract",
+								rounds: 1,
+								members: ["caspar", "melchior"],
+							}),
+						]),
+					),
+					inspect(fauxAssistantMessage("Synthesized retry contract.")),
+				]);
+			} else {
+				h.faux.setResponses([inspect(fauxAssistantMessage("Ready to convene council advisors."))]);
+			}
+
+			await h.runPrompt(input);
+
+			expect(h.session.getActiveToolNames()).toEqual(expect.arrayContaining(["bash", "council"]));
+			expect(requests.length).toBeGreaterThanOrEqual(1);
+			const turn1 = requests[0]!;
+			expect(turn1.tools).toEqual(expect.arrayContaining(["bash", "council"]));
+			expect(extractPromptSection(turn1.systemPrompt, "tools")).toContain(
+				"- council: Convene the 3-model read-only technical council",
+			);
+			const rules = extractPromptSection(turn1.systemPrompt, "rules");
+			expect(rules).toContain("Use `council` when the user invokes `/council`");
+			expect(rules).toContain("Never pass a `model` override to `council`");
+			expect(h.errors).toEqual([]);
+		} finally {
+			await h.cleanup();
+		}
+	}, 15_000);
+
+	it("deactivates and re-activates council across navigateTree between pre-council and post-council leaves and restores on session_start", async () => {
+		const dirForManager = await mkdtemp(path.join(tmpdir(), "pi-council-session-store-"));
+		const manager = SessionManager.create(dirForManager, dirForManager);
+		const h = await createCouncilAgentSession({ sessionManager: manager });
+		let resumed: Awaited<ReturnType<typeof createCouncilAgentSession>> | undefined;
+
+		try {
+			h.faux.setResponses([fauxAssistantMessage("Ordinary architecture answer.")]);
+			await h.runPrompt("Compare SQLite WAL vs rollback journal tradeoffs");
+			const preCouncilLeafId = h.session.sessionManager.getLeafId()!;
+			expect(h.session.getActiveToolNames()).toEqual(["bash"]);
+
+			h.faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("council", {
+						topic: "Design the retry contract",
+						rounds: 1,
+						members: ["caspar", "melchior"],
+					}),
+				]),
+				fauxAssistantMessage("Synthesized retry design."),
+			]);
+			await h.runPrompt("Convene the council on lock leases");
+			const postCouncilLeafId = h.session.sessionManager.getLeafId()!;
+			expect(h.session.getActiveToolNames()).toEqual(expect.arrayContaining(["bash", "council"]));
+
+			// Navigating back to the pre-council leaf deactivates council.
+			await h.session.navigateTree(preCouncilLeafId);
+			expect(h.session.getActiveToolNames()).toEqual(["bash"]);
+			expect(h.session.getActiveToolNames()).not.toContain("council");
+
+			// Navigating forward to the post-council leaf re-activates council.
+			await h.session.navigateTree(postCouncilLeafId);
+			expect(h.session.getActiveToolNames()).toEqual(expect.arrayContaining(["bash", "council"]));
+
+			// Even if manually cleared before reload or navigated across branches, branch state restores council.
+			const sessionFile = manager.getSessionFile()!;
+			expect(sessionFile).toBeTruthy();
+			resumed = await createCouncilAgentSession({
+				sessionManager: SessionManager.open(sessionFile, dirForManager),
+			});
+			expect(resumed.session.getActiveToolNames()).toEqual(expect.arrayContaining(["bash", "council"]));
+			resumed.session.setActiveToolsByName(["bash"]);
+			expect(resumed.session.getActiveToolNames()).toEqual(["bash"]);
+			await resumed.session.reload();
+			expect(resumed.session.getActiveToolNames()).toEqual(expect.arrayContaining(["bash", "council"]));
+
+			await resumed.session.navigateTree(preCouncilLeafId);
+			expect(resumed.session.getActiveToolNames()).toEqual(["bash"]);
+			await resumed.session.navigateTree(postCouncilLeafId);
+			expect(resumed.session.getActiveToolNames()).toEqual(expect.arrayContaining(["bash", "council"]));
+
+			// Also verify session_start + session_tree restoration when branch only has pi-extensions.command
+			// (no SystemMessage tool patch yet).
+			const commandBranchManager = SessionManager.inMemory(dirForManager);
+			commandBranchManager.appendCustomEntry("pi-extensions.command", {
+				command: "council",
+				kind: "extension",
+				extension: "council",
+			});
+			const fromCommandEntry = await createCouncilAgentSession({
+				sessionManager: commandBranchManager,
+			});
+			try {
+				expect(fromCommandEntry.session.getActiveToolNames()).toEqual(
+					expect.arrayContaining(["bash", "council"]),
+				);
+				expect(fromCommandEntry.errors).toEqual([]);
+			} finally {
+				await fromCommandEntry.cleanup();
+			}
+
+			expect(h.errors).toEqual([]);
+			expect(resumed.errors).toEqual([]);
+		} finally {
+			try {
+				if (resumed) await resumed.cleanup();
+				await h.cleanup();
+			} finally {
+				await rm(dirForManager, { recursive: true, force: true });
+			}
+		}
+	}, 20_000);
 });
