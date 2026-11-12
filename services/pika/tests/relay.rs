@@ -2314,7 +2314,8 @@ async fn chatrooms_members_representatives_messages_and_deletions_survive_restar
 async fn relay_events_and_mailbox_survive_restarts_and_expire_cleanly() {
     let s = server_with(|c| {
         c.relay.ttl = Duration::from_secs(30);
-        c.relay.ack_wait = Duration::from_millis(20);
+        // Long enough for step 1's live ack on a slow CI runner; step 3 waits it out once.
+        c.relay.ack_wait = Duration::from_millis(500);
     })
     .await;
     s.env
