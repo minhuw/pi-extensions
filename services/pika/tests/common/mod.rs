@@ -12,32 +12,34 @@ use tempfile::TempDir;
 pub const DEVICE: &str = "laptop";
 pub const SESSION_ID: &str = "7f3c2a10-5b1e-4c3d-9a8e-1f2e3d4c5b6a";
 pub const RUN_ID: &str = "20261021-100000-abcd";
-/// SQL that removes schema version 21 for tests that rewind `user_version`.
-pub const UNDO_V21: &str = "DROP TABLE nodes;";
-/// SQL that removes schema versions 21 and 20 for tests that rewind `user_version`.
-pub const UNDO_V20: &str = "DROP TABLE nodes; DROP TABLE relay_boards;";
-/// SQL that removes schema versions 21, 20, and 19 for tests that rewind `user_version`.
-pub const UNDO_V19: &str = "DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started;";
-/// SQL that removes schema versions 21, 20, 19, and 18 for tests that rewind `user_version`.
-pub const UNDO_V18: &str = "DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms;";
-/// SQL that removes schema versions 21, 20, 19, 18, and 17 for tests that rewind `user_version`.
-pub const UNDO_V17: &str = "DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; ALTER TABLE memory_notes DROP COLUMN last_used_at;";
-/// SQL that removes schema versions 21, 20, 19, 18, 17, 16 (it goes with 15's table), and 15 for tests that rewind `user_version`.
-pub const UNDO_V15: &str = "DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; ALTER TABLE memory_notes DROP COLUMN last_used_at; DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases;
+/// SQL that removes schema version 22 for tests that rewind `user_version`.
+pub const UNDO_V22: &str = "DROP TABLE deck_projects;";
+/// SQL that removes schema versions 22 and 21 for tests that rewind `user_version`.
+pub const UNDO_V21: &str = "DROP TABLE deck_projects; DROP TABLE nodes;";
+/// SQL that removes schema versions 22, 21, and 20 for tests that rewind `user_version`.
+pub const UNDO_V20: &str = "DROP TABLE deck_projects; DROP TABLE nodes; DROP TABLE relay_boards;";
+/// SQL that removes schema versions 22, 21, 20, and 19 for tests that rewind `user_version`.
+pub const UNDO_V19: &str = "DROP TABLE deck_projects; DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started;";
+/// SQL that removes schema versions 22, 21, 20, 19, and 18 for tests that rewind `user_version`.
+pub const UNDO_V18: &str = "DROP TABLE deck_projects; DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms;";
+/// SQL that removes schema versions 22, 21, 20, 19, 18, and 17 for tests that rewind `user_version`.
+pub const UNDO_V17: &str = "DROP TABLE deck_projects; DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; ALTER TABLE memory_notes DROP COLUMN last_used_at;";
+/// SQL that removes schema versions 22, 21, 20, 19, 18, 17, 16 (it goes with 15's table), and 15 for tests that rewind `user_version`.
+pub const UNDO_V15: &str = "DROP TABLE deck_projects; DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; ALTER TABLE memory_notes DROP COLUMN last_used_at; DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases;
     DROP INDEX memory_revisions_batch; ALTER TABLE memory_revisions DROP COLUMN batch_id;
     ALTER TABLE memory_revisions DROP COLUMN sources; ALTER TABLE memory_revisions DROP COLUMN provenance;
     ALTER TABLE memory_notes DROP COLUMN sources;";
-/// SQL that removes schema versions 21..=14 for tests that rewind `user_version`.
-pub const UNDO_V14: &str = "DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes;";
-/// SQL that removes schema versions 21..=13 for tests that rewind `user_version`.
-pub const UNDO_V13: &str = "DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access;";
-/// SQL that removes schema versions 21..=11 (12 goes with 11's table) for tests that rewind `user_version`.
-pub const UNDO_V11: &str = "DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access; DROP TABLE usage_events; DROP INDEX entries_activity;";
-/// Remove versions 21..=10 for tests that rewind `user_version`.
-pub const UNDO_V10: &str = "DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access; DROP TABLE usage_events; DROP INDEX entries_activity; DROP TABLE deleted_streams; DROP TABLE hidden_sessions; DROP TABLE session_hidden;
+/// SQL that removes schema versions 22..=14 for tests that rewind `user_version`.
+pub const UNDO_V14: &str = "DROP TABLE deck_projects; DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes;";
+/// SQL that removes schema versions 22..=13 for tests that rewind `user_version`.
+pub const UNDO_V13: &str = "DROP TABLE deck_projects; DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access;";
+/// SQL that removes schema versions 22..=11 (12 goes with 11's table) for tests that rewind `user_version`.
+pub const UNDO_V11: &str = "DROP TABLE deck_projects; DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access; DROP TABLE usage_events; DROP INDEX entries_activity;";
+/// Remove versions 22..=10 for tests that rewind `user_version`.
+pub const UNDO_V10: &str = "DROP TABLE deck_projects; DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access; DROP TABLE usage_events; DROP INDEX entries_activity; DROP TABLE deleted_streams; DROP TABLE hidden_sessions; DROP TABLE session_hidden;
     DROP INDEX IF EXISTS search_docs_sid; DROP INDEX lines_blob; DROP INDEX request_dict_blob;";
-/// Remove versions 21..=8 for tests that rewind `user_version`.
-pub const UNDO_V8: &str = "DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access; DROP TABLE usage_events; DROP INDEX entries_activity; DROP TABLE deleted_streams; DROP TABLE hidden_sessions; DROP TABLE session_hidden;
+/// Remove versions 22..=8 for tests that rewind `user_version`.
+pub const UNDO_V8: &str = "DROP TABLE deck_projects; DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access; DROP TABLE usage_events; DROP INDEX entries_activity; DROP TABLE deleted_streams; DROP TABLE hidden_sessions; DROP TABLE session_hidden;
     DROP INDEX IF EXISTS search_docs_sid; DROP INDEX lines_blob; DROP INDEX request_dict_blob;
     DROP TABLE visitor_views; DROP TABLE visitor_day_key; ALTER TABLE sessions DROP COLUMN repository;";
 /// SQL that puts back the full-text index that schema version 7 replaced, for tests that rewind `user_version`. Dropping

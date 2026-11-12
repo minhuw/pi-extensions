@@ -743,7 +743,7 @@ fn an_older_database_gains_the_memory_tables() {
     conn.execute_batch(&format!("{UNDO_V14} PRAGMA user_version = 13;")).unwrap();
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(21));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(22));
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     assert_eq!(one(&store, "SELECT COUNT(*) AS n FROM memory_scopes, memory_notes, memory_revisions")["n"], json!(0));
     assert!(!pika::store::DERIVED_TABLES.iter().any(|t| t.starts_with("memory_")));
@@ -1409,7 +1409,7 @@ fn an_older_database_gains_last_used_times() {
     conn.execute_batch(&format!("{UNDO_V17} PRAGMA user_version = 16;")).unwrap();
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(21));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(22));
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     assert_eq!(one(&store, "SELECT last_used_at FROM memory_notes")["last_used_at"], Value::Null);
     let view = store.read(|conn| pika::memory::view(conn, DEVICE, None, None)).unwrap();

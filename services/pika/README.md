@@ -104,7 +104,7 @@ Every route is under the base path:
 - `GET api/relay/v1/connect` (a WebSocket) and `GET api/relay/v1/sessions` are the relay's device routes, with `Authorization: Bearer <token>`.
 - `GET api/node/v1/connect` (a WebSocket) is the `pika-node` daemons' route, with `Authorization: Bearer <node credential>` (see [Nodes](#nodes)).
 - `api/agent/v1/*` is the read API for pi agents on devices with read access, with `Authorization: Bearer <token>` and credentials scrubbed (see [Agent read access](#agent-read-access)).
-- `api/v1/*` is the read API used by the UI (including the owner-only `extension-usage` aggregate of tool calls and extension commands), plus login, browser sessions (`auth/sessions`), devices, pairing approval, the relay dashboard (`relay/sessions`, `relay/messages`, `relay/events`), and the browser's node socket (`node/connect`).
+- `api/v1/*` is the read API used by the UI (including the owner-only `extension-usage` aggregate of tool calls and extension commands), plus login, browser sessions (`auth/sessions`), devices, pairing approval, the relay dashboard (`relay/sessions`, `relay/messages`, `relay/events`), the browser's node socket (`node/connect`), and Deck's projects (`deck/project-keys`, `deck/projects`).
 - `api/public/v1/*` provides anonymous read access to published projects only (see [Publishing projects](#publishing-projects)), plus anonymous usage aggregates that any site may query (see [Usage API for other sites](#usage-api-for-other-sites)).
 - `docs` and `docs/*` serve the public documentation without a pika login.
 - Every other path serves the UI. The server injects `<meta name="pika-base">` into `index.html`, so one build works under any base path.
@@ -258,8 +258,9 @@ Nodes let you use terminals, files, and pi pane status on your machines from the
 - **The browser:** its node socket needs your login session and an `Origin` equal to pika's own. Behind a TLS proxy, run with `PIKA_TRUST_PROXY=1` or set `PIKA_PUBLIC_URL`, so that pika knows its HTTPS origin. Signing out closes the socket.
 - **Limits:** 32 online nodes, 64 open channels per node, 16 per browser tab, 30 channel opens a minute per tab, and 4 tabs per login session.
 - **Behind a proxy:** `/api/node/` must stay open to daemons and needs WebSocket upgrades, like `/api/relay/` (see [Reverse proxy](#reverse-proxy)). The browser's socket is under `api/v1/` and stays behind the proxy's login.
+- **Projects:** daemons report checkouts (clones and their worktrees), never projects. Deck groups them into projects by a key the server computes with memory's rules (`POST api/v1/deck/project-keys`): checkouts of one repository URL, on any node, are one project with the same key as its memory scope; a checkout without a remote is its own project per node (`local:<name>@node:<node id>`). The project names and collapsed states you set in Deck are stored on the server (`api/v1/deck/projects`), so every browser shows them; `pika reindex` leaves them alone.
 
-Nodes are stored in schema version 21, which the server adds when it first opens the database, without a reindex; older binaries cannot open the database afterwards.
+Nodes are stored in schema version 21 and Deck's projects in version 22, which the server adds when it first opens the database, without a reindex; older binaries cannot open the database afterwards.
 
 ### Upgrading from 0.8.1
 

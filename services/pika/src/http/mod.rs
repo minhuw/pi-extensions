@@ -1,4 +1,5 @@
 mod auth;
+mod deck;
 mod devices;
 mod ingest;
 mod manage;
@@ -155,7 +156,8 @@ pub fn router(state: AppState) -> Router {
         .route("/me", get(auth::me))
         .merge(login(protected))
         .merge(relay::browser_routes(&state, login))
-        .merge(nodes::browser_routes(&state, login));
+        .merge(nodes::browser_routes(&state, login))
+        .merge(deck::routes(&state, login));
     let inner = Router::new()
         .route("/api/health", get(health))
         .route("/api/ingest/v1/batch", post(ingest::batch))

@@ -5,6 +5,7 @@ pub mod blobs;
 pub mod board;
 pub mod cli;
 pub mod config;
+pub mod deck;
 pub mod delete;
 pub mod derive;
 pub mod export;
