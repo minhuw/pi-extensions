@@ -84,8 +84,8 @@ pub fn price_source(raw: &str) -> Option<String> {
     }
 }
 
-/// Relay settings. Only `enabled`, `max_hops`, `ttl`, and `heartbeat` come from the environment, and the last two only
-/// for tests and the end-to-end script; every other field keeps its default outside tests. See `docs/RELAY.md`.
+/// Relay settings. Only `enabled`, `ttl`, and `heartbeat` come from the environment, and the last two only for tests
+/// and the end-to-end script; every other field keeps its default outside tests. See `docs/RELAY.md`.
 #[derive(Clone, Debug)]
 pub struct RelayConfig {
     pub enabled: bool,
@@ -105,8 +105,6 @@ pub struct RelayConfig {
     pub max_outgoing_bytes: usize,
     pub max_text_bytes: usize,
     pub max_frame_bytes: usize,
-    /// Sends a message may be from the user's last turn: a `hops` above it is `hop_limit`.
-    pub max_hops: u64,
     /// Sends per sending session in a sliding minute.
     pub sends_per_minute: usize,
     /// Sends per sending device, across its sessions, in a sliding minute.
@@ -119,9 +117,6 @@ pub struct RelayConfig {
     pub max_remembered: usize,
     pub event_ring: usize,
 }
-
-/// The default relay hop limit; `PIKA_RELAY_MAX_HOPS` overrides it.
-pub const DEFAULT_MAX_HOPS: u64 = 128;
 
 impl Default for RelayConfig {
     fn default() -> Self {
@@ -136,7 +131,6 @@ impl Default for RelayConfig {
             max_outgoing_bytes: 8 << 20,
             max_text_bytes: 32 << 10,
             max_frame_bytes: 64 << 10,
-            max_hops: DEFAULT_MAX_HOPS,
             sends_per_minute: 60,
             sends_per_minute_per_device: 300,
             max_queued_per_target: 100,

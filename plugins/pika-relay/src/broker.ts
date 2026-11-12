@@ -11,11 +11,11 @@ import { basename } from "node:path";
 import { isExcluded, loadConfig, type PikaConfig } from "../../../extensions/pika/config.ts";
 import { type ConnectionState, RelayConnection, RequestError } from "../../../extensions/pika/relay/connection.ts";
 import {
-    cut, expiredContent, headerField, type HelloSession, MAX_HOPS, type MessageFrame, messageContent, type OnlineSession, type RelayRoom, type RelayRoomDetail,
+    cut, expiredContent, headerField, type HelloSession, type MessageFrame, messageContent, type OnlineSession, type RelayRoom, type RelayRoomDetail,
     RELAY_VERSION, type SentFrame, type SessionState, since, type StatusFrame, targetLabel, UNANSWERED,
 } from "../../../extensions/pika/relay/protocol.ts";
 import { resolveRepository } from "../../../extensions/pika/repository.ts";
-import { preview, REJECTIONS, rejection, roomLine, roomMessageLine, sendResult, sessionLine } from "./format.ts";
+import { preview, REJECTIONS, roomLine, roomMessageLine, sendResult, sessionLine } from "./format.ts";
 import { readLines, writeLine } from "./ipc.ts";
 import { agentDir, inboxPath, pendingPath, pidPath, socketPath, stateDir } from "./paths.ts";
 import { ANSWER_HINT, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "./tools.ts";
@@ -67,7 +67,7 @@ interface Thread {
     sent: SentRecord[];
     notified: Set<string>;
     seen: Set<string>;
-    limits: { ttlSeconds: number; maxTextBytes: number; maxHops: number };
+    limits: { ttlSeconds: number; maxTextBytes: number };
 }
 
 type HookEvent = "SessionStart" | "UserPromptSubmit" | "PostToolUse" | "Stop" | "SessionEnd";
@@ -210,7 +210,6 @@ class Broker {
         const limits = state.welcome.limits;
         if (Number.isFinite(limits?.ttlSeconds) && limits.ttlSeconds > 0) thread.limits.ttlSeconds = limits.ttlSeconds;
         if (Number.isFinite(limits?.maxTextBytes) && limits.maxTextBytes > 0) thread.limits.maxTextBytes = limits.maxTextBytes;
-        if (Number.isFinite(limits?.maxHops) && limits.maxHops > 0) thread.limits.maxHops = limits.maxHops;
         // The state may have changed between hello and welcome.
         this.pushState(thread);
     }
@@ -296,7 +295,7 @@ class Broker {
         if (!thread) {
             thread = {
                 id, state: "idle", hops: 0, hookAt: 0, activeAt: Date.now(), clients: new Set(), reported: {}, waiters: new Set(), sent: [], notified: new Set(), seen: new Set(),
-                limits: { ttlSeconds: 300, maxTextBytes: 32 * 1024, maxHops: MAX_HOPS },
+                limits: { ttlSeconds: 300, maxTextBytes: 32 * 1024 },
             };
             for (const entry of this.readInbox(thread)) this.remember(thread, entry.id);
             this.threads.set(id, thread);
@@ -484,7 +483,7 @@ class Broker {
             if (response.status === 401) throw new Error("the server rejected this device's token (HTTP 401)");
             if (response.status === 404 && body?.error === "not_found") throw new Error(REJECTIONS.unknown_room);
             if (response.status === 404) throw new Error(`the pika server at ${config.url} has no relay (HTTP 404)`);
-            if (typeof body?.error === "string") throw new Error(`relay error (${body.error}): ${rejection(body.error, thread.limits.maxHops) ?? body.error}`);
+            if (typeof body?.error === "string") throw new Error(`relay error (${body.error}): ${REJECTIONS[body.error] ?? body.error}`);
             throw new Error(`unexpected HTTP ${response.status} from ${config.url}`);
         }
         return await response.json() as T;
@@ -530,7 +529,7 @@ class Broker {
         }
         if (answer.status === "rejected") {
             record.status = "rejected"; record.reason = answer.reason; remember();
-            throw new Error(`relay rejected the message (${answer.reason}): ${rejection(answer.reason, thread.limits.maxHops) ?? "see the reason"}.`);
+            throw new Error(`relay rejected the message (${answer.reason}): ${REJECTIONS[answer.reason] ?? "see the reason"}.`);
         }
         record.id = answer.id;
         record.label = answer.room ? `room #${headerField(answer.room)}` : targetLabel(answer.to, targetTo);

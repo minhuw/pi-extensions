@@ -300,7 +300,7 @@ async fn hello_is_answered_with_welcome_and_lists_the_session() {
     assert_eq!(
         welcome,
         json!({ "type": "welcome", "device": "laptop", "deviceName": "laptop", "serverVersion": env!("CARGO_PKG_VERSION"),
-            "limits": { "ttlSeconds": 300, "heartbeatSeconds": 20, "maxTextBytes": 32768, "maxHops": 128 } })
+            "limits": { "ttlSeconds": 300, "heartbeatSeconds": 20, "maxTextBytes": 32768 } })
     );
     let items = sessions(&s).await;
     let item = &items[0];
@@ -476,6 +476,38 @@ async fn a_message_acknowledged_in_time_is_delivered() {
 }
 
 #[tokio::test]
+async fn large_hop_counts_are_accepted_and_preserved() {
+    let s = server().await;
+    let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    let (mut b, _) = Client::online(&s, &s.desktop, "sess-b").await;
+    let hops = 1_000_000;
+
+    let mut direct = send("high-direct", "sess-b", "direct");
+    direct["hops"] = json!(hops);
+    a.send(direct).await;
+    let message = b.next().await;
+    assert_eq!(message["hops"], json!(hops));
+    b.send(json!({ "type": "ack", "id": message["id"] })).await;
+    assert_eq!(a.next().await["status"], "delivered");
+
+    create_room(&s, "ops", &["sess-a", "sess-b"]).await;
+    let mut post = room_post("high-room", "ops", "room");
+    post["hops"] = json!(hops);
+    post["mentions"] = json!(["sess-b"]);
+    let sent = a.relay(post).await;
+    assert_eq!((&sent["status"], &sent["room"]), (&json!("delivered"), &json!("ops")));
+    let notified = b.next().await;
+    assert_eq!((&notified["room"], &notified["hops"]), (&json!("ops"), &json!(hops)));
+    assert_eq!(room_detail(&s, "ops").await["messages"][0]["hops"], json!(hops));
+
+    let recorded = events(&s, "").await;
+    for text in ["direct", "room"] {
+        let event = recorded.iter().find(|event| event["text"] == text).unwrap();
+        assert_eq!((&event["status"], &event["hops"]), (&json!("delivered"), &json!(hops)));
+    }
+}
+
+#[tokio::test]
 async fn a_late_ack_answers_queued_then_reports_delivered() {
     let s = server_with(|c| c.relay.ack_wait = Duration::from_millis(100)).await;
     let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
@@ -610,11 +642,11 @@ async fn sends_are_rejected_in_order() {
         (frame("nobody", "x", json!("1")), "invalid"),
         (json!({ "type": "send", "clientId": "c", "to": "nobody", "text": "x" }), "invalid"),
         (json!({ "type": "send", "clientId": "c", "to": "nobody", "text": 5, "hops": 1 }), "invalid"),
-        (frame("sess-a", &big, json!(129)), "self"),
-        (frame("nobody", &big, json!(129)), "too_large"),
-        (frame("nobody", "x", json!(129)), "hop_limit"),
+        (frame("sess-a", &big, json!(1_000_000)), "self"),
+        (frame("nobody", &big, json!(1_000_000)), "too_large"),
+        (frame("nobody", "x", json!(1_000_000)), "unknown_session"),
         (frame("nobody", "x", json!(1)), "unknown_session"),
-        (frame(SESSION_ID, &exact, json!(128)), "queued"),
+        (frame(SESSION_ID, &exact, json!(1_000_000)), "queued"),
         (frame("nobody", "x", json!(1)), "unknown_session"),
         (frame(SESSION_ID, "x", json!(1)), "mailbox_full"),
     ];
@@ -655,8 +687,8 @@ async fn each_session_may_send_60_a_minute() {
     }
     assert_eq!(a.relay(send("c60", SESSION_ID, "x")).await["reason"], "rate_limited");
     let mut over = send("c61", "nobody", "x");
-    over["hops"] = json!(129);
-    assert_eq!(a.relay(over).await["reason"], "rate_limited", "the rate is checked before the hops");
+    over["hops"] = json!(1_000_000);
+    assert_eq!(a.relay(over).await["reason"], "rate_limited", "a large hop count does not bypass the rate limit");
     assert_eq!(a.relay(send("c62", "sess-a", "x")).await["reason"], "self", "self is checked first");
     // Another session has its own budget.
     assert_eq!(b.relay(send("b0", SESSION_ID, "x")).await["status"], "queued");
@@ -1454,16 +1486,16 @@ async fn a_message_frame_over_64_kib_is_too_large() {
     let web = http(&s.app, post("/api/v1/relay/messages", json!({ "to": "sess-b", "text": controls }), None)).await;
     assert_eq!((web.status, web.json()), (StatusCode::BAD_REQUEST, json!({ "error": "too_large" })));
     // A `send` frame within 64 KiB whose `message` frame, with the sender's details, is over it.
-    // Sized for the longest frame below, the one with `hops` over the limit.
+    // Sized for the longest frame below, whose hop count is informational metadata.
     let mut longest = send("c1", "sess-b", "");
-    longest["hops"] = json!(129);
+    longest["hops"] = json!(1_000_000);
     let controls = escaped_text((64 * 1024 - longest.to_string().len()) / 6, 0);
     assert!(send("c1", "sess-b", &controls).to_string().len() <= 64 * 1024);
     assert_eq!(a.relay(send("c1", "sess-b", &controls)).await["reason"], "too_large");
-    // In the same place in the order: after `self`, before the hops and the target.
+    // In the same place in the order: after `self`, before the target.
     assert_eq!(a.relay(send("c2", "sess-a", &controls)).await["reason"], "self");
     let mut far = send("c3", "nobody", &controls);
-    far["hops"] = json!(129);
+    far["hops"] = json!(1_000_000);
     assert_eq!(a.relay(far).await["reason"], "too_large");
     let events = events(&s, "").await;
     assert_eq!(events.len(), 4);

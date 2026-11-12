@@ -9,9 +9,6 @@ export const MESSAGE_TYPE = "relay-message";
 export const NOTICE_TYPE = "relay-notice";
 export const RECEIVED_TYPE = "relay-received";
 
-/** The server's default hop limit, used until its `welcome` gives `limits.maxHops`. */
-export const MAX_HOPS = 128;
-
 /**
  * Timings, mutable so tests can shorten them. `deadAfterMs` is the liveness limit of both sides;
  * a connection that stayed online for `stableMs` starts its next backoff from the beginning.
@@ -94,7 +91,7 @@ export interface Welcome {
 	/** Servers older than 0.4 send no name. */
 	deviceName?: string;
 	serverVersion: string;
-	limits: { ttlSeconds: number; heartbeatSeconds: number; maxTextBytes: number; maxHops: number };
+	limits: { ttlSeconds: number; heartbeatSeconds: number; maxTextBytes: number };
 }
 
 export interface MessageFrame {

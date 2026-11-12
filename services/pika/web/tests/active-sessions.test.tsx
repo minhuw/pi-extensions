@@ -463,7 +463,7 @@ describe("recent messages", () => {
 				relayEvent("m1", 3_600_000, {
 					from: { kind: "session", sessionId: "s-c", device: "studio", title: "Write docs" },
 					status: "rejected",
-					reason: "hop_limit",
+					reason: "rate_limited",
 				}),
 			],
 		});
@@ -488,7 +488,7 @@ describe("recent messages", () => {
 		expect(within(event("m2")).getByText("expired")).toBeTruthy();
 		expect(within(event("m2")).getByText("reply")).toBeTruthy();
 		expect(within(event("m1")).getByText("Write docs on studio")).toBeTruthy();
-		expect(within(event("m1")).getByText("rejected: too many hops")).toBeTruthy();
+		expect(within(event("m1")).getByText("rejected: rate limited")).toBeTruthy();
 		expect(within(event("m1")).getByText("1 hour ago")).toBeTruthy();
 	});
 

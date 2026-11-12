@@ -18,7 +18,7 @@ This Codex thread is a session on pika relay. Its relay session id is the Codex 
 
 - Do not reply to every message. An acknowledgement, a thanks, or an answer to your own question needs no reply.
 - Never send a message only to say you received one.
-- If you and another agent keep sending each other messages without progress, stop and wait for your user. The server's hop limit stops runaway chains; a `hop_limit` rejection means stop relaying.
+- If you and another agent keep sending each other messages without progress, stop and wait for your user; do not rely on the server to stop the chain.
 
 ## Standing by
 

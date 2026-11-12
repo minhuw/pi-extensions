@@ -462,7 +462,7 @@ Relay lets running pi sessions send text messages to each other through the serv
   - Under the authenticated `{base}/api/v1/`: `GET relay/sessions`, `POST relay/messages`, and `GET relay/events?limit=`.
   - Swarm boards (see "Boards" in `RELAY.md`): `PUT {base}/api/relay/v1/boards/{sessionId}` with the bearer token, and `GET relay/boards/{sessionId}` and `GET relay/rooms/{name}/boards` under `{base}/api/v1/`.
   - `GET {base}/api/health` lists `"relay"` in `features` when relay is on, before `"agent"`.
-- **Settings:** `--relay` / `PIKA_RELAY`: `on` (default) or `off`, with the same spellings as `PIKA_TRUST_PROXY`; empty means on. When off, every relay route answers 404 `{ error: "relay_disabled" }`, before any authentication. `--relay-max-hops` / `PIKA_RELAY_MAX_HOPS`: the hop limit, a positive integer, default 128. `PIKA_RELAY_TTL_SECS` (default 300) and `PIKA_RELAY_HEARTBEAT_SECS` (default 20) exist for tests and the end-to-end script only, and are hidden from `--help`.
+- **Settings:** `--relay` / `PIKA_RELAY`: `on` (default) or `off`, with the same spellings as `PIKA_TRUST_PROXY`; empty means on. When off, every relay route answers 404 `{ error: "relay_disabled" }`, before any authentication. `PIKA_RELAY_TTL_SECS` (default 300) and `PIKA_RELAY_HEARTBEAT_SECS` (default 20) exist for tests and the end-to-end script only, and are hidden from `--help`.
 - **State:** online sessions live in memory; chatrooms, recent events, and unexpired mailbox entries persist in SQLite (`relay_rooms`, `relay_room_members`, `relay_room_messages`, `relay_events`, `relay_mailbox`, added by schema version 18 without a reindex and left intact by `pika reindex`), and swarm boards in `relay_boards` (schema version 20, likewise). Ownership checks and `recorded` use the `sessions` table. Ownership, addressing, limits, and revocation are keyed by device id; `deviceName` fields are looked up when an object is serialized, so a rename shows in the next list and in every frame sent after it.
 - **Revocation:** revoking a token closes every relay connection made with it with 4401 at once, both from `DELETE devices/:id` and when a pairing that continues a device deletes its old token. A token revoked by another process (`pika token revoke`) is noticed within one heartbeat, because each connection re-checks its token every heartbeat; it is also checked again at `hello`.
 - **Shutdown:** stopping the server closes every relay connection with 1001.
@@ -488,7 +488,6 @@ Relay lets running pi sessions send text messages to each other through the serv
   - `--trust-proxy` / `PIKA_TRUST_PROXY=1`, default off
   - `--max-body` / `PIKA_MAX_BODY`
   - `--relay` / `PIKA_RELAY`: `on` (default) or `off` (see "Relay")
-  - `--relay-max-hops` / `PIKA_RELAY_MAX_HOPS`: the relay hop limit, default 128 (see "Relay")
   - `--prices` / `PIKA_PRICES`: the models.dev-format price catalog, an `http(s)` URL or a file, default `https://models.dev/api.json`; empty means the default, and `off` (or `0`, `false`, `no`) turns estimates off (see "Prices")
 - **Data dir layout:**
   - `pika.db`: SQLite in WAL mode.

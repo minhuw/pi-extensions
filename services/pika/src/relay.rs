@@ -525,7 +525,6 @@ pub enum Reason {
     SelfTarget,
     TooLarge,
     RateLimited,
-    HopLimit,
     UnknownSession,
     /// A room post to a room that does not exist.
     UnknownRoom,
@@ -543,7 +542,6 @@ impl Reason {
             Reason::SelfTarget => "self",
             Reason::TooLarge => "too_large",
             Reason::RateLimited => "rate_limited",
-            Reason::HopLimit => "hop_limit",
             Reason::UnknownSession => "unknown_session",
             Reason::UnknownRoom => "unknown_room",
             Reason::NotMember => "not_member",
@@ -558,7 +556,6 @@ impl Reason {
             "self" => Some(Reason::SelfTarget),
             "too_large" => Some(Reason::TooLarge),
             "rate_limited" => Some(Reason::RateLimited),
-            "hop_limit" => Some(Reason::HopLimit),
             "unknown_session" => Some(Reason::UnknownSession),
             "unknown_room" => Some(Reason::UnknownRoom),
             "not_member" => Some(Reason::NotMember),
@@ -2184,7 +2181,6 @@ impl Relay {
                 "ttlSeconds": self.config.ttl.as_secs(),
                 "heartbeatSeconds": self.config.heartbeat.as_secs(),
                 "maxTextBytes": self.config.max_text_bytes,
-                "maxHops": self.config.max_hops,
             },
         });
         inner.push(conn, welcome.to_string());
@@ -2281,8 +2277,6 @@ impl Relay {
             Some(Reason::TooLarge)
         } else if inner.rate_limited(&sender, Instant::now()) {
             Some(Reason::RateLimited)
-        } else if draft.hops > config.max_hops {
-            Some(Reason::HopLimit)
         } else if owner.is_none() {
             Some(Reason::UnknownSession)
         } else if inner.queues.get(&draft.to).is_some_and(|q| q.len() >= config.max_queued_per_target)
@@ -2383,8 +2377,6 @@ impl Relay {
             Some(Reason::TooLarge)
         } else if inner.rate_limited(&sender, Instant::now()) {
             Some(Reason::RateLimited)
-        } else if draft.hops > config.max_hops {
-            Some(Reason::HopLimit)
         } else if !inner.rooms.contains_key(&room_name) {
             Some(Reason::UnknownRoom)
         } else if sender.session_id().is_some_and(|s| !inner.rooms[&room_name].members.contains_key(s)) {
@@ -2938,7 +2930,7 @@ mod tests {
         assert!(c.enabled);
         assert_eq!((c.ttl.as_secs(), c.heartbeat.as_secs(), c.dead_after.as_secs()), (300, 20, 45));
         assert_eq!((c.hello_timeout.as_secs(), c.ack_wait.as_secs(), c.write_timeout.as_secs()), (10, 2, 45));
-        assert_eq!((c.max_text_bytes, c.max_frame_bytes, c.max_hops), (32 * 1024, 64 * 1024, 128));
+        assert_eq!((c.max_text_bytes, c.max_frame_bytes), (32 * 1024, 64 * 1024));
         assert_eq!((c.sends_per_minute, c.sends_per_minute_per_device, c.max_outgoing_bytes), (60, 300, 8 << 20));
         assert_eq!((c.max_queued_per_target, c.max_queued), (100, 10_000));
         assert_eq!((c.max_online, c.max_connections_per_device, c.event_ring), (1_000, 64, 500));

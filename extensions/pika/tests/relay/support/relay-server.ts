@@ -70,7 +70,7 @@ export class FakeRelay {
 	onSend?: (frame: Frame, connection: Connection) => SentAnswer | "none" | undefined;
 	/** How long a routed message waits for its `ack` before `sent` says queued; 2 s as in the contract. */
 	ackWaitMs = 2_000;
-	limits = { ttlSeconds: 300, heartbeatSeconds: 20, maxTextBytes: 32 * 1024, maxHops: 8 };
+	limits = { ttlSeconds: 300, heartbeatSeconds: 20, maxTextBytes: 32 * 1024 };
 	/** Messages `queue` accepted: pushed on every welcome of their target until acknowledged or expired. */
 	readonly mailbox = new Map<string, { sessionId: string; frame: Frame }>();
 	readonly rooms = new Map<string, { name: string; topic?: string; createdAt: string; updatedAt: string; members: Set<string>; messages: RoomMessage[]; representative?: string }>();
@@ -298,7 +298,6 @@ export class FakeRelay {
 			const text = String(frame.text ?? "");
 			const hops = frame.hops as number;
 			if (!roomName || !text || !Number.isInteger(hops) || hops < 1) return { status: "rejected", reason: "invalid" };
-			if (hops > this.limits.maxHops) return { status: "rejected", reason: "hop_limit" };
 			const now = new Date().toISOString();
 			// Posting never creates a room or adds a member.
 			const room = this.rooms.get(roomName);
@@ -380,7 +379,6 @@ export class FakeRelay {
 		const hops = frame.hops as number;
 		if (!/^[A-Za-z0-9._-]{1,128}$/.test(to) || !String(frame.text ?? "") || !Number.isInteger(hops) || hops < 1) return { status: "rejected", reason: "invalid" };
 		if (to === from.session?.id) return { status: "rejected", reason: "self" };
-		if (hops > this.limits.maxHops) return { status: "rejected", reason: "hop_limit" };
 		const target = this.online(to);
 		if (!target && !this.recorded.has(to)) return { status: "rejected", reason: "unknown_session" };
 		const id = this.nextId();

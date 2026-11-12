@@ -5,7 +5,7 @@
 # and fidelity assertions across a server outage and a pi restart, a 5,000-entry session, the trace route against what
 # pi wrote, and the UI in the locally installed Chrome (the session page's trajectory view: KPI strip, canvas overview,
 # ledger, inspector, lazy subagents, deep links, replay; and the transcript view); then pika relay between two
-# `pi --mode rpc` processes logged in as two devices (questions and answers, the hop limit, expiry with a short TTL,
+# `pi --mode rpc` processes logged in as two devices (questions and answers, informational hop counts, expiry with a short TTL,
 # `/relay off`, renaming a device, messages from the browser route and the dashboard, and revocation closing the
 # connection); then a second machine pairing through `/pika login` under a free-text name while the browser denies and
 # approves it, pairing again after `/pika logout` and continuing the same device by its device key, renaming and
@@ -141,7 +141,7 @@ url="http://127.0.0.1:$port$base_path"
 export PIKA_PASSWORD="e2e-$(node -e 'console.log(require("crypto").randomBytes(9).toString("hex"))')"
 # Test-only relay timings (docs/RELAY.md): undelivered messages expire after 6 s instead of 300, and the server pings
 # and re-checks tokens every 2 s instead of 20. The driver restarts the server with the same environment.
-export PIKA_RELAY_TTL_SECS=6 PIKA_RELAY_HEARTBEAT_SECS=2 PIKA_RELAY_MAX_HOPS=8
+export PIKA_RELAY_TTL_SECS=6 PIKA_RELAY_HEARTBEAT_SECS=2
 # Offline and deterministic: costs stay as recorded, without fetching the models.dev price catalog.
 export PIKA_PRICES=off
 data="$work/data"

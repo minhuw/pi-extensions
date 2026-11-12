@@ -12,9 +12,6 @@ export const REJECTIONS = {
     unknown_room: "no such chatroom; your user creates rooms in the pika web UI",
     not_member: "this session is not a member of that room; only your user can add it, in the pika web UI",
 };
-export const rejection = (reason, maxHops) => reason === "hop_limit"
-    ? `the message would travel more than ${maxHops} hops between sessions without the user; stop relaying and wait for your user`
-    : REJECTIONS[reason];
 export const preview = (text) => { const line = text.replace(/\s+/g, " ").trim(); return line.length > 60 ? `${line.slice(0, 59)}…` : line; };
 /** One online session; every field comes from another device. */
 export function sessionLine(session) {

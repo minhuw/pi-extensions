@@ -401,7 +401,7 @@ Top-level sessions in the TUI or RPC mode get four tools; print and JSON session
 ### Safety
 
 - **Any device token can message every online session.** A machine you paired with pika can start turns in all your connected sessions, on every machine. Revoke devices you no longer use on the server's Devices page; revoking one closes its relay connections at once.
-- **Hop limit.** Every message carries a hop count. A turn you start resets it; a turn started by a relay message continues from that message's count, and each `relay_send` adds one. The server rejects messages above its hop limit (128 unless the server sets `PIKA_RELAY_MAX_HOPS`), which stops sessions that keep relaying to each other without you.
+- **Hop counts.** Every message carries an informational hop count. A turn you start resets it; a turn started by a relay message continues from that message's count, and each `relay_send` adds one. The server does not limit relay chains by hops; the per-session and per-device send rate limits still apply.
 - Messages pass through the server as plain text and are held in memory only until they are delivered or expire. The session transcripts that pika uploads are the permanent record.
 - Messages from other sessions are marked as not coming from you, but a model may still act on them. Treat every connected session as able to ask any other for work.
 

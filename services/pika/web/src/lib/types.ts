@@ -657,13 +657,12 @@ export interface RelayTarget {
 
 export type RelayStatus = "queued" | "delivered" | "expired" | "rejected";
 
-/** Why the server refused a message; `self`, `hop_limit`, and `not_member` come only from sessions. */
+/** Why the server refused a message; `self` and `not_member` come only from sessions. */
 export type RelayRejection =
 	| "invalid"
 	| "self"
 	| "too_large"
 	| "rate_limited"
-	| "hop_limit"
 	| "unknown_session"
 	| "unknown_room"
 	| "not_member"

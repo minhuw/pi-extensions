@@ -53,9 +53,6 @@ enum Command {
         /// Relay messages between pi sessions: on or off.
         #[arg(long, env = "PIKA_RELAY", default_value = "on", value_parser = parse_switch_on)]
         relay: bool,
-        /// Most hops a relay message may travel between sessions without the user.
-        #[arg(long, env = "PIKA_RELAY_MAX_HOPS", default_value_t = config::DEFAULT_MAX_HOPS, value_parser = clap::value_parser!(u64).range(1..))]
-        relay_max_hops: u64,
         /// Route terminals and files between the web UI and pika-node daemons: on or off (see docs/NODE.md).
         #[arg(long, env = "PIKA_NODES", value_parser = parse_switch)]
         nodes: bool,
@@ -214,11 +211,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             nodes_insecure,
             public_url,
             prices,
-            relay_max_hops,
             relay_ttl_secs,
             relay_heartbeat_secs,
         } => {
-            let mut relay_config = RelayConfig { enabled: relay, max_hops: relay_max_hops, ..RelayConfig::default() };
+            let mut relay_config = RelayConfig { enabled: relay, ..RelayConfig::default() };
             if let Some(secs) = relay_ttl_secs {
                 relay_config.ttl = Duration::from_secs(secs);
             }
@@ -521,16 +517,5 @@ mod tests {
         let cli = Cli::try_parse_from(["pika", "node", "rename", "node01", "build box"]).unwrap();
         assert!(matches!(cli.command, Command::Node { action: NodeAction::Rename { ref node, ref name } }
             if node == "node01" && name == "build box"));
-    }
-
-    #[test]
-    fn relay_max_hops_defaults_to_128_and_must_be_positive() {
-        let hops = |extra: &[&str]| match Cli::try_parse_from([&["pika", "serve"][..], extra].concat()) {
-            Ok(Cli { command: Command::Serve { relay_max_hops, .. }, .. }) => Some(relay_max_hops),
-            _ => None,
-        };
-        assert_eq!(hops(&[]), Some(128));
-        assert_eq!(hops(&["--relay-max-hops", "1000"]), Some(1000));
-        assert_eq!(hops(&["--relay-max-hops", "0"]), None);
     }
 }

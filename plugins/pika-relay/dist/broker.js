@@ -11,9 +11,9 @@ import { homedir, hostname } from "node:os";
 import { basename } from "node:path";
 import { isExcluded, loadConfig } from "./shared/config.js";
 import { RelayConnection, RequestError } from "./shared/relay/connection.js";
-import { cut, expiredContent, headerField, MAX_HOPS, messageContent, RELAY_VERSION, since, targetLabel, UNANSWERED, } from "./shared/relay/protocol.js";
+import { cut, expiredContent, headerField, messageContent, RELAY_VERSION, since, targetLabel, UNANSWERED, } from "./shared/relay/protocol.js";
 import { resolveRepository } from "./shared/repository.js";
-import { preview, REJECTIONS, rejection, roomLine, roomMessageLine, sendResult, sessionLine } from "./format.js";
+import { preview, REJECTIONS, roomLine, roomMessageLine, sendResult, sessionLine } from "./format.js";
 import { readLines, writeLine } from "./ipc.js";
 import { agentDir, inboxPath, pendingPath, pidPath, socketPath, stateDir } from "./paths.js";
 import { ANSWER_HINT, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "./tools.js";
@@ -172,8 +172,6 @@ class Broker {
             thread.limits.ttlSeconds = limits.ttlSeconds;
         if (Number.isFinite(limits?.maxTextBytes) && limits.maxTextBytes > 0)
             thread.limits.maxTextBytes = limits.maxTextBytes;
-        if (Number.isFinite(limits?.maxHops) && limits.maxHops > 0)
-            thread.limits.maxHops = limits.maxHops;
         // The state may have changed between hello and welcome.
         this.pushState(thread);
     }
@@ -271,7 +269,7 @@ class Broker {
         if (!thread) {
             thread = {
                 id, state: "idle", hops: 0, hookAt: 0, activeAt: Date.now(), clients: new Set(), reported: {}, waiters: new Set(), sent: [], notified: new Set(), seen: new Set(),
-                limits: { ttlSeconds: 300, maxTextBytes: 32 * 1024, maxHops: MAX_HOPS },
+                limits: { ttlSeconds: 300, maxTextBytes: 32 * 1024 },
             };
             for (const entry of this.readInbox(thread))
                 this.remember(thread, entry.id);
@@ -486,7 +484,7 @@ class Broker {
             if (response.status === 404)
                 throw new Error(`the pika server at ${config.url} has no relay (HTTP 404)`);
             if (typeof body?.error === "string")
-                throw new Error(`relay error (${body.error}): ${rejection(body.error, thread.limits.maxHops) ?? body.error}`);
+                throw new Error(`relay error (${body.error}): ${REJECTIONS[body.error] ?? body.error}`);
             throw new Error(`unexpected HTTP ${response.status} from ${config.url}`);
         }
         return await response.json();
@@ -536,7 +534,7 @@ class Broker {
             record.status = "rejected";
             record.reason = answer.reason;
             remember();
-            throw new Error(`relay rejected the message (${answer.reason}): ${rejection(answer.reason, thread.limits.maxHops) ?? "see the reason"}.`);
+            throw new Error(`relay rejected the message (${answer.reason}): ${REJECTIONS[answer.reason] ?? "see the reason"}.`);
         }
         record.id = answer.id;
         record.label = answer.room ? `room #${headerField(answer.room)}` : targetLabel(answer.to, targetTo);

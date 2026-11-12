@@ -1,6 +1,7 @@
 // pika relay end to end (docs/RELAY.md, "End to end"): two real `pi --mode rpc` processes with the pika extension, each
-// logged in as its own device, talk through the real server. A asks B with relay_send and B's answer reaches A; a chain
-// between them stops at the hop limit; `/relay off` takes B offline, and a message to it expires after the short test
+// logged in as its own device, talk through the real server. A asks B with relay_send and B's answer reaches A; a
+// nine-message chain preserves informational hop counts without a chain limit; `/relay off` takes B offline, and a
+// message to it expires after the short test
 // TTL with a notice that starts a turn in A; renaming A's device shows in relay's lists and on the dashboard; messages
 // from the browser route and from the dashboard in Chrome reach B;
 // B's uploaded transcript holds what it received; revoking B's device on the Devices page closes its connection with
@@ -18,8 +19,8 @@ const REPO = join(import.meta.dirname, "..", "..", "..");
 const EXTENSIONS = ["extensions/pika/index.ts"].map((path) => join(REPO, path));
 const PROVIDER = "pika-e2e-relay";
 const MODEL = "mock-model";
-/** e2e.sh starts the server with PIKA_RELAY_MAX_HOPS=8, so the chain stays short. */
-const MAX_HOPS = 8;
+/** The scripted chain ends itself after nine messages. */
+const CHAIN_HOPS = 9;
 
 const QUESTION = "What is the build status?";
 const ANSWER = "The build is green.";
@@ -105,6 +106,7 @@ export function relayResponder(body: Record<string, unknown>): ScriptedReply {
 	if (relay?.text === QUESTION) return script([send({ to: relay.from, replyTo: relay.id, text: ANSWER }), "I answered the build question."]);
 	if (relay?.text === ANSWER) return "The other session says the build is green.";
 	const hop = relay && /^chain hop (\d+)$/.exec(relay.text);
+	if (relay && hop && Number(hop[1]) >= CHAIN_HOPS) return "I finished the chain.";
 	if (relay && hop) return script([send({ to: relay.from, replyTo: relay.id, text: chainText(Number(hop[1]) + 1) }), "I passed the chain on."]);
 	return "This prompt has no script.";
 }
@@ -219,21 +221,20 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 		answered(aEntries, answer, "the answer in A");
 		log(`relay: A asked B (${askId}, hops 1); B's turn started with it and its answer ${answerSent[1]} (hops 2) reached A`);
 
-		// 3. A chain between the sessions without the user stops at the hop limit.
+		// 3. A bounded scripted chain carries informational hop counts without a server chain limit.
 		await a.prompt(PROMPTS.chain(B.sessionId));
-		const cut = await waitFor(async () => toolResults(await a.entries(), "relay_send").find((entry) => lastText(entry).includes("(hop_limit)")), 60_000, "the chain to reach the hop limit");
+		await waitFor(async () => custom(await b.entries(), "relay-received").some((entry) => entry.data?.text === chainText(CHAIN_HOPS)), 60_000, "the ninth chain message");
 		await settled("the chain");
-		check(cut.message?.isError && lastText(cut).startsWith("relay rejected the message (hop_limit):"), `the cut relay_send answered ${JSON.stringify(lastText(cut))}`);
 		const chain = (await events()).filter((event) => /^chain hop \d+$/.test(event.text)).reverse();
 		checkEqual(chain.map((event) => ({ text: event.text, hops: event.hops, status: event.status, reason: event.reason, from: event.from.sessionId })),
-			Array.from({ length: MAX_HOPS + 1 }, (_, i) => ({
-				text: chainText(i + 1), hops: i + 1, status: i < MAX_HOPS ? "delivered" : "rejected", reason: i < MAX_HOPS ? undefined : "hop_limit",
+			Array.from({ length: CHAIN_HOPS }, (_, i) => ({
+				text: chainText(i + 1), hops: i + 1, status: "delivered", reason: undefined,
 				from: i % 2 === 0 ? A.sessionId : B.sessionId,
 			})), "the chain's events");
 		const hopsOf = async (pi: RpcPi) => custom(await pi.entries(), "relay-received").map((entry) => entry.data?.hops);
-		checkEqual({ a: await hopsOf(a), b: await hopsOf(b) }, { a: [2, 2, 4, 6, 8], b: [1, 1, 3, 5, 7] }, "the hops of every message each session received");
+		checkEqual({ a: await hopsOf(a), b: await hopsOf(b) }, { a: [2, 2, 4, 6, 8], b: [1, 1, 3, 5, 7, 9] }, "the hops of every message each session received");
 		const hopEvent = chain.at(-1)!;
-		log(`relay: the chain ran ${MAX_HOPS} hops and A's ninth send was rejected with hop_limit`);
+		log(`relay: the chain delivered all ${CHAIN_HOPS} hops with their informational counts preserved`);
 
 		// 4. `/relay off` takes B offline; a message to it expires after the TTL, and the notice starts a turn in A.
 		const off = await b.prompt("/relay off");
@@ -298,7 +299,7 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 		checkEqual(await browser.page.$$eval("[data-relay-device]", (nodes) => nodes.map((node) => node.getAttribute("data-relay-device"))), [A.deviceId, B.deviceId], "the dashboard's device groups");
 		check((await browser.textOf(`[data-relay-device="${A.deviceId}"] h3`)).includes(RENAMED_A), "A's device group is not headed by its new name");
 		for (const id of [askId, answerSent[1]!, hopEvent.id, lateId, sent.body.id]) await browser.visible(`[data-relay-event="${id}"]`);
-		checkEqual(await browser.page.$eval(`[data-relay-event="${hopEvent.id}"]`, (node) => node.getAttribute("data-status")), "rejected", "the dashboard's status of the cut chain message");
+		checkEqual(await browser.page.$eval(`[data-relay-event="${hopEvent.id}"]`, (node) => node.getAttribute("data-status")), "delivered", "the dashboard's status of the last chain message");
 		checkEqual(await browser.page.$eval(`[data-relay-event="${lateId}"]`, (node) => node.getAttribute("data-status")), "expired", "the dashboard's status of the late note");
 		check((await browser.textOf(`[data-online-session="${B.sessionId}"]`)).includes(B.name), "B's row does not show its name");
 		check((await browser.textOf("[data-online-count]")).includes("2"), "the sign band does not count 2 online sessions");

@@ -7,8 +7,6 @@ export const RELAY_VERSION = "0.1.0";
 export const MESSAGE_TYPE = "relay-message";
 export const NOTICE_TYPE = "relay-notice";
 export const RECEIVED_TYPE = "relay-received";
-/** The server's default hop limit, used until its `welcome` gives `limits.maxHops`. */
-export const MAX_HOPS = 128;
 /**
  * Timings, mutable so tests can shorten them. `deadAfterMs` is the liveness limit of both sides;
  * a connection that stayed online for `stableMs` starts its next backoff from the beginning.

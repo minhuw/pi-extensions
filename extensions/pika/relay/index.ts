@@ -7,7 +7,7 @@ import { loadRelaySettings } from "../config.ts";
 import { credentialsRegistry } from "../credentials.ts";
 import { type ConnectionState, RelayConnection, RequestError } from "./connection.ts";
 import {
-	cut, deviceLabel, expiredContent, headerField, type HelloSession, MAX_HOPS, MESSAGE_TYPE, type MessageFrame, messageContent, NOTICE_TYPE, type OnlineSession, RECEIVED_TYPE,
+	cut, deviceLabel, expiredContent, headerField, type HelloSession, MESSAGE_TYPE, type MessageFrame, messageContent, NOTICE_TYPE, type OnlineSession, RECEIVED_TYPE,
 	type RelayRoom, type RelayRoomDetail, RELAY_VERSION, type RoomFrame, type RoomMember, type RoomMessage, sanitize, type SentFrame, type SessionState, since, type StatusFrame, type Target, targetLabel, timing,
 	ttlText,
 } from "./protocol.ts";
@@ -164,10 +164,6 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	let runHops = 0;
 	let ttlSeconds = 300;
 	let maxTextBytes = 32 * 1024;
-	let maxHops = MAX_HOPS;
-	const rejection = (reason: string): string | undefined => reason === "hop_limit"
-		? `the message would travel more than ${maxHops} hops between sessions without the user; stop relaying and wait for your user`
-		: REJECTIONS[reason];
 	let title: string | undefined;
 	/** The repository name pika resolves for the session's cwd, once asked; undefined until then or without one. */
 	let project: { cwd: string; name?: string; pending: Promise<void> } | undefined;
@@ -464,7 +460,6 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		const limits = state.welcome.limits;
 		if (Number.isFinite(limits?.ttlSeconds) && limits.ttlSeconds > 0) ttlSeconds = limits.ttlSeconds;
 		if (Number.isFinite(limits?.maxTextBytes) && limits.maxTextBytes > 0) maxTextBytes = limits.maxTextBytes;
-		if (Number.isFinite(limits?.maxHops) && limits.maxHops > 0) maxHops = limits.maxHops;
 		// State may have changed between hello and welcome.
 		pushState();
 		refreshRooms();
@@ -743,7 +738,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			if (response.status === 401) throw new Error("the server rejected this device's token (HTTP 401)");
 			if (response.status === 404 && errBody?.error === "not_found") throw new Error("no such chatroom exists yet");
 			if (response.status === 404) throw new Error(`the pika server at ${current.url} has no relay (HTTP 404)`);
-			if (typeof errBody?.error === "string") throw new Error(`relay error (${errBody.error}): ${rejection(errBody.error) ?? errBody.error}`);
+			if (typeof errBody?.error === "string") throw new Error(`relay error (${errBody.error}): ${REJECTIONS[errBody.error] ?? errBody.error}`);
 			throw new Error(`unexpected HTTP ${response.status} from ${current.url}`);
 		}
 		return await response.json() as T;
@@ -864,7 +859,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		}
 		if (answer.status === "rejected") {
 			record.status = "rejected"; record.reason = answer.reason; remember();
-			throw new Error(`relay rejected the message (${answer.reason}): ${rejection(answer.reason) ?? "see the reason"}.`);
+			throw new Error(`relay rejected the message (${answer.reason}): ${REJECTIONS[answer.reason] ?? "see the reason"}.`);
 		}
 		const now = Date.now();
 		exchanged.set(targetKey, now);

@@ -33,7 +33,6 @@ Deferred, not in v1: addressing subagent and Herder child sessions, a same-machi
 | Owner memory after a session goes offline | the message TTL, and while messages are queued for it; at most 10,000 remembered sessions, the oldest forgotten first |
 | Queued messages per target session | 100 |
 | Queued messages in the whole mailbox | 10,000 |
-| Max hops | 8 |
 | Online sessions per server | 1,000 |
 | Connections per device | 64 |
 | Dashboard event ring | last 500 events |
@@ -45,7 +44,6 @@ The server reads TTL and heartbeat from internal configuration so tests can shor
 ### Configuration and discovery
 
 - `PIKA_RELAY` = `on` (default) | `off`. When off, every relay route answers 404 `{ error: "relay_disabled" }` and the WebSocket upgrade is refused with that response.
-- `PIKA_RELAY_MAX_HOPS` = the hop limit, a positive integer, default 128.
 - `GET {base}/api/health` gains `features: string[]`, containing `"relay"` when relay is on. Older servers have no `features`; the extension treats that as "no relay".
 - Version 0.3.0.
 
@@ -70,19 +68,19 @@ The server reads TTL and heartbeat from internal configuration so tests can shor
   - On success the server answers `welcome` and then pushes every queued, unexpired message for this session in acceptance order.
 - `state`: `{ type: "state", state?: "idle" | "busy", name?, title?, model? }` updates the online entry.
 - `send`: `{ type: "send", clientId, to, text, urgent?: boolean, replyTo?: string, hops: number }`
-  - `clientId` is the sender's correlation id (≤ 64 characters); `to` is a session id; `hops` is an integer ≥ 1.
+  - `clientId` is the sender's correlation id (≤ 64 characters); `to` is a session id; `hops` is informational metadata and must be an integer ≥ 1, with no hop-count ceiling.
   - The server answers `sent` with the same `clientId`: either `{ type: "sent", clientId, id, status: "delivered" | "queued", to: Target }`, where `queued` means the target is offline or has not acknowledged yet, or `{ type: "sent", clientId, status: "rejected", reason }`.
-  - **Rejection reasons, checked in this order:** `invalid` (empty text, bad id, bad hops), `self` (to its own session), `too_large` (text over 32 KiB, or a `message` frame over 64 KiB once JSON-encoded, which escaping control characters can cause; this applies to web sends too), `rate_limited` (per session or per device), `hop_limit` (`hops` > the hop limit, 128 by default), `unknown_session` (`to` is neither online nor a session pika has recorded), `mailbox_full`.
+  - **Rejection reasons, checked in this order:** `invalid` (empty text, bad id, bad hops), `self` (to its own session), `too_large` (text over 32 KiB, or a `message` frame over 64 KiB once JSON-encoded, which escaping control characters can cause; this applies to web sends too), `rate_limited` (per session or per device), `unknown_session` (`to` is neither online nor a session pika has recorded), `mailbox_full`.
   - A message to an online target is pushed at once; `sent` reports `delivered` only if the target's `ack` arrives within 2 s, otherwise `queued`.
 - `send` to a room: `{ type: "send", clientId, room, text, mentions?: string[], urgent?, replyTo?, hops }`, without `to` (see Rooms).
   - Answered `{ type: "sent", clientId, id, status: "delivered", room, notified: Target[], to: Target, unmatched?: string[] }`, where `to` is `#<room>`, or rejected as above.
-  - **Rejection reasons, checked in this order:** `invalid`, `too_large`, `rate_limited`, `hop_limit`, `unknown_room` (no such room), `not_member` (the sending session is not a member).
+  - **Rejection reasons, checked in this order:** `invalid`, `too_large`, `rate_limited`, `unknown_room` (no such room), `not_member` (the sending session is not a member).
 - `ack`: `{ type: "ack", id }` from the target after it delivered message `id`. Unknown or already-acknowledged ids are ignored.
 - `pong`: `{ type: "pong" }` in answer to `ping`. Any frame counts as liveness.
 
 #### Server → client
 
-- `welcome`: `{ type: "welcome", device, deviceName, serverVersion, limits: { ttlSeconds, heartbeatSeconds, maxTextBytes, maxHops } }`.
+- `welcome`: `{ type: "welcome", device, deviceName, serverVersion, limits: { ttlSeconds, heartbeatSeconds, maxTextBytes } }`.
 - `message`: `{ type: "message", id, room?, mentions?, from: Sender, text, urgent, replyTo?, hops, sentAt }`, where `Sender` is `{ kind: "session", sessionId, device, deviceName, name?, title?, project? }` or `{ kind: "web" }`. Pushed again after a reconnect while unacknowledged; the client deduplicates by `id`.
 - `status`: `{ type: "status", id, status: "delivered" | "expired", to: Target, at }` for messages this session sent. Sent to the sender's current connection; if the sender is offline it is dropped.
 - `ping`: `{ type: "ping", at }` every heartbeat interval.
@@ -143,7 +141,7 @@ A room may have one representative: a member session that stands for the user. T
 - `GET relay/rooms/{name}` → `{ room: RelayRoom, messages: RoomMessage[] }`.
 - `POST relay/rooms/{name}/members` with `{ sessionId, action?: "add" | "remove" | "represent" | "unrepresent" }` → adds, removes, elects as representative, or clears as representative a member session, whichever device owns it; removing the representative clears it.
 - `DELETE relay/rooms/{name}` → deletes the room (`204 No Content`); if it had a representative, its online members get `room` without one.
-- `POST relay/messages` with body `{ to, text, urgent?: boolean }` (1:1) or `{ room, text, mentions?: string[], urgent?: boolean }` (chatroom) → 200 `{ id, status: "delivered" | "queued", to: Target, room?, notified?, unmatched? }`, or 400, 404, or 429 `{ error: <reason> }` with the same reasons as `send` (no `self` or `hop_limit`; an unknown room is 404 `unknown_room`, and `not_member`, which a web post never gets, would be 403). The sender is `{ kind: "web" }`, with hops 0. In a chatroom, which must exist, only the `@`-mentioned members receive a `message` push that triggers a turn (see Rooms).
+- `POST relay/messages` with body `{ to, text, urgent?: boolean }` (1:1) or `{ room, text, mentions?: string[], urgent?: boolean }` (chatroom) → 200 `{ id, status: "delivered" | "queued", to: Target, room?, notified?, unmatched? }`, or 400, 404, or 429 `{ error: <reason> }` with the same reasons as `send` (no `self`; an unknown room is 404 `unknown_room`, and `not_member`, which a web post never gets, would be 403). The sender is `{ kind: "web" }`, with hops 0. In a chatroom, which must exist, only the `@`-mentioned members receive a `message` push that triggers a turn (see Rooms).
 - `GET relay/events?limit=` (default 100, max 500) → `{ items: RelayEvent[] }`, newest first:
   ```
   RelayEvent = { id, at, from: Sender, to: Target, status: "queued" | "delivered" | "expired" | "rejected", reason?, deliveredAt?, urgent, replyTo?, hops, text }
@@ -180,7 +178,7 @@ Use a WebSocket client (for example `tokio-tungstenite`) against the real router
 - an offline target: queued, then delivered on reconnect;
 - expiry with a short TTL, sending `status: expired` to an online sender;
 - deduplicated re-push after a dropped connection;
-- every rejection reason, the rate limit, and the per-target and global queue limits;
+- large informational hop counts, every remaining rejection reason, the rate limit, and the per-target and global queue limits;
 - the heartbeat timeout marking a session offline;
 - revoking a device, and continuing it by pairing, which close with 4401;
 - `deviceName` in every object that carries `device`, the sort order of the session lists, and renames showing at once;
@@ -307,7 +305,7 @@ Client-only (`extensions/pika/relay/side.ts`); the wire format is unchanged. A b
 
 ### Hops
 
-The extension tracks `runHops`. It resets to 0 at `before_agent_start` with `messageType: "user"`. Each delivered relay message raises it to `max(runHops, message.hops)`. Outgoing messages carry `hops = runHops + 1`, and `/relay send` from the user carries 1. The server rejects `hops` above its hop limit, 128 unless `PIKA_RELAY_MAX_HOPS` sets another, and advertises it as `welcome.limits.maxHops`, which the extension's `hop_limit` error text shows. This stops agent-to-agent chains that run without the user; the per-session and per-device send rates still slow a loop below the limit.
+The extension tracks `runHops`. It resets to 0 at `before_agent_start` with `messageType: "user"`. Each delivered relay message raises it to `max(runHops, message.hops)`. Outgoing messages carry `hops = runHops + 1`, and `/relay send` from the user carries 1. The count is informational wire metadata, retained for compatibility: the server accepts every valid value and applies no hop-based chain control, while the per-session and per-device send rates bound relay activity. Servers from before this change may still enforce their former configured hop limit and answer `hop_limit`.
 
 ### Tools (registered in top-level sessions only)
 
@@ -387,6 +385,7 @@ When the session is idle, the notice starts a turn, and its content ends with th
 
 - Two real pi processes (RPC mode, faux or mock provider) logged into the real server.
 - A asks B something with `relay_send`; B's turn starts with the message, and B's reply reaches A.
+- A nine-message relay chain preserves the informational hop counts without a hop rejection.
 - A message to a session that goes offline expires with a short test TTL, and A receives the notice.
 - The dashboard is screenshotted in light and dark with both sessions online and messages listed.
 - A message sent from the dashboard reaches B.

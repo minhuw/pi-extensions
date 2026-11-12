@@ -197,7 +197,7 @@ it("wakes the sender with a notice when a message expires, and records delivery 
 	expect(a.errors).toEqual([]);
 });
 
-it("counts hops: user turns send 1, turns started by relay messages send one more, and the server's limit stops a chain", async () => {
+it("counts hops as informational metadata: user turns send 1 and relay turns send one more, without a chain limit", async () => {
 	const notes = new Notes();
 	const a = await online({ ui: notes.context() });
 	const id = a.session.sessionId;
@@ -230,16 +230,15 @@ it("counts hops: user turns send 1, turns started by relay messages send one mor
 	expect(hops()).toEqual([1, 4, 4, 1, 1]);
 	expect(notes.last).toEqual({ type: "info", message: expect.stringMatching(/^Queued message msg-\d+ for pi session peer: /) });
 
-	// At 8 hops the next answer is rejected. The fake server's welcome says maxHops 8, not the default 128, so the error
-	// text shows the server's limit.
-	callTool(a, "relay_send", { to: "peer", text: "ninth hop" });
-	relay.push(id, { id: "m-8", hops: 8, from: { kind: "session", sessionId: "peer", device: "desktop" } });
-	await waitFor(() => results(a, "relay_send").length === 5, 5_000, "the rejected answer");
-	expect(hops().at(-1)).toBe(9);
-	expect(results(a, "relay_send").at(-1)).toEqual({
-		text: "relay rejected the message (hop_limit): the message would travel more than 8 hops between sessions without the user; stop relaying and wait for your user.",
-		isError: true,
-	});
+	// Hop counts above the former default remain valid metadata and the send is accepted.
+	callTool(a, "relay_send", { to: "peer", text: "past the former default" });
+	relay.push(id, { id: "m-128", hops: 128, from: { kind: "session", sessionId: "peer", device: "desktop" } });
+	await waitFor(() => results(a, "relay_send").length === 5, 5_000, "the high-hop answer");
+	expect(hops().at(-1)).toBe(129);
+	expect(relay.routed.at(-1)).toMatchObject({ to: "peer", text: "past the former default", hops: 129 });
+	const accepted = results(a, "relay_send").at(-1)!;
+	expect(accepted.isError).toBe(false);
+	expect(accepted.text).toMatch(/^Queued message msg-\d+ for pi session peer: /);
 	await waitFor(() => a.session.isStreaming === false, 5_000, "idle");
 	expect(a.errors).toEqual([]);
 });

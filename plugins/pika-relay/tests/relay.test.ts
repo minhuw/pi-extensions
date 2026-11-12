@@ -215,7 +215,7 @@ describe("receiving", () => {
         expect(stop.output.reason).toContain("survive");
     });
 
-    it("counts hops: genuine prompts reset them, relay messages raise them, and a Stop continuation is not genuine", async () => {
+    it("counts informational hops without a chain limit: genuine prompts reset them and a Stop continuation is not genuine", async () => {
         relay.recorded.add("other");
         await start(A);
         const server = await mcp();
@@ -235,13 +235,10 @@ describe("receiving", () => {
         expect(await runHook(env, "UserPromptSubmit", { session_id: A, cwd: env.cwd, prompt: stop.output.reason })).toMatchObject({ code: 0, stdout: "" });
         expect(await sendHops()).toBe(6);
 
-        const later = relay.push(A, { hops: 9 });
+        const later = relay.push(A, { hops: 128 });
         await relay.waitForAck(A, later);
         expect((await runHook(env, "PostToolUse", { session_id: A, cwd: env.cwd })).output.hookSpecificOutput.additionalContext).toContain(later);
-        // The fake server's hop limit is 8, which its welcome told the broker.
-        expect(await server.call(A, "relay_send", { to: "other", text: "hi" })).toEqual({
-            text: "relay rejected the message (hop_limit): the message would travel more than 8 hops between sessions without the user; stop relaying and wait for your user.", isError: true,
-        });
+        expect(await sendHops()).toBe(129);
 
         await runHook(env, "UserPromptSubmit", { session_id: A, cwd: env.cwd, prompt: "a new task" });
         expect(await sendHops()).toBe(1);

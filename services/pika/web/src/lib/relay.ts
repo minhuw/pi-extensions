@@ -77,7 +77,6 @@ const REASONS: Record<string, { short: string; long: string }> = {
 	self: { short: "sent to itself", long: "A session can't message itself." },
 	too_large: { short: "too large", long: "The message is too long: the limit is 32 KiB." },
 	rate_limited: { short: "rate limited", long: "Too many messages in the last minute. Wait a moment and try again." },
-	hop_limit: { short: "too many hops", long: "The message went through more sessions without the user than the server allows." },
 	unknown_session: { short: "unknown session", long: "pika doesn't know this session: it is offline and was never uploaded." },
 	unknown_room: { short: "unknown room", long: "No such room. Create it here or with /relay join." },
 	not_member: { short: "not a member", long: "The sender is not a member of the room." },
