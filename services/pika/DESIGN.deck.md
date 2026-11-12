@@ -8,6 +8,8 @@ colors:
   dk-line-strong: "#c3c9d0"
   dk-code: "#eceff2"
   dk-raised: "#ffffff"
+  dk-menu-line: "rgb(22 26 31 / 0.16)"
+  dk-menu-hi: "rgb(90 70 200 / 0.13)"
   dk-tip: "#23282e"
   dk-tip-ink: "#f1f3f5"
   dk-ink: "#161a1f"
@@ -29,6 +31,8 @@ colors:
   dk-dark-line-strong: "#383f47"
   dk-dark-code: "#1d2126"
   dk-dark-raised: "#1f2328"
+  dk-dark-menu-line: "#383f47"
+  dk-dark-menu-hi: "rgb(165 150 255 / 0.2)"
   dk-dark-tip: "#e4e7eb"
   dk-dark-tip-ink: "#111417"
   dk-dark-ink: "#e4e7eb"
@@ -116,8 +120,25 @@ components:
     rounded: "{rounded.dk-menu}"
     padding: "4px"
   dk-menu-item:
-    height: "24px"
+    backgroundColor: "{colors.dk-menu-hi}"
+    textColor: "{colors.dk-ink}"
+    typography: "{typography.dk-ui}"
+    height: "26px"
+    padding: "0 8px 0 6px"
     rounded: "{rounded.dk-bar-control}"
+  dk-menu-header:
+    textColor: "{colors.dk-ink-3}"
+    typography: "{typography.dk-meta}"
+  dk-button-primary:
+    backgroundColor: "{colors.dk-accent}"
+    textColor: "{colors.dk-on-accent}"
+    rounded: "{rounded.dk-bar-control}"
+    height: "28px"
+  dk-button-secondary:
+    backgroundColor: "{colors.dk-raised}"
+    textColor: "{colors.dk-ink}"
+    rounded: "{rounded.dk-bar-control}"
+    height: "28px"
   dk-tooltip:
     backgroundColor: "{colors.dk-tip}"
     textColor: "{colors.dk-tip-ink}"
@@ -139,7 +160,7 @@ It is scoped. `services/pika/DESIGN.md` (Swiss Typographic Concordance) owns `/d
 **Key characteristics**
 
 - Cool neutral grounds: the work (terminal, editor, active tab) on the lightest ground, chrome (rail, Explorer, tab strips) one step down. No shadows for structure; one-pixel lines.
-- One accent, an indigo violet (`dk-accent`), for selection, focus, the active tab and group, splitter focus and drop targets, the terminal's selection and search, and Monaco's cursor. It never marks a status.
+- One accent, an indigo violet (`dk-accent`), for selection, focus, the active tab and group, splitter focus and drop targets, menu highlights (as a tint), a dialog's primary action, the terminal's selection and search, and Monaco's cursor. It never marks a status.
 - Status colours, reserved: needs you amber, failed red, done green, working blue; idle and quiet are ink. Every status also has its own glyph shape, so colour is never the only cue.
 - The system UI face at 13px, 11.5px metadata, tabular numerals; monospace only for terminals, code, and the browser key.
 
@@ -245,7 +266,16 @@ Deck is an app of its own inside pika: its route renders outside the dashboard's
 
 - **Cursor and selection:** the arrow everywhere, including buttons, tabs, rows and tree items; the I-beam only over text fields and selectable text. Chrome does not select: the root sets `user-select: none`, and inputs, code, `kbd`, and anything marked `data-selectable` select again (commands, fingerprints, the build).
 - **Focus:** rings for the keyboard only (`:focus-visible`); a click leaves none.
-- **One menu (`Menu.tsx`)** for every context menu and drop-down: a raised sheet (`dk-raised`, 1px `dk-line-strong`, 6px radius, a soft two-layer shadow), 24px items, the highlighted item in the accent with `dk-on-accent` ink whether the pointer or the keyboard put it there, shortcuts right-aligned in ink-3, separators as inset hairlines, destructive items (Kill…, Remove…) in failed ink. Arrows, Home/End, a letter to jump, Enter/Space, Escape/Tab close and return focus; a press outside, a resize or the window losing focus closes it; opening one closes any other; pressing the button that opened it closes it. Context menus exist on tabs (splits, Pin, Copy Path, Close, Close Others), agent rows (Open, Close Pane, Copy Working Directory, Kill…/Remove…), and tree items (Open or Expand/Collapse, Copy Path, Copy Relative Path, Refresh); the menu key and Shift+F10 open them from the keyboard.
+- **One menu (`Menu.tsx`)** for every context menu and drop-down, drawn like a native one (macOS, Zed, VS Code):
+  - **Sheet:** `dk-raised`, a 1px `dk-menu-line` hairline, 6px radius, the soft two-layer `dk-shadow`, 4px inside; 220–380px wide.
+  - **Rows:** 26px, 13px text in full ink, 6px/8px side padding, 4px radius. A 16px icon column always comes first (the item's 14px icon in ink-2, the check of a chosen one, or blank), then the label, a hint in ink-3 at 12px that truncates first (a project's path), the shortcut right-aligned in ink-3 tabular figures, and a chevron for a submenu.
+  - **Highlight:** the accent tint `dk-menu-hi` (13% light, 20% dark) with the text staying ink, whether the pointer or the keyboard put it there; the item whose submenu is open stays highlighted. Destructive items (Kill, Remove, Re-pair…) are failed ink with a failed-ink icon, highlighted or not.
+  - **Groups:** separators are inset hairlines with 4px above and below; a header names the items under it (11.5px, 600, ink-3, aligned with the labels) and makes them a `group` for assistive technology. A note is one line of ink-2 text where there is nothing to choose.
+  - **Disabled is rare.** A menu is never a list of disabled items. What cannot apply here is left out (splits for a group's only tab, Close Others with nothing to close, a fingerprint never pinned); a node that is not connected leaves out everything that needs it and the menu says so once, in a note ("node01 is not connected"). An item stays disabled only when that teaches something, today only "Update pika-node on X to use this". Disabled text is ink at 40%; the item can still be highlighted (with a hover tint, not the accent), and its reason shows once, in a tooltip bubble beside the menu, and is the item's `aria-describedby`; never a second line under every item.
+  - **Submenus** open beside their item (flipping left at the window's edge) after the pointer rests 120ms, or with Right, Enter or Space; Left or Escape closes one and returns to its item.
+  - **Keyboard:** focus starts on the checked or first enabled item (on the sheet itself when there is only a note, so Escape still works); arrows, Home/End, a letter to jump, Enter/Space, Escape/Tab close and return focus. A press outside the menu and its submenus, a resize or the window losing focus closes it; opening one closes any other; pressing the button that opened it closes it. Context menus exist on tabs, agent rows, project cards, nodes and tree items; the menu key and Shift+F10 open them from the keyboard.
+  - **The rail's "+"** targets a node: the node on screen (or the only connected one) without asking, under a header naming where things land ("atlas · mac") when there is a project or another node; the project on screen is the default, and New Worktree… appears only there. Other connected nodes follow as submenus under "Other nodes". With no node on screen and up to four connected, each is a group under its name, so one choice picks node and action; beyond four, one submenu per node. With none connected, it offers "Pair <node>…" for each unpaired node, or says which nodes are not connected.
+- **Buttons:** the shared `BUTTON` set is re-toned inside the root through its `ui-button*` names: 28px, 4px radius; a dialog's or page's primary action (Add Project, Create Worktree, Pair this browser) in the accent, as a desktop's default button; secondary framed in `dk-line-strong` on `dk-raised`; danger in failed. Text fields in Deck's dialogs are 28px, `dk-line-strong`, turning accent with a soft accent ring on focus; checkboxes take the accent (`accent-color`).
 - **Tooltips (`Tooltips.tsx`)** replace `title`: an inverse bubble (`dk-tip`) after 600ms, at once while another just showed, with the action's shortcut beside the name; hidden on press, key, scroll, or leaving; never on touch. The bubble is `aria-hidden`; every control keeps its own accessible name.
 - **Dialogs** inside the root are sheets like the menus (8px radius, `dk-raised`, the same shadow).
 - **Glyphs** are drawn SVG (chevrons, the panel toggles, the diff arrows), never Unicode triangles or arrows.
@@ -257,6 +287,7 @@ Deck is an app of its own inside pika: its route renders outside the dashboard's
 - Splitters are 1px lines that turn `dk-line-strong` on hover and accent on focus; drop targets are accent-framed over `dk-accent-soft`.
 - The workspace header shows the focused pane's state as glyph plus label in the state's ink, never a boxed pill. "New terminal" is a quiet framed button; the accent is not spent on it.
 - Dialogs (shortcuts, quick open) frame in `dk-line-strong`.
+- An empty tab group offers "New terminal" once, as a labelled button in its body; its strip has no `+` until it holds a tab.
 
 ## Do's and Don'ts
 
