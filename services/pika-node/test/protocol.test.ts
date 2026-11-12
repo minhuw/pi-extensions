@@ -107,6 +107,8 @@ describe("bridge socket", () => {
         expect(parseBridgeMessage({ type: "status", status: bridge({ activities: [activity, activity] as never, activityCount: 2 }) }).ok).toBe(false);
         expect(parseBridgeMessage({ type: "status", status: bridge({ activities: [activity as never], activityCount: 0 }) }).ok).toBe(false);
         expect(parseBridgeMessage({ type: "status", status: bridge({ activities: [{ ...activity, progress: { completed: 4, total: 3 } }] as never, activityCount: 1 }) }).ok).toBe(false);
+        // An older bridge's `title` is an unknown field now, not a reason to drop its status.
+        expect(parseBridgeMessage({ type: "status", status: { ...bridge(), title: "old" } }).ok).toBe(true);
         expect(parseBridgeMessage({ type: "open", id: "o1", path: "/home/u/a.ts", line: 3 }).ok).toBe(true);
         expect(parseBridgeMessage({ type: "diff", id: "d1", path: "a.ts" }).ok).toBe(false);
         expect(parseDaemonToBridge({ type: "reply", id: "o1", result: { delivered: 2 } }).ok).toBe(true);

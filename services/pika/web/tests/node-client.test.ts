@@ -227,7 +227,8 @@ describe("liveBridge", () => {
 		state: "busy" as const,
 		activities: [{ source: "subagents", id: "a1", label: "reviewer", state: "running" as const }],
 		activityCount: 1,
-		title: "pi - review",
+		session: { id: "s1", name: "review", cwd: "/home/me/app" },
+		model: "magpie/claude-opus-5-5",
 		updatedAt: 1,
 	};
 
@@ -235,7 +236,7 @@ describe("liveBridge", () => {
 		expect(liveBridge({ state: "busy", bridge, bridgeConnected: true, unread: false })).toBe(bridge);
 	});
 
-	it("drops a closed bridge's activities and title: pi may have been killed while they ran", () => {
+	it("drops a closed bridge's activities and model: pi may have been killed while they ran", () => {
 		expect(liveBridge({ state: "idle", bridge, bridgeConnected: false, unread: false })).toBeUndefined();
 		expect(liveBridge(undefined)).toBeUndefined();
 	});

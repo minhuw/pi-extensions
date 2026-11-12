@@ -234,11 +234,11 @@ A pane status has two sources, and the daemon merges them. It keeps the latest m
    - **Parsing:** the headless emulator's `parser.registerOscHandler(7501, …)` passes the payload to `parseProgramStatus` (`protocol.ts`). A payload it rejects is ignored, as is the startup query `7501;?`. The daemon does not answer that query, because the variable already enables the reports.
    - **Coverage:** it covers pi's idle, working, and done states and every dialog, built-in or extension (`blocked`), except plain `showSelector` menus (`/model`, `/settings`).
    - **Clearing:** `clear` drops the program status. So does a change of the PTY's foreground process (node-pty `process`, polled every 2 s) away from the one that was in front when the status arrived, so a crashed pi leaves no stale `working`.
-2. **Bridge status (`BridgeStatus`, §5).** Only the bridge knows background activities (Subagents, Herder), the session (id, name, cwd, file), the model, and the title. It also reports `waiting` while an extension's `ctx.ui` dialog opened from a command or event handler is open (`ui_prompt_*`). pi's built-in dialogs and extension shortcut handlers emit no `ui_prompt_*`; OSC 7501 covers those.
+2. **Bridge status (`BridgeStatus`, §5).** Only the bridge knows background activities (Subagents, Herder), the session (id, name, cwd, file) and the model. Clients label a pane by its session name, else its terminal title, else `argv[0]`. The bridge sends no title of its own, and a `title` from an older bridge is ignored. It also reports `waiting` while an extension's `ctx.ui` dialog opened from a command or event handler is open (`ui_prompt_*`). pi's built-in dialogs and extension shortcut handlers emit no `ui_prompt_*`; OSC 7501 covers those.
 
 ```
 ProgramStatus = { state: "idle" | "working" | "blocked" | "done" | "error", app, kind?: "question" | "permission" | "auth", message?, at }
-BridgeStatus  = { state: "idle" | "busy" | "waiting", activities: Activity[], activityCount, session?: { id, name?, cwd, file? }, model?, title?, updatedAt }
+BridgeStatus  = { state: "idle" | "busy" | "waiting", activities: Activity[], activityCount, session?: { id, name?, cwd, file? }, model?, updatedAt }
 Activity      = { source, id, label, kind?: "agent" | "workflow" | "step", state?: "running" | "waiting", startedAt?, model?, progress?: { completed, total } }
 PaneView      = { state: "idle" | "busy" | "waiting", program?: ProgramStatus, bridge?: BridgeStatus, bridgeConnected: boolean, unread: boolean }
 ```
@@ -250,7 +250,7 @@ PaneView      = { state: "idle" | "busy" | "waiting", program?: ProgramStatus, b
 3. Else `busy` if the root is `busy` or `activityCount > 0`. Background activities keep a pane busy after pi's own turn is done.
 4. Else `idle`.
 
-- `bridgeConnected` is false after the bridge's socket closes. The last `bridge` stays until the terminal exits, for its session, but a closed bridge no longer counts in the merged `state` (pi may have been killed while busy). Clients likewise show its session but not its activities or title, which ended with that pi.
+- `bridgeConnected` is false after the bridge's socket closes. The last `bridge` stays until the terminal exits, for its session, but a closed bridge no longer counts in the merged `state` (pi may have been killed while busy). Clients likewise show its session, marked as disconnected, but not its activities or model, which ended with that pi.
 - **Unread** is the daemon's "done" flag: it becomes true when the merged state goes from `busy` or `waiting` to `idle`. `pane.seen { terminalId }` from any client clears it, and the daemon sends the new `pane.status` to every channel. A program status of `error` also sets it.
 - Activities follow the Orca bridge's activity protocol (sources and ids 1–64 / 1–160 characters, labels ≤ 240, at most 128 activities per pane).
 

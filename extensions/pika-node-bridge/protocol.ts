@@ -34,7 +34,6 @@ export interface BridgeStatus {
 	activityCount: number;
 	session?: PaneSession;
 	model?: string;
-	title?: string;
 	updatedAt: number;
 }
 

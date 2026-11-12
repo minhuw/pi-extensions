@@ -1,14 +1,16 @@
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Icon } from "../components/icons";
+import { ModelMark } from "../components/ModelName";
 import { BUTTON, Callout, ConfirmDialog, cx, EmptyState, Pill } from "../components/ui";
 import { useApi } from "../lib/api";
 import { withBase } from "../lib/base";
 import { copyText } from "../lib/clipboard";
 import { shortUserAgent } from "../lib/devices";
+import { bareModelOf } from "../lib/model";
 import { useHealth } from "../lib/relay";
 import { useTheme } from "../lib/theme";
-import { liveBridge, NodesClient, orderTerminals, type NodesSnapshot, type NodeView } from "../nodes/client";
+import { homePath, liveBridge, NodesClient, orderTerminals, paneLabel, paneSession, type NodesSnapshot, type NodeView } from "../nodes/client";
 import { displayFingerprint, type TerminalInfo } from "../nodes/contract";
 import { IndexedDbKeyStore } from "../nodes/identity";
 import { nodeSocketUrl } from "../nodes/socket";
@@ -139,10 +141,6 @@ function PaneBadge({ terminal }: { terminal: TerminalInfo }) {
 const paneState = (terminal: TerminalInfo): string =>
 	terminal.exited ? "exited" : terminal.status?.state === "idle" && terminal.status.unread ? "unread" : (terminal.status?.state ?? "unknown");
 
-function terminalLabel(terminal: TerminalInfo): string {
-	return liveBridge(terminal.status)?.title || terminal.title || terminal.argv[0] || "Shell";
-}
-
 function linkLabel(view: NodeView): ReactNode {
 	const link = view.link;
 	if (!view.pin && link.kind !== "ready") return <Pill>Not paired</Pill>;
@@ -197,7 +195,7 @@ function NodeRail({ snapshot, nodeId, terminalId }: { snapshot: NodesSnapshot; n
 												>
 													<Icon name="terminal" size={13} className="shrink-0 text-muted" />
 													<span className="min-w-0 flex-1 truncate" title={terminal.cwd}>
-														{terminalLabel(terminal)}
+														{paneLabel(terminal)}
 													</span>
 													<PaneBadge terminal={terminal} />
 												</Link>
@@ -374,10 +372,7 @@ function NodeMain({ client, view, terminalId, fingerprint }: { client: NodesClie
 	return (
 		<>
 			<header className="flex h-10 shrink-0 items-center gap-3 border-b border-line px-3">
-				<span className="min-w-0 truncate text-[13.5px] font-medium">
-					{name}
-					{terminal && <span className="font-normal text-muted"> · {terminal.cwd}</span>}
-				</span>
+				<PaneHeading node={name} terminal={terminal} home={link.welcome.home} />
 				{terminal && <PaneDetail terminal={terminal} />}
 				<button type="button" className={cx(BUTTON.secondary, "ml-auto h-7")} disabled={busy} onClick={create} data-new-terminal="">
 					<Icon name="plus" size={13} />
@@ -418,10 +413,58 @@ function NodeMain({ client, view, terminalId, fingerprint }: { client: NodesClie
 				>
 					{killing.exited
 						? "Its last screen goes away."
-						: `Sends SIGTERM to ${terminalLabel(killing)} (pid ${killing.pid}) on ${name}. Anything running in it stops.`}
+						: `Sends SIGTERM to ${paneLabel(killing)} (pid ${killing.pid}) on ${name}. Anything running in it stops.`}
 				</ConfirmDialog>
 			)}
 		</>
+	);
+}
+
+const Dot = () => (
+	<span className="shrink-0 text-muted" aria-hidden="true">
+		·
+	</span>
+);
+
+/** The node, then the pane's pi session as its bridge reported it: name, cwd under the node's home, and model. */
+export function PaneHeading({ node, terminal, home }: { node: string; terminal?: TerminalInfo; home?: string }) {
+	const session = terminal && paneSession(terminal);
+	const model = bareModelOf(session?.model);
+	return (
+		<span className="flex min-w-0 items-center gap-1.5 text-[13.5px]">
+			<span className="shrink-0 font-medium">{node}</span>
+			{session?.name && (
+				<>
+					<Dot />
+					<span className="min-w-0 truncate font-medium" data-session-name="">
+						{session.name}
+					</span>
+				</>
+			)}
+			{session && (
+				<>
+					<Dot />
+					<span className="min-w-0 truncate text-muted" title={session.cwd} data-pane-cwd="">
+						{homePath(session.cwd, home)}
+					</span>
+				</>
+			)}
+			{model && (
+				<span className="inline-flex min-w-0 shrink items-center gap-1 text-muted" title={session?.model} data-pane-model="">
+					<span className="mono truncate text-[11.5px]">{model}</span>
+					<ModelMark model={model} size={12} className="shrink-0" />
+				</span>
+			)}
+			{session?.disconnected && (
+				<span
+					className="shrink-0 text-[11.5px] text-muted"
+					title="pi's bridge to pika-node closed; this is the last session it reported"
+					data-bridge-disconnected=""
+				>
+					Bridge disconnected
+				</span>
+			)}
+		</span>
 	);
 }
 

@@ -146,7 +146,6 @@ export interface BridgeStatus {
     activityCount: number;
     session?: PaneSession;
     model?: string;
-    title?: string;
     updatedAt: number;
 }
 export type ProgramState = "idle" | "working" | "blocked" | "done" | "error";
@@ -445,7 +444,6 @@ const bridgeStatusSpec: Spec = {
     activityCount: int(0, LIMITS.maxActivityCount),
     "?session": paneSession,
     "?model": label(240),
-    "?title": label(240),
     updatedAt: time,
 };
 export const isBridgeStatus: Check = object(bridgeStatusSpec, uniqueActivities);

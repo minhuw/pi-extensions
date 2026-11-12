@@ -373,8 +373,42 @@ export function orderTerminals(terminals: readonly TerminalInfo[]): TerminalInfo
 
 /**
  * The bridge's status while its socket is open. A closed bridge's last status stays for its session (NODE.md, "Pane
- * status"), but its activities and title died with that pi.
+ * status"), but its activities and model died with that pi.
  */
 export function liveBridge(status: PaneView | undefined): BridgeStatus | undefined {
 	return status?.bridgeConnected ? status.bridge : undefined;
+}
+
+/** A pane's name: its pi session's name, else its terminal title, else its program, else "Shell". */
+export function paneLabel(terminal: TerminalInfo): string {
+	return sanitize(terminal.status?.bridge?.session?.name) || terminal.title || terminal.argv[0] || "Shell";
+}
+
+/** `path` with the node's home directory as `~`. */
+export function homePath(path: string, home: string | undefined): string {
+	if (!home || home === "/") return path;
+	if (path === home) return "~";
+	return path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
+}
+
+export interface PaneSessionView {
+	name?: string;
+	cwd: string;
+	model?: string;
+	/** The bridge that reported this session has closed: the session is the last one it saw. */
+	disconnected: boolean;
+}
+
+/** What a pane's header shows of its pi session, cleaned for display; the terminal's cwd without a bridge. */
+export function paneSession(terminal: TerminalInfo): PaneSessionView {
+	const status = terminal.status;
+	const session = status?.bridge?.session;
+	const name = sanitize(session?.name);
+	const model = sanitize(liveBridge(status)?.model);
+	return {
+		...(name ? { name } : {}),
+		cwd: (session && sanitize(session.cwd)) || terminal.cwd,
+		...(model ? { model } : {}),
+		disconnected: Boolean(status?.bridge && !status.bridgeConnected && !terminal.exited),
+	};
 }
