@@ -5,7 +5,7 @@ import { credentialsRegistry } from "./credentials.ts";
 import { inspectRepository, PROJECT_CONFIG, type ProjectConfig, type RepositoryState, validProjectName } from "./repository.ts";
 
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
-const NAME_CHOICE = "None of these: give the project a name";
+const NAME_CHOICE = "None of these: I'll type a project name";
 
 // Module copies loaded for other cwds share this state, so it lives on globalThis.
 const SHARED = Symbol.for("pi-extensions.pika.project");
@@ -55,14 +55,15 @@ export function describeIdentity(state: RepositoryState): string {
 
 /** Asks for a project name; Enter keeps `fallback`. Undefined when dismissed. */
 async function askName(ui: ExtensionUIContext, folder: string, fallback: string): Promise<string | undefined> {
-	let title = `pika: name repository ${folder}. pika files its sessions and memory under this name on this device; Enter keeps "${fallback}".`;
+	// The question comes first: Orca and the pika web UI show this title on one truncated line.
+	let title = `pika: project name for ${folder}? (Enter = "${fallback}") Your sessions and memory here are grouped under it.`;
 	for (;;) {
 		const answer = await ui.input(title, fallback);
 		if (answer === undefined) return undefined;
 		const typed = answer.trim() || fallback;
 		const name = validProjectName(typed);
 		if (name) return name;
-		title = `pika: "${typed}" is no project name: it may not be blank, . or .., hold / or \\ or a control character, or exceed 255 bytes. Name repository ${folder}; Enter keeps "${fallback}".`;
+		title = `pika: "${typed}" can't be a project name (no / or \\, not . or .., at most 255 bytes). Project name for ${folder}? (Enter = "${fallback}")`;
 	}
 }
 
@@ -74,9 +75,9 @@ export async function askIdentity(ui: ExtensionUIContext, state: RepositoryState
 	const folder = state.folder!;
 	const candidates = state.remotes.filter((remote) => remote.url);
 	if (candidates.length) {
-		const title = current ? `pika: this repository is filed as ${current}. Which remote identifies repository ${folder}?`
-			: state.question === "stale" ? `pika: remote "${state.config?.remote}", saved to identify repository ${folder}, is gone or has no web URL. Which remote identifies it now?`
-			: `pika: repository ${folder} has more than one remote and none named origin. Which remote identifies it? pika files its sessions and memory under that remote's URL.`;
+		const title = current ? `pika: which remote identifies ${folder}? (now: ${current})`
+			: state.question === "stale" ? `pika: which remote identifies ${folder} now? The saved one, "${state.config?.remote}", is gone or has no web URL.`
+			: `pika: which remote identifies ${folder}? It has several and none is "origin"; your sessions and memory here are grouped under its URL.`;
 		const options = candidates.map((remote) => `${remote.name}  ${remote.url}`);
 		const choice = await ui.select(title, [...options, NAME_CHOICE]);
 		if (choice === undefined) return undefined;

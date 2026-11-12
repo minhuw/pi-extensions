@@ -66,7 +66,7 @@ it("asks a TUI session which remote identifies a repository without origin, and 
 	const h = await startSession({ workspace, cwd: repo, extensions: [pikaExtension], mode: "tui", ui: ui.context() });
 	try {
 		await waitFor(() => noteAbout(ui, "is now project"), 5_000, "the answer");
-		expect(ui.selects).toEqual([{ title: expect.stringContaining("repository app has more than one remote and none named origin"), options: [`a  ${A}`, `b  ${B}`, "None of these: give the project a name"] }]);
+		expect(ui.selects).toEqual([{ title: expect.stringContaining("which remote identifies app? It has several and none is \"origin\""), options: [`a  ${A}`, `b  ${B}`, "None of these: I'll type a project name"] }]);
 		expect(await configOf(repo)).toEqual({ remote: "b" });
 		expect(await readFile(join(repo, ".pi", "pika", ".gitignore"), "utf8")).toBe("*\n");
 		expect(git(repo, "status", "--porcelain")).toBe("");
@@ -87,8 +87,8 @@ it("asks for a name when no remote has a web URL, and keeps asking until the nam
 		await waitFor(() => noteAbout(ui, "is now project"), 5_000, "the answer");
 		expect(ui.selects).toEqual([]);
 		expect(ui.prompts.map((prompt) => prompt.title)).toEqual([
-			expect.stringContaining("name repository app"),
-			expect.stringContaining('"a/b" is no project name'),
+			expect.stringContaining("project name for app?"),
+			expect.stringContaining('"a/b" can\'t be a project name'),
 		]);
 		expect(ui.prompts[0]!.placeholder).toBe("app");
 		expect(await configOf(repo)).toEqual({ remote: null, project: "tool" });
@@ -122,7 +122,7 @@ it("asks again when the saved remote is gone, offering the remotes left", async 
 	const h = await startSession({ workspace, cwd: repo, extensions: [pikaExtension], mode: "tui", ui: ui.context() });
 	try {
 		await waitFor(() => noteAbout(ui, "is now project"), 5_000, "the answer");
-		expect(ui.selects[0]!.title).toContain('remote "fork", saved to identify repository app, is gone');
+		expect(ui.selects[0]!.title).toContain('which remote identifies app now? The saved one, "fork", is gone');
 		// The saved name stays with the newly chosen remote.
 		expect(await configOf(repo)).toEqual({ remote: "b", project: "kept" });
 	} finally { await h.shutdown(); }
@@ -171,10 +171,10 @@ it("/pika project shows the identity and asks again, even when nothing is open",
 	const ui = new ScriptedUI();
 	const h = await startSession({ workspace, cwd: repo, extensions: [pikaExtension], mode: "rpc", ui: ui.context() });
 	try {
-		ui.choices = ["None of these: give the project a name"];
+		ui.choices = ["None of these: I'll type a project name"];
 		ui.inputs = ["renamed"];
 		await h.session.prompt("/pika project");
-		expect(ui.selects[0]!.title).toContain(`this repository is filed as project app, identified by ${A}; from its remotes`);
+		expect(ui.selects[0]!.title).toContain(`which remote identifies app? (now: project app, identified by ${A}; from its remotes`);
 		expect(await configOf(repo)).toEqual({ remote: null, project: "renamed" });
 		expect(ui.last!.message).toContain("this repository is now project renamed on this device only");
 
