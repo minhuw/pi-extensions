@@ -613,6 +613,27 @@ describe("run ownership", () => {
 		expect(readLock(run.paths.lock)?.sessionId).toBe("session-z#00000000");
 	});
 
+	it("clean refuses a named run with an unreadable journal while another session's lock is fresh, and deletes it once stale", async () => {
+		let now = Date.parse("2026-10-25T10:00:00Z");
+		const { fixture, h, runId, run } = await started({ options: { lock: { now: () => new Date(now) } } });
+		writeFileSync(run.paths.journal, `{oops\n${readFileSync(run.paths.journal, "utf8")}`);
+		expect(() => run.state()).toThrow(/corrupt at line 1/);
+		writeFileSync(run.paths.lock, otherLock(new Date(now)));
+		const holder = readLock(run.paths.lock)!;
+		const refs = fixture.git("for-each-ref", "refs/herder");
+		now += 5_000;
+		await h.command(`clean ${runId}`);
+		expect(h.lastNotice()).toMatchObject({ level: "error" });
+		expect(h.lastNotice()!.text).toContain(`Herder run ${runId} is in use: run is locked by session ${holder.sessionId} (pid ${holder.pid} on elsewhere, heartbeat 5s ago)`);
+		expect(existsSync(run.paths.journal)).toBe(true);
+		expect(readLock(run.paths.lock)).toEqual(holder);
+		expect(fixture.git("for-each-ref", "refs/herder")).toBe(refs);
+		now += LOCK_STALE_MS;
+		await h.command(`clean ${runId}`);
+		expect(h.lastNotice()).toEqual({ text: `Deleted 1 Herder run(s): ${runId}.`, level: "info" });
+		expect(existsSync(run.paths.dir)).toBe(false);
+	});
+
 	it("an explicit runId of a finished run does not take its lock", async () => {
 		const { h, runId, run } = await approved();
 		await h.command("abort");

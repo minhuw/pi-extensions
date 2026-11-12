@@ -1,8 +1,9 @@
 import { existsSync, rmSync } from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { goalDraft } from "../artifacts/goal.ts";
+import { LOCK_STALE_MS } from "../config.ts";
 import type { RunState } from "../journal/fold.ts";
-import { readLock } from "../run/lock.ts";
+import { isStale, readLock } from "../run/lock.ts";
 import { isRunId, refPrefix, runPaths } from "../run/paths.ts";
 import { createRun, listRuns, openRun, type RunStore } from "../run/store.ts";
 import type { DeliveryMode } from "../types.ts";
@@ -204,6 +205,14 @@ function clean(herder: Herder, s: Session, runId: string | undefined): string {
 		// A run whose journal cannot be read goes only when named: nothing can resume or abort it.
 		let state: RunState | undefined;
 		try { state = run.state(); } catch { if (!runId) continue; }
+		if (!state) {
+			// Its lock is all that says another session still works in it.
+			const lock = readLock(run.paths.lock);
+			if (lock && lock.sessionId !== herder.lockId(s) && !isStale(lock, herder.now())) {
+				const age = Math.round((herder.now().getTime() - Date.parse(lock.heartbeatAt)) / 1000);
+				throw new Error(`Herder run ${id} is in use: run is locked by session ${lock.sessionId} (pid ${lock.pid} on ${lock.host}, heartbeat ${age}s ago). It can be deleted once that heartbeat is older than ${LOCK_STALE_MS / 60_000} minutes.`);
+			}
+		}
 		if (state && !isFinished(state)) {
 			if (runId) throw new Error(`Herder run ${id} is unfinished (${state.status}); abort it first with /herder abort ${id}.`);
 			continue;
