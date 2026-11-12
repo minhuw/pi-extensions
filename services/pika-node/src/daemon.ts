@@ -1,25 +1,26 @@
 /**
  * The daemon's inner-protocol core (NODE.md §4–5): terminals, attachments with per-client backlogs, the size
- * owner, pane status, and bridge requests. Transports (an E2E channel, or `pika-node attach` over the unix
- * socket) are `Peer`s; this file does no networking.
+ * owner, pane status, checkouts and where each terminal sits in them, and bridge requests. Transports (an E2E
+ * channel, or `pika-node attach` over the unix socket) are `Peer`s; this file does no networking.
  */
 import { randomBytes } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
+import { Checkouts, place, type CheckoutList, type Placement } from "./checkouts.ts";
 import { asNodeError, NodeError } from "./errors.ts";
 import { Files } from "./files.ts";
 import { Pane } from "./pane.ts";
 import type { Paths } from "./paths.ts";
 import { VERSION } from "./paths.ts";
 import {
-    CAPABILITIES, LIMITS, parseClientMessage, PROTOCOL_VERSION, timing, utf8Length,
-    type BridgeStatus, type ClientMessage, type NodeEvent, type NodeMessage, type Notice, type Request,
-    type Snapshot, type TerminalInfo, type Welcome,
+    CAPABILITIES, LIMITS, parseClientMessage, PROTOCOL_VERSION, SETUP_ENV, timing, utf8Length,
+    type BridgeStatus, type Checkout, type ClientMessage, type NodeEvent, type NodeMessage, type Notice, type Request,
+    type Requests, type Snapshot, type TerminalInfo, type Welcome, type Worktree,
 } from "./protocol.ts";
 import { account, spawnCommand, spawnEnv, SpawnError, type Account } from "./spawn.ts";
 import { loadConfig, roots, saveConfig, type Config } from "./store.ts";
-import { processCwd, Terminal } from "./terminal.ts";
+import { processCwd, processCwds, Terminal } from "./terminal.ts";
 
 /** One inner-protocol endpoint. `send` is ordered and never throws; after `closed`, messages are dropped. */
 export interface Peer {
@@ -40,6 +41,8 @@ const RESYNC_BELOW = 256 * KiB;
 /** The server socket's own buffer past which a channel resyncs its terminals. */
 const TRANSPORT_LIMIT = 4 * MiB;
 const MAX_TERMINALS = 128;
+/** `worktree.remove` with `force` waits this long for the worktree's terminals to exit after SIGHUP. */
+const FORCE_EXIT_MS = 5_000;
 
 interface Item { message: NodeMessage; bytes: number; seq?: number }
 
@@ -59,6 +62,11 @@ interface Pty {
     terminal: Terminal;
     pane: Pane;
     cwd: string;
+    /** The start cwd's real path, and the shell's live cwd as last seen (NODE.md "Checkouts", "Terminals"). */
+    realCwd: string;
+    liveCwd: string | undefined;
+    /** The checkout and worktree holding the cwd; kept once the terminal exits, while that checkout is listed. */
+    placed: Placement | undefined;
     argv: string[];
     createdAt: number;
     owner: Peer | undefined;
@@ -83,12 +91,14 @@ export class Daemon {
     readonly paths: Paths;
     readonly account: Account;
     readonly files: Files;
+    readonly checkouts: Checkouts;
     #terminals = new Map<string, Pty>();
     #peers = new Set<Peer>();
     #options: DaemonOptions;
     #log: (line: string) => void;
     #pumpTimer: NodeJS.Timeout | undefined;
     #foregroundTimer: NodeJS.Timeout;
+    #cwdPoll: Promise<void> | undefined;
     onTerminalsChanged: () => void = () => {};
 
     constructor(options: DaemonOptions) {
@@ -97,7 +107,18 @@ export class Daemon {
         this.account = options.account ?? account();
         this.#log = options.log ?? (() => {});
         this.files = new Files({ home: this.account.home, uploads: join(this.paths.home, "uploads"), log: this.#log });
-        this.#foregroundTimer = setInterval(() => this.#pollForeground(), timing.foregroundPollMs);
+        this.checkouts = new Checkouts({
+            config: () => this.config(),
+            save: config => saveConfig(this.paths, config),
+            terminalCwds: () => [...this.#terminals.values()].filter(pty => !pty.terminal.exited).map(pty => pty.liveCwd ?? pty.realCwd),
+            scanned: (list, changed) => this.#checkoutsScanned(list, changed),
+            log: this.#log,
+        });
+        this.checkouts.poke();
+        this.#foregroundTimer = setInterval(() => {
+            this.#pollForeground();
+            this.#pollCwds().catch((error: Error) => this.#log(`cwd poll failed: ${error.message}`));
+        }, timing.foregroundPollMs);
         this.#foregroundTimer.unref();
     }
 
@@ -189,14 +210,7 @@ export class Daemon {
 
     async #request(peer: Peer, request: Request): Promise<object> {
         switch (request.type) {
-            case "term.create": {
-                const pty = this.create(request, peer);
-                // The reply goes out after this returns; every other channel learns of the terminal now.
-                const terminal = this.#info(pty);
-                for (const other of this.#peers) if (other !== peer) other.send({ type: "term.created", terminal });
-                setImmediate(() => { if (!peer.closed) peer.send({ type: "term.created", terminal: this.#info(pty) }); });
-                return { terminal };
-            }
+            case "term.create": return { terminal: this.#announce(peer, this.create(request, peer)) };
             case "term.list": return { terminals: [...this.#terminals.values()].sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : -1)).map(pty => this.#info(pty)) };
             case "term.attach": {
                 const pty = this.#terminal(request.terminalId);
@@ -211,7 +225,9 @@ export class Daemon {
                 const pty = this.#terminal(request.terminalId);
                 if (pty.terminal.exited) throw new NodeError("exited", "the terminal has exited");
                 // The shell's own directory: it is the PTY's process, and a program it runs (pi) usually shares it.
-                return { cwd: (await processCwd(pty.terminal.pid)) ?? pty.cwd };
+                const live = await processCwd(pty.terminal.pid);
+                if (live) this.#moved(pty, live);
+                return { cwd: live ?? pty.cwd };
             }
             case "term.rename": {
                 const pty = this.#terminal(request.terminalId);
@@ -222,15 +238,19 @@ export class Daemon {
                 }
                 return { terminal: this.#info(pty) };
             }
-            case "checkouts.list":
-            case "checkout.add":
+            // NODE.md "Checkouts". A `checkouts.changed` an edit causes goes out after its reply (`#checkoutsScanned`).
+            case "checkouts.list": return await this.checkouts.scan();
+            case "checkout.add": return { checkout: await this.checkouts.add(request.path) };
             case "checkout.hide":
-            case "checkout.unhide":
-            case "checkout.update":
-            case "worktree.create":
-            case "worktree.remove":
-                // NODE.md "Checkouts": the contract is in protocol.ts; the daemon does not implement it yet.
-                throw new NodeError("unsupported", `${request.type} is not implemented yet`);
+                await this.checkouts.hide(request.checkoutId);
+                return {};
+            case "checkout.unhide": return { checkout: await this.checkouts.unhide(request.checkoutId) };
+            case "checkout.update": return { checkout: await this.checkouts.update(request.checkoutId, request) };
+            case "worktree.create": return this.#worktreeCreate(peer, request);
+            case "worktree.remove": return this.checkouts.removeWorktree(request.checkoutId, request.path, {
+                deleteBranch: request.deleteBranch === true,
+                ready: (checkout, worktree) => this.#releaseWorktree(checkout, worktree, request.force === true),
+            });
             case "term.kill": {
                 const pty = this.#terminal(request.terminalId);
                 if (pty.terminal.exited) this.#remove(pty);
@@ -239,6 +259,14 @@ export class Daemon {
             }
             default: return this.files.request(peer, request);
         }
+    }
+
+    /** Tells every other channel of a new terminal now, and its creator after the reply (which goes out first). */
+    #announce(peer: Peer, pty: Pty): TerminalInfo {
+        const terminal = this.#info(pty);
+        for (const other of this.#peers) if (other !== peer) other.send({ type: "term.created", terminal });
+        setImmediate(() => { if (!peer.closed) peer.send({ type: "term.created", terminal: this.#info(pty) }); });
+        return terminal;
     }
 
     #notice(peer: Peer, notice: Notice): void {
@@ -273,6 +301,7 @@ export class Daemon {
             ...(pty.terminal.exited ? { exited: pty.terminal.exited } : {}),
             ...(status ? { status } : {}),
             ...(pty.label ? { label: pty.label } : {}),
+            ...(pty.placed ? { checkoutId: pty.placed.checkoutId, worktreePath: pty.placed.worktreePath } : {}),
         };
     }
 
@@ -307,13 +336,23 @@ export class Daemon {
                     this.#broadcast({ type: "term.exit", terminalId: id, code, signal }, pty);
                     if (pty.pane.exit()) this.#paneChanged(pty);
                     this.onTerminalsChanged();
+                    // Its checkout may have been listed only for this terminal.
+                    this.checkouts.poke();
                 },
             },
         });
-        pty = { id, terminal, pane, cwd, argv: params.argv ?? [this.account.shell, "-l"], createdAt: Date.now(), owner, attachments: new Map(), bridge: undefined, label: undefined };
+        let realCwd = cwd;
+        try { realCwd = realpathSync(cwd); }
+        catch { /* gone since the check; placed by its live cwd later */ }
+        pty = {
+            id, terminal, pane, cwd, realCwd, liveCwd: undefined, placed: place(realCwd, this.checkouts.list.checkouts),
+            argv: params.argv ?? [this.account.shell, "-l"], createdAt: Date.now(), owner, attachments: new Map(), bridge: undefined, label: undefined,
+        };
         this.#terminals.set(id, pty);
         this.#log(`terminal ${id} pid ${terminal.pid}: ${[file, ...args].join(" ")}`);
         this.onTerminalsChanged();
+        // Its cwd may be in a repository no checkout lists yet.
+        this.checkouts.poke();
         return pty;
     }
 
@@ -440,6 +479,93 @@ export class Daemon {
     }
 
     // -----------------------------------------------------------------------------------------------------------
+    // Checkouts
+
+    /**
+     * After each scan: a changed list goes to every channel, then each terminal whose checkout or worktree changed is
+     * placed again. Both wait a turn, so an edit's reply goes out first.
+     */
+    #checkoutsScanned(list: CheckoutList, changed: boolean): void {
+        setImmediate(() => {
+            if (changed) this.#broadcast({ type: "checkouts.changed", checkouts: list.checkouts, truncated: list.truncated });
+            for (const pty of this.#terminals.values()) this.#place(pty);
+        });
+    }
+
+    /**
+     * Places a terminal by its live cwd (else its start cwd) in the current list. An exited terminal stays where it was,
+     * unless its checkout left the list (hidden or gone), so no terminal names a checkout clients cannot see.
+     */
+    #place(pty: Pty): void {
+        const listed = this.checkouts.list.checkouts;
+        const placed = pty.terminal.exited
+            ? pty.placed && listed.some(checkout => checkout.id === pty.placed!.checkoutId) ? pty.placed : undefined
+            : place(pty.liveCwd ?? pty.realCwd, listed);
+        if (placed?.checkoutId === pty.placed?.checkoutId && placed?.worktreePath === pty.placed?.worktreePath) return;
+        pty.placed = placed;
+        this.#broadcast({ type: "term.placed", terminalId: pty.id, checkoutId: placed?.checkoutId ?? null, worktreePath: placed?.worktreePath ?? null }, pty);
+    }
+
+    /** A terminal's shell was seen in `cwd`: placed again now, and its checkout listed by the next scan if it is new. */
+    #moved(pty: Pty, cwd: string): void {
+        if (pty.terminal.exited || cwd === (pty.liveCwd ?? pty.realCwd)) {
+            pty.liveCwd = cwd;
+            return;
+        }
+        pty.liveCwd = cwd;
+        this.#place(pty);
+        this.checkouts.poke();
+    }
+
+    /** Every live terminal's cwd, every 2 s (one `lsof` on macOS); a call during a poll shares it. */
+    #pollCwds(): Promise<void> {
+        return this.#cwdPoll ??= (async () => {
+            const live = [...this.#terminals.values()].filter(pty => !pty.terminal.exited);
+            const cwds = await processCwds(live.map(pty => pty.terminal.pid));
+            for (const pty of live) {
+                const cwd = cwds.get(pty.terminal.pid);
+                if (cwd) this.#moved(pty, cwd);
+            }
+        })().finally(() => { this.#cwdPoll = undefined; });
+    }
+
+    async #worktreeCreate(peer: Peer, request: Requests["worktree.create"]): Promise<object> {
+        const { checkout, worktree, main } = await this.checkouts.createWorktree(request.checkoutId, request.name, request.base);
+        const script = checkout.settings.setupScript;
+        if (!script) return { checkout, worktree };
+        let pty: Pty;
+        try {
+            pty = this.create({
+                cols: request.cols ?? 80, rows: request.rows ?? 24, cwd: worktree.path, argv: ["sh", "-c", script],
+                env: { [SETUP_ENV.worktree]: worktree.path, [SETUP_ENV.checkout]: main, [SETUP_ENV.branch]: request.name },
+            }, peer);
+        } catch (error) {
+            // The worktree stays created; only its setup terminal is missing.
+            if (error instanceof NodeError && error.code === "limit") return { checkout, worktree };
+            throw error;
+        }
+        return { checkout, worktree, setupTerminal: this.#announce(peer, pty) };
+    }
+
+    /**
+     * `worktree.remove`'s busy check: refuses while live terminals sit in the worktree, or, with `force`, hangs them up
+     * and waits up to 5 s for them to exit. Cwds are polled first, so a terminal that just changed into it counts.
+     */
+    async #releaseWorktree(checkout: Checkout, worktree: Worktree, force: boolean): Promise<void> {
+        await this.#pollCwds();
+        const using = () => [...this.#terminals.values()].filter(pty => !pty.terminal.exited
+            && pty.placed?.checkoutId === checkout.id && pty.placed.worktreePath === worktree.path);
+        const busy = using();
+        if (busy.length === 0) return;
+        const count = (n: number) => `${n} live terminal${n === 1 ? "" : "s"}`;
+        if (!force) throw new NodeError("busy", `${count(busy.length)} use ${worktree.path}`);
+        for (const pty of busy) pty.terminal.kill("SIGHUP");
+        for (let waited = 0; waited < FORCE_EXIT_MS && busy.some(pty => !pty.terminal.exited); waited += 50) await new Promise(resolve => setTimeout(resolve, 50));
+        const left = busy.filter(pty => !pty.terminal.exited).length;
+        if (left) throw new NodeError("busy", `${count(left)} did not exit after SIGHUP and still use ${worktree.path}`);
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
     // Bridge (§5)
 
     /** A bridge `hello` for `paneId`; the token identifies this connection, and a newer one replaces it. */
@@ -505,6 +631,7 @@ export class Daemon {
     /** Hangs up every PTY (daemon stop) and deletes the raw logs once they exited. */
     async shutdown(): Promise<void> {
         clearInterval(this.#foregroundTimer);
+        this.checkouts.dispose();
         if (this.#pumpTimer) clearTimeout(this.#pumpTimer);
         this.files.shutdown();
         const ptys = [...this.#terminals.values()];

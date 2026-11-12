@@ -20,7 +20,7 @@ Linux and macOS only; Node ≥ 22.19 runs the TypeScript directly (no build). `$
 - `src/daemon.ts`: inner protocol core: terminals, attachments and backlog resync, size owner, pane status, bridge requests.
 - `src/terminal.ts`: one PTY + headless xterm (sole query answerer, OSC 7501, seq/snapshot); `src/snapshot.ts`: serialization and the modes the serialize addon omits.
 - `src/link.ts`: WebSocket to the server and E2E channels; `src/crypto.ts`: handshake and records.
-- `src/socket.ts`: unix socket (bridge and `attach` clients); `src/files.ts`: projects and files; `src/store.ts`: config, identity, allowlist, pending enrolments.
+- `src/socket.ts`: unix socket (bridge and `attach` clients); `src/files.ts`: files; `src/checkouts.ts`: checkouts and worktrees (`src/repository.ts`: repository and project names); `src/store.ts`: config, identity, allowlist, pending enrolments.
 
 ## Tests
 

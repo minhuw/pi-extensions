@@ -6,22 +6,28 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { exportIdentity, generateIdentity, importIdentity, type Identity, type StoredIdentity } from "./crypto.ts";
 import { writeAtomic, type Paths } from "./paths.ts";
-import { isAbsolutePath, LIMITS, matchFingerprint, timing, type ClientKey, type ClientsFile, type PendingClient } from "./protocol.ts";
+import {
+    CHECKOUT_NAME, isAbsolutePath, isCheckoutSettings, LIMITS, matchFingerprint, timing,
+    type CheckoutSettings, type ClientKey, type ClientsFile, type PendingClient,
+} from "./protocol.ts";
 
 export interface ServerConfig { url: string; credential: string }
 export interface Config {
     version: 1;
     server?: ServerConfig;
     roots?: string[];
-    /** Projects added by hand (`projects.add`), real paths. */
-    projects?: string[];
-    /** Projects found on their own (a root's repository, a terminal's) that `projects.remove` hid, real paths. */
-    hiddenProjects?: string[];
-    /** Real path → the name `projects.rename` gave it. */
-    projectNames?: Record<string, string>;
+    /** Checkouts added by hand (`checkout.add`): real paths of main worktrees, bare repositories, or folders. */
+    checkouts?: string[];
+    /** Checkout ids taken off the list (`checkout.hide`). */
+    hiddenCheckouts?: string[];
+    /** Checkout id → the name `checkout.update` gave it. */
+    checkoutNames?: Record<string, string>;
+    /** Checkout id → its settings (`checkout.update`). */
+    checkoutSettings?: Record<string, CheckoutSettings>;
 }
 
 export const CREDENTIAL = /^pkn_[A-Za-z0-9_-]{43}$/;
+const CHECKOUT_ID = /^[0-9a-f]{32}$/;
 
 function readJson(path: string): unknown {
     const text = readFileSync(path, "utf8");
@@ -40,20 +46,30 @@ export function loadConfig(p: Paths): Config {
         if (typeof credential !== "string" || !CREDENTIAL.test(credential)) throw new Error(`${p.config}: server.credential must be a pkn_ node credential`);
         config.server = { url: url.replace(/\/+$/, ""), credential };
     }
-    for (const key of ["roots", "projects", "hiddenProjects"] as const) {
+    // The spike's `projects`, `hiddenProjects`, and `projectNames` are ignored (never released), and dropped on the next save.
+    for (const key of ["roots", "checkouts"] as const) {
         const list = raw[key];
         if (list === undefined) continue;
         if (!Array.isArray(list) || !list.every(item => isAbsolutePath(item))) throw new Error(`${p.config}: ${key} must be a list of absolute paths`);
         config[key] = list as string[];
     }
-    if (raw.projectNames !== undefined) {
-        const names = raw.projectNames as unknown;
-        if (!names || typeof names !== "object" || Array.isArray(names)
-            || !Object.entries(names).every(([path, name]) => isAbsolutePath(path) && typeof name === "string" && name.trim().length > 0)) {
-            throw new Error(`${p.config}: projectNames must map absolute paths to names`);
-        }
-        config.projectNames = { ...(names as Record<string, string>) };
+    if (raw.hiddenCheckouts !== undefined) {
+        const list = raw.hiddenCheckouts as unknown;
+        if (!Array.isArray(list) || !list.every(item => typeof item === "string" && CHECKOUT_ID.test(item))) throw new Error(`${p.config}: hiddenCheckouts must be a list of checkout ids`);
+        config.hiddenCheckouts = list as string[];
     }
+    const byId = <T>(key: "checkoutNames" | "checkoutSettings", valid: (value: unknown) => boolean, what: string): Record<string, T> | undefined => {
+        const map = raw[key] as unknown;
+        if (map === undefined) return undefined;
+        if (!map || typeof map !== "object" || Array.isArray(map) || !Object.entries(map).every(([id, value]) => CHECKOUT_ID.test(id) && valid(value))) {
+            throw new Error(`${p.config}: ${key} must map checkout ids to ${what}`);
+        }
+        return { ...(map as Record<string, T>) };
+    };
+    const names = byId<string>("checkoutNames", name => typeof name === "string" && name.trim().length > 0 && name.length <= CHECKOUT_NAME && !/[\x00-\x1f\x7f-\x9f]/.test(name), "names");
+    if (names) config.checkoutNames = names;
+    const settings = byId<CheckoutSettings>("checkoutSettings", isCheckoutSettings, "settings");
+    if (settings) config.checkoutSettings = settings;
     return config;
 }
 

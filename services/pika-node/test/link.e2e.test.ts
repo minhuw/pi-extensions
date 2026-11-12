@@ -140,7 +140,7 @@ const server = new FakeServer();
 let running: Running;
 
 beforeAll(async () => {
-    writeFileSync(home.config, JSON.stringify({ version: 1, server: { url: server.url, credential: CREDENTIAL } }));
+    writeFileSync(home.config, JSON.stringify({ version: 1, server: { url: server.url, credential: CREDENTIAL }, roots: [home.home] }));
     running = (await runDaemon(home))!;
     await server.online();
 });

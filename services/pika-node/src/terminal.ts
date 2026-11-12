@@ -38,6 +38,29 @@ export async function processCwd(pid: number): Promise<string | undefined> {
     const line = listed?.split("\n").find(row => row.startsWith("n/"));
     return line?.slice(1);
 }
+
+/** `processCwd` of several processes, with one `lsof` on macOS; a process that tells nothing is left out. */
+export async function processCwds(pids: number[]): Promise<Map<number, string>> {
+    const cwds = new Map<number, string>();
+    if (pids.length === 0) return cwds;
+    if (process.platform !== "darwin") {
+        await Promise.all(pids.map(async pid => {
+            const cwd = await processCwd(pid);
+            if (cwd) cwds.set(pid, cwd);
+        }));
+        return cwds;
+    }
+    // lsof exits 1 when one of the processes is gone, and still lists the others.
+    const listed = await new Promise<string>(resolve => {
+        execFile("/usr/sbin/lsof", ["-a", "-p", pids.join(","), "-d", "cwd", "-Fpn"], { timeout: 5_000 }, (_error, stdout) => resolve(stdout ?? ""));
+    });
+    let pid: number | undefined;
+    for (const row of listed.split("\n")) {
+        if (row.startsWith("p")) pid = Number(row.slice(1));
+        else if (row.startsWith("n/") && pid !== undefined) cwds.set(pid, row.slice(1));
+    }
+    return cwds;
+}
 const LOG_BYTES = 8 * 1024 * 1024;
 
 export interface TerminalHooks {

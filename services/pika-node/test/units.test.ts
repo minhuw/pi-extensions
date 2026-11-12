@@ -6,7 +6,7 @@ import { ensureDirs } from "../src/paths.ts";
 import { LIMITS, utf8Length, type NodeMessage, type Snapshot, type TerminalInfo } from "../src/protocol.ts";
 import { restoreSuffix, serializeScreen } from "../src/snapshot.ts";
 import { spawnCommand, spawnEnv } from "../src/spawn.ts";
-import { addPending, allowPending, readClients, readPending, removeClient } from "../src/store.ts";
+import { addPending, allowPending, readClients, readPending, removeClient, saveConfig } from "../src/store.ts";
 import { chunks } from "../src/terminal.ts";
 import { tempHome, until } from "./support.ts";
 
@@ -179,6 +179,8 @@ describe("enrolment files", () => {
 describe("backpressure", () => {
     const home = tempHome();
     ensureDirs(home);
+    // A root of its own, so the daemon's checkout scan stays out of the real home.
+    saveConfig(home, { version: 1, roots: [home.home] });
     const daemon = new Daemon({ paths: home });
     afterAll(async () => {
         await daemon.shutdown();
