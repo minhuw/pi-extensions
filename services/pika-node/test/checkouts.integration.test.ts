@@ -112,7 +112,7 @@ describe("checkouts over the unix socket", () => {
         const shell = (await a.request<Created>("term.create", { cols: 80, rows: 24, cwd: join(wt), argv: ["bash", "--noprofile", "--norc"] })).terminal;
         expect(shell).toMatchObject({ checkoutId: id, worktreePath: realpathSync(wt) });
         const busy = await a.requestError("worktree.remove", { checkoutId: id, path: wt });
-        expect(busy).toMatchObject({ code: "busy", message: expect.stringContaining("1 live terminal") });
+        expect(busy).toMatchObject({ code: "busy", message: `1 live terminal uses ${realpathSync(wt)}` });
         const forced = await a.requestError("worktree.remove", { checkoutId: id, path: wt, force: true });
         expect(forced.code).toBe("conflict");
         expect(forced.message).toMatch(/untracked|modified/);

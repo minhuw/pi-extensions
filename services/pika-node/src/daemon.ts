@@ -558,11 +558,12 @@ export class Daemon {
         const busy = using();
         if (busy.length === 0) return;
         const count = (n: number) => `${n} live terminal${n === 1 ? "" : "s"}`;
-        if (!force) throw new NodeError("busy", `${count(busy.length)} use ${worktree.path}`);
+        const use = (n: number) => (n === 1 ? "uses" : "use");
+        if (!force) throw new NodeError("busy", `${count(busy.length)} ${use(busy.length)} ${worktree.path}`);
         for (const pty of busy) pty.terminal.kill("SIGHUP");
         for (let waited = 0; waited < FORCE_EXIT_MS && busy.some(pty => !pty.terminal.exited); waited += 50) await new Promise(resolve => setTimeout(resolve, 50));
         const left = busy.filter(pty => !pty.terminal.exited).length;
-        if (left) throw new NodeError("busy", `${count(left)} did not exit after SIGHUP and still use ${worktree.path}`);
+        if (left) throw new NodeError("busy", `${count(left)} did not exit after SIGHUP and still ${use(left)} ${worktree.path}`);
     }
 
     // -----------------------------------------------------------------------------------------------------------
