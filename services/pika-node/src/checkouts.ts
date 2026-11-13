@@ -371,7 +371,9 @@ export class Checkouts {
         const visible = found.filter(item => !hidden.has(item.checkout.id));
         this.#list = listOf(visible.map(item => item.checkout));
         const listed = new Set(this.#list.checkouts.map(checkout => checkout.id));
-        this.#watch(visible.filter(item => listed.has(item.checkout.id)));
+        // A watch opens after this scan read what it guards, and on macOS opening or closing one restarts the loop's
+        // FSEvents stream, which drops the events in flight for every watch. One more scan sees what they missed.
+        if (this.#watch(visible.filter(item => listed.has(item.checkout.id)))) this.poke();
         const encoded = JSON.stringify(this.#list);
         const changed = encoded !== this.#sent;
         this.#sent = encoded;
@@ -379,14 +381,16 @@ export class Checkouts {
         return this.#list;
     }
 
-    /** Watches each listed git checkout's files; closes watches no longer wanted. */
-    #watch(found: Found[]): void {
+    /** Watches each listed git checkout's files; closes watches no longer wanted. Whether it opened or closed one. */
+    #watch(found: Found[]): boolean {
         const wanted = new Map<string, Set<string> | null>();
         for (const item of found) for (const [dir, names] of item.watch) wanted.set(dir, names);
+        let moved = false;
         for (const [dir, entry] of this.#watchers) {
             if (wanted.has(dir)) continue;
             entry.watcher.close();
             this.#watchers.delete(dir);
+            moved = true;
         }
         for (const [dir, names] of wanted) {
             const current = this.#watchers.get(dir);
@@ -405,7 +409,9 @@ export class Checkouts {
                 this.poke();
             });
             this.#watchers.set(dir, { watcher, names });
+            moved = true;
         }
+        return moved;
     }
 
     /** The number of directories watched (tests). */
