@@ -197,6 +197,7 @@ export function TerminalView({
 	const [dragging, setDragging] = useState(false);
 	const [hoverLink, setHoverLink] = useState<string>();
 	const fileInput = useRef<HTMLInputElement>(null);
+	const offersFitRef = useRef(false);
 	// Read by the link provider and the paste, which outlive renders.
 	const latest = useRef({ terminal, home, onOpenFile, theme, onFocus, onKill });
 	latest.current = { terminal, home, onOpenFile, theme, onFocus, onKill };
@@ -461,6 +462,8 @@ export function TerminalView({
 				if (!latest.current.terminal.exited && !uploading.current) fileInput.current?.click();
 			},
 			kill: () => latest.current.onKill(),
+			fit: () => fitHereRef.current(),
+			offersFit: () => offersFitRef.current,
 		}),
 		[],
 	);
@@ -493,6 +496,8 @@ export function TerminalView({
 		ownerRef.current?.fitHere();
 		termRef.current?.focus();
 	};
+	const fitHereRef = useRef(fitHere);
+	fitHereRef.current = fitHere;
 
 	/** Typing searches from the current match on (`incremental`); Enter and the buttons move to the next or previous. */
 	const find = (query: string, backwards = false, incremental = false) => {
@@ -561,6 +566,8 @@ export function TerminalView({
 				: `${search.results.resultCount} matches`
 		: "";
 	const fitBanner = size.told && size.canFitHere;
+	// The tab menu offers Fit Here exactly while the chip does, and never for an exited terminal.
+	offersFitRef.current = fitBanner && !exited;
 
 	return (
 		<div

@@ -84,6 +84,10 @@ export class SlotRegistry {
 		return true;
 	}
 
+	offersFit(node: string, terminalId: string): boolean {
+		return this.#handles.get(slotKey(node, terminalId))?.offersFit() ?? false;
+	}
+
 	/** The renderer a shown terminal draws with; undefined while it is hidden or gone. */
 	setRenderer(node: string, terminalId: string, renderer: Renderer | undefined): void {
 		const key = slotKey(node, terminalId);
@@ -116,6 +120,7 @@ export class SlotRegistry {
 					settle();
 				},
 				command: (terminalId, command) => this.command(node, terminalId, command),
+				offersFit: (terminalId) => this.offersFit(node, terminalId),
 			};
 			this.#views.set(node, view);
 		}

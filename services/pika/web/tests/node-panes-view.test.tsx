@@ -21,6 +21,7 @@ function fakeSlots() {
         },
         resizeEnd: vi.fn<() => void>(),
         command: () => false,
+        offersFit: () => false,
     };
     return slots;
 }

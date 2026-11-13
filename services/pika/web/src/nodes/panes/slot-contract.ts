@@ -15,13 +15,18 @@ export interface TerminalSlots {
      * this way. False when no terminal of that id is drawn.
      */
     command(terminalId: string, command: TerminalCommand): boolean;
+    /** Whether `terminalId`'s drawn terminal offers "Fit here" now (the `fit` command): false when none is drawn. */
+    offersFit(terminalId: string): boolean;
 }
 
-/** What chrome outside a terminal asks of it: open its find widget, pick files to upload, kill (or remove) it. */
-export type TerminalCommand = "find" | "upload" | "kill";
+/**
+ * What chrome outside a terminal asks of it: open its find widget, pick files to upload, kill (or remove) it, or take
+ * the size for this window ("Fit here").
+ */
+export type TerminalCommand = "find" | "upload" | "kill" | "fit";
 
-/** A drawn terminal's commands, which it registers with the layer while it is mounted. */
-export type TerminalHandle = Record<TerminalCommand, () => void>;
+/** A drawn terminal's commands, which it registers with the layer while it is mounted, and whether it offers Fit here. */
+export type TerminalHandle = Record<TerminalCommand, () => void> & { offersFit(): boolean };
 
 export const TerminalSlotsContext = createContext<TerminalSlots | null>(null);
 

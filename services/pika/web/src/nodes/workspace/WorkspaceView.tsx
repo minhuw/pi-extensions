@@ -610,13 +610,17 @@ const SPLITS: readonly [Side, string][] = [
 /** What a terminal tab's menu needs of its focused pane's terminal. */
 export interface TerminalMenu {
 	exited: boolean;
+	/** The terminal offers "Fit here" (another window owns its size and this one fits another): the menu offers Fit Here. */
+	offersFit?: boolean;
 	run: (command: TerminalCommand) => void;
 }
 
 /** The terminal a terminal tab's menu acts on (its focused pane), when the node has told the page of it. */
 function terminalMenuOf(tab: TerminalTab, view: WorkspaceViewProps): TerminalMenu | undefined {
 	const terminal = view.terminals.get(tab.focused);
-	return terminal && { exited: terminal.exited !== undefined, run: (command) => void view.slots.command(tab.focused, command) };
+	if (!terminal) return undefined;
+	const exited = terminal.exited !== undefined;
+	return { exited, offersFit: !exited && view.slots.offersFit(tab.focused), run: (command) => void view.slots.command(tab.focused, command) };
 }
 
 const withShortcut = (action: ActionId): { shortcut?: string } => {
@@ -626,7 +630,7 @@ const withShortcut = (action: ActionId): { shortcut?: string } => {
 
 /**
  * A tab's context menu entries (Deck's shared menu): for a terminal tab first its terminal's actions (Find, Upload
- * Files, Split Terminal Right and Down); then the splits, Pin, Copy Path for a file, Close, Close Others; last, for a
+ * Files, Fit Here while another window owns the size, Split Terminal Right and Down); then the splits, Pin, Copy Path for a file, Close, Close Others; last, for a
  * terminal, Kill Terminal (Remove Terminal once it exited). A group's only tab has no splits to move into, and a tab
  * with no unpinned neighbours no others to close: both are left out rather than shown disabled.
  */
@@ -640,6 +644,7 @@ export function tabMenuItems(ws: Workspace, tabId: string, actions: WorkspaceAct
 		? [
 				{ id: "find", label: "Find", icon: "search", run: () => terminal.run("find"), ...withShortcut("find") },
 				...(terminal.exited ? [] : [{ id: "upload", label: "Upload Files…", icon: "upload" as const, run: () => terminal.run("upload") }]),
+				...(terminal.offersFit ? [{ id: "fit", label: "Fit Here", run: () => terminal.run("fit") }] : []),
 				{ id: "split-pane-right", label: "Split Terminal Right", icon: "split-right", run: () => actions.splitPane(tab.id, "row"), ...withShortcut("split.right") },
 				{ id: "split-pane-down", label: "Split Terminal Down", icon: "split-down", run: () => actions.splitPane(tab.id, "column"), ...withShortcut("split.down") },
 				"separator",

@@ -142,6 +142,31 @@ describe("the terminal view's chrome", () => {
 		expect(banner()).toBeNull();
 	});
 
+	it("tells the tab menu it offers Fit here exactly while the chip shows, and fits as the chip does", async () => {
+		const { view, emit, notices, handle } = await mount({ cols: 100, rows: 30 });
+		const claims = () => notices.filter((notice) => notice.claim === true);
+		expect(handle.current!.offersFit()).toBe(false);
+		await emit({ type: "term.resized", terminalId: "t1", cols: 80, rows: 24, owned: false });
+		expect(view.container.querySelector("[data-fit-here]")).not.toBeNull();
+		expect(handle.current!.offersFit()).toBe(true);
+		act(() => handle.current!.fit());
+		expect(claims()).toEqual([{ type: "term.resize", terminalId: "t1", cols: 100, rows: 30, claim: true }]);
+		await emit({ type: "term.resized", terminalId: "t1", cols: 100, rows: 30, owned: true });
+		expect(handle.current!.offersFit()).toBe(false);
+		// Owner at another size: no chip, nothing to offer.
+		await emit({ type: "term.resized", terminalId: "t1", cols: 90, rows: 28, owned: true });
+		expect(handle.current!.offersFit()).toBe(false);
+	});
+
+	it("offers no Fit here for an exited terminal, whoever owns the size", async () => {
+		measuresAs({ cols: 100, rows: 30 });
+		const fake = fakeChannel();
+		const handle = createRef<TerminalHandle>();
+		render(<TerminalView ref={handle} channel={fake.channel} terminal={info("t1", { exited: { code: 0, signal: null } })} theme="dark" home="/home/me" onKill={() => {}} onOpenFile={() => {}} />);
+		await fake.emit({ type: "term.resized", terminalId: "t1", cols: 80, rows: 24, owned: false });
+		expect(handle.current!.offersFit()).toBe(false);
+	});
+
 	it("shows the grid's new size for a moment when this window resizes it", async () => {
 		const { view, emit } = await mount();
 		await emit({ type: "term.resized", terminalId: "t1", cols: 80, rows: 24, owned: true });
@@ -181,15 +206,18 @@ describe("the registry between terminals and chrome", () => {
 		const registry = new SlotRegistry();
 		const slots = registry.forNode("n1");
 		expect(slots.command("t1", "find")).toBe(false);
-		const first = { find: vi.fn(), upload: vi.fn(), kill: vi.fn() };
-		const second = { find: vi.fn(), upload: vi.fn(), kill: vi.fn() };
+		const first = { find: vi.fn(), upload: vi.fn(), kill: vi.fn(), fit: vi.fn(), offersFit: () => true };
+		const second = { find: vi.fn(), upload: vi.fn(), kill: vi.fn(), fit: vi.fn(), offersFit: () => false };
+		expect(slots.offersFit("t1")).toBe(false);
 		registry.setHandle("n1", "t1", first);
+		expect(slots.offersFit("t1")).toBe(true);
 		expect(slots.command("t1", "find")).toBe(true);
 		expect(first.find).toHaveBeenCalledTimes(1);
 		registry.setHandle("n1", "t1", second);
 		registry.dropHandle("n1", "t1", first);
 		slots.command("t1", "upload");
 		expect(second.upload).toHaveBeenCalledTimes(1);
+		expect(slots.offersFit("t1")).toBe(false);
 		expect(registry.forNode("n2").command("t1", "find")).toBe(false);
 		registry.dropHandle("n1", "t1", second);
 		expect(slots.command("t1", "kill")).toBe(false);
@@ -235,7 +263,7 @@ describe("the tab strip's terminal actions", () => {
 		resizeEnd: vi.fn(),
 	});
 
-	function fakeSlots() {
+	function fakeSlots(fits = new Set<string>()) {
 		const commands: [string, TerminalCommand][] = [];
 		const slots: TerminalSlots = {
 			attach: () => {},
@@ -244,6 +272,7 @@ describe("the tab strip's terminal actions", () => {
 				commands.push([terminalId, command]);
 				return true;
 			},
+			offersFit: (terminalId) => fits.has(terminalId),
 		};
 		return { slots, commands };
 	}
@@ -352,6 +381,56 @@ describe("the tab strip's terminal actions", () => {
 
 		const file = ids(tabMenuItems(ws, "file:/p/a.ts", run));
 		for (const id of ["find", "upload", "split-pane-right", "split-pane-down", "kill"]) expect(file).not.toContain(id);
+	});
+
+	it("puts Fit Here in a terminal tab's menu only while its terminal offers it, after Upload", () => {
+		const ids = (entries: MenuEntry[]) => entries.map((entry) => (entry === "separator" ? "|" : "id" in entry ? entry.id : "?"));
+		const ws = base();
+		const commands: TerminalCommand[] = [];
+		const run = actions();
+		const offered = tabMenuItems(ws, "term:1", run, { exited: false, offersFit: true, run: (command) => commands.push(command) });
+		expect(ids(offered).slice(0, 4)).toEqual(["find", "upload", "fit", "split-pane-right"]);
+		menuItems(offered).find((item) => item.id === "fit")!.run!();
+		expect(commands).toEqual(["fit"]);
+		expect(ids(tabMenuItems(ws, "term:1", run, { exited: false, offersFit: false, run: () => {} }))).not.toContain("fit");
+		expect(ids(tabMenuItems(ws, "file:/p/a.ts", run))).not.toContain("fit");
+	});
+
+	it("asks the drawn terminal whether it offers Fit here when the tab menu opens, and runs it once", () => {
+		const menuOf = (tabId: string) => document.querySelector<HTMLElement>(`[data-tab-menu='${tabId}']`);
+		const open = (tabId: string) => fireEvent.contextMenu(strip().querySelector(`[data-tab-id='${tabId}']`)!);
+		const close = () => fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+
+		// The owner, or a window that fits the PTY's size anyway: no Fit Here.
+		const owner = fakeSlots();
+		const page = render(view(base(), [info("t1")], owner.slots, actions()));
+		open("term:1");
+		expect(within(menuOf("term:1")!).queryByRole("menuitem", { name: /Fit Here/ })).toBeNull();
+		close();
+		page.unmount();
+
+		// An exited terminal: none, even if its view said so.
+		const exited = fakeSlots(new Set(["t1"]));
+		const gone = render(view(base(), [info("t1", { exited: { code: 0, signal: null } })], exited.slots, actions()));
+		open("term:1");
+		expect(within(menuOf("term:1")!).queryByRole("menuitem", { name: /Fit Here/ })).toBeNull();
+		close();
+		gone.unmount();
+
+		// A file tab: none.
+		const file = fakeSlots(new Set(["t1"]));
+		const files = render(view(base(), [info("t1")], file.slots, actions()));
+		open("file:/p/a.ts");
+		expect(within(menuOf("file:/p/a.ts")!).queryByRole("menuitem", { name: /Fit Here/ })).toBeNull();
+		close();
+		files.unmount();
+
+		// Another window owns the size and this one fits another: Fit Here, which sends the fit command once.
+		const other = fakeSlots(new Set(["t1"]));
+		render(view(base(), [info("t1")], other.slots, actions()));
+		open("term:1");
+		fireEvent.click(within(menuOf("term:1")!).getByRole("menuitem", { name: /Fit Here/ }));
+		expect(other.commands).toEqual([["t1", "fit"]]);
 	});
 
 	it("opens the menu with the terminal's actions from the tab itself", () => {
