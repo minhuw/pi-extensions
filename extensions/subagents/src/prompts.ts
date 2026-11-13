@@ -34,8 +34,8 @@ export interface PromptExtras {
    */
   workflowChild?: boolean;
   /**
-   * Set only for the built-in general-purpose, and only when it received the
-   * nested `Agent` tool. Claude Code's general-purpose prompt closes with this
+   * Set only for a built-in agent (locally `worker`), and only when it received
+   * the nested `Agent` tool. Claude Code's general-purpose prompt closes with this
    * line; without it a delegating agent tends to hand its whole task to one
    * child. An agent that cannot spawn gets nothing to misread.
    */
@@ -97,7 +97,7 @@ Return only the answer, in exactly the shape the prompt asks for — no preamble
 </workflow_child>`
     : "";
 
-  // Append mode only: the one agent that gets this, general-purpose, is append.
+  // Both modes: upstream's general-purpose is append, the local worker replace.
   const delegationBlock = extras?.delegationGuideline
     ? "\n\nYou are already the dedicated agent for this task. Do the work directly — do not re-delegate your entire assignment to another single subagent."
     : "";
@@ -152,7 +152,7 @@ You have been invoked to handle a specific task autonomously.
 
 ${envBlock}`;
 
-  return activeAgentTag + replaceHeader + worktreeBlock + workflowBlock + "\n\n" + config.systemPrompt + extrasSuffix;
+  return activeAgentTag + replaceHeader + worktreeBlock + workflowBlock + delegationBlock + "\n\n" + config.systemPrompt + extrasSuffix;
 }
 
 /**

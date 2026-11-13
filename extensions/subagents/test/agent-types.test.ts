@@ -186,11 +186,11 @@ describe("agent type registry", () => {
       });
     });
 
-    // Upstream (#448) lets its built-in general-purpose delegate. The local
-    // fleet has no general-purpose and keeps recon, worker and the council
-    // advisors free of nested delegation.
-    it("keeps nested delegation off for every built-in agent", () => {
-      for (const name of [...DEFAULT_AGENT_NAMES, ...COUNCIL_AGENT_NAMES]) {
+    // Upstream (#448) lets its built-in general-purpose delegate to any type.
+    // Locally only worker delegates, and only to recon.
+    it("lets worker delegate to recon only and no other built-in delegate", () => {
+      expect(getAgentConfig("worker")?.allowedSubagents).toEqual(["recon"]);
+      for (const name of ["recon", ...COUNCIL_AGENT_NAMES]) {
         expect(getAgentConfig(name)?.allowedSubagents).toBeUndefined();
       }
     });

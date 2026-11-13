@@ -8,7 +8,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Context, fauxToolCall, getCurrentTools } from "@earendil-works/pi-ai";
+import { type Context, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseAgentDefinition, parseAgentFrontmatter } from "../src/agent-definitions.js";
 import { serializeAgentFile } from "../src/agent-file-toggle.js";
@@ -22,8 +22,15 @@ vi.setConfig({ testTimeout: 30_000 });
 const NO_TOOLS_REPLY = "I have no tools available, so I cannot inspect the repository.";
 const RESUME_REPLY = "It found nothing new since the first run.";
 
+// Every parent prompt starts with "Delegate". Tool presence cannot tell them
+// apart: worker gets the nested `Agent` tool too.
 function isParent(context: Context): boolean {
-  return getCurrentTools(context.messages).some((t) => t.name === "Agent");
+  const user = context.messages.find((m) => m.role === "user");
+  const content = user?.content;
+  const text = typeof content === "string"
+    ? content
+    : ((content ?? []) as Array<{ text?: string }>).map((b) => b.text ?? "").join("");
+  return text.startsWith("Delegate");
 }
 
 function lastMessageIsToolResult(context: Context): boolean {

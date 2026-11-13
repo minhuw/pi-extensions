@@ -16,7 +16,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Context, getCurrentTools, type ToolCall } from "@earendil-works/pi-ai";
+import { type Context, getCurrentSystemPrompt, getCurrentTools, type Tool, type ToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
@@ -183,33 +183,59 @@ describe("PR #164 nested agents through the real print-mode boundary", () => {
     expect(nestedToolsIn(observed.get("plain-child"))).toEqual([]);
   });
 
-  it("gives the built-in worker and recon agents no nested tools", async () => {
-    // Upstream gives its built-in general-purpose the nested tools (#448); the
-    // local fleet keeps nested delegation off for both built-ins.
+  it("lets the built-in worker delegate to recon only, and recon not at all", async () => {
+    // Upstream gives its built-in general-purpose nested tools for every type
+    // (#448); locally worker may spawn recon and nothing else.
     const observed = new Map<string, string[]>();
+    let workerAgentTool: Tool | undefined;
+    let workerPrompt = "";
+    let workerResults: string[] = [];
+    const routes = new Set<string>();
     ({ run, cwd } = await runWithAgents(
       {},
       (ctx) => {
         const route = userPrompt(ctx);
-        if (route === "gp-child" || route === "explore-child") {
+        routes.add(route);
+        if (route === "explore-child") {
           observed.set(route, tools(ctx));
-          return `${route} done`;
+          return "explore-child done";
         }
-        const spawned = toolResults(ctx, "Agent").length;
-        if (spawned === 0) {
-          return agentCall({ subagent_type: "worker", description: "gp", prompt: "gp-child", run_in_background: false });
+        if (route === "worker-child") {
+          observed.set(route, tools(ctx));
+          workerAgentTool = getCurrentTools(ctx.messages).find((tool) => tool.name === "Agent");
+          workerPrompt = getCurrentSystemPrompt(ctx.messages);
+          const attempts = toolResults(ctx, "Agent");
+          const next = ["worker", "council-caspar", "recon"][attempts.length];
+          if (next) {
+            return agentCall(
+              { subagent_type: next, description: `try ${next}`, prompt: next === "recon" ? "explore-child" : `${next}-nested`, run_in_background: false },
+              { id: `nested-${next}` },
+            );
+          }
+          workerResults = attempts;
+          return "worker-child done";
         }
-        if (spawned === 1) {
-          return agentCall({ subagent_type: "recon", description: "explore", prompt: "explore-child", run_in_background: false });
+        if (toolResults(ctx, "Agent").length === 0) {
+          return agentCall({ subagent_type: "worker", description: "worker", prompt: "worker-child", run_in_background: false });
         }
-        return "both done";
+        return "root done";
       },
-      { prompt: "root-builtins" },
+      { prompt: "root-builtins", maxModelCalls: 16 },
     ));
 
-    expect(run.responseText).toContain("both done");
-    expect(observed.get("gp-child")).toBeDefined();
-    expect(nestedToolsIn(observed.get("gp-child"))).toEqual([]);
+    expect(run.responseText).toContain("root done");
+    expect(observed.get("worker-child")).toEqual(expect.arrayContaining(NESTED_TOOLS));
+    // The nested tool advertises recon only and no model override.
+    const schema = JSON.stringify(workerAgentTool?.parameters);
+    expect(schema).toContain("Available: recon.");
+    expect(workerAgentTool?.parameters).not.toHaveProperty("properties.model");
+    expect(workerPrompt).toContain("do not re-delegate your entire assignment");
+    expect(workerResults).toHaveLength(3);
+    expect(workerResults[0]).toContain('Nested agent type "worker" is not allowed for this parent. Allowed: recon.');
+    expect(workerResults[1]).toContain('Unknown or disabled nested agent type: "council-caspar". Allowed: recon.');
+    expect(workerResults[2]).toContain("explore-child done");
+    expect(routes.has("worker-nested")).toBe(false);
+    expect(routes.has("council-caspar-nested")).toBe(false);
     expect(observed.get("explore-child")).toBeDefined();
     expect(nestedToolsIn(observed.get("explore-child"))).toEqual([]);
   });

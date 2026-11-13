@@ -835,6 +835,7 @@ import {
   getConfig,
   getToolNamesForType,
 } from "../src/agent-types.js";
+import { DEFAULT_AGENTS } from "../src/default-agents.js";
 import { createNestedSubagentTools } from "../src/nested-tools.js";
 
 const BUILTINS_7 = ["read", "bash", "edit", "write", "grep", "find", "ls"];
@@ -1389,6 +1390,39 @@ describe("agent-runner master tool allowlist", () => {
     // Nor the "do not re-delegate" line, which only makes sense with the tool.
     const { buildAgentPrompt } = await import("../src/prompts.js");
     expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]).not.toHaveProperty("delegationGuideline");
+  });
+
+  // The local built-in that delegates: worker, to recon only.
+  describe("the built-in worker", () => {
+    async function runWorker(workflow: boolean) {
+      const worker = DEFAULT_AGENTS.get("worker")!;
+      vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+      vi.mocked(getAgentConfig).mockReturnValueOnce({ ...worker, extensions: false });
+      vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+      const { session } = createSession("OK");
+      createAgentSession.mockResolvedValue({ session });
+      await runAgent(ctx, "worker", "go", {
+        pi,
+        workflow,
+        nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1 },
+      });
+      const { buildAgentPrompt } = await import("../src/prompts.js");
+      return vi.mocked(buildAgentPrompt).mock.lastCall![4] as Record<string, unknown>;
+    }
+
+    it("gets nested tools scoped to recon, with the re-delegation line", async () => {
+      const extras = await runWorker(false);
+      expect(createNestedSubagentTools).toHaveBeenCalledWith(expect.objectContaining({ allowedSubagents: ["recon"] }));
+      expect(lastToolsPassed()).toContain("Agent");
+      expect(extras).toMatchObject({ delegationGuideline: true });
+    });
+
+    it("gets no nested tools as a workflow agent", async () => {
+      const extras = await runWorker(true);
+      expect(createNestedSubagentTools).not.toHaveBeenCalled();
+      expect(lastToolsPassed()).not.toContain("Agent");
+      expect(extras).not.toHaveProperty("delegationGuideline");
+    });
   });
 
   // Claude Code's general-purpose prompt closes with the re-delegation line. It

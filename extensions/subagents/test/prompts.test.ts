@@ -62,8 +62,16 @@ describe("buildAgentPrompt", () => {
     expect(prompt).not.toContain("re-delegate");
   });
 
-  // Upstream uses its built-in general-purpose; local built-ins are replace-mode
-  // and never delegate, so an append-mode agent carries the line here.
+  // The runner sets the flag for worker (replace mode) when it gets `Agent`.
+  it("adds the re-delegation line to worker's replace-mode prompt when it can delegate", () => {
+    const prompt = buildAgentPrompt(getDefaultConfig("worker"), "/workspace", env, undefined, { delegationGuideline: true });
+    expect(prompt).toContain(
+      "You are already the dedicated agent for this task. Do the work directly — do not re-delegate your entire assignment to another single subagent.",
+    );
+    expect(prompt).toContain("implement a bounded task");
+  });
+
+  // Upstream's delegating general-purpose is append-mode.
   it("adds Claude Code's re-delegation line when the agent can delegate", () => {
     const config: AgentConfig = { ...getDefaultConfig("worker"), name: "delegator", systemPrompt: "", promptMode: "append" };
     const prompt = buildAgentPrompt(config, "/workspace", env, "Parent.", { delegationGuideline: true });

@@ -982,8 +982,8 @@ export async function runAgent(
   const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
     ? options.nestedRuntime
     : undefined;
-  // A workflow agent running the built-in general-purpose (what an untyped
-  // agent() gets) does not delegate: Claude Code's `workflow-subagent` drops the
+  // A workflow agent running a built-in (`worker` is what an untyped agent()
+  // gets) does not delegate: Claude Code's `workflow-subagent` drops the
   // Agent tool, and the workflow script is what fans out. A custom agent's own
   // `allowed_subagents` still applies.
   const builtinInWorkflow = options.workflow === true && agentConfig?.isDefault === true;
@@ -999,7 +999,7 @@ export async function runAgent(
       })
     : [];
   const nestedToolNames = new Set(nestedTools.map(tool => tool.name));
-  // Only where the built-in general-purpose can actually spawn — not in a
+  // Only where a built-in (locally `worker`) can actually spawn — not in a
   // workflow, at the depth cap, isolated, or with `Agent` disallowed.
   if (agentConfig?.isDefault && nestedToolNames.has("Agent") && !disallowedSet?.has("Agent")) {
     extras.delegationGuideline = true;
