@@ -633,6 +633,71 @@ describe("live trajectory", () => {
 		expect(added.classList).toContain("row-in");
 		expect(row("[data-kind='shell']").dataset.running).toBeUndefined();
 	});
+
+	/** A live parent whose worker runs on; `grow` gives the worker a read and has the parent's trace show it changed. */
+	function liveFamily() {
+		const worker = child("c1", "p1", "call_agent", { agentType: "worker", description: "Fix tests" }, 1000);
+		const parent = simple("p1", "Ship it", [toolCall("call_agent", "Agent", { subagent_type: "worker", description: "Fix tests" })], [worker]);
+		parent.detail = { ...parent.detail, entryCount: parent.entries.length, lastAt: new Date().toISOString() };
+		const c1 = simple("c1", "Child prompt", []);
+		const grow = () => {
+			Object.assign(c1, simple("c1", "Child prompt", [toolCall("c_read", "read", { path: "README.md" })]));
+			const children = [{ ...worker, entryCount: c1.entries.length, lastAt: new Date(Date.now() - 1000).toISOString() }];
+			const seq = parent.entries.length;
+			parent.entries.push(entry(seq, assistantMessage([{ type: "text", text: "Still going" }], 9000)));
+			parent.turns[0] = { ...parent.turns[0], endSeq: seq };
+			parent.detail = { ...parent.detail, children, entryCount: parent.entries.length, lastAt: new Date().toISOString() };
+		};
+		return { sessions: [parent, c1], grow };
+	}
+
+	/** Polls until the parent's trace refetches, which refetches the changed worker's trace. */
+	async function untilRefetched(calls: string[], path: string) {
+		const count = () => calls.filter((call) => call === path).length;
+		const before = count();
+		for (let waited = 0; count() === before && waited <= LIVE_POLL_MS + TRACE_REFRESH_MS; waited += 500) {
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(500);
+			});
+		}
+		await waitFor(() => expect(count()).toBe(before + 1));
+	}
+
+	it("shows an expanded subagent's refetched trace even when it lands in the same millisecond as the one it replaces", async () => {
+		const family = liveFamily();
+		const server = createFakeServer({ sessions: family.sessions });
+		renderApp("/s/p1", server.fetch);
+		const agent = await waitFor(() => row("[data-kind='agent'][data-seq='2']"), firstRender);
+		// The worker's trace and its refetch get the same `dataUpdatedAt`, as on a fast machine or a busy fake clock.
+		vi.spyOn(Date, "now").mockReturnValue(Date.now());
+		fireEvent.click(within(agent).getByRole("button", { name: "Expand subagent" }));
+		await waitFor(() => expect(document.querySelectorAll("[data-ledger-row][data-depth='1']").length).toBeGreaterThan(0));
+		expect(document.querySelector("[data-ledger-row][data-depth='1'][data-kind='read']")).toBeNull();
+
+		family.grow();
+		await untilRefetched(server.calls, "/api/v1/sessions/c1/trace");
+		await waitFor(() => expect(document.querySelector("[data-ledger-row][data-depth='1'][data-kind='read']")).not.toBeNull());
+	});
+
+	it("splits a subagent's refetched trace into the breakdown even when it lands in the same millisecond as the one it replaces", async () => {
+		const family = liveFamily();
+		const server = createFakeServer({ sessions: family.sessions });
+		renderApp("/s/p1", server.fetch);
+		const strip = await waitFor(() => {
+			const node = document.querySelector<HTMLElement>("[data-breakdown]");
+			if (!node) throw new Error("no breakdown");
+			return node;
+		}, firstRender);
+		const kinds = () => [...strip.querySelectorAll<HTMLElement>("[data-breakdown-family]")].map((item) => item.dataset.breakdownFamily);
+		vi.spyOn(Date, "now").mockReturnValue(Date.now());
+		fireEvent.click(within(strip).getByRole("button", { name: "Split" }));
+		await waitFor(() => expect(strip.querySelector("[data-breakdown-total]")?.textContent).toContain("2 sessions"));
+		expect(kinds()).not.toContain("read");
+
+		family.grow();
+		await untilRefetched(server.calls, "/api/v1/sessions/c1/trace");
+		await waitFor(() => expect(kinds()).toContain("read"));
+	});
 });
 
 describe("subagents in the ledger", () => {

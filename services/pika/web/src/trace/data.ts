@@ -1,6 +1,7 @@
 import { skipToken, useQueries, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { useApi, type PikaApi } from "../lib/api";
+import { dataId } from "../lib/dataId";
 import type { Entry, SessionTrace, TraceRecord, TraceTurn } from "../lib/types";
 import { recordSpan } from "./kinds";
 
@@ -113,7 +114,7 @@ export function useDescendantTraces(root: SessionTrace, enabled: boolean): Desce
 	const queries = useQueries({
 		queries: (enabled ? ids : []).map((id) => ({ queryKey: traceKey(id), queryFn: () => fetchTrace(api, id, queryClient), staleTime: 60_000 })),
 	});
-	const signature = queries.map((query) => `${query.status}:${query.dataUpdatedAt}`).join(",");
+	const signature = queries.map((query) => `${query.status}:${dataId(query.data)}`).join(",");
 	const loaded = useMemo(() => {
 		const traces = new Map<string, SessionTrace>();
 		let failed = 0;

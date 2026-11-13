@@ -6,6 +6,7 @@ import { Markdown } from "../components/Markdown";
 import { ReportList } from "../components/Ticket";
 import { cx, EmptyState, ErrorState, Pill, Skeleton, SkeletonLines, Toggle } from "../components/ui";
 import { useApi } from "../lib/api";
+import { dataId } from "../lib/dataId";
 import { turnReports } from "../lib/tickets";
 import { formatCost, formatDateTime, formatDuration, plural } from "../lib/format";
 import { useShortcuts } from "../lib/keyboard";
@@ -40,18 +41,6 @@ export function entriesKey(sessionId: string, turn: Pick<Turn, "endSeq">, from: 
 }
 
 const HIGHLIGHT_MS = 2500;
-
-// A number per data object, so a memo can tell pages apart by identity. `dataUpdatedAt` cannot: a live turn's carried
-// page and its refetch can be written in the same millisecond.
-const dataIds = new WeakMap<object, number>();
-let nextDataId = 0;
-
-function dataId(data: object | undefined): number {
-	if (!data) return -1;
-	let id = dataIds.get(data);
-	if (id === undefined) dataIds.set(data, (id = nextDataId++));
-	return id;
-}
 
 function estimateRow(row: Row | undefined): number {
 	if (!row) return 80;

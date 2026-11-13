@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { cx } from "../components/ui";
 import { useApi } from "../lib/api";
+import { dataId } from "../lib/dataId";
 import { useMediaQuery } from "../lib/hooks";
 import { isTypingTarget } from "../lib/keyboard";
 import type { SessionTrace, TraceRecord, TraceTurn } from "../lib/types";
@@ -200,7 +201,7 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 		// Live children refetch when their parent's trace shows them changed, not on every poll.
 		queries: childIds.map((id) => ({ queryKey: traceKey(id), queryFn: () => fetchTrace(api, id, queryClient), staleTime: 60_000 })),
 	});
-	const childSignature = childQueries.map((query) => `${query.status}:${query.dataUpdatedAt}`).join(",");
+	const childSignature = childQueries.map((query) => `${query.status}:${dataId(query.data)}`).join(",");
 	const childStates = useMemo(() => {
 		const map = new Map<string, ChildTraceState>();
 		childIds.forEach((id, i) => {
