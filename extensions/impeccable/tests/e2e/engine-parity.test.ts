@@ -26,10 +26,11 @@ it("compares management scope and literal workspace patterns with the verified p
 		};
 		for (const [key, directory] of Object.entries(isolated)) { await fs.mkdir(directory, { recursive: true }); vi.stubEnv(key, directory); }
 		vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+		vi.stubEnv("IMPECCABLE_CREDENTIAL_STORE", "file");
 		vi.stubEnv("GIT_CONFIG_GLOBAL", path.join(temporary, "gitconfig"));
 		// Remove ambient credentials/context/provider/Git overrides from native child processes.
 		const env: NodeJS.ProcessEnv = Object.fromEntries(Object.keys(process.env).map((key) => [key, undefined]));
-		Object.assign(env, isolated, { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, TMPDIR: temporary, TMP: temporary, TEMP: temporary, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL });
+		Object.assign(env, isolated, { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, TMPDIR: temporary, TMP: temporary, TEMP: temporary, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL, IMPECCABLE_CREDENTIAL_STORE: "file" });
 		const options = { binary: "", cacheRoot: isolated.IMPECCABLE_HOME, downloadBase: DEFAULT_DOWNLOAD_BASE, env, timeoutMs: 120_000 };
 		const resolved = await resolveEngine(options);
 		expect(resolved.trustedOverride).toBe(false);

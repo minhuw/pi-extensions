@@ -83,7 +83,7 @@ it("checks an actual npm tarball, guarded extracted activation, and offline exec
 			expect(sourceFiles).toContain(required);
 		}
 		// Verify the packed snapshot's own manifest, including complete canonical roles.
-		const vendor = path.join(ext, "vendor/impeccable-4.8.1");
+		const vendor = path.join(ext, "vendor/impeccable-4.9.0");
 		const lines = (await readFile(path.join(vendor, "MANIFEST.sha256"), "utf8")).trim().split("\n");
 		const vendorFiles: string[] = [];
 		for (const line of lines) {
@@ -97,7 +97,7 @@ it("checks an actual npm tarball, guarded extracted activation, and offline exec
 		expect(await walk(path.join(vendor, "source/agents"))).toHaveLength(4);
 		expect(await walk(path.join(ext, "skills/impeccable/reference/agents"))).toHaveLength(4);
 		const provenance = JSON.parse(await readFile(path.join(ext, "upstream.json"), "utf8"));
-		expect(provenance.upstream).toMatchObject({ tag: "skill-v4.8.1", commit: "924bbd194d02e5e15a227e75b5901fb0d7a4ecad", engineVersion: "0.1.19", license: "Apache-2.0" });
+		expect(provenance.upstream).toMatchObject({ tag: "skill-v4.9.0", commit: "c4cd1924c389f68d37c687d9c2bbf13f12547c41", engineVersion: "0.1.23", license: "Apache-2.0" });
 		expect(await readFile(path.join(ext, "LICENSE"), "utf8")).toContain("Apache License");
 		expect(await readFile(path.join(ext, "NOTICE.md"), "utf8")).toContain("platform-design-skills");
 		const cwd = path.join(temp, "unrelated project with spaces");
@@ -127,7 +127,7 @@ it("checks an actual npm tarball, guarded extracted activation, and offline exec
 		const results = JSON.parse((await exec(process.execPath, ["--experimental-strip-types", path.join(harness, "runner.mjs"), installed, cwd, binary, cacheRoot], { cwd, env, timeout: 30_000 })).stdout) as EngineRunResult[];
 		expect(results.map((result) => result.status)).toEqual(["success", "findings", "error"]);
 		const checksumBytes = await readFile(path.join(ext, "skills/impeccable/scripts/engine-checksums.txt"));
-		const checksums = checksumBytes.toString().split(/\r?\n/).filter((line) => line.startsWith("0.1.19 "));
+		const checksums = checksumBytes.toString().split(/\r?\n/).filter((line) => line.startsWith("0.1.23 "));
 		expect(checksums).toHaveLength(5);
 		for (const line of checksums) expect(line).toMatch(/^0\.1\.19\s+impeccable-\S+\s+[a-f0-9]{64}$/);
 		for (const [index, result] of results.entries()) {
@@ -137,7 +137,7 @@ it("checks an actual npm tarball, guarded extracted activation, and offline exec
 			expect(JSON.parse(result.stdout)).toEqual({
 				argv, cwd, stdin: JSON.stringify({ event: "package-relocation", literal: "$ARGUMENTS" }),
 				skill: path.join(ext, "skills/impeccable"), self: path.join(ext, "skills/impeccable/scripts/impeccable"), provider: "pi",
-				literal: "literal $1 $(value); with spaces", skillExists: true, launcherExists: true, version: "0.1.19", checksums: digest(checksumBytes),
+				literal: "literal $1 $(value); with spaces", skillExists: true, launcherExists: true, version: "0.1.23", checksums: digest(checksumBytes),
 			});
 		}
 		expect(results[2].stderr).toBe("protocol fixture failure\n");

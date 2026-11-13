@@ -40,7 +40,7 @@ describe("resources and checksums", () => {
 	});
 
 	it("pins ENGINE_VERSION to the upstream release", () => {
-		expect(ENGINE_VERSION).toBe("0.1.19");
+		expect(ENGINE_VERSION).toBe("0.1.23");
 	});
 
 	it("selects the released platform assets, including the windows-on-arm fallback", () => {
@@ -56,7 +56,7 @@ describe("resources and checksums", () => {
 
 	it("parses checksums for the pinned version and ignores comments and other versions", () => {
 		const parsed = parseChecksums(
-			"# comment\n0.1.19 impeccable-darwin-arm64 abc123\n0.1.18 impeccable-darwin-arm64 deadbeef\n0.1.19 impeccable-linux-x64 456def\n",
+			"# comment\n0.1.23 impeccable-darwin-arm64 abc123\n0.1.19 impeccable-darwin-arm64 deadbeef\n0.1.23 impeccable-linux-x64 456def\n",
 			ENGINE_VERSION,
 		);
 		expect(parsed).toEqual(

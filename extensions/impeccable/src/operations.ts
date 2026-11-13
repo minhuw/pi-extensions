@@ -6,7 +6,7 @@ import { lstat, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:f
 import os from "node:os";
 import path from "node:path";
 import { runEngine, type EngineRunResult, type RunEngineOptions } from "./engine.ts";
-import { getSkillDir } from "./resources.ts";
+import { getLauncherPath, getSkillDir } from "./resources.ts";
 import { atomicWrite, hookStatus, object, optionalText, parseTargetArgs, physicalPath, readConfigs, resolveDirectory, resolveProject, saveConfig, serialized, withGitExcludeMutation, withManagedFileMutation } from "./project.ts";
 
 export interface IntegrationMetadata { adapter: "pi"; engineRun: boolean; operation: string; root: string; [key: string]: unknown }
@@ -15,6 +15,23 @@ const PIN_MARKER = "<!-- pi-impeccable-owned-prompt:v1 -->";
 const UPDATE_HANDOFF = "Upgrade or change this vendored distribution through this repository's README vendoring procedure.";
 const UPDATE_AVAILABLE_HANDOFF = `A newer upstream Impeccable is published. Do not run or offer \`npx impeccable update\`: it installs foreign harness skills and leaves this Pi package unchanged. ${UPDATE_HANDOFF}`;
 const execFileAsync = promisify(execFile);
+
+/**
+ * Account sign-in and the switches that turn on account uploads (scan health
+ * counts and foundations, full DESIGN.md, critique reports, daily setup status).
+ * The adapter never runs these for the user; status, off, forget, logout and
+ * whoami pass through.
+ */
+function accountEnableCommand(argv: readonly string[]): string | undefined {
+	const args = argv[0] === "skills" ? argv.slice(1) : argv;
+	const verb = args[0]?.toLowerCase();
+	const positional = args.slice(1).filter((arg) => !arg.startsWith("-")).map((arg) => arg.toLowerCase());
+	if (verb === "login") return "login";
+	if ((verb === "critiques" || verb === "setup") && positional[0] === "on") return `${verb} on`;
+	if (verb === "health" && positional[0] === "on") return "health on";
+	if (verb === "health" && positional[0] === "design" && positional[1] === "on") return "health design on";
+	return undefined;
+}
 /** Establish local-config privacy before any real local-config commit. */
 async function excludeLocalConfig(root: string, signal: AbortSignal | undefined, committed: string[]): Promise<void> {
 	await withGitExcludeMutation(root, signal, async (file, repository) => {
@@ -117,6 +134,12 @@ async function reportMetadata(root: string) {
 
 /** Pi management boundary. runEngine remains a raw, bounded managed executor. */
 export async function runOperation(options: RunEngineOptions, pi: Pick<ExtensionAPI, "getCommands">, sessionCwd = options.cwd ?? process.cwd()): Promise<OperationResult> {
+	const account = accountEnableCommand(options.argv);
+	if (account) {
+		const launcher = getLauncherPath();
+		const command = `${/^[\w./:\\-]+$/.test(launcher) ? launcher : `'${launcher.replaceAll("'", "'\\''")}'`} ${account}`;
+		return adapterResult(options, options.cwd ?? sessionCwd, { handoff: "user", command }, `The Pi adapter never signs in to an Impeccable account or turns on account uploads on the user's behalf. If the user wants \`impeccable ${account}\`, they run it themselves in a terminal (in Pi: \`! ${command}\`).`);
+	}
 	if (["live", "live-generate", "live-poll", "live-server", "live-complete"].includes(options.argv[0] ?? "")) {
 		const action = options.argv[0] === "live" ? "start" : options.argv[0] === "live-generate" ? "generate" : options.argv[0] === "live-complete" ? "reply" : "status";
 		return adapterResult(options, options.cwd ?? sessionCwd, { handoff: "impeccable_live", action, argv: options.argv.slice(1) }, `Use impeccable_live ${action}; the Pi session owner exclusively manages native boot, polling, acknowledgements and helper cleanup. Do not launch a competing poller or shell helper.`);

@@ -49,6 +49,8 @@ export async function foundations() {
 			TMPDIR: temp, TMP: temp, TEMP: temp,
 			GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: path.join(temp, "gitconfig"),
 			IMPECCABLE_NO_STALENESS_CHECK: "1", IMPECCABLE_NO_TELEMETRY: "1", PLAYWRIGHT_SKIP_BROWSER_GC: "1",
+			// Account state stays in the private cache, never the developer's keychain sign-in.
+			IMPECCABLE_CREDENTIAL_STORE: "file",
 		};
 		for (const key of ["HOME", "PI_CODING_AGENT_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "IMPECCABLE_HOME", "PLAYWRIGHT_BROWSERS_PATH"]) await fs.mkdir(env[key]!, { recursive: true, mode: 0o700 });
 		for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);

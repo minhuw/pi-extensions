@@ -2,7 +2,7 @@
 /**
  * Deterministic Pi transformation for the vendored Impeccable skill distribution.
  *
- * Reads the pristine vendor snapshot recorded in `vendor/impeccable-4.8.1` and writes
+ * Reads the pristine vendor snapshot recorded in `vendor/impeccable-4.9.0` and writes
  * the Pi-adapted skill under `skills/impeccable` and the native prompt templates under
  * `prompts`. The transformation is pure and recorded in LOCAL-PATCHES.md; running it
  * against the committed snapshot reproduces the committed `skills/` and `prompts/`
@@ -23,7 +23,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const extensionRoot = path.resolve(__dirname, "..");
 
 const args = parseArgs(process.argv.slice(2));
-const vendorRoot = path.resolve(args.vendor ?? path.join(extensionRoot, "vendor", "impeccable-4.8.1"));
+const vendorRoot = path.resolve(args.vendor ?? path.join(extensionRoot, "vendor", "impeccable-4.9.0"));
 const outRoot = path.resolve(args.out ?? extensionRoot);
 
 /**
@@ -61,7 +61,7 @@ function localizeSkill(text, relative) {
 		.replace(SETUP_STEP1_ORIGINAL, SETUP_STEP1_LOCAL)
 		.replaceAll(UPSTREAM_SCRIPTS_DIR, LOCAL_SCRIPTS_DIR);
 	if (relative === "SKILL.md") {
-		localized = replaceRequired(localized, "version: 4.8.1\n", "version: 4.8.1\ndisable-model-invocation: true\n");
+		localized = replaceRequired(localized, "version: 4.9.0\n", "version: 4.9.0\ndisable-model-invocation: true\n");
 		localized = replaceRequired(localized, "**Pin / Unpin:** `<skill-base-dir>/scripts/impeccable pin <pin|unpin> <command>` creates or removes a standalone `/<command>` shortcut. Report the script's result concisely; relay stderr verbatim on error.", "**Pin / Unpin:** Use impeccable_run with argv: [\"pin\", \"pin\", \"<command>\"] or [\"pin\", \"unpin\", \"<command>\"], optionally --project (default) or --user. The Pi adapter creates native prompt shortcuts with ownership markers in the session cwd's .pi/prompts (project) or the agent prompts directory (user), independently of engine cwd/target/root selection, and checks current commands through Pi discovery; it refuses conflicts such as Writer /polish. Run /reload after a change. Unpin removes only adapter-owned prompts. All /design-* templates remain canonical; never modify package resources or create harness-local skills.");
 		localized = replaceRequired(localized, "## Setup\n", "## Setup\n\nRead [reference/pi-runtime.md](reference/pi-runtime.md) for impeccable_question, impeccable_delegate, impeccable_live and impeccable_capabilities; these adapters apply to every playbook and emitted engine directive.\n");
 	}

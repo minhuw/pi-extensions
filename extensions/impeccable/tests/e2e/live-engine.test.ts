@@ -32,8 +32,9 @@ it("bridges the verified engine's boot, poll, publication ack, journal recovery 
 		for (const key of Object.keys(process.env)) if (/^(IMPECCABLE_|GIT_|PI_)/.test(key)) vi.stubEnv(key, undefined);
 		const isolated = { HOME: path.join(temp, "home"), USERPROFILE: path.join(temp, "home"), PI_CODING_AGENT_DIR: path.join(temp, "agent"), XDG_CONFIG_HOME: path.join(temp, "config"), XDG_CACHE_HOME: path.join(temp, "cache"), IMPECCABLE_HOME: path.join(temp, "engine") };
 		for (const [key, dir] of Object.entries(isolated)) { await fs.mkdir(dir, { recursive: true }); vi.stubEnv(key, dir); }
+		vi.stubEnv("IMPECCABLE_CREDENTIAL_STORE", "file");
 		const env: NodeJS.ProcessEnv = Object.fromEntries(Object.keys(process.env).map((key) => [key, undefined]));
-		Object.assign(env, isolated, { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: path.join(temp, "gitconfig") });
+		Object.assign(env, isolated, { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: path.join(temp, "gitconfig"), IMPECCABLE_CREDENTIAL_STORE: "file" });
 		await exec("git", ["init", "--quiet"], { cwd: root, env });
 		await exec("git", ["add", "index.html", "package.json"], { cwd: root, env });
 		const options = { binary: "", cacheRoot: isolated.IMPECCABLE_HOME, env };

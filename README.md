@@ -65,7 +65,7 @@ This installs all the extensions above, their prompts and skills, and the theme.
 
 - **Subagents:** don't also install `@tintinweb/pi-subagents` from npm in the same Pi profile. Scripted workflows (`SubagentWorkflow`) are off by default; set `workflowsEnabled: true` to turn them on.
 - **Autoresearch:** remove `npm:pi-autoresearch` if you have it, because both register `/autoresearch`. Existing `.auto/` data is kept.
-- **Impeccable:** the design engine (0.1.19) is downloaded and verified the first time it is needed. Live browser work needs an app it can run. Writer keeps `/polish` for prose; use `/design-polish` for UI.
+- **Impeccable:** the design engine (0.1.23) is downloaded and verified the first time it is needed. Live browser work needs an app it can run. The extension never signs you in to an Impeccable account or turns on its uploads; see [privacy](extensions/impeccable/README.md#runtime-configuration-and-privacy). Writer keeps `/polish` for prose; use `/design-polish` for UI.
 - **Agent Browser:** needs the `agent-browser` CLI and its Chromium runtime on `PATH` (or `AGENT_BROWSER_BIN`): `npm install -g agent-browser && agent-browser install`.
 - **Herder:** run state lives in the git directory (`<git-common-dir>/herder/` and `refs/herder/`), not in the working tree. Approving a goal and confirming delivery need an interactive session (TUI or RPC).
 - **Orca Bridge:** activates only inside Orca panes. The optional [Pi Activity plugin](extensions/orca-bridge/plugin/README.md) shows local terminal sessions, agents, and workflow progress in Orca's sidebar and status bar. Native-chat background tracking is unavailable. `/orca-status` shows bridge and companion readiness.

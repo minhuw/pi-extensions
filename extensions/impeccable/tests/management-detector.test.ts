@@ -100,6 +100,25 @@ it("keeps genuine doctor JSON alongside Pi metadata and routes runtime upgrades 
 	} finally { await h.close(); }
 });
 
+it("never signs in or turns on account uploads, while status and off controls reach the engine", async () => {
+	const h = await detectorFixture();
+	try {
+		process.env.IMPECCABLE_BIN = h.binary;
+		for (const argv of [["login"], ["login", "--no-browser"], ["skills", "login"], ["health", "on"], ["health", "design", "on"], ["critiques", "on"], ["setup", "ON"]]) {
+			const refused = await runOperation({ argv, cwd: h.directory }, h.api);
+			expect(refused.ok).toBe(false);
+			expect(refused.integration?.engineRun).toBe(false);
+			expect(refused.message).toContain("never signs in to an Impeccable account or turns on account uploads");
+			expect(JSON.parse(refused.stdout)).toMatchObject({ handoff: "user", command: expect.stringMatching(/impeccable (login|health on|health design on|critiques on|setup on)$/) });
+		}
+		for (const argv of [["health", "off"], ["health", "design", "off"], ["critiques", "forget"], ["setup", "status"], ["logout"], ["whoami"]]) {
+			const passed = await runOperation({ argv, cwd: h.directory }, h.api);
+			expect(passed.binary).toBe(h.binary);
+			expect(passed.message ?? "").not.toContain("never signs in");
+		}
+	} finally { await h.close(); }
+});
+
 it("pins native prompts without shadowing discovered commands and unpins only owned files", async () => {
 	const h = await detectorFixture(undefined, [fileURLToPath(new URL("../../writer/prompts/polish.md", import.meta.url))]);
 	try {
