@@ -8,6 +8,9 @@
  *   of a group's body it splits that edge, into the rest of the body it moves into the group (`drop-zone.ts`).
  * - **Tab strips** are tab lists: arrows move between tabs, Home and End, Delete closes, Shift+F10 or the context
  *   menu key opens the tab's menu (Move Tab to Split Right/Left/Down/Up, Pin, Close, Close Others).
+ * - **Terminal actions:** while a group's active tab is a terminal, its strip ends in that terminal's actions (Find,
+ *   Upload, Split Right, Split Down), and the tab's menu offers them too, with Kill. They run on the tab's focused pane
+ *   through the terminal layer (`TerminalSlots.command`); the terminal itself has no toolbar.
  *
  * After Orca's tab groups (`src/renderer/src/components/tab-group/`: `TabGroupSplitNodeTree.tsx`,
  * `TabGroupPanel.tsx`, `useTabDragSplit.ts`; MIT, Copyright (c) 2026 Lovecast Inc.; see ORCA-LICENSE); pika's own code.
@@ -20,19 +23,19 @@ import { BUTTON, cx } from "../../components/ui";
 import { copyText } from "../../lib/clipboard";
 import type { Theme } from "../../lib/theme";
 import { paneLabel } from "../client";
-import { isMenuKey, useMenu, type MenuEntry } from "../deck/Menu";
+import { isMenuKey, MenuIcon, useMenu, type MenuEntry, type MenuGlyph } from "../deck/Menu";
 import { tip } from "../deck/Tooltips";
-import { actionShortcut } from "../keys";
+import { actionShortcut, type ActionId } from "../keys";
 import { sanitize, type TerminalInfo } from "../contract";
 import { isDirty, type EditorSnapshot, type EditorStore } from "../editor";
 import { EditorTabBody, diffKind } from "../FilePanel";
 import { baseName } from "../files";
 import { TerminalSplitView } from "../panes/TerminalSplitView";
-import { TerminalSlotsContext, type TerminalSlots } from "../panes/slot-contract";
+import { TerminalSlotsContext, type TerminalCommand, type TerminalSlots } from "../panes/slot-contract";
 import type { PaneDirection, PaneTree } from "../panes/pane-tree";
 import { dropZone, TAB_STRIP_HEIGHT, zonePreview, type Box, type DropZone } from "./drop-zone";
 import { clampRatio, type GroupTree, type Side, type TreePath } from "./layout-tree";
-import { activeTab, groupOf, tabTerminals, type Group, type Workspace, type WorkspaceTab } from "./model";
+import { activeTab, groupOf, tabTerminals, type Group, type TerminalTab, type Workspace, type WorkspaceTab } from "./model";
 import { paneMark, StatusGlyph, strongestMark } from "./status";
 
 export interface WorkspaceActions {
@@ -114,7 +117,10 @@ export function WorkspaceView(props: WorkspaceViewProps) {
 	const start = useRef<{ x: number; y: number } | null>(null);
 	const tabMenu = useMenu();
 	const openMenu = (at: Menu) => {
-		if (ws.tabs[at.tabId]) tabMenu.open({ anchor: { x: at.x, y: at.y }, items: tabMenuItems(ws, at.tabId, actions), label: "Tab", attrs: { "data-tab-menu": at.tabId } });
+		const tab = ws.tabs[at.tabId];
+		if (!tab) return;
+		const terminal = tab.kind === "terminal" ? terminalMenuOf(tab, props) : undefined;
+		tabMenu.open({ anchor: { x: at.x, y: at.y }, items: tabMenuItems(ws, at.tabId, actions, terminal), label: "Tab", attrs: { "data-tab-menu": at.tabId } });
 	};
 	const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
@@ -416,6 +422,7 @@ function TabBody({ tab, view }: { tab: WorkspaceTab; view: WorkspaceViewProps })
 function TabStrip({ group, view, focused, onMenu }: { group: Group; view: WorkspaceViewProps; focused: boolean; onMenu: (menu: Menu) => void }) {
 	const { ws, actions } = view;
 	const strip = useRef<HTMLDivElement>(null);
+	const active = activeTab(ws, group.id);
 
 	const focusTab = (index: number) => {
 		const id = group.tabOrder[Math.max(0, Math.min(group.tabOrder.length - 1, index))];
@@ -451,6 +458,7 @@ function TabStrip({ group, view, focused, onMenu }: { group: Group; view: Worksp
 					return tab ? <TabItem key={id} tab={tab} active={group.activeTabId === id} view={view} onKeyDown={keyDown} onMenu={onMenu} /> : null;
 				})}
 			</div>
+			{active?.kind === "terminal" && <TerminalActions tab={active} view={view} />}
 			{/* An empty group says the same in its body, with a labelled button: one offer, not two. */}
 			{group.tabOrder.length > 0 && (
 				<button
@@ -465,6 +473,38 @@ function TabStrip({ group, view, focused, onMenu }: { group: Group; view: Worksp
 				</button>
 			)}
 		</div>
+	);
+}
+
+/** The active terminal tab's actions, at the strip's right end before the group's "+"; they act on its focused pane. */
+function TerminalActions({ tab, view }: { tab: TerminalTab; view: WorkspaceViewProps }) {
+	const terminal = view.terminals.get(tab.focused);
+	const run = (command: TerminalCommand) => view.slots.command(tab.focused, command);
+	return (
+		<div className="flex shrink-0 items-stretch" role="group" aria-label="Terminal actions" data-terminal-actions={tab.id}>
+			<StripButton label="Find" action="find" glyph="search" onClick={() => run("find")} id="find" />
+			{terminal && !terminal.exited && <StripButton label="Upload files" glyph="upload" onClick={() => run("upload")} id="upload" />}
+			<StripButton label="Split right" action="split.right" glyph="split-right" onClick={() => view.actions.splitPane(tab.id, "row")} id="split-right" />
+			<StripButton label="Split down" action="split.down" glyph="split-down" onClick={() => view.actions.splitPane(tab.id, "column")} id="split-down" />
+			<span className="my-2.5 w-px bg-line" aria-hidden="true" />
+		</div>
+	);
+}
+
+function StripButton({ label, action, glyph, onClick, id }: { label: string; action?: ActionId; glyph: MenuGlyph; onClick: () => void; id: string }) {
+	return (
+		<button
+			type="button"
+			className="flex w-7 shrink-0 items-center justify-center text-muted hover:bg-hover hover:text-ink"
+			aria-label={label}
+			{...tip(label, action)}
+			// The terminal keeps focus, as a click on a toolbar button in a desktop terminal leaves it there.
+			onMouseDown={(event) => event.preventDefault()}
+			onClick={onClick}
+			data-terminal-action={id}
+		>
+			<MenuIcon glyph={glyph} />
+		</button>
 	);
 }
 
@@ -567,18 +607,49 @@ const SPLITS: readonly [Side, string][] = [
 	["up", "Move Tab to Split Up"],
 ];
 
+/** What a terminal tab's menu needs of its focused pane's terminal. */
+export interface TerminalMenu {
+	exited: boolean;
+	run: (command: TerminalCommand) => void;
+}
+
+/** The terminal a terminal tab's menu acts on (its focused pane), when the node has told the page of it. */
+function terminalMenuOf(tab: TerminalTab, view: WorkspaceViewProps): TerminalMenu | undefined {
+	const terminal = view.terminals.get(tab.focused);
+	return terminal && { exited: terminal.exited !== undefined, run: (command) => void view.slots.command(tab.focused, command) };
+}
+
+const withShortcut = (action: ActionId): { shortcut?: string } => {
+	const keys = actionShortcut(action);
+	return keys ? { shortcut: keys } : {};
+};
+
 /**
- * A tab's context menu entries (Deck's shared menu): the splits, Pin, Copy Path for a file, Close, Close Others. A
- * group's only tab has no splits to move into, and a tab with no unpinned neighbours no others to close: both are left
- * out rather than shown disabled.
+ * A tab's context menu entries (Deck's shared menu): for a terminal tab first its terminal's actions (Find, Upload
+ * Files, Split Terminal Right and Down); then the splits, Pin, Copy Path for a file, Close, Close Others; last, for a
+ * terminal, Kill Terminal (Remove Terminal once it exited). A group's only tab has no splits to move into, and a tab
+ * with no unpinned neighbours no others to close: both are left out rather than shown disabled.
  */
-export function tabMenuItems(ws: Workspace, tabId: string, actions: WorkspaceActions): MenuEntry[] {
+export function tabMenuItems(ws: Workspace, tabId: string, actions: WorkspaceActions, terminal?: TerminalMenu): MenuEntry[] {
 	const tab = ws.tabs[tabId]!;
 	const group = groupOf(ws, tab.id)!;
 	const alone = group.tabOrder.length === 1;
 	const others = group.tabOrder.some((id) => id !== tab.id && !ws.tabs[id]?.pinned);
 	const closeKeys = actionShortcut("tab.close");
+	const own: MenuEntry[] = terminal
+		? [
+				{ id: "find", label: "Find", icon: "search", run: () => terminal.run("find"), ...withShortcut("find") },
+				...(terminal.exited ? [] : [{ id: "upload", label: "Upload Files…", icon: "upload" as const, run: () => terminal.run("upload") }]),
+				{ id: "split-pane-right", label: "Split Terminal Right", icon: "split-right", run: () => actions.splitPane(tab.id, "row"), ...withShortcut("split.right") },
+				{ id: "split-pane-down", label: "Split Terminal Down", icon: "split-down", run: () => actions.splitPane(tab.id, "column"), ...withShortcut("split.down") },
+				"separator",
+			]
+		: [];
+	const kill: MenuEntry[] = terminal
+		? ["separator", terminal.exited ? { id: "kill", label: "Remove Terminal…", icon: "trash", danger: true, run: () => terminal.run("kill") } : { id: "kill", label: "Kill Terminal…", icon: "kill", danger: true, run: () => terminal.run("kill") }]
+		: [];
 	return [
+		...own,
 		...(alone
 			? []
 			: [
@@ -590,5 +661,6 @@ export function tabMenuItems(ws: Workspace, tabId: string, actions: WorkspaceAct
 		"separator",
 		{ id: "close", label: "Close", icon: "close", run: () => actions.close(tab.id), ...(closeKeys ? { shortcut: closeKeys } : {}) },
 		...(others ? [{ id: "close-others", label: "Close Others", run: () => actions.closeOthers(tab.id) }] : []),
+		...kill,
 	];
 }

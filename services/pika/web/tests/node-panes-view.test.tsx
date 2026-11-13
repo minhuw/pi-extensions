@@ -20,6 +20,7 @@ function fakeSlots() {
             else current.delete(terminalId);
         },
         resizeEnd: vi.fn<() => void>(),
+        command: () => false,
     };
     return slots;
 }

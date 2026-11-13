@@ -103,7 +103,7 @@ export const BUILT_IN: readonly { label: string; mac: string; other: string }[] 
 	{ label: "Find in the editor", mac: "⌘F", other: "Ctrl+F" },
 	{ label: "Open a path printed in the terminal", mac: "⌘-click", other: "Ctrl-click" },
 	{ label: "Next or previous match while finding in the terminal", mac: "Enter, ⇧Enter", other: "Enter, Shift+Enter" },
-	{ label: "Close a dialog or the find bar", mac: "Esc", other: "Esc" },
+	{ label: "Close a dialog or the find widget", mac: "Esc", other: "Esc" },
 ];
 
 /** The browser's and the system's own chords: a binding to one is refused. */

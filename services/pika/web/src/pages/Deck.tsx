@@ -427,6 +427,7 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	const hub = useMemo(() => new WorkspaceHub(), []);
 	const hubVersion = useSyncExternalStore(hub.subscribe, hub.getVersion);
 	const registry = useMemo(() => new SlotRegistry(), []);
+	const rendererFallback = useSyncExternalStore(registry.subscribeRenderers, registry.fallback);
 	const recentTerminals = useMemo(() => new RecentTerminals(), []);
 	const api = useApi();
 	const { keys, keysVersion, presentation, projects: deckProjects } = useDeckProjects(api, snapshot);
@@ -1121,6 +1122,7 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 			needs={inbox.layout.needs.length}
 			working={inbox.layout.working.length}
 			{...(permission === "default" && snapshot.nodes.length > 0 ? { onNotify: requestPermission } : {})}
+			{...(rendererFallback ? { renderer: rendererFallback } : {})}
 		/>
 	);
 

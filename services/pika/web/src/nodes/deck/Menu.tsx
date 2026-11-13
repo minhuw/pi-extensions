@@ -358,7 +358,8 @@ const GLYPHS: Record<Exclude<MenuGlyph, IconName> | "check", ReactNode> = {
 	),
 };
 
-function MenuIcon({ glyph }: { glyph: MenuGlyph | "check" }) {
+/** A menu glyph at the menus' 14 px; the tab strip's terminal actions draw theirs with it too, so both match. */
+export function MenuIcon({ glyph }: { glyph: MenuGlyph | "check" }) {
 	if (glyph in GLYPHS) {
 		return (
 			<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round">

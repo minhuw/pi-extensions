@@ -229,6 +229,11 @@ export const Icons = {
 			<path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13.5h10" />
 		</Svg>
 	),
+	upload: (p: IconProps) => (
+		<Svg {...p}>
+			<path d="M8 10.5v-8M4.5 6 8 2.5 11.5 6M3 13.5h10" />
+		</Svg>
+	),
 	eye: (p: IconProps) => (
 		<Svg {...p}>
 			<path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" />

@@ -2,7 +2,8 @@
  * The terminal layer: every terminal any workspace shows is drawn here once, keyed by its node and id, and placed
  * over the slot its pane registered (`SlotRegistry`). Moving a tab between groups, splitting, switching tabs or
  * places only moves (or hides) the drawn terminal; its xterm is never built again. A terminal without a slot on
- * screen is hidden, which gives back its WebGL context (`TerminalView`'s `visible`).
+ * screen is hidden, which gives back its WebGL context (`TerminalView`'s `visible`). Each drawn terminal registers its
+ * commands (find, upload, kill) and, while shown, its renderer with the registry, for the tab strip and the status bar.
  *
  * The idea is Orca's `TerminalPaneOverlayLayer` (`src/renderer/src/components/terminal-pane/mounting/`, MIT, Copyright
  * (c) 2026 Lovecast Inc.; see ORCA-LICENSE); the code is pika's own, and places terminals with measured boxes rather
@@ -12,12 +13,14 @@
  * paint without it, and Deck starts loading it as it mounts (`preloadTerminalView`), while the node's channel opens.
  */
 
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { onDemand } from "../../lib/onDemand";
 import type { Theme } from "../../lib/theme";
 import type { NodeChannel } from "../channel";
 import type { TerminalInfo } from "../contract";
 import { keepsPaneOnExit } from "../panes/actions";
+import type { TerminalHandle } from "../panes/slot-contract";
+import type { Renderer } from "../renderer";
 import { SetupFooter, type SetupAction } from "./SetupFooter";
 import type { SlotRegistry } from "./slots";
 
@@ -122,6 +125,20 @@ const LayerItem = memo(function LayerItem({
 	const visible = box !== null && box.width >= 1 && box.height >= 1;
 	const unread = terminal.status?.unread === true;
 
+	const handle = useCallback(
+		(commands: TerminalHandle | null) => {
+			if (!commands) return;
+			registry.setHandle(node, id, commands);
+			return () => registry.dropHandle(node, id, commands);
+		},
+		[registry, node, id],
+	);
+	const [renderer, setRenderer] = useState<Renderer>();
+	useEffect(() => {
+		registry.setRenderer(node, id, visible ? renderer : undefined);
+		return () => registry.setRenderer(node, id, undefined);
+	}, [registry, node, id, visible, renderer]);
+
 	useEffect(() => {
 		if (!visible || !unread) return;
 		const mark = () => {
@@ -146,6 +163,8 @@ const LayerItem = memo(function LayerItem({
 				theme={theme}
 				home={entry.home}
 				visible={visible}
+				ref={handle}
+				onRenderer={setRenderer}
 				onFocus={() => onFocus(node, id)}
 				onKill={() => onKill(node, terminal)}
 				onOpenFile={(path, at) => onOpenFile(node, id, path, at)}

@@ -12,6 +12,7 @@ import { useSignOut } from "../../components/Layout";
 import { useHealth } from "../../lib/relay";
 import type { Theme } from "../../lib/theme";
 import { actionShortcut } from "../keys";
+import type { Renderer } from "../renderer";
 import { menuBelow, useMenu, type MenuEntry } from "./Menu";
 import { tip } from "./Tooltips";
 import { DECK } from "./tokens";
@@ -144,10 +145,19 @@ export interface StatusBarProps {
 	working: number;
 	/** Shown while the browser has not been asked for notifications. */
 	onNotify?: () => void;
+	/** Why a terminal on screen draws with xterm's DOM renderer, when one does (`SlotRegistry.fallback`). */
+	renderer?: Renderer;
 }
 
-/** The status bar: the socket and nodes on the left, what the agents need, then notifications and the build. */
-export function DeckStatusBar({ socket, online, nodes, needs, working, onNotify }: StatusBarProps) {
+/** What the status bar says when a terminal on screen draws without WebGL, and why, for its tooltip. */
+const DOM_RENDERER: Partial<Record<Renderer, string>> = {
+	"no-webgl": "WebGL is unavailable here, so terminals draw with the DOM renderer, which is slower for heavy output.",
+	"webgl-failed": "WebGL failed to start, so this terminal draws with the DOM renderer, which is slower for heavy output.",
+	"context-lost": "The WebGL context was lost, so this terminal draws with the DOM renderer until it shows again.",
+};
+
+/** The status bar: the socket and nodes on the left, what the agents need, then notifications, the renderer and the build. */
+export function DeckStatusBar({ socket, online, nodes, needs, working, onNotify, renderer }: StatusBarProps) {
 	const health = useHealth();
 	const version = health.data?.version;
 	const connected = socket === "open";
@@ -161,6 +171,12 @@ export function DeckStatusBar({ socket, online, nodes, needs, working, onNotify 
 			{needs > 0 && <span className="font-medium text-dk-needs-ink" data-status-needs="">{needs === 1 ? "1 needs you" : `${needs} need you`}</span>}
 			{working > 0 && <span data-status-working="">{working} working</span>}
 			<span className="ml-auto flex items-center gap-4">
+				{renderer && DOM_RENDERER[renderer] && (
+					<span {...tip(DOM_RENDERER[renderer])} data-renderer={renderer}>
+						DOM renderer
+						<span className="sr-only">: {DOM_RENDERER[renderer]}</span>
+					</span>
+				)}
 				{onNotify && (
 					<button type="button" className="h-5 rounded-[3px] px-1 hover:bg-dk-hover hover:text-dk-ink" onClick={onNotify} {...tip("Notify me when an agent waits or finishes")} data-notify-enable="">
 						Turn on notifications

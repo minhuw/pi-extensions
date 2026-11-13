@@ -3,8 +3,7 @@ import { SearchAddon, type ISearchOptions, type ISearchResultChangeEvent } from 
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal, type ILink, type ITerminalOptions, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { useEffect, useRef, useState, type DragEvent } from "react";
-import { Icon } from "../components/icons";
+import { useEffect, useImperativeHandle, useRef, useState, type DragEvent, type ReactNode, type Ref } from "react";
 import { BUTTON, Callout, cx } from "../components/ui";
 import type { Theme } from "../lib/theme";
 import { AttachStream, type ScreenOp } from "./attach";
@@ -13,7 +12,7 @@ import { homePath, paneCwd } from "./client";
 import { LIMITS, type TerminalInfo } from "./contract";
 import { documentFonts, followFonts, MONO_FONT_FAMILY } from "./fonts";
 import { claimsSize, splitInput } from "./input";
-import { actionShortcut, isFindKey, LINK_MODIFIER } from "./keys";
+import { IS_MAC, isFindKey, LINK_MODIFIER } from "./keys";
 import { cellRange, findPaths, PathChecker, resolvePath, type CellText, type PathMatch } from "./links";
 import { clipboardImage, pasteText, runsPi } from "./paste";
 import { swallowQueries } from "./queries";
@@ -21,6 +20,8 @@ import { WebglRenderer, type Renderer } from "./renderer";
 import { onSettled, whenSettled } from "./resize-gate";
 import { SizeOwner } from "./size";
 import { blend, DK_TOKENS } from "./deck/tokens";
+import { tip } from "./deck/Tooltips";
+import type { TerminalHandle } from "./panes/slot-contract";
 import { UploadCancelled, uploadFiles, uploadName, type UploadItem, type UploadProgress } from "./upload";
 import { applyWidths } from "./widths";
 
@@ -111,6 +112,9 @@ function osc7Path(data: string): string | undefined {
 	}
 }
 
+/** How long the grid's new size shows after it changes, as a desktop terminal shows it while its window resizes. */
+export const SIZE_HINT_MS = 1_000;
+
 const SIZE_FORMAT = new Intl.NumberFormat("en", { maximumFractionDigits: 1 });
 const bytes = (size: number) => (size < 1024 * 1024 ? `${SIZE_FORMAT.format(size / 1024)} KiB` : `${SIZE_FORMAT.format(size / 1024 / 1024)} MiB`);
 
@@ -131,6 +135,12 @@ interface SizeView {
  * The workspace's terminal layer mounts it once and only moves it, so `visible` says whether it shows: a hidden view
  * gives back its WebGL context and measures nothing; showing again takes a context and fits its box. A new fit goes
  * to the node only once no pointer is down (`resize-gate.ts`), so a divider drag sends one size, on release.
+ *
+ * It has no toolbar: the whole box is the terminal (DESIGN.deck.md, "Terminal chrome"). Its actions live in the tab
+ * strip and the tab's menu, which reach it through `ref` (`TerminalHandle`); what is only sometimes true floats over
+ * the grid while it is: the find widget (top right), the grid's size for a moment after it changes, "Sized by another
+ * window · Fit here" for a non-owner, an upload's progress or failure, the link under the pointer, and "Attaching…".
+ * None of them takes layout, so opening or closing one never changes the size the terminal fits.
  */
 export function TerminalView({
 	channel,
@@ -141,6 +151,8 @@ export function TerminalView({
 	onOpenFile,
 	visible = true,
 	onFocus,
+	onRenderer,
+	ref,
 }: {
 	channel: NodeChannel;
 	terminal: TerminalInfo;
@@ -154,6 +166,10 @@ export function TerminalView({
 	visible?: boolean;
 	/** The terminal took keyboard focus. */
 	onFocus?: () => void;
+	/** What draws the terminal now (the status bar says when it is the DOM renderer). */
+	onRenderer?: (renderer: Renderer) => void;
+	/** The commands the tab strip and the tab menu run. */
+	ref?: Ref<TerminalHandle>;
 }) {
 	const { terminalId } = terminal;
 	const host = useRef<HTMLDivElement>(null);
@@ -182,8 +198,8 @@ export function TerminalView({
 	const [hoverLink, setHoverLink] = useState<string>();
 	const fileInput = useRef<HTMLInputElement>(null);
 	// Read by the link provider and the paste, which outlive renders.
-	const latest = useRef({ terminal, home, onOpenFile, theme, onFocus });
-	latest.current = { terminal, home, onOpenFile, theme, onFocus };
+	const latest = useRef({ terminal, home, onOpenFile, theme, onFocus, onKill });
+	latest.current = { terminal, home, onOpenFile, theme, onFocus, onKill };
 	const visibleRef = useRef(visible);
 	visibleRef.current = visible;
 	const rendererRef = useRef<WebglRenderer<WebglAddon> | null>(null);
@@ -436,6 +452,43 @@ export function TerminalView({
 		if (termRef.current) termRef.current.options.disableStdin = exited;
 	}, [exited]);
 
+	useImperativeHandle(
+		ref,
+		() => ({
+			find: () => openSearch.current(),
+			// Synchronous, inside the click or menu choice that asked, so the browser lets the file picker open.
+			upload: () => {
+				if (!latest.current.terminal.exited && !uploading.current) fileInput.current?.click();
+			},
+			kill: () => latest.current.onKill(),
+		}),
+		[],
+	);
+
+	useEffect(() => {
+		if (renderer) onRenderer?.(renderer);
+	}, [renderer, onRenderer]);
+
+	// The new size, for a moment, when this window resized the grid after it went live (not for the attach's own size;
+	// a non-owner's banner says the size another window set).
+	const [sizeHint, setSizeHint] = useState(false);
+	const lastSize = useRef<{ key: string; live: boolean } | null>(null);
+	const live = phase.kind === "live";
+	const owned = size.owned;
+	useEffect(() => {
+		const key = `${size.cols}x${size.rows}`;
+		const before = lastSize.current;
+		lastSize.current = { key, live };
+		if (!before?.live || before.key === key || !owned || !visibleRef.current) return;
+		setSizeHint(true);
+		const timer = setTimeout(() => setSizeHint(false), SIZE_HINT_MS);
+		// A newer size restarts the moment; anything else that runs this again (a reattach) ends it.
+		return () => {
+			clearTimeout(timer);
+			setSizeHint(false);
+		};
+	}, [size.cols, size.rows, live, owned]);
+
 	const fitHere = () => {
 		ownerRef.current?.fitHere();
 		termRef.current?.focus();
@@ -500,6 +553,15 @@ export function TerminalView({
 
 	const percent = upload && upload.progress.total > 0 ? Math.floor((upload.progress.sent / upload.progress.total) * 100) : 0;
 
+	const results = search?.query && search.results
+		? search.results.resultCount === 0
+			? "No matches"
+			: search.results.resultIndex >= 0
+				? `${search.results.resultIndex + 1} of ${search.results.resultCount}`
+				: `${search.results.resultCount} matches`
+		: "";
+	const fitBanner = size.told && size.canFitHere;
+
 	return (
 		<div
 			className="flex min-h-0 flex-1 flex-col"
@@ -524,153 +586,16 @@ export function TerminalView({
 				void send([image]);
 			}}
 		>
-			<div className="flex h-9 shrink-0 items-center gap-3 border-b border-line px-3 text-[12.5px] text-muted">
-				<span className="tabular-nums" data-terminal-size="">
-					{size.cols}×{size.rows}
-				</span>
-				{size.told && <span className="shrink-0 whitespace-nowrap" data-size-owner={size.owned ? "here" : "elsewhere"}>{size.owned ? "Sized by this window" : "Sized by another window"}</span>}
-				{size.canFitHere && (
-					<button type="button" className={cx(BUTTON.quiet, "h-7 px-2")} onClick={fitHere} data-fit-here="">
-						Fit here
-					</button>
-				)}
-				{renderer && renderer !== "webgl" && renderer !== "hidden" && (
-					<span className="text-ink" data-renderer="dom" title="xterm.js draws with DOM elements, which is slower for heavy output">
-						{renderer === "no-webgl"
-							? "WebGL is unavailable here; drawing with the DOM renderer"
-							: renderer === "context-lost"
-								? "The WebGL context was lost; drawing with the DOM renderer"
-								: "WebGL failed to start; drawing with the DOM renderer"}
-					</span>
-				)}
-				{phase.kind === "attaching" && <span role="status">Attaching…</span>}
-				{hoverLink && (
-					<span className="min-w-0 truncate" data-link-hint="">
-						{LINK_MODIFIER}-click opens {hoverLink}
-					</span>
-				)}
-				<span className="ml-auto flex shrink-0 items-center gap-1">
-					<button
-						type="button"
-						className={cx(BUTTON.quiet, "h-7 px-2")}
-						onClick={() => openSearch.current()}
-						title={actionShortcut("find") ? `Find (${actionShortcut("find")})` : "Find"}
-						data-find-open=""
-					>
-						<Icon name="search" size={13} />
-						<span className="sr-only">Find</span>
-					</button>
-					{!exited && (
-						<>
-							<button
-								type="button"
-								className={cx(BUTTON.quiet, "h-7 px-2")}
-								disabled={upload !== null}
-								onClick={() => fileInput.current?.click()}
-								title="Upload files to the node and paste their paths (or drop them on the terminal)"
-								data-upload-pick=""
-							>
-								Upload
-							</button>
-							<input
-								ref={fileInput}
-								type="file"
-								multiple
-								hidden
-								onChange={(event) => {
-									const picked = Array.from(event.target.files ?? [], (file) => ({ blob: file, name: uploadName(file.name) }));
-									event.target.value = "";
-									void send(picked);
-								}}
-								data-upload-input=""
-							/>
-						</>
-					)}
-					<button type="button" className={cx(BUTTON.quiet, "h-7 px-2")} onClick={onKill} data-kill-terminal="">
-						{exited ? "Remove" : "Kill"}
-					</button>
-				</span>
-			</div>
-			{search && (
-				<div className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3 text-[12.5px]" data-terminal-search="">
-					<input
-						ref={searchInput}
-						className="h-7 w-[220px] min-w-0 rounded-sm border border-line bg-page px-2 text-[12.5px]"
-						aria-label="Find in the terminal"
-						placeholder="Find"
-						value={search.query}
-						autoFocus
-						onChange={(event) => {
-							const query = event.target.value;
-							setSearch((current) => current && { ...current, query });
-							find(query, false, true);
-						}}
-						onKeyDown={(event) => {
-							if (event.key === "Escape") {
-								event.preventDefault();
-								closeSearch();
-							} else if (event.key === "Enter") {
-								event.preventDefault();
-								find(search.query, event.shiftKey);
-							} else if (isFindKey(event.nativeEvent)) {
-								event.preventDefault();
-								event.currentTarget.select();
-							}
-						}}
-						data-find-input=""
-					/>
-					<span className="tabular-nums text-muted" role="status" data-find-results="">
-						{search.query && search.results
-							? search.results.resultCount === 0
-								? "No matches"
-								: search.results.resultIndex >= 0
-									? `${search.results.resultIndex + 1} of ${search.results.resultCount}`
-									: `${search.results.resultCount} matches`
-							: ""}
-					</span>
-					<button type="button" className={cx(BUTTON.quiet, "h-7 px-2")} onClick={() => find(search.query, true)} disabled={!search.query} data-find-previous="">
-						Previous
-					</button>
-					<button type="button" className={cx(BUTTON.quiet, "h-7 px-2")} onClick={() => find(search.query)} disabled={!search.query} data-find-next="">
-						Next
-					</button>
-					<button type="button" className={cx(BUTTON.quiet, "ml-auto h-7 px-2")} onClick={closeSearch} aria-label="Close find" data-find-close="">
-						<Icon name="close" size={13} />
-					</button>
-				</div>
-			)}
-			{upload && (
-				<div className="flex h-9 shrink-0 items-center gap-3 border-b border-line px-3 text-[12.5px]" role="status" data-upload-progress={percent}>
-					<span className="min-w-0 truncate">
-						Uploading {upload.progress.name}
-						{upload.progress.count > 1 ? ` (${upload.progress.index + 1} of ${upload.progress.count})` : ""}
-					</span>
-					<span className="h-1.5 w-[120px] shrink-0 overflow-hidden rounded-full bg-hover" aria-hidden="true">
-						<span className="block h-full bg-dk-accent" style={{ width: `${percent}%` }} />
-					</span>
-					<span className="shrink-0 tabular-nums text-muted">
-						{bytes(upload.progress.sent)} of {bytes(upload.progress.total)}
-					</span>
-					<button type="button" className={cx(BUTTON.quiet, "ml-auto h-7 px-2")} onClick={() => upload.abort.abort()} data-upload-cancel="">
-						Cancel
-					</button>
-				</div>
-			)}
-			{uploadError && (
-				<div className="shrink-0 px-3 pt-2" data-upload-error="">
-					<Callout tone="red" title="Upload failed">
-						{uploadError}
-						<button type="button" className={cx(BUTTON.quiet, "ml-2 h-6 px-1.5")} onClick={() => setUploadError(null)}>
-							Dismiss
-						</button>
-					</Callout>
-				</div>
-			)}
 			{exited && (
-				<div className="shrink-0 border-b border-line bg-soft px-3 py-1.5 text-[12.5px]" data-terminal-exited="">
-					Exited
-					{terminal.exited!.code !== null ? ` with code ${terminal.exited!.code}` : ""}
-					{terminal.exited!.signal ? ` by ${terminal.exited!.signal}` : ""}. Its last screen stays until you remove it.
+				<div className="flex shrink-0 items-center gap-2 border-b border-line bg-soft px-3 py-1 text-[12.5px]" data-terminal-exited="">
+					<span className="min-w-0 flex-1">
+						Exited
+						{terminal.exited!.code !== null ? ` with code ${terminal.exited!.code}` : ""}
+						{terminal.exited!.signal ? ` by ${terminal.exited!.signal}` : ""}. Its last screen stays until you remove it.
+					</span>
+					<button type="button" className={cx(BUTTON.quiet, "h-6 shrink-0 px-2")} onClick={onKill} data-kill-terminal="">
+						Remove
+					</button>
 				</div>
 			)}
 			{phase.kind === "failed" && (
@@ -680,9 +605,132 @@ export function TerminalView({
 					</Callout>
 				</div>
 			)}
+			{!exited && (
+				<input
+					ref={fileInput}
+					type="file"
+					multiple
+					hidden
+					onChange={(event) => {
+						const picked = Array.from(event.target.files ?? [], (file) => ({ blob: file, name: uploadName(file.name) }));
+						event.target.value = "";
+						void send(picked);
+					}}
+					data-upload-input=""
+				/>
+			)}
 			<div className="relative flex min-h-0 flex-1 flex-col">
 				{/* No padding here: the fit addon measures this element. A non-owner's grid is smaller or larger than it, letterboxed or scrolled. */}
 				<div ref={host} className="min-h-0 flex-1 overflow-auto bg-page" data-terminal-host="" />
+				{/* Everything below floats over the grid and takes no layout, so none of it changes the fit. */}
+				{search && (
+					<div
+						className="absolute top-2 right-4 z-10 flex h-8 max-w-[calc(100%-24px)] items-center gap-0.5 rounded-[6px] border border-dk-menu-line bg-dk-raised py-1 pr-1 pl-1 text-[12px] shadow-dk"
+						role="search"
+						data-terminal-search=""
+					>
+						<input
+							ref={searchInput}
+							className="h-6 w-[200px] min-w-0 shrink rounded-[3px] border border-dk-line-strong bg-dk-ground px-1.5 text-[12.5px] outline-none focus:border-dk-accent"
+							aria-label="Find in the terminal"
+							placeholder="Find"
+							value={search.query}
+							autoFocus
+							onChange={(event) => {
+								const query = event.target.value;
+								setSearch((current) => current && { ...current, query });
+								find(query, false, true);
+							}}
+							onKeyDown={(event) => {
+								if (event.key === "Escape") {
+									event.preventDefault();
+									closeSearch();
+								} else if (event.key === "Enter") {
+									event.preventDefault();
+									find(search.query, event.shiftKey);
+								} else if (isFindKey(event.nativeEvent)) {
+									event.preventDefault();
+									event.currentTarget.select();
+								}
+							}}
+							data-find-input=""
+						/>
+						<span className={cx("min-w-[64px] shrink-0 px-1.5 text-right tabular-nums", search.results?.resultCount === 0 ? "text-dk-ink" : "text-dk-ink-3")} role="status" data-find-results="">
+							{results}
+						</span>
+						<FindButton label="Previous match" keys={IS_MAC ? "⇧↩" : "Shift+Enter"} onClick={() => find(search.query, true)} disabled={!search.query} data="data-find-previous">
+							<path d="M3 7.5 6 4.5l3 3" />
+						</FindButton>
+						<FindButton label="Next match" keys={IS_MAC ? "↩" : "Enter"} onClick={() => find(search.query)} disabled={!search.query} data="data-find-next">
+							<path d="M3 4.5 6 7.5l3-3" />
+						</FindButton>
+						<FindButton label="Close" keys="Esc" onClick={closeSearch} data="data-find-close">
+							<path d="M3 3l6 6M9 3l-6 6" />
+						</FindButton>
+					</div>
+				)}
+				{phase.kind === "attaching" && (
+					<div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+						<span className={CHIP} role="status" data-terminal-attaching="">
+							Attaching…
+						</span>
+					</div>
+				)}
+				{sizeHint && phase.kind === "live" && (
+					<div className="pointer-events-none absolute inset-0 flex items-center justify-center" aria-hidden="true">
+						<span className={cx(CHIP, "text-[13px] tabular-nums")} data-terminal-size="">
+							{size.cols}×{size.rows}
+						</span>
+					</div>
+				)}
+				<div className="pointer-events-none absolute inset-x-3 bottom-2 flex items-end justify-between gap-2">
+					<span className="min-w-0">
+						{hoverLink && (
+							<span className={cx(CHIP, "block truncate")} data-link-hint="">
+								{LINK_MODIFIER}-click opens {hoverLink}
+							</span>
+						)}
+					</span>
+					<span className="flex min-w-0 shrink-0 flex-col items-end gap-1.5">
+						{uploadError && (
+							<span className={cx(CHIP, "pointer-events-auto max-w-[420px] gap-2")} role="alert" data-upload-error="">
+								<span className="min-w-0 truncate text-dk-failed-ink" {...tip(uploadError)}>
+									Upload failed: {uploadError}
+								</span>
+								<button type="button" className={cx(BUTTON.quiet, "h-6 shrink-0 px-1.5")} onClick={() => setUploadError(null)}>
+									Dismiss
+								</button>
+							</span>
+						)}
+						{upload && (
+							<span className={cx(CHIP, "pointer-events-auto max-w-[420px] gap-2")} role="status" data-upload-progress={percent}>
+								<span className="min-w-0 truncate">
+									Uploading {upload.progress.name}
+									{upload.progress.count > 1 ? ` (${upload.progress.index + 1} of ${upload.progress.count})` : ""}
+								</span>
+								<span className="h-1.5 w-[80px] shrink-0 overflow-hidden rounded-full bg-hover" aria-hidden="true">
+									<span className="block h-full bg-dk-accent" style={{ width: `${percent}%` }} />
+								</span>
+								<span className="shrink-0 tabular-nums text-dk-ink-3">
+									{bytes(upload.progress.sent)} of {bytes(upload.progress.total)}
+								</span>
+								<button type="button" className={cx(BUTTON.quiet, "h-6 shrink-0 px-1.5")} onClick={() => upload.abort.abort()} data-upload-cancel="">
+									Cancel
+								</button>
+							</span>
+						)}
+						{fitBanner && (
+							<span className={cx(CHIP, "pointer-events-auto gap-2")} data-size-owner="elsewhere">
+								<span className="tabular-nums">
+									Sized by another window · {size.cols}×{size.rows}
+								</span>
+								<button type="button" className={cx(BUTTON.quiet, "h-6 shrink-0 px-1.5")} onClick={fitHere} {...tip("Resize the terminal to this window")} data-fit-here="">
+									Fit here
+								</button>
+							</span>
+						)}
+					</span>
+				</div>
 				{dragging && (
 					<div
 						className="pointer-events-none absolute inset-2 flex items-center justify-center rounded-sm border-2 border-dashed border-dk-accent bg-page/85 text-[14px] font-medium"
@@ -693,5 +741,27 @@ export function TerminalView({
 				)}
 			</div>
 		</div>
+	);
+}
+
+/** A floating note over the grid: a raised sheet like the menus, in meta type. */
+const CHIP = "flex h-8 items-center rounded-[6px] border border-dk-menu-line bg-dk-raised px-2.5 text-[12px] text-dk-ink shadow-dk";
+
+function FindButton({ label, keys, onClick, disabled, data, children }: { label: string; keys: string; onClick: () => void; disabled?: boolean; data: string; children: ReactNode }) {
+	return (
+		<button
+			type="button"
+			className="flex size-6 shrink-0 items-center justify-center rounded-[3px] text-dk-ink-2 hover:bg-dk-hover hover:text-dk-ink disabled:opacity-40 disabled:hover:bg-transparent"
+			onClick={onClick}
+			disabled={disabled}
+			aria-label={label}
+			data-tip={label}
+			data-tip-keys={keys}
+			{...{ [data]: "" }}
+		>
+			<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true">
+				{children}
+			</svg>
+		</button>
 	);
 }

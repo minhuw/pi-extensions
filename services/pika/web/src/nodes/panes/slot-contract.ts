@@ -10,7 +10,18 @@ export interface TerminalSlots {
     attach(terminalId: string, element: HTMLElement | null): void;
     /** A divider drag (or another resize the user made) ended: fit the terminals and send their sizes to the node. */
     resizeEnd(): void;
+    /**
+     * Runs `command` on `terminalId`'s drawn terminal: the tab strip's actions and the tab menu reach the terminal
+     * this way. False when no terminal of that id is drawn.
+     */
+    command(terminalId: string, command: TerminalCommand): boolean;
 }
+
+/** What chrome outside a terminal asks of it: open its find widget, pick files to upload, kill (or remove) it. */
+export type TerminalCommand = "find" | "upload" | "kill";
+
+/** A drawn terminal's commands, which it registers with the layer while it is mounted. */
+export type TerminalHandle = Record<TerminalCommand, () => void>;
 
 export const TerminalSlotsContext = createContext<TerminalSlots | null>(null);
 
