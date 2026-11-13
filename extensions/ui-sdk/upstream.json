@@ -1,0 +1,23 @@
+{
+	"repository": "https://github.com/vercel-labs/ui",
+	"tag": "@ui-sdk/core@0.1.0-beta.2",
+	"commit": "8ff6bcf7100d48230a3fab8c72475d99316cc58a",
+	"package": "@ui-sdk/core",
+	"version": "0.1.0-beta.2",
+	"license": "Apache-2.0",
+	"source": "packages/core/skills/ui-sdk",
+	"target": "skills/ui-sdk",
+	"files": {
+		"SKILL.md": "bbcb19f944023dd8f36f895378852c325b811ced38fdd7dae234825c3d9c858a",
+		"references/agent-ready.md": "a78c7db97260c5a4b9f6189b8ac9134d96f801df508ebfa5e17b7e4b03a49e53",
+		"references/build-interface.md": "a93c3c21bfc5bc939350d0a3b02b56258df85328c49dc9f4357b78b91d05f1f1",
+		"references/create-component.md": "00150e2cab1266384de9292d09f8a0f9da19fd08f67c762dd8f914179cb4da58",
+		"references/patterns.md": "6cb4f62f57d36dac0318bda20474fff285f35836597c0d04f2a488d0cf5d0cd5",
+		"references/styles.md": "61ae4fccdce8a27bfe46fdb28aa17e36abe752ca59858f00dd878a14f53dffae",
+		"references/testing.md": "9a40c6f81ec2ad032693bf709658d458774f3f2cbe20551c197064fc18d3c4d1",
+		"references/web-components.md": "31056cc7d3b317845d4c64f50def9db020e0e4f6f3c9c62a79c505af7eb28821"
+	},
+	"licenseFile": {
+		"LICENSE": "85dc930b9f77edd477ceddd7658dd3a4bb4411186718d19e137a7a5724ee7007"
+	}
+}

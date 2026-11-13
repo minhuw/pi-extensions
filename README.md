@@ -21,6 +21,7 @@ The [pika server](services/pika/README.md) serves this documentation publicly at
 | [Writer](extensions/writer/README.md) | Eight prompts for writing CS conference papers, ported from [claude-writer](https://github.com/minhuw/claude-writer). |
 | [Impeccable](extensions/impeccable/README.md) | The Impeccable design skill, with `/impeccable`, `/design`, and 24 `/design-*` prompts for building, refining, and critiquing interfaces. |
 | [Agent Browser](extensions/agent-browser/README.md) | Browser automation and web testing through `agent-browser`, with the `agent-browser` skill, the `agent_browser` tool (isolated per-session daemons and inline screenshots), and `/agent-browser`. |
+| [UI SDK](extensions/ui-sdk/README.md) | The `ui-sdk` skill from Vercel's headless [UI SDK](https://ui-sdk.dev) (beta): building interfaces with its components and `@ui-sdk/core` behaviors in React, Vue, Svelte, Solid, or web components, making them agent-ready, and testing them. |
 | [Subagents](extensions/subagents/README.md) | Delegates bounded tasks to a local agent fleet (`recon`, `worker`), using a maintained fork of `@tintinweb/pi-subagents` v0.23.1. |
 | [Council](extensions/council/README.md) | `/council <topic>` and the `council` tool convene three pinned read-only advisors (`caspar`, `melchior`, `balthasar`) for a two-round, identity-blinded deliberation on difficult architectural and design questions. |
 | [Herder](extensions/herder/README.md) | `/herder <goal>` runs a coding task in disposable git worktrees, checks the result against the goal, and delivers it to your branch after you confirm. `/herder-improve` and `/herder-simplify` audit the repository and start a run for the findings you pick. |
@@ -100,3 +101,5 @@ The pika server (Rust) and its web UI have their own toolchains, and `npm test` 
 ## License
 
 [MIT](LICENSE) for this collection's own code. The vendored Impeccable skill keeps its [Apache-2.0 license](extensions/impeccable/LICENSE) and [notice](extensions/impeccable/NOTICE.md); its changes are listed in [LOCAL-PATCHES.md](extensions/impeccable/LOCAL-PATCHES.md).
+
+The vendored UI SDK skill keeps its [Apache-2.0 license](extensions/ui-sdk/LICENSE) and [notice](extensions/ui-sdk/NOTICE.md).
