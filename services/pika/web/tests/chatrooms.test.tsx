@@ -170,6 +170,35 @@ describe("chatrooms page", () => {
 		});
 	});
 
+	it("keeps an Edit topic click made as soon as a new room shows", async () => {
+		const server = createFakeServer({ online: [onlineSession("s-web", { name: "Frontend", project: "pika-web" })] });
+		renderApp("/chatrooms", server.fetch);
+		const messenger = await waitFor(() => {
+			const node = document.querySelector<HTMLElement>("[data-imessage]")!;
+			expect(node.querySelector('[data-imessage-thread="dm:s-web"]')).toBeTruthy();
+			return node;
+		});
+		fireEvent.click(messenger.querySelector<HTMLElement>('[data-imessage-thread="dm:s-web"]')!);
+		fireEvent.click(messenger.querySelector<HTMLButtonElement>("[data-imessage-new-room]")!);
+		const form = screen.getByRole("dialog", { name: "New room" }).querySelector<HTMLElement>("[data-imessage-room-form]")!;
+		fireEvent.change(within(form).getByLabelText("Room name"), { target: { value: "#auth-sync" } });
+		fireEvent.change(within(form).getByLabelText("Topic (optional)"), { target: { value: "Sync token schema" } });
+		// Clicks in the microtask after the room's first commit, before React runs that commit's effects.
+		const clicked = new Promise<void>((resolve) => {
+			const observer = new MutationObserver(() => {
+				const edit = messenger.querySelector<HTMLButtonElement>("[data-imessage-edit-topic]");
+				if (messenger.querySelector("[data-imessage-active-title]")?.textContent !== "#auth-sync" || !edit) return;
+				observer.disconnect();
+				fireEvent.click(edit);
+				resolve();
+			});
+			observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+		});
+		fireEvent.click(within(form).getByRole("button", { name: "Create room" }));
+		await clicked;
+		expect((screen.getByLabelText("Room topic") as HTMLInputElement).value).toBe("Sync token schema");
+	});
+
 	it("supports replyTo threading from the stream into the composer and renders inline reply context", async () => {
 		const at = new Date().toISOString();
 		const member = { sessionId: "s-lead", device: "mini", name: "Lead", project: "pika", state: "idle" as const, online: true, joinedAt: at };

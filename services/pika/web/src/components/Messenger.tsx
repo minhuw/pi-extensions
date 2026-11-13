@@ -1238,7 +1238,11 @@ export function Messenger({
 			: `dm:${resolvedSelection.sessionId}`
 		: "";
 
-	useEffect(() => {
+	// The thread's own UI state resets in the render that switches threads. As an effect it ran after the switch
+	// committed, so a click in between (Edit topic on a room just created) was undone.
+	const [stateKey, setStateKey] = useState(resolvedKey);
+	if (stateKey !== resolvedKey) {
+		setStateKey(resolvedKey);
 		setSelectedMentions(new Set());
 		setSendFeedback(null);
 		setManagingMembers(false);
@@ -1253,6 +1257,8 @@ export function Messenger({
 		setScrolledUp(false);
 		setCopiedDmId(false);
 		setDismissedMentionAt(null);
+	}
+	useEffect(() => {
 		stickToBottom.current = true;
 	}, [resolvedKey]);
 
