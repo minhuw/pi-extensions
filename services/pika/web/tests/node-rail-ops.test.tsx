@@ -11,7 +11,7 @@ import { menuItems, type MenuEntry } from "../src/nodes/deck/Menu";
 import { placeKey, placeOfTerminal, placeWords, type RailNode } from "../src/nodes/workspace/places";
 import { addMenu, agentMenu, checkoutMenu, nodeMenu, otherMenu, projectMenu, worktreeMenu, type AddMenuState } from "../src/nodes/workspace/rail-menus";
 import { OTHER } from "../src/nodes/workspace/store";
-import { gitCheckout, rail, worktree } from "./support/checkouts";
+import { folderCheckout, gitCheckout, rail, worktree } from "./support/checkouts";
 
 const pane = (id: string, status?: Partial<PaneView>, extra: Partial<TerminalInfo> = {}): TerminalInfo => ({
 	terminalId: id,
@@ -159,8 +159,13 @@ describe("the rail's menus as data", () => {
 	const checkoutRun = { rename: noop, settings: noop, reveal: noop, copyPath: noop, keep: noop, hide: noop };
 	const worktreeRun = { newTerminal: noop, newAgent: noop, reveal: noop, copyPath: noop, copyBranch: noop, remove: noop };
 	const projectRun = { newWorktree: noop, rename: noop, fold: noop, copyRepository: noop };
-	const checkoutState = { nodeName: "mac", connected: true, canCheckouts: true, kind: "git" as const, configured: false };
-	const projectState = { nodeName: "mac", connected: true, canCheckouts: true, persisted: true, collapsed: false, repository: "https://github.com/me/repo", worktreeFrom: [{ id: "c1", label: "~/repo" }] };
+	const repo = gitCheckout("a", "/home/me/repo");
+	const clone = gitCheckout("b", "/home/me/src/repo");
+	/** A bare repository: git, but no main worktree to branch from (its linked worktrees are not one). */
+	const bare = gitCheckout("c", "/srv/repo.git", { worktrees: [worktree("/srv/repo-fix", "fix")] });
+	const notes = folderCheckout("d", "/home/me/notes");
+	const checkoutState = { nodeName: "mac", connected: true, canCheckouts: true, checkout: repo, configured: false };
+	const projectState = { nodeName: "mac", connected: true, canCheckouts: true, persisted: true, collapsed: false, repository: "https://github.com/me/repo", worktreeFrom: [{ checkout: repo, label: "~/repo" }] };
 
 	it("gives a project heading its worktree, rename, folding, and repository URL; with one checkout, the checkout's items too", () => {
 		expect(ids(projectMenu(projectState, projectRun))).toEqual(["new-worktree", "|", "rename", "fold", "|", "copy-repository"]);
@@ -173,17 +178,40 @@ describe("the rail's menus as data", () => {
 		expect(find(single, "hide")).toMatchObject({ label: "Remove from Deck", danger: true });
 		// Two checkouts that make worktrees: New Worktree asks which.
 		const made: string[] = [];
-		const two = projectMenu({ ...projectState, worktreeFrom: [{ id: "c1", label: "~/repo" }, { id: "c2", label: "~/src/repo" }] }, { ...projectRun, newWorktree: (id) => made.push(id) });
+		const two = projectMenu({ ...projectState, worktreeFrom: [{ checkout: repo, label: "~/repo" }, { checkout: clone, label: "~/src/repo" }] }, { ...projectRun, newWorktree: (id) => made.push(id) });
 		const submenu = find(two, "new-worktree")!.submenu!;
-		expect(ids(submenu)).toEqual(["new-worktree:c1", "new-worktree:c2"]);
+		expect(ids(submenu)).toEqual([`new-worktree:${repo.id}`, `new-worktree:${clone.id}`]);
 		menuItems(submenu)[1]!.run!();
-		expect(made).toEqual(["c2"]);
+		expect(made).toEqual([clone.id]);
+	});
+
+	it("hides New Worktree and Worktree Settings for a folder or a bare repository, which cannot make worktrees", () => {
+		for (const checkout of [notes, bare]) {
+			const alone = projectMenu({ ...projectState, worktreeFrom: [{ checkout, label: "~/x" }], checkout: { ...checkoutState, checkout } }, { ...projectRun, checkout: checkoutRun });
+			expect(ids(alone)).not.toContain("new-worktree");
+			expect(ids(alone)).not.toContain("settings");
+			expect(ids(checkoutMenu({ ...checkoutState, checkout }, checkoutRun))).not.toContain("settings");
+		}
+		// Beside one that can, only that one is offered, without asking which.
+		const made: string[] = [];
+		const mixed = projectMenu({ ...projectState, worktreeFrom: [{ checkout: bare, label: "/srv/repo.git" }, { checkout: repo, label: "~/repo" }, { checkout: notes, label: "~/notes" }] }, { ...projectRun, newWorktree: (id) => made.push(id) });
+		expect(find(mixed, "new-worktree")).toMatchObject({ label: "New Worktree…" });
+		expect(find(mixed, "new-worktree")!.submenu).toBeUndefined();
+		find(mixed, "new-worktree")!.run!();
+		expect(made).toEqual([repo.id]);
+		// The "+" on a folder's or a bare repository's place offers no worktree either.
+		const plusRun = { newTerminal: noop, addCheckout: noop, newWorktree: noop, pair: noop };
+		const mac = { id: "m", name: "mac", canCheckouts: true };
+		for (const checkout of [notes, bare]) {
+			const menu = addMenu({ nodes: [mac], offline: [], unpaired: [], current: { node: "m", place: { place: `${checkout.id}:${checkout.path}`, name: "x", checkout } } }, plusRun);
+			expect(menuItems(menu).map((entry) => entry.id)).toEqual(["new-terminal", "new-agent", "add-checkout"]);
+		}
 	});
 
 	it("gives a checkout its names, settings, place, and Keep or Remove from Deck; a folder has no settings", () => {
 		expect(ids(checkoutMenu(checkoutState, checkoutRun))).toEqual(["rename-checkout", "settings", "|", "reveal", "copy-path", "|", "keep", "hide"]);
 		// One added by hand is kept already.
-		expect(ids(checkoutMenu({ ...checkoutState, kind: "folder", configured: true }, checkoutRun))).toEqual(["rename-checkout", "|", "reveal", "copy-path", "|", "hide"]);
+		expect(ids(checkoutMenu({ ...checkoutState, checkout: notes, configured: true }, checkoutRun))).toEqual(["rename-checkout", "|", "reveal", "copy-path", "|", "hide"]);
 	});
 
 	it("gives a worktree card terminals, its path and branch, and removal only for a linked worktree", () => {
@@ -266,7 +294,7 @@ describe("the rail's + menu", () => {
 	});
 
 	it("defaults to the worktree on screen, names where things land, and offers a new worktree of its checkout", () => {
-		const menu = plus({ nodes: [mac], current: { node: "m", place: { place: "c:/p/atlas", name: "atlas · main", checkoutId: "c" } } });
+		const menu = plus({ nodes: [mac], current: { node: "m", place: { place: "c:/p/atlas", name: "atlas · main", checkout: { ...gitCheckout("c", "/p/atlas"), id: "c" } } } });
 		expect(ids(menu)).toEqual(["#atlas · main · mac", "new-terminal", "new-agent", "new-worktree", "|", "add-checkout"]);
 		menuItems(menu).find((entry) => entry.id === "new-agent")!.run!();
 		menuItems(menu).find((entry) => entry.id === "new-worktree")!.run!();
@@ -275,7 +303,7 @@ describe("the rail's + menu", () => {
 			["worktree", "m", "c"],
 		]);
 		// A folder makes no worktrees.
-		expect(ids(plus({ nodes: [mac], current: { node: "m", place: { place: "f:/p/notes", name: "notes" } } }))).not.toContain("new-worktree");
+		expect(ids(plus({ nodes: [mac], current: { node: "m", place: { place: "f:/p/notes", name: "notes", checkout: folderCheckout("f", "/p/notes") } } }))).not.toContain("new-worktree");
 	});
 
 	it("groups several connected nodes under their names when none is on screen, so one choice picks both", () => {
@@ -312,7 +340,7 @@ describe("the rail's + menu", () => {
 			{ offline: ["mac"] },
 			{ unpaired: [{ id: "m", name: "mac" }] },
 			{ nodes: [old] },
-			{ nodes: [old], current: { node: "m", place: { place: "c:/p", name: "p", checkoutId: "c" } } },
+			{ nodes: [old], current: { node: "m", place: { place: "c:/p", name: "p", checkout: gitCheckout("c", "/p") } } },
 			{ nodes: [old, node01] },
 			{ nodes: [old, node01], current: { node: "m" } },
 		];

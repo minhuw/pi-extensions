@@ -31,7 +31,7 @@ import {
 	type Placement,
 	type Section,
 } from "./inbox";
-import { makesWorktrees, placeKey, type RailNode, type RailProject, type RailWorktree } from "./places";
+import { placeKey, type RailNode, type RailProject, type RailWorktree } from "./places";
 import { addMenu, agentMenu, checkoutMenu, killNeedsConfirm, nodeMenu, otherMenu, projectMenu, worktreeMenu, type CheckoutMenuActions, type CheckoutMenuState } from "./rail-menus";
 import { installRailTree } from "./rail-tree";
 import { markLabel, sectionMark, StatusGlyph, type PaneMark } from "./status";
@@ -317,7 +317,7 @@ export function AgentRail(props: AgentRailProps) {
 		nodeName: nodeName(node),
 		connected: connected(node),
 		canCheckouts: canCheckouts(node),
-		kind: checkout.kind,
+		checkout,
 		configured: checkout.source === "configured",
 	});
 	const checkoutActions = (node: string, checkout: Checkout, renameRow: string): CheckoutMenuActions | undefined =>
@@ -347,7 +347,7 @@ export function AgentRail(props: AgentRailProps) {
 				persisted: project.serverKey !== null,
 				collapsed: isCollapsed(node, project),
 				...(project.repository ? { repository: project.repository } : {}),
-				worktreeFrom: project.checkouts.filter(({ checkout }) => makesWorktrees(checkout)).map(({ checkout }) => ({ id: checkout.id, label: homePath(sanitize(checkout.path), props.homeOf(node)) })),
+				worktreeFrom: project.checkouts.map(({ checkout }) => ({ checkout, label: homePath(sanitize(checkout.path), props.homeOf(node)) })),
 				...(only ? { checkout: checkoutState(node, only) } : {}),
 			},
 			{
@@ -445,7 +445,7 @@ export function AgentRail(props: AgentRailProps) {
 											place: {
 												place: info.worktree.place,
 												name: info.checkout.checkout.kind === "folder" ? info.project.name : `${info.project.name} · ${info.worktree.label}`,
-												...(makesWorktrees(info.checkout.checkout) ? { checkoutId: info.checkout.checkout.id } : {}),
+												checkout: info.checkout.checkout,
 											},
 										}
 									: {}),

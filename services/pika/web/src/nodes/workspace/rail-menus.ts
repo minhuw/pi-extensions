@@ -8,14 +8,18 @@
  *   that teaches something (an older pika-node: "Update pika-node on mac to use this"), and its reason shows once,
  *   beside the menu while it is highlighted.
  * - A node that is not connected leaves out everything that needs it, and the menu says so once, in a note.
+ * - New Worktree… and Worktree Settings… show only for a checkout that can make worktrees (`makesWorktrees`: git with
+ *   a main worktree), decided here from the checkout's own data: a folder or a bare repository would only fail.
  *
  * The items follow Orca's worktree and host menus and T3 Code's thread menu (both MIT; see ORCA-LICENSE and
  * T3-LICENSE): Orca's "Mark Read" / "Mark Unread", "Copy Path", "Copy Branch Name", removing a repository from the app
  * rather than from disk, and removing a worktree with git; T3's "Rename", "Mark unread", and "Copy path" / "Copy thread id". Destructive items are last and red.
  */
+import type { Checkout } from "../contract";
 import type { MenuEntry, MenuItem } from "../deck/Menu";
 import { actionShortcut } from "../keys";
 import type { Section } from "./inbox";
+import { makesWorktrees } from "./places";
 
 /** Why an item that needs a newer daemon is disabled. */
 export const updateNode = (node: string): string => `Update pika-node on ${node} to use this`;
@@ -116,12 +120,15 @@ export function agentMenu(state: AgentMenuState, run: AgentMenuActions): MenuEnt
 
 // --- A project heading, a checkout, a worktree card, "Other" ------------------------------------------------------
 
+/** What the menus read of a checkout to decide whether it can make worktrees. */
+export type WorktreeSource = Pick<Checkout, "id" | "kind" | "worktrees">;
+
 export interface CheckoutMenuState {
 	nodeName: string;
 	connected: boolean;
 	/** The daemon offers `checkouts` (every checkout and worktree request). */
 	canCheckouts: boolean;
-	kind: "git" | "folder";
+	checkout: WorktreeSource;
 	/** Added by hand (`checkout.add`): it stays listed without a terminal or a root finding it. */
 	configured: boolean;
 }
@@ -142,7 +149,7 @@ function checkoutParts(state: CheckoutMenuState, run: CheckoutMenuActions): [Par
 	return [
 		[
 			on && item("rename-checkout", `Rename on ${state.nodeName}…`, run.rename, { icon: "pencil", ...unless(edit) }),
-			on && state.kind === "git" && item("settings", "Worktree Settings…", run.settings, { icon: "branch", ...unless(edit) }),
+			on && makesWorktrees(state.checkout) && item("settings", "Worktree Settings…", run.settings, { icon: "branch", ...unless(edit) }),
 		],
 		[on && item("reveal", "Reveal in Explorer", run.reveal, { icon: "reveal" }), item("copy-path", "Copy Path", run.copyPath, { icon: "copy" })],
 		[
@@ -166,8 +173,8 @@ export interface ProjectMenuState {
 	persisted: boolean;
 	collapsed: boolean;
 	repository?: string;
-	/** The project's checkouts that can make worktrees, by id, each with a label (its path) for choosing. */
-	worktreeFrom: readonly { id: string; label: string }[];
+	/** The project's checkouts, each with a label (its path) for choosing; only those that can make worktrees are offered. */
+	worktreeFrom: readonly { checkout: WorktreeSource; label: string }[];
 	/** The heading stands for the project's only checkout: its items join the heading's. */
 	checkout?: CheckoutMenuState;
 }
@@ -183,7 +190,7 @@ export interface ProjectMenuActions {
 export function projectMenu(state: ProjectMenuState, run: ProjectMenuActions): MenuEntry[] {
 	const on = state.connected;
 	const worktree = unless(state.canCheckouts ? undefined : updateNode(state.nodeName));
-	const from = state.worktreeFrom;
+	const from = state.worktreeFrom.filter(({ checkout }) => makesWorktrees(checkout)).map(({ checkout, label }) => ({ id: checkout.id, label }));
 	const newWorktree: Part =
 		on &&
 		from.length > 0 &&
@@ -305,6 +312,13 @@ export interface AddMenuNode {
 	canCheckouts: boolean;
 }
 
+export interface AddMenuPlace {
+	place: string;
+	name: string;
+	/** New Worktree… comes from it when it can make worktrees. */
+	checkout: WorktreeSource;
+}
+
 export interface AddMenuState {
 	/** The connected nodes, in the rail's order: the "+" makes things on these. */
 	nodes: readonly AddMenuNode[];
@@ -312,11 +326,8 @@ export interface AddMenuState {
 	offline: readonly string[];
 	/** Nodes this browser has not paired: pairing is the way to them. */
 	unpaired: readonly { id: string; name: string }[];
-	/**
-	 * The node on screen, and its place when it is a worktree (not "Other"): its name, and the checkout new worktrees
-	 * come from when it can make them.
-	 */
-	current?: { node: string; place?: { place: string; name: string; checkoutId?: string } };
+	/** The node on screen, and its place when it is a worktree (not "Other"): its name, and its checkout. */
+	current?: { node: string; place?: AddMenuPlace };
 }
 
 export interface AddMenuActions {
@@ -355,11 +366,12 @@ export function addMenu(state: AddMenuState, run: AddMenuActions): MenuEntry[] {
 	const isCurrent = target !== undefined && target.id === state.current?.node;
 	const place = isCurrent ? state.current?.place : undefined;
 	const id = (node: AddMenuNode, name: string, prefix: boolean) => (prefix ? `${node.id}:${name}` : name);
-	const create = (node: AddMenuNode, prefix: boolean, here?: { place: string; name: string; checkoutId?: string }): Part[] => [
+	const create = (node: AddMenuNode, prefix: boolean, here?: AddMenuPlace): Part[] => [
 		item(id(node, "new-terminal", prefix), "New Terminal", () => run.newTerminal(node.id, here?.place, false), { icon: "terminal", ...(here && isCurrent ? shortcut("terminal.new") : {}) }),
 		item(id(node, "new-agent", prefix), "New pi Agent", () => run.newTerminal(node.id, here?.place, true), { icon: "agent" }),
-		here?.checkoutId !== undefined &&
-			item(id(node, "new-worktree", prefix), "New Worktree…", () => run.newWorktree(node.id, here.checkoutId!), { icon: "branch", ...unless(node.canCheckouts ? undefined : updateNode(node.name)) }),
+		here !== undefined &&
+			makesWorktrees(here.checkout) &&
+			item(id(node, "new-worktree", prefix), "New Worktree…", () => run.newWorktree(node.id, here.checkout.id), { icon: "branch", ...unless(node.canCheckouts ? undefined : updateNode(node.name)) }),
 	];
 	const addCheckout = (node: AddMenuNode, prefix: boolean) =>
 		item(id(node, "add-checkout", prefix), "Add Repository…", () => run.addCheckout(node.id), { icon: "folder", ...unless(node.canCheckouts ? undefined : updateNode(node.name)) });

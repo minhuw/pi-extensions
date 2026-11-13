@@ -42,7 +42,7 @@ export function worktreePathFor(checkout: Pick<Checkout, "path" | "settings">, n
 }
 
 /** A git checkout that can make worktrees: one with a main worktree (not a folder, not a bare repository). */
-export const makesWorktrees = (checkout: Checkout): boolean => checkout.kind === "git" && checkout.worktrees.some((worktree) => worktree.isMain);
+export const makesWorktrees = (checkout: Pick<Checkout, "kind" | "worktrees">): boolean => checkout.kind === "git" && checkout.worktrees.some((worktree) => worktree.isMain);
 
 /** One worktree card. */
 export interface RailWorktree {
