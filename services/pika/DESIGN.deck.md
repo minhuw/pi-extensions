@@ -242,8 +242,8 @@ One list for every agent on every node, in sections by what the user has to do (
 The toggle in the rail header switches to Orca's levels: node → project → checkout → worktree card → agents (`NODE.md`, "Checkouts"). A node reports checkouts (a repository's common dir with its worktrees, or a plain folder); the server's project key (`POST deck/project-keys`, asked in batches and kept for the page) groups them, so clones of one remote are one project and a fork is another. A checkout whose key is not known yet joins the others of its repository for now; one with no key is a project of its own.
 
 - **Node header:** link glyph and state; folds in this browser.
-- **Project heading (28px, 13px/600):** chevron, the server's name for the project (`deck/projects`) else its first checkout's name, the path of its only checkout, and, folded, its strongest status glyph and agent count (T3's aggregated dot). A click folds it; the server keeps folding for every browser (a project without a key folds in this browser). F2 or Rename Project… names it on the server. Its menu: New Worktree… (a submenu of checkouts when there are several), Rename Project…, Collapse, Copy Repository URL; with one checkout, that checkout's items too.
-- **Checkout row (24px, monospace path in ink-2):** only when the node has two or more checkouts of the project; otherwise the heading stands for it. Menu: Rename on <node>…, Worktree Settings… (where new worktrees go, the base, a setup script), Reveal in Explorer, Copy Path, Keep in Deck (one found on its own), Remove from Deck (hidden on the node, with a five-second Undo).
+- **Project heading (28px, 13px/600):** chevron, the server's name for the project (`deck/projects`) else its first checkout's name, the path of its only checkout, and, folded, its strongest status glyph and agent count (T3's aggregated dot). A click folds it; the server keeps folding for every browser (a project without a key folds in this browser). F2 or Rename Project… names it on the server. Its menu: New Worktree… (a submenu of checkouts when there are several; only checkouts that can make worktrees, git with a main worktree, so never a folder or a bare repository), Rename Project…, Collapse, Copy Repository URL; with one checkout, that checkout's items too.
+- **Checkout row (24px, monospace path in ink-2):** only when the node has two or more checkouts of the project; otherwise the heading stands for it. Menu: Rename on <node>…, Worktree Settings… (where new worktrees go, the base, a setup script; not for a folder or a bare repository), Reveal in Explorer, Copy Path, Keep in Deck (one found on its own), Remove from Deck (hidden on the node, with a five-second Undo).
 - **Worktree card (two lines):** the folder's name with `detached`, `locked`, `prunable` markers, then the branch (or short commit) in monospace with a branch glyph; the main worktree first. A click shows its workspace. Menu: New Terminal, New pi Agent, Reveal in Explorer, Copy Path, Copy Branch Name, Remove Worktree… (linked ones only).
 - **Agents** sit under the card of the worktree their node places them in (the shell's live cwd), in the inbox's order. Terminals in no listed worktree go under the node's "Other" card.
 - **Shown:** projects with agents, the one on screen, and checkouts added by hand; the rest wait behind "N more projects". The filter matches agents and project names, paths, and branches.
@@ -298,9 +298,34 @@ Deck is an app of its own inside pika: its route renders outside the dashboard's
 ## Chrome outside the rail
 
 - Tab strips on chrome; the active tab on ground with a 2px accent underline; the focused group's strip has a 2px accent top line. Status glyphs on terminal tabs use the same set.
+- While a group's active tab is a terminal, its strip ends in that terminal's actions (see "Terminal chrome"), then a hairline, then the group's `+`.
 - Splitters are 1px lines that turn `dk-line-strong` on hover and accent on focus; drop targets are accent-framed over `dk-accent-soft`.
 - The workspace header shows the focused pane's state as glyph plus label in the state's ink, never a boxed pill. "New terminal" is a quiet framed button; the accent is not spent on it.
 - An empty tab group offers "New terminal" once, as a labelled button in its body; its strip has no `+` until it holds a tab.
+
+## Terminal chrome
+
+A terminal has no toolbar of its own: the box under the tab strip is all terminal, as in VS Code, Zed or Ghostty, so a tab costs the app bar and one strip, never a third bar (`TerminalView.tsx`). What used to sit in its 36px bar moved to the chrome that already exists, or floats over the grid only while it is true. Nothing floating takes layout, so showing or hiding it never changes the size the terminal fits, and the fit measures the whole box.
+
+- **Actions (tab strip):** for the group's active terminal tab, 28px-wide icon buttons at the strip's right end, in ink-2 turning ink on hover: Find (search glyph, ⌘F), Upload files (not once the terminal exited), Split right, Split down (their pane shortcuts). Tooltips name them with their shortcuts. A press keeps focus in the terminal. They act on the tab's focused pane, through the terminal layer (`TerminalSlots.command`). A file or diff tab shows none.
+- **Actions (tab menu):** a terminal tab's menu starts with Find, Upload Files…, Split Terminal Right, Split Terminal Down, and ends, after Close and Close Others, with Kill Terminal… (Remove Terminal… once it exited), red, which asks first as the rail's Kill does.
+- **Find:** ⌘F in the terminal, the strip's Find, or the menu opens a find widget floating at the terminal's top right (VS Code's): a raised sheet like the menus (`dk-raised`, `dk-menu-line`, 6px radius, `dk-shadow`) with the field, the match count ("3 of 12", "No matches") in ink-3 tabular figures, previous, next and close. Enter and ⇧Enter step, typing searches from the current match, ⌘F again selects the field, Escape closes and gives focus back to the terminal. Matches use the accent at 22%, the active one at 50%.
+- **Floating notes** share one look: a 32px raised chip like the find widget, 12px text. Per item:
+
+| Former toolbar item | Where it went | Why |
+| --- | --- | --- |
+| Find button | Strip action, tab menu, ⌘F; the bar became the floating widget | An action of the tab, as an editor's find; the widget never pushes the grid down |
+| Upload button | Strip action and tab menu; the hidden file input stays in the terminal; drop and image paste unchanged | An action of the tab; the picker opens inside the click that asked |
+| Kill / Remove button | Tab menu (Kill Terminal…, Remove Terminal…); an exited terminal's notice keeps a Remove button; the rail row's hover actions unchanged | Destructive and rare: a menu item with a confirmation, not a one-click icon beside Find |
+| "Sized by another window" + Fit here | A chip at the bottom right, "Sized by another window · 80×24" with Fit here, shown only to a window that does not own the size and whose fit differs, after the node said so (`term.resized`) | Transient and actionable, and about this terminal only; the owner, the usual case, sees nothing |
+| "Sized by this window" | Dropped | The normal state; nothing to do about it |
+| `cols×rows` | Centred chip for 1 s after this window resizes the grid (as Ghostty and iTerm2 show it while a window resizes); a non-owner's chip states the size | Only interesting while it changes |
+| WebGL fallback note | Status bar, "DOM renderer", its reason in the tooltip, while a terminal on screen draws without WebGL (`SlotRegistry.fallback`) | Environmental, not actionable, and usually page-wide (no WebGL2): one quiet item, not a banner over every pane forever |
+| "Attaching…" | Centred chip while attaching | Transient |
+| "⌘-click opens …" | Chip at the bottom left while the pointer is on a path, as a browser shows a link's address | Transient, follows the pointer |
+| Upload progress and failure | Chips at the bottom right (progress with Cancel; the failure in failed ink with Dismiss); they used to be rows that resized the terminal mid-upload | Transient |
+
+- **In the flow** stay only what describes the terminal for good: the exited notice (with Remove) and "Could not attach", and a setup terminal's footer.
 
 ## Setup terminals
 
