@@ -262,6 +262,12 @@ Nodes let you use terminals, files, and pi pane status on your machines from the
 
 Nodes are stored in schema version 21 and Deck's projects in version 22, which the server adds when it first opens the database, without a reindex; older binaries cannot open the database afterwards.
 
+### Upgrading from 0.17
+
+- **Deck** adds remote terminals and files through `pika-node`, a checkout/worktree UI, and per-project names and collapsed states shared across browsers. Nodes remain off by default; set `PIKA_NODES=on` to enable them (see [Nodes](#nodes)).
+- The server adds schema version 21 for nodes and 22 for Deck's projects when it opens the database, without a reindex. Older binaries cannot open the upgraded database; keep a [backup](#backup) if you may need to roll back.
+- Relay no longer limits message chains by hop count. Remove `--relay-max-hops` from launch commands; `PIKA_RELAY_MAX_HOPS` no longer has an effect. The existing rate limits remain: 60 messages per sending session and 300 per device per minute.
+
 ### Upgrading from 0.8.1
 
 - pika prices Magpie calls that used tokens but recorded no cost, because the Magpie provider had no price for the model, from the models.dev catalog (see [Usage statistics](#usage-statistics-and-performance)). The database upgrades to schema version 12 when the server opens it, without a reindex; older binaries cannot open it, so keep a [backup](#backup). The server now fetches `https://models.dev/api.json` once a day; set `PIKA_PRICES=off` to keep recorded costs only, or point it at a mirror or file.
@@ -358,7 +364,7 @@ The [`pika image`](../../.github/workflows/pika-image.yml) workflow publishes a 
 
 | Tag | Source |
 | --- | --- |
-| `latest`, `0.17.0`, `0.17` | a `pika-v0.17.0` release tag |
+| `latest`, `0.18.0`, `0.18` | a `pika-v0.18.0` release tag |
 | `edge` | the newest `master` commit matching the image workflow's paths: pika, published documentation sources, or the workflow itself |
 | `sha-<commit>` | that commit |
 
@@ -367,7 +373,7 @@ Prefer a version tag in production and `edge` to follow `master`.
 To release, set `version` in `Cargo.toml`, commit, then push a matching tag; the workflow refuses a tag that disagrees with `Cargo.toml`:
 
 ```bash
-git tag pika-v0.17.0 && git push origin pika-v0.17.0
+git tag pika-v0.18.0 && git push origin pika-v0.18.0
 ```
 
 Published from this public repository, the package is public, so servers pull it without logging in. A fork or a private copy of the repository may publish it as private; then make it public under the package's **Package settings → Change visibility**, or log in on the server with `docker login ghcr.io` and a token that has `read:packages`.
