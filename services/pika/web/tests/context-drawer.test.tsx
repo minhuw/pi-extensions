@@ -6,7 +6,7 @@ import { ContextDrawer } from "../src/context/ContextDrawer";
 import { detectShape, newMessageStart, normalizeRequest, systemSections, type PayloadShape } from "../src/context/payload";
 import type { Entry, ModelRequest } from "../src/lib/types";
 import { assistantMessage, entry, header, onlineSession, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
-import { mockLayout, renderApp, renderWithApi } from "./support/render";
+import { firstRender, mockLayout, renderApp, renderWithApi } from "./support/render";
 import {
 	anthropicCachedPayloads,
 	anthropicPayload,
@@ -59,7 +59,7 @@ describe("what the model saw", () => {
 		const r2 = modelRequest("r2", anthropicPayload);
 		const server = createFakeServer({ sessions: [sessionWithRequests()], requests: [r1, r2] });
 		renderApp("/s/s1?view=transcript", server.fetch);
-		fireEvent.click(await screen.findByRole("button", { name: /2 model calls/ }));
+		fireEvent.click(await screen.findByRole("button", { name: /2 model calls/ }, firstRender));
 		const buttons = await screen.findAllByRole("button", { name: "Show what the model saw" });
 		expect(buttons).toHaveLength(2);
 		fireEvent.click(buttons[1]);
@@ -219,7 +219,7 @@ describe("what the model saw", () => {
 		const r2 = modelRequest("r2", { ...anthropicPayload, messages: [anthropicPayload.messages[0], { $pika: "ab".repeat(32) }] }, { complete: false });
 		const server = createFakeServer({ sessions: [sessionWithRequests()], requests: [r1, r2] });
 		renderApp("/s/s1?view=transcript", server.fetch);
-		fireEvent.click(await screen.findByRole("button", { name: /2 model calls/ }));
+		fireEvent.click(await screen.findByRole("button", { name: /2 model calls/ }, firstRender));
 		const open = async () => {
 			fireEvent.click((await screen.findAllByRole("button", { name: "Show what the model saw" }))[1]);
 			return screen.findByRole("dialog", { name: "What the model saw" });

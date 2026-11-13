@@ -2,12 +2,9 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionLink, SessionTree } from "../src/lib/types";
 import { iso, summary } from "./support/fixtures";
-import { mockLayout, renderApp, scrollMain } from "./support/render";
+import { firstRender, mockLayout, renderApp, scrollMain } from "./support/render";
 import { createFakeServer, type FakeSession } from "./support/server";
 import { ticketFamily } from "./support/tickets";
-
-/** The session page and its views load on demand, which takes longer than the default second on a busy machine. */
-const LOAD_MS = 4000;
 
 function session(id: string, extra: Parameters<typeof summary>[1] = {}): FakeSession {
 	return { detail: summary(id, extra), turns: [], entries: [] };
@@ -22,7 +19,7 @@ async function family(id: string): Promise<HTMLElement> {
 		const node = document.querySelector<HTMLElement>(`[data-family="${id}"]`);
 		if (!node) throw new Error(`no family under ${id}`);
 		return node;
-	}, { timeout: LOAD_MS });
+	}, firstRender);
 }
 
 function familyRows(root: ParentNode = document): [string, string][] {
@@ -403,7 +400,7 @@ describe("superagent tickets in the session list", () => {
 	it("badges the nested cards of ticket children with #N", async () => {
 		renderApp("/?children=1", createFakeServer({ sessions: ticketFamily() }).fetch);
 		const tree = await family("main");
-		await waitFor(() => expect(familyRows(tree).map(([id]) => id)).toEqual(expect.arrayContaining(["tk1", "tk2", "tk3"])), { timeout: LOAD_MS });
+		await waitFor(() => expect(familyRows(tree).map(([id]) => id)).toEqual(expect.arrayContaining(["tk1", "tk2", "tk3"])), firstRender);
 		for (const id of [1, 2, 3]) {
 			const badge = familyRow(`tk${id}`).querySelector<HTMLElement>("[data-ticket-badge]")!;
 			expect(badge.textContent).toBe(`#${id}`);

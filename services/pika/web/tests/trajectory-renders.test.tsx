@@ -4,7 +4,7 @@
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TraceRecord } from "../src/lib/types";
-import { mockLayout, renderApp } from "./support/render";
+import { firstRender, mockLayout, renderApp } from "./support/render";
 import { createFakeServer } from "./support/server";
 import { rows, session } from "./support/trajectory";
 
@@ -34,7 +34,7 @@ describe("replay rendering", () => {
 		vi.useFakeTimers({ shouldAdvanceTime: true });
 		try {
 			renderApp("/s/t1", createFakeServer({ sessions: [session()] }).fetch);
-			await waitFor(() => expect(rows()).toHaveLength(9));
+			await waitFor(() => expect(rows()).toHaveLength(9), firstRender);
 			const current = () => document.querySelector<HTMLElement>("[data-replay-current]");
 			// With reduced motion each frame steps to the next record: the previous one and the new one change.
 			fireEvent.click(screen.getByRole("button", { name: "Replay the session" }));
@@ -66,7 +66,7 @@ describe("replay rendering", () => {
 		vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "cancelAnimationFrame", "performance"] });
 		try {
 			renderApp("/s/t1", createFakeServer({ sessions: [session()] }).fetch);
-			await waitFor(() => expect(rows()).toHaveLength(9));
+			await waitFor(() => expect(rows()).toHaveLength(9), firstRender);
 			fireEvent.click(screen.getByRole("button", { name: "1×" }));
 			fireEvent.click(screen.getByRole("button", { name: "Replay the session" }));
 			// At 1×, the first record starts at the playhead and the next one 1 s later: frames in between move only the playhead.

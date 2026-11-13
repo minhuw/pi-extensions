@@ -5,7 +5,7 @@ import { ApiError } from "../src/lib/api";
 import { formatWait } from "../src/lib/format";
 import { loginErrorMessage, safeNext } from "../src/pages/Login";
 import { assistantMessage, entry, header, summary, turn, userMessage } from "./support/fixtures";
-import { mockLayout, renderApp } from "./support/render";
+import { firstRender, mockLayout, renderApp } from "./support/render";
 import { createFakeServer, type FakeSession } from "./support/server";
 
 function session(): FakeSession {
@@ -26,7 +26,7 @@ describe("login", () => {
 	it("sends the user to the login page and back after signing in", async () => {
 		const server = createFakeServer({ sessions: [session()], password: "hunter2" });
 		renderApp("/s/s1", server.fetch);
-		expect(await screen.findByRole("heading", { name: "Sign in to pika" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Sign in to pika" }, firstRender)).toBeTruthy();
 		expect(screen.queryByRole("navigation", { name: "Main" })).toBeNull();
 
 		const input = screen.getByLabelText("Password");
@@ -84,7 +84,7 @@ describe("login", () => {
 			return base.fetch(input, init);
 		}) as typeof fetch;
 		renderApp("/s/s1", fetchImpl);
-		expect(await screen.findByRole("heading", { name: "Sign in to pika" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Sign in to pika" }, firstRender)).toBeTruthy();
 	});
 
 	it.each(["proxy", "none"] as const)("reloads instead of showing the password form on a 401 in %s mode", async (authMode) => {
@@ -103,7 +103,7 @@ describe("login", () => {
 		observer.observe(document.body, { childList: true, subtree: true });
 		try {
 			renderApp("/s/s1", fetchImpl);
-			await waitFor(() => expect(reload).toHaveBeenCalled());
+			await waitFor(() => expect(reload).toHaveBeenCalled(), firstRender);
 			// Several failing queries reload once, and a later 401 does not reload again right away.
 			await new Promise((resolve) => setTimeout(resolve, 50));
 			expect(reload).toHaveBeenCalledTimes(1);
@@ -117,7 +117,7 @@ describe("login", () => {
 
 	it("stays open when no password is configured", async () => {
 		renderApp("/s/s1", createFakeServer({ sessions: [session()] }).fetch);
-		expect(await screen.findByRole("heading", { name: "Protected session" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Protected session" }, firstRender)).toBeTruthy();
 		await waitFor(() => expect(screen.queryByRole("button", { name: "Sign out" })).toBeNull());
 	});
 

@@ -5,7 +5,7 @@ import { Dialog, DialogContent, DialogTitle } from "../src/components/ui-shadcn/
 import { menuBelow, useMenu, type MenuEntry } from "../src/nodes/deck/Menu";
 import { DeckTooltips, tip } from "../src/nodes/deck/Tooltips";
 import { DECK_ROOT } from "../src/nodes/deck/tokens";
-import { renderApp } from "./support/render";
+import { firstRender, renderApp } from "./support/render";
 import { createFakeServer } from "./support/server";
 
 afterEach(() => {
@@ -17,7 +17,7 @@ describe("Deck's frame", () => {
 	it("fills the window with its own bar instead of the band, and reaches pika's sections from the app menu", async () => {
 		const server = createFakeServer({ features: [] });
 		renderApp("/deck", server.fetch);
-		await screen.findByText("Nodes are off on this server");
+		await screen.findByText("Nodes are off on this server", {}, firstRender);
 		expect(document.querySelector("[data-deck] [data-deck-bar]")).not.toBeNull();
 		expect(document.querySelector("[data-sign-band]")).toBeNull();
 

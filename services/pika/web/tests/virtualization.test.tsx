@@ -2,7 +2,7 @@ import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Entry, Turn } from "../src/lib/types";
 import { assistantMessage, entry, header, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
-import { mockLayout, renderApp, scrollMain } from "./support/render";
+import { firstRender, largeSessionTest, mockLayout, renderApp, scrollMain } from "./support/render";
 import { createFakeServer, type FakeSession } from "./support/server";
 
 const ROW_HEIGHT = 100;
@@ -73,7 +73,7 @@ describe("virtualization", () => {
 		expect(fixture.entries.length).toBe(5001);
 		const server = createFakeServer({ sessions: [fixture] });
 		renderApp("/s/many?view=transcript", server.fetch);
-		await screen.findByText("Question 0");
+		await screen.findByText("Question 0", {}, firstRender);
 		expect(entryNodeCount()).toBeGreaterThan(0);
 		expect(entryNodeCount()).toBeLessThan(300);
 
@@ -87,14 +87,14 @@ describe("virtualization", () => {
 		expect(screen.queryByText("Question 0")).toBeNull();
 		const turnsShown = [...document.querySelectorAll("[data-turn]")].map((node) => Number(node.getAttribute("data-turn")));
 		expect(Math.min(...turnsShown)).toBeGreaterThan(100);
-	});
+	}, largeSessionTest);
 
 	it("keeps an expanded 5,000-entry turn under 300 entry nodes while paging", async () => {
 		const fixture = longTurn();
 		expect(fixture.entries.length).toBe(5000);
 		const server = createFakeServer({ sessions: [fixture] });
 		renderApp("/s/long?view=transcript", server.fetch);
-		fireEvent.click(await screen.findByRole("button", { name: /model calls/ }));
+		fireEvent.click(await screen.findByRole("button", { name: /model calls/ }, firstRender));
 		await waitFor(() => expect(document.querySelectorAll("[data-entry-seq]").length).toBeGreaterThan(0));
 		expect(entryNodeCount()).toBeLessThan(300);
 		const entryCalls = () => server.calls.filter((call) => call.includes("/entries"));
@@ -112,5 +112,5 @@ describe("virtualization", () => {
 		expect(entryCalls().length).toBeLessThan(25);
 		expect(entryCalls()[1]).toBe("/api/v1/sessions/long/entries?from=201&to=4999&limit=200");
 		expect(Math.min(...renderedSeqs())).toBeGreaterThan(1000);
-	});
+	}, largeSessionTest);
 });

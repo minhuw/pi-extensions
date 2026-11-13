@@ -3,12 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChildSession, SessionDetail, SessionLink, SessionTree } from "../src/lib/types";
 import { LIVE_WINDOW_MS, TRACE_REFRESH_MS } from "../src/session/live";
 import { entry, header, iso, summary, turn, userMessage } from "./support/fixtures";
-import { mockLayout, renderApp } from "./support/render";
+import { firstRender, mockLayout, renderApp } from "./support/render";
 import { createFakeServer, treeOf, type FakeSession } from "./support/server";
 import { ticketFamily } from "./support/tickets";
-
-/** The session page and its views load on demand, which takes longer than the default second on a busy machine. */
-const LOAD_MS = 4000;
 
 function fake(detail: SessionDetail): FakeSession {
 	return { detail, entries: [entry(0, header(detail.id)), entry(1, userMessage(`Prompt for ${detail.id}`))], turns: [turn(0, 1, 1)] };
@@ -43,7 +40,7 @@ async function tree(): Promise<HTMLElement> {
 		const node = document.querySelector<HTMLElement>("[data-agent-tree]");
 		if (!node) throw new Error("no agent tree");
 		return node;
-	}, { timeout: LOAD_MS });
+	}, firstRender);
 }
 
 function rows(): [string, string][] {
@@ -75,19 +72,19 @@ afterEach(() => {
 describe("the agent tree", () => {
 	it("offers the Agents view only for a session with a family", async () => {
 		const first = renderApp("/s/solo", createFakeServer({ sessions: family() }).fetch);
-		await screen.findByRole("heading", { name: "Alone" }, { timeout: LOAD_MS });
+		await screen.findByRole("heading", { name: "Alone" }, firstRender);
 		expect(viewOptions()).toEqual(["Trajectory", "Transcript"]);
 		expect(document.querySelector("[data-open-agent-tree]")).toBeNull();
 		first.unmount();
 		renderApp("/s/a1", createFakeServer({ sessions: family() }).fetch);
-		await screen.findByRole("heading", { name: "Session a1" }, { timeout: LOAD_MS });
+		await screen.findByRole("heading", { name: "Session a1" }, firstRender);
 		expect(viewOptions()).toEqual(["Trajectory", "Transcript", "Agents"]);
 	});
 
 	it("shows a grandchild's whole family from the root, with the current session marked", async () => {
 		renderApp("/s/a1?view=agents", createFakeServer({ sessions: family() }).fetch);
 		await tree();
-		await waitFor(() => expect(rows()).toEqual([["r", "0"], ["a", "1"], ["a1", "2"], ["h", "1"]]));
+		await waitFor(() => expect(rows()).toEqual([["r", "0"], ["a", "1"], ["a1", "2"], ["h", "1"]]), firstRender);
 		expect(document.querySelector("[data-session-page='agents']")).toBeTruthy();
 		expect(screen.getByRole("radio", { name: "Agents" }).getAttribute("aria-checked")).toBe("true");
 		const current = rowOf("a1");
@@ -108,19 +105,19 @@ describe("the agent tree", () => {
 
 	it("links each other row to its agents view and its trajectory", async () => {
 		renderApp("/s/a1?view=agents", createFakeServer({ sessions: family() }).fetch);
-		await waitFor(() => rowOf("a"));
+		await waitFor(() => rowOf("a"), firstRender);
 		expect(within(rowOf("a")).getByRole("link", { name: "Fix tests" }).getAttribute("href")).toBe("/s/a?view=agents");
 		expect(within(rowOf("a")).getByRole("link", { name: "Open the trajectory" }).getAttribute("href")).toBe("/s/a?view=trajectory");
 		expect(within(rowOf("a1")).queryByRole("link", { name: "Look around" })).toBeNull();
 		fireEvent.click(within(rowOf("r")).getByRole("link", { name: "Ship the feature" }));
-		await screen.findByRole("heading", { name: "Ship the feature" }, { timeout: LOAD_MS });
+		await screen.findByRole("heading", { name: "Ship the feature" }, firstRender);
 		await waitFor(() => expect(rowOf("r").hasAttribute("data-current")).toBe(true));
 		expect(rowOf("a1").hasAttribute("data-current")).toBe(false);
 	});
 
 	it("totals the family and each subtree", async () => {
 		renderApp("/s/a1?view=agents", createFakeServer({ sessions: family() }).fetch);
-		await waitFor(() => rowOf("h"));
+		await waitFor(() => rowOf("h"), firstRender);
 		expect(document.querySelector("[data-tree-summary]")?.textContent).toBe("4 sessions · 3 levels · $1.85 · 386k tokens across the tree");
 		const subtree = (id: string) => rowOf(id).querySelector("[data-tree-subtree]")?.textContent;
 		expect(subtree("r")).toBe("$1.85");
@@ -133,7 +130,7 @@ describe("the agent tree", () => {
 
 	it("collapses and expands with the caret, showing how many sessions a closed row hides", async () => {
 		renderApp("/s/a1?view=agents", createFakeServer({ sessions: family() }).fetch);
-		await waitFor(() => rowOf("a1"));
+		await waitFor(() => rowOf("a1"), firstRender);
 		expect(rowOf("a").getAttribute("aria-expanded")).toBe("true");
 		expect(rowOf("a1").hasAttribute("aria-expanded")).toBe(false);
 		expect(rowOf("a").querySelector("[data-tree-hidden]")).toBeNull();
@@ -151,7 +148,7 @@ describe("the agent tree", () => {
 
 	it("expands and collapses everything at once, and keeps the choice across views", async () => {
 		renderApp("/s/a1?view=agents", createFakeServer({ sessions: family() }).fetch);
-		await waitFor(() => rowOf("a1"));
+		await waitFor(() => rowOf("a1"), firstRender);
 		fireEvent.click(screen.getByRole("button", { name: "Collapse all" }));
 		expect(rows().map(([id]) => id)).toEqual(["r"]);
 		fireEvent.click(screen.getByRole("radio", { name: "Transcript" }));
@@ -165,7 +162,7 @@ describe("the agent tree", () => {
 
 	it("moves, folds, and opens rows from the keyboard", async () => {
 		renderApp("/s/a1?view=agents", createFakeServer({ sessions: family() }).fetch);
-		await waitFor(() => rowOf("a1"));
+		await waitFor(() => rowOf("a1"), firstRender);
 		expect(rowOf("a1").tabIndex).toBe(0);
 		expect(rowOf("a").tabIndex).toBe(-1);
 		const key = (id: string, name: string) => fireEvent.keyDown(rowOf(id), { key: name });
@@ -191,7 +188,7 @@ describe("the agent tree", () => {
 		expect(document.activeElement).toBe(rowOf("a1"));
 		key("a1", "Home");
 		key("r", "Enter");
-		await screen.findByRole("heading", { name: "Ship the feature" }, { timeout: LOAD_MS });
+		await screen.findByRole("heading", { name: "Ship the feature" }, firstRender);
 		await waitFor(() => expect(rowOf("r").hasAttribute("data-current")).toBe(true));
 	});
 
@@ -205,12 +202,12 @@ describe("the agent tree", () => {
 		await tree();
 		expect(rowOf("a").querySelector("[data-live]")).not.toBeNull();
 		await act(() => vi.advanceTimersByTimeAsync(TRACE_REFRESH_MS * 2 + 1_000));
-		await waitFor(() => expect(rowOf("a").querySelector("[data-live]")).toBeNull());
+		await waitFor(() => expect(rowOf("a").querySelector("[data-live]")).toBeNull(), firstRender);
 	});
 
 	it("opens the Agents view from the Subagents tile", async () => {
 		renderApp("/s/r", createFakeServer({ sessions: family() }).fetch);
-		await screen.findByRole("heading", { name: "Ship the feature" }, { timeout: LOAD_MS });
+		await screen.findByRole("heading", { name: "Ship the feature" }, firstRender);
 		await waitFor(() => expect(document.querySelector("[data-session-page='trajectory']")).toBeTruthy());
 		const button = await waitFor(() => {
 			const node = document.querySelector<HTMLElement>("[data-kpi='subagents'] [data-open-agent-tree]");
@@ -234,7 +231,7 @@ describe("the agent tree", () => {
 			const node = document.querySelector<HTMLElement>("[data-tree-truncated]");
 			if (!node) throw new Error("no callout");
 			return node;
-		});
+		}, firstRender);
 		expect(callout.textContent).toMatch(/Only the first 2,000 sessions/);
 		expect(rows()).toHaveLength(4);
 	});
@@ -245,14 +242,14 @@ describe("the agent tree", () => {
 			const node = document.querySelector<HTMLElement>("[data-tree-missing]");
 			if (!node) throw new Error("no callout");
 			return node;
-		});
+		}, firstRender);
 		expect(callout.textContent).toMatch(/This server does not serve session trees yet/);
 		expect(screen.getByRole("heading", { name: "Session a1" })).toBeTruthy();
 	});
 
 	it("shows the trajectory for a session without a family", async () => {
 		renderApp("/s/solo?view=agents", createFakeServer({ sessions: family() }).fetch);
-		await screen.findByRole("heading", { name: "Alone" }, { timeout: LOAD_MS });
+		await screen.findByRole("heading", { name: "Alone" }, firstRender);
 		await waitFor(() => expect(document.querySelector("[data-session-page='trajectory']")).toBeTruthy());
 		expect(document.querySelector("[data-agent-tree]")).toBeNull();
 		expect(screen.getByRole("radio", { name: "Trajectory" }).getAttribute("aria-checked")).toBe("true");
@@ -274,7 +271,7 @@ describe("the agent tree", () => {
 			return new Response(JSON.stringify({ ...body, nodes }), { status: 200, headers: { "Content-Type": "application/json" } });
 		};
 		renderApp("/public/s/a1?view=agents", fetchImpl);
-		await waitFor(() => expect(rows()).toEqual([["r", "0"], ["a", "1"], ["a1", "2"], ["h", "1"]]));
+		await waitFor(() => expect(rows()).toEqual([["r", "0"], ["a", "1"], ["a1", "2"], ["h", "1"]]), firstRender);
 		expect(within(rowOf("r")).getByText("main")).toBeTruthy();
 		expect(within(rowOf("a")).getByText("subagent")).toBeTruthy();
 		expect(within(rowOf("a")).getByRole("link", { name: "Session a" }).getAttribute("href")).toBe("/public/s/a?view=agents");
@@ -287,7 +284,7 @@ describe("superagent tickets in the agent tree", () => {
 	it("lists three tickets and a ticket's grandchildren, each ticket with its #N badge and branch", async () => {
 		renderApp("/s/main?view=agents", createFakeServer({ sessions: ticketFamily() }).fetch);
 		await tree();
-		await waitFor(() => expect(rows()).toEqual([["main", "0"], ["tk1", "1"], ["g1", "2"], ["g2", "2"], ["tk2", "1"], ["tk3", "1"]]), { timeout: LOAD_MS });
+		await waitFor(() => expect(rows()).toEqual([["main", "0"], ["tk1", "1"], ["g1", "2"], ["g2", "2"], ["tk2", "1"], ["tk3", "1"]]), firstRender);
 		const badge = rowOf("tk2").querySelector<HTMLElement>("[data-ticket-badge]")!;
 		expect(badge.textContent).toBe("#2");
 		expect(badge.getAttribute("title")).toBe("Ticket #2 · pi/2-add-retries");

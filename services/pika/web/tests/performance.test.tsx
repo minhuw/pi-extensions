@@ -4,7 +4,7 @@ import type { TraceLlmRecord } from "../src/lib/types";
 import { KpiStrip } from "../src/trace/Header";
 import { callPerformance, sessionPerformance } from "../src/trace/performance";
 import { summary } from "./support/fixtures";
-import { mockLayout, renderApp, renderWithApi } from "./support/render";
+import { firstRender, mockLayout, renderApp, renderWithApi } from "./support/render";
 import { createFakeServer, traceOf } from "./support/server";
 import { session } from "./support/trajectory";
 
@@ -49,7 +49,7 @@ describe("measured model performance", () => {
 			Object.assign(first, call({ seq: first.seq, turn: first.turn }));
 			const fetchImpl: typeof fetch = (input, init) => String(input).endsWith("/trace") ? Promise.resolve(Response.json(trace)) : server.fetch(input, init);
 			renderApp("/s/t1", fetchImpl);
-			await waitFor(() => expect(document.querySelector('[data-call-performance]')?.textContent).toContain("400ms · 71.4/s"));
+			await waitFor(() => expect(document.querySelector('[data-call-performance]')?.textContent).toContain("400ms · 71.4/s"), firstRender);
 			expect(screen.getAllByText("Performance", { selector: "span" })).toHaveLength(2);
 			expect(server.calls.some(path => path.includes("/entries"))).toBe(false);
 		} finally { restore(); }

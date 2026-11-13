@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChildSession, Entry } from "../src/lib/types";
 import { applySessionUpdates, isLive, LIVE_POLL_MS, TRACE_REFRESH_MS } from "../src/session/live";
 import { assistantMessage, entry, header, summary, toolCall, turn, userMessage } from "./support/fixtures";
-import { mockLayout, renderApp } from "./support/render";
+import { firstRender, mockLayout, renderApp } from "./support/render";
 import { createFakeServer, type FakeSession } from "./support/server";
 
 function liveSession(lastAt: string): FakeSession {
@@ -51,7 +51,7 @@ describe("live updates", () => {
 		const fixture = liveSession(new Date(Date.now() - 10_000).toISOString());
 		const server = createFakeServer({ sessions: [fixture] });
 		renderApp("/s/live?view=transcript", server.fetch);
-		expect(await screen.findByText("live")).toBeTruthy();
+		expect(await screen.findByText("live", {}, firstRender)).toBeTruthy();
 		// Expand both turns so each has cached entries.
 		for (const strip of await screen.findAllByRole("button", { name: /1 model call/ })) fireEvent.click(strip);
 		await screen.findByText("Working on it", { selector: "[data-entry-seq] p" });
@@ -86,7 +86,7 @@ describe("live updates", () => {
 		const fixture = liveSession(new Date(Date.now() - 10_000).toISOString());
 		const server = createFakeServer({ sessions: [fixture], updates: false });
 		renderApp("/s/live?view=transcript", server.fetch);
-		await screen.findByText("Working on it", { selector: "[data-final-answer] p" });
+		await screen.findByText("Working on it", { selector: "[data-final-answer] p" }, firstRender);
 		grow(fixture);
 		await act(async () => {
 			await vi.advanceTimersByTimeAsync(LIVE_POLL_MS * 3);
@@ -102,7 +102,7 @@ describe("live updates", () => {
 		const fixture = liveSession(new Date(Date.now() - 10_000).toISOString());
 		const server = createFakeServer({ sessions: [fixture] });
 		renderApp("/s/live?view=transcript", server.fetch);
-		await screen.findByText("Working on it", { selector: "[data-final-answer] p" });
+		await screen.findByText("Working on it", { selector: "[data-final-answer] p" }, firstRender);
 		expect(server.calls).toContain("/api/v1/sessions/live/turns?limit=100");
 
 		// 60 new turns: more than one updates response carries.
@@ -128,7 +128,7 @@ describe("live updates", () => {
 		const fixture = liveSession(new Date(Date.now() - 10_000).toISOString());
 		const server = createFakeServer({ sessions: [fixture] });
 		renderApp("/s/live?view=transcript", server.fetch);
-		await screen.findByText("Working on it", { selector: "[data-final-answer] p" });
+		await screen.findByText("Working on it", { selector: "[data-final-answer] p" }, firstRender);
 		expect(document.querySelector("[data-subagents]")).toBeNull();
 
 		grow(fixture);
@@ -144,7 +144,7 @@ describe("live updates", () => {
 	it("does not poll sessions idle for more than two minutes", async () => {
 		const server = createFakeServer({ sessions: [liveSession(new Date(Date.now() - 5 * 60_000).toISOString())] });
 		renderApp("/s/live?view=transcript", server.fetch);
-		await screen.findByText("Working on it", { selector: "[data-final-answer] p" });
+		await screen.findByText("Working on it", { selector: "[data-final-answer] p" }, firstRender);
 		await act(async () => {
 			await vi.advanceTimersByTimeAsync(LIVE_POLL_MS * 2);
 		});
@@ -196,7 +196,7 @@ describe("live traces", () => {
 		const server = createFakeServer({ sessions });
 		const traces = (id: string) => server.calls.filter((call) => call === `/api/v1/sessions/${id}/trace`).length;
 		renderApp("/s/p", server.fetch);
-		await waitFor(() => expect(document.querySelectorAll("[data-ledger-row][data-kind='agent']")).toHaveLength(2));
+		await waitFor(() => expect(document.querySelectorAll("[data-ledger-row][data-kind='agent']")).toHaveLength(2), firstRender);
 		for (const agent of document.querySelectorAll<HTMLElement>("[data-ledger-row][data-kind='agent']")) {
 			fireEvent.click(within(agent).getByRole("button", { name: "Expand subagent" }));
 		}
@@ -248,7 +248,7 @@ describe("live traces", () => {
 		const fixture = liveSession(new Date(Date.now() - 10_000).toISOString());
 		const server = createFakeServer({ sessions: [fixture] });
 		renderApp("/s/live?view=transcript", server.fetch);
-		await screen.findByText("Working on it", { selector: "[data-final-answer] p" });
+		await screen.findByText("Working on it", { selector: "[data-final-answer] p" }, firstRender);
 		grow(fixture);
 		await act(async () => {
 			await vi.advanceTimersByTimeAsync(LIVE_POLL_MS + TRACE_REFRESH_MS);

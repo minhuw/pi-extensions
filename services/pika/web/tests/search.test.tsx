@@ -4,7 +4,7 @@ import { parseSnippet } from "../src/lib/snippet";
 import type { Entry, SearchHit, Turn } from "../src/lib/types";
 import { SEARCH_DEBOUNCE_MS, SESSION_LIMIT, Snippet } from "../src/pages/Search";
 import { assistantMessage, entry, header, iso, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
-import { mockLayout, renderApp } from "./support/render";
+import { firstRender, mockLayout, renderApp } from "./support/render";
 import { createFakeServer, type FakeSession } from "./support/server";
 
 function hit(sessionId: string, seq: number, kind: SearchHit["kind"], snippet: string, sessionTitle = `Session ${sessionId}`): SearchHit {
@@ -222,7 +222,7 @@ describe("search page", () => {
 		const server = createFakeServer({ sessions: [{ detail: summary("long", { entryCount: entries.length }), entries, turns }] });
 		const target = 1 + 120 * 2 + 1;
 		renderApp(`/s/long?view=transcript&seq=${target}`, server.fetch);
-		await waitFor(() => expect(document.querySelector(`[data-entry-seq='${target}'][data-highlighted]`)).toBeTruthy());
+		await waitFor(() => expect(document.querySelector(`[data-entry-seq='${target}'][data-highlighted]`)).toBeTruthy(), firstRender);
 		expect(server.calls).toContain("/api/v1/sessions/long/turns?cursor=100&limit=100");
 		expect(server.calls).toContain(`/api/v1/sessions/long/entries?from=${target - 1}&to=${target}&limit=200`);
 		expect(screen.getByText(`Answer 120`)).toBeTruthy();

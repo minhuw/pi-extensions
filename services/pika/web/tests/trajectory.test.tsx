@@ -7,7 +7,7 @@ import { foldGaps, layoutOverview, makeScale, overviewLanes, traceIntervals } fr
 import { formatPhase } from "../src/trace/format";
 import { LADDER_OPEN_KEY } from "../src/trace/Ladder";
 import { assistantMessage, entry, header, iso, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
-import { mockLayout, renderApp } from "./support/render";
+import { firstRender, largeSessionTest, mockLayout, renderApp } from "./support/render";
 import { anthropicPayload, modelRequest } from "./support/requests";
 import { createFakeServer, traceOf, type FakeSession } from "./support/server";
 import { entryCalls, inspector, key, row, rows, selected, session, slideOver } from "./support/trajectory";
@@ -61,7 +61,7 @@ describe("trajectory ledger", () => {
 	it("shows one row per record under sticky turn headers, with badges by family and summaries", async () => {
 		const server = createFakeServer({ sessions: [session()] });
 		renderApp("/s/t1", server.fetch);
-		await waitFor(() => expect(rows().length).toBe(9));
+		await waitFor(() => expect(rows().length).toBe(9), firstRender);
 		expect(document.querySelector("[data-trajectory]")).not.toBeNull();
 		expect(server.calls).toContain("/api/v1/sessions/t1/trace");
 		// The ledger needs no entries.
@@ -101,7 +101,7 @@ describe("trajectory ledger", () => {
 
 	it("keeps the shortcuts and colors in the toolbar's help, and the inspector hidden until something is inspected", async () => {
 		renderApp("/s/t1", createFakeServer({ sessions: [session()] }).fetch);
-		const shell = await waitFor(() => row("[data-kind='shell']"));
+		const shell = await waitFor(() => row("[data-kind='shell']"), firstRender);
 		const pane = slideOver()!;
 		expect(pane.dataset.inspectorPane).toBe("hidden");
 		expect(pane.className).toContain("min-[1200px]:hidden");
@@ -138,7 +138,7 @@ describe("trajectory ledger", () => {
 		];
 		const server = createFakeServer({ sessions: [{ detail: summary("m1", { title: "List" }), entries, turns: [turn(0, 1, 3, { userText: "List", modelCalls: 1, toolCalls: 1 })] }] });
 		renderApp("/s/m1", server.fetch);
-		fireEvent.click(await waitFor(() => row("[data-seq='2'][data-kind='llm']")));
+		fireEvent.click(await waitFor(() => row("[data-seq='2'][data-kind='llm']"), firstRender));
 		await waitFor(() => expect(inspector().textContent).toContain("gpt-6.1-sol"));
 		fireEvent.click(within(inspector()).getByRole("tab", { name: "Input" }));
 		const input = await waitFor(() => inspector().querySelector("[data-json-tree]")!);
@@ -157,7 +157,7 @@ describe("trajectory ledger", () => {
 		const server = createFakeServer({ sessions: [session()] });
 		renderApp("/s/t1", server.fetch);
 		expect(document.querySelector("[data-inspector-empty]")).toBeNull();
-		fireEvent.click(await waitFor(() => row("[data-kind='shell']")));
+		fireEvent.click(await waitFor(() => row("[data-kind='shell']"), firstRender));
 		expect(selected()).toBe(row("[data-kind='shell']"));
 		await waitFor(() => expect(inspector().querySelector("[data-tool='bash']")).not.toBeNull());
 		expect(inspector().dataset.tab).toBe("rendered");
@@ -186,7 +186,7 @@ describe("trajectory ledger", () => {
 	it("shows what the model saw in the Context tab, with the drawer's attributes", async () => {
 		const server = createFakeServer({ sessions: [session()], requests: [modelRequest("r1", anthropicPayload)] });
 		renderApp("/s/t1", server.fetch);
-		fireEvent.click(await waitFor(() => row("[data-seq='2'][data-kind='llm']")));
+		fireEvent.click(await waitFor(() => row("[data-seq='2'][data-kind='llm']"), firstRender));
 		await waitFor(() => expect(within(inspector()).getByRole("button", { name: /Thinking/ })).toBeTruthy());
 		expect(inspector().textContent).toContain("npm test");
 		expect(inspector().querySelector("[data-usage]")?.textContent).toContain("8,000");
@@ -217,7 +217,7 @@ describe("trajectory ledger", () => {
 			const node = document.querySelector<HTMLElement>("[data-overview]");
 			if (!node) throw new Error("no overview");
 			return node;
-		});
+		}, firstRender);
 		const labels = [...overview.querySelectorAll("[data-overview-rows] span")].map((node) => node.textContent);
 		expect(labels).toEqual(["Turns", "Provider", "Model calls", "Tools", "Subagents"]);
 		expect(document.querySelector("[data-phase-key]")?.textContent).toBe("WaitingStreaming");
@@ -277,7 +277,7 @@ describe("trajectory ledger", () => {
 			const node = document.querySelector<HTMLElement>("[data-overview]");
 			if (!node) throw new Error("no overview");
 			return node;
-		});
+		}, firstRender);
 		const labels = [...overview.querySelectorAll("[data-overview-rows] span")].map((node) => node.textContent);
 		expect(labels).toEqual(["Turns", "Model calls", "Tools", "Subagents"]);
 		expect(document.querySelector("[data-phase-key]")).toBeNull();
@@ -289,7 +289,7 @@ describe("trajectory ledger", () => {
 	it("moves with j, k, and arrows, folds turns with ← and →, jumps with [ and ], and filters with /", async () => {
 		const server = createFakeServer({ sessions: [session()] });
 		renderApp("/s/t1", server.fetch);
-		await waitFor(() => expect(rows().length).toBe(9));
+		await waitFor(() => expect(rows().length).toBe(9), firstRender);
 		key("j");
 		await waitFor(() => expect(selected()?.dataset.seq).toBe("2"));
 		key("ArrowDown");
@@ -322,7 +322,7 @@ describe("trajectory ledger", () => {
 
 	it("filters by text, family, and errors, and counts what it shows", async () => {
 		renderApp("/s/t1", createFakeServer({ sessions: [session()] }).fetch);
-		await waitFor(() => expect(rows().length).toBe(9));
+		await waitFor(() => expect(rows().length).toBe(9), firstRender);
 		const count = () => document.querySelector("[data-ledger-count]")?.textContent;
 		expect(count()).toBe("9 records");
 		fireEvent.change(screen.getByRole("searchbox", { name: "Filter records" }), { target: { value: "api.ts" } });
@@ -361,7 +361,7 @@ describe("trajectory ledger", () => {
 			turns.push(turn(i, seq, seq + 1, { userText: `Question ${i}`, at: iso(i * 10_000), durationMs: 2000 }));
 		}
 		renderApp("/s/many", createFakeServer({ sessions: [{ detail: summary("many", { entryCount: entries.length }), entries, turns }] }).fetch);
-		await waitFor(() => expect(rows().map((node) => node.dataset.turnIndex)).toEqual(["42", "43", "44"]));
+		await waitFor(() => expect(rows().map((node) => node.dataset.turnIndex)).toEqual(["42", "43", "44"]), firstRender);
 		const expanded = () => [...document.querySelectorAll("[data-turn-head] button[aria-expanded='true']")].length;
 		expect(expanded()).toBe(3);
 		fireEvent.click(screen.getByRole("button", { name: "Collapse all" }));
@@ -379,7 +379,7 @@ describe("trajectory overview", () => {
 			const node = document.querySelector<HTMLElement>("[data-overview]");
 			if (!node) throw new Error("no overview");
 			return node;
-		});
+		}, firstRender);
 		expect(overview.getAttribute("aria-label")).toBe("Session timeline: 2 turns, 5 model calls, 4 tool calls, 1m 10s active.");
 		expect(overview.querySelectorAll("canvas")).toHaveLength(2);
 		// The plot is 800 px wide in jsdom; place the edit call the way the overview does.
@@ -418,7 +418,7 @@ describe("trajectory overview", () => {
 			const node = document.querySelector<HTMLElement>("[data-overview]");
 			if (!node) throw new Error("no overview");
 			return node;
-		});
+		}, firstRender);
 		const plot = overview.querySelector<HTMLElement>("[data-overview-plot]")!;
 		const button = (name: string) => within(overview).queryByRole("button", { name }) as HTMLButtonElement | null;
 		const whole = button("Show the whole session")!;
@@ -477,7 +477,7 @@ describe("trajectory overview", () => {
 			const node = document.querySelector<HTMLElement>("[data-replay]");
 			if (!node) throw new Error("no replay");
 			return node;
-		});
+		}, firstRender);
 		expect(replay.dataset.status).toBe("stopped");
 		expect(within(replay).getByRole("button", { name: "10×" }).getAttribute("aria-pressed")).toBe("true");
 		fireEvent.click(within(replay).getByRole("button", { name: "60×" }));
@@ -499,7 +499,7 @@ describe("trajectory overview", () => {
 		try {
 			const server = createFakeServer({ sessions: [session()] });
 			renderApp("/s/t1", server.fetch);
-			fireEvent.click(await screen.findByRole("button", { name: "Replay the session" }));
+			fireEvent.click(await screen.findByRole("button", { name: "Replay the session" }, firstRender));
 			const current = () => document.querySelector<HTMLElement>("[data-replay-current]");
 			await act(async () => {
 				await vi.advanceTimersByTimeAsync(700);
@@ -528,7 +528,7 @@ describe("session views", () => {
 	it("switches between trajectory and transcript and remembers the choice", async () => {
 		const server = createFakeServer({ sessions: [session()] });
 		const first = renderApp("/s/t1", server.fetch);
-		await waitFor(() => expect(document.querySelector("[data-trajectory]")).not.toBeNull());
+		await waitFor(() => expect(document.querySelector("[data-trajectory]")).not.toBeNull(), firstRender);
 		const views = screen.getByRole("radiogroup", { name: "View" });
 		expect(within(views).getByRole("radio", { name: "Trajectory" }).getAttribute("aria-checked")).toBe("true");
 		fireEvent.click(within(views).getByRole("radio", { name: "Transcript" }));
@@ -541,16 +541,16 @@ describe("session views", () => {
 		first.unmount();
 
 		const second = renderApp("/s/t1", server.fetch);
-		await waitFor(() => expect(document.querySelector("[data-turn-list]")).not.toBeNull());
+		await waitFor(() => expect(document.querySelector("[data-turn-list]")).not.toBeNull(), firstRender);
 		second.unmount();
 		// The URL wins over the stored choice.
 		renderApp("/s/t1?view=trajectory", server.fetch);
-		await waitFor(() => expect(document.querySelector("[data-trajectory]")).not.toBeNull());
+		await waitFor(() => expect(document.querySelector("[data-trajectory]")).not.toBeNull(), firstRender);
 	});
 
 	it("falls back to the transcript when the server has no trace route", async () => {
 		renderApp("/s/t1", createFakeServer({ sessions: [session()], trace: false }).fetch);
-		expect(await screen.findByText("Transcript only")).toBeTruthy();
+		expect(await screen.findByText("Transcript only", {}, firstRender)).toBeTruthy();
 		expect(await screen.findByText("Thanks", { selector: "[data-turn] p" })).toBeTruthy();
 		expect(document.querySelector("[data-trajectory]")).toBeNull();
 	});
@@ -558,7 +558,7 @@ describe("session views", () => {
 	it("deep-links to a record: selects, highlights, and scrolls to it", async () => {
 		renderApp("/s/t1?seq=5", createFakeServer({ sessions: [session()] }).fetch);
 		// Seq 5 is the read call's result.
-		await waitFor(() => expect(document.querySelector("[data-ledger-row][data-highlighted]")?.getAttribute("data-kind")).toBe("read"));
+		await waitFor(() => expect(document.querySelector("[data-ledger-row][data-highlighted]")?.getAttribute("data-kind")).toBe("read"), firstRender);
 		expect(selected()?.textContent).toContain("src/api.ts");
 		expect(document.querySelectorAll("[data-highlighted]")).toHaveLength(1);
 	});
@@ -572,7 +572,7 @@ describe("session views", () => {
 			turns.push(turn(i, seq, seq + 1, { userText: `Question ${i}`, at: iso(i * 10_000), durationMs: 2000 }));
 		}
 		renderApp("/s/many?seq=6", createFakeServer({ sessions: [{ detail: summary("many", { entryCount: entries.length }), entries, turns }] }).fetch);
-		await waitFor(() => expect(document.querySelector("[data-ledger-row][data-highlighted]")?.getAttribute("data-seq")).toBe("6"));
+		await waitFor(() => expect(document.querySelector("[data-ledger-row][data-highlighted]")?.getAttribute("data-seq")).toBe("6"), firstRender);
 		expect(selected()?.textContent).toContain("Answer 2");
 	});
 });
@@ -606,7 +606,7 @@ describe("live trajectory", () => {
 		};
 		const server = createFakeServer({ sessions: [fixture] });
 		renderApp("/s/live", server.fetch);
-		const bash = await waitFor(() => row("[data-kind='shell']"));
+		const bash = await waitFor(() => row("[data-kind='shell']"), firstRender);
 		expect(bash.dataset.running).toBe("true");
 		expect(bash.textContent).toContain("running");
 
@@ -639,7 +639,7 @@ describe("subagents in the ledger", () => {
 	it("expands an Agent row into its child's records lazily, and nests again", async () => {
 		const server = createFakeServer({ sessions: agents() });
 		renderApp("/s/p1", server.fetch);
-		const agent = await waitFor(() => row("[data-kind='agent'][data-seq='2']"));
+		const agent = await waitFor(() => row("[data-kind='agent'][data-seq='2']"), firstRender);
 		expect(agent.textContent).toContain("worker");
 		expect(agent.textContent).toContain("Fix tests");
 		expect(server.calls.some((call) => call.startsWith("/api/v1/sessions/c1"))).toBe(false);
@@ -662,7 +662,7 @@ describe("subagents in the ledger", () => {
 	it("lists a workflow's children as rows, each expandable", async () => {
 		const server = createFakeServer({ sessions: agents() });
 		renderApp("/s/p1", server.fetch);
-		const workflow = await waitFor(() => row("[data-kind='agent'][data-seq='4']"));
+		const workflow = await waitFor(() => row("[data-kind='agent'][data-seq='4']"), firstRender);
 		expect(workflow.textContent).toContain("review-fanout");
 		expect(workflow.textContent).toContain("2 agents");
 		fireEvent.click(within(workflow).getByRole("button", { name: "Expand subagent" }));
@@ -700,7 +700,7 @@ describe("time breakdown", () => {
 		fireEvent.click(split);
 		expect(split.getAttribute("aria-pressed")).toBe("true");
 		// Level by level, down to the worker's own recon.
-		await waitFor(() => expect(strip.querySelector("[data-breakdown-total]")?.textContent).toContain("5 sessions"));
+		await waitFor(() => expect(strip.querySelector("[data-breakdown-total]")?.textContent).toContain("5 sessions"), firstRender);
 		expect(new Set(traces(server.calls))).toEqual(new Set(["p1", "c1", "w1", "w2", "c1n"].map((id) => `/api/v1/sessions/${id}/trace`)));
 		expect(strip.dataset.mode).toBe("split");
 		expect(kinds(strip)).toEqual(["llm", "read", "between"]);
@@ -725,7 +725,7 @@ describe("time breakdown", () => {
 		renderApp("/s/t1", createFakeServer({ sessions: [fixture] }).fetch);
 		const strip = await breakdown();
 		const total = () => strip.querySelector("[data-breakdown-total]")?.textContent;
-		await waitFor(() => expect(rows()).toHaveLength(9));
+		await waitFor(() => expect(rows()).toHaveLength(9), firstRender);
 		const whole = total();
 		expect(whole).toContain("9 calls");
 		expect(strip.hasAttribute("data-range")).toBe(false);
@@ -788,7 +788,7 @@ describe("trajectory virtualization", () => {
 		const server = createFakeServer({ sessions: [{ detail: summary("big", { entryCount: entries.length }), entries, turns }] });
 		renderApp("/s/big", server.fetch);
 		const count = () => document.querySelectorAll("[data-turn], [data-entry-seq]").length;
-		await waitFor(() => expect(count()).toBeGreaterThan(0));
+		await waitFor(() => expect(count()).toBeGreaterThan(0), firstRender);
 		expect(count()).toBeLessThan(300);
 		fireEvent.click(screen.getByRole("button", { name: /Collapse all|Expand all/ }));
 		if (screen.queryByRole("button", { name: "Expand all" })) fireEvent.click(screen.getByRole("button", { name: "Expand all" }));
@@ -805,7 +805,7 @@ describe("trajectory virtualization", () => {
 		expect(Math.max(...rows().map((node) => Number(node.dataset.seq)))).toBeGreaterThan(4000);
 		// Nothing but the trace was fetched.
 		expect(entryCalls(server.calls)).toEqual([]);
-	});
+	}, largeSessionTest);
 });
 
 describe("superagent tickets in the trajectory", () => {
@@ -850,7 +850,7 @@ describe("superagent tickets in the trajectory", () => {
 			const node = document.querySelector<HTMLElement>("[data-overview]");
 			if (!node) throw new Error("no overview");
 			return node;
-		});
+		}, firstRender);
 		const gutter = overview.querySelector<HTMLElement>("[data-overview-rows]")!;
 		expect([...gutter.querySelectorAll("span")].map((node) => node.textContent)).toEqual(["Turns", "Model calls", "Tools", "Subagents"]);
 		// Three rows of 16 px with 2 px between, instead of one band: 68 + 52 + 5.

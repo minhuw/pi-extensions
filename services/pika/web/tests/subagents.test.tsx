@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ChildSession, SessionLink } from "../src/lib/types";
 import { assistantMessage, entry, header, iso, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
-import { mockLayout, renderApp } from "./support/render";
+import { firstRender, mockLayout, renderApp } from "./support/render";
 import { createFakeServer, type FakeSession } from "./support/server";
 
 function child(id: string, parent: string, toolCallId: string, link: Partial<SessionLink>, at = 0): ChildSession {
@@ -74,7 +74,7 @@ describe("inline subagents", () => {
 			const node = document.querySelector<HTMLElement>("[data-kpi='subagents']");
 			if (!node) throw new Error("no tile");
 			return node;
-		});
+		}, firstRender);
 		expect(tile.querySelector("[data-kpi-value]")?.textContent).toBe("3");
 		const list = tile.querySelector<HTMLElement>("[data-subagents]")!;
 		expect([...list.querySelectorAll("a")].map((link) => link.getAttribute("href"))).toEqual(["/s/c1"]);
@@ -87,7 +87,7 @@ describe("inline subagents", () => {
 	it("expands an Agent call into its child session, lazily and recursively", async () => {
 		const server = createFakeServer({ sessions: fixture() });
 		renderApp("/s/p1?view=transcript", server.fetch);
-		fireEvent.click(await screen.findByRole("button", { name: /3 model calls/ }));
+		fireEvent.click(await screen.findByRole("button", { name: /3 model calls/ }, firstRender));
 		await openTool("agent");
 		const card = await waitFor(() => {
 			const node = document.querySelector<HTMLElement>("[data-agent-card]");
@@ -129,7 +129,7 @@ describe("inline subagents", () => {
 
 	it("groups workflow children under their workflow call", async () => {
 		renderApp("/s/p1?view=transcript", createFakeServer({ sessions: fixture() }).fetch);
-		fireEvent.click(await screen.findByRole("button", { name: /3 model calls/ }));
+		fireEvent.click(await screen.findByRole("button", { name: /3 model calls/ }, firstRender));
 		await openTool("workflow");
 		const card = await waitFor(() => {
 			const node = document.querySelector<HTMLElement>("[data-workflow-card]");

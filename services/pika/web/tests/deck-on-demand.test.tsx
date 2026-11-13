@@ -15,6 +15,7 @@ import {
 	UndoToast,
 } from "../src/nodes/deck/OnDemand";
 import { gitCheckout } from "./support/checkouts";
+import { firstRender } from "./support/render";
 
 const ATLAS = gitCheckout("a", "/home/me/code/atlas");
 const noop = () => {};
@@ -30,39 +31,39 @@ const OVERLAYS: [string, () => ReactElement, () => HTMLElement | Promise<HTMLEle
 				Sends SIGTERM to pi.
 			</ConfirmDialog>
 		),
-		() => screen.findByRole("alertdialog", { name: "Kill this terminal?" }),
+		() => screen.findByRole("alertdialog", { name: "Kill this terminal?" }, firstRender),
 	],
 	[
 		"Add a repository",
 		() => <AddCheckoutDialog nodeName="mac" home="/home/me" listFolders={async () => []} onAdd={async () => {}} onCancel={noop} />,
-		() => screen.findByRole("dialog", { name: "Add a repository on mac" }),
+		() => screen.findByRole("dialog", { name: "Add a repository on mac" }, firstRender),
 	],
 	[
 		"New worktree",
 		() => <NewWorktreeDialog projectName="atlas" checkout={ATLAS} home="/home/me" onCreate={async () => {}} onCancel={noop} />,
-		() => screen.findByRole("dialog", { name: "New worktree of atlas" }),
+		() => screen.findByRole("dialog", { name: "New worktree of atlas" }, firstRender),
 	],
 	[
 		"Remove worktree",
 		() => <RemoveWorktreeDialog nodeName="mac" path="/home/me/code/atlas-fix" home="/home/me" branch="fix" prunable={false} liveTerminals={0} onRemove={async () => {}} onCancel={noop} />,
-		() => screen.findByRole("alertdialog", { name: "Remove the worktree fix?" }),
+		() => screen.findByRole("alertdialog", { name: "Remove the worktree fix?" }, firstRender),
 	],
 	[
 		"worktree settings",
 		() => <CheckoutSettingsDialog checkoutName="atlas" checkout={ATLAS} home="/home/me" onSave={async () => {}} onCancel={noop} />,
-		() => screen.findByRole("dialog", { name: "Worktree settings of atlas" }),
+		() => screen.findByRole("dialog", { name: "Worktree settings of atlas" }, firstRender),
 	],
-	["shortcuts help", () => <KeysHelp onClose={noop} />, () => screen.findByRole("dialog", { name: "Keyboard shortcuts" })],
-	["quick open", () => <QuickOpen files={files} home="/home/me" onPick={noop} onClose={noop} />, () => screen.findByRole("dialog", { name: "Open a file" })],
+	["shortcuts help", () => <KeysHelp onClose={noop} />, () => screen.findByRole("dialog", { name: "Keyboard shortcuts" }, firstRender)],
+	["quick open", () => <QuickOpen files={files} home="/home/me" onPick={noop} onClose={noop} />, () => screen.findByRole("dialog", { name: "Open a file" }, firstRender)],
 	[
 		"undo notice",
 		() => <UndoToast notice={{ id: 1, message: "Removed repo from Deck", undo: noop }} onDone={noop} />,
-		() => screen.findByText("Removed repo from Deck"),
+		() => screen.findByText("Removed repo from Deck", {}, firstRender),
 	],
 ];
 
 describe("Deck's overlays, loaded on demand", () => {
-	// Runs first in this file, so nothing has loaded the overlays' chunk yet.
+	// Runs first in this file, so nothing has loaded the overlays' chunk yet: whichever opens first waits for it, within `firstRender`.
 	it.each(OVERLAYS)("open the %s before their chunk has loaded", async (_name, element, shown) => {
 		const { unmount } = render(element());
 		// Each component loads its part of the chunk on its first render: nothing shows until it has.

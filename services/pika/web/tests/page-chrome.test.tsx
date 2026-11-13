@@ -8,7 +8,7 @@ import { PAGE_COLUMN } from "../src/components/ui";
 import type { RunDetail } from "../src/lib/types";
 import { TRANSCRIPT_COLUMN, TRAJECTORY_COLUMN } from "../src/pages/SessionView";
 import { onlineSession, summary } from "./support/fixtures";
-import { mockLayout, renderApp } from "./support/render";
+import { firstRender, mockLayout, renderApp } from "./support/render";
 import { installMatchMedia } from "./support/media";
 import { createFakeServer } from "./support/server";
 
@@ -67,7 +67,7 @@ describe("logo", () => {
 		unmount();
 
 		renderApp("/s/s1", server.fetch);
-		await screen.findByRole("heading", { name: "Fix the parser", level: 1 });
+		await screen.findByRole("heading", { name: "Fix the parser", level: 1 }, firstRender);
 		expect(current("Sessions")).toBe("true");
 		expect(current("Herder runs")).toBeNull();
 	});
@@ -138,7 +138,7 @@ describe("page width", () => {
 	it("gives the session header the full width, and the transcript body a reading column", async () => {
 		const server = createFakeServer({ sessions: [{ detail: summary("s1", { title: "Fix the parser" }), turns: [], entries: [] }] });
 		const first = renderApp("/s/s1", server.fetch);
-		const heading = await screen.findByRole("heading", { name: "Fix the parser", level: 1 });
+		const heading = await screen.findByRole("heading", { name: "Fix the parser", level: 1 }, firstRender);
 		const header = heading.closest<HTMLElement>("[data-session-header]")!;
 		for (const name of TRAJECTORY_COLUMN.split(" ")) expect(header.classList).toContain(name);
 		expect(header.className).not.toMatch(/max-w-/);
@@ -146,7 +146,7 @@ describe("page width", () => {
 		first.unmount();
 
 		renderApp("/s/s1?view=transcript", server.fetch);
-		const again = await screen.findByRole("heading", { name: "Fix the parser", level: 1 });
+		const again = await screen.findByRole("heading", { name: "Fix the parser", level: 1 }, firstRender);
 		const sessionHeader = again.closest<HTMLElement>("[data-session-header]")!;
 		for (const name of TRAJECTORY_COLUMN.split(" ")) expect(sessionHeader.classList).toContain(name);
 		expect(sessionHeader.className).not.toMatch(/max-w-/);
@@ -166,7 +166,7 @@ describe("title badges", () => {
 			online: [onlineSession("s1")],
 		});
 		renderApp("/s/s1", server.fetch);
-		const heading = await screen.findByRole("heading", { name: "Refactor the parser", level: 1 });
+		const heading = await screen.findByRole("heading", { name: "Refactor the parser", level: 1 }, firstRender);
 		await waitFor(() => expect(document.querySelector("[data-online]")).not.toBeNull());
 		// Long titles clamp to two lines and keep the full text in the tooltip.
 		expect(heading.classList).toContain("line-clamp-2");
@@ -181,7 +181,7 @@ describe("title badges", () => {
 	it("leave a title without badges a plain heading", async () => {
 		const server = createFakeServer({ sessions: [{ detail: summary("s1", { title: "Old session" }), turns: [], entries: [] }] });
 		renderApp("/s/s1", server.fetch);
-		const heading = await screen.findByRole("heading", { name: "Old session", level: 1 });
+		const heading = await screen.findByRole("heading", { name: "Old session", level: 1 }, firstRender);
 		expect(heading.classList).not.toContain("inline");
 		expect(document.querySelector("[data-title-badges]")).toBeNull();
 	});

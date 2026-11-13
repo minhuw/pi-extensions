@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { LAYOUT_GUARD_MS } from "../src/lib/hooks";
 import { HEALTH_RETRY_MS, RELAY_BADGE_POLL_MS, RELAY_POLL_MS } from "../src/lib/relay";
 import { onlineSession, relayEvent, summary } from "./support/fixtures";
-import { renderApp } from "./support/render";
+import { firstRender, renderApp } from "./support/render";
 import { createFakeServer } from "./support/server";
 
 const SESSIONS = "/api/v1/relay/sessions";
@@ -669,7 +669,7 @@ describe("session page", () => {
 	it("shows an Online badge and a Message action while the session is online", async () => {
 		const server = createFakeServer({ sessions: [recorded], online: [onlineSession("s-a", { name: "parser" })] });
 		renderApp("/s/s-a", server.fetch);
-		expect(await screen.findByRole("heading", { name: "Refactor the parser", level: 1 })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Refactor the parser", level: 1 }, firstRender)).toBeTruthy();
 		await waitFor(() => expect(document.querySelector("[data-online]")?.textContent).toBe("Online"));
 		fireEvent.click(screen.getByRole("button", { name: "Message this session" }));
 		const dialog = screen.getByRole("dialog", { name: "Message parser" });
@@ -683,7 +683,7 @@ describe("session page", () => {
 	it("shows neither when the session is offline", async () => {
 		const server = createFakeServer({ sessions: [recorded], online: [onlineSession("s-other")] });
 		renderApp("/s/s-a", server.fetch);
-		expect(await screen.findByRole("heading", { name: "Refactor the parser", level: 1 })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Refactor the parser", level: 1 }, firstRender)).toBeTruthy();
 		await waitFor(() => expect(count(server, SESSIONS)).toBe(1));
 		expect(document.querySelector("[data-online]")).toBeNull();
 		expect(screen.queryByRole("button", { name: "Message this session" })).toBeNull();
@@ -692,7 +692,7 @@ describe("session page", () => {
 	it("shows neither when relay is off", async () => {
 		const server = createFakeServer({ sessions: [recorded], features: [], online: [onlineSession("s-a")] });
 		renderApp("/s/s-a", server.fetch);
-		expect(await screen.findByRole("heading", { name: "Refactor the parser", level: 1 })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Refactor the parser", level: 1 }, firstRender)).toBeTruthy();
 		await waitFor(() => expect(server.calls).toContain("/api/health"));
 		expect(document.querySelector("[data-online]")).toBeNull();
 		expect(relayCalls(server)).toEqual([]);

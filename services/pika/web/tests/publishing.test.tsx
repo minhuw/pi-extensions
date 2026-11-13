@@ -2,7 +2,7 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PikaApi, type PublishingSettings } from "../src/lib/api";
 import { inGuestView } from "../src/lib/guestView";
-import { mockLayout, renderApp } from "./support/render";
+import { firstRender, mockLayout, renderApp } from "./support/render";
 import { createFakeServer } from "./support/server";
 import { row, session } from "./support/trajectory";
 
@@ -99,7 +99,7 @@ describe("project publishing", () => {
 	it("serves the public transcript and keeps project navigation public", async () => {
 		const server = publicServer();
 		renderApp("/public/s/t1?view=transcript", server.fetch);
-		await waitFor(() => expect(document.querySelector("[data-session-page='transcript']")).toBeTruthy());
+		await waitFor(() => expect(document.querySelector("[data-session-page='transcript']")).toBeTruthy(), firstRender);
 		fireEvent.click(await screen.findByRole("button", { name: /4 model calls/ }));
 		expect(await screen.findByText("Fixed the retry count.")).toBeTruthy();
 		const breadcrumb = screen.getByRole("navigation", { name: "Breadcrumb" });
@@ -111,14 +111,14 @@ describe("project publishing", () => {
 		const published = session();
 		published.detail = { ...published.detail, repository: "https://github.com/minhuw/pi-extensions" };
 		renderApp("/public/s/t1", publicServer([published]).fetch);
-		const link = await screen.findByRole("link", { name: "Open minhuw/pi-extensions on GitHub" });
+		const link = await screen.findByRole("link", { name: "Open minhuw/pi-extensions on GitHub" }, firstRender);
 		expect(link.getAttribute("href")).toBe("https://github.com/minhuw/pi-extensions");
 	});
 
 	it("shows an unavailable session publicly without sending the visitor to login", async () => {
 		const server = publicServer();
 		renderApp("/public/s/private", server.fetch);
-		expect(await screen.findByRole("heading", { name: "This session doesn’t exist" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "This session doesn’t exist" }, firstRender)).toBeTruthy();
 		expect(screen.getByRole("link", { name: "Back to sessions" }).getAttribute("href")).toBe("/public/");
 		expect(document.querySelector("[data-guest-note]")).toBeNull();
 		expect(server.calls).not.toContain("/api/v1/me");
@@ -147,7 +147,7 @@ describe("signed-out visitors", () => {
 	it("open a published session's link publicly, and signing in returns to the owner's page", async () => {
 		const server = guestServer();
 		renderApp("/s/t1", server.fetch);
-		expect(await screen.findByRole("heading", { name: "Fix the flaky test" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Fix the flaky test" }, firstRender)).toBeTruthy();
 		expect(screen.queryByRole("navigation", { name: "Main" })).toBeNull();
 		const signIn = screen.getByRole("link", { name: "Sign in" });
 		expect(signIn.getAttribute("href")).toBe("/login?next=%2Fs%2Ft1");
@@ -161,7 +161,7 @@ describe("signed-out visitors", () => {
 
 	it("are asked for the password at a private session's link, with the gallery offered", async () => {
 		renderApp("/s/private", guestServer().fetch);
-		expect(await screen.findByRole("heading", { name: "Sign in to pika" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Sign in to pika" }, firstRender)).toBeTruthy();
 		expect((await screen.findByRole("link", { name: "Browse public trajectories" })).getAttribute("href")).toBe("/public");
 	});
 
@@ -190,7 +190,7 @@ describe("the owner's guest view", () => {
 	it("opens a session as a guest sees it, without the owner's API, and returns to the owner's page", async () => {
 		const server = guestServer([session()], { signedIn: true });
 		renderApp("/s/t1?view=transcript", server.fetch);
-		const viewAsGuest = await screen.findByRole("link", { name: "View as guest" });
+		const viewAsGuest = await screen.findByRole("link", { name: "View as guest" }, firstRender);
 		expect(viewAsGuest.getAttribute("href")).toBe("/public/s/t1?view=transcript");
 		const before = server.owner.calls.length;
 		fireEvent.click(viewAsGuest);
@@ -210,7 +210,7 @@ describe("the owner's guest view", () => {
 
 	it("tells only the owner why a guest misses a private session", async () => {
 		renderApp("/s/t1", guestServer([], { signedIn: true }).fetch);
-		fireEvent.click(await screen.findByRole("link", { name: "View as guest" }));
+		fireEvent.click(await screen.findByRole("link", { name: "View as guest" }, firstRender));
 		expect(await screen.findByRole("heading", { name: "This session doesn’t exist" })).toBeTruthy();
 		const note = document.querySelector("[data-guest-note]")!;
 		expect(note.textContent).toContain("this session’s project isn’t published");

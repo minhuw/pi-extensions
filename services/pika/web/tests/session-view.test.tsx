@@ -14,7 +14,7 @@ import {
 	turn,
 	userMessage,
 } from "./support/fixtures";
-import { mockLayout, renderApp } from "./support/render";
+import { firstRender, mockLayout, renderApp } from "./support/render";
 import { BATCH_REPORT, ticketFamily } from "./support/tickets";
 import { createFakeServer, type FakeSession } from "./support/server";
 
@@ -94,7 +94,7 @@ describe("session view", () => {
 			],
 		};
 		renderApp("/s/s1?view=transcript", createFakeServer({ sessions: [session] }).fetch);
-		await screen.findByRole("heading", { name: "Mixed turns" });
+		await screen.findByRole("heading", { name: "Mixed turns" }, firstRender);
 		const head = (index: number) => document.querySelector<HTMLElement>(`[data-turn="${index}"]`)!;
 		await waitFor(() => expect(head(2)).toBeTruthy());
 		const label = (index: number) => head(index).querySelector<HTMLElement>("[data-turn-start]")!;
@@ -114,7 +114,7 @@ describe("session view", () => {
 	it("shows the title, chips, and key numbers instead of a property table", async () => {
 		const server = createFakeServer({ sessions: [sessionFixture()] });
 		renderApp("/s/s1", server.fetch);
-		const heading = await screen.findByRole("heading", { name: "Fix the failing test", level: 1 });
+		const heading = await screen.findByRole("heading", { name: "Fix the failing test", level: 1 }, firstRender);
 		expect(heading.getAttribute("title")).toBe("Fix the failing test");
 		expect(heading.classList).toContain("line-clamp-2");
 		expect(document.querySelector("dl dt")).toBeNull();
@@ -141,7 +141,7 @@ describe("session view", () => {
 	it("shows a prompt card with its work strip and final answer in the transcript", async () => {
 		const server = createFakeServer({ sessions: [sessionFixture()] });
 		renderApp("/s/s1?view=transcript", server.fetch);
-		expect(await screen.findByText("failing", { selector: "strong" })).toBeTruthy();
+		expect(await screen.findByText("failing", { selector: "strong" }, firstRender)).toBeTruthy();
 		const strip = document.querySelector<HTMLElement>("[data-work-strip='0']")!;
 		expect(strip.textContent).toContain("3 model calls · 2 tools · 2m 14s · $0.31");
 		expect(within(strip).getByText("1 error")).toBeTruthy();
@@ -153,14 +153,14 @@ describe("session view", () => {
 		named.detail = { ...named.detail, device: "4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a", deviceName: "Studio Mac" };
 		const first = renderApp("/s/s1", createFakeServer({ sessions: [named] }).fetch);
 		const device = () => document.querySelector<HTMLElement>("[data-device-chip]")!;
-		await screen.findByRole("heading", { name: "Fix the failing test" });
+		await screen.findByRole("heading", { name: "Fix the failing test" }, firstRender);
 		expect(device().textContent).toBe("Studio Mac");
 		first.unmount();
 
 		const unnamed = sessionFixture();
 		unnamed.detail = { ...unnamed.detail, device: "mini", deviceName: undefined };
 		renderApp("/s/s1", createFakeServer({ sessions: [unnamed] }).fetch);
-		await screen.findByRole("heading", { name: "Fix the failing test" });
+		await screen.findByRole("heading", { name: "Fix the failing test" }, firstRender);
 		expect(device().textContent).toBe("mini");
 	});
 
@@ -173,7 +173,7 @@ describe("session view", () => {
 		const repositoryLink = () => document.querySelector<HTMLAnchorElement>("[data-session-chips] [data-repository]");
 
 		const github = renderApp("/s/s1", withRepository("https://github.com/minhuw/pi-extensions"));
-		const link = await screen.findByRole("link", { name: "Open minhuw/pi-extensions on GitHub" });
+		const link = await screen.findByRole("link", { name: "Open minhuw/pi-extensions on GitHub" }, firstRender);
 		expect(link).toBe(repositoryLink());
 		expect(link.getAttribute("href")).toBe("https://github.com/minhuw/pi-extensions");
 		expect([link.getAttribute("target"), link.getAttribute("rel"), link.getAttribute("title")]).toEqual([
@@ -188,14 +188,14 @@ describe("session view", () => {
 		github.unmount();
 
 		const other = renderApp("/s/s1", withRepository("https://gitlab.example.com/team/proj"));
-		const generic = await screen.findByRole("link", { name: "Open the repository gitlab.example.com/team/proj" });
+		const generic = await screen.findByRole("link", { name: "Open the repository gitlab.example.com/team/proj" }, firstRender);
 		expect(generic.textContent).toBe("gitlab.example.com/team/proj");
 		expect(generic.querySelector("svg")?.getAttribute("data-icon")).toBe("external");
 		other.unmount();
 
 		for (const repository of [undefined, "javascript:alert(1)", "not a url"]) {
 			const view = renderApp("/s/s1", withRepository(repository));
-			await screen.findByRole("heading", { name: "Fix the failing test" });
+			await screen.findByRole("heading", { name: "Fix the failing test" }, firstRender);
 			expect(repositoryLink()).toBeNull();
 			expect(document.querySelector("[data-session-chips] [data-cwd]")?.getAttribute("title")).toBe("/home/me/code/pika");
 			view.unmount();
@@ -214,7 +214,7 @@ describe("session view", () => {
 	it("expands a turn into a timeline loaded from that turn's entries", async () => {
 		const server = createFakeServer({ sessions: [sessionFixture()] });
 		renderApp("/s/s1?view=transcript", server.fetch);
-		const strip = await screen.findByRole("button", { name: /3 model calls/ });
+		const strip = await screen.findByRole("button", { name: /3 model calls/ }, firstRender);
 		expect(strip.getAttribute("aria-expanded")).toBe("false");
 		expect(server.calls.some((call) => call.includes("/entries"))).toBe(false);
 
@@ -263,7 +263,7 @@ describe("session view", () => {
 		fixture.turns = [fixture.turns[0], turn(1, 10, 10), turn(2, 11, 11)];
 		const server = createFakeServer({ sessions: [fixture] });
 		renderApp("/s/s1?view=transcript", server.fetch);
-		await screen.findByText("Prompt number 3");
+		await screen.findByText("Prompt number 3", {}, firstRender);
 		fireEvent.keyDown(window, { key: "j" });
 		await waitFor(() => expect(document.querySelector("[data-turn][data-active]")?.getAttribute("data-turn")).toBe("0"));
 		fireEvent.keyDown(window, { key: "j" });
@@ -275,7 +275,7 @@ describe("session view", () => {
 	it("shows a 404 page for an unknown session", async () => {
 		const server = createFakeServer({ sessions: [] });
 		renderApp("/s/nope", server.fetch);
-		expect(await screen.findByText("This session doesn’t exist")).toBeTruthy();
+		expect(await screen.findByText("This session doesn’t exist", {}, firstRender)).toBeTruthy();
 	});
 
 	it("shows an error callout when the session fails to load", async () => {
@@ -322,7 +322,7 @@ describe("buildTimeline", () => {
 describe("superagent tickets in the transcript", () => {
 	it("renders report turns, a batched report, an in-turn report, and the ticket_create card with its ticket", async () => {
 		renderApp("/s/main?view=transcript", createFakeServer({ sessions: ticketFamily() }).fetch);
-		await screen.findByRole("heading", { name: "Release router" });
+		await screen.findByRole("heading", { name: "Release router" }, firstRender);
 		const head = (index: number) => document.querySelector<HTMLElement>(`[data-turn="${index}"]`)!;
 		await waitFor(() => expect(head(4)).toBeTruthy());
 		const label = (index: number) => head(index).querySelector<HTMLElement>("[data-turn-start]")!.textContent;
@@ -369,7 +369,7 @@ describe("superagent tickets in the transcript", () => {
 
 	it("shows the ticket badge in a ticket session's header", async () => {
 		renderApp("/s/tk3", createFakeServer({ sessions: ticketFamily() }).fetch);
-		await screen.findByRole("heading", { name: "Ticket 3" });
+		await screen.findByRole("heading", { name: "Ticket 3" }, firstRender);
 		const chip = await waitFor(() => {
 			const node = document.querySelector<HTMLElement>("[data-session-chips] [data-ticket-chip] [data-ticket-badge]");
 			if (!node) throw new Error("no ticket chip");

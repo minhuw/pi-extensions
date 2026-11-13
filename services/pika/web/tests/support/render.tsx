@@ -6,6 +6,22 @@ import { AppProviders, AppRoutes } from "../../src/App";
 import { PikaApi } from "../../src/lib/api";
 import { SessionViewContext, type SessionViewContextValue } from "../../src/session/context";
 
+/**
+ * The wait budget for a lazy page's first render: `renderApp` on `/s/…`, `/deck`, `/statistics`, or `/docs`, until the page
+ * shows its first content. The first render in each test file evaluates the page's chunk and the views it loads on
+ * demand (Trajectory, Overview, AgentTree) in a fresh worker, then lays it out in jsdom. Run alone this took 0.4-0.8 s;
+ * with the full suite running at load 76-117 on a 10-core Mac the slowest such waits took 1.0-1.8 s, past the default
+ * second.
+ * Use it on that first wait only; later waits in the test keep the default.
+ */
+export const firstRender = { timeout: 4000 };
+
+/**
+ * The test timeout for tests that scroll through a 5,000-entry session, page by page. Run alone they take 0.5-0.7 s;
+ * in the full suite at load 76-117 on a 10-core Mac they took 2.3-5.1 s, past the default 5 s.
+ */
+export const largeSessionTest = 15_000;
+
 function testQueryClient() {
 	return new QueryClient({ defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } } });
 }

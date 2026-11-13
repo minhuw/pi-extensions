@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { PublishingSettings } from "../src/lib/api";
 import { summary } from "./support/fixtures";
-import { mockLayout, renderApp } from "./support/render";
+import { firstRender, mockLayout, renderApp } from "./support/render";
 import { createFakeServer, type FakeSession } from "./support/server";
 import { session } from "./support/trajectory";
 
@@ -30,7 +30,7 @@ describe("hiding a session from the public", () => {
 			const element = document.querySelector("[data-session-header]");
 			expect(element).toBeTruthy();
 			return element as HTMLElement;
-		});
+		}, firstRender);
 		expect(header.querySelector("[data-hidden-badge]")).toBeNull();
 		fireEvent.click(within(header).getByRole("button", { name: /Hide from public/ }));
 		await waitFor(() => expect(header.querySelector("[data-hidden-badge]")?.textContent).toBe("Hidden from public"));
@@ -48,7 +48,7 @@ describe("hiding a session from the public", () => {
 		const sessions = family();
 		sessions[2]!.detail = { ...sessions[2]!.detail, hidden: true, hiddenBy: "c1" };
 		renderApp("/s/g1", createFakeServer({ sessions }).fetch);
-		const badge = await screen.findByText("Hidden from public");
+		const badge = await screen.findByText("Hidden from public", {}, firstRender);
 		expect(badge.closest("[data-hidden-badge]")?.getAttribute("title")).toMatch(/with the session that started it/);
 		expect(screen.queryByRole("button", { name: /Hide from public|Show in public/ })).toBeNull();
 		const link = screen.getByRole("link", { name: "the session that started it" });
@@ -73,7 +73,7 @@ describe("deleting a session", () => {
 	it("confirms with the number of sessions it deletes, then goes to its parent", async () => {
 		const server = createFakeServer({ sessions: family() });
 		renderApp("/s/c1", server.fetch);
-		fireEvent.click(await screen.findByRole("button", { name: "Delete…" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Delete…" }, firstRender));
 		const dialog = await screen.findByRole("dialog");
 		await waitFor(() => expect(dialog.textContent).toMatch(/This deletes 2 sessions: this one and the 1 session it started/));
 		expect(dialog.textContent).toMatch(/It cannot be undone/);
@@ -89,7 +89,7 @@ describe("deleting a session", () => {
 	it("cancels without deleting, and a root session goes to the session list", async () => {
 		const server = createFakeServer({ sessions: family() });
 		renderApp("/s/t1", server.fetch);
-		fireEvent.click(await screen.findByRole("button", { name: "Delete…" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Delete…" }, firstRender));
 		fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Cancel" }));
 		expect(screen.queryByRole("dialog")).toBeNull();
 		expect(server.mutations).toEqual([]);
@@ -126,7 +126,7 @@ describe("after deleting a session", () => {
 		const orphan: FakeSession = { detail: summary("o1", { parentSessionId: "never-uploaded", title: "Orphan" }), entries: [], turns: [] };
 		const server = createFakeServer({ sessions: [...family(), orphan] });
 		renderApp("/s/o1", server.fetch);
-		fireEvent.click(await screen.findByRole("button", { name: "Delete…" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Delete…" }, firstRender));
 		fireEvent.click(await within(await screen.findByRole("dialog")).findByRole("button", { name: "Delete 1 session" }));
 		await onSessionList(server);
 		expect(server.mutations.map((m) => [m.method, m.path])).toEqual([["DELETE", "/api/v1/sessions/o1"]]);
@@ -138,7 +138,7 @@ describe("after deleting a session", () => {
 		const b: FakeSession = { detail: summary("b1", { parentSessionId: "a1", title: "Cycle B", childCount: 1 }), entries: [], turns: [] };
 		const server = createFakeServer({ sessions: [...family(), a, b] });
 		renderApp("/s/a1", server.fetch);
-		fireEvent.click(await screen.findByRole("button", { name: "Delete…" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Delete…" }, firstRender));
 		fireEvent.click(await within(await screen.findByRole("dialog")).findByRole("button", { name: "Delete 2 sessions" }));
 		await onSessionList(server);
 		expect(screen.queryByRole("heading", { name: "Cycle B", level: 1 })).toBeNull();
@@ -148,7 +148,7 @@ describe("after deleting a session", () => {
 		const server = createFakeServer({ sessions: family() });
 		const holding = holdingDeletes(server.fetch);
 		renderApp("/s/c1", holding.fetch);
-		fireEvent.click(await screen.findByRole("button", { name: "Delete…" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Delete…" }, firstRender));
 		const dialog = await screen.findByRole("dialog");
 		fireEvent.click(await within(dialog).findByRole("button", { name: "Delete 2 sessions" }));
 		const cancel = within(dialog).getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
@@ -166,7 +166,7 @@ describe("after deleting a session", () => {
 	it("still cancels on the backdrop while it only counts", async () => {
 		const server = createFakeServer({ sessions: family() });
 		renderApp("/s/c1", server.fetch);
-		fireEvent.click(await screen.findByRole("button", { name: "Delete…" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Delete…" }, firstRender));
 		const dialog = await screen.findByRole("dialog");
 		fireEvent.click(dialog.parentElement!);
 		expect(screen.queryByRole("dialog")).toBeNull();
@@ -185,7 +185,7 @@ describe("public pages", () => {
 			return source.fetch(input, init);
 		};
 		renderApp("/public/s/t1", fetchImpl);
-		expect(await screen.findByRole("heading", { name: "Fix the flaky test", level: 1 })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Fix the flaky test", level: 1 }, firstRender)).toBeTruthy();
 		expect(screen.queryByRole("button", { name: /Hide from public|Show in public|Delete/ })).toBeNull();
 		expect(document.querySelector("[data-hidden-badge]")).toBeNull();
 		expect(screen.queryByText("Hidden from public")).toBeNull();

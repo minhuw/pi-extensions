@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChildSession, Entry } from "../src/lib/types";
 import { foldGaps, layoutOverview, makeScale, overviewLanes, traceIntervals } from "../src/trace/axis";
 import { assistantMessage, entry, header, summary, toolCall, turn, userMessage } from "./support/fixtures";
-import { mockLayout, renderApp } from "./support/render";
+import { firstRender, mockLayout, renderApp } from "./support/render";
 import { createFakeServer, traceOf, type FakeSession } from "./support/server";
 import { entryCalls, inspector, key, manyTurns, row, rows, selected, session, slideOver } from "./support/trajectory";
 
@@ -92,7 +92,7 @@ describe("a trace with missing times", () => {
 		]);
 		const server = createFakeServer({ sessions });
 		renderApp("/s/p", server.fetch);
-		const workflow = await waitFor(() => row("[data-kind='agent'][data-seq='2'][data-running]:not([data-depth])"));
+		const workflow = await waitFor(() => row("[data-kind='agent'][data-seq='2'][data-running]:not([data-depth])"), firstRender);
 		expect(document.querySelector("[data-overview]")).not.toBeNull();
 		// The overview places the new child on its Agent call.
 		const trace = traceOf(sessions[0]);
@@ -121,7 +121,7 @@ describe("a trace with missing times", () => {
 		const fixture = session();
 		const broken = { ...traceOf(fixture), children: [null] };
 		renderApp("/s/t1", createFakeServer({ sessions: [fixture], traces: { t1: broken } }).fetch);
-		expect(await screen.findByText("The trajectory view could not be shown")).toBeTruthy();
+		expect(await screen.findByText("The trajectory view could not be shown", {}, firstRender)).toBeTruthy();
 		expect(errors.mock.calls.some((call) => String(call[0]).includes("pika: the trajectory view failed to render"))).toBe(true);
 		// The header and its view switch still work.
 		expect(screen.getByRole("heading", { name: "Fix the flaky test", level: 1 })).toBeTruthy();
@@ -137,7 +137,7 @@ describe("a trace with missing times", () => {
 describe("keyboard scope", () => {
 	it("moves through the ledger only from the ledger or the page, never from controls or the inspector", async () => {
 		renderApp("/s/t1", createFakeServer({ sessions: [session()] }).fetch);
-		await waitFor(() => expect(rows()).toHaveLength(9));
+		await waitFor(() => expect(rows()).toHaveLength(9), firstRender);
 		const replay = document.querySelector<HTMLElement>("[data-replay]")!;
 		const speed = within(replay).getByRole("button", { name: "60×" });
 		const view = screen.getByRole("radio", { name: "Trajectory" });
@@ -175,7 +175,7 @@ describe("keyboard scope", () => {
 	it("leaves j, k, and / to the transcript and the site search there", async () => {
 		localStorage.setItem("pika-session-view", "transcript");
 		renderApp("/s/t1", createFakeServer({ sessions: [session()] }).fetch);
-		await waitFor(() => expect(document.querySelector("[data-turn='1']")).not.toBeNull());
+		await waitFor(() => expect(document.querySelector("[data-turn='1']")).not.toBeNull(), firstRender);
 		const active = () => document.querySelector("[data-turn][data-active]")?.getAttribute("data-turn");
 		key("j");
 		await waitFor(() => expect(active()).toBe("0"));
@@ -210,7 +210,7 @@ describe("a selected record in a live session", () => {
 		};
 		const server = createFakeServer({ sessions: [fixture] });
 		renderApp("/s/live", server.fetch);
-		fireEvent.click(await waitFor(() => row("[data-kind='shell'][data-running]")));
+		fireEvent.click(await waitFor(() => row("[data-kind='shell'][data-running]"), firstRender));
 		fireEvent.click(within(inspector()).getByRole("tab", { name: "Output" }));
 		await waitFor(() => expect(inspector().textContent).toContain("No result recorded."));
 
@@ -233,7 +233,7 @@ describe("replay", () => {
 		vi.useFakeTimers({ shouldAdvanceTime: true });
 		try {
 			renderApp("/s/many", createFakeServer({ sessions: [manyTurns("many")] }).fetch);
-			await waitFor(() => expect(rows().map((node) => node.dataset.turnIndex)).toEqual(["42", "43", "44"]));
+			await waitFor(() => expect(rows().map((node) => node.dataset.turnIndex)).toEqual(["42", "43", "44"]), firstRender);
 			fireEvent.click(screen.getByRole("button", { name: "Replay the session" }));
 			await act(async () => {
 				await vi.advanceTimersByTimeAsync(700);
@@ -262,7 +262,7 @@ describe("replay", () => {
 	it("drops a reveal whose record a filter hides, instead of revealing it when the filter clears", async () => {
 		const fixture = session();
 		renderApp("/s/t1", createFakeServer({ sessions: [fixture] }).fetch);
-		await waitFor(() => expect(rows()).toHaveLength(9));
+		await waitFor(() => expect(rows()).toHaveLength(9), firstRender);
 		const filter = screen.getByRole("searchbox", { name: "Filter records" });
 		fireEvent.change(filter, { target: { value: "grep" } });
 		await waitFor(() => expect(rows().map((node) => node.dataset.kind)).toEqual(["read"]));
@@ -291,12 +291,12 @@ describe("the live tail", () => {
 
 	it("opens a finished session at the top and a live one at its tail", async () => {
 		const done = renderApp("/s/done", createFakeServer({ sessions: [manyTurns("done")] }).fetch);
-		await waitFor(() => expect(document.querySelector("[data-turn='0'][data-turn-head]")).not.toBeNull());
+		await waitFor(() => expect(document.querySelector("[data-turn='0'][data-turn-head]")).not.toBeNull(), firstRender);
 		expect(pane().scrollTop).toBe(0);
 		done.unmount();
 
 		renderApp("/s/live", createFakeServer({ sessions: [manyTurns("live", 45, { lastAt: new Date().toISOString() })] }).fetch);
-		await waitFor(() => expect(pane().scrollTop).toBeGreaterThan(0));
+		await waitFor(() => expect(pane().scrollTop).toBeGreaterThan(0), firstRender);
 		expect(pane().scrollTop).toBe(pane().scrollHeight - pane().clientHeight);
 		expect(row("[data-seq='90']").textContent).toContain("Answer 44");
 	});
@@ -307,7 +307,7 @@ describe("the live tail", () => {
 			const fixture = manyTurns("live", 45, { lastAt: new Date().toISOString() });
 			const server = createFakeServer({ sessions: [fixture] });
 			renderApp("/s/live", server.fetch);
-			await waitFor(() => expect(pane().scrollTop).toBeGreaterThan(0));
+			await waitFor(() => expect(pane().scrollTop).toBeGreaterThan(0), firstRender);
 			const bottom = () => pane().scrollHeight - pane().clientHeight;
 			const top = pane().scrollTop;
 			expect(top).toBe(bottom());
@@ -349,7 +349,7 @@ describe("accessibility", () => {
 		restore();
 		restore = mockLayout({ viewport: 400, rowHeight: 34 });
 		renderApp("/s/many", createFakeServer({ sessions: [manyTurns("many")] }).fetch);
-		const listbox = await screen.findByRole("listbox", { name: "Session records" });
+		const listbox = await screen.findByRole("listbox", { name: "Session records" }, firstRender);
 		fireEvent.click(await screen.findByRole("button", { name: "Collapse all" }));
 		fireEvent.click(await screen.findByRole("button", { name: "Expand all" }));
 		await waitFor(() => expect(rows().length).toBeGreaterThan(5));
@@ -372,7 +372,7 @@ describe("accessibility", () => {
 
 	it("keeps the closed slide-over inert and returns focus to the ledger when it closes", async () => {
 		renderApp("/s/t1", createFakeServer({ sessions: [session()] }).fetch);
-		await waitFor(() => expect(rows()).toHaveLength(9));
+		await waitFor(() => expect(rows()).toHaveLength(9), firstRender);
 		const aside = slideOver()!;
 		expect(aside.hasAttribute("inert")).toBe(true);
 		expect(aside.getAttribute("aria-hidden")).toBe("true");
@@ -400,7 +400,7 @@ describe("transcript deep links", () => {
 			const node = document.querySelector<HTMLElement>("[data-entry-seq='4'][data-highlighted]");
 			if (!node) throw new Error("no highlighted entry");
 			return node;
-		});
+		}, firstRender);
 		const read = target.querySelector<HTMLElement>("[data-tool='read'] > button")!;
 		await waitFor(() => expect(read.getAttribute("aria-expanded")).toBe("true"));
 		expect(target.textContent).toContain("export const base");

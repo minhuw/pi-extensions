@@ -5,7 +5,7 @@ import { guestPath } from "../src/lib/guestView";
 import { totalTokens } from "../src/lib/format";
 import type { UsageGroup, UsageReport, UsageStatistics } from "../src/lib/types";
 import { axisTicks, bucketParts, formatDateRange, layerOf, modelFamily, modelOrder, OTHER, splitSeries, tokenParts, UNNAMED, usageBuckets, type Series } from "../src/pages/Statistics";
-import { renderApp } from "./support/render";
+import { firstRender, renderApp } from "./support/render";
 import { createFakeServer } from "./support/server";
 
 function fixture(exclude = false): UsageStatistics {
@@ -66,7 +66,7 @@ describe("Statistics", () => {
 	it("opens anonymously under a base path, includes unpublished by default, and keeps owner controls absent", async () => {
 		const api = server();
 		renderApp("/public/statistics", api.fetch, "/pika");
-		await screen.findByRole("heading", { name: "Statistics", level: 1 });
+		await screen.findByRole("heading", { name: "Statistics", level: 1 }, firstRender);
 		await waitFor(() => expect(totals()?.textContent).toContain("460"));
 		expect((screen.getByRole("checkbox", { name: "Exclude unpublished trajectories" }) as HTMLInputElement).checked).toBe(false);
 		const [url, init] = api.calls()[0];
@@ -81,7 +81,7 @@ describe("Statistics", () => {
 	it("refetches aggregates on exclusion and period changes, preserving the chosen scope in the URL", async () => {
 		const api = server();
 		renderApp("/public/statistics", api.fetch);
-		await waitFor(() => expect(totals()?.textContent).toContain("460"));
+		await waitFor(() => expect(totals()?.textContent).toContain("460"), firstRender);
 		fireEvent.click(screen.getByRole("checkbox", { name: "Exclude unpublished trajectories" }));
 		await waitFor(() => expect(totals()?.textContent).toContain("80"));
 		expect(screen.getByText("Showing published, visible trajectories only.")).toBeTruthy();
@@ -95,7 +95,7 @@ describe("Statistics", () => {
 	it("makes chart days keyboard selectable with exact values, including zero days", async () => {
 		const api = server();
 		renderApp("/public/statistics?days=7", api.fetch);
-		const last = await screen.findByRole("button", { name: "2026-11-03: 380 tokens" });
+		const last = await screen.findByRole("button", { name: "2026-11-03: 380 tokens" }, firstRender);
 		last.focus();
 		fireEvent.keyDown(last, { key: "ArrowLeft" });
 		expect(document.activeElement?.getAttribute("aria-label")).toBe("2026-11-02: 0 tokens");
@@ -112,7 +112,7 @@ describe("Statistics", () => {
 		api.state.usage = true;
 		api.state.breakdowns = true;
 		renderApp("/public/statistics?days=7", api.fetch);
-		await screen.findByRole("heading", { name: "Breakdown by project" });
+		await screen.findByRole("heading", { name: "Breakdown by project" }, firstRender);
 		const split = within(screen.getByRole("group", { name: "Split" }));
 		expect(split.getByRole("button", { name: "Total" }).getAttribute("aria-pressed")).toBe("true");
 		const parts = (date: string) => [...document.querySelectorAll(`[data-usage-bar="${date}"] [data-usage-part]`)].map((el) => el.getAttribute("data-usage-part"));
@@ -193,7 +193,7 @@ describe("Statistics", () => {
 		const api = server();
 		api.state.breakdowns = true;
 		renderApp("/public/statistics?days=7&by=model", api.fetch);
-		await screen.findByRole("heading", { name: "Breakdown by model" });
+		await screen.findByRole("heading", { name: "Breakdown by model" }, firstRender);
 		await waitFor(() => expect(api.usageCalls()).toHaveLength(2));
 		expect(within(screen.getByRole("group", { name: "Split" })).getByRole("button", { name: "By model" }).getAttribute("aria-pressed")).toBe("true");
 		expect(screen.getByRole("button", { name: "2026-11-03: 380 tokens" })).toBeTruthy();
@@ -290,7 +290,7 @@ describe("Statistics", () => {
 	it("links the owner's tab and retains the page and filters when viewing as guest", async () => {
 		const api = server();
 		renderApp("/statistics?days=90&excludeUnpublished=true", api.fetch);
-		await waitFor(() => expect(totals()).toBeTruthy());
+		await waitFor(() => expect(totals()).toBeTruthy(), firstRender);
 		expect(api.calls()[0][0]).toBe("/api/v1/statistics?days=90&excludeUnpublished=true");
 		const nav = screen.getByRole("navigation", { name: "Main" });
 		expect(within(nav).getByRole("link", { name: "Statistics" }).getAttribute("aria-current")).toBe("page");
@@ -302,7 +302,7 @@ describe("Statistics", () => {
 		const api = server();
 		const fetchImpl: typeof fetch = (input, init) => String(input).endsWith("/me") ? Promise.resolve(Response.json({ authenticated: false, passwordRequired: true, authMode: "password" })) : api.fetch(input, init);
 		renderApp("/statistics?days=7", fetchImpl);
-		await waitFor(() => expect(totals()).toBeTruthy());
+		await waitFor(() => expect(totals()).toBeTruthy(), firstRender);
 		expect(api.calls()[0][0]).toBe("/api/public/v1/statistics?days=7&excludeUnpublished=false");
 	});
 
@@ -315,7 +315,7 @@ describe("Statistics", () => {
 		data.models = [{ ...data.totals, kind: "model", name: "gpt-6-luna", metrics }];
 		const fetchImpl: typeof fetch = (input, init) => String(input).includes("/statistics") ? Promise.resolve(Response.json(data)) : api.fetch(input, init);
 		renderApp("/public/statistics", fetchImpl);
-		await screen.findByRole("heading", { name: "Breakdown by project" });
+		await screen.findByRole("heading", { name: "Breakdown by project" }, firstRender);
 		const figures = totals().textContent;
 		expect(figures).toContain("75% cache reads");
 		expect(figures).toContain("1 failed");
@@ -335,7 +335,7 @@ describe("Statistics", () => {
 		let fetched = data;
 		const fetchImpl: typeof fetch = (input, init) => String(input).includes("/statistics") ? Promise.resolve(Response.json(fetched)) : api.fetch(input, init);
 		renderApp("/public/statistics", fetchImpl);
-		await waitFor(() => expect(totals()?.textContent).toContain("460"));
+		await waitFor(() => expect(totals()?.textContent).toContain("460"), firstRender);
 		// Recorded costs alone: an older server, or nothing to estimate.
 		expect(cost().textContent).toContain("Recorded cost");
 		expect(cost().textContent).toContain("$0.25 / active day");
