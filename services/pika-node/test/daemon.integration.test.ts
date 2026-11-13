@@ -214,6 +214,16 @@ describe("pika-node daemon over the unix socket", () => {
         expect(env).toContain("EXTRA=yes");
         expect(env).not.toContain("__PIKA_TEST_GUARD");
         expect(env).not.toContain("ORCA_TEST");
+        // `term.restart` runs it again with the same env, as a new pane id.
+        const again = (await a.request<Created>("term.restart", { terminalId: id })).terminal;
+        expect(again).toMatchObject({ argv: ["env"], cols: 200, rows: 50 });
+        expect(again.role).toBeUndefined();
+        await a.inbox.waitFor(m => m.type === "term.exit" && m.terminalId === again.terminalId);
+        const rerun = (await a.request<Attached>("term.attach", { terminalId: again.terminalId })).snapshot.data;
+        expect(rerun).toContain("EXTRA=yes");
+        expect(rerun).toContain(`PIKA_NODE_PANE_ID=${again.terminalId}`);
+        expect((await a.inbox.waitFor(m => m.type === "term.removed" && m.terminalId === id)).replacedBy).toBe(again.terminalId);
+        await a.request("term.kill", { terminalId: again.terminalId });
         const refused = await a.requestError("term.create", { cols: 80, rows: 24, env: { PIKA_NODE_PANE_ID: "x" } });
         expect(refused.code).toBe("invalid");
         a.close();

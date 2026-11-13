@@ -14,7 +14,7 @@ import { Pane } from "./pane.ts";
 import type { Paths } from "./paths.ts";
 import { VERSION } from "./paths.ts";
 import {
-    CAPABILITIES, LIMITS, parseClientMessage, PROTOCOL_VERSION, SETUP_ENV, timing, utf8Length,
+    CAPABILITIES, LIMITS, parseClientMessage, PROTOCOL_VERSION, SETUP_ENV, SETUP_ROLE, timing, utf8Length,
     type BridgeStatus, type Checkout, type ClientMessage, type NodeEvent, type NodeMessage, type Notice, type Request,
     type Requests, type Snapshot, type TerminalInfo, type Welcome, type Worktree,
 } from "./protocol.ts";
@@ -68,6 +68,10 @@ interface Pty {
     /** The checkout and worktree holding the cwd; kept once the terminal exits, while that checkout is listed. */
     placed: Placement | undefined;
     argv: string[];
+    /** The requested argv and env as given, which `term.restart` starts again. */
+    spawn: { argv?: string[]; env?: Record<string, string> };
+    /** `TerminalInfo.role`. */
+    role: string | undefined;
     createdAt: number;
     owner: Peer | undefined;
     attachments: Map<Peer, Attachment>;
@@ -257,6 +261,7 @@ export class Daemon {
                 else pty.terminal.kill(request.signal ?? "SIGTERM");
                 return {};
             }
+            case "term.restart": return { terminal: this.#restart(peer, this.#terminal(request.terminalId)) };
             default: return this.files.request(peer, request);
         }
     }
@@ -266,6 +271,31 @@ export class Daemon {
         const terminal = this.#info(pty);
         for (const other of this.#peers) if (other !== peer) other.send({ type: "term.created", terminal });
         setImmediate(() => { if (!peer.closed) peer.send({ type: "term.created", terminal: this.#info(pty) }); });
+        return terminal;
+    }
+
+    /**
+     * Starts an exited terminal's argv, env, cwd, size, role, and label again as a new terminal, then removes the old
+     * one (`term.removed` with `replacedBy`, after the new one's `term.created`). The old one makes room for the
+     * new one under the terminal limit; it stays when the new one fails to start.
+     */
+    #restart(peer: Peer, old: Pty): TerminalInfo {
+        if (!old.terminal.exited) throw new NodeError("busy", "the terminal is still running");
+        this.#terminals.delete(old.id);
+        let pty: Pty;
+        try {
+            pty = this.create({
+                cols: old.terminal.cols, rows: old.terminal.rows, cwd: old.cwd,
+                ...(old.spawn.argv ? { argv: old.spawn.argv } : {}), ...(old.spawn.env ? { env: old.spawn.env } : {}), ...(old.role ? { role: old.role } : {}),
+            }, peer);
+        } catch (error) {
+            this.#terminals.set(old.id, old);
+            throw error;
+        }
+        pty.label = old.label;
+        const terminal = this.#announce(peer, pty);
+        // After the reply and the creator's `term.created` (`#announce`), so no client sees the pane end before its successor.
+        setImmediate(() => this.#remove(old, pty.id));
         return terminal;
     }
 
@@ -302,13 +332,14 @@ export class Daemon {
             ...(status ? { status } : {}),
             ...(pty.label ? { label: pty.label } : {}),
             ...(pty.placed ? { checkoutId: pty.placed.checkoutId, worktreePath: pty.placed.worktreePath } : {}),
+            ...(pty.role ? { role: pty.role } : {}),
         };
     }
 
     // -----------------------------------------------------------------------------------------------------------
     // Terminals
 
-    create(params: { cols: number; rows: number; cwd?: string; argv?: string[]; env?: Record<string, string> }, owner?: Peer): Pty {
+    create(params: { cols: number; rows: number; cwd?: string; argv?: string[]; env?: Record<string, string>; role?: string }, owner?: Peer): Pty {
         if (this.#terminals.size >= MAX_TERMINALS) throw new NodeError("limit", `at most ${MAX_TERMINALS} terminals`);
         const cwd = params.cwd ?? this.account.home;
         let stat;
@@ -346,7 +377,8 @@ export class Daemon {
         catch { /* gone since the check; placed by its live cwd later */ }
         pty = {
             id, terminal, pane, cwd, realCwd, liveCwd: undefined, placed: place(realCwd, this.checkouts.list.checkouts),
-            argv: params.argv ?? [this.account.shell, "-l"], createdAt: Date.now(), owner, attachments: new Map(), bridge: undefined, label: undefined,
+            argv: params.argv ?? [this.account.shell, "-l"], spawn: { ...(params.argv ? { argv: params.argv } : {}), ...(params.env ? { env: params.env } : {}) },
+            role: params.role, createdAt: Date.now(), owner, attachments: new Map(), bridge: undefined, label: undefined,
         };
         this.#terminals.set(id, pty);
         this.#log(`terminal ${id} pid ${terminal.pid}: ${[file, ...args].join(" ")}`);
@@ -356,10 +388,10 @@ export class Daemon {
         return pty;
     }
 
-    #remove(pty: Pty): void {
+    #remove(pty: Pty, replacedBy?: string): void {
         this.#terminals.delete(pty.id);
         pty.terminal.dispose();
-        this.#broadcast({ type: "term.removed", terminalId: pty.id });
+        this.#broadcast({ type: "term.removed", terminalId: pty.id, ...(replacedBy ? { replacedBy } : {}) });
         this.onTerminalsChanged();
     }
 
@@ -537,7 +569,7 @@ export class Daemon {
         try {
             pty = this.create({
                 cols: request.cols ?? 80, rows: request.rows ?? 24, cwd: worktree.path, argv: ["sh", "-c", script],
-                env: { [SETUP_ENV.worktree]: worktree.path, [SETUP_ENV.checkout]: main, [SETUP_ENV.branch]: request.name },
+                env: { [SETUP_ENV.worktree]: worktree.path, [SETUP_ENV.checkout]: main, [SETUP_ENV.branch]: request.name }, role: SETUP_ROLE,
             }, peer);
         } catch (error) {
             // The worktree stays created; only its setup terminal is missing.

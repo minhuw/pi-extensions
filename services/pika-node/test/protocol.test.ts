@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-    becameDone, CAPABILITIES, displayFingerprint, ERROR_CODES, isCheckout, isWorktree, encodeLine, fromBase64Url, LIMITS, LineDecoder, LineTooLong, matchFingerprint, mergeState,
+    becameDone, CAPABILITIES, displayFingerprint, ERROR_CODES, isCheckout, isWorktree, encodeLine, fromBase64Url, LIMITS, LineDecoder, LineTooLong, matchFingerprint, mergeState, SETUP_ROLE,
     parseBridgeMessage, parseChannelBody, parseClientMessage, parseClientToServer, parseDaemonToBridge, parseNodeMessage,
     parseNodeToServer, parseProgramStatus, parseServerToClient, parseServerToNode, toBase64Url, utf8Length,
     type BridgeStatus, type ProgramStatus,
@@ -294,7 +294,24 @@ describe("checkouts", () => {
     });
 
     it("lists the checkouts capability in place of the spike's project capabilities, and the busy error", () => {
-        expect(CAPABILITIES).toEqual(["terminal", "files", "status", "checkouts", "term.rename", "pane.unread"]);
+        expect(CAPABILITIES).toEqual(["terminal", "files", "status", "checkouts", "term.rename", "pane.unread", "term.restart"]);
         expect(ERROR_CODES).toContain("busy");
+    });
+
+    it("parses setup roles and restarts", () => {
+        const terminal = { terminalId: "t1", title: "", cwd: "/w/repo-fix", cols: 1, rows: 1, pid: 1, createdAt: 1, argv: ["sh", "-c", "npm ci"], role: SETUP_ROLE };
+        expect(SETUP_ROLE).toBe("setup");
+        expect(parseNodeMessage({ type: "term.created", terminal })).toMatchObject({ ok: true, message: { terminal: { role: "setup" } } });
+        // A role a later daemon adds still parses; clients treat it as none.
+        expect(parseNodeMessage({ type: "term.created", terminal: { ...terminal, role: "later" } }).ok).toBe(true);
+        expect(parseNodeMessage({ type: "term.created", terminal: { ...terminal, role: "" } }).ok).toBe(false);
+        expect(parseNodeMessage({ type: "term.created", terminal: { ...terminal, role: 1 } }).ok).toBe(false);
+        expect(parseClientMessage({ type: "term.restart", id: "1", terminalId: "t1" })).toEqual({ ok: true, message: { type: "term.restart", id: "1", terminalId: "t1" } });
+        expect(parseClientMessage({ type: "term.restart", id: "1" })).toMatchObject({ ok: false, reason: "invalid", id: "1" });
+        // A client cannot give a terminal a role: `term.create` drops the field.
+        expect(parseClientMessage({ type: "term.create", id: "1", cols: 80, rows: 24, role: "setup" })).toEqual({ ok: true, message: { type: "term.create", id: "1", cols: 80, rows: 24 } });
+        expect(parseNodeMessage({ type: "term.removed", terminalId: "t1", replacedBy: "t2" })).toEqual({ ok: true, message: { type: "term.removed", terminalId: "t1", replacedBy: "t2" } });
+        expect(parseNodeMessage({ type: "term.removed", terminalId: "t1" }).ok).toBe(true);
+        expect(parseNodeMessage({ type: "term.removed", terminalId: "t1", replacedBy: "a b" }).ok).toBe(false);
     });
 });

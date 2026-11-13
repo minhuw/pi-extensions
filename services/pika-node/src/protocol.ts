@@ -94,9 +94,9 @@ export type ErrorCode = typeof ERROR_CODES[number];
  * What a daemon offers, in `welcome.capabilities`. Past `terminal`, `files`, and `status`, each names requests, notices,
  * or fields a client may use only when listed (an older daemon answers `unsupported`, or drops a notice): `checkouts`
  * (`checkouts.list`, `checkout.*`, `worktree.*`, `checkouts.changed`, `term.placed`, `TerminalInfo.checkoutId` and
- * `worktreePath`), `term.rename`, and `pane.unread`.
+ * `worktreePath`), `term.rename`, `pane.unread`, and `term.restart` (`term.restart`, `term.removed.replacedBy`).
  */
-export const CAPABILITIES = ["terminal", "files", "status", "checkouts", "term.rename", "pane.unread"] as const;
+export const CAPABILITIES = ["terminal", "files", "status", "checkouts", "term.rename", "pane.unread", "term.restart"] as const;
 export type Capability = typeof CAPABILITIES[number];
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -187,7 +187,14 @@ export interface TerminalInfo {
     checkoutId?: string;
     /** The innermost of that checkout's worktrees holding the cwd; a `folder` checkout's own path. */
     worktreePath?: string;
+    /**
+     * Why the daemon started it: `setup` for a `worktree.create` setup script (kept by `term.restart`). Clients treat
+     * any other value as none, so a later daemon may add roles.
+     */
+    role?: string;
 }
+/** `TerminalInfo.role` of a setup script's terminal. */
+export const SETUP_ROLE = "setup";
 export interface Stat { size: number; mtimeMs: number; hash?: string }
 export interface DirEntry { name: string; kind: "file" | "dir" | "symlink" | "other"; size: number; mtimeMs: number }
 /** Per-checkout settings (`checkout.update`), kept in `config.json` by checkout id. */
@@ -279,6 +286,7 @@ export interface Requests {
     "term.kill": { terminalId: string; signal?: Signal };
     "term.cwd": { terminalId: string };
     "term.rename": { terminalId: string; label: string | null };
+    "term.restart": { terminalId: string };
     "checkouts.list": Record<never, never>;
     "checkout.add": { path: string };
     "checkout.hide": { checkoutId: string };
@@ -308,6 +316,8 @@ export interface Results {
     /** The working directory of the terminal's shell now, which a `cd` changes (`TerminalInfo.cwd` is where it started). */
     "term.cwd": { cwd: string };
     "term.rename": { terminal: TerminalInfo };
+    /** The new terminal; the exited one it replaces is removed (`term.removed` with `replacedBy`). */
+    "term.restart": { terminal: TerminalInfo };
     "checkouts.list": { checkouts: Checkout[]; truncated: boolean };
     "checkout.add": { checkout: Checkout };
     "checkout.hide": Record<never, never>;
@@ -361,7 +371,7 @@ export type NodeEvent =
     | Welcome
     | { type: "error"; code: string; message: string; terminalId?: string }
     | { type: "term.created"; terminal: TerminalInfo }
-    | { type: "term.removed"; terminalId: string }
+    | { type: "term.removed"; terminalId: string; replacedBy?: string }
     | { type: "term.output"; terminalId: string; seq: number; data: string }
     | { type: "term.snapshot"; terminalId: string; snapshot: Snapshot }
     | { type: "term.resized"; terminalId: string; cols: number; rows: number; owned: boolean }
@@ -634,6 +644,7 @@ export const parseClientMessage = parser<ClientMessage>({
     "pane.seen": { terminalId },
     "pane.unread": { terminalId },
     "term.rename": { id: requestId, terminalId, label: nullable(label(TERMINAL_LABEL)) },
+    "term.restart": { id: requestId, terminalId },
     "checkouts.list": { id: requestId },
     "checkout.add": { id: requestId, path: isAbsolutePath },
     "checkout.hide": { id: requestId, checkoutId },
@@ -664,6 +675,7 @@ const terminalInfo = object({
     "?label": label(TERMINAL_LABEL),
     "?checkoutId": checkoutId,
     "?worktreePath": isAbsolutePath,
+    "?role": label(32),
 });
 const replyError = object({ code: label(64), message: str(4 * KiB), "?current": object({ size: time, mtimeMs: time, "?hash": hex64 }) });
 
@@ -677,7 +689,7 @@ export const parseNodeMessage = parser<NodeMessage>({
     },
     error: { code: label(64), message: str(4 * KiB), "?terminalId": terminalId },
     "term.created": { terminal: terminalInfo },
-    "term.removed": { terminalId },
+    "term.removed": { terminalId, "?replacedBy": terminalId },
     "term.output": { terminalId, seq: int(1), data: str(LIMITS.maxOutputChunkBytes) },
     "term.snapshot": { terminalId, snapshot },
     "term.resized": { terminalId, cols, rows, owned: bool },

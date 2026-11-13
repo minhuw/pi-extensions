@@ -101,16 +101,44 @@ describe("checkouts over the unix socket", () => {
         const wt = join(base, "root", "app-feat-one");
         expect(created.worktree).toMatchObject({ path: realpathSync(wt), branch: "feat/one", isMain: false, detached: false });
         expect(created.checkout.worktrees.map(w => w.path)).toEqual([repo, realpathSync(wt)]);
-        const setup = created.setupTerminal!;
-        expect(setup).toMatchObject({ cwd: realpathSync(wt), cols: 100, rows: 30, argv: ["sh", "-c", script], checkoutId: id, worktreePath: realpathSync(wt) });
-        await b.inbox.waitFor(m => m.type === "term.created" && (m.terminal as TerminalInfo).terminalId === setup.terminalId);
+        const first = created.setupTerminal!;
+        expect(first).toMatchObject({ cwd: realpathSync(wt), cols: 100, rows: 30, argv: ["sh", "-c", script], checkoutId: id, worktreePath: realpathSync(wt), role: "setup" });
+        const seen = await b.inbox.waitFor(m => m.type === "term.created" && (m.terminal as TerminalInfo).terminalId === first.terminalId);
+        expect((seen.terminal as TerminalInfo).role).toBe("setup");
         await b.inbox.waitFor(m => m.type === "checkouts.changed" && inRepo(m as unknown as Listed)?.worktrees.length === 2);
-        await a.inbox.waitFor(m => m.type === "term.exit" && m.terminalId === setup.terminalId && m.code === 0, 20_000, "setup exit");
+        await a.inbox.waitFor(m => m.type === "term.exit" && m.terminalId === first.terminalId && m.code === 0, 20_000, "setup exit");
+        expect(readFileSync(join(wt, ".setup-out"), "utf8")).toBe(`${realpathSync(wt)}\n${repo}\nfeat/one\n`);
+
+        // Restart: the same argv, env, cwd, size, role, and label in a new terminal; the exited one goes after its successor arrives.
+        await a.request("term.rename", { terminalId: first.terminalId, label: "Setup" });
+        rmSync(join(wt, ".setup-out"));
+        const setup = (await a.request<Created>("term.restart", { terminalId: first.terminalId })).terminal;
+        expect(setup.terminalId).not.toBe(first.terminalId);
+        expect(setup).toMatchObject({ cwd: realpathSync(wt), cols: 100, rows: 30, argv: ["sh", "-c", script], role: "setup", label: "Setup" });
+        expect(setup.exited).toBeUndefined();
+        const removed1 = await b.inbox.waitFor(m => m.type === "term.removed" && m.terminalId === first.terminalId);
+        expect(removed1.replacedBy).toBe(setup.terminalId);
+        await a.inbox.waitFor(m => m.type === "term.removed" && m.terminalId === first.terminalId);
+        for (const inbox of [a.inbox, b.inbox]) {
+            const order = (match: (m: Record<string, unknown>) => boolean) => inbox.messages.findIndex(match);
+            expect(order(m => m.type === "term.created" && (m.terminal as TerminalInfo).terminalId === setup.terminalId))
+                .toBeLessThan(order(m => m.type === "term.removed" && m.terminalId === first.terminalId));
+        }
+        const own = a.inbox.messages;
+        expect(own.findIndex(m => m.type === "reply" && (m.result as Created | undefined)?.terminal?.terminalId === setup.terminalId))
+            .toBeLessThan(own.findIndex(m => m.type === "term.created" && (m.terminal as TerminalInfo).terminalId === setup.terminalId));
+        const listedNow = (await a.request<{ terminals: TerminalInfo[] }>("term.list")).terminals.map(t => t.terminalId);
+        expect(listedNow).toContain(setup.terminalId);
+        expect(listedNow).not.toContain(first.terminalId);
+        expect(await a.requestError("term.restart", { terminalId: first.terminalId })).toMatchObject({ code: "not_found" });
+        await a.inbox.waitFor(m => m.type === "term.exit" && m.terminalId === setup.terminalId && m.code === 0, 20_000, "rerun exit");
         expect(readFileSync(join(wt, ".setup-out"), "utf8")).toBe(`${realpathSync(wt)}\n${repo}\nfeat/one\n`);
 
         // A live terminal in the worktree makes it busy; force hangs it up, and then git refuses the untracked file.
         const shell = (await a.request<Created>("term.create", { cols: 80, rows: 24, cwd: join(wt), argv: ["bash", "--noprofile", "--norc"] })).terminal;
         expect(shell).toMatchObject({ checkoutId: id, worktreePath: realpathSync(wt) });
+        expect(shell.role).toBeUndefined();
+        expect(await a.requestError("term.restart", { terminalId: shell.terminalId })).toMatchObject({ code: "busy" });
         const busy = await a.requestError("worktree.remove", { checkoutId: id, path: wt });
         expect(busy).toMatchObject({ code: "busy", message: `1 live terminal uses ${realpathSync(wt)}` });
         const forced = await a.requestError("worktree.remove", { checkoutId: id, path: wt, force: true });
