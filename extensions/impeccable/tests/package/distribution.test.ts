@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { expect, it } from "vitest";
 import type { EngineRunResult } from "../../src/engine.ts";
+import { ENGINE_VERSION } from "../../src/resources.ts";
 
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -129,7 +130,7 @@ it("checks an actual npm tarball, guarded extracted activation, and offline exec
 		const checksumBytes = await readFile(path.join(ext, "skills/impeccable/scripts/engine-checksums.txt"));
 		const checksums = checksumBytes.toString().split(/\r?\n/).filter((line) => line.startsWith("0.1.23 "));
 		expect(checksums).toHaveLength(5);
-		for (const line of checksums) expect(line).toMatch(/^0\.1\.19\s+impeccable-\S+\s+[a-f0-9]{64}$/);
+		for (const line of checksums) expect(line).toMatch(new RegExp(`^${ENGINE_VERSION.replaceAll(".", "\\.")}\\s+impeccable-\\S+\\s+[a-f0-9]{64}$`));
 		for (const [index, result] of results.entries()) {
 			const verb = ["context", "detect", "fail"][index];
 			const argv = [verb, "--target", "surface with spaces", "$(literal)", "a;b", "$ARGUMENTS"];
