@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **⚠️ Behavior change — a workflow starts only when you ask for one** ([#451](https://github.com/tintinweb/pi-subagents/pull/451)). A request for a number of agents, like "use 10 agents to …", now runs parallel `Agent` calls instead of a `SubagentWorkflow`. To run a workflow, say so ("use a workflow") or name a saved workflow.
+
+### Fixed
+- **Asking for a number of subagents no longer starts a workflow** ([#451](https://github.com/tintinweb/pi-subagents/pull/451)). A pi-only `SubagentWorkflow` guideline sent requests like "use 10 agents to …" to a workflow instead of parallel `Agent` calls, overriding the tool description's rule that a workflow needs an explicit opt-in. The guideline is removed, as Claude Code has none; "use a workflow" or a saved workflow name still starts one.
+- **Running workflow agents show live tool-call and token counts** ([#298](https://github.com/tintinweb/pi-subagents/issues/298), [#453](https://github.com/tintinweb/pi-subagents/pull/453), superseding [#299](https://github.com/tintinweb/pi-subagents/pull/299) — thanks [@cgngtr](https://github.com/cgngtr)). A row, its inspector **Activity** and the totals stayed at zero until the agent settled, including on resumed agents. Counts now update as each tool completes and each assistant message ends. `budget.spent()` now includes attempts stopped by a retry, so a script guarding on it sees a higher number after one. A resumed agent's row and `budget.spent()` now count only its continuation; both used to count the earlier run again.
+
+## [0.25.0] - 2026-11-13
+
+> **⚠️ Behavior change — `general-purpose` can now spawn subagents of its own** ([#448](https://github.com/tintinweb/pi-subagents/pull/448)). A `general-purpose` agent may delegate instead of doing all the work itself; its children count toward `maxConcurrentNested`. Depth stays at `maxSubagentDepth` `2`: a subagent's children cannot spawn again, unlike Claude Code's default of 3; set it to `3` to match. Inside a workflow it does not, as in Claude Code: the script does the fanning out. To keep `general-purpose` from delegating, add a `general-purpose.md` agent file without `allowed_subagents`; it replaces the built-in. A `general-purpose.md` you ejected earlier is such a file, so it keeps the old behavior: add `allowed_subagents: all` to it, or delete it to use the built-in. Set `maxSubagentDepth` to `1` to turn nesting off entirely.
+
+> **⚠️ Behavior change — `/agents` → Settings writes the global file unless the project has its own** ([#391](https://github.com/tintinweb/pi-subagents/issues/391), [#419](https://github.com/tintinweb/pi-subagents/pull/419)). Changes used to land in `<cwd>/.pi/subagents.json`, creating it in every repo you opened Settings in. They now go to `~/.pi/agent/subagents.json` unless that project file already exists; press Tab on the page to write the project file instead.
+
+### Changed
+- **`/agents` → Settings no longer leaves `.pi/subagents.json` in your repos, and Tab picks the file it writes** ([#391](https://github.com/tintinweb/pi-subagents/issues/391) — thanks [@danieltwagner](https://github.com/danieltwagner); [#419](https://github.com/tintinweb/pi-subagents/pull/419) — thanks [@xh123637](https://github.com/xh123637)). The page opens on the project file if the project has one, and on the global file otherwise; the header names the target and Tab switches it. A save writes only the setting you changed, so pi sessions sharing the global file no longer revert each other's changes, and built-in defaults are no longer copied into the file. The toast names the file written, and warns when a project value overrides a global save.
+- **The built-in `general-purpose` agent delegates, matching Claude Code** ([#448](https://github.com/tintinweb/pi-subagents/pull/448)). In Claude Code, `general-purpose` keeps its `Agent` tool and `Explore`/`Plan` drop it. Here nested delegation required a custom agent with `allowed_subagents`, so asking for "a subagent that spawns subagents" got a `general-purpose` child with no `Agent` tool. The allowlist stays opt-in for custom agents: `general-purpose` already has every tool, so delegation grants it nothing new. When it can spawn, its prompt carries Claude Code's line telling it not to hand its whole task to a single child.
+
+### Added
+- **`/agents` → Settings shows where each value comes from, resets a row with Delete, and filters as you type.** A row set in a settings file is tagged `project` or `global`; Delete (or Backspace) removes that setting from the tagged file, so the row falls back to the other file's value or the built-in default. Rows are grouped by category, typing filters them by label, and the list fits the terminal and scrolls instead of pushing the header off a short one.
+
+### Fixed
+- **`/agents` → Settings refuses a number that would be dropped on restart.** The number prompt accepted values outside the range loading keeps, so a saved value like a max concurrency of `5000` silently vanished on the next start. Enter on a number row now opens an editor under the list that names the accepted range and refuses anything outside it.
+- **Finished nested subagents no longer outlive their parent across a session switch.** On `/new` or a session switch, finished agents whose result was never read stay in memory. A nested child's result is only ever read by its parent, so nothing marked it read: it stayed for up to 10 minutes with its session still loaded, after its parent was gone. It is now removed along with its parent.
+- **`get_subagent_result` now shows when a saved result finished** ([#436](https://github.com/tintinweb/pi-subagents/issues/436) — thanks [@EndUser123](https://github.com/EndUser123)). Once an agent's live record is gone, the tool answers from the session's saved record, which is kept for the whole session, so a result from days earlier looked current. The answer now includes a `Finished:` line with the time and age, e.g. `2026-11-10T14:14Z (2d ago)`. This matters most for handles: after a reload, `explore` returns the most recent saved `explore` run, however old it is.
+- **A leftover schedule lock no longer freezes pi for 5 seconds** ([#247](https://github.com/tintinweb/pi-subagents/issues/247), [#266](https://github.com/tintinweb/pi-subagents/pull/266) — thanks [@ChakornK](https://github.com/ChakornK)). When a lock file was left behind, every schedule write blocked the UI for 5 s while it retried, then failed anyway. A leftover lock holding pi's own PID is now reclaimed immediately; any other held lock fails at once. If a job fires while the lock is held, the job still runs and only its status bookkeeping is skipped, reported as a `subagents:scheduled` error event.
+
+## [0.24.0] - 2026-11-12
+
+> **⚠️ Behavior change — nested spawns are refused once 10 nested subagents are running** ([#427](https://github.com/tintinweb/pi-subagents/pull/427)). Only agents with `allowed_subagents` are affected; the parent gets a tool error and does the work itself. To restore the unbounded behavior, set `/agents → Settings → Max nested concurrency` (`maxConcurrentNested`) to `0`.
+
+> **⚠️ Behavior change — FleetView rows show each agent's own tokens, and the selection is marked `❯`.** A parent that delegates now shows a smaller figure in FleetView, because its nested children are listed with their own; every other surface still reports the rolled-up total. `●` now marks the view in front (`main` or the open agent) instead of the selection, as in Claude Code. In fullscreen mode a left press on a fleet row opens that agent instead of starting a text selection.
+
+### Changed
+- **`showModel` now also names the model on the fleet view rows, and both surfaces show the bare thinking level** ([#445](https://github.com/tintinweb/pi-subagents/issues/445)). The fleet row carried only the agent type, description, elapsed and tokens, so two same-type agents differing only by model or thinking level were indistinguishable without opening each viewer; with `showModel` on, each row now names the model and level after the description. The level renders bare (`sonnet 4.6 · high`) on both the fleet row and the widget running line, dropping the earlier `thinking:` label; the `Agent` tool result and conversation viewer keep the labelled form.
+
+### Added
+- **`maxConcurrentNested` caps how many nested subagents run at once** ([#427](https://github.com/tintinweb/pi-subagents/pull/427), part of [#352](https://github.com/tintinweb/pi-subagents/issues/352)). Nested children skip both queueing pools, so nothing bounded a parent's fan-out. A nested spawn over the limit (default `10`, `0` = unlimited) is refused rather than queued, since queueing a child behind its waiting parent would deadlock. Top-level and workflow agents neither count nor are refused. In `/agents → Settings`, "Max concurrency" is now "Max background concurrency", next to the new "Max nested concurrency" and "Nested depth".
+- **FleetView lists nested subagents under their parent, with a `❯` cursor and mouse support.** Agents spawned through `allowed_subagents` were hidden from every surface, so a delegating agent's fan-out was invisible until it returned. They now appear indented under their parent (`├`/`└`), and open, steer and stop like any other row. In fullscreen mode, hovering a row moves the cursor and clicking opens it. `/agents → Running agents` lists them the same way, and keeps a finished child there after FleetView drops it. Workflow agents stay in the workflow inspector. New `AgentRecord.ownUsage` holds an agent's spend without its descendants'.
+
+## [0.23.2] - 2026-11-10
+
+### Added
+- **Partial README translations in Simplified Chinese, Japanese and Korean** (`README.zh-CN.md`, `README.ja.md`, `README.ko.md`). They cover the intro, Features, Install, Quick Start and the `/agents` command, and link to the English `README.md` for everything else. A language switcher sits at the top of each README.
+
+### Fixed
+
+- **Conversation viewer honors `tui.altScreen.top`/`tui.altScreen.bottom`.** The fullscreen observer's scroll-to-top and jump-to-latest keys, and the jump-to-latest divider label, now resolve through your keybindings the way its scroll and expand keys already did. Remapping those actions in `keybindings.json` no longer leaves the observer on the stock `Ctrl+Home`/`Ctrl+End` while the main transcript uses the remap. `Home`/`End` keep working as aliases, and `Ctrl+Home`/`Ctrl+End` now also scroll in the windowed viewer ([#438](https://github.com/tintinweb/pi-subagents/issues/438)).
+
 ## [0.23.1] - 2026-11-04
 
 ### Added

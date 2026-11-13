@@ -2,9 +2,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type Context, getCurrentTools } from "@earendil-works/pi-ai";
+import type { Context } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { agentCall, type PrintModeRun, runPrintMode } from "./helpers/print-mode-runner.js";
+import { agentCall, isSubagentContext, type PrintModeRun, runPrintMode } from "./helpers/print-mode-runner.js";
 
 vi.setConfig({ testTimeout: 30_000 });
 
@@ -120,7 +120,7 @@ describe("background completion steering scheduling", () => {
         currentParentSession = session;
       },
       respond: async (context) => {
-        const isParent = getCurrentTools(context.messages).some((tool) => tool.name === "Agent");
+        const isParent = !isSubagentContext(context);
         if (!isParent) {
           childModelCalls++;
           return COMPLETION_MARKER;
@@ -211,7 +211,7 @@ describe("background completion steering scheduling", () => {
       extensionPaths: [BLOCKING_TOOL_EXTENSION],
       prompt: "Start two background children and keep working with a blocking tool.",
       respond: async (context) => {
-        if (!getCurrentTools(context.messages).some((tool) => tool.name === "Agent")) return COMPLETION_MARKER;
+        if (isSubagentContext(context)) return COMPLETION_MARKER;
         parentModelCalls++;
         if (parentModelCalls === 1) {
           return [

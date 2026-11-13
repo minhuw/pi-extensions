@@ -186,6 +186,15 @@ describe("agent type registry", () => {
       });
     });
 
+    // Upstream (#448) lets its built-in general-purpose delegate. The local
+    // fleet has no general-purpose and keeps recon, worker and the council
+    // advisors free of nested delegation.
+    it("keeps nested delegation off for every built-in agent", () => {
+      for (const name of [...DEFAULT_AGENT_NAMES, ...COUNCIL_AGENT_NAMES]) {
+        expect(getAgentConfig(name)?.allowedSubagents).toBeUndefined();
+      }
+    });
+
     it("default agents are marked isDefault", () => {
       for (const name of [...DEFAULT_AGENT_NAMES, ...COUNCIL_AGENT_NAMES]) {
         expect(getAgentConfig(name)?.isDefault).toBe(true);
@@ -393,6 +402,21 @@ describe("agent type registry", () => {
       const config = getConfig(name);
       expect(config.description).toBe(`Custom ${name}`);
       expect(config.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
+    });
+
+    // The documented opt-out: a general-purpose.md without `allowed_subagents`
+    // replaces the built-in outright. It must not inherit the built-in's
+    // delegation, nor its `isDefault`, which the runner's workflow gate keys on.
+    it("a general-purpose override without allowed_subagents does not delegate", () => {
+      registerAgents(new Map([["general-purpose", makeAgentConfig({
+        name: "general-purpose",
+        description: "Custom general-purpose",
+      })]]));
+
+      const config = getAgentConfig("general-purpose");
+      expect(config?.description).toBe("Custom general-purpose");
+      expect(config?.allowedSubagents).toBeUndefined();
+      expect(config?.isDefault).not.toBe(true);
     });
 
     it.each(["recon", "worker"])("disabled agent %s is excluded from available types", name => {

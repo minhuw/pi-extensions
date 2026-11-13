@@ -7,9 +7,9 @@ Subagents delegates tasks to a configurable fleet of Pi agents. This collection 
 | Field | Value |
 | --- | --- |
 | Package | `@tintinweb/pi-subagents` |
-| Version / tag | **v0.23.1** |
-| Commit | `9bb6c822bae9f4fe8d33384b715a5e2e96d5df10` |
-| Previous vendor base | v0.22.0, `85a704cb8f35c96c0cabfa665b572bab296942e5` |
+| Version / tag | **v0.25.0** plus unreleased master fixes through `e22c178` (#451, #453) |
+| Commit | `e22c178c0c4a64e01f7ef9eee4ed8c81d3622593` |
+| Previous vendor base | v0.23.1, `9bb6c822bae9f4fe8d33384b715a5e2e96d5df10` |
 | Entry | [`src/index.ts`](./src/index.ts) |
 
 [Upstream documentation](UPSTREAM.md), [changelog](CHANGELOG.md), and [local patch ledger](LOCAL-PATCHES.md). The local behavior described here takes precedence over upstream defaults.
@@ -31,7 +31,7 @@ Do **not** also install `npm:@tintinweb/pi-subagents` in the same Pi profile. Af
 - **Foreground by default:** `Agent` waits for completion unless background execution is selected. An agent’s frontmatter takes precedence over the tool’s `run_in_background` argument, which takes precedence over `backgroundByDefault` (default `false`).
 - **Default fleet:** `recon` and `worker` replace upstream Explore/Plan/general-purpose as the model-visible fleet, alongside three model-hidden council advisors (`council-caspar`, `council-melchior`, `council-balthasar`) loaded from `extensions/council/agents/` for cross-extension RPC deliberation. Unknown types fall back to `worker`; set `fallbackSubagent: "none"` to reject unknown types instead.
 - **Package discovery is opt-in:** `packageAgents` and `packageWorkflows` default to `false`. Enable either in `subagents.json` (or specify a package allowlist) to discover explicitly declared resources from configured packages. Project trust still applies.
-- **Nested delegation is opt-in per agent:** the new upstream delegation controls are available, but the embedded fleet does not gain recursive delegation automatically.
+- **Nested delegation is opt-in per agent:** the upstream delegation controls (`allowed_subagents`, `maxSubagentDepth`, `maxConcurrentNested`) are available, but `recon` and `worker` get no nested tools; upstream's delegating built-in `general-purpose` has no local counterpart.
 - **Scripted workflows are disabled by default pending reliability fixes:** `SubagentWorkflow`, the workflow inspector menu entry, and startup workflow execution are off unless `workflowsEnabled: true` is explicitly configured. Existing explicit opt-ins remain supported; set `workflowsEnabled: false` to disable them. Reload while no agents are running to apply changes to tool registration. When enabled, orchestration still requires an explicit user request.
 - **Tool-requiring roles fail runs without tool calls:** agent frontmatter `require_tool_use: true` makes a run that ends normally (would be `completed` or `steered`) without calling a single tool settle as `error`: "<type> finished without calling any tool, though its role requires tools; the model may not have received its tool definitions. Its reply is kept below. Retry, or check the model route." The reply stays as the result. This catches a model route that drops the child's tool definitions, where the child answers "I have no tools available" and would otherwise look like a finished run. Only an agent's spawn run is checked: a resume may answer a follow-up in text alone. The rule is skipped when the run starts with no active tools. Embedded `recon` and `worker` set it; the council advisors and custom agents default to off. It applies to top-level, nested, and workflow children, and ejecting keeps the field.
 - **Hidden agent types:** frontmatter `model_visible: false` keeps a type out of every model-facing path (the `Agent` tool's description and execution, the fallback, nested tools, `@type` mentions, workflows, schedules, and the subagent host); cross-extension RPC, the manager registry, and `/agents` still see it.
@@ -41,7 +41,7 @@ Do **not** also install `npm:@tintinweb/pi-subagents` in the same Pi profile. Af
 - **Local integrations remain:** service tiers, scoped host/telemetry ownership, Orca busy-state coordination, and compact invocation/model metadata.
 - **External agents:** agents other extensions publish in the shared `pi-extensions.external-agents` registry, such as [Herder](../herder/README.md)'s steps, appear in the widget under their own group heading, in the fleet list, and in `/agents → Running agents`. Their live conversation opens read-only: Subagents cannot stop, steer, or background them. Each Pi session sees only the agents it started. The contract is documented in `src/external-agents.ts`.
 
-Settings live in the global or project `subagents.json`; see [upstream configuration](UPSTREAM.md) for locations and precedence. For example:
+Settings live in the global or project `subagents.json`; see [upstream configuration](UPSTREAM.md) for locations and precedence. `/agents` → Settings writes only the changed key, to the project file if one exists and otherwise the global file (Tab switches). For example:
 
 ```json
 {

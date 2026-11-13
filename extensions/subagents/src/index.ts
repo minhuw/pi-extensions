@@ -11,14 +11,14 @@
  *   /agents model           — Configure persistent or session subagent model overrides
  */
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { type AutocompleteItem, Container, isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
+import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { type AutocompleteItem, Container, isKeyRelease, matchesKey, type ScrollViewScrollbar, type SettingItem, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
-import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager, assertValidSpawnCwd, isTopLevelAgent } from "./agent-manager.js";
 import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, reopenTarget, worktreeLost } from "./agent-record-entry.js";
 import { resolveChildSessionRoot } from "./agent-runner.js";
@@ -26,7 +26,6 @@ import { validateReopenSessionFile } from "./reopen.js";
 import { validateLinkData } from "./child-session-hooks.js";
 import { getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { getRecordConversation, openViewerSession } from "./session-transcript.js";
-import { rowDescription, sourceIndicator, sourceLegend } from "./agent-source-badge.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getEnabledTypes, getFallbackSubagent, isDefaultsDisabled, isModelVisible, NO_FALLBACK, registerAgents, resolveEnabledType, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { CompletionOutbox, NOTIFICATION_HOLD_MS } from "./completion-outbox.js";
@@ -49,12 +48,27 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { getPackageAgentsGate, getPackageWorkflowsGate, invalidatePackageCache, packageNameForPath, seedProjectTrust, setPackageAgentsGate, setPackageWorkflowsGate, setProjectTrusted } from "./package-resources.js";
+import { getPackageAgentsGate, getPackageWorkflowsGate, invalidatePackageCache, seedProjectTrust, setPackageAgentsGate, setPackageWorkflowsGate, setProjectTrusted } from "./package-resources.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import {
+  applyAndEmitLoaded,
+  applySettings,
+  defaultSettingsScope,
+  isNumericSettingKey,
+  loadSettings,
+  SETTING_DEFAULTS,
+  type SettingsAppliers,
+  type SettingsScope,
+  type SubagentsSettings,
+  saveAndEmitChanged,
+  saveSettings,
+  settingSources,
+  settingsFilePath,
+  type ToolDescriptionMode,
+} from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
-import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, THINKING_LEVELS, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import { modelSupportsServiceTier, parseServiceTier } from "./service-tier.js";
 import {
@@ -66,6 +80,7 @@ import {
   describeActivity,
   fgPreservingNestedStyles,
   formatAgentIdentity,
+  formatAge,
   formatCost,
   formatDuration,
   formatModelName,
@@ -81,13 +96,13 @@ import {
   type Theme,
   type UICtx,
 } from "./ui/agent-widget.js";
+import { createAgentsMenu } from "./ui/agents-menu.js";
 import { ConversationViewer, getConversationOverlayOptions, type ViewerBackgroundAction } from "./ui/conversation-viewer.js";
 import { ExternalAgentTracker, type ExternalAgentView, externalRecord } from "./external-agents.js";
 import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
-import { showSchedulesMenu } from "./ui/schedule-menu.js";
-import { selectItem } from "./ui/select-item.js";
+import { createSettingsPage, type SettingsPageDeps } from "./ui/settings-menu.js";
 import { renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
-import { openWorkflowFromFleet, showWorkflowsMenu, type WorkflowMenuDeps } from "./ui/workflow-menu.js";
+import { openWorkflowFromFleet, type WorkflowMenuDeps } from "./ui/workflow-menu.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
 import { decideWorkflowCollision, FOREIGN_WORKFLOW_TOOL_NAMES } from "./workflow/collisions.js";
 import { WORKFLOW_ENTRY_TYPE, type WorkflowEntryData, workflowEntryData } from "./workflow/entry.js";
@@ -176,15 +191,6 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
 
   return { state, callbacks };
 }
-
-/**
- * Advertised thinking levels, ordered to mirror pi-ai's EXTENDED_THINKING_LEVELS
- * (`off` + every `ThinkingLevel`). Single source for the Agent tool description,
- * the generated-agent template, and the `/agents` wizard so these lists can't
- * drift behind pi again (#147). Availability of any level still depends on the
- * host pi version and the selected model — pi clamps unsupported levels down.
- */
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 /** Human-readable status label for agent completion. */
 function getStatusLabel(status: string, error?: string): string {
@@ -484,7 +490,7 @@ export default function (pi: ExtensionAPI) {
   /** Preserve local compact model/thinking/tier identity unless explicitly hidden. */
   let showModel = true;
   function isShowModelEnabled(): boolean { return showModel; }
-  function setShowModel(b: boolean): void { showModel = b; widget.update(); }
+  function setShowModel(b: boolean): void { showModel = b; widget.update(); fleet.update(); }
   /**
    * How much of the conversation viewer renders as Markdown. Read through a
    * getter by the viewer rather than captured like `showCost`, because the
@@ -1109,10 +1115,15 @@ export default function (pi: ExtensionAPI) {
     return resolved?.kind === "live" ? resolved.record : undefined;
   };
 
-  /** get_subagent_result's answer from a persisted record, once the live record is gone. */
+  /**
+   * get_subagent_result's answer from a persisted record, once the live record
+   * is gone. The record lasts as long as the session file, so it states when
+   * the run finished: a days-old result must not read as current (#436).
+   */
   const formatSavedAgentRecord = (saved: AgentRecordEntryData): string =>
     `Agent: ${saved.id}\n` +
     `Type: ${getDisplayName(saved.type)} | Status: ${saved.status}${getStatusNote(saved.status)} | Duration: ${formatDuration(saved.startedAt, saved.completedAt)}\n` +
+    (saved.completedAt ? `Finished: ${new Date(saved.completedAt).toISOString().slice(0, 16)}Z (${formatAge(saved.completedAt)} ago)\n` : "") +
     `Description: ${saved.description}\n` +
     `(From the session's saved record: the live record has been cleaned up, so its stats and conversation are gone.)\n\n` +
     (saved.status === "error" ? `Error: ${saved.error}${partialOutputSuffix(saved)}` : saved.result?.trim() || "No output.");
@@ -1650,7 +1661,7 @@ export default function (pi: ExtensionAPI) {
   // one opened from `/agents`: same settings on the way in, same persist out.
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
     (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
-    getFullscreenScrollbar, backgroundActionFor);
+    getFullscreenScrollbar, backgroundActionFor, isShowModelEnabled);
   fleet.setExternalSource(() => externalAgentTracker.list());
   let fleetViewEnabled = false;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
@@ -1956,37 +1967,37 @@ export default function (pi: ExtensionAPI) {
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
   // Global + project merged; missing → defaults; corrupt file emits a warning
   // to stderr and falls back to defaults.
-  applyAndEmitLoaded(
-    {
-      setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
-      setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n),
-      setDefaultMaxTurns,
-      setGraceTurns,
-      setDefaultJoinMode,
-      setBackgroundByDefault,
-      setSchedulingEnabled,
-      setScopeModels: setScopeModelsEnabled,
-      setStrictAgentFiles: (b) => { strictAgentFiles = b; },
-      setDisableDefaultAgents: setDisableDefaultAgents,
-      setToolDescriptionMode: setToolDescriptionMode,
-      setFleetView: setFleetViewEnabled,
-      setAgentMentions: setAgentMentionMode,
-      setRememberAgents,
-      setWidgetMode: setWidgetMode,
-      setOutputTranscript: setOutputTranscriptDefault,
-      setWorktreeIsolation: setWorktreeIsolationEnabled,
-      setWorkflowsEnabled: setWorkflowsEnabled,
-      setMaxSubagentDepth: setMaxSubagentDepth,
-      setFallbackSubagent: setFallbackSubagent,
-      setReportUsage,
-      setShowCost,
-      setShowModel,
-      setViewerMarkdown,
-      setPackageAgents: setPackageAgentsGate,
-      setPackageWorkflows: setPackageWorkflowsGate,
-    },
-    (event, payload) => pi.events.emit(event, payload),
-  );
+  // Also how Del on the Settings page applies the value a row falls back to.
+  const settingsAppliers: SettingsAppliers = {
+    setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
+    setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n),
+    setMaxConcurrentNested: (n) => manager.setMaxConcurrentNested(n),
+    setDefaultMaxTurns,
+    setGraceTurns,
+    setDefaultJoinMode,
+    setBackgroundByDefault,
+    setSchedulingEnabled,
+    setScopeModels: setScopeModelsEnabled,
+    setStrictAgentFiles: (b) => { strictAgentFiles = b; },
+    setDisableDefaultAgents: setDisableDefaultAgents,
+    setToolDescriptionMode: setToolDescriptionMode,
+    setFleetView: setFleetViewEnabled,
+    setAgentMentions: setAgentMentionMode,
+    setRememberAgents,
+    setWidgetMode: setWidgetMode,
+    setOutputTranscript: setOutputTranscriptDefault,
+    setWorktreeIsolation: setWorktreeIsolationEnabled,
+    setWorkflowsEnabled: setWorkflowsEnabled,
+    setMaxSubagentDepth: setMaxSubagentDepth,
+    setFallbackSubagent: setFallbackSubagent,
+    setReportUsage,
+    setShowCost,
+    setShowModel,
+    setViewerMarkdown,
+    setPackageAgents: setPackageAgentsGate,
+    setPackageWorkflows: setPackageWorkflowsGate,
+  };
+  applyAndEmitLoaded(settingsAppliers, (event, payload) => pi.events.emit(event, payload));
 
   // ---- Agent tool ----
 
@@ -3165,7 +3176,6 @@ Terse command-style prompts produce shallow, generic work.
     description: "Use only when the user explicitly opts into a multi-agent workflow. For individual delegation use Agent in the foreground.\n\n" + renderToolDescriptionTemplate(fullWorkflowToolDescription),
     promptSnippet: "Run a deterministic script that orchestrates many subagents",
     promptGuidelines: [
-      "Only after explicit user opt-in to a multi-agent workflow: use SubagentWorkflow when the number of agents depends on something discovered at runtime, when work flows through stages, or when findings should be independently verified. Use Agent for one delegated task or a handful you can name up front.",
       "Prefer `pipeline` over `parallel` — a barrier costs wall-clock whenever the stages are unevenly sized.",
       "A workflow runs in the background and notifies you when it finishes — do not poll or sleep waiting for it.",
     ],
@@ -3670,190 +3680,6 @@ Terse command-style prompts produce shallow, generic work.
     return `${label} (→ ${resolvedFull})`;
   }
 
-  async function showAgentsMenu(ctx: ExtensionCommandContext) {
-    reloadCustomAgents();
-    const allNames = getAllTypes();
-
-    // Build select options
-    const options: string[] = [];
-
-    // Running agents entry (only if there are active agents)
-    const agents = manager.listAgents().filter(record => !record.owner && isTopLevelAgent(record));
-    const external = externalAgentTracker.list();
-    if (agents.length + external.length > 0) {
-      const running = agents.filter(a => a.status === "running" || a.status === "queued").length
-        + external.filter(view => view.agent.status === "running").length;
-      const done = agents.filter(a => a.status === "completed" || a.status === "steered").length
-        + external.filter(view => view.agent.status === "completed").length;
-      options.push(`Running agents (${agents.length + external.length}) — ${running} running, ${done} done`);
-    }
-
-    // Agent types list
-    if (allNames.length > 0) {
-      options.push(`Agent types (${allNames.length})`);
-    }
-
-    // Scheduled jobs entry (always present when scheduler is active)
-    if (scheduler.isActive()) {
-      const jobCount = scheduler.list().length;
-      options.push(`Scheduled jobs (${jobCount})`);
-    }
-
-    // Workflow runs, on the same terms as scheduled jobs: shown only when the
-    // feature is on, so the menu never advertises something switched off.
-    if (isWorkflowsEnabled()) {
-      options.push(`Workflows (${workflowTasks.size})`);
-    }
-
-    // Actions
-    options.push("Create new agent");
-    options.push("Settings");
-
-    const noAgentsMsg = allNames.length === 0 && agents.length === 0
-      ? "No agents found. Create specialized subagents that can be delegated to.\n\n" +
-        "Each subagent has its own context window, custom system prompt, and specific tools.\n\n" +
-        "Try creating: Code Reviewer, Security Auditor, Test Writer, or Documentation Writer.\n\n"
-      : "";
-
-    if (noAgentsMsg) {
-      ctx.ui.notify(noAgentsMsg, "info");
-    }
-
-    const choice = await ctx.ui.select("Agents", options);
-    if (!choice) return;
-
-    if (choice.startsWith("Running agents (")) {
-      await showRunningAgents(ctx);
-      await showAgentsMenu(ctx);
-    } else if (choice.startsWith("Agent types (")) {
-      await showAllAgentsList(ctx);
-      await showAgentsMenu(ctx);
-    } else if (choice.startsWith("Scheduled jobs (")) {
-      await showSchedulesMenu(ctx, scheduler);
-      await showAgentsMenu(ctx);
-    } else if (choice.startsWith("Workflows (")) {
-      await showWorkflowsMenu(ctx, workflowMenuDeps);
-      await showAgentsMenu(ctx);
-    } else if (choice === "Create new agent") {
-      await showCreateWizard(ctx);
-    } else if (choice === "Settings") {
-      await showSettings(ctx);
-      await showAgentsMenu(ctx);
-    }
-  }
-
-  /**
-   * The package that provided an agent, for display only. Undefined for every
-   * other source, and for a package path no currently-admitted package owns —
-   * which is what a stale `sourcePath` looks like after the gate narrows.
-   */
-  function packageNameOf(cfg: AgentConfig | undefined): string | undefined {
-    if (cfg?.source !== "package" || !cfg.sourcePath) return undefined;
-    return packageNameForPath(cfg.sourcePath, process.cwd());
-  }
-
-  async function showAllAgentsList(ctx: ExtensionCommandContext) {
-    const allNames = getAllTypes();
-    if (allNames.length === 0) {
-      ctx.ui.notify("No agents.", "info");
-      return;
-    }
-
-    const configs = allNames.map(name => getAgentConfig(name));
-
-    // One row per agent (name in the left column, model on the right); the
-    // full description renders below the highlighted row via SettingsList,
-    // exactly like the Settings menu — so long descriptions never wrap the list.
-    // A package agent's description is prefixed with the package that provided
-    // it: the `▪` badge says a package won, not which one.
-    const items: SettingItem[] = allNames.map((name, i) => {
-      const cfg = configs[i];
-      const model = `${getModelLabel(name, ctx.modelRegistry)}${formatOverrideBadge(name)}`;
-      const invocation = [
-        model,
-        `thinking: ${cfg?.thinking ?? "inherit"}`,
-        `tier: ${cfg?.serviceTier ?? "unpinned"}`,
-      ].join(" · ");
-      return {
-        id: name,
-        label: `${sourceIndicator(cfg)}${name}`,
-        currentValue: invocation,
-        description: rowDescription(name, cfg, packageNameOf(cfg)),
-        // Single-value list so Enter "activates" the row (fires onChange with the
-        // agent's id) without offering anything to actually cycle.
-        values: [invocation],
-      };
-    });
-
-    const legend = sourceLegend(configs);
-
-    const selected = await ctx.ui.custom<string | undefined>((_tui, _theme, _kb, done) => {
-      const slTheme = getSettingsListTheme();
-      const list = new SettingsList(
-        items,
-        Math.min(items.length, 12),
-        slTheme,
-        id => done(id), // Enter/Space on a row → return that agent's name
-        () => done(undefined), // Esc → cancel
-      );
-      const container = new Container();
-      container.addChild(new Text("Agent types", 0, 0));
-      if (legend) container.addChild(new Text(slTheme.hint(legend), 0, 0));
-      container.addChild(new Spacer(1));
-      container.addChild(list);
-      return {
-        render: (w: number) => container.render(w),
-        invalidate: () => container.invalidate(),
-        handleInput: (data: string) => list.handleInput?.(data),
-      };
-    });
-
-    if (selected && getAgentConfig(selected)) {
-      await showAgentDetail(ctx, selected);
-      await showAllAgentsList(ctx);
-    }
-  }
-
-  async function showRunningAgents(ctx: ExtensionCommandContext) {
-    const agents = manager.listAgents().filter(record => !record.owner && isTopLevelAgent(record));
-    // Other extensions' agents follow Subagents' own, read-only.
-    const items: ({ record: AgentRecord } | { view: ExternalAgentView })[] = [
-      ...agents.map(record => ({ record })),
-      ...externalAgentTracker.list().map(view => ({ view })),
-    ];
-    if (items.length === 0) {
-      ctx.ui.notify("No agents.", "info");
-      return;
-    }
-
-    // Numbered + item-paired. Two same-type agents spawned together with the
-    // same description render identically here, and resolving the choice by
-    // string match would open whichever came first.
-    const item = await selectItem(ctx.ui, "Running agents", items, entry => {
-      if ("view" in entry) return externalAgentLabel(entry.view);
-      const a = entry.record;
-      const dn = getDisplayName(a.type);
-      const dur = formatDuration(a.startedAt, a.completedAt);
-      const { identity, tags } = buildInvocationTags(buildRecordInvocation(a));
-      const metadata = [identity, ...tags].filter(Boolean);
-      const invocationText = metadata.length > 0 ? ` · ${metadata.join(" · ")}` : "";
-      return `${dn} (${a.description})${invocationText} · ${a.toolUses} tools · ${a.status} · ${dur}`;
-    });
-    if (!item) return;
-
-    if ("view" in item) await viewExternalConversation(ctx, item.view);
-    else await viewAgentConversation(ctx, item.record);
-    // Back-navigation: re-show the list
-    await showRunningAgents(ctx);
-  }
-
-  function externalAgentLabel(view: ExternalAgentView): string {
-    const { agent } = view;
-    const identity = formatAgentIdentity({ modelName: agent.model, thinking: agent.thinking });
-    const metadata = [agent.role, identity, agent.group].filter(Boolean).join(" · ");
-    return `${agent.name}${agent.description ? ` (${agent.description})` : ""} · ${metadata} · ${view.activity.toolUses} tools · ${agent.status} · ${formatDuration(agent.startedAt, agent.completedAt)}`;
-  }
-
   /** The live conversation of another extension's agent, read-only: no stop, steer, or background. */
   async function viewExternalConversation(ctx: ExtensionCommandContext, view: ExternalAgentView) {
     const { id, name, role, status, sessionFile } = view.agent;
@@ -4010,387 +3836,6 @@ Terse command-style prompts produce shallow, generic work.
     }
   }
 
-  async function showAgentDetail(ctx: ExtensionCommandContext, name: string) {
-    const cfg = getAgentConfig(name);
-    if (!cfg) {
-      ctx.ui.notify(`Agent config not found for "${name}".`, "warning");
-      return;
-    }
-
-    const isPackage = cfg.source === "package";
-    const file = locateAgentFile(name, cfg.sourcePath, undefined, cfg.source);
-    const isDefault = cfg.isDefault === true;
-    const disabled = cfg.enabled === false;
-
-    let menuOptions: string[];
-    if (isPackage) {
-      // Read-only: nothing here may write inside pi's install root. `Disable`
-      // still appears because it writes a *local* stub that shadows the package
-      // agent, and `Enable` never does — a package agent that reads as disabled
-      // was disabled by its own author's `enabled: false`, which only the
-      // package can take back. Eject is the way out of that: the copy it writes
-      // carries no `enabled:` line, so the ejected agent is on.
-      menuOptions = disabled
-        ? ["Eject (export as .md)", "Back"]
-        : ["Eject (export as .md)", "Disable", "Back"];
-    } else if (disabled && file) {
-      // Disabled agent with a file — offer Enable
-      menuOptions = isDefault
-        ? ["Enable", "Edit", "Reset to default", "Delete", "Back"]
-        : ["Enable", "Edit", "Delete", "Back"];
-    } else if (isDefault && !file) {
-      // Default agent with no .md override
-      menuOptions = ["Eject (export as .md)", "Disable", "Back"];
-    } else if (isDefault && file) {
-      // Default agent with .md override (ejected)
-      menuOptions = ["Edit", "Disable", "Reset to default", "Delete", "Back"];
-    } else {
-      // User-defined agent
-      menuOptions = ["Edit", "Disable", "Delete", "Back"];
-    }
-
-    if (!isCouncilAgentName(name)) {
-      const modelOptions = getActiveModelOverride(name)
-        ? ["Change model", "Reset model override"]
-        : ["Change model"];
-      menuOptions = [...modelOptions, ...menuOptions];
-    }
-
-    // Name the package in the title: this menu's options are the read-only set,
-    // and "which package do I have to uninstall or allowlist away" is the
-    // question they raise.
-    const pkgName = packageNameOf(cfg);
-    const choice = await ctx.ui.select(pkgName ? `${name} — ${pkgName}` : name, menuOptions);
-    if (!choice || choice === "Back") return;
-
-    if (choice === "Change model") {
-      await promptAgentModelPicker(ctx, name);
-    } else if (choice === "Reset model override") {
-      clearAgentModelOverride(name, "all");
-      reloadCustomAgents();
-      const restored = getAgentConfig(name)?.model ?? "inherit parent model";
-      ctx.ui.notify(`${name} model reset to default (${restored})`, "info");
-    } else if (choice === "Edit" && file) {
-      const content = readFileSync(file.path, "utf-8");
-      const edited = await ctx.ui.editor(`Edit ${name}`, content);
-      if (edited !== undefined && edited !== content) {
-        const { writeFileSync } = await import("node:fs");
-        writeFileSync(file.path, edited, "utf-8");
-        reloadCustomAgents();
-        ctx.ui.notify(`Updated ${file.path}`, "info");
-      }
-    } else if (choice === "Delete") {
-      if (file) {
-        const confirmed = await ctx.ui.confirm("Delete agent", `Delete ${name} from ${file.location} (${file.path})?`);
-        if (confirmed) {
-          unlinkSync(file.path);
-          reloadCustomAgents();
-          ctx.ui.notify(`Deleted ${file.path}`, "info");
-        }
-      }
-    } else if (choice === "Reset to default" && file) {
-      const confirmed = await ctx.ui.confirm("Reset to default", `Delete override ${file.path} and restore embedded default?`);
-      if (confirmed) {
-        unlinkSync(file.path);
-        reloadCustomAgents();
-        ctx.ui.notify(`Restored default ${name}`, "info");
-      }
-    } else if (choice.startsWith("Eject")) {
-      await ejectAgent(ctx, name, cfg);
-    } else if (choice === "Disable") {
-      await disableAgent(ctx, name);
-    } else if (choice === "Enable") {
-      await enableAgent(ctx, name);
-    }
-  }
-
-  /** Eject a default agent: write its embedded config as a .md file. */
-  async function ejectAgent(ctx: ExtensionCommandContext, name: string, cfg: AgentConfig) {
-    const location = await ctx.ui.select("Choose location", [
-      "Project (.pi/agents/)",
-      `Personal (${personalAgentsDir()})`,
-    ]);
-    if (!location) return;
-
-    const targetDir = location.startsWith("Project") ? projectAgentsDir() : personalAgentsDir();
-    mkdirSync(targetDir, { recursive: true });
-
-    const targetPath = join(targetDir, `${name}.md`);
-    if (existsSync(targetPath)) {
-      const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
-      if (!overwrite) return;
-    }
-
-    const content = serializeAgentFile(cfg);
-
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(targetPath, content, "utf-8");
-    reloadCustomAgents();
-    ctx.ui.notify(`Ejected ${name} to ${targetPath}`, "info");
-  }
-
-  /** Disable an agent: set enabled: false in its .md file, or create a stub for built-in defaults. */
-  async function disableAgent(ctx: ExtensionCommandContext, name: string) {
-    const cfg = getAgentConfig(name);
-    // `locateAgentFile` refuses a package agent's own path, so this is either the
-    // local stub already shadowing it or nothing — never a file inside pi's
-    // install root. An unshadowed package agent therefore falls to the stub
-    // branch below, which writes `enabled: false` at project or personal scope.
-    const file = locateAgentFile(name, cfg?.sourcePath, undefined, cfg?.source);
-    if (file) {
-      // Existing file — set enabled: false in frontmatter (idempotent)
-      const content = readFileSync(file.path, "utf-8");
-      const { content: updated, outcome } = disableInContent(content);
-      if (outcome === "already-disabled") {
-        ctx.ui.notify(`${name} is already disabled.`, "info");
-        return;
-      }
-      if (outcome === "no-frontmatter") {
-        // Nothing to edit — say so rather than rewriting the file unchanged and
-        // reporting success for a change that never happened.
-        ctx.ui.notify(`Cannot disable ${name}: ${file.path} has no frontmatter block.`, "error");
-        return;
-      }
-      const { writeFileSync } = await import("node:fs");
-      writeFileSync(file.path, updated, "utf-8");
-      reloadCustomAgents();
-      ctx.ui.notify(`Disabled ${name} (${file.path})`, "info");
-      return;
-    }
-
-    // No editable file (a built-in default, or a package-provided agent) —
-    // create a stub that shadows it.
-    const location = await ctx.ui.select("Choose location", [
-      "Project (.pi/agents/)",
-      `Personal (${personalAgentsDir()})`,
-    ]);
-    if (!location) return;
-
-    const targetDir = location.startsWith("Project") ? projectAgentsDir() : personalAgentsDir();
-    mkdirSync(targetDir, { recursive: true });
-
-    const targetPath = join(targetDir, `${name}.md`);
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(targetPath, "---\nenabled: false\n---\n", "utf-8");
-    reloadCustomAgents();
-    ctx.ui.notify(`Disabled ${name} (${targetPath})`, "info");
-  }
-
-  /** Enable a disabled agent by removing enabled: false from its frontmatter. */
-  async function enableAgent(ctx: ExtensionCommandContext, name: string) {
-    const cfg = getAgentConfig(name);
-    const file = locateAgentFile(name, cfg?.sourcePath, undefined, cfg?.source);
-    if (!file) return;
-
-    const content = readFileSync(file.path, "utf-8");
-    const { content: updated, changed } = enableInContent(content);
-    if (!changed && !isEmptyStub(updated)) {
-      // The file carries no `enabled: false` to remove, so it was never disabled
-      // by us — reporting success here would hide a no-op.
-      ctx.ui.notify(`${name} is not disabled in ${file.path}.`, "info");
-      return;
-    }
-    const { writeFileSync } = await import("node:fs");
-
-    // If the file was just a stub ("---\n---\n"), delete it to restore the built-in default
-    if (isEmptyStub(updated)) {
-      unlinkSync(file.path);
-      reloadCustomAgents();
-      ctx.ui.notify(`Enabled ${name} (removed ${file.path})`, "info");
-    } else {
-      writeFileSync(file.path, updated, "utf-8");
-      reloadCustomAgents();
-      ctx.ui.notify(`Enabled ${name} (${file.path})`, "info");
-    }
-  }
-
-  async function showCreateWizard(ctx: ExtensionCommandContext) {
-    const location = await ctx.ui.select("Choose location", [
-      "Project (.pi/agents/)",
-      `Personal (${personalAgentsDir()})`,
-    ]);
-    if (!location) return;
-
-    const targetDir = location.startsWith("Project") ? projectAgentsDir() : personalAgentsDir();
-
-    const method = await ctx.ui.select("Creation method", [
-      "Generate with Claude (recommended)",
-      "Manual configuration",
-    ]);
-    if (!method) return;
-
-    if (method.startsWith("Generate")) {
-      await showGenerateWizard(ctx, targetDir);
-    } else {
-      await showManualWizard(ctx, targetDir);
-    }
-  }
-
-  async function showGenerateWizard(ctx: ExtensionCommandContext, targetDir: string) {
-    const description = await ctx.ui.input("Describe what this agent should do");
-    if (!description) return;
-
-    const name = await ctx.ui.input("Agent name (filename, no spaces)");
-    if (!name) return;
-
-    mkdirSync(targetDir, { recursive: true });
-
-    const targetPath = join(targetDir, `${name}.md`);
-    if (existsSync(targetPath)) {
-      const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
-      if (!overwrite) return;
-    }
-
-    ctx.ui.notify("Generating agent definition...", "info");
-
-    const generatePrompt = `Create a custom pi sub-agent definition file based on this description: "${description}"
-
-Write a markdown file to: ${targetPath}
-
-The file format is a markdown file with YAML frontmatter and a system prompt body:
-
-\`\`\`markdown
----
-description: <one-line description shown in UI>
-color: <optional agent name badge color: red, blue, green, yellow, purple, orange, pink, cyan, an Agency Agents alias, or quoted "#RRGGBB">
-tools: <comma-separated built-in tools: read, bash, edit, write, grep, find, ls. Use "none" for no tools. Omit for all tools>
-model: <optional model as "provider/modelId", e.g. "anthropic/claude-haiku-4-5". Omit to inherit parent model>
-thinking: <optional thinking level: ${THINKING_LEVELS.join(", ")}. Omit to inherit>
-service_tier: <optional: fast|standard (or priority|default|flex|auto) for OpenAI-compatible models. Omit for provider default>
-max_turns: <optional max agentic turns. 0 or omit for unlimited (default)>
-prompt_mode: <"replace" (body IS the full system prompt) or "append" (body is appended to default prompt). Default: replace>
-extensions: <true (inherit all MCP/extension tools), false (none), or comma-separated names. Default: true>
-skills: <true (inherit all), false (none), or comma-separated skill names to preload into prompt. Default: true>
-disallowed_tools: <comma-separated tool names to block, even if otherwise available. Omit for none>
-inherit_context: <true to fork parent conversation into agent so it sees chat history. Default: false>
-run_in_background: <pin this agent to background (true) or foreground (false). Omit to follow the backgroundByDefault setting, which defaults to foreground>
-output_transcript: <false to write no transcript file or path for this agent. Independent of persist_session. Default: true>
-isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
-memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>${
-      // Offering the field on a project that turned worktrees off would bake a
-      // request that is refused at spawn time into a file that outlives the
-      // session — the #231 pathology (models fill the fields they are shown)
-      // one layer up. Built per invocation, so this read is live.
-      isWorktreeIsolationEnabled()
-        ? `\nisolation: <"worktree" to run in isolated git worktree; "off" to refuse one even when the caller asks. Omit for normal>`
-        : ""
-    }
----
-
-<system prompt body — instructions for the agent>
-\`\`\`
-
-Guidelines for choosing settings:
-- For read-only tasks (review, analysis): tools: read, bash, grep, find, ls
-- For code modification tasks: include edit, write
-- Use prompt_mode: append if the agent should keep the default system prompt and add specialization on top
-- Use prompt_mode: replace for fully custom agents with their own personality/instructions
-- Set inherit_context: true if the agent needs to know what was discussed in the parent conversation
-- Set isolated: true if the agent should NOT have access to MCP servers or other extensions
-- Set output_transcript: false to skip writing this agent's transcript; this alone doesn't keep the run off disk (persist_session, isolation: worktree commits, and memory still write) — set those too if that's the goal
-- Only include frontmatter fields that differ from defaults — omit fields where the default is fine
-
-Write the file using the write tool. Only write the file, nothing else.`;
-
-    const { record } = await manager.spawnAndWait(pi, ctx, "worker", generatePrompt, {
-      description: `Generate ${name} agent`,
-      maxTurns: 5,
-      // Exempt from maxConcurrentForeground. This runs from a modal wizard, not
-      // a tool call: it passes no signal, and Esc in `ctx.ui` never reaches the
-      // manager — so a user waiting behind a full pool would have no way to
-      // cancel at all. It is also one human action that cannot fan out, which
-      // is what the limit exists to bound. It still counts once started.
-      bypassQueue: true,
-    });
-
-    if (record.status === "error") {
-      ctx.ui.notify(`Generation failed: ${record.error}`, "warning");
-      return;
-    }
-
-    reloadCustomAgents();
-
-    if (existsSync(targetPath)) {
-      ctx.ui.notify(`Created ${targetPath}`, "info");
-    } else {
-      ctx.ui.notify("Agent generation completed but file was not created. Check the agent output.", "warning");
-    }
-  }
-
-  async function showManualWizard(ctx: ExtensionCommandContext, targetDir: string) {
-    // 1. Name
-    const name = await ctx.ui.input("Agent name (filename, no spaces)");
-    if (!name) return;
-
-    // 2. Description
-    const description = await ctx.ui.input("Description (one line)");
-    if (!description) return;
-
-    // 3. Tools
-    const toolChoice = await ctx.ui.select("Tools", ["all", "none", "read-only (read, bash, grep, find, ls)", "custom..."]);
-    if (!toolChoice) return;
-
-    let tools: string;
-    if (toolChoice === "all") {
-      tools = BUILTIN_TOOL_NAMES.join(", ");
-    } else if (toolChoice === "none") {
-      tools = "none";
-    } else if (toolChoice.startsWith("read-only")) {
-      tools = "read, bash, grep, find, ls";
-    } else {
-      const customTools = await ctx.ui.input("Tools (comma-separated)", BUILTIN_TOOL_NAMES.join(", "));
-      if (!customTools) return;
-      tools = customTools;
-    }
-
-    // 4. Model
-    const modelChoice = await ctx.ui.select("Model", [
-      "inherit (parent model)",
-      "haiku",
-      "sonnet",
-      "opus",
-      "custom...",
-    ]);
-    if (!modelChoice) return;
-
-    let model: string | undefined;
-    if (modelChoice === "haiku") model = "anthropic/claude-haiku-4-5";
-    else if (modelChoice === "sonnet") model = "anthropic/claude-sonnet-4-6";
-    else if (modelChoice === "opus") model = "anthropic/claude-opus-4-6";
-    else if (modelChoice === "custom...") {
-      model = (await ctx.ui.input("Model (provider/modelId)")) || undefined;
-    }
-
-    // 5. Thinking
-    // "inherit" is a UI-only pseudo-choice (omit the field); the rest mirror pi.
-    const thinkingChoice = await ctx.ui.select("Thinking level", ["inherit", ...THINKING_LEVELS]);
-    if (!thinkingChoice) return;
-
-    // 6. System prompt
-    const systemPrompt = await ctx.ui.editor("System prompt", "");
-    if (systemPrompt === undefined) return;
-
-    const content = buildNewAgentFile({
-      description,
-      tools,
-      model,
-      thinking: thinkingChoice === "inherit" ? undefined : thinkingChoice,
-      systemPrompt,
-    });
-
-    mkdirSync(targetDir, { recursive: true });
-    const targetPath = join(targetDir, `${name}.md`);
-
-    if (existsSync(targetPath)) {
-      const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
-      if (!overwrite) return;
-    }
-
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(targetPath, content, "utf-8");
-    reloadCustomAgents();
-    ctx.ui.notify(`Created ${targetPath}`, "info");
-  }
 
   /**
    * Every settings mutation writes this WHOLE object back to disk, so a field
@@ -4406,6 +3851,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       maxConcurrent: manager.getMaxConcurrent(),
       // 0 = unlimited, and the default — see SubagentsSettings.
       maxConcurrentForeground: manager.getMaxConcurrentForeground(),
+      maxConcurrentNested: manager.getMaxConcurrentNested(),
       // 0 = unlimited — per SubagentsSettings.defaultMaxTurns docstring and
       // normalizeMaxTurns() in agent-runner.ts (which maps 0 → undefined).
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
@@ -4457,6 +3903,32 @@ Write the file using the write tool. Only write the file, nothing else.`;
   const _settingsSnapshotIsComplete: _NoMissingSettingsKeys = true;
   void _settingsSnapshotIsComplete;
 
+  // The settings as last persisted (or as loaded at startup). A save writes
+  // only the keys that differ from it, so a change here cannot revert what
+  // another pi session saved to the shared global file, and untouched
+  // defaults are never frozen into a file.
+  let savedSnapshot: SubagentsSettings = snapshotSettings();
+
+  /** Where a Settings-page change goes: the chosen file, and the setting it set. */
+  type SettingsTarget = { scope: SettingsScope; key?: keyof SubagentsSettings };
+
+  /** Persist + broadcast what changed since the last save; the toast to show. */
+  function saveSnapshot(successMsg: string, target?: SettingsTarget): { message: string; level: "info" | "warning" } {
+    const snapshot = snapshotSettings();
+    const { persisted, ...toast } = saveAndEmitChanged(
+      snapshot,
+      savedSnapshot,
+      successMsg,
+      (event, payload) => pi.events.emit(event, payload),
+      process.cwd(),
+      target?.scope,
+      target?.key ? { [target.key]: snapshot[target.key] } : {},
+    );
+    // A failed write keeps the old baseline, so the next save retries this change.
+    if (persisted) savedSnapshot = snapshot;
+    return toast;
+  }
+
   /**
    * Whether a package gate lets anything through. `undefined` is the unset
    * default and reads as `true`; an empty allowlist matches nothing, like
@@ -4481,14 +3953,38 @@ Write the file using the write tool. Only write the file, nothing else.`;
       : `${base} Currently limited to an empty list, so nothing loads.`;
   }
 
-  const NUMERIC_IDS = new Set([
-    "maxConcurrent", "maxConcurrentForeground", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
-  ]);
+  // The setting a row shows: its id, except Join mode's.
+  const settingKeyOf = (id: string) => (id === "joinMode" ? "defaultJoinMode" : id) as keyof SubagentsSettings;
 
+  /**
+   * Put one setting back to `value`, the value loading gives once Del has
+   * removed it from a file; `undefined` unsets it. Carries the side effects
+   * the Settings rows carry when they change the same setting.
+   */
+  function resetSetting(key: keyof SubagentsSettings, value: unknown) {
+    if (value !== undefined) applySettings({ [key]: value } as SubagentsSettings, settingsAppliers);
+    else if (key === "fallbackSubagent") setFallbackSubagent(undefined);
+    else if (key === "packageAgents") setPackageAgentsGate(undefined);
+    else if (key === "packageWorkflows") setPackageWorkflowsGate(undefined);
+    else if (key === "workflowsEnabled") {
+      // Back to the local default (off), and no longer the user's answer.
+      workflowsEnabled = false;
+      workflowsPinned = false;
+    }
+    if (key === "packageAgents" || key === "packageWorkflows") reloadCustomAgents();
+    if (key === "schedulingEnabled" && !isSchedulingEnabled()) scheduler.stop();
+  }
+
+  /**
+   * `scope` is the file changes are written to. It starts at the default rule
+   * and Tab switches it; the list always shows the effective (merged) values.
+   */
   async function showSettings(ctx: ExtensionCommandContext) {
+    let scope: SettingsScope = defaultSettingsScope(process.cwd());
     function buildItems(): SettingItem[] {
       const mc = manager.getMaxConcurrent();
       const mcf = manager.getMaxConcurrentForeground();
+      const mcn = manager.getMaxConcurrentNested();
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
       const msd = getMaxSubagentDepth();
@@ -4500,20 +3996,36 @@ Write the file using the write tool. Only write the file, nothing else.`;
       const fallbackValue = getFallbackSubagent() ?? "worker";
       const fallbackValues = [...new Set([...getAvailableTypes(), NO_FALLBACK])];
 
+      // Ordered by category, with no header rows (every row stays a setting the
+      // filter can match): limits, dispatch, features, agent files, display.
       return [
         {
           id: "maxConcurrent",
-          label: "Max concurrency",
-          description: "Max concurrent background agents (Enter to type)",
+          label: "Max background concurrency",
+          description: "Max concurrent background agents; extras wait in a queue (Enter to type)",
           currentValue: String(mc),
           values: [String(mc)],
         },
         {
           id: "maxConcurrentForeground",
           label: "Max foreground concurrency",
-          description: "Max concurrent foreground (blocking) agents (0 = unlimited, Enter to type)",
+          description: "Max concurrent foreground (blocking) agents; extras wait in a queue (0 = unlimited, Enter to type)",
           currentValue: String(mcf),
           values: [String(mcf)],
+        },
+        {
+          id: "maxConcurrentNested",
+          label: "Max nested concurrency",
+          description: "Max concurrent nested agents (started by subagents); extras are refused (0 = unlimited, Enter to type)",
+          currentValue: String(mcn),
+          values: [String(mcn)],
+        },
+        {
+          id: "maxSubagentDepth",
+          label: "Nested depth",
+          description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, even with allowed_subagents; Enter to type)",
+          currentValue: String(msd),
+          values: [String(msd)],
         },
         {
           id: "defaultMaxTurns",
@@ -4528,13 +4040,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
           description: "Grace turns after wrap-up steer (Enter to type)",
           currentValue: String(gt),
           values: [String(gt)],
-        },
-        {
-          id: "maxSubagentDepth",
-          label: "Nested depth",
-          description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, Enter to type)",
-          currentValue: String(msd),
-          values: [String(msd)],
         },
         {
           id: "joinMode",
@@ -4552,6 +4057,34 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["on", "off"],
         },
         {
+          id: "fallbackSubagent",
+          label: "Fallback agent",
+          description: `Agent used when subagent_type is unknown, disabled, or ambiguous; "${NO_FALLBACK}" rejects the call instead (strict dispatch)`,
+          currentValue: fallbackValue,
+          values: fallbackValues,
+        },
+        {
+          id: "disableDefaultAgents",
+          label: "Disable defaults",
+          description: "Hide built-in agents (recon, worker) — custom agents are unaffected",
+          currentValue: isDefaultsDisabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "scopeModels",
+          label: "Scope models",
+          description: "Validate subagent models against scoped models (/scoped-models)",
+          currentValue: isScopeModelsEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "toolDescriptionMode",
+          label: "Tool description",
+          description: "Agent tool description sent to the LLM: full (rich, default), compact (~75% fewer tokens, for small/local models), or custom (.pi/agent-tool-description.md with {{placeholders}})",
+          currentValue: getToolDescriptionMode(),
+          values: ["full", "compact", "custom"],
+        },
+        {
           id: "schedulingEnabled",
           label: "Scheduling",
           description: "Schedule subagent feature (off removes `schedule` param from Agent tool spec on next pi session)",
@@ -4565,6 +4098,28 @@ Write the file using the write tool. Only write the file, nothing else.`;
             "Scripted workflows are off by default pending reliability fixes "
             + "(changing tool registration requires a reload)",
           currentValue: isWorkflowsEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "worktreeIsolation",
+          label: "Worktree isolation",
+          description:
+            "Allow isolation: worktree to copy the repo. Off refuses worktrees on every path immediately — for repos where a copy costs too much time or disk — and drops the `isolation` param from the Agent tool spec on next pi session.",
+          currentValue: isWorktreeIsolationEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "agentMentions",
+          label: "Agent mentions",
+          description: "Route `@handle message` at the prompt to that agent. model = an off-screen clone of this conversation calls the Agent tool, so the agent gets a context-written prompt, a transcript and per-tool detail, and the chat stays clean; direct = started here from your text, no model call. Messaging and resuming are direct either way.",
+          currentValue: getAgentMentionMode(),
+          values: ["model", "direct", "off"],
+        },
+        {
+          id: "rememberAgents",
+          label: "Remember agents",
+          description: "Persist subagent sessions so `@handle` can resume one long after it finished (they also appear in /resume)",
+          currentValue: getRememberAgents() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -4590,32 +4145,11 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["on", "off"],
         },
         {
-          id: "scopeModels",
-          label: "Scope models",
-          description: "Validate subagent models against scoped models (/scoped-models)",
-          currentValue: isScopeModelsEnabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
           id: "strictAgentFiles",
           label: "Strict agent files",
           description: "Fail startup on an unreadable/unparseable agent .md instead of skipping it with a warning",
           currentValue: strictAgentFiles ? "on" : "off",
           values: ["on", "off"],
-        },
-        {
-          id: "disableDefaultAgents",
-          label: "Disable defaults",
-          description: "Hide built-in agents (recon, worker) — custom agents are unaffected",
-          currentValue: isDefaultsDisabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "fallbackSubagent",
-          label: "Fallback agent",
-          description: `Agent used when subagent_type is unknown, disabled, or ambiguous; "${NO_FALLBACK}" rejects the call instead (strict dispatch)`,
-          currentValue: fallbackValue,
-          values: fallbackValues,
         },
         {
           id: "outputTranscript",
@@ -4625,19 +4159,25 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["on", "off"],
         },
         {
-          id: "worktreeIsolation",
-          label: "Worktree isolation",
-          description:
-            "Allow isolation: worktree to copy the repo. Off refuses worktrees on every path immediately — for repos where a copy costs too much time or disk — and drops the `isolation` param from the Agent tool spec on next pi session.",
-          currentValue: isWorktreeIsolationEnabled() ? "on" : "off",
+          id: "widgetMode",
+          label: "Widget",
+          description: "Above-editor agent widget: all = every agent; background = hide foreground (they already render inline); off = hide the widget.",
+          currentValue: getWidgetMode(),
+          values: ["all", "background", "off"],
+        },
+        {
+          id: "fleetView",
+          label: "Fleet view",
+          description: "Claude Code-style main+subagents list below the editor (↓/← to navigate, Enter to view)",
+          currentValue: isFleetViewEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
         {
-          id: "reportUsage",
-          label: "Report usage to session",
+          id: "showModel",
+          label: "Show model",
           description:
-            "Add subagent tokens and cost to this session's own totals, so pi's footer and /cost stop reading a delegating session as nearly free. Reported on the next tool result (agents that finish in the background are counted on the one after). Context-window % is unaffected.",
-          currentValue: isReportUsageEnabled() ? "on" : "off",
+            "Name the model driving each agent, and the thinking level it is running at, on the widget's running rows and the fleet view rows. The Agent tool result and the conversation viewer show the pair either way — this adds it where the rows are already dense.",
+          currentValue: isShowModelEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -4649,14 +4189,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["on", "off"],
         },
         {
-          id: "showModel",
-          label: "Show model",
-          description:
-            "Name the model driving each agent, and the thinking level it is running at, on the widget's running rows. The Agent tool result and the conversation viewer show the pair either way — this adds it to the widget, where the row is already dense.",
-          currentValue: isShowModelEnabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
           id: "viewerMarkdown",
           label: "Viewer markdown",
           description:
@@ -4665,73 +4197,61 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["off", "assistant", "all"],
         },
         {
-          id: "fleetView",
-          label: "Fleet view",
-          description: "Claude Code-style main+subagents list below the editor (↓/← to navigate, Enter to view)",
-          currentValue: isFleetViewEnabled() ? "on" : "off",
+          id: "reportUsage",
+          label: "Report usage to session",
+          description:
+            "Add subagent tokens and cost to this session's own totals, so pi's footer and /cost stop reading a delegating session as nearly free. Reported on the next tool result (agents that finish in the background are counted on the one after). Context-window % is unaffected.",
+          currentValue: isReportUsageEnabled() ? "on" : "off",
           values: ["on", "off"],
-        },
-        {
-          id: "agentMentions",
-          label: "Agent mentions",
-          description: "Route `@handle message` at the prompt to that agent. model = an off-screen clone of this conversation calls the Agent tool, so the agent gets a context-written prompt, a transcript and per-tool detail, and the chat stays clean; direct = started here from your text, no model call. Messaging and resuming are direct either way.",
-          currentValue: getAgentMentionMode(),
-          values: ["model", "direct", "off"],
-        },
-        {
-          id: "rememberAgents",
-          label: "Remember agents",
-          description: "Persist subagent sessions so `@handle` can resume one long after it finished (they also appear in /resume)",
-          currentValue: getRememberAgents() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "widgetMode",
-          label: "Widget",
-          description: "Above-editor agent widget: all = every agent; background = hide foreground (they already render inline); off = hide the widget.",
-          currentValue: getWidgetMode(),
-          values: ["all", "background", "off"],
-        },
-        {
-          id: "toolDescriptionMode",
-          label: "Tool description",
-          description: "Agent tool description sent to the LLM: full (rich, default), compact (~75% fewer tokens, for small/local models), or custom (.pi/agent-tool-description.md with {{placeholders}})",
-          currentValue: getToolDescriptionMode(),
-          values: ["full", "compact", "custom"],
         },
       ];
     }
 
     function applyValue(id: string, value: string) {
+      // The file the page is switched to. A typed row also names its setting:
+      // retyping the value in effect must still reach a file that stores a
+      // different one. Toggle and cycling rows always change their value.
+      const target: SettingsTarget = {
+        scope,
+        key: isNumericSettingKey(id) ? id : undefined,
+      };
       if (id === "maxConcurrent") {
         const n = parseInt(value, 10);
         if (n >= 1) {
           manager.setMaxConcurrent(n);
-          notifyApplied(ctx, `Max concurrency set to ${n}`);
+          notifyApplied(ctx, target, `Max background concurrency set to ${n}`);
         }
       } else if (id === "maxConcurrentForeground") {
         // 0 is meaningful here, unlike maxConcurrent above: it means unlimited.
         const n = parseInt(value, 10);
         if (n >= 0) {
           manager.setMaxConcurrentForeground(n);
-          notifyApplied(ctx, n === 0
+          notifyApplied(ctx, target, n === 0
             ? "Max foreground concurrency set to unlimited"
             : `Max foreground concurrency set to ${n}`);
+        }
+      } else if (id === "maxConcurrentNested") {
+        const n = parseInt(value, 10);
+        if (n >= 0) {
+          manager.setMaxConcurrentNested(n);
+          notifyApplied(ctx, target, n === 0
+            ? "Max nested concurrency set to unlimited"
+            : `Max nested concurrency set to ${n}`);
         }
       } else if (id === "defaultMaxTurns") {
         const n = parseInt(value, 10);
         if (n === 0) {
           setDefaultMaxTurns(undefined);
-          notifyApplied(ctx, "Default max turns set to unlimited");
+          notifyApplied(ctx, target, "Default max turns set to unlimited");
         } else if (n >= 1) {
           setDefaultMaxTurns(n);
-          notifyApplied(ctx, `Default max turns set to ${n}`);
+          notifyApplied(ctx, target, `Default max turns set to ${n}`);
         }
       } else if (id === "graceTurns") {
         const n = parseInt(value, 10);
         if (n >= 1) {
           setGraceTurns(n);
-          notifyApplied(ctx, `Grace turns set to ${n}`);
+          notifyApplied(ctx, target, `Grace turns set to ${n}`);
         }
       } else if (id === "maxSubagentDepth") {
         const n = parseInt(value, 10);
@@ -4739,19 +4259,21 @@ Write the file using the write tool. Only write the file, nothing else.`;
           setMaxSubagentDepth(n);
           notifyApplied(
             ctx,
+            target,
             n <= 1
-              ? "Nested delegation disabled"
+              ? "Nested delegation disabled for every agent, including those with allowed_subagents"
               : `Nested depth set to ${n}. Applies to agents started from now on.`,
           );
         }
       } else if (id === "joinMode") {
         setDefaultJoinMode(value as JoinMode);
-        notifyApplied(ctx, `Default join mode set to ${value}`);
+        notifyApplied(ctx, target, `Default join mode set to ${value}`);
       } else if (id === "backgroundByDefault") {
         const enabled = value === "on";
         setBackgroundByDefault(enabled);
         notifyApplied(
           ctx,
+          target,
           enabled
             ? "Agent calls run in the background unless they pass run_in_background: false"
             : "Agent calls block and return inline unless they pass run_in_background: true",
@@ -4765,6 +4287,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           if (!enabled) scheduler.stop();  // immediate kill — outstanding fires stop ticking
           notifyApplied(
             ctx,
+            target,
             `Scheduling ${enabled ? "enabled" : "disabled"}. Tool spec change takes effect on next pi session.`,
           );
         }
@@ -4779,25 +4302,27 @@ Write the file using the write tool. Only write the file, nothing else.`;
           // lose work the user never asked to discard.
           notifyApplied(
             ctx,
+            target,
             `Workflows ${enabled ? "enabled" : "disabled"}. Tool spec change takes effect on next pi session.`,
           );
         }
       } else if (id === "scopeModels") {
         const enabled = value === "on";
         setScopeModelsEnabled(enabled);
-        notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
+        notifyApplied(ctx, target, `Scope models ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "strictAgentFiles") {
         const enabled = value === "on";
         strictAgentFiles = enabled;
-        notifyApplied(ctx, `Strict agent files ${enabled ? "enabled" : "disabled"}. Takes effect on next pi session.`);
+        notifyApplied(ctx, target, `Strict agent files ${enabled ? "enabled" : "disabled"}. Takes effect on next pi session.`);
       } else if (id === "disableDefaultAgents") {
         const enabled = value === "on";
         setDisableDefaultAgents(enabled);
-        notifyApplied(ctx, `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.`);
+        notifyApplied(ctx, target, `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.`);
       } else if (id === "fallbackSubagent") {
         setFallbackSubagent(value);
         notifyApplied(
           ctx,
+          target,
           value === NO_FALLBACK
             ? "Unknown or disabled agent types will now be rejected"
             : `Unknown agent types will fall back to ${value}`,
@@ -4805,7 +4330,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       } else if (id === "outputTranscript") {
         const enabled = value === "on";
         setOutputTranscriptDefault(enabled);
-        notifyApplied(ctx, `Output transcript ${enabled ? "enabled" : "disabled"} by default`);
+        notifyApplied(ctx, target, `Output transcript ${enabled ? "enabled" : "disabled"} by default`);
       } else if (id === "worktreeIsolation") {
         const enabled = value === "on";
         setWorktreeIsolationEnabled(enabled);
@@ -4813,6 +4338,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         // the isolation parameter only appears/disappears next session.
         notifyApplied(
           ctx,
+          target,
           `Worktree isolation ${enabled ? "enabled" : "disabled"}. Tool parameter updates on next pi session.`,
         );
       } else if (id === "packageAgents" || id === "packageWorkflows") {
@@ -4831,15 +4357,16 @@ Write the file using the write tool. Only write the file, nothing else.`;
         // the `Agent` tool's description and schema are built at registration,
         // so until the next session the model is reading a stale type list.
         const specNote = isAgents ? " Tool spec change takes effect on next pi session." : "";
-        notifyApplied(ctx, `${label} ${enabled ? "enabled" : "disabled"}.${replaced}${specNote}`);
+        notifyApplied(ctx, target, `${label} ${enabled ? "enabled" : "disabled"}.${replaced}${specNote}`);
       } else if (id === "toolDescriptionMode") {
         setToolDescriptionMode(value as ToolDescriptionMode);
-        notifyApplied(ctx, `Tool description set to ${value}. Takes effect on next pi session.`);
+        notifyApplied(ctx, target, `Tool description set to ${value}. Takes effect on next pi session.`);
       } else if (id === "reportUsage") {
         const enabled = value === "on";
         setReportUsage(enabled);
         notifyApplied(
           ctx,
+          target,
           enabled
             ? "Subagent usage now counted in this session's totals"
             : "Subagent usage no longer counted in this session's totals",
@@ -4847,23 +4374,24 @@ Write the file using the write tool. Only write the file, nothing else.`;
       } else if (id === "showCost") {
         const enabled = value === "on";
         setShowCost(enabled);
-        notifyApplied(ctx, `Cost display ${enabled ? "enabled" : "disabled"}`);
+        notifyApplied(ctx, target, `Cost display ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "showModel") {
         const enabled = value === "on";
         setShowModel(enabled);
-        notifyApplied(ctx, `Model display ${enabled ? "enabled" : "disabled"}`);
+        notifyApplied(ctx, target, `Model display ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "viewerMarkdown") {
         setViewerMarkdown(value as ViewerMarkdownMode);
-        notifyApplied(ctx, `Viewer markdown set to ${value}`);
+        notifyApplied(ctx, target, `Viewer markdown set to ${value}`);
       } else if (id === "fleetView") {
         const enabled = value === "on";
         setFleetViewEnabled(enabled);
-        notifyApplied(ctx, `Fleet view ${enabled ? "enabled" : "disabled"}`);
+        notifyApplied(ctx, target, `Fleet view ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "agentMentions") {
         const mode = value as AgentMentionMode;
         setAgentMentionMode(mode);
         notifyApplied(
           ctx,
+          target,
           mode === "off"
             ? "Agent mentions disabled"
             : mode === "model"
@@ -4873,94 +4401,63 @@ Write the file using the write tool. Only write the file, nothing else.`;
       } else if (id === "rememberAgents") {
         const enabled = value === "on";
         setRememberAgents(enabled);
-        notifyApplied(ctx, `Remember agents ${enabled ? "enabled" : "disabled"}`);
+        notifyApplied(ctx, target, `Remember agents ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "widgetMode") {
         setWidgetMode(value as WidgetMode);
-        notifyApplied(ctx, `Widget set to ${value}`);
+        notifyApplied(ctx, target, `Widget set to ${value}`);
       }
     }
 
-    let list: SettingsList;
-    // Track current selection index directly (SettingsList doesn't expose it).
-    // Updated on arrow keys so Enter knows which field is selected immediately.
-    let currentIndex = 0;
-
-    const result = await ctx.ui.custom<string | undefined>((_tui, _theme, _kb, done) => {
-      const items = buildItems();
-
-      list = new SettingsList(
-        items,
-        items.length + 2,
-        getSettingsListTheme(),
-        (id, newValue) => {
-          applyValue(id, newValue);
-        },
-        () => done(undefined as undefined),
+    // Remove the row's setting from the file its tag names. The row then
+    // shows what a restart would load: the other file's value, or the default.
+    const resetRow = (id: string) => {
+      const key = settingKeyOf(id);
+      const row = () => buildItems().find(item => item.id === id);
+      const label = row()?.label ?? id;
+      const cwd = process.cwd();
+      const source = settingSources(cwd)[key];
+      if (!source) {
+        ctx.ui.notify(`${label} is already at its default`, "info");
+        return;
+      }
+      if (!saveSettings({ [key]: undefined } as SubagentsSettings, cwd, source)) {
+        ctx.ui.notify(`${label}: failed to remove it from ${source} settings`, "warning");
+        return;
+      }
+      resetSetting(key, loadSettings(cwd)[key] ?? SETTING_DEFAULTS[key]);
+      // The file now agrees with memory for this key; a later save must not write it back.
+      const snapshot = snapshotSettings();
+      savedSnapshot = { ...savedSnapshot, [key]: snapshot[key] };
+      pi.events.emit("subagents:settings_changed", { settings: snapshot, persisted: true });
+      const still = settingSources(cwd)[key];
+      const value = row()?.currentValue;
+      ctx.ui.notify(
+        still
+          ? `${label} is now ${value} from ${still} settings (removed from ${source} settings)`
+          : `${label} reset to the default, ${value} (removed from ${source} settings)`,
+        "info",
       );
+    };
 
-      const container = new Container();
-      container.addChild(new Text("⚙  Subagent Settings", 0, 0));
-      container.addChild(new Spacer(1));
-      container.addChild(list);
-
-      return {
-        render: (w: number) => container.render(w),
-        invalidate: () => container.invalidate(),
-        handleInput: (data: string) => {
-          // Track navigation so Enter knows the current field
-          if (matchesKey(data, "up")) {
-            currentIndex = Math.max(0, currentIndex - 1);
-          } else if (matchesKey(data, "down")) {
-            currentIndex = Math.min(items.length - 1, currentIndex + 1);
-          }
-
-          // Enter on numeric field → close and prompt for typed input
-          if (matchesKey(data, Key.enter) && NUMERIC_IDS.has(items[currentIndex].id)) {
-            done(items[currentIndex].id);
-            return;
-          }
-          list.handleInput?.(data);
-        },
-      };
-    });
-
-    // If a numeric field ID was returned, prompt for typed input
-    if (result && NUMERIC_IDS.has(result)) {
-      const current = result === "maxConcurrent"
-        ? String(manager.getMaxConcurrent())
-        : result === "maxConcurrentForeground"
-          ? String(manager.getMaxConcurrentForeground())
-          : result === "defaultMaxTurns"
-            ? String(getDefaultMaxTurns() ?? 0)
-            : result === "maxSubagentDepth"
-              ? String(getMaxSubagentDepth())
-              : String(getGraceTurns());
-
-      const label = result === "maxConcurrent"
-        ? "Max concurrency (1+)"
-        : result === "maxConcurrentForeground"
-          ? "Max foreground concurrency (0 = unlimited)"
-          : result === "defaultMaxTurns"
-            ? "Default max turns (0 = unlimited)"
-            : result === "maxSubagentDepth"
-              ? "Nested depth (0/1 = nesting off)"
-              : "Grace turns (1+)";
-
-      // Loop until user enters a valid integer or cancels (Esc / null).
-      // Silently trims whitespace; rejects non-numeric input by re-prompting.
-      let input: string | undefined = await ctx.ui.input(label, current);
-      while (input != null) {
-        const trimmed = input.trim();
-        const n = Number(trimmed);
-        if (trimmed !== "" && Number.isInteger(n)) {
-          applyValue(result, String(n));
-          await showSettings(ctx);
-          return;
-        }
-        // Invalid — re-prompt with the user's last entry so they can edit it
-        input = await ctx.ui.input(label, trimmed);
-      }
-    }
+    const deps: SettingsPageDeps = {
+      buildItems,
+      fileTags: () => {
+        const sources = settingSources(process.cwd());
+        return id => sources[settingKeyOf(id)];
+      },
+      apply: applyValue,
+      reset: resetRow,
+      header: () => {
+        const path = settingsFilePath(scope, process.cwd());
+        const shown = scope === "project" ? ".pi/subagents.json" : path.replace(homedir(), "~");
+        const created = scope === "project" && !existsSync(path) ? " · created on first change" : "";
+        return { scope, file: `${shown}${created}` };
+      },
+      toggleScope: () => {
+        scope = scope === "global" ? "project" : "global";
+      },
+    };
+    await ctx.ui.custom<undefined>((tui, theme, kb, done) => createSettingsPage(deps, tui, theme, kb, () => done(undefined)));
   }
 
   // Persist the current snapshot, emit `subagents:settings_changed`, and surface
@@ -4977,23 +4474,15 @@ Write the file using the write tool. Only write the file, nothing else.`;
    * looking persisted when the next session will not have it.
    */
   function persistSettings(ctx: ExtensionCommandContext | undefined, changeMsg: string): void {
-    const { message, level } = saveAndEmitChanged(
-      snapshotSettings(),
-      changeMsg,
-      (event, payload) => pi.events.emit(event, payload),
-    );
+    const { message, level } = saveSnapshot(changeMsg);
     // `ctx` is absent only on the fleet path between sessions, where
     // `currentCtx` has been cleared and there is no UI to carry the warning to.
     // The write still happens.
     if (level === "warning") ctx?.ui.notify(message, level);
   }
 
-  function notifyApplied(ctx: ExtensionCommandContext, successMsg: string) {
-    const { message, level } = saveAndEmitChanged(
-      snapshotSettings(),
-      successMsg,
-      (event, payload) => pi.events.emit(event, payload),
-    );
+  function notifyApplied(ctx: ExtensionCommandContext, target: SettingsTarget, successMsg: string) {
+    const { message, level } = saveSnapshot(successMsg, target);
     ctx.ui.notify(message, level);
   }
 
@@ -5258,6 +4747,37 @@ Write the file using the write tool. Only write the file, nothing else.`;
     return null;
   }
 
+  /**
+   * What `/agents → Workflows` and the fleet list's `workflow` rows need from
+   * here. One object, built once: both entry points open the same inspector,
+   * and handing them different views of the session would let the two drift.
+   */
+  const workflowMenuDeps: WorkflowMenuDeps = {
+    tasks: workflowTasks,
+    getRecord: id => manager.getRecord(id),
+    viewAgentConversation,
+    // Read lazily: `currentCtx` is rebound on every session_start, and the
+    // fleet list may act between sessions, when there is none.
+    getCtx: () => currentCtx as unknown as ExtensionCommandContext | undefined,
+  };
+
+  fleet.setWorkflowSource(fleetWorkflows, id => openWorkflowFromFleet(id, workflowMenuDeps));
+
+  const { showAgentsMenu } = createAgentsMenu({
+    pi,
+    manager,
+    scheduler,
+    workflowMenuDeps,
+    isWorkflowsEnabled,
+    reloadCustomAgents,
+    getModelLabel,
+    viewAgentConversation,
+    showSettings,
+    listExternalAgents: () => externalAgentTracker.list(),
+    viewExternalConversation,
+    formatOverrideBadge,
+    promptAgentModelPicker: (ctx, name) => promptAgentModelPicker(ctx, name),
+  });
   pi.registerCommand("agents", {
     description: "Manage agents",
     getArgumentCompletions: getAgentsArgumentCompletions,
@@ -5279,20 +4799,4 @@ Write the file using the write tool. Only write the file, nothing else.`;
       );
     },
   });
-
-  /**
-   * What `/agents → Workflows` and the fleet list's `workflow` rows need from
-   * here. One object, built once: both entry points open the same inspector,
-   * and handing them different views of the session would let the two drift.
-   */
-  const workflowMenuDeps: WorkflowMenuDeps = {
-    tasks: workflowTasks,
-    getRecord: id => manager.getRecord(id),
-    viewAgentConversation,
-    // Read lazily: `currentCtx` is rebound on every session_start, and the
-    // fleet list may act between sessions, when there is none.
-    getCtx: () => currentCtx as unknown as ExtensionCommandContext | undefined,
-  };
-
-  fleet.setWorkflowSource(fleetWorkflows, id => openWorkflowFromFleet(id, workflowMenuDeps));
 }

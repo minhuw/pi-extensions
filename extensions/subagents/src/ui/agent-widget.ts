@@ -235,6 +235,15 @@ export function formatMs(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+/** Coarse age of a past timestamp: `<1m`, `42m`, `5h`, `3d` (floored). */
+export function formatAge(timestamp: number, now = Date.now()): string {
+  const minutes = Math.floor((now - timestamp) / 60_000);
+  if (minutes < 1) return "<1m";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+}
+
 /** Format duration from start/completed timestamps. */
 export function formatDuration(startedAt: number, completedAt?: number): string {
   if (completedAt) return formatMs(completedAt - startedAt);
@@ -271,7 +280,7 @@ export function formatAgentIdentity(source?: {
 /** Mode label is not included — callers add it where they want it. */
 export function buildInvocationTags(
   invocation: AgentInvocation | undefined,
-): { modelName?: string; modelId?: string; identity?: string; tags: string[] } {
+): { modelName?: string; modelId?: string; thinking?: string; identity?: string; tags: string[] } {
   const tags: string[] = [];
   if (!invocation) return { tags };
   const asked = (value: string | undefined, requested: string | undefined) =>
@@ -286,6 +295,7 @@ export function buildInvocationTags(
   return {
     modelName,
     modelId: asked(invocation.modelId, invocation.requestedModel),
+    thinking,
     identity: formatAgentIdentity({ ...invocation, modelName, thinking }),
     tags,
   };

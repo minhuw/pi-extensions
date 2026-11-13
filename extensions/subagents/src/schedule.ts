@@ -185,8 +185,7 @@ export class SubagentScheduler {
           const t = setTimeout(() => {
             this.executeJob(job.id);
             // Auto-disable one-shots after they fire (mirrors pi-cron-schedule)
-            store.update(job.id, { enabled: false });
-            const updated = store.get(job.id);
+            const updated = this.persist(job.id, { enabled: false });
             if (updated) this.emit({ type: "updated", job: updated });
           }, delay);
           this.intervals.set(job.id, t);
@@ -232,7 +231,7 @@ export class SubagentScheduler {
     const job = store.get(id);
     if (!job?.enabled) return;
 
-    store.update(id, { lastStatus: "running" });
+    this.persist(id, { lastStatus: "running" });
 
     let agentId: string;
     try {
@@ -288,7 +287,7 @@ export class SubagentScheduler {
       });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      store.update(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
+      this.persist(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
       this.emit({ type: "error", jobId: id, error });
       return;
     }
@@ -298,7 +297,7 @@ export class SubagentScheduler {
     const finalize = (status: "success" | "error") => {
       const next = this.getNextRun(id);
       const current = store.get(id);
-      store.update(id, {
+      this.persist(id, {
         lastRun: new Date().toISOString(),
         lastStatus: status,
         runCount: (current?.runCount ?? 0) + 1,
@@ -319,6 +318,20 @@ export class SubagentScheduler {
         finalize(failed ? "error" : "success");
       })
       .catch(() => finalize("error"));
+  }
+
+  /**
+   * Fire-time bookkeeping. A failed persist (e.g. the store lock is held by
+   * another process) becomes an error event rather than a throw out of a timer
+   * tick; the run itself is unaffected.
+   */
+  private persist(id: string, patch: Partial<ScheduledSubagent>): ScheduledSubagent | undefined {
+    try {
+      return this.store?.update(id, patch);
+    } catch (err) {
+      this.emit({ type: "error", jobId: id, error: err instanceof Error ? err.message : String(err) });
+      return undefined;
+    }
   }
 
   private emit(event: ScheduleChangeEvent): void {

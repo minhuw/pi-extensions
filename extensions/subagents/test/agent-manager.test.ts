@@ -616,6 +616,59 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     manager.clearCompleted(true);
     expect(manager.getRecord(id)).toBeDefined();
   });
+
+  // Only the owner can read a nested child's result, so once the owner is gone
+  // an unread child has no reader left to be spared for.
+  it("clearCompleted(true) removes unread nested descendants along with their removed parent", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent",
+      isBackground: true,
+    });
+    const childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: parentId,
+    });
+    const grandchildId = manager.spawn(mockPi, mockCtx, "scout", "grandchild", {
+      description: "grandchild",
+      isBackground: true,
+      depth: 3,
+      parentAgentId: childId,
+    });
+    await Promise.all([parentId, childId, grandchildId].map(id => manager.getRecord(id)!.promise));
+    manager.getRecord(parentId)!.resultConsumed = true;
+
+    manager.clearCompleted(true);
+    expect(manager.getRecord(parentId)).toBeUndefined();
+    expect(manager.getRecord(childId)).toBeUndefined();
+    expect(manager.getRecord(grandchildId)).toBeUndefined();
+  });
+
+  it("clearCompleted(true) keeps an unread nested child while its parent stays", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent",
+      isBackground: true,
+    });
+    const childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: parentId,
+    });
+    await Promise.all([parentId, childId].map(id => manager.getRecord(id)!.promise));
+
+    // The parent is unread too, so it is spared — and can still collect its child.
+    manager.clearCompleted(true);
+    expect(manager.getRecord(parentId)).toBeDefined();
+    expect(manager.getRecord(childId)).toBeDefined();
+  });
 });
 
 // The manager-level usage hook is the ONE place every assistant message is seen
@@ -683,6 +736,10 @@ describe("AgentManager — the usage hook fires once per assistant message", () 
     // records would bill this session for two messages when one was sent. The
     // double-booking stays — it is what makes a hidden child visible.
     expect(manager.getRecord(parentId)!.lifetimeUsage).toEqual({ input: 20, output: 10, cacheWrite: 0, cost: 0.002 });
+    // `ownUsage` is the figure that is not double-booked: the parent keeps only
+    // its own message, the child only its own — what the fleet list shows.
+    expect(manager.getRecord(parentId)!.ownUsage).toEqual({ input: 10, output: 5, cacheWrite: 0, cost: 0.001 });
+    expect(manager.getRecord(childId)!.ownUsage).toEqual({ input: 10, output: 5, cacheWrite: 0, cost: 0.001 });
   });
 });
 
@@ -707,6 +764,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     const record = manager.getRecord(id)!;
 
     expect(record.lifetimeUsage).toEqual({ input: 0, output: 0, cacheWrite: 0, cost: 0 });
+    expect(record.ownUsage).toEqual({ input: 0, output: 0, cacheWrite: 0, cost: 0 });
     expect(record.compactionCount).toBe(0);
 
     manager.abort(id);
@@ -735,6 +793,35 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({
       input: 300, output: 130, cacheWrite: 30, cost: 0.03,
     });
+  });
+
+  // The workflow host reads the record inside these hooks to report a running
+  // row's counters (#298), so the record must already include the event.
+  it("updates the record before forwarding a spawn's activity and usage hooks", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      // A real child does work first; by then spawn() has returned the id.
+      await new Promise(resolve => setTimeout(resolve, 0));
+      opts.onToolActivity?.({ type: "end", toolName: "read" });
+      opts.onAssistantUsage?.({ input: 100, output: 20, cacheWrite: 0, cost: 0 });
+      return { responseText: "done", session: mockSession(), aborted: false, steered: false };
+    });
+    const seen: { toolUses?: number; output?: number }[] = [];
+    let id = "";
+    const read = () => {
+      const record = manager.getRecord(id);
+      seen.push({ toolUses: record?.toolUses, output: record?.lifetimeUsage.output });
+    };
+
+    id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      onToolActivity: read,
+      onAssistantUsage: read,
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(seen).toEqual([{ toolUses: 1, output: 0 }, { toolUses: 1, output: 20 }]);
   });
 
   it("onCompaction from runAgent increments record.compactionCount", async () => {
@@ -799,6 +886,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     await manager.resume(id, "more");
 
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 70, output: 30, cacheWrite: 5, cost: 0.007 });
+    expect(manager.getRecord(id)!.ownUsage).toEqual({ input: 70, output: 30, cacheWrite: 5, cost: 0.007 });
     expect(manager.getRecord(id)!.compactionCount).toBe(1);
   });
 
@@ -2366,6 +2454,31 @@ describe("AgentManager — background resume", () => {
     // Internal record bookkeeping still runs alongside the forwarded callbacks.
     expect(manager.getRecord(id)!.toolUses).toBe(1);
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 5, output: 3, cacheWrite: 0, cost: 0 });
+    expect(manager.getRecord(id)!.ownUsage).toEqual({ input: 5, output: 3, cacheWrite: 0, cost: 0 });
+  });
+
+  // As on spawn: a resumed workflow row is reported from inside these hooks.
+  it.each([
+    ["foreground", false],
+    ["background", true],
+  ])("updates the record before forwarding a %s resume's activity and usage hooks", async (_mode, isBackground) => {
+    manager = new AgentManager();
+    const id = await spawnSettled(manager);
+    vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, opts: any) => {
+      opts.onToolActivity?.({ type: "end", toolName: "grep" });
+      opts.onAssistantUsage?.({ input: 5, output: 3, cacheWrite: 0, cost: 0 });
+      return { text: "ok" };
+    });
+    const seen: { toolUses: number; output: number }[] = [];
+    const read = () => {
+      const record = manager.getRecord(id)!;
+      seen.push({ toolUses: record.toolUses, output: record.lifetimeUsage.output });
+    };
+
+    const record = await manager.resume(id, "go", undefined, { isBackground, onToolActivity: read, onAssistantUsage: read });
+    await record?.promise;
+
+    expect(seen).toEqual([{ toolUses: 1, output: 0 }, { toolUses: 1, output: 3 }]);
   });
 
   it("queues a background resume when the concurrency pool is full", async () => {

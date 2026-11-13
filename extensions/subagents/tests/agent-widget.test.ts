@@ -112,6 +112,8 @@ describe("foreground agent metadata", () => {
 
     expect(invocation).toEqual({
       modelName: "openai/gpt-6-luna",
+      modelId: undefined,
+      thinking: "xhigh",
       identity: "openai/gpt-6-luna · xhigh · fast",
       tags: ["worktree"],
     });

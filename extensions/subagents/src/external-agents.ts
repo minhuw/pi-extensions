@@ -212,6 +212,7 @@ export function externalRecord(view: () => ExternalAgentView | undefined, fallba
     get toolUses() { return current().activity.toolUses; },
     get turnCount() { return current().activity.turnCount; },
     get lifetimeUsage() { return current().usage; },
+    get ownUsage() { return current().usage; },
     get compactionCount() { return current().compactions; },
     get session() { return current().agent.session; },
     get invocation() { return { modelName: current().agent.model, thinking: current().agent.thinking }; },
