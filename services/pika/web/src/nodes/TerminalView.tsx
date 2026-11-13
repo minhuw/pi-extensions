@@ -22,6 +22,7 @@ import { onSettled, whenSettled } from "./resize-gate";
 import { SizeOwner } from "./size";
 import { blend, DK_TOKENS } from "./deck/tokens";
 import { UploadCancelled, uploadFiles, uploadName, type UploadItem, type UploadProgress } from "./upload";
+import { applyWidths } from "./widths";
 
 /** Deck's ground and ink (`deck/tokens.ts`), so the terminal reads as part of the page in either theme. */
 const THEMES: Record<Theme, ITheme> = {
@@ -41,7 +42,8 @@ export const TERMINAL_OPTIONS = {
 	// which the footer uses most, into one cell whenever one is drawn wider than 1.5 cells.
 	customGlyphs: true,
 	cursorBlink: true,
-	// The search addon highlights matches with decorations, a proposed API; no option here changes a reply.
+	// The search addon highlights matches with decorations, and `widths.ts` sets the Unicode version: both proposed APIs.
+	// No option here changes a reply.
 	allowProposedApi: true,
 } as const satisfies ITerminalOptions;
 
@@ -195,6 +197,7 @@ export function TerminalView({
 		const term = new Terminal({ ...TERMINAL_OPTIONS, cols: initialSize.current.cols, rows: initialSize.current.rows, theme: THEMES[initialTheme.current] });
 		// Before anything is written: a query answered here would reach pi as a second reply.
 		const swallowing = swallowQueries(term);
+		applyWidths(term);
 		const fit = new FitAddon();
 		term.loadAddon(fit);
 		const searcher = new SearchAddon();
