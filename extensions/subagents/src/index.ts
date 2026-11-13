@@ -851,7 +851,7 @@ export default function (pi: ExtensionAPI) {
 
   // Expose the root manager through the public process-global host seam.
   // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
-  // Documented for callers in docs/rpc.md ("The manager registry").
+  // Upstream's `pi-subagents:manager` registry is not published (docs/rpc.md, "No manager registry").
   //
   // Claim the slot only if it's free: subagent sessions re-activate this
   // extension in the same process (session.bindExtensions in agent-runner.ts),
@@ -967,8 +967,8 @@ export default function (pi: ExtensionAPI) {
     // Trusted callers only, so `model_visible: false` types are spawnable here.
     const dispatch = resolveSpawnType(type, { includeHidden: true });
     if (!dispatch.ok) throw new Error(dispatch.message);
-    // Every programmatic spawn lands here — cross-extension RPC, both `@handle`
-    // mention paths, and the `Symbol.for("pi-subagents:manager")` registry — and
+    // Every programmatic spawn lands here — cross-extension RPC and both `@handle`
+    // mention paths — and
     // none came through the Agent tool, which is where the UI activity tracker is
     // otherwise created. Without one the widget and FleetView have no tool name
     // and no turn count, so the row reads `thinking…` for the agent's whole life
