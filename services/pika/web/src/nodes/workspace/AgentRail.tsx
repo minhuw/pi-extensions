@@ -3,7 +3,7 @@ import { Icon } from "../../components/icons";
 import { cx } from "../../components/ui";
 import { copyText } from "../../lib/clipboard";
 import { isMenuKey, menuAtPointer, menuBelow, useMenu, type MenuAnchor, type MenuEntry } from "../deck/Menu";
-import { InlineRename } from "../deck/RailDialogs";
+import { InlineRename } from "../deck/InlineRename";
 import { tip } from "../deck/Tooltips";
 import { homePath, paneLabel, paneSession, type NodeView } from "../client";
 import { sanitize, type Activity, type Checkout, type TerminalInfo } from "../contract";
