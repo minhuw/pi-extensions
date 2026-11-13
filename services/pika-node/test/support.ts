@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { paths, type Paths } from "../src/paths.ts";
 import { encodeLine, LineDecoder, PROTOCOL_VERSION, sanitize, type NodeMessage, type Snapshot } from "../src/protocol.ts";
+import { applyWidths } from "../src/widths.ts";
 
 const require = createRequire(import.meta.url);
 const { Terminal } = require("@xterm/headless") as typeof import("@xterm/headless");
@@ -116,6 +117,7 @@ export class Screen {
     seq: number;
     constructor(snapshot: Snapshot) {
         this.terminal = new Terminal({ cols: snapshot.cols, rows: snapshot.rows, scrollback: 1_000, allowProposedApi: true });
+        applyWidths(this.terminal);
         this.terminal.write(snapshot.data);
         this.seq = snapshot.outputSequence;
     }

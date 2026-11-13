@@ -14,6 +14,7 @@ import type { IPty } from "node-pty";
 import { LogFile } from "./logfile.ts";
 import { LIMITS, parseProgramStatus, type ProgramStatus, type Signal, type Snapshot } from "./protocol.ts";
 import { checkInternals, serializeScreen } from "./snapshot.ts";
+import { applyWidths } from "./widths.ts";
 
 const require = createRequire(import.meta.url);
 const { Terminal: Headless } = require("@xterm/headless") as typeof import("@xterm/headless");
@@ -127,8 +128,9 @@ export class Terminal {
         this.rows = options.rows;
         this.#hooks = options.hooks;
         this.#log = new LogFile(options.logPath, LOG_BYTES);
-        // Reply-affecting options must match the web UI's xterm.js (windowOptions stay off).
+        // Reply-affecting options and widths must match the web UI's xterm.js (windowOptions stay off).
         this.#screen = new Headless({ cols: options.cols, rows: options.rows, scrollback: SCROLLBACK, allowProposedApi: true });
+        applyWidths(this.#screen);
         this.#serializer = new SerializeAddon();
         this.#screen.loadAddon(this.#serializer);
         checkInternals(this.#screen);

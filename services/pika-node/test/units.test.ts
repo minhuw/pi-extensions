@@ -8,16 +8,18 @@ import { restoreSuffix, serializeScreen } from "../src/snapshot.ts";
 import { spawnCommand, spawnEnv } from "../src/spawn.ts";
 import { addPending, allowPending, readClients, readPending, removeClient, saveConfig } from "../src/store.ts";
 import { chunks } from "../src/terminal.ts";
+import { UNICODE_VERSION, applyWidths } from "../src/widths.ts";
 import { tempHome, until } from "./support.ts";
 
 const require = createRequire(import.meta.url);
 const { Terminal } = require("@xterm/headless") as typeof import("@xterm/headless");
 const { SerializeAddon } = require("@xterm/addon-serialize") as typeof import("@xterm/addon-serialize");
 
-function screen(cols = 80, rows = 24) {
+function screen(cols = 80, rows = 24, widths = true) {
     const terminal = new Terminal({ cols, rows, scrollback: 1_000, allowProposedApi: true });
     const addon = new SerializeAddon();
     terminal.loadAddon(addon);
+    if (widths) applyWidths(terminal);
     const write = (data: string) => new Promise<void>(resolve => terminal.write(data, resolve));
     return { terminal, addon, write };
 }
@@ -77,6 +79,78 @@ describe("snapshots", () => {
         expect(utf8Length(data)).toBeLessThanOrEqual(LIMITS.maxSnapshotBytes);
         expect(utf8Length(JSON.stringify(data))).toBeLessThan(LIMITS.maxRecordBytes);
         expect(utf8Length(source.addon.serialize())).toBeGreaterThan(LIMITS.maxSnapshotBytes);
+    });
+});
+
+/** Every cell of the buffer (characters and width) and the cursor, to compare two screens exactly. */
+function cells(terminal: InstanceType<typeof Terminal>): string {
+    const buffer = terminal.buffer.active;
+    const rows: string[] = [];
+    for (let y = 0; y < buffer.length; y++) {
+        const line = buffer.getLine(y)!;
+        const row: string[] = [];
+        for (let x = 0; x < terminal.cols; x++) {
+            const cell = line.getCell(x)!;
+            row.push(`${cell.getChars()}/${cell.getWidth()}`);
+        }
+        rows.push(row.join(" "));
+    }
+    return `${rows.join("\n")}\ncursor ${buffer.cursorX},${buffer.cursorY}`;
+}
+
+describe("widths", () => {
+    // pi-tui 1.5.2's `visibleWidth` for each string (RGI emoji 2, VS16 and ZWJ sequences one emoji, East Asian Wide 2).
+    const PI_WIDTHS: [string, number][] = [
+        ["🐝", 2], ["⚡", 2], ["✅", 2], ["🟢", 2], ["⭐", 2], ["⌚", 2],
+        ["❤", 1], ["❤\uFE0F", 2], ["✔\uFE0F", 2], ["🖥\uFE0F", 2], ["©", 1], ["#\uFE0F\u20E3", 2],
+        ["👍🏽", 2], ["👨\u200D👩\u200D👧", 2], ["🏳\uFE0F\u200D🌈", 2], ["🧑\u200D💻", 2], ["🇨🇭", 2],
+        ["中文", 4], ["한", 2], ["ｱ", 1], ["Ａ", 2], ["\uE0B0", 1], ["\u{F0615}", 1], ["▉", 1], ["…", 1], ["e\u0301", 1],
+    ];
+
+    it("are pi's for emoji, sequences, CJK and Private Use Area icons", async () => {
+        const actual: [string, number][] = [];
+        for (const [text] of PI_WIDTHS) {
+            const source = screen(40, 3);
+            await source.write(text);
+            actual.push([text, source.terminal.buffer.active.cursorX]);
+        }
+        expect(actual).toEqual(PI_WIDTHS);
+        expect(screen().terminal.unicode.activeVersion).toBe(UNICODE_VERSION);
+    });
+
+    it("are not pi's without the addon: xterm 6 gives emoji one cell (fails if a new version changes its default)", async () => {
+        const source = screen(40, 3, false);
+        await source.write("🐝⚡✅");
+        expect(source.terminal.unicode.activeVersion).toBe("6");
+        expect(source.terminal.buffer.active.cursorX).toBe(3);
+    });
+
+    it("right-align pi's footer: the line ends at the right edge", async () => {
+        // pi pads the footer by its own widths: the left part is 14 cells (🐝 2, the icon 1), the right 10.
+        const line = `🐝 swarm  \u{F0615} 0×${" ".repeat(40 - 14 - 10)}▉▉▉▉  0.0%`;
+        const source = screen(40, 3);
+        await source.write(line);
+        expect(source.terminal.buffer.active.cursorX).toBe(40);
+        expect(source.terminal.buffer.active.getLine(0)!.translateToString(true)).toBe(line);
+    });
+
+    it("survive a snapshot: emoji, sequences and CJK restore cell for cell", async () => {
+        const source = screen(30, 4);
+        await source.write("🐝 swarm ❤\uFE0F 👨\u200D👩\u200D👧 🇨🇭 中文 e\u0301|\r\n\x1b[1m🧑\u200D💻\x1b[0m ✔\uFE0F #\uFE0F\u20E3 👍🏽 end");
+        const target = screen(30, 4);
+        await target.write(serializeScreen(source.terminal, source.addon));
+        expect(cells(target.terminal)).toEqual(cells(source.terminal));
+        expect(state(target.terminal)).toEqual(state(source.terminal));
+    });
+
+    it("join a sequence a snapshot cut in two, as the live screen does", async () => {
+        const live = screen(30, 3);
+        await live.write("x👨");
+        const target = screen(30, 3);
+        await target.write(serializeScreen(live.terminal, live.addon));
+        for (const side of [live, target]) await side.write("\u200D👩 y");
+        expect(cells(target.terminal)).toEqual(cells(live.terminal));
+        expect(live.terminal.buffer.active.cursorX).toBe(5);
     });
 });
 

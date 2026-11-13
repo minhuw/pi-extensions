@@ -19,6 +19,7 @@
 	},
 	"dependencies": {
 		"@xterm/addon-serialize": "0.14.0",
+		"@xterm/addon-unicode-graphemes": "0.4.0",
 		"@xterm/headless": "6.0.0",
 		"node-pty": "^1.1.0",
 		"ws": "^8.22.2"
