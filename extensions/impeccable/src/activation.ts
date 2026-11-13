@@ -12,6 +12,21 @@ export const IMPECCABLE_TOOL_NAMES = [
 ] as const;
 
 export const SKILL_LOCATION_MESSAGE = "impeccable:skill-location";
+export const COMPANIONS_MESSAGE = "impeccable:companions";
+
+// Skills other extensions publish to be offered only alongside Impeccable (ui-sdk publishes; typed locally, no cross-extension import).
+const DESIGN_COMPANIONS = Symbol.for("pi-extensions.design-companions");
+
+interface DesignCompanion {
+	name: string;
+	skillPath: string;
+	installedSkillPath: string;
+	summary: string;
+}
+
+interface CompanionDetails {
+	companions: string[];
+}
 
 export const IMPECCABLE_MENTION_RE =
 	/\bimpeccable(?:_[a-z]+|-live)?\b|(?:^|\s)\/design(?:-[a-z-]+)?(?=\s|$)|<!--\s*pi-impeccable-owned-prompt:v1\s*-->/i;
@@ -21,6 +36,7 @@ const ACTIVE_BRANCH_TYPES = new Set<string>([
 	LIVE_SNAPSHOT,
 	LIVE_MESSAGE,
 	SKILL_LOCATION_MESSAGE,
+	COMPANIONS_MESSAGE,
 ]);
 
 export function activateImpeccableTools(pi: Pick<ExtensionAPI, "getActiveTools" | "setActiveTools">): void {
@@ -39,13 +55,30 @@ function hasImpeccableBranchState(branch: readonly SessionEntry[] | undefined): 
 	);
 }
 
-function hasSkillLocationSinceCompaction(branch: readonly SessionEntry[] | undefined): boolean {
-	if (!branch) return false;
+function entriesSinceCompaction(branch: readonly SessionEntry[] | undefined): readonly SessionEntry[] {
+	if (!branch) return [];
 	const lastCompaction = branch.findLastIndex((entry) => entry.type === "compaction");
-	const activeEntries = lastCompaction >= 0 ? branch.slice(lastCompaction + 1) : branch;
-	return activeEntries.some(
-		(entry) => entry.type === "custom_message" && entry.customType === SKILL_LOCATION_MESSAGE,
-	);
+	return lastCompaction >= 0 ? branch.slice(lastCompaction + 1) : branch;
+}
+
+function registeredCompanions(): DesignCompanion[] {
+	const registry = (globalThis as { [DESIGN_COMPANIONS]?: Map<string, DesignCompanion> })[DESIGN_COMPANIONS];
+	return registry ? [...registry.values()] : [];
+}
+
+function deliveredCompanionNames(entries: readonly SessionEntry[]): Set<string> {
+	const names = new Set<string>();
+	for (const entry of entries) {
+		if (entry.type !== "custom_message") continue;
+		if (entry.customType !== SKILL_LOCATION_MESSAGE && entry.customType !== COMPANIONS_MESSAGE) continue;
+		const details = entry.details as Partial<CompanionDetails> | undefined;
+		for (const name of details?.companions ?? []) names.add(name);
+	}
+	return names;
+}
+
+export function companionLine(companion: DesignCompanion): string {
+	return `Companion skill ${companion.name} (${companion.summary}): when the work needs it, read the project's ${companion.installedSkillPath} if present (matches the installed version), else ${companion.skillPath}. If the project lacks it, you may propose adding it; never install it unasked.`;
 }
 
 export function registerActivation(pi: ExtensionAPI): void {
@@ -70,14 +103,28 @@ export function registerActivation(pi: ExtensionAPI): void {
 		}
 		activateImpeccableTools(pi);
 		const skillDir = getSkillDir();
-		if (event.prompt.includes(skillDir)) return;
-		if (hasSkillLocationSinceCompaction(ctx.sessionManager?.getBranch?.())) return;
-		return {
-			message: {
-				customType: SKILL_LOCATION_MESSAGE,
-				content: `Impeccable skill directory (<skill-base-dir>): ${skillDir} (SKILL.md: ${path.join(skillDir, "SKILL.md")}). Read SKILL.md only when using the Impeccable design skill.`,
-				display: false,
-			},
-		};
+		const entries = entriesSinceCompaction(ctx.sessionManager?.getBranch?.());
+		const delivered = deliveredCompanionNames(entries);
+		const companions = registeredCompanions().filter((companion) => !delivered.has(companion.name));
+		const details: CompanionDetails | undefined = companions.length > 0 ? { companions: companions.map((companion) => companion.name) } : undefined;
+		const companionLines = companions.map(companionLine);
+		const needsSkillLocation =
+			!event.prompt.includes(skillDir) &&
+			!entries.some((entry) => entry.type === "custom_message" && entry.customType === SKILL_LOCATION_MESSAGE);
+		if (needsSkillLocation) {
+			return {
+				message: {
+					customType: SKILL_LOCATION_MESSAGE,
+					content: [
+						`Impeccable skill directory (<skill-base-dir>): ${skillDir} (SKILL.md: ${path.join(skillDir, "SKILL.md")}). Read SKILL.md only when using the Impeccable design skill.`,
+						...companionLines,
+					].join("\n"),
+					display: false,
+					...(details ? { details } : {}),
+				},
+			};
+		}
+		if (!details) return;
+		return { message: { customType: COMPANIONS_MESSAGE, content: companionLines.join("\n"), display: false, details } };
 	});
 }

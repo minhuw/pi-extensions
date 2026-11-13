@@ -16,7 +16,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import impeccableExtension from "../index.ts";
-import { IMPECCABLE_TOOL_NAMES, SKILL_LOCATION_MESSAGE } from "../src/activation.ts";
+import { COMPANIONS_MESSAGE, companionLine, IMPECCABLE_TOOL_NAMES, SKILL_LOCATION_MESSAGE } from "../src/activation.ts";
 import { delegate } from "../src/delegation.ts";
 import { getSkillDir } from "../src/resources.ts";
 import { isolateEngineEnvironment } from "./support/engine-environment.ts";
@@ -738,6 +738,123 @@ it.each([
 	} finally {
 		await h.cleanup();
 	}
+});
+
+const DESIGN_COMPANIONS = Symbol.for("pi-extensions.design-companions");
+const fakeCompanion = {
+	name: "ui-sdk",
+	skillPath: "/vendored/ui-sdk/skills/ui-sdk/SKILL.md",
+	installedSkillPath: "node_modules/@ui-sdk/core/skills/ui-sdk/SKILL.md",
+	summary: "headless behaviors for interactive web components",
+};
+
+async function withCompanions(companions: (typeof fakeCompanion)[], run: (register: () => void) => Promise<void>) {
+	const registry = globalThis as { [DESIGN_COMPANIONS]?: Map<string, typeof fakeCompanion> };
+	const previous = registry[DESIGN_COMPANIONS];
+	const register = () => {
+		registry[DESIGN_COMPANIONS] = new Map(companions.map((companion) => [companion.name, companion]));
+	};
+	delete registry[DESIGN_COMPANIONS];
+	try {
+		await run(register);
+	} finally {
+		if (previous) registry[DESIGN_COMPANIONS] = previous;
+		else delete registry[DESIGN_COMPANIONS];
+	}
+}
+
+function customMessages(h: { session: AgentSession }, customType: string) {
+	return h.session.sessionManager
+		.getBranch()
+		.filter((entry) => entry.type === "custom_message" && entry.customType === customType);
+}
+
+function compact(h: { session: AgentSession }) {
+	h.session.sessionManager.appendCompaction("Compacted earlier context", h.session.sessionManager.getBranch()[0]!.id, 100);
+}
+
+it("appends registered design companions to the skill-location message once per compaction window", async () => {
+	await withCompanions([fakeCompanion], async (register) => {
+		register();
+		const h = await fixture({ activateImpeccableTools: false, loadResources: true });
+		try {
+			h.faux.setResponses([fauxAssistantMessage("One."), fauxAssistantMessage("Two."), fauxAssistantMessage("Three.")]);
+			await h.session.prompt("/design-audit page.html");
+			expect(customMessages(h, SKILL_LOCATION_MESSAGE)).toEqual([
+				expect.objectContaining({
+					display: false,
+					content: expect.stringContaining(`\n${companionLine(fakeCompanion)}`),
+					details: { companions: ["ui-sdk"] },
+				}),
+			]);
+			expect(companionLine(fakeCompanion)).toContain(fakeCompanion.skillPath);
+			expect(companionLine(fakeCompanion)).toContain(fakeCompanion.installedSkillPath);
+
+			await h.session.prompt("Run impeccable doctor next");
+			expect(customMessages(h, SKILL_LOCATION_MESSAGE)).toHaveLength(1);
+			expect(customMessages(h, COMPANIONS_MESSAGE)).toEqual([]);
+
+			compact(h);
+			await h.session.prompt("Run impeccable context after compaction");
+			const locations = customMessages(h, SKILL_LOCATION_MESSAGE);
+			expect(locations).toHaveLength(2);
+			expect(locations[1]).toMatchObject({ content: expect.stringContaining(companionLine(fakeCompanion)) });
+			expect(customMessages(h, COMPANIONS_MESSAGE)).toEqual([]);
+			expect(h.errors).toEqual([]);
+		} finally {
+			await h.cleanup();
+		}
+	});
+});
+
+it("sends a hidden companions message when the prompt already carries the skill directory", async () => {
+	await withCompanions([fakeCompanion], async (register) => {
+		register();
+		const h = await fixture({ activateImpeccableTools: false, loadResources: true });
+		try {
+			h.faux.setResponses([fauxAssistantMessage("One."), fauxAssistantMessage("Two."), fauxAssistantMessage("Three.")]);
+			await h.session.prompt(`Use impeccable; the skill lives at ${getSkillDir()}`);
+			expect(customMessages(h, SKILL_LOCATION_MESSAGE)).toEqual([]);
+			expect(customMessages(h, COMPANIONS_MESSAGE)).toEqual([
+				expect.objectContaining({ display: false, content: companionLine(fakeCompanion), details: { companions: ["ui-sdk"] } }),
+			]);
+
+			await h.session.prompt(`Use impeccable again from ${getSkillDir()}`);
+			expect(customMessages(h, COMPANIONS_MESSAGE)).toHaveLength(1);
+
+			compact(h);
+			await h.session.prompt(`Use impeccable after compaction from ${getSkillDir()}`);
+			expect(customMessages(h, COMPANIONS_MESSAGE)).toHaveLength(2);
+			expect(customMessages(h, SKILL_LOCATION_MESSAGE)).toEqual([]);
+			expect(h.errors).toEqual([]);
+		} finally {
+			await h.cleanup();
+		}
+	});
+});
+
+it("mentions no companions when none are registered, and sends one registered later", async () => {
+	await withCompanions([fakeCompanion], async (register) => {
+		const h = await fixture({ activateImpeccableTools: false, loadResources: true });
+		try {
+			h.faux.setResponses([fauxAssistantMessage("One."), fauxAssistantMessage("Two."), fauxAssistantMessage("Three.")]);
+			await h.session.prompt("/design-audit page.html");
+			await h.session.prompt(`Use impeccable from ${getSkillDir()}`);
+			const [location] = customMessages(h, SKILL_LOCATION_MESSAGE);
+			expect(customMessages(h, SKILL_LOCATION_MESSAGE)).toHaveLength(1);
+			expect(location).toMatchObject({ details: undefined });
+			expect(JSON.stringify(location)).not.toContain("Companion skill");
+			expect(customMessages(h, COMPANIONS_MESSAGE)).toEqual([]);
+
+			register();
+			await h.session.prompt("Run impeccable doctor");
+			expect(customMessages(h, SKILL_LOCATION_MESSAGE)).toHaveLength(1);
+			expect(customMessages(h, COMPANIONS_MESSAGE)).toEqual([expect.objectContaining({ content: companionLine(fakeCompanion) })]);
+			expect(h.errors).toEqual([]);
+		} finally {
+			await h.cleanup();
+		}
+	});
 });
 
 it("restores impeccable_* tools on session_start/session_tree from branch state and activates on /impeccable-live", async () => {
