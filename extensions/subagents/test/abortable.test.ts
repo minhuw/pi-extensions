@@ -108,4 +108,29 @@ describe("abortable", () => {
 
     expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
   });
+
+  it("a late abort after normal settlement is inert", async () => {
+    // A long-lived parent signal is aborted for unrelated reasons after this
+    // wait already finished; nothing should be re-rejected or throw.
+    const unhandled = await withUnhandledRejectionSpy(async () => {
+      const controller = new AbortController();
+      await expect(abortable(Promise.resolve("done"), controller.signal)).resolves.toBe("done");
+      controller.abort(new Error("much later"));
+      await new Promise((r) => setTimeout(r, 5));
+    });
+
+    expect(unhandled).toEqual([]);
+  });
+
+  it("does not leak a listener per wait on a shared parent signal", async () => {
+    // Many children wait on one parent signal over a session's lifetime.
+    const controller = new AbortController();
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+
+    for (let i = 0; i < 20; i++) {
+      await abortable(Promise.resolve(i), controller.signal);
+    }
+
+    expect(remove).toHaveBeenCalledTimes(20);
+  });
 });
