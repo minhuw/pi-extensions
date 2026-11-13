@@ -82,6 +82,23 @@ describe("live updates", () => {
 		await waitFor(() => expect(server.calls).toContain("/api/v1/sessions/live/updates?since=5"));
 	});
 
+	it("shows a refetched turn even when it lands in the same millisecond as the page it replaces", async () => {
+		const fixture = liveSession(new Date(Date.now() - 10_000).toISOString());
+		const server = createFakeServer({ sessions: [fixture] });
+		renderApp("/s/live?view=transcript", server.fetch);
+		for (const strip of await screen.findAllByRole("button", { name: /1 model call/ }, firstRender)) fireEvent.click(strip);
+		await screen.findByText("Working on it", { selector: "[data-entry-seq] p" });
+
+		grow(fixture);
+		// The carried page and its refetch get the same `dataUpdatedAt`, as on a fast machine or a busy fake clock.
+		vi.spyOn(Date, "now").mockReturnValue(Date.now() + LIVE_POLL_MS);
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(LIVE_POLL_MS);
+		});
+		await waitFor(() => expect(entryCalls(server.calls)).toContain("/api/v1/sessions/live/entries?from=3&to=5&limit=200"));
+		expect(await screen.findByText("Finished the second prompt", { selector: "[data-entry-seq] p" })).toBeTruthy();
+	});
+
 	it("stops polling when the server has no updates route", async () => {
 		const fixture = liveSession(new Date(Date.now() - 10_000).toISOString());
 		const server = createFakeServer({ sessions: [fixture], updates: false });
