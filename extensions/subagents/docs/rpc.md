@@ -1,10 +1,10 @@
 # Driving subagents from another extension
 
-Another pi extension can spawn a subagent, listen for subagent completion, read the result, steer or message it, reopen its saved conversation and stop the run — all over the `pi.events` bus, without importing this package directly. Seven request/reply channels (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`, `subagents:rpc:steer`, `subagents:rpc:send`, `subagents:rpc:reopen`), the lifecycle events in README's [event table](../README.md#events), one per-message usage event (`subagents:usage`), one terminal `subagents:disposed`, and one in-process registry at `Symbol.for("pi-subagents:manager")`.
+Another pi extension can spawn a subagent, listen for subagent completion, read the result, steer or message it, reopen its saved conversation and stop the run — all over the `pi.events` bus, without importing this package directly. Seven request/reply channels (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`, `subagents:rpc:steer`, `subagents:rpc:send`, `subagents:rpc:reopen`), the lifecycle events in README's [event table](../README.md#events), one per-message usage event (`subagents:usage`), and one terminal `subagents:disposed`. This fork does not publish upstream's `Symbol.for("pi-subagents:manager")` registry; see [No manager registry](#no-manager-registry).
 
 The thing worth understanding up front is that **the bus is in-process.** Every "RPC" call here is a synchronous `pi.events.emit` into the same event loop, and every reply comes back the same way. That single fact explains most of what follows: why `signal` and the `on*` callbacks work on a spawn payload at all, why a `consume` fired inside a `subagents:completed` handler lands *before* the notification decision has been made, and why none of this survives a real process boundary.
 
-For the channel list, the reply envelope, the per-channel snippets and the event table, see [`README.md`](../README.md#cross-extension-rpc). This document is the reference README does not have room for: the complete spawn-option surface, every error string, the notification race, the registry, and what each protocol version does and does not promise. The current version is `3`.
+For the channel list, the reply envelope, the per-channel snippets and the event table, see [`README.md`](../README.md#cross-extension-rpc). This document is the reference README does not have room for: the complete spawn-option surface, every error string, the notification race, the missing registry, and what each protocol version does and does not promise. The current version is `3`.
 
 ## Spawn options
 
@@ -30,7 +30,7 @@ For the channel list, the reply envelope, the per-channel snippets and the event
 | `signal` | AbortSignal | Aborting it stops the subagent |
 | `onSpawned` / `onQueued` / `onCompaction` / `onBeforeWorktreeCleanup` | functions | Fire as documented on `SpawnOptions` |
 | `notifyParent` | boolean | `false`: no parent completion notification for any run of this agent — the spawn, every `send` resume, and a `reopen` that sets it again. Lifecycle events and `subagents:record` entries are unchanged. Stored on the record. Since protocol 3 |
-| `retain` | boolean | Exempts the settled record from the 10-minute completed-agent cleanup, so `send` keeps reaching it. Session boundaries (`session_start`, `session_before_switch`) and shutdown still remove it. Since protocol 3 |
+| `retain` | boolean | Exempts the settled record from the 10-minute completed-agent cleanup, so `send` keeps reaching it. A settled persisted child session also stays live instead of being torn down on completion (`releaseCompletedSession`, `src/agent-manager.ts`). Session boundaries (`session_start`, `session_before_switch`) and shutdown still remove it. Since protocol 3 |
 | `parentToolCallId` | string | The parent session's tool call that started this agent. Written to the child's session link and to `subagents:record` as `toolCallId`. Stripped before protocol 3 |
 | `linkData` | object | Extra top-level keys merged into the child's `pi-extensions.session-link` entry (written only while a child-session hook is registered). Must be a plain object of JSON values, at most 8 KiB as UTF-8 JSON, with no key from the standard link (`kind`, `parentSessionId`, `parentSessionFile`, `parentToolCallId`, `agentId`, `parentAgentId`, `workflowId`, `agentType`, `description`); a copy is taken at spawn. Since protocol 3 |
 
@@ -38,6 +38,7 @@ For the channel list, the reply envelope, the per-channel snippets and the event
 
 | Field | Why it is taken away |
 |---|---|
+| `metadata`, `owner`, `rootActionId`, `planId` | Host ownership. Only the scoped host sets `metadata`, whose `owner`, `rootActionId` and `planId` land on the record. A forged owner would hide the agent from FleetView and the lifecycle events and make `send` refuse it |
 | `parentAgentId` | Ownership. A forged parent hides your agent under someone else's nested tools |
 | `keepSessionModel` | Internal to `reopen`: keeps a reopened file's saved model. Meaningless without a session file, which a spawn cannot name |
 | `workflowId` | A forged value would hide an RPC-spawned agent inside someone else's workflow — and take it out of the concurrency pool with it |
@@ -52,7 +53,7 @@ For the channel list, the reply envelope, the per-channel snippets and the event
 
 Four things that are not obvious from the tables:
 
-- **Agent types a model cannot name are spawnable here.** An agent with `model_visible: false` is absent from the `Agent` tool, nested tools, `@type` mentions, workflows, schedules, the subagent host's descriptors and the fallback, but `spawn`, `reopen` and the registry's `spawn` accept it. The fallback itself never lands on a hidden type.
+- **Agent types a model cannot name are spawnable here.** An agent with `model_visible: false` is absent from the `Agent` tool, nested tools, `@type` mentions, workflows, schedules, the subagent host's descriptors and the fallback, but `spawn` and `reopen` accept it. The fallback itself never lands on a hidden type.
 - **Nothing is required at runtime.** `description` is non-optional in TypeScript and never validated. A spawn with no `options` at all is legal and is what "returns agent id on success" in `test/cross-extension-rpc.test.ts` pins.
 - **`bypassQueue` is not stripped.** Its own doc comment scopes it to the scheduler and the `/agents` generator, but a bus caller can set it and skip the `maxConcurrent` check.
 - **`structuredOutput` is documented "set only by the workflow host"** (its field comment on `SpawnOptions`) and is also not stripped.
@@ -162,7 +163,7 @@ The reopened run keeps the **session's** saved model (when the registry still ha
 
 ## Lifecycle payloads
 
-`subagents:started` fires for every run of a top-level agent: an RPC or registry spawn, an `Agent`-tool spawn, a background or foreground resume (including `send`), a reopen, and a queued agent when it starts. It carries `{ id, type, description }`, plus `sessionId` and `sessionFile` once the agent has a session — so a resume or reopen has them, a fresh spawn's first event does not.
+`subagents:started` fires for every run of a top-level agent: an RPC spawn, an `Agent`-tool spawn, a background or foreground resume (including `send`), a reopen, and a queued agent when it starts. It carries `{ id, type, description }`, plus `sessionId` and `sessionFile` once the agent has a session — so a resume or reopen has them, a fresh spawn's first event does not.
 
 `subagents:completed` and `subagents:failed` fire for every settled run, including a foreground resume and a stop while queued (`failed`, `status: "stopped"`; it never started, so it has no `subagents:started`). Besides `id`, `type`, `description`, `result`, `error`, `status`, `toolUses`, `durationMs`, `tokens` and `usage`, they carry:
 
@@ -202,20 +203,11 @@ One related thing that lives nowhere else: on every top-level settle, pi-subagen
 
 `subagents:rpc:steer` `{ requestId, agentId, message }` delivers `message` into a running or queued agent's conversation, the bus-side half of the `steer_subagent` tool. It takes an id only, enforces the same top-level ownership guard as stop, and answers `Agent is not running` for a record that has settled. A message queued before the agent's session exists is flushed when the session is created, exactly as the tool's steer is. A successful steer emits `subagents:steered` `{ id, message }`, as every steer path does. Like `consume`, it is outside the `ping` version handshake.
 
-## The manager registry
+## No manager registry
 
-`globalThis[Symbol.for("pi-subagents:manager")]` (`MANAGER_KEY` and `registryEntry`, `src/index.ts`) is a second integration surface — the standard Node cross-package singleton pattern, no bus involved:
+Upstream publishes `globalThis[Symbol.for("pi-subagents:manager")]` with `waitForAll`, `hasRunning`, `spawn` and `getRecord`. This fork removes it, so that slot stays `undefined`. Use the bus: `subagents:rpc:spawn` starts an agent, `subagents:completed`/`subagents:failed` report its settled result, and `subagents:rpc:consume` suppresses its notification. Nothing replaces `waitForAll()` or `hasRunning()`; track the ids your own spawns returned.
 
-| Member | Signature | Notes |
-|---|---|---|
-| `waitForAll()` | `() => Promise<void>` | Resolves when nothing is running. **All** agents, including ones you did not spawn — a shutdown barrier, not a join |
-| `hasRunning()` | `() => boolean` | |
-| `spawn(pi, ctx, type, prompt, options)` | `=> string` | **Is** `spawnTopLevel`, so the strip list and `linkData` validation above apply identically, and hidden types are spawnable |
-| `getRecord(id)` | `=> AgentRecord \| undefined` | Filtered through `isTopLevelAgent`, so someone else's child comes back `undefined` rather than leaking |
-
-The slot is claimed by the first activation only; subagent sessions re-activate this extension in the same process, and unconditionally overwriting would point the registry at a short-lived child manager whose shutdown would then delete the root session's entry ([#128](https://github.com/tintinweb/pi-subagents/pull/128)). Child activations leave it alone, and shutdown releases it only if this activation claimed it (`ownsManagerRegistry`, checked in the `session_shutdown` handler).
-
-Prefer the bus. The registry has no reply envelope, no version, and no availability event — `globalThis[Symbol.for("pi-subagents:manager")] === undefined` is the only probe you get, and it is also `undefined` in a session that filtered pi-subagents out. Reach for it for the two things the bus has no verb for — *is anything still running*, and *give me a settled record back* — or for a headless host that wants to block on `waitForAll()` before exiting.
+The fork's `globalThis[Symbol.for("pi-subagents:host")]` (`src/host-registry.ts`) is not a drop-in replacement. It is a scoped foreground seam for trusted in-process hosts: `describeTypes()`, `resolveType()` and `spawnAndWait()`. `spawnAndWait` requires `isolated: true` and a caller-chosen absolute `cwd`, refuses `model_visible: false` types, and resolves with the finished run. A request's `metadata.owner` makes the record host-owned, which hides it from FleetView and the lifecycle events. The slot has no version handshake; its contract is the TypeScript in `src/host-registry.ts`. The first bound `session_start` claims it, and only that activation's shutdown releases it.
 
 ## Protocol versions
 
