@@ -96,8 +96,7 @@
 		"skills": [
 			"./extensions/herder/skills",
 			"./extensions/impeccable/skills",
-			"./extensions/agent-browser/skills",
-			"./extensions/ui-sdk/skills"
+			"./extensions/agent-browser/skills"
 		],
 		"prompts": [
 			"./extensions/commit/prompts/commit.md",
@@ -162,6 +161,7 @@
 			"./extensions/subagents/src/index.ts",
 			"./extensions/council/index.ts",
 			"./extensions/herder/index.ts",
+			"./extensions/ui-sdk/index.ts",
 			"./extensions/impeccable/index.ts",
 			"./extensions/agent-browser/index.ts",
 			"./extensions/agents-md/index.ts",

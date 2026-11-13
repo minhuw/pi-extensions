@@ -1,11 +1,12 @@
-// The vendored UI SDK skill: byte-identical to upstream.json, loadable by Pi, and outranked by a project's installed copy.
+// The vendored UI SDK skill: byte-identical to upstream.json, loadable by Pi, and offered only through Impeccable as a design companion.
 import { createHash } from "node:crypto";
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { DefaultResourceLoader, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
+import uiSdkExtension, { DESIGN_COMPANIONS, UI_SDK_COMPANION, type DesignCompanion } from "../index.ts";
 
 const extensionDir = fileURLToPath(new URL("..", import.meta.url));
 const repoRoot = join(extensionDir, "..", "..");
@@ -61,9 +62,33 @@ describe("vendored files", () => {
 		for (const [path, hash] of Object.entries(upstream.licenseFile)) expect(sha256(join(extensionDir, path)), path).toBe(hash);
 	});
 
-	it("is listed in pi.skills", () => {
-		const manifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { pi: { skills: string[] } };
-		expect(manifest.pi.skills).toContain("./extensions/ui-sdk/skills");
+});
+
+describe("design companion", () => {
+	const manifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { pi: { skills: string[]; extensions: string[] } };
+
+	it("stays out of pi.skills, so ui-sdk never reaches <available_skills>", () => {
+		expect(manifest.pi.skills.filter((path) => path.includes("ui-sdk"))).toEqual([]);
+		expect(manifest.pi.extensions).toContain("./extensions/ui-sdk/index.ts");
+		expect(manifest.pi.extensions.at(-1)).toBe("./extensions/pika/index.ts");
+	});
+
+	it("publishes one companion entry with the vendored SKILL.md, idempotently across reloads", () => {
+		const registry = globalThis as { [DESIGN_COMPANIONS]?: Map<string, DesignCompanion> };
+		const previous = registry[DESIGN_COMPANIONS];
+		delete registry[DESIGN_COMPANIONS];
+		try {
+			uiSdkExtension({} as ExtensionAPI);
+			uiSdkExtension({} as ExtensionAPI);
+			const companions = [...registry[DESIGN_COMPANIONS]!.values()];
+			expect(companions).toEqual([UI_SDK_COMPANION]);
+			expect(UI_SDK_COMPANION.skillPath).toBe(join(skillDir, "SKILL.md"));
+			expect(existsSync(UI_SDK_COMPANION.skillPath)).toBe(true);
+			expect(UI_SDK_COMPANION.installedSkillPath).toBe("node_modules/@ui-sdk/core/skills/ui-sdk/SKILL.md");
+		} finally {
+			if (previous) registry[DESIGN_COMPANIONS] = previous;
+			else delete registry[DESIGN_COMPANIONS];
+		}
 	});
 });
 
@@ -80,30 +105,5 @@ describe("Pi skill loading", () => {
 		expect(skill!.description.trim().length).toBeGreaterThan(0);
 		expect(skill!.description).toContain("ui-sdk");
 		expect(skill!.disableModelInvocation).toBe(false);
-	});
-
-	// README: a project settings entry for node_modules/@ui-sdk/core/skills wins over this package's copy.
-	it("prefers the project's installed copy, listed in .pi/settings.json, over the package copy", async () => {
-		const root = mkdtempSync(join(tmpdir(), "ui-sdk-precedence-"));
-		temps.push(root);
-		const pkg = join(root, "pkg");
-		cpSync(skillsRoot, join(pkg, "skills"), { recursive: true });
-		writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "pkg", version: "0.0.0", pi: { skills: ["./skills"] } }));
-		const agentDir = join(root, "agent");
-		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [pkg] }));
-
-		const project = join(root, "project");
-		const installed = join(project, "node_modules", "@ui-sdk", "core", "skills", "ui-sdk");
-		mkdirSync(installed, { recursive: true });
-		writeFileSync(join(installed, "SKILL.md"), "---\nname: ui-sdk\ndescription: Installed ui-sdk skill.\n---\n\n# Installed\n");
-		mkdirSync(join(project, ".pi"), { recursive: true });
-		writeFileSync(join(project, ".pi", "settings.json"), JSON.stringify({ skills: ["../node_modules/@ui-sdk/core/skills"] }));
-
-		const { skills, diagnostics } = await loadSkills(project, agentDir);
-		const matches = skills.filter((skill) => skill.name === "ui-sdk");
-		expect(matches).toHaveLength(1);
-		expect(matches[0]!.filePath).toBe(join(installed, "SKILL.md"));
-		expect(diagnostics.filter((item) => item.type === "collision").map((item) => item.message)).toEqual(['name "ui-sdk" collision']);
 	});
 });
