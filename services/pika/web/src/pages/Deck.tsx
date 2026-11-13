@@ -9,6 +9,7 @@ import { withBase } from "../lib/base";
 import { copyText } from "../lib/clipboard";
 import { shortUserAgent } from "../lib/devices";
 import { bareModelOf } from "../lib/model";
+import { whenIdle } from "../lib/onDemand";
 import { useHealth } from "../lib/relay";
 import { useAppliedTheme, useTheme } from "../lib/theme";
 import { countedTitle, paneCounts, PaneAlerts } from "../nodes/alerts";
@@ -20,17 +21,16 @@ import { EditorStore, isDirty, type EditorSnapshot } from "../nodes/editor";
 import { ChangesPanel, diffControlAt, Explorer, useChanges, usePageVisible } from "../nodes/FilePanel";
 import { IndexedDbKeyStore } from "../nodes/identity";
 import { currentKeymap, focusOf, resolveKey, type PageCommands } from "../nodes/keys";
-import { KeysHelp } from "../nodes/KeysHelp";
 import { clampWidth, LAYOUT_BOUNDS, loadLayout, saveLayout, type NodesLayout } from "../nodes/layout";
 import { ClosedPanes, closePane, keepsPaneOnExit, paneEvent, replacePane, rerunPane, shellPane, splitPane, type PaneHost } from "../nodes/panes/actions";
 import { focusNext, focusPrevious } from "../nodes/panes/pane-tree";
-import { QuickOpen } from "../nodes/QuickOpen";
 import { nodeSocketUrl } from "../nodes/socket";
 import { Splitter } from "../nodes/Splitter";
 import { BAR_BUTTON, DeckAppBar, DeckStatusBar } from "../nodes/deck/Chrome";
 import { menuBelow, useMenu, type MenuEntry } from "../nodes/deck/Menu";
 import { DECK_ROOT } from "../nodes/deck/tokens";
-import { AddCheckoutDialog, CheckoutSettingsDialog, ConfirmDialog, NewWorktreeDialog, RemoveWorktreeDialog, UndoToast, type UndoNotice } from "../nodes/deck/RailDialogs";
+import { AddCheckoutDialog, CheckoutSettingsDialog, ConfirmDialog, KeysHelp, NewWorktreeDialog, preloadOverlays, QuickOpen, RemoveWorktreeDialog, UndoToast } from "../nodes/deck/OnDemand";
+import type { UndoNotice } from "../nodes/deck/RailDialogs";
 import { DeckTooltips, tip } from "../nodes/deck/Tooltips";
 import { AgentRail, InboxBadge, railAgents, useInbox, type RailOps } from "../nodes/workspace/AgentRail";
 import { flatLayout, inboxBadge, inboxKey, nextNeeding, splitKey, stepKey } from "../nodes/workspace/inbox";
@@ -67,7 +67,7 @@ import { RecentTerminals } from "../nodes/workspace/recent";
 import { SlotRegistry } from "../nodes/workspace/slots";
 import { OTHER, WorkspaceHub, type NodeWorkspaces } from "../nodes/workspace/store";
 import type { SetupAction } from "../nodes/workspace/SetupFooter";
-import { layerKey, TerminalLayer, type LayerTerminal } from "../nodes/workspace/TerminalLayer";
+import { layerKey, preloadTerminalView, TerminalLayer, type LayerTerminal } from "../nodes/workspace/TerminalLayer";
 import { WorkspaceView, type WorkspaceActions } from "../nodes/workspace/WorkspaceView";
 
 /** The command that moves this browser's pending entry into the node's allowlist (NODE.md, "Enrolment"). */
@@ -100,6 +100,19 @@ function useNodesClient(): NodesClient | null {
 }
 
 const noop = () => () => {};
+
+/**
+ * Loads the chunks Deck splits off: the terminal view at once, as most places show a terminal and the node's channel
+ * takes a few round trips to open anyway; the overlays (dialogs, shortcuts help, quick open) once the browser is idle.
+ * A failed preload is not reported here: the component's own load tries again when it renders and reports it there.
+ */
+function usePreloads() {
+	useEffect(() => {
+		const ignore = () => {};
+		preloadTerminalView().catch(ignore);
+		return whenIdle(() => void preloadOverlays().catch(ignore));
+	}, []);
+}
 
 function useSnapshot(client: NodesClient | null): NodesSnapshot {
 	return useSyncExternalStore(client?.subscribe ?? noop, client?.getSnapshot ?? (() => EMPTY));
@@ -441,6 +454,7 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	const [permission, requestPermission] = useNotificationPermission();
 	const commands = useRef<PageCommands>({});
 	useKeyDispatch(commands);
+	usePreloads();
 	const latest = useRef({ snapshot, railNodes, nodeId });
 	latest.current = { snapshot, railNodes, nodeId };
 

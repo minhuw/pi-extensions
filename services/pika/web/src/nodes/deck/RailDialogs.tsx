@@ -3,7 +3,8 @@
  * node, completed from its folders), New Worktree (Orca's flow: a branch, a base, the folder it lands in, and pi
  * started in it), Remove Worktree (git's refusals shown in place), a checkout's worktree settings, the confirmations
  * (kill, close unsaved, forget a key), and the undo notice that follows a removal (T3 Code's: the change is made at
- * once, and Undo puts it back for five seconds). The inline rename field the rail draws is `InlineRename.tsx`.
+ * once, and Undo puts it back for five seconds). None is open on Deck's first paint, so Deck loads them on demand
+ * (`OnDemand.tsx`); the inline rename field the rail draws is `InlineRename.tsx`.
  */
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { AlertDialog, AlertDialogClose, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogTitle } from "../../components/ui-shadcn/alert-dialog";

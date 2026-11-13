@@ -7,16 +7,25 @@
  * The idea is Orca's `TerminalPaneOverlayLayer` (`src/renderer/src/components/terminal-pane/mounting/`, MIT, Copyright
  * (c) 2026 Lovecast Inc.; see ORCA-LICENSE); the code is pika's own, and places terminals with measured boxes rather
  * than CSS anchor positioning.
+ *
+ * `TerminalView` (xterm and its addons, most of Deck's code by size) is its own chunk: Deck's frame, rail and tabs
+ * paint without it, and Deck starts loading it as it mounts (`preloadTerminalView`), while the node's channel opens.
  */
 
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { onDemand } from "../../lib/onDemand";
 import type { Theme } from "../../lib/theme";
 import type { NodeChannel } from "../channel";
 import type { TerminalInfo } from "../contract";
 import { keepsPaneOnExit } from "../panes/actions";
-import { TerminalView } from "../TerminalView";
 import { SetupFooter, type SetupAction } from "./SetupFooter";
 import type { SlotRegistry } from "./slots";
+
+// Until it loads, an empty view's space, so an exited setup terminal's footer stays at the bottom.
+const TerminalView = onDemand(() => import("../TerminalView").then((module) => module.TerminalView), <div className="min-h-0 flex-1" data-terminal-loading="" />);
+
+/** Starts loading the terminal view's chunk, so a terminal shows as soon as its node's channel is open. */
+export const preloadTerminalView = (): Promise<unknown> => TerminalView.preload();
 
 export interface LayerTerminal {
 	node: string;
