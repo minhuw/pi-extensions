@@ -207,6 +207,13 @@ export class NodesClient {
 		return terminal;
 	}
 
+	/** `term.restart`: an exited terminal started again as a new one, which the node lists in its place (`term.removed`). */
+	async restartTerminal(node: string, terminalId: string): Promise<TerminalInfo> {
+		const { terminal } = await this.#request(node, (channel) => channel.request("term.restart", { terminalId }));
+		this.#added(node, terminal);
+		return terminal;
+	}
+
 	async killTerminal(node: string, terminalId: string): Promise<void> {
 		await this.#request(node, (channel) => channel.request("term.kill", { terminalId }));
 	}

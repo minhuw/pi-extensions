@@ -13,7 +13,9 @@ import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Theme } from "../../lib/theme";
 import type { NodeChannel } from "../channel";
 import type { TerminalInfo } from "../contract";
+import { keepsPaneOnExit } from "../panes/actions";
 import { TerminalView } from "../TerminalView";
+import { SetupFooter, type SetupAction } from "./SetupFooter";
 import type { SlotRegistry } from "./slots";
 
 export interface LayerTerminal {
@@ -34,6 +36,8 @@ export interface TerminalLayerProps {
 	onOpenFile: (node: string, terminalId: string, path: string, at?: { line: number; column?: number }) => void;
 	/** The terminal shows while the page is visible and it has unread output: `pane.seen`. */
 	onSeen: (node: string, terminalId: string) => void;
+	/** The footer of an exited setup terminal (`SetupFooter`) chose an action for its pane. */
+	onSetupAction: (node: string, terminalId: string, action: SetupAction) => Promise<void>;
 }
 
 /** The `data-layer-terminal` value of a terminal's box, for finding it. */
@@ -67,6 +71,7 @@ const LayerItem = memo(function LayerItem({
 	onKill,
 	onOpenFile,
 	onSeen,
+	onSetupAction,
 }: TerminalLayerProps & { entry: LayerTerminal }) {
 	const { node, terminal } = entry;
 	const id = terminal.terminalId;
@@ -136,6 +141,7 @@ const LayerItem = memo(function LayerItem({
 				onKill={() => onKill(node, terminal)}
 				onOpenFile={(path, at) => onOpenFile(node, id, path, at)}
 			/>
+			{terminal.exited && keepsPaneOnExit(terminal) && <SetupFooter exited={terminal.exited} onAction={(action) => onSetupAction(node, id, action)} />}
 		</div>
 	);
 });

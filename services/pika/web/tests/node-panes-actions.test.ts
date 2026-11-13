@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { NodeRequestError } from "../src/nodes/channel";
 import type { NodeEvent, Requests, RequestType, Results, TerminalInfo } from "../src/nodes/contract";
-import { ClosedPanes, closePane, paneEvent, prunePanes, removePane, splitPane, splitSize, type PaneHost, type PaneTab } from "../src/nodes/panes/actions";
+import { ClosedPanes, closePane, keepsPaneOnExit, paneEvent, prunePanes, removePane, rerunPane, shellPane, splitPane, splitSize, type PaneHost, type PaneTab } from "../src/nodes/panes/actions";
 import { leaf, leaves, type PaneTree } from "../src/nodes/panes/pane-tree";
 
 const info = (terminalId: string, more: Partial<TerminalInfo> = {}): TerminalInfo => ({
@@ -24,8 +24,8 @@ interface Call {
 }
 
 /**
- * A node with terminals, answering `term.cwd`, `term.create`, and `term.kill` the way the daemon does: `term.kill`
- * on a terminal that has exited (`exit`) removes it.
+ * A node with terminals, answering `term.cwd`, `term.create`, `term.kill`, and `term.restart` the way the daemon does:
+ * `term.kill` on a terminal that has exited (`exit`) removes it, and `term.restart` replaces one.
  */
 function fakeNode(terminals: TerminalInfo[], live: Record<string, string> = {}) {
     const calls: Call[] = [];
@@ -54,6 +54,17 @@ function fakeNode(terminals: TerminalInfo[], live: Record<string, string> = {}) 
             }
             case "term.kill":
                 return {} as Results[K];
+            case "term.restart": {
+                const { terminalId } = params as Requests["term.restart"];
+                const old = known.get(terminalId);
+                if (!old) throw new NodeRequestError({ code: "not_found", message: `no terminal ${terminalId}` });
+                if (!exited.has(terminalId)) throw new NodeRequestError({ code: "busy", message: "the terminal is still running" });
+                const { exited: _gone, ...rest } = old;
+                const terminal = { ...rest, terminalId: `new${next++}` };
+                known.delete(terminalId);
+                known.set(terminal.terminalId, terminal);
+                return { terminal } as Results[K];
+            }
             default:
                 throw new Error(`unexpected ${type}`);
         }
@@ -235,6 +246,99 @@ describe("node events", () => {
         paneEvent(h, { type: "term.removed", terminalId: "b" });
         expect(state.tab).toEqual({ tree: leaf("a"), focused: "a" });
         expect(state.closed).toBe(0);
+    });
+});
+
+describe("setup terminals", () => {
+    const setup = (terminalId: string, more: Partial<TerminalInfo> = {}) =>
+        info(terminalId, { argv: ["sh", "-c", "npm ci"], cwd: "/w/app-fix", worktreePath: "/w/app-fix", checkoutId: "c".repeat(32), role: "setup", cols: 100, rows: 30, ...more });
+
+    it("keep their pane when they exit; other terminals still lose theirs", () => {
+        expect(keepsPaneOnExit(setup("s"))).toBe(true);
+        expect(keepsPaneOnExit(info("a"))).toBe(false);
+        expect(keepsPaneOnExit(info("a", { role: "later" }))).toBe(false);
+        expect(keepsPaneOnExit(undefined)).toBe(false);
+        const node = fakeNode([]);
+        const { host: h, state } = host(node, { tree: split("row", leaf("s"), leaf("a")), focused: "s" }, [setup("s"), info("a")]);
+        paneEvent(h, { type: "term.exit", terminalId: "s", code: 1, signal: null });
+        expect(state.tab).toEqual({ tree: split("row", leaf("s"), leaf("a")), focused: "s" });
+        paneEvent(h, { type: "term.exit", terminalId: "a", code: 0, signal: null });
+        expect(state.tab).toEqual({ tree: leaf("s"), focused: "s" });
+        // Removed from the node (Close, Remove, another browser), the pane goes all the same.
+        paneEvent(h, { type: "term.removed", terminalId: "s" });
+        expect(state.closed).toBe(1);
+    });
+
+    it("hand their pane to the terminal that replaced them, without taking focus", () => {
+        const node = fakeNode([]);
+        const { host: h, state } = host(node, { tree: split("row", leaf("s"), leaf("a")), focused: "a" }, [setup("s"), info("a")]);
+        paneEvent(h, { type: "term.removed", terminalId: "s", replacedBy: "s2" });
+        expect(state.tab).toEqual({ tree: split("row", leaf("s2"), leaf("a")), focused: "a" });
+        // A focused pane keeps focus on its successor.
+        const focused = host(node, { tree: leaf("s"), focused: "s" }, [setup("s")]);
+        paneEvent(focused.host, { type: "term.removed", terminalId: "s", replacedBy: "s2" });
+        expect(focused.state.tab).toEqual({ tree: leaf("s2"), focused: "s2" });
+        // A tab that already shows the successor just loses the old pane.
+        const both = host(node, { tree: split("row", leaf("s"), leaf("s2")), focused: "s" }, []);
+        paneEvent(both.host, { type: "term.removed", terminalId: "s", replacedBy: "s2" });
+        expect(both.state.tab).toEqual({ tree: leaf("s2"), focused: "s2" });
+    });
+
+    it("rerun in their pane through term.restart, with focus", async () => {
+        const s = setup("s", { exited: { code: 1, signal: null } });
+        const node = fakeNode([s, info("a")]);
+        node.exit("s");
+        const { host: h, state } = host(node, { tree: split("row", leaf("a"), leaf("s")), focused: "a" }, [s, info("a")]);
+        const created = await rerunPane(h, "s");
+        expect(created).toMatchObject({ terminalId: "new1", role: "setup", argv: ["sh", "-c", "npm ci"], cwd: "/w/app-fix" });
+        expect(node.calls).toEqual([{ type: "term.restart", params: { terminalId: "s" } }]);
+        expect(state.tab).toEqual({ tree: split("row", leaf("a"), leaf("new1")), focused: "new1" });
+        expect(node.listed("s")).toBe(false);
+        // The node's term.removed { replacedBy } that follows changes nothing more.
+        paneEvent(h, { type: "term.removed", terminalId: "s", replacedBy: "new1" });
+        expect(state.tab).toEqual({ tree: split("row", leaf("a"), leaf("new1")), focused: "new1" });
+        // A live terminal is refused, and its pane stays.
+        await expect(rerunPane(h, "a")).rejects.toMatchObject({ code: "busy" });
+        expect(state.tab).toEqual({ tree: split("row", leaf("a"), leaf("new1")), focused: "new1" });
+    });
+
+    it("open a shell in their worktree in their pane, then leave the node's list", async () => {
+        const s = setup("s", { exited: { code: 1, signal: null } });
+        const node = fakeNode([s]);
+        node.exit("s");
+        const { host: h, state } = host(node, { tree: split("column", leaf("s"), leaf("a")), focused: "a" }, [s]);
+        const created = await shellPane(h, "s");
+        expect(created?.terminalId).toBe("new1");
+        expect(node.calls).toEqual([
+            { type: "term.create", params: { cols: 100, rows: 30, cwd: "/w/app-fix" } },
+            { type: "term.kill", params: { terminalId: "s" } },
+        ]);
+        expect(state.tab).toEqual({ tree: split("column", leaf("new1"), leaf("a")), focused: "new1" });
+        expect(node.listed("s")).toBe(false);
+    });
+
+    it("keep the exited terminal and hang the shell up when the tab closed while it started", async () => {
+        const s = setup("s", { exited: { code: 1, signal: null } });
+        const node = fakeNode([s]);
+        node.exit("s");
+        const { host: h, state } = host(node, { tree: leaf("s"), focused: "s" }, [s]);
+        node.hold();
+        const pending = shellPane(h, "s");
+        state.tab = undefined;
+        node.release();
+        expect(await pending).toBeUndefined();
+        expect(node.calls.at(-1)).toEqual({ type: "term.kill", params: { terminalId: "new1", signal: "SIGHUP" } });
+        expect(node.listed("s")).toBe(true);
+    });
+
+    it("close their pane and leave the node's list", async () => {
+        const s = setup("s", { exited: { code: 0, signal: null } });
+        const node = fakeNode([s, info("a")]);
+        node.exit("s");
+        const { host: h, state } = host(node, { tree: split("row", leaf("s"), leaf("a")), focused: "s" }, [s, info("a")]);
+        await closePane(h, "s");
+        expect(state.tab).toEqual({ tree: leaf("a"), focused: "a" });
+        expect(node.listed("s")).toBe(false);
     });
 });
 

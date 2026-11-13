@@ -9,8 +9,8 @@
  */
 import { NodeRequestError, type NodeChannel } from "../channel";
 import { paneCwd } from "../client";
-import type { NodeEvent, TerminalInfo } from "../contract";
-import { closeLeaf, focusSuccessorOnClose, hasLeaf, leaves, splitLeaf, type PaneDirection, type PaneTree } from "./pane-tree";
+import { SETUP_ROLE, type NodeEvent, type TerminalInfo } from "../contract";
+import { closeLeaf, focusSuccessorOnClose, hasLeaf, leaves, replaceLeaf, splitLeaf, type PaneDirection, type PaneTree } from "./pane-tree";
 
 /** A tab's panes and which one has focus (always one of its leaves). */
 export interface PaneTab {
@@ -159,6 +159,53 @@ export function removePane(host: PaneHost, terminalId: string): void {
     else host.closeTab();
 }
 
+/**
+ * `terminalId`'s pane shows `newId` instead, in the same place; focus goes to it when `focus` says so, or when the old
+ * pane had it. False, changing nothing, when the tab is gone, has no such pane, or already shows `newId`.
+ */
+export function replacePane(host: PaneHost, terminalId: string, newId: string, focus: boolean): boolean {
+    const tab = host.read();
+    if (!tab || !hasLeaf(tab.tree, terminalId) || hasLeaf(tab.tree, newId)) return false;
+    host.write({ tree: replaceLeaf(tab.tree, terminalId, newId), focused: focus || tab.focused === terminalId ? newId : tab.focused });
+    return true;
+}
+
+/** Whether a terminal keeps its pane once it exits: a setup script's (`role: "setup"`), so its last screen stays. */
+export const keepsPaneOnExit = (terminal: TerminalInfo | undefined): boolean => terminal?.role === SETUP_ROLE;
+
+/**
+ * Runs an exited terminal again (`term.restart`: the same argv, env, and cwd) in its pane, with focus. The node
+ * removes the old terminal once the new one is announced (`term.removed` with `replacedBy`). A tab closed meanwhile
+ * leaves the new terminal running, listed in the rail. Returns the new terminal.
+ */
+export async function rerunPane(host: PaneHost, terminalId: string): Promise<TerminalInfo> {
+    const { terminal } = await channelOf(host).request("term.restart", { terminalId });
+    replacePane(host, terminalId, terminal.terminalId, true);
+    return terminal;
+}
+
+/**
+ * Replaces an exited terminal's pane with a new login shell in its worktree (else where it started), with focus, then
+ * removes the exited terminal from the node's list. When the tab closed while the shell started, the shell is hung up
+ * and the exited terminal stays; returns undefined then.
+ */
+export async function shellPane(host: PaneHost, terminalId: string): Promise<TerminalInfo | undefined> {
+    const channel = channelOf(host);
+    const old = host.terminal(terminalId);
+    const cwd = old?.worktreePath ?? old?.cwd;
+    const { terminal } = await channel.request("term.create", { ...(old ? { cols: old.cols, rows: old.rows } : DEFAULT_SIZE), ...(cwd ? { cwd } : {}) });
+    if (!replacePane(host, terminalId, terminal.terminalId, true)) {
+        await channel.request("term.kill", { terminalId: terminal.terminalId, signal: "SIGHUP" }).catch(() => {});
+        return undefined;
+    }
+    try {
+        await channel.request("term.kill", { terminalId });
+    } catch (error) {
+        if (!(error instanceof NodeRequestError && error.code === "not_found")) throw error;
+    }
+    return terminal;
+}
+
 /** `tab` without `terminalId`'s pane, focus moved if it was there; null when that was the last pane. */
 function withoutPane(tab: PaneTab, terminalId: string): PaneTab | null {
     const tree = closeLeaf(tab.tree, terminalId);
@@ -178,8 +225,14 @@ export function prunePanes(tab: PaneTab, keep: (terminalId: string) => boolean):
 
 /**
  * The node's events that end panes: a terminal that exits on its own (`term.exit`), or one removed from the node
- * (`term.removed`), loses its pane. Feed it every event of the tab's node (`NodesClient.onEvent`).
+ * (`term.removed`), loses its pane. A setup script's terminal keeps its pane when it exits (`keepsPaneOnExit`), and
+ * one replaced by `term.restart` (`replacedBy`) hands its pane to its successor, without moving focus. Feed it every
+ * event of the tab's node (`NodesClient.onEvent`).
  */
 export function paneEvent(host: PaneHost, event: NodeEvent): void {
-    if (event.type === "term.exit" || event.type === "term.removed") removePane(host, event.terminalId);
+    if (event.type === "term.exit") {
+        if (!keepsPaneOnExit(host.terminal(event.terminalId))) removePane(host, event.terminalId);
+    } else if (event.type === "term.removed") {
+        if (!(event.replacedBy && replacePane(host, event.terminalId, event.replacedBy, false))) removePane(host, event.terminalId);
+    }
 }

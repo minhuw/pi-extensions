@@ -22,8 +22,8 @@ import { IndexedDbKeyStore } from "../nodes/identity";
 import { currentKeymap, focusOf, resolveKey, type PageCommands } from "../nodes/keys";
 import { KeysHelp } from "../nodes/KeysHelp";
 import { clampWidth, LAYOUT_BOUNDS, loadLayout, saveLayout, type NodesLayout } from "../nodes/layout";
-import { ClosedPanes, closePane, paneEvent, splitPane, type PaneHost } from "../nodes/panes/actions";
-import { focusNext, focusPrevious, replaceLeaf } from "../nodes/panes/pane-tree";
+import { ClosedPanes, closePane, keepsPaneOnExit, paneEvent, replacePane, rerunPane, shellPane, splitPane, type PaneHost } from "../nodes/panes/actions";
+import { focusNext, focusPrevious } from "../nodes/panes/pane-tree";
 import { QuickOpen } from "../nodes/QuickOpen";
 import { nodeSocketUrl } from "../nodes/socket";
 import { Splitter } from "../nodes/Splitter";
@@ -66,6 +66,7 @@ import { placeKey, placeOfTerminal, placePath, placeWords, railNode, splitPlace,
 import { RecentTerminals } from "../nodes/workspace/recent";
 import { SlotRegistry } from "../nodes/workspace/slots";
 import { OTHER, WorkspaceHub, type NodeWorkspaces } from "../nodes/workspace/store";
+import type { SetupAction } from "../nodes/workspace/SetupFooter";
 import { layerKey, TerminalLayer, type LayerTerminal } from "../nodes/workspace/TerminalLayer";
 import { WorkspaceView, type WorkspaceActions } from "../nodes/workspace/WorkspaceView";
 
@@ -499,7 +500,12 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 			if (view.link.kind !== "ready" || !rail) continue;
 			const ws = hub.get(view.info.id);
 			ws.reconcile(
-				view.terminals.map((terminal) => ({ terminalId: terminal.terminalId, place: ws.placeOf(terminal.terminalId) ?? placeOfTerminal(rail.places, terminal), exited: Boolean(terminal.exited) })),
+				view.terminals.map((terminal) => ({
+					terminalId: terminal.terminalId,
+					place: ws.placeOf(terminal.terminalId) ?? placeOfTerminal(rail.places, terminal),
+					exited: Boolean(terminal.exited),
+					keepExited: keepsPaneOnExit(terminal),
+				})),
 				view.listed,
 			);
 		}
@@ -594,10 +600,11 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 					ws.update(place, (current) => setPanes(current, tabId, tab.tree, tab.focused), focus ? { tabId, terminalId: tab.focused } : undefined);
 				},
 				closeTab: () => ws.update(place, (current) => closeTab(current, tabId, { forget: true })),
-				terminal: (id) => terminalOf(node, id),
+				// The client's list now, not the last render's: an event can arrive before the render that lists its terminal.
+				terminal: (id) => client.getSnapshot().nodes.find((view) => view.info.id === node)?.terminals.find((item) => item.terminalId === id),
 			};
 		},
-		[client, closedPanes, hub, terminalOf],
+		[client, closedPanes, hub],
 	);
 
 	const run = useCallback(async (action: () => Promise<unknown>) => {
@@ -672,6 +679,26 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 			const host = paneHost(node, place, tabId);
 			if (host) await closePane(host, terminalId);
 		});
+
+	/** An exited setup terminal's footer: Rerun or Open shell here put a new terminal in its pane; Close ends both. */
+	const setupAction = useRef<(node: string, terminalId: string, action: SetupAction) => Promise<void>>(async () => {});
+	setupAction.current = (node, terminalId, action) =>
+		run(async () => {
+			const nodeWs = hub.get(node);
+			const owner = nodeWs.placeOf(terminalId);
+			const tab = owner ? tabOfTerminal(nodeWs.layout(owner), terminalId) : undefined;
+			const host = owner && tab ? paneHost(node, owner, tab.id) : undefined;
+			if (!host) return;
+			if (action === "close") return await closePane(host, terminalId);
+			const release = nodeWs.holdNewTerminals();
+			try {
+				if (action === "rerun") await rerunPane(host, terminalId);
+				else await shellPane(host, terminalId);
+			} finally {
+				release();
+			}
+		});
+	const onSetupAction = useCallback((node: string, terminalId: string, action: SetupAction) => setupAction.current(node, terminalId, action), []);
 
 	/** Closes a tab, asking first when its file has unsaved edits. A terminal tab's terminals keep running. */
 	const requestClose = (node: string, place: string, tabId: string) => {
@@ -1037,22 +1064,20 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 				const ws = hub.get(node);
 				const place = placeFor(node, old);
 				const found = paneTabOf(key);
+				// The node starts it again with its env and role, and removes the old one; an older node gets a copy started here.
+				const onNode = client.capabilities(node).has("term.restart");
 				// A login shell's own argv (`[shell, "-l"]`) is the default: no argv, so it does not run inside another.
 				const argv = old.argv.length === 2 && old.argv[1] === "-l" ? undefined : old.argv;
 				const release = ws.holdNewTerminals();
 				try {
-					const created = await client.createTerminal(node, { cols: old.cols, rows: old.rows }, old.cwd, argv);
+					const created = onNode ? await client.restartTerminal(node, terminalId) : await client.createTerminal(node, { cols: old.cols, rows: old.rows }, old.cwd, argv);
 					ws.know(created.terminalId);
-					if (found) {
-						ws.update(found.place, (current) => {
-							const tab = current.tabs[found.tabId];
-							return tab?.kind === "terminal" ? setPanes(current, found.tabId, replaceLeaf(tab.panes, terminalId, created.terminalId), created.terminalId) : current;
-						}, { tabId: found.tabId, terminalId: created.terminalId });
-					} else {
-						ws.reveal(place, created.terminalId);
+					const host = found && paneHost(found.node, found.place, found.tabId);
+					if (!(host && replacePane(host, terminalId, created.terminalId, true)) && !ws.placeOf(created.terminalId)) ws.reveal(place, created.terminalId);
+					if (!onNode) {
+						if (old.label) await client.renameTerminal(node, created.terminalId, old.label).catch(() => {});
+						await client.killTerminal(node, terminalId);
 					}
-					if (old.label) await client.renameTerminal(node, created.terminalId, old.label).catch(() => {});
-					await client.killTerminal(node, terminalId);
 					navigate(`/deck/${encodeURIComponent(node)}/${encodeURIComponent(created.terminalId)}`);
 				} finally {
 					release();
@@ -1222,7 +1247,16 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 							</DeckEmpty>
 						</div>
 					)}
-					<TerminalLayer registry={registry} terminals={layerTerminals} theme={theme} onFocus={onLayerFocus} onKill={onLayerKill} onOpenFile={onLayerOpen} onSeen={onSeen} />
+					<TerminalLayer
+						registry={registry}
+						terminals={layerTerminals}
+						theme={theme}
+						onFocus={onLayerFocus}
+						onKill={onLayerKill}
+						onOpenFile={onLayerOpen}
+						onSeen={onSeen}
+						onSetupAction={onSetupAction}
+					/>
 				</div>
 			</section>
 			{filesShown && ready && editors && (

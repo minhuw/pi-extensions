@@ -7,6 +7,7 @@ import { EditorStore } from "../src/nodes/editor";
 import { WebglRenderer, type Renderer } from "../src/nodes/renderer";
 import { addTab, createWorkspace, moveTab, splitTab, terminalTab, type Workspace } from "../src/nodes/workspace/model";
 import { SlotRegistry } from "../src/nodes/workspace/slots";
+import { setupOutcome } from "../src/nodes/workspace/SetupFooter";
 import { paneMark, strongestMark } from "../src/nodes/workspace/status";
 import { TerminalLayer, type LayerTerminal } from "../src/nodes/workspace/TerminalLayer";
 import { WorkspaceView, type WorkspaceActions } from "../src/nodes/workspace/WorkspaceView";
@@ -75,7 +76,7 @@ function Page({ ws, registry, terminals }: { ws: Workspace | undefined; registry
 					onLayout={() => registry.layoutChanged()}
 				/>
 			)}
-			<TerminalLayer registry={registry} terminals={entries} theme="light" onFocus={() => {}} onKill={() => {}} onOpenFile={() => {}} onSeen={() => {}} />
+			<TerminalLayer registry={registry} terminals={entries} theme="light" onFocus={() => {}} onKill={() => {}} onOpenFile={() => {}} onSeen={() => {}} onSetupAction={async () => {}} />
 		</div>
 	);
 }
@@ -207,5 +208,13 @@ describe("pane marks", () => {
 		expect(paneMark(pane({ exited: { code: 0, signal: null } }))).toBe("exited");
 		expect(strongestMark(["idle", "done", "waiting", "working"])).toBe("waiting");
 		expect(strongestMark(["idle", "working"])).toBe("working");
+	});
+});
+
+describe("the setup footer", () => {
+	it("says a script finished, failed with its code, or was stopped by a signal", () => {
+		expect(setupOutcome({ code: 0, signal: null })).toEqual({ mark: "done", text: "Setup finished" });
+		expect(setupOutcome({ code: 127, signal: null })).toEqual({ mark: "error", text: "Setup failed (exit 127)" });
+		expect(setupOutcome({ code: null, signal: "SIGHUP" })).toEqual({ mark: "exited", text: "Setup stopped (SIGHUP)" });
 	});
 });

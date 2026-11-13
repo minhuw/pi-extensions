@@ -231,6 +231,101 @@ describe("Deck on checkouts", () => {
 		expect(received("term.create")).toHaveLength(0);
 	});
 
+	it("keeps an exited setup terminal's pane with a footer: Rerun, Open shell here, Close; other panes still go", async () => {
+		const fix = worktree(`${HOME}/repo-fix`, "fix");
+		repo = { ...repo, worktrees: [...repo.worktrees, fix] };
+		checkouts = [repo];
+		const inFix = { cwd: fix.path, checkoutId: repo.id, worktreePath: fix.path };
+		const setup = (terminalId: string) => shell(terminalId, { ...inFix, argv: ["sh", "-c", "npm ci"], role: "setup" });
+		terminals = [setup("s1"), setup("s2"), shell("t3", inFix)];
+		node.welcome = ((base) => () => ({ ...base(), capabilities: [...base().capabilities, "term.restart"] }))(node.welcome);
+		answer = ((base) => (message: ClientMessage) => {
+			if (message.type === "term.restart") return { result: { terminal: setup("s9") } };
+			if (message.type === "term.create") return { result: { terminal: shell("t11", { ...inFix, cols: message.cols, rows: message.rows }) } };
+			if (message.type === "term.kill") return { result: {} };
+			return base(message);
+		})(answer);
+		await open();
+		const drawn = () => [...document.querySelectorAll("[data-layer-terminal]")].map((box) => box.getAttribute("data-layer-terminal")!.split("\n")[1]).sort();
+		const box = (terminalId: string) => document.querySelector(`[data-layer-terminal='node-1\\a ${terminalId}']`)!;
+		const footer = (terminalId: string) => box(terminalId).querySelector("[data-setup-footer]");
+		const send = (event: object) => act(async () => {
+			await node.send(event as never);
+			await settle();
+		});
+		await waitFor(() => expect(drawn()).toEqual(["s1", "s2", "t3"]));
+		expect(footer("s1")).toBeNull();
+
+		// The script fails: its pane stays, with the outcome and the actions; a plain terminal's pane still goes.
+		await send({ type: "term.exit", terminalId: "s1", code: 1, signal: null });
+		await send({ type: "term.exit", terminalId: "s2", code: 0, signal: null });
+		await send({ type: "term.exit", terminalId: "t3", code: 0, signal: null });
+		expect(drawn()).toEqual(["s1", "s2"]);
+		expect(footer("s1")!.getAttribute("data-setup-footer")).toBe("error");
+		expect(footer("s1")!.querySelector("[data-setup-outcome]")!.textContent).toBe("Setup failed (exit 1)");
+		expect(footer("s2")!.querySelector("[data-setup-outcome]")!.textContent).toBe("Setup finished");
+		// (The layer hides the box: jsdom measures no slot.)
+		expect([...footer("s1")!.querySelectorAll("button")].map((button) => button.textContent)).toEqual(["Rerun", "Open shell here", "Close"]);
+		// The rail keeps the row, failed.
+		expect(agentsUnder(fix.path)).toContain("s1");
+
+		// Rerun: term.restart, and the new terminal takes the pane once the node replaces the old one.
+		fireEvent.click(footer("s1")!.querySelector("[data-setup-action='rerun']")!);
+		await waitFor(() => expect(received("term.restart")).toHaveLength(1));
+		expect(received("term.restart")[0]).toMatchObject({ terminalId: "s1" });
+		await send({ type: "term.created", terminal: setup("s9") });
+		await send({ type: "term.removed", terminalId: "s1", replacedBy: "s9" });
+		await waitFor(() => expect(drawn()).toEqual(["s2", "s9"]));
+		expect(footer("s9")).toBeNull();
+		expect(agentsUnder(fix.path)).not.toContain("s1");
+
+		// Open shell here: a login shell in the worktree takes the pane, and the exited terminal is removed.
+		await send({ type: "term.exit", terminalId: "s9", code: 0, signal: null });
+		fireEvent.click(footer("s9")!.querySelector("[data-setup-action='shell']")!);
+		await waitFor(() => expect(received("term.kill")).toHaveLength(1));
+		expect(received("term.create").at(-1)).toMatchObject({ cwd: fix.path, cols: 80, rows: 24 });
+		expect(received("term.create").at(-1)).not.toHaveProperty("argv");
+		expect(received("term.kill")[0]).toMatchObject({ terminalId: "s9" });
+		await send({ type: "term.created", terminal: shell("t11", inFix) });
+		await send({ type: "term.removed", terminalId: "s9" });
+		await waitFor(() => expect(drawn()).toEqual(["s2", "t11"]));
+
+		// The rail's Restart has the node start it again (its env stays on the node), with nothing copied here.
+		await send({ type: "term.exit", terminalId: "t11", code: 2, signal: null });
+		openMenu(document.querySelector(`[data-worktree-card='${fix.path}'] [data-agent-row='s2']`)!);
+		fireEvent.click(menuItem("data-agent-menu", "restart"));
+		await waitFor(() => expect(received("term.restart")).toHaveLength(2));
+		expect(received("term.restart")[1]).toMatchObject({ terminalId: "s2" });
+		expect(received("term.create")).toHaveLength(1);
+		expect(received("term.kill")).toHaveLength(1);
+		expect(received("term.rename")).toHaveLength(0);
+		await send({ type: "term.created", terminal: setup("s9") });
+		await send({ type: "term.removed", terminalId: "s2", replacedBy: "s9" });
+		await waitFor(() => expect(drawn()).toEqual(["s9"]));
+	});
+
+	it("closes an exited setup terminal's pane from its footer", async () => {
+		const setup = shell("s2", { argv: ["sh", "-c", "npm ci"], role: "setup", cwd: `${HOME}/repo`, checkoutId: repo.id, worktreePath: `${HOME}/repo` });
+		terminals = [setup, shell("t1", { cwd: `${HOME}/repo`, checkoutId: repo.id, worktreePath: `${HOME}/repo` })];
+		answer = ((base) => (message: ClientMessage) => (message.type === "term.kill" ? { result: {} } : base(message)))(answer);
+		await open();
+		const drawn = () => [...document.querySelectorAll("[data-layer-terminal]")].map((box) => box.getAttribute("data-layer-terminal")!.split("\n")[1]).sort();
+		const send = (event: object) => act(async () => {
+			await node.send(event as never);
+			await settle();
+		});
+		await waitFor(() => expect(drawn()).toEqual(["s2", "t1"]));
+		await send({ type: "term.exit", terminalId: "s2", code: 0, signal: null });
+		const footer = document.querySelector("[data-layer-terminal='node-1\\a s2'] [data-setup-footer]")!;
+		expect(footer.getAttribute("data-setup-footer")).toBe("done");
+		// Close: the pane goes and the exited terminal leaves the node's list.
+		fireEvent.click(footer.querySelector("[data-setup-action='close']")!);
+		await waitFor(() => expect(received("term.kill")).toHaveLength(1));
+		expect(received("term.kill")[0]).toMatchObject({ terminalId: "s2" });
+		await send({ type: "term.removed", terminalId: "s2" });
+		await waitFor(() => expect(drawn()).toEqual(["t1"]));
+	});
+
 	it("removes a worktree: busy offers to stop its terminals, the branch kept unless asked", async () => {
 		const fix = worktree(`${HOME}/repo-fix`, "fix");
 		repo = { ...repo, worktrees: [...repo.worktrees, fix] };

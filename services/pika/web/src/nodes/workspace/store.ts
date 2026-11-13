@@ -146,14 +146,15 @@ export class NodeWorkspaces {
 
 	/**
 	 * The node's terminals now, each with its place. Once the node has listed them (`listed`), terminals that are
-	 * gone leave every workspace (on the first listing, exited ones too: a restored layout keeps live panes only);
-	 * terminals new to this browser get a tab in their place's active group, shown only where the group had nothing.
+	 * gone leave every workspace (on the first listing, exited ones too, but for those that `keepExited`, a setup
+	 * script's: a restored layout keeps live panes only); terminals new to this browser get a tab in their place's
+	 * active group, shown only where the group had nothing.
 	 */
-	reconcile(terminals: readonly { terminalId: string; place: string; exited?: boolean }[], listed: boolean): void {
+	reconcile(terminals: readonly { terminalId: string; place: string; exited?: boolean; keepExited?: boolean }[], listed: boolean): void {
 		if (!listed) return;
 		const first = !this.#listed;
 		this.#listed = true;
-		const live = new Set(terminals.filter((item) => !(first && item.exited)).map((item) => item.terminalId));
+		const live = new Set(terminals.filter((item) => !(first && item.exited && !item.keepExited)).map((item) => item.terminalId));
 		let changed = false;
 		for (const [place, ws] of this.#layouts) {
 			const pruned = pruneTerminals(ws, (id) => live.has(id));

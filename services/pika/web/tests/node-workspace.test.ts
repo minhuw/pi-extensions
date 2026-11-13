@@ -273,6 +273,26 @@ describe("a node's workspaces", () => {
 		expect(JSON.parse(storage.getItem(`${WORKSPACE_KEY_PREFIX}n1`)!).version).toBe(2);
 	});
 
+	it("restores the panes of exited setup terminals, but no other exited panes, and opens no tab for them", () => {
+		const storage = new MemoryStorage();
+		const first = new NodeWorkspaces("n1", { storage });
+		first.reveal(P, "setup");
+		first.reveal(P, "shell");
+		const again = new NodeWorkspaces("n1", { storage });
+		again.reconcile(
+			[
+				{ terminalId: "setup", place: P, exited: true, keepExited: true },
+				{ terminalId: "shell", place: P, exited: true },
+				{ terminalId: "old-setup", place: P, exited: true, keepExited: true },
+			],
+			true,
+		);
+		expect(again.placeOf("setup")).toBe(P);
+		expect(again.placeOf("shell")).toBeUndefined();
+		// An exited setup terminal this browser never showed gets no tab of its own.
+		expect(again.placeOf("old-setup")).toBeUndefined();
+	});
+
 	it("waits for a terminal it is creating, and moves a revealed terminal between places", () => {
 		const store = new NodeWorkspaces("n1", { storage: new MemoryStorage() });
 		const release = store.holdNewTerminals();
