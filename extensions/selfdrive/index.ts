@@ -10,8 +10,87 @@ const ENTRY = "selfdrive";
 const TASK_ENTRY = "selfdrive-task";
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
 const SESSION_MODES = Symbol.for("pi-extensions.session-modes");
+export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
+const CHILD_GUARD_SHARED_KEY = Symbol.for("pi-extensions.selfdrive.child-guard");
+const GUARD_LOAD_PROBE_EVENT = "pi-extensions.selfdrive.guard-load-probe";
 const OFF_ERROR = "self-driving mode is off";
 const TEXT_CAP = 300;
+
+export interface ChildSessionHook {
+	name: string;
+	extensionFactory: (pi: ExtensionAPI) => void;
+}
+
+interface ChildGuardSharedState {
+	boundGuardApis: WeakSet<object>;
+	openInstances: Set<object>;
+	hook?: ChildSessionHook;
+}
+
+function getChildGuardState(): ChildGuardSharedState {
+	const shared = globalThis as Record<symbol, unknown>;
+	let state = shared[CHILD_GUARD_SHARED_KEY] as ChildGuardSharedState | undefined;
+	if (!state) {
+		state = { boundGuardApis: new WeakSet<object>(), openInstances: new Set<object>() };
+		shared[CHILD_GUARD_SHARED_KEY] = state;
+	}
+	return state;
+}
+
+function getChildHooksSet(): Set<ChildSessionHook> {
+	const shared = globalThis as Record<symbol, unknown>;
+	let hooks = shared[CHILD_SESSION_HOOKS] as Set<ChildSessionHook> | undefined;
+	if (!(hooks instanceof Set)) {
+		hooks = new Set<ChildSessionHook>();
+		shared[CHILD_SESSION_HOOKS] = hooks;
+	}
+	return hooks;
+}
+
+function registerGuardOnce(pi: ExtensionAPI): void {
+	const state = getChildGuardState();
+	if (state.boundGuardApis.has(pi)) return;
+
+	// Deduplicate when a child loads selfdrive both normally and via CHILD_SESSION_HOOKS in the same loader pass.
+	let inLoadPass = true;
+	const events = pi.events;
+	if (events && typeof events.emit === "function" && typeof events.on === "function") {
+		const probe = { alreadyLoaded: false };
+		events.emit(GUARD_LOAD_PROBE_EVENT, probe);
+		if (probe.alreadyLoaded) return;
+		events.on(GUARD_LOAD_PROBE_EVENT, (data) => {
+			if (inLoadPass && data && typeof data === "object") {
+				(data as { alreadyLoaded: boolean }).alreadyLoaded = true;
+			}
+		});
+	}
+
+	state.boundGuardApis.add(pi);
+	registerGuard(pi);
+	pi.on("session_start", () => { inLoadPass = false; });
+	pi.on("session_shutdown", () => { inLoadPass = false; });
+}
+
+const childGuardHook: ChildSessionHook = {
+	name: ENTRY,
+	extensionFactory: (childPi) => registerGuardOnce(childPi),
+};
+
+function syncChildSessionHook(nextHook?: ChildSessionHook): void {
+	const state = getChildGuardState();
+	if (nextHook) state.hook = nextHook;
+	const hooks = getChildHooksSet();
+	if (state.openInstances.size > 0 && state.hook) {
+		for (const item of [...hooks]) {
+			if (item.name === ENTRY && item !== state.hook) hooks.delete(item);
+		}
+		hooks.add(state.hook);
+	} else {
+		for (const item of [...hooks]) {
+			if (item.name === ENTRY) hooks.delete(item);
+		}
+	}
+}
 
 /** Delays, exported so tests can shorten them. */
 export const timing = {
@@ -130,10 +209,13 @@ function publishMode(id: string, active: boolean): void {
 	}
 }
 
+const hasSessionLink = (ctx: ExtensionContext) =>
+	ctx.sessionManager?.getEntries?.().some((entry) => entry.type === "custom" && entry.customType === SESSION_LINK_TYPE) ?? false;
+
 /** Same as swarm mode: top-level TUI and RPC sessions, not children (no mode, or a session link). */
 function isEligible(ctx: ExtensionContext): boolean {
 	if (ctx.mode !== "tui" && ctx.mode !== "rpc") return false;
-	return !ctx.sessionManager.getEntries().some((entry) => entry.type === "custom" && entry.customType === SESSION_LINK_TYPE);
+	return !hasSessionLink(ctx);
 }
 
 const isEntry = (entry: SessionEntry, type: string): entry is CustomEntry => entry.type === "custom" && entry.customType === type;
@@ -201,7 +283,8 @@ function latestOutcomes(after: readonly SessionEntry[], tasks: readonly Task[]):
  * continuations between runs, until they type again. Herder reads the published grant to approve goals.
  */
 export default function selfdriveExtension(pi: ExtensionAPI): void {
-	registerGuard(pi);
+	registerGuardOnce(pi);
+	const instanceToken = {};
 	const runtimes = new Map<string, Runtime>();
 	let toolsRegistered = false;
 
@@ -535,6 +618,10 @@ export default function selfdriveExtension(pi: ExtensionAPI): void {
 
 	// --- Lifecycle: a reload resumes; anything else ends a mode left on.
 	pi.on("session_start", (event, ctx) => {
+		if (!hasSessionLink(ctx)) {
+			getChildGuardState().openInstances.add(instanceToken);
+			syncChildSessionHook(childGuardHook);
+		}
 		if (!isEligible(ctx)) return;
 		const previous = get(ctx);
 		if (previous) close(previous);
@@ -550,7 +637,11 @@ export default function selfdriveExtension(pi: ExtensionAPI): void {
 		ctx.ui.notify("Self-driving mode 🚗 ended when pi restarted; /selfdrive report shows what it did.", "info");
 	});
 	const teardown = (_event: unknown, ctx: ExtensionContext) => { const r = get(ctx); if (r) close(r); };
-	pi.on("session_shutdown", teardown);
+	pi.on("session_shutdown", (event, ctx) => {
+		teardown(event, ctx);
+		getChildGuardState().openInstances.delete(instanceToken);
+		syncChildSessionHook();
+	});
 	pi.on("session_before_switch", teardown);
 	pi.on("session_before_fork", teardown);
 }
