@@ -1,3 +1,4 @@
+import { appendFileSync, readFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
@@ -6,8 +7,8 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/provid
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import pikaExtension, { statusText } from "../index.ts";
 import { loadConfig } from "../config.ts";
-import { currentUploader, MAX_BATCH_BYTES } from "../uploader.ts";
-import { MockIngest } from "./support/ingest-server.ts";
+import { BUDGET_RECOVERY_STEP, BUDGET_RECOVERY_STREAK, currentUploader, MAX_BATCH_BYTES, Uploader } from "../uploader.ts";
+import { MockIngest, TOKEN } from "./support/ingest-server.ts";
 import { readText, startSession, waitFor, Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;
@@ -87,4 +88,79 @@ it("parks a block and a line the server keeps refusing as too large, reports the
 		expect(ingest.batchRequests).toBe(sent);
 		expect(ingest.responses.filter((code) => code === 413)).toHaveLength(6);
 	} finally { await h.shutdown(); }
+}, 40_000);
+
+it("additively restores the batch budget after accepted streaks and resets the streak on another 413", async () => {
+	const MiB = 1024 * 1024;
+	const halfMiBLine = `${"x".repeat(512 * 1024)}\n`;
+	const key = "session:budget-recovery";
+	const file = join(workspace.sessionDir, "budget-recovery.jsonl");
+	const uploader = new Uploader({ url: ingest.url, token: TOKEN, dir: workspace.pikaDir });
+	try {
+		await uploader.openStream({ key, kind: "session", path: file });
+		await uploader.flush();
+
+		const sendAndMeasure = async (content: string) => {
+			const before = ingest.bodies.length;
+			appendFileSync(file, content);
+			await uploader.flush();
+			await waitFor(() => ingest.data(key) === readFileSync(file, "utf8"), 5_000, "stream caught up");
+			return ingest.bodies.slice(before).map((body) => body.streams?.reduce((count, stream) => count + stream.lines.length, 0) ?? 0);
+		};
+		const sendSmallBatches = async (count: number) => {
+			for (let i = 0; i < count; i++) expect(await sendAndMeasure("ok\n")).toEqual([1]);
+		};
+
+		// A transient 413 on a multi-unit batch (~5 MiB) halves the budget (~3.97 MiB, fitting 7 half-MiB lines).
+		ingest.maxBody = 4 * MiB;
+		const afterFirst413 = await sendAndMeasure(halfMiBLine.repeat(10));
+		expect(ingest.responses).toEqual([413, 200, 200]);
+		expect(afterFirst413).toEqual([7, 3]);
+		ingest.maxBody = Number.POSITIVE_INFINITY;
+
+		// Before completing BUDGET_RECOVERY_STREAK accepted batches (currently at 2), budget stays halved.
+		await sendSmallBatches(BUDGET_RECOVERY_STREAK - 3);
+		// Batch #10 is built under the halved budget (7 lines), then its acceptance completes the streak
+		// and raises the budget by one additive step (~4.97 MiB, fitting 9 half-MiB lines); batch #11 sends the 1 remaining line (streak = 1).
+		expect(await sendAndMeasure(halfMiBLine.repeat(8))).toEqual([7, 1]);
+
+		// Budget grew additively by one step (9 lines > 7), not straight back to MAX_BATCH_BYTES (12 lines still split).
+		expect(await sendAndMeasure(halfMiBLine.repeat(12))).toEqual([9, 3]);
+
+		// Advance to one batch short of the next recovery step (streak is 1 + 2 = 3), then trigger a single-unit 413.
+		await sendSmallBatches(BUDGET_RECOVERY_STREAK - 4);
+		ingest.maxBody = 100;
+		const beforeSingle413 = ingest.responses.length;
+		appendFileSync(file, "ok\n");
+		await uploader.flush();
+		expect(ingest.responses.slice(beforeSingle413)).toEqual([413]);
+		ingest.maxBody = Number.POSITIVE_INFINITY;
+		await uploader.drain(5_000);
+		expect(ingest.responses.slice(beforeSingle413)).toEqual([413, 200]);
+		// Because the 413 reset the streak to 0, budget stayed at step 1 (9 lines, not step 2's 11 lines).
+		expect(await sendAndMeasure(halfMiBLine.repeat(12))).toEqual([9, 3]);
+
+		// Advance again to one batch short of recovery (streak is 1 + 2 = 3), then trigger a multi-unit 413.
+		// Budget halves from ~4.97 MiB to ~2.48 MiB (fitting 4 half-MiB lines) and the streak resets to 0.
+		await sendSmallBatches(BUDGET_RECOVERY_STREAK - 4);
+		ingest.maxBody = 3 * MiB;
+		const beforeSecond413 = ingest.responses.length;
+		expect(await sendAndMeasure(halfMiBLine.repeat(8))).toEqual([4, 4]);
+		expect(ingest.responses.slice(beforeSecond413)).toEqual([413, 200, 200]);
+		ingest.maxBody = Number.POSITIVE_INFINITY;
+		// Had the streak not been reset, the first 200 above would have raised the budget to ~3.48 MiB (6 lines).
+		expect(await sendAndMeasure(halfMiBLine.repeat(6))).toEqual([4, 2]);
+
+		// Complete enough accepted streaks to restore the budget all the way to MAX_BATCH_BYTES, plus an extra streak to verify the cap.
+		const halvedTwice = Math.floor((Math.floor(MAX_BATCH_BYTES / 2) + BUDGET_RECOVERY_STEP) / 2);
+		const stepsToMax = Math.ceil((MAX_BATCH_BYTES - halvedTwice) / BUDGET_RECOVERY_STEP);
+		const currentStreak = 4; // 2 from the split after 413 + 2 from the 6-line probe
+		await sendSmallBatches((stepsToMax + 1) * BUDGET_RECOVERY_STREAK - currentStreak);
+
+		// At MAX_BATCH_BYTES (~7.94 MiB), 15 half-MiB lines fit in one batch (more than 1 step below max = 14),
+		// while 16 lines (~8 MiB) still split, proving recovery caps at MAX_BATCH_BYTES.
+		expect(await sendAndMeasure(halfMiBLine.repeat(16))).toEqual([15, 1]);
+	} finally {
+		await uploader.stop();
+	}
 }, 40_000);

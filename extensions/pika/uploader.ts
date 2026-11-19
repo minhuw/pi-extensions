@@ -13,6 +13,10 @@ export const PIKA_VERSION = "0.4.0";
 /** Uncompressed batch body limit; the server accepts 32 MiB by default. */
 export const MAX_BATCH_BYTES = 8 * 1024 * 1024 - 64 * 1024;
 const MIN_BATCH_BYTES = 256 * 1024;
+/** Consecutive accepted batches required before a reduced batch budget grows by one step. */
+export const BUDGET_RECOVERY_STREAK = 10;
+/** Additive increase to a reduced batch budget after each recovery streak. */
+export const BUDGET_RECOVERY_STEP = 1024 * 1024;
 const BATCH_OVERHEAD = 512;
 const STREAM_OVERHEAD = 256;
 const BLOB_OVERHEAD = 90;
@@ -272,6 +276,7 @@ export class Uploader {
 	private scanning = false;
 	private failures = 0;
 	private budget = MAX_BATCH_BYTES;
+	private acceptedStreak = 0;
 	private oneItem = false;
 	private inflight?: ClientRequest;
 	private closed = false;
@@ -850,6 +855,7 @@ export class Uploader {
 
 	/** Smaller batches first; a single item that keeps getting 413 is parked so the rest of the queue moves on. */
 	private async tooLarge(batch: Batch): Promise<Outcome> {
+		this.acceptedStreak = 0;
 		if (batch.units > 1) {
 			if (this.budget > MIN_BATCH_BYTES) this.budget = Math.max(MIN_BATCH_BYTES, Math.floor(this.budget / 2));
 			else this.oneItem = true;
@@ -989,6 +995,10 @@ export class Uploader {
 		if (!progressed) {
 			this.noteError("the server accepted a batch without advancing any stream");
 			return "retry";
+		}
+		if (this.budget < MAX_BATCH_BYTES && ++this.acceptedStreak >= BUDGET_RECOVERY_STREAK) {
+			this.budget = Math.min(MAX_BATCH_BYTES, this.budget + BUDGET_RECOVERY_STEP);
+			this.acceptedStreak = 0;
 		}
 		return "progress";
 	}
