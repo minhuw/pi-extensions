@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, InMemoryCredentialStore, type ApiKeyCredential, type AuthPrompt, type Provider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import magpie, { createMagpieProvider } from "../index.ts";
+import magpie, { createMagpieProvider, isPlainRemote } from "../index.ts";
 
 const saved: ApiKeyCredential = { type: "api_key", key: "saved-secret", env: { MAGPIE_BASE_URL: "https://saved.example" } };
 const catalog = (id = "old") => Response.json({ data: [{ id }] });
@@ -108,6 +108,51 @@ describe("native api-key login", () => {
 		expect(await credentials.read("magpie")).toEqual(saved);
 		expect(provider.getModels()).toBe(previous);
 		expect(prompt).toHaveBeenCalledTimes(step + 1);
+	});
+	it("warns before prompting for or transmitting the API key over plain remote HTTP", async () => {
+		const { models } = await setup();
+		const order: string[] = [];
+		const responses = ["http://remote.example:3425", "remote-secret"];
+		const prompt = vi.fn(async (p: AuthPrompt) => {
+			order.push(`prompt:${p.type}`);
+			return responses.shift()!;
+		});
+		const notify = vi.fn((event: { type: string; message?: string }) => {
+			order.push(`notify:${event.type}`);
+		});
+		vi.mocked(fetch).mockImplementation(async () => {
+			order.push("fetch");
+			return catalog();
+		});
+		const credential = await models.login("magpie", "api_key", { prompt, notify });
+		expect(credential).toEqual({ type: "api_key", key: "remote-secret", env: { MAGPIE_BASE_URL: "http://remote.example:3425" } });
+		expect(notify).toHaveBeenCalledWith({
+			type: "info",
+			message: expect.stringMatching(/plain HTTP.*unencrypted/i),
+		});
+		expect(order).toEqual(["prompt:text", "notify:info", "prompt:secret", "notify:progress", "fetch"]);
+	});
+	it.each([
+		["https://remote.example", "remote-secret"],
+		["http://127.0.0.1:3425", ""],
+		["http://localhost:3425", ""],
+		["http://[::1]:3425", ""],
+	])("does not emit a plain-HTTP warning for %s", async (url, key) => {
+		const { models } = await setup();
+		const ui = interaction(url, key);
+		await models.login("magpie", "api_key", ui);
+		expect(ui.notify).not.toHaveBeenCalledWith(expect.objectContaining({ type: "info" }));
+		expect(ui.notify).toHaveBeenCalledWith(expect.objectContaining({ type: "progress" }));
+	});
+	it("identifies plain remote HTTP origins consistently with loopback rules", () => {
+		expect(isPlainRemote("http://remote.example:3425")).toBe(true);
+		expect(isPlainRemote("http://127.evil.example")).toBe(true);
+		expect(isPlainRemote("http://localhost.example")).toBe(true);
+		expect(isPlainRemote("https://remote.example")).toBe(false);
+		expect(isPlainRemote("http://127.0.0.1:3425")).toBe(false);
+		expect(isPlainRemote("http://127.0.0.2:3425")).toBe(false);
+		expect(isPlainRemote("http://localhost:3425")).toBe(false);
+		expect(isPlainRemote("http://[::1]:3425")).toBe(false);
 	});
 });
 

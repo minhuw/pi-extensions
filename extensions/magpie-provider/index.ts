@@ -22,6 +22,15 @@ import { createMagpiePricingResolver, withMagpiePricing, type MagpiePricing } fr
 export const DISCOVERY_TIMEOUT_MS = 3000;
 interface Config { origin: string; apiKey?: string }
 
+function isLoopbackHost(hostname: string): boolean {
+	return hostname === "localhost" || hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+}
+
+export function isPlainRemote(origin: string): boolean {
+	const url = new URL(origin);
+	return url.protocol === "http:" && !isLoopbackHost(url.hostname);
+}
+
 export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
 	let url: URL;
 	try { url = new URL(env.MAGPIE_BASE_URL ?? "http://127.0.0.1:3425"); }
@@ -30,7 +39,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
 		url.href.includes('?') || url.href.includes('#') || !/^\/(?:v1\/?)?$/.test(url.pathname)) {
 		throw new Error("MAGPIE_BASE_URL must be an HTTP(S) origin, optionally ending in /v1, without credentials, query, or fragment.");
 	}
-	const loopback = url.hostname === "localhost" || url.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(url.hostname);
+	const loopback = isLoopbackHost(url.hostname);
 	const apiKey = env.MAGPIE_API_KEY?.trim() || (loopback ? "magpie-pi" : undefined);
 	return { origin: url.origin, apiKey };
 }
@@ -190,6 +199,12 @@ export function createMagpieProvider(
 				const url = await interaction.prompt({ type: "text", message: `Gateway URL (blank uses ${current.origin})`, placeholder: current.origin, signal });
 				check();
 				const origin = readConfig({ MAGPIE_BASE_URL: url.trim() || current.origin }).origin;
+				if (isPlainRemote(origin)) {
+					interaction.notify({
+						type: "info",
+						message: `Warning: ${origin} uses plain HTTP to a non-loopback host, so the API key will travel unencrypted. Use HTTPS for remote gateways.`,
+					});
+				}
 				const key = await interaction.prompt({ type: "secret", message: "Gateway API key (blank uses magpie-pi on loopback only)", signal });
 				check();
 				const config = readConfig({ MAGPIE_BASE_URL: origin, MAGPIE_API_KEY: key });
