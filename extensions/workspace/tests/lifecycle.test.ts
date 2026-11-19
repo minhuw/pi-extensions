@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
@@ -32,15 +32,23 @@ import {
 	hasLiveOtherOwner,
 	inspectWorkspaceSafety,
 	isPidAlive,
+	markSessionWorkspacesClosed,
 	readRegistry,
 	readRegistryState,
+	recordWorkspaceSweep,
+	registryLockFilePath,
+	setWorkspacePin,
+	syncWorkspaces,
+	touchWorkspace,
 	validateWorkspaceName,
+	withRegistryLock,
 	WORKSPACE_LIMITS,
 	WorkspaceOwnershipError,
 	WorkspaceQuotaError,
 } from "../registry.ts";
 
 const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
+const registryModuleUrl = new URL("../registry.ts", import.meta.url).href;
 
 let sandboxRoot: string;
 let projectCwd: string;
@@ -65,6 +73,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	await settleWorkspaceSweeps();
 	delete (globalThis as Record<symbol, unknown>)[WORKSPACE_SHARED_KEY];
 	delete (globalThis as Record<symbol, unknown>)[CHILD_SESSION_HOOKS];
 	if (prevAgentDir === undefined) {
@@ -406,6 +415,7 @@ describe("removal is never a touch", () => {
 	it("lets a session at quota rm -rf any workspace without registering it, while the write guard still sees the targets", async () => {
 		await createOrTouchWorkspace(projectCwd, { name: "unheld" }, agentDir);
 		await mkdir(path.join(workspacesDir(projectCwd), "unregistered", "sub"), { recursive: true });
+		await recordWorkspaceSweep(projectCwd, new Date());
 		const outside = path.join(sandboxRoot, "outside");
 		await mkdir(outside);
 		const h = await startSession();
@@ -682,6 +692,7 @@ describe("release", () => {
 			{ name: "foreign-dead", sessionId: "dead-session", pid: deadPid },
 			agentDir,
 		);
+		await recordWorkspaceSweep(projectCwd, new Date());
 
 		const h = await startSession();
 		try {
@@ -809,5 +820,177 @@ describe("automatic sweep", () => {
 		} finally {
 			await again.dispose();
 		}
+	});
+});
+
+function runChildRegistryScript(script: string, args: string[]): Promise<{ code: number; stderr: string }> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(process.execPath, ["--experimental-strip-types", "-e", script, ...args], {
+			env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let stderr = "";
+		child.stderr.on("data", (chunk: Buffer) => {
+			stderr += chunk.toString("utf8");
+		});
+		child.on("error", reject);
+		child.on("close", (code) => {
+			resolve({ code: code ?? 1, stderr });
+		});
+	});
+}
+
+describe("registry concurrency and locking", () => {
+	it("serializes concurrent in-process touch, pin, close, sync, sweep, and release updates without lost writes or leftover locks", async () => {
+		for (let i = 0; i < 4; i += 1) {
+			await createOrTouchWorkspace(
+				projectCwd,
+				{ name: `pin-target-${i}`, sessionId: `pin-sess-${i}`, pid: process.pid },
+				agentDir,
+			);
+			await createOrTouchWorkspace(
+				projectCwd,
+				{ name: `close-target-${i}`, sessionId: `close-sess-${i}`, pid: process.pid },
+				agentDir,
+			);
+		}
+		await createOrTouchWorkspace(projectCwd, { name: "gc-release-target" }, agentDir);
+
+		const closeTime = new Date(5_000_000);
+		const sweepTime = new Date(6_000_000);
+
+		const ops: Promise<unknown>[] = [];
+		for (let i = 0; i < 12; i += 1) {
+			ops.push(
+				touchWorkspace(
+					projectCwd,
+					{ name: `concurrent-${i}`, sessionId: `touch-sess-${i}`, pid: process.pid },
+					agentDir,
+				),
+			);
+		}
+		for (let i = 0; i < 4; i += 1) {
+			ops.push(setWorkspacePin(projectCwd, `pin-target-${i}`, true, agentDir));
+			ops.push(markSessionWorkspacesClosed(projectCwd, `close-sess-${i}`, closeTime, agentDir));
+		}
+		ops.push(syncWorkspaces(projectCwd, undefined, agentDir));
+		ops.push(recordWorkspaceSweep(projectCwd, sweepTime));
+		ops.push(releaseAndCollectWorkspace({ cwd: projectCwd, name: "gc-release-target", agentDir }));
+
+		await Promise.all(ops);
+
+		const state = await readRegistryState(projectCwd);
+		const byName = new Map(state.entries.map((entry) => [entry.name, entry]));
+
+		for (let i = 0; i < 12; i += 1) {
+			expect(byName.get(`concurrent-${i}`), `concurrent-${i}`).toMatchObject({
+				name: `concurrent-${i}`,
+				sessionId: `touch-sess-${i}`,
+			});
+		}
+		for (let i = 0; i < 4; i += 1) {
+			expect(byName.get(`pin-target-${i}`)?.pinned, `pin-target-${i}`).toBe(true);
+			const closed = byName.get(`close-target-${i}`);
+			expect(closed?.closedAt, `close-target-${i}`).toBe(closeTime.toISOString());
+			expect(closed?.pid, `close-target-${i}`).toBeUndefined();
+		}
+		expect(byName.has("gc-release-target")).toBe(false);
+		expect(state.lastSweepAt).toBe(sweepTime.toISOString());
+
+		const leftoverFiles = fs
+			.readdirSync(workspacesDir(projectCwd))
+			.filter((name) => name.includes(".registry.lock") || name.endsWith(".tmp"));
+		expect(leftoverFiles).toEqual([]);
+	});
+
+	it("serializes concurrent cross-process registry mutations without lost writes or leftover locks", async () => {
+		await createOrTouchWorkspace(projectCwd, { name: "shared-pin", sessionId: "owner-pin", pid: process.pid }, agentDir);
+		await createOrTouchWorkspace(
+			projectCwd,
+			{ name: "shared-close", sessionId: "owner-close", pid: process.pid },
+			agentDir,
+		);
+
+		const workerScript = `
+			const [cwd, agentDir, workerIdx] = process.argv.slice(1);
+			const mod = await import(${JSON.stringify(registryModuleUrl)});
+			const idx = Number(workerIdx);
+			await mod.touchWorkspace(cwd, { name: \`proc-\${idx}-a\`, sessionId: \`ps-\${idx}\`, pid: process.pid }, agentDir);
+			await mod.touchWorkspace(cwd, { name: \`proc-\${idx}-b\`, sessionId: \`ps-\${idx}\`, pid: process.pid }, agentDir);
+			if (idx === 0) {
+				await mod.setWorkspacePin(cwd, "shared-pin", true, agentDir);
+			}
+			if (idx === 1) {
+				await mod.markSessionWorkspacesClosed(cwd, "owner-close", new Date(7_000_000), agentDir);
+			}
+		`;
+
+		const results = await Promise.all(
+			Array.from({ length: 6 }, (_, idx) => runChildRegistryScript(workerScript, [projectCwd, agentDir, String(idx)])),
+		);
+		for (const res of results) {
+			expect(res.code, res.stderr).toBe(0);
+		}
+
+		const entries = await readRegistry(projectCwd);
+		const byName = new Map(entries.map((entry) => [entry.name, entry]));
+		for (let idx = 0; idx < 6; idx += 1) {
+			expect(byName.has(`proc-${idx}-a`), `proc-${idx}-a`).toBe(true);
+			expect(byName.has(`proc-${idx}-b`), `proc-${idx}-b`).toBe(true);
+		}
+		expect(byName.get("shared-pin")?.pinned).toBe(true);
+		expect(byName.get("shared-close")?.closedAt).toBe(new Date(7_000_000).toISOString());
+
+		const leftoverFiles = fs
+			.readdirSync(workspacesDir(projectCwd))
+			.filter((name) => name.includes(".registry.lock") || name.endsWith(".tmp"));
+		expect(leftoverFiles).toEqual([]);
+	});
+
+	it("recovers stale locks (dead PID and expired age), supports nested re-entry, and verifies ownership before unlinking", async () => {
+		const lockPath = registryLockFilePath(projectCwd);
+		await mkdir(workspacesDir(projectCwd), { recursive: true });
+
+		// 1. Dead-PID stale lock recovery.
+		const exited = spawnSync(process.execPath, ["-e", ""]);
+		const deadPid = exited.pid!;
+		expect(isPidAlive(deadPid)).toBe(false);
+		await writeFile(lockPath, JSON.stringify({ pid: deadPid, token: "dead-owner", ts: Date.now() }), "utf8");
+
+		await touchWorkspace(projectCwd, { name: "after-dead-lock", sessionId: "s-dead" }, agentDir);
+		expect((await readRegistry(projectCwd)).some((entry) => entry.name === "after-dead-lock")).toBe(true);
+		expect(fs.existsSync(lockPath)).toBe(false);
+
+		// 2. Expired-age stale lock recovery even with a live PID.
+		await writeFile(
+			lockPath,
+			JSON.stringify({ pid: process.ppid, token: "aged-owner", ts: Date.now() - 60_000 }),
+			"utf8",
+		);
+		const nestedResult = await withRegistryLock(
+			projectCwd,
+			async () => {
+				// Nested call on the same project must re-enter without deadlocking.
+				return withRegistryLock(projectCwd, async () => "re-entered");
+			},
+			{ staleMs: 1_000, timeoutMs: 2_000 },
+		);
+		expect(nestedResult).toBe("re-entered");
+		expect(fs.existsSync(lockPath)).toBe(false);
+
+		// 3. Owner-verified release refuses to unlink a lock replaced by another owner.
+		const replacementPayload = JSON.stringify({ pid: process.ppid, token: "foreign-replacement", ts: Date.now() });
+		await withRegistryLock(projectCwd, async () => {
+			expect(fs.existsSync(lockPath)).toBe(true);
+			await writeFile(lockPath, replacementPayload, "utf8");
+		});
+		expect(fs.existsSync(lockPath)).toBe(true);
+		expect(fs.readFileSync(lockPath, "utf8")).toBe(replacementPayload);
+		fs.unlinkSync(lockPath);
+
+		const leftoverFiles = fs
+			.readdirSync(workspacesDir(projectCwd))
+			.filter((name) => name.includes(".registry.lock") || name.endsWith(".tmp"));
+		expect(leftoverFiles).toEqual([]);
 	});
 });

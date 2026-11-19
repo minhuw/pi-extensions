@@ -13,6 +13,7 @@ import {
 	releaseWorkspace,
 	setWorkspacePin,
 	syncWorkspaces,
+	withRegistryLock,
 	writeRegistry,
 	type WorkspaceEntry,
 	type WorkspaceSafetyReport,
@@ -163,9 +164,11 @@ export async function runWorkspaceGc(options: GcOptions): Promise<GcResult> {
 		}
 
 		if (!dryRun && removedNames.size > 0) {
-			const current = await readRegistry(projectCwd);
-			const remaining = current.filter((item) => !removedNames.has(item.name));
-			await writeRegistry(projectCwd, remaining, options.agentDir);
+			await withRegistryLock(projectCwd, async () => {
+				const current = await readRegistry(projectCwd);
+				const remaining = current.filter((item) => !removedNames.has(item.name));
+				await writeRegistry(projectCwd, remaining, options.agentDir);
+			});
 		}
 	}
 
@@ -216,8 +219,10 @@ export async function releaseAndCollectWorkspace(options: {
 		return { entry, report, removed: false };
 	}
 	await removeWorkspaceDirectory(projectCwd, report);
-	const remaining = (await readRegistry(projectCwd)).filter((item) => item.name !== entry.name);
-	await writeRegistry(projectCwd, remaining, options.agentDir);
+	await withRegistryLock(projectCwd, async () => {
+		const remaining = (await readRegistry(projectCwd)).filter((item) => item.name !== entry.name);
+		await writeRegistry(projectCwd, remaining, options.agentDir);
+	});
 	return { entry, report, removed: true };
 }
 

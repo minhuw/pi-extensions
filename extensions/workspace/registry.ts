@@ -1,7 +1,8 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile } from "node:fs/promises";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -91,17 +92,297 @@ export interface ReleaseWorkspaceOptions {
 }
 
 export class WorkspaceOwnershipError extends Error {
-	constructor(
-		readonly workspaceName: string,
-		readonly reason: string,
-	) {
+	readonly workspaceName: string;
+	readonly reason: string;
+
+	constructor(workspaceName: string, reason: string) {
 		super(`Refusing to release workspace "${workspaceName}": ${reason}.`);
 		this.name = "WorkspaceOwnershipError";
+		this.workspaceName = workspaceName;
+		this.reason = reason;
 	}
 }
 
 export function registryFilePath(cwd: string): string {
 	return path.join(workspacesDir(cwd), ".registry.json");
+}
+
+export function registryLockFilePath(cwd: string): string {
+	return path.join(workspacesDir(cwd), ".registry.lock");
+}
+
+export interface RegistryLockOptions {
+	/** Lock age in ms after which it is treated as stale even if its owning PID is alive (default: 30_000). */
+	staleMs?: number;
+	/** Maximum time in ms to wait to acquire the lock before throwing (default: 10_000). */
+	timeoutMs?: number;
+	/** Base backoff delay in ms between acquisition retries (default: 5). */
+	retryDelayMs?: number;
+}
+
+const DEFAULT_REGISTRY_LOCK_STALE_MS = 30_000;
+const DEFAULT_REGISTRY_LOCK_TIMEOUT_MS = 10_000;
+const DEFAULT_REGISTRY_LOCK_RETRY_MS = 5;
+const MAX_REGISTRY_LOCK_RETRY_MS = 50;
+const MAX_STALE_RECOVERY_ATTEMPTS = 100;
+
+interface RegistryLockPayload {
+	pid: number;
+	token?: string;
+	ts?: number;
+}
+
+const activeRegistryLockTokens = new Set<string>();
+const registryLockContext = new AsyncLocalStorage<Set<string>>();
+const inProcessRegistryQueues = new Map<string, Promise<void>>();
+
+function parseRegistryLockContent(raw: string): RegistryLockPayload | null {
+	const trimmed = raw.trim();
+	if (!trimmed) return null;
+	if (/^\d+$/.test(trimmed)) {
+		const pid = Number.parseInt(trimmed, 10);
+		return Number.isInteger(pid) && pid > 0 ? { pid } : null;
+	}
+	try {
+		const parsed = JSON.parse(trimmed) as { pid?: unknown; token?: unknown; ts?: unknown };
+		if (!parsed || typeof parsed !== "object") return null;
+		const pid = parsed.pid;
+		if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return null;
+		const token = typeof parsed.token === "string" && parsed.token.length > 0 ? parsed.token : undefined;
+		const ts = typeof parsed.ts === "number" && Number.isFinite(parsed.ts) ? parsed.ts : undefined;
+		return {
+			pid,
+			...(token !== undefined ? { token } : {}),
+			...(ts !== undefined ? { ts } : {}),
+		};
+	} catch {
+		return null;
+	}
+}
+
+function readLockFileSnapshot(lockPath: string): { raw: string; mtimeMs: number } | undefined {
+	let fd: number;
+	try {
+		fd = fs.openSync(lockPath, "r");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+	try {
+		const st = fs.fstatSync(fd);
+		const raw = fs.readFileSync(fd, "utf8");
+		return { raw, mtimeMs: st.mtimeMs };
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+function isRegistryLockStale(
+	parsed: RegistryLockPayload | null,
+	mtimeMs: number,
+	staleMs: number,
+	nowMs: number,
+): boolean {
+	if (!parsed) {
+		return nowMs - mtimeMs >= staleMs;
+	}
+	if (parsed.token && activeRegistryLockTokens.has(parsed.token)) {
+		return false;
+	}
+	if (parsed.pid === process.pid) {
+		return true;
+	}
+	if (!isPidAlive(parsed.pid)) {
+		return true;
+	}
+	const lockTs = parsed.ts ?? mtimeMs;
+	return nowMs - lockTs >= staleMs;
+}
+
+function createLockFileExclusive(lockPath: string, token: string): void {
+	const payload = JSON.stringify({ pid: process.pid, token, ts: Date.now() });
+	const fd = fs.openSync(lockPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR, 0o600);
+	try {
+		fs.writeFileSync(fd, payload, "utf8");
+	} catch (error) {
+		try {
+			fs.closeSync(fd);
+		} catch {
+			// Ignore close error.
+		}
+		try {
+			fs.unlinkSync(lockPath);
+		} catch {
+			// Ignore cleanup error.
+		}
+		throw error;
+	}
+	fs.closeSync(fd);
+}
+
+function tryRecoverStaleRegistryLock(lockPath: string, staleMs: number): boolean {
+	const claimPath = `${lockPath}.stale.${process.pid}.${randomUUID()}`;
+	try {
+		fs.renameSync(lockPath, claimPath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+			return true;
+		}
+		throw error;
+	}
+
+	// Verify the claimed lock is still stale before deleting it; removing claimPath
+	// never unlinks a fresh lock created at lockPath after our rename.
+	try {
+		const snapshot = readLockFileSnapshot(claimPath);
+		if (!snapshot) return true;
+		const parsed = parseRegistryLockContent(snapshot.raw);
+		if (isRegistryLockStale(parsed, snapshot.mtimeMs, staleMs, Date.now())) {
+			try {
+				fs.unlinkSync(claimPath);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+			return true;
+		}
+		// A live contender replaced lockPath right before our rename — restore without overwriting a newer lock.
+		try {
+			fs.linkSync(claimPath, lockPath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+				try {
+					fs.renameSync(claimPath, lockPath);
+					return false;
+				} catch {
+					// Best-effort restore failed; fall through to remove claimPath.
+				}
+			}
+		}
+		try {
+			fs.unlinkSync(claimPath);
+		} catch {
+			// Ignore cleanup error.
+		}
+		return false;
+	} catch (error) {
+		try {
+			fs.unlinkSync(claimPath);
+		} catch {
+			// Ignore cleanup error.
+		}
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+		throw error;
+	}
+}
+
+async function acquireRegistryLockFile(lockPath: string, options?: RegistryLockOptions): Promise<string> {
+	const staleMs = options?.staleMs ?? DEFAULT_REGISTRY_LOCK_STALE_MS;
+	const timeoutMs = options?.timeoutMs ?? DEFAULT_REGISTRY_LOCK_TIMEOUT_MS;
+	const baseDelayMs = Math.max(1, options?.retryDelayMs ?? DEFAULT_REGISTRY_LOCK_RETRY_MS);
+	const deadline = Date.now() + timeoutMs;
+	const token = randomUUID();
+	let attempt = 0;
+	let recoveryAttempts = 0;
+
+	while (true) {
+		try {
+			createLockFileExclusive(lockPath, token);
+			activeRegistryLockTokens.add(token);
+			return token;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+				throw error;
+			}
+		}
+
+		let snapshot: { raw: string; mtimeMs: number } | undefined;
+		try {
+			snapshot = readLockFileSnapshot(lockPath);
+		} catch (error) {
+			throw new Error(`Workspace registry lock is unreadable: ${lockPath}`, { cause: error });
+		}
+		if (!snapshot) {
+			continue;
+		}
+
+		const parsed = parseRegistryLockContent(snapshot.raw);
+		if (isRegistryLockStale(parsed, snapshot.mtimeMs, staleMs, Date.now()) && recoveryAttempts < MAX_STALE_RECOVERY_ATTEMPTS) {
+			recoveryAttempts += 1;
+			if (tryRecoverStaleRegistryLock(lockPath, staleMs)) {
+				continue;
+			}
+		}
+
+		const remainingMs = deadline - Date.now();
+		if (remainingMs <= 0) {
+			const ownerInfo = parsed ? `pid ${parsed.pid}` : "unknown owner";
+			throw new Error(`Timed out acquiring workspace registry lock (${ownerInfo}): ${lockPath}`);
+		}
+
+		const backoff = Math.min(MAX_REGISTRY_LOCK_RETRY_MS, baseDelayMs * Math.min(8, attempt + 1));
+		const jitter = Math.floor(Math.random() * baseDelayMs);
+		const delay = Math.min(remainingMs, backoff + jitter);
+		attempt += 1;
+		await new Promise<void>((resolve) => setTimeout(resolve, delay));
+	}
+}
+
+export function releaseRegistryLock(lockPath: string, token: string): void {
+	activeRegistryLockTokens.delete(token);
+	try {
+		const snapshot = readLockFileSnapshot(lockPath);
+		if (!snapshot) return;
+		const parsed = parseRegistryLockContent(snapshot.raw);
+		if (parsed && parsed.token === token && parsed.pid === process.pid) {
+			fs.unlinkSync(lockPath);
+		}
+	} catch {
+		// Never throw from release if the lock is already gone, replaced, or unreadable.
+	}
+}
+
+/**
+ * Serializes read-modify-write operations on `<projectDir>/.pi/workspaces/.registry.json`
+ * both within this process and across concurrent Pi processes via an exclusive lockfile.
+ * Nested calls on the same project within the same async execution context re-enter safely.
+ */
+export async function withRegistryLock<T>(
+	projectDir: string,
+	fn: () => Promise<T> | T,
+	options?: RegistryLockOptions,
+): Promise<T> {
+	const canonicalDir = resolveCanonicalPath(projectDir);
+	const held = registryLockContext.getStore();
+	if (held?.has(canonicalDir)) {
+		return await fn();
+	}
+
+	const prev = inProcessRegistryQueues.get(canonicalDir) ?? Promise.resolve();
+	let releaseQueue!: () => void;
+	const current = new Promise<void>((resolve) => {
+		releaseQueue = resolve;
+	});
+	const tail = prev.then(() => current);
+	inProcessRegistryQueues.set(canonicalDir, tail);
+
+	await prev;
+	try {
+		await ensureWorkspacesClosure(canonicalDir);
+		const lockPath = registryLockFilePath(canonicalDir);
+		const token = await acquireRegistryLockFile(lockPath, options);
+		try {
+			const nextHeld = new Set(held);
+			nextHeld.add(canonicalDir);
+			return await registryLockContext.run(nextHeld, fn);
+		} finally {
+			releaseRegistryLock(lockPath, token);
+		}
+	} finally {
+		releaseQueue();
+		if (inProcessRegistryQueues.get(canonicalDir) === tail) {
+			inProcessRegistryQueues.delete(canonicalDir);
+		}
+	}
 }
 
 export function projectsIndexFilePath(agentDir?: string): string {
@@ -126,16 +407,24 @@ export function validateWorkspaceName(name: string): string {
 	return trimmed;
 }
 
-async function writeJsonAtomic(filePath: string, data: unknown): Promise<void> {
+function writeJsonAtomicSync(filePath: string, data: unknown): void {
 	const dir = path.dirname(filePath);
-	await mkdir(dir, { recursive: true });
-	const tempPath = `${filePath}.${randomUUID()}.tmp`;
+	fs.mkdirSync(dir, { recursive: true });
+	const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 	try {
-		await writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-		await rename(tempPath, filePath);
+		fs.writeFileSync(tempPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+		fs.renameSync(tempPath, filePath);
 	} finally {
-		await rm(tempPath, { force: true });
+		try {
+			fs.rmSync(tempPath, { force: true });
+		} catch {
+			// Ignore cleanup error.
+		}
 	}
+}
+
+async function writeJsonAtomic(filePath: string, data: unknown): Promise<void> {
+	writeJsonAtomicSync(filePath, data);
 }
 
 export async function readProjectsIndex(agentDir?: string): Promise<string[]> {
@@ -224,18 +513,24 @@ export async function readRegistryState(cwd: string): Promise<RegistryState> {
 	}
 }
 
-export async function writeRegistry(cwd: string, entries: WorkspaceEntry[], agentDir?: string): Promise<void> {
+async function writeRegistryUnlocked(cwd: string, entries: WorkspaceEntry[], agentDir?: string): Promise<void> {
 	await ensureWorkspacesClosure(cwd);
 	const { lastSweepAt } = await readRegistryState(cwd);
-	await writeJsonAtomic(registryFilePath(cwd), { ...(lastSweepAt ? { lastSweepAt } : {}), workspaces: entries });
+	writeJsonAtomicSync(registryFilePath(cwd), { ...(lastSweepAt ? { lastSweepAt } : {}), workspaces: entries });
 	await registerProjectInIndex(cwd, agentDir);
+}
+
+export async function writeRegistry(cwd: string, entries: WorkspaceEntry[], agentDir?: string): Promise<void> {
+	return withRegistryLock(cwd, () => writeRegistryUnlocked(cwd, entries, agentDir));
 }
 
 /** Stamps the automatic sweep without indexing the project: a project with no workspaces stays out of the index. */
 export async function recordWorkspaceSweep(cwd: string, at: Date): Promise<void> {
-	await ensureWorkspacesClosure(cwd);
-	const { entries } = await readRegistryState(cwd);
-	await writeJsonAtomic(registryFilePath(cwd), { lastSweepAt: at.toISOString(), workspaces: entries });
+	return withRegistryLock(cwd, async () => {
+		await ensureWorkspacesClosure(cwd);
+		const { entries } = await readRegistryState(cwd);
+		writeJsonAtomicSync(registryFilePath(cwd), { lastSweepAt: at.toISOString(), workspaces: entries });
+	});
 }
 
 /** A session holds a workspace it owns that is neither released nor pinned; held workspaces count toward its quota. */
@@ -262,15 +557,18 @@ export function hasLiveOtherOwner(
 }
 
 export class WorkspaceQuotaError extends Error {
-	constructor(
-		readonly requested: string[],
-		readonly held: string[],
-		readonly limit: number,
-	) {
+	readonly requested: string[];
+	readonly held: string[];
+	readonly limit: number;
+
+	constructor(requested: string[], held: string[], limit: number) {
 		super(
 			`Workspace quota reached: this session already holds ${held.length} of ${limit} workspaces (${held.join(", ")}), so it cannot start holding ${requested.map((name) => `"${name}"`).join(", ")}. Call workspace({action: "release", name}) for one you no longer need (release deletes it when it is clean) or workspace({action: "pin", name}) to keep it outside the quota, then retry.`,
 		);
 		this.name = "WorkspaceQuotaError";
+		this.requested = requested;
+		this.held = held;
+		this.limit = limit;
 	}
 }
 
@@ -312,77 +610,79 @@ export async function touchWorkspace(
 	agentDir?: string,
 ): Promise<WorkspaceTouchResult> {
 	const name = validateWorkspaceName(input.name);
-	const entries = await readRegistry(cwd);
-	const sessionId = input.sessionId;
-	if (sessionId !== undefined && input.maxHeld !== undefined) {
-		assertWorkspaceQuota(entries, sessionId, [name], input.maxHeld, {
-			pinned: input.pinned === true,
-			activeSessionIds: input.activeSessionIds,
-		});
-	}
-	const wasHeld = sessionId !== undefined && entries.some((entry) => entry.name === name && isHeldBy(entry, sessionId));
-	const wsRoot = await ensureWorkspacesClosure(cwd);
-	const wsPath = path.join(wsRoot, name);
-	await mkdir(wsPath, { recursive: true });
+	return withRegistryLock(cwd, async () => {
+		const entries = await readRegistry(cwd);
+		const sessionId = input.sessionId;
+		if (sessionId !== undefined && input.maxHeld !== undefined) {
+			assertWorkspaceQuota(entries, sessionId, [name], input.maxHeld, {
+				pinned: input.pinned === true,
+				activeSessionIds: input.activeSessionIds,
+			});
+		}
+		const wasHeld = sessionId !== undefined && entries.some((entry) => entry.name === name && isHeldBy(entry, sessionId));
+		const wsRoot = await ensureWorkspacesClosure(cwd);
+		const wsPath = path.join(wsRoot, name);
+		await mkdir(wsPath, { recursive: true });
 
-	const policy = await readProjectPolicy(cwd);
-	const nowIso = (input.now ?? new Date()).toISOString();
+		const policy = await readProjectPolicy(cwd);
+		const nowIso = (input.now ?? new Date()).toISOString();
 
-	const existingIndex = entries.findIndex((entry) => entry.name === name);
-	const ownedByOther =
-		existingIndex >= 0 &&
-		sessionId !== undefined &&
-		hasLiveOtherOwner(entries[existingIndex]!, sessionId, input.activeSessionIds);
-	let updatedEntry: WorkspaceEntry;
+		const existingIndex = entries.findIndex((entry) => entry.name === name);
+		const ownedByOther =
+			existingIndex >= 0 &&
+			sessionId !== undefined &&
+			hasLiveOtherOwner(entries[existingIndex]!, sessionId, input.activeSessionIds);
+		let updatedEntry: WorkspaceEntry;
 
-	if (ownedByOther) {
-		// No transfer away from a live owner: only the access time moves.
-		updatedEntry = { ...entries[existingIndex]!, lastAccessedAt: nowIso };
-		entries[existingIndex] = updatedEntry;
-	} else if (existingIndex >= 0) {
-		const prev = entries[existingIndex]!;
-		updatedEntry = {
-			...prev,
-			name,
-			path: wsPath,
-			...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
-			...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
-			...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}),
-			...(input.pid !== undefined ? { pid: input.pid } : {}),
-			lastAccessedAt: nowIso,
-			pinned: input.pinned ?? prev.pinned,
-			ttlMs: input.ttlMs ?? prev.ttlMs,
+		if (ownedByOther) {
+			// No transfer away from a live owner: only the access time moves.
+			updatedEntry = { ...entries[existingIndex]!, lastAccessedAt: nowIso };
+			entries[existingIndex] = updatedEntry;
+		} else if (existingIndex >= 0) {
+			const prev = entries[existingIndex]!;
+			updatedEntry = {
+				...prev,
+				name,
+				path: wsPath,
+				...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+				...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
+				...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}),
+				...(input.pid !== undefined ? { pid: input.pid } : {}),
+				lastAccessedAt: nowIso,
+				pinned: input.pinned ?? prev.pinned,
+				ttlMs: input.ttlMs ?? prev.ttlMs,
+			};
+			delete updatedEntry.closedAt;
+			delete updatedEntry.releasedAt;
+			entries[existingIndex] = updatedEntry;
+		} else {
+			updatedEntry = {
+				name,
+				path: wsPath,
+				...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+				...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
+				...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}),
+				...(input.pid !== undefined ? { pid: input.pid } : {}),
+				createdAt: nowIso,
+				lastAccessedAt: nowIso,
+				pinned: input.pinned ?? false,
+				ttlMs: input.ttlMs ?? policy.defaultTtlMs ?? 0,
+			};
+			entries.push(updatedEntry);
+		}
+
+		await writeRegistryUnlocked(cwd, entries, agentDir);
+		return {
+			entry: updatedEntry,
+			acquired: existingIndex < 0 || (sessionId !== undefined && !wasHeld && !ownedByOther),
+			ownedByOther,
+			held: sessionId !== undefined ? heldWorkspaceNames(entries, sessionId) : [],
+			projectTotal: entries.length,
 		};
-		delete updatedEntry.closedAt;
-		delete updatedEntry.releasedAt;
-		entries[existingIndex] = updatedEntry;
-	} else {
-		updatedEntry = {
-			name,
-			path: wsPath,
-			...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
-			...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
-			...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}),
-			...(input.pid !== undefined ? { pid: input.pid } : {}),
-			createdAt: nowIso,
-			lastAccessedAt: nowIso,
-			pinned: input.pinned ?? false,
-			ttlMs: input.ttlMs ?? policy.defaultTtlMs ?? 0,
-		};
-		entries.push(updatedEntry);
-	}
-
-	await writeRegistry(cwd, entries, agentDir);
-	return {
-		entry: updatedEntry,
-		acquired: existingIndex < 0 || (sessionId !== undefined && !wasHeld && !ownedByOther),
-		ownedByOther,
-		held: sessionId !== undefined ? heldWorkspaceNames(entries, sessionId) : [],
-		projectTotal: entries.length,
-	};
+	});
 }
 
-export async function syncWorkspaces(cwd: string, now?: Date, agentDir?: string): Promise<WorkspaceEntry[]> {
+async function syncWorkspacesUnlocked(cwd: string, now?: Date, agentDir?: string): Promise<WorkspaceEntry[]> {
 	const wsRoot = workspacesDir(cwd);
 	if (!fs.existsSync(wsRoot)) {
 		return [];
@@ -444,10 +744,17 @@ export async function syncWorkspaces(cwd: string, now?: Date, agentDir?: string)
 	}
 
 	if (changed || (synced.length > 0 && !fs.existsSync(registryFilePath(cwd)))) {
-		await writeRegistry(cwd, synced, agentDir);
+		await writeRegistryUnlocked(cwd, synced, agentDir);
 	}
 
 	return synced;
+}
+
+export async function syncWorkspaces(cwd: string, now?: Date, agentDir?: string): Promise<WorkspaceEntry[]> {
+	if (!fs.existsSync(workspacesDir(cwd))) {
+		return [];
+	}
+	return withRegistryLock(cwd, () => syncWorkspacesUnlocked(cwd, now, agentDir));
 }
 
 function liveOtherOwnerReason(entry: WorkspaceEntry, options?: ReleaseWorkspaceOptions): string | undefined {
@@ -475,22 +782,27 @@ export async function releaseWorkspace(
 	agentDir?: string,
 	options?: ReleaseWorkspaceOptions,
 ): Promise<WorkspaceEntry | undefined> {
-	const entries = await syncWorkspaces(cwd, now, agentDir);
-	const target = entries.find((entry) => entry.name === name);
-	if (!target) return undefined;
-
-	const blocker = liveOtherOwnerReason(target, options);
-	if (blocker) {
-		throw new WorkspaceOwnershipError(target.name, blocker);
+	if (!fs.existsSync(workspacesDir(cwd))) {
+		return undefined;
 	}
+	return withRegistryLock(cwd, async () => {
+		const entries = await syncWorkspacesUnlocked(cwd, now, agentDir);
+		const target = entries.find((entry) => entry.name === name);
+		if (!target) return undefined;
 
-	const nowIso = (now ?? new Date()).toISOString();
-	target.releasedAt = nowIso;
-	target.closedAt = nowIso;
-	delete target.pid;
+		const blocker = liveOtherOwnerReason(target, options);
+		if (blocker) {
+			throw new WorkspaceOwnershipError(target.name, blocker);
+		}
 
-	await writeRegistry(cwd, entries, agentDir);
-	return target;
+		const nowIso = (now ?? new Date()).toISOString();
+		target.releasedAt = nowIso;
+		target.closedAt = nowIso;
+		delete target.pid;
+
+		await writeRegistryUnlocked(cwd, entries, agentDir);
+		return target;
+	});
 }
 
 export async function setWorkspacePin(
@@ -499,14 +811,19 @@ export async function setWorkspacePin(
 	pinned: boolean,
 	agentDir?: string,
 ): Promise<WorkspaceEntry | undefined> {
-	const entries = await syncWorkspaces(cwd, undefined, agentDir);
-	const target = entries.find((entry) => entry.name === name);
-	if (!target) return undefined;
+	if (!fs.existsSync(workspacesDir(cwd))) {
+		return undefined;
+	}
+	return withRegistryLock(cwd, async () => {
+		const entries = await syncWorkspacesUnlocked(cwd, undefined, agentDir);
+		const target = entries.find((entry) => entry.name === name);
+		if (!target) return undefined;
 
-	target.pinned = pinned;
-	target.lastAccessedAt = new Date().toISOString();
-	await writeRegistry(cwd, entries, agentDir);
-	return target;
+		target.pinned = pinned;
+		target.lastAccessedAt = new Date().toISOString();
+		await writeRegistryUnlocked(cwd, entries, agentDir);
+		return target;
+	});
 }
 
 export async function markSessionWorkspacesClosed(
@@ -515,20 +832,23 @@ export async function markSessionWorkspacesClosed(
 	now?: Date,
 	agentDir?: string,
 ): Promise<void> {
-	if (!fs.existsSync(registryFilePath(cwd))) return;
-	const entries = await readRegistry(cwd);
-	let changed = false;
-	const nowIso = (now ?? new Date()).toISOString();
-	for (const entry of entries) {
-		if (entry.sessionId === sessionId && !entry.closedAt) {
-			entry.closedAt = nowIso;
-			delete entry.pid;
-			changed = true;
+	if (!fs.existsSync(workspacesDir(cwd))) return;
+	await withRegistryLock(cwd, async () => {
+		if (!fs.existsSync(registryFilePath(cwd))) return;
+		const entries = await readRegistry(cwd);
+		let changed = false;
+		const nowIso = (now ?? new Date()).toISOString();
+		for (const entry of entries) {
+			if (entry.sessionId === sessionId && !entry.closedAt) {
+				entry.closedAt = nowIso;
+				delete entry.pid;
+				changed = true;
+			}
 		}
-	}
-	if (changed) {
-		await writeRegistry(cwd, entries, agentDir);
-	}
+		if (changed) {
+			await writeRegistryUnlocked(cwd, entries, agentDir);
+		}
+	});
 }
 
 export function isPidAlive(pid: number): boolean {
