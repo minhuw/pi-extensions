@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { appendFile, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export type StreamKind = "session" | "herder-journal";
@@ -54,6 +54,8 @@ export interface SpooledRequest extends RequestRecord {
 }
 
 export const MAX_ACKED = 100_000;
+const DIR_MODE = 0o700;
+const FILE_MODE = 0o600;
 const HASH = /^[0-9a-f]{64}$/;
 const REQUEST_ID = /^[A-Za-z0-9-]{1,100}$/;
 const ACKED_URL = "# ";
@@ -63,10 +65,19 @@ const validRequest = (record: SpooledRequest | undefined): record is SpooledRequ
 
 const missing = (error: unknown) => (error as NodeJS.ErrnoException)?.code === "ENOENT";
 
+async function tighten(path: string, mode: number): Promise<void> {
+	try {
+		await chmod(path, mode);
+	} catch (error) {
+		if (!missing(error)) throw error;
+	}
+}
+
 async function atomicWrite(file: string, data: string): Promise<void> {
 	const temp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
 	try {
-		await writeFile(temp, data);
+		await writeFile(temp, data, { mode: FILE_MODE });
+		await chmod(temp, FILE_MODE);
 		await rename(temp, file);
 	} catch (error) {
 		await rm(temp, { force: true }).catch(() => undefined);
@@ -107,15 +118,28 @@ export class Store {
 	}
 
 	async init(): Promise<void> {
-		for (const dir of [this.done, this.requests, this.blobs, this.parked]) await mkdir(dir, { recursive: true });
+		const spool = join(this.dir, "spool");
+		for (const dir of [this.done, this.requests, this.blobs, this.parked]) await mkdir(dir, { recursive: true, mode: DIR_MODE });
+		for (const dir of [this.dir, this.streams, this.done, spool, this.requests, this.blobs, this.parked]) await tighten(dir, DIR_MODE);
+		await tighten(this.ackedLog, FILE_MODE);
 		// Temp files left by a crash before their rename hold nothing that is not also elsewhere.
 		const cutoff = Date.now() - 60_000;
-		for (const dir of [this.streams, this.done, this.requests, this.blobs, this.parked]) {
-			for (const name of await list(dir)) {
-				if (!name.endsWith(".tmp")) continue;
-				const file = join(dir, name);
-				const info = await stat(file).catch(() => undefined);
-				if (info && info.mtimeMs < cutoff) await rm(file, { force: true }).catch(() => undefined);
+		for (const dir of [this.streams, this.done, spool, this.requests, this.blobs, this.parked]) {
+			const entries = await readdir(dir, { withFileTypes: true }).catch((error) => {
+				if (missing(error)) return [];
+				throw error;
+			});
+			for (const entry of entries) {
+				if (!entry.isFile()) continue;
+				const file = join(dir, entry.name);
+				if (entry.name.endsWith(".tmp")) {
+					const info = await stat(file).catch(() => undefined);
+					if (info && info.mtimeMs < cutoff) {
+						await rm(file, { force: true }).catch(() => undefined);
+						continue;
+					}
+				}
+				await tighten(file, FILE_MODE);
 			}
 		}
 	}
@@ -241,7 +265,9 @@ export class Store {
 	}
 
 	async appendAcked(hashes: readonly string[]): Promise<void> {
-		if (hashes.length) await appendFile(this.ackedLog, hashes.map((hash) => `${hash}\n`).join(""));
+		if (!hashes.length) return;
+		await appendFile(this.ackedLog, hashes.map((hash) => `${hash}\n`).join(""), { mode: FILE_MODE });
+		await chmod(this.ackedLog, FILE_MODE);
 	}
 
 	async rewriteAcked(url: string, hashes: readonly string[]): Promise<void> {

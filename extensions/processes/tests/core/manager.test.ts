@@ -245,6 +245,40 @@ describe("logs", () => {
 		const owner = JSON.parse(fs.readFileSync(path.join(path.dirname(info.logPath), "owner.json"), "utf8"));
 		expect(owner.pid).toBe(process.pid);
 	});
+
+	it("enforces 0700 on stateDir and runDir and 0600 on owner.json and log files", async () => {
+		const freshStateDir = path.join(tempDir(), "fresh-state");
+		const freshManager = createProcessManager({ stateDir: freshStateDir, shell: { shell: "/bin/sh", args: ["-c"] } });
+		cleanups.push(() => freshManager.shutdown());
+		expect(fs.statSync(freshStateDir).mode & 0o777).toBe(0o700);
+
+		const stateDir = path.join(tempDir(), "state");
+		fs.mkdirSync(stateDir, { recursive: true, mode: 0o755 });
+		fs.chmodSync(stateDir, 0o755);
+
+		const manager = createProcessManager({ stateDir, maxLogBytes: 200, shell: { shell: "/bin/sh", args: ["-c"] } });
+		cleanups.push(() => manager.shutdown());
+		const events: ProcessEvent[] = [];
+		manager.subscribe((event) => events.push(event));
+
+		const { process: quiet } = await manager.start({ command: "true", cwd: stateDir, owner: "t", ready: false });
+		await next(events, "exit", 5000, (event) => event.process.id === quiet.id);
+		const runDir = path.dirname(quiet.logPath);
+		expect(fs.statSync(stateDir).mode & 0o777).toBe(0o700);
+		expect(fs.statSync(runDir).mode & 0o777).toBe(0o700);
+		expect(fs.statSync(path.join(runDir, "owner.json")).mode & 0o777).toBe(0o600);
+		expect(fs.statSync(quiet.logPath).mode & 0o777).toBe(0o600);
+
+		const { process: noisy } = await manager.start({
+			command: "i=1; while [ $i -le 60 ]; do echo \"line $i\"; i=$((i+1)); done",
+			cwd: stateDir,
+			owner: "t",
+			ready: false,
+		});
+		await next(events, "exit", 5000, (event) => event.process.id === noisy.id);
+		expect(fs.statSync(noisy.logPath).mode & 0o777).toBe(0o600);
+		expect(fs.statSync(`${noisy.logPath}.1`).mode & 0o777).toBe(0o600);
+	});
 });
 
 describe("names and limits", () => {

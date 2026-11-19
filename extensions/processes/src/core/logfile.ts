@@ -43,7 +43,16 @@ export class LogFile {
 		while (offset < data.length) {
 			if (this.size >= this.maxBytes) this.rotate();
 			const length = Math.min(this.maxBytes - this.size, data.length - offset);
-			this.fd ??= fs.openSync(this.path, "a");
+			if (this.fd === undefined) {
+				const fd = fs.openSync(this.path, "a", 0o600);
+				try {
+					fs.fchmodSync(fd, 0o600);
+				} catch (error) {
+					fs.closeSync(fd);
+					throw error;
+				}
+				this.fd = fd;
+			}
 			fs.writeSync(this.fd, data, offset, length);
 			this.size += length;
 			offset += length;

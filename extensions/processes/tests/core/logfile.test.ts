@@ -67,6 +67,23 @@ describe("LogFile", () => {
 		expect(() => log.read({ filter: "a".repeat(501) }, true)).toThrow(/longer than 500/);
 		log.close();
 	});
+
+	it("enforces 0600 on created, rotated, and pre-existing log files", () => {
+		const logPath = path.join(dir, "secret.log");
+		const log = new LogFile(logPath, 50);
+		for (const line of numbered(1, 20)) log.append(Buffer.from(`${line}\n`));
+		expect(fs.statSync(logPath).mode & 0o777).toBe(0o600);
+		expect(fs.statSync(`${logPath}.1`).mode & 0o777).toBe(0o600);
+		log.close();
+
+		const loosePath = path.join(dir, "loose.log");
+		fs.writeFileSync(loosePath, "", { mode: 0o644 });
+		fs.chmodSync(loosePath, 0o644);
+		const tightened = new LogFile(loosePath, 1024);
+		tightened.append(Buffer.from("hello\n"));
+		expect(fs.statSync(loosePath).mode & 0o777).toBe(0o600);
+		tightened.close();
+	});
 });
 
 describe("text", () => {

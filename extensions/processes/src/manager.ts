@@ -89,11 +89,15 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 	const maxLive = options.maxLive ?? DEFAULT_MAX_LIVE;
 	const maxLogBytes = options.maxLogBytes ?? DEFAULT_MAX_LOG_BYTES;
 	const errorCooldownMs = options.errorCooldownMs ?? DEFAULT_ERROR_COOLDOWN_MS;
-	fs.mkdirSync(options.stateDir, { recursive: true });
+	fs.mkdirSync(options.stateDir, { recursive: true, mode: 0o700 });
+	fs.chmodSync(options.stateDir, 0o700);
 	sweep(options.stateDir, options.retentionMs ?? DEFAULT_RETENTION_MS);
 	const runDir = path.join(options.stateDir, `${process.pid}-${Date.now()}`);
-	fs.mkdirSync(runDir);
-	fs.writeFileSync(path.join(runDir, "owner.json"), `${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}\n`);
+	fs.mkdirSync(runDir, { mode: 0o700 });
+	fs.chmodSync(runDir, 0o700);
+	const ownerPath = path.join(runDir, "owner.json");
+	fs.writeFileSync(ownerPath, `${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}\n`, { mode: 0o600 });
+	fs.chmodSync(ownerPath, 0o600);
 
 	const records = new Map<string, ProcessRecord>();
 	const waits = new Map<string, Wait>();
@@ -346,7 +350,12 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 			checkCapacity();
 			const id = uniqueId("p", (candidate) => records.has(candidate));
 			const logPath = path.join(runDir, `${id}.log`);
-			fs.closeSync(fs.openSync(logPath, "a"));
+			const fd = fs.openSync(logPath, "a", 0o600);
+			try {
+				fs.fchmodSync(fd, 0o600);
+			} finally {
+				fs.closeSync(fd);
+			}
 			const record: ProcessRecord = {
 				info: { id, name: start.name ?? defaultName(start.command), command: start.command, cwd: start.cwd, owner: start.owner, pid: undefined, status: "starting", startedAt: Date.now(), urls: [], logPath, logBytes: 0, restarts: 0, attached: start.attached ?? false },
 				options: { ...start, env: start.env && { ...start.env } },
