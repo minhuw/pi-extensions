@@ -531,6 +531,67 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		expect(mixedReport.status).toBe("REVIEW");
 		expect(mixedReport.reasons).toContain("contains files outside git repositories");
 	});
+
+	it("classifies git workspaces with untracked gitignored files as REVIEW and keeps clean pushed clones SAFE", async () => {
+		const bareRemote = path.join(sandboxRoot, "ignored-origin.git");
+		git(sandboxRoot, ["init", "--bare", bareRemote]);
+		const seedRepo = path.join(sandboxRoot, "ignored-seed");
+		initGitRepo(seedRepo);
+		commitFile(seedRepo, ".gitignore", ".env\noutputs/\n");
+		commitFile(seedRepo, "README.md", "tracked\n");
+		git(seedRepo, ["remote", "add", "origin", bareRemote]);
+		git(seedRepo, ["push", "-u", "origin", "HEAD"]);
+
+		// 1. Clean, pushed clone with a gitignored file -> REVIEW ("gitignored files present")
+		const ignoredFileWs = await createOrTouchWorkspace(projectCwd, { name: "ignored-file-ws" }, agentDir);
+		git(projectCwd, ["clone", bareRemote, ignoredFileWs.path]);
+		await writeFile(path.join(ignoredFileWs.path, ".env"), "API_KEY=secret\n", "utf8");
+		const ignoredFileReport = await inspectWorkspaceSafety(ignoredFileWs);
+		expect(ignoredFileReport.status).toBe("REVIEW");
+		expect(ignoredFileReport.reasons).toEqual(["gitignored files present"]);
+
+		// 2. Clean, pushed clone with a gitignored directory containing local output -> REVIEW
+		const ignoredDirWs = await createOrTouchWorkspace(projectCwd, { name: "ignored-dir-ws" }, agentDir);
+		git(projectCwd, ["clone", bareRemote, ignoredDirWs.path]);
+		await mkdir(path.join(ignoredDirWs.path, "outputs"), { recursive: true });
+		await writeFile(path.join(ignoredDirWs.path, "outputs", "result.json"), '{"ok":true}\n', "utf8");
+		const ignoredDirReport = await inspectWorkspaceSafety(ignoredDirWs);
+		expect(ignoredDirReport.status).toBe("REVIEW");
+		expect(ignoredDirReport.reasons).toEqual(["gitignored files present"]);
+
+		// 3. Clone with both a non-ignored untracked file and a gitignored file reports both reasons
+		const bothWs = await createOrTouchWorkspace(projectCwd, { name: "both-dirty-and-ignored-ws" }, agentDir);
+		git(projectCwd, ["clone", bareRemote, bothWs.path]);
+		await writeFile(path.join(bothWs.path, ".env"), "API_KEY=secret\n", "utf8");
+		await writeFile(path.join(bothWs.path, "scratch.txt"), "untracked\n", "utf8");
+		const bothReport = await inspectWorkspaceSafety(bothWs);
+		expect(bothReport.status).toBe("REVIEW");
+		expect(bothReport.reasons).toContain("uncommitted or untracked changes");
+		expect(bothReport.reasons).toContain("gitignored files present");
+
+		// 4. Truly clean, pushed clone without ignored files -> SAFE
+		const cleanWs = await createOrTouchWorkspace(projectCwd, { name: "truly-clean-ws" }, agentDir);
+		git(projectCwd, ["clone", bareRemote, cleanWs.path]);
+		const cleanReport = await inspectWorkspaceSafety(cleanWs);
+		expect(cleanReport.status).toBe("SAFE");
+		expect(cleanReport.reasons).toEqual(["clean git workspace with all commits backed up"]);
+
+		// Non-interactive GC (--yes) removes only the truly clean clone and preserves ignored-file workspaces
+		const gcResult = await runWorkspaceGc({
+			cwd: projectCwd,
+			agentDir,
+			yes: true,
+		});
+		expect(gcResult.removed.map((r) => r.entry.name)).toEqual(["truly-clean-ws"]);
+		expect(gcResult.kept.map((r) => r.entry.name).sort()).toEqual([
+			"both-dirty-and-ignored-ws",
+			"ignored-dir-ws",
+			"ignored-file-ws",
+		]);
+		expect(fs.existsSync(cleanWs.path)).toBe(false);
+		expect(fs.existsSync(path.join(ignoredFileWs.path, ".env"))).toBe(true);
+		expect(fs.existsSync(path.join(ignoredDirWs.path, "outputs", "result.json"))).toBe(true);
+	});
 });
 
 describe("index.ts — Pi session integration, tool_call enforcement, child propagation, tool & /workspace command", () => {

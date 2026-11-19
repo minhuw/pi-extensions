@@ -133,8 +133,8 @@ Workspace inspection classifies each `<cwd>/.pi/workspaces/<name>` directory int
 | --- | --- | --- |
 | `PINNED` | Explicitly pinned via `/workspace pin <name>`, the `workspace` tool, or interactive GC review. | Always kept. |
 | `ACTIVE` | Owned by a currently active session, another running pi process (`pid`), or still within its configured `ttlMs` retention window (and not explicitly `release`d). | Always kept. |
-| `SAFE` | Empty directory, clean remote git clone with all commits pushed to a remote, or clean linked `git worktree` with no uncommitted/untracked files, no stashes, and no unmerged/unpushed commits. | Removed automatically by `/workspace gc`. |
-| `REVIEW` | Contains non-git files, files outside nested git repositories, uncommitted or untracked changes, git stash entries, a local-only git repository with no remote, or unpushed/unmerged commits. | Kept by default; interactive `/workspace gc` prompts whether to `Keep for now`, `Pin permanently`, or `Remove anyway`. |
+| `SAFE` | Empty directory, clean remote git clone with all commits pushed to a remote, or clean linked `git worktree` with no uncommitted, untracked, or gitignored files, no stashes, and no unmerged/unpushed commits. | Removed automatically by `/workspace gc`. |
+| `REVIEW` | Contains non-git files, files outside nested git repositories, uncommitted or untracked changes, gitignored files, git stash entries, a local-only git repository with no remote, or unpushed/unmerged commits. | Kept by default; interactive `/workspace gc` prompts whether to `Keep for now`, `Pin permanently`, or `Remove anyway`. |
 
 When removing a workspace that is a linked `git worktree`, garbage collection runs `git worktree remove --force` and `git worktree prune` against the main repository so Git's worktree metadata stays clean.
 

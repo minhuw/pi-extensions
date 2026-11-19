@@ -783,9 +783,26 @@ export async function inspectWorkspaceSafety(
 	}
 
 	for (const gitRoot of gitRoots) {
-		const statusRes = await runGit(gitRoot.root, ["status", "--porcelain"]);
-		if (statusRes.code !== 0 || statusRes.stdout.trim().length > 0) {
+		const statusRes = await runGit(gitRoot.root, ["status", "--porcelain", "--ignored=matching"]);
+		if (statusRes.code !== 0) {
 			reviewReasons.add("uncommitted or untracked changes");
+		} else {
+			let hasChanges = false;
+			let hasIgnored = false;
+			for (const line of statusRes.stdout.split(/\r?\n/)) {
+				if (line.trim().length === 0) continue;
+				if (line.startsWith("!! ")) {
+					hasIgnored = true;
+				} else {
+					hasChanges = true;
+				}
+			}
+			if (hasChanges) {
+				reviewReasons.add("uncommitted or untracked changes");
+			}
+			if (hasIgnored) {
+				reviewReasons.add("gitignored files present");
+			}
 		}
 
 		const stashRes = await runGit(gitRoot.root, ["stash", "list"]);

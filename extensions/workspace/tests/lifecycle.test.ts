@@ -536,6 +536,89 @@ describe("release", () => {
 		}
 	});
 
+	it("keeps a clean pushed git workspace with gitignored files on release and sweep, while collecting a truly clean one", async () => {
+		const bareRemote = path.join(sandboxRoot, "release-ignored-origin.git");
+		git(sandboxRoot, ["init", "--bare", bareRemote]);
+		const seedRepo = path.join(sandboxRoot, "release-ignored-seed");
+		await mkdir(seedRepo, { recursive: true });
+		git(seedRepo, ["init"]);
+		git(seedRepo, ["config", "user.email", "test@example.com"]);
+		git(seedRepo, ["config", "user.name", "Test User"]);
+		await writeFile(path.join(seedRepo, ".gitignore"), ".env\n", "utf8");
+		await writeFile(path.join(seedRepo, "README.md"), "seeded\n", "utf8");
+		git(seedRepo, ["add", ".gitignore", "README.md"]);
+		git(seedRepo, ["commit", "-m", "init"]);
+		git(seedRepo, ["remote", "add", "origin", bareRemote]);
+		git(seedRepo, ["push", "-u", "origin", "HEAD"]);
+
+		const ignoredPath = path.join(workspacesDir(projectCwd), "with-env");
+		const cleanPath = path.join(workspacesDir(projectCwd), "clean-clone");
+
+		const h = await startSession();
+		try {
+			await h.runTools([
+				fauxToolCall("bash", { command: `git clone ${bareRemote} ${ignoredPath}` }),
+				fauxToolCall("write", { path: ".pi/workspaces/with-env/.env", content: "TOKEN=local-only\n" }),
+				fauxToolCall("bash", { command: `git clone ${bareRemote} ${cleanPath}` }),
+				fauxToolCall("workspace", { action: "release", name: "with-env" }),
+				fauxToolCall("workspace", { action: "release", name: "clean-clone" }),
+			]);
+
+			const [, , , releasedIgnored, releasedClean] = h.toolResults();
+			expect(releasedIgnored!.isError).toBe(false);
+			expect(releasedIgnored!.text).toContain('Released workspace "with-env" but kept it');
+			expect(releasedIgnored!.text).toContain("REVIEW — gitignored files present");
+			expect(fs.existsSync(path.join(ignoredPath, ".env"))).toBe(true);
+
+			expect(releasedClean!.isError).toBe(false);
+			expect(releasedClean!.text).toContain('Released and removed workspace "clean-clone"');
+			expect(fs.existsSync(cleanPath)).toBe(false);
+
+			const releases = h.telemetry().filter((data) => data.event === "release");
+			expect(releases).toHaveLength(2);
+			expect(releases[0]).toMatchObject({
+				name: "with-env",
+				status: "REVIEW",
+				removed: false,
+				reasons: ["gitignored files present"],
+			});
+			expect(releases[1]).toMatchObject({
+				name: "clean-clone",
+				status: "SAFE",
+				removed: true,
+			});
+		} finally {
+			await h.dispose();
+		}
+
+		// Automatic sweep also preserves the released workspace with gitignored files and collects a clean clone.
+		await settleWorkspaceSweeps();
+		const sweepClean = await createOrTouchWorkspace(projectCwd, { name: "sweep-clean" }, agentDir);
+		git(projectCwd, ["clone", bareRemote, sweepClean.path]);
+
+		const sweep = await runScheduledSweep({
+			cwd: projectCwd,
+			intervalMs: WORKSPACE_LIMITS.sweepIntervalMs,
+			agentDir,
+			now: Date.now() + WORKSPACE_LIMITS.sweepIntervalMs + 1_000,
+		});
+		expect(sweep?.result.removed.map((report) => report.entry.name)).toEqual(["sweep-clean"]);
+		expect(sweep?.result.kept.map((report) => report.entry.name)).toEqual(["with-env"]);
+		expect(fs.existsSync(sweepClean.path)).toBe(false);
+		expect(fs.existsSync(path.join(ignoredPath, ".env"))).toBe(true);
+
+		// Once the gitignored file is removed, the workspace becomes SAFE and is collected on release.
+		await rm(path.join(ignoredPath, ".env"));
+		const afterCleanup = await releaseAndCollectWorkspace({
+			cwd: projectCwd,
+			name: "with-env",
+			agentDir,
+		});
+		expect(afterCleanup?.report.status).toBe("SAFE");
+		expect(afterCleanup?.removed).toBe(true);
+		expect(fs.existsSync(ignoredPath)).toBe(false);
+	});
+
 	it("refuses to release another active session's SAFE workspace, allows owner release, and allows release once the owner ends", async () => {
 		const parent = await startSession();
 		const child = await startSession({ child: true });
