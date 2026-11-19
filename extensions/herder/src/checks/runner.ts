@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { blockedCheckCommand, hasStandingGrants } from "../adapter/standing.ts";
 import { CHECK_ERROR_LINES, CHECK_TAIL_LINES } from "../config.ts";
 import type { CheckResult, CheckSpec, OutputStore } from "../types.ts";
 
@@ -78,8 +79,15 @@ export async function runCheck(spec: CheckSpec, options: CheckRunOptions): Promi
 	const started = performance.now();
 	const output = new OutputCapture(options.outputLimits ?? CHECK_OUTPUT_LIMITS);
 	let outcome: Outcome = { exitCode: null, timedOut: false, aborted: false };
-	if (existsSync(options.cwd)) outcome = await execute(spec, options, output);
-	else output.push(Buffer.from(`check directory ${options.cwd} does not exist\n`));
+	const blocked = hasStandingGrants() ? blockedCheckCommand(spec.command, options.cwd) : undefined;
+	if (blocked) {
+		output.push(Buffer.from(`${blocked}\n`));
+		outcome = { exitCode: 126, timedOut: false, aborted: false };
+	} else if (existsSync(options.cwd)) {
+		outcome = await execute(spec, options, output);
+	} else {
+		output.push(Buffer.from(`check directory ${options.cwd} does not exist\n`));
+	}
 	if (outcome.aborted) throw signal?.reason;
 	const log = output.toBuffer();
 	const { exitCode, timedOut } = outcome;

@@ -11,8 +11,9 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import {
 	createAgentSessionFromServices, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import { publishGrant, repositoryOf, standingRegistry, withdrawGrant, type StandingApproval } from "../grants.ts";
+import { grants, publishGrant, repositoryOf, standingRegistry, withdrawGrant, type StandingApproval } from "../grants.ts";
 import { bashBlockReason, blockReason, registerGuard } from "../guard.ts";
+import selfdriveExtension, { runtime as selfdriveRuntime } from "../index.ts";
 
 let root: string;
 let repo: string;
@@ -434,6 +435,61 @@ describe("the hook in a Pi session", () => {
 			rmSync(join(repo, "src", "guarded.ts"), { force: true });
 			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		}
+	});
+});
+
+describe("published standing grants", () => {
+	it("attach checkCommand backed by selfdrive's bash guard", async () => {
+		const savedKeepAwake = selfdriveRuntime.keepAwake;
+		selfdriveRuntime.keepAwake = () => ({ kill: () => {} });
+		const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+		const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+		const pi = {
+			on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
+				handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+			},
+			registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, command),
+			registerTool: () => {},
+			registerMessageRenderer: () => {},
+			appendEntry: () => {},
+			sendMessage: () => {},
+		} as unknown as ExtensionAPI;
+		const sessionId = "selfdrive-grant-check-command";
+		const ctx = {
+			mode: "rpc",
+			hasUI: true,
+			cwd: repo,
+			isIdle: () => true,
+			hasPendingMessages: () => false,
+			ui: {
+				confirm: async () => true,
+				notify: () => {},
+				setStatus: () => {},
+			},
+			sessionManager: {
+				getSessionId: () => sessionId,
+				getBranch: () => [],
+				getEntries: () => [],
+			},
+		};
+		try {
+			selfdriveExtension(pi);
+			await commands.get("selfdrive")!.handler("on test checks", ctx);
+			const published = grants().find((item) => item.id === sessionId);
+			expect(published).toBeDefined();
+			expect(typeof published!.checkCommand).toBe("function");
+
+			const worktreeCwd = join(repo, ".git", "herder", "worktrees", "run-1");
+			expect(published!.checkCommand!("echo ok", worktreeCwd)).toBeUndefined();
+			expect(published!.checkCommand!("npm ci && npm test", worktreeCwd)).toBeUndefined();
+
+			for (const cmd of ["git push", "npm publish", "sudo ls", "ssh host ls", "gh pr create", `echo bad > "${join(repo, "src", "a.ts")}"`]) {
+				expect(published!.checkCommand!(cmd, worktreeCwd)).toBe(bashBlockReason(cmd, worktreeCwd, [repo]));
+			}
+		} finally {
+			for (const handler of handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, ctx);
+			selfdriveRuntime.keepAwake = savedKeepAwake;
 		}
 	});
 });

@@ -15,6 +15,8 @@ export interface StandingApproval {
 	text: string;
 	/** ISO time the user granted it. */
 	since: string;
+	/** Returns the block reason if `command` run in `cwd` violates selfdrive's command guard, or undefined when allowed. */
+	checkCommand?: (command: string, cwd: string) => string | undefined;
 }
 export interface StandingApprovalRegistry { grants: Map<string, StandingApproval> }
 
@@ -58,6 +60,32 @@ export function sinceGrant(grant: StandingApproval, iso: string | undefined): bo
 	const at = iso === undefined ? Number.NaN : Date.parse(iso);
 	const since = Date.parse(grant.since);
 	return Number.isFinite(at) && Number.isFinite(since) && at >= since;
+}
+
+function checkWith(grant: StandingApproval, command: string, cwd: string): string | undefined {
+	if (typeof grant.checkCommand !== "function") return undefined;
+	try {
+		const reason = grant.checkCommand(command, cwd);
+		return typeof reason === "string" && reason.length > 0 ? reason : undefined;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return `Blocked by self-driving mode: command guard failed (${message})`;
+	}
+}
+
+/**
+ * Validates a check command against selfdrive's command guard via the standing-approval contract.
+ * When `grant` is given, evaluates that grant; otherwise evaluates every well-formed active grant in the process.
+ */
+export function blockedCheckCommand(command: string, cwd: string, grant?: StandingApproval): string | undefined {
+	if (grant !== undefined) return checkWith(grant, command, cwd);
+	if (!hasStandingGrants()) return undefined;
+	for (const active of standingRegistry().grants.values()) {
+		if (!wellFormed(active)) continue;
+		const reason = checkWith(active, command, cwd);
+		if (reason) return reason;
+	}
+	return undefined;
 }
 
 /** One line for prompts that prime the model while a grant covers the repository. */

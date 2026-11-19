@@ -18,6 +18,8 @@ export interface StandingApproval {
 	text: string;
 	/** ISO time the user granted it. */
 	since: string;
+	/** Returns the block reason if `command` run in `cwd` violates selfdrive's command guard, or undefined when allowed. */
+	checkCommand?: (command: string, cwd: string) => string | undefined;
 }
 export interface StandingApprovalRegistry { grants: Map<string, StandingApproval> }
 

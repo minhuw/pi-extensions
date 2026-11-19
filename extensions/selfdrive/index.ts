@@ -3,7 +3,7 @@ import type { CustomEntry, ExtensionAPI, ExtensionContext, SessionEntry } from "
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { publishGrant, repositoryOf, withdrawGrant } from "./grants.ts";
-import { registerGuard } from "./guard.ts";
+import { bashBlockReason, canonical, registerGuard } from "./guard.ts";
 import { buildReport, costOf, countByStatus, elapsed, foldLedger, isOpen, nextTaskId, type CostEntry, type Task } from "./report.ts";
 
 const ENTRY = "selfdrive";
@@ -378,7 +378,15 @@ export default function selfdriveExtension(pi: ExtensionAPI): void {
 		r.on = true;
 		publishMode(r.id, true);
 		const repo = repositoryOf(ctx.cwd);
-		if (repo) publishGrant({ id: r.id, ...repo, text: grantText(r.since, r.focus), since: r.since });
+		if (repo) {
+			publishGrant({
+				id: r.id,
+				...repo,
+				text: grantText(r.since, r.focus),
+				since: r.since,
+				checkCommand: (command, cwd) => bashBlockReason(command, cwd, [canonical(repo.toplevel)]),
+			});
+		}
 		try { r.awake?.kill(); } catch {}
 		r.awake = runtime.keepAwake();
 		registerTools();

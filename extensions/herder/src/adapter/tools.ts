@@ -13,7 +13,7 @@ import { confirmLong, reviewGoal } from "./confirm.ts";
 import { describeChecks, describeDelivery, describeIntegration, describeStep, describeVerification } from "./format.ts";
 import { requireApproved, requireIdle, type Herder, type Held, type Session } from "./session.ts";
 import type { StatusReport } from "./runtime.ts";
-import { sinceGrant, standingGrant, type StandingApproval } from "./standing.ts";
+import { blockedCheckCommand, sinceGrant, standingGrant, type StandingApproval } from "./standing.ts";
 import { describeRun, isFinished, isParked, planTasks, runDetails } from "./status.ts";
 
 const literals = <T extends string>(values: readonly T[], description?: string) =>
@@ -112,6 +112,17 @@ async function approveGoal(herder: Herder, s: Session, held: Held, ctx: Extensio
 		throw new Error("The goal is already approved and frozen, but goal.md changed since. Restore the approved text; a different goal needs a new run.");
 	}
 	if (grant) {
+		const blocked = goal.checks.flatMap((spec) => {
+			const reason = blockedCheckCommand(spec.command, held.run.paths.worktrees, grant);
+			return reason ? [{ id: spec.id, command: spec.command, reason }] : [];
+		});
+		if (blocked.length) {
+			const lines = blocked.map((item) => `- check ${item.id}: ${item.reason}`);
+			return reply(
+				`Standing approval refused: goal.md contains check command(s) disallowed by self-driving mode:\n${lines.join("\n")}\nRevise ## Checks in goal.md and call approve_goal again.`,
+				{ approved: false, blocked: true, grant: grant.id, blockedChecks: blocked },
+			);
+		}
 		held.run.journal.append({ t: "goal.approved", sha256, checks: goal.checks, approvedBy: "standing", authorization: grant.text, grant: grant.id });
 		held.run.renderProgress(planTasks(held.run));
 		herder.refresh(s);
