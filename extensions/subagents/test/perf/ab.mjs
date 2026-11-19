@@ -2,8 +2,8 @@
  * ab.mjs — run the benchmarks against the working tree AND against another git
  * ref, then print the difference.
  *
- *   npm run bench:ab -- master
- *   npm run bench:ab -- HEAD~1 --rounds 5 --filter viewer
+ *   node extensions/subagents/test/perf/ab.mjs master
+ *   node extensions/subagents/test/perf/ab.mjs HEAD~1 --rounds 5 --filter viewer
  *
  * This is the question `vitest bench --compare` cannot answer. `--compare` only
  * annotates a run with a stored baseline and never fails; more importantly the
@@ -33,16 +33,18 @@
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const REPO = process.cwd();
-const PERF_DIR = join("test", "perf");
-const FIXTURES = join("test", "helpers", "perf-fixtures.ts");
+const SUBAGENTS_DIR = join("extensions", "subagents");
+const PERF_DIR = join(SUBAGENTS_DIR, "test", "perf");
+const FIXTURES = join(SUBAGENTS_DIR, "test", "helpers", "perf-fixtures.ts");
+const VITEST_CONFIG = join(SUBAGENTS_DIR, "vitest.config.ts");
 
 function usage(message) {
   if (message) console.error(`\n  ${message}`);
   console.error(`
-  Usage: npm run bench:ab -- <ref> [--rounds N] [--filter substring]
+  Usage: node extensions/subagents/test/perf/ab.mjs <ref> [--rounds N] [--filter substring]
 
     <ref>       git ref to compare the working tree against (e.g. master, HEAD~1)
     --rounds    how many alternating A/B rounds to run (default 3)
@@ -70,7 +72,7 @@ const git = (...args) => execFileSync("git", args, { cwd: REPO, encoding: "utf-8
 
 /** Run the benchmarks in `cwd`, returning task name → median ms per sample. */
 function runBench(cwd, filter, jsonPath) {
-  const args = ["vitest", "bench", ...(filter ? [filter] : []), `--outputJson=${jsonPath}`];
+  const args = ["vitest", "bench", "--config", VITEST_CONFIG, ...(filter ? [filter] : []), `--outputJson=${jsonPath}`];
   try {
     execFileSync("npx", args, { cwd, stdio: "ignore" });
   } catch {
@@ -170,7 +172,7 @@ try {
       cpSync(join(REPO, PERF_DIR, file), join(worktree, PERF_DIR, file));
     }
   }
-  mkdirSync(join(worktree, "test", "helpers"), { recursive: true });
+  mkdirSync(join(worktree, dirname(FIXTURES)), { recursive: true });
   cpSync(join(REPO, FIXTURES), join(worktree, FIXTURES));
 
   const head = new Map();

@@ -1,4 +1,4 @@
-# Offline collection gate: typecheck and the full `npm test` suite.
+# Offline collection gate: typecheck, the full `npm test` suite, and the Impeccable package tarball check.
 # The Impeccable engine, visual-foundations, and e2e gates need network and a browser and stay out of CI.
 # magpie-provider.yml adds macOS and Node 24 for the Magpie provider.
 name: Extensions CI
@@ -57,3 +57,6 @@ jobs:
 
       - name: Run offline collection suite
         run: npm test
+
+      - name: Run Impeccable package checks
+        run: npm run test:impeccable:package

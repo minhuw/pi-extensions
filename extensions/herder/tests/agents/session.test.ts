@@ -5,7 +5,7 @@ import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxProviderHandle, type FauxResponseStep } from "@earendil-works/pi-ai/providers/faux";
 import { AgentSession, ModelRegistry, ModelRuntime, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPiAgentRunner, modelRuntimeOf, type PiRunnerOptions } from "../../src/agents/session.ts";
 import { createRun } from "../../src/run/store.ts";
