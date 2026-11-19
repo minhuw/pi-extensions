@@ -84,6 +84,22 @@ export interface InspectWorkspaceSafetyOptions {
 	checkPid?: boolean;
 }
 
+export interface ReleaseWorkspaceOptions {
+	sessionId?: string;
+	activeSessionIds?: ReadonlySet<string>;
+	checkPid?: boolean;
+}
+
+export class WorkspaceOwnershipError extends Error {
+	constructor(
+		readonly workspaceName: string,
+		readonly reason: string,
+	) {
+		super(`Refusing to release workspace "${workspaceName}": ${reason}.`);
+		this.name = "WorkspaceOwnershipError";
+	}
+}
+
 export function registryFilePath(cwd: string): string {
 	return path.join(workspacesDir(cwd), ".registry.json");
 }
@@ -434,15 +450,39 @@ export async function syncWorkspaces(cwd: string, now?: Date, agentDir?: string)
 	return synced;
 }
 
+function liveOtherOwnerReason(entry: WorkspaceEntry, options?: ReleaseWorkspaceOptions): string | undefined {
+	const sessionId = options?.sessionId;
+	if (!sessionId || entry.releasedAt) return undefined;
+	if (entry.sessionId && entry.sessionId !== sessionId && options.activeSessionIds?.has(entry.sessionId)) {
+		return `it is currently owned by another active session (${entry.sessionId})`;
+	}
+	if (
+		!entry.closedAt &&
+		entry.pid &&
+		entry.pid !== process.pid &&
+		options.checkPid !== false &&
+		isPidAlive(entry.pid)
+	) {
+		return `it is currently owned by another running process (pid ${entry.pid})`;
+	}
+	return undefined;
+}
+
 export async function releaseWorkspace(
 	cwd: string,
 	name: string,
 	now?: Date,
 	agentDir?: string,
+	options?: ReleaseWorkspaceOptions,
 ): Promise<WorkspaceEntry | undefined> {
 	const entries = await syncWorkspaces(cwd, now, agentDir);
 	const target = entries.find((entry) => entry.name === name);
 	if (!target) return undefined;
+
+	const blocker = liveOtherOwnerReason(target, options);
+	if (blocker) {
+		throw new WorkspaceOwnershipError(target.name, blocker);
+	}
 
 	const nowIso = (now ?? new Date()).toISOString();
 	target.releasedAt = nowIso;

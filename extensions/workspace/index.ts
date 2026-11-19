@@ -616,6 +616,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 				const outcome = await releaseAndCollectWorkspace({
 					cwd: ctx.cwd,
 					name: params.name,
+					sessionId,
 					activeSessionIds: getSharedState().activeSessionIds,
 				});
 				if (!outcome) {

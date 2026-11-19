@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
@@ -17,7 +17,7 @@ import {
 	type CreateAgentSessionRuntimeFactory,
 	type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
-import { runScheduledSweep } from "../gc.ts";
+import { releaseAndCollectWorkspace, runScheduledSweep } from "../gc.ts";
 import {
 	CHILD_SESSION_HOOKS,
 	settleWorkspaceSweeps,
@@ -31,10 +31,12 @@ import {
 	createOrTouchWorkspace,
 	hasLiveOtherOwner,
 	inspectWorkspaceSafety,
+	isPidAlive,
 	readRegistry,
 	readRegistryState,
 	validateWorkspaceName,
 	WORKSPACE_LIMITS,
+	WorkspaceOwnershipError,
 	WorkspaceQuotaError,
 } from "../registry.ts";
 
@@ -529,6 +531,120 @@ describe("release", () => {
 			await rm(path.join(workspacesDir(projectCwd), "scratch", "notes.md"));
 			await h.runTools([fauxToolCall("workspace", { action: "release", name: "scratch" })]);
 			expect(h.toolResults().at(-1)!.text).toContain('Released and removed workspace "scratch"');
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("refuses to release another active session's SAFE workspace, allows owner release, and allows release once the owner ends", async () => {
+		const parent = await startSession();
+		const child = await startSession({ child: true });
+		try {
+			await parent.runTools([create("parent-keep"), create("parent-self")]);
+			const keepPath = path.join(workspacesDir(projectCwd), "parent-keep");
+			const selfPath = path.join(workspacesDir(projectCwd), "parent-self");
+			expect(fs.existsSync(keepPath)).toBe(true);
+			expect(fs.existsSync(selfPath)).toBe(true);
+
+			// Non-owner cannot release or delete an active session's SAFE workspace.
+			await child.runTools([fauxToolCall("workspace", { action: "release", name: "parent-keep" })]);
+			const refused = child.toolResults().at(-1)!;
+			expect(refused.isError).toBe(true);
+			expect(refused.text).toContain('Refusing to release workspace "parent-keep"');
+			expect(refused.text).toContain("another active session");
+			expect(fs.existsSync(keepPath)).toBe(true);
+			const keepEntry = (await readRegistry(projectCwd)).find((entry) => entry.name === "parent-keep");
+			expect(keepEntry).toMatchObject({
+				name: "parent-keep",
+				sessionId: parent.session.sessionId,
+				pid: process.pid,
+			});
+			expect(keepEntry?.releasedAt).toBeUndefined();
+			expect(keepEntry?.closedAt).toBeUndefined();
+			expect(child.telemetry().filter((data) => data.event === "release")).toEqual([]);
+
+			// Owning session can still release and remove its own SAFE workspace.
+			await parent.runTools([fauxToolCall("workspace", { action: "release", name: "parent-self" })]);
+			const selfReleased = parent.toolResults().at(-1)!;
+			expect(selfReleased.isError).toBe(false);
+			expect(selfReleased.text).toContain('Released and removed workspace "parent-self"');
+			expect(fs.existsSync(selfPath)).toBe(false);
+			expect((await readRegistry(projectCwd)).map((entry) => entry.name)).toEqual(["parent-keep"]);
+
+			// Once the owning session is no longer active, another session can release and remove it.
+			await parent.dispose();
+			await child.runTools([fauxToolCall("workspace", { action: "release", name: "parent-keep" })]);
+			const releasedAfterEnd = child.toolResults().at(-1)!;
+			expect(releasedAfterEnd.isError).toBe(false);
+			expect(releasedAfterEnd.text).toContain('Released and removed workspace "parent-keep"');
+			expect(fs.existsSync(keepPath)).toBe(false);
+			expect(await readRegistry(projectCwd)).toEqual([]);
+		} finally {
+			await child.dispose();
+			await parent.dispose();
+		}
+	});
+
+	it("refuses to release a workspace owned by another live process and allows release once that pid is dead", async () => {
+		const liveForeign = await createOrTouchWorkspace(
+			projectCwd,
+			{ name: "foreign-live", sessionId: "remote-session", pid: process.ppid },
+			agentDir,
+		);
+		const exited = spawnSync(process.execPath, ["-e", ""]);
+		const deadPid = exited.pid!;
+		expect(isPidAlive(deadPid)).toBe(false);
+		const deadForeign = await createOrTouchWorkspace(
+			projectCwd,
+			{ name: "foreign-dead", sessionId: "dead-session", pid: deadPid },
+			agentDir,
+		);
+
+		const h = await startSession();
+		try {
+			await h.runTools([
+				fauxToolCall("workspace", { action: "release", name: "foreign-live" }),
+				fauxToolCall("workspace", { action: "release", name: "foreign-dead" }),
+			]);
+			const [liveRes, deadRes] = h.toolResults().slice(-2);
+
+			expect(liveRes!.isError).toBe(true);
+			expect(liveRes!.text).toContain('Refusing to release workspace "foreign-live"');
+			expect(liveRes!.text).toContain(`pid ${process.ppid}`);
+			expect(fs.existsSync(liveForeign.path)).toBe(true);
+			const untouched = (await readRegistry(projectCwd)).find((entry) => entry.name === "foreign-live");
+			expect(untouched).toMatchObject({
+				name: "foreign-live",
+				sessionId: "remote-session",
+				pid: process.ppid,
+			});
+			expect(untouched?.releasedAt).toBeUndefined();
+			expect(untouched?.closedAt).toBeUndefined();
+
+			expect(deadRes!.isError).toBe(false);
+			expect(deadRes!.text).toContain('Released and removed workspace "foreign-dead"');
+			expect(fs.existsSync(deadForeign.path)).toBe(false);
+
+			// Programmatic API refuses with WorkspaceOwnershipError when sessionId is passed,
+			// and preserves backwards-compatible release when sessionId is omitted.
+			await expect(
+				releaseAndCollectWorkspace({
+					cwd: projectCwd,
+					name: "foreign-live",
+					sessionId: h.session.sessionId,
+					activeSessionIds: sharedState().activeSessionIds,
+					agentDir,
+				}),
+			).rejects.toThrow(WorkspaceOwnershipError);
+			expect(fs.existsSync(liveForeign.path)).toBe(true);
+
+			const compat = await releaseAndCollectWorkspace({
+				cwd: projectCwd,
+				name: "foreign-live",
+				agentDir,
+			});
+			expect(compat?.removed).toBe(true);
+			expect(fs.existsSync(liveForeign.path)).toBe(false);
 		} finally {
 			await h.dispose();
 		}

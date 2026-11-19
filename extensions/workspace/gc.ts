@@ -188,9 +188,11 @@ export interface ReleaseOutcome {
 export async function releaseAndCollectWorkspace(options: {
 	cwd: string;
 	name: string;
+	sessionId?: string;
 	agentDir?: string;
 	activeSessionIds?: ReadonlySet<string>;
 	now?: number;
+	checkPid?: boolean;
 }): Promise<ReleaseOutcome | undefined> {
 	const projectCwd = resolveCanonicalPath(options.cwd);
 	const entry = await releaseWorkspace(
@@ -198,9 +200,18 @@ export async function releaseAndCollectWorkspace(options: {
 		options.name,
 		options.now !== undefined ? new Date(options.now) : undefined,
 		options.agentDir,
+		{
+			sessionId: options.sessionId,
+			activeSessionIds: options.activeSessionIds,
+			checkPid: options.checkPid,
+		},
 	);
 	if (!entry) return undefined;
-	const report = await inspectWorkspaceSafety(entry, { activeSessionIds: options.activeSessionIds, now: options.now });
+	const report = await inspectWorkspaceSafety(entry, {
+		activeSessionIds: options.activeSessionIds,
+		now: options.now,
+		checkPid: options.checkPid,
+	});
 	if (report.status !== "SAFE") {
 		return { entry, report, removed: false };
 	}
