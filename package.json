@@ -19,8 +19,9 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:orca-bridge && npm run test:pika-node-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:continue-session && npm run test:quality && npm run test:statusline && npm run test:goal && npm run test:molt && npm run test:language && npm run test:soul && npm run test:spokesman && npm run test:delegation && npm run test:selfdrive && npm run test:benchmark && npm run test:autoresearch && npm run test:subagents && npm run test:council && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:codex-relay && npm run test:impeccable && npm run test:workspace && npm run test:agent-browser && npm run test:agents-md && npm run test:fff && npm run test:processes && npm run test:session-name && npm run test:ui-sdk",
+		"test": "npm run test:orca-bridge && npm run test:pika-node-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:continue-session && npm run test:quality && npm run test:statusline && npm run test:goal && npm run test:molt && npm run test:language && npm run test:soul && npm run test:spokesman && npm run test:delegation && npm run test:selfdrive && npm run test:benchmark && npm run test:autoresearch && npm run test:subagents && npm run test:council && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:codex-relay && npm run test:impeccable && npm run test:workspace && npm run test:agent-browser && npm run test:agents-md && npm run test:fff && npm run test:processes && npm run test:session-name && npm run test:ui-sdk && npm run test:agent-desktop",
 		"test:agent-browser": "vitest run extensions/agent-browser",
+		"test:agent-desktop": "vitest run extensions/agent-desktop",
 		"test:agents-md": "vitest run extensions/agents-md",
 		"test:ui-sdk": "vitest run extensions/ui-sdk",
 		"test:fff": "vitest run extensions/fff",
@@ -64,6 +65,7 @@
 	},
 	"dependencies": {
 		"@ff-labs/fff-node": "0.11.0",
+		"agent-desktop": "1.3.1",
 		"croner": "^10.0.1",
 		"diff": "^8.0.4",
 		"nanoid": "^5.1.16",
@@ -96,7 +98,8 @@
 		"skills": [
 			"./extensions/herder/skills",
 			"./extensions/impeccable/skills",
-			"./extensions/agent-browser/skills"
+			"./extensions/agent-browser/skills",
+			"./extensions/agent-desktop/skills"
 		],
 		"prompts": [
 			"./extensions/commit/prompts/commit.md",
@@ -164,6 +167,7 @@
 			"./extensions/ui-sdk/index.ts",
 			"./extensions/impeccable/index.ts",
 			"./extensions/agent-browser/index.ts",
+			"./extensions/agent-desktop/index.ts",
 			"./extensions/agents-md/index.ts",
 			"./extensions/fff/index.ts",
 			"./extensions/workspace/index.ts",
