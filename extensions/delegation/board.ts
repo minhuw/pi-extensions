@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext, ExtensionFactory, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -21,6 +22,7 @@ import { Type } from "typebox";
 
 const BOARDS = Symbol.for("pi-extensions.swarm-boards");
 const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
+const SESSION_MODES = Symbol.for("pi-extensions.session-modes");
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
 /** The coordinator's snapshot entries: the latest on the branch is its board. */
 const ENTRY_TYPE = "swarm-board";
@@ -33,6 +35,11 @@ const HOOK_NAME = "swarm-board";
 /** How long changes from outside the coordinator's own tool calls (children, telemetry) gather before one snapshot. */
 const PERSIST_DELAY_MS = 100;
 const COORDINATOR = "coordinator";
+
+export const MAX_TITLE_CHARS = 240;
+export const MAX_NOTE_CHARS = 500;
+export const MAX_CARDS = 200;
+export const MAX_BYTES = 60 * 1024;
 
 export type CardStatus = "todo" | "doing" | "blocked" | "done" | "failed" | "dropped";
 
@@ -54,6 +61,16 @@ export interface SwarmBoard {
 	sessionId: string;
 	updatedAt: number;
 	cards: SwarmCard[];
+	nextId?: number;
+}
+
+interface CoordinatorInstance {
+	isActive(): boolean;
+}
+
+interface SessionModesRegistry {
+	modes: Map<string, Set<string>>;
+	listeners: Set<(sessionId: string) => void>;
 }
 
 export interface SwarmBoards {
@@ -62,6 +79,8 @@ export interface SwarmBoards {
 	listeners: Set<(board: SwarmBoard) => void>;
 	/** Not part of the contract: each subagent session's coordinator session, nested children included. */
 	members?: Map<string, string>;
+	/** Not part of the contract: open coordinator instances in this process, for dynamic child-hook sync. */
+	coordinators?: Set<CoordinatorInstance>;
 }
 
 const STATUSES: readonly CardStatus[] = ["doing", "blocked", "todo", "done", "failed", "dropped"];
@@ -75,11 +94,23 @@ export function swarmBoards(): SwarmBoards {
 }
 
 const members = () => (swarmBoards().members ??= new Map());
+const coordinators = () => (swarmBoards().coordinators ??= new Set());
+
+function sessionModes(): SessionModesRegistry {
+	const shared = globalThis as Record<symbol, unknown>;
+	return (shared[SESSION_MODES] ??= { modes: new Map(), listeners: new Set() }) as SessionModesRegistry;
+}
+
+function unsubscribeModeListener(listener: (sessionId: string) => void): void {
+	const registry = (globalThis as Record<symbol, unknown>)[SESSION_MODES] as SessionModesRegistry | undefined;
+	registry?.listeners.delete(listener);
+}
 
 /** Replace a coordinator's board and tell every listener. A failing listener is logged and does not stop the others. */
 function publish(board: SwarmBoard): void {
 	const registry = swarmBoards();
 	registry.boards.set(board.sessionId, board);
+	syncChildHook();
 	for (const listener of [...registry.listeners]) {
 		try {
 			const result: unknown = listener(board);
@@ -93,20 +124,84 @@ function publish(board: SwarmBoard): void {
 /** Strictly later than the board's last change, so each snapshot has its own `updatedAt`. */
 const nextTime = (board: SwarmBoard | undefined) => Math.max(Date.now(), (board?.updatedAt ?? 0) + 1);
 
+const maxCardNum = (cards: readonly SwarmCard[]) =>
+	Math.max(0, ...cards.map((card) => Number(/^c(\d+)$/.exec(card.id)?.[1] ?? 0)));
+
+const initialNextId = (board: SwarmBoard | undefined) =>
+	Math.max(board?.nextId ?? 1, maxCardNum(board?.cards ?? []) + 1);
+
+const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
+
+function truncate(text: string, max: number): string {
+	if (text.length <= max) return text;
+	return `${text.slice(0, max - 1)}…`;
+}
+
+const formatTitle = (text: string) => truncate(oneLine(text), MAX_TITLE_CHARS);
+
+function formatNote(text?: string): string | undefined {
+	const trimmed = text?.trim();
+	return trimmed ? truncate(trimmed, MAX_NOTE_CHARS) : undefined;
+}
+
+const serializedBytes = (sessionId: string, updatedAt: number, cards: SwarmCard[]) =>
+	Buffer.byteLength(JSON.stringify({ version: 1, sessionId, updatedAt, cards }), "utf8");
+
+/** Evict oldest settled cards when card count or serialized size exceeds bounds; never silently delete open cards. */
+function trimBoard(sessionId: string, now: number, cards: SwarmCard[]): void {
+	while (cards.length > MAX_CARDS || serializedBytes(sessionId, now, cards) > MAX_BYTES) {
+		let oldestIndex = -1;
+		let oldestUpdatedAt = Infinity;
+		for (let i = 0; i < cards.length; i++) {
+			const card = cards[i]!;
+			if (!TERMINAL.includes(card.status)) continue;
+			if (card.updatedAt < oldestUpdatedAt) {
+				oldestUpdatedAt = card.updatedAt;
+				oldestIndex = i;
+			}
+		}
+		if (oldestIndex === -1) break;
+		cards.splice(oldestIndex, 1);
+	}
+}
+
 /** Apply `change` to a copy of the coordinator's cards and publish the result. */
-function mutate(sessionId: string, change: (cards: SwarmCard[], now: number) => void): SwarmBoard {
+function mutate(sessionId: string, change: (cards: SwarmCard[], now: number, allocateId: () => string) => void): SwarmBoard {
 	const current = swarmBoards().boards.get(sessionId);
 	const now = nextTime(current);
 	const cards = (current?.cards ?? []).map((card) => ({ ...card }));
-	change(cards, now);
-	const board: SwarmBoard = { version: 1, sessionId, updatedAt: now, cards };
+	let nextId = initialNextId(current);
+	const allocateId = () => {
+		const id = Math.max(nextId, maxCardNum(cards) + 1);
+		nextId = id + 1;
+		return `c${id}`;
+	};
+	change(cards, now, allocateId);
+	nextId = Math.max(nextId, maxCardNum(cards) + 1);
+	trimBoard(sessionId, now, cards);
+	const board: SwarmBoard = { version: 1, sessionId, updatedAt: now, cards, nextId };
 	publish(board);
 	return board;
 }
 
-function newCard(cards: SwarmCard[], now: number, fields: Omit<SwarmCard, "id" | "createdAt" | "updatedAt" | "updatedBy">): SwarmCard {
-	const next = Math.max(0, ...cards.map((card) => Number(/^c(\d+)$/.exec(card.id)?.[1] ?? 0))) + 1;
-	const card: SwarmCard = { id: `c${next}`, ...fields, updatedBy: fields.createdBy, createdAt: now, updatedAt: now };
+function newCard(
+	cards: SwarmCard[],
+	now: number,
+	allocateId: () => string,
+	fields: Omit<SwarmCard, "id" | "createdAt" | "updatedAt" | "updatedBy">,
+): SwarmCard {
+	const title = formatTitle(fields.title);
+	const note = formatNote(fields.note);
+	const { note: _ignoredNote, ...rest } = fields;
+	const card: SwarmCard = {
+		id: allocateId(),
+		...rest,
+		title,
+		...(note ? { note } : {}),
+		updatedBy: fields.createdBy,
+		createdAt: now,
+		updatedAt: now,
+	};
 	cards.push(card);
 	return card;
 }
@@ -116,8 +211,6 @@ function findCard(cards: SwarmCard[], id: string): SwarmCard {
 	if (!card) throw new Error(`No card ${id} on the swarm board.`);
 	return card;
 }
-
-const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
 
 function cardLine(card: SwarmCard): string {
 	const agent = card.agent || card.agentId ? ` [${[card.agent, card.agentId].filter(Boolean).join(" ")}]` : "";
@@ -217,7 +310,25 @@ function linkAgent(cards: SwarmCard[], card: SwarmCard, agentId: string, explici
 	card.agentId = agentId;
 }
 
-function coordinatorAction(sessionId: string, params: BoardParams) {
+/** Ask Subagents to stop a linked running agent over `pi.events`; returns true iff Subagents confirmed the stop. */
+async function stopLinkedAgent(pi: ExtensionAPI, agentId: string): Promise<boolean> {
+	const requestId = randomUUID();
+	let reply: { success?: boolean; error?: string } | undefined;
+	const unsub = pi.events.on(`subagents:rpc:stop:reply:${requestId}`, (data) => {
+		reply = data as { success?: boolean; error?: string };
+	});
+	try {
+		pi.events.emit("subagents:rpc:stop", { requestId, agentId });
+		// Subagents' handleRpc is async (awaits the handler before emitting the reply), so yield microtasks if needed.
+		if (reply === undefined) await Promise.resolve();
+		if (reply === undefined) await Promise.resolve();
+	} finally {
+		unsub();
+	}
+	return reply?.success === true;
+}
+
+async function coordinatorAction(pi: ExtensionAPI, sessionId: string, params: BoardParams) {
 	const by = COORDINATOR;
 	switch (params.action) {
 		case "list": {
@@ -225,16 +336,16 @@ function coordinatorAction(sessionId: string, params: BoardParams) {
 			return result(params.includeSettled ? formatBoard(board) : formatBoardCompact(board), board);
 		}
 		case "add": {
-			const title = oneLine(params.title ?? "");
+			const title = formatTitle(params.title ?? "");
 			if (!title) throw new Error("add needs a title.");
 			const rawStatus = trimOpt(params.status);
 			const status = rawStatus ?? "todo";
 			if (!isStatus(status)) throw new Error(`Unknown status ${status}.`);
-			const note = trimOpt(params.note);
+			const note = formatNote(params.note);
 			const agentId = trimOpt(params.agentId);
 			let id = "";
-			const board = mutate(sessionId, (cards, now) => {
-				const card = newCard(cards, now, { title, status, ...(note ? { note } : {}), createdBy: by });
+			const board = mutate(sessionId, (cards, now, allocateId) => {
+				const card = newCard(cards, now, allocateId, { title, status, ...(note ? { note } : {}), createdBy: by });
 				if (agentId) linkAgent(cards, card, agentId, rawStatus !== undefined);
 				id = card.id;
 			});
@@ -246,18 +357,32 @@ function coordinatorAction(sessionId: string, params: BoardParams) {
 			const status = params.action === "drop" ? "dropped" : trimOpt(params.status);
 			if (status !== undefined && !isStatus(status)) throw new Error(`Unknown status ${status}.`);
 			const agentId = trimOpt(params.agentId);
+			let droppedAgentId: string | undefined;
 			const board = mutate(sessionId, (cards, now) => {
 				const card = findCard(cards, id);
 				if (agentId) linkAgent(cards, card, agentId, status !== undefined);
 				if (params.action === "update" && params.title !== undefined) {
-					const title = oneLine(params.title);
+					const title = formatTitle(params.title);
 					if (!title) throw new Error("A card's title cannot be empty.");
 					card.title = title;
 				}
 				if (status) card.status = status;
-				if (params.note !== undefined) card.note = params.note.trim() || undefined;
+				if (params.note !== undefined) {
+					const note = formatNote(params.note);
+					if (note) card.note = note;
+					else delete card.note;
+				}
 				Object.assign(card, { updatedBy: by, updatedAt: now });
+				if (params.action === "drop") droppedAgentId = card.agentId;
 			});
+			if (params.action === "drop" && droppedAgentId) {
+				const sharedWithOpen = board.cards.some(
+					(candidate) => candidate.id !== id && candidate.agentId === droppedAgentId && OPEN.includes(candidate.status),
+				);
+				if (!sharedWithOpen && await stopLinkedAgent(pi, droppedAgentId)) {
+					return result(`Dropped ${id} (stopped agent ${droppedAgentId}).\n${formatBoardCompact(board)}`, board);
+				}
+			}
 			return result(`${params.action === "drop" ? "Dropped" : "Updated"} ${id}.\n${formatBoardCompact(board)}`, board);
 		}
 		case "prune": {
@@ -278,29 +403,29 @@ function childAction(role: ChildRole, params: BoardParams) {
 			return result(`Your card: ${ownCard(boardId, agentId)?.id ?? "none yet"}.\n${text}`, board);
 		}
 		case "note": {
-			const note = params.note?.trim();
+			const note = formatNote(params.note);
 			if (!note) throw new Error("note needs a note.");
 			const status = trimOpt(params.status);
 			if (status !== undefined && status !== "doing" && status !== "blocked") throw new Error("A subagent can set its own card only to doing or blocked; the coordinator settles cards.");
 			let id = "";
-			const board = mutate(boardId, (cards, now) => {
+			const board = mutate(boardId, (cards, now, allocateId) => {
 				let card = cards.find((candidate) => candidate.agentId === agentId);
 				if (card?.status === "dropped") throw new Error(`The coordinator dropped your card ${card.id}; stop and report back.`);
-				card ??= newCard(cards, now, { title: oneLine(link.description || link.agentType || agentId), status: "doing", agentId, ...(link.agentType ? { agent: link.agentType } : {}), createdBy: agentId });
+				card ??= newCard(cards, now, allocateId, { title: formatTitle(link.description || link.agentType || agentId), status: "doing", agentId, ...(link.agentType ? { agent: link.agentType } : {}), createdBy: agentId });
 				Object.assign(card, { status: status ?? (TERMINAL.includes(card.status) || card.status === "todo" ? "doing" : card.status), note, updatedBy: agentId, updatedAt: now });
 				id = card.id;
 			});
 			return result(`Noted on ${id}.\n${formatBoardCompact(board)}`, board);
 		}
 		case "add": {
-			const title = oneLine(params.title ?? "");
+			const title = formatTitle(params.title ?? "");
 			if (!title) throw new Error("add needs a title.");
 			const status = trimOpt(params.status);
 			if (status !== undefined && status !== "todo") throw new Error("A subagent can add only todo cards.");
-			const note = trimOpt(params.note);
+			const note = formatNote(params.note);
 			let id = "";
-			const board = mutate(boardId, (cards, now) => {
-				id = newCard(cards, now, { title, status: "todo", ...(note ? { note } : {}), createdBy: agentId }).id;
+			const board = mutate(boardId, (cards, now, allocateId) => {
+				id = newCard(cards, now, allocateId, { title, status: "todo", ...(note ? { note } : {}), createdBy: agentId }).id;
 			});
 			return result(`Added ${id}.\n${formatBoardCompact(board)}`, board);
 		}
@@ -311,22 +436,22 @@ function childAction(role: ChildRole, params: BoardParams) {
 const ownCard = (boardId: string, agentId: string) => swarmBoards().boards.get(boardId)?.cards.find((card) => card.agentId === agentId);
 
 /** The tool both sides run: what a call may do follows from the calling session. */
-function execute(isOn: ((ctx: ExtensionContext) => boolean) | undefined, params: BoardParams, ctx: ExtensionContext) {
+async function execute(pi: ExtensionAPI | undefined, isOn: ((ctx: ExtensionContext) => boolean) | undefined, params: BoardParams, ctx: ExtensionContext) {
 	const role = childRole(ctx);
 	if (role) return childAction(role, params);
-	if (isOn && isCoordinator(ctx)) {
+	if (pi && isOn && isCoordinator(ctx)) {
 		if (!isOn(ctx)) throw new Error("Swarm mode is off in this session, so the swarm board is closed. The user turns it on with /swarm.");
-		return coordinatorAction(ctx.sessionManager.getSessionId(), params);
+		return coordinatorAction(pi, ctx.sessionManager.getSessionId(), params);
 	}
 	throw new Error("This session has no swarm board.");
 }
 
 const optionalText = (description: string) => Type.Optional(Type.String({ description }));
 
-const coordinatorTool = (isOn: (ctx: ExtensionContext) => boolean) => ({
+const coordinatorTool = (pi: ExtensionAPI, isOn: (ctx: ExtensionContext) => boolean) => ({
 	name: TOOL,
 	label: "Swarm Board",
-	description: "Kanban board you and your subagents share; agents you launch get cards automatically. list shows open cards and a settled summary (pass includeSettled: true for all); add a card (status defaults to todo); update id with title, status, note, or agentId (links a card to a launched agent); drop id; prune removes settled cards.",
+	description: "Kanban board you and your subagents share; agents you launch get cards automatically. list shows open cards and a settled summary (pass includeSettled: true for all); add a card (status defaults to todo); update id with title, status, note, or agentId (links a card to a launched agent); drop id cancels the card and stops any running linked agent; prune removes settled cards.",
 	parameters: Type.Object({
 		action: Type.Union([Type.Literal("list"), Type.Literal("add"), Type.Literal("update"), Type.Literal("drop"), Type.Literal("prune")]),
 		id: optionalText("Card id, as c3, for update and drop."),
@@ -337,7 +462,7 @@ const coordinatorTool = (isOn: (ctx: ExtensionContext) => boolean) => ({
 		includeSettled: Type.Optional(Type.Boolean({ description: "For list: include done, failed, and dropped cards." })),
 	}),
 	async execute(_id: string, params: BoardParams, _signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) {
-		return execute(isOn, params, ctx);
+		return execute(pi, isOn, params, ctx);
 	},
 });
 
@@ -353,11 +478,11 @@ const childTool = {
 		includeSettled: Type.Optional(Type.Boolean({ description: "For list: include done, failed, and dropped cards." })),
 	}),
 	async execute(_id: string, params: BoardParams, _signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) {
-		return execute(undefined, params, ctx);
+		return execute(undefined, undefined, params, ctx);
 	},
 };
 
-const GUIDANCE = "Read swarm_board before editing files another card may own; post progress with note, set blocked with the reason when you need the coordinator, and add todo cards for follow-up work you find instead of doing it.";
+const CHILD_SECTION = 'You are one of several agents sharing a swarm board with your coordinator. Call swarm_board with action "list" before editing files another card may own; post progress with note, set blocked with the reason when you need the coordinator, and add todo cards for follow-up work you find instead of doing it.';
 
 const isConversation = (entry: SessionEntry) => entry.type === "message"
 	? entry.message.role !== "system"
@@ -377,9 +502,7 @@ const childExtension: ExtensionFactory = (pi) => {
 		if (fixed?.type === "custom") section = (fixed.data as { section?: string } | undefined)?.section;
 		// A child that already talked without the section never gains one: that would rewrite its cached prefix.
 		else if (!ctx.sessionManager.getEntries().some(isConversation)) {
-			const card = ownCard(role.boardId, role.agentId);
-			const open = formatBoard(swarmBoards().boards.get(role.boardId), ["doing", "blocked", "todo"]);
-			section = `You are one of several agents sharing a swarm board with your coordinator. Your card: ${card?.id ?? "none yet (note creates it)"}.\nOpen cards:\n${open}\n${GUIDANCE}`;
+			section = CHILD_SECTION;
 		}
 	});
 
@@ -394,13 +517,23 @@ const childExtension: ExtensionFactory = (pi) => {
 	});
 };
 
-/** Load the board extension into every child session, replacing an earlier copy (a `/reload` makes a new one). */
-function installChildHook(): void {
+const childHookEntry = { name: HOOK_NAME, extensionFactory: childExtension };
+
+/** Keep the child-session hook registered iff at least one coordinator has swarm mode on or any board exists. */
+function syncChildHook(): void {
+	const registry = swarmBoards();
+	const active = registry.boards.size > 0 || [...coordinators()].some((instance) => instance.isActive());
 	const shared = globalThis as Record<symbol, unknown>;
 	let hooks = shared[CHILD_SESSION_HOOKS] as Set<{ name: string; extensionFactory: ExtensionFactory }> | undefined;
+	if (!active) {
+		if (hooks instanceof Set) {
+			for (const hook of [...hooks]) if (hook.name === HOOK_NAME) hooks.delete(hook);
+		}
+		return;
+	}
 	if (!(hooks instanceof Set)) shared[CHILD_SESSION_HOOKS] = hooks = new Set();
-	for (const hook of [...hooks]) if (hook.name === HOOK_NAME) hooks.delete(hook);
-	hooks.add({ name: HOOK_NAME, extensionFactory: childExtension });
+	for (const hook of [...hooks]) if (hook.name === HOOK_NAME && hook !== childHookEntry) hooks.delete(hook);
+	hooks.add(childHookEntry);
 }
 
 interface Telemetry {
@@ -429,15 +562,25 @@ function readBranch(ctx: ExtensionContext): SwarmBoard | undefined {
  * for the session's own subagents; and the child-session hook that gives those subagents a restricted board.
  */
 export function registerBoard(pi: ExtensionAPI, isOn: (ctx: ExtensionContext) => boolean): void {
-	installChildHook();
 	// Registered at load in every session, so the tool set never changes mid-session; calls check the session's role.
-	pi.registerTool(coordinatorTool(isOn));
+	pi.registerTool(coordinatorTool(pi, isOn));
 
 	let current: ExtensionContext | undefined;
 	let sessionId: string | undefined;
 	/** `updatedAt` of the board this session last persisted or restored. */
 	let persisted: number | undefined;
 	let timer: ReturnType<typeof setTimeout> | undefined;
+
+	const instance: CoordinatorInstance = {
+		isActive: () => {
+			if (current === undefined) return false;
+			try { return isOn(current); } catch { return false; }
+		},
+	};
+
+	const onModeChange = () => {
+		syncChildHook();
+	};
 
 	function flush(): void {
 		if (timer) clearTimeout(timer);
@@ -461,18 +604,29 @@ export function registerBoard(pi: ExtensionAPI, isOn: (ctx: ExtensionContext) =>
 		if (timer) clearTimeout(timer);
 		timer = undefined;
 		current = undefined;
-		if (!isCoordinator(ctx)) return;
+		if (!isCoordinator(ctx)) {
+			coordinators().delete(instance);
+			unsubscribeModeListener(onModeChange);
+			syncChildHook();
+			return;
+		}
 		current = ctx;
 		const id = ctx.sessionManager.getSessionId();
 		if (sessionId !== undefined && sessionId !== id) swarmBoards().boards.delete(sessionId);
 		sessionId = id;
 		swarmBoards().listeners.add(listener);
+		coordinators().add(instance);
+		sessionModes().listeners.add(onModeChange);
 		const saved = readBranch(ctx);
 		const live = swarmBoards().boards.get(id);
-		if (!saved && !live) return;
+		if (!saved && !live) {
+			syncChildHook();
+			return;
+		}
 		// The registry may hold a later board than this branch (`/tree`): the branch wins, under a later `updatedAt`.
 		// A branch without a snapshot has an empty board. Either way the branch already says it, so nothing is written.
-		const board: SwarmBoard = { version: 1, sessionId: id, updatedAt: nextTime(live), cards: saved?.cards ?? [] };
+		const cards = saved?.cards ?? [];
+		const board: SwarmBoard = { version: 1, sessionId: id, updatedAt: nextTime(live), cards, nextId: initialNextId(saved) };
 		persisted = board.updatedAt;
 		publish(board);
 	}
@@ -484,11 +638,13 @@ export function registerBoard(pi: ExtensionAPI, isOn: (ctx: ExtensionContext) =>
 	pi.on("session_tree", async (event, ctx) => restore(event, ctx));
 
 	pi.on("before_agent_start", async (_event, ctx) => {
-		if (!isCoordinator(ctx) || !isOn(ctx)) return undefined;
+		if (!isCoordinator(ctx)) return undefined;
+		syncChildHook();
+		if (!isOn(ctx)) return undefined;
 		// Children launched during the run find their coordinator's board, even an empty one.
 		const id = ctx.sessionManager.getSessionId();
 		if (!swarmBoards().boards.has(id)) {
-			const board: SwarmBoard = { version: 1, sessionId: id, updatedAt: nextTime(undefined), cards: [] };
+			const board: SwarmBoard = { version: 1, sessionId: id, updatedAt: nextTime(undefined), cards: [], nextId: 1 };
 			persisted = board.updatedAt;
 			publish(board);
 		}
@@ -507,8 +663,11 @@ export function registerBoard(pi: ExtensionAPI, isOn: (ctx: ExtensionContext) =>
 			swarmBoards().boards.delete(sessionId);
 			for (const [child, board] of members()) if (board === sessionId) members().delete(child);
 		}
+		coordinators().delete(instance);
+		unsubscribeModeListener(onModeChange);
 		current = undefined;
 		sessionId = undefined;
+		syncChildHook();
 	});
 
 	pi.events.on("subagents:telemetry", (data) => {
@@ -520,6 +679,21 @@ export function registerBoard(pi: ExtensionAPI, isOn: (ctx: ExtensionContext) =>
 		const parent = telemetry.parentSessionId;
 		if (!parent || (parent !== sessionId && members().get(parent) !== sessionId)) return;
 		trackAgent(sessionId, telemetry);
+	});
+
+	pi.events.on("subagents:steered", (data) => {
+		const ctx = current;
+		const id = (data as { id?: unknown } | null | undefined)?.id;
+		if (!ctx || sessionId === undefined || !isOn(ctx) || typeof id !== "string" || !id) return;
+		const board = swarmBoards().boards.get(sessionId);
+		const card = board?.cards.find((candidate) => candidate.agentId === id && candidate.status === "blocked");
+		if (!card) return;
+		mutate(sessionId, (cards, now) => {
+			const target = cards.find((candidate) => candidate.id === card.id && candidate.status === "blocked");
+			if (!target) return;
+			delete target.note;
+			Object.assign(target, { status: "doing", updatedBy: COORDINATOR, updatedAt: now });
+		});
 	});
 }
 
@@ -534,10 +708,14 @@ function trackAgent(sessionId: string, telemetry: Telemetry): void {
 	const card = board?.cards.find((candidate) => candidate.agentId === telemetry.agentId);
 	if (telemetry.phase === "started") {
 		if (card && (card.status === "doing" || card.status === "dropped")) return;
-		mutate(sessionId, (cards, now) => {
+		mutate(sessionId, (cards, now, allocateId) => {
 			const linked = cards.find((candidate) => candidate.agentId === telemetry.agentId);
-			if (linked) Object.assign(linked, { status: "doing", updatedBy: COORDINATOR, updatedAt: now });
-			else newCard(cards, now, { title: oneLine(telemetry.description || telemetry.type), status: "doing", agentId: telemetry.agentId, agent: telemetry.type, createdBy: COORDINATOR });
+			if (linked) {
+				if (linked.status === "blocked") delete linked.note;
+				Object.assign(linked, { status: "doing", updatedBy: COORDINATOR, updatedAt: now });
+			} else {
+				newCard(cards, now, allocateId, { title: formatTitle(telemetry.description || telemetry.type), status: "doing", agentId: telemetry.agentId, agent: telemetry.type, createdBy: COORDINATOR });
+			}
 		});
 		return;
 	}

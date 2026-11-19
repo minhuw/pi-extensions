@@ -272,7 +272,7 @@ describe("stall detection", () => {
 		await waitFor(() => h.requests.length === 2);
 		await h.session.waitForIdle();
 		const text = stallText([{ agentId: "a1", type: "worker", description: "task a1", idleMs: STALL_MS + 60_000 }]);
-		expect(text).toBe('Swarm mode: a background agent has run no tool and reported nothing for a while: a1 (worker, "task a1", idle 11 min). Check each with get_subagent_result, redirect it with steer_subagent, or stop and relaunch it.');
+		expect(text).toBe('Swarm mode: a background agent has run no tool and reported nothing for a while: a1 (worker, "task a1", idle 11 min). Check each with get_subagent_result (pass verbose: true to inspect progress; do not pass wait: true), redirect it with steer_subagent, or drop its card on swarm_board to stop and relaunch it.');
 		expect(h.requests[1]!.conversation.map(textOf).at(-1)).toBe(text);
 		expect(h.coachEntries().map(({ display }) => display)).toEqual([false]);
 

@@ -46,7 +46,7 @@ export const stallText = (agents: readonly StalledAgent[]) => {
 			? "been stuck in a tool call with no telemetry for a while"
 			: "stalled with no telemetry for a while";
 	return `Swarm mode: ${subject} ${reason}: ${list}. `
-		+ "Check each with get_subagent_result, redirect it with steer_subagent, or stop and relaunch it.";
+		+ "Check each with get_subagent_result (pass verbose: true to inspect progress; do not pass wait: true), redirect it with steer_subagent, or drop its card on swarm_board to stop and relaunch it.";
 };
 
 /** A swarm board card a subagent marked blocked. */
