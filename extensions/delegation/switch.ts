@@ -23,6 +23,12 @@ export interface ModeSpec {
 	defaults?: { read(ctx?: ExtensionContext): Promise<boolean>; write(on: boolean): Promise<void> };
 	/** Called with the branch's state at session start and `/tree`, and with each switch, in eligible sessions only. */
 	onState?: (ctx: ExtensionContext, active: boolean) => void;
+	/** Optional subcommands handled under `/<name> <key> [args]`. */
+	subcommands?: Record<string, (args: string, ctx: ExtensionContext, active: boolean) => Promise<void> | void>;
+	/** Extra usage segment inserted before `default [on | off]`, e.g. `"board [clear]"`. */
+	usageExtra?: string;
+	/** Custom footer status text; defaults to `active ? mode.status : undefined`. */
+	formatStatus?: (ctx: ExtensionContext, active: boolean) => string | undefined;
 }
 
 /** The pin, written once at a branch's first run, or a switch. */
@@ -56,7 +62,10 @@ function isEligible(ctx: ExtensionContext): boolean {
  */
 export function registerMode(pi: ExtensionAPI, mode: ModeSpec): (ctx: ExtensionContext) => boolean {
 	const { name, notes, defaults } = mode;
-	const usage = `Usage: /${name} [on | off | status${defaults ? " | default [on | off]" : ""}]`;
+	const usageParts = ["on", "off", "status"];
+	if (mode.usageExtra) usageParts.push(mode.usageExtra);
+	if (defaults) usageParts.push("default [on | off]");
+	const usage = `Usage: /${name} [${usageParts.join(" | ")}]`;
 	/** The configured default, read at each session start and before a session's first run. */
 	let configured = false;
 	const refreshDefault = async () => { if (defaults) configured = await defaults.read(); };
@@ -113,7 +122,8 @@ export function registerMode(pi: ExtensionAPI, mode: ModeSpec): (ctx: ExtensionC
 	}
 
 	function setStatus(ctx: ExtensionContext, active: boolean): void {
-		try { ctx.ui.setStatus(name, active ? mode.status : undefined); } catch {}
+		const text = mode.formatStatus ? mode.formatStatus(ctx, active) : (active ? mode.status : undefined);
+		try { ctx.ui.setStatus(name, text); } catch {}
 	}
 
 	function writePin({ base, active }: ModeState, ctx: ExtensionContext): void {
@@ -185,6 +195,15 @@ export function registerMode(pi: ExtensionAPI, mode: ModeSpec): (ctx: ExtensionC
 			if (action === "status") {
 				ctx.ui.notify(active ? notes.isOn : notes.isOff, "info");
 				return;
+			}
+			if (mode.subcommands) {
+				for (const [key, handler] of Object.entries(mode.subcommands)) {
+					if (action === key || action.startsWith(`${key} `)) {
+						const rest = action.slice(key.length).trim();
+						await handler(rest, ctx, active);
+						return;
+					}
+				}
 			}
 			if (!["", "on", "off"].includes(action)) {
 				ctx.ui.notify(usage, "warning");

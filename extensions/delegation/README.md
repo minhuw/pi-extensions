@@ -6,6 +6,7 @@ The collection loads this extension automatically; use `/reload` after installin
 
 ```text
 /swarm [on | off | status]   toggle, set, or show swarm mode for this session
+/swarm board [clear]         show the swarm board, or clear settled cards
 /swarm default [on | off]    show or set the default for new sessions
 ```
 
@@ -31,14 +32,15 @@ The extension lists each session with swarm mode on in a registry other extensio
 
 While swarm mode is on, `coach.ts` sends hidden `swarm-coach` messages:
 
-- **Context.** Once the context is half full, it asks the model to delegate the remaining work to background agents and keep only their summaries. It joins a request the run makes anyway, never starts a turn, and repeats only after a compaction.
-- **Stalled agents.** It follows the session's own top-level agents through pi-subagents' `subagents:telemetry` events. An agent is stalled when it is running, has no active tool, and has sent no telemetry for 10 minutes. The coach sends one message naming the stalled agents (id, type, description, minutes idle) and asking the model to check, steer, or relaunch them. The message starts a turn in an idle session and steers a running one. It names an agent again only after new telemetry from it; completed agents are forgotten.
+- **Context.** Once the context is half full, it asks the model to delegate the remaining work to background agents and keep only their summaries. It joins a request the run makes anyway, never starts a turn, and repeats only after a compaction or `/tree` branch switch.
+- **Stalled agents.** It follows the session's own top-level agents through pi-subagents' `subagents:telemetry` events. An agent is stalled when it is running and has sent no telemetry for 10 minutes with no active tool, or for 25 minutes while stuck in an active tool call. The coach sends one message naming the stalled agents (id, type, description, idle time, and any active tool) and asking the model to check, steer, or relaunch them. The message starts a turn in an idle session and steers a running one. It names an agent again only after new telemetry from it; completed agents are forgotten.
+- **Blocked cards.** It watches the session's swarm board and wakes or steers the coordinator when a subagent marks a card `blocked` (or updates its blocker note), once per card and note.
 
 ## Board
 
-While swarm mode is on, the session and its subagents share a kanban board through the `swarm_board` tool. The session's model lists, adds, updates, and drops cards, and links one to a launched agent with `agentId`. Agents get cards on their own: an agent that starts opens a `doing` card titled after its description. An agent that finishes moves its card to `done`, or to `failed` after an error, abort, or stop. A card the coordinator marked `blocked` stays blocked when its agent ends normally, and cards already done, failed, or dropped are left alone. Off swarm mode the tool refuses.
+While swarm mode is on, the session and its subagents share a kanban board through the `swarm_board` tool. The session's model lists, adds, updates, drops, and prunes settled cards, and links a card to a launched agent with `agentId` (absorbing an unmodified auto-created card for that agent instead of colliding). By default, tool output shows open cards (`doing`, `blocked`, `todo`) plus a one-line summary of settled counts; pass `includeSettled: true` to `list` for the full history. Agents get cards on their own: an agent that starts opens a `doing` card titled after its description. An agent that finishes moves its card to `done`, or to `failed` after an error, abort, or stop. A card the coordinator marked `blocked` stays blocked when its agent ends normally, and cards already done, failed, or dropped are left alone. Off swarm mode the tool refuses.
 
-Subagents get the board through the child-session hook, and only subagents of a session that has one. Each sees a short system prompt section at its first run: the open cards, its own card, and the rule to read the board before editing files another card may own. A subagent can list the board, post progress on its own card with `note` (`doing`, or `blocked` with the reason when it needs the coordinator), and `add` `todo` cards for follow-up work it finds. It cannot drop or retitle cards or touch other agents' cards. Nested subagents share their root session's board. Herder steps get no board, and neither do agents whose `extensions:` leave out `swarm-board`, such as `recon`.
+Subagents get the board through the child-session hook (and replace the coordinator tool with the restricted child tool when Delegation itself loads into a child), and only subagents of a session that has one. Each sees a short system prompt section at its first run: the open cards, its own card, and the rule to read the board before editing files another card may own. A subagent can list the board, post progress on its own card with `note` (`doing`, or `blocked` with the reason when it needs the coordinator), and `add` `todo` cards for follow-up work it finds. It cannot drop or retitle cards or touch other agents' cards. Nested subagents share their root session's board. Herder steps get no board, and neither do agents whose `extensions:` leave out `swarm-board`, such as `recon`.
 
 The session stores the board as `swarm-board` entries, writing a snapshot after its own changes and, batched, after its subagents' changes. The board survives `/reload` and resuming, and follows the branch on `/tree` and forks. Other extensions in the Pi process read live boards in `globalThis[Symbol.for("pi-extensions.swarm-boards")]` (contract in `board.ts`), which [pika](../pika/README.md) uploads and shows in a room's Board view.
 
@@ -57,6 +59,6 @@ Appending a message leaves Magpie's cached prefix intact; changing a section wou
 - The state is stored in the session file, so it survives `/reload` and resuming. `/tree` and forks take the state of the point they land on.
 - Subagents, Herder steps, and print and JSON modes are not affected; `/swarm` only warns there.
 
-While swarm mode is on, [Statusline Footer](../statusline-footer/README.md) shows `🐝 swarm` in its bar, just before the compaction count.
+While swarm mode is on, [Statusline Footer](../statusline-footer/README.md) shows `🐝 swarm` in its bar (or `🐝 swarm · N blocked` while `N` board cards are blocked), just before the compaction count.
 
 Run `npm run test:delegation` for offline tests that drive real Pi sessions on a local faux provider and check what the provider receives.

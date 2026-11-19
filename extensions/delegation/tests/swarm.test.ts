@@ -10,6 +10,7 @@ import {
 	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
 	type CreateAgentSessionRuntimeFactory, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
+import { formatBoard, swarmBoards, type SwarmBoard, type SwarmCard } from "../board.ts";
 
 // Load by path, as Pi does.
 const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
@@ -27,7 +28,7 @@ const OFF_MESSAGE = "Swarm mode is off. Ignore earlier swarm mode instructions: 
 const SECTION = `<swarm>\n${ON_MESSAGE} A later swarm mode message overrides this.\n</swarm>`;
 const ON_NOTE = "Swarm mode 🐝 on: the model runs long tasks in background agents and ends its turns, so it answers you and relay messages meanwhile. Takes effect with the next prompt; usage may increase.";
 const OFF_NOTE = "Swarm mode off. Takes effect with the next prompt.";
-const USAGE = "Usage: /swarm [on | off | status | default [on | off]]";
+const USAGE = "Usage: /swarm [on | off | status | board [clear] | default [on | off]]";
 const INELIGIBLE = "/swarm works only in top-level TUI and RPC sessions.";
 const SESSION_MODES = Symbol.for("pi-extensions.session-modes");
 
@@ -908,5 +909,142 @@ describe("the footer status", () => {
 		expect(h.entries()).toEqual([{ active: true }, { base: true }, { active: false }]);
 		expect(afterPrompt(await h.run("two"), "two")).toEqual([OFF_MESSAGE]);
 		expect(h.errors).toEqual([]);
+	});
+
+	it("shows blocked card count live when swarm mode is on and stays cleared when off", async () => {
+		const h = await start();
+		const publish = (cards: SwarmCard[]) => {
+			const registry = swarmBoards();
+			const prev = registry.boards.get(h.sessionId);
+			const board: SwarmBoard = {
+				version: 1,
+				sessionId: h.sessionId,
+				updatedAt: Math.max(Date.now(), (prev?.updatedAt ?? 0) + 1),
+				cards,
+			};
+			registry.boards.set(h.sessionId, board);
+			for (const listener of [...registry.listeners]) listener(board);
+		};
+		const card = (id: string, status: SwarmCard["status"]): SwarmCard => ({
+			id,
+			title: `Task ${id}`,
+			status,
+			createdBy: "coordinator",
+			updatedBy: "coordinator",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+
+		// Off by default in test helper (default is false)
+		expect(h.status).toBeUndefined();
+		publish([card("c1", "blocked")]);
+		expect(h.status).toBeUndefined();
+
+		// Turn swarm on: picks up existing blocked card immediately
+		await h.command("/swarm on");
+		expect(h.status).toBe("🐝 swarm · 1 blocked");
+
+		// Second blocked card appears live
+		publish([card("c1", "blocked"), card("c2", "blocked")]);
+		expect(h.status).toBe("🐝 swarm · 2 blocked");
+
+		// Unblocked -> reverts to base status
+		publish([card("c1", "doing"), card("c2", "done")]);
+		expect(h.status).toBe(STATUS);
+
+		// Turn off -> cleared even if blocked cards appear
+		await h.command("/swarm off");
+		expect(h.status).toBeUndefined();
+		publish([card("c1", "blocked")]);
+		expect(h.status).toBeUndefined();
+	});
+});
+
+describe("/swarm board", () => {
+	const makeCard = (id: string, status: SwarmCard["status"]): SwarmCard => ({
+		id,
+		title: `Task ${id}`,
+		status,
+		createdBy: "coordinator",
+		updatedBy: "coordinator",
+		createdAt: 1,
+		updatedAt: 1,
+	});
+
+	it("shows off+empty note when swarm is off and board has no cards, and formatted board otherwise", async () => {
+		const h = await start();
+		await h.command("/swarm board");
+		expect(h.lastNote).toEqual({
+			message: "Swarm mode is off and the swarm board has no cards.",
+			type: "info",
+		});
+
+		await h.command("/swarm on");
+		await h.command("/swarm board");
+		expect(h.lastNote).toEqual({
+			message: formatBoard(undefined),
+			type: "info",
+		});
+
+		const board: SwarmBoard = {
+			version: 1,
+			sessionId: h.sessionId,
+			updatedAt: Date.now(),
+			cards: [makeCard("c1", "doing"), makeCard("c2", "blocked")],
+		};
+		swarmBoards().boards.set(h.sessionId, board);
+		await h.command("/swarm board");
+		expect(h.lastNote).toEqual({
+			message: formatBoard(board),
+			type: "info",
+		});
+	});
+
+	it("clears settled cards while preserving open cards, notifies listeners, and reports when nothing to clear", async () => {
+		const h = await start();
+		await h.command("/swarm on");
+
+		await h.command("/swarm board clear");
+		expect(h.lastNote).toEqual({ message: "No settled cards to clear.", type: "info" });
+
+		const initial: SwarmBoard = {
+			version: 1,
+			sessionId: h.sessionId,
+			updatedAt: 100,
+			cards: [
+				makeCard("c1", "todo"),
+				makeCard("c2", "doing"),
+				makeCard("c3", "blocked"),
+				makeCard("c4", "done"),
+				makeCard("c5", "failed"),
+				makeCard("c6", "dropped"),
+			],
+		};
+		swarmBoards().boards.set(h.sessionId, initial);
+
+		const seen: SwarmBoard[] = [];
+		const listener = (b: SwarmBoard) => { if (b.sessionId === h.sessionId) seen.push(b); };
+		swarmBoards().listeners.add(listener);
+		try {
+			await h.command("/swarm board clear");
+			expect(h.lastNote).toEqual({ message: "Cleared 3 settled cards.", type: "info" });
+			const updated = swarmBoards().boards.get(h.sessionId);
+			expect(updated).toBeDefined();
+			expect(updated!.updatedAt).toBeGreaterThan(initial.updatedAt);
+			expect(updated!.cards.map((c) => c.id)).toEqual(["c1", "c2", "c3"]);
+			expect(seen).toHaveLength(1);
+			expect(seen[0]).toBe(updated);
+
+			await h.command("/swarm board clear");
+			expect(h.lastNote).toEqual({ message: "No settled cards to clear.", type: "info" });
+		} finally {
+			swarmBoards().listeners.delete(listener);
+		}
+	});
+
+	it("warns with usage on invalid /swarm board arguments", async () => {
+		const h = await start();
+		await h.command("/swarm board invalid");
+		expect(h.lastNote).toEqual({ message: USAGE, type: "warning" });
 	});
 });

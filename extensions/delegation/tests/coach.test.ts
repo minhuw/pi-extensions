@@ -10,7 +10,8 @@ import {
 	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
 	type CreateAgentSessionRuntimeFactory, type ExtensionAPI, type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
-import { COACH, contextText, registerCoach, stallText } from "../coach.ts";
+import { blockedText, COACH, contextText, registerCoach, stallText } from "../coach.ts";
+import type { SwarmBoard, SwarmBoards, SwarmCard } from "../board.ts";
 import { registerSwarm } from "../swarm.ts";
 
 // Load by path, as Pi does.
@@ -89,6 +90,20 @@ function quietUi() {
 
 const SUBAGENTS_TELEMETRY = "subagents:telemetry";
 const STALL_MS = 10 * 60_000;
+const ACTIVE_TOOL_STALL_MS = 25 * 60_000;
+const BOARDS = Symbol.for("pi-extensions.swarm-boards");
+
+function getBoardRegistry(): SwarmBoards {
+	const global = globalThis as Record<symbol, SwarmBoards | undefined>;
+	return (global[BOARDS] ??= { version: 1, boards: new Map(), listeners: new Set() });
+}
+
+function publishBoard(sessionId: string, cards: SwarmCard[]): void {
+	const registry = getBoardRegistry();
+	const board: SwarmBoard = { version: 1, sessionId, updatedAt: Date.now(), cards };
+	registry.boards.set(sessionId, board);
+	for (const listener of registry.listeners) listener(board);
+}
 
 /**
  * A session with the extension loaded by path, or, with `clock`, with swarm mode and a coach built here on a clock the
@@ -212,6 +227,23 @@ describe("the context nudge", () => {
 		expect((await h.run(filler(COACH.contextShare + 5), calls("edit"), "done")).flatMap(coachTexts)).toEqual([]);
 		expect(h.coachEntries()).toEqual([]);
 	});
+
+	it("re-arms the context nudge after navigating the session tree", async () => {
+		const h = await start();
+		await h.run("start", "ok");
+		const startLeafId = h.session.sessionManager.getLeafId()!;
+
+		const big = filler(COACH.contextShare);
+		expect(nudges(await h.run(big, calls("edit"), "done"), big).map((texts) => texts.length)).toEqual([0, 1]);
+		expect(h.coachEntries()).toHaveLength(1);
+
+		await h.session.navigateTree(startLeafId, { summarize: false });
+		expect(h.coachEntries()).toHaveLength(0);
+
+		expect(nudges(await h.run(big, calls("edit"), "done"), big).map((texts) => texts.length)).toEqual([0, 1]);
+		expect(h.coachEntries()).toHaveLength(1);
+		expect(h.errors).toEqual([]);
+	});
 });
 
 describe("stall detection", () => {
@@ -244,11 +276,32 @@ describe("stall detection", () => {
 		expect(h.requests[1]!.conversation.map(textOf).at(-1)).toBe(text);
 		expect(h.coachEntries().map(({ display }) => display)).toEqual([false]);
 
-		clock.now += STALL_MS * 3;
+		clock.now += STALL_MS;
 		await settle();
 		expect(h.requests).toHaveLength(2);
 		expect(h.coachEntries()).toHaveLength(1);
 		expect(h.errors).toEqual([]);
+	});
+
+	it("wakes an idle session for an agent stuck in an active tool after activeToolStallMs", async () => {
+		const { h, clock } = await idle();
+		h.reply("checking");
+		h.emit("a1", { activeTools: ["bash"] });
+		clock.now += ACTIVE_TOOL_STALL_MS - 1;
+		await settle();
+		expect(h.coachEntries()).toEqual([]);
+		clock.now += 1;
+		await waitFor(() => h.requests.length === 2);
+		await h.session.waitForIdle();
+		const text = stallText([{ agentId: "a1", type: "worker", description: "task a1", idleMs: ACTIVE_TOOL_STALL_MS, activeTools: ["bash"] }]);
+		expect(text).toContain("running bash for 25 min");
+		expect(text).toContain("stuck in a tool call");
+		expect(h.requests[1]!.conversation.map(textOf).at(-1)).toBe(text);
+
+		clock.now += ACTIVE_TOOL_STALL_MS;
+		await settle();
+		expect(h.requests).toHaveLength(2);
+		expect(h.coachEntries()).toHaveLength(1);
 	});
 
 	it("names every agent stalled at once in one message", async () => {
@@ -343,6 +396,95 @@ describe("stall detection", () => {
 	});
 });
 
+describe("blocked card alerts", () => {
+	const card = (id: string, overrides: Partial<SwarmCard> = {}): SwarmCard => ({
+		id, title: `task ${id}`, status: "blocked", agent: "worker", agentId: "a1", note: "need API key",
+		createdBy: "coordinator", updatedBy: "a1", createdAt: 1, updatedAt: 2, ...overrides,
+	});
+	const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
+	async function waitFor(condition: () => boolean) {
+		for (let tries = 0; tries < 200 && !condition(); tries++) await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(condition()).toBe(true);
+	}
+
+	it("wakes an idle session once when a subagent marks a card blocked, and re-alerts on note change or re-block", async () => {
+		const h = await start();
+		await h.run("start", "ok");
+		const sessionId = h.session.sessionManager.getSessionId();
+
+		h.reply("unblocking", "unblocking again", "unblocking third");
+		publishBoard(sessionId, [card("c1")]);
+		await waitFor(() => h.requests.length === 2);
+		await h.session.waitForIdle();
+
+		const expected = blockedText([{ id: "c1", title: "task c1", agent: "worker", agentId: "a1", note: "need API key" }]);
+		expect(h.requests[1]!.conversation.map(textOf).at(-1)).toBe(expected);
+		expect(h.coachEntries().map(({ display }) => display)).toEqual([false]);
+
+		// Same card and note does not re-alert.
+		publishBoard(sessionId, [card("c1")]);
+		await settle();
+		expect(h.requests).toHaveLength(2);
+
+		// Updated note re-alerts.
+		publishBoard(sessionId, [card("c1", { note: "still waiting on schema" })]);
+		await waitFor(() => h.requests.length === 3);
+		await h.session.waitForIdle();
+		expect(h.requests[2]!.conversation.map(textOf).at(-1)).toBe(
+			blockedText([{ id: "c1", title: "task c1", agent: "worker", agentId: "a1", note: "still waiting on schema" }]),
+		);
+
+		// Leaving blocked and returning to blocked with the same note re-alerts.
+		publishBoard(sessionId, [card("c1", { status: "doing", note: "resumed" })]);
+		await settle();
+		publishBoard(sessionId, [card("c1", { note: "still waiting on schema" })]);
+		await waitFor(() => h.requests.length === 4);
+		await h.session.waitForIdle();
+		expect(h.coachEntries()).toHaveLength(3);
+		expect(h.errors).toEqual([]);
+	});
+
+	it("ignores coordinator-blocked cards, other sessions, and swarm-off sessions", async () => {
+		const h = await start();
+		await h.run("start", "ok");
+		const sessionId = h.session.sessionManager.getSessionId();
+
+		publishBoard(sessionId, [card("c1", { updatedBy: "coordinator" })]);
+		publishBoard("other-session", [card("c2")]);
+		await settle();
+		expect(h.coachEntries()).toEqual([]);
+
+		await h.command("/swarm off");
+		publishBoard(sessionId, [card("c3")]);
+		await settle();
+		expect(h.coachEntries()).toEqual([]);
+		expect(h.requests).toHaveLength(1);
+	});
+
+	it("seeds already-blocked cards on session_tree and removes its listener on shutdown", async () => {
+		const h = await start({ clock: { now: 1_000 } });
+		await h.run("start", "ok");
+		const startLeafId = h.session.sessionManager.getLeafId()!;
+		const sessionId = h.session.sessionManager.getSessionId();
+
+		await h.command("/swarm off");
+		publishBoard(sessionId, [card("c1")]);
+		await settle();
+		expect(h.coachEntries()).toEqual([]);
+
+		// Navigating back to startLeafId re-enables swarm mode and seeds c1 as already known.
+		await h.session.navigateTree(startLeafId, { summarize: false });
+		publishBoard(sessionId, [card("c1")]);
+		await settle();
+		expect(h.coachEntries()).toEqual([]);
+
+		const listenersBefore = getBoardRegistry().listeners.size;
+		await h.dispose();
+		started.splice(started.indexOf(h), 1);
+		expect(getBoardRegistry().listeners.size).toBeLessThan(listenersBefore);
+	});
+});
+
 it("leaves swarm's own messages unchanged", async () => {
 	const h = await start();
 	await h.command("/swarm off");
@@ -354,5 +496,5 @@ it("leaves swarm's own messages unchanged", async () => {
 	await h.run("three", "ok");
 	expect(h.swarmMessages().map((text) => (text as string).split(/[:.]/)[0])).toEqual(["Swarm mode 🐝 is on", "Swarm mode is off"]);
 	expect(h.coachEntries()).toEqual([]);
-	expect(COACH).toEqual({ contextShare: 50, stallMs: 10 * 60_000, checkMs: 60_000 });
+	expect(COACH).toEqual({ contextShare: 50, stallMs: 10 * 60_000, activeToolStallMs: 25 * 60_000, checkMs: 60_000 });
 });

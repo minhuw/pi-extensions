@@ -9,7 +9,7 @@ import {
 	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
 	type CreateAgentSessionRuntimeFactory, type ExtensionAPI, type ExtensionContext, type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
-import { registerBoard, type SwarmBoard, type SwarmBoards } from "../board.ts";
+import { formatBoardCompact, pruneSettled, registerBoard, type SwarmBoard, type SwarmBoards } from "../board.ts";
 
 const BOARDS = Symbol.for("pi-extensions.swarm-boards");
 const HOOKS = Symbol.for("pi-extensions.child-session-hooks");
@@ -108,7 +108,7 @@ async function start(options: StartOptions = {}) {
 			return requests.at(-1)!;
 		},
 		/** Have the model call swarm_board once and return the tool's result. */
-		async call(args: Record<string, string>) {
+		async call(args: Record<string, string | boolean>) {
 			harness.faux.setResponses([
 				respond(harness, () => fauxAssistantMessage(fauxToolCall("swarm_board", args))),
 				respond(harness, () => fauxAssistantMessage("ok")),
@@ -169,13 +169,74 @@ describe("coordinator", () => {
 			{ id: "c2", title: "Docs", status: "doing", note: "draft", createdBy: "coordinator", updatedBy: "coordinator" },
 			{ id: "c3", title: "Old", status: "dropped", createdBy: "coordinator", updatedBy: "coordinator" },
 		]));
-		expect((await h.call({ action: "list" })).text).toBe("doing:\n- c2 Docs — draft\nblocked:\n- c1 [a1] Parser — needs API\ndropped:\n- c3 Old");
+		expect((await h.call({ action: "list" })).text).toBe("doing:\n- c2 Docs — draft\nblocked:\n- c1 [a1] Parser — needs API\nsettled: 1 dropped");
+		expect((await h.call({ action: "list", includeSettled: true })).text).toBe("doing:\n- c2 Docs — draft\nblocked:\n- c1 [a1] Parser — needs API\ndropped:\n- c3 Old");
 		const missing = await h.call({ action: "update", id: "c9", status: "done" });
 		expect(missing).toEqual({ text: "No card c9 on the swarm board.", isError: true });
 		const taken = await h.call({ action: "update", id: "c2", agentId: "a1" });
 		expect(taken).toEqual({ text: "Agent a1 is already on card c1.", isError: true });
-		expect(await h.call({ action: "note", note: "mine" })).toEqual({ text: "Unknown action note: use list, add, update, or drop.", isError: true });
+		const noteRefused = await h.call({ action: "note", note: "mine" });
+		expect(noteRefused.isError).toBe(true);
+		expect(noteRefused.text).toContain("Validation failed");
 		expect(h.snapshots().at(-1)!.cards).toEqual(h.board!.cards);
+	});
+
+	it("absorbs an unmodified auto-created card when linking agentId on update or add, and normalizes blank optional args", async () => {
+		const h = await start();
+		await h.call({ action: "add", title: "Planned task", agentId: "  " });
+		h.telemetry({ phase: "started", agentId: "a1", type: "worker", description: "Auto title" });
+		expect(h.board!.cards).toHaveLength(2);
+		// Linking c1 to a1 absorbs the bare auto-created c2, copying agent and adopting doing status.
+		const linked = await h.call({ action: "update", id: " c1 ", agentId: " a1 " });
+		expect(linked.isError).toBe(false);
+		expect(cards(h)).toEqual(strip([
+			{ id: "c1", title: "Planned task", status: "doing", agentId: "a1", agent: "worker", createdBy: "coordinator", updatedBy: "coordinator" },
+		]));
+
+		// add with agentId also absorbs an unmodified auto-created card, while respecting explicit status.
+		h.telemetry({ phase: "started", agentId: "a2", type: "recon", description: "Auto recon" });
+		expect((await h.call({ action: "add", title: "Explicit recon", status: "blocked", agentId: "a2", note: "waiting" })).isError).toBe(false);
+		expect(cards(h)!.find((c) => c.agentId === "a2")).toEqual(strip({
+			id: "c3", title: "Explicit recon", status: "blocked", agentId: "a2", agent: "recon", note: "waiting", createdBy: "coordinator", updatedBy: "coordinator",
+		}));
+		// Clearing note with empty string still works; blank id is rejected.
+		expect((await h.call({ action: "update", id: "c3", note: "" })).isError).toBe(false);
+		expect(cards(h)!.find((c) => c.id === "c3")!.note).toBeUndefined();
+		expect(await h.call({ action: "update", id: "   ", status: "done" })).toEqual({ text: "update needs a card id.", isError: true });
+
+		// Does not absorb a card that is blocked, dropped, has a note, or was touched by an agent.
+		expect(await h.call({ action: "add", title: "Clash blocked", agentId: "a2" })).toEqual({ text: "Agent a2 is already on card c3.", isError: true });
+		await h.call({ action: "update", id: "c1", note: "has progress" });
+		expect(await h.call({ action: "add", title: "Clash noted", agentId: "a1" })).toEqual({ text: "Agent a1 is already on card c1.", isError: true });
+	});
+
+	it("formats compactly by default and prunes settled cards without spurious mutations", async () => {
+		const h = await start();
+		expect(formatBoardCompact(undefined)).toBe("The swarm board has no cards.");
+		await h.call({ action: "add", title: "Open", status: "doing" });
+		await h.call({ action: "add", title: "Finished", status: "done" });
+		await h.call({ action: "add", title: "Errored", status: "failed" });
+		await h.call({ action: "add", title: "Skipped", status: "dropped" });
+		expect((await h.call({ action: "list" })).text).toBe("doing:\n- c1 Open\nsettled: 1 done, 1 failed, 1 dropped");
+		expect((await h.call({ action: "list", includeSettled: true })).text).toContain("done:\n- c2 Finished");
+
+		const pruned = await h.call({ action: "prune" });
+		expect(pruned.isError).toBe(false);
+		expect(pruned.text).toBe("Pruned 3 settled card(s).\ndoing:\n- c1 Open");
+		expect(h.board!.cards.map((c) => c.id)).toEqual(["c1"]);
+
+		// Second prune is a no-op and does not publish a new board.
+		const before = h.board!;
+		const noop = await h.call({ action: "prune" });
+		expect(noop.isError).toBe(false);
+		expect(noop.text).toBe("No settled cards to prune.\ndoing:\n- c1 Open");
+		expect(h.board).toBe(before);
+		expect(pruneSettled(h.sessionId)).toEqual({ removed: 0, board: before });
+
+		// Board with only settled cards shows "No open cards.\nsettled: ...".
+		await h.call({ action: "update", id: "c1", status: "done" });
+		expect((await h.call({ action: "list" })).text).toBe("No open cards.\nsettled: 1 done");
+		expect((await h.call({ action: "prune" })).text).toBe("Pruned 1 settled card(s).\nThe swarm board has no cards.");
 	});
 
 	it("persists each change as a snapshot and restores the latest when the session is reopened", async () => {
@@ -391,20 +452,33 @@ describe("children", () => {
 		await vi.waitFor(() => expect(coordinator.snapshots().at(-1)?.cards).toEqual(coordinator.board!.cards));
 	});
 
-	it("enforces the child's limits in code when Delegation's own wider tool serves the child", async () => {
+	it("gives a child loading Delegation the childTool schema (replacing coordinatorTool)", async () => {
 		const coordinator = await start();
 		coordinator.telemetry({ phase: "started", agentId: "a1", description: "Fix parser" });
 		await coordinator.call({ action: "add", title: "Docs" });
+		await coordinator.call({ action: "add", title: "Done work", status: "done" });
 		const child = await startChild(coordinator, { agentId: "a1" }, { delegation: true });
 		expect(child.tools().filter((name) => name === "swarm_board")).toHaveLength(1);
-		expect(await child.call({ action: "note", status: "done", note: "finished" })).toEqual({ text: "A subagent can set its own card only to doing or blocked; the coordinator settles cards.", isError: true });
-		expect(await child.call({ action: "add", title: "Sneaky", status: "doing" })).toEqual({ text: "A subagent can add only todo cards.", isError: true });
-		for (const action of ["drop", "update"]) {
-			const refused = await child.call({ action, id: "c2", title: "Renamed" });
-			expect(refused).toEqual({ text: `A subagent can only list, note on its own card, and add todo cards; ${action} is for the coordinator.`, isError: true });
+		for (const args of [
+			{ action: "note", status: "done", note: "finished" },
+			{ action: "drop", id: "c2" },
+			{ action: "update", id: "c2", title: "Renamed" },
+			{ action: "prune" },
+		] as Record<string, string | boolean>[]) {
+			const refused = await child.call(args);
+			expect(refused.isError).toBe(true);
+			expect(refused.text).toContain("Validation failed");
 		}
+		expect((await child.call({ action: "list" })).text).toContain("settled: 1 done");
+		expect((await child.call({ action: "list", includeSettled: true })).text).toContain("done:\n- c3 Done work");
 		expect((await child.call({ action: "note", note: "progress" })).isError).toBe(false);
-		expect(cards(coordinator)!.map((card) => [card.title, card.status, card.updatedBy])).toEqual([["Fix parser", "doing", "a1"], ["Docs", "todo", "coordinator"]]);
+		expect((await child.call({ action: "add", title: "Follow-up" })).isError).toBe(false);
+		expect(cards(coordinator)!.map((card) => [card.title, card.status, card.updatedBy])).toEqual([
+			["Fix parser", "doing", "a1"],
+			["Docs", "todo", "coordinator"],
+			["Done work", "done", "coordinator"],
+			["Follow-up", "todo", "a1"],
+		]);
 		expect(child.requests[0]!.system).toContain("Your card: c1.");
 	});
 

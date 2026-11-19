@@ -2,9 +2,12 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { formatBoard, pruneSettled, swarmBoards, type SwarmBoard } from "./board.ts";
 import { registerMode } from "./switch.ts";
 
 const NAME = "swarm";
+const STATUS = "🐝 swarm";
+const USAGE = "Usage: /swarm [on | off | status | board [clear] | default [on | off]]";
 const SESSION_MODES = Symbol.for("pi-extensions.session-modes");
 const ON_PREFIX = "Swarm mode 🐝 is on";
 const ON_TEXT = `${ON_PREFIX}: the user explicitly opts in to background agents, so this session stays free to answer them and other pi sessions that message it through pika relay, which reach it only between turns. `
@@ -84,16 +87,57 @@ function publish(sessionId: string, active: boolean): void {
 	}
 }
 
+function formatSwarmStatus(sessionId: string, active: boolean): string | undefined {
+	if (!active) return undefined;
+	const board = swarmBoards().boards.get(sessionId);
+	const blocked = board?.cards.filter((card) => card.status === "blocked").length ?? 0;
+	return blocked > 0 ? `${STATUS} · ${blocked} blocked` : STATUS;
+}
+
+function handleBoard(rest: string, ctx: ExtensionContext, active: boolean): void {
+	const sessionId = ctx.sessionManager.getSessionId();
+	const board = swarmBoards().boards.get(sessionId);
+	if (rest === "") {
+		if (!active && !board?.cards.length) {
+			ctx.ui.notify("Swarm mode is off and the swarm board has no cards.", "info");
+			return;
+		}
+		ctx.ui.notify(formatBoard(board), "info");
+		return;
+	}
+	if (rest === "clear") {
+		const { removed } = pruneSettled(sessionId);
+		if (removed === 0) {
+			ctx.ui.notify("No settled cards to clear.", "info");
+			return;
+		}
+		ctx.ui.notify(`Cleared ${removed} settled ${removed === 1 ? "card" : "cards"}.`, "info");
+		return;
+	}
+	ctx.ui.notify(USAGE, "warning");
+}
+
 /**
  * `/swarm`, on by default in fresh sessions: the session coordinates background agents and stays free for its user and
  * relay messages, published in the session modes registry for relay. Returns whether swarm mode applies to a context's
  * session and branch.
  */
 export function registerSwarm(pi: ExtensionAPI): (ctx: ExtensionContext) => boolean {
+	let currentCtx: ExtensionContext | undefined;
+	let currentActive = false;
+
+	const onBoard = (board: SwarmBoard) => {
+		if (!currentCtx || !currentActive) return;
+		try {
+			if (board.sessionId !== currentCtx.sessionManager.getSessionId()) return;
+			currentCtx.ui.setStatus(NAME, formatSwarmStatus(board.sessionId, currentActive));
+		} catch {}
+	};
+
 	const isSwarmOn = registerMode(pi, {
 		name: NAME,
-		description: "Toggle swarm mode 🐝, background agents so the session keeps answering: /swarm [on | off | status | default [on | off]]",
-		status: "🐝 swarm",
+		description: "Toggle swarm mode 🐝, background agents so the session keeps answering: /swarm [on | off | status | board [clear] | default [on | off]]",
+		status: STATUS,
 		onPrefix: ON_PREFIX,
 		onText: ON_TEXT,
 		offPrefix: OFF_PREFIX,
@@ -108,9 +152,22 @@ export function registerSwarm(pi: ExtensionAPI): (ctx: ExtensionContext) => bool
 			alreadyOff: "Swarm mode is already off.",
 		},
 		defaults: { read: readDefault, write: writeDefault },
-		onState: (ctx, active) => publish(ctx.sessionManager.getSessionId(), active),
+		usageExtra: "board [clear]",
+		subcommands: { board: handleBoard },
+		formatStatus: (ctx, active) => formatSwarmStatus(ctx.sessionManager.getSessionId(), active),
+		onState: (ctx, active) => {
+			currentCtx = ctx;
+			currentActive = active;
+			publish(ctx.sessionManager.getSessionId(), active);
+			swarmBoards().listeners.add(onBoard);
+		},
 	});
 	// Only eligible sessions are ever published, so any other has nothing to remove.
-	pi.on("session_shutdown", async (_event, ctx) => { publish(ctx.sessionManager.getSessionId(), false); });
+	pi.on("session_shutdown", async (_event, ctx) => {
+		swarmBoards().listeners.delete(onBoard);
+		currentCtx = undefined;
+		currentActive = false;
+		publish(ctx.sessionManager.getSessionId(), false);
+	});
 	return isSwarmOn;
 }
