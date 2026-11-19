@@ -651,7 +651,8 @@ describe("createWorkflowHost — abort, resume and gate", () => {
   });
 
   it("runs a gate through pi.exec in the child's own tree", async () => {
-    const exec = vi.fn(async () => execResult({ stdout: "3 passing" }));
+    const exec = vi.fn(async (_cmd: string, _args?: string[], _opts?: Record<string, unknown>) =>
+      execResult({ stdout: "3 passing" }));
     const host = createWorkflowHost({
       pi: { exec } as any,
       ctx: ctx({ cwd: "/session" }),
@@ -665,7 +666,7 @@ describe("createWorkflowHost — abort, resume and gate", () => {
   });
 
   it("falls back to the session's cwd when the child had no tree of its own", async () => {
-    const exec = vi.fn(async () => execResult());
+    const exec = vi.fn(async (_cmd: string, _args?: string[], _opts?: Record<string, unknown>) => execResult());
     const host = createWorkflowHost({
       pi: { exec } as any,
       ctx: ctx({ cwd: "/session" }),
@@ -1396,7 +1397,7 @@ describe("collisions with another extension", () => {
       },
     });
 
-  const warnings = (context: any) =>
+  const warnings = (context: any): string[] =>
     context.ui.notify.mock.calls.filter((c: any[]) => c[1] === "warning").map((c: any[]) => String(c[0]));
 
   it("warns when another extension already owns the tool name", async () => {

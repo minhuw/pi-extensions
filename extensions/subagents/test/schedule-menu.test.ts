@@ -25,7 +25,7 @@ import { showSchedulesMenu } from "../src/ui/schedule-menu.js";
 function makeCtx(opts: { pick?: (labels: string[]) => string | undefined; confirm?: boolean } = {}) {
   const notify = vi.fn();
   const select = vi.fn(async (_title: string, labels: string[]) => opts.pick?.(labels));
-  const confirm = vi.fn(async () => opts.confirm ?? true);
+  const confirm = vi.fn(async (_title: string, _message?: string) => opts.confirm ?? true);
   return { ctx: { ui: { select, confirm, notify } } as any, select, confirm, notify };
 }
 

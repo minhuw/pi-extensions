@@ -54,6 +54,9 @@ function makeRecord(): AgentRecord {
     type: TYPE,
     description: "Review this change",
     status: "running",
+    turnCount: 0,
+    activeTools: [],
+    responseText: "",
     toolUses: 0,
     startedAt: Date.now(),
     session: {
@@ -61,6 +64,7 @@ function makeRecord(): AgentRecord {
       subscribe: vi.fn(() => vi.fn()),
     } as unknown as AgentRecord["session"],
     lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+    ownUsage: { input: 0, output: 0, cacheWrite: 0 },
     compactionCount: 0,
   };
 }
@@ -71,7 +75,6 @@ function makeActivity(): AgentActivity {
     toolUses: 0,
     responseText: "",
     turnCount: 1,
-    lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
   };
 }
 

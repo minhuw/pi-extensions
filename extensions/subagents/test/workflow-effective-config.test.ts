@@ -98,7 +98,7 @@ describe("the workflow host reports a child's effective configuration", () => {
       ctx: ctx({ modelRegistry: { find: vi.fn(() => haiku), getAvailable: vi.fn(() => [haiku]) } }),
       manager,
     });
-    const reported: unknown[] = [];
+    const reported: Record<string, unknown>[] = [];
 
     // The user configuration is fuzzy; the row reports the effective model.
     await host.spawnAgent(spawnRequest({ agentType: "pinned", onResolved: configCollector(reported) }));

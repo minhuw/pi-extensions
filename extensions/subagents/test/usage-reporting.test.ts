@@ -179,7 +179,7 @@ describe("reporting subagent usage back to the parent session", () => {
 
     vi.mocked(resumeAgent).mockImplementation(async (_session: any, _prompt: any, opts: any) => {
       opts.onAssistantUsage?.({ input: 7, output: 3, cacheWrite: 0, cost: 0.002 });
-      return { text: "resumed" };
+      return { text: "resumed", aborted: false, steered: false };
     });
 
     const started = await tools.get("Agent").execute(
@@ -248,7 +248,7 @@ describe("reporting subagent usage back to the parent session", () => {
 
     vi.mocked(resumeAgent).mockImplementation(async (_session: any, _prompt: any, opts: any) => {
       opts.onAssistantUsage?.({ input: 7, output: 3, cacheWrite: 0, cost: 0.002 });
-      return { text: "resumed" };
+      return { text: "resumed", aborted: false, steered: false };
     });
 
     const id = pi.events.emit.mock.calls.find((c: any[]) => c[0] === "subagents:completed")?.[1]?.id;

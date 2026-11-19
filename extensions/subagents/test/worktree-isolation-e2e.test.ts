@@ -64,10 +64,10 @@ function toolResultNames(context: Context): string[] {
 }
 
 /** Every Agent tool result the parent session received, concatenated. */
-function agentResultText(session: Context): string {
+function agentResultText(session: { messages: ReadonlyArray<{ role: string }> }): string {
   return session.messages
     .filter((m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent")
-    .flatMap((m) => ((m.content ?? []) as Array<{ text?: string }>).map((b) => b.text ?? ""))
+    .flatMap((m) => (((m as { content?: unknown }).content ?? []) as Array<{ text?: string }>).map((b) => b.text ?? ""))
     .join("\n");
 }
 

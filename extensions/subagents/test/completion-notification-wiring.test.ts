@@ -46,7 +46,7 @@ function makePi() {
       },
       appendEntry: vi.fn(),
       sendMessage: vi.fn(),
-    } as never,
+    },
     tools,
     handlers,
   };
@@ -80,7 +80,7 @@ function completedRun() {
     session: { dispose: vi.fn() },
     aborted: false,
     steered: false,
-  } as Awaited<ReturnType<typeof runAgent>>;
+  } as unknown as Awaited<ReturnType<typeof runAgent>>;
 }
 
 async function spawnBackground(
@@ -113,7 +113,7 @@ describe("background completion notification wiring", () => {
     vi.mocked(runAgent).mockResolvedValue(completedRun());
 
     const { pi, tools, handlers } = makePi();
-    subagentsExtension(pi);
+    subagentsExtension(pi as never);
 
     await spawnBackground(tools.get("Agent")!, "individual-call", "individual child");
     await vi.advanceTimersByTimeAsync(200); // result-consumption hold
@@ -141,7 +141,7 @@ describe("background completion notification wiring", () => {
     });
 
     const { pi, tools, handlers } = makePi();
-    subagentsExtension(pi);
+    subagentsExtension(pi as never);
     const agentTool = tools.get("Agent")!;
 
     await Promise.all([
@@ -174,7 +174,7 @@ describe("background completion notification wiring", () => {
     vi.mocked(runAgent).mockResolvedValue(completedRun());
 
     const { pi, tools, handlers } = makePi();
-    subagentsExtension(pi);
+    subagentsExtension(pi as never);
     const agentTool = tools.get("Agent")!;
 
     await Promise.all([

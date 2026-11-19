@@ -201,7 +201,7 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
         if (spawned) {
           const id = /Agent ID:\s*(\S+)/.exec(spawned)?.[1];
           expect(id).toBeTruthy();
-          return fauxToolCall("get_subagent_result", { agent_id: id, wait: true });
+          return fauxToolCall("get_subagent_result", { agent_id: id!, wait: true });
         }
         return agentCall({
           subagent_type: "worker",

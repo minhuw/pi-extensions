@@ -152,7 +152,7 @@ describe("messaging a running agent", () => {
 
     const id = await spawnBackground(tools);
     await flush();
-    const record = rootManager()!.getRecord(id);
+    const record = rootManager()!.getRecord(id)!;
     record.resultConsumed = true;
 
     await send(lifecycle, "@recon keep going");
@@ -377,7 +377,7 @@ describe("resolving which agent a handle means", () => {
     const queuedId = await spawnBackground(tools);
     await flush();
 
-    const queued = managerRegistry().getRecord(queuedId);
+    const queued = managerRegistry().getRecord(queuedId)!;
     expect(queued.status).toBe("queued");
 
     expect(await send(lifecycle, "@recon-2 wait for me")).toEqual({ action: "handled" });
@@ -395,7 +395,7 @@ describe("resolving which agent a handle means", () => {
 
     const id = await spawnBackground(tools);
     await flush();
-    managerRegistry().getRecord(id).parentAgentId = "some-parent";
+    managerRegistry().getRecord(id)!.parentAgentId = "some-parent";
     vi.mocked(runAgent).mockClear();
 
     expect(await send(lifecycle, "@recon reach into a child")).toEqual({ action: "handled" });
@@ -413,7 +413,7 @@ describe("resolving which agent a handle means", () => {
 
     const id = await spawnBackground(tools);
     await flush();
-    managerRegistry().getRecord(id).resultConsumed = true;
+    managerRegistry().getRecord(id)!.resultConsumed = true;
     await lifecycle.get("session_before_switch")();
     expect(managerRegistry().getRecord(id)).toBeUndefined();
 
@@ -518,7 +518,7 @@ describe("mentioning an agent that has never run", () => {
 
     await send(lifecycle, "@recon go");
     const record = rootManager()!
-      .getRecord(vi.mocked(runAgent).mock.calls[0][3].agentId);
+      .getRecord(vi.mocked(runAgent).mock.calls[0][3].agentId!)!;
 
     expect(record.isBackground).toBe(true);
     expect(record.description).toBe("go");
@@ -1083,7 +1083,7 @@ describe("resuming an evicted agent by name", () => {
    */
   async function evict(id: string) {
     const manager = rootManager()!;
-    const record = manager.getRecord(id);
+    const record = manager.getRecord(id)!;
     record.sessionFile = sessionPath();
     writeFileSync(record.sessionFile, "");
     record.completedAt = Date.now() - 11 * 60_000;
@@ -1135,7 +1135,7 @@ describe("resuming an evicted agent by name", () => {
 
     const manager = rootManager()!;
     const resumedId = (vi.mocked(runAgent).mock.calls[0][3] as any).agentId;
-    expect(manager.getRecord(resumedId).handle).toBe("recon");
+    expect(manager.getRecord(resumedId)!.handle).toBe("recon");
   });
 
   it("stops resolving to the tombstone once the resume has taken the name", async () => {
@@ -1304,7 +1304,7 @@ describe("resuming an evicted agent by name", () => {
     // has on an agent the dispatcher spawned without returning anything.
     const resumedId = (vi.mocked(runAgent).mock.calls[0][3] as any).agentId;
     const manager = rootManager()!;
-    expect(manager.getRecord(resumedId).description).toBe("find flaky tests");
+    expect(manager.getRecord(resumedId)!.description).toBe("find flaky tests");
   });
 
   it("does not let the tools steer or read an agent that is gone", async () => {

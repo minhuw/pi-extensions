@@ -17,7 +17,7 @@
 // limit. Those are asserted directly.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentManager } from "../src/agent-manager.js";
+import { AgentManager, type OnAgentComplete } from "../src/agent-manager.js";
 
 vi.mock("../src/agent-runner.js", async () => ({
   ...await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js"),
@@ -78,12 +78,12 @@ const recordFor = (manager: AgentManager, prompt: string) =>
 
 describe("AgentManager.sendToBackground", () => {
   let manager: AgentManager;
-  let onComplete: ReturnType<typeof vi.fn>;
+  let onComplete: ReturnType<typeof vi.fn<OnAgentComplete>>;
 
   beforeEach(() => {
     vi.mocked(runAgent).mockClear();
     vi.mocked(resumeAgent).mockClear();
-    onComplete = vi.fn();
+    onComplete = vi.fn<OnAgentComplete>();
   });
 
   afterEach(async () => {

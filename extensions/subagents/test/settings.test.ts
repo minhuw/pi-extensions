@@ -716,6 +716,7 @@ describe("settings persistence", () => {
         setShowModel: vi.fn(),
         setPackageAgents: vi.fn(),
         setPackageWorkflows: vi.fn(),
+        setWorkflowsEnabled: vi.fn(),
       };
     });
 
@@ -1002,6 +1003,7 @@ describe("settings persistence", () => {
         setShowModel: vi.fn(),
         setPackageAgents: vi.fn(),
         setPackageWorkflows: vi.fn(),
+        setWorkflowsEnabled: vi.fn(),
       };
     });
 

@@ -53,8 +53,8 @@ function tui(rows = 40, columns = 120) {
 function session(messages: unknown[], extra: Record<string, ToolRenderers> = {}) {
   const cwd = process.cwd();
   const tools: Record<string, ToolRenderers> = {
-    bash: createBashToolDefinition(cwd),
-    edit: createEditToolDefinition(cwd),
+    bash: createBashToolDefinition(cwd) as unknown as ToolRenderers,
+    edit: createEditToolDefinition(cwd) as unknown as ToolRenderers,
     ...extra,
   };
   return {

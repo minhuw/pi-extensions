@@ -114,7 +114,8 @@ describe("usage", () => {
 
   describe("cost accumulation", () => {
     it("sums cost across messages but keeps it out of the token total", () => {
-      const usage = { input: 0, output: 0, cacheWrite: 0 };
+      const usage: { input: number; output: number; cacheWrite: number; cacheRead?: number; cost?: number } =
+        { input: 0, output: 0, cacheWrite: 0 };
       addUsage(usage, { input: 100, output: 50, cacheWrite: 10, cacheRead: 900, cost: 0.002 });
       addUsage(usage, { input: 200, output: 80, cacheWrite: 20, cacheRead: 1800, cost: 0.004 });
 

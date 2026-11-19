@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CompletionOutbox, NOTIFICATION_HOLD_MS, type OutboxItem } from "../src/completion-outbox.js";
+import { CompletionOutbox, NOTIFICATION_HOLD_MS, type OutboxItem, type OutboxMessage } from "../src/completion-outbox.js";
 import type { NotificationDetails } from "../src/types.js";
 
 function details(id: string, others?: NotificationDetails[]): NotificationDetails {
   return {
-    id, description: `task ${id}`, status: "completed", toolUses: 0, turnCount: 1,
+    id, type: "worker", displayName: "Worker", description: `task ${id}`, status: "completed", toolUses: 0, turnCount: 1,
     totalTokens: 0, durationMs: 1, resultPreview: "", ...(others ? { others } : {}),
   };
 }
@@ -14,13 +14,13 @@ const item = (id: string): OutboxItem => ({ ids: [id], build: () => message(id) 
 
 describe("CompletionOutbox", () => {
   let running: boolean;
-  let send: ReturnType<typeof vi.fn>;
+  let send: ReturnType<typeof vi.fn<(message: OutboxMessage) => void>>;
   let outbox: CompletionOutbox;
 
   beforeEach(() => {
     vi.useFakeTimers();
     running = false;
-    send = vi.fn();
+    send = vi.fn<(message: OutboxMessage) => void>();
     outbox = new CompletionOutbox(send, () => running);
   });
 
@@ -140,7 +140,7 @@ describe("CompletionOutbox", () => {
     outbox.onTurnEnd("stop");
     expect(send.mock.calls[0][0].details.executionId).toBe("run-a");
     expect(send.mock.calls[1][0].details.executionId).toBe("run-a");
-    expect(send.mock.calls[1][0].details.others[0].executionId).toBe("run-b");
+    expect(send.mock.calls[1][0].details.others![0].executionId).toBe("run-b");
   });
 
   it("keeps distinct executions, deduplicates pending pairs, and cancels only the consumed execution", () => {

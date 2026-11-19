@@ -75,7 +75,7 @@ describe("rowDescription", () => {
   });
 
   it("falls back to the agent's name when it has no description", () => {
-    expect(rowDescription("reviewer", { prompt: "p" } as AgentConfig)).toBe("reviewer");
+    expect(rowDescription("reviewer", { prompt: "p" } as unknown as AgentConfig)).toBe("reviewer");
     expect(rowDescription("reviewer", undefined)).toBe("reviewer");
   });
 });

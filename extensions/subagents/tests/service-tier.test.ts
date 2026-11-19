@@ -29,7 +29,7 @@ describe("local service tiers", () => {
   });
 
   it("pins each request after an asynchronous payload hook without losing options", async () => {
-    const base = vi.fn(() => "stream");
+    const base = vi.fn((..._args: unknown[]) => "stream");
     const session = { agent: { streamFunction: base } };
     applyServiceTier(session as any, "fast");
     const model = { api: "openai-responses" };

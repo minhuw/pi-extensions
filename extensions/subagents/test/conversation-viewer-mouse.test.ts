@@ -321,6 +321,7 @@ describe("observer input isolation in Pi's fullscreen renderer", () => {
       stop: vi.fn(), drainInput: async () => {}, write: vi.fn(),
       moveBy: vi.fn(), hideCursor: vi.fn(), showCursor: vi.fn(), clearLine: vi.fn(),
       clearFromCursor: vi.fn(), clearScreen: vi.fn(), setTitle: vi.fn(), setProgress: vi.fn(),
+      setProgramStatus: vi.fn(),
     };
     const openUrl = vi.fn();
     const copySelection = vi.fn(async () => true);

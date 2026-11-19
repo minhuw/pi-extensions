@@ -150,7 +150,7 @@ describe("Agent({ resume }) once the live record is gone", () => {
     const first = boot(branch);
     const res = await first.agent({ prompt: "Review the change.", run_in_background: false });
     const id = (res as any).details.agentId;
-    const transcript = first.manager.getRecord(id).outputFile;
+    const transcript = first.manager.getRecord(id)!.outputFile!;
     await first.lifecycle.get("session_shutdown")?.();
     delete (globalThis as any)[MANAGER_KEY];
 
@@ -168,12 +168,12 @@ describe("Agent({ resume }) once the live record is gone", () => {
     settleWith("OTHER", undefined);
     const { agent, manager } = boot(branch);
     const other = (await agent({ prompt: "Something else.", run_in_background: false }) as any).details.agentId;
-    expect(manager.getRecord(other).handle).toBe("recon");
+    expect(manager.getRecord(other)!.handle).toBe("recon");
 
     settleWith("RESUMED-RUN", sessionFile);
     await agent({ prompt: "Continue.", resume: id, run_in_background: false });
 
-    expect(manager.getRecord(id).handle).not.toBe("recon");
+    expect(manager.getRecord(id)!.handle).not.toBe("recon");
   });
 
   it("stays resumable after a reopen that failed before its session existed", async () => {

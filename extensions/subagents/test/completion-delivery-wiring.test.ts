@@ -70,7 +70,9 @@ function controllableRuns() {
     }) as any,
   );
   vi.mocked(resumeAgent).mockImplementation((_s: any, prompt: string) =>
-    new Promise(resolve => { finishers.set(prompt, () => resolve({ text: `${prompt} done` })); }),
+    new Promise(resolve => {
+      finishers.set(prompt, () => resolve({ text: `${prompt} done`, aborted: false, steered: false }));
+    }),
   );
   return { settle: (prompt: string) => finishers.get(prompt)!() };
 }
@@ -359,7 +361,7 @@ describe("`group` join mode — one notification per turn's batch", () => {
     const original = AgentManager.prototype.awaitStartup;
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    const spy = vi.spyOn(AgentManager.prototype, "awaitStartup").mockImplementation(function (id) {
+    const spy = vi.spyOn(AgentManager.prototype, "awaitStartup").mockImplementation(function (this: AgentManager, id) {
       const startup = original.call(this, id);
       return this.getRecord(id)?.description === "fast" ? startup.then(() => gate) : startup;
     });
@@ -399,7 +401,7 @@ describe("`group` join mode — one notification per turn's batch", () => {
     const original = AgentManager.prototype.resume;
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    const spy = vi.spyOn(AgentManager.prototype, "resume").mockImplementation(function (...args) {
+    const spy = vi.spyOn(AgentManager.prototype, "resume").mockImplementation(function (this: AgentManager, ...args) {
       const started = original.apply(this, args);
       return started.then(async record => { await gate; return record; });
     });

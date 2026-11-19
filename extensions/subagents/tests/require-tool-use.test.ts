@@ -162,7 +162,7 @@ describe("require_tool_use (real pi, faux model)", () => {
         }
         if (parentToolResults(context, "get_subagent_result").length > 0) return "parent done";
         agentId = /Agent ID: (\S+)/.exec(spawned[0]!)?.[1];
-        return fauxToolCall("get_subagent_result", { agent_id: agentId, wait: true }, { id: "call-get" });
+        return fauxToolCall("get_subagent_result", { agent_id: agentId!, wait: true }, { id: "call-get" });
       },
     });
 
@@ -193,15 +193,15 @@ describe("require_tool_use (real pi, faux model)", () => {
         }
         agentId ??= /Agent ID: (\S+)/.exec(spawned[0]!)?.[1];
         // Wait for the first run: a resume needs its settled session.
-        if (fetched.length === 0) return fauxToolCall("get_subagent_result", { agent_id: agentId, wait: true }, { id: "call-wait" });
+        if (fetched.length === 0) return fauxToolCall("get_subagent_result", { agent_id: agentId!, wait: true }, { id: "call-wait" });
         if (spawned.length === 1) {
           return fauxToolCall("Agent", {
             subagent_type: "worker", description: "follow up", prompt: "FOLLOW-UP: check again.",
-            resume: agentId, run_in_background: background,
+            resume: agentId!, run_in_background: background,
           }, { id: "call-resume" });
         }
         if (background && fetched.length === 1) {
-          return fauxToolCall("get_subagent_result", { agent_id: agentId, wait: true }, { id: "call-wait-2" });
+          return fauxToolCall("get_subagent_result", { agent_id: agentId!, wait: true }, { id: "call-wait-2" });
         }
         return "parent done";
       },

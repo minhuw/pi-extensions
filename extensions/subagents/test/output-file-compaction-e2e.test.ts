@@ -101,7 +101,7 @@ describe("output-file streaming across a real compaction (#145)", () => {
         compaction: { enabled: false, keepRecentTokens: 500 },
         retry: { enabled: false },
       }),
-    });
+    } as Parameters<typeof createAgentSession>[0]);
 
     const outPath = join(tmp, "agent.output");
     writeInitialEntry(outPath, "agent-145", "repro", cwd);
@@ -174,7 +174,7 @@ describe("output-file streaming across a real compaction (#145)", () => {
         resourceLoader: loader,
         sessionManager: SessionManager.inMemory(cwd),
         settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
-      });
+      } as Parameters<typeof createAgentSession>[0]);
 
       const outPath = join(tmp, "agent.output");
       writeInitialEntry(outPath, "agent-sys", "the spawn prompt", cwd);

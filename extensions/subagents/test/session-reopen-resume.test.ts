@@ -126,6 +126,7 @@ describe("session-transcript on-demand reader", () => {
       messageCount: 4,
       activeTools: [],
       lifetimeUsage: { input: 30, output: 25, cacheWrite: 0, cost: 0 },
+      ownUsage: { input: 30, output: 25, cacheWrite: 0, cost: 0 },
       compactionCount: 0,
     };
 

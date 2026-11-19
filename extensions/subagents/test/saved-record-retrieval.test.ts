@@ -220,7 +220,7 @@ describe("get_subagent_result falls back to the saved record", () => {
       return tools
         .get("Agent")
         .execute("tc-spawn", { prompt: "Review.", description: "Review", subagent_type: "recon", run_in_background: false }, undefined, undefined, context)
-        .then((res) => (res as any).details.agentId as string);
+        .then((res: any) => res.details.agentId as string);
     };
     await spawn("FIRST-RESULT");
     const second = await spawn("SECOND-RESULT");

@@ -109,7 +109,7 @@ describe("package-provided agents, wired through the extension", () => {
     writePiSettings("user", [makePackage()]);
     await boot(false);
     expect(getAllTypes()).not.toContain("pkg-researcher");
-    expect(listSavedWorkflows(env.dir).map(flow => flow.name)).not.toContain("pkg-flow");
+    expect(listSavedWorkflows(env.dir)).not.toContain("pkg-flow");
   });
 
   it("registers an agent from a package in pi's user settings", async () => {

@@ -154,6 +154,7 @@ import {
   parseExtSelectors,
   resolveDefaultModel,
   resolveEffectiveMaxTurns,
+  type RunOptions,
   resumeAgent,
   runAgent,
   SUBAGENT_TOOL_NAMES,
@@ -177,7 +178,7 @@ function createSession(finalText: string) {
       listeners.push(listener);
       return () => {};
     }),
-    prompt: vi.fn(async () => {
+    prompt: vi.fn(async (_text?: string, _options?: any) => {
       session.messages.push({
         role: "assistant",
         content: [{ type: "text", text: finalText }],
@@ -1224,7 +1225,7 @@ describe("agent-runner child-session hooks", () => {
   it("adds no link entry to a reopened session file", async () => {
     registerHook();
     const reopened = { kind: "reopened-session-manager", appendCustomEntry: vi.fn() };
-    sessionManagerOpen.mockReturnValueOnce(reopened);
+    sessionManagerOpen.mockReturnValueOnce(reopened as any);
     createAgentSession.mockResolvedValue({ session: createSession("OK").session });
 
     await runAgent(ctx, "recon", "carry on", { pi, resumeSessionFile: "/sessions/recon.jsonl" });

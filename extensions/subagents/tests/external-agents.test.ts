@@ -44,7 +44,7 @@ function publish(reg: ExternalAgentRegistry, agent: ExternalAgent | string) {
   for (const listener of reg.listeners) listener(id);
 }
 
-function agent(over: Partial<ExternalAgent> & { session?: FakeSession } = {}): ExternalAgent {
+function agent(over: Omit<Partial<ExternalAgent>, "session"> & { session?: FakeSession } = {}): ExternalAgent {
   return {
     id: "herder:run-1:impl-0:1@100", source: "herder", ownerSessionId: "session-a", group: "Herder run-1 · launch 2",
     name: "T1 · implement", role: "worker", description: "Implement the parser.", model: "gpt-x", thinking: "high",

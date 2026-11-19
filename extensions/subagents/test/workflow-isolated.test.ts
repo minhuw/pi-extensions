@@ -45,7 +45,7 @@ const spawnRequest = (overrides: Partial<WorkflowSpawnRequest> = {}): WorkflowSp
 
 /** The spawn options the manager handed to `runAgent` for the first child. */
 function runAgentOptions(): Record<string, unknown> {
-  return vi.mocked(runAgent).mock.calls[0]?.[3] as Record<string, unknown>;
+  return vi.mocked(runAgent).mock.calls[0]?.[3] as unknown as Record<string, unknown>;
 }
 
 describe("the workflow host forwards an agent's `isolated`", () => {

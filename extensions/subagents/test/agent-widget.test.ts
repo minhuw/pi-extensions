@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderRunningAgentStatus } from "../src/index.js";
-import type { WidgetMode } from "../src/types.js";
+import type { AgentInvocation, WidgetMode } from "../src/types.js";
 import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatCost, formatSessionTokens } from "../src/ui/agent-widget.js";
 
 describe("formatSessionTokens", () => {
@@ -79,7 +79,7 @@ describe("AgentWidget", () => {
       startedAt: Date.now(),
       lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       compactionCount: 0,
-      invocation: { modelName: "sonnet 4.6", modelId: "anthropic/claude-sonnet-4-6", thinking: "high" },
+      invocation: { modelName: "sonnet 4.6", modelId: "anthropic/claude-sonnet-4-6", thinking: "high" } as AgentInvocation,
       isBackground: opts.isBackground,
       parentAgentId: opts.parentAgentId,
       workflowId: opts.workflowId,
@@ -303,7 +303,7 @@ describe("AgentWidget cost display", () => {
       () => showCost,
     );
     let factory: any;
-    widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } } as any);
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } });
     widget.update();
     return factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render().join("\n");
   }
@@ -340,7 +340,7 @@ describe("AgentWidget cost display", () => {
       { listAgents: () => [finished] } as any, new Map(), () => "all", () => true,
     );
     let factory: any;
-    widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } } as any);
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } });
     widget.update();
     const out = factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render().join("\n");
 
@@ -361,7 +361,7 @@ describe("AgentWidget cost display", () => {
       { listAgents: () => [running] } as any, new Map(), () => "all", () => true,
     );
     let factory: any;
-    widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } } as any);
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } });
     widget.update();
     const out = factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render().join("\n");
 
@@ -380,7 +380,7 @@ describe("AgentWidget cost display", () => {
     } as AgentActivity]]);
     const widget = new AgentWidget({ listAgents: () => [agent] } as any, activity, () => "all");
     let factory: any;
-    widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } } as any);
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } });
     widget.update();
     expect(factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render().join("\n"))
       .not.toContain("$");
@@ -420,7 +420,7 @@ describe("AgentWidget overflow accounting", () => {
     } as AgentActivity]));
     const widget = new AgentWidget({ listAgents: () => agents } as any, activity, () => "all");
     let factory: any;
-    widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } } as any);
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } });
     widget.update();
     if (!factory) return [];
     return factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render();

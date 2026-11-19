@@ -368,7 +368,7 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     settingsManager: live
       ? SettingsManager.create(cwd, agentDir)
       : SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
-  });
+  } as Parameters<typeof createAgentSession>[0]);
   session.setSessionName("print-mode-host");
 
   // Binding fires session_start so the extension initializes and publishes its

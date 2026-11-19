@@ -20,7 +20,7 @@ vi.mock("../src/worktree.js", () => ({
   isWorktreeIsolationEnabled: vi.fn(() => true),
 }));
 
-import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import { type RunResult, resumeAgent, runAgent } from "../src/agent-runner.js";
 import { addUsage } from "../src/usage.js";
 import { createWorktree, isWorktreeIsolationEnabled } from "../src/worktree.js";
 
@@ -880,7 +880,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     vi.mocked(resumeMock).mockImplementation(async (_session, _prompt, opts: any) => {
       opts.onAssistantUsage?.({ input: 70, output: 30, cacheWrite: 5, cost: 0.007 });
       opts.onCompaction?.({ reason: "overflow", tokensBefore: 999 });
-      return { text: "second" };
+      return { text: "second", aborted: false, steered: false };
     });
 
     await manager.resume(id, "more");
@@ -1892,7 +1892,7 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
 
   it("an external stop still wins over a late failure resolution", async () => {
     manager = new AgentManager();
-    let resolveRun: ((v: unknown) => void) | undefined;
+    let resolveRun: ((v: RunResult) => void) | undefined;
     const session = mockSession();
     vi.mocked(runAgent).mockImplementation(() => new Promise((r) => { resolveRun = r; }));
 
@@ -1920,6 +1920,8 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
     vi.mocked(resumeMock).mockResolvedValue({
       text: "",
       failure: "retries exhausted on resume",
+      aborted: false,
+      steered: false,
     });
 
     await manager.resume(id, "more");
@@ -1940,6 +1942,8 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
     vi.mocked(resumeMock).mockResolvedValue({
       text: "new partial progress",
       failure: "provider died mid-turn",
+      aborted: false,
+      steered: false,
     });
 
     await manager.resume(id, "more");
@@ -2391,7 +2395,7 @@ describe("AgentManager — background resume", () => {
     onComplete.mockClear(); // drop the spawn's own completion
 
     // Deferred resumeAgent so we can observe the mid-flight state.
-    let finish!: (v: { text: string; failure?: string }) => void;
+    let finish!: (v: { text: string; failure?: string; aborted: boolean; steered: boolean }) => void;
     vi.mocked(resumeAgent).mockImplementation(
       () => new Promise((resolve) => { finish = resolve; }),
     );
@@ -2402,7 +2406,7 @@ describe("AgentManager — background resume", () => {
     expect(record?.promise).toBeDefined();
     expect(onComplete).not.toHaveBeenCalled();
 
-    finish({ text: "second" });
+    finish({ text: "second", aborted: false, steered: false });
     await record!.promise;
 
     expect(manager.getRecord(id)!.status).toBe("completed");
@@ -2439,7 +2443,7 @@ describe("AgentManager — background resume", () => {
     vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, opts: any) => {
       opts.onToolActivity?.({ type: "end", toolName: "grep" });
       opts.onAssistantUsage?.({ input: 5, output: 3, cacheWrite: 0, cost: 0 });
-      return { text: "ok" };
+      return { text: "ok", aborted: false, steered: false };
     });
 
     const record = await manager.resume(id, "go", undefined, {
@@ -2467,7 +2471,7 @@ describe("AgentManager — background resume", () => {
     vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, opts: any) => {
       opts.onToolActivity?.({ type: "end", toolName: "grep" });
       opts.onAssistantUsage?.({ input: 5, output: 3, cacheWrite: 0, cost: 0 });
-      return { text: "ok" };
+      return { text: "ok", aborted: false, steered: false };
     });
     const seen: { toolUses: number; output: number }[] = [];
     const read = () => {
@@ -2982,6 +2986,7 @@ describe("host-owned foreground controls", () => {
       }));
     try {
       const id = manager.spawn(mockPi, mockCtx, "worker", "owned", {
+        description: "owned",
         isBackground: false,
         signal: controller.signal,
         metadata: { owner: "herder", rootActionId: "action-1", planId: "plan-1" },
