@@ -1694,6 +1694,18 @@ export default function (pi: ExtensionAPI) {
   function getBackgroundByDefault(): boolean { return backgroundByDefault; }
   function setBackgroundByDefault(b: boolean) { backgroundByDefault = b; }
 
+  const SESSION_MODES_KEY = Symbol.for("pi-extensions.session-modes");
+  function isSwarmModeActive(ctx: ExtensionContext): boolean {
+    const sessionId = ctx.sessionManager?.getSessionId?.();
+    if (!sessionId) return false;
+    const registry = (globalThis as Record<symbol, unknown>)[SESSION_MODES_KEY] as
+      | { modes?: Map<string, Set<string>> }
+      | undefined;
+    if (typeof registry?.modes?.get !== "function") return false;
+    const modes = registry.modes.get(sessionId);
+    return typeof modes?.has === "function" && modes.has("swarm") === true;
+  }
+
   // Master switch for the schedule subagent feature. Defaults to enabled.
   // Read once at extension init (before tool registration) so the Agent tool's
   // param schema reflects the persisted setting. Runtime toggles via /agents
@@ -2448,7 +2460,7 @@ Terse command-style prompts produce shallow, generic work.
 
       const resolvedConfig = resolveAgentInvocationConfig(customConfig, { ...params, model: undefined }, {
         worktreeAllowed: isWorktreeIsolationEnabled(),
-        defaultRunInBackground: getBackgroundByDefault(),
+        defaultRunInBackground: getBackgroundByDefault() || isSwarmModeActive(ctx),
       });
 
       // Frontmatter wins; the already-normalized tool value fills the gap.

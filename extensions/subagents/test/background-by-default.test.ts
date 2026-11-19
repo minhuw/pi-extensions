@@ -114,3 +114,64 @@ describe("backgroundByDefault", () => {
     for (const out of outs) expect(out).not.toContain("queued");
   });
 });
+
+const SESSION_MODES_KEY = Symbol.for("pi-extensions.session-modes");
+
+describe("swarm mode background default", () => {
+  let env: Hermetic;
+  const g = globalThis as Record<symbol, unknown>;
+
+  beforeEach(() => {
+    env = hermeticDir();
+    delete g[SESSION_MODES_KEY];
+  });
+
+  afterEach(() => {
+    delete g[SESSION_MODES_KEY];
+    env.restore();
+    vi.clearAllMocks();
+  });
+
+  function setSessionModes(entries: Record<string, string[]>) {
+    g[SESSION_MODES_KEY] = {
+      modes: new Map(Object.entries(entries).map(([id, modes]) => [id, new Set(modes)])),
+      listeners: new Set(),
+    };
+  }
+
+  it("defaults omitted run_in_background to background when swarm mode is active on the session", async () => {
+    setSessionModes({ s1: ["swarm"] });
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    settled("THE-PAYLOAD");
+
+    const out = textOf(await spawn(tools));
+
+    expect(out).toContain("Agent ID:");
+    expect(out).not.toContain("THE-PAYLOAD");
+  });
+
+  it("still runs foreground when run_in_background is explicitly false in swarm mode", async () => {
+    setSessionModes({ s1: ["swarm"] });
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    settled("THE-PAYLOAD");
+
+    const out = textOf(await spawn(tools, { run_in_background: false }));
+
+    expect(out).toContain("THE-PAYLOAD");
+    expect(out).not.toContain("started in background");
+  });
+
+  it("does not affect this session when swarm mode is active only on a different session", async () => {
+    setSessionModes({ s2: ["swarm"] });
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    settled("THE-PAYLOAD");
+
+    const out = textOf(await spawn(tools));
+
+    expect(out).toContain("THE-PAYLOAD");
+    expect(out).not.toContain("started in background");
+  });
+});
