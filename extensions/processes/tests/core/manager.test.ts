@@ -2,7 +2,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createProcessManager } from "../../src/manager.ts";
 import type { ManagerOptions, ProcessEvent, ProcessManager, StartOptions } from "../../src/types.ts";
 
@@ -356,6 +356,127 @@ it("killAllSync SIGKILLs every live group", async () => {
 	expect(await gone(info.pid!)).toBe(true);
 	await sleep(200);
 	expect(manager.get(info.id)).toMatchObject({ status: "exited", signal: "SIGKILL" });
+});
+
+describe("error isolation", () => {
+	it("isolates throwing subscribers so later listeners and exit tracking complete without unhandled rejections", async () => {
+		const rejections: unknown[] = [];
+		const onRejection = (reason: unknown) => rejections.push(reason);
+		process.on("unhandledRejection", onRejection);
+		cleanups.push(() => {
+			process.off("unhandledRejection", onRejection);
+		});
+
+		const cwd = tempDir();
+		const manager = createProcessManager({ stateDir: path.join(cwd, "state"), shell: { shell: "/bin/sh", args: ["-c"] } });
+		cleanups.push(() => manager.shutdown());
+
+		let thrown = 0;
+		manager.subscribe(() => {
+			thrown++;
+			throw new Error("subscriber failure");
+		});
+		const received: ProcessEvent[] = [];
+		manager.subscribe((event) => received.push(event));
+
+		const { process: info } = await manager.start({ command: "echo hello; sleep 0.2; exit 0", cwd, owner: "test", ready: false });
+		const waitId = manager.wait(info.id, { until: "exit" });
+
+		const exit = await next(received, "exit");
+		const waitDone = await next(received, "wait_done", 5000, (event) => event.waitId === waitId);
+		expect(thrown).toBeGreaterThan(0);
+		expect(exit.process).toMatchObject({ id: info.id, status: "exited", exitCode: 0 });
+		expect(exit.tail).toEqual(["hello"]);
+		expect(waitDone.outcome).toBe("satisfied");
+		expect(manager.get(info.id)).toMatchObject({ status: "exited", exitCode: 0 });
+		await sleep(50);
+		expect(rejections).toEqual([]);
+	});
+
+	it("isolates track() errors during exit handling without unhandled rejections and lets stop() settle", async () => {
+		const rejections: unknown[] = [];
+		const onRejection = (reason: unknown) => rejections.push(reason);
+		process.on("unhandledRejection", onRejection);
+		cleanups.push(() => {
+			process.off("unhandledRejection", onRejection);
+		});
+
+		const { manager, start, events } = setup();
+		const { process: natural } = await start("echo before-unlink; sleep 0.3; exit 0", { ready: false });
+		const deadline = Date.now() + 2000;
+		while (manager.get(natural.id).logBytes === 0 && Date.now() < deadline) await sleep(25);
+		fs.unlinkSync(natural.logPath);
+		const waitId = manager.wait(natural.id, { until: "exit" });
+
+		const exit = await next(events, "exit", 5000, (event) => event.process.id === natural.id);
+		const waitDone = await next(events, "wait_done", 5000, (event) => event.waitId === waitId);
+		expect(exit.process).toMatchObject({ status: "exited", exitCode: 0 });
+		expect(exit.tail).toEqual([]);
+		expect(waitDone.outcome).toBe("satisfied");
+		expect((await manager.stop(natural.id)).outcome).toBe("already");
+
+		const { process: stopped } = await start("echo gone-before-stop; sleep 30", { ready: false });
+		const stopDeadline = Date.now() + 2000;
+		while (manager.get(stopped.id).logBytes === 0 && Date.now() < stopDeadline) await sleep(25);
+		fs.unlinkSync(stopped.logPath);
+		const result = await manager.stop(stopped.id, 300);
+		expect(result.process.status).toBe("stopped");
+		await sleep(50);
+		expect(rejections).toEqual([]);
+	});
+
+	it("ignores ENOENT races during startup sweep for vanishing run dirs and files", async () => {
+		const stateDir = path.join(tempDir(), "state");
+		const danglingDir = path.join(stateDir, "99999999-1");
+		const vanishingStatDir = path.join(stateDir, "99999999-2");
+		const vanishingReaddir = path.join(stateDir, "99999999-3");
+		const vanishingFileDir = path.join(stateDir, "99999999-4");
+		const freshDir = path.join(stateDir, "99999999-5");
+		for (const dir of [danglingDir, vanishingStatDir, vanishingReaddir, vanishingFileDir, freshDir]) {
+			fs.mkdirSync(dir, { recursive: true });
+		}
+		const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+		const danglingOwner = path.join(danglingDir, "owner.json");
+		fs.writeFileSync(danglingOwner, "{}\n");
+		fs.symlinkSync(path.join(stateDir, "missing-target"), path.join(danglingDir, "dangling.log"));
+		const vanishingFile = path.join(vanishingFileDir, "owner.json");
+		fs.writeFileSync(vanishingFile, "{}\n");
+		for (const target of [danglingOwner, danglingDir, vanishingStatDir, vanishingReaddir, vanishingFile, vanishingFileDir]) {
+			fs.utimesSync(target, old, old);
+		}
+
+		const realStatSync = fs.statSync;
+		const realReaddirSync = fs.readdirSync;
+		const statSpy = vi.spyOn(fs, "statSync").mockImplementation(((target: fs.PathLike, ...args: unknown[]) => {
+			const filePath = String(target);
+			if (filePath === vanishingStatDir && fs.existsSync(vanishingStatDir)) {
+				fs.rmSync(vanishingStatDir, { recursive: true, force: true });
+			} else if (filePath === vanishingFile && fs.existsSync(vanishingFile)) {
+				fs.unlinkSync(vanishingFile);
+			}
+			return Reflect.apply(realStatSync, fs, [target, ...args]);
+		}) as typeof fs.statSync);
+		const readdirSpy = vi.spyOn(fs, "readdirSync").mockImplementation(((target: fs.PathLike, ...args: unknown[]) => {
+			if (String(target) === vanishingReaddir && fs.existsSync(vanishingReaddir)) {
+				fs.rmSync(vanishingReaddir, { recursive: true, force: true });
+			}
+			return Reflect.apply(realReaddirSync, fs, [target, ...args]);
+		}) as typeof fs.readdirSync);
+		cleanups.push(() => {
+			statSpy.mockRestore();
+			readdirSpy.mockRestore();
+		});
+
+		const manager = createProcessManager({ stateDir, shell: { shell: "/bin/sh", args: ["-c"] } });
+		cleanups.push(() => manager.shutdown());
+		expect(fs.existsSync(danglingDir)).toBe(false);
+		expect(fs.existsSync(vanishingStatDir)).toBe(false);
+		expect(fs.existsSync(vanishingReaddir)).toBe(false);
+		expect(fs.existsSync(vanishingFileDir)).toBe(false);
+		expect(fs.existsSync(freshDir)).toBe(true);
+		const { process: info } = await manager.start({ command: "true", cwd: stateDir, owner: "test", ready: false });
+		expect(info.status).toBe("exited");
+	});
 });
 
 // Exercises the type import so a contract drift fails typecheck here too.

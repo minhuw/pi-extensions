@@ -104,11 +104,23 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 	const listeners = new Set<(event: ProcessEvent) => void>();
 
 	const emit = (event: ProcessEvent) => {
-		for (const listener of [...listeners]) listener(event);
+		for (const listener of [...listeners]) {
+			try {
+				listener(event);
+			} catch {
+				// Isolate listener failure so remaining listeners and exit tracking continue.
+			}
+		}
 	};
 	const snapshot = (record: ProcessRecord): ProcessInfo => ({ ...record.info, urls: [...record.info.urls] });
 	const changed = (record: ProcessRecord) => emit({ type: "changed", process: snapshot(record) });
-	const tail = (record: ProcessRecord) => record.log.read({ tail: TAIL_LINES, maxBytes: TAIL_BYTES }, true).lines;
+	const tail = (record: ProcessRecord) => {
+		try {
+			return record.log.read({ tail: TAIL_LINES, maxBytes: TAIL_BYTES }, true).lines;
+		} catch {
+			return [];
+		}
+	};
 	const live = () => [...records.values()].filter((record) => LIVE.has(record.info.status));
 	const current = (record: ProcessRecord, run: Run) => record.run === run && !run.exited;
 
@@ -202,7 +214,7 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 				if (current(record, run) && record.info.status === "starting") emit({ type: "ready_timeout", process: snapshot(record), tail: tail(record) });
 			}, plan.timeoutMs);
 		}
-		run.finished = track(record, run, exited, closed, splitters);
+		run.finished = track(record, run, exited, closed, splitters).catch(() => {});
 		changed(record);
 		await delay(START_SETTLE_MS);
 	}
@@ -210,24 +222,34 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 	async function track(record: ProcessRecord, run: Run, exited: Promise<[number | null, NodeJS.Signals | null]>, closed: Promise<void>, splitters: LineSplitter[]): Promise<void> {
 		const [code, signal] = await exited;
 		run.exited = true;
-		stopReadiness(run);
 		record.info.exitCode = code;
 		record.info.signal = signal;
-		const pgid = record.info.pid!;
-		// We own the group: nothing the shell left behind may outlive it.
-		const reap = (async () => {
-			await delay(LEFTOVER_PAUSE_MS);
-			if (!run.stopping && groupAlive(pgid)) await terminateGroup(pgid, LEFTOVER_GRACE_MS);
-		})();
 		let timer: NodeJS.Timeout | undefined;
-		await Promise.race([closed, new Promise<void>((resolve) => (timer = setTimeout(resolve, CLOSE_GRACE_MS)))]);
-		clearTimeout(timer);
-		await reap;
-		run.child.stdout!.destroy();
-		run.child.stderr!.destroy();
-		for (const splitter of splitters) for (const line of splitter.end()) handleLine(record, run, line);
-		record.log.close();
-		clearTimeout(run.errorTimer);
+		try {
+			stopReadiness(run);
+			const pgid = record.info.pid!;
+			// We own the group: nothing the shell left behind may outlive it.
+			const reap = (async () => {
+				await delay(LEFTOVER_PAUSE_MS);
+				if (!run.stopping && groupAlive(pgid)) await terminateGroup(pgid, LEFTOVER_GRACE_MS);
+			})().catch(() => {});
+			await Promise.race([closed, new Promise<void>((resolve) => (timer = setTimeout(resolve, CLOSE_GRACE_MS)))]);
+			clearTimeout(timer);
+			await reap;
+			run.child.stdout!.destroy();
+			run.child.stderr!.destroy();
+			for (const splitter of splitters) for (const line of splitter.end()) handleLine(record, run, line);
+		} catch {
+			// Isolate unexpected exit-handling errors so status, waits, and stop() settle cleanly.
+		} finally {
+			clearTimeout(timer);
+			clearTimeout(run.errorTimer);
+			try {
+				record.log.close();
+			} catch {
+				// Ignore close failure so exit status and notifications still settle.
+			}
+		}
 		if (run.errorLines.length) emitErrors(record, run);
 		const requested = run.stopping !== undefined;
 		record.info.status = requested ? "stopped" : "exited";
@@ -494,9 +516,37 @@ function sweep(stateDir: string, retentionMs: number): void {
 		const match = /^(\d+)-\d+$/.exec(entry.name);
 		if (!entry.isDirectory() || !match || pidAlive(Number(match[1]))) continue;
 		const dir = path.join(stateDir, entry.name);
-		const newest = Math.max(fs.statSync(dir).mtimeMs, ...fs.readdirSync(dir).map((file) => fs.statSync(path.join(dir, file)).mtimeMs));
-		if (Date.now() - newest > retentionMs) fs.rmSync(dir, { recursive: true, force: true });
+		let newest: number;
+		let files: string[];
+		try {
+			newest = fs.statSync(dir).mtimeMs;
+			files = fs.readdirSync(dir);
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			throw error;
+		}
+		for (const file of files) {
+			try {
+				const mtimeMs = fs.statSync(path.join(dir, file)).mtimeMs;
+				if (mtimeMs > newest) newest = mtimeMs;
+			} catch (error) {
+				if (isEnoent(error)) continue;
+				throw error;
+			}
+		}
+		if (Date.now() - newest > retentionMs) {
+			try {
+				fs.rmSync(dir, { recursive: true, force: true });
+			} catch (error) {
+				if (isEnoent(error)) continue;
+				throw error;
+			}
+		}
 	}
+}
+
+function isEnoent(error: unknown): boolean {
+	return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
 function pidAlive(pid: number): boolean {
