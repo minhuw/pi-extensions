@@ -12,7 +12,7 @@ import {
 	createAgentSessionFromServices, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { grants, publishGrant, repositoryOf, standingRegistry, withdrawGrant, type StandingApproval } from "../grants.ts";
-import { bashBlockReason, blockReason, registerGuard } from "../guard.ts";
+import { bashBlockReason, blockReason, guardRuntime, reasons, registerGuard } from "../guard.ts";
 import selfdriveExtension, { runtime as selfdriveRuntime } from "../index.ts";
 
 let root: string;
@@ -39,7 +39,9 @@ beforeAll(() => {
 	// A linked worktree checked out inside the checkout, as a worktree under .pi/workspaces/ or elsewhere would be.
 	git(repo, "worktree", "add", "-q", "--detach", join(repo, "nested-wt"), "HEAD");
 	mkdirSync(join(repo, ".pi", "workspaces", "side"), { recursive: true });
+	mkdirSync(join(repo, ".pi", "agents"), { recursive: true });
 	mkdirSync(join(repo, ".git", "herder", "runs", "r1", "wt"), { recursive: true });
+	mkdirSync(join(repo, ".git", "herder", "worktrees", "w1"), { recursive: true });
 	// A nested repository (a `.git` directory) and a submodule-like `.git` file both stay part of the checkout.
 	mkdirSync(join(repo, "vendor", "lib"), { recursive: true });
 	git(join(repo, "vendor", "lib"), "init", "-q");
@@ -77,6 +79,10 @@ describe("write and edit", () => {
 		["a path that climbs back in", "../repo/src/a.ts"],
 		["a nested repository", "vendor/lib/x.ts"],
 		["a submodule", "vendor/sub/x.ts"],
+		[".pi/settings.json inside checkout", ".pi/settings.json"],
+		[".pi/agents inside checkout", ".pi/agents/foo.md"],
+		[".pi/pika inside checkout", ".pi/pika/project.json"],
+		["a sibling directory prefixed with workspaces", ".pi/workspaces-other/file.ts"],
 	])("blocks %s inside the checkout", (_name, raw) => {
 		const path = raw.replace("REPO", repo).replace("ALIAS", alias).replace("FILEURL", pathToFileURL(join(repo, "src", "a.ts")).href);
 		for (const tool of ["write", "edit"]) {
@@ -89,7 +95,9 @@ describe("write and edit", () => {
 
 	it.each([
 		["the git dir, where Herder's worktrees live", ".git/herder/runs/r1/wt/src/a.ts"],
-		["a workspace under .pi/", ".pi/workspaces/side/notes.md"],
+		["a Herder worktree under .git/herder/worktrees/", ".git/herder/worktrees/w1/file.ts"],
+		["a workspace under .pi/workspaces/", ".pi/workspaces/side/notes.md"],
+		["a new workspace file under .pi/workspaces/", ".pi/workspaces/ws1/file.ts"],
 		["a linked worktree inside the checkout", "nested-wt/src/a.ts"],
 		["a symlink that leads out of the checkout", "link-out/x.txt"],
 		["another directory", "OUTSIDE/x.txt"],
@@ -253,7 +261,24 @@ describe("bash", () => {
 		["echo x > nested-wt/src/a.ts && cd nested-wt && git commit -am x", "repo", "allow"],
 		["git -C REPO/nested-wt commit -m x", "out", "allow"],
 		["git -C REPO/.git/herder/runs/r1/wt commit -m x", "out", "allow"],
+		["git -C REPO/.git/herder/worktrees/w1 commit -m x", "out", "allow"],
+		["GIT_DIR=REPO/.git/herder/worktrees/w1/.git GIT_WORK_TREE=REPO/.git/herder/worktrees/w1 git commit -m x", "out", "allow"],
+		["GIT_DIR=REPO/.git/worktrees/nested-wt GIT_WORK_TREE=REPO/nested-wt git commit -m x", "out", "allow"],
+		["GIT_DIR=REPO/.git git status", "out", "allow"],
+		["(export GIT_DIR=REPO/.git && git status) && git commit -m x", "out", "allow"],
+		["export GIT_DIR=REPO/.git && unset GIT_DIR && git commit -m x", "out", "allow"],
+		["export GIT_DIR=REPO/.git && env -u GIT_DIR git commit -m x", "out", "allow"],
+		["git config --get user.name", "repo", "allow"],
+		["git config --get core.hooksPath", "repo", "allow"],
+		["git config --list", "repo", "allow"],
+		["git config -l", "out", "allow"],
+		["git config get user.name", "out", "allow"],
+		["git config list", "out", "allow"],
+		["git config user.name Test", "out", "allow"],
+		["git -c user.name=Test status", "out", "allow"],
 		["cd .pi/workspaces/side && npm install", "repo", "allow"],
+		["echo x > .pi/workspaces/ws1/file.ts", "repo", "allow"],
+		["echo x > .git/herder/worktrees/w1/file.ts", "repo", "allow"],
 		["echo x > .git/herder/note", "repo", "allow"],
 		["echo x > link-out/file.txt", "repo", "allow"],
 		["find . -name '*.ts' -exec grep -l x {} +", "repo", "allow"],
@@ -269,10 +294,52 @@ describe("bash", () => {
 		["git -C REPO commit -m x", "out", "checkout"],
 		["git -C REPO/src checkout .", "out", "checkout"],
 		["git --work-tree=REPO checkout .", "out", "checkout"],
+		["GIT_DIR=REPO/.git git commit -m x", "out", "checkout"],
+		["GIT_WORK_TREE=REPO git checkout -- .", "out", "checkout"],
+		["git --git-dir=REPO/.git --work-tree=REPO reset --hard", "out", "checkout"],
+		["git --git-dir REPO/.git --work-tree REPO reset --hard", "out", "checkout"],
+		["env GIT_DIR=REPO/.git git commit -m x", "out", "checkout"],
+		["env GIT_WORK_TREE=REPO git checkout -- .", "out", "checkout"],
+		["export GIT_DIR=REPO/.git && git commit -m x", "out", "checkout"],
+		["export GIT_WORK_TREE=REPO && git reset --hard", "out", "checkout"],
+		["GIT_DIR=REPO/.git; export GIT_DIR; git commit -m x", "out", "checkout"],
+		["GIT_DIR=REPO/.git bash -c 'git commit -m x'", "out", "checkout"],
+		["GIT_DIR=ALIAS/.git git commit -m x", "out", "checkout"],
+		["GIT_DIR=REPO/.git/modules/sub git commit -m x", "out", "checkout"],
+		["git -C REPO/.git update-ref refs/heads/main HEAD", "out", "checkout"],
 		["cd REPO && git commit -m x", "out", "checkout"],
 		["cd ALIAS/src && git reset --hard", "out", "checkout"],
 		["bash -c 'cd REPO && git stash'", "out", "checkout"],
 		["bash <<'EOF'\ngit commit -m x\nEOF", "repo", "checkout"],
+		// Dangerous git config and -c / --config-env overrides, anywhere.
+		["git config alias.p '!sh -c id'", "out", "system"],
+		["git config --global core.hooksPath /tmp/h", "out", "system"],
+		["git config core.fsmonitor /tmp/evil", "out", "system"],
+		["git config core.sshCommand 'evil'", "out", "system"],
+		["git config include.path /tmp/cfg", "out", "system"],
+		["git config includeIf.gitdir:/tmp/.path /tmp/cfg", "out", "system"],
+		["git config INCLUDEIF.gitdir:/tmp/.path /tmp/cfg", "out", "system"],
+		["git config --unset core.hooksPath", "out", "system"],
+		["git config --unset-all alias.p", "out", "system"],
+		["git config --add core.fsmonitor /tmp/evil", "out", "system"],
+		["git config --replace-all include.path /tmp/cfg", "out", "system"],
+		["git config -f /tmp/cfg core.hooksPath /tmp/h", "out", "system"],
+		["git config set core.hooksPath /tmp/h", "out", "system"],
+		["git config unset alias.p", "out", "system"],
+		["git config --remove-section alias", "out", "system"],
+		["git config --rename-section core other", "out", "system"],
+		["git -c core.sshCommand=evil fetch", "out", "system"],
+		["git -c alias.x='!id' x", "out", "system"],
+		["git -c CORE.hooksPath=/tmp/h status", "out", "system"],
+		["git -c include.path=/tmp/cfg status", "out", "system"],
+		["git -c includeIf.gitdir:/tmp/.path=/tmp/cfg status", "out", "system"],
+		["git -ccore.editor=evil status", "out", "system"],
+		["git --config-env=core.sshCommand=MY_SSH fetch", "out", "system"],
+		["git --config-env core.hooksPath=MY_HOOKS status", "out", "system"],
+		// Narrowed .pi/ exemption: only .pi/workspaces/ is exempt.
+		["echo '{}' > .pi/settings.json", "repo", "checkout"],
+		["rm -f .pi/agents/foo.md", "repo", "checkout"],
+		["echo x > .pi/pika/project.json", "repo", "checkout"],
 		// Package installs in the checkout.
 		["npm install", "repo", "checkout"],
 		["npm ci", "repo", "checkout"],
@@ -340,9 +407,50 @@ describe("bash", () => {
 		expect(bashBlockReason("rm -f \"$HOME/selfdrive-guard-x\"", repo, [home])).toContain("would change your user's checkout");
 	});
 
-	it("survives commands that do not parse", () => {
-		expect(bashBlockReason("echo \"unterminated", repo, [repo])).toBeUndefined();
-		expect(bashBlockReason("if then fi )", repo, [repo])).toBeUndefined();
+	it("blocks GIT_DIR/GIT_WORK_TREE targeting the checkout even from a workspace or Herder worktree", () => {
+		const workspaceCwd = join(repo, ".pi", "workspaces", "side");
+		const herderCwd = join(repo, ".git", "herder", "worktrees", "w1");
+		for (const cwd of [outside, workspaceCwd, herderCwd]) {
+			expect(bashBlockReason(`GIT_DIR=${join(repo, ".git")} git commit -m x`, cwd, [repo])).toContain("would change your user's checkout");
+			expect(bashBlockReason(`GIT_WORK_TREE=${repo} git checkout -- .`, cwd, [repo])).toContain("would change your user's checkout");
+			expect(bashBlockReason(`git --git-dir=${join(repo, ".git")} --work-tree=${repo} reset --hard`, cwd, [repo])).toContain("would change your user's checkout");
+			expect(bashBlockReason("git -c core.sshCommand=evil fetch", cwd, [repo])).toContain("Blocked by self-driving mode:");
+			expect(bashBlockReason("git config alias.p '!sh -c id'", cwd, [repo])).toContain("Blocked by self-driving mode:");
+		}
+	});
+
+	it("fails closed on unparseable or malformed shell syntax", () => {
+		for (const bad of ["echo \"unterminated", "if then fi )", "echo $(if then fi)", "bash -c 'echo \"unterminated'"]) {
+			expect(bashBlockReason(bad, outside, [repo])).toBe(reasons.analysis);
+		}
+	});
+
+	it("fails closed when command analysis throws unexpectedly", () => {
+		const savedParse = guardRuntime.parse;
+		guardRuntime.parse = () => {
+			throw new Error("boom");
+		};
+		try {
+			expect(bashBlockReason("echo ok", outside, [repo])).toBe(reasons.analysis);
+		} finally {
+			guardRuntime.parse = savedParse;
+		}
+	});
+
+	it("fails closed when nested shell inspection exceeds depth 8", () => {
+		const sq = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
+		const nest = (inner: string, levels: number): string => {
+			let cmd = inner;
+			for (let i = 0; i < levels; i++) cmd = `bash -c ${sq(cmd)}`;
+			return cmd;
+		};
+		expect(bashBlockReason(nest("echo ok", 8), outside, [repo])).toBeUndefined();
+		expect(bashBlockReason(nest("git push", 8), outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason(nest("echo ok", 9), outside, [repo])).toBe(reasons.nesting);
+
+		// Also fail closed when depth is exceeded via stdin redirection into a local shell.
+		const nineWithStdin = nest("bash <<< 'echo ok'", 8);
+		expect(bashBlockReason(nineWithStdin, outside, [repo])).toBe(reasons.nesting);
 	});
 });
 

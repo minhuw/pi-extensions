@@ -7,8 +7,11 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { forEachChild, parse, type Command, type SyntaxNode, type Word } from "unbash";
+import { forEachChild, parse, type Assignment, type Command, type SyntaxNode } from "unbash";
 import { grants, type StandingApproval } from "./grants.ts";
+
+/** Runtime seams for tests. */
+export const guardRuntime = { parse };
 
 const BLOCKED = "Blocked by self-driving mode:";
 export const reasons = {
@@ -19,6 +22,8 @@ export const reasons = {
 		`${BLOCKED} ${what} leaves this machine, and that waits for your user. Leave the work in a verified Herder run and record it as proposed.`,
 	system: (what: string) =>
 		`${BLOCKED} ${what} needs privileges or another machine, or changes system settings. Record what is needed as a question for your user (selfdrive_task with needs).`,
+	analysis: `${BLOCKED} could not safely parse shell command under selfdrive standing approval.`,
+	nesting: `${BLOCKED} shell command exceeds maximum inspection nesting depth under selfdrive standing approval.`,
 };
 
 /** Registers the `tool_call` guard that holds while any standing grant exists in this process. */
@@ -36,16 +41,17 @@ export function blockReason(toolName: string, input: unknown, cwd: string, sessi
 	const args = (input ?? {}) as Record<string, unknown>;
 	if (toolName === "herder_deliver") return active.some((grant) => grant.id === sessionId) ? reasons.deliver : undefined;
 	const toplevels = [...new Set(active.map((grant) => canonical(grant.toplevel)))];
+	const commonDirs = [...new Set(active.map((grant) => canonical(grant.commonDir)))];
 	if (toolName === "write" || toolName === "edit") {
 		const raw = typeof args.path === "string" ? args.path : typeof args.file_path === "string" ? args.file_path : undefined;
 		const target = raw?.trim() ? resolveToolPath(raw, cwd) : undefined;
 		return target && insideCheckout(target, toplevels) ? reasons.checkout(`${toolName} ${target}`) : undefined;
 	}
-	if (toolName === "bash" && typeof args.command === "string" && args.command.trim()) return bashBlockReason(args.command, cwd, toplevels);
+	if (toolName === "bash" && typeof args.command === "string" && args.command.trim()) return bashBlockReason(args.command, cwd, toplevels, commonDirs);
 	if (toolName === "process_start" && typeof args.command === "string" && args.command.trim()) {
 		// The process runs in `cwd` relative to the session's, resolved the way the processes extension resolves it.
 		const dir = typeof args.cwd === "string" ? resolve(cwd, args.cwd.replace(/^@/, "")) : cwd;
-		return bashBlockReason(args.command, dir, toplevels);
+		return bashBlockReason(args.command, dir, toplevels, commonDirs);
 	}
 	return undefined;
 }
@@ -110,14 +116,47 @@ const within = (parent: string, child: string): string | undefined => {
 
 /**
  * True when the canonical `path` is in a grant's checkout: inside its top level, but not under its `.git/` (Herder's
- * worktrees live there) or `.pi/` (workspaces), and not in another git worktree checked out inside it.
+ * worktrees live there) or `.pi/workspaces/` (workspaces), and not in another git worktree checked out inside it.
  */
 export function insideCheckout(path: string, toplevels: string[]): boolean {
 	return toplevels.some((toplevel) => {
 		const rel = within(toplevel, path);
 		if (rel === undefined) return false;
-		const first = rel.split(sep)[0];
-		return first !== ".git" && first !== ".pi" && !inLinkedWorktree(toplevel, path);
+		const [first, second] = rel.split(sep);
+		if (first === ".git") return false;
+		if (first === ".pi" && second === "workspaces") return false;
+		return !inLinkedWorktree(toplevel, path);
+	});
+}
+
+function protectedGitDirsOf(toplevels: string[], commonDirs: string[]): string[] {
+	const dirs = new Set<string>(commonDirs.map((dir) => canonical(dir)));
+	for (const toplevel of toplevels) {
+		const dotGit = join(toplevel, ".git");
+		dirs.add(canonical(dotGit));
+		try {
+			if (lstatSync(dotGit).isFile()) {
+				const target = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, "utf8"))?.[1];
+				if (target) dirs.add(canonical(resolve(toplevel, target)));
+			}
+		} catch {
+			// No `.git` file at toplevel.
+		}
+	}
+	return [...dirs];
+}
+
+function inProtectedGitDir(path: string, gitDirs: string[]): boolean {
+	return gitDirs.some((gitDir) => {
+		const rel = within(gitDir, path);
+		if (rel === undefined) return false;
+		if (rel === "") return true;
+		const parts = rel.split(sep);
+		// Allow Herder's worktrees/runs under `<common-dir>/herder/{worktrees,runs}/...`
+		// and linked worktree gitdirs under `<common-dir>/worktrees/<name>`.
+		if (parts[0] === "herder" && (parts[1] === "worktrees" || parts[1] === "runs") && parts.length >= 3) return false;
+		if (parts[0] === "worktrees" && parts.length >= 2) return false;
+		return true;
 	});
 }
 
@@ -146,6 +185,7 @@ function inLinkedWorktree(toplevel: string, path: string): boolean {
 
 // ---- Bash ----
 
+const MAX_NESTING_DEPTH = 8;
 const LOCAL_SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
 const WRITE_REDIRECTS = new Set([">", ">>", ">|", "&>", "&>>", "<>", ">&"]);
 const PSEUDO_DEVICE = /^\/dev\/(?:null|stdin|stdout|stderr|tty|fd\/\d+|tcp\/.*|udp\/.*)$/;
@@ -156,6 +196,12 @@ const MUTATING_GIT = new Set([
 	"tag", "update-ref", "clean", "rm", "mv", "pull",
 ]);
 const GIT_OPTIONS_WITH_VALUE = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"]);
+const DANGEROUS_GIT_CONFIG_KEY = /^(?:alias|core|include|includeif)\./i;
+const DANGEROUS_GIT_CONFIG_SECTION = /^(?:alias|core|include|includeif)(?:\.|$)/i;
+const GIT_CONFIG_OPTIONS_WITH_VALUE = new Set(["-f", "--file", "--blob", "--type", "--default", "--value", "--comment"]);
+const GIT_CONFIG_READ_FLAGS = new Set(["--list", "-l", "--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool"]);
+const GIT_CONFIG_WRITE_FLAGS = new Set(["--add", "--replace-all", "--unset", "--unset-all"]);
+const GIT_CONFIG_SECTION_FLAGS = new Set(["--remove-section", "--rename-section"]);
 const PACKAGE_INSTALLS: Record<string, Set<string>> = {
 	npm: new Set(["install", "i", "in", "add", "ci", "clean-install", "ic", "install-clean", "isntall", "remove", "rm", "r", "un", "uninstall", "unlink", "update", "up", "upgrade", "dedupe", "prune", "link", "ln"]),
 	pnpm: new Set(["install", "i", "add", "remove", "rm", "uninstall", "un", "update", "up", "upgrade", "prune", "link", "unlink"]),
@@ -214,34 +260,77 @@ const optionValue = (args: string[], names: string[]): string | undefined => {
  * `insideCheckout`; the directory is the cwd as changed by `cd` and `git -C`), mutating git and package installs, and
  * file writes (`sed -i`, `perl -i`, redirections, `tee`, `rm`, `mv`, `cp`, `truncate`, …) whose targets are inside it.
  */
-export function bashBlockReason(command: string, cwd: string, toplevels: string[]): string | undefined {
+export function bashBlockReason(command: string, cwd: string, toplevels: string[], commonDirs: string[] = []): string | undefined {
 	const found: string[] = [];
+	const protectedGitDirs = protectedGitDirsOf(toplevels, commonDirs);
 	const inCheckout = (path: string): boolean => insideCheckout(path, toplevels);
+	const inGitCheckout = (path: string): boolean => inCheckout(path) || inProtectedGitDir(path, protectedGitDirs);
 	const at = (dir: string, word: string): string => canonical(resolve(dir, expandHome(word)));
 	let effectiveCwd = canonical(cwd);
 	let shellReadsStdin = false;
+	let stdinEnv: Map<string, string> | undefined;
+	let shellVars = new Map<string, string>();
+	let exportedEnv = new Map<string, string>();
 
 	const writes = (what: string, targets: string[], dir: string): void => {
 		const hit = targets.map((target) => at(dir, target)).find(inCheckout);
 		if (hit) found.push(reasons.checkout(`${what} ${hit}`));
 	};
 
-	const inspect = (all: string[], depth: number): void => {
+	const inspect = (all: string[], depth: number, prefixAssignments?: Map<string, string>): void => {
 		let words = all;
 		let dir = effectiveCwd;
+		const cmdEnv = new Map<string, string>(exportedEnv);
+		if (prefixAssignments) {
+			for (const [name, value] of prefixAssignments) cmdEnv.set(name, value);
+		}
 		// Wrappers that run the rest of the line as a command.
 		for (;;) {
 			const verb = words[0] === undefined ? undefined : basename(words[0]);
 			if (verb === undefined) return;
-			if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]!)) words = words.slice(1);
-			else if (verb === "env") {
+			if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]!)) {
+				const eq = words[0]!.indexOf("=");
+				cmdEnv.set(words[0]!.slice(0, eq), words[0]!.slice(eq + 1));
+				words = words.slice(1);
+			} else if (verb === "env") {
 				let i = 1;
+				let options = true;
 				for (; i < words.length; i++) {
 					const word = words[i]!;
-					if (word === "-C" || word === "--chdir") dir = at(dir, words[++i] ?? ".");
-					else if (word.startsWith("--chdir=")) dir = at(dir, word.slice("--chdir=".length));
-					else if (word === "-u" || word === "--unset" || word === "-S") i++;
-					else if (!word.startsWith("-") && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) break;
+					if (options && word === "--") {
+						options = false;
+						continue;
+					}
+					if (options && (word === "-i" || word === "--ignore-environment" || word === "-")) {
+						cmdEnv.clear();
+					} else if (options && (word === "-C" || word === "--chdir")) {
+						dir = at(dir, words[++i] ?? ".");
+					} else if (options && word.startsWith("--chdir=")) {
+						dir = at(dir, word.slice("--chdir=".length));
+					} else if (options && (word === "-u" || word === "--unset")) {
+						const name = words[++i];
+						if (name) cmdEnv.delete(name);
+					} else if (options && word.startsWith("--unset=")) {
+						cmdEnv.delete(word.slice("--unset=".length));
+					} else if (options && (word === "-S" || word.startsWith("--split-string="))) {
+						const split = word === "-S" ? (words[++i] ?? "") : word.slice("--split-string=".length);
+						const restAfter = words.slice(i + 1);
+						if (restAfter.length === 0) {
+							if (split) run(split, depth + 1, cmdEnv);
+							return;
+						}
+						for (const token of split.trim().split(/\s+/)) {
+							const eq = token.indexOf("=");
+							if (eq > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(token.slice(0, eq))) {
+								cmdEnv.set(token.slice(0, eq), token.slice(eq + 1));
+							}
+						}
+					} else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+						const eq = word.indexOf("=");
+						cmdEnv.set(word.slice(0, eq), word.slice(eq + 1));
+					} else if (!options || !word.startsWith("-")) {
+						break;
+					}
 				}
 				words = words.slice(i);
 			} else if (verb === "command" || verb === "builtin" || verb === "exec" || verb === "nohup" || verb === "time") {
@@ -271,7 +360,44 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 				const flag = args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg));
 				return flag >= 0 ? args.slice(flag + 1).find((arg) => !arg.startsWith("-")) : undefined;
 			})();
-			if (script && depth < 8) run(script, depth + 1);
+			if (script) run(script, depth + 1, cmdEnv);
+			return;
+		}
+
+		if (verb === "export" || ((verb === "declare" || verb === "typeset") && args.some((arg) => /^-[A-Za-z]*x[A-Za-z]*$/.test(arg)))) {
+			const unexport = verb === "export" && args.some((arg) => /^-[A-Za-z]*n[A-Za-z]*$/.test(arg));
+			let options = true;
+			for (const arg of args) {
+				if (options && arg === "--") {
+					options = false;
+					continue;
+				}
+				if (options && arg.startsWith("-")) continue;
+				const eq = arg.indexOf("=");
+				if (eq > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(arg.slice(0, eq))) {
+					const name = arg.slice(0, eq);
+					const val = arg.slice(eq + 1);
+					shellVars.set(name, val);
+					if (unexport) exportedEnv.delete(name);
+					else exportedEnv.set(name, val);
+				} else if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(arg)) {
+					if (unexport) exportedEnv.delete(arg);
+					else if (shellVars.has(arg)) exportedEnv.set(arg, shellVars.get(arg)!);
+				}
+			}
+			return;
+		}
+		if (verb === "unset") {
+			let options = true;
+			for (const arg of args) {
+				if (options && arg === "--") {
+					options = false;
+					continue;
+				}
+				if (options && arg.startsWith("-")) continue;
+				shellVars.delete(arg);
+				exportedEnv.delete(arg);
+			}
 			return;
 		}
 
@@ -282,19 +408,50 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 		}
 
 		if (verb === "git") {
-			let gitDir = dir;
+			let gitCwd = dir;
+			let gitDirOpt = cmdEnv.get("GIT_DIR");
+			let workTreeOpt = cmdEnv.get("GIT_WORK_TREE");
 			let i = 0;
 			for (; i < args.length; i++) {
 				const arg = args[i]!;
-				if (arg === "-C" || arg === "--work-tree") gitDir = at(gitDir, args[++i] ?? ".");
-				else if (arg.startsWith("--work-tree=")) gitDir = at(gitDir, arg.slice("--work-tree=".length));
-				else if (GIT_OPTIONS_WITH_VALUE.has(arg)) i++;
+				if (arg === "-C") gitCwd = at(gitCwd, args[++i] ?? ".");
+				else if (arg.startsWith("-C") && arg.length > 2) gitCwd = at(gitCwd, arg.slice(2));
+				else if (arg === "--work-tree") workTreeOpt = args[++i];
+				else if (arg.startsWith("--work-tree=")) workTreeOpt = arg.slice("--work-tree=".length);
+				else if (arg === "--git-dir") gitDirOpt = args[++i];
+				else if (arg.startsWith("--git-dir=")) gitDirOpt = arg.slice("--git-dir=".length);
+				else if (arg === "-c") {
+					const key = args[++i]?.split("=")[0];
+					if (key && DANGEROUS_GIT_CONFIG_KEY.test(key)) return void found.push(reasons.system(`git -c ${key}`));
+				} else if (arg.startsWith("-c") && arg.length > 2) {
+					const key = arg.slice(2).split("=")[0];
+					if (key && DANGEROUS_GIT_CONFIG_KEY.test(key)) return void found.push(reasons.system(`git -c ${key}`));
+				} else if (arg === "--config-env") {
+					const key = args[++i]?.split("=")[0];
+					if (key && DANGEROUS_GIT_CONFIG_KEY.test(key)) return void found.push(reasons.system(`git --config-env ${key}`));
+				} else if (arg.startsWith("--config-env=")) {
+					const key = arg.slice("--config-env=".length).split("=")[0];
+					if (key && DANGEROUS_GIT_CONFIG_KEY.test(key)) return void found.push(reasons.system(`git --config-env ${key}`));
+				} else if (GIT_OPTIONS_WITH_VALUE.has(arg)) i++;
 				else if (!arg.startsWith("-")) break;
 			}
 			const sub = args[i];
 			const rest = args.slice(i + 1);
+			if (sub === "config") {
+				const key = dangerousGitConfig(rest);
+				if (key) return void found.push(reasons.system(`git config ${key}`));
+			}
 			if (sub === "push" || sub === "send-email") return void found.push(reasons.remote(`git ${sub}`));
-			if (sub !== undefined && mutatingGit(sub, rest) && inCheckout(gitDir)) found.push(reasons.checkout(`git ${sub} in ${gitDir}`));
+			if (sub !== undefined && mutatingGit(sub, rest)) {
+				const resolvedGitDir = gitDirOpt !== undefined ? at(gitCwd, gitDirOpt) : undefined;
+				const resolvedWorkTree = workTreeOpt !== undefined ? at(gitCwd, workTreeOpt) : undefined;
+				const targets: string[] = [];
+				if (resolvedGitDir !== undefined) targets.push(resolvedGitDir);
+				if (resolvedWorkTree !== undefined) targets.push(resolvedWorkTree);
+				if (resolvedGitDir === undefined || resolvedWorkTree === undefined) targets.push(gitCwd);
+				const hit = targets.find(inGitCheckout);
+				if (hit) found.push(reasons.checkout(`git ${sub} in ${hit}`));
+			}
 			return;
 		}
 
@@ -347,42 +504,81 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 		if (targets) writes(verb, targets.length > 0 ? targets : ["."], dir);
 	};
 
-	const run = (script: string, depth: number): void => {
+	const run = (script: string, depth: number, nextEnv?: Map<string, string>): void => {
+		if (depth > MAX_NESTING_DEPTH) {
+			found.push(reasons.nesting);
+			return;
+		}
 		const savedCwd = effectiveCwd;
 		const savedStdin = shellReadsStdin;
+		const savedStdinEnv = stdinEnv;
+		const savedShellVars = new Map(shellVars);
+		const savedExported = new Map(exportedEnv);
+		if (nextEnv) {
+			shellVars = new Map(nextEnv);
+			exportedEnv = new Map(nextEnv);
+		}
 		shellReadsStdin = false;
+		stdinEnv = undefined;
 		try {
-			visit(parse(script), depth);
+			visit(guardRuntime.parse(script), depth);
 		} catch {
-			// unbash reports syntax errors in the tree rather than throwing; keep what was found.
+			found.push(reasons.analysis);
 		}
 		effectiveCwd = savedCwd;
 		shellReadsStdin = savedStdin;
+		stdinEnv = savedStdinEnv;
+		shellVars = savedShellVars;
+		exportedEnv = savedExported;
 	};
 
 	const visit = (node: SyntaxNode, depth: number): void => {
 		const children = (): void => forEachChild(node, (child) => visit(child, depth));
 		switch (node.type) {
+			case "Script": {
+				children();
+				if (node.errors && node.errors.length > 0) found.push(reasons.analysis);
+				return;
+			}
 			case "Subshell":
 			case "CommandExpansion":
 			case "ProcessSubstitution":
 			case "ArithmeticCommandExpansion": {
-				// They keep their `cd` to themselves.
-				const saved = effectiveCwd;
+				// They keep their `cd` and env changes to themselves.
+				const savedCwd = effectiveCwd;
+				const savedVars = new Map(shellVars);
+				const savedExported = new Map(exportedEnv);
 				children();
-				effectiveCwd = saved;
+				effectiveCwd = savedCwd;
+				shellVars = savedVars;
+				exportedEnv = savedExported;
 				return;
 			}
 			case "Pipeline": {
 				// Every stage runs in its own subshell; a local shell in any stage reads the heredocs as a script.
-				const saved = { cwd: effectiveCwd, shellReadsStdin };
-				shellReadsStdin ||= node.commands.some(isLocalShell);
+				const saved = {
+					cwd: effectiveCwd,
+					shellReadsStdin,
+					stdinEnv,
+					shellVars: new Map(shellVars),
+					exportedEnv: new Map(exportedEnv),
+				};
+				const shellStage = node.commands.find(isLocalShell);
+				if (shellStage) {
+					shellReadsStdin = true;
+					stdinEnv = shellCommandEnv(shellStage, saved.exportedEnv);
+				}
 				for (const stage of node.commands) {
 					effectiveCwd = saved.cwd;
+					shellVars = new Map(saved.shellVars);
+					exportedEnv = new Map(saved.exportedEnv);
 					visit(stage, depth);
 				}
 				effectiveCwd = saved.cwd;
 				shellReadsStdin = saved.shellReadsStdin;
+				stdinEnv = saved.stdinEnv;
+				shellVars = saved.shellVars;
+				exportedEnv = saved.exportedEnv;
 				return;
 			}
 			case "Redirected": {
@@ -406,15 +602,29 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 			case "HereString": {
 				children();
 				const script = node.type === "HereDoc" ? node.body.text : node.target?.value;
-				if (shellReadsStdin && script && depth < 8) run(script, depth + 1);
+				if (shellReadsStdin && script) run(script, depth + 1, stdinEnv);
 				return;
 			}
 			case "Command": {
-				const saved = shellReadsStdin;
-				shellReadsStdin ||= isLocalShell(node);
+				const savedStdin = shellReadsStdin;
+				const savedStdinEnv = stdinEnv;
+				const stageEnv = shellCommandEnv(node, exportedEnv);
+				if (stageEnv) {
+					shellReadsStdin = true;
+					stdinEnv = stageEnv;
+				}
 				children();
-				shellReadsStdin = saved;
-				inspect(commandWords(node), depth);
+				shellReadsStdin = savedStdin;
+				stdinEnv = savedStdinEnv;
+				const prefix = prefixEnv(node);
+				if (node.name === undefined) {
+					for (const [name, value] of prefix) {
+						shellVars.set(name, value);
+						if (exportedEnv.has(name)) exportedEnv.set(name, value);
+					}
+					return;
+				}
+				inspect(commandWords(node), depth, prefix);
 				return;
 			}
 			default:
@@ -426,14 +636,98 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 	return found[0];
 }
 
+function assignmentValue(assignment: Assignment): string {
+	return assignment.value.type === "Word" ? assignment.value.value : "";
+}
+
+function prefixEnv(command: Command): Map<string, string> {
+	const env = new Map<string, string>();
+	for (const item of command.prefix) {
+		if (item.type === "Assignment") env.set(item.name, assignmentValue(item));
+	}
+	return env;
+}
+
 function commandWords(command: Command): string[] {
-	return [command.name, ...command.args].filter((arg): arg is Word => arg?.type === "Word").map((word) => word.value);
+	const out: string[] = [];
+	if (command.name?.type === "Word") out.push(command.name.value);
+	for (const arg of command.args) {
+		if (arg.type === "Word") out.push(arg.value);
+		else if (arg.type === "Assignment") out.push(`${arg.name}=${assignmentValue(arg)}`);
+	}
+	return out;
+}
+
+function shellCommandEnv(node: SyntaxNode, base: Map<string, string>): Map<string, string> | undefined {
+	if (node.type !== "Command" || !isLocalShell(node)) return undefined;
+	const env = new Map(base);
+	for (const [name, value] of prefixEnv(node)) env.set(name, value);
+	const words = commandWords(node);
+	if (words[0] !== undefined && basename(words[0]) === "env") {
+		for (let i = 1; i < words.length; i++) {
+			const word = words[i]!;
+			if (word === "-i" || word === "--ignore-environment" || word === "-") env.clear();
+			else if (word === "-u" || word === "--unset") {
+				const name = words[++i];
+				if (name) env.delete(name);
+			} else if (word.startsWith("--unset=")) env.delete(word.slice("--unset=".length));
+			else if (word === "-C" || word === "--chdir" || word === "-S") i++;
+			else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+				const eq = word.indexOf("=");
+				env.set(word.slice(0, eq), word.slice(eq + 1));
+			} else if (!word.startsWith("-")) break;
+		}
+	}
+	return env;
 }
 
 function isLocalShell(node: SyntaxNode): boolean {
 	if (node.type !== "Command") return false;
 	const words = commandWords(node).filter((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) && word !== "sudo" && word !== "env" && word !== "command" && word !== "exec");
 	return words[0] !== undefined && LOCAL_SHELLS.has(basename(words[0]));
+}
+
+function dangerousGitConfig(rest: string[]): string | undefined {
+	let readOnly = false;
+	let writeFlag = false;
+	let sectionFlag = false;
+	const pos: string[] = [];
+	let options = true;
+	for (let i = 0; i < rest.length; i++) {
+		const arg = rest[i]!;
+		if (options && arg === "--") {
+			options = false;
+			continue;
+		}
+		if (options && arg.startsWith("-") && arg !== "-") {
+			if (GIT_CONFIG_READ_FLAGS.has(arg)) readOnly = true;
+			else if (GIT_CONFIG_WRITE_FLAGS.has(arg)) writeFlag = true;
+			else if (GIT_CONFIG_SECTION_FLAGS.has(arg)) sectionFlag = true;
+			else if (GIT_CONFIG_OPTIONS_WITH_VALUE.has(arg)) i++;
+			else if (/^-[A-Za-z]+$/.test(arg) && !arg.startsWith("-f") && arg.includes("l")) readOnly = true;
+			continue;
+		}
+		pos.push(arg);
+	}
+	if (pos.length === 0) return undefined;
+
+	const first = pos[0]!;
+	if (!readOnly && !writeFlag && !sectionFlag) {
+		if (first === "list" || first === "get") return undefined;
+		if (first === "set" || first === "unset") {
+			const key = pos[1];
+			return key && DANGEROUS_GIT_CONFIG_KEY.test(key) ? key : undefined;
+		}
+		if (first === "remove-section" || first === "rename-section") {
+			return pos.slice(1).find((section) => DANGEROUS_GIT_CONFIG_SECTION.test(section));
+		}
+	}
+
+	if (readOnly && !writeFlag && !sectionFlag) return undefined;
+	if (sectionFlag) return pos.find((section) => DANGEROUS_GIT_CONFIG_SECTION.test(section));
+	const key = pos[0]!;
+	if ((writeFlag || pos.length >= 2) && DANGEROUS_GIT_CONFIG_KEY.test(key)) return key;
+	return undefined;
 }
 
 function mutatingGit(sub: string, rest: string[]): boolean {
