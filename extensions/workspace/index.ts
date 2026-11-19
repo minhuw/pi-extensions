@@ -8,6 +8,8 @@ import {
 	denyProjectPath,
 	ensureWorkspacesClosure,
 	evaluatePathAccess,
+	extractAgentBrowserExternalTargets,
+	extractAgentBrowserWriteTargets,
 	extractBashExternalWriteTargets,
 	extractTaggedBashWriteTargets,
 	extractWorkspaceNameFromPath,
@@ -451,6 +453,40 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			workspaceTouchPaths = tagged.filter((target) => !target.deletes).map((target) => target.path);
 			// A command that names a state file counts whatever it is, not only the writes the extractor knows.
 			namedStateFile = findBashNamedStateFile(command, ctx.cwd, managedStateFiles(ctx.cwd));
+		} else if (event.toolName === "process_start") {
+			const input = event.input as { command?: unknown; cwd?: unknown } | undefined;
+			const command = typeof input?.command === "string" ? input.command : undefined;
+			const rawCwd = typeof input?.cwd === "string" && input.cwd.length > 0 ? input.cwd : undefined;
+			const cleanedCwd = rawCwd ? (rawCwd.startsWith("@") ? rawCwd.slice(1) : rawCwd) : undefined;
+			if ((!command || !command.trim()) && !cleanedCwd) return undefined;
+			const targetCwd = cleanedCwd ? resolveLiteralPath(cleanedCwd, ctx.cwd) : ctx.cwd;
+			const externalTargets: string[] = [];
+			if (cleanedCwd) {
+				const cwdCheck = evaluatePathAccess({ targetPath: cleanedCwd, cwd: ctx.cwd, literal: true });
+				if (!cwdCheck.allowed) {
+					externalTargets.push(cwdCheck.resolvedPath);
+				}
+			}
+			if (command && command.trim()) {
+				externalTargets.push(...extractBashExternalWriteTargets(command, ctx.cwd, targetCwd));
+				const tagged = extractTaggedBashWriteTargets(command, targetCwd, ctx.cwd);
+				localWritePaths = tagged.map((target) => target.path);
+				workspaceTouchPaths = tagged.filter((target) => !target.deletes).map((target) => target.path);
+				namedStateFile = findBashNamedStateFile(command, targetCwd, managedStateFiles(ctx.cwd));
+			}
+			targetPaths = [...new Set(externalTargets)];
+		} else if (event.toolName === "agent_browser") {
+			const input = event.input as { argv?: unknown; cwd?: unknown } | undefined;
+			const argv = Array.isArray(input?.argv)
+				? input.argv.filter((arg): arg is string => typeof arg === "string")
+				: [];
+			const rawCwd = typeof input?.cwd === "string" && input.cwd.length > 0 ? input.cwd : undefined;
+			if (argv.length === 0 && !rawCwd) return undefined;
+			const targetCwd = rawCwd ? resolveLiteralPath(rawCwd, ctx.cwd) : ctx.cwd;
+			const writeTargets = extractAgentBrowserWriteTargets(argv, targetCwd);
+			localWritePaths = writeTargets;
+			workspaceTouchPaths = writeTargets;
+			targetPaths = extractAgentBrowserExternalTargets(argv, ctx.cwd, rawCwd);
 		} else {
 			return undefined;
 		}

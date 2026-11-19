@@ -431,26 +431,271 @@ function resolveBashWord(word: string, effectiveCwd: string): string {
 	return resolveSymlinks(path.resolve(effectiveCwd, word), new Set<string>());
 }
 
-/** Words of a simple command, past leading `KEY=VALUE` assignments and `sudo`/`env`/`command` wrappers. */
-function commandWords(command: Command): string[] {
-	const words = [command.name, ...command.args]
+const ENV_VALUE_SHORT = new Set(["u", "C", "S", "P", "a"]);
+const ENV_VALUE_LONG = new Set(["--unset", "--chdir", "--split-string", "--argv0"]);
+const SUDO_VALUE_SHORT = new Set(["u", "g", "C", "D", "h", "p", "r", "t", "T", "U", "R", "a", "c"]);
+const SUDO_VALUE_LONG = new Set([
+	"--user",
+	"--group",
+	"--close-from",
+	"--chdir",
+	"--host",
+	"--prompt",
+	"--role",
+	"--type",
+	"--command-timeout",
+	"--other-user",
+	"--chroot",
+	"--auth-type",
+	"--login-class",
+]);
+const NICE_VALUE_SHORT = new Set(["n"]);
+const NICE_VALUE_LONG = new Set(["--adjustment"]);
+const TIMEOUT_VALUE_SHORT = new Set(["k", "s"]);
+const TIMEOUT_VALUE_LONG = new Set(["--kill-after", "--signal"]);
+const COMMAND_QUERY_SHORT = new Set(["v", "V"]);
+
+interface WrapperOptionConfig {
+	valueShort: ReadonlySet<string>;
+	valueLong: ReadonlySet<string>;
+	chdirShort?: string;
+	chdirLong?: string;
+	allowBareDash?: boolean;
+	splitStringShort?: string;
+	splitStringLong?: string;
+	stopOnShort?: ReadonlySet<string>;
+	skipLeadingPositional?: boolean;
+}
+
+function splitEnvString(value: string): string[] {
+	try {
+		const parsed = parse(`: ${value}`);
+		const first = parsed.commands[0]?.command;
+		if (parsed.commands.length === 1 && first?.type === "Command") {
+			return first.args
+				.filter((arg): arg is Word => arg.type === "Word")
+				.map((word) => bashWordValue(word));
+		}
+	} catch {
+		// Unparseable -S payload: ignore it rather than breaking inspection of following words.
+	}
+	return [];
+}
+
+function consumeWrapperOptions(
+	tokens: string[],
+	startIdx: number,
+	config: WrapperOptionConfig,
+	baseCwd: string,
+): { idx: number; effectiveCwd: string; aborted?: boolean } {
+	let idx = startIdx;
+	let effectiveCwd = baseCwd;
+	let usedSplitString = false;
+
+	while (idx < tokens.length) {
+		const token = tokens[idx]!;
+		if (token === "--") {
+			idx++;
+			break;
+		}
+		if (token === "-") {
+			if (config.allowBareDash) {
+				idx++;
+				continue;
+			}
+			break;
+		}
+		if (!token.startsWith("-")) {
+			break;
+		}
+		if (token.startsWith("--")) {
+			const eq = token.indexOf("=");
+			if (eq >= 0) {
+				const name = token.slice(0, eq);
+				const value = token.slice(eq + 1);
+				if (config.chdirLong && name === config.chdirLong && value) {
+					effectiveCwd = resolveBashWord(value, effectiveCwd);
+				}
+				idx++;
+				if (config.splitStringLong && name === config.splitStringLong && value && !usedSplitString) {
+					usedSplitString = true;
+					const extra = splitEnvString(value);
+					if (extra.length > 0) tokens.splice(idx, 0, ...extra);
+				}
+				continue;
+			}
+			if (config.valueLong.has(token)) {
+				const value = tokens[idx + 1];
+				idx += value !== undefined ? 2 : 1;
+				if (config.chdirLong && token === config.chdirLong && value) {
+					effectiveCwd = resolveBashWord(value, effectiveCwd);
+				}
+				if (config.splitStringLong && token === config.splitStringLong && value && !usedSplitString) {
+					usedSplitString = true;
+					const extra = splitEnvString(value);
+					if (extra.length > 0) tokens.splice(idx, 0, ...extra);
+				}
+				continue;
+			}
+			idx++;
+			continue;
+		}
+
+		// Short option cluster (`-i`, `-u FOO`, `-iu FOO`, `-C/outside`).
+		if (config.stopOnShort) {
+			for (let j = 1; j < token.length; j++) {
+				if (config.stopOnShort.has(token[j]!)) {
+					return { idx: startIdx - 1, effectiveCwd: baseCwd, aborted: true };
+				}
+			}
+		}
+		let consumedValue = false;
+		for (let j = 1; j < token.length; j++) {
+			const ch = token[j]!;
+			if (config.valueShort.has(ch)) {
+				const attached = token.slice(j + 1);
+				let value: string | undefined;
+				if (attached.length > 0) {
+					value = attached;
+					idx++;
+				} else {
+					value = tokens[idx + 1];
+					idx += value !== undefined ? 2 : 1;
+				}
+				if (config.chdirShort && ch === config.chdirShort && value) {
+					effectiveCwd = resolveBashWord(value, effectiveCwd);
+				}
+				if (config.splitStringShort && ch === config.splitStringShort && value && !usedSplitString) {
+					usedSplitString = true;
+					const extra = splitEnvString(value);
+					if (extra.length > 0) tokens.splice(idx, 0, ...extra);
+				}
+				consumedValue = true;
+				break;
+			}
+		}
+		if (!consumedValue) {
+			idx++;
+		}
+	}
+
+	if (config.skipLeadingPositional && idx < tokens.length) {
+		idx++;
+	}
+
+	return { idx, effectiveCwd };
+}
+
+/**
+ * Words of a simple command past leading `KEY=VALUE` assignments and `env`/`sudo`/`command`/`nohup`/`nice`/`timeout`
+ * wrappers (with their option flags), plus the effective working directory after any `env -C`/`--chdir` or
+ * `sudo -D`/`--chdir`.
+ */
+function unwrapCommand(command: Command, baseCwd: string): { words: string[]; effectiveCwd: string } {
+	const tokens = [command.name, ...command.args]
 		.filter((arg): arg is Word => arg?.type === "Word")
 		.map((word) => bashWordValue(word));
 	let idx = 0;
-	while (idx < words.length) {
-		const word = words[idx]!;
-		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || word === "sudo" || word === "env" || word === "command") {
+	let effectiveCwd = baseCwd;
+	while (idx < tokens.length) {
+		const word = tokens[idx]!;
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
 			idx++;
+			continue;
+		}
+		const base = path.basename(word);
+		if (base === "env") {
+			const next = consumeWrapperOptions(
+				tokens,
+				idx + 1,
+				{
+					valueShort: ENV_VALUE_SHORT,
+					valueLong: ENV_VALUE_LONG,
+					chdirShort: "C",
+					chdirLong: "--chdir",
+					allowBareDash: true,
+					splitStringShort: "S",
+					splitStringLong: "--split-string",
+				},
+				effectiveCwd,
+			);
+			idx = next.idx;
+			effectiveCwd = next.effectiveCwd;
+			continue;
+		}
+		if (base === "sudo") {
+			const next = consumeWrapperOptions(
+				tokens,
+				idx + 1,
+				{
+					valueShort: SUDO_VALUE_SHORT,
+					valueLong: SUDO_VALUE_LONG,
+					chdirShort: "D",
+					chdirLong: "--chdir",
+				},
+				effectiveCwd,
+			);
+			idx = next.idx;
+			effectiveCwd = next.effectiveCwd;
+			continue;
+		}
+		if (word === "command") {
+			const next = consumeWrapperOptions(
+				tokens,
+				idx + 1,
+				{
+					valueShort: new Set(),
+					valueLong: new Set(),
+					stopOnShort: COMMAND_QUERY_SHORT,
+				},
+				effectiveCwd,
+			);
+			if (next.aborted) break;
+			idx = next.idx;
+			continue;
+		}
+		if (base === "nohup") {
+			const next = consumeWrapperOptions(
+				tokens,
+				idx + 1,
+				{ valueShort: new Set(), valueLong: new Set() },
+				effectiveCwd,
+			);
+			idx = next.idx;
+			continue;
+		}
+		if (base === "nice") {
+			const next = consumeWrapperOptions(
+				tokens,
+				idx + 1,
+				{ valueShort: NICE_VALUE_SHORT, valueLong: NICE_VALUE_LONG },
+				effectiveCwd,
+			);
+			idx = next.idx;
+			continue;
+		}
+		if (base === "timeout") {
+			const next = consumeWrapperOptions(
+				tokens,
+				idx + 1,
+				{
+					valueShort: TIMEOUT_VALUE_SHORT,
+					valueLong: TIMEOUT_VALUE_LONG,
+					skipLeadingPositional: true,
+				},
+				effectiveCwd,
+			);
+			idx = next.idx;
 			continue;
 		}
 		break;
 	}
-	return words.slice(idx);
+	return { words: tokens.slice(idx), effectiveCwd };
 }
 
-function isLocalShell(node: SyntaxNode): boolean {
+function isLocalShell(node: SyntaxNode, baseCwd: string): boolean {
 	if (node.type !== "Command") return false;
-	const verb = commandWords(node)[0];
+	const verb = unwrapCommand(node, baseCwd).words[0];
 	return verb !== undefined && LOCAL_SHELLS.has(path.basename(verb));
 }
 
@@ -620,6 +865,7 @@ interface BashWalkVisitor {
 function walkBashCommands(command: string, canonicalCwd: string, visitor: BashWalkVisitor): void {
 	let effectiveCwd = canonicalCwd;
 	let shellReadsStdin = false;
+	let shellStdinCwd = canonicalCwd;
 
 	const visit = (node: SyntaxNode): void => {
 		switch (node.type) {
@@ -635,14 +881,19 @@ function walkBashCommands(command: string, canonicalCwd: string, visitor: BashWa
 			}
 			case "Pipeline": {
 				// Every stage runs in its own subshell; a local shell in any stage reads the heredocs.
-				const saved = { cwd: effectiveCwd, shellReadsStdin };
-				shellReadsStdin ||= node.commands.some(isLocalShell);
+				const saved = { cwd: effectiveCwd, shellReadsStdin, shellStdinCwd };
+				const localShellStage = node.commands.find((stage) => isLocalShell(stage, effectiveCwd));
+				if (localShellStage) {
+					shellReadsStdin = true;
+					shellStdinCwd = unwrapCommand(localShellStage as Command, effectiveCwd).effectiveCwd;
+				}
 				for (const stage of node.commands) {
 					effectiveCwd = saved.cwd;
 					visit(stage);
 				}
 				effectiveCwd = saved.cwd;
 				shellReadsStdin = saved.shellReadsStdin;
+				shellStdinCwd = saved.shellStdinCwd;
 				return;
 			}
 			case "Redirected": {
@@ -669,25 +920,30 @@ function walkBashCommands(command: string, canonicalCwd: string, visitor: BashWa
 				const script = node.type === "HereDoc" ? hereDocText(node) : node.target && bashWordValue(node.target);
 				if (shellReadsStdin && script) {
 					const saved = effectiveCwd;
+					effectiveCwd = shellStdinCwd;
 					visit(parse(script));
 					effectiveCwd = saved;
 				}
 				return;
 			}
 			case "Command": {
-				const saved = shellReadsStdin;
-				shellReadsStdin ||= isLocalShell(node);
+				const unwrapped = unwrapCommand(node, effectiveCwd);
+				const saved = { shellReadsStdin, shellStdinCwd };
+				if (unwrapped.words[0] !== undefined && LOCAL_SHELLS.has(path.basename(unwrapped.words[0]))) {
+					shellReadsStdin = true;
+					shellStdinCwd = unwrapped.effectiveCwd;
+				}
 				forEachChild(node, visit);
-				shellReadsStdin = saved;
-				const words = commandWords(node);
-				const [verb, ...args] = words;
+				shellReadsStdin = saved.shellReadsStdin;
+				shellStdinCwd = saved.shellStdinCwd;
+				const [verb, ...args] = unwrapped.words;
 				if (!verb) return;
-				visitor.command(words, effectiveCwd);
+				visitor.command(unwrapped.words, unwrapped.effectiveCwd);
 				if (verb === "cd" || verb === "pushd") {
 					// `cd` alone goes home.
 					const dest = args.find((a) => !a.startsWith("-")) ?? os.homedir();
 					if (dest !== "-") {
-						effectiveCwd = resolveBashWord(dest, effectiveCwd);
+						effectiveCwd = resolveBashWord(dest, unwrapped.effectiveCwd);
 					}
 				}
 				return;
@@ -714,16 +970,17 @@ const DELETING_VERBS = new Set(["rm", "rmdir"]);
  * Commands for other machines (`ssh host mkdir /x`) and heredoc bodies are data unless a
  * local shell reads them (`bash <<EOF`, `cat <<EOF | sh`).
  */
-export function extractBashWriteTargets(command: string, cwd: string): string[] {
-	return [...new Set(extractTaggedBashWriteTargets(command, cwd).map((target) => target.path))];
+export function extractBashWriteTargets(command: string, cwd: string, projectCwd?: string): string[] {
+	return [...new Set(extractTaggedBashWriteTargets(command, cwd, projectCwd).map((target) => target.path))];
 }
 
 /**
  * The targets of `extractBashWriteTargets`, each tagged with whether it is only deleted. A path both deleted and
  * written in one command (`rm -rf d; mkdir d`) is tagged as written.
  */
-export function extractTaggedBashWriteTargets(command: string, cwd: string): BashWriteTarget[] {
-	const canonicalCwd = resolveCanonicalPath(cwd);
+export function extractTaggedBashWriteTargets(command: string, cwd: string, projectCwd?: string): BashWriteTarget[] {
+	const startCwd = resolveCanonicalPath(cwd);
+	const canonicalCwd = resolveCanonicalPath(projectCwd ?? cwd);
 	const targets: string[] = [];
 	const written = new Set<string>();
 	let deleting = false;
@@ -832,7 +1089,7 @@ export function extractTaggedBashWriteTargets(command: string, cwd: string): Bas
 		}
 	};
 
-	walkBashCommands(command, canonicalCwd, {
+	walkBashCommands(command, startCwd, {
 		command: inspectCommand,
 		writeRedirect: (target, effectiveCwd) => {
 			push(resolveBashWord(target, effectiveCwd));
@@ -895,13 +1152,173 @@ export function findBashNamedStateFile(command: string, cwd: string, stateFiles:
 
 /**
  * Inspects a shell command string for write/creation operations targeting paths outside
- * `<cwd>` and `/tmp`.
+ * `<cwd>` and `/tmp`. When `baseCwd` is provided, relative paths in `command` resolve against
+ * `baseCwd` while access policy is still evaluated against `cwd`.
  */
-export function extractBashExternalWriteTargets(command: string, cwd: string): string[] {
-	const writeTargets = extractBashWriteTargets(command, cwd);
+export function extractBashExternalWriteTargets(command: string, cwd: string, baseCwd?: string): string[] {
+	const writeTargets = extractBashWriteTargets(command, baseCwd ?? cwd, cwd);
 	const external: string[] = [];
 	for (const targetPath of writeTargets) {
 		const check = evaluatePathAccess({ targetPath, cwd, literal: true });
+		if (!check.allowed) {
+			external.push(check.resolvedPath);
+		}
+	}
+	return [...new Set(external)];
+}
+
+const AGENT_BROWSER_GLOBAL_VALUE_FLAGS = new Set([
+	"--session",
+	"-s",
+	"--cdp",
+	"--provider",
+	"-p",
+	"--engine",
+	"--config",
+	"--namespace",
+	"--profile",
+	"--allowed-domains",
+	"--idle-timeout",
+	"--user-agent",
+	"--proxy",
+	"--headers",
+	"--session-name",
+	"--executable-path",
+	"--extensions",
+	"--args",
+	"--proxy-bypass",
+	"--state",
+	"--download-path",
+]);
+
+const AGENT_BROWSER_SCREENSHOT_VALUE_FLAGS = new Set([
+	"--selector",
+	"-S",
+	"--format",
+	"--quality",
+	"-q",
+	"--clip",
+]);
+
+const AGENT_BROWSER_PDF_VALUE_FLAGS = new Set([
+	"--format",
+	"--margin",
+	"--scale",
+	"--header-template",
+	"--footer-template",
+	"--width",
+	"--height",
+	"--page-ranges",
+]);
+
+function extractAgentBrowserPositionals(
+	tokens: readonly string[],
+	valueFlags: ReadonlySet<string>,
+): string[] {
+	const positionals: string[] = [];
+	for (let i = 0; i < tokens.length; i++) {
+		const token = tokens[i]!;
+		if (token === "--") {
+			positionals.push(...tokens.slice(i + 1));
+			break;
+		}
+		if (AGENT_BROWSER_GLOBAL_VALUE_FLAGS.has(token) || valueFlags.has(token)) {
+			i++;
+			continue;
+		}
+		if (token.startsWith("-")) {
+			continue;
+		}
+		positionals.push(token);
+	}
+	return positionals;
+}
+
+/**
+ * Extracts resolved file-writing target paths from an `agent_browser` CLI `argv` array
+ * relative to `cwd` (without importing the `agent-browser` extension).
+ */
+export function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: string): string[] {
+	let subcommand: string | undefined;
+	let subcommandIndex = -1;
+	for (let i = 0; i < argv.length; i++) {
+		const token = argv[i]!;
+		if (token === "--") {
+			if (i + 1 < argv.length) {
+				subcommand = argv[i + 1];
+				subcommandIndex = i + 1;
+			}
+			break;
+		}
+		if (AGENT_BROWSER_GLOBAL_VALUE_FLAGS.has(token)) {
+			i++;
+			continue;
+		}
+		if (token.startsWith("-")) {
+			continue;
+		}
+		subcommand = token;
+		subcommandIndex = i;
+		break;
+	}
+
+	if (!subcommand) return [];
+	const rest = argv.slice(subcommandIndex + 1);
+	const rawTargets: string[] = [];
+
+	if (subcommand === "screenshot") {
+		const positionals = extractAgentBrowserPositionals(rest, AGENT_BROWSER_SCREENSHOT_VALUE_FLAGS);
+		if (positionals[0]) rawTargets.push(positionals[0]);
+	} else if (subcommand === "pdf") {
+		const positionals = extractAgentBrowserPositionals(rest, AGENT_BROWSER_PDF_VALUE_FLAGS);
+		if (positionals[0]) rawTargets.push(positionals[0]);
+	} else if (subcommand === "trace") {
+		const positionals = extractAgentBrowserPositionals(rest, new Set());
+		if ((positionals[0] === "start" || positionals[0] === "stop") && positionals[1]) {
+			rawTargets.push(positionals[1]);
+		}
+	} else if (subcommand === "state") {
+		const positionals = extractAgentBrowserPositionals(rest, new Set());
+		if (positionals[0] === "save" && positionals[1]) {
+			rawTargets.push(positionals[1]);
+		}
+	} else if (subcommand === "download") {
+		const positionals = extractAgentBrowserPositionals(rest, new Set());
+		if (positionals.length >= 2) {
+			rawTargets.push(positionals[1]!);
+		} else if (positionals.length === 1) {
+			rawTargets.push(positionals[0]!);
+		}
+	} else if (subcommand === "record") {
+		const positionals = extractAgentBrowserPositionals(rest, new Set());
+		if (positionals[0] === "start" && positionals[1]) {
+			rawTargets.push(positionals[1]);
+		}
+	}
+
+	return [...new Set(rawTargets.map((target) => resolveLiteralPath(target, cwd)))];
+}
+
+/**
+ * Extracts external paths (outside `projectCwd` and `/tmp`) from an `agent_browser` call's
+ * optional `cwd` and file-writing `argv` targets.
+ */
+export function extractAgentBrowserExternalTargets(
+	argv: readonly string[],
+	projectCwd: string,
+	rawCwd?: string,
+): string[] {
+	const hasCwd = typeof rawCwd === "string" && rawCwd.length > 0;
+	const targetCwd = hasCwd ? resolveLiteralPath(rawCwd, projectCwd) : projectCwd;
+	const external: string[] = [];
+	if (hasCwd) {
+		const cwdCheck = evaluatePathAccess({ targetPath: rawCwd, cwd: projectCwd, literal: true });
+		if (!cwdCheck.allowed) {
+			external.push(cwdCheck.resolvedPath);
+		}
+	}
+	for (const writeTarget of extractAgentBrowserWriteTargets(argv, targetCwd)) {
+		const check = evaluatePathAccess({ targetPath: writeTarget, cwd: projectCwd, literal: true });
 		if (!check.allowed) {
 			external.push(check.resolvedPath);
 		}

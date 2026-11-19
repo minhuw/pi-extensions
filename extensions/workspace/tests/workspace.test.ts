@@ -15,7 +15,10 @@ import {
 	SessionManager,
 	SettingsManager,
 	type CreateAgentSessionRuntimeFactory,
+	type ExtensionAPI,
+	type ExtensionContext,
 	type ExtensionUIContext,
+	type ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { runWorkspaceGc } from "../gc.ts";
 import workspaceExtension, {
@@ -30,6 +33,8 @@ import {
 	denyProjectPath,
 	ensureWorkspacesClosure,
 	evaluatePathAccess,
+	extractAgentBrowserExternalTargets,
+	extractAgentBrowserWriteTargets,
 	extractBashExternalWriteTargets,
 	isSubpath,
 	readProjectPolicy,
@@ -1330,5 +1335,304 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 		expect(rootReadme).toContain("[Workspace](extensions/workspace/README.md)");
 		expect(agentsMd).toContain("`extensions/workspace/`");
 		expect(agentsMd).toContain("`npm run test:workspace`");
+	});
+});
+
+describe("AC-10: wrapper option flags, process_start, and agent_browser external-path guards", () => {
+	type ToolCallHandler = (
+		event: { toolName: string; input: unknown },
+		ctx: ExtensionContext,
+	) => Promise<ToolCallEventResult | undefined>;
+
+	function loadToolCallHandler(): ToolCallHandler {
+		let toolCall: ToolCallHandler | undefined;
+		workspaceExtension({
+			on: (event: string, handler: ToolCallHandler) => {
+				if (event === "tool_call") toolCall = handler;
+			},
+			registerTool: () => {},
+			registerCommand: () => {},
+		} as unknown as ExtensionAPI);
+		return toolCall!;
+	}
+
+	function makeCtx(options: {
+		hasUI: boolean;
+		child?: boolean;
+		prompts: string[];
+		choice?: string | ((title: string) => string);
+	}): ExtensionContext {
+		return {
+			cwd: projectCwd,
+			mode: options.hasUI ? "rpc" : "print",
+			hasUI: options.hasUI,
+			ui: {
+				select: options.hasUI
+					? async (title: string) => {
+							options.prompts.push(title);
+							if (typeof options.choice === "function") return options.choice(title);
+							return options.choice ?? "Deny";
+						}
+					: undefined,
+			},
+			sessionManager: {
+				getSessionId: () => "ac10-session",
+				getEntries: () =>
+					options.child ? [{ type: "custom", customType: SESSION_LINK_TYPE, data: {} }] : [],
+			},
+		} as unknown as ExtensionContext;
+	}
+
+	it("skips wrapper option flags for env, sudo, command, nohup, nice, and timeout and tracks env -C / sudo -D", () => {
+		const canonicalOutside = resolveCanonicalPath(outsideDir);
+
+		expect(extractBashExternalWriteTargets(`env -u FOO cp a ${outsideDir}/b`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "b"),
+		]);
+		expect(extractBashExternalWriteTargets(`env -i -0 -u FOO cp a ${outsideDir}/b`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "b"),
+		]);
+		expect(extractBashExternalWriteTargets(`env --unset=FOO VAR=1 tee ${outsideDir}/f`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "f"),
+		]);
+		expect(extractBashExternalWriteTargets(`env -- cp a ${outsideDir}/b`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "b"),
+		]);
+		expect(extractBashExternalWriteTargets(`env -S "VAR=1" cp a ${outsideDir}/b`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "b"),
+		]);
+		expect(extractBashExternalWriteTargets(`env -S "-C ${outsideDir}" touch x`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "x"),
+		]);
+		// env -C / --chdir shifts cwd only for the wrapped command, not later commands.
+		expect(
+			extractBashExternalWriteTargets(`env -C ${outsideDir} touch x && touch local.txt`, projectCwd),
+		).toEqual([path.join(canonicalOutside, "x")]);
+		expect(extractBashExternalWriteTargets(`env --chdir=${outsideDir} touch x`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "x"),
+		]);
+
+		expect(extractBashExternalWriteTargets(`sudo -u root cp a ${outsideDir}/b`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "b"),
+		]);
+		expect(extractBashExternalWriteTargets(`sudo -u root tee ${outsideDir}/file`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "file"),
+		]);
+		expect(extractBashExternalWriteTargets(`sudo -g wheel -E rm ${outsideDir}/f`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "f"),
+		]);
+		expect(extractBashExternalWriteTargets(`sudo -H -n -u root -C 3 cp a ${outsideDir}/b`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "b"),
+		]);
+		expect(extractBashExternalWriteTargets(`sudo -D ${outsideDir} touch x`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "x"),
+		]);
+		expect(extractBashExternalWriteTargets(`sudo --chdir=${outsideDir} cp /tmp/a b`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "b"),
+		]);
+
+		expect(extractBashExternalWriteTargets(`command -p mv a ${outsideDir}/b`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "b"),
+		]);
+		expect(extractBashExternalWriteTargets(`command -- cp a ${outsideDir}/b`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "b"),
+		]);
+		expect(extractBashExternalWriteTargets(`command -v rm ${outsideDir}/f`, projectCwd)).toEqual([]);
+
+		expect(extractBashExternalWriteTargets(`nohup cp a ${outsideDir}/b`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "b"),
+		]);
+		expect(extractBashExternalWriteTargets(`nice -n 10 cp a ${outsideDir}/b`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "b"),
+		]);
+		expect(extractBashExternalWriteTargets(`timeout -s TERM 5 cp a ${outsideDir}/b`, projectCwd)).toEqual([
+			path.join(canonicalOutside, "b"),
+		]);
+	});
+
+	it("guards bash wrapper commands with option flags in tool_call", async () => {
+		const toolCall = loadToolCallHandler();
+		const canonicalOutside = resolveCanonicalPath(outsideDir);
+		const cases: [command: string, expectedPath: string][] = [
+			[`env -u FOO cp a ${outsideDir}/b`, path.join(canonicalOutside, "b")],
+			[`sudo -u root tee ${outsideDir}/file`, path.join(canonicalOutside, "file")],
+			[`command -p mv a ${outsideDir}/b`, path.join(canonicalOutside, "b")],
+			[`env -C ${outsideDir} touch created.txt`, path.join(canonicalOutside, "created.txt")],
+			[`sudo -D ${outsideDir} touch created2.txt`, path.join(canonicalOutside, "created2.txt")],
+		];
+
+		for (const [command, expectedPath] of cases) {
+			const headlessPrompts: string[] = [];
+			const headlessRes = await toolCall(
+				{ toolName: "bash", input: { command } },
+				makeCtx({ hasUI: false, prompts: headlessPrompts }),
+			);
+			expect(headlessRes, command).toMatchObject({ block: true });
+			expect(headlessRes?.reason, command).toContain(expectedPath);
+			expect(headlessPrompts).toEqual([]);
+
+			const uiPrompts: string[] = [];
+			const uiRes = await toolCall(
+				{ toolName: "bash", input: { command } },
+				makeCtx({ hasUI: true, prompts: uiPrompts, choice: "Deny" }),
+			);
+			expect(uiRes, command).toMatchObject({ block: true });
+			expect(uiPrompts).toEqual([`Allow write outside workspace (${expectedPath})?`]);
+		}
+	});
+
+	it("guards process_start external write targets and external cwd while allowing in-project and /tmp writes", async () => {
+		const toolCall = loadToolCallHandler();
+		const canonicalOutside = resolveCanonicalPath(outsideDir);
+
+		// Blocked / prompted external targets
+		const externalCases: [input: { command: string; cwd?: string }, expectedPath: string][] = [
+			[{ command: `echo hi > ${outsideDir}/a` }, path.join(canonicalOutside, "a")],
+			[{ command: `env -u FOO tee ${outsideDir}/b` }, path.join(canonicalOutside, "b")],
+			[{ command: "echo hi > rel.txt", cwd: outsideDir }, canonicalOutside],
+			[{ command: "node server.js", cwd: outsideDir }, canonicalOutside],
+		];
+
+		for (const [input, expectedPath] of externalCases) {
+			const headlessPrompts: string[] = [];
+			const blocked = await toolCall(
+				{ toolName: "process_start", input },
+				makeCtx({ hasUI: false, prompts: headlessPrompts }),
+			);
+			expect(blocked, JSON.stringify(input)).toMatchObject({ block: true });
+			expect(blocked?.reason, JSON.stringify(input)).toContain(expectedPath);
+			expect(headlessPrompts).toEqual([]);
+
+			const uiPrompts: string[] = [];
+			const denied = await toolCall(
+				{ toolName: "process_start", input },
+				makeCtx({ hasUI: true, prompts: uiPrompts, choice: "Deny" }),
+			);
+			expect(denied, JSON.stringify(input)).toMatchObject({ block: true });
+			expect(uiPrompts).toEqual([`Allow write outside workspace (${expectedPath})?`]);
+		}
+
+		// Approving for session allows a subsequent process_start write to the same external path
+		const allowPrompts: string[] = [];
+		const targetFile = path.join(outsideDir, "approved.log");
+		const allowedFirst = await toolCall(
+			{ toolName: "process_start", input: { command: `echo hi > ${targetFile}` } },
+			makeCtx({ hasUI: true, prompts: allowPrompts, choice: "Allow for this session" }),
+		);
+		expect(allowedFirst).toBeUndefined();
+		expect(allowPrompts).toEqual([`Allow write outside workspace (${resolveCanonicalPath(targetFile)})?`]);
+
+		const secondPrompts: string[] = [];
+		const allowedSecond = await toolCall(
+			{ toolName: "process_start", input: { command: `echo hi >> ${targetFile}` } },
+			makeCtx({ hasUI: true, prompts: secondPrompts, choice: "Deny" }),
+		);
+		expect(allowedSecond).toBeUndefined();
+		expect(secondPrompts).toEqual([]);
+
+		// In-project and /tmp writes stay allowed without prompting
+		for (const input of [
+			{ command: "echo hi > local-output.txt" },
+			{ command: "echo hi > /tmp/process-start-ok.txt" },
+			{ command: "echo hi > ok.txt", cwd: "/tmp" },
+			{ command: "echo hi > sub.txt", cwd: "." },
+		]) {
+			const prompts: string[] = [];
+			const res = await toolCall(
+				{ toolName: "process_start", input },
+				makeCtx({ hasUI: true, prompts, choice: "Deny" }),
+			);
+			expect(res, JSON.stringify(input)).toBeUndefined();
+			expect(prompts, JSON.stringify(input)).toEqual([]);
+		}
+	});
+
+	it("extracts and guards agent_browser external cwd and file-writing targets while allowing safe calls", async () => {
+		const canonicalOutside = resolveCanonicalPath(outsideDir);
+
+		// Pure helper checks
+		expect(extractAgentBrowserWriteTargets(["screenshot", `${outsideDir}/shot.png`], projectCwd)).toEqual([
+			path.join(canonicalOutside, "shot.png"),
+		]);
+		expect(
+			extractAgentBrowserWriteTargets(
+				["--session", "s1", "--headed", "--json", "--profile", "p1", "pdf", `${outsideDir}/out.pdf`],
+				projectCwd,
+			),
+		).toEqual([path.join(canonicalOutside, "out.pdf")]);
+		expect(
+			extractAgentBrowserWriteTargets(["--session=s1", "state", "save", `${outsideDir}/state.json`], projectCwd),
+		).toEqual([path.join(canonicalOutside, "state.json")]);
+		expect(
+			extractAgentBrowserWriteTargets(["trace", "start", "--screenshots", `${outsideDir}/trace.zip`], projectCwd),
+		).toEqual([path.join(canonicalOutside, "trace.zip")]);
+		expect(extractAgentBrowserWriteTargets(["trace", "stop", `${outsideDir}/trace2.zip`], projectCwd)).toEqual([
+			path.join(canonicalOutside, "trace2.zip"),
+		]);
+		expect(
+			extractAgentBrowserWriteTargets(["download", "@e3", `${outsideDir}/report.csv`], projectCwd),
+		).toEqual([path.join(canonicalOutside, "report.csv")]);
+		expect(extractAgentBrowserWriteTargets(["download", `${outsideDir}/direct.csv`], projectCwd)).toEqual([
+			path.join(canonicalOutside, "direct.csv"),
+		]);
+		expect(extractAgentBrowserWriteTargets(["screenshot"], projectCwd)).toEqual([]);
+		expect(extractAgentBrowserWriteTargets(["screenshot", "--base64"], projectCwd)).toEqual([]);
+		expect(extractAgentBrowserWriteTargets(["open", "https://example.com"], projectCwd)).toEqual([]);
+		expect(extractAgentBrowserWriteTargets(["state", "load", `${outsideDir}/state.json`], projectCwd)).toEqual([]);
+		expect(extractAgentBrowserExternalTargets(["open", "https://example.com"], projectCwd, outsideDir)).toEqual([
+			canonicalOutside,
+		]);
+
+		// tool_call guard checks
+		const toolCall = loadToolCallHandler();
+		const externalCases: [input: { argv: string[]; cwd?: string }, expectedPath: string][] = [
+			[{ argv: ["open", "https://example.com"], cwd: outsideDir }, canonicalOutside],
+			[{ argv: ["screenshot", `${outsideDir}/shot.png`] }, path.join(canonicalOutside, "shot.png")],
+			[{ argv: ["--session", "s1", "pdf", `${outsideDir}/out.pdf`] }, path.join(canonicalOutside, "out.pdf")],
+			[{ argv: ["state", "save", `${outsideDir}/state.json`] }, path.join(canonicalOutside, "state.json")],
+			[{ argv: ["trace", "start", `${outsideDir}/trace.zip`] }, path.join(canonicalOutside, "trace.zip")],
+			[{ argv: ["trace", "stop", `${outsideDir}/trace.zip`] }, path.join(canonicalOutside, "trace.zip")],
+			[{ argv: ["download", "@e1", `${outsideDir}/dl.bin`] }, path.join(canonicalOutside, "dl.bin")],
+			[{ argv: ["screenshot", "--selector", "#main", `${outsideDir}/sel.png`] }, path.join(canonicalOutside, "sel.png")],
+		];
+
+		for (const [input, expectedPath] of externalCases) {
+			const headlessPrompts: string[] = [];
+			const blocked = await toolCall(
+				{ toolName: "agent_browser", input },
+				makeCtx({ hasUI: false, prompts: headlessPrompts }),
+			);
+			expect(blocked, JSON.stringify(input)).toMatchObject({ block: true });
+			expect(blocked?.reason, JSON.stringify(input)).toContain(expectedPath);
+			expect(headlessPrompts).toEqual([]);
+
+			const uiPrompts: string[] = [];
+			const denied = await toolCall(
+				{ toolName: "agent_browser", input },
+				makeCtx({ hasUI: true, prompts: uiPrompts, choice: "Deny" }),
+			);
+			expect(denied, JSON.stringify(input)).toMatchObject({ block: true });
+			expect(uiPrompts).toEqual([`Allow write outside workspace (${expectedPath})?`]);
+		}
+
+		// Safe agent_browser calls stay allowed without prompting
+		for (const input of [
+			{ argv: ["screenshot"] },
+			{ argv: ["screenshot", "--base64"] },
+			{ argv: ["open", "https://example.com"] },
+			{ argv: ["screenshot", "/tmp/shot.png"] },
+			{ argv: ["screenshot", "artifacts/shot.png"] },
+			{ argv: ["--session", "s1", "pdf", "artifacts/out.pdf"] },
+			{ argv: ["state", "load", `${outsideDir}/state.json`] },
+			{ argv: ["open", "https://example.com"], cwd: "/tmp" },
+		]) {
+			const prompts: string[] = [];
+			const res = await toolCall(
+				{ toolName: "agent_browser", input },
+				makeCtx({ hasUI: true, prompts, choice: "Deny" }),
+			);
+			expect(res, JSON.stringify(input)).toBeUndefined();
+			expect(prompts, JSON.stringify(input)).toEqual([]);
+		}
 	});
 });

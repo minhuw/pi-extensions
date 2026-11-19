@@ -854,4 +854,64 @@ describe("workspace write guard — state-file spellings only Pi's literal readi
 			await h.dispose();
 		}
 	});
+
+	it("blocks wrapper-option bash, process_start, and agent_browser attempts to write managed state files without a prompt", async () => {
+		const toolCall = loadToolCallHandler();
+		const policyFile = policyFilePath(projectCwd);
+		const registryFile = registryFilePath(projectCwd);
+		await mkdir(workspacesDir(projectCwd), { recursive: true });
+		await writeFile(policyFile, "{}\n", "utf8");
+		await writeFile(registryFile, "{}\n", "utf8");
+
+		const blockedCalls: [toolName: string, input: unknown, file: string][] = [
+			["bash", { command: "env -u X tee .pi/workspaces/policy.json" }, policyFile],
+			["bash", { command: "env -C .pi/workspaces tee policy.json" }, policyFile],
+			["bash", { command: "env --unset=FOO VAR=1 cp /tmp/policy.json .pi/workspaces/" }, policyFile],
+			["bash", { command: "sudo -u root tee .pi/workspaces/.registry.json" }, registryFile],
+			["bash", { command: "sudo -D .pi/workspaces cp /tmp/policy.json ." }, policyFile],
+			["bash", { command: "command -p mv /tmp/policy.json .pi/workspaces/policy.json" }, policyFile],
+			["process_start", { command: "tee .pi/workspaces/policy.json" }, policyFile],
+			["process_start", { command: "echo '{}' > .pi/workspaces/.registry.json" }, registryFile],
+			["process_start", { command: "tee policy.json", cwd: ".pi/workspaces" }, policyFile],
+			["process_start", { command: "env -u X tee .pi/workspaces/policy.json" }, policyFile],
+			["agent_browser", { argv: ["screenshot", ".pi/workspaces/policy.json"] }, policyFile],
+			["agent_browser", { argv: ["--session", "s1", "pdf", ".pi/workspaces/.registry.json"] }, registryFile],
+			["agent_browser", { argv: ["state", "save", ".pi/workspaces/policy.json"] }, policyFile],
+			["agent_browser", { argv: ["trace", "stop", ".pi/workspaces/policy.json"] }, policyFile],
+			["agent_browser", { argv: ["download", "@e1", ".pi/workspaces/.registry.json"] }, registryFile],
+			["agent_browser", { argv: ["screenshot", "policy.json"], cwd: ".pi/workspaces" }, policyFile],
+		];
+
+		for (const [toolName, input, file] of blockedCalls) {
+			for (const kind of SESSION_KINDS) {
+				const prompts: string[] = [];
+				const result = await toolCall({ toolName, input }, handlerContext(kind, prompts));
+				const label = `${toolName} ${JSON.stringify(input)} (${kind} session)`;
+				expectManagedFileBlock(result, file, label);
+				expect(prompts, label).toEqual([]);
+			}
+		}
+
+		// Read-only commands through wrappers, process_start, and agent_browser remain allowed.
+		const allowedCalls: [toolName: string, input: unknown][] = [
+			["bash", { command: "env -u X cat .pi/workspaces/policy.json" }],
+			["bash", { command: "sudo -u root grep -c allowedPaths .pi/workspaces/policy.json" }],
+			["bash", { command: "env -C .pi/workspaces cat policy.json" }],
+			["process_start", { command: "cat .pi/workspaces/policy.json" }],
+			["agent_browser", { argv: ["state", "load", ".pi/workspaces/policy.json"] }],
+			["agent_browser", { argv: ["screenshot"] }],
+		];
+
+		for (const [toolName, input] of allowedCalls) {
+			for (const kind of SESSION_KINDS) {
+				const prompts: string[] = [];
+				const result = await toolCall({ toolName, input }, handlerContext(kind, prompts));
+				expect(result, `${toolName} ${JSON.stringify(input)} (${kind} session)`).toBeUndefined();
+				expect(prompts, `${toolName} ${JSON.stringify(input)}`).toEqual([]);
+			}
+		}
+
+		expect(await readFile(policyFile, "utf8")).toBe("{}\n");
+		expect(await readFile(registryFile, "utf8")).toBe("{}\n");
+	});
 });
