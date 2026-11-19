@@ -3,6 +3,7 @@ import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { credentialsRegistry } from "../credentials.ts";
+import { sanitize } from "../relay/protocol.ts";
 import { get, timing } from "./client.ts";
 import {
 	type Entry, formatEntries, formatOverview, formatRun, formatRuns, formatSearch, type RunDetail, type RunSummary, type SearchGroup,
@@ -94,11 +95,11 @@ export function recallSearchTool() {
 			return { content: [{ type: "text", text: formatSearch(groups, { query, project, sort }) }], details };
 		},
 		renderCall(args, theme) {
-			const where = args.project ? ` · project ${args.project}` : args.scope === "project" ? " · this project" : "";
-			return new Text(`${theme.fg("toolTitle", theme.bold("recall_search "))}${theme.fg("muted", JSON.stringify(args.query ?? ""))}${theme.fg("dim", where)}`, 0, 0);
+			const where = args.project ? ` · project ${sanitize(String(args.project))}` : args.scope === "project" ? " · this project" : "";
+			return new Text(`${theme.fg("toolTitle", theme.bold("recall_search "))}${theme.fg("muted", JSON.stringify(sanitize(String(args.query ?? ""))))}${theme.fg("dim", where)}`, 0, 0);
 		},
 		renderResult(result, { expanded, isPartial }, theme, context) {
-			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			const text = sanitize(result.content[0]?.type === "text" ? result.content[0].text : "");
 			if (isPartial) return new Text(theme.fg("dim", "searching…"), 0, 0);
 			if (context.isError) return new Text(theme.fg("error", text), 0, 0);
 			const count = (result.details as SearchDetails | undefined)?.sessionIds.length ?? 0;
@@ -163,10 +164,10 @@ export function recallReadTool() {
 		renderCall(args, theme) {
 			const mode = readMode(args);
 			const at = mode === "entries" ? ` · seq ${args.seq}` : mode === "conflict" ? " · choose seq or fromTurn" : args.fromTurn ? ` · from turn ${args.fromTurn}` : "";
-			return new Text(`${theme.fg("toolTitle", theme.bold("recall_read "))}${theme.fg("muted", String(args.sessionId ?? ""))}${theme.fg("dim", at)}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("recall_read "))}${theme.fg("muted", sanitize(String(args.sessionId ?? "")))}${theme.fg("dim", sanitize(at))}`, 0, 0);
 		},
 		renderResult(result, { expanded, isPartial }, theme, context) {
-			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			const text = sanitize(result.content[0]?.type === "text" ? result.content[0].text : "");
 			if (isPartial) return new Text(theme.fg("dim", "reading…"), 0, 0);
 			if (context.isError) return new Text(theme.fg("error", text), 0, 0);
 			const details = result.details as ReadDetails | undefined;
@@ -222,12 +223,12 @@ export function recallHerderTool() {
 		},
 		renderCall(args, theme) {
 			const title = theme.fg("toolTitle", theme.bold("recall_herder "));
-			if (args.runId) return new Text(`${title}${theme.fg("muted", String(args.runId))}${theme.fg("dim", args.fromEvent ? ` · from event ${args.fromEvent}` : "")}`, 0, 0);
-			const where = args.project ? ` · project ${args.project}` : args.scope === "project" ? " · this project" : "";
+			if (args.runId) return new Text(`${title}${theme.fg("muted", sanitize(String(args.runId)))}${theme.fg("dim", args.fromEvent ? sanitize(` · from event ${args.fromEvent}`) : "")}`, 0, 0);
+			const where = args.project ? ` · project ${sanitize(String(args.project))}` : args.scope === "project" ? " · this project" : "";
 			return new Text(`${title}${theme.fg("muted", "runs")}${theme.fg("dim", where)}`, 0, 0);
 		},
 		renderResult(result, { expanded, isPartial }, theme, context) {
-			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			const text = sanitize(result.content[0]?.type === "text" ? result.content[0].text : "");
 			if (isPartial) return new Text(theme.fg("dim", "reading…"), 0, 0);
 			if (context.isError) return new Text(theme.fg("error", text), 0, 0);
 			const details = result.details as Partial<RunsDetails & RunDetails> | undefined;

@@ -256,6 +256,73 @@ it("collapses a successful save or forget to its action, revision, and scope, si
 	expect(render("memory_save", update, { isError: true, expanded: true })).toEqual(refused.text.split("\n"));
 });
 
+it("strips ANSI/OSC/CSI control sequences from rendered memory tool output while preserving raw result.content and theme styling", async () => {
+	const OSC52 = "\x1b]52;c;SGVsbG8=\x07";
+	const CSI_RED = "\x1b[31m";
+	const CSI_RESET = "\x1b[0m";
+	const CSI_CLEAR = "\x1b[2J";
+	const DIRTY = `${OSC52}${CSI_RED}danger${CSI_RESET}${CSI_CLEAR}`;
+	const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
+	const styledTheme = { fg: (_color: string, text: string) => `\x1b[32m${text}\x1b[0m`, bold: (text: string) => `\x1b[1m${text}\x1b[22m` } as unknown as Theme;
+	const last = (name: string) => h.session.messages.filter((message) => message.role === "toolResult" && message.toolName === name).at(-1);
+	const renderResult = (name: string, args: object, { expanded = false, isError = false, theme = plainTheme, result = last(name) as unknown } = {}) =>
+		h.session.extensionRunner.getToolDefinition(name)!.renderResult!(result as never, { expanded, isPartial: false }, theme, { args, expanded, isError } as never)
+			.render(500).map((line) => line.trimEnd()).join("\n");
+	const renderCall = (name: string, args: object, theme = plainTheme) =>
+		h.session.extensionRunner.getToolDefinition(name)!.renderCall!(args as never, theme, { args, expanded: false, isError: false } as never)
+			.render(500).map((line) => line.trimEnd()).join("\n");
+
+	const dirtyScope = { ...PROJECT_SCOPE, label: `proj-${DIRTY}` };
+	const dirtyNote = note({ scope: dirtyScope, title: `Title ${DIRTY}`, hook: `Hook ${DIRTY}`, body: `Body ${DIRTY}` });
+	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, dirtyScope], notes: [dirtyNote], index: INDEX, indexBytes: INDEX.length, indexLines: 3 } });
+	pika.routes.set("POST memory/notes", { body: written(dirtyNote) });
+	pika.routes.set(`POST memory/notes/${dirtyNote.id}/forget`, { body: written({ ...dirtyNote, revision: 2, deletedAt: "2026-11-08T10:00:00Z" }) });
+
+	const readOut = await callTool(h, "memory_read", {});
+	const saveArgs = { expectedRevision: 0, scope: "project", category: "project", title: dirtyNote.title, hook: dirtyNote.hook, body: dirtyNote.body };
+	const saveOut = await callTool(h, "memory_save", saveArgs);
+	const forgetOut = await callTool(h, "memory_forget", { id: dirtyNote.id, expectedRevision: 1 });
+
+	for (const [name, args, out] of [
+		["memory_read", {}, readOut],
+		["memory_save", saveArgs, saveOut],
+		["memory_forget", { id: dirtyNote.id, expectedRevision: 1 }, forgetOut],
+	] as const) {
+		expect(out.isError).toBe(false);
+		expect(out.text).toContain(OSC52);
+		expect(out.text).toContain(CSI_RED);
+		expect(out.text).toContain(CSI_CLEAR);
+
+		for (const expanded of [false, true]) {
+			const rendered = renderResult(name, args, { expanded });
+			expect(rendered).not.toContain("\x1b");
+			expect(rendered).not.toContain("\x07");
+			if (expanded) expect(rendered).toContain("danger");
+
+			const styled = renderResult(name, args, { expanded, theme: styledTheme });
+			expect(styled).not.toContain(OSC52);
+			expect(styled).not.toContain(CSI_RED);
+			expect(styled).not.toContain(CSI_CLEAR);
+			expect(styled).not.toContain("\x07");
+			if (!expanded || name === "memory_read") expect(styled).toContain("\x1b[32m");
+		}
+
+		// Error rendering (collapsed + expanded) strips control sequences without mutating content.
+		const errRes = { content: [{ type: "text", text: `boom ${DIRTY}\nline 2 ${DIRTY}` }], details: {} };
+		expect(renderResult(name, args, { isError: true, result: errRes })).not.toContain("\x1b");
+		expect(renderResult(name, args, { isError: true, expanded: true, result: errRes })).not.toContain("\x1b");
+		expect(errRes.content[0]!.text).toContain(OSC52);
+	}
+
+	expect(renderResult("memory_save", saveArgs)).toBe("created · rev 1 · project proj-danger");
+	expect(renderResult("memory_forget", { id: dirtyNote.id })).toBe("forgot · rev 2 · project proj-danger");
+
+	// renderCall strips control sequences from call arguments too.
+	expect(renderCall("memory_read", { ids: [DIRTY], query: DIRTY })).toBe('memory_read ids danger · "danger"');
+	expect(renderCall("memory_save", { id: DIRTY, scope: "project", title: DIRTY })).toBe("memory_save danger · project · update danger");
+	expect(renderCall("memory_forget", { id: DIRTY })).toBe("memory_forget danger");
+});
+
 it("without a git repository, project saves fail and user saves still work", async () => {
 	await h.shutdown();
 	const bare = await Workspace.create({ git: false });

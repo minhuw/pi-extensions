@@ -1,6 +1,7 @@
 import { type AgentToolResult, defineTool, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { sanitize } from "../relay/protocol.ts";
 import { resolveRepository, type RepositoryInfo } from "../repository.ts";
 import { MemoryServerError, noMemoryApi, request } from "./client.ts";
 import {
@@ -18,13 +19,13 @@ const noteId = (text: string) => text.trim().replace(/^\[|\]$/g, "");
 
 /** `memory_read`'s filters as its call line shows them; empty for none. */
 export const readFilters = (args: { ids?: string[]; query?: string; category?: string; scope?: string }): string =>
-	[args.ids?.length ? `ids ${args.ids.join(", ")}` : "", args.query ? JSON.stringify(args.query) : "", args.category ?? "", args.scope ? `${args.scope} scope` : ""].filter(Boolean).join(" · ");
+	[args.ids?.length ? `ids ${args.ids.map((id) => sanitize(id)).join(", ")}` : "", args.query ? JSON.stringify(sanitize(args.query)) : "", args.category ? sanitize(args.category) : "", args.scope ? `${sanitize(args.scope)} scope` : ""].filter(Boolean).join(" · ");
 
 export type WriteAction = "created" | "updated" | "forgot";
 /** What a `memory_save` with these arguments does: it updates the note its id names, else creates one. */
 export const saveAction = (args: { id?: unknown }): WriteAction => typeof args.id === "string" && noteId(args.id) ? "updated" : "created";
 
-const scopeText = (scope: Partial<Scope> | undefined) => scope?.kind === "user" ? "user" : scope?.kind === "project" ? `project ${scope.label ?? ""}`.trim() : "";
+const scopeText = (scope: Partial<Scope> | undefined) => scope?.kind === "user" ? "user" : scope?.kind === "project" ? `project ${sanitize(scope.label ?? "")}`.trim() : "";
 /**
  * A successful save or forget in brief, from the note in its details: "created · rev 1 · user", or without `withScope`
  * "created · rev 1". Without that note, the result's first line.
@@ -155,7 +156,7 @@ export function memoryReadTool(options: { recordUse?: boolean } = {}) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("memory_read "))}${theme.fg("muted", readFilters(args) || "all notes")}`, 0, 0);
 		},
 		renderResult(result, { expanded, isPartial }, theme, context) {
-			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			const text = sanitize(result.content[0]?.type === "text" ? result.content[0].text : "");
 			if (isPartial) return new Text(theme.fg("dim", "reading…"), 0, 0);
 			if (context.isError) return new Text(theme.fg("error", text), 0, 0);
 			const count = (result.details as ReadDetails | undefined)?.noteIds.length ?? 0;
@@ -209,11 +210,11 @@ export function memorySaveTool() {
 			}
 		},
 		renderCall(args, theme) {
-			const what = args.id ? `update ${args.id}` : "new";
-			return new Text(`${theme.fg("toolTitle", theme.bold("memory_save "))}${theme.fg("muted", String(args.title ?? ""))}${theme.fg("dim", ` · ${args.scope ?? "?"} · ${what}`)}`, 0, 0);
+			const what = args.id ? `update ${sanitize(String(args.id))}` : "new";
+			return new Text(`${theme.fg("toolTitle", theme.bold("memory_save "))}${theme.fg("muted", sanitize(String(args.title ?? "")))}${theme.fg("dim", ` · ${sanitize(String(args.scope ?? "?"))} · ${what}`)}`, 0, 0);
 		},
 		renderResult(result, { expanded, isPartial }, theme, context) {
-			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			const text = sanitize(result.content[0]?.type === "text" ? result.content[0].text : "");
 			if (isPartial) return new Text(theme.fg("dim", "saving…"), 0, 0);
 			if (context.isError) return new Text(theme.fg("error", expanded ? text : firstLine(text)), 0, 0);
 			// The call line shows the title already.
@@ -250,10 +251,10 @@ export function memoryForgetTool() {
 			}
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("memory_forget "))}${theme.fg("muted", String(args.id ?? ""))}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("memory_forget "))}${theme.fg("muted", sanitize(String(args.id ?? "")))}`, 0, 0);
 		},
 		renderResult(result, { expanded, isPartial }, theme, context) {
-			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			const text = sanitize(result.content[0]?.type === "text" ? result.content[0].text : "");
 			if (isPartial) return new Text(theme.fg("dim", "forgetting…"), 0, 0);
 			if (context.isError) return new Text(theme.fg("error", expanded ? text : firstLine(text)), 0, 0);
 			return new Text(expanded ? text : theme.fg("success", writeSummary("forgot", result.details, text)), 0, 0);

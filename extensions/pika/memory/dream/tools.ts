@@ -3,6 +3,7 @@ import { type AgentToolResult, defineTool, type ToolDefinition } from "@earendil
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { recallReadTool, recallSearchTool } from "../../recall/index.ts";
+import { sanitize } from "../../relay/protocol.ts";
 import { MemoryServerError } from "../client.ts";
 import { BODY_LIMIT, bodyTooLong, type Category, type FullAnswer, formatFull, formatNote, type Note, type ScopeKind } from "../format.ts";
 import { CATEGORY, firstLine, memoryReadTool, SCOPE } from "../tools.ts";
@@ -51,7 +52,7 @@ function refusal(run: DreamRun): string | undefined {
 
 const renderStage = (verb: string) => ({
 	renderResult(result: AgentToolResult<unknown>, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: { fg(color: "dim" | "error" | "success", text: string): string }, context: { isError: boolean }) {
-		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		const text = sanitize(result.content[0]?.type === "text" ? result.content[0].text : "");
 		if (isPartial) return new Text(theme.fg("dim", `${verb}…`), 0, 0);
 		if (context.isError) return new Text(theme.fg("error", expanded ? text : firstLine(text)), 0, 0);
 		return new Text(expanded ? text : theme.fg("success", firstLine(text)), 0, 0);
@@ -94,7 +95,7 @@ export function dreamSaveTool(run: DreamRun) {
 			return { content: [{ type: "text", text }], details: { position, staged: run.staged.length } };
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("dream_save "))}${theme.fg("muted", String(args.title ?? ""))}${theme.fg("dim", ` · ${args.scope ?? "?"} · ${args.id ? `update ${args.id}` : "new"}`)}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("dream_save "))}${theme.fg("muted", sanitize(String(args.title ?? "")))}${theme.fg("dim", ` · ${sanitize(String(args.scope ?? "?"))} · ${args.id ? `update ${sanitize(String(args.id))}` : "new"}`)}`, 0, 0);
 		},
 		...renderStage("staging"),
 	});
@@ -123,7 +124,7 @@ export function dreamForgetTool(run: DreamRun) {
 			return { content: [{ type: "text", text }], details: { position, staged: run.staged.length } };
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("dream_forget "))}${theme.fg("muted", String(args.id ?? ""))}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("dream_forget "))}${theme.fg("muted", sanitize(String(args.id ?? "")))}`, 0, 0);
 		},
 		...renderStage("staging"),
 	});
