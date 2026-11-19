@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
@@ -18,7 +18,12 @@ it("reads pika.json, lets PIKA_URL and PIKA_TOKEN override it, and always honors
 		await writeFile(join(dir, "pika.json"), JSON.stringify({ url: "ftp://files", token: "t" }));
 		expect(loadConfig(dir, {})).toMatchObject({ enabled: false, reason: expect.stringMatching(/invalid server url/) });
 		await writeFile(join(dir, "pika.json"), "{");
-		expect(loadConfig(dir, {})).toMatchObject({ enabled: false, reason: expect.stringMatching(/cannot read/) });
+		expect(loadConfig(dir, {})).toEqual({
+			enabled: false,
+			reason: `cannot parse ${join(dir, "pika.json")} as JSON; fix or remove it`,
+			file: join(dir, "pika.json"),
+			unreadable: true,
+		});
 	} finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -35,7 +40,29 @@ it("rejects a server url with credentials, a query, or a fragment, without repea
 		expect(loadConfig(dir, { PIKA_URL: "https://pika.example.com/?x=1" })).toMatchObject({ enabled: false, reason: "invalid server url in PIKA_URL: the server URL must not have a query or fragment" });
 		expect(loadConfig(dir, { PIKA_URL: "https://Pika.Example.com:443/pika//" })).toMatchObject({ enabled: true, config: { url: "https://Pika.Example.com:443/pika" } });
 		await writeFile(file, `{ "token": "pika_secret" `);
-		expect(loadConfig(dir, {})).toMatchObject({ enabled: false, unreadable: true });
+		expect(loadConfig(dir, {})).toEqual({ enabled: false, reason: `cannot parse ${file} as JSON; fix or remove it`, file, unreadable: true });
+	} finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+it("returns a fixed parse-failure reason for malformed pika.json without leaking parser excerpts or secrets", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pi-pika-config-"));
+	const file = join(dir, "pika.json");
+	const dummyToken = "unquoted_dummy_secret_value";
+	try {
+		for (const malformed of [
+			`{"token": ${dummyToken}}`,
+			`{"url": "https://pika.example.com", "token": "${dummyToken}" `,
+			`${dummyToken}`,
+		]) {
+			await writeFile(file, malformed);
+			const result = loadConfig(dir, {});
+			expect(result).toEqual({ enabled: false, reason: `cannot parse ${file} as JSON; fix or remove it`, file, unreadable: true });
+			expect(result.enabled ? "" : result.reason).not.toContain(dummyToken);
+			expect(JSON.stringify(result)).not.toContain(dummyToken);
+		}
+		await rm(file);
+		await mkdir(file);
+		expect(loadConfig(dir, {})).toEqual({ enabled: false, reason: `cannot read ${file} (EISDIR)`, file, unreadable: true });
 	} finally { await rm(dir, { recursive: true, force: true }); }
 });
 

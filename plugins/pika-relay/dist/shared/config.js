@@ -14,8 +14,13 @@ export function loadConfig(agentDir, env = process.env) {
             return { enabled: false, reason: `${file} is not a JSON object`, file };
     }
     catch (error) {
-        if (error.code !== "ENOENT")
-            return { enabled: false, reason: `cannot read ${file}: ${error.message}`, file, unreadable: true };
+        if (error instanceof SyntaxError) {
+            return { enabled: false, reason: `cannot parse ${file} as JSON; fix or remove it`, file, unreadable: true };
+        }
+        const code = typeof error?.code === "string" ? error.code : undefined;
+        if (code !== "ENOENT") {
+            return { enabled: false, reason: code ? `cannot read ${file} (${code})` : `cannot read ${file}`, file, unreadable: true };
+        }
     }
     const url = (env.PIKA_URL || (typeof raw.url === "string" ? raw.url : "")).trim();
     const token = (env.PIKA_TOKEN || (typeof raw.token === "string" ? raw.token : "")).trim();

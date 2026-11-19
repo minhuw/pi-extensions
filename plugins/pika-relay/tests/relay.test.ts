@@ -352,6 +352,21 @@ describe("MCP tools", () => {
         expect(sent.text).toMatch(/^This session is not connected to pika relay: pika is not configured or is disabled: "enabled" is false in .*pika\.json\.$/);
         expect((await server.call(A, "relay_list")).text).toMatch(/^relay is offline in this session: pika is not configured or is disabled/);
     });
+
+    it("reports malformed pika.json with a fixed error without leaking secret-like tokens", async () => {
+        const file = join(env.agentDir, "pika.json");
+        const dummyToken = "unquoted_dummy_secret_value";
+        await writeFile(file, `{"token": ${dummyToken}}`);
+        const server = await mcp();
+        const sent = await server.call(A, "relay_send", { to: B, text: "hi" });
+        expect(sent.isError).toBe(true);
+        expect(sent.text).toBe(`This session is not connected to pika relay: pika is not configured or is disabled: cannot parse ${file} as JSON; fix or remove it.`);
+        expect(sent.text).not.toContain(dummyToken);
+        const list = await server.call(A, "relay_list");
+        expect(list.isError).toBe(true);
+        expect(list.text).toBe(`relay is offline in this session: pika is not configured or is disabled: cannot parse ${file} as JSON; fix or remove it`);
+        expect(list.text).not.toContain(dummyToken);
+    });
 });
 
 describe("relay_wait", () => {
