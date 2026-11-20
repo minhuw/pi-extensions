@@ -81,6 +81,7 @@ export interface ParsedAgentBrowserArgv {
 const GLOBAL_VALUE_FLAGS = new Set([
 	"--session",
 	"-s",
+	"--session-name",
 	"--cdp",
 	"--provider",
 	"-p",
@@ -92,7 +93,13 @@ const GLOBAL_VALUE_FLAGS = new Set([
 	"--idle-timeout",
 	"--user-agent",
 	"--proxy",
+	"--proxy-bypass",
 	"--headers",
+	"--executable-path",
+	"--extensions",
+	"--args",
+	"--state",
+	"--download-path",
 ]);
 
 const SCREENSHOT_VALUE_FLAGS = new Set([

@@ -71,9 +71,10 @@ fs.appendFileSync(logFile, JSON.stringify(record) + "\\n", "utf8");
 
 // Parse flags and subcommand
 const valueFlags = new Set([
-	"--session", "-s", "--cdp", "--provider", "-p", "--engine", "--config",
+	"--session", "-s", "--session-name", "--cdp", "--provider", "-p", "--engine", "--config",
 	"--namespace", "--profile", "--allowed-domains", "--idle-timeout",
-	"--user-agent", "--proxy", "--headers",
+	"--user-agent", "--proxy", "--proxy-bypass", "--headers",
+	"--executable-path", "--extensions", "--args", "--state", "--download-path",
 ]);
 const shotValueFlags = new Set(["--selector", "-S", "--format", "--quality", "-q", "--clip"]);
 
@@ -280,6 +281,140 @@ describe("AC-2 & AC-3 — Direct argv execution, session isolation, inline scree
 			screenshotPath: undefined,
 			screenshotBase64: true,
 		});
+	});
+
+	it("consumes values for all 7 additional global value flags before and after subcommands", async () => {
+		const flagCases: ReadonlyArray<readonly [flag: string, value: string]> = [
+			["--session-name", "persisted-auth"],
+			["--executable-path", "/usr/bin/chromium"],
+			["--extensions", "/ext/one,/ext/two"],
+			["--args", "--disable-gpu,--no-sandbox"],
+			["--proxy-bypass", "localhost,127.0.0.1"],
+			["--state", "auth/state.json"],
+			["--download-path", "/tmp/downloads"],
+		];
+
+		for (const [flag, value] of flagCases) {
+			// Space-separated before regular subcommand
+			expect(parseAgentBrowserArgv([flag, value, "open", "https://example.com"])).toEqual({
+				explicitSession: undefined,
+				subcommand: "open",
+				subcommandIndex: 2,
+				screenshotPath: undefined,
+				screenshotBase64: false,
+			});
+
+			// Equals-separated before regular subcommand
+			expect(parseAgentBrowserArgv([`${flag}=${value}`, "open", "https://example.com"])).toEqual({
+				explicitSession: undefined,
+				subcommand: "open",
+				subcommandIndex: 1,
+				screenshotPath: undefined,
+				screenshotBase64: false,
+			});
+
+			// Space-separated before screenshot (no explicit path)
+			expect(parseAgentBrowserArgv([flag, value, "screenshot"])).toEqual({
+				explicitSession: undefined,
+				subcommand: "screenshot",
+				subcommandIndex: 2,
+				screenshotPath: undefined,
+				screenshotBase64: false,
+			});
+
+			// Equals-separated before screenshot with explicit path
+			expect(parseAgentBrowserArgv([`${flag}=${value}`, "screenshot", "out/shot.png"])).toEqual({
+				explicitSession: undefined,
+				subcommand: "screenshot",
+				subcommandIndex: 1,
+				screenshotPath: "out/shot.png",
+				screenshotBase64: false,
+			});
+
+			// Space-separated after screenshot does not consume value as screenshotPath
+			expect(parseAgentBrowserArgv(["screenshot", flag, value, "out/shot.png"])).toEqual({
+				explicitSession: undefined,
+				subcommand: "screenshot",
+				subcommandIndex: 0,
+				screenshotPath: "out/shot.png",
+				screenshotBase64: false,
+			});
+
+			// Space-separated before meta-subcommand (close)
+			expect(parseAgentBrowserArgv([flag, value, "close"])).toEqual({
+				explicitSession: undefined,
+				subcommand: "close",
+				subcommandIndex: 2,
+				screenshotPath: undefined,
+				screenshotBase64: false,
+			});
+
+			// Equals-separated before meta-subcommand (close)
+			expect(parseAgentBrowserArgv([`${flag}=${value}`, "close"])).toEqual({
+				explicitSession: undefined,
+				subcommand: "close",
+				subcommandIndex: 1,
+				screenshotPath: undefined,
+				screenshotBase64: false,
+			});
+		}
+
+		// Multiple global value flags chained together with --session
+		expect(
+			parseAgentBrowserArgv([
+				"--session-name",
+				"work",
+				"--executable-path",
+				"/opt/chrome",
+				"--extensions",
+				"/ext/a",
+				"--args",
+				"--headless=new",
+				"--proxy-bypass",
+				"*.internal",
+				"--state",
+				"state.json",
+				"--download-path",
+				"/tmp/dl",
+				"--session",
+				"explicit-1",
+				"screenshot",
+				"out/combined.png",
+			]),
+		).toEqual({
+			explicitSession: "explicit-1",
+			subcommand: "screenshot",
+			subcommandIndex: 16,
+			screenshotPath: "out/combined.png",
+			screenshotBase64: false,
+		});
+
+		// End-to-end check: runAgentBrowser still captures inline screenshot and prepends --session for close
+		const shotRes = await runAgentBrowser({
+			argv: ["--download-path", "/tmp/downloads", "screenshot"],
+			session: "pi-flag-test",
+			cwd: projectCwd,
+		});
+		expect(shotRes.ok).toBe(true);
+		expect(shotRes.subcommand).toBe("screenshot");
+		expect(shotRes.image).toBeDefined();
+		expect(shotRes.image!.data).toBe(ONE_BY_ONE_PNG_BASE64);
+
+		const closeRes = await runAgentBrowser({
+			argv: ["--session-name", "persisted-auth", "close"],
+			session: "pi-flag-test",
+			cwd: projectCwd,
+		});
+		expect(closeRes.ok).toBe(true);
+		expect(closeRes.subcommand).toBe("close");
+		const invocations = await readInvocations();
+		expect(invocations.at(-1)?.argv).toEqual([
+			"--session",
+			"pi-flag-test",
+			"--session-name",
+			"persisted-auth",
+			"close",
+		]);
 	});
 
 	it("executes agent-browser without shell expansion, isolates AGENT_BROWSER_SESSION, and enforces timeout, truncation, and ENOENT install hints", async () => {
