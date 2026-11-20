@@ -728,6 +728,11 @@ function extractGitTargets(args: string[], baseCwd: string): string[] {
 			idx += 2;
 			continue;
 		}
+		if (arg.startsWith("-C") && arg.length > 2) {
+			gitCwd = resolveBashWord(arg.slice(2), gitCwd);
+			idx++;
+			continue;
+		}
 		if (arg.startsWith("-")) {
 			idx++;
 			continue;
@@ -813,21 +818,70 @@ function optionValue(args: string[], names: string[]): string | undefined {
 	return value;
 }
 
-/** Archive written by `tar -c/-r/-u`, or the `-C` extraction directory otherwise. */
-function extractTarTarget(args: string[]): string | undefined {
+const CP_LN_MV_OTHER_VALUE_SHORT = new Set(["S"]);
+const INSTALL_OTHER_VALUE_SHORT = new Set(["B", "f", "g", "h", "l", "m", "M", "N", "o", "S", "T"]);
+
+function extractTargetDirectoryOption(
+	args: string[],
+	index: number,
+	otherValueShort: ReadonlySet<string>,
+): { targetDir: string | undefined; nextIdx: number } | undefined {
+	const arg = args[index]!;
+	if (arg === "-t" || arg === "--target-directory") {
+		const value = args[index + 1];
+		return { targetDir: value, nextIdx: value !== undefined ? index + 1 : index };
+	}
+	if (arg.startsWith("--target-directory=")) {
+		return { targetDir: arg.slice("--target-directory=".length), nextIdx: index };
+	}
+	if (arg.startsWith("-") && !arg.startsWith("--") && arg.length > 1) {
+		for (let j = 1; j < arg.length; j++) {
+			const ch = arg[j]!;
+			if (ch === "t") {
+				const attached = arg.slice(j + 1);
+				if (attached.length > 0) {
+					return { targetDir: attached, nextIdx: index };
+				}
+				const value = args[index + 1];
+				return { targetDir: value, nextIdx: value !== undefined ? index + 1 : index };
+			}
+			if (otherValueShort.has(ch)) {
+				break;
+			}
+		}
+	}
+	return undefined;
+}
+
+const TAR_OTHER_VALUE_SHORT = new Set(["b", "H", "I", "K", "L", "N", "T", "V", "X"]);
+
+/** Archive written by `tar -c/-r/-u`, or the `-C`/`--directory` extraction directories otherwise. */
+function extractTarTargets(args: string[], effectiveCwd: string): string[] {
 	let archive: string | undefined;
-	let directory: string | undefined;
+	const directories: string[] = [];
+	let tarCwd = effectiveCwd;
 	let writesArchive = false;
+	const pushDir = (dir: string | undefined) => {
+		if (!dir) return;
+		tarCwd = resolveBashWord(dir, tarCwd);
+		directories.push(tarCwd);
+	};
+
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i]!;
-		if (arg === "-C" || arg === "--directory" || arg === "-f" || arg === "--file") {
-			if (arg === "-C" || arg === "--directory") directory = args[i + 1];
-			else archive = args[i + 1];
-			i++;
+		if (arg === "--") break;
+		if (arg === "-C" || arg === "--directory") {
+			pushDir(args[i + 1]);
+			if (args[i + 1] !== undefined) i++;
+			continue;
+		}
+		if (arg === "-f" || arg === "--file") {
+			archive = args[i + 1];
+			if (args[i + 1] !== undefined) i++;
 			continue;
 		}
 		if (arg.startsWith("--directory=")) {
-			directory = arg.slice("--directory=".length);
+			pushDir(arg.slice("--directory=".length));
 			continue;
 		}
 		if (arg.startsWith("--file=")) {
@@ -838,17 +892,48 @@ function extractTarTarget(args: string[]): string | undefined {
 			writesArchive = true;
 			continue;
 		}
-		// Bundled short options (`-czf out.tgz`), or traditional bundled first argument (`czf out.tgz`).
-		const letters = arg.startsWith("-") && !arg.startsWith("--") ? arg.slice(1) : i === 0 ? arg : "";
-		if (!/^[A-Za-z]+$/.test(letters)) continue;
-		if (/[cru]/.test(letters)) writesArchive = true;
-		if (letters.endsWith("f") && args[i + 1]) {
-			archive = args[i + 1];
-			i++;
+		if (arg.startsWith("-") && !arg.startsWith("--") && arg.length > 1) {
+			for (let j = 1; j < arg.length; j++) {
+				const ch = arg[j]!;
+				if (!/[A-Za-z]/.test(ch)) break;
+				if (ch === "C") {
+					const attached = arg.slice(j + 1);
+					if (attached.length > 0) {
+						pushDir(attached);
+					} else if (args[i + 1] !== undefined) {
+						pushDir(args[i + 1]);
+						i++;
+					}
+					break;
+				}
+				if (ch === "f") {
+					const attached = arg.slice(j + 1);
+					if (attached.length > 0) {
+						archive = attached;
+					} else if (args[i + 1] !== undefined) {
+						archive = args[i + 1];
+						i++;
+					}
+					break;
+				}
+				if (TAR_OTHER_VALUE_SHORT.has(ch)) break;
+				if (ch === "c" || ch === "r" || ch === "u") writesArchive = true;
+			}
+			continue;
+		}
+		// Traditional bundled first argument without leading `-` (`czf out.tgz`, `xf in.tar`).
+		if (i === 0 && /^[A-Za-z]+$/.test(arg)) {
+			if (/[cru]/.test(arg)) writesArchive = true;
+			if (arg.endsWith("f") && args[i + 1]) {
+				archive = args[i + 1];
+				i++;
+			}
 		}
 	}
-	if (writesArchive) return archive && archive !== "-" ? archive : undefined;
-	return directory;
+	if (writesArchive) {
+		return archive && archive !== "-" ? [resolveBashWord(archive, effectiveCwd)] : [];
+	}
+	return directories;
 }
 
 interface BashWalkVisitor {
@@ -990,12 +1075,14 @@ export function extractTaggedBashWriteTargets(command: string, cwd: string, proj
 	};
 
 	const inspectCommand = (words: string[], effectiveCwd: string): void => {
-		deleting = DELETING_VERBS.has(words[0] ?? "");
-		inspectWords(words, effectiveCwd);
+		const rawVerb = words[0];
+		const verb = rawVerb ? path.basename(rawVerb) : "";
+		deleting = DELETING_VERBS.has(verb);
+		inspectWords(verb, words.slice(1), effectiveCwd);
 		deleting = false;
 	};
 
-	const inspectWords = ([verb, ...args]: string[], effectiveCwd: string): void => {
+	const inspectWords = (verb: string, args: string[], effectiveCwd: string): void => {
 		if (!verb || verb === "cd" || verb === "pushd") return;
 
 		if (verb === "git") {
@@ -1009,6 +1096,10 @@ export function extractTaggedBashWriteTargets(command: string, cwd: string, proj
 			const positionals: string[] = [];
 			for (let i = 0; i < args.length; i++) {
 				const arg = args[i]!;
+				if (arg === "--") {
+					positionals.push(...args.slice(i + 1));
+					break;
+				}
 				if (flagsWithValue.has(arg)) {
 					i++;
 					continue;
@@ -1026,24 +1117,28 @@ export function extractTaggedBashWriteTargets(command: string, cwd: string, proj
 		}
 
 		if (verb === "cp" || verb === "ln" || verb === "install") {
-			let targetDir: string | undefined;
+			const targetDirs: string[] = [];
 			const positionals: string[] = [];
+			const otherValueShort = verb === "install" ? INSTALL_OTHER_VALUE_SHORT : CP_LN_MV_OTHER_VALUE_SHORT;
 			for (let i = 0; i < args.length; i++) {
 				const arg = args[i]!;
-				if ((arg === "-t" || arg === "--target-directory") && args[i + 1]) {
-					targetDir = args[i + 1]!;
-					i++;
-					continue;
+				if (arg === "--") {
+					positionals.push(...args.slice(i + 1));
+					break;
 				}
-				if (arg.startsWith("--target-directory=")) {
-					targetDir = arg.slice("--target-directory=".length);
+				const parsed = extractTargetDirectoryOption(args, i, otherValueShort);
+				if (parsed) {
+					if (parsed.targetDir) targetDirs.push(parsed.targetDir);
+					i = parsed.nextIdx;
 					continue;
 				}
 				if (arg.startsWith("-")) continue;
 				positionals.push(arg);
 			}
-			if (targetDir) {
-				push(resolveBashWord(targetDir, effectiveCwd));
+			if (targetDirs.length > 0) {
+				for (const targetDir of targetDirs) {
+					push(resolveBashWord(targetDir, effectiveCwd));
+				}
 			} else if (positionals.length >= 2) {
 				push(resolveBashWord(positionals[positionals.length - 1]!, effectiveCwd));
 			} else if (effectiveCwd !== canonicalCwd) {
@@ -1053,11 +1148,30 @@ export function extractTaggedBashWriteTargets(command: string, cwd: string, proj
 		}
 
 		if (verb === "mv") {
-			const positionals = args.filter((arg) => !arg.startsWith("-"));
+			const targetDirs: string[] = [];
+			const positionals: string[] = [];
+			for (let i = 0; i < args.length; i++) {
+				const arg = args[i]!;
+				if (arg === "--") {
+					positionals.push(...args.slice(i + 1));
+					break;
+				}
+				const parsed = extractTargetDirectoryOption(args, i, CP_LN_MV_OTHER_VALUE_SHORT);
+				if (parsed) {
+					if (parsed.targetDir) targetDirs.push(parsed.targetDir);
+					i = parsed.nextIdx;
+					continue;
+				}
+				if (arg.startsWith("-")) continue;
+				positionals.push(arg);
+			}
 			for (const p of positionals) {
 				push(resolveBashWord(p, effectiveCwd));
 			}
-			if (positionals.length === 0 && effectiveCwd !== canonicalCwd) {
+			for (const targetDir of targetDirs) {
+				push(resolveBashWord(targetDir, effectiveCwd));
+			}
+			if (positionals.length === 0 && targetDirs.length === 0 && effectiveCwd !== canonicalCwd) {
 				push(effectiveCwd);
 			}
 			return;
@@ -1073,9 +1187,16 @@ export function extractTaggedBashWriteTargets(command: string, cwd: string, proj
 			return;
 		}
 
+		if (verb === "tar") {
+			const tarTargets = extractTarTargets(args, effectiveCwd);
+			if (tarTargets.length > 0) {
+				for (const target of tarTargets) push(target);
+				return;
+			}
+		}
+
 		const explicitTarget =
 			verb === "dd" ? args.find((arg) => arg.startsWith("of="))?.slice("of=".length)
-			: verb === "tar" ? extractTarTarget(args)
 			: verb === "unzip" ? optionValue(args, ["-d"]) ?? args.find((arg) => /^-d./.test(arg))?.slice(2)
 			: verb === "npm" || verb === "pnpm" || verb === "yarn" ? optionValue(args, ["--prefix", "-C", "--dir", "--cwd"])
 			: undefined;

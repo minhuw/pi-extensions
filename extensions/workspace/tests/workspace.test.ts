@@ -36,6 +36,8 @@ import {
 	extractAgentBrowserExternalTargets,
 	extractAgentBrowserWriteTargets,
 	extractBashExternalWriteTargets,
+	extractBashWriteTargets,
+	extractTaggedBashWriteTargets,
 	isSubpath,
 	readProjectPolicy,
 	resolveCanonicalPath,
@@ -299,6 +301,119 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 			['n=$(for d in a b; do [ -n "$(git -C $d status 2>/dev/null)" ] && echo y; done | wc -l)', []],
 		] as const) {
 			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual(expected);
+		}
+	});
+
+	it("normalizes explicit command paths and extracts target-directory and -C flags without affecting read-only commands", () => {
+		const canonicalOutside = resolveCanonicalPath(outsideDir);
+		const canonicalProject = resolveCanonicalPath(projectCwd);
+
+		// Explicit paths for mutating verbs
+		for (const [command, expected] of [
+			[`/bin/rm -rf ${outsideDir}/old`, [path.join(canonicalOutside, "old")]],
+			[`/bin/rmdir ${outsideDir}/empty`, [path.join(canonicalOutside, "empty")]],
+			[`/bin/mv local.txt ${outsideDir}/moved.txt`, [path.join(canonicalOutside, "moved.txt")]],
+			[`/usr/bin/git clone https://github.com/example/repo.git ${outsideDir}/repo`, [path.join(canonicalOutside, "repo")]],
+			[`/usr/bin/git -C${outsideDir} init`, [canonicalOutside]],
+			[`/usr/bin/cp local.txt ${outsideDir}/copied.txt`, [path.join(canonicalOutside, "copied.txt")]],
+			[`/usr/bin/ln -s local.txt ${outsideDir}/link.txt`, [path.join(canonicalOutside, "link.txt")]],
+			[`/usr/bin/install local.txt ${outsideDir}/bin/app`, [path.join(canonicalOutside, "bin", "app")]],
+			[`/usr/bin/tee ${outsideDir}/out.log`, [path.join(canonicalOutside, "out.log")]],
+			[`/bin/mkdir -p ${outsideDir}/dir`, [path.join(canonicalOutside, "dir")]],
+			[`/usr/bin/touch ${outsideDir}/file.txt`, [path.join(canonicalOutside, "file.txt")]],
+			[`/bin/dd if=/dev/zero of=${outsideDir}/disk.img`, [path.join(canonicalOutside, "disk.img")]],
+			[`/usr/bin/tar -xzf archive.tgz -C${outsideDir}`, [canonicalOutside]],
+			[`/usr/bin/unzip archive.zip -d${outsideDir}`, [canonicalOutside]],
+			[`/usr/local/bin/cargo init ${outsideDir}/crate`, [path.join(canonicalOutside, "crate")]],
+			[`/usr/local/bin/npm install --prefix ${outsideDir}`, [canonicalOutside]],
+			[`sudo /bin/rm -rf ${outsideDir}/wrapped`, [path.join(canonicalOutside, "wrapped")]],
+			[`env -u FOO /bin/mv -t${outsideDir} local.txt`, [canonicalOutside]],
+			[`cd ${outsideDir} && /usr/bin/tar -xzf /tmp/in.tgz`, [canonicalOutside]],
+		] as const) {
+			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual(expected);
+		}
+
+		// Explicit deleting verbs keep deletes: true tagging
+		expect(extractTaggedBashWriteTargets("/bin/rm -rf .pi/workspaces/temp-ws", projectCwd)).toEqual([
+			{ path: path.join(canonicalProject, ".pi", "workspaces", "temp-ws"), deletes: true },
+		]);
+		expect(extractTaggedBashWriteTargets("/bin/rmdir .pi/workspaces/temp-ws", projectCwd)).toEqual([
+			{ path: path.join(canonicalProject, ".pi", "workspaces", "temp-ws"), deletes: true },
+		]);
+
+		// mv target-directory flags (all spellings)
+		for (const [command, expected] of [
+			[`mv --target-directory=${outsideDir} local.txt`, [canonicalOutside]],
+			[`mv --target-directory ${outsideDir} local.txt`, [canonicalOutside]],
+			[`mv -t ${outsideDir} local.txt`, [canonicalOutside]],
+			[`mv -t${outsideDir} local.txt`, [canonicalOutside]],
+			[`mv -ft${outsideDir} local.txt`, [canonicalOutside]],
+			[`/bin/mv --target-directory=${outsideDir} local.txt`, [canonicalOutside]],
+			[`mv --target-directory=./local ${outsideDir}/src.txt`, [path.join(canonicalOutside, "src.txt")]],
+			[`mv -t${outsideDir}/dst ${outsideDir}/src.txt`, [path.join(canonicalOutside, "src.txt"), path.join(canonicalOutside, "dst")]],
+			[`mv -t${outsideDir} -- -weird`, [canonicalOutside]],
+		] as const) {
+			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual(expected);
+		}
+		expect(extractBashWriteTargets("mv --target-directory=.pi/workspaces/ws1 local.txt", projectCwd)).toEqual([
+			path.join(canonicalProject, "local.txt"),
+			path.join(canonicalProject, ".pi", "workspaces", "ws1"),
+		]);
+
+		// cp / ln / install attached -t<dir> and existing forms
+		for (const [command, expected] of [
+			[`cp -t${outsideDir} local.txt`, [canonicalOutside]],
+			[`cp -rt${outsideDir} src`, [canonicalOutside]],
+			[`cp -t ${outsideDir} local.txt`, [canonicalOutside]],
+			[`cp --target-directory=${outsideDir} local.txt`, [canonicalOutside]],
+			[`cp --target-directory ${outsideDir} local.txt`, [canonicalOutside]],
+			[`/usr/bin/cp -t${outsideDir} local.txt`, [canonicalOutside]],
+			[`ln -s -t${outsideDir} local.txt`, [canonicalOutside]],
+			[`ln -sft${outsideDir} local.txt`, [canonicalOutside]],
+			[`/usr/bin/ln -s -t${outsideDir} local.txt`, [canonicalOutside]],
+			[`install -t${outsideDir} local.txt`, [canonicalOutside]],
+			[`install -D -m0755 -t${outsideDir} local.txt`, [canonicalOutside]],
+			[`install -oroot -m0755 -t${outsideDir} local.txt`, [canonicalOutside]],
+			[`/usr/bin/install -t${outsideDir} local.txt`, [canonicalOutside]],
+		] as const) {
+			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual(expected);
+		}
+
+		// git and tar attached -C<dir> and existing forms
+		for (const [command, expected] of [
+			[`git -C${outsideDir} init`, [canonicalOutside]],
+			[`git -C${outsideDir} clone https://github.com/example/repo.git`, [path.join(canonicalOutside, "repo")]],
+			[`git -C${outsideDir} worktree add wt HEAD`, [path.join(canonicalOutside, "wt")]],
+			[`git -C${outsideDir} -Csub init`, [path.join(canonicalOutside, "sub")]],
+			[`tar -xzf archive.tgz -C${outsideDir}`, [canonicalOutside]],
+			[`tar -C${outsideDir} -xzf archive.tgz`, [canonicalOutside]],
+			[`tar -xC${outsideDir} -f archive.tgz`, [canonicalOutside]],
+			[`tar -xzf archive.tgz -C../outside`, [canonicalOutside]],
+			[`tar -xzf archive.tgz -C${outsideDir} -Csub`, [canonicalOutside, path.join(canonicalOutside, "sub")]],
+			[`tar -czf${outsideDir}/out.tgz src`, [path.join(canonicalOutside, "out.tgz")]],
+			[`tar xf archive.tar --directory ${outsideDir}`, [canonicalOutside]],
+		] as const) {
+			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual(expected);
+		}
+
+		// Read-only commands and internal bare/flagged commands stay unaffected
+		for (const command of [
+			`/bin/ls -la ${outsideDir}`,
+			`/bin/cat ${outsideDir}/notes.txt`,
+			`/usr/bin/git -C${outsideDir} status`,
+			`/usr/bin/git -C ${outsideDir} diff`,
+			`git -C${outsideDir} log -1`,
+			`/usr/bin/tar -xzf ${outsideDir}/in.tgz`,
+			`/usr/bin/tar -cf out.tar -C${outsideDir} .`,
+			`tar -tzf ${outsideDir}/in.tgz`,
+			`cp -a ${outsideDir}/src ./local`,
+			`cp -t./local ${outsideDir}/src`,
+			`cp -S.txt local.txt ./dest`,
+			`install -oroot -m0755 local.txt ./dest`,
+			`mv local1.txt local2.txt`,
+			`mv -t./local local1.txt`,
+		]) {
+			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual([]);
 		}
 	});
 });
