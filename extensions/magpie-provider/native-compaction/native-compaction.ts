@@ -15,6 +15,8 @@ export const OPAQUE_COMPACTION_TYPES = new Set(["compaction", "compaction_summar
 const REMOTE_COMPACTION_V2_RETAINED_TOKEN_BUDGET = 64_000;
 const REMOTE_COMPACTION_V2_MAX_AGENT_MESSAGE_TOKENS = 10_000;
 const MAX_REMOTE_RETRIES = 2;
+export const MAX_RETRY_DELAY_MS = 30_000;
+export const DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS = 120_000;
 
 export type JsonObject = Record<string, unknown>;
 export type ResponseItem = JsonObject & { type?: string };
@@ -536,15 +538,19 @@ export function shouldFallbackToBuiltinCompaction(params: {
 }
 
 function parseRetryDelay(response: Response): number | undefined {
-	const retryAfterMs = response.headers.get("retry-after-ms");
+	const retryAfterMs = response.headers.get("retry-after-ms")?.trim();
 	const milliseconds = Number(retryAfterMs);
-	if (retryAfterMs && Number.isFinite(milliseconds) && milliseconds >= 0) return milliseconds;
-	const retryAfter = response.headers.get("retry-after");
+	if (retryAfterMs && Number.isFinite(milliseconds) && milliseconds >= 0) {
+		return Math.min(milliseconds, MAX_RETRY_DELAY_MS);
+	}
+	const retryAfter = response.headers.get("retry-after")?.trim();
 	if (!retryAfter) return undefined;
 	const seconds = Number(retryAfter);
-	if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+	if (Number.isFinite(seconds) && seconds >= 0) {
+		return Math.min(seconds * 1000, MAX_RETRY_DELAY_MS);
+	}
 	const date = Date.parse(retryAfter);
-	return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
+	return Number.isFinite(date) ? Math.min(Math.max(0, date - Date.now()), MAX_RETRY_DELAY_MS) : undefined;
 }
 
 function isRetryableStatus(status: number): boolean {
@@ -553,7 +559,12 @@ function isRetryableStatus(status: number): boolean {
 
 class NonRetryableCompactionError extends Error {}
 
+function abortError(signal?: AbortSignal): Error {
+	return signal?.reason instanceof Error ? signal.reason : new Error("Compaction aborted");
+}
+
 async function delay(ms: number, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) throw abortError(signal);
 	if (ms <= 0) return;
 	await new Promise<void>((resolve, reject) => {
 		const cleanup = () => signal?.removeEventListener("abort", onAbort);
@@ -564,9 +575,41 @@ async function delay(ms: number, signal?: AbortSignal): Promise<void> {
 		const onAbort = () => {
 			clearTimeout(timer);
 			cleanup();
-			reject(signal?.reason instanceof Error ? signal.reason : new Error("Compaction aborted"));
+			reject(abortError(signal));
 		};
 		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+function waitForAbort<T>(promise: Promise<T>, signal?: AbortSignal, onLateResolve?: (value: T) => void): Promise<T> {
+	if (!signal || signal.aborted) return promise;
+	return new Promise<T>((resolve, reject) => {
+		let settled = false;
+		const cleanup = () => signal.removeEventListener("abort", onAbort);
+		const onAbort = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(abortError(signal));
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => {
+				if (settled) {
+					onLateResolve?.(value);
+					return;
+				}
+				settled = true;
+				cleanup();
+				resolve(value);
+			},
+			(error) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				reject(error);
+			},
+		);
 	});
 }
 
@@ -594,7 +637,11 @@ export function usageFromResponse(model: Model<any>, value: unknown): Usage | un
 
 async function readCompactResponse(response: Response, signal?: AbortSignal): Promise<CompactResponse> {
 	if (response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "text/event-stream") {
-		return parseCompactResponse(await response.json());
+		if (signal?.aborted) {
+			await response.body?.cancel(signal.reason).catch(() => {});
+			signal.throwIfAborted();
+		}
+		return parseCompactResponse(await waitForAbort(response.json(), signal));
 	}
 	if (!response.body) throw new Error("Native Responses returned an empty event stream.");
 	const reader = response.body.getReader();
@@ -659,45 +706,81 @@ export async function callRemoteCompaction(params: {
 	model: Model<any>;
 	signal?: AbortSignal;
 	fetchImpl?: typeof fetch;
+	timeoutMs?: number;
 }): Promise<RemoteCompactionResult> {
 	const fetchImpl = params.fetchImpl ?? fetch;
+	const timeoutMs = params.timeoutMs ?? DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS;
+	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+		throw new RangeError(`Invalid remote compaction timeoutMs: ${String(timeoutMs)}`);
+	}
 	let lastError: unknown;
 	for (let attempt = 0; attempt <= MAX_REMOTE_RETRIES; attempt++) {
 		try {
-			const response = await fetchImpl(params.url, {
-				method: "POST",
-				redirect: "error",
-				headers: params.headers,
-				body: JSON.stringify(params.body),
-				signal: params.signal,
-			});
-			if (!response.ok) {
-				const responseBody = await response.text().catch(() => "");
-				const message = `Native Responses compaction failed (${response.status}): ${responseBody || response.statusText}`;
-				// auth_unavailable is a routing/auth-selection miss. Repeating the same bound request will not recover.
-				if (!isRetryableStatus(response.status) || isAuthUnavailableMessage(responseBody) || isAuthUnavailableMessage(message)) {
-					throw new NonRetryableCompactionError(message);
+			let retryAfterMs: number | undefined;
+			let retryError: Error | undefined;
+			const timeoutController = new AbortController();
+			const attemptSignal = params.signal
+				? AbortSignal.any([params.signal, timeoutController.signal])
+				: timeoutController.signal;
+			const timer = attemptSignal.aborted
+				? undefined
+				: setTimeout(() => {
+					timeoutController.abort(new Error(`Native Responses compaction timed out after ${timeoutMs}ms.`));
+				}, timeoutMs);
+			try {
+				const response = await waitForAbort(
+					fetchImpl(params.url, {
+						method: "POST",
+						redirect: "error",
+						headers: params.headers,
+						body: JSON.stringify(params.body),
+						signal: attemptSignal,
+					}),
+					attemptSignal,
+					(lateResponse) => {
+						void lateResponse.body?.cancel().catch(() => {});
+					},
+				);
+				if (!response.ok) {
+					const responseBody = await waitForAbort(response.text(), attemptSignal).catch((error) => {
+						if (attemptSignal.aborted) {
+							void response.body?.cancel(attemptSignal.reason).catch(() => {});
+							throw error;
+						}
+						return "";
+					});
+					const message = `Native Responses compaction failed (${response.status}): ${responseBody || response.statusText}`;
+					// auth_unavailable is a routing/auth-selection miss. Repeating the same bound request will not recover.
+					if (!isRetryableStatus(response.status) || isAuthUnavailableMessage(responseBody) || isAuthUnavailableMessage(message)) {
+						throw new NonRetryableCompactionError(message);
+					}
+					retryError = new Error(message);
+					if (attempt === MAX_REMOTE_RETRIES) throw retryError;
+					retryAfterMs = parseRetryDelay(response);
+				} else {
+					const parsed = await readCompactResponse(response, attemptSignal);
+					attemptSignal.throwIfAborted();
+					const input = Array.isArray(params.body.input)
+						? (params.body.input as unknown[]).filter(isResponseItem).filter((item) => item.type !== "compaction_trigger")
+						: [];
+					return {
+						replacementHistory: buildRemoteCompactionV2ReplacementHistory(input, parsed.output),
+						usage: usageFromResponse(params.model, parsed.usage),
+					};
 				}
-				const error = new Error(message);
-				if (attempt === MAX_REMOTE_RETRIES) throw error;
-				lastError = error;
-				await delay(parseRetryDelay(response) ?? 1000 * 2 ** attempt, params.signal);
+			} finally {
+				if (timer !== undefined) clearTimeout(timer);
+			}
+			if (retryError) {
+				lastError = retryError;
+				await delay(retryAfterMs ?? Math.min(1000 * 2 ** attempt, MAX_RETRY_DELAY_MS), params.signal);
 				continue;
 			}
-			const parsed = await readCompactResponse(response, params.signal);
-			params.signal?.throwIfAborted();
-			const input = Array.isArray(params.body.input)
-				? (params.body.input as unknown[]).filter(isResponseItem).filter((item) => item.type !== "compaction_trigger")
-				: [];
-			return {
-				replacementHistory: buildRemoteCompactionV2ReplacementHistory(input, parsed.output),
-				usage: usageFromResponse(params.model, parsed.usage),
-			};
 		} catch (error) {
 			if (params.signal?.aborted || error instanceof NonRetryableCompactionError) throw error;
 			lastError = error;
 			if (attempt === MAX_REMOTE_RETRIES) throw error;
-			await delay(1000 * 2 ** attempt, params.signal);
+			await delay(Math.min(1000 * 2 ** attempt, MAX_RETRY_DELAY_MS), params.signal);
 		}
 	}
 	throw lastError instanceof Error ? lastError : new Error("Native Responses compaction failed.");

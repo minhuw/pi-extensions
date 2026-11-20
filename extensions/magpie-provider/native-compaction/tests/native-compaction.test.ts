@@ -11,8 +11,10 @@ import {
 	buildCompactRequestBody,
 	buildRemoteCompactionV2ReplacementHistory,
 	callRemoteCompaction,
+	DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS,
 	effectiveInputForBranch,
 	findNativeCheckpoint,
+	MAX_RETRY_DELAY_MS,
 	modelKey,
 	NATIVE_COMPACTION_KIND,
 	NATIVE_COMPACTION_VERSION,
@@ -608,17 +610,190 @@ describe("streamed remote compaction", () => {
 		const controller = new AbortController();
 		const reason = new Error("cancel compaction");
 		const cancel = vi.fn();
+		let attemptSignal: AbortSignal | null | undefined;
 		const body = new ReadableStream<Uint8Array>({
 			pull() { controller.abort(reason); },
 			cancel,
 		}, { highWaterMark: 0 });
 		const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
-			expect(init?.signal).toBe(controller.signal);
+			attemptSignal = init?.signal;
+			expect(attemptSignal).toBeInstanceOf(AbortSignal);
+			expect(attemptSignal?.aborted).toBe(false);
 			return new Response(body, { headers: { "content-type": "text/event-stream" } });
 		});
 		await expect(callRemoteCompaction({ ...request, signal: controller.signal, fetchImpl })).rejects.toBe(reason);
+		expect(attemptSignal?.aborted).toBe(true);
+		expect(attemptSignal?.reason).toBe(reason);
 		expect(fetchImpl).toHaveBeenCalledOnce();
 		expect(cancel).toHaveBeenCalledOnce();
 		expect(body.locked).toBe(false);
+	});
+
+	it.each([
+		["pre-aborted signal with Retry-After: 60", { "retry-after": "60" }],
+		["pre-aborted signal with Retry-After: 0", { "retry-after": "0" }],
+	] as const)("rejects immediately in retry backoff on %s without scheduling a timer", async (_name, headers) => {
+		vi.useFakeTimers();
+		const reason = new Error("already aborted before backoff");
+		const fetchImpl = vi.fn<typeof fetch>(async () => new Response("overloaded", { status: 503, headers }));
+		try {
+			await expect(
+				callRemoteCompaction({ ...request, signal: AbortSignal.abort(reason), fetchImpl }),
+			).rejects.toBe(reason);
+			expect(fetchImpl).toHaveBeenCalledOnce();
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("rejects immediately in retry backoff when signal aborts before delay starts", async () => {
+		vi.useFakeTimers();
+		const controller = new AbortController();
+		const fetchImpl = vi.fn<typeof fetch>(async () => {
+			controller.abort("non-error reason");
+			return new Response("overloaded", { status: 503, headers: { "retry-after": "30" } });
+		});
+		try {
+			await expect(
+				callRemoteCompaction({ ...request, signal: controller.signal, fetchImpl }),
+			).rejects.toThrow("Compaction aborted");
+			expect(fetchImpl).toHaveBeenCalledOnce();
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it.each([
+		["extreme retry-after-ms", { "retry-after-ms": "999999999" }],
+		["extreme numeric retry-after", { "retry-after": "86400" }],
+		["far-future HTTP-date retry-after", { "retry-after": "Wed, 21 Oct 2099 07:28:00 GMT" }],
+	] as const)("caps retry delay to MAX_RETRY_DELAY_MS for %s", async (_name, headers) => {
+		vi.useFakeTimers();
+		const fetchImpl = vi.fn<typeof fetch>(async () => new Response("rate limited", { status: 429, headers }));
+		try {
+			const assertion = expect(callRemoteCompaction({ ...request, fetchImpl })).rejects.toThrow("(429)");
+			await vi.advanceTimersByTimeAsync(0);
+			for (const attempt of [1, 2]) {
+				await vi.advanceTimersByTimeAsync(MAX_RETRY_DELAY_MS - 1);
+				expect(fetchImpl).toHaveBeenCalledTimes(attempt);
+				await vi.advanceTimersByTimeAsync(1);
+				expect(fetchImpl).toHaveBeenCalledTimes(attempt + 1);
+			}
+			await assertion;
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("enforces per-attempt timeout on a stalled fetch and retries until the retry limit", async () => {
+		vi.useFakeTimers();
+		const timeoutMs = 250;
+		const signals: (AbortSignal | null | undefined)[] = [];
+		const fetchImpl = vi.fn<typeof fetch>((_url, init) => {
+			signals.push(init?.signal);
+			return new Promise<Response>(() => {});
+		});
+		try {
+			expect(DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS).toBeGreaterThan(0);
+			const assertion = expect(
+				callRemoteCompaction({ ...request, fetchImpl, timeoutMs }),
+			).rejects.toThrow(`timed out after ${timeoutMs}ms`);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(fetchImpl).toHaveBeenCalledTimes(1);
+			// Attempt 0 timeout + 1000ms backoff
+			await vi.advanceTimersByTimeAsync(timeoutMs - 1);
+			expect(signals[0]?.aborted).toBe(false);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(signals[0]?.aborted).toBe(true);
+			await vi.advanceTimersByTimeAsync(999);
+			expect(fetchImpl).toHaveBeenCalledTimes(1);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(fetchImpl).toHaveBeenCalledTimes(2);
+			// Attempt 1 timeout + 2000ms backoff + attempt 2 timeout
+			await vi.advanceTimersByTimeAsync(timeoutMs + 2000 + timeoutMs);
+			await assertion;
+			expect(fetchImpl).toHaveBeenCalledTimes(3);
+			expect(signals.every((signal) => signal?.aborted)).toBe(true);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("enforces per-attempt timeout on a stalled SSE stream, cleans up readers, and retries until limit", async () => {
+		vi.useFakeTimers();
+		const timeoutMs = 250;
+		const streams: ReturnType<typeof streamResponse>[] = [];
+		const fetchImpl = vi.fn<typeof fetch>(async () => {
+			const stream = streamResponse(": heartbeat\n\n", true);
+			streams.push(stream);
+			return stream.response;
+		});
+		try {
+			const assertion = expect(
+				callRemoteCompaction({ ...request, fetchImpl, timeoutMs }),
+			).rejects.toThrow(`timed out after ${timeoutMs}ms`);
+			await vi.runAllTimersAsync();
+			await assertion;
+			expect(fetchImpl).toHaveBeenCalledTimes(3);
+			expect(streams).toHaveLength(3);
+			for (const { body, cancel } of streams) {
+				expect(cancel).toHaveBeenCalledOnce();
+				expect(body.locked).toBe(false);
+			}
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("propagates caller abort during a stalled fetch and stops retries immediately", async () => {
+		vi.useFakeTimers();
+		const controller = new AbortController();
+		const reason = new Error("caller aborted stalled fetch");
+		let attemptSignal: AbortSignal | null | undefined;
+		const fetchImpl = vi.fn<typeof fetch>((_url, init) => {
+			attemptSignal = init?.signal;
+			return new Promise<Response>(() => {});
+		});
+		try {
+			const assertion = expect(
+				callRemoteCompaction({ ...request, signal: controller.signal, fetchImpl, timeoutMs: 5_000 }),
+			).rejects.toBe(reason);
+			await vi.advanceTimersByTimeAsync(100);
+			expect(attemptSignal).toBeInstanceOf(AbortSignal);
+			expect(attemptSignal?.aborted).toBe(false);
+			controller.abort(reason);
+			await assertion;
+			expect(attemptSignal?.aborted).toBe(true);
+			expect(attemptSignal?.reason).toBe(reason);
+			expect(fetchImpl).toHaveBeenCalledOnce();
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("stops retries immediately when caller aborts during post-timeout backoff", async () => {
+		vi.useFakeTimers();
+		const controller = new AbortController();
+		const reason = new Error("caller aborted during backoff");
+		const fetchImpl = vi.fn<typeof fetch>(() => new Promise<Response>(() => {}));
+		try {
+			const assertion = expect(
+				callRemoteCompaction({ ...request, signal: controller.signal, fetchImpl, timeoutMs: 250 }),
+			).rejects.toBe(reason);
+			await vi.advanceTimersByTimeAsync(250 + 500);
+			expect(fetchImpl).toHaveBeenCalledOnce();
+			controller.abort(reason);
+			await assertion;
+			expect(fetchImpl).toHaveBeenCalledOnce();
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
