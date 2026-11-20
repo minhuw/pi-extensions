@@ -145,6 +145,43 @@ it("has the model write a handover, then sends it as the first message of a new 
 	} finally { await h.cleanup(); }
 }, 10_000);
 
+it("records pi-extensions.command once for /handoff, not again for its internal completion step", async () => {
+	const h = await fixture();
+	try {
+		const seen: string[] = [];
+		h.faux.setResponses([
+			answer("Initial progress.", seen),
+			answer("# Handover\nContinue from here.", seen),
+			answer("Continuing now.", seen),
+		]);
+		await h.runtime.session.prompt("Start work.");
+		const before = h.state();
+		const beforeSessionManager = h.runtime.session.sessionManager;
+
+		await h.runtime.session.prompt("/handoff continue");
+		await vi.waitFor(() => {
+			expect(h.state().id).not.toBe(before.id);
+			expect(h.runtime.session.messages.map((message) => message.role).filter((role) => role !== "system")).toEqual(["user", "assistant"]);
+			expect(h.runtime.session.isIdle).toBe(true);
+		});
+
+		const commandEntries = (manager: typeof beforeSessionManager) =>
+			manager
+				.getEntries()
+				.filter((entry) => entry.type === "custom" && entry.customType === "pi-extensions.command");
+
+		expect(commandEntries(beforeSessionManager)).toMatchObject([
+			{
+				type: "custom",
+				customType: "pi-extensions.command",
+				data: { command: "handoff", kind: "extension", extension: "molt" },
+			},
+		]);
+		expect(commandEntries(h.runtime.session.sessionManager)).toEqual([]);
+		expect(h.errors).toEqual([]);
+	} finally { await h.cleanup(); }
+}, 10_000);
+
 it("stays in the session when the model does not finish a handover", async () => {
 	const h = await fixture();
 	try {

@@ -136,7 +136,6 @@ export default function moltExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("handoff", {
 		description: "Have the model write a handover, then continue in a new session that starts from it",
 		handler: async (args, ctx) => {
-			pi.appendEntry("pi-extensions.command", { command: "handoff", kind: "extension", extension: "molt" });
 			const ready = pending;
 			if (ready?.ready && ready.document && args.trim() === ready.token) {
 				pending = undefined;
@@ -150,6 +149,7 @@ export default function moltExtension(pi: ExtensionAPI): void {
 				if (!switched) ctx.ui.notify("The new session was cancelled; the handover is the last reply in this session.", "warning");
 				return;
 			}
+			pi.appendEntry("pi-extensions.command", { command: "handoff", kind: "extension", extension: "molt" });
 			if (!ctx.isIdle()) {
 				ctx.ui.notify("Wait for the current response to finish, or press Escape, before /handoff.", "warning");
 				return;
