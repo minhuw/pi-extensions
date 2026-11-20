@@ -4,7 +4,7 @@
  * `deferred` (never declared on registration; pi's MCP tools use these), and
  * `direct` with `defaultActive: false` (declared only when named).
  */
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 
 const tool = (name, extra) => ({
   name,

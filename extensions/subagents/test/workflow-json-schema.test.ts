@@ -3,8 +3,8 @@
  *
  * Pure, no stubs: this is the one place that decides whether a script-supplied
  * JSON Schema is usable and whether a child's payload matches it. The most
- * important thing it pins is *which* typebox — the repo has both packages
- * installed and only one of them can do this.
+ * important thing it pins is *which* typebox — `typebox` validates plain JSON
+ * Schema directly, whereas `@sinclair/typebox` cannot.
  */
 
 import { describe, expect, it } from "vitest";

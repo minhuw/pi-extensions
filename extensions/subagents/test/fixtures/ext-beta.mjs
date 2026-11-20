@@ -3,7 +3,7 @@
  * Registers a single tool, used to prove that the `ext:` allowlist flip mutes
  * a loaded-but-unselected extension. See ext-alpha.mjs for the conventions.
  */
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 
 export default function (pi) {
   pi.registerTool({

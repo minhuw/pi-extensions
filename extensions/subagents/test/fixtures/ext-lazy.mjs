@@ -10,7 +10,7 @@
  * contributes no tools at all, so any scoping that snapshots the tool set then
  * will drop `lazy_tool` permanently. See ext-alpha.mjs for the conventions.
  */
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 
 export default function (pi) {
   pi.on("session_start", () => {

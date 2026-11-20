@@ -1,4 +1,4 @@
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 
 const CONTROL_KEY = Symbol.for("pi-subagents:test:blocking-tool");
 

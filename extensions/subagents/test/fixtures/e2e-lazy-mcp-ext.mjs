@@ -4,7 +4,7 @@
  * tool only once the "server" connects. The test stands in for the connection
  * by calling `globalThis.__lazyMcpConnect()` after the subagent's scope is installed.
  */
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 
 export default function (pi) {
   pi.on("session_start", () => {

@@ -20,7 +20,7 @@
  * Headless: a faux Model object satisfies createAgentSession; we assert on the
  * pre-prompt gated tool set captured at onSessionCreated, so no LLM/network is
  * involved. cwd is the fixtures dir so the templates' relative `extensions:`
- * paths resolve and the .mjs fixtures can import `@sinclair/typebox` from the
+ * paths resolve and the .mjs fixtures can import `typebox` from the
  * repo's node_modules.
  */
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";

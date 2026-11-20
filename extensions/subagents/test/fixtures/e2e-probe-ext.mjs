@@ -7,7 +7,7 @@
  * Plain ESM (.mjs) so node imports it without any TS transform step.
  */
 import { writeFileSync } from "node:fs";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 
 export default function (pi) {
   pi.registerTool({
