@@ -1419,8 +1419,8 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 			pi: { extensions: string[] };
 		};
 		expect(manifest.scripts["test:workspace"]).toBe("vitest run extensions/workspace");
-		expect(manifest.scripts.test).toContain("npm run test:molt && npm run test:language &&");
-		expect(manifest.scripts.test).toContain("npm run test:workspace");
+		const vitestTargets = manifest.scripts.test.split(" && ").find((step) => step.startsWith("vitest run "))?.split(/\s+/) ?? [];
+		expect(vitestTargets).toEqual(expect.arrayContaining(["extensions/molt", "extensions/language", "extensions/workspace"]));
 		const exts = manifest.pi.extensions;
 		expect(exts).toContain("./extensions/workspace/index.ts");
 		expect(exts.at(-1)).toBe("./extensions/pika/index.ts");

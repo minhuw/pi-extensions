@@ -1599,7 +1599,8 @@ it("AC-16 is listed in the manifest with pika last and runs in npm test", async 
 	expect(extensions.indexOf("./extensions/language/index.ts")).toBe(extensions.indexOf("./extensions/molt/index.ts") + 1);
 	expect(extensions.at(-1)).toBe("./extensions/pika/index.ts");
 	expect(manifest.scripts["test:language"]).toBe("vitest run extensions/language");
-	expect(manifest.scripts.test).toContain("npm run test:molt && npm run test:language &&");
+	const vitestTargets = manifest.scripts.test.split(" && ").find((step) => step.startsWith("vitest run "))?.split(/\s+/) ?? [];
+	expect(vitestTargets).toEqual(expect.arrayContaining(["extensions/molt", "extensions/language"]));
 });
 
 describe("contract edges", () => {

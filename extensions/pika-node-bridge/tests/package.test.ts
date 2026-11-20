@@ -12,7 +12,8 @@ it("loads next to the Orca bridge and before pika, which stays last, and runs in
 	expect(extensions.indexOf("./extensions/pika-node-bridge/index.ts")).toBe(extensions.indexOf("./extensions/orca-bridge/index.ts") + 1);
 	expect(extensions.at(-1)).toBe("./extensions/pika/index.ts");
 	expect(manifest.scripts["test:pika-node-bridge"]).toBe("vitest run extensions/pika-node-bridge");
-	expect(manifest.scripts.test).toContain("npm run test:pika-node-bridge &&");
+	const vitestTargets = manifest.scripts.test.split(" && ").find((step) => step.startsWith("vitest run "))?.split(/\s+/) ?? [];
+	expect(vitestTargets).toContain("extensions/pika-node-bridge");
 });
 
 it("imports at runtime only Node, the Pi SDK types, and its own files", () => {

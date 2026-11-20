@@ -1288,7 +1288,8 @@ describe("5 — Package manifest and documentation contracts", () => {
 
 		expect(manifest.dependencies["agent-desktop"]).toBe("1.3.1");
 		expect(manifest.scripts["test:agent-desktop"]).toBe("vitest run extensions/agent-desktop");
-		expect(manifest.scripts.test).toContain("npm run test:agent-desktop");
+		const vitestTargets = manifest.scripts.test.split(" && ").find((step) => step.startsWith("vitest run "))?.split(/\s+/) ?? [];
+		expect(vitestTargets).toContain("extensions/agent-desktop");
 		expect(manifest.pi.skills).toContain("./extensions/agent-desktop/skills");
 
 		const exts = manifest.pi.extensions;

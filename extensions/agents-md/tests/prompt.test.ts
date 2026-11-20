@@ -40,7 +40,8 @@ it("loads the extension before pika, which stays last, lists the prompt, and run
 	expect(extensions.at(-1)).toBe("./extensions/pika/index.ts");
 	expect(prompts.filter(entry => entry.includes("extensions/agents-md/"))).toEqual([promptEntry]);
 	expect(manifest.scripts["test:agents-md"]).toBe("vitest run extensions/agents-md");
-	expect(manifest.scripts.test.split(" && ")).toContain("npm run test:agents-md");
+	const vitestTargets = manifest.scripts.test.split(" && ").find((step) => step.startsWith("vitest run "))?.split(/\s+/) ?? [];
+	expect(vitestTargets).toContain("extensions/agents-md");
 });
 
 it("parses the /agents-md frontmatter and expands the focus", async () => {

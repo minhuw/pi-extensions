@@ -450,7 +450,12 @@ describe("package.json manifest invariants", () => {
 
 		expect(pkg.dependencies?.["@ff-labs/fff-node"]).toBeTruthy();
 		expect(pkg.scripts?.["test:fff"]).toBeTruthy();
-		expect(pkg.scripts?.test).toContain("npm run test:fff");
+		const vitestTargets =
+			pkg.scripts?.test
+				?.split(" && ")
+				.find((step) => step.startsWith("vitest run "))
+				?.split(/\s+/) ?? [];
+		expect(vitestTargets).toContain("extensions/fff");
 	});
 });
 

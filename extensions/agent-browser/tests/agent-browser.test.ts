@@ -801,7 +801,8 @@ describe("AC-5 — Repository manifest and documentation contracts", () => {
 		};
 
 		expect(manifest.scripts["test:agent-browser"]).toBe("vitest run extensions/agent-browser");
-		expect(manifest.scripts.test).toContain("npm run test:agent-browser");
+		const vitestTargets = manifest.scripts.test.split(" && ").find((step) => step.startsWith("vitest run "))?.split(/\s+/) ?? [];
+		expect(vitestTargets).toContain("extensions/agent-browser");
 		expect(manifest.pi.skills).toContain("./extensions/agent-browser/skills");
 
 		const exts = manifest.pi.extensions;

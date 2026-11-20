@@ -1013,6 +1013,7 @@ describe("spokesman extension in real Pi sessions", () => {
 		]);
 		expect(extensions.at(-1)).toBe("./extensions/pika/index.ts");
 		expect(manifest.scripts["test:spokesman"]).toBe("vitest run extensions/spokesman");
-		expect(manifest.scripts.test).toContain("npm run test:language && npm run test:soul && npm run test:spokesman &&");
+		const vitestTargets = manifest.scripts.test.split(" && ").find((step) => step.startsWith("vitest run "))?.split(/\s+/) ?? [];
+		expect(vitestTargets).toEqual(expect.arrayContaining(["extensions/language", "extensions/soul", "extensions/spokesman"]));
 	});
 });

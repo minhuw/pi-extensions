@@ -895,7 +895,8 @@ it("is listed in the manifest after Spokesman with pika last and runs in npm tes
 	expect(extensions.indexOf("./extensions/delegation/index.ts")).toBe(extensions.indexOf("./extensions/spokesman/index.ts") + 1);
 	expect(extensions.at(-1)).toBe("./extensions/pika/index.ts");
 	expect(manifest.scripts["test:delegation"]).toBe("vitest run extensions/delegation");
-	expect(manifest.scripts.test).toContain("npm run test:spokesman && npm run test:delegation &&");
+	const vitestTargets = manifest.scripts.test.split(" && ").find((step) => step.startsWith("vitest run "))?.split(/\s+/) ?? [];
+	expect(vitestTargets).toEqual(expect.arrayContaining(["extensions/spokesman", "extensions/delegation"]));
 });
 
 describe("the footer status", () => {

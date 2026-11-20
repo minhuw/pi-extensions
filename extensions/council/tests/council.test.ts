@@ -1209,8 +1209,12 @@ describe("/council command and package contracts", () => {
 		};
 
 		expect(manifest.scripts["test:council"]).toBe("vitest run extensions/council");
-		expect(manifest.scripts.test).toContain("npm run test:subagents && npm run test:council &&");
-		expect(manifest.scripts.test).toContain("npm run test:molt && npm run test:language && npm run test:soul && npm run test:spokesman &&");
+		const testSteps = manifest.scripts.test.split(" && ");
+		expect(testSteps).toContain("npm run test:subagents");
+		const vitestTargets = testSteps.find((step) => step.startsWith("vitest run "))?.split(/\s+/) ?? [];
+		expect(vitestTargets).toEqual(
+			expect.arrayContaining(["extensions/council", "extensions/molt", "extensions/language", "extensions/soul", "extensions/spokesman"]),
+		);
 
 		const exts = manifest.pi.extensions;
 		const subagentsIdx = exts.indexOf("./extensions/subagents/src/index.ts");
