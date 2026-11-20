@@ -30,6 +30,7 @@ import {
 	parseAgentFrontmatter,
 } from "../../subagents/src/agent-definitions.ts";
 import councilExtension, {
+	assertCouncilModelsAvailable,
 	buildRound1Prompt,
 	buildRound2Prompt,
 	COUNCIL_MEMBERS,
@@ -38,6 +39,7 @@ import councilExtension, {
 	resolveCouncilMembers,
 	rotatePeersForMember,
 	type CouncilMemberId,
+	type CouncilModelRegistry,
 } from "../index.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -70,9 +72,17 @@ function createDispatchingBus() {
 	};
 }
 
+const DEFAULT_COUNCIL_MODELS = [
+	"magpie/gemini-4-carbon",
+	"magpie/gpt-6.2-astra",
+	"magpie/claude-fable-5-2",
+] as const;
+
 interface HarnessOptions {
 	minimalPi?: boolean;
 	pingVersion?: number | null;
+	availableModels?: readonly string[] | null;
+	unauthenticatedModels?: readonly string[];
 	round1Handler?: (req: {
 		id: string;
 		type: string;
@@ -285,9 +295,40 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 
 	councilExtension(pi);
 
+	let ctx: ExtensionContext;
+	if (opts.availableModels === null) {
+		ctx = {} as ExtensionContext;
+	} else {
+		const registeredKeys = opts.availableModels ?? DEFAULT_COUNCIL_MODELS;
+		const unauthSet = new Set(opts.unauthenticatedModels ?? []);
+		const registeredMap = new Map<string, { provider: string; id: string }>();
+		for (const fullId of [...registeredKeys, ...(opts.unauthenticatedModels ?? [])]) {
+			const slashIdx = fullId.indexOf("/");
+			if (slashIdx > 0 && slashIdx < fullId.length - 1) {
+				const provider = fullId.slice(0, slashIdx);
+				const id = fullId.slice(slashIdx + 1);
+				registeredMap.set(`${provider}/${id}`, { provider, id });
+			}
+		}
+		const modelRegistry: CouncilModelRegistry = {
+			find(provider: string, id: string) {
+				return registeredMap.get(`${provider}/${id}`);
+			},
+			getAvailable() {
+				return [...registeredMap.values()].filter((m) => !unauthSet.has(`${m.provider}/${m.id}`));
+			},
+			hasConfiguredAuth(model: { provider: string; id: string }) {
+				const key = `${model.provider}/${model.id}`;
+				return registeredMap.has(key) && !unauthSet.has(key);
+			},
+		};
+		ctx = { modelRegistry } as unknown as ExtensionContext;
+	}
+
 	return {
 		pi,
 		bus,
+		ctx,
 		tool: tools.get("council")!,
 		command: commands.get("council")!,
 		spawns,
@@ -344,6 +385,53 @@ describe("pure council helpers", () => {
 		expect(() => resolveCouncilMembers([])).toThrow(/at least 2 distinct members/i);
 		expect(() => resolveCouncilMembers(["caspar", "caspar"])).toThrow(/Duplicate council member "caspar"/i);
 		expect(() => resolveCouncilMembers(["caspar", "unknown"])).toThrow(/Unknown council member "unknown"/i);
+	});
+
+	it("assertCouncilModelsAvailable validates registered models and optional auth/availability hooks", () => {
+		const allSpecs = resolveCouncilMembers();
+		expect(() => assertCouncilModelsAvailable(allSpecs, undefined)).toThrow(
+			/model registry is unavailable/i,
+		);
+		expect(() => assertCouncilModelsAvailable(allSpecs, {} as CouncilModelRegistry)).toThrow(
+			/model registry is unavailable/i,
+		);
+
+		// Registry with find() only (no getAvailable / hasConfiguredAuth) succeeds when all models are found
+		const findOnlyRegistry: CouncilModelRegistry = {
+			find(provider, id) {
+				return { provider, id };
+			},
+		};
+		expect(() => assertCouncilModelsAvailable(allSpecs, findOnlyRegistry)).not.toThrow();
+
+		// hasConfiguredAuth returning false fails even without getAvailable()
+		const noAuthMelchior: CouncilModelRegistry = {
+			find(provider, id) {
+				return { provider, id };
+			},
+			hasConfiguredAuth(model) {
+				return model.id !== "gpt-6.2-astra";
+			},
+		};
+		expect(() => assertCouncilModelsAvailable(allSpecs, noAuthMelchior)).toThrow(
+			/melchior \(magpie\/gpt-6\.2-astra: model unavailable or missing credentials\)/i,
+		);
+
+		// getAvailable() omitting a model fails even when hasConfiguredAuth is omitted
+		const missingFromAvailable: CouncilModelRegistry = {
+			find(provider, id) {
+				return { provider, id };
+			},
+			getAvailable() {
+				return [
+					{ provider: "magpie", id: "gemini-4-carbon" },
+					{ provider: "magpie", id: "gpt-6.2-astra" },
+				];
+			},
+		};
+		expect(() => assertCouncilModelsAvailable(allSpecs, missingFromAvailable)).toThrow(
+			/balthasar \(magpie\/claude-fable-5-2: model unavailable or missing credentials\)/i,
+		);
 	});
 
 	it("rotatePeersForMember counterbalances Peer A and Peer B positions across 3 members and 2 members", () => {
@@ -441,7 +529,7 @@ describe("council tool execution and RPC deliberation", () => {
 			},
 			undefined,
 			undefined,
-			{} as ExtensionContext,
+			harness.ctx,
 		);
 
 		expect(harness.spawns).toHaveLength(3);
@@ -523,7 +611,7 @@ describe("council tool execution and RPC deliberation", () => {
 			},
 			undefined,
 			undefined,
-			{} as ExtensionContext,
+			harness.ctx,
 		);
 
 		expect(harness.spawns).toHaveLength(2);
@@ -547,7 +635,7 @@ describe("council tool execution and RPC deliberation", () => {
 				{ topic: "Valid topic", model: "openai/gpt-5" } as any,
 				undefined,
 				undefined,
-				{} as ExtensionContext,
+				harness.ctx,
 			),
 		).rejects.toThrow("Model overrides are not permitted on council; members use pinned council agent definitions.");
 
@@ -557,7 +645,7 @@ describe("council tool execution and RPC deliberation", () => {
 				{ topic: "   " },
 				undefined,
 				undefined,
-				{} as ExtensionContext,
+				harness.ctx,
 			),
 		).rejects.toThrow(/Council topic must not be empty/i);
 
@@ -567,7 +655,7 @@ describe("council tool execution and RPC deliberation", () => {
 				{ topic: "Valid topic", members: ["caspar"] as any },
 				undefined,
 				undefined,
-				{} as ExtensionContext,
+				harness.ctx,
 			),
 		).rejects.toThrow(/at least 2 distinct members/i);
 
@@ -577,7 +665,7 @@ describe("council tool execution and RPC deliberation", () => {
 				{ topic: "Valid topic", members: ["melchior", "melchior"] as any },
 				undefined,
 				undefined,
-				{} as ExtensionContext,
+				harness.ctx,
 			),
 		).rejects.toThrow(/Duplicate council member/i);
 
@@ -588,9 +676,98 @@ describe("council tool execution and RPC deliberation", () => {
 				{ topic: "Valid topic" },
 				undefined,
 				undefined,
-				{} as ExtensionContext,
+				oldProtocolHarness.ctx,
 			),
 		).rejects.toThrow(/RPC protocol >= 3/i);
+	});
+
+	it("fails fast before spawning any subagent when any selected pinned model is unavailable, and allows an available 2-member subset", async () => {
+		// 1 of 3 pinned models unregistered (melchior / magpie/gpt-6.2-astra missing)
+		const missingMelchiorHarness = bootCouncilHarness({
+			availableModels: ["magpie/gemini-4-carbon", "magpie/claude-fable-5-2"],
+		});
+		await expect(
+			missingMelchiorHarness.tool.execute(
+				"tc-unregistered-1",
+				{ topic: "Preflight unregistered model check" },
+				undefined,
+				undefined,
+				missingMelchiorHarness.ctx,
+			),
+		).rejects.toThrow(/pinned council model\(s\) unavailable.*melchior.*magpie\/gpt-6\.2-astra/i);
+		expect(missingMelchiorHarness.spawns).toHaveLength(0);
+
+		// Explicit 2-member subset whose pinned models ARE available succeeds even when unselected 3rd is unavailable
+		const subsetResult = await missingMelchiorHarness.tool.execute(
+			"tc-subset-ok",
+			{
+				topic: "Two-member subset with available models",
+				members: ["caspar", "balthasar"],
+			},
+			undefined,
+			undefined,
+			missingMelchiorHarness.ctx,
+		);
+		expect(missingMelchiorHarness.spawns).toHaveLength(2);
+		expect(missingMelchiorHarness.spawns.map((s) => s.type)).toEqual([
+			"council-caspar",
+			"council-balthasar",
+		]);
+		expect(subsetResult.details.round1).toHaveLength(2);
+		expect(subsetResult.details.round2).toHaveLength(2);
+
+		// 1 of 3 pinned models registered in find() but missing credentials
+		const unauthMelchiorHarness = bootCouncilHarness({
+			unauthenticatedModels: ["magpie/gpt-6.2-astra"],
+		});
+		await expect(
+			unauthMelchiorHarness.tool.execute(
+				"tc-unauth-1",
+				{ topic: "Preflight unauthenticated model check" },
+				undefined,
+				undefined,
+				unauthMelchiorHarness.ctx,
+			),
+		).rejects.toThrow(
+			/pinned council model\(s\) unavailable.*melchior \(magpie\/gpt-6\.2-astra: model unavailable or missing credentials\)/i,
+		);
+		expect(unauthMelchiorHarness.spawns).toHaveLength(0);
+
+		// All 3 pinned models unavailable -> lists every unavailable selected member in one error
+		const noneAvailableHarness = bootCouncilHarness({
+			availableModels: ["magpie/gemini-4-carbon"],
+			unauthenticatedModels: ["magpie/gemini-4-carbon"],
+		});
+		let allFailedMessage = "";
+		try {
+			await noneAvailableHarness.tool.execute(
+				"tc-all-unavailable",
+				{ topic: "All models unavailable check" },
+				undefined,
+				undefined,
+				noneAvailableHarness.ctx,
+			);
+		} catch (err) {
+			allFailedMessage = err instanceof Error ? err.message : String(err);
+		}
+		expect(allFailedMessage).toMatch(/pinned council model\(s\) unavailable/i);
+		expect(allFailedMessage).toContain("caspar (magpie/gemini-4-carbon: model unavailable or missing credentials)");
+		expect(allFailedMessage).toContain("melchior (magpie/gpt-6.2-astra: model not registered)");
+		expect(allFailedMessage).toContain("balthasar (magpie/claude-fable-5-2: model not registered)");
+		expect(noneAvailableHarness.spawns).toHaveLength(0);
+
+		// Missing ctx.modelRegistry ({} as ExtensionContext)
+		const missingRegistryHarness = bootCouncilHarness({ availableModels: null });
+		await expect(
+			missingRegistryHarness.tool.execute(
+				"tc-no-registry",
+				{ topic: "Missing model registry check" },
+				undefined,
+				undefined,
+				{} as ExtensionContext,
+			),
+		).rejects.toThrow(/model registry is unavailable/i);
+		expect(missingRegistryHarness.spawns).toHaveLength(0);
 	});
 
 	it("completes deliberation when 1 of 3 members fails in Round 1 or Round 2, and throws when 2 of 3 fail in Round 1", async () => {
@@ -612,7 +789,7 @@ describe("council tool execution and RPC deliberation", () => {
 			{ topic: "Resilience check" },
 			undefined,
 			undefined,
-			{} as ExtensionContext,
+			r1PartialHarness.ctx,
 		);
 
 		expect(r1PartialResult.details.round1).toHaveLength(2);
@@ -647,7 +824,7 @@ describe("council tool execution and RPC deliberation", () => {
 			{ topic: "R2 partial failure check" },
 			undefined,
 			undefined,
-			{} as ExtensionContext,
+			r2PartialHarness.ctx,
 		);
 
 		expect(r2PartialResult.details.round1).toHaveLength(3);
@@ -677,7 +854,7 @@ describe("council tool execution and RPC deliberation", () => {
 				{ topic: "Majority failure check" },
 				undefined,
 				undefined,
-				{} as ExtensionContext,
+				r1TwoFailedHarness.ctx,
 			),
 		).rejects.toThrow(/at least 2 members must succeed in Round 1/i);
 	});
@@ -693,7 +870,7 @@ describe("council tool execution and RPC deliberation", () => {
 			{ topic: "Abort while Round 1 is running" },
 			controller.signal,
 			undefined,
-			{} as ExtensionContext,
+			harness.ctx,
 		);
 
 		await vi.waitFor(() => expect(harness.spawns).toHaveLength(3));
@@ -832,7 +1009,9 @@ function extractPromptSection(systemPrompt: string, tag: "tools" | "rules"): str
 	return match![1]!;
 }
 
-async function createCouncilAgentSession(options: { sessionManager?: SessionManager } = {}) {
+async function createCouncilAgentSession(
+	options: { sessionManager?: SessionManager; magpieModels?: Array<{ id: string }> } = {},
+) {
 	const directory = await mkdtemp(path.join(tmpdir(), "pi-council-runtime-"));
 	let session: AgentSession | undefined;
 	const cleanup = async () => {
@@ -857,6 +1036,19 @@ async function createCouncilAgentSession(options: { sessionManager?: SessionMana
 			provider: "council-runtime",
 			models: [{ id: "test" }],
 		});
+		const magpieModels = options.magpieModels ?? [
+			{ id: "gemini-4-carbon" },
+			{ id: "gpt-6.2-astra" },
+			{ id: "claude-fable-5-2" },
+		];
+		const magpieFaux =
+			magpieModels.length > 0
+				? fauxProvider({
+						api: "council-magpie-api",
+						provider: "magpie",
+						models: magpieModels,
+					})
+				: undefined;
 		let spawnSeq = 0;
 		const resources = new DefaultResourceLoader({
 			cwd: directory,
@@ -869,6 +1061,9 @@ async function createCouncilAgentSession(options: { sessionManager?: SessionMana
 			extensionFactories: [
 				(pi) => {
 					pi.registerProvider(faux.provider);
+					if (magpieFaux) {
+						pi.registerProvider(magpieFaux.provider);
+					}
 					pi.events.on("subagents:rpc:ping", (raw: any) => {
 						pi.events.emit(`subagents:rpc:ping:reply:${raw.requestId}`, {
 							success: true,
@@ -936,7 +1131,17 @@ async function createCouncilAgentSession(options: { sessionManager?: SessionMana
 			await settled;
 		};
 
-		return { directory, session: current, faux, errors, runPrompt, cleanup };
+		return {
+			directory,
+			session: current,
+			faux,
+			errors,
+			get spawnCount() {
+				return spawnSeq;
+			},
+			runPrompt,
+			cleanup,
+		};
 	} catch (error) {
 		await cleanup();
 		throw error;
@@ -1123,4 +1328,49 @@ describe("council tool activation in real AgentSession + fauxProvider", () => {
 			}
 		}
 	}, 20_000);
+
+	it("fails fast with isError toolResult and zero subagent spawns when a selected pinned model is missing from ModelRegistry", async () => {
+		const h = await createCouncilAgentSession({
+			magpieModels: [{ id: "gemini-4-carbon" }, { id: "claude-fable-5-2" }],
+		});
+
+		try {
+			h.faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("council", {
+						topic: "Design lock leases",
+					}),
+				]),
+				fauxAssistantMessage("Council could not convene because magpie/gpt-6.2-astra is unavailable."),
+			]);
+
+			await h.runPrompt("Convene the council on lock leases");
+
+			expect(h.spawnCount).toBe(0);
+			expect(h.errors).toEqual([]);
+
+			const toolResults = h.session.sessionManager
+				.getBranch()
+				.filter(
+					(entry): entry is Extract<typeof entry, { type: "message" }> =>
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						entry.message.toolName === "council",
+				);
+			expect(toolResults).toHaveLength(1);
+			const toolResultMsg = toolResults[0]!.message;
+			expect(toolResultMsg.role).toBe("toolResult");
+			if (toolResultMsg.role === "toolResult") {
+				expect(toolResultMsg.isError).toBe(true);
+				const resultText = toolResultMsg.content
+					.filter((block): block is { type: "text"; text: string } => block.type === "text")
+					.map((block) => block.text)
+					.join("\n");
+				expect(resultText).toMatch(/pinned council model\(s\) unavailable/i);
+				expect(resultText).toContain("magpie/gpt-6.2-astra");
+			}
+		} finally {
+			await h.cleanup();
+		}
+	}, 15_000);
 });

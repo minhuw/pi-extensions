@@ -24,7 +24,7 @@ import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryDat
 import { resolveChildSessionRoot } from "./agent-runner.js";
 import { validateReopenSessionFile } from "./reopen.js";
 import { validateLinkData } from "./child-session-hooks.js";
-import { getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
+import { getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, resolvePinnedCouncilModel, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { getRecordConversation, openViewerSession } from "./session-transcript.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getEnabledTypes, getFallbackSubagent, isDefaultsDisabled, isModelVisible, NO_FALLBACK, registerAgents, resolveEnabledType, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
@@ -967,6 +967,27 @@ export default function (pi: ExtensionAPI) {
     // Trusted callers only, so `model_visible: false` types are spawnable here.
     const dispatch = resolveSpawnType(type, { includeHidden: true });
     if (!dispatch.ok) throw new Error(dispatch.message);
+    let resolvedOptions = options;
+    if (isCouncilAgentName(dispatch.type)) {
+      const councilCfg = getAgentConfig(dispatch.type);
+      if (options?.model != null) {
+        const suppliedId =
+          typeof options.model === "string"
+            ? options.model
+            : `${options.model.provider}/${options.model.id}`;
+        if (suppliedId !== councilCfg?.model) {
+          throw new Error(
+            `Council advisor "${dispatch.type}" has pinned model "${councilCfg?.model}" and cannot be overridden.`,
+          );
+        }
+      }
+      const pinnedModel = resolvePinnedCouncilModel(
+        ctxRef?.modelRegistry,
+        councilCfg?.model,
+        dispatch.type,
+      );
+      resolvedOptions = { ...options, model: pinnedModel };
+    }
     // Every programmatic spawn lands here — cross-extension RPC and both `@handle`
     // mention paths — and
     // none came through the Agent tool, which is where the UI activity tracker is
@@ -982,10 +1003,10 @@ export default function (pi: ExtensionAPI) {
     // built with `undefined` renders `↻3` where the Agent tool renders `↻3≤20`.
     // Like the tool's own, it is a prediction — editing the agent file mid-run
     // leaves the displayed ceiling stale.
-    const { state, callbacks } = createActivityTracker(resolveEffectiveMaxTurns(dispatch.type, options?.maxTurns));
+    const { state, callbacks } = createActivityTracker(resolveEffectiveMaxTurns(dispatch.type, resolvedOptions?.maxTurns));
     // Repaints are left to the manager's `onStart` callback, which already starts
     // the widget/fleet timers for agents that enter this way.
-    const id = manager.spawn(piRef, ctxRef, dispatch.type, prompt, { ...options, ...callbacks });
+    const id = manager.spawn(piRef, ctxRef, dispatch.type, prompt, { ...resolvedOptions, ...callbacks });
     agentActivity.set(id, state);
     return id;
   };
@@ -2466,9 +2487,16 @@ Terse command-style prompts produce shallow, generic work.
       // Frontmatter wins; the already-normalized tool value fills the gap.
       let serviceTier = resolvedConfig.serviceTierFromParams ? toolServiceTier : resolvedConfig.serviceTier;
 
-      // Only the selected agent definition can choose a model; otherwise inherit.
+      // Only the selected agent definition can choose a model; otherwise inherit
+      // (except council advisors, whose pinned models never fall back to parent).
       let model = ctx.model;
-      if (resolvedConfig.modelInput) {
+      if (isCouncilAgentName(subagentType)) {
+        try {
+          model = resolvePinnedCouncilModel(ctx.modelRegistry, customConfig?.model, subagentType);
+        } catch (err) {
+          return textResult(err instanceof Error ? err.message : String(err));
+        }
+      } else if (resolvedConfig.modelInput) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") {
           // config-specified: silent fallback to parent

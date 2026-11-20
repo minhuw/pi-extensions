@@ -31,6 +31,7 @@ import { loadBoundedContextFiles } from "./context-files.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
+import { isCouncilAgentName } from "./model-overrides.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, inheritableParentPrompt, type PromptExtras } from "./prompts.js";
 import { applyServiceTier, modelSupportsServiceTier, type ServiceTierInput } from "./service-tier.js";
@@ -511,6 +512,54 @@ export function resolveDefaultModel(
   }
 
   return parentModel;
+}
+
+/**
+ * Resolve a pinned model for a council advisor (`council-caspar`,
+ * `council-melchior`, `council-balthasar`). Never falls back to `parentModel`:
+ * throws when `configModel` is missing, `registry` cannot verify it, the model
+ * is unregistered, or auth/availability checks reject it.
+ */
+export function resolvePinnedCouncilModel(
+  registry:
+    | {
+        find(provider: string, modelId: string): Model<any> | undefined;
+        getAvailable?(): Model<any>[];
+        hasConfiguredAuth?(model: Model<any>): boolean;
+      }
+    | undefined,
+  configModel: string | undefined,
+  agentType: string,
+): Model<any> {
+  if (!configModel) {
+    throw new Error(`Council advisor "${agentType}" has no pinned model configured.`);
+  }
+  if (!registry || typeof registry.find !== "function") {
+    throw new Error(
+      `Pinned model "${configModel}" for council advisor "${agentType}" cannot be verified because modelRegistry is unavailable.`,
+    );
+  }
+  const slashIdx = configModel.indexOf("/");
+  const provider = slashIdx > 0 ? configModel.slice(0, slashIdx) : "";
+  const modelId = slashIdx > 0 ? configModel.slice(slashIdx + 1) : "";
+  const found = provider && modelId ? registry.find(provider, modelId) : undefined;
+  if (!found) {
+    throw new Error(
+      `Pinned model "${configModel}" for council advisor "${agentType}" is not registered.`,
+    );
+  }
+  const available = typeof registry.getAvailable === "function" ? registry.getAvailable() : undefined;
+  const inAvailable = available
+    ? available.some((m: any) => m.provider === provider && m.id === modelId)
+    : undefined;
+  const hasAuth =
+    typeof registry.hasConfiguredAuth === "function" ? registry.hasConfiguredAuth(found) : undefined;
+  if (hasAuth === false || inAvailable === false) {
+    throw new Error(
+      `Pinned model "${configModel}" for council advisor "${agentType}" is not available (missing credentials or unavailable provider).`,
+    );
+  }
+  return found;
 }
 
 /** Info about a tool event in the subagent. */
@@ -1243,10 +1292,22 @@ export async function runAgent(
     }
   }
 
-  // Resolve model: explicit option > config.model > parent model
-  const model = options.model ?? resolveDefaultModel(
-    ctx.model, ctx.modelRegistry, agentConfig?.model,
-  );
+  // Resolve model: council advisors require their pinned model and never fall
+  // back to the parent session model; other agents use explicit option >
+  // config.model > parent model.
+  let model: Model<any> | undefined;
+  if (isCouncilAgentName(type)) {
+    if (options.model && `${options.model.provider}/${options.model.id}` !== agentConfig?.model) {
+      throw new Error(
+        `Council advisor "${type}" has pinned model "${agentConfig?.model}" and cannot be overridden.`,
+      );
+    }
+    model = resolvePinnedCouncilModel(ctx.modelRegistry, agentConfig?.model, type);
+  } else {
+    model = options.model ?? resolveDefaultModel(
+      ctx.model, ctx.modelRegistry, agentConfig?.model,
+    );
+  }
 
   // Resolve thinking level: explicit option > agent config > parent session level.
   // Without the parent step, an unset level falls through to pi's
@@ -1403,7 +1464,7 @@ export async function runAgent(
 
   // A reopen keeps the conversation's model when it is still available.
   let sessionModel = model;
-  if (keepSessionModel && !options.model) {
+  if (keepSessionModel && !options.model && !isCouncilAgentName(type)) {
     const saved = sessionManager.buildSessionContext().model;
     const restored = saved ? ctx.modelRegistry?.find(saved.provider, saved.modelId) : undefined;
     if (restored) sessionModel = restored;

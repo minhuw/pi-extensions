@@ -154,6 +154,7 @@ import {
   parseExtSelectors,
   resolveDefaultModel,
   resolveEffectiveMaxTurns,
+  resolvePinnedCouncilModel,
   type RunOptions,
   resumeAgent,
   runAgent,
@@ -3573,5 +3574,171 @@ describe("resolveDefaultModel", () => {
 
   it("returns undefined when neither a config model nor a parent model exists", () => {
     expect(resolveDefaultModel(undefined, registry([haiku]), undefined)).toBeUndefined();
+  });
+});
+
+describe("resolvePinnedCouncilModel and council advisor model pinning", () => {
+  const parentModel = { provider: "anthropic", id: "parent-model" } as any;
+  const casparModel = { provider: "magpie", id: "gemini-4-carbon" } as any;
+  const otherModel = { provider: "openai", id: "gpt-5" } as any;
+
+  function mockCouncilCasparConfig() {
+    const cfg = DEFAULT_AGENTS.get("council-caspar")!;
+    vi.mocked(getConfig).mockReturnValueOnce(
+      makeConfig({ displayName: cfg.displayName ?? cfg.name, extensions: false }),
+    );
+    vi.mocked(getAgentConfig).mockReturnValueOnce({ ...cfg, extensions: false });
+  }
+
+  it("resolvePinnedCouncilModel throws when configModel or modelRegistry is missing", () => {
+    expect(() =>
+      resolvePinnedCouncilModel(
+        { find: () => casparModel, getAvailable: () => [casparModel] },
+        undefined,
+        "council-caspar",
+      ),
+    ).toThrow('Council advisor "council-caspar" has no pinned model configured.');
+
+    expect(() =>
+      resolvePinnedCouncilModel(undefined, "magpie/gemini-4-carbon", "council-caspar"),
+    ).toThrow(
+      'Pinned model "magpie/gemini-4-carbon" for council advisor "council-caspar" cannot be verified because modelRegistry is unavailable.',
+    );
+  });
+
+  it("resolvePinnedCouncilModel throws when the pinned model is unregistered or unavailable", () => {
+    expect(() =>
+      resolvePinnedCouncilModel(
+        { find: () => undefined, getAvailable: () => [] },
+        "magpie/gemini-4-carbon",
+        "council-caspar",
+      ),
+    ).toThrow(
+      'Pinned model "magpie/gemini-4-carbon" for council advisor "council-caspar" is not registered.',
+    );
+
+    expect(() =>
+      resolvePinnedCouncilModel(
+        { find: () => casparModel, getAvailable: () => [otherModel] },
+        "magpie/gemini-4-carbon",
+        "council-caspar",
+      ),
+    ).toThrow(
+      'Pinned model "magpie/gemini-4-carbon" for council advisor "council-caspar" is not available (missing credentials or unavailable provider).',
+    );
+
+    expect(() =>
+      resolvePinnedCouncilModel(
+        {
+          find: () => casparModel,
+          getAvailable: () => [casparModel],
+          hasConfiguredAuth: () => false,
+        },
+        "magpie/gemini-4-carbon",
+        "council-caspar",
+      ),
+    ).toThrow(
+      'Pinned model "magpie/gemini-4-carbon" for council advisor "council-caspar" is not available (missing credentials or unavailable provider).',
+    );
+  });
+
+  it("runAgent throws instead of falling back to ctx.model when council-caspar's pinned model is not registered", async () => {
+    mockCouncilCasparConfig();
+    const councilCtx = {
+      ...ctx,
+      model: parentModel,
+      modelRegistry: {
+        find: vi.fn(() => undefined),
+        getAvailable: vi.fn(() => [parentModel]),
+      },
+    };
+
+    await expect(runAgent(councilCtx, "council-caspar", "Deliberate", { pi })).rejects.toThrow(
+      'Pinned model "magpie/gemini-4-carbon" for council advisor "council-caspar" is not registered.',
+    );
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("runAgent throws when council-caspar's pinned model is excluded from getAvailable() or lacks auth", async () => {
+    mockCouncilCasparConfig();
+    const unavailableCtx = {
+      ...ctx,
+      model: parentModel,
+      modelRegistry: {
+        find: vi.fn((provider: string, id: string) =>
+          provider === "magpie" && id === "gemini-4-carbon" ? casparModel : undefined,
+        ),
+        getAvailable: vi.fn(() => [parentModel]),
+        hasConfiguredAuth: vi.fn(() => true),
+      },
+    };
+
+    await expect(runAgent(unavailableCtx, "council-caspar", "Deliberate", { pi })).rejects.toThrow(
+      'Pinned model "magpie/gemini-4-carbon" for council advisor "council-caspar" is not available',
+    );
+    expect(createAgentSession).not.toHaveBeenCalled();
+
+    mockCouncilCasparConfig();
+    const unauthCtx = {
+      ...ctx,
+      model: parentModel,
+      modelRegistry: {
+        find: vi.fn((provider: string, id: string) =>
+          provider === "magpie" && id === "gemini-4-carbon" ? casparModel : undefined,
+        ),
+        getAvailable: vi.fn(() => [casparModel]),
+        hasConfiguredAuth: vi.fn(() => false),
+      },
+    };
+
+    await expect(runAgent(unauthCtx, "council-caspar", "Deliberate", { pi })).rejects.toThrow(
+      'Pinned model "magpie/gemini-4-carbon" for council advisor "council-caspar" is not available',
+    );
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("runAgent throws when options.model attempts to override council-caspar's pinned model", async () => {
+    mockCouncilCasparConfig();
+    const councilCtx = {
+      ...ctx,
+      model: parentModel,
+      modelRegistry: {
+        find: vi.fn((provider: string, id: string) =>
+          provider === "magpie" && id === "gemini-4-carbon" ? casparModel : undefined,
+        ),
+        getAvailable: vi.fn(() => [casparModel, otherModel]),
+        hasConfiguredAuth: vi.fn(() => true),
+      },
+    };
+
+    await expect(
+      runAgent(councilCtx, "council-caspar", "Deliberate", { pi, model: otherModel }),
+    ).rejects.toThrow(
+      'Council advisor "council-caspar" has pinned model "magpie/gemini-4-carbon" and cannot be overridden.',
+    );
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("runAgent succeeds with the pinned model when magpie/gemini-4-carbon is registered and available", async () => {
+    mockCouncilCasparConfig();
+    const { session } = createSession("CASPAR VERDICT");
+    createAgentSession.mockResolvedValue({ session });
+
+    const councilCtx = {
+      ...ctx,
+      model: parentModel,
+      modelRegistry: {
+        find: vi.fn((provider: string, id: string) =>
+          provider === "magpie" && id === "gemini-4-carbon" ? casparModel : undefined,
+        ),
+        getAvailable: vi.fn(() => [casparModel, parentModel]),
+        hasConfiguredAuth: vi.fn(() => true),
+      },
+    };
+
+    const result = await runAgent(councilCtx, "council-caspar", "Deliberate", { pi });
+    expect(result.responseText).toBe("CASPAR VERDICT");
+    expect(createAgentSession).toHaveBeenCalledTimes(1);
+    expect(createAgentSession.mock.calls[0][0].model).toBe(casparModel);
   });
 });

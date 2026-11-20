@@ -113,6 +113,52 @@ export const CouncilParameters = Type.Object({
 	),
 });
 
+export interface CouncilModelRegistry {
+	find(provider: string, modelId: string): { provider: string; id: string } | undefined;
+	getAvailable?(): ReadonlyArray<{ provider: string; id: string }>;
+	hasConfiguredAuth?(model: any): boolean;
+}
+
+export function assertCouncilModelsAvailable(
+	specs: readonly CouncilMemberSpec[],
+	modelRegistry: CouncilModelRegistry | undefined,
+): void {
+	if (!modelRegistry || typeof modelRegistry.find !== "function") {
+		throw new Error("Council deliberation failed: model registry is unavailable to verify pinned council models.");
+	}
+
+	const availableKeys =
+		typeof modelRegistry.getAvailable === "function"
+			? new Set(modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`))
+			: undefined;
+
+	const unavailable: string[] = [];
+	for (const spec of specs) {
+		const slashIdx = spec.model.indexOf("/");
+		const provider = slashIdx > 0 ? spec.model.slice(0, slashIdx) : "";
+		const modelId = slashIdx > 0 ? spec.model.slice(slashIdx + 1) : "";
+		const found = slashIdx > 0 && modelId.length > 0 ? modelRegistry.find(provider, modelId) : undefined;
+
+		if (!found) {
+			unavailable.push(`${spec.id} (${spec.model}: model not registered)`);
+			continue;
+		}
+
+		const hasAuth =
+			typeof modelRegistry.hasConfiguredAuth === "function" ? modelRegistry.hasConfiguredAuth(found) : undefined;
+		const inAvailable = availableKeys ? availableKeys.has(`${provider}/${modelId}`) : undefined;
+		if (hasAuth === false || inAvailable === false) {
+			unavailable.push(`${spec.id} (${spec.model}: model unavailable or missing credentials)`);
+		}
+	}
+
+	if (unavailable.length > 0) {
+		throw new Error(
+			`Council deliberation failed: pinned council model(s) unavailable — ${unavailable.join("; ")}.`,
+		);
+	}
+}
+
 export function resolveCouncilMembers(members?: readonly string[]): CouncilMemberSpec[] {
 	const rawList = members === undefined ? [...COUNCIL_MEMBER_IDS] : members;
 	if (!Array.isArray(rawList)) {
@@ -448,7 +494,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 			"Never pass a `model` override to `council`; council advisors are pinned to their dedicated agent definitions.",
 		],
 		parameters: CouncilParameters,
-		async execute(_toolCallId, params, signal) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if ((params as Record<string, unknown>).model !== undefined) {
 				throw new Error(
 					"Model overrides are not permitted on council; members use pinned council agent definitions.",
@@ -477,6 +523,8 @@ export default function councilExtension(pi: ExtensionAPI): void {
 					: `unsupported protocol version ${String(pingReply.data?.version)}`;
 				throw new Error(`Council requires pi-subagents RPC protocol >= 3 (${reason}).`);
 			}
+
+			assertCouncilModelsAvailable(specs, ctx?.modelRegistry);
 
 			const ownedAgentIds = new Set<string>();
 			const activeAgentIds = new Set<string>();

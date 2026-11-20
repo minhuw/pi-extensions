@@ -2,8 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AgentManager } from "../src/agent-manager.js";
 import { type EventBus, PROTOCOL_VERSION, type RpcDeps, registerRpcHandlers, type SpawnCapable } from "../src/cross-extension-rpc.js";
+import subagentsExtension from "../src/index.js";
 import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
+import { ctx as makeExtCtx, type Hermetic, hermeticDir, makePi } from "./helpers/boot-extension.js";
 
 /** Simple in-process event bus for testing. */
 function createEventBus(): EventBus {
@@ -637,6 +640,149 @@ describe("cross-extension RPC", () => {
       expect(call).toEqual({ success: true, data: { id: "agent-42" } });
       expect(manager.spawn).toHaveBeenCalledWith(
         deps.pi, ctx, "worker", "x", expect.objectContaining({ model: BLOCKED, invocation: expect.objectContaining({ modelName: `${BLOCKED.provider}/${BLOCKED.id}` }) }),
+      );
+    });
+  });
+
+  describe("spawn RPC pinned council advisor enforcement (end-to-end extension)", () => {
+    const parentModel = { id: "parent-model", provider: "anthropic", name: "Parent Model" };
+    const melchiorModel = { id: "gpt-6.2-astra", provider: "magpie", name: "GPT 6.2 Astra" };
+    const overrideModel = { id: "gpt-5.5", provider: "openai-codex", name: "GPT 5.5" };
+
+    let hermetic: Hermetic | undefined;
+    let lifecycle: Map<string, any> | undefined;
+    let parentCtx: any;
+
+    afterEach(async () => {
+      await lifecycle?.get("session_shutdown")?.({}, parentCtx);
+      lifecycle = undefined;
+      parentCtx = undefined;
+      delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
+      delete (globalThis as any)[Symbol.for("pi-subagents:host")];
+      hermetic?.restore();
+      hermetic = undefined;
+      vi.restoreAllMocks();
+    });
+
+    async function bootWithRegistry(modelRegistry: any) {
+      hermetic = hermeticDir({
+        settings: { outputTranscript: false, schedulingEnabled: false },
+      });
+      const booted = makePi();
+      const bus = createEventBus();
+      booted.pi.events = bus;
+      subagentsExtension(booted.pi);
+      lifecycle = booted.lifecycle;
+      parentCtx = makeExtCtx({
+        isProjectTrusted: () => true,
+        model: parentModel,
+        modelRegistry,
+      });
+      await booted.lifecycle.get("session_start")({}, parentCtx);
+
+      const rpcSpawn = async (requestId: string, payload: Record<string, unknown>) => {
+        const reply = vi.fn();
+        bus.on(`subagents:rpc:spawn:reply:${requestId}`, reply);
+        bus.emit("subagents:rpc:spawn", { requestId, ...payload });
+        await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+        return (reply as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      };
+
+      return { rpcSpawn };
+    }
+
+    it("rejects council-melchior when magpie/gpt-6.2-astra is absent instead of falling back to ctx.model", async () => {
+      const spawnSpy = vi.spyOn(AgentManager.prototype, "spawn");
+      const { rpcSpawn } = await bootWithRegistry({
+        find: (provider: string, id: string) =>
+          provider === parentModel.provider && id === parentModel.id ? parentModel : undefined,
+        getAll: () => [parentModel],
+        getAvailable: () => [parentModel],
+      });
+
+      const reply = await rpcSpawn("req-cm-missing", {
+        type: "council-melchior",
+        prompt: "Review architecture",
+      });
+
+      expect(reply).toEqual({
+        success: false,
+        error: expect.stringMatching(/magpie\/gpt-6\.2-astra.*not (registered|available)/i),
+      });
+      expect(spawnSpy).not.toHaveBeenCalled();
+    });
+
+    it("rejects council-melchior when magpie/gpt-6.2-astra is registered but unavailable", async () => {
+      const spawnSpy = vi.spyOn(AgentManager.prototype, "spawn");
+      const { rpcSpawn } = await bootWithRegistry({
+        find: (provider: string, id: string) =>
+          provider === melchiorModel.provider && id === melchiorModel.id ? melchiorModel : undefined,
+        getAll: () => [melchiorModel, parentModel],
+        getAvailable: () => [parentModel],
+        hasConfiguredAuth: () => false,
+      });
+
+      const reply = await rpcSpawn("req-cm-unavail", {
+        type: "council-melchior",
+        prompt: "Review architecture",
+      });
+
+      expect(reply).toEqual({
+        success: false,
+        error: expect.stringMatching(/magpie\/gpt-6\.2-astra.*not (registered|available)/i),
+      });
+      expect(spawnSpy).not.toHaveBeenCalled();
+    });
+
+    it("rejects council-melchior when options.model attempts to override its pinned model", async () => {
+      const spawnSpy = vi.spyOn(AgentManager.prototype, "spawn");
+      const models = [melchiorModel, overrideModel, parentModel];
+      const { rpcSpawn } = await bootWithRegistry({
+        find: (provider: string, id: string) =>
+          models.find((m) => m.provider === provider && m.id === id),
+        getAll: () => models,
+        getAvailable: () => models,
+        hasConfiguredAuth: () => true,
+      });
+
+      const reply = await rpcSpawn("req-cm-override", {
+        type: "council-melchior",
+        prompt: "Review architecture",
+        options: { model: "openai-codex/gpt-5.5" },
+      });
+
+      expect(reply).toEqual({
+        success: false,
+        error: 'Council advisor "council-melchior" has pinned model "magpie/gpt-6.2-astra" and cannot be overridden.',
+      });
+      expect(spawnSpy).not.toHaveBeenCalled();
+    });
+
+    it("forwards the resolved pinned model to manager.spawn when magpie/gpt-6.2-astra is available", async () => {
+      const spawnSpy = vi.spyOn(AgentManager.prototype, "spawn").mockReturnValueOnce("council-42");
+      vi.spyOn(AgentManager.prototype, "awaitStartup").mockResolvedValueOnce(undefined);
+      const models = [melchiorModel, parentModel];
+      const { rpcSpawn } = await bootWithRegistry({
+        find: (provider: string, id: string) =>
+          models.find((m) => m.provider === provider && m.id === id),
+        getAll: () => models,
+        getAvailable: () => models,
+        hasConfiguredAuth: () => true,
+      });
+
+      const reply = await rpcSpawn("req-cm-ok", {
+        type: "council-melchior",
+        prompt: "Review architecture",
+      });
+
+      expect(reply).toEqual({ success: true, data: { id: "council-42" } });
+      expect(spawnSpy).toHaveBeenCalledTimes(1);
+      expect(spawnSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        parentCtx,
+        "council-melchior",
+        "Review architecture",
+        expect.objectContaining({ model: melchiorModel }),
       );
     });
   });
