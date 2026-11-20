@@ -394,21 +394,39 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // Wait for completion if requested. Cancellation (e.g. the parent's tool
       // call is aborted) stops only this wait; the nested child keeps running and
       // stays unconsumed. Queued records have no promise until the manager starts
-      // them, so poll — abortably — until they leave the queue, then await.
+      // them, and isolated worktree children also have a gap where
+      // `status === "running"` before `record.promise` is attached — wait
+      // through both before awaiting `record.promise`.
+      let startupError: string | undefined;
       if (params.wait && (record.status === "queued" || record.status === "running")) {
         while (record.status === "queued") {
-          await abortable(new Promise<void>(resolve => setTimeout(resolve, 250)), signal);
+          await abortable(
+            record.startGate ?? new Promise<void>(resolve => setTimeout(resolve, 250)),
+            signal,
+          );
+        }
+        if (record.status === "running" && !record.promise) {
+          try {
+            await abortable(context.manager.awaitStartup(record.id), signal);
+          } catch (err) {
+            if (signal?.aborted) throw signal.reason;
+            startupError = err instanceof Error ? err.message : String(err);
+          }
         }
         if (record.promise) await abortable(record.promise, signal);
       }
-      let output = formatRecord(record, "fetched");
+      const unresolvedStartupFailure =
+        startupError !== undefined && (record.status === "running" || record.status === "queued");
+      let output = unresolvedStartupFailure
+        ? `Agent failed: ${startupError}${partialOutputSuffix(record)}`
+        : formatRecord(record, "fetched");
       if (params.verbose) {
         const conversation = getRecordConversation(record);
         if (conversation) {
           output += `\n\n--- Agent Conversation ---\n${conversation}`;
         }
       }
-      return textResult(output, record.status === "error");
+      return textResult(output, record.status === "error" || unresolvedStartupFailure);
     },
   });
 

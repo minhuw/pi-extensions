@@ -810,14 +810,18 @@ export class AgentManager {
       (err) => {
         this.startups.delete(id);
         this.detachParentAbort(record);
+        // Settle the record even on an immediate failure before removing it
+        // from `agents`: a caller that already grabbed the record while async
+        // worktree startup was in flight (e.g. `get_subagent_result(wait)`)
+        // must see the terminal failure instead of a stale "running" status.
+        if (record.status !== "stopped") record.status = "error";
+        record.error = err instanceof Error ? err.message : String(err);
+        record.completedAt ??= Date.now();
         if (queuedPool !== undefined) {
           // Mirrors settleRun: an inline caller gets this failure as a throw
           // out of spawnAndWait, so an unconsumed record would ALSO nudge the
           // session about it — the same failure reported twice.
           if (queuedPool === "foreground") record.resultConsumed = true;
-          record.status = "error";
-          record.error = err instanceof Error ? err.message : String(err);
-          record.completedAt = Date.now();
           this.onComplete?.(record);
         } else {
           this.agents.delete(id);

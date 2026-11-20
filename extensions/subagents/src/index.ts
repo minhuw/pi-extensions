@@ -3580,13 +3580,23 @@ Terse command-style prompts produce shallow, generic work.
       // call; the background agent keeps running and remains unconsumed so its
       // completion notification can still be delivered.
       // Queued agents have no promise yet (it's created when the queue starts
-      // them), so poll until they leave the queue, then await like a running one.
+      // them), and isolated worktree agents also have a gap after leaving the
+      // queue where `status === "running"` while `record.promise` is still
+      // unset until `createWorktree` finishes — wait through both before
+      // awaiting `record.promise`.
       if (params.wait && (record.status === "running" || record.status === "queued")) {
         while (record.status === "queued") {
           await abortable(
-            new Promise<void>((resolve) => setTimeout(resolve, QUEUE_WAIT_POLL_MS)),
+            record.startGate ?? new Promise<void>((resolve) => setTimeout(resolve, QUEUE_WAIT_POLL_MS)),
             signal,
           );
+        }
+        if (record.status === "running" && !record.promise) {
+          try {
+            await abortable(manager.awaitStartup(record.id), signal);
+          } catch {
+            if (signal?.aborted) throw signal.reason;
+          }
         }
         if (record.promise) await abortable(record.promise, signal);
       }
