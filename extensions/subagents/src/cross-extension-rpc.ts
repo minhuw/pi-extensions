@@ -1,8 +1,8 @@
 /**
  * Cross-extension RPC handlers for the subagents extension.
  *
- * Exposes ping, spawn, stop, consume, steer, send, and reopen RPCs over the pi.events
- * event bus, using per-request scoped reply channels.
+ * Exposes ping, spawn, stop, consume, steer, send, reopen, and release RPCs over
+ * the pi.events event bus, using per-request scoped reply channels.
  *
  * Reply envelope follows pi-mono convention:
  *   success → { success: true, data?: T }
@@ -69,6 +69,11 @@ export interface SpawnCapable {
    * `sessionFile`. Validates everything and throws with a caller-facing message.
    */
   reopen(pi: unknown, ctx: unknown, sessionFile: unknown, type: unknown, prompt: unknown, options: unknown): string;
+  /**
+   * Clear retention on a top-level agent and release its retained session
+   * immediately when settled (or automatically on settle if still active).
+   */
+  release(id: string): boolean;
 }
 
 export interface RpcDeps {
@@ -86,6 +91,7 @@ export interface RpcHandle {
   unsubSteer: () => void;
   unsubSend: () => void;
   unsubReopen: () => void;
+  unsubRelease: () => void;
 }
 
 /**
@@ -269,5 +275,17 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     },
   );
 
-  return { unsubPing, unsubSpawn, unsubStop, unsubConsume, unsubSteer, unsubSend, unsubReopen };
+  // Release a retained top-level agent once the caller no longer needs to
+  // resume it: clears `retain`, tears down its live session immediately when
+  // settled (or upon settle if still running/queued), and lets normal GC
+  // reclaim the record. Outside the ping version handshake, like consume and
+  // steer: additive and best-effort.
+  const unsubRelease = handleRpc<{ requestId: string; agentId: string }>(
+    events, "subagents:rpc:release", ({ agentId }) => {
+      assertOwned(agentId);
+      if (!manager.release(agentId)) throw new Error("Agent is owned by another agent or workflow");
+    },
+  );
+
+  return { unsubPing, unsubSpawn, unsubStop, unsubConsume, unsubSteer, unsubSend, unsubReopen, unsubRelease };
 }

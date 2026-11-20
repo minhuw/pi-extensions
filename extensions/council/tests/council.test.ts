@@ -102,6 +102,10 @@ interface HarnessOptions {
 				status?: string;
 		  }
 		| "hang";
+	/** Return true to hold the spawn RPC reply until manually resolved via `deferredSpawns`. */
+	deferSpawn?: (req: { id: string; type: string }) => boolean;
+	/** Return true to hold the send RPC reply until manually resolved via `deferredSends`. */
+	deferSend?: (req: { agentId: string; type: string }) => boolean;
 }
 
 function bootCouncilHarness(opts: HarnessOptions = {}) {
@@ -124,6 +128,19 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 		text: string;
 	}> = [];
 	const stops: Array<{ requestId: string; agentId: string }> = [];
+	const releases: Array<{ requestId: string; agentId: string }> = [];
+	const deferredSpawns: Array<{
+		id: string;
+		type: string;
+		requestId: string;
+		resolve: (reply?: { success: boolean; data?: { id: string }; error?: string }) => void;
+	}> = [];
+	const deferredSends: Array<{
+		agentId: string;
+		type: string;
+		requestId: string;
+		resolve: (reply?: { success: boolean; data?: { delivery: string }; error?: string }) => void;
+	}> = [];
 	const consumes: Array<{
 		requestId: string;
 		agentId: string;
@@ -157,6 +174,11 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 		bus.emit(`subagents:rpc:stop:reply:${raw.requestId}`, { success: true });
 	});
 
+	bus.on("subagents:rpc:release", (raw: any) => {
+		releases.push({ requestId: raw.requestId, agentId: raw.agentId });
+		bus.emit(`subagents:rpc:release:reply:${raw.requestId}`, { success: true });
+	});
+
 	bus.on("subagents:rpc:spawn", (raw: any) => {
 		const id = `council-agent-${++agentSeq}`;
 		agentTypesById.set(id, raw.type);
@@ -167,6 +189,25 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 			prompt: raw.prompt,
 			options: raw.options ?? {},
 		});
+
+		if (opts.deferSpawn?.({ id, type: raw.type })) {
+			deferredSpawns.push({
+				id,
+				type: raw.type,
+				requestId: raw.requestId,
+				resolve: (reply = { success: true, data: { id } }) => {
+					if (reply.success && reply.data?.id) {
+						bus.emit("subagents:started", {
+							id: reply.data.id,
+							type: raw.type,
+							description: raw.options?.description ?? "",
+						});
+					}
+					bus.emit(`subagents:rpc:spawn:reply:${raw.requestId}`, reply);
+				},
+			});
+			return;
+		}
 
 		bus.emit("subagents:started", {
 			id,
@@ -216,6 +257,18 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 			type,
 			text: raw.text,
 		});
+
+		if (opts.deferSend?.({ agentId: raw.agentId, type })) {
+			deferredSends.push({
+				agentId: raw.agentId,
+				type,
+				requestId: raw.requestId,
+				resolve: (reply = { success: true, data: { delivery: "resumed" } }) => {
+					bus.emit(`subagents:rpc:send:reply:${raw.requestId}`, reply);
+				},
+			});
+			return;
+		}
 
 		const outcome = opts.round2Handler
 			? opts.round2Handler({ agentId: raw.agentId, type, text: raw.text })
@@ -334,6 +387,9 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 		spawns,
 		sends,
 		stops,
+		releases,
+		deferredSpawns,
+		deferredSends,
 		consumes,
 		sendUserMessage,
 		on,
@@ -859,7 +915,7 @@ describe("council tool execution and RPC deliberation", () => {
 		).rejects.toThrow(/at least 2 members must succeed in Round 1/i);
 	});
 
-	it("emits subagents:rpc:stop for all active council subagents when AbortSignal aborts", async () => {
+	it("emits subagents:rpc:stop and subagents:rpc:release for all active council subagents when AbortSignal aborts", async () => {
 		const harness = bootCouncilHarness({
 			round1Handler: () => "hang",
 		});
@@ -877,8 +933,175 @@ describe("council tool execution and RPC deliberation", () => {
 		controller.abort();
 
 		await expect(promise).rejects.toThrow(/aborted/i);
-		expect(harness.stops.map((s) => s.agentId).sort()).toEqual(
-			harness.spawns.map((s) => s.id).sort(),
+		const expectedIds = harness.spawns.map((s) => s.id).sort();
+		expect(harness.stops.map((s) => s.agentId).sort()).toEqual(expectedIds);
+		expect(harness.releases.map((r) => r.agentId).sort()).toEqual(expectedIds);
+	});
+
+	it("releases retained sessions across normal 2-round completion, Round 1 failure, and Round 2 failure", async () => {
+		// 1. Normal 2-round completion
+		const normalHarness = bootCouncilHarness();
+		await normalHarness.tool.execute(
+			"tc-rel-normal",
+			{ topic: "Normal 2-round release check" },
+			undefined,
+			undefined,
+			{} as ExtensionContext,
+		);
+		expect(normalHarness.releases.map((r) => r.agentId).sort()).toEqual(
+			normalHarness.spawns.map((s) => s.id).sort(),
+		);
+
+		// 2. Round 1 fatal failure (< 2 succeeded)
+		const r1FailHarness = bootCouncilHarness({
+			round1Handler: ({ type }) => {
+				if (type !== "council-caspar") {
+					return { event: "failed", status: "error", error: `${type} failed` };
+				}
+				return { event: "completed", status: "completed", result: "Caspar proposal" };
+			},
+		});
+		await expect(
+			r1FailHarness.tool.execute(
+				"tc-rel-r1-fail",
+				{ topic: "Round 1 failure release check" },
+				undefined,
+				undefined,
+				{} as ExtensionContext,
+			),
+		).rejects.toThrow(/at least 2 members must succeed/i);
+		expect(r1FailHarness.releases.map((r) => r.agentId).sort()).toEqual(
+			r1FailHarness.spawns.map((s) => s.id).sort(),
+		);
+
+		// 3. Round 2 failure (send RPC error + failed settle)
+		const r2FailHarness = bootCouncilHarness({
+			round2Handler: ({ type }) => {
+				if (type === "council-melchior") return { rpcError: "session unavailable" };
+				if (type === "council-balthasar") {
+					return { event: "failed", status: "error", error: "provider error" };
+				}
+				return { event: "completed", status: "completed", result: "Caspar R2" };
+			},
+		});
+		await r2FailHarness.tool.execute(
+			"tc-rel-r2-fail",
+			{ topic: "Round 2 failure release check" },
+			undefined,
+			undefined,
+			{} as ExtensionContext,
+		);
+		expect(r2FailHarness.releases.map((r) => r.agentId).sort()).toEqual(
+			r2FailHarness.spawns.map((s) => s.id).sort(),
+		);
+	});
+
+	it("stops and releases late-returning advisor agents when cancelled while spawn RPC is still in-flight", async () => {
+		const harness = bootCouncilHarness({
+			deferSpawn: ({ type }) => type === "council-balthasar",
+			round1Handler: () => "hang",
+		});
+
+		const controller = new AbortController();
+		const promise = harness.tool.execute(
+			"tc-abort-inflight-spawn",
+			{ topic: "Abort while balthasar spawn is in flight" },
+			controller.signal,
+			undefined,
+			{} as ExtensionContext,
+		);
+
+		await vi.waitFor(() => expect(harness.spawns).toHaveLength(3));
+		expect(harness.deferredSpawns).toHaveLength(1);
+		const lateSpawn = harness.deferredSpawns[0]!;
+
+		controller.abort();
+		await expect(promise).rejects.toThrow(/aborted/i);
+
+		// Already-spawned advisors were stopped and released before the late spawn replied.
+		const earlyIds = harness.spawns
+			.filter((s) => s.id !== lateSpawn.id)
+			.map((s) => s.id)
+			.sort();
+		expect(harness.stops.map((s) => s.agentId).sort()).toEqual(earlyIds);
+		expect(harness.releases.map((r) => r.agentId).sort()).toEqual(earlyIds);
+
+		// Now the late spawn RPC resolves after cancellation and finally cleanup.
+		lateSpawn.resolve();
+		await vi.waitFor(() => expect(harness.stops.map((s) => s.agentId)).toContain(lateSpawn.id));
+		await vi.waitFor(() => expect(harness.releases.map((r) => r.agentId)).toContain(lateSpawn.id));
+
+		const allIds = harness.spawns.map((s) => s.id).sort();
+		expect(harness.stops.map((s) => s.agentId).sort()).toEqual(allIds);
+		expect(harness.releases.map((r) => r.agentId).sort()).toEqual(allIds);
+	});
+
+	it("stops and releases all advisors when cancelled while all spawn RPCs are still in-flight", async () => {
+		const harness = bootCouncilHarness({
+			deferSpawn: () => true,
+		});
+
+		const controller = new AbortController();
+		const promise = harness.tool.execute(
+			"tc-abort-all-inflight-spawns",
+			{ topic: "Abort while all spawns are in flight", members: ["caspar", "melchior"] },
+			controller.signal,
+			undefined,
+			{} as ExtensionContext,
+		);
+
+		await vi.waitFor(() => expect(harness.deferredSpawns).toHaveLength(2));
+		controller.abort();
+		await expect(promise).rejects.toThrow(/aborted/i);
+		expect(harness.stops).toHaveLength(0);
+
+		for (const deferred of harness.deferredSpawns) {
+			deferred.resolve();
+		}
+
+		const allIds = harness.spawns.map((s) => s.id).sort();
+		await vi.waitFor(() => expect(harness.stops.map((s) => s.agentId).sort()).toEqual(allIds));
+		await vi.waitFor(() => expect(harness.releases.map((r) => r.agentId).sort()).toEqual(allIds));
+	});
+
+	it("stops and releases late-returning advisor agents when cancelled while Round 2 send RPC is in-flight", async () => {
+		const harness = bootCouncilHarness({
+			deferSend: ({ type }) => type === "council-melchior",
+			round2Handler: () => "hang",
+		});
+
+		const controller = new AbortController();
+		const promise = harness.tool.execute(
+			"tc-abort-inflight-send",
+			{ topic: "Abort while Round 2 send is in flight", members: ["caspar", "melchior"] },
+			controller.signal,
+			undefined,
+			{} as ExtensionContext,
+		);
+
+		await vi.waitFor(() => expect(harness.sends).toHaveLength(2));
+		expect(harness.deferredSends).toHaveLength(1);
+		const lateSend = harness.deferredSends[0]!;
+		const earlyR2Id = harness.sends.find((s) => s.agentId !== lateSend.agentId)!.agentId;
+
+		controller.abort();
+		await expect(promise).rejects.toThrow(/aborted/i);
+
+		// Early Round 2 advisor was stopped immediately; all owned agents released in finally.
+		expect(harness.stops.map((s) => s.agentId)).toEqual([earlyR2Id]);
+		expect(new Set(harness.releases.map((r) => r.agentId))).toEqual(
+			new Set(harness.spawns.map((s) => s.id)),
+		);
+
+		// Late Round 2 send resolves after abort/finally: must immediately stop and re-release.
+		const releasesBeforeLateSend = harness.releases.filter((r) => r.agentId === lateSend.agentId).length;
+		lateSend.resolve({ success: true, data: { delivery: "resumed" } });
+
+		await vi.waitFor(() => expect(harness.stops.map((s) => s.agentId)).toContain(lateSend.agentId));
+		await vi.waitFor(() =>
+			expect(harness.releases.filter((r) => r.agentId === lateSend.agentId).length).toBeGreaterThan(
+				releasesBeforeLateSend,
+			),
 		);
 	});
 });

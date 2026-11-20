@@ -1235,6 +1235,7 @@ export default function (pi: ExtensionAPI) {
           steer: (id, message) => manager.steer(id, message),
           send: sendToAgent,
           reopen: reopenAgent,
+          release: (id) => manager.release(id),
         },
       });
       // Broadcast readiness so extensions loaded alongside us can discover us.
@@ -1531,6 +1532,7 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubSteer();
     rpcHandle?.unsubSend();
     rpcHandle?.unsubReopen();
+    rpcHandle?.unsubRelease();
     rpcHandle = undefined;
     currentCtx = undefined;
     // The registration token prevents a child activation from releasing the

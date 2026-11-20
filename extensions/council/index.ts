@@ -517,6 +517,9 @@ export default function councilExtension(pi: ExtensionAPI): void {
 			}
 
 			const pingReply = await callRpc<{ version?: number }>("ping", {}, DEFAULT_PING_TIMEOUT_MS);
+			if (signal?.aborted) {
+				throw new Error("Council deliberation aborted.");
+			}
 			if (!pingReply?.success || typeof pingReply.data?.version !== "number" || pingReply.data.version < 3) {
 				const reason = !pingReply?.success
 					? pingReply?.error ?? "ping failed"
@@ -528,17 +531,43 @@ export default function councilExtension(pi: ExtensionAPI): void {
 
 			const ownedAgentIds = new Set<string>();
 			const activeAgentIds = new Set<string>();
+			const settledAgents = new Set<string>();
+			const round1StoppedIds = new Set<string>();
+			const releasedAgentIds = new Set<string>();
 			const pendingWaiters = new Map<string, (outcome: { event: "completed" | "failed"; data: LifecycleSettlePayload }) => void>();
 			const earlySettles = new Map<string, { event: "completed" | "failed"; data: LifecycleSettlePayload }>();
 			const abortWaiters = new Set<(err: Error) => void>();
 			let inFlightSpawns = 0;
+			let inRound2 = false;
 			let aborted = false;
+			let cleanedUp = false;
+
+			const isCancelledOrDone = () => aborted || cleanedUp || Boolean(signal?.aborted);
+
+			const stopAgent = (agentId: string) => {
+				activeAgentIds.delete(agentId);
+				if (!inRound2) {
+					round1StoppedIds.add(agentId);
+				}
+				pi.events.emit("subagents:rpc:stop", { requestId: randomUUID(), agentId });
+			};
+
+			const releaseAgent = (agentId: string, force = false) => {
+				if (!force && releasedAgentIds.has(agentId)) return;
+				releasedAgentIds.add(agentId);
+				pi.events.emit("subagents:rpc:release", { requestId: randomUUID(), agentId });
+			};
 
 			const stopActiveAgents = () => {
-				for (const agentId of activeAgentIds) {
-					pi.events.emit("subagents:rpc:stop", { requestId: randomUUID(), agentId });
+				for (const agentId of [...activeAgentIds]) {
+					stopAgent(agentId);
 				}
-				activeAgentIds.clear();
+			};
+
+			const releaseOwnedAgents = () => {
+				for (const agentId of ownedAgentIds) {
+					releaseAgent(agentId);
+				}
 			};
 
 			const onAbort = () => {
@@ -551,6 +580,15 @@ export default function councilExtension(pi: ExtensionAPI): void {
 				}
 				abortWaiters.clear();
 			};
+
+			const abortPromise = new Promise<never>((_resolve, reject) => {
+				if (aborted || signal?.aborted) {
+					reject(new Error("Council deliberation aborted."));
+					return;
+				}
+				abortWaiters.add(reject);
+			});
+			abortPromise.catch(() => {});
 
 			signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -566,6 +604,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 
 				ownedAgentIds.add(agentId);
 				activeAgentIds.delete(agentId);
+				settledAgents.add(agentId);
 
 				// Synchronously consume completion so pi-subagents never schedules a parent notification.
 				pi.events.emit("subagents:rpc:consume", { requestId: randomUUID(), agentId });
@@ -588,8 +627,11 @@ export default function councilExtension(pi: ExtensionAPI): void {
 						(inFlightSpawns > 0 && typeof data.type === "string" && COUNCIL_AGENT_TYPES.has(data.type)))
 				) {
 					ownedAgentIds.add(data.id);
-					if (aborted) {
-						pi.events.emit("subagents:rpc:stop", { requestId: randomUUID(), agentId: data.id });
+					if (isCancelledOrDone()) {
+						if (inRound2 || !round1StoppedIds.has(data.id)) {
+							stopAgent(data.id);
+						}
+						releaseAgent(data.id);
 					} else {
 						activeAgentIds.add(data.id);
 					}
@@ -635,22 +677,46 @@ export default function councilExtension(pi: ExtensionAPI): void {
 				const round1Outcomes = await Promise.all(
 					specs.map(async (spec) => {
 						inFlightSpawns++;
-						let spawnReply: RpcReply<{ id: string }>;
-						try {
-							spawnReply = await callRpc<{ id: string }>("spawn", {
-								type: spec.agentType,
-								prompt: round1Prompt,
-								options: {
-									description: `Council R1 (${spec.id}): ${shortTopic}`,
-									notifyParent: false,
-									retain: rounds === 2,
-									isBackground: true,
-									bypassQueue: true,
-								},
+						let handledLateSpawn = false;
+						const stopAndReleaseLateSpawn = (agentId: string) => {
+							if (handledLateSpawn) return;
+							handledLateSpawn = true;
+							ownedAgentIds.add(agentId);
+							if (!settledAgents.has(agentId) && !round1StoppedIds.has(agentId)) {
+								stopAgent(agentId);
+							}
+							releaseAgent(agentId);
+						};
+
+						const spawnPromise = callRpc<{ id: string }>("spawn", {
+							type: spec.agentType,
+							prompt: round1Prompt,
+							options: {
+								description: `Council R1 (${spec.id}): ${shortTopic}`,
+								notifyParent: false,
+								retain: rounds === 2,
+								isBackground: true,
+								bypassQueue: true,
+							},
+						});
+
+						// Keep observing in-flight spawns even if Promise.race rejects early
+						// on abort/failure so late-returning advisors are stopped and released.
+						const lateSpawnCleanup = spawnPromise
+							.then((reply) => {
+								inFlightSpawns--;
+								if (isCancelledOrDone() && reply?.success && reply.data?.id) {
+									stopAndReleaseLateSpawn(reply.data.id);
+								}
+								return reply;
+							})
+							.catch((err) => {
+								inFlightSpawns--;
+								throw err;
 							});
-						} finally {
-							inFlightSpawns--;
-						}
+						lateSpawnCleanup.catch(() => {});
+
+						const spawnReply = await Promise.race([lateSpawnCleanup, abortPromise]);
 
 						if (!spawnReply?.success || !spawnReply.data?.id) {
 							return {
@@ -662,12 +728,13 @@ export default function councilExtension(pi: ExtensionAPI): void {
 
 						const agentId = spawnReply.data.id;
 						ownedAgentIds.add(agentId);
-						if (!earlySettles.has(agentId)) {
-							activeAgentIds.add(agentId);
-						}
-						if (aborted || signal?.aborted) {
+						if (isCancelledOrDone()) {
+							stopAndReleaseLateSpawn(agentId);
 							onAbort();
 							throw new Error("Council deliberation aborted.");
+						}
+						if (!settledAgents.has(agentId)) {
+							activeAgentIds.add(agentId);
 						}
 
 						const settled = await waitForAgentSettle(agentId);
@@ -736,6 +803,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 				const round2: CouncilRound2Entry[] = [];
 
 				if (rounds === 2) {
+					inRound2 = true;
 					const round2Outcomes = await Promise.all(
 						round1.map(async (r1Entry, index) => {
 							const rotatedPeers = rotatePeersForMember(round1, index);
@@ -748,24 +816,60 @@ export default function councilExtension(pi: ExtensionAPI): void {
 							});
 
 							earlySettles.delete(r1Entry.agentId);
-							activeAgentIds.add(r1Entry.agentId);
+							settledAgents.delete(r1Entry.agentId);
 							const settlePromise = waitForAgentSettle(r1Entry.agentId);
+							// Suppress unhandled rejection if Promise.race rejects or send fails
+							settlePromise.catch(() => {});
 
-							const sendReply = await callRpc<{ delivery?: string }>("send", {
+							let handledLateSend = false;
+							const stopAndReleaseLateSend = (reply: RpcReply<{ delivery?: string }> | undefined) => {
+								if (handledLateSend) return;
+								handledLateSend = true;
+								activeAgentIds.delete(r1Entry.agentId);
+								pendingWaiters.delete(r1Entry.agentId);
+								if (reply?.success) {
+									if (!settledAgents.has(r1Entry.agentId)) {
+										stopAgent(r1Entry.agentId);
+									}
+									// Force re-emit release so a newly resumed late Round 2 run
+									// is guaranteed to tear down on settle even if `finally` ran first.
+									releaseAgent(r1Entry.agentId, true);
+								} else {
+									releaseAgent(r1Entry.agentId);
+								}
+							};
+
+							const sendPromise = callRpc<{ delivery?: string }>("send", {
 								agentId: r1Entry.agentId,
 								text: round2Prompt,
 							});
+							const lateSendCleanup = sendPromise.then((reply) => {
+								if (isCancelledOrDone()) {
+									stopAndReleaseLateSend(reply);
+								}
+								return reply;
+							});
+							lateSendCleanup.catch(() => {});
+
+							const sendReply = await Promise.race([lateSendCleanup, abortPromise]);
 
 							if (!sendReply?.success) {
 								activeAgentIds.delete(r1Entry.agentId);
 								pendingWaiters.delete(r1Entry.agentId);
-								// Suppress unhandled rejection if waitForAgentSettle rejects on abort
-								settlePromise.catch(() => {});
 								return {
 									r1Entry,
 									ok: false as const,
 									error: sendReply?.error ?? `Failed to resume ${r1Entry.agentType} for Round 2`,
 								};
+							}
+
+							if (isCancelledOrDone()) {
+								stopAndReleaseLateSend(sendReply);
+								onAbort();
+								throw new Error("Council deliberation aborted.");
+							}
+							if (!settledAgents.has(r1Entry.agentId)) {
+								activeAgentIds.add(r1Entry.agentId);
 							}
 
 							const settled = await settlePromise;
@@ -853,6 +957,9 @@ export default function councilExtension(pi: ExtensionAPI): void {
 					},
 				};
 			} finally {
+				cleanedUp = true;
+				stopActiveAgents();
+				releaseOwnedAgents();
 				signal?.removeEventListener("abort", onAbort);
 				unsubStarted?.();
 				unsubCompleted?.();

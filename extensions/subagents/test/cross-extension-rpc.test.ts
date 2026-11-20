@@ -40,6 +40,7 @@ describe("cross-extension RPC", () => {
       steer: vi.fn().mockReturnValue(true),
       send: vi.fn().mockResolvedValue("steered"),
       reopen: vi.fn().mockReturnValue("agent-43"),
+      release: vi.fn().mockReturnValue(true),
     };
     ctx = { session: true };
     deps = { events, pi: { events }, getCtx: () => ctx, manager };
@@ -332,6 +333,67 @@ describe("cross-extension RPC", () => {
       await new Promise((r) => setTimeout(r, 20));
       expect(reply).not.toHaveBeenCalled();
       expect(manager.consumeResult).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- release ---
+
+  describe("release RPC", () => {
+    it("releases a top-level agent and replies with success", async () => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:release:reply:req-r1", reply);
+      events.emit("subagents:rpc:release", { requestId: "req-r1", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true });
+      expect(manager.release).toHaveBeenCalledWith("agent-42");
+    });
+
+    it("returns error when the agent is unknown", async () => {
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:release:reply:req-r2", reply);
+      events.emit("subagents:rpc:release", { requestId: "req-r2", agentId: "nonexistent" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent not found" });
+      expect(manager.release).not.toHaveBeenCalled();
+    });
+
+    it("refuses to release a nested child or workflow-owned agent", async () => {
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue({ parentAgentId: "parent-1" });
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:release:reply:req-r3", reply);
+      events.emit("subagents:rpc:release", { requestId: "req-r3", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent is owned by another agent or workflow" });
+      expect(manager.release).not.toHaveBeenCalled();
+
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue({ workflowId: "wf-1" });
+      const replyWf = vi.fn();
+      events.on("subagents:rpc:release:reply:req-r4", replyWf);
+      events.emit("subagents:rpc:release", { requestId: "req-r4", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(replyWf).toHaveBeenCalled());
+      expect(replyWf).toHaveBeenCalledWith({ success: false, error: "Agent is owned by another agent or workflow" });
+      expect(manager.release).not.toHaveBeenCalled();
+    });
+
+    it("unsub stops responding to release requests", async () => {
+      const { unsubRelease } = registerRpcHandlers(deps);
+      unsubRelease();
+
+      const reply = vi.fn();
+      events.on("subagents:rpc:release:reply:req-r5", reply);
+      events.emit("subagents:rpc:release", { requestId: "req-r5", agentId: "agent-42" });
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(reply).not.toHaveBeenCalled();
+      expect(manager.release).not.toHaveBeenCalled();
     });
   });
 

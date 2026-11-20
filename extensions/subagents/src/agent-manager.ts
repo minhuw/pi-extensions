@@ -427,6 +427,12 @@ export class AgentManager {
   private reopenContexts = new Map<string, SpawnReopenContext>();
   private sessionShutdowns = new WeakMap<object, Promise<void>>();
   private pendingShutdowns = new Set<Promise<void>>();
+  /** Agents whose runAgent/resumeAgent promise has not reached its settle tail yet
+   *  (including after `abort()` synchronously flips status to `"stopped"`). */
+  private inFlightRuns = new Set<string>();
+  /** Top-level agents explicitly released while still active; tears down their
+   *  session (even when in-memory) as soon as the run settles. */
+  private releasedIds = new Set<string>();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
@@ -955,7 +961,7 @@ export class AgentManager {
 
     this.onStart?.(record);
 
-
+    this.inFlightRuns.add(id);
     const promise = runAgent(ctx, type, prompt, {
       pi,
       agentId: id,
@@ -1111,7 +1117,8 @@ export class AgentManager {
         }
 
         this.abortOwnedChildren(id);
-        this.releaseCompletedSession(record);
+        this.inFlightRuns.delete(id);
+        this.releaseCompletedSession(record, this.releasedIds.delete(id));
 
         this.settleRun(record, true);
         return responseText;
@@ -1146,7 +1153,8 @@ export class AgentManager {
         }
 
         this.abortOwnedChildren(id);
-        this.releaseCompletedSession(record);
+        this.inFlightRuns.delete(id);
+        this.releaseCompletedSession(record, this.releasedIds.delete(id));
 
         this.settleRun(record, false);
         return "";
@@ -1466,6 +1474,7 @@ export class AgentManager {
     // holds for a resume issued on a call that was cancelled first.
     if (signal?.aborted) this.abort(id);
 
+    this.inFlightRuns.add(id);
     try {
       const outcome = record.session
         ? await resumeAgent(record.session, prompt, {
@@ -1516,7 +1525,8 @@ export class AgentManager {
     // Same contract as the spawn settle paths: children spawned during the
     // resumed turn must not outlive it — nothing else can see or reach them.
     this.abortOwnedChildren(id);
-    this.releaseCompletedSession(record);
+    this.inFlightRuns.delete(id);
+    this.releaseCompletedSession(record, this.releasedIds.delete(id));
 
     // The inline caller receives this run's result, so its settle notifies no
     // one (as `settleRun` does for a foreground spawn) — it reports lifecycle only.
@@ -1677,14 +1687,15 @@ export class AgentManager {
   /**
    * Snapshot context-% and message count onto `record` and immediately tear
    * down its `AgentSession` when persisted on disk (unless `record.retain` is
-   * set). Purely in-memory sessions stay attached so they remain resumable.
+   * set). Purely in-memory sessions stay attached so they remain resumable,
+   * unless `force` is set by an explicit `release()` call.
    */
-  private releaseCompletedSession(record: AgentRecord): void {
+  private releaseCompletedSession(record: AgentRecord, force = false): void {
     const session = record.session;
     if (!session || record.retain) return;
     const sessionFile = session.sessionManager?.getSessionFile?.() ?? record.sessionFile;
-    if (!sessionFile) return;
-    record.sessionFile = sessionFile;
+    if (!sessionFile && !force) return;
+    if (sessionFile) record.sessionFile = sessionFile;
     record.contextPercent = getSessionContextPercent(session) ?? record.contextPercent;
     if (Array.isArray(session.messages)) {
       record.messageCount = session.messages.length;
@@ -1761,12 +1772,14 @@ export class AgentManager {
       }
       // Children spawned during the resumed turn must not outlive it.
       this.abortOwnedChildren(id);
-      this.releaseCompletedSession(record);
+      this.inFlightRuns.delete(id);
+      this.releaseCompletedSession(record, this.releasedIds.delete(id));
       if (occupiesPoolSlot(record)) this.runningBackground--;
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       this.drainQueue();
     };
 
+    this.inFlightRuns.add(id);
     const runPromise = record.session
       ? resumeAgent(record.session, prompt, {
           type: record.type,
@@ -1948,6 +1961,25 @@ export class AgentManager {
     return this.abortRecord(id, false);
   }
 
+  /**
+   * Clear retention on a top-level agent so its session and record can be
+   * reclaimed. When the agent has already settled (not running, queued, or
+   * still unwinding an abort), tears down its retained `AgentSession`
+   * immediately; otherwise its settle path tears it down upon completion.
+   */
+  release(id: string): boolean {
+    const record = this.agents.get(id);
+    if (!record || record.owner || !isTopLevelAgent(record)) return false;
+    record.retain = false;
+    if (record.status !== "running" && record.status !== "queued" && !this.inFlightRuns.has(id)) {
+      this.releasedIds.delete(id);
+      this.releaseCompletedSession(record, true);
+    } else {
+      this.releasedIds.add(id);
+    }
+    return true;
+  }
+
   /** Abort one record; owned records are cancellable only by their parent signal. */
   private abortRecord(id: string, allowOwned: boolean): boolean {
     const record = this.agents.get(id);
@@ -1983,6 +2015,8 @@ export class AgentManager {
     record.session = undefined;
     this.agents.delete(id);
     this.reopenContexts.delete(id);
+    this.inFlightRuns.delete(id);
+    this.releasedIds.delete(id);
     // A failed startup keeps its (rejected) entry so a late awaitStartup still
     // sees it; drop it with the record so the map can't grow unbounded.
     this.startups.delete(id);
@@ -2126,6 +2160,8 @@ export class AgentManager {
     this.agents.clear();
     this.reopenContexts.clear();
     this.startups.clear();
+    this.inFlightRuns.clear();
+    this.releasedIds.clear();
     for (const session of sessions) {
       if (session) this.scheduleSessionShutdown(session);
     }
