@@ -27,40 +27,61 @@ function harness(mode: ExtensionContext["mode"] = "tui", child = false) {
 	let idle = false;
 	let pending = false;
 	const statuses = new Map<string, string>();
+	const setStatus = vi.fn((key: string, text: string | undefined) => {
+		if (text === undefined) statuses.delete(key);
+		else statuses.set(key, text);
+	});
 	const auth = vi.fn(async () => ({ ok: true as const, apiKey: "private-key", baseUrl: "https://active.example/v1" }));
 	const notify = vi.fn();
 	const sendMessage = vi.fn();
 	const controller = new AbortController();
-	const ctx = {
-		mode, hasUI: true, model: { ...model }, sessionManager: session,
+	let activeSession = session;
+	const makeCtx = (targetSession: SessionManager, targetStatuses: Map<string, string>, targetSetStatus: typeof setStatus, targetMode = mode) => ({
+		mode: targetMode, hasUI: true, model: { ...model }, sessionManager: targetSession,
 		modelRegistry: { getApiKeyAndHeaders: auth }, signal: controller.signal,
 		isIdle: () => idle, hasPendingMessages: () => pending,
-		ui: { notify, setStatus: (key: string, text: string | undefined) => text === undefined ? statuses.delete(key) : statuses.set(key, text) },
-	} as unknown as ExtensionContext;
+		ui: { notify, setStatus: targetSetStatus },
+	}) as unknown as ExtensionContext;
+	let activeCtx = makeCtx(session, statuses, setStatus);
+	const appendEntry = vi.fn((type: string, data: unknown) => activeSession.appendCustomEntry(type, structuredClone(data)));
 	const pi = {
 		on: (event: string, handler: any) => handlers.set(event, handler),
 		registerCommand: (name: string, command: any) => commands.set(name, command),
-		appendEntry: (type: string, data: unknown) => session.appendCustomEntry(type, structuredClone(data)), sendMessage,
+		appendEntry, sendMessage,
 	} as unknown as ExtensionAPI;
-	const route = () => ({ session: session.getSessionId(), route: { asked: "auto/gpt-test", time: new Date(Date.now()).toISOString(),
+	const route = () => ({ session: activeSession.getSessionId(), route: { asked: "auto/gpt-test", time: new Date(Date.now()).toISOString(),
 		done: true, status: 429, tries: [{ model: "codex/gpt-test", done: true, status: 429, fail: "quota" }] } });
-	const fetcher = vi.fn(async (url: string | URL | Request) => String(url).includes("/quotas")
+	const fetcher = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => String(url).includes("/quotas")
 		? Response.json({ object: "list", data: [{ provider: "codex", kind: "subscription", windows: [
 			{ name: "5 hours", used: 100, remaining: 0, resetsAt: new Date(RESET).toISOString() },
 		] }] }) : Response.json(route()));
 	vi.stubGlobal("fetch", fetcher);
 	registerMagpieAutoContinue(pi);
-	const emit = async (event: string, data: unknown = {}) => handlers.get(event)?.(data, ctx);
+	const emit = async (event: string, data: unknown = {}, targetCtx = activeCtx) => handlers.get(event)?.(data, targetCtx);
 	const start = async () => { idle = false; await emit("before_agent_start"); };
 	const finishMessage = async (msg = message()) => {
 		// Pi emits message_end to extensions before persisting the message.
 		await emit("message_end", { message: msg });
-		session.appendMessage(msg);
+		activeSession.appendMessage(msg);
 	};
 	const settled = async (aborted = false) => { idle = true; await emit("agent_settled", { aborted }); };
 	const fail = async () => { await start(); await finishMessage(); await settled(); };
-	const command = (args: string) => commands.get("magpie-auto-continue")!.handler(args, ctx);
-	return { session, ctx, auth, notify, sendMessage, statuses, controller, fetcher, emit, start, finishMessage, settled, fail, command,
+	const command = (args: string, targetCtx = activeCtx) => commands.get("magpie-auto-continue")!.handler(args, targetCtx);
+	const replaceSession = (nextMode: ExtensionContext["mode"] = mode, nextChild = false) => {
+		const nextSession = SessionManager.inMemory();
+		nextSession.appendMessage({ role: "user", content: "Next session task", timestamp: Date.now() - 100 });
+		if (nextChild) nextSession.appendCustomEntry("pi-extensions.session-link", { parentSessionId: "parent" });
+		const nextStatuses = new Map<string, string>();
+		const nextSetStatus = vi.fn((key: string, text: string | undefined) => {
+			if (text === undefined) nextStatuses.delete(key);
+			else nextStatuses.set(key, text);
+		});
+		const nextCtx = makeCtx(nextSession, nextStatuses, nextSetStatus, nextMode);
+		activeSession = nextSession;
+		activeCtx = nextCtx;
+		return { session: nextSession, ctx: nextCtx, statuses: nextStatuses, setStatus: nextSetStatus };
+	};
+	return { session, ctx: activeCtx, auth, notify, sendMessage, statuses, setStatus, appendEntry, controller, fetcher, emit, start, finishMessage, settled, fail, command, replaceSession,
 		setIdle: (next: boolean) => { idle = next; }, setPending: (next: boolean) => { pending = next; },
 		reload: async () => { await emit("session_shutdown"); registerMagpieAutoContinue(pi); await emit("session_start", { reason: "reload" }); },
 	};
@@ -234,5 +255,197 @@ describe("Magpie quota continuation", () => {
 		h.session.appendMessage(message({ stopReason: "stop", timestamp: NOW + 1 }));
 		await vi.advanceTimersByTimeAsync(RETRY - NOW);
 		expect(h.sendMessage).not.toHaveBeenCalled(); expect(h.statuses.size).toBe(0);
+	});
+
+	it("deletes the runtime entry on session_shutdown while cancelling timers, clearing status, and preserving the wait checkpoint", async () => {
+		const h = harness();
+		await h.fail();
+		expect(vi.getTimerCount()).toBe(1);
+		h.setStatus.mockClear();
+		h.appendEntry.mockClear();
+
+		await h.emit("session_shutdown", { reason: "quit" });
+		expect(vi.getTimerCount()).toBe(0);
+		expect(h.statuses.size).toBe(0);
+		expect(h.setStatus).toHaveBeenCalledWith("magpie-quota", undefined);
+		expect(h.appendEntry).toHaveBeenCalledWith("magpie-auto-continue", expect.objectContaining({
+			version: 1, enabled: true, wait: expect.objectContaining({ model: model.id, retryAt: RETRY }),
+		}));
+
+		// A deleted runtime must not react to subsequent events or clobber the saved checkpoint.
+		h.setStatus.mockClear();
+		h.appendEntry.mockClear();
+		await h.emit("input", { text: "late", source: "interactive" });
+		await h.emit("session_tree");
+		await h.emit("session_shutdown", { reason: "quit" });
+		expect(h.setStatus).not.toHaveBeenCalled();
+		expect(h.appendEntry).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(RETRY - NOW + 60_000);
+		expect(h.sendMessage).not.toHaveBeenCalled();
+
+		// Re-entering the same session on the same extension instance still restores the paused checkpoint.
+		await h.emit("session_start", { reason: "reload" });
+		expect(h.statuses.get("magpie-quota")).toContain("quota paused");
+		await h.command("resume");
+		await vi.advanceTimersByTimeAsync(1);
+		expect(h.sendMessage).toHaveBeenCalledTimes(1);
+	});
+
+	it("aborts an in-flight quota lookup and deletes the runtime entry on session_shutdown", async () => {
+		const h = harness();
+		let lookupSignal: AbortSignal | undefined;
+		let release!: (value: Response) => void;
+		h.fetcher.mockImplementation((_url, init) => {
+			lookupSignal = init?.signal ?? undefined;
+			return new Promise(resolve => { release = resolve; });
+		});
+		await h.start();
+		const pending = h.finishMessage();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(lookupSignal?.aborted).toBe(false);
+
+		await h.emit("session_shutdown", { reason: "quit" });
+		expect(lookupSignal?.aborted).toBe(true);
+		expect(h.statuses.size).toBe(0);
+
+		h.setStatus.mockClear();
+		h.appendEntry.mockClear();
+		release(Response.json({ object: "list", data: [] }));
+		await pending;
+		await h.settled();
+		await h.emit("input", { text: "after shutdown", source: "interactive" });
+		expect(h.setStatus).not.toHaveBeenCalled();
+		expect(h.appendEntry).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+		expect(h.sendMessage).not.toHaveBeenCalled();
+	});
+
+	it.each(["session_before_switch", "session_before_fork"] as const)(
+		"deletes the runtime entry and cancels pending timers and lookups on %s while preserving cancelled-switch recovery",
+		async event => {
+			const h = harness();
+			await h.fail();
+			expect(vi.getTimerCount()).toBe(1);
+			h.setStatus.mockClear();
+			h.appendEntry.mockClear();
+
+			await h.emit(event, event === "session_before_switch" ? { reason: "new" } : { entryId: "e1", position: "before" });
+			expect(vi.getTimerCount()).toBe(0);
+			expect(h.statuses.size).toBe(0);
+			expect(h.setStatus).toHaveBeenCalledWith("magpie-quota", undefined);
+
+			// The closed session entry must be removed from runtimes rather than retained.
+			h.setStatus.mockClear();
+			h.appendEntry.mockClear();
+			await h.emit("input", { text: "late", source: "interactive" });
+			await h.emit("model_select");
+			await h.emit("session_tree");
+			await h.emit("session_shutdown", { reason: event === "session_before_switch" ? "new" : "fork" });
+			expect(h.setStatus).not.toHaveBeenCalled();
+			expect(h.appendEntry).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(RETRY - NOW + 60_000);
+			expect(h.sendMessage).not.toHaveBeenCalled();
+
+			// If the switch/fork was cancelled, the same session can re-enter cleanly via commands or the next turn.
+			vi.setSystemTime(NOW);
+			await h.command("status");
+			expect(h.notify).toHaveBeenLastCalledWith(expect.stringContaining("no quota wait is pending"), "info");
+			await h.fail();
+			expect(h.statuses.get("magpie-quota")).toContain("quota awaiting");
+
+			// Also verify an in-flight quota lookup is aborted and cleaned up on switch/fork.
+			let lookupSignal: AbortSignal | undefined;
+			let release!: (value: Response) => void;
+			h.fetcher.mockImplementationOnce((_url, init) => {
+				lookupSignal = init?.signal ?? undefined;
+				return new Promise(resolve => { release = resolve; });
+			});
+			await h.start();
+			const pending = h.finishMessage();
+			await vi.advanceTimersByTimeAsync(0);
+			expect(lookupSignal?.aborted).toBe(false);
+
+			await h.emit(event, event === "session_before_switch" ? { reason: "new" } : { entryId: "e2", position: "before" });
+			expect(lookupSignal?.aborted).toBe(true);
+			expect(h.statuses.size).toBe(0);
+			h.setStatus.mockClear();
+			h.appendEntry.mockClear();
+			release(Response.json({ object: "list", data: [] }));
+			await pending;
+			await h.settled();
+			await h.emit("input", { text: "after leave", source: "interactive" });
+			expect(h.setStatus).not.toHaveBeenCalled();
+			expect(h.appendEntry).not.toHaveBeenCalled();
+
+			// Cancelled switch/fork preserves persisted disabled state on re-entry.
+			await h.command("off");
+			await h.emit(event, event === "session_before_switch" ? { reason: "new" } : { entryId: "e3", position: "before" });
+			h.fetcher.mockClear();
+			await h.fail();
+			expect(h.fetcher).not.toHaveBeenCalled();
+		},
+	);
+
+	it("cancels and deletes a prior session runtime when session_start replaces it directly", async () => {
+		const h = harness();
+		const firstCtx = h.ctx;
+		const firstSetStatus = h.setStatus;
+		const firstStatuses = h.statuses;
+
+		await h.fail();
+		expect(vi.getTimerCount()).toBe(1);
+		expect(firstStatuses.get("magpie-quota")).toContain("quota awaiting");
+
+		const second = h.replaceSession();
+		h.appendEntry.mockClear();
+		firstSetStatus.mockClear();
+
+		await h.emit("session_start", { reason: "new" }, second.ctx);
+		expect(vi.getTimerCount()).toBe(0);
+		expect(firstStatuses.size).toBe(0);
+		expect(firstSetStatus).toHaveBeenCalledWith("magpie-quota", undefined);
+		// Must not write the old session's state into the replacement session.
+		expect(h.appendEntry).not.toHaveBeenCalled();
+		expect(second.session.getEntries().some(entry => entry.type === "custom" && entry.customType === "magpie-auto-continue")).toBe(false);
+
+		// Prior session entry is gone from runtimes; advancing timers must not fire into the new session.
+		firstSetStatus.mockClear();
+		await h.emit("input", { text: "stale", source: "interactive" }, firstCtx);
+		await h.emit("session_shutdown", { reason: "new" }, firstCtx);
+		expect(firstSetStatus).not.toHaveBeenCalled();
+		expect(h.appendEntry).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(RETRY - NOW + 60_000);
+		expect(h.sendMessage).not.toHaveBeenCalled();
+
+		// Replacement session operates normally.
+		vi.setSystemTime(NOW);
+		await h.fail();
+		expect(second.statuses.get("magpie-quota")).toContain("quota awaiting");
+
+		// Replacing a session that has an in-flight lookup (even with an ineligible session) aborts and drops it.
+		let lookupSignal: AbortSignal | undefined;
+		let release!: (value: Response) => void;
+		h.fetcher.mockImplementationOnce((_url, init) => {
+			lookupSignal = init?.signal ?? undefined;
+			return new Promise(resolve => { release = resolve; });
+		});
+		await h.start();
+		const pending = h.finishMessage();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(lookupSignal?.aborted).toBe(false);
+
+		const third = h.replaceSession("print");
+		second.setStatus.mockClear();
+		h.appendEntry.mockClear();
+		await h.emit("session_start", { reason: "resume" }, third.ctx);
+		expect(lookupSignal?.aborted).toBe(true);
+		expect(second.statuses.size).toBe(0);
+		expect(h.appendEntry).not.toHaveBeenCalled();
+
+		second.setStatus.mockClear();
+		release(Response.json({ object: "list", data: [] }));
+		await pending;
+		await h.emit("input", { text: "stale second", source: "interactive" }, second.ctx);
+		expect(second.setStatus).not.toHaveBeenCalled();
 	});
 });

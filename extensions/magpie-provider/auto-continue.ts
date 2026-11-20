@@ -234,7 +234,21 @@ export function registerMagpieAutoContinue(pi: ExtensionAPI): void {
 		}
 	}
 
-	pi.on("session_start", (_event, ctx) => { ensure(ctx); });
+	function close(id: string, r: Runtime, save: boolean): void {
+		r.closed = true;
+		runtimes.delete(id);
+		clear(r, save);
+	}
+
+	pi.on("session_start", (_event, ctx) => {
+		const id = ctx.sessionManager.getSessionId();
+		const canTrack = eligible(ctx);
+		for (const [otherId, prior] of [...runtimes]) {
+			if (otherId === id && canTrack) continue;
+			close(otherId, prior, false);
+		}
+		ensure(ctx);
+	});
 	pi.on("before_agent_start", (_event, ctx) => {
 		const r = ensure(ctx);
 		if (r) { clear(r); r.last = undefined; }
@@ -274,13 +288,19 @@ export function registerMagpieAutoContinue(pi: ExtensionAPI): void {
 		const r = get(ctx);
 		if (r) { r.uiDepth = Math.max(0, r.uiDepth - 1); arm(r); }
 	});
-	const leave = (_event: unknown, ctx: ExtensionContext) => { const r = get(ctx); if (r) { clear(r); r.closed = true; } };
+	const leave = (_event: unknown, ctx: ExtensionContext) => {
+		const id = ctx.sessionManager.getSessionId();
+		const r = get(ctx);
+		if (r) close(id, r, true);
+	};
 	pi.on("session_before_switch", leave);
 	pi.on("session_before_fork", leave);
 	pi.on("session_shutdown", (_event, ctx) => {
+		const id = ctx.sessionManager.getSessionId();
 		const r = get(ctx);
 		if (!r) return;
 		invalidate(r); r.closed = true;
+		runtimes.delete(id);
 		// Keep the failed-call checkpoint for explicit resume after reload/restart.
 		if (r.wait) persist(r);
 		ctx.ui.setStatus(STATUS, undefined);
