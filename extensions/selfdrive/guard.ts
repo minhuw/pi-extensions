@@ -2,7 +2,7 @@
 // run, edit the user's checkout, push or publish, or need privileges, another machine, or system settings. It runs in
 // every session of the process (subagent and Herder children load this extension in-process too). It is a heuristic that
 // prevents accidents, not a sandbox: a determined command can get past it.
-import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,7 +45,7 @@ export function blockReason(toolName: string, input: unknown, cwd: string, sessi
 	if (toolName === "write" || toolName === "edit") {
 		const raw = typeof args.path === "string" ? args.path : typeof args.file_path === "string" ? args.file_path : undefined;
 		const target = raw?.trim() ? resolveToolPath(raw, cwd) : undefined;
-		return target && insideCheckout(target, toplevels) ? reasons.checkout(`${toolName} ${target}`) : undefined;
+		return target && insideCheckout(target, toplevels, commonDirs) ? reasons.checkout(`${toolName} ${target}`) : undefined;
 	}
 	if (toolName === "bash" && typeof args.command === "string" && args.command.trim()) return bashBlockReason(args.command, cwd, toplevels, commonDirs);
 	if (toolName === "process_start" && typeof args.command === "string" && args.command.trim()) {
@@ -114,11 +114,7 @@ const within = (parent: string, child: string): string | undefined => {
 	return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) ? undefined : rel;
 };
 
-/**
- * True when the canonical `path` is in a grant's checkout: inside its top level, but not under its `.git/` (Herder's
- * worktrees live there) or `.pi/workspaces/` (workspaces), and not in another git worktree checked out inside it.
- */
-export function insideCheckout(path: string, toplevels: string[]): boolean {
+function inWorktreeCheckout(path: string, toplevels: string[]): boolean {
 	return toplevels.some((toplevel) => {
 		const rel = within(toplevel, path);
 		if (rel === undefined) return false;
@@ -129,21 +125,71 @@ export function insideCheckout(path: string, toplevels: string[]): boolean {
 	});
 }
 
+/**
+ * True when the canonical `path` is in a grant's checkout or its protected `.git/` internals: inside its top level
+ * (outside `.pi/workspaces/` and linked worktrees) or inside a protected git dir (outside `.git/herder/{worktrees,runs}`
+ * and `.git/worktrees`).
+ */
+export function insideCheckout(path: string, toplevels: string[], commonDirs: string[] = []): boolean {
+	const canonicalToplevels = [...new Set(toplevels.map((dir) => canonical(dir)))];
+	return inWorktreeCheckout(path, canonicalToplevels) || inProtectedGitDir(path, protectedGitDirsOf(canonicalToplevels, commonDirs));
+}
+
+function readGitDirPointer(dotGit: string, baseDir: string): string | undefined {
+	try {
+		if (!statSync(dotGit).isFile()) return undefined;
+		const target = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, "utf8"))?.[1];
+		return target ? canonical(resolve(baseDir, target)) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function readCommonDirPointer(gitDir: string): string | undefined {
+	try {
+		const common = readFileSync(join(gitDir, "commondir"), "utf8").trim();
+		return common ? canonical(resolve(gitDir, common)) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function protectedGitDirsOf(toplevels: string[], commonDirs: string[]): string[] {
 	const dirs = new Set<string>(commonDirs.map((dir) => canonical(dir)));
 	for (const toplevel of toplevels) {
-		const dotGit = join(toplevel, ".git");
+		const canonicalTop = canonical(toplevel);
+		const dotGit = join(canonicalTop, ".git");
 		dirs.add(canonical(dotGit));
-		try {
-			if (lstatSync(dotGit).isFile()) {
-				const target = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, "utf8"))?.[1];
-				if (target) dirs.add(canonical(resolve(toplevel, target)));
-			}
-		} catch {
-			// No `.git` file at toplevel.
+		const target = readGitDirPointer(dotGit, canonicalTop);
+		if (target) {
+			dirs.add(target);
+			const common = readCommonDirPointer(target);
+			if (common) dirs.add(common);
 		}
 	}
 	return [...dirs];
+}
+
+function gitCommonDirOf(dir: string): string | undefined {
+	const start = canonical(dir);
+	const fromWorktreeGitDir = readCommonDirPointer(start);
+	if (fromWorktreeGitDir) return fromWorktreeGitDir;
+	for (let cur = start; ; cur = dirname(cur)) {
+		const dotGit = join(cur, ".git");
+		try {
+			const stat = statSync(dotGit);
+			if (stat.isDirectory()) return canonical(dotGit);
+			if (stat.isFile()) {
+				const gitDir = readGitDirPointer(dotGit, cur);
+				if (!gitDir) return undefined;
+				return readCommonDirPointer(gitDir) ?? gitDir;
+			}
+		} catch {
+			// No `.git` at this level.
+		}
+		const parent = dirname(cur);
+		if (parent === cur) return undefined;
+	}
 }
 
 function inProtectedGitDir(path: string, gitDirs: string[]): boolean {
@@ -262,9 +308,9 @@ const optionValue = (args: string[], names: string[]): string | undefined => {
  */
 export function bashBlockReason(command: string, cwd: string, toplevels: string[], commonDirs: string[] = []): string | undefined {
 	const found: string[] = [];
-	const protectedGitDirs = protectedGitDirsOf(toplevels, commonDirs);
-	const inCheckout = (path: string): boolean => insideCheckout(path, toplevels);
-	const inGitCheckout = (path: string): boolean => inCheckout(path) || inProtectedGitDir(path, protectedGitDirs);
+	const canonicalToplevels = [...new Set(toplevels.map((dir) => canonical(dir)))];
+	const protectedGitDirs = protectedGitDirsOf(canonicalToplevels, commonDirs);
+	const inCheckout = (path: string): boolean => inWorktreeCheckout(path, canonicalToplevels) || inProtectedGitDir(path, protectedGitDirs);
 	const at = (dir: string, word: string): string => canonical(resolve(dir, expandHome(word)));
 	let effectiveCwd = canonical(cwd);
 	let shellReadsStdin = false;
@@ -440,6 +486,33 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 			if (sub === "config") {
 				const key = dangerousGitConfig(rest);
 				if (key) return void found.push(reasons.system(`git config ${key}`));
+				const mutation = gitConfigMutation(rest);
+				if (mutation) {
+					const explicitFile = mutation.file ?? (mutation.scope === undefined ? cmdEnv.get("GIT_CONFIG") : undefined);
+					if (explicitFile !== undefined) {
+						const target = at(gitCwd, explicitFile);
+						if (inCheckout(target)) return void found.push(reasons.checkout(`git config ${target}`));
+					} else if (mutation.scope !== "global" && mutation.scope !== "system") {
+						const targets: string[] = [];
+						const resolvedGitDir = gitDirOpt !== undefined ? at(gitCwd, gitDirOpt) : undefined;
+						if (resolvedGitDir !== undefined) {
+							targets.push(resolvedGitDir);
+							if (mutation.scope !== "worktree") {
+								const common = gitCommonDirOf(resolvedGitDir);
+								if (common) targets.push(common);
+							}
+						} else {
+							targets.push(gitCwd);
+							if (mutation.scope !== "worktree") {
+								const common = gitCommonDirOf(gitCwd);
+								if (common) targets.push(common);
+							}
+						}
+						const hit = targets.find(inCheckout);
+						if (hit) return void found.push(reasons.checkout(`git config in ${hit}`));
+					}
+				}
+				return;
 			}
 			if (sub === "push" || sub === "send-email") return void found.push(reasons.remote(`git ${sub}`));
 			if (sub !== undefined && mutatingGit(sub, rest)) {
@@ -449,7 +522,11 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 				if (resolvedGitDir !== undefined) targets.push(resolvedGitDir);
 				if (resolvedWorkTree !== undefined) targets.push(resolvedWorkTree);
 				if (resolvedGitDir === undefined || resolvedWorkTree === undefined) targets.push(gitCwd);
-				const hit = targets.find(inGitCheckout);
+				if (sub === "remote") {
+					const common = gitCommonDirOf(resolvedGitDir ?? gitCwd);
+					if (common) targets.push(common);
+				}
+				const hit = targets.find(inCheckout);
 				if (hit) found.push(reasons.checkout(`git ${sub} in ${hit}`));
 			}
 			return;
@@ -730,11 +807,58 @@ function dangerousGitConfig(rest: string[]): string | undefined {
 	return undefined;
 }
 
+function gitConfigMutation(rest: string[]): { file?: string; scope?: "global" | "system" | "local" | "worktree" } | undefined {
+	let readOnly = false;
+	let writeFlag = false;
+	let sectionFlag = false;
+	let file: string | undefined;
+	let scope: "global" | "system" | "local" | "worktree" | undefined;
+	const pos: string[] = [];
+	let options = true;
+	for (let i = 0; i < rest.length; i++) {
+		const arg = rest[i]!;
+		if (options && arg === "--") {
+			options = false;
+			continue;
+		}
+		if (options && arg.startsWith("-") && arg !== "-") {
+			if (arg === "-f" || arg === "--file") file = rest[++i];
+			else if (arg.startsWith("--file=")) file = arg.slice("--file=".length);
+			else if (arg.startsWith("-f") && arg.length > 2) file = arg.slice(2);
+			else if (arg === "--global") scope = "global";
+			else if (arg === "--system") scope = "system";
+			else if (arg === "--local") scope = "local";
+			else if (arg === "--worktree") scope = "worktree";
+			else if (arg === "-e" || arg === "--edit") writeFlag = true;
+			else if (GIT_CONFIG_READ_FLAGS.has(arg)) readOnly = true;
+			else if (GIT_CONFIG_WRITE_FLAGS.has(arg)) writeFlag = true;
+			else if (GIT_CONFIG_SECTION_FLAGS.has(arg)) sectionFlag = true;
+			else if (GIT_CONFIG_OPTIONS_WITH_VALUE.has(arg)) i++;
+			else if (/^-[A-Za-z]+$/.test(arg)) {
+				if (arg.includes("e")) writeFlag = true;
+				if (arg.includes("l")) readOnly = true;
+			}
+			continue;
+		}
+		pos.push(arg);
+	}
+	if (writeFlag || sectionFlag) return { file, scope };
+	if (readOnly || pos.length === 0) return undefined;
+	const first = pos[0]!;
+	if (first === "list" || first === "get") return undefined;
+	if (first === "set" || first === "unset" || first === "remove-section" || first === "rename-section" || first === "edit") {
+		return { file, scope };
+	}
+	return pos.length >= 2 ? { file, scope } : undefined;
+}
+
 function mutatingGit(sub: string, rest: string[]): boolean {
 	if (sub === "branch") {
 		return rest.some((arg) => ["--delete", "--move", "--force", "--copy"].includes(arg) || (/^-[A-Za-z]+$/.test(arg) && /[dDmMfcC]/.test(arg)));
 	}
 	if (sub === "worktree") return rest[0] === "remove" || rest[0] === "move";
+	if (sub === "symbolic-ref") return rest.includes("-d") || rest.includes("--delete") || positionals(rest, new Set(["-m"])).length >= 2;
+	if (sub === "remote") return ["add", "rename", "remove", "rm", "set-head", "set-branches", "set-url", "prune"].includes(rest[0] ?? "");
 	if (!MUTATING_GIT.has(sub)) return false;
 	if (sub === "stash") return rest[0] !== "list" && rest[0] !== "show";
 	if (sub === "tag") {
@@ -824,15 +948,55 @@ function fileTargets(verb: string, args: string[]): string[] | undefined {
 		case "rm":
 		case "rmdir":
 		case "unlink":
-		case "mv":
 		case "tee":
 			return positionals(args);
+		case "mv": {
+			const directory = optionValue(args, ["-t", "--target-directory"]);
+			const paths = positionals(args, new Set(["-t", "--target-directory", "-S", "--suffix"]));
+			return directory ? [...paths, directory] : paths;
+		}
 		case "mkdir":
 			return positionals(args, new Set(["-m", "--mode"]));
 		case "touch":
 			return positionals(args, new Set(["-d", "-t", "-r", "--date", "--reference"]));
 		case "truncate":
 			return positionals(args, new Set(["-s", "--size", "-r", "--reference"]));
+		case "chmod": {
+			let hasReference = false;
+			let sawMode = false;
+			let options = true;
+			const targets: string[] = [];
+			for (let i = 0; i < args.length; i++) {
+				const arg = args[i]!;
+				if (options && arg === "--") {
+					options = false;
+					continue;
+				}
+				if (options && arg === "--reference") {
+					hasReference = true;
+					i++;
+					continue;
+				}
+				if (options && arg.startsWith("--reference=")) {
+					hasReference = true;
+					continue;
+				}
+				if (options && arg.startsWith("--")) continue;
+				if (options && arg.startsWith("-") && arg.length > 1) {
+					if (!hasReference && !sawMode && /^-[rwxXstugo]+(?:,[augo]*[+-=][rwxXstugo]*)*$/.test(arg)) {
+						sawMode = true;
+						options = false;
+					}
+					continue;
+				}
+				if (!hasReference && !sawMode) {
+					sawMode = true;
+					continue;
+				}
+				targets.push(arg);
+			}
+			return targets;
+		}
 		case "cp":
 		case "ln":
 		case "install": {

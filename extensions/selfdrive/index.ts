@@ -384,7 +384,7 @@ export default function selfdriveExtension(pi: ExtensionAPI): void {
 				...repo,
 				text: grantText(r.since, r.focus),
 				since: r.since,
-				checkCommand: (command, cwd) => bashBlockReason(command, cwd, [canonical(repo.toplevel)]),
+				checkCommand: (command, cwd) => bashBlockReason(command, cwd, [canonical(repo.toplevel)], [canonical(repo.commonDir)]),
 			});
 		}
 		try { r.awake?.kill(); } catch {}

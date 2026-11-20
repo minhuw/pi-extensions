@@ -12,7 +12,7 @@ import {
 	createAgentSessionFromServices, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { grants, publishGrant, repositoryOf, standingRegistry, withdrawGrant, type StandingApproval } from "../grants.ts";
-import { bashBlockReason, blockReason, guardRuntime, reasons, registerGuard } from "../guard.ts";
+import { bashBlockReason, blockReason, guardRuntime, insideCheckout, reasons, registerGuard } from "../guard.ts";
 import selfdriveExtension, { runtime as selfdriveRuntime } from "../index.ts";
 
 let root: string;
@@ -83,6 +83,15 @@ describe("write and edit", () => {
 		[".pi/agents inside checkout", ".pi/agents/foo.md"],
 		[".pi/pika inside checkout", ".pi/pika/project.json"],
 		["a sibling directory prefixed with workspaces", ".pi/workspaces-other/file.ts"],
+		[".git/config inside checkout", ".git/config"],
+		[".git/hooks/pre-commit inside checkout", ".git/hooks/pre-commit"],
+		[".git/HEAD inside checkout", ".git/HEAD"],
+		[".git/refs/heads/main inside checkout", ".git/refs/heads/main"],
+		[".git/modules/sub/config inside checkout", ".git/modules/sub/config"],
+		[".git/herder/note outside worktrees/runs", ".git/herder/note"],
+		[".git/config via checkout symlink", "ALIAS/.git/config"],
+		[".git/config climbed out of a Herder worktree", ".git/herder/worktrees/w1/../../../config"],
+		[".git directory itself", ".git"],
 	])("blocks %s inside the checkout", (_name, raw) => {
 		const path = raw.replace("REPO", repo).replace("ALIAS", alias).replace("FILEURL", pathToFileURL(join(repo, "src", "a.ts")).href);
 		for (const tool of ["write", "edit"]) {
@@ -95,7 +104,9 @@ describe("write and edit", () => {
 
 	it.each([
 		["the git dir, where Herder's worktrees live", ".git/herder/runs/r1/wt/src/a.ts"],
+		["a Herder run artifact under .git/herder/runs/", ".git/herder/runs/r1/goal.md"],
 		["a Herder worktree under .git/herder/worktrees/", ".git/herder/worktrees/w1/file.ts"],
+		["a linked worktree gitdir under .git/worktrees/", ".git/worktrees/nested-wt/HEAD"],
 		["a workspace under .pi/workspaces/", ".pi/workspaces/side/notes.md"],
 		["a new workspace file under .pi/workspaces/", ".pi/workspaces/ws1/file.ts"],
 		["a linked worktree inside the checkout", "nested-wt/src/a.ts"],
@@ -125,6 +136,70 @@ describe("write and edit", () => {
 		expect(blockReason("write", { path: "  " }, repo, "s", [grant])).toBeUndefined();
 		expect(blockReason("write", { path: "src/a.ts" }, repo, "s", [{ ...grant, toplevel: outside }])).toBeUndefined();
 		expect(blockReason("write", { path: "src/a.ts" }, repo, "s", [])).toBeUndefined();
+	});
+
+	it("blocks write/edit targeting protected .git internals through separate git dirs and worktree gitdir pointers", () => {
+		const sepRepo = join(root, "sep-repo");
+		const sepGitDir = join(root, "sep-gitdir");
+		const sepWorktree = join(root, "sep-worktree");
+		mkdirSync(sepRepo, { recursive: true });
+		git(sepRepo, "init", "-q", "--separate-git-dir", sepGitDir);
+		git(sepRepo, "config", "user.email", "test@example.com");
+		git(sepRepo, "config", "user.name", "Test");
+		writeFileSync(join(sepRepo, "README.md"), "hi\n");
+		git(sepRepo, "add", ".");
+		git(sepRepo, "commit", "-q", "-m", "init");
+		git(sepRepo, "worktree", "add", "-q", "--detach", sepWorktree, "HEAD");
+		mkdirSync(join(sepGitDir, "herder", "worktrees", "w1"), { recursive: true });
+		mkdirSync(join(sepGitDir, "herder", "runs", "r1"), { recursive: true });
+
+		const sepGrant: StandingApproval = {
+			id: "sep-session",
+			...repositoryOf(sepRepo)!,
+			text: "Self-driving mode, granted by the user.",
+			since: new Date().toISOString(),
+		};
+		expect(sepGrant.toplevel).toBe(sepRepo);
+		expect(sepGrant.commonDir).toBe(sepGitDir);
+
+		const protectedTargets = [
+			join(sepGitDir, "config"),
+			join(sepGitDir, "hooks", "pre-commit"),
+			join(sepGitDir, "HEAD"),
+			join(sepRepo, ".git"),
+		];
+		for (const target of protectedTargets) {
+			for (const tool of ["write", "edit"]) {
+				expect(blockReason(tool, { path: target, content: "x" }, outside, "some-session", [sepGrant])).toContain("would change your user's checkout");
+			}
+			// Also resolved through `<toplevel>/.git` or `<worktree>/.git` gitdir + commondir pointers even without commonDirs.
+			expect(insideCheckout(target, [sepRepo])).toBe(true);
+		}
+		for (const target of [join(sepGitDir, "config"), join(sepGitDir, "hooks", "pre-commit"), join(sepGitDir, "HEAD")]) {
+			expect(insideCheckout(target, [sepWorktree])).toBe(true);
+		}
+
+		// A dangling symlink pointing to a protected hook is also blocked.
+		const danglingLink = join(outside, "hook-link");
+		symlinkSync(join(sepGitDir, "hooks", "pre-commit"), danglingLink);
+		try {
+			expect(blockReason("write", { path: danglingLink, content: "#!/bin/sh\n" }, outside, "some-session", [sepGrant])).toContain("would change your user's checkout");
+		} finally {
+			rmSync(danglingLink, { force: true });
+		}
+
+		// Exempt paths under `<commonDir>/herder/{worktrees,runs}` and `<commonDir>/worktrees` remain allowed.
+		const allowedTargets = [
+			join(sepGitDir, "herder", "worktrees", "w1", "file.ts"),
+			join(sepGitDir, "herder", "runs", "r1", "goal.md"),
+			join(sepGitDir, "worktrees", "sep-worktree", "HEAD"),
+			join(sepWorktree, "README.md"),
+		];
+		for (const target of allowedTargets) {
+			for (const tool of ["write", "edit"]) {
+				expect(blockReason(tool, { path: target, content: "x" }, outside, "some-session", [sepGrant])).toBeUndefined();
+			}
+		}
 	});
 
 	it("blocks herder_deliver only in the granting session", () => {
@@ -279,7 +354,15 @@ describe("bash", () => {
 		["cd .pi/workspaces/side && npm install", "repo", "allow"],
 		["echo x > .pi/workspaces/ws1/file.ts", "repo", "allow"],
 		["echo x > .git/herder/worktrees/w1/file.ts", "repo", "allow"],
-		["echo x > .git/herder/note", "repo", "allow"],
+		["echo x > .git/herder/runs/r1/note", "repo", "allow"],
+		["echo x > .git/worktrees/nested-wt/note", "repo", "allow"],
+		["chmod +x .git/herder/worktrees/w1/run.sh", "repo", "allow"],
+		["chmod +x .git/herder/runs/r1/scripts/check.sh", "repo", "allow"],
+		["chmod +x /tmp/run.sh", "repo", "allow"],
+		["git config -f /tmp/cfg user.name Test", "repo", "allow"],
+		["git -C REPO/nested-wt config --worktree user.name Test", "out", "allow"],
+		["git symbolic-ref HEAD", "repo", "allow"],
+		["git remote -v", "repo", "allow"],
 		["echo x > link-out/file.txt", "repo", "allow"],
 		["find . -name '*.ts' -exec grep -l x {} +", "repo", "allow"],
 		["find /tmp -name x -delete", "repo", "allow"],
@@ -340,6 +423,52 @@ describe("bash", () => {
 		["echo '{}' > .pi/settings.json", "repo", "checkout"],
 		["rm -f .pi/agents/foo.md", "repo", "checkout"],
 		["echo x > .pi/pika/project.json", "repo", "checkout"],
+		// Protected .git/ internals (outside .git/herder/{worktrees,runs} and .git/worktrees).
+		["echo x > .git/config", "repo", "checkout"],
+		["echo x >> .git/config", "repo", "checkout"],
+		["printf '#!/bin/sh\\n' > .git/hooks/pre-commit", "repo", "checkout"],
+		["echo 'ref: refs/heads/evil' > .git/HEAD", "repo", "checkout"],
+		["echo x > .git/herder/note", "repo", "checkout"],
+		["echo x > REPO/.git/config", "out", "checkout"],
+		["echo x > ALIAS/.git/hooks/post-checkout", "out", "checkout"],
+		["echo x > .git/herder/worktrees/w1/../../../config", "repo", "checkout"],
+		["cp /tmp/evil .git/hooks/pre-commit", "repo", "checkout"],
+		["cp -t .git/hooks /tmp/evil", "repo", "checkout"],
+		["mv /tmp/evil .git/config", "repo", "checkout"],
+		["mv -t .git/hooks /tmp/evil", "repo", "checkout"],
+		["mv --target-directory=.git/hooks /tmp/evil", "repo", "checkout"],
+		["mv .git/config /tmp/bak", "repo", "checkout"],
+		["rm -f .git/HEAD", "repo", "checkout"],
+		["rm -rf .git/hooks", "repo", "checkout"],
+		["echo x | tee .git/config", "repo", "checkout"],
+		["echo x | tee -a .git/hooks/pre-commit", "repo", "checkout"],
+		["touch .git/hooks/pre-commit", "repo", "checkout"],
+		["truncate -s 0 .git/config", "repo", "checkout"],
+		["chmod +x .git/hooks/pre-commit", "repo", "checkout"],
+		["chmod 755 .git/hooks/pre-commit", "repo", "checkout"],
+		["chmod -R +x .git/hooks", "repo", "checkout"],
+		["chmod -x .git/hooks/pre-commit", "repo", "checkout"],
+		["chmod --reference=/tmp/ref .git/hooks/pre-commit", "repo", "checkout"],
+		["sed -i 's/a/b/' .git/config", "repo", "checkout"],
+		["sed -i '' 's/a/b/' .git/config", "repo", "checkout"],
+		["perl -pi -e 's/a/b/' .git/config", "repo", "checkout"],
+		["ln -sf /tmp/evil .git/hooks/pre-commit", "repo", "checkout"],
+		["install -m 755 /tmp/evil .git/hooks/pre-commit", "repo", "checkout"],
+		["dd if=/tmp/evil of=.git/config", "repo", "checkout"],
+		["find .git/hooks -delete", "repo", "checkout"],
+		["find .git/hooks -exec chmod +x {} \\;", "repo", "checkout"],
+		["patch -d .git -p0 < /tmp/p", "repo", "checkout"],
+		["rsync -a /tmp/evil .git/config", "repo", "checkout"],
+		["git config user.name Evil", "repo", "checkout"],
+		["git -C REPO config user.name Evil", "out", "checkout"],
+		["GIT_DIR=REPO/.git git config user.name Evil", "out", "checkout"],
+		["git config -f REPO/.git/config user.name Evil", "out", "checkout"],
+		["git config set -f REPO/.git/config user.name Evil", "out", "checkout"],
+		["git config --unset user.name", "repo", "checkout"],
+		["git -C REPO/nested-wt config user.name Evil", "out", "checkout"],
+		["git symbolic-ref HEAD refs/heads/evil", "repo", "checkout"],
+		["git remote set-url origin https://evil.example/repo.git", "repo", "checkout"],
+		["git -C REPO/nested-wt remote set-url origin https://evil.example/repo.git", "out", "checkout"],
 		// Package installs in the checkout.
 		["npm install", "repo", "checkout"],
 		["npm ci", "repo", "checkout"],
@@ -419,6 +548,44 @@ describe("bash", () => {
 		}
 	});
 
+	it("blocks mutating bash commands targeting separate git dirs or worktree gitdir pointers while allowing exempt paths", () => {
+		const bashSepRepo = join(root, "bash-sep-repo");
+		const bashSepGit = join(root, "bash-sep-gitdir");
+		const bashSepWt = join(root, "bash-sep-wt");
+		mkdirSync(bashSepRepo, { recursive: true });
+		git(bashSepRepo, "init", "-q", "--separate-git-dir", bashSepGit);
+		git(bashSepRepo, "config", "user.email", "test@example.com");
+		git(bashSepRepo, "config", "user.name", "Test");
+		writeFileSync(join(bashSepRepo, "a.txt"), "1\n");
+		git(bashSepRepo, "add", ".");
+		git(bashSepRepo, "commit", "-q", "-m", "init");
+		git(bashSepRepo, "worktree", "add", "-q", "--detach", bashSepWt, "HEAD");
+		mkdirSync(join(bashSepGit, "herder", "worktrees", "w1"), { recursive: true });
+		mkdirSync(join(bashSepGit, "herder", "runs", "r1"), { recursive: true });
+
+		for (const cmd of [
+			`echo bad > "${join(bashSepGit, "config")}"`,
+			`chmod +x "${join(bashSepGit, "hooks", "pre-commit")}"`,
+			`rm -f "${join(bashSepGit, "HEAD")}"`,
+			`sed -i 's/a/b/' "${join(bashSepGit, "config")}"`,
+			`git config -f "${join(bashSepGit, "config")}" user.name Evil`,
+		]) {
+			// Resolved via commonDirs, via separate-git-dir `.git` pointer, and via worktree `.git` + commondir pointers.
+			expect(bashBlockReason(cmd, outside, [bashSepRepo], [bashSepGit])).toContain("would change your user's checkout");
+			expect(bashBlockReason(cmd, outside, [bashSepRepo])).toContain("would change your user's checkout");
+			expect(bashBlockReason(cmd, outside, [bashSepWt])).toContain("would change your user's checkout");
+		}
+
+		for (const cmd of [
+			`echo ok > "${join(bashSepGit, "herder", "worktrees", "w1", "file.ts")}"`,
+			`echo ok > "${join(bashSepGit, "herder", "runs", "r1", "goal.md")}"`,
+			`echo ok > "${join(bashSepGit, "worktrees", "bash-sep-wt", "HEAD")}"`,
+		]) {
+			expect(bashBlockReason(cmd, outside, [bashSepRepo], [bashSepGit])).toBeUndefined();
+			expect(bashBlockReason(cmd, outside, [bashSepRepo])).toBeUndefined();
+		}
+	});
+
 	it("fails closed on unparseable or malformed shell syntax", () => {
 		for (const bad of ["echo \"unterminated", "if then fi )", "echo $(if then fi)", "bash -c 'echo \"unterminated'"]) {
 			expect(bashBlockReason(bad, outside, [repo])).toBe(reasons.analysis);
@@ -465,11 +632,40 @@ describe("process_start", () => {
 		["ssh host ls", "out"],
 		["echo x > src/a.ts", "repo"],
 		["npm install", "repo"],
+		["echo x > .git/config", "repo"],
+		["chmod +x .git/hooks/pre-commit", "repo"],
+		["cp /tmp/evil .git/hooks/pre-commit", "repo"],
+		["rm -f .git/HEAD", "repo"],
+		["sed -i 's/a/b/' .git/config", "repo"],
+		["git config user.name Evil", "repo"],
 	] as const)("blocks %j in %s with bash's reason", (command, where) => {
 		const cwd = where === "repo" ? repo : outside;
 		const reason = judge(command, cwd);
 		expect(reason).toMatch(/^Blocked by self-driving mode: /);
-		expect(reason).toBe(bashBlockReason(command, cwd, [repo]));
+		expect(reason).toBe(bashBlockReason(command, cwd, [repo], [join(repo, ".git")]));
+	});
+
+	it("blocks protected .git internals resolved through commonDirs and allows exempt git paths", () => {
+		const externalCommonDir = join(root, "proc-common-git");
+		mkdirSync(join(externalCommonDir, "herder", "worktrees", "w1"), { recursive: true });
+		mkdirSync(join(externalCommonDir, "herder", "runs", "r1"), { recursive: true });
+		mkdirSync(join(externalCommonDir, "worktrees", "wt1"), { recursive: true });
+		const externalGrant: StandingApproval = { ...grant, commonDir: externalCommonDir };
+
+		for (const command of [
+			`echo bad > "${join(externalCommonDir, "config")}"`,
+			`chmod +x "${join(externalCommonDir, "hooks", "pre-commit")}"`,
+			`rm -f "${join(externalCommonDir, "HEAD")}"`,
+		]) {
+			expect(blockReason("process_start", { command }, outside, "some-session", [externalGrant])).toContain("would change your user's checkout");
+		}
+		for (const command of [
+			`echo ok > "${join(externalCommonDir, "herder", "worktrees", "w1", "file.ts")}"`,
+			`echo ok > "${join(externalCommonDir, "herder", "runs", "r1", "goal.md")}"`,
+			`echo ok > "${join(externalCommonDir, "worktrees", "wt1", "HEAD")}"`,
+		]) {
+			expect(blockReason("process_start", { command }, outside, "some-session", [externalGrant])).toBeUndefined();
+		}
 	});
 
 	it("judges the command in its cwd, relative to the session's", () => {
@@ -593,10 +789,95 @@ describe("published standing grants", () => {
 			expect(published!.checkCommand!("npm ci && npm test", worktreeCwd)).toBeUndefined();
 
 			for (const cmd of ["git push", "npm publish", "sudo ls", "ssh host ls", "gh pr create", `echo bad > "${join(repo, "src", "a.ts")}"`]) {
-				expect(published!.checkCommand!(cmd, worktreeCwd)).toBe(bashBlockReason(cmd, worktreeCwd, [repo]));
+				expect(published!.checkCommand!(cmd, worktreeCwd)).toBe(bashBlockReason(cmd, worktreeCwd, [repo], [join(repo, ".git")]));
 			}
 		} finally {
 			for (const handler of handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, ctx);
+			selfdriveRuntime.keepAwake = savedKeepAwake;
+		}
+	});
+
+	it("passes commonDir into published checkCommand so separate git dirs are protected", async () => {
+		const savedKeepAwake = selfdriveRuntime.keepAwake;
+		const savedGitDir = process.env.GIT_DIR;
+		const savedGitWorkTree = process.env.GIT_WORK_TREE;
+		selfdriveRuntime.keepAwake = () => ({ kill: () => {} });
+
+		// A bare/external git dir paired via GIT_DIR + GIT_WORK_TREE has no `.git` file inside toplevel,
+		// so checkCommand protects `<commonDir>` internals only when publishGrant passes `[canonical(repo.commonDir)]`.
+		const extWorkTree = join(root, "grant-ext-worktree");
+		const extCommonDir = join(root, "grant-ext-gitdir");
+		mkdirSync(extWorkTree, { recursive: true });
+		mkdirSync(extCommonDir, { recursive: true });
+		git(extCommonDir, "init", "--bare", "-q");
+		mkdirSync(join(extCommonDir, "herder", "worktrees", "w1"), { recursive: true });
+		mkdirSync(join(extCommonDir, "herder", "runs", "r1"), { recursive: true });
+		mkdirSync(join(extCommonDir, "worktrees", "wt1"), { recursive: true });
+
+		const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+		const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+		const pi = {
+			on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
+				handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+			},
+			registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, command),
+			registerTool: () => {},
+			registerMessageRenderer: () => {},
+			appendEntry: () => {},
+			sendMessage: () => {},
+		} as unknown as ExtensionAPI;
+		const sessionId = "selfdrive-grant-common-dir";
+		const ctx = {
+			mode: "rpc",
+			hasUI: true,
+			cwd: extWorkTree,
+			isIdle: () => true,
+			hasPendingMessages: () => false,
+			ui: {
+				confirm: async () => true,
+				notify: () => {},
+				setStatus: () => {},
+			},
+			sessionManager: {
+				getSessionId: () => sessionId,
+				getBranch: () => [],
+				getEntries: () => [],
+			},
+		};
+		try {
+			process.env.GIT_DIR = extCommonDir;
+			process.env.GIT_WORK_TREE = extWorkTree;
+			selfdriveExtension(pi);
+			await commands.get("selfdrive")!.handler("on test commonDir", ctx);
+			const published = grants().find((item) => item.id === sessionId);
+			expect(published).toBeDefined();
+			expect(published!.toplevel).toBe(extWorkTree);
+			expect(published!.commonDir).toBe(extCommonDir);
+
+			// Mutations against protected internals of extCommonDir must be blocked via commonDirs.
+			for (const cmd of [
+				`echo bad > "${join(extCommonDir, "config")}"`,
+				`chmod +x "${join(extCommonDir, "hooks", "pre-commit")}"`,
+				`rm -f "${join(extCommonDir, "HEAD")}"`,
+				`GIT_DIR="${extCommonDir}" git commit -m x`,
+			]) {
+				expect(published!.checkCommand!(cmd, outside)).toContain("would change your user's checkout");
+			}
+
+			// Exempt paths under extCommonDir remain allowed.
+			for (const cmd of [
+				`echo ok > "${join(extCommonDir, "herder", "worktrees", "w1", "file.ts")}"`,
+				`echo ok > "${join(extCommonDir, "herder", "runs", "r1", "goal.md")}"`,
+				`echo ok > "${join(extCommonDir, "worktrees", "wt1", "HEAD")}"`,
+			]) {
+				expect(published!.checkCommand!(cmd, outside)).toBeUndefined();
+			}
+		} finally {
+			for (const handler of handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, ctx);
+			if (savedGitDir === undefined) delete process.env.GIT_DIR;
+			else process.env.GIT_DIR = savedGitDir;
+			if (savedGitWorkTree === undefined) delete process.env.GIT_WORK_TREE;
+			else process.env.GIT_WORK_TREE = savedGitWorkTree;
 			selfdriveRuntime.keepAwake = savedKeepAwake;
 		}
 	});
