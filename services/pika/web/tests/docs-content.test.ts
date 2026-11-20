@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -94,21 +94,48 @@ describe("published documentation content", () => {
 	let data: DocsData;
 	beforeAll(async () => { data = await loadDocsData(); });
 
-	it("includes exactly the 19 extension READMEs and eight other approved sources", () => {
-		const names = ["commit", "recap", "continue-session", "agents-md", "quality", "writer", "impeccable", "subagents", "herder", "orca-bridge", "autoresearch", "benchmark", "goal", "molt", "language", "workspace", "statusline-footer", "pika", "magpie-provider"];
+	it("includes exactly the 31 extension READMEs and eight other approved sources", () => {
+		const names = [
+			"commit", "recap", "continue-session", "agents-md", "quality", "writer",
+			"impeccable", "ui-sdk", "agent-browser", "agent-desktop",
+			"subagents", "council", "delegation", "selfdrive", "herder",
+			"orca-bridge", "pika-node-bridge",
+			"autoresearch", "benchmark",
+			"goal", "molt", "language", "soul", "spokesman", "session-name", "workspace", "processes", "fff", "statusline-footer",
+			"pika", "magpie-provider",
+		];
 		expect(data.pages.map((page) => page.source).sort()).toEqual([
 			"README.md", ...names.map((name) => `extensions/${name}/README.md`),
 			"services/pika/README.md", "docs/installation.md", "docs/configuration.md", "docs/development.md",
 			"docs/guides/performance.md", "docs/guides/delegation.md", "docs/guides/code-review.md",
 		].sort());
 		expect(data.pages.find((page) => page.source === "extensions/goal/README.md")?.slug).toBe("extensions/goal");
-		expect(new Set(data.pages.map((page) => page.slug)).size).toBe(27);
+		expect(new Set(data.pages.map((page) => page.slug)).size).toBe(39);
 		for (const page of data.pages) {
 			expect(page.slug).not.toBe("");
 			expect(page.title).toBeTruthy();
 			expect(page.description).toBeTruthy();
 			expect(page.searchText).toContain(page.title);
 		}
+	});
+
+	it("includes every extensions/*/README.md present in the repository", async () => {
+		const entries = await readdir(resolve(repositoryRoot, "extensions"), { withFileTypes: true });
+		const repoExtensionReadmes: string[] = [];
+		for (const entry of entries) {
+			if (!entry.isDirectory()) continue;
+			const rel = `extensions/${entry.name}/README.md`;
+			try {
+				await access(resolve(repositoryRoot, rel));
+				repoExtensionReadmes.push(rel);
+			} catch {
+				// Ignore directories without a README.md.
+			}
+		}
+		const publishedExtensionSources = DOC_SOURCES
+			.map((source) => source.source)
+			.filter((source) => /^extensions\/[^/]+\/README\.md$/.test(source));
+		expect(publishedExtensionSources.sort()).toEqual(repoExtensionReadmes.sort());
 	});
 
 	it("retains canonical source bytes and derives headings from the same parser as the UI", async () => {
@@ -123,11 +150,18 @@ describe("published documentation content", () => {
 		const manifest = JSON.parse(await readFile(resolve(repositoryRoot, "package.json"), "utf8")) as { pi: { prompts: string[] } };
 		const registeredPrompts = new Map(manifest.pi.prompts.map((path) => [`/${basename(path, ".md")}`, path]));
 		expect(data.commands.map((command) => command.command)).toEqual(expect.arrayContaining([...registeredPrompts.keys()]));
+		expect(new Set(data.commands.map((command) => command.command)).size).toBe(data.commands.length);
 		expect(data.groups.map((group) => group.title)).toEqual(["Getting started", "Reference", "Guides", "pika", "Development"]);
-		expect(data.groups.find((group) => group.title === "Reference")?.items).toHaveLength(19);
+		expect(data.groups.find((group) => group.title === "Reference")?.items).toHaveLength(31);
 		expect(data.groups.find((group) => group.title === "Guides")?.items).toHaveLength(3);
 		expect(data.groups.flatMap((group) => group.items.map((item) => item.slug)).sort()).toEqual(data.pages.map((page) => page.slug).sort());
-		expect(data.commands.map((command) => command.command)).toEqual(expect.arrayContaining(["/commit", "/review", "/herder", "/benchmark", "/autoresearch", "/goal"]));
+		expect(data.commands.map((command) => command.command)).toEqual(expect.arrayContaining([
+			"/commit", "/review", "/herder", "/benchmark", "/autoresearch", "/goal",
+			"/handoff", "/memory", "/fast", "/magpie-auto-continue",
+			"/agent-browser", "/agent-desktop", "/council", "/swarm", "/selfdrive",
+			"/pika-open", "/pika-diff", "/soul", "/spokesman", "/ps",
+			"/fff-health", "/fff-rescan", "/fff-mode",
+		]));
 		for (const command of data.commands) {
 			const [slug, hash] = command.slug.split("#");
 			const page = data.pages.find((page) => page.slug === slug);
