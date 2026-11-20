@@ -153,6 +153,46 @@ function toSpawnResult(record: AgentRecord, baseline?: InvocationUsage): Workflo
 const GATE_SHELL: readonly [string, string] =
   process.platform === "win32" ? ["cmd", "/c"] : ["sh", "-c"];
 
+/**
+ * Selfdrive's process-global standing-approval contract. Declared locally to
+ * preserve cross-extension isolation (never import from `extensions/selfdrive/`).
+ */
+const STANDING_APPROVAL_KEY = Symbol.for("pi-extensions.standing-approval");
+
+interface StandingApprovalGrant {
+  id: string;
+  commonDir: string;
+  toplevel: string;
+  checkCommand?: (command: string, cwd: string) => string | undefined;
+}
+
+interface StandingApprovalRegistry {
+  grants?: Map<string, StandingApprovalGrant>;
+}
+
+/**
+ * Check `command` in `cwd` against every active standing-approval grant that
+ * exposes `checkCommand`. Returns the first non-empty block reason, or
+ * undefined when no grant blocks the command. Fails closed if a guard throws.
+ */
+function checkStandingApproval(command: string, cwd: string): string | undefined {
+  const registry = (globalThis as Record<symbol, unknown>)[STANDING_APPROVAL_KEY] as
+    | StandingApprovalRegistry
+    | undefined;
+  if (!(registry?.grants instanceof Map) || registry.grants.size === 0) return undefined;
+  for (const grant of registry.grants.values()) {
+    if (!grant || typeof grant.checkCommand !== "function") continue;
+    try {
+      const reason = grant.checkCommand(command, cwd);
+      if (typeof reason === "string" && reason.length > 0) return reason;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `Blocked by self-driving mode: command guard failed (${message})`;
+    }
+  }
+  return undefined;
+}
+
 export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
   const { pi, ctx, manager } = deps;
   /** Runtime agent id → the manager record it spawned. Never pruned mid-run. */
@@ -187,6 +227,10 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
    * decided from one behaviour, whichever route the command took.
    */
   async function executeGate(command: string, cwd: string): Promise<WorkflowGateResult> {
+    const blocked = checkStandingApproval(command, cwd);
+    if (blocked !== undefined) {
+      return { ok: false, output: blocked };
+    }
     const result = await pi.exec(GATE_SHELL[0], [GATE_SHELL[1], command], {
       cwd,
       timeout: deps.gateTimeoutMs ?? DEFAULT_GATE_TIMEOUT_MS,
