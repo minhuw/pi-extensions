@@ -12,7 +12,7 @@ function tools(): Map<string, ToolDefinition> {
 }
 
 const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as never;
-const lines = (component: { render(width: number): string[] }) => component.render(200).map((line) => line.trimEnd()).join("\n");
+const lines = (component: { render(width: number): readonly string[] }) => component.render(200).map((line) => line.trimEnd()).join("\n");
 const context = (args: unknown, isError = false) => ({ args, isError, state: {}, invalidate() {}, expanded: false, isPartial: false }) as never;
 
 it("renders compact calls and results", () => {

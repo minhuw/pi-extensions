@@ -32,7 +32,7 @@ function renderers(h: Harness, tool: string) {
 		...keys, args, expanded, isError, toolCallId: "call-1", invalidate() {}, lastComponent: undefined, state: {}, cwd: workspace.cwd,
 		executionStarted: true, argsComplete: true, isPartial: false, showImages: false, durationMs: 1, outputPad: 0,
 	}) as never;
-	const lines = (component: { render(width: number): string[] }) => component.render(200).map((line) => line.trimEnd());
+	const lines = (component: { render(width: number): readonly string[] }) => component.render(200).map((line) => line.trimEnd());
 	return {
 		definition,
 		call: (args: Args, expanded = false) => lines(definition.renderCall!(args as never, theme, context(args, expanded, false))),

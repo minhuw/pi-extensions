@@ -45,7 +45,7 @@ See the root [README](README.md#extensions) for the overview, and read the targe
 
 ## Verification commands
 
-Run from the repository root with Node `>=22.19.0` (SDK baseline Pi 1.5.0; peer compatibility Pi `>=1.3.0`).
+Run from the repository root with Node `>=22.19.0` (SDK baseline Pi 1.6.0; peer compatibility Pi `>=1.3.0`).
 
 | Command | Scope |
 | --- | --- |

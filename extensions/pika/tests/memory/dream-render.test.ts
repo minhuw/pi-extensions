@@ -14,7 +14,7 @@ const SOURCES = [{ sessionId: "s-past-1", seq: 7 }];
 
 const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
 const styledTheme = { fg: (_color: string, text: string) => `\x1b[32m${text}\x1b[0m`, bold: (text: string) => `\x1b[1m${text}\x1b[22m` } as unknown as Theme;
-const lines = (component: { render(width: number): string[] }) => component.render(500).map((line) => line.trimEnd()).join("\n");
+const lines = (component: { render(width: number): readonly string[] }) => component.render(500).map((line) => line.trimEnd()).join("\n");
 
 let workspace: Workspace;
 let pika: FakePika;

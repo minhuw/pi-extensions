@@ -32,7 +32,7 @@ vi.mock("@earendil-works/pi-tui", async (importOriginal) => {
         // and its depth depends on the platform's stack limit, so reproducing it
         // makes the test both slow and liable to stop triggering silently.
         if (markdownThrows) throw new RangeError("Maximum call stack size exceeded");
-        return super.render(width);
+        return [...super.render(width)];
       }
     },
     wrapTextWithAnsi: (...args: [string, number]) => {

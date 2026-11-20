@@ -134,7 +134,7 @@ function createFakeTheme(): Theme {
 }
 
 type DialogScript = (api: {
-	render(width?: number): string[];
+	render(width?: number): readonly string[];
 	plainLines(width?: number): string[];
 	press(key: string): void;
 	typeText(text: string): void;

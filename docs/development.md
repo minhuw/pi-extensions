@@ -1,6 +1,6 @@
 # Development
 
-Use Node.js **22.19.0 or newer**. Development dependencies target the **Pi 1.5.0 SDK**; the extensions retain runtime support for **Pi 1.3.0 or newer**. Run collection commands from the repository root:
+Use Node.js **22.19.0 or newer**. Development dependencies target the **Pi 1.6.0 SDK**; the extensions retain runtime support for **Pi 1.3.0 or newer**. Run collection commands from the repository root:
 
 ```bash
 npm ci

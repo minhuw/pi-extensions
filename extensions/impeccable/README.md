@@ -6,7 +6,7 @@ The [feature and evidence map](FEATURES.md) covers every command, role and nativ
 
 ## Install and start
 
-Use Node >=22.19.0 and Pi >=1.3.0. Development and real-session tests use SDK 1.5.0.
+Use Node >=22.19.0 and Pi >=1.3.0. Development and real-session tests use SDK 1.6.0.
 
 ```bash
 pi install git:github.com/minhuw/pi-extensions
