@@ -8,7 +8,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { fileURLToPath } from "node:url";
 import { structuredPatch } from "diff";
 import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
-import { isContextFile, lintContextFile, newFindings, repositoryContextFiles, type LintFinding } from "./lint.ts";
+import { CONTEXT_FILE_NAMES, lintContextFile, newFindings, repositoryContextFiles, type LintFinding } from "./lint.ts";
 import { promptReviewDialog } from "./review-ui.ts";
 
 export const SESSION_LINK_TYPE = "pi-extensions.session-link";
@@ -81,13 +81,16 @@ export function canonical(path: string, seen = new Set<string>()): string {
 	}
 }
 
+const CONTEXT_FILE_NAMES_LOWER = new Set(CONTEXT_FILE_NAMES.map((name) => name.toLowerCase()));
+
+/** Whether `path` (absolute or relative) names a context file by its base name, case-insensitively. */
+export function isGatedContextFile(path: string): boolean {
+	return CONTEXT_FILE_NAMES_LOWER.has(basename(path).toLowerCase());
+}
+
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 
-/**
- * A `write`/`edit` path resolved the way Pi's file tools resolve it (Unicode spaces become spaces, one leading `@` is
- * dropped, `~` is expanded, a `file://` URL becomes its path), then canonicalized. Undefined when Pi could not resolve it.
- */
-export function resolveToolPath(raw: string, cwd: string): string | undefined {
+function normalizeToolPath(raw: string, cwd: string): string | undefined {
 	let path = raw.replace(UNICODE_SPACES, " ");
 	if (path.startsWith("@")) path = path.slice(1);
 	if (path === "~") path = homedir();
@@ -99,7 +102,16 @@ export function resolveToolPath(raw: string, cwd: string): string | undefined {
 			return undefined;
 		}
 	}
-	return canonical(resolve(canonical(cwd), path));
+	return resolve(canonical(cwd), path);
+}
+
+/**
+ * A `write`/`edit` path resolved the way Pi's file tools resolve it (Unicode spaces become spaces, one leading `@` is
+ * dropped, `~` is expanded, a `file://` URL becomes its path), then canonicalized. Undefined when Pi could not resolve it.
+ */
+export function resolveToolPath(raw: string, cwd: string): string | undefined {
+	const resolved = normalizeToolPath(raw, cwd);
+	return resolved ? canonical(resolved) : undefined;
 }
 
 /** `file` relative to `root` when inside it, else absolute. */
@@ -261,9 +273,10 @@ export async function reviewToolCall(toolName: string, input: unknown, ctx: Exte
 	if (!ctx.hasUI || isChildSession(ctx)) return undefined;
 	const args = (input ?? {}) as Record<string, unknown>;
 	const raw = typeof args.path === "string" ? args.path : undefined;
-	const file = raw?.trim() ? resolveToolPath(raw, ctx.cwd) : undefined;
+	const normalized = raw?.trim() ? normalizeToolPath(raw, ctx.cwd) : undefined;
+	const file = normalized ? canonical(normalized) : undefined;
 	// The written file, or the name the agent wrote through: an AGENTS.md symlink makes its target a context file.
-	if (!file || !(isContextFile(file) || isContextFile(basename(raw!.trim().replace(/^@/, ""))))) return undefined;
+	if (!file || !(isGatedContextFile(file) || isGatedContextFile(normalized!) || isGatedContextFile(raw!.trim().replace(/^@/, "")))) return undefined;
 
 	const root = rootFor(file);
 	const path = displayPath(root, file);

@@ -28,7 +28,7 @@ vi.mock("../lint.ts", async (importOriginal) => {
 
 import agentsMdExtension from "../index.ts";
 import {
-	applyEdits, CHOICES, isChildSession, MAX_DIFF_LINES, reasons, reviewToolCall, STANDING_APPROVAL_KEY, truncateDiff, unifiedDiff, userAway,
+	applyEdits, CHOICES, isChildSession, isGatedContextFile, MAX_DIFF_LINES, reasons, reviewToolCall, STANDING_APPROVAL_KEY, truncateDiff, unifiedDiff, userAway,
 } from "../gate.ts";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -317,6 +317,137 @@ describe("reviewToolCall", () => {
 		await reviewToolCall("write", { path: "AGENTS.md", content }, ctx);
 		expect(shown(ui)).toMatch(/… \d+ more diff lines \(\d+ added, \d+ removed\) not shown/);
 		expect(shown(ui).split("\n").length).toBeLessThan(60);
+	});
+
+	it("matches context filenames case-insensitively", () => {
+		for (const candidate of [
+			"AGENTS.override.md", "agents.override.md", "Agents.Override.MD",
+			"AGENTS.md", "agents.md", "Agents.Md", "AGENTS.MD",
+			"CLAUDE.md", "claude.md", "Claude.MD", "CLAUDE.MD",
+			"sub/Agents.Md", "/repo/sub/claude.MD",
+		]) {
+			expect(isGatedContextFile(candidate), candidate).toBe(true);
+		}
+		for (const candidate of [
+			"README.md", "src/a.ts", "agents.md.bak", "MY-AGENTS.md", "claude.mdx",
+			"agents.override.txt", "agents.md/notes.txt", "AGENTS.md/notes.txt",
+		]) {
+			expect(isGatedContextFile(candidate), candidate).toBe(false);
+		}
+	});
+
+	it.each([
+		"agents.md",
+		"Agents.Md",
+		"Claude.MD",
+		"claude.md",
+		"agents.override.md",
+		"Agents.Override.MD",
+	])("gates mixed-case %s for both write and edit in interactive review and while away", async (name) => {
+		const dir = join("extensions", `case-${name.replaceAll(".", "-")}`);
+		const rel = join(dir, name);
+		mkdirSync(join(repo, dir), { recursive: true });
+
+		// Interactive write creating the mixed-case context file: rejected, then approved.
+		const rejectWrite = context({ answer: CHOICES.reject });
+		expect(await reviewToolCall("write", { path: rel, content: "- Rule 1.\n" }, rejectWrite.ctx)).toEqual({
+			block: true,
+			reason: reasons.rejected(rel),
+		});
+		expect(rejectWrite.ui.select).toHaveBeenCalledTimes(1);
+
+		const applyWrite = context({ answer: CHOICES.apply });
+		expect(await reviewToolCall("write", { path: rel, content: "- Rule 1.\n" }, applyWrite.ctx)).toBeUndefined();
+		expect(applyWrite.ui.select).toHaveBeenCalledTimes(1);
+
+		// Create the mixed-case file on disk and test interactive edit: rejected, then approved.
+		writeFileSync(join(repo, rel), "- Rule 1.\n");
+
+		const rejectEdit = context({ answer: CHOICES.reject });
+		expect(await reviewToolCall("edit", edit("- Rule 1.", "- Rule 2.", rel), rejectEdit.ctx)).toEqual({
+			block: true,
+			reason: reasons.rejected(rel),
+		});
+		expect(rejectEdit.ui.select).toHaveBeenCalledTimes(1);
+
+		const applyEdit = context({ answer: CHOICES.apply });
+		expect(await reviewToolCall("edit", edit("- Rule 1.", "- Rule 2.", rel), applyEdit.ctx)).toBeUndefined();
+		expect(applyEdit.ui.select).toHaveBeenCalledTimes(1);
+
+		// Standing approval / away mode blocks both write and edit without prompting.
+		(globalThis as Record<symbol, unknown>)[STANDING_APPROVAL_KEY] = { grants: new Map([["s", { id: "s" }]]) };
+		const away = context({ answer: CHOICES.apply });
+		expect(await reviewToolCall("write", { path: rel, content: "- Away write.\n" }, away.ctx)).toEqual({
+			block: true,
+			reason: reasons.away(rel),
+		});
+		expect(await reviewToolCall("edit", edit("- Rule 1.", "- Away edit.", rel), away.ctx)).toEqual({
+			block: true,
+			reason: reasons.away(rel),
+		});
+		expect(away.ui.select).not.toHaveBeenCalled();
+	});
+
+	it("gates mixed-case symlinks in both interactive review and away mode", async () => {
+		const byName = join(repo, "extensions", "case-link-name");
+		const byTarget = join(repo, "extensions", "case-link-target");
+		mkdirSync(byName, { recursive: true });
+		mkdirSync(byTarget, { recursive: true });
+		symlinkSync(join("..", "..", "docs", "guide.md"), join(byName, "Agents.Md"));
+		writeFileSync(join(byTarget, "agents.md"), "- Target.\n");
+		symlinkSync("agents.md", join(byTarget, "NOTES.md"));
+
+		const interactive = context({ answer: CHOICES.reject });
+		expect(await reviewToolCall("write", { path: "extensions/case-link-name/Agents.Md", content: "x\n" }, interactive.ctx)).toEqual({
+			block: true,
+			reason: reasons.rejected(join("docs", "guide.md")),
+		});
+		expect(await reviewToolCall("edit", edit("- Target.", "- Changed.", "extensions/case-link-target/NOTES.md"), interactive.ctx)).toEqual({
+			block: true,
+			reason: reasons.rejected(join("extensions", "case-link-target", "agents.md")),
+		});
+		expect(interactive.ui.select).toHaveBeenCalledTimes(2);
+
+		(globalThis as Record<symbol, unknown>)[STANDING_APPROVAL_KEY] = { grants: new Map([["s", { id: "s" }]]) };
+		const away = context({ answer: CHOICES.apply });
+		expect(await reviewToolCall("write", { path: "extensions/case-link-name/Agents.Md", content: "x\n" }, away.ctx)).toEqual({
+			block: true,
+			reason: reasons.away(join("docs", "guide.md")),
+		});
+		expect(await reviewToolCall("edit", edit("- Target.", "- Changed.", "extensions/case-link-target/NOTES.md"), away.ctx)).toEqual({
+			block: true,
+			reason: reasons.away(join("extensions", "case-link-target", "agents.md")),
+		});
+		expect(away.ui.select).not.toHaveBeenCalled();
+	});
+
+	it("leaves non-context lookalike files unaffected in interactive review and while away", async () => {
+		const dir = join("extensions", "non-context");
+		mkdirSync(join(repo, dir, "agents.md"), { recursive: true });
+		const paths = [
+			join(dir, "my-agents.md"),
+			join(dir, "agents.md.bak"),
+			join(dir, "claude.mdx"),
+			join(dir, "AGENTS.override.txt"),
+			join(dir, "README.md"),
+			join(dir, "agents.md", "notes.txt"),
+		];
+		for (const rel of paths) writeFileSync(join(repo, rel), "before\n");
+
+		const interactive = context({ answer: CHOICES.reject });
+		for (const rel of paths) {
+			expect(await reviewToolCall("write", { path: rel, content: "after\n" }, interactive.ctx), `write ${rel}`).toBeUndefined();
+			expect(await reviewToolCall("edit", edit("before", "after", rel), interactive.ctx), `edit ${rel}`).toBeUndefined();
+		}
+		expect(interactive.ui.select).not.toHaveBeenCalled();
+
+		(globalThis as Record<symbol, unknown>)[STANDING_APPROVAL_KEY] = { grants: new Map([["s", { id: "s" }]]) };
+		const away = context({ answer: CHOICES.reject });
+		for (const rel of paths) {
+			expect(await reviewToolCall("write", { path: rel, content: "after\n" }, away.ctx), `away write ${rel}`).toBeUndefined();
+			expect(await reviewToolCall("edit", edit("before", "after", rel), away.ctx), `away edit ${rel}`).toBeUndefined();
+		}
+		expect(away.ui.select).not.toHaveBeenCalled();
 	});
 });
 
