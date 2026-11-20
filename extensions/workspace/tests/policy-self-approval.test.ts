@@ -880,6 +880,12 @@ describe("workspace write guard — state-file spellings only Pi's literal readi
 			["agent_browser", { argv: ["trace", "stop", ".pi/workspaces/policy.json"] }, policyFile],
 			["agent_browser", { argv: ["download", "@e1", ".pi/workspaces/.registry.json"] }, registryFile],
 			["agent_browser", { argv: ["screenshot", "policy.json"], cwd: ".pi/workspaces" }, policyFile],
+			["agent_browser", { argv: ["--profile", ".pi/workspaces/policy.json", "open", "https://example.com"] }, policyFile],
+			["agent_browser", { argv: ["--download-path=.pi/workspaces/.registry.json", "open", "https://example.com"] }, registryFile],
+			["agent_desktop", { argv: ["screenshot", ".pi/workspaces/policy.json"] }, policyFile],
+			["agent_desktop", { argv: ["screenshot", "policy.json"], cwd: ".pi/workspaces" }, policyFile],
+			["agent_desktop", { argv: ["--screenshot", ".pi/workspaces/policy.json", "snapshot"] }, policyFile],
+			["agent_desktop", { argv: ["--trace=.pi/workspaces/.registry.json", "click", "@s1:e1"] }, registryFile],
 		];
 
 		for (const [toolName, input, file] of blockedCalls) {
@@ -900,6 +906,8 @@ describe("workspace write guard — state-file spellings only Pi's literal readi
 			["process_start", { command: "cat .pi/workspaces/policy.json" }],
 			["agent_browser", { argv: ["state", "load", ".pi/workspaces/policy.json"] }],
 			["agent_browser", { argv: ["screenshot"] }],
+			["agent_desktop", { argv: ["snapshot", "-i"], cwd: ".pi/workspaces" }],
+			["agent_desktop", { argv: ["screenshot"], cwd: ".pi/workspaces" }],
 		];
 
 		for (const [toolName, input] of allowedCalls) {

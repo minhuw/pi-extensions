@@ -35,6 +35,8 @@ import {
 	evaluatePathAccess,
 	extractAgentBrowserExternalTargets,
 	extractAgentBrowserWriteTargets,
+	extractAgentDesktopExternalTargets,
+	extractAgentDesktopWriteTargets,
 	extractBashExternalWriteTargets,
 	extractBashWriteTargets,
 	extractTaggedBashWriteTargets,
@@ -54,6 +56,7 @@ import {
 	releaseWorkspace,
 	setWorkspacePin,
 	syncWorkspaces,
+	WORKSPACE_LIMITS,
 } from "../registry.ts";
 
 const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
@@ -1665,6 +1668,8 @@ describe("AC-10: wrapper option flags, process_start, and agent_browser external
 	it("extracts and guards agent_browser external cwd and file-writing targets while allowing safe calls", async () => {
 		const canonicalOutside = resolveCanonicalPath(outsideDir);
 
+		const canonicalProject = resolveCanonicalPath(projectCwd);
+
 		// Pure helper checks
 		expect(extractAgentBrowserWriteTargets(["screenshot", `${outsideDir}/shot.png`], projectCwd)).toEqual([
 			path.join(canonicalOutside, "shot.png"),
@@ -1674,7 +1679,7 @@ describe("AC-10: wrapper option flags, process_start, and agent_browser external
 				["--session", "s1", "--headed", "--json", "--profile", "p1", "pdf", `${outsideDir}/out.pdf`],
 				projectCwd,
 			),
-		).toEqual([path.join(canonicalOutside, "out.pdf")]);
+		).toEqual([path.join(canonicalProject, "p1"), path.join(canonicalOutside, "out.pdf")]);
 		expect(
 			extractAgentBrowserWriteTargets(["--session=s1", "state", "save", `${outsideDir}/state.json`], projectCwd),
 		).toEqual([path.join(canonicalOutside, "state.json")]);
@@ -1749,5 +1754,329 @@ describe("AC-10: wrapper option flags, process_start, and agent_browser external
 			expect(res, JSON.stringify(input)).toBeUndefined();
 			expect(prompts, JSON.stringify(input)).toEqual([]);
 		}
+	});
+
+	it("extracts and guards agent_browser --profile and --download-path flags (separate and = forms)", async () => {
+		const canonicalProject = resolveCanonicalPath(projectCwd);
+		const canonicalOutside = resolveCanonicalPath(outsideDir);
+
+		// Pure helper checks: before and after subcommand, separate and = forms
+		expect(
+			extractAgentBrowserWriteTargets(["--profile", `${outsideDir}/prof`, "open", "https://example.com"], projectCwd),
+		).toEqual([path.join(canonicalOutside, "prof")]);
+		expect(
+			extractAgentBrowserWriteTargets([`--profile=${outsideDir}/prof`, "open", "https://example.com"], projectCwd),
+		).toEqual([path.join(canonicalOutside, "prof")]);
+		expect(
+			extractAgentBrowserWriteTargets(["open", "https://example.com", "--profile", `${outsideDir}/prof`], projectCwd),
+		).toEqual([path.join(canonicalOutside, "prof")]);
+		expect(
+			extractAgentBrowserWriteTargets(["open", "https://example.com", `--profile=${outsideDir}/prof`], projectCwd),
+		).toEqual([path.join(canonicalOutside, "prof")]);
+		expect(
+			extractAgentBrowserWriteTargets(
+				["--download-path", `${outsideDir}/dl`, "open", "https://example.com"],
+				projectCwd,
+			),
+		).toEqual([path.join(canonicalOutside, "dl")]);
+		expect(
+			extractAgentBrowserWriteTargets(
+				[`--download-path=${outsideDir}/dl`, "open", "https://example.com"],
+				projectCwd,
+			),
+		).toEqual([path.join(canonicalOutside, "dl")]);
+		expect(
+			extractAgentBrowserWriteTargets(
+				["open", "https://example.com", "--download-path", `${outsideDir}/dl`],
+				projectCwd,
+			),
+		).toEqual([path.join(canonicalOutside, "dl")]);
+		expect(
+			extractAgentBrowserWriteTargets(
+				["open", "https://example.com", `--download-path=${outsideDir}/dl`],
+				projectCwd,
+			),
+		).toEqual([path.join(canonicalOutside, "dl")]);
+		// Relative paths resolve against effective cwd
+		expect(
+			extractAgentBrowserWriteTargets(
+				["--profile", "my-profile", "--download-path=my-dl", "open", "https://example.com"],
+				projectCwd,
+			),
+		).toEqual([path.join(canonicalProject, "my-profile"), path.join(canonicalProject, "my-dl")]);
+		expect(
+			extractAgentBrowserExternalTargets(
+				["--profile", "my-profile", "open", "https://example.com"],
+				projectCwd,
+				outsideDir,
+			),
+		).toEqual([canonicalOutside, path.join(canonicalOutside, "my-profile")]);
+		// Value of another global flag or tokens after `--` are not treated as write flags
+		expect(
+			extractAgentBrowserWriteTargets(["--session", "--profile", "open", "https://example.com"], projectCwd),
+		).toEqual([]);
+		expect(
+			extractAgentBrowserWriteTargets(["open", "--", "--download-path", `${outsideDir}/dl`], projectCwd),
+		).toEqual([]);
+		expect(
+			extractAgentBrowserWriteTargets(["--profile=", "--download-path=", "open", "https://example.com"], projectCwd),
+		).toEqual([]);
+
+		// tool_call guard: external --profile and --download-path are blocked / prompted
+		const toolCall = loadToolCallHandler();
+		const externalCases: [input: { argv: string[]; cwd?: string }, expectedPath: string][] = [
+			[{ argv: ["--profile", `${outsideDir}/prof`, "open", "https://example.com"] }, path.join(canonicalOutside, "prof")],
+			[{ argv: [`--profile=${outsideDir}/prof`, "open", "https://example.com"] }, path.join(canonicalOutside, "prof")],
+			[{ argv: ["open", "https://example.com", "--profile", `${outsideDir}/prof`] }, path.join(canonicalOutside, "prof")],
+			[{ argv: ["open", "https://example.com", `--profile=${outsideDir}/prof`] }, path.join(canonicalOutside, "prof")],
+			[
+				{ argv: ["--download-path", `${outsideDir}/dl`, "open", "https://example.com"] },
+				path.join(canonicalOutside, "dl"),
+			],
+			[
+				{ argv: [`--download-path=${outsideDir}/dl`, "open", "https://example.com"] },
+				path.join(canonicalOutside, "dl"),
+			],
+			[
+				{ argv: ["open", "https://example.com", "--download-path", `${outsideDir}/dl`] },
+				path.join(canonicalOutside, "dl"),
+			],
+			[
+				{ argv: ["open", "https://example.com", `--download-path=${outsideDir}/dl`] },
+				path.join(canonicalOutside, "dl"),
+			],
+		];
+
+		for (const [input, expectedPath] of externalCases) {
+			const headlessPrompts: string[] = [];
+			const blocked = await toolCall(
+				{ toolName: "agent_browser", input },
+				makeCtx({ hasUI: false, prompts: headlessPrompts }),
+			);
+			expect(blocked, JSON.stringify(input)).toMatchObject({ block: true });
+			expect(blocked?.reason, JSON.stringify(input)).toContain(expectedPath);
+			expect(headlessPrompts).toEqual([]);
+
+			const uiPrompts: string[] = [];
+			const denied = await toolCall(
+				{ toolName: "agent_browser", input },
+				makeCtx({ hasUI: true, prompts: uiPrompts, choice: "Deny" }),
+			);
+			expect(denied, JSON.stringify(input)).toMatchObject({ block: true });
+			expect(uiPrompts).toEqual([`Allow write outside workspace (${expectedPath})?`]);
+		}
+
+		// Inside workspace or /tmp stays allowed without prompting
+		for (const input of [
+			{ argv: ["--profile", "profiles/p1", "open", "https://example.com"] },
+			{ argv: ["--profile=profiles/p2", "open", "https://example.com"] },
+			{ argv: ["--download-path", "artifacts/dl", "open", "https://example.com"] },
+			{ argv: ["--download-path=artifacts/dl2", "open", "https://example.com"] },
+			{ argv: ["--profile", "/tmp/ab-profile", "open", "https://example.com"] },
+			{ argv: ["--download-path=/tmp/ab-dl", "open", "https://example.com"] },
+		]) {
+			const prompts: string[] = [];
+			const res = await toolCall(
+				{ toolName: "agent_browser", input },
+				makeCtx({ hasUI: true, prompts, choice: "Deny" }),
+			);
+			expect(res, JSON.stringify(input)).toBeUndefined();
+			expect(prompts, JSON.stringify(input)).toEqual([]);
+		}
+
+		// Workspace auto-registration & quota enforcement through --profile / --download-path
+		const browserQuotaCtx = makeCtx({ hasUI: false, prompts: [] });
+		for (let i = 0; i < WORKSPACE_LIMITS.maxHeldPerSession; i++) {
+			const res = await toolCall(
+				{
+					toolName: "agent_browser",
+					input: { argv: ["--profile", `.pi/workspaces/browser-prof-${i}/data`, "open", "https://example.com"] },
+				},
+				browserQuotaCtx,
+			);
+			expect(res).toBeUndefined();
+		}
+		const reg = await readRegistry(projectCwd);
+		expect(reg.some((e) => e.name === "browser-prof-0")).toBe(true);
+
+		const overQuotaBrowser = await toolCall(
+			{
+				toolName: "agent_browser",
+				input: { argv: ["--download-path=.pi/workspaces/browser-over/dl", "open", "https://example.com"] },
+			},
+			browserQuotaCtx,
+		);
+		expect(overQuotaBrowser).toMatchObject({ block: true });
+		expect(overQuotaBrowser?.reason).toContain("browser-over");
+	});
+
+	it("extracts and guards agent_desktop file-writing options while leaving read-only calls unaffected", async () => {
+		const canonicalProject = resolveCanonicalPath(projectCwd);
+		const canonicalOutside = resolveCanonicalPath(outsideDir);
+		const symlinkOut = path.join(projectCwd, "escape-link");
+		await symlink(outsideDir, symlinkOut);
+
+		// Pure helper checks: file-writing options
+		expect(extractAgentDesktopWriteTargets(["screenshot", `${outsideDir}/shot.png`], projectCwd)).toEqual([
+			path.join(canonicalOutside, "shot.png"),
+		]);
+		expect(
+			extractAgentDesktopWriteTargets(["screenshot", "--app", "Finder", "shots/finder.png"], projectCwd),
+		).toEqual([path.join(canonicalProject, "shots", "finder.png")]);
+		expect(
+			extractAgentDesktopWriteTargets(["screenshot", "shots/win.png", "--window-id", "42"], projectCwd),
+		).toEqual([path.join(canonicalProject, "shots", "win.png")]);
+		expect(
+			extractAgentDesktopWriteTargets(["--screenshot", `${outsideDir}/debug.html`, "snapshot"], projectCwd),
+		).toEqual([path.join(canonicalOutside, "debug.html")]);
+		expect(
+			extractAgentDesktopWriteTargets([`--screenshot=${outsideDir}/debug.html`, "click", "@s1:e1"], projectCwd),
+		).toEqual([path.join(canonicalOutside, "debug.html")]);
+		expect(
+			extractAgentDesktopWriteTargets(["click", "@s1:e1", "--screenshot", `${outsideDir}/after.html`], projectCwd),
+		).toEqual([path.join(canonicalOutside, "after.html")]);
+		expect(
+			extractAgentDesktopWriteTargets(["--trace", `${outsideDir}/trace.jsonl`, "snapshot"], projectCwd),
+		).toEqual([path.join(canonicalOutside, "trace.jsonl")]);
+		expect(
+			extractAgentDesktopWriteTargets([`--trace=${outsideDir}/trace.jsonl`, "click", "@s1:e1"], projectCwd),
+		).toEqual([path.join(canonicalOutside, "trace.jsonl")]);
+		expect(
+			extractAgentDesktopWriteTargets(["click", "@s1:e1", "--trace", `${outsideDir}/trace.jsonl`], projectCwd),
+		).toEqual([path.join(canonicalOutside, "trace.jsonl")]);
+		expect(
+			extractAgentDesktopWriteTargets(["click", "@s1:e1", `--trace=${outsideDir}/trace.jsonl`], projectCwd),
+		).toEqual([path.join(canonicalOutside, "trace.jsonl")]);
+		expect(
+			extractAgentDesktopWriteTargets(["trace", "export", "--out", `${outsideDir}/viewer.html`], projectCwd),
+		).toEqual([path.join(canonicalOutside, "viewer.html")]);
+		expect(
+			extractAgentDesktopExternalTargets(["trace", "export"], projectCwd, outsideDir),
+		).toEqual([canonicalOutside]);
+
+		// Relative write targets resolve against cwd (including @-prefixed cwd)
+		expect(
+			extractAgentDesktopExternalTargets(["screenshot", "shot.png"], projectCwd, outsideDir),
+		).toEqual([path.join(canonicalOutside, "shot.png")]);
+		expect(
+			extractAgentDesktopExternalTargets(["screenshot", "shot.png"], projectCwd, `@${outsideDir}`),
+		).toEqual([path.join(canonicalOutside, "shot.png")]);
+		expect(
+			extractAgentDesktopExternalTargets(["--trace", "t.jsonl", "click", "@s1:e1"], projectCwd, outsideDir),
+		).toEqual([path.join(canonicalOutside, "t.jsonl")]);
+		expect(
+			extractAgentDesktopExternalTargets(["--screenshot=dbg.html", "snapshot"], projectCwd, outsideDir),
+		).toEqual([path.join(canonicalOutside, "dbg.html")]);
+
+		// Read-only calls & temp-only screenshot (without positional path) produce no write targets, even with external cwd
+		for (const argv of [
+			["snapshot", "-i", "--app", "Notes"],
+			["list-windows"],
+			["get", "text", "@s1:e1"],
+			["status"],
+			["click", "@s1:e1"],
+			["screenshot"],
+			["screenshot", "--app", "Notes", "--window-id", "42"],
+			["trace", "show"],
+			["trace", "export", "--help"],
+			["--wait-for", "--trace", "click", "@s1:e1"],
+			["type", "@s1:e1", "--", "--trace", `${outsideDir}/not-a-flag.jsonl`],
+		]) {
+			expect(extractAgentDesktopWriteTargets(argv, projectCwd), JSON.stringify(argv)).toEqual([]);
+			expect(extractAgentDesktopExternalTargets(argv, projectCwd, outsideDir), JSON.stringify(argv)).toEqual([]);
+		}
+
+		// tool_call guard: external write targets are blocked / prompted
+		const toolCall = loadToolCallHandler();
+		const externalCases: [input: { argv: string[]; cwd?: string }, expectedPath: string][] = [
+			[{ argv: ["screenshot", `${outsideDir}/shot.png`] }, path.join(canonicalOutside, "shot.png")],
+			[{ argv: ["screenshot", "shot.png"], cwd: outsideDir }, path.join(canonicalOutside, "shot.png")],
+			[{ argv: ["screenshot", "shot.png"], cwd: `@${outsideDir}` }, path.join(canonicalOutside, "shot.png")],
+			[{ argv: ["screenshot", "escape-link/shot.png"] }, path.join(canonicalOutside, "shot.png")],
+			[{ argv: ["screenshot", "shot.png"], cwd: "escape-link" }, path.join(canonicalOutside, "shot.png")],
+			[{ argv: ["--screenshot", `${outsideDir}/dbg.html`, "snapshot"] }, path.join(canonicalOutside, "dbg.html")],
+			[{ argv: [`--screenshot=${outsideDir}/dbg.html`, "click", "@s1:e1"] }, path.join(canonicalOutside, "dbg.html")],
+			[{ argv: ["click", "@s1:e1", "--screenshot", "dbg.html"], cwd: outsideDir }, path.join(canonicalOutside, "dbg.html")],
+			[{ argv: ["--trace", `${outsideDir}/trace.jsonl`, "click", "@s1:e1"] }, path.join(canonicalOutside, "trace.jsonl")],
+			[{ argv: [`--trace=${outsideDir}/trace.jsonl`, "snapshot"] }, path.join(canonicalOutside, "trace.jsonl")],
+			[{ argv: ["snapshot", "--trace=trace.jsonl"], cwd: outsideDir }, path.join(canonicalOutside, "trace.jsonl")],
+			[{ argv: ["trace", "export", "--out", `${outsideDir}/viewer.html`] }, path.join(canonicalOutside, "viewer.html")],
+			[{ argv: ["trace", "export"], cwd: outsideDir }, canonicalOutside],
+		];
+
+		for (const [input, expectedPath] of externalCases) {
+			const headlessPrompts: string[] = [];
+			const blocked = await toolCall(
+				{ toolName: "agent_desktop", input },
+				makeCtx({ hasUI: false, prompts: headlessPrompts }),
+			);
+			expect(blocked, JSON.stringify(input)).toMatchObject({ block: true });
+			expect(blocked?.reason, JSON.stringify(input)).toContain(expectedPath);
+			expect(headlessPrompts).toEqual([]);
+
+			const uiPrompts: string[] = [];
+			const denied = await toolCall(
+				{ toolName: "agent_desktop", input },
+				makeCtx({ hasUI: true, prompts: uiPrompts, choice: "Deny" }),
+			);
+			expect(denied, JSON.stringify(input)).toMatchObject({ block: true });
+			expect(uiPrompts).toEqual([`Allow write outside workspace (${expectedPath})?`]);
+		}
+
+		// Safe file-writing calls inside workspace / /tmp AND read-only calls (even with external cwd) stay allowed without prompting
+		for (const input of [
+			{ argv: ["screenshot", "artifacts/shot.png"] },
+			{ argv: ["screenshot", "/tmp/desktop-shot.png"] },
+			{ argv: ["screenshot", "shot.png"], cwd: "/tmp" },
+			{ argv: ["screenshot", "/tmp/desktop-shot.png"], cwd: outsideDir },
+			{ argv: ["--screenshot", "artifacts/dbg.html", "snapshot"] },
+			{ argv: ["--screenshot=/tmp/dbg.html", "click", "@s1:e1"] },
+			{ argv: ["--trace", "artifacts/trace.jsonl", "click", "@s1:e1"] },
+			{ argv: ["--trace=/tmp/trace.jsonl", "snapshot"] },
+			{ argv: ["screenshot", "artifacts/shot.png"], cwd: "none" },
+			// Read-only calls without write flags (both default cwd and external cwd)
+			{ argv: ["snapshot", "-i", "--app", "Notes"] },
+			{ argv: ["snapshot", "-i"], cwd: outsideDir },
+			{ argv: ["list-windows"], cwd: outsideDir },
+			{ argv: ["get", "text", "@s1:e1"], cwd: outsideDir },
+			{ argv: ["status"], cwd: outsideDir },
+			{ argv: ["click", "@s1:e1"], cwd: outsideDir },
+			{ argv: ["screenshot"], cwd: outsideDir },
+			{ argv: ["screenshot", "--app", "Notes"], cwd: outsideDir },
+			{ argv: ["trace", "show"], cwd: outsideDir },
+		]) {
+			const prompts: string[] = [];
+			const res = await toolCall(
+				{ toolName: "agent_desktop", input },
+				makeCtx({ hasUI: true, prompts, choice: "Deny" }),
+			);
+			expect(res, JSON.stringify(input)).toBeUndefined();
+			expect(prompts, JSON.stringify(input)).toEqual([]);
+		}
+
+		// Workspace auto-registration & per-session quota enforcement for agent_desktop
+		const quotaCtx = makeCtx({ hasUI: false, prompts: [] });
+		for (let i = 0; i < WORKSPACE_LIMITS.maxHeldPerSession; i++) {
+			const res = await toolCall(
+				{
+					toolName: "agent_desktop",
+					input: { argv: ["--trace", `.pi/workspaces/desktop-ws-${i}/trace.jsonl`, "snapshot"] },
+				},
+				quotaCtx,
+			);
+			expect(res).toBeUndefined();
+		}
+		const reg = await readRegistry(projectCwd);
+		expect(reg.some((e) => e.name === "desktop-ws-0")).toBe(true);
+
+		const overQuota = await toolCall(
+			{
+				toolName: "agent_desktop",
+				input: { argv: ["screenshot", ".pi/workspaces/desktop-ws-over/shot.png"] },
+			},
+			quotaCtx,
+		);
+		expect(overQuota).toMatchObject({ block: true });
+		expect(overQuota?.reason).toContain("desktop-ws-over");
 	});
 });

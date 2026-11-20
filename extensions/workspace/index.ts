@@ -10,10 +10,13 @@ import {
 	evaluatePathAccess,
 	extractAgentBrowserExternalTargets,
 	extractAgentBrowserWriteTargets,
+	extractAgentDesktopExternalTargets,
+	extractAgentDesktopWriteTargets,
 	extractBashExternalWriteTargets,
 	extractTaggedBashWriteTargets,
 	extractWorkspaceNameFromPath,
 	findBashNamedStateFile,
+	normalizeAgentDesktopCwd,
 	normalizeFileToolPath,
 	policyFilePath,
 	readProjectPolicy,
@@ -487,6 +490,20 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			localWritePaths = writeTargets;
 			workspaceTouchPaths = writeTargets;
 			targetPaths = extractAgentBrowserExternalTargets(argv, ctx.cwd, rawCwd);
+		} else if (event.toolName === "agent_desktop") {
+			const input = event.input as { argv?: unknown; cwd?: unknown } | undefined;
+			const argv = Array.isArray(input?.argv)
+				? input.argv.filter((arg): arg is string => typeof arg === "string" && arg.trim().length > 0)
+				: [];
+			const rawCwd = typeof input?.cwd === "string" ? input.cwd : undefined;
+			if (argv.length === 0) return undefined;
+			const normalizedCwd = normalizeAgentDesktopCwd(rawCwd);
+			const targetCwd = normalizedCwd ? resolveLiteralPath(normalizedCwd, ctx.cwd) : ctx.cwd;
+			const writeTargets = extractAgentDesktopWriteTargets(argv, targetCwd);
+			if (writeTargets.length === 0) return undefined;
+			localWritePaths = writeTargets;
+			workspaceTouchPaths = writeTargets;
+			targetPaths = extractAgentDesktopExternalTargets(argv, ctx.cwd, rawCwd);
 		} else {
 			return undefined;
 		}
