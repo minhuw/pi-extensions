@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as PiSDK from "@earendil-works/pi-coding-agent";
 import { constants } from "node:fs";
-import { access, lstat, mkdir, open, readFile, readdir, realpath, rename, rmdir, stat, unlink } from "node:fs/promises";
+import { access, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rmdir, stat, unlink } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import os from "node:os";
 import path from "node:path";
@@ -296,11 +296,64 @@ export async function readConfigs(root: string, signal?: AbortSignal): Promise<C
 	}));
 }
 
+export type AuditLogSource = "env" | "local" | "shared";
+export interface HookAuditLog { path: string; source: AuditLogSource }
+
 export async function hookStatus(root: string, signal?: AbortSignal) {
 	const configs = await readConfigs(root, signal);
+	const localHook = object(configs[1]?.value.hook) ? configs[1].value.hook : undefined;
 	const hook = Object.assign({}, ...configs.map((config) => config.value.hook ?? {})) as ObjectValue;
 	const enabled = hook.enabled === true && (hook.consent === undefined || hook.consent === "accepted") && !truthy(process.env.IMPECCABLE_HOOK_DISABLED);
-	return { root, enabled, hook, detectorSources: configs.map((config) => ({ file: config.file, detector: config.value.detector ?? {}, legacyHookIgnores: config.value.hook ?? {} })), envOverrides: { disabled: process.env.IMPECCABLE_HOOK_DISABLED, quiet: process.env.IMPECCABLE_HOOK_QUIET, log: process.env.IMPECCABLE_HOOK_LOG }, delivery: "Actionable Pi boundary events required; verified on SDK 1.4", configPaths: configs.map((config) => config.file), provider: "pi", adapter: "pi-lifecycle", optInRequired: true, upgrades: "Update the vendored distribution through this repository; runtime update/install/link is disabled." };
+	const envLog = process.env.IMPECCABLE_HOOK_LOG;
+	const auditLog: HookAuditLog | undefined = typeof envLog === "string" && envLog
+		? { path: envLog, source: "env" }
+		: typeof hook.auditLog === "string" && hook.auditLog
+			? { path: hook.auditLog, source: localHook && Object.hasOwn(localHook, "auditLog") ? "local" : "shared" }
+			: undefined;
+	return { root, enabled, hook, ...(auditLog ? { auditLog } : {}), detectorSources: configs.map((config) => ({ file: config.file, detector: config.value.detector ?? {}, legacyHookIgnores: config.value.hook ?? {} })), envOverrides: { disabled: process.env.IMPECCABLE_HOOK_DISABLED, quiet: process.env.IMPECCABLE_HOOK_QUIET, log: process.env.IMPECCABLE_HOOK_LOG }, delivery: "Actionable Pi boundary events required; verified on SDK 1.4", configPaths: configs.map((config) => config.file), provider: "pi", adapter: "pi-lifecycle", optInRequired: true, upgrades: "Update the vendored distribution through this repository; runtime update/install/link is disabled." };
+}
+
+/** Resolve a path to its canonical physical target, following existing and dangling symlinks. */
+async function resolvePhysicalTarget(file: string, depth = 0): Promise<string> {
+	if (depth > 40) throw new Error(`Too many symbolic links while resolving ${file}`);
+	const resolved = path.resolve(file);
+	try { return await realpath(resolved); }
+	catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+	const parent = path.dirname(resolved);
+	if (parent === resolved) return resolved;
+	const physicalParent = await resolvePhysicalTarget(parent, depth);
+	const candidate = path.join(physicalParent, path.basename(resolved));
+	try {
+		const info = await lstat(candidate);
+		if (info.isSymbolicLink()) {
+			const linkTarget = await readlink(candidate);
+			return resolvePhysicalTarget(path.resolve(physicalParent, linkTarget), depth + 1);
+		}
+		return candidate;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return candidate;
+		throw error;
+	}
+}
+
+/** Confine repo-tracked .impeccable/config.json hook.auditLog to the canonical project root. */
+export async function resolveAuditLogPath(root: string, auditLog: HookAuditLog): Promise<string> {
+	if (auditLog.source !== "shared") {
+		const expanded = auditLog.path.startsWith("~/") || (process.platform === "win32" && auditLog.path.startsWith("~\\"))
+			? path.join(os.homedir(), auditLog.path.slice(2))
+			: auditLog.path;
+		return path.resolve(root, expanded);
+	}
+	if (auditLog.path.startsWith("~")) {
+		throw new Error(`Refusing repository hook.auditLog ${JSON.stringify(auditLog.path)}: tilde expansion is not allowed in .impeccable/config.json`);
+	}
+	const canonicalRoot = await realpath(root);
+	const destination = await resolvePhysicalTarget(path.resolve(canonicalRoot, auditLog.path));
+	const relative = path.relative(canonicalRoot, destination);
+	if (!relative || outside(relative)) {
+		throw new Error(`Refusing repository hook.auditLog ${JSON.stringify(auditLog.path)}: destination escapes project root ${canonicalRoot}`);
+	}
+	return destination;
 }
 
 /** One queue shared by extension instances in this process, including nested sessions. */

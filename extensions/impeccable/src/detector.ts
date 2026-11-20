@@ -4,7 +4,7 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises
 import os from "node:os";
 import path from "node:path";
 import { runEngine, sha256, truncateText } from "./engine.ts";
-import { hookStatus, object, optionalText, readConfigs, resolveEditPath, resolveProject, serialized, withGitExcludeMutation } from "./project.ts";
+import { hookStatus, object, optionalText, readConfigs, resolveAuditLogPath, resolveEditPath, resolveProject, serialized, withGitExcludeMutation } from "./project.ts";
 
 const MAX_SOURCE_BYTES = 512 * 1024;
 const MAX_SCANS = 24;
@@ -123,9 +123,8 @@ export function registerDetector(pi: ExtensionAPI): () => Promise<void> {
 			const raw = auditSize <= MAX_FEEDBACK_BYTES ? await optionalText(auditFile) : undefined;
 			if (raw && Buffer.byteLength(raw) <= MAX_FEEDBACK_BYTES) {
 				const parsed: unknown = JSON.parse(raw.trim()); if (object(parsed)) audit = parsed;
-				const log = process.env.IMPECCABLE_HOOK_LOG || status.hook.auditLog;
-				if (typeof log === "string" && log) {
-					const destination = path.resolve(root, log.startsWith("~/") ? path.join(os.homedir(), log.slice(2)) : log);
+				if (status.auditLog) {
+					const destination = await resolveAuditLogPath(root, status.auditLog);
 					await mkdir(path.dirname(destination), { recursive: true }); await appendFile(destination, raw);
 				}
 			}
