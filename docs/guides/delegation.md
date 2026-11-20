@@ -14,7 +14,7 @@ Choose delegation by the task’s scope and how long its state needs to last. An
 
 Give each agent a goal, relevant paths, permission to make specific changes, and the evidence it must return. Foreground execution is the default. Custom definitions may override the embedded roles and their models; read-only role instructions are not an operating-system sandbox.
 
-For difficult architectural, design, or tradeoff questions where a single advisor (`expert`) has been retired, convene the three-model [Council](../../extensions/council/README.md) via `/council <topic>` or the `council` tool (`caspar` on `magpie/gemini-4-carbon`, `melchior` on `magpie/gpt-6-astra`, and `balthasar` on `magpie/claude-fable-5-2`). Council runs an independent proposal round in parallel followed by an anonymized, position-counterbalanced cross-examination round before the main session synthesizes the result.
+For difficult architectural, design, or tradeoff questions where a single advisor (`expert`) has been retired, convene the three-model [Council](../../extensions/council/README.md) via `/council <topic>` or the `council` tool (`caspar` on `magpie/gemini-4-carbon`, `melchior` on `magpie/gpt-6.2-astra`, and `balthasar` on `magpie/claude-fable-5-2`). Council runs an independent proposal round in parallel followed by an anonymized, position-counterbalanced cross-examination round before the main session synthesizes the result.
 
 For a small implementation, verify the worker's changes with tests and checks; use `analyst` only when you explicitly want an independent read-only audit or review. Wait for the writer before auditing or testing its result. Keep the main session responsible for resolving findings and checking the final change.
 

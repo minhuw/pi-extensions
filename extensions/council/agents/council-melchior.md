@@ -1,9 +1,9 @@
 ---
 name: council-melchior
 display_name: Council (Melchior)
-description: Read-only council advisor pinned to magpie/gpt-6-astra for multi-model technical deliberation.
+description: Read-only council advisor pinned to magpie/gpt-6.2-astra for multi-model technical deliberation.
 tools: read, bash, grep, find, ls
-model: magpie/gpt-6-astra
+model: magpie/gpt-6.2-astra
 thinking: xhigh
 model_visible: false
 isolation: off

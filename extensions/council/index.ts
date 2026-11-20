@@ -24,9 +24,9 @@ export const COUNCIL_MEMBERS: Record<CouncilMemberId, CouncilMemberSpec> = {
 	melchior: {
 		id: "melchior",
 		agentType: "council-melchior",
-		model: "magpie/gpt-6-astra",
+		model: "magpie/gpt-6.2-astra",
 		thinking: "xhigh",
-		label: "Melchior (magpie/gpt-6-astra)",
+		label: "Melchior (magpie/gpt-6.2-astra)",
 	},
 	balthasar: {
 		id: "balthasar",
@@ -165,13 +165,13 @@ export function rotatePeersForMember<T extends { member: CouncilMemberId }>(
 
 const IDENTITY_LEAK_PATTERNS: readonly RegExp[] = [
 	/\bmagpie\/gemini-4-carbon\b/gi,
-	/\bmagpie\/gpt-6-astra\b/gi,
+	/\bmagpie\/gpt-6\.2-astra\b/gi,
 	/\bmagpie\/claude-fable-5-2\b/gi,
 	/\bcouncil-caspar\b/gi,
 	/\bcouncil-melchior\b/gi,
 	/\bcouncil-balthasar\b/gi,
 	/\bgemini-4-carbon\b/gi,
-	/\bgpt-6-astra\b/gi,
+	/\bgpt-6\.2-astra\b/gi,
 	/\bclaude-fable-5-2\b/gi,
 ];
 
@@ -440,7 +440,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 		label: "Council",
 		defaultActive: false,
 		description:
-			"Convene a 3-model read-only technical council (Caspar on magpie/gemini-4-carbon, Melchior on magpie/gpt-6-astra, Balthasar on magpie/claude-fable-5-2) for a 2-round deliberation on difficult architecture, design, or tradeoff questions. Round 1 gathers independent codebase-grounded proposals in parallel; Round 2 resumes each advisor with anonymized, position-swapped peer proposals (Peer A, Peer B) and a verbosity-normalized rubric before returning the full deliberation for stake-free synthesis.",
+			"Convene a 3-model read-only technical council (Caspar on magpie/gemini-4-carbon, Melchior on magpie/gpt-6.2-astra, Balthasar on magpie/claude-fable-5-2) for a 2-round deliberation on difficult architecture, design, or tradeoff questions. Round 1 gathers independent codebase-grounded proposals in parallel; Round 2 resumes each advisor with anonymized, position-swapped peer proposals (Peer A, Peer B) and a verbosity-normalized rubric before returning the full deliberation for stake-free synthesis.",
 		promptSnippet:
 			"Convene the 3-model read-only technical council (Caspar, Melchior, Balthasar) for 2-round architectural deliberation",
 		promptGuidelines: [

@@ -65,7 +65,7 @@ Select an existing agent type with `subagent_type` (`agentType` in workflows). T
 | `worker` | Bounded implementation and verification | coding tools; must call a tool | inherit parent |
 | `analyst` | Read-only deep analysis and codebase audits (explicit audit/review invocation) | read-only; must call a tool | inherit parent |
 | `council-caspar` | Read-only council advisor (`model_visible: false`, `isolation: off`) | read-only | `magpie/gemini-4-carbon`, thinking `high`, no tier override |
-| `council-melchior` | Read-only council advisor (`model_visible: false`, `isolation: off`) | read-only | `magpie/gpt-6-astra`, thinking `xhigh`, no tier override |
+| `council-melchior` | Read-only council advisor (`model_visible: false`, `isolation: off`) | read-only | `magpie/gpt-6.2-astra`, thinking `xhigh`, no tier override |
 | `council-balthasar` | Read-only council advisor (`model_visible: false`, `isolation: off`) | read-only | `magpie/claude-fable-5-2`, thinking `high`, no tier override |
 
 The three council advisors are loaded from `extensions/council/agents/` and have `model_visible: false`, so they remain hidden from model-facing `Agent`, workflow, and nested delegation surfaces while remaining spawnable over cross-extension RPC. Custom `.md` files with the same name override embedded defaults through normal agent discovery; `disableDefaultAgents: true` hides all built-in defaults while leaving custom agents available.

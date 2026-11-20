@@ -307,7 +307,7 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 describe("council agent definitions in extensions/council/agents/", () => {
 	it.each([
 		["council-caspar", "magpie/gemini-4-carbon", "high"],
-		["council-melchior", "magpie/gpt-6-astra", "xhigh"],
+		["council-melchior", "magpie/gpt-6.2-astra", "xhigh"],
 		["council-balthasar", "magpie/claude-fable-5-2", "high"],
 	] as const)("validates %s frontmatter and read-only deliberation sections", async (name, model, thinking) => {
 		const filePath = path.join(agentsDir, `${name}.md`);
@@ -398,7 +398,7 @@ describe("pure council helpers", () => {
 			peers: [
 				{
 					label: "Peer A",
-					text: "Proposal from council-melchior on magpie/gpt-6-astra: append-only log at `src/journal.ts:12`.",
+					text: "Proposal from council-melchior on magpie/gpt-6.2-astra: append-only log at `src/journal.ts:12`.",
 				},
 				{
 					label: "Peer B",
@@ -621,7 +621,7 @@ describe("council tool execution and RPC deliberation", () => {
 			{
 				member: "melchior",
 				agentType: "council-melchior",
-				model: "magpie/gpt-6-astra",
+				model: "magpie/gpt-6.2-astra",
 				round: 1,
 				error: "Gateway timeout on melchior",
 			},
@@ -729,7 +729,7 @@ describe("/council command and package contracts", () => {
 		expect(notify).toHaveBeenCalledTimes(1);
 		expect(notify.mock.calls[0][0]).toContain("/council <topic or design question>");
 		expect(notify.mock.calls[0][0]).toContain("magpie/gemini-4-carbon");
-		expect(notify.mock.calls[0][0]).toContain("magpie/gpt-6-astra");
+		expect(notify.mock.calls[0][0]).toContain("magpie/gpt-6.2-astra");
 		expect(notify.mock.calls[0][0]).toContain("magpie/claude-fable-5-2");
 		expect(harness.sendUserMessage).not.toHaveBeenCalled();
 		expect(harness.activeTools).toEqual(["bash"]);

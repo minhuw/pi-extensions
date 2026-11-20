@@ -16,7 +16,7 @@ The council's three advisor definitions live in `extensions/council/agents/` and
 | Member ID | Agent definition | Pinned model | Thinking | Tools |
 | --- | --- | --- | --- | --- |
 | `caspar` | `council-caspar` | `magpie/gemini-4-carbon` | `high` | `read, bash, grep, find, ls` (read-only) |
-| `melchior` | `council-melchior` | `magpie/gpt-6-astra` | `xhigh` | `read, bash, grep, find, ls` (read-only) |
+| `melchior` | `council-melchior` | `magpie/gpt-6.2-astra` | `xhigh` | `read, bash, grep, find, ls` (read-only) |
 | `balthasar` | `council-balthasar` | `magpie/claude-fable-5-2` | `high` | `read, bash, grep, find, ls` (read-only) |
 
 Because `model_visible: false` is set on all three definitions, ordinary `Agent` calls, nested subagent tools, `@type` mentions, and workflows cannot spawn them directly or fall back to them. They are spawned exclusively over Subagents' cross-extension RPC (`subagents:rpc:spawn` and `subagents:rpc:send`, protocol >= 3). Raw `model` overrides on the `council` tool are rejected so the panel's model diversity is always preserved.

@@ -167,7 +167,7 @@ describe("agent type registry", () => {
       expect(getAgentConfig("council-melchior")).toMatchObject({
         name: "council-melchior",
         displayName: "Council (Melchior)",
-        model: "magpie/gpt-6-astra",
+        model: "magpie/gpt-6.2-astra",
         thinking: "xhigh",
         modelVisible: false,
         isolation: "off",
