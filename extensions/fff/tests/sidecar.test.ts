@@ -1,8 +1,9 @@
-import { execFileSync } from "node:child_process";
+import { type ChildProcess, execFileSync, fork } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { SidecarFffBackend, type SidecarBackendOptions } from "../client.ts";
 import { fffFileAnnotation } from "../index.ts";
@@ -879,5 +880,313 @@ describe("SidecarFffBackend", () => {
 		await expect(backend.fileSearch(wt2Ensure.root, "alpha.ts")).rejects.toThrow(
 			/FFF root not initialized/,
 		);
+	});
+
+	it("counts evicted auxiliary entries in deadHandleCount and recycles the idle sidecar once PI_FFF_MAX_DEAD_HANDLES is reached", async () => {
+		const baseDir = makeTempDir("aux-eviction-recycle");
+		const workspaceDir = path.join(baseDir, "workspace");
+		fs.mkdirSync(workspaceDir, { recursive: true });
+		fs.writeFileSync(path.join(workspaceDir, "main.ts"), "export const workspaceToken = true;\n");
+
+		const backend = makeBackend({
+			env: {
+				...process.env,
+				PI_FFF_MAX_DEAD_HANDLES: "2",
+			},
+		});
+
+		const workspaceEnsure = await backend.ensureRoot({
+			basePath: workspaceDir,
+			kind: "workspace",
+		});
+		const oldPid = trackPid(backend.getPid());
+
+		// MAX_AUX is 16: fill all 16 unpinned auxiliary slots without triggering any eviction.
+		const auxRoots: string[] = [];
+		for (let i = 0; i < 16; i++) {
+			const dir = path.join(baseDir, `aux-${i}`);
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(
+				path.join(dir, `item-${i}.ts`),
+				`export const token${i} = "AUX_RECYCLE_TOKEN_${i}";\n`,
+			);
+			const res = await backend.ensureRoot({ basePath: dir, kind: "aux", exact: true });
+			expect(res.created).toBe(true);
+			auxRoots.push(res.root);
+		}
+
+		const healthAtCap = await backend.healthCheck(workspaceEnsure.root);
+		expect(healthAtCap.ok).toBe(true);
+		if (healthAtCap.ok) {
+			expect(healthAtCap.value.pid).toBe(oldPid);
+			expect(healthAtCap.value.sharedRoots).toBe(17);
+		}
+		expect(isPidAlive(oldPid)).toBe(true);
+
+		// 17th aux root evicts aux-0: deadHandleCount=1 < 2 -> must NOT recycle yet.
+		const aux16Dir = path.join(baseDir, "aux-16");
+		fs.mkdirSync(aux16Dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(aux16Dir, "item-16.ts"),
+			'export const token16 = "AUX_RECYCLE_TOKEN_16";\n',
+		);
+		const aux16Ensure = await backend.ensureRoot({
+			basePath: aux16Dir,
+			kind: "aux",
+			exact: true,
+		});
+		expect(aux16Ensure.created).toBe(true);
+
+		await sleep(50);
+		const healthAfterFirstEviction = await backend.healthCheck(workspaceEnsure.root);
+		expect(healthAfterFirstEviction.ok).toBe(true);
+		if (healthAfterFirstEviction.ok) {
+			expect(healthAfterFirstEviction.value.pid).toBe(oldPid);
+			expect(healthAfterFirstEviction.value.sharedRoots).toBe(17);
+		}
+		expect(isPidAlive(oldPid)).toBe(true);
+
+		// 18th aux root evicts aux-1: deadHandleCount=2 >= 2 -> idle sidecar recycles after RPC completion.
+		const aux17Dir = path.join(baseDir, "aux-17");
+		fs.mkdirSync(aux17Dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(aux17Dir, "item-17.ts"),
+			'export const token17 = "AUX_RECYCLE_TOKEN_17";\n',
+		);
+		const aux17Ensure = await backend.ensureRoot({
+			basePath: aux17Dir,
+			kind: "aux",
+			exact: true,
+		});
+		expect(aux17Ensure.created).toBe(true);
+
+		expect(await waitForPidExit(oldPid)).toBe(true);
+
+		// Subsequent calls transparently spawn a fresh sidecar and re-ensure requested roots.
+		const postRecycleGrep = await backend.grep(aux17Ensure.root, "AUX_RECYCLE_TOKEN_17", {
+			mode: "plain",
+		});
+		expect(postRecycleGrep.ok).toBe(true);
+		if (postRecycleGrep.ok) {
+			expect(postRecycleGrep.value.items.map((m) => m.relativePath)).toContain("item-17.ts");
+		}
+
+		const newPid = trackPid(backend.getPid());
+		expect(newPid).not.toBe(oldPid);
+		expect(isPidAlive(newPid)).toBe(true);
+
+		const healthPostRecycle = await backend.healthCheck(workspaceEnsure.root);
+		expect(healthPostRecycle.ok).toBe(true);
+		if (healthPostRecycle.ok) {
+			expect(healthPostRecycle.value.pid).toBe(newPid);
+		}
+	});
+
+	it("counts replaced entries in ensureEntry() on config mismatch and recycles once PI_FFF_MAX_DEAD_HANDLES is reached", async () => {
+		const baseDir = makeTempDir("replace-entry-recycle");
+		const repoDir = path.join(baseDir, "repo");
+		fs.mkdirSync(repoDir, { recursive: true });
+		fs.writeFileSync(path.join(repoDir, "entry.ts"), "export const marker = 'REPLACE_TOKEN';\n");
+
+		const backend = makeBackend({
+			env: {
+				...process.env,
+				PI_FFF_MAX_DEAD_HANDLES: "2",
+			},
+		});
+
+		const initial = await backend.ensureRoot({
+			basePath: repoDir,
+			kind: "workspace",
+			followSymlinks: true,
+		});
+		expect(initial.created).toBe(true);
+		const oldPid = trackPid(backend.getPid());
+
+		// Same config reuses the live handle without incrementing deadHandleCount.
+		const reused = await backend.ensureRoot({
+			basePath: repoDir,
+			kind: "workspace",
+			followSymlinks: true,
+		});
+		expect(reused.created).toBe(false);
+		expect(backend.getPid()).toBe(oldPid);
+
+		// First config mismatch replaces the existing entry: deadHandleCount=1 < 2 -> no recycle yet.
+		const firstReplacement = await backend.ensureRoot({
+			basePath: repoDir,
+			kind: "workspace",
+			followSymlinks: false,
+		});
+		expect(firstReplacement.created).toBe(true);
+
+		await sleep(50);
+		const healthAfterFirstReplace = await backend.healthCheck(initial.root);
+		expect(healthAfterFirstReplace.ok).toBe(true);
+		if (healthAfterFirstReplace.ok) {
+			expect(healthAfterFirstReplace.value.pid).toBe(oldPid);
+			expect(healthAfterFirstReplace.value.sharedRoots).toBe(1);
+		}
+		expect(isPidAlive(oldPid)).toBe(true);
+
+		// Second config mismatch replaces the entry again: deadHandleCount=2 >= 2 -> idle sidecar recycles.
+		const secondReplacement = await backend.ensureRoot({
+			basePath: repoDir,
+			kind: "workspace",
+			followSymlinks: true,
+		});
+		expect(secondReplacement.created).toBe(true);
+
+		expect(await waitForPidExit(oldPid)).toBe(true);
+
+		// Subsequent queries transparently respawn a new sidecar and succeed.
+		const search = await backend.fileSearch(initial.root, "entry.ts");
+		expect(search.ok).toBe(true);
+		if (search.ok) {
+			expect(search.value.items.map((i) => i.relativePath)).toContain("entry.ts");
+		}
+
+		const newPid = trackPid(backend.getPid());
+		expect(newPid).not.toBe(oldPid);
+		expect(isPidAlive(newPid)).toBe(true);
+
+		const healthPostRecycle = await backend.healthCheck(initial.root);
+		expect(healthPostRecycle.ok).toBe(true);
+		if (healthPostRecycle.ok) {
+			expect(healthPostRecycle.value.pid).toBe(newPid);
+			expect(healthPostRecycle.value.sharedRoots).toBe(1);
+		}
+	});
+
+	it("counts replaced destroyed handles in ensureEntry() without double-counting and recycles once PI_FFF_MAX_DEAD_HANDLES is reached", async () => {
+		const baseDir = makeTempDir("destroyed-handle-replace");
+		const repoDir = path.join(baseDir, "repo");
+		fs.mkdirSync(repoDir, { recursive: true });
+		fs.writeFileSync(path.join(repoDir, "sample.ts"), "export const ok = true;\n");
+
+		const fakeFffNodePath = path.join(baseDir, "fake-fff-node.mjs");
+		fs.writeFileSync(
+			fakeFffNodePath,
+			[
+				"export class FileFinder {",
+				"\tconstructor() {",
+				"\t\tthis._destroyed = false;",
+				"\t}",
+				"\tstatic create() {",
+				"\t\treturn { ok: true, value: new FileFinder() };",
+				"\t}",
+				"\tget isDestroyed() {",
+				"\t\treturn this._destroyed;",
+				"\t}",
+				"\tasync waitForScan() {",
+				"\t\treturn { ok: true, value: true };",
+				"\t}",
+				"\tscanFiles() {",
+				"\t\tthis._destroyed = true;",
+				"\t\treturn { ok: true };",
+				"\t}",
+				"\thealthCheck() {",
+				"\t\treturn { ok: true, value: { version: 'test', git: { repositoryFound: false }, filePicker: { initialized: true }, frecency: { initialized: false } } };",
+				"\t}",
+				"}",
+			].join("\n"),
+		);
+
+		const hooksPath = path.join(baseDir, "hooks.mjs");
+		fs.writeFileSync(
+			hooksPath,
+			[
+				`const targetUrl = ${JSON.stringify(pathToFileURL(fakeFffNodePath).href)};`,
+				"export async function resolve(specifier, context, nextResolve) {",
+				"\tif (specifier === '@ff-labs/fff-node') {",
+				"\t\treturn { url: targetUrl, shortCircuit: true };",
+				"\t}",
+				"\treturn nextResolve(specifier, context);",
+				"}",
+			].join("\n"),
+		);
+
+		const registerPath = path.join(baseDir, "register.mjs");
+		fs.writeFileSync(
+			registerPath,
+			[
+				'import { register } from "node:module";',
+				`register(${JSON.stringify(pathToFileURL(hooksPath).href)});`,
+			].join("\n"),
+		);
+
+		const sidecarPath = fileURLToPath(new URL("../sidecar.mjs", import.meta.url));
+		const proc: ChildProcess = fork(sidecarPath, [], {
+			execArgv: ["--import", pathToFileURL(registerPath).href],
+			stdio: ["ignore", "ignore", "ignore", "ipc"],
+			env: {
+				...process.env,
+				PI_FFF_MAX_DEAD_HANDLES: "2",
+			},
+		});
+		const pid = trackPid(proc.pid);
+
+		let nextId = 1;
+		const rpc = (method: string, params: Record<string, unknown>) =>
+			new Promise<{ ok: boolean; value?: unknown; error?: string }>((resolve, reject) => {
+				const id = nextId++;
+				const onMsg = (msg: unknown) => {
+					if (!msg || typeof msg !== "object" || (msg as { id?: number }).id !== id) return;
+					proc.off("message", onMsg);
+					proc.off("exit", onExit);
+					resolve(msg as { ok: boolean; value?: unknown; error?: string });
+				};
+				const onExit = () => {
+					proc.off("message", onMsg);
+					reject(new Error("sidecar exited before replying"));
+				};
+				proc.on("message", onMsg);
+				proc.once("exit", onExit);
+				proc.send({ id, method, params });
+			});
+
+		const exitPromise = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+			(resolve) => {
+				proc.once("exit", (code, signal) => resolve({ code, signal }));
+			},
+		);
+
+		try {
+			const ensure1 = await rpc("ensure", { basePath: repoDir, kind: "workspace" });
+			expect(ensure1.ok).toBe(true);
+			const root = (ensure1.value as { root: string; created: boolean }).root;
+			expect((ensure1.value as { created: boolean }).created).toBe(true);
+
+			// Mark finder #1 destroyed, then re-ensure same config -> replaces destroyed entry (deadHandleCount=1 < 2).
+			const destroy1 = await rpc("scanFiles", { root });
+			expect(destroy1.ok).toBe(true);
+
+			const ensure2 = await rpc("ensure", { basePath: repoDir, kind: "workspace" });
+			expect(ensure2.ok).toBe(true);
+			expect((ensure2.value as { created: boolean }).created).toBe(true);
+
+			await sleep(50);
+			const healthAfterFirstReplace = await rpc("healthCheck", { root });
+			expect(healthAfterFirstReplace.ok).toBe(true);
+			expect(isPidAlive(pid)).toBe(true);
+
+			// Mark finder #2 destroyed, then re-ensure -> replaces destroyed entry (deadHandleCount=2 >= 2) -> exits 0!
+			const destroy2 = await rpc("scanFiles", { root });
+			expect(destroy2.ok).toBe(true);
+
+			const ensure3 = await rpc("ensure", { basePath: repoDir, kind: "workspace" });
+			expect(ensure3.ok).toBe(true);
+			expect((ensure3.value as { created: boolean }).created).toBe(true);
+
+			const exitResult = await Promise.race([
+				exitPromise,
+				sleep(2_000).then(() => null),
+			]);
+			expect(exitResult).toEqual({ code: 0, signal: null });
+		} finally {
+			if (isPidAlive(pid)) {
+				proc.kill("SIGKILL");
+			}
+		}
 	});
 });

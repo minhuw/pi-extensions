@@ -108,11 +108,19 @@ function readGitHeadState(root) {
 	}
 }
 
+function retireEntry(entry) {
+	if (!entry || entry.retired) {
+		return;
+	}
+	entry.retired = true;
+	deadHandleCount++;
+}
+
 function sweepMissingRoots() {
 	for (const [root, entry] of entries.entries()) {
 		if (!fs.existsSync(entry.root)) {
 			entries.delete(root);
-			deadHandleCount++;
+			retireEntry(entry);
 		}
 	}
 }
@@ -164,6 +172,7 @@ function evictAuxIfNeeded() {
 			break;
 		}
 		entries.delete(oldest.root);
+		retireEntry(oldest);
 	}
 }
 
@@ -306,7 +315,12 @@ async function ensureEntry(params) {
 		}
 
 		const finder = res.value;
-		await finder.waitForScan(waitTimeoutMs);
+		try {
+			await finder.waitForScan(waitTimeoutMs);
+		} catch (err) {
+			deadHandleCount++;
+			throw err;
+		}
 
 		const entry = {
 			root: target,
@@ -317,6 +331,7 @@ async function ensureEntry(params) {
 			dbPathsKey,
 			headState: readGitHeadState(target),
 			refreshPromise: null,
+			retired: false,
 			options: usedDbPaths
 				? {
 						...baseOptions,
@@ -326,7 +341,11 @@ async function ensureEntry(params) {
 				: baseOptions,
 		};
 
+		const replaced = entries.get(target);
 		entries.set(target, entry);
+		if (replaced && replaced !== entry) {
+			retireEntry(replaced);
+		}
 		evictAuxIfNeeded();
 		return entry;
 	})();
@@ -405,6 +424,27 @@ function sendReply(payload) {
 	}
 }
 
+function maybeScheduleRecycle() {
+	if (
+		!recycleScheduled &&
+		deadHandleCount >= MAX_DEAD_HANDLES &&
+		inFlightRpcCount === 0 &&
+		pending.size === 0
+	) {
+		recycleScheduled = true;
+		setImmediate(() => {
+			recycleScheduled = false;
+			if (
+				deadHandleCount >= MAX_DEAD_HANDLES &&
+				inFlightRpcCount === 0 &&
+				pending.size === 0
+			) {
+				process.exit(0);
+			}
+		});
+	}
+}
+
 process.on("message", (msg) => {
 	if (!msg || typeof msg !== "object" || !("id" in msg)) {
 		return;
@@ -420,20 +460,7 @@ process.on("message", (msg) => {
 			sendReply({ id, ok: false, error: message });
 		} finally {
 			inFlightRpcCount--;
-			if (
-				!recycleScheduled &&
-				deadHandleCount >= MAX_DEAD_HANDLES &&
-				inFlightRpcCount === 0 &&
-				pending.size === 0
-			) {
-				recycleScheduled = true;
-				setImmediate(() => {
-					recycleScheduled = false;
-					if (inFlightRpcCount === 0 && pending.size === 0) {
-						process.exit(0);
-					}
-				});
-			}
+			maybeScheduleRecycle();
 		}
 	})();
 });
