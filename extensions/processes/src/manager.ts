@@ -53,6 +53,7 @@ interface Plan {
 /** State of one spawn; a restart replaces it. */
 interface Run {
 	child: ChildProcess;
+	pid: number;
 	/** Readiness criteria not yet met: "pattern", "port", "url", or "auto-url". */
 	pending: Set<string>;
 	autoProbing: boolean;
@@ -73,6 +74,7 @@ interface ProcessRecord {
 	plan: Plan;
 	log: LogFile;
 	run?: Run;
+	restarting?: Promise<void>;
 	lastByte?: number;
 }
 
@@ -85,6 +87,26 @@ interface Wait {
 }
 
 export function createProcessManager(options: ManagerOptions): ProcessManager {
+	return createManagerCore(options).manager;
+}
+
+/** @internal Exposed for deterministic stale-run regression tests. */
+export function createProcessManagerForTest(options: ManagerOptions): {
+	manager: ProcessManager;
+	relaunchWithoutStop(idOrName: string): Promise<ProcessInfo>;
+} {
+	const core = createManagerCore(options);
+	return {
+		manager: core.manager,
+		async relaunchWithoutStop(idOrName: string): Promise<ProcessInfo> {
+			const record = core.find(idOrName);
+			await core.launch(record);
+			return core.snapshot(record);
+		},
+	};
+}
+
+function createManagerCore(options: ManagerOptions) {
 	if (process.platform === "win32") throw new Error("The process manager supports macOS and Linux only.");
 	const maxLive = options.maxLive ?? DEFAULT_MAX_LIVE;
 	const maxLogBytes = options.maxLogBytes ?? DEFAULT_MAX_LOG_BYTES;
@@ -122,13 +144,14 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 		}
 	};
 	const live = () => [...records.values()].filter((record) => LIVE.has(record.info.status));
-	const current = (record: ProcessRecord, run: Run) => record.run === run && !run.exited;
+	const current = (record: ProcessRecord, run: Run) => record.run === run;
+	const active = (record: ProcessRecord, run: Run) => current(record, run) && !run.exited;
 
 	function find(idOrName: string): ProcessRecord {
 		const byId = records.get(idOrName);
 		if (byId) return byId;
 		const named = [...records.values()].filter((record) => record.info.name === idOrName);
-		const found = named.find((record) => LIVE.has(record.info.status)) ?? named.at(-1);
+		const found = named.find((record) => LIVE.has(record.info.status) || record.restarting !== undefined) ?? named.at(-1);
 		if (!found) throw new Error(`Unknown process "${idOrName}".`);
 		return found;
 	}
@@ -180,7 +203,11 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 		if (plan.port !== undefined) pending.add("port");
 		if (plan.url !== undefined) pending.add("url");
 		if (!plan.disabled && pending.size === 0) pending.add("auto-url");
-		const run: Run = { child, pending, autoProbing: false, stopProbes: [], errorLines: [], suppressed: 0, errorMuted: false, exited: false, finished: Promise.resolve() };
+		const run: Run = { child, pid, pending, autoProbing: false, stopProbes: [], errorLines: [], suppressed: 0, errorMuted: false, exited: false, finished: Promise.resolve() };
+		if (record.run) {
+			stopReadiness(record.run);
+			clearTimeout(record.run.errorTimer);
+		}
 		record.run = run;
 		const { info } = record;
 		info.pid = pid;
@@ -191,7 +218,7 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 
 		const splitters = [new LineSplitter(), new LineSplitter()];
 		const output = (splitter: LineSplitter) => (chunk: Buffer) => {
-			if (record.run !== run) return;
+			if (!current(record, run)) return;
 			record.log.append(chunk);
 			record.lastByte = chunk.at(-1);
 			record.info.logBytes = record.log.bytes;
@@ -211,7 +238,7 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 				run.stopProbes.push(pollUntil(() => httpUp(url), 1000, () => satisfy(record, run, "url")));
 			}
 			run.readyTimer = setTimeout(() => {
-				if (current(record, run) && record.info.status === "starting") emit({ type: "ready_timeout", process: snapshot(record), tail: tail(record) });
+				if (active(record, run) && record.info.status === "starting") emit({ type: "ready_timeout", process: snapshot(record), tail: tail(record) });
 			}, plan.timeoutMs);
 		}
 		run.finished = track(record, run, exited, closed, splitters).catch(() => {});
@@ -222,36 +249,43 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 	async function track(record: ProcessRecord, run: Run, exited: Promise<[number | null, NodeJS.Signals | null]>, closed: Promise<void>, splitters: LineSplitter[]): Promise<void> {
 		const [code, signal] = await exited;
 		run.exited = true;
-		record.info.exitCode = code;
-		record.info.signal = signal;
 		let timer: NodeJS.Timeout | undefined;
 		try {
 			stopReadiness(run);
-			const pgid = record.info.pid!;
+			if (!current(record, run)) return;
+			const pgid = run.pid;
 			// We own the group: nothing the shell left behind may outlive it.
 			const reap = (async () => {
 				await delay(LEFTOVER_PAUSE_MS);
-				if (!run.stopping && groupAlive(pgid)) await terminateGroup(pgid, LEFTOVER_GRACE_MS);
+				if (current(record, run) && !run.stopping && groupAlive(pgid)) await terminateGroup(pgid, LEFTOVER_GRACE_MS);
 			})().catch(() => {});
 			await Promise.race([closed, new Promise<void>((resolve) => (timer = setTimeout(resolve, CLOSE_GRACE_MS)))]);
 			clearTimeout(timer);
 			await reap;
 			run.child.stdout!.destroy();
 			run.child.stderr!.destroy();
+			if (!current(record, run)) return;
 			for (const splitter of splitters) for (const line of splitter.end()) handleLine(record, run, line);
 		} catch {
 			// Isolate unexpected exit-handling errors so status, waits, and stop() settle cleanly.
 		} finally {
 			clearTimeout(timer);
 			clearTimeout(run.errorTimer);
-			try {
-				record.log.close();
-			} catch {
-				// Ignore close failure so exit status and notifications still settle.
+			run.child.stdout!.destroy();
+			run.child.stderr!.destroy();
+			if (current(record, run)) {
+				try {
+					record.log.close();
+				} catch {
+					// Ignore close failure so exit status and notifications still settle.
+				}
 			}
 		}
+		if (!current(record, run)) return;
 		if (run.errorLines.length) emitErrors(record, run);
 		const requested = run.stopping !== undefined;
+		record.info.exitCode = code;
+		record.info.signal = signal;
 		record.info.status = requested ? "stopped" : "exited";
 		record.info.endedAt = Date.now();
 		const lines = tail(record);
@@ -263,10 +297,11 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 	}
 
 	function onLine(record: ProcessRecord, run: Run, line: string): void {
-		if (current(record, run)) handleLine(record, run, line);
+		if (active(record, run)) handleLine(record, run, line);
 	}
 
 	function handleLine(record: ProcessRecord, run: Run, line: string): void {
+		if (!current(record, run)) return;
 		const { info, plan } = record;
 		const fresh = findLocalUrls(line).filter((url) => !info.urls.includes(url));
 		if (fresh.length && info.urls.length < MAX_URLS) {
@@ -300,7 +335,7 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 		run.errorMuted = true;
 		run.errorTimer = setTimeout(() => {
 			run.errorMuted = false;
-			if (!run.errorLines.length || run.exited) return;
+			if (!run.errorLines.length || !active(record, run)) return;
 			emitErrors(record, run);
 			mute(record, run);
 		}, errorCooldownMs);
@@ -313,7 +348,7 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 	}
 
 	function satisfy(record: ProcessRecord, run: Run, kind: string): void {
-		if (!current(record, run) || record.info.status !== "starting" || !run.pending.delete(kind) || run.pending.size) return;
+		if (!active(record, run) || record.info.status !== "starting" || !run.pending.delete(kind) || run.pending.size) return;
 		stopReadiness(run);
 		record.info.status = "ready";
 		record.info.readyAt = Date.now();
@@ -346,16 +381,47 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 		}
 		run.stopping ??= (async () => {
 			stopReadiness(run);
-			record.info.status = "stopping";
-			changed(record);
-			const outcome = await terminateGroup(record.info.pid!, graceMs);
+			if (current(record, run)) {
+				record.info.status = "stopping";
+				changed(record);
+			}
+			const outcome = await terminateGroup(run.pid, graceMs);
 			if (outcome !== "stuck") await run.finished;
 			return { process: snapshot(record), outcome };
 		})();
 		return run.stopping;
 	}
 
-	return {
+	async function restartRecord(record: ProcessRecord): Promise<ProcessInfo> {
+		const previous = record.restarting ?? Promise.resolve();
+		const next = previous.then(async () => {
+			if (records.get(record.info.id) !== record) throw new Error(`Unknown process "${record.info.id}".`);
+			const result = await stop(record, DEFAULT_GRACE_MS);
+			if (result.outcome === "stuck") throw new Error(`Process "${record.info.name}" survived SIGKILL; not restarting.`);
+			const clash = live().find((other) => other !== record && other.info.name === record.info.name);
+			if (clash) throw new Error(`Another live process (${clash.info.id}) is named "${record.info.name}".`);
+			checkCapacity();
+			record.info.restarts++;
+			const separator = `${record.lastByte === undefined || record.lastByte === 10 ? "" : "\n"}--- restart ${record.info.restarts} ---\n`;
+			record.log.append(Buffer.from(separator));
+			record.lastByte = 10;
+			record.info.logBytes = record.log.bytes;
+			await launch(record);
+			return snapshot(record);
+		});
+		const tailPromise = next.then(
+			() => undefined,
+			() => undefined,
+		);
+		record.restarting = tailPromise;
+		try {
+			return await next;
+		} finally {
+			if (record.restarting === tailPromise) record.restarting = undefined;
+		}
+	}
+
+	const manager: ProcessManager = {
 		async start(start) {
 			if (!start.command.trim()) throw new Error("command must not be empty.");
 			if (!path.isAbsolute(start.cwd)) throw new Error(`cwd must be absolute, got "${start.cwd}".`);
@@ -407,19 +473,7 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 		stop: (idOrName, graceMs = DEFAULT_GRACE_MS) => stop(find(idOrName), graceMs),
 
 		async restart(idOrName) {
-			const record = find(idOrName);
-			const result = await stop(record, DEFAULT_GRACE_MS);
-			if (result.outcome === "stuck") throw new Error(`Process "${record.info.name}" survived SIGKILL; not restarting.`);
-			const clash = live().find((other) => other !== record && other.info.name === record.info.name);
-			if (clash) throw new Error(`Another live process (${clash.info.id}) is named "${record.info.name}".`);
-			checkCapacity();
-			record.info.restarts++;
-			const separator = `${record.lastByte === undefined || record.lastByte === 10 ? "" : "\n"}--- restart ${record.info.restarts} ---\n`;
-			record.log.append(Buffer.from(separator));
-			record.lastByte = 10;
-			record.info.logBytes = record.log.bytes;
-			await launch(record);
-			return snapshot(record);
+			return restartRecord(find(idOrName));
 		},
 
 		wait(idOrName, waitOptions) {
@@ -452,7 +506,9 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 
 		discard(idOrName) {
 			const record = find(idOrName);
-			if (LIVE.has(record.info.status)) throw new Error(`Process "${record.info.name}" is still ${record.info.status}; stop it first.`);
+			if (LIVE.has(record.info.status) || record.restarting) {
+				throw new Error(`Process "${record.info.name}" is still ${record.restarting ? "restarting" : record.info.status}; stop it first.`);
+			}
 			record.log.remove();
 			records.delete(record.info.id);
 		},
@@ -467,7 +523,7 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 		clear() {
 			let count = 0;
 			for (const [id, record] of records) {
-				if (LIVE.has(record.info.status)) continue;
+				if (LIVE.has(record.info.status) || record.restarting) continue;
 				record.log.remove();
 				records.delete(id);
 				count++;
@@ -482,7 +538,8 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 
 		killAllSync() {
 			for (const record of live()) {
-				if (record.info.pid !== undefined) signalGroup(record.info.pid, "SIGKILL");
+				const pid = record.run?.pid ?? record.info.pid;
+				if (pid !== undefined) signalGroup(pid, "SIGKILL");
 			}
 		},
 
@@ -490,6 +547,8 @@ export function createProcessManager(options: ManagerOptions): ProcessManager {
 			await Promise.all(live().map((record) => stop(record, DEFAULT_GRACE_MS)));
 		},
 	};
+
+	return { manager, find, launch, snapshot };
 }
 
 function compile(start: StartOptions): Plan {

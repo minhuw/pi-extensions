@@ -3,7 +3,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createProcessManager } from "../../src/manager.ts";
+import { createProcessManager, createProcessManagerForTest } from "../../src/manager.ts";
 import type { ManagerOptions, ProcessEvent, ProcessManager, StartOptions } from "../../src/types.ts";
 
 const NODE = JSON.stringify(process.execPath);
@@ -140,6 +140,272 @@ describe("lifecycle", () => {
 		await next(events, "ready", 5000, (event) => event.process.restarts === 1);
 		expect((await manager.logs("srv")).lines).toEqual(["run", "--- restart 1 ---", "run"]);
 		expect(events.filter((event) => event.type === "exit").map((event) => event.type === "exit" && event.requested)).toEqual([true]);
+	});
+
+	it("serializes concurrent restart() calls on the same record without leaking intermediate processes", async () => {
+		const { manager, start, events, cwd } = setup();
+		const runsFile = path.join(cwd, "runs.log");
+		const script = path.join(cwd, "worker.cjs");
+		fs.writeFileSync(
+			script,
+			`const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+fs.appendFileSync(${JSON.stringify(runsFile)}, process.pid + "," + child.pid + "\\n");
+console.log("ready " + process.pid);
+setInterval(() => {}, 1000);
+`,
+		);
+		cleanups.push(() => {
+			if (!fs.existsSync(runsFile)) return;
+			for (const line of fs.readFileSync(runsFile, "utf8").trim().split("\n").filter(Boolean)) {
+				for (const raw of line.split(",")) {
+					const pid = Number(raw);
+					if (Number.isInteger(pid) && pid > 0) {
+						try {
+							process.kill(pid, "SIGKILL");
+						} catch {
+							// Already exited.
+						}
+					}
+				}
+			}
+		});
+
+		const { process: first } = await start(`exec ${NODE} ${JSON.stringify(script)}`, {
+			name: "srv",
+			ready: { pattern: "^ready \\d+$" },
+		});
+		await next(events, "ready", 5000, (event) => event.process.pid === first.pid);
+
+		const [r1, r2, r3] = await Promise.all([
+			manager.restart(first.id),
+			manager.restart("srv"),
+			manager.restart(first.id),
+		]);
+		await next(events, "ready", 5000, (event) => event.process.restarts === 3 && event.process.pid === r3.pid);
+
+		expect([r1.id, r2.id, r3.id]).toEqual([first.id, first.id, first.id]);
+		expect([r1.restarts, r2.restarts, r3.restarts]).toEqual([1, 2, 3]);
+		expect(new Set([first.pid, r1.pid, r2.pid, r3.pid]).size).toBe(4);
+
+		const recorded = fs
+			.readFileSync(runsFile, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => line.split(",").map(Number) as [number, number]);
+		expect(recorded).toHaveLength(4);
+		expect(recorded.map(([pid]) => pid)).toEqual([first.pid, r1.pid, r2.pid, r3.pid]);
+
+		for (const [parentPid, childPid] of recorded.slice(0, 3)) {
+			expect(await gone(parentPid)).toBe(true);
+			expect(await gone(childPid)).toBe(true);
+		}
+
+		// Wait past LEFTOVER_PAUSE_MS to ensure no stale reap kills the newest run or corrupts status.
+		await sleep(250);
+		expect(pidAlive(r3.pid!)).toBe(true);
+		expect(pidAlive(recorded[3][1])).toBe(true);
+		const current = manager.get(first.id);
+		expect(current).toMatchObject({ id: first.id, name: "srv", pid: r3.pid, status: "ready", restarts: 3 });
+		expect(current.exitCode).toBeUndefined();
+		expect(current.signal).toBeUndefined();
+		expect(current.endedAt).toBeUndefined();
+
+		const exits = events.filter((event): event is Extract<ProcessEvent, { type: "exit" }> => event.type === "exit");
+		expect(exits).toHaveLength(3);
+		expect(exits.every((event) => event.requested)).toBe(true);
+
+		const lines = (await manager.logs("srv")).lines;
+		expect(lines).toEqual([
+			`ready ${first.pid}`,
+			"--- restart 1 ---",
+			`ready ${r1.pid}`,
+			"--- restart 2 ---",
+			`ready ${r2.pid}`,
+			"--- restart 3 ---",
+			`ready ${r3.pid}`,
+		]);
+
+		await manager.shutdown();
+		expect(await gone(r3.pid!)).toBe(true);
+		expect(await gone(recorded[3][1])).toBe(true);
+	});
+
+	it("recovers per-record restart serialization after a failed restart", async () => {
+		const { manager, start } = setup();
+		await expect(manager.restart("missing")).rejects.toThrow(/Unknown process/);
+
+		const { process: first } = await start("sleep 30", { name: "srv", ready: false });
+		await manager.stop(first.id, 300);
+		const { process: blocker } = await start("sleep 30", { name: "srv", ready: false });
+
+		await expect(manager.restart(first.id)).rejects.toThrow(/Another live process/);
+		await manager.stop(blocker.id, 300);
+
+		const restarted = await manager.restart(first.id);
+		expect(restarted).toMatchObject({ id: first.id, name: "srv", status: "running", restarts: 1 });
+		expect(pidAlive(restarted.pid!)).toBe(true);
+	});
+
+	it("ignores a delayed stale run exit after a replacement run is active without corrupting status or killing the replacement", async () => {
+		const cwd = tempDir();
+		const { manager, relaunchWithoutStop } = createProcessManagerForTest({
+			stateDir: path.join(cwd, "state"),
+			shell: { shell: "/bin/sh", args: ["-c"] },
+		});
+		cleanups.push(() => manager.shutdown());
+		const events: ProcessEvent[] = [];
+		manager.subscribe((event) => events.push(event));
+
+		const script = path.join(cwd, "signaled-worker.cjs");
+		fs.writeFileSync(
+			script,
+			`process.on("SIGUSR1", () => {
+	console.log("ERROR stale-boom");
+	process.exit(9);
+});
+process.on("SIGUSR2", () => {
+	console.log("alive " + process.pid);
+});
+console.log("ready " + process.pid);
+setInterval(() => {}, 1000);
+`,
+		);
+
+		const { process: first } = await manager.start({
+			command: `exec ${NODE} ${JSON.stringify(script)}`,
+			cwd,
+			owner: "test",
+			name: "srv",
+			ready: { pattern: "^ready \\d+$" },
+			errorPattern: "^ERROR",
+		});
+		cleanups.push(() => {
+			if (first.pid !== undefined) {
+				try {
+					process.kill(-first.pid, "SIGKILL");
+				} catch {
+					// Already exited.
+				}
+			}
+		});
+		await next(events, "ready", 5000, (event) => event.process.pid === first.pid);
+
+		const second = await relaunchWithoutStop(first.id);
+		expect(second.pid).not.toBe(first.pid);
+		await next(events, "ready", 5000, (event) => event.process.pid === second.pid);
+
+		const waitId = manager.wait(first.id, { until: "exit" });
+		const eventCountBefore = events.length;
+
+		// Trigger the stale first run to exit on its own (unrequested -> reap path would run if unguarded).
+		process.kill(first.pid!, "SIGUSR1");
+		expect(await gone(first.pid!)).toBe(true);
+
+		// Wait past LEFTOVER_PAUSE_MS so any unguarded stale reap/cleanup would have settled.
+		await sleep(300);
+
+		expect(pidAlive(second.pid!)).toBe(true);
+		const active = manager.get(first.id);
+		expect(active).toMatchObject({ id: first.id, pid: second.pid, status: "ready" });
+		expect(active.exitCode).toBeUndefined();
+		expect(active.signal).toBeUndefined();
+		expect(active.endedAt).toBeUndefined();
+
+		const afterEvents = events.slice(eventCountBefore);
+		expect(afterEvents.filter((event) => event.type === "exit")).toEqual([]);
+		expect(afterEvents.filter((event) => event.type === "error_output")).toEqual([]);
+		expect(afterEvents.filter((event) => event.type === "wait_done")).toEqual([]);
+
+		// Verify the shared log file was not closed/broken by the stale run.
+		process.kill(second.pid!, "SIGUSR2");
+		const deadline = Date.now() + 2000;
+		let lines: string[] = [];
+		while (Date.now() < deadline) {
+			lines = (await manager.logs(first.id)).lines;
+			if (lines.includes(`alive ${second.pid}`)) break;
+			await sleep(25);
+		}
+		expect(lines).toContain(`alive ${second.pid}`);
+
+		const stopped = await manager.stop(first.id, 500);
+		expect(stopped.process).toMatchObject({ id: first.id, pid: second.pid, status: "stopped" });
+		expect(await gone(second.pid!)).toBe(true);
+		const waitDone = await next(events, "wait_done", 3000, (event) => event.waitId === waitId);
+		expect(waitDone.outcome).toBe("satisfied");
+		expect(events.filter((event) => event.type === "exit")).toHaveLength(1);
+	});
+
+	it("ignores a stale run superseded mid-track while awaiting pipe close and leftover reap", async () => {
+		const cwd = tempDir();
+		const { manager, relaunchWithoutStop } = createProcessManagerForTest({
+			stateDir: path.join(cwd, "state"),
+			shell: { shell: "/bin/sh", args: ["-c"] },
+		});
+		cleanups.push(() => manager.shutdown());
+		const events: ProcessEvent[] = [];
+		manager.subscribe((event) => events.push(event));
+
+		const childPidFile = path.join(cwd, "holder.pid");
+		const script = path.join(cwd, "midtrack-worker.cjs");
+		fs.writeFileSync(
+			script,
+			`const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+process.on("SIGUSR1", () => {
+	// Spawn a short-lived child inheriting stdout so the parent exits before stdout closes.
+	const holder = spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 400)"], { stdio: ["ignore", 1, 2] });
+	fs.writeFileSync(${JSON.stringify(childPidFile)}, String(holder.pid));
+	process.exit(7);
+});
+console.log("ready " + process.pid);
+setInterval(() => {}, 1000);
+`,
+		);
+		cleanups.push(() => {
+			if (!fs.existsSync(childPidFile)) return;
+			const pid = Number(fs.readFileSync(childPidFile, "utf8").trim());
+			if (Number.isInteger(pid) && pid > 0) {
+				try {
+					process.kill(pid, "SIGKILL");
+				} catch {
+					// Already exited.
+				}
+			}
+		});
+
+		const { process: first } = await manager.start({
+			command: `exec ${NODE} ${JSON.stringify(script)}`,
+			cwd,
+			owner: "test",
+			name: "srv",
+			ready: { pattern: "^ready \\d+$" },
+		});
+		await next(events, "ready", 5000, (event) => event.process.pid === first.pid);
+
+		// First run exits while its child holds stdout open, keeping track() suspended in closed/reap.
+		process.kill(first.pid!, "SIGUSR1");
+		expect(await gone(first.pid!)).toBe(true);
+		const holderPid = Number(fs.readFileSync(childPidFile, "utf8").trim());
+
+		// Supersede the record while run1's track() is still suspended awaiting pipe close + reap.
+		const second = await relaunchWithoutStop(first.id);
+		await next(events, "ready", 5000, (event) => event.process.pid === second.pid);
+
+		// Wait for holder to exit and run1's track() to finish settling.
+		expect(await gone(holderPid)).toBe(true);
+		await sleep(250);
+
+		expect(pidAlive(second.pid!)).toBe(true);
+		const active = manager.get(first.id);
+		expect(active).toMatchObject({ id: first.id, pid: second.pid, status: "ready" });
+		expect(active.exitCode).toBeUndefined();
+		expect(active.endedAt).toBeUndefined();
+		expect(events.filter((event) => event.type === "exit")).toEqual([]);
+
+		await manager.stop(first.id, 500);
+		expect(await gone(second.pid!)).toBe(true);
 	});
 
 	it("clear removes finished records and their logs", async () => {
