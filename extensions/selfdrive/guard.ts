@@ -339,49 +339,23 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 				cmdEnv.set(words[0]!.slice(0, eq), words[0]!.slice(eq + 1));
 				words = words.slice(1);
 			} else if (verb === "env") {
-				let i = 1;
-				let options = true;
-				for (; i < words.length; i++) {
-					const word = words[i]!;
-					if (options && word === "--") {
-						options = false;
-						continue;
-					}
-					if (options && (word === "-i" || word === "--ignore-environment" || word === "-")) {
-						cmdEnv.clear();
-					} else if (options && (word === "-C" || word === "--chdir")) {
-						dir = at(dir, words[++i] ?? ".");
-					} else if (options && word.startsWith("--chdir=")) {
-						dir = at(dir, word.slice("--chdir=".length));
-					} else if (options && (word === "-u" || word === "--unset")) {
-						const name = words[++i];
-						if (name) cmdEnv.delete(name);
-					} else if (options && word.startsWith("--unset=")) {
-						cmdEnv.delete(word.slice("--unset=".length));
-					} else if (options && (word === "-S" || word.startsWith("--split-string="))) {
-						const split = word === "-S" ? (words[++i] ?? "") : word.slice("--split-string=".length);
-						const restAfter = words.slice(i + 1);
-						if (restAfter.length === 0) {
-							if (split) run(split, depth + 1, cmdEnv);
-							return;
-						}
-						for (const token of split.trim().split(/\s+/)) {
-							const eq = token.indexOf("=");
-							if (eq > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(token.slice(0, eq))) {
-								cmdEnv.set(token.slice(0, eq), token.slice(eq + 1));
-							}
-						}
-					} else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
-						const eq = word.indexOf("=");
-						cmdEnv.set(word.slice(0, eq), word.slice(eq + 1));
-					} else if (!options || !word.startsWith("-")) {
-						break;
-					}
-				}
-				words = words.slice(i);
-			} else if (verb === "command" || verb === "builtin" || verb === "exec" || verb === "nohup" || verb === "time") {
+				const unwrapped = unwrapEnv(words, cmdEnv, depth, (target) => {
+					dir = at(dir, target);
+				});
+				if (!unwrapped.ok) return void found.push(unwrapped.reason);
+				words = unwrapped.words;
+				depth = unwrapped.depth;
+			} else if (verb === "exec") {
+				const unwrapped = unwrapExec(words, cmdEnv);
+				if (!unwrapped.ok) return void found.push(unwrapped.reason);
+				words = unwrapped.words;
+			} else if (verb === "command" || verb === "builtin" || verb === "nohup" || verb === "time") {
 				words = words.slice(1);
-				while (words[0]?.startsWith("-")) words = words.slice(1);
+				while (words[0]?.startsWith("-")) {
+					const opt = words[0];
+					words = words.slice(1);
+					if (opt === "--") break;
+				}
 			} else if (verb === "nice" || verb === "timeout" || verb === "xargs" || verb === "stdbuf") {
 				const withValue = verb === "nice" ? ["-n"] : verb === "timeout" ? ["-s", "-k", "--signal", "--kill-after"] : verb === "xargs" ? ["-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"] : ["-i", "-o", "-e"];
 				let i = 1;
@@ -735,33 +709,328 @@ function commandWords(command: Command): string[] {
 	return out;
 }
 
-function shellCommandEnv(node: SyntaxNode, base: Map<string, string>): Map<string, string> | undefined {
-	if (node.type !== "Command" || !isLocalShell(node)) return undefined;
-	const env = new Map(base);
-	for (const [name, value] of prefixEnv(node)) env.set(name, value);
-	const words = commandWords(node);
-	if (words[0] !== undefined && basename(words[0]) === "env") {
-		for (let i = 1; i < words.length; i++) {
-			const word = words[i]!;
-			if (word === "-i" || word === "--ignore-environment" || word === "-") env.clear();
-			else if (word === "-u" || word === "--unset") {
-				const name = words[++i];
-				if (name) env.delete(name);
-			} else if (word.startsWith("--unset=")) env.delete(word.slice("--unset=".length));
-			else if (word === "-C" || word === "--chdir" || word === "-S") i++;
-			else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
-				const eq = word.indexOf("=");
-				env.set(word.slice(0, eq), word.slice(eq + 1));
-			} else if (!word.startsWith("-")) break;
+const ENV_SIMPLE_ESCAPES: Record<string, string> = {
+	"\\": "\\",
+	'"': '"',
+	"'": "'",
+	t: "\t",
+	n: "\n",
+	r: "\r",
+	f: "\f",
+	v: "\v",
+	$: "$",
+	"#": "#",
+	" ": " ",
+	"\t": "\t",
+};
+
+/**
+ * Splits an `env -S` / `--split-string` argument into tokens following GNU/BSD `env -S` quoting, escape, and
+ * `${VARNAME}` expansion rules. Returns undefined on malformed or unterminated syntax so callers fail closed.
+ */
+function splitEnvString(input: string, env: Map<string, string>): string[] | undefined {
+	const tokens: string[] = [];
+	let current = "";
+	let inToken = false;
+	let quote: "'" | '"' | null = null;
+
+	for (let i = 0; i < input.length; i++) {
+		const ch = input[i]!;
+		if (quote === "'") {
+			if (ch === "'") {
+				quote = null;
+			} else if (ch === "\\") {
+				if (i + 1 >= input.length) return undefined;
+				const next = input[i + 1]!;
+				if (next === "'" || next === "\\") {
+					current += next;
+					i++;
+				} else {
+					current += ch;
+				}
+			} else {
+				current += ch;
+			}
+			continue;
+		}
+		if (quote === '"') {
+			if (ch === '"') {
+				quote = null;
+			} else if (ch === "\\") {
+				if (i + 1 >= input.length) return undefined;
+				const next = input[++i]!;
+				if (next === "_") current += " ";
+				else if (Object.hasOwn(ENV_SIMPLE_ESCAPES, next)) current += ENV_SIMPLE_ESCAPES[next]!;
+				else return undefined;
+			} else if (ch === "$") {
+				if (input[i + 1] !== "{") return undefined;
+				const close = input.indexOf("}", i + 2);
+				if (close < 0) return undefined;
+				const name = input.slice(i + 2, close);
+				if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return undefined;
+				current += env.has(name) ? env.get(name)! : `\${${name}}`;
+				i = close;
+			} else {
+				current += ch;
+			}
+			continue;
+		}
+		if (/\s/.test(ch)) {
+			if (inToken) {
+				tokens.push(current);
+				current = "";
+				inToken = false;
+			}
+		} else if (ch === "#" && !inToken) {
+			break;
+		} else if (ch === "'" || ch === '"') {
+			quote = ch;
+			inToken = true;
+		} else if (ch === "\\") {
+			if (i + 1 >= input.length) return undefined;
+			const next = input[++i]!;
+			if (next === "c") break;
+			if (next === "_") {
+				if (inToken) {
+					tokens.push(current);
+					current = "";
+					inToken = false;
+				}
+			} else if (Object.hasOwn(ENV_SIMPLE_ESCAPES, next)) {
+				current += ENV_SIMPLE_ESCAPES[next]!;
+				inToken = true;
+			} else {
+				return undefined;
+			}
+		} else if (ch === "$") {
+			if (input[i + 1] !== "{") return undefined;
+			const close = input.indexOf("}", i + 2);
+			if (close < 0) return undefined;
+			const name = input.slice(i + 2, close);
+			if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return undefined;
+			const value = env.has(name) ? env.get(name)! : `\${${name}}`;
+			if (value.length > 0) {
+				current += value;
+				inToken = true;
+			}
+			i = close;
+		} else {
+			current += ch;
+			inToken = true;
 		}
 	}
-	return env;
+
+	if (quote !== null) return undefined;
+	if (inToken) tokens.push(current);
+	return tokens;
+}
+
+type UnwrapEnvResult = { ok: true; words: string[]; depth: number } | { ok: false; reason: string };
+
+/** Unwraps `env` options, `-S`/`--split-string` expansions (spliced with trailing args), and `NAME=VALUE` assignments. */
+function unwrapEnv(allWords: string[], cmdEnv: Map<string, string>, depth: number, chdir?: (target: string) => void): UnwrapEnvResult {
+	let words = allWords.slice(1);
+	let options = true;
+	let currentDepth = depth;
+	// In GNU/BSD `env`, `-i` clears the utility's environment after option parsing while `-u` removes immediately.
+	const lookupEnv = new Map(cmdEnv);
+
+	for (let i = 0; i < words.length; i++) {
+		const word = words[i]!;
+		if (options) {
+			if (word === "--") {
+				options = false;
+				continue;
+			}
+			if (word === "-" || word === "--ignore-environment") {
+				cmdEnv.clear();
+				continue;
+			}
+			if (word === "--chdir") {
+				if (i + 1 >= words.length) return { ok: false, reason: reasons.analysis };
+				chdir?.(words[++i]!);
+				continue;
+			}
+			if (word.startsWith("--chdir=")) {
+				chdir?.(word.slice("--chdir=".length));
+				continue;
+			}
+			if (word === "--unset") {
+				if (i + 1 >= words.length) return { ok: false, reason: reasons.analysis };
+				const name = words[++i]!;
+				cmdEnv.delete(name);
+				lookupEnv.delete(name);
+				continue;
+			}
+			if (word.startsWith("--unset=")) {
+				const name = word.slice("--unset=".length);
+				cmdEnv.delete(name);
+				lookupEnv.delete(name);
+				continue;
+			}
+			if (word === "--argv0") {
+				if (i + 1 >= words.length) return { ok: false, reason: reasons.analysis };
+				i++;
+				continue;
+			}
+			if (word.startsWith("--argv0=")) {
+				continue;
+			}
+			if (word === "--split-string" || word.startsWith("--split-string=")) {
+				let raw: string;
+				if (word === "--split-string") {
+					if (i + 1 >= words.length) return { ok: false, reason: reasons.analysis };
+					raw = words[++i]!;
+				} else {
+					raw = word.slice("--split-string=".length);
+				}
+				if (currentDepth + 1 > MAX_NESTING_DEPTH) return { ok: false, reason: reasons.nesting };
+				const splitTokens = splitEnvString(raw, lookupEnv);
+				if (splitTokens === undefined) return { ok: false, reason: reasons.analysis };
+				currentDepth++;
+				words = [...splitTokens, ...words.slice(i + 1)];
+				i = -1;
+				continue;
+			}
+			if (
+				word === "--null"
+				|| word === "--debug"
+				|| word === "--list-signal-handling"
+				|| word === "--help"
+				|| word === "--version"
+				|| word === "--block-signal"
+				|| word.startsWith("--block-signal=")
+				|| word === "--default-signal"
+				|| word.startsWith("--default-signal=")
+				|| word === "--ignore-signal"
+				|| word.startsWith("--ignore-signal=")
+			) {
+				continue;
+			}
+			if (word.startsWith("--")) {
+				return { ok: false, reason: reasons.analysis };
+			}
+			if (word.startsWith("-") && word.length > 1) {
+				for (let k = 1; k < word.length; k++) {
+					const flag = word[k]!;
+					if (flag === "i") {
+						cmdEnv.clear();
+					} else if (flag === "0" || flag === "v") {
+						continue;
+					} else if (flag === "C") {
+						const val = k + 1 < word.length ? word.slice(k + 1) : words[++i];
+						if (val === undefined) return { ok: false, reason: reasons.analysis };
+						chdir?.(val);
+						break;
+					} else if (flag === "u") {
+						const val = k + 1 < word.length ? word.slice(k + 1) : words[++i];
+						if (val === undefined) return { ok: false, reason: reasons.analysis };
+						cmdEnv.delete(val);
+						lookupEnv.delete(val);
+						break;
+					} else if (flag === "P" || flag === "a") {
+						const val = k + 1 < word.length ? word.slice(k + 1) : words[++i];
+						if (val === undefined) return { ok: false, reason: reasons.analysis };
+						break;
+					} else if (flag === "S") {
+						const raw = k + 1 < word.length ? word.slice(k + 1) : words[++i];
+						if (raw === undefined) return { ok: false, reason: reasons.analysis };
+						if (currentDepth + 1 > MAX_NESTING_DEPTH) return { ok: false, reason: reasons.nesting };
+						const splitTokens = splitEnvString(raw, lookupEnv);
+						if (splitTokens === undefined) return { ok: false, reason: reasons.analysis };
+						currentDepth++;
+						words = [...splitTokens, ...words.slice(i + 1)];
+						i = -1;
+						break;
+					} else {
+						return { ok: false, reason: reasons.analysis };
+					}
+				}
+				continue;
+			}
+		}
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+			options = false;
+			const eq = word.indexOf("=");
+			cmdEnv.set(word.slice(0, eq), word.slice(eq + 1));
+			continue;
+		}
+		return { ok: true, words: words.slice(i), depth: currentDepth };
+	}
+
+	return { ok: true, words: [], depth: currentDepth };
+}
+
+type UnwrapExecResult = { ok: true; words: string[] } | { ok: false; reason: string };
+
+/** Unwraps `exec` options (`-c`, `-l`, `-a <argv0>` / `-a<argv0>`, `--`), failing closed on malformed options. */
+function unwrapExec(allWords: string[], cmdEnv: Map<string, string>): UnwrapExecResult {
+	let i = 1;
+	for (; i < allWords.length; i++) {
+		const word = allWords[i]!;
+		if (word === "--") {
+			i++;
+			break;
+		}
+		if (!word.startsWith("-") || word === "-") break;
+		if (word.startsWith("--")) return { ok: false, reason: reasons.analysis };
+		for (let k = 1; k < word.length; k++) {
+			const flag = word[k]!;
+			if (flag === "c") {
+				cmdEnv.clear();
+			} else if (flag === "l") {
+				continue;
+			} else if (flag === "a") {
+				if (k + 1 < word.length) break;
+				if (i + 1 >= allWords.length) return { ok: false, reason: reasons.analysis };
+				i++;
+				break;
+			} else {
+				return { ok: false, reason: reasons.analysis };
+			}
+		}
+	}
+	return { ok: true, words: allWords.slice(i) };
+}
+
+function shellCommandEnv(node: SyntaxNode, base: Map<string, string>): Map<string, string> | undefined {
+	if (node.type !== "Command") return undefined;
+	const env = new Map(base);
+	for (const [name, value] of prefixEnv(node)) env.set(name, value);
+	let words = commandWords(node);
+	let depth = 0;
+	for (;;) {
+		const verb = words[0] === undefined ? undefined : basename(words[0]);
+		if (verb === undefined) return undefined;
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]!)) {
+			const eq = words[0]!.indexOf("=");
+			env.set(words[0]!.slice(0, eq), words[0]!.slice(eq + 1));
+			words = words.slice(1);
+		} else if (verb === "env") {
+			const unwrapped = unwrapEnv(words, env, depth);
+			if (!unwrapped.ok) return undefined;
+			words = unwrapped.words;
+			depth = unwrapped.depth;
+		} else if (verb === "exec") {
+			const unwrapped = unwrapExec(words, env);
+			if (!unwrapped.ok) return undefined;
+			words = unwrapped.words;
+		} else if (verb === "command" || verb === "builtin" || verb === "nohup" || verb === "time") {
+			words = words.slice(1);
+			while (words[0]?.startsWith("-")) {
+				const opt = words[0];
+				words = words.slice(1);
+				if (opt === "--") break;
+			}
+		} else if (verb === "sudo") {
+			words = words.slice(1);
+		} else break;
+	}
+	return words[0] !== undefined && LOCAL_SHELLS.has(basename(words[0])) ? env : undefined;
 }
 
 function isLocalShell(node: SyntaxNode): boolean {
-	if (node.type !== "Command") return false;
-	const words = commandWords(node).filter((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) && word !== "sudo" && word !== "env" && word !== "command" && word !== "exec");
-	return words[0] !== undefined && LOCAL_SHELLS.has(basename(words[0]));
+	return shellCommandEnv(node, new Map()) !== undefined;
 }
 
 function dangerousGitConfig(rest: string[]): string | undefined {

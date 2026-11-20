@@ -618,6 +618,104 @@ describe("bash", () => {
 		// Also fail closed when depth is exceeded via stdin redirection into a local shell.
 		const nineWithStdin = nest("bash <<< 'echo ok'", 8);
 		expect(bashBlockReason(nineWithStdin, outside, [repo])).toBe(reasons.nesting);
+
+		// Also fail closed when depth is exceeded via env -S.
+		const nineWithEnvSplit = nest("env -S 'echo ok'", 8);
+		expect(bashBlockReason(nineWithEnvSplit, outside, [repo])).toBe(reasons.nesting);
+	});
+
+	it("parses env -S / --split-string with trailing arguments and fails closed on malformed syntax", () => {
+		// Remote / system / checkout mutations across -S, attached -S, --split-string=, and --split-string.
+		expect(bashBlockReason("env -S 'git' push", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("env -S 'rm -rf' src/a.ts", repo, [repo])).toBe(reasons.checkout(`rm ${join(repo, "src", "a.ts")}`));
+		expect(bashBlockReason("env --split-string='git push' origin main", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("env --split-string 'git push' origin main", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("env -S'git push' origin main", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("env -iS'git' push", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("env -S 'git\\_push' origin main", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("env -S 'git\\c ignored' push", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("env -S 'git # comment' push", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("env -S '' git push", outside, [repo])).toBe(reasons.remote("git push"));
+
+		// Quoted arguments inside -S combined with trailing arguments, env options, and assignments.
+		expect(bashBlockReason(`env -S 'git -C "${repo}"' commit -m x`, outside, [repo])).toContain("would change your user's checkout");
+		expect(bashBlockReason("env -S \"rm -rf 'src/a.ts'\" /tmp/other", repo, [repo])).toBe(reasons.checkout(`rm ${join(repo, "src", "a.ts")}`));
+		expect(bashBlockReason("env -S 'sed -i \"\" s/a/b/' src/a.ts", repo, [repo])).toContain("would change your user's checkout");
+		expect(bashBlockReason(`env -S 'GIT_DIR=${repo}/.git git' commit -m x`, outside, [repo])).toContain("would change your user's checkout");
+		expect(bashBlockReason(`env -S '-C "${repo}" rm -rf' src/a.ts`, outside, [repo])).toBe(reasons.checkout(`rm ${join(repo, "src", "a.ts")}`));
+		expect(bashBlockReason("env -S 'sh -c' 'git push'", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("env -S 'sh' <<< 'git push'", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("CMD=push env -S 'git ${CMD}'", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("CMD=push env -i -S 'git ${CMD}'", outside, [repo])).toBe(reasons.remote("git push"));
+
+		// Protected .git internals and exemptions remain enforced through env -S.
+		expect(bashBlockReason("env -S 'chmod +x' .git/hooks/pre-commit", repo, [repo])).toContain("would change your user's checkout");
+		expect(bashBlockReason("env -S 'rm -rf' .git/herder/runs/r1/note", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("env -S 'rm -rf' .git/herder/worktrees/w1/file.ts", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("env -S 'rm -rf' .git/worktrees/nested-wt/note", repo, [repo])).toBeUndefined();
+
+		// Safe env -S commands remain allowed.
+		expect(bashBlockReason("env -S 'echo \"hello world\"' trailing", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("env -S 'git' status", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("env -S 'rm -rf' /tmp/safe-target", outside, [repo])).toBeUndefined();
+		expect(bashBlockReason("export GIT_DIR=" + join(repo, ".git") + " && env -S '-u GIT_DIR git' commit -m x", outside, [repo])).toBeUndefined();
+
+		// Malformed env -S syntax and missing/unknown options fail closed.
+		for (const malformed of [
+			"env -S 'echo \"unterminated' foo",
+			"env -S \"echo 'unterminated\" foo",
+			"env -S 'git\\' push",
+			"env -S 'echo \\x' foo",
+			"env -S 'echo \"a\\cb\"' foo",
+			"env -S 'echo $HOME'",
+			"env -S 'echo ${UNTERM'",
+			"env -S 'echo ${}'",
+			"env -S",
+			"env --split-string",
+			"env --unknown-flag echo ok",
+		]) {
+			expect(bashBlockReason(malformed, outside, [repo]), malformed).toBe(reasons.analysis);
+		}
+	});
+
+	it("unwraps exec options including -a <argv0>, -c, -l, and -- and fails closed on malformed options", () => {
+		expect(bashBlockReason("exec -a fake git push", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("exec -a fake -- rm -rf src/a.ts", repo, [repo])).toBe(reasons.checkout(`rm ${join(repo, "src", "a.ts")}`));
+		expect(bashBlockReason("exec -c -l -a fake git push", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("exec -- git push", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("exec -afake git push", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("exec -cla fake git push", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("exec -clafake git push", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("exec -a '' git push", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("exec -a -- git push", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("exec -a fake -l git push", outside, [repo])).toBe(reasons.remote("git push"));
+
+		// Chained wrappers and stdin shells through exec -a.
+		expect(bashBlockReason("exec -a fake env -S 'git' push", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("env -S 'exec -a fake git' push", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("exec -a fake sh <<< 'git push'", outside, [repo])).toBe(reasons.remote("git push"));
+		expect(bashBlockReason("cat <<'EOF' | exec -a fake sh\ngit push\nEOF", outside, [repo])).toBe(reasons.remote("git push"));
+
+		// Protected .git internals and exemptions remain enforced through exec -a.
+		expect(bashBlockReason("exec -a fake chmod +x .git/hooks/pre-commit", repo, [repo])).toContain("would change your user's checkout");
+		expect(bashBlockReason("exec -a fake rm -rf .git/herder/worktrees/w1/file.ts", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("exec -a fake rm -rf .git/herder/runs/r1/note", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("exec -a fake rm -rf .git/worktrees/nested-wt/note", repo, [repo])).toBeUndefined();
+
+		// Safe exec commands remain allowed, and -c clears inherited env.
+		expect(bashBlockReason("exec -a fake echo ok", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("exec -c -l -a fake -- echo ok", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason(`export GIT_DIR=${repo}/.git && exec -c git commit -m x`, outside, [repo])).toBeUndefined();
+
+		// Malformed exec options fail closed.
+		for (const malformed of [
+			"exec -a",
+			"exec -cla",
+			"exec -z echo ok",
+			"exec --unknown echo ok",
+		]) {
+			expect(bashBlockReason(malformed, outside, [repo]), malformed).toBe(reasons.analysis);
+		}
 	});
 });
 
