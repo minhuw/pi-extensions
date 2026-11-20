@@ -9,10 +9,16 @@ import {
   getAgentStatsParts,
 } from "../src/ui/agent-widget.js";
 
-it("scopes extensions on recon and worker while retaining built-in search tools across the default fleet", () => {
-  expect(DEFAULT_AGENTS.get("recon")?.extensions).toEqual(["fff", "selfdrive"]);
-  expect(DEFAULT_AGENTS.get("recon")?.extSelectors).toEqual(["ext:fff"]);
-  expect(DEFAULT_AGENTS.get("recon")?.excludeExtensions).toBeUndefined();
+it("scopes extensions on recon, analyst, and worker while retaining built-in search tools across the default fleet", () => {
+  for (const name of ["recon", "analyst"]) {
+    expect(DEFAULT_AGENTS.get(name)?.extensions).toEqual(["fff", "selfdrive"]);
+    expect(DEFAULT_AGENTS.get(name)?.extSelectors).toEqual(["ext:fff"]);
+    expect(DEFAULT_AGENTS.get(name)?.excludeExtensions).toBeUndefined();
+  }
+  expect(DEFAULT_AGENTS.get("analyst")?.model).toBeUndefined();
+  expect(DEFAULT_AGENTS.get("analyst")?.thinking).toBeUndefined();
+  expect(DEFAULT_AGENTS.get("analyst")?.serviceTier).toBeUndefined();
+  expect(DEFAULT_AGENTS.get("analyst")?.allowedSubagents).toBeUndefined();
 
   expect(DEFAULT_AGENTS.get("worker")?.extensions).toBe(true);
   expect(DEFAULT_AGENTS.get("worker")?.excludeExtensions).toEqual([
@@ -34,7 +40,7 @@ it("scopes extensions on recon and worker while retaining built-in search tools 
     expect(DEFAULT_AGENTS.get(name)?.extensions).toBe(true);
     expect(DEFAULT_AGENTS.get(name)?.excludeExtensions).toBeUndefined();
   }
-  for (const name of ["recon", "council-caspar", "council-melchior", "council-balthasar"]) {
+  for (const name of ["recon", "analyst", "council-caspar", "council-melchior", "council-balthasar"]) {
     expect(DEFAULT_AGENTS.get(name)?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
   }
 });

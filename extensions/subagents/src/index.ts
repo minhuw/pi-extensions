@@ -1730,7 +1730,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ---- Disable default agents configuration ----
-  // When enabled, the hardcoded default agents (recon, worker) are not
+  // When enabled, the hardcoded default agents (recon, worker, analyst) are not
   // registered. User-defined agents from project/global custom
   // agent dirs are completely unaffected — only DEFAULT_AGENTS are suppressed.
   // Defaults to false; opt-in via `/agents → Settings` or subagents.json.
@@ -4078,7 +4078,7 @@ Terse command-style prompts produce shallow, generic work.
         {
           id: "disableDefaultAgents",
           label: "Disable defaults",
-          description: "Hide built-in agents (recon, worker) — custom agents are unaffected",
+          description: "Hide built-in agents (recon, worker, analyst) — custom agents are unaffected",
           currentValue: isDefaultsDisabled() ? "on" : "off",
           values: ["on", "off"],
         },

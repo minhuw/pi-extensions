@@ -14,7 +14,7 @@ export type { ServiceTierInput };
 export type SubagentType = string;
 
 /** Names of the model-visible embedded default agents. */
-export const DEFAULT_AGENT_NAMES = ["recon", "worker"] as const;
+export const DEFAULT_AGENT_NAMES = ["recon", "worker", "analyst"] as const;
 
 /** Names of the three model-hidden embedded council agents. */
 export const COUNCIL_AGENT_NAMES = ["council-caspar", "council-melchior", "council-balthasar"] as const;

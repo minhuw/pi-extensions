@@ -55,7 +55,7 @@ Use the playbook to inspect these dimensions:
 
 Do not pad the audit with formatting, naming nits, arbitrary file splitting, micro-extractions, or generic "clean code" advice. A finding must identify a concrete maintenance cost and a credible reduction with evidence.
 
-On nontrivial repositories, parallelize independent read-only dimensions when the host has subagents (in this collection, the `Agent` tool with the `recon` agent type); otherwise work in leverage order. Children do not inherit this skill, so every audit prompt must include:
+On nontrivial repositories, parallelize independent read-only dimensions when the host has subagents (in this collection, the `Agent` tool with the `analyst` agent type); otherwise work in leverage order. Children do not inherit this skill, so every audit prompt must include:
 
 - the absolute playbook path and exact headings to read, always including `## Finding format`;
 - recon scope, skip paths, dynamic-loading risks, accepted trade-offs, and active migrations;

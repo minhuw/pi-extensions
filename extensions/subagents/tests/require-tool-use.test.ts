@@ -1,5 +1,5 @@
 /**
- * `require_tool_use`: a tool-requiring agent (embedded recon/worker/reviewer)
+ * `require_tool_use`: a tool-requiring agent (embedded recon/worker/analyst)
  * whose run ends without calling any tool is settled as an error, not a
  * completion. Guards against a model route that drops the child's tool
  * definitions, where the child answers "I have no tools available" and would
@@ -250,7 +250,7 @@ describe("require_tool_use frontmatter", () => {
       expect(parseFile(ejected).requireToolUse).toBe(value);
     }
     expect(serializeAgentFile(parse("description: x\n"))).not.toContain("require_tool_use");
-    for (const name of ["recon", "worker"]) {
+    for (const name of ["recon", "worker", "analyst"]) {
       expect(DEFAULT_AGENTS.get(name)?.requireToolUse).toBe(true);
       expect(serializeAgentFile(DEFAULT_AGENTS.get(name)!)).toContain("require_tool_use: true");
     }

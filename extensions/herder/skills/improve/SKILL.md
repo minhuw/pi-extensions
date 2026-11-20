@@ -32,7 +32,7 @@ Discover each toolchain owner and canonical invocation from repository scripts, 
 
 Use the playbook to inspect the requested categories: correctness, security, performance, tests, architecture, dependencies/migrations, DX/tooling, docs, and direction.
 
-On nontrivial repositories, parallelize read-only categories when the host has subagents (in this collection, the `Agent` tool with the `recon` agent type); otherwise work in category-priority order. Children do not inherit this skill, so every audit prompt must include:
+On nontrivial repositories, parallelize read-only categories when the host has subagents (in this collection, the `Agent` tool with the `analyst` agent type); otherwise work in category-priority order. Children do not inherit this skill, so every audit prompt must include:
 
 - the absolute playbook path and headings to read, always including `## Finding format`;
 - recon scope, skip paths, risk hints, and accepted trade-offs;

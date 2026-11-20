@@ -10,13 +10,13 @@ Choose delegation by the task’s scope and how long its state needs to last. An
 | --- | --- | --- |
 | `recon` | Read-only exploration and a compact handoff. | “Use recon to trace how an upload reaches storage. Return the entry points and relevant tests.” |
 | `worker` | Bounded implementation and verification. | “Use a worker to add the missing invalid-input test in the parser suite. Run that suite and report the result.” |
-| `reviewer` | Read-only review ranked by severity. | “Use a reviewer to inspect the parser diff for correctness bugs. Give a failing input for each finding; do not edit.” |
+| `analyst` | Read-only deep analysis and audit (inherits parent model; explicit audit/review requests only). | “Use analyst to audit the parser diff for correctness bugs. Give a failing input for each finding; do not edit.” |
 
 Give each agent a goal, relevant paths, permission to make specific changes, and the evidence it must return. Foreground execution is the default. Custom definitions may override the embedded roles and their models; read-only role instructions are not an operating-system sandbox.
 
 For difficult architectural, design, or tradeoff questions where a single advisor (`expert`) has been retired, convene the three-model [Council](../../extensions/council/README.md) via `/council <topic>` or the `council` tool (`caspar` on `magpie/gemini-4-carbon`, `melchior` on `magpie/gpt-6-astra`, and `balthasar` on `magpie/claude-fable-5-2`). Council runs an independent proposal round in parallel followed by an anonymized, position-counterbalanced cross-examination round before the main session synthesizes the result.
 
-For a small implementation, start with a worker followed by a reviewer. Wait for the writer before reviewing or testing its result. Keep the main session responsible for resolving findings and checking the final change.
+For a small implementation, verify the worker's changes with tests and checks; use `analyst` only when you explicitly want an independent read-only audit or review. Wait for the writer before auditing or testing its result. Keep the main session responsible for resolving findings and checking the final change.
 
 ## Coordinate several agents explicitly
 
@@ -26,7 +26,7 @@ A bounded request might be:
 
 ```text
 Use a scripted multi-agent workflow: have recon locate the parser's callers,
-then a worker add support for trailing whitespace, then a reviewer inspect
+then a worker add support for trailing whitespace, then an analyst inspect
 that change. Run the parser tests after the writer finishes.
 ```
 

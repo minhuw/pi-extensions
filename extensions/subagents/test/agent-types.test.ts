@@ -48,7 +48,7 @@ describe("agent type registry", () => {
 
   describe("default agents", () => {
     it("recognizes all default agent types", () => {
-      expect(getAvailableTypes()).toEqual(["recon", "worker"]);
+      expect(getAvailableTypes()).toEqual(["recon", "worker", "analyst"]);
       expect(DEFAULT_AGENT_NAMES).toEqual(getAvailableTypes());
       for (const name of [...DEFAULT_AGENT_NAMES, ...COUNCIL_AGENT_NAMES]) expect(isValidType(name)).toBe(true);
     });
@@ -63,6 +63,7 @@ describe("agent type registry", () => {
       expect(isValidType("recon")).toBe(true);
       expect(isValidType("RECON")).toBe(true);
       expect(isValidType("Worker")).toBe(true);
+      expect(isValidType("Analyst")).toBe(true);
       expect(isValidType("COUNCIL-MELCHIOR")).toBe(true);
     });
 
@@ -75,6 +76,7 @@ describe("agent type registry", () => {
     it("resolveType returns canonical key or undefined", () => {
       expect(resolveType("recon")).toBe("recon");
       expect(resolveType("WORKER")).toBe("worker");
+      expect(resolveType("ANALYST")).toBe("analyst");
       expect(resolveType("nonexistent")).toBeUndefined();
     });
 
@@ -100,8 +102,29 @@ describe("agent type registry", () => {
       expect(cfg?.serviceTier).toBe("fast");
     });
 
-    it("serializeAgentFile round-trips recon and worker extension scoping and serviceTier", () => {
-      for (const name of ["recon", "worker"] as const) {
+    it("analyst is read-only, scoped to fff/selfdrive, inherits parent model, and never delegates", () => {
+      const cfg = getAgentConfig("analyst");
+      expect(cfg).toMatchObject({
+        name: "analyst",
+        displayName: "Analyst",
+        builtinToolNames: ["read", "bash", "grep", "find", "ls"],
+        extSelectors: ["ext:fff"],
+        extensions: ["fff", "selfdrive"],
+        skills: true,
+        promptMode: "replace",
+        requireToolUse: true,
+        isDefault: true,
+      });
+      expect(cfg?.builtinToolNames).not.toContain("edit");
+      expect(cfg?.builtinToolNames).not.toContain("write");
+      expect(cfg?.model).toBeUndefined();
+      expect(cfg?.thinking).toBeUndefined();
+      expect(cfg?.serviceTier).toBeUndefined();
+      expect(cfg?.allowedSubagents).toBeUndefined();
+    });
+
+    it("serializeAgentFile round-trips recon, worker, and analyst extension scoping and serviceTier", () => {
+      for (const name of ["recon", "worker", "analyst"] as const) {
         const original = DEFAULT_AGENTS.get(name)!;
         const serialized = serializeAgentFile(original);
         const { frontmatter, body } = parseAgentFrontmatter<Record<string, unknown>>(serialized);
@@ -190,7 +213,7 @@ describe("agent type registry", () => {
     // Locally only worker delegates, and only to recon.
     it("lets worker delegate to recon only and no other built-in delegate", () => {
       expect(getAgentConfig("worker")?.allowedSubagents).toEqual(["recon"]);
-      for (const name of ["recon", ...COUNCIL_AGENT_NAMES]) {
+      for (const name of ["recon", "analyst", ...COUNCIL_AGENT_NAMES]) {
         expect(getAgentConfig(name)?.allowedSubagents).toBeUndefined();
       }
     });
@@ -388,7 +411,7 @@ describe("agent type registry", () => {
       expect(isValidType("worker")).toBe(true);
     });
 
-    it.each(["recon", "worker"])("user agent overrides default %s", name => {
+    it.each(["recon", "worker", "analyst"])("user agent overrides default %s", name => {
       const override = makeAgentConfig({
         name,
         description: `Custom ${name}`,
@@ -419,7 +442,7 @@ describe("agent type registry", () => {
       expect(config?.isDefault).not.toBe(true);
     });
 
-    it.each(["recon", "worker"])("disabled agent %s is excluded from available types", name => {
+    it.each(["recon", "worker", "analyst"])("disabled agent %s is excluded from available types", name => {
       registerAgents(new Map([[name, makeAgentConfig({ name, enabled: false })]]));
 
       expect(isValidType(name)).toBe(false);
@@ -605,17 +628,19 @@ describe("resolveSpawnType — fail-closed dispatch (#183)", () => {
 });
 
 describe("local fleet runtime tool selection", () => {
-  it("uses read-only search tools for recon/council advisors and scoped extensions for recon/worker", () => {
+  it("uses read-only search tools for recon/analyst/council advisors and scoped extensions for recon/analyst/worker", () => {
     registerAgents(new Map());
     setDefaultsDisabled(false);
     expect(getAvailableTypes()).toEqual(DEFAULT_AGENT_NAMES);
     for (const retired of ["Explore", "Plan", "general-purpose", "expert", "reviewer"]) expect(isValidType(retired)).toBe(false);
-    for (const name of ["recon", ...COUNCIL_AGENT_NAMES]) {
+    for (const name of ["recon", "analyst", ...COUNCIL_AGENT_NAMES]) {
       expect(getToolNamesForType(name)).toEqual(["read", "bash", "grep", "find", "ls"]);
       expect(getConfig(name).excludeExtensions).toBeUndefined();
     }
-    expect(getConfig("recon").extensions).toEqual(["fff", "selfdrive"]);
-    expect(getAgentConfig("recon")?.extSelectors).toEqual(["ext:fff"]);
+    for (const name of ["recon", "analyst"]) {
+      expect(getConfig(name).extensions).toEqual(["fff", "selfdrive"]);
+      expect(getAgentConfig(name)?.extSelectors).toEqual(["ext:fff"]);
+    }
     for (const name of COUNCIL_AGENT_NAMES) {
       expect(getConfig(name).extensions).toBe(true);
     }

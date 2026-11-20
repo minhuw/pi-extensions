@@ -92,7 +92,7 @@ All three Herder skills set `disable-model-invocation: true` and all eight `herd
 
 The audit is read-only. It changes no files, installs nothing, and holds no run or lock. It needs an interactive session, a commit, and that this session does not already hold an unparked unfinished run (unless it is `blocked` under a standing authorization). The flow is:
 
-1. The model recons the repository, audits it (with read-only `recon` subagents when Subagents is loaded), and vets every finding against the code.
+1. The model recons the repository, audits it (with read-only `analyst` subagents when Subagents is loaded), and vets every finding against the code.
 2. It posts a table of the vetted findings, followed by a short explanation of each.
 3. `herder_pick_findings` shows the findings as a checklist with the recommended ones checked. Cancelling or selecting nothing ends the audit without a run. A note you add becomes a constraint of the goal.
 4. The model starts a run with `herder_run { action: "start" }` and writes `goal.md`: one acceptance criterion per selected finding, mapped to the repository's checks, with the unselected findings out of scope. A check that proves one finding gates only its task (`integrate: no`), and `max_agents` allows about 5 agents per finding. With more than about 15 findings selected, the model recommends narrowing the selection first: the approved goal and its budget are frozen.
