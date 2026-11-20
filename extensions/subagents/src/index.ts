@@ -33,7 +33,19 @@ import { type RpcHandle, registerRpcHandlers, type SendDelivery } from "./cross-
 import { loadCustomAgents } from "./custom-agents.js";
 import { completionKey, GroupJoinManager, type GroupMember } from "./group-join.js";
 import { registerSubagentHost, releaseSubagentHost, resolveSubagentHostModel, type SubagentHost, type SubagentTelemetry, type SubagentTypeDescriptor } from "./host-registry.js";
-import { isolationParam, MODEL_OVERRIDE_ERROR, MODEL_SELECTION_GUIDANCE, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
+import {
+  isolationParam,
+  maxTurnsParam,
+  MODEL_OVERRIDE_ERROR,
+  MODEL_SELECTION_GUIDANCE,
+  normalizeAgentToolParams,
+  normalizeOptionalString,
+  type NormalizedAgentToolParams,
+  resolveAgentInvocationConfig,
+  resolveJoinMode,
+  serviceTierParam,
+  thinkingParam,
+} from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
 import {
@@ -70,7 +82,7 @@ import {
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, THINKING_LEVELS, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
-import { modelSupportsServiceTier, parseServiceTier } from "./service-tier.js";
+import { modelSupportsServiceTier } from "./service-tier.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -2223,23 +2235,11 @@ Terse command-style prompts produce shallow, generic work.
       subagent_type: Type.String({
         description: `The type of specialized agent to use. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .pi/agents/*.md (project) or ${getAgentDir()}/agents/*.md (global) are also available.`,
       }),
-      thinking: Type.Optional(
-        Type.String({
-          description: `Thinking level: ${THINKING_LEVELS.join(", ")}. Overrides agent default.`,
-        }),
+      thinking: thinkingParam(`Thinking level: ${THINKING_LEVELS.join(", ")}. Overrides agent default.`),
+      service_tier: serviceTierParam(
+        'Optional service tier for OpenAI-compatible models: "fast"|"standard" (or raw "priority"|"default"|"flex"|"auto"). Frontmatter service_tier is authoritative when set.',
       ),
-      service_tier: Type.Optional(
-        Type.String({
-          description:
-            'Optional service tier for OpenAI-compatible models: "fast"|"standard" (or raw "priority"|"default"|"flex"|"auto"). Frontmatter service_tier is authoritative when set.',
-        }),
-      ),
-      max_turns: Type.Optional(
-        Type.Number({
-          description: "Maximum number of agentic turns before stopping. Omit for unlimited (default).",
-          minimum: 1,
-        }),
-      ),
+      max_turns: maxTurnsParam("Maximum number of agentic turns before stopping. Omit or pass 0 for unlimited (default)."),
       run_in_background: Type.Optional(
         Type.Boolean({
           description: "Defaults to false — blocks and returns the full result inline. Set true only when background execution is explicitly requested; returns an ID and notifies on completion.",
@@ -2282,8 +2282,8 @@ Terse command-style prompts produce shallow, generic work.
       const config = subagentType ? getAgentConfig(subagentType) : undefined;
       const desc = args.description ?? "";
       const model = config?.model;
-      const thinking = config?.thinking ?? args.thinking;
-      const serviceTier = config?.serviceTier ?? args.service_tier;
+      const thinking = config?.thinking ?? normalizeOptionalString(args.thinking);
+      const serviceTier = config?.serviceTier ?? normalizeOptionalString(args.service_tier);
       const identity = formatAgentIdentity({
         modelName: typeof model === "string" ? model : undefined,
         thinking: typeof thinking === "string" ? thinking : undefined,
@@ -2400,6 +2400,10 @@ Terse command-style prompts produce shallow, generic work.
       // Unknown keys survive stale/raw tool calls; refuse before scheduling or resuming.
       if ("model" in callParams) return { ...textResult(MODEL_OVERRIDE_ERROR), isError: true };
 
+      const normalized = normalizeAgentToolParams(callParams);
+      if (!normalized.ok) return { ...textResult(normalized.error), isError: true };
+      const normalizedCallParams = normalized.params;
+
       // Ensure we have UI context for widget rendering
       widget.setUICtx(ctx.ui as UICtx);
 
@@ -2417,9 +2421,9 @@ Terse command-style prompts produce shallow, generic work.
       // ignores `subagent_type`, model and the rest, and runs under the agent
       // type's current definition.
       // `schedule` is left to its own branch, which refuses the combination.
-      const saved = callParams.resume !== undefined && !callParams.schedule
-        && manager.getRecord(callParams.resume) === undefined
-        ? findAgentRecordEntry(ctx, callParams.resume)
+      const saved = normalizedCallParams.resume !== undefined && !normalizedCallParams.schedule
+        && manager.getRecord(normalizedCallParams.resume) === undefined
+        ? findAgentRecordEntry(ctx, normalizedCallParams.resume)
         : undefined;
       let reopenOptions: { resumeSessionFile: string; reclaim: { id: string; handle?: string; alias?: string } } | undefined;
       if (saved !== undefined) {
@@ -2430,12 +2434,12 @@ Terse command-style prompts produce shallow, generic work.
           reclaim: { id: saved.id, handle: saved.handle, alias: saved.alias },
         };
       }
-      const params: typeof callParams = saved === undefined ? callParams : {
-        prompt: callParams.prompt,
+      const params: NormalizedAgentToolParams = saved === undefined ? normalizedCallParams : {
+        prompt: normalizedCallParams.prompt,
         description: saved.description,
         subagent_type: saved.type,
-        run_in_background: callParams.run_in_background,
-        max_turns: callParams.max_turns,
+        run_in_background: normalizedCallParams.run_in_background,
+        max_turns: normalizedCallParams.max_turns,
         isolation: undefined,
         schedule: undefined,
       };
@@ -2471,15 +2475,8 @@ Terse command-style prompts produce shallow, generic work.
       // Get agent config (if any)
       const customConfig = getAgentConfig(subagentType);
 
-      // Validate service_tier tool param early (frontmatter already sanitized at load).
-      let toolServiceTier: ReturnType<typeof parseServiceTier>;
-      if (params.service_tier != null && params.service_tier !== "") {
-        try {
-          toolServiceTier = parseServiceTier(params.service_tier);
-        } catch (err) {
-          return textResult(err instanceof Error ? err.message : String(err));
-        }
-      }
+      // service_tier was normalized and validated upfront by normalizeAgentToolParams.
+      const toolServiceTier = params.service_tier;
 
       const resolvedConfig = resolveAgentInvocationConfig(customConfig, { ...params, model: undefined }, {
         worktreeAllowed: isWorktreeIsolationEnabled(),

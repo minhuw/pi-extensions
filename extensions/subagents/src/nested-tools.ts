@@ -16,7 +16,15 @@ import {
   resolveTypeIn,
 } from "./agent-types.js";
 import { loadCustomAgents } from "./custom-agents.js";
-import { isolationParam, MODEL_OVERRIDE_ERROR, MODEL_SELECTION_GUIDANCE, resolveAgentInvocationConfig } from "./invocation-config.js";
+import {
+  isolationParam,
+  maxTurnsParam,
+  MODEL_OVERRIDE_ERROR,
+  MODEL_SELECTION_GUIDANCE,
+  normalizeAgentToolParams,
+  resolveAgentInvocationConfig,
+  thinkingParam,
+} from "./invocation-config.js";
 import { resolveModel } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
 import {
@@ -174,8 +182,8 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       prompt: Type.String({ description: "Self-contained task for the nested agent." }),
       description: Type.String({ description: "Short 3-5 word task description." }),
       subagent_type: Type.String({ description: `Allowed nested agent type. Available: ${availableIn(loadRegistry()).join(", ") || "none"}.` }),
-      thinking: Type.Optional(Type.String({ description: "Optional thinking level." })),
-      max_turns: Type.Optional(Type.Number({ minimum: 1 })),
+      thinking: thinkingParam("Optional thinking level."),
+      max_turns: maxTurnsParam(),
       run_in_background: Type.Optional(
         Type.Boolean({
           description: "Defaults to false for nested spawns — the call blocks and returns the child's result inline. Set true only for work you will collect later with get_subagent_result; a detached child is stopped when you finish.",
@@ -186,8 +194,12 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       inherit_context: Type.Optional(Type.Boolean()),
       ...isolationParam(isWorktreeIsolationEnabled()),
     }),
-    execute: async (toolCallId, params, signal, _onUpdate, ctx) => {
-      if ("model" in params) return textResult(MODEL_OVERRIDE_ERROR, true);
+    execute: async (toolCallId, rawParams, signal, _onUpdate, ctx) => {
+      if ("model" in rawParams) return textResult(MODEL_OVERRIDE_ERROR, true);
+
+      const normalized = normalizeAgentToolParams(rawParams);
+      if (!normalized.ok) return textResult(normalized.error, true);
+      const params = normalized.params;
 
       if (params.resume) {
         const existing = context.manager.getRecord(params.resume);

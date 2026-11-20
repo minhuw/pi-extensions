@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveAgentInvocationConfig, resolveJoinMode } from "../src/invocation-config.js";
+import { normalizeAgentToolParams, resolveAgentInvocationConfig, resolveJoinMode } from "../src/invocation-config.js";
 import type { AgentConfig } from "../src/types.js";
 
 function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
@@ -189,5 +189,124 @@ describe("resolveAgentInvocationConfig — overridden params (#182)", () => {
     );
 
     expect(resolved.overridden).toEqual({ thinking: "max", model: undefined });
+  });
+
+  it("treats blank optional strings and max_turns: 0 as omitted without recording overrides", () => {
+    const withConfig = resolveAgentInvocationConfig(
+      makeConfig({
+        model: "provider/config-model",
+        thinking: "high",
+        serviceTier: "fast",
+        maxTurns: 10,
+        isolation: "worktree",
+      }),
+      {
+        model: "  ",
+        thinking: " ",
+        service_tier: "",
+        max_turns: 0,
+        isolation: "   ",
+      },
+    );
+
+    expect(withConfig.modelInput).toBe("provider/config-model");
+    expect(withConfig.modelFromParams).toBe(false);
+    expect(withConfig.thinking).toBe("high");
+    expect(withConfig.serviceTier).toBe("fast");
+    expect(withConfig.serviceTierFromParams).toBe(false);
+    expect(withConfig.maxTurns).toBe(10);
+    expect(withConfig.isolation).toBe("worktree");
+    expect(withConfig.overridden).toBeUndefined();
+
+    const withoutConfig = resolveAgentInvocationConfig(undefined, {
+      model: "",
+      thinking: "   ",
+      service_tier: "  ",
+      max_turns: 0,
+      isolation: "",
+    });
+
+    expect(withoutConfig.modelInput).toBeUndefined();
+    expect(withoutConfig.modelFromParams).toBe(false);
+    expect(withoutConfig.thinking).toBeUndefined();
+    expect(withoutConfig.serviceTier).toBeUndefined();
+    expect(withoutConfig.serviceTierFromParams).toBe(false);
+    expect(withoutConfig.maxTurns).toBeUndefined();
+    expect(withoutConfig.isolation).toBeUndefined();
+    expect(withoutConfig.overridden).toBeUndefined();
+  });
+});
+
+describe("normalizeAgentToolParams", () => {
+  const base = { prompt: "do work", description: "do work", subagent_type: "worker" };
+
+  it("collapses blank optional strings and max_turns: 0 to undefined", () => {
+    const result = normalizeAgentToolParams({
+      ...base,
+      name: "  ",
+      resume: "",
+      thinking: " ",
+      service_tier: "  ",
+      schedule: "\t\n",
+      isolation: "",
+      max_turns: 0,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      params: {
+        ...base,
+        name: undefined,
+        resume: undefined,
+        thinking: undefined,
+        service_tier: undefined,
+        schedule: undefined,
+        isolation: undefined,
+        max_turns: undefined,
+        run_in_background: undefined,
+        isolated: undefined,
+        inherit_context: undefined,
+      },
+    });
+  });
+
+  it("trims valid optional strings and preserves positive max_turns", () => {
+    const result = normalizeAgentToolParams({
+      ...base,
+      name: " auth-audit ",
+      resume: " agent-1 ",
+      thinking: " HIGH ",
+      service_tier: " Fast ",
+      schedule: " 5m ",
+      isolation: " worktree ",
+      max_turns: 5,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      params: {
+        ...base,
+        name: "auth-audit",
+        resume: "agent-1",
+        thinking: "high",
+        service_tier: "fast",
+        schedule: "5m",
+        isolation: "worktree",
+        max_turns: 5,
+        run_in_background: undefined,
+        isolated: undefined,
+        inherit_context: undefined,
+      },
+    });
+  });
+
+  it.each([
+    ["thinking", "invalid"],
+    ["service_tier", "turbo"],
+    ["isolation", "bogus"],
+    ["max_turns", -1],
+  ])("rejects invalid %s=%j", (field, value) => {
+    const result = normalizeAgentToolParams({ ...base, [field]: value });
+    expect(result.ok).toBe(false);
   });
 });

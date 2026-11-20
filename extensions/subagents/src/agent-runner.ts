@@ -30,6 +30,7 @@ import { buildParentContext, extractText } from "./context.js";
 import { loadBoundedContextFiles } from "./context-files.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
+import { normalizeOptionalString } from "./invocation-config.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { isCouncilAgentName } from "./model-overrides.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
@@ -950,10 +951,10 @@ export async function runAgent(
   const agentConfig = getAgentConfig(type);
 
   // Resolve working directory: worktree override > parent cwd
-  const effectiveCwd = options.cwd ?? ctx.cwd;
+  const effectiveCwd = normalizeOptionalString(options.cwd) ?? ctx.cwd;
   // Filesystem work happens in effectiveCwd; config discovery in configCwd.
   // They differ only for SpawnOptions.cwd spawns (config stays with the parent).
-  const configCwd = options.configCwd ?? effectiveCwd;
+  const configCwd = normalizeOptionalString(options.configCwd) ?? effectiveCwd;
 
   const env = await detectEnv(options.pi, effectiveCwd);
   options.signal?.throwIfAborted();
@@ -1314,7 +1315,9 @@ export async function runAgent(
   // defaultThinkingLevel (e.g. "max") instead of matching the spawning session.
   // Undefined for a session-model reopen, so pi restores the saved level.
   const keepSessionModel = options.keepSessionModel === true && options.resumeSessionFile !== undefined;
-  const thinkingLevel = options.thinkingLevel ?? (keepSessionModel ? undefined : (agentConfig?.thinking ?? ctx.thinkingLevel));
+  const explicitThinkingLevel = normalizeOptionalString(options.thinkingLevel) as ThinkingLevel | undefined;
+  const configThinkingLevel = normalizeOptionalString(agentConfig?.thinking) as ThinkingLevel | undefined;
+  const thinkingLevel = explicitThinkingLevel ?? (keepSessionModel ? undefined : (configThinkingLevel ?? ctx.thinkingLevel));
 
   // The `agent({ schema })` contract: this child reports its answer by calling
   // StructuredOutput, and `structuredJson` below is what the caller reads. The
@@ -1510,7 +1513,7 @@ export async function runAgent(
   // Pin service tier after session construction (streamFunction is live).
   // Skip silently when the model API cannot honor it (e.g. scheduled fire with a
   // non-OpenAI model); the Agent tool path validates earlier and errors/warns.
-  const serviceTier = options.serviceTier ?? agentConfig?.serviceTier;
+  const serviceTier = (normalizeOptionalString(options.serviceTier) as ServiceTierInput | undefined) ?? agentConfig?.serviceTier;
   if (serviceTier && modelSupportsServiceTier(session.model)) {
     applyServiceTier(session, serviceTier);
   }
