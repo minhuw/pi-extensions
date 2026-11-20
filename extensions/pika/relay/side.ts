@@ -106,6 +106,8 @@ export async function askSide(ctx: ExtensionContext, thinking: ThinkingLevel, me
 	const stream = ctx.modelRegistry.streamSimple(model, { messages: convertToLlm(messages) }, {
 		signal,
 		sessionId: ctx.sessionManager.getSessionId(),
+		// Sharing sessionId reuses prompt caches, so keep this side request off the turn's continuation/message thread.
+		disableContinuation: true,
 		// As the turn's own requests set it.
 		...(thinking === "off" ? {} : { reasoning: thinking }),
 	});

@@ -82,7 +82,7 @@ it("answers a message a busy turn leaves unread from the turn's last request, an
 	await waitFor(noted(h), 5_000, "the side answer");
 
 	const [main, side] = requests;
-	expect(side!.options).toMatchObject({ sessionId: id });
+	expect(side!.options).toMatchObject({ sessionId: id, disableContinuation: true });
 	// Changing tool_choice would lose the cached messages; the request's tool calls are never run instead.
 	expect(side!.options?.toolChoice).toBeUndefined();
 	expect(main!.options?.toolChoice).toBeUndefined();
