@@ -4,7 +4,7 @@
 // turn, and the result tells the model so; its exit then arrives as a process-event notification.
 import { constants } from "node:os";
 import { createBashToolDefinition, type BashOperations, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ProcessInfo, ProcessManager } from "./types.ts";
+import type { ProcessInfo, ProcessManager, StopResult } from "./types.ts";
 
 export interface BashTiming {
 	/** A command without an explicit timeout moves to the background after this long. */
@@ -35,6 +35,18 @@ function exitCode(process: ProcessInfo): number | null {
 	return signal ? 128 + constants.signals[signal] : null;
 }
 
+function isUnknownProcessError(error: unknown, id: string): boolean {
+	return error instanceof Error && (error.message === `Unknown process "${id}".` || error.message === `Unknown process ${id}`);
+}
+
+function discardIfPresent(processes: ProcessManager, id: string): void {
+	try {
+		processes.discard(id);
+	} catch (error) {
+		if (!isUnknownProcessError(error, id)) throw error;
+	}
+}
+
 /** Runs commands for one bash call; `promoted` is set when the command was detached instead of finishing. */
 function operations(manager: () => ProcessManager, ctx: ExtensionContext, timing: BashTiming, calls: Set<Foreground>, call: { promoted?: Promotion }): BashOperations {
 	return {
@@ -57,27 +69,60 @@ function operations(manager: () => ProcessManager, ctx: ExtensionContext, timing
 				const finished = (process: ProcessInfo) => {
 					if (settled) return;
 					cleanup();
-					processes.discard(process.id);
+					try {
+						discardIfPresent(processes, process.id);
+					} catch (error) {
+						reject(error);
+						return;
+					}
 					resolve({ exitCode: exitCode(process) });
 				};
 				const stopWith = (error: Error) => {
 					if (settled || id === undefined) return;
 					cleanup();
 					const target = id;
-					processes.stop(target, STOP_GRACE_MS).then((result) => {
-						if (result.outcome === "stuck") reject(new Error(`${error.message}; process group ${result.process.pid} survived SIGKILL`));
-						else {
-							processes.discard(target);
+					let stopping: Promise<StopResult>;
+					try {
+						stopping = processes.stop(target, STOP_GRACE_MS);
+					} catch (stopError) {
+						reject(isUnknownProcessError(stopError, target) ? error : stopError);
+						return;
+					}
+					stopping.then(
+						(result) => {
+							if (result.outcome === "stuck") {
+								reject(new Error(`${error.message}; process group ${result.process.pid} survived SIGKILL`));
+								return;
+							}
+							try {
+								discardIfPresent(processes, target);
+							} catch (discardError) {
+								reject(discardError);
+								return;
+							}
 							reject(error);
-						}
-					}, reject);
+						},
+						(stopError) => {
+							reject(isUnknownProcessError(stopError, target) ? error : stopError);
+						},
+					);
 				};
 				const foreground: Foreground = {
 					startedAt: Date.now(),
 					promote(reason) {
 						if (settled || id === undefined) return;
+						let process: ProcessInfo;
+						try {
+							process = processes.detach(id);
+						} catch (error) {
+							if (isUnknownProcessError(error, id)) return;
+							cleanup();
+							reject(error);
+							return;
+						}
+						if (settled) return;
 						cleanup();
-						call.promoted = { process: processes.detach(id), reason };
+						call.promoted = { process, reason };
 						resolve({ exitCode: 0 });
 					},
 				};
@@ -85,7 +130,14 @@ function operations(manager: () => ProcessManager, ctx: ExtensionContext, timing
 				// Output can arrive before start() resolves with the id, so this runs on output and once the id is known.
 				const checkUrl = () => {
 					if (urlScheduled || settled || id === undefined) return;
-					const url = processes.get(id).urls[0];
+					let process: ProcessInfo;
+					try {
+						process = processes.get(id);
+					} catch (error) {
+						if (isUnknownProcessError(error, id)) return;
+						throw error;
+					}
+					const url = process.urls[0];
 					if (!url) return;
 					urlScheduled = true;
 					timers.push(setTimeout(() => foreground.promote(`it printed ${url} and kept running`), timing.urlSettleMs));
@@ -123,7 +175,8 @@ function operations(manager: () => ProcessManager, ctx: ExtensionContext, timing
 						} else if (!/^\s*sleep\b/.test(command)) {
 							timers.push(setTimeout(() => foreground.promote(`it was still running after ${Math.round(timing.promoteAfterMs / 1000)}s`), timing.promoteAfterMs));
 						}
-					}, (error) => {
+					})
+					.catch((error) => {
 						cleanup();
 						reject(error);
 					});

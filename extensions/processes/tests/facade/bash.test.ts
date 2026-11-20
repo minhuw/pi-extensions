@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { registerBash, type BashTiming } from "../../src/bash.ts";
 import { createProcessManager } from "../../src/manager.ts";
 import type { ProcessEvent, ProcessManager } from "../../src/types.ts";
-import { createCtx, createPi } from "./fakes.ts";
+import { createCtx, createPi, FakeManager } from "./fakes.ts";
 
 const NODE = JSON.stringify(process.execPath);
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -112,5 +112,192 @@ describe("bash override", () => {
 		const result = await pending;
 		expect(text(result)).toContain("because the user sent a new message");
 		expect(manager.list()[0]).toMatchObject({ attached: false, status: "running" });
+	});
+
+	it("settles cleanly when processes.clear() removes a fast-exiting record before finished() discards it", async () => {
+		const { manager, bash } = setup();
+		let cleared = 0;
+		manager.subscribe((event) => {
+			if (event.type === "exit") cleared += manager.clear();
+		});
+
+		const ok = await bash({ command: "echo fast-ok" });
+		expect(text(ok)).toContain("fast-ok");
+		expect(ok.structuredContent.exit_code).toBe(0);
+		expect(cleared).toBe(1);
+
+		const failed = await bash({ command: "echo fast-fail; exit 4" });
+		expect(failed.isError).toBe(true);
+		expect(text(failed)).toContain("fast-fail");
+		expect(text(failed)).toContain("Command exited with code 4");
+		expect(cleared).toBe(2);
+		expect(manager.list()).toEqual([]);
+	});
+
+	it("settles cleanly when processes.discard() removes a record on exit before bash's listener runs", async () => {
+		const { manager, bash } = setup();
+		const discarded: string[] = [];
+		// Subscribed before bash() subscribes, so this runs ahead of bash's exit listener.
+		manager.subscribe((event) => {
+			if (event.type !== "exit") return;
+			manager.discard(event.process.id);
+			discarded.push(event.process.id);
+		});
+
+		// Runs past START_SETTLE_MS so bash() enters its live exit-listener path rather than early-exit.
+		const result = await bash({ command: "sleep 0.25; echo late-exit; exit 5" });
+		expect(result.isError).toBe(true);
+		expect(text(result)).toContain("late-exit");
+		expect(text(result)).toContain("Command exited with code 5");
+		expect(discarded).toHaveLength(1);
+		expect(manager.list()).toEqual([]);
+	});
+
+	it("rejects with the abort error when processes.clear() races with stopWith() cleanup", async () => {
+		const { manager, bash } = setup();
+		let cleared = 0;
+		manager.subscribe((event) => {
+			if (event.type === "exit") cleared += manager.clear();
+		});
+
+		const controller = new AbortController();
+		const pending = bash({ command: "sleep 30" }, controller.signal);
+		while (manager.list().length === 0) await sleep(20);
+		controller.abort();
+
+		await expect(pending).rejects.toThrow("Command aborted");
+		expect(cleared).toBe(1);
+		expect(manager.list()).toEqual([]);
+	});
+
+	it("rejects with the timeout error when processes.discard() races with stopWith() cleanup", async () => {
+		const { manager, bash } = setup({ promoteAfterMs: 100 });
+		const discarded: string[] = [];
+		manager.subscribe((event) => {
+			if (event.type !== "exit") return;
+			manager.discard(event.process.id);
+			discarded.push(event.process.id);
+		});
+
+		await expect(bash({ command: "sleep 30", timeout: 1 })).rejects.toThrow("Command timed out after 1 seconds");
+		expect(discarded).toHaveLength(1);
+		expect(manager.list()).toEqual([]);
+	});
+
+	it("handles an already-discarded record in checkUrl(), promote(), and stopWith() without throwing or hanging", async () => {
+		const fake = new FakeManager();
+		const pi = createPi();
+		registerBash(pi.api, () => fake, { promoteAfterMs: 60_000, urlSettleMs: 50, inputMinRunMs: 0 });
+		const ctx = { ...createCtx("session-a", { cwd: process.cwd() }), sessionManager: { getSessionId: () => "session-a", getSessionFile: () => undefined, getEntries: () => [] } };
+		const bash = (params: { command: string; timeout?: number }, signal?: AbortSignal) => pi.tools.get("bash")!.execute("call-1", params, signal, undefined, ctx);
+
+		// 1. Record is already gone when checkUrl() runs on output after start() resolved.
+		let getCalls = 0;
+		const origGet = fake.get.bind(fake);
+		fake.get = (idOrName) => {
+			getCalls++;
+			return origGet(idOrName);
+		};
+		const pending = bash({ command: "echo hi" });
+		await sleep(0);
+		const [started] = fake.processes;
+		expect(started).toBeDefined();
+		fake.discard(started!.id);
+		const beforeOutputGets = getCalls;
+		fake.starts[0]!.onOutput?.(Buffer.from("http://127.0.0.1:8080/\n"));
+		expect(getCalls).toBeGreaterThan(beforeOutputGets);
+		fake.emit({ type: "exit", process: { ...started!, status: "exited", exitCode: 0 }, requested: false, tail: [] });
+		const result = await pending;
+		expect(result.structuredContent.exit_code).toBe(0);
+
+		// 2. Record is cleared before bash's exit listener while input triggers promote().
+		let detachCalls = 0;
+		const origDetach = fake.detach.bind(fake);
+		fake.detach = (idOrName) => {
+			detachCalls++;
+			return origDetach(idOrName);
+		};
+		const unsubRace = fake.subscribe((event) => {
+			if (event.type !== "exit") return;
+			fake.discard(event.process.id);
+			void pi.fire("input", { type: "input", text: "steer", source: "interactive", streamingBehavior: "steer" }, ctx);
+		});
+		const racingPromote = bash({ command: "echo race" });
+		await sleep(0);
+		const [second] = fake.processes;
+		expect(second).toBeDefined();
+		fake.emit({ type: "exit", process: { ...second!, status: "exited", exitCode: 6 }, requested: false, tail: [] });
+		unsubRace();
+		const racedResult = await racingPromote;
+		expect(detachCalls).toBe(1);
+		expect(racedResult.isError).toBe(true);
+		expect(text(racedResult)).toContain("Command exited with code 6");
+
+		// 3. Record is already gone when stopWith() invokes processes.stop() (sync Unknown process throw).
+		const controller = new AbortController();
+		const aborting = bash({ command: "sleep 30" }, controller.signal);
+		await sleep(0);
+		const [third] = fake.processes;
+		expect(third).toBeDefined();
+		fake.discard(third!.id);
+		let stopCalls = 0;
+		fake.stop = (idOrName) => {
+			stopCalls++;
+			throw new Error(`Unknown process "${idOrName}".`);
+		};
+		controller.abort();
+		await expect(aborting).rejects.toThrow("Command aborted");
+		expect(stopCalls).toBe(1);
+
+		// 4. Record is already gone when processes.stop() rejects asynchronously with Unknown process.
+		const controller2 = new AbortController();
+		const abortingAsync = bash({ command: "sleep 30" }, controller2.signal);
+		await sleep(0);
+		const [fourth] = fake.processes;
+		expect(fourth).toBeDefined();
+		fake.discard(fourth!.id);
+		fake.stop = async (idOrName) => {
+			stopCalls++;
+			throw new Error(`Unknown process "${idOrName}".`);
+		};
+		controller2.abort();
+		await expect(abortingAsync).rejects.toThrow("Command aborted");
+		expect(stopCalls).toBe(2);
+	});
+
+	it("propagates unexpected discard() errors instead of swallowing them or hanging", async () => {
+		const makeBash = (failDiscard: () => never) => {
+			const fake = new FakeManager();
+			fake.discard = failDiscard;
+			const pi = createPi();
+			registerBash(pi.api, () => fake, { promoteAfterMs: 60_000, urlSettleMs: 50, inputMinRunMs: 0 });
+			const ctx = { ...createCtx("session-a", { cwd: process.cwd() }), sessionManager: { getSessionId: () => "session-a", getSessionFile: () => undefined, getEntries: () => [] } };
+			const bash = (params: { command: string; timeout?: number }, signal?: AbortSignal) => pi.tools.get("bash")!.execute("call-1", params, signal, undefined, ctx);
+			return { fake, bash };
+		};
+
+		// Unexpected error in finished()
+		{
+			const { fake, bash } = makeBash(() => {
+				throw new Error("EACCES: unlink failed");
+			});
+			const pending = bash({ command: "echo boom" });
+			await sleep(0);
+			const [started] = fake.processes;
+			fake.emit({ type: "exit", process: { ...started!, status: "exited", exitCode: 0 }, requested: false, tail: [] });
+			await expect(pending).rejects.toThrow("EACCES: unlink failed");
+		}
+
+		// Unexpected error in stopWith()
+		{
+			const { fake, bash } = makeBash(() => {
+				throw new Error("EIO: disk error");
+			});
+			const controller = new AbortController();
+			const pending = bash({ command: "sleep 30" }, controller.signal);
+			await sleep(0);
+			controller.abort();
+			await expect(pending).rejects.toThrow("EIO: disk error");
+		}
 	});
 });
