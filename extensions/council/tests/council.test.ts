@@ -939,6 +939,12 @@ describe("council tool execution and RPC deliberation", () => {
 	});
 
 	it("releases retained sessions across normal 2-round completion, Round 1 failure, and Round 2 failure", async () => {
+		const mockCtx = {
+			modelRegistry: {
+				find: (provider: string, id: string) => ({ provider, id }),
+			},
+		} as unknown as ExtensionContext;
+
 		// 1. Normal 2-round completion
 		const normalHarness = bootCouncilHarness();
 		await normalHarness.tool.execute(
@@ -946,7 +952,7 @@ describe("council tool execution and RPC deliberation", () => {
 			{ topic: "Normal 2-round release check" },
 			undefined,
 			undefined,
-			{} as ExtensionContext,
+			mockCtx,
 		);
 		expect(normalHarness.releases.map((r) => r.agentId).sort()).toEqual(
 			normalHarness.spawns.map((s) => s.id).sort(),
@@ -967,7 +973,7 @@ describe("council tool execution and RPC deliberation", () => {
 				{ topic: "Round 1 failure release check" },
 				undefined,
 				undefined,
-				{} as ExtensionContext,
+				mockCtx,
 			),
 		).rejects.toThrow(/at least 2 members must succeed/i);
 		expect(r1FailHarness.releases.map((r) => r.agentId).sort()).toEqual(
@@ -989,7 +995,7 @@ describe("council tool execution and RPC deliberation", () => {
 			{ topic: "Round 2 failure release check" },
 			undefined,
 			undefined,
-			{} as ExtensionContext,
+			mockCtx,
 		);
 		expect(r2FailHarness.releases.map((r) => r.agentId).sort()).toEqual(
 			r2FailHarness.spawns.map((s) => s.id).sort(),
@@ -1002,13 +1008,19 @@ describe("council tool execution and RPC deliberation", () => {
 			round1Handler: () => "hang",
 		});
 
+		const mockCtx = {
+			modelRegistry: {
+				find: (provider: string, id: string) => ({ provider, id }),
+			},
+		} as unknown as ExtensionContext;
+
 		const controller = new AbortController();
 		const promise = harness.tool.execute(
 			"tc-abort-inflight-spawn",
 			{ topic: "Abort while balthasar spawn is in flight" },
 			controller.signal,
 			undefined,
-			{} as ExtensionContext,
+			mockCtx,
 		);
 
 		await vi.waitFor(() => expect(harness.spawns).toHaveLength(3));
@@ -1041,13 +1053,19 @@ describe("council tool execution and RPC deliberation", () => {
 			deferSpawn: () => true,
 		});
 
+		const mockCtx = {
+			modelRegistry: {
+				find: (provider: string, id: string) => ({ provider, id }),
+			},
+		} as unknown as ExtensionContext;
+
 		const controller = new AbortController();
 		const promise = harness.tool.execute(
 			"tc-abort-all-inflight-spawns",
 			{ topic: "Abort while all spawns are in flight", members: ["caspar", "melchior"] },
 			controller.signal,
 			undefined,
-			{} as ExtensionContext,
+			mockCtx,
 		);
 
 		await vi.waitFor(() => expect(harness.deferredSpawns).toHaveLength(2));
@@ -1070,13 +1088,19 @@ describe("council tool execution and RPC deliberation", () => {
 			round2Handler: () => "hang",
 		});
 
+		const mockCtx = {
+			modelRegistry: {
+				find: (provider: string, id: string) => ({ provider, id }),
+			},
+		} as unknown as ExtensionContext;
+
 		const controller = new AbortController();
 		const promise = harness.tool.execute(
 			"tc-abort-inflight-send",
 			{ topic: "Abort while Round 2 send is in flight", members: ["caspar", "melchior"] },
 			controller.signal,
 			undefined,
-			{} as ExtensionContext,
+			mockCtx,
 		);
 
 		await vi.waitFor(() => expect(harness.sends).toHaveLength(2));
