@@ -70,7 +70,7 @@ The statusline footer counts processes through the in-process `processes:request
 
 ## Development
 
-`src/types.ts` is the contract between the substrate (`src/manager.ts`, `src/core/`, no Pi imports) and the Pi facade (`index.ts`, `src/extension.ts`, `bash.ts`, `tools.ts`, `notify.ts`, `guard.ts`, `ui.ts`, `footer.ts`).
+`src/types.ts` is the contract between the substrate (`src/manager.ts`, `src/core/`, no Pi imports) and the Pi facade (`index.ts`, `src/extension.ts`, `src/bash.ts`, `src/tools.ts`, `src/notify.ts`, `src/guard.ts`, `src/ui.ts`, `src/footer.ts`).
 
 ```bash
 npm run test:processes                        # all offline suites

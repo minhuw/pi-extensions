@@ -30,6 +30,7 @@ Pi loads the checkout's TypeScript directly. Use `/reload` after editing it; see
 
 - Remove or disable `npm:@tintinweb/pi-subagents` in the same Pi profile. This collection already includes its own [Subagents](../extensions/subagents/README.md) fork. Reload when no agents are running.
 - Remove or disable `npm:pi-autoresearch` before using [Autoresearch](../extensions/autoresearch/README.md). Both register `/autoresearch`. Existing `.auto/` files are preserved; the collection does not automatically import or execute those campaigns.
+- Remove or disable `npm:@ff-labs/pi-fff` in the same Pi profile before using [FFF](../extensions/fff/README.md). Both register the same tools, `--fff-*` flags, and `/fff-*` commands. Existing `<agentDir>/pi-fff.json` settings and FFF databases remain compatible.
 - If your settings still load the retired CLIProxyAPI provider or standalone native-compaction extension paths, remove those entries. Their saved credentials and configuration files are not changed by installation.
 
 ## Connect optional services
