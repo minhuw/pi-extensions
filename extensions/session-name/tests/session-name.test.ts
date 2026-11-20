@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import sessionName, { AUTO_ENTRY, REFRESH_SYSTEM_PROMPT, sanitizeTitle, SYSTEM_PROMPT } from "../index.ts";
+import sessionName, { AUTO_ENTRY, MAX_OUTPUT_TOKENS, REFRESH_SYSTEM_PROMPT, sanitizeTitle, SYSTEM_PROMPT } from "../index.ts";
 
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 type Model = { provider: string; id: string };
@@ -48,7 +48,7 @@ function harness(options: {
 	entries?: unknown[];
 	models?: Model[];
 	auth?: boolean;
-	complete?: (model: Model, context: Context, options: { signal?: AbortSignal }) => Promise<AssistantMessage>;
+	complete?: (model: Model, context: Context, options: { signal?: AbortSignal; maxTokens?: number }) => Promise<AssistantMessage>;
 } = {}) {
 	const handlers = new Map<string, Handler[]>();
 	let name = options.name;
@@ -94,8 +94,9 @@ it("names the session after the first completed run, from the first prompt and f
 	await h.emit("agent_settled", { aborted: false });
 	await drain();
 	expect(h.name()).toBe("Fix flaky goal retry test");
-	const [, context] = h.complete.mock.calls[0]!;
+	const [, context, options] = h.complete.mock.calls[0]!;
 	expect(context.systemPrompt).toBe(SYSTEM_PROMPT);
+	expect(options.maxTokens).toBe(MAX_OUTPUT_TOKENS);
 	const input = context.messages[0]!.content as string;
 	expect(input).toContain("Fix the flaky retry test in extensions/goal");
 	expect(input).toContain("it passes 50 times in a row");
