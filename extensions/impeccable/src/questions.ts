@@ -35,20 +35,16 @@ export type QuestionReport = {
 /** Validate the whole batch before opening any dialog, including cross-item constraints. */
 function validate(request: Request): void {
 	if (!Check(QuestionSchema, request)) throw new Error("Invalid structured question batch.");
-	if (!Array.isArray(request.questions) || request.questions.length < 1 || request.questions.length > 5) {
-		throw new Error("Provide one to five related questions.");
-	}
 	const ids = new Set<string>();
 	for (const question of request.questions) {
-		if (!/^[A-Za-z0-9_-]{1,80}$/.test(question.id) || ids.has(question.id) || !question.question.trim()) {
+		if (ids.has(question.id) || !question.question.trim()) {
 			throw new Error("Questions need unique stable ids and nonempty text.");
 		}
 		ids.add(question.id);
 		if (question.choices) {
 			const choices = new Set<string>();
-			if (!question.choices.length || question.choices.length > 10) throw new Error("Provide one to ten choices.");
 			for (const choice of question.choices) {
-				if (!/^[A-Za-z0-9_-]{1,80}$/.test(choice.id) || choices.has(choice.id) || !choice.label.trim()) {
+				if (choices.has(choice.id) || !choice.label.trim()) {
 					throw new Error("Choices need unique stable ids and nonempty labels.");
 				}
 				choices.add(choice.id);
@@ -68,7 +64,7 @@ export async function askQuestions(
 		status, answers, pending: request.questions.slice(answers.length), message,
 	});
 	if (signal?.aborted) return report("cancelled", "Tool cancelled; no answer was assumed.");
-	const useTuiCustom = (ctx as Partial<Pick<ExtensionContext, "mode">>).mode === "tui" && typeof ctx.ui?.custom === "function";
+	const useTuiCustom = ctx.mode === "tui" && typeof ctx.ui?.custom === "function";
 	if (!ctx.hasUI || (!useTuiCustom && (typeof ctx.ui?.input !== "function" || typeof ctx.ui?.select !== "function"))) {
 		return report("unavailable", "Dialog UI unavailable. Ask the pending questions in chat and wait for actual answers before proceeding with the decision.");
 	}

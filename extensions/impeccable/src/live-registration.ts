@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { activateImpeccableTools } from "./activation.ts";
-import { LiveOwner, LIVE_MESSAGE, LIVE_SNAPSHOT, type LiveSaved } from "./live.ts";
+import { LiveOwner, LIVE_MESSAGE, LIVE_SNAPSHOT } from "./live.ts";
 import { object } from "./project.ts";
 
 /**
@@ -65,7 +65,7 @@ export function registerLive(pi: ExtensionAPI) {
 			owner = new LiveOwner(ctx.sessionManager.getSessionId(), changed);
 			// Only this active branch and exact session may recover; forks inherit entries, not ownership.
 			const entry = ctx.sessionManager.getBranch().findLast((e) => e.type === "custom" && e.customType === LIVE_SNAPSHOT);
-			if (entry?.type === "custom" && object(entry.data) && entry.data.sessionId === owner.sessionId) await owner.restore(entry.data as unknown as LiveSaved);
+			if (entry?.type === "custom" && object(entry.data) && entry.data.sessionId === owner.sessionId) await owner.restore(entry.data);
 		}
 		return owner;
 	};

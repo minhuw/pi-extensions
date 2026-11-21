@@ -20,8 +20,6 @@ import {
 } from "./side.ts";
 import { logItems, peerLabel, type RelaySentData, senderLabel, SENT_TYPE, showRelayLog, size } from "./viewer.ts";
 
-export { timing } from "./protocol.ts";
-
 /** At most this many sent messages are remembered for relay_status, and this many shown. */
 const SENT_KEPT = 200;
 const SENT_SHOWN = 50;

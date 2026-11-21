@@ -1,7 +1,8 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import type { Readable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { groupAlive, signalGroup, spawnWatchdog, terminateGroup } from "./core/group.ts";
 import { LogFile } from "./core/logfile.ts";
@@ -52,7 +53,7 @@ interface Plan {
 
 /** State of one spawn; a restart replaces it. */
 interface Run {
-	child: ChildProcess;
+	child: ChildProcessByStdio<null, Readable, Readable>;
 	pid: number;
 	/** Readiness criteria not yet met: "pattern", "port", "url", or "auto-url". */
 	pending: Set<string>;
@@ -253,15 +254,15 @@ function createManagerCore(options: ManagerOptions) {
 				});
 			} catch (error) {
 				if (initialPid !== undefined) spawningPids.delete(initialPid);
-				child.stdout?.destroy();
-				child.stderr?.destroy();
+				child.stdout.destroy();
+				child.stderr.destroy();
 				throw error;
 			}
 			const pid = child.pid;
 			if (pid === undefined) {
 				if (initialPid !== undefined) spawningPids.delete(initialPid);
-				child.stdout?.destroy();
-				child.stderr?.destroy();
+				child.stdout.destroy();
+				child.stderr.destroy();
 				throw new Error(`Spawned "${start.command}" without a pid.`);
 			}
 			if (shuttingDown) {
@@ -271,8 +272,8 @@ function createManagerCore(options: ManagerOptions) {
 				} finally {
 					if (initialPid !== undefined) spawningPids.delete(initialPid);
 					spawningPids.delete(pid);
-					child.stdout?.destroy();
-					child.stderr?.destroy();
+					child.stdout.destroy();
+					child.stderr.destroy();
 				}
 				throw new Error("Process manager is shutting down.");
 			}
@@ -307,8 +308,8 @@ function createManagerCore(options: ManagerOptions) {
 				for (const line of splitter.push(chunk)) onLine(record, run, line);
 				if (record.info.attached) record.options.onOutput?.(chunk);
 			};
-			child.stdout!.on("data", output(splitters[0]));
-			child.stderr!.on("data", output(splitters[1]));
+			child.stdout.on("data", output(splitters[0]));
+			child.stderr.on("data", output(splitters[1]));
 
 			if (!plan.disabled) {
 				if (plan.port !== undefined) {
@@ -354,8 +355,8 @@ function createManagerCore(options: ManagerOptions) {
 			await Promise.race([closed, new Promise<void>((resolve) => (timer = setTimeout(resolve, CLOSE_GRACE_MS)))]);
 			clearTimeout(timer);
 			await reap;
-			run.child.stdout!.destroy();
-			run.child.stderr!.destroy();
+			run.child.stdout.destroy();
+			run.child.stderr.destroy();
 			if (!current(record, run)) return;
 			for (const splitter of splitters) for (const line of splitter.end()) handleLine(record, run, line);
 		} catch {
@@ -363,8 +364,8 @@ function createManagerCore(options: ManagerOptions) {
 		} finally {
 			clearTimeout(timer);
 			clearTimeout(run.errorTimer);
-			run.child.stdout!.destroy();
-			run.child.stderr!.destroy();
+			run.child.stdout.destroy();
+			run.child.stderr.destroy();
 			if (!groupAlive(run.pid)) run.stopWatchdog?.();
 			if (current(record, run)) {
 				try {

@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { BUILTIN_ROLE_DIR, loadRole, loadRoles, parseRole, roleSha256 } from "../../src/agents/roles.ts";
+import { loadRole, loadRoles, parseRole, roleSha256 } from "../../src/agents/roles.ts";
 import { BUILTIN_ROLES } from "../../src/config.ts";
 import { fakeRole } from "../support/fake-runner.ts";
 
@@ -88,8 +88,7 @@ describe("loadRoles", () => {
 		expect(() => loadRoles({ builtinDir, overrideDir })).toThrow(join(overrideDir, "worker.md"));
 	});
 
-	const hasBuiltins = existsSync(BUILTIN_ROLE_DIR) && readdirSync(BUILTIN_ROLE_DIR).some((file) => file.endsWith(".md"));
-	it.skipIf(!hasBuiltins)("loads the shipped built-in roles", () => {
+	it("loads the shipped built-in roles", () => {
 		const roles = loadRoles({ overrideDir: join(dir, "absent") });
 		expect([...roles.keys()].sort()).toEqual([...BUILTIN_ROLES].sort());
 		for (const name of ["worker", "tester", "resolver", "curator"]) expect(roles.get(name)!.write).toBe(true);

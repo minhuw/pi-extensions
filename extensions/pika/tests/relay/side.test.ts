@@ -223,8 +223,8 @@ it("drops a side answer once the turn read the message, and needs none for a mes
 	await waitFor(() => texts(h.session, "assistant").includes("read the second"), 5_000, "the second follow-up turn");
 	await sleep(400);
 	expect(sideRequests()).toHaveLength(1);
+	expect(JSON.stringify(sideRequests()[0]!.messages.at(-1))).toContain(`Message ${message}`);
 	expect(relay.frames(id, "send")).toEqual([]);
-	expect(message).toBeTruthy();
 	expect(h.errors).toEqual([]);
 });
 

@@ -18,7 +18,7 @@ export function validateSchema(schema: object, value: unknown): string[] {
 		if (Check(schema, value)) return [];
 		const messages: string[] = [];
 		for (const error of Errors(schema, value)) {
-			const path = String(error.instancePath ?? "");
+			const path = error.instancePath;
 			messages.push(`${path ? `$${path.replace(/\//g, ".")}` : "$"}: ${error.message}`);
 			if (messages.length >= MAX_MESSAGES) break;
 		}

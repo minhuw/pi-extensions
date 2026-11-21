@@ -11,7 +11,6 @@ import {
 	ModelRuntime,
 	SessionManager,
 	SettingsManager,
-	type AgentSession,
 	type ExtensionAPI,
 	type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";

@@ -10,8 +10,6 @@ import {
 	type SessionSummary, type Trace, type Turn,
 } from "./format.ts";
 
-export { timing } from "./client.ts";
-
 /** The entries `recall_read` shows around a seq: this many before it and after it. */
 const BEFORE = 4;
 const AFTER = 8;

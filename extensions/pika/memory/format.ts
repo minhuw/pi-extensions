@@ -12,7 +12,6 @@ export interface Note {
 export interface MemoryView { scopes?: Scope[]; notes?: Note[]; index?: string; indexBytes?: number; indexLines?: number }
 /** A successful save or forget. */
 export interface WriteAnswer { note: Note; index: string; indexBytes: number; indexLines: number }
-/** A 422 `memory_full`. */
 /** A 422 `memory_full`; `project` is the project scope whose index with the user scope overflows, null for the user scope's alone (absent from older servers). */
 export interface FullAnswer { indexBytes?: number; indexLines?: number; limitBytes?: number; limitLines?: number; project?: Scope | null }
 

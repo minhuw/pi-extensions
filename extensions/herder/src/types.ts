@@ -180,9 +180,9 @@ export interface IntegrateCompletedEvent extends EventBase { t: "integrate.compl
 export interface IntegrateFailedEvent extends EventBase { t: "integrate.failed"; key: string; from: string; source: string; reason: "conflict" | "checks_failed" | "error"; conflicts?: string[]; checks?: CheckResult[]; message?: string; task?: string; error?: string }
 export interface VerifyCompletedEvent extends EventBase { t: "verify.completed"; head: string; checks: CheckResult[]; verdict: Verdict; criteria: CriterionResult[]; verifierRan: boolean; gaps?: Gap[] }
 export interface DecisionRecordedEvent extends EventBase { t: "decision.recorded"; question: string; answer: string }
-/** `rebasedOnto` records a replay onto a moved branch; `checks` are the checks rerun at the delivered tip. */
 /** Journaled immediately before delivery writes to the user's checkout or branches, so a retry after a crash can reconcile. */
 export interface DeliveryStartedEvent extends EventBase { t: "delivery.started"; mode: DeliveryMode; target: string; tip: string; onto: string; commits: string[]; rebasedOnto?: string; curated?: boolean }
+/** `rebasedOnto` records a replay onto a moved branch; `checks` are the checks rerun at the delivered tip. */
 export interface DeliveryCompletedEvent extends EventBase { t: "delivery.completed"; mode: DeliveryMode; target: string; tip: string; commits: string[]; rebasedOnto?: string; checks?: CheckResult[]; curated?: boolean }
 export interface RunFinishedEvent extends EventBase { t: "run.finished"; status: RunStatus; reason: string }
 
@@ -192,6 +192,5 @@ export type JournalEvent =
 	| IntegrateCompletedEvent | IntegrateFailedEvent | VerifyCompletedEvent
 	| DecisionRecordedEvent | DeliveryStartedEvent | DeliveryCompletedEvent | RunFinishedEvent;
 export type JournalEventType = JournalEvent["t"];
-export type EventOf<T extends JournalEventType> = Extract<JournalEvent, { t: T }>;
 /** An event as callers write it; the journal adds `v` and `at`. */
 export type JournalInput<E extends JournalEvent = JournalEvent> = E extends JournalEvent ? Omit<E, "v" | "at"> : never;

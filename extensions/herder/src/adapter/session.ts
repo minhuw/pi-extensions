@@ -544,6 +544,6 @@ export class Herder {
 			try { held?.lock.release(); } catch {}
 		};
 		if (settled) release();
-		else void work!.finally(release);
+		else void work.finally(release);
 	}
 }

@@ -472,7 +472,7 @@ export class Uploader {
 	herderRun(payload: unknown): void {
 		if (!payload || typeof payload !== "object") return;
 		const run = payload as Record<string, unknown>;
-		const text = (key: string) => typeof run[key] === "string" ? run[key] as string : undefined;
+		const text = (key: string) => typeof run[key] === "string" ? run[key] : undefined;
 		const runId = text("runId"); const journalPath = text("journalPath");
 		if (!runId || !journalPath) return;
 		const key = `herder:${runId}`;

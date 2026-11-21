@@ -6,10 +6,6 @@ import { type MemoryPin, PIN_ENTRY } from "./entries.ts";
 import { type MemoryView, sectionText } from "./format.ts";
 import { cwdOf, memoryForgetTool, memoryReadTool, memorySaveTool, where } from "./tools.ts";
 
-export { timing } from "./client.ts";
-export { DREAM_ENTRY, type DreamRecord, type MemoryPin, PIN_ENTRY } from "./entries.ts";
-export type { ReadDetails, WriteDetails } from "./tools.ts";
-
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -80,5 +76,3 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 
 	dreamExtension(pi);
 }
-
-export { memoryExtension };

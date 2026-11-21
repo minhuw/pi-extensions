@@ -193,7 +193,7 @@ function interrupted(deps: DeliverDeps, started: DeliveryStartedEvent): { done?:
  */
 export async function deliver(deps: DeliverDeps, request: DeliveryRequest): Promise<DeliveryOutcome> {
 	const { runId, store, vcs } = deps;
-	const mode = request.mode ?? "series";
+	const mode = request.mode;
 	if (!MODES.includes(mode)) throw new Error(`unknown delivery mode ${JSON.stringify(mode)}; expected one of ${MODES.join(", ")}`);
 	const signal = deps.signal ?? new AbortController().signal;
 	const refuse = (reason: string, extra: Partial<DeliveryOutcome> = {}): DeliveryOutcome => ({ ...extra, status: "refused", reason, mode });

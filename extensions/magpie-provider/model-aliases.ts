@@ -142,7 +142,7 @@ export function assertMagpieAliasRoute(model: Model<any>, catalog: readonly Mode
 	if (!target) fail("target_missing");
 	if (target.magpieAliasTarget !== undefined || !target.magpieRoute ||
 		target.magpieRoute.canonicalId !== targetId || (autoGroup ? target.magpieRoute.group !== true :
-			target.magpieRoute.group || target.magpieRoute.owner !== alias.magpieRoute!.owner)) fail("metadata_conflict");
+			target.magpieRoute.group || target.magpieRoute.owner !== alias.magpieRoute.owner)) fail("metadata_conflict");
 	if (autoGroup) {
 		const current = catalog.find(row => row.id === name) as MagpieModel | undefined;
 		if (current && (!current.magpieRoute?.group || current.magpieRoute.canonicalId !== targetId ||
@@ -151,7 +151,7 @@ export function assertMagpieAliasRoute(model: Model<any>, catalog: readonly Mode
 		for (const row of catalog as readonly MagpieModel[]) {
 			if (row.magpieAliasTarget !== undefined || magpieModelName(row.id) !== name || row.magpieRoute?.group) continue;
 			if (!row.magpieRoute || !owner(row.magpieRoute.owner)) fail("metadata_conflict");
-			if (row.magpieRoute.canonicalId !== targetId || row.magpieRoute.owner !== alias.magpieRoute!.owner) fail("ambiguous");
+			if (row.magpieRoute.canonicalId !== targetId || row.magpieRoute.owner !== alias.magpieRoute.owner) fail("ambiguous");
 		}
 	}
 	for (let index = messages.length - 1; index >= 0; index--) {

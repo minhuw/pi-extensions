@@ -169,7 +169,7 @@ function parseCriteria(lines: Line[], problems: string[]): { criterion: Criterio
 		// The last marker wins, so the criterion text itself may say "verify:".
 		const marker = [...start[2].matchAll(VERIFY)].pop();
 		if (!marker) { problems.push(`line ${n}: ${id} has no \`verify:\`; end it with \`verify: check:<id>\` or \`verify: judge — rubric: "…"\``); continue; }
-		let body = start[2].slice(0, marker.index!).trim();
+		let body = start[2].slice(0, marker.index).trim();
 		let spec = start[2].slice(marker.index + marker[0].length).trim();
 		if (/[([]$/.test(body)) { body = body.slice(0, -1).trim(); spec = spec.replace(/[)\]]$/, "").trim(); }
 		body = body.replace(/[\s*_,;\u2014\u2013-]+$/, "");

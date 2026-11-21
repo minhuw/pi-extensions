@@ -47,7 +47,7 @@ function styleInlineMarkdown(text: string, theme: Theme, baseColor?: ThemeColor)
 	let last = 0;
 	const paintBase = (chunk: string) => (chunk ? (baseColor ? theme.fg(baseColor, chunk) : chunk) : "");
 	for (const match of text.matchAll(INLINE_MD)) {
-		const at = match.index ?? 0;
+		const at = match.index;
 		if (at > last) out += paintBase(text.slice(last, at));
 		if (match[1] !== undefined) {
 			out += theme.fg("mdCode", match[0]);

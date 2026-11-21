@@ -340,7 +340,10 @@ export async function login(ctx: ExtensionCommandContext, file: string, arg: str
 	}
 	let before: Record<string, unknown> | undefined;
 	try { before = await readConfigFile(file); } catch (error) { return fail(errorText(error)); }
-	const stored = (name: "url" | "token") => typeof before?.[name] === "string" ? (before[name] as string).trim() : "";
+	const stored = (name: "url" | "token") => {
+		const value = before?.[name];
+		return typeof value === "string" ? value.trim() : "";
+	};
 	const recognition: Recognition = {
 		keyDir: join(dirname(file), "pika"),
 		configured: { url: process.env.PIKA_URL?.trim() || stored("url") || undefined, token: process.env.PIKA_TOKEN?.trim() || stored("token") || undefined },

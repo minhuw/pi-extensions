@@ -141,7 +141,7 @@ export async function delegate(request: Request, ctx: ExtensionToolContext, sign
 		// Even errors and policy conflicts can follow writes in the shared checkout.
 		const userStopped = details.status === "stopped" && !controller.signal.aborted;
 		const atBoundary = boundaryReached || (details.turnCount ?? 0) >= packet.maxTurns;
-		const nativeError = Boolean(outcome.isError || result.isError || details.status === "error");
+		const nativeError = outcome.isError || result.isError || details.status === "error";
 		const cancelled = signal?.aborted || userStopped || boundaryReached || (details.status === "aborted" && !policyConflicts.length);
 		const status = cancelled ? "cancelled" : policyConflicts.length || nativeError || atBoundary || details.status === "stopped" ? "partial" : details.status === "steered" ? "wrapped-up" : "completed";
 		const reason = signal?.aborted ? "caller-cancelled" : userStopped ? "user-stopped" : atBoundary ? "turn-boundary-reached" : policyConflicts.length ? "policy-conflict" : details.status === "aborted" ? "native-turn-limit-aborted" : nativeError ? "agent-error" : details.status === "stopped" ? "adapter-stopped" : status === "wrapped-up" ? "soft-limit-wrap-up" : "native-completed";

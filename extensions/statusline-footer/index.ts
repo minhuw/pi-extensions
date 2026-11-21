@@ -34,7 +34,7 @@ import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
+import type { Usage } from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -739,9 +739,8 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 		if (m.role === "user") {
 			s.turns++;
 		} else if (m.role === "assistant") {
-			const a = m as AssistantMessage;
-			addUsage(s, a.usage, a.provider);
-			for (const block of a.content ?? []) {
+			addUsage(s, m.usage, m.provider);
+			for (const block of m.content ?? []) {
 				if (block.type !== "toolCall") continue;
 				s.toolCalls++;
 				const args = block.arguments as Record<string, unknown>;
@@ -1823,7 +1822,7 @@ export default function (pi: ExtensionAPI) {
 		const state = getSessionState(ctx);
 		if (!state || ctx.mode !== "tui" || event.message.role !== "assistant") return;
 		const { metrics } = state;
-		const { usage, stopReason } = event.message as AssistantMessage;
+		const { usage, stopReason } = event.message;
 		// The whole call, from the request to the last token, and only once content was observed.
 		const callMs = metrics.requestSentAt > 0 && metrics.firstTokenAt > 0 ? Date.now() - metrics.requestSentAt : 0;
 		// Ignore degenerate samples (no content observed, failed or aborted calls,

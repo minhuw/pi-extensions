@@ -4,7 +4,6 @@ import type { IntegrateResult, Limits, StepResult } from "../types.ts";
 import { startSandbox, syntaxProblem } from "./sandbox.ts";
 import type { CallSite, SandboxCall, ScriptProblem } from "./sandbox.ts";
 
-export type { ScriptProblem } from "./sandbox.ts";
 export interface ValidationContext {
 	roles: readonly string[]; checks: readonly string[];
 	/** Roles that cannot run with `write: true`; the others write by default. */

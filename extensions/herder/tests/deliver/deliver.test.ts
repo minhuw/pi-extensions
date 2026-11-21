@@ -553,7 +553,7 @@ describe("deliver", () => {
 		const pending = run_(run, { mode: "series", curate: true }, { runner, signal: controller.signal });
 		while (!runner.calls.length) await new Promise((resolve) => setTimeout(resolve, 5));
 		controller.abort();
-		await expect(pending).rejects.toBeDefined();
+		await expect(pending).rejects.toThrow("aborted");
 		expect(existsSync(worktreePath(fixture.commonDir, run.runId, "curate"))).toBe(false);
 		expect(run.vcs.readRef(curatedRef(run.runId))).toBeNull();
 		expect(fixture.head()).toBe(run.base);

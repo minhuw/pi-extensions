@@ -204,7 +204,7 @@ async function runOperationUnqueued(options: RunEngineOptions, pi: Pick<Extensio
 		const context = await validatedContext(cwd, argv, options.signal);
 		root = context.root;
 		const { target, withoutTarget } = context;
-		if (["hooks", "pin", "ignores"].includes(verb ?? "")) argv.splice(0, argv.length, ...withoutTarget);
+		if (["hooks", "pin", "ignores"].includes(verb)) argv.splice(0, argv.length, ...withoutTarget);
 		// Upstream may interpret missing dotted selectors as their parent. Never
 		// give a mutating doctor the original selector after validating its scope.
 		// Absence selects workspace reporting upstream; never synthesize a target.
@@ -219,7 +219,7 @@ async function runOperationUnqueued(options: RunEngineOptions, pi: Pick<Extensio
 			// artifact mutations are not tracked by the adapter's commit list.
 			return { ...result, integration: { adapter: "pi", engineRun: true, operation: verb, root, ...(target === undefined ? {} : { originalTarget: target, effectiveTarget: root }), hooks: await reportMetadata(root), upstreamManifestDiscovery: "Upstream cannot discover this external Pi package; its genuine artifact findings remain in stdout." } };
 		});
-		if (["update", "install", "link"].includes(verb ?? "") || (verb === "skills" && ["update", "install", "link"].includes(argv[1] ?? ""))) return adapterResult(options, root, { managedBy: "repository", message: UPDATE_HANDOFF });
+		if (["update", "install", "link"].includes(verb) || (verb === "skills" && ["update", "install", "link"].includes(argv[1] ?? ""))) return adapterResult(options, root, { managedBy: "repository", message: UPDATE_HANDOFF });
 		if (verb === "pin") {
 			const result = await pin(managed, root, pi, sessionCwd, committed);
 			options.signal?.throwIfAborted();
@@ -291,14 +291,14 @@ async function runOperationUnqueued(options: RunEngineOptions, pi: Pick<Extensio
 						}
 					}
 					options.signal?.throwIfAborted();
-					return { ...result, integration: { adapter: "pi", engineRun: true, operation: verb ?? "", root, configPaths: configs.map((config) => config.file), validationCwd: stage, committed } };
+					return { ...result, integration: { adapter: "pi", engineRun: true, operation: verb, root, configPaths: configs.map((config) => config.file), validationCwd: stage, committed } };
 				} finally { await rm(stage, { recursive: true, force: true }); }
 			}
 			if (verb === "hooks") throw new Error(`Unknown hook action: ${argv[1]}`);
 			let result: EngineRunResult;
 			try { result = await runEngine({ ...options, argv, cwd }); }
 			finally { invalidateProjectConfigCache(); }
-			return { ...result, integration: { adapter: "pi", engineRun: true, operation: verb ?? "", root } };
+			return { ...result, integration: { adapter: "pi", engineRun: true, operation: verb, root } };
 		});
 		options.signal?.throwIfAborted();
 		return operationResult;

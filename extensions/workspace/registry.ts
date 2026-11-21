@@ -666,7 +666,7 @@ export async function touchWorkspace(
 				createdAt: nowIso,
 				lastAccessedAt: nowIso,
 				pinned: input.pinned ?? false,
-				ttlMs: input.ttlMs ?? policy.defaultTtlMs ?? 0,
+				ttlMs: input.ttlMs ?? policy.defaultTtlMs,
 			};
 			entries.push(updatedEntry);
 		}
@@ -721,7 +721,7 @@ async function syncWorkspacesUnlocked(cwd: string, now?: Date, agentDir?: string
 				createdAt: createdIso,
 				lastAccessedAt: nowIso,
 				pinned: false,
-				ttlMs: policy.defaultTtlMs ?? 0,
+				ttlMs: policy.defaultTtlMs,
 			});
 			changed = true;
 		} else {

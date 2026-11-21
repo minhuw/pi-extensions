@@ -290,7 +290,7 @@ describe("bash override", () => {
 
 		// Unexpected error in stopWith()
 		{
-			const { fake, bash } = makeBash(() => {
+			const { bash } = makeBash(() => {
 				throw new Error("EIO: disk error");
 			});
 			const controller = new AbortController();

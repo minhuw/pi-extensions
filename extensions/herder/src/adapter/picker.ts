@@ -21,7 +21,6 @@ export const PickParameters = Type.Object({
 	findings: Type.Array(FindingSchema, { minItems: 1, maxItems: 99, description: "The findings in table order" }),
 });
 export type Finding = Static<typeof FindingSchema>;
-export type PickParams = Static<typeof PickParameters>;
 /** `via: "standing"`: the user's standing authorization (self-driving mode) took the recommended set without asking. */
 export interface PickDetails { selected: string[]; note?: string; cancelled: boolean; via: "picker" | "editor" | "standing"; grant?: string }
 /** Picker state shared across the picker instances of one interaction (each note edit reopens the picker). */

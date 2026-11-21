@@ -337,18 +337,18 @@ export class LiveOwner {
 		this.controller.signal.throwIfAborted();
 		this.phase = "polling"; this.notify(); this.background(() => this.poll()); return this.view();
 	}
-	async restore(saved: LiveSaved) {
-		if (saved.version !== 1 || saved.sessionId !== this.sessionId || typeof saved.root !== "string" || !Array.isArray(saved.ids) || saved.ids.some((id) => !idOK(id))) throw new Error("No recovery metadata for this Pi session/branch");
-		this.root = await resolveDirectory(saved.root); this.ids = saved.ids.slice(-64);
-		if (saved.pending) {
-			if (!Number.isFinite(saved.pending.receivedAt) || typeof saved.pending.token !== "string" || typeof saved.pending.hash !== "string") throw new Error("Malformed recovery event metadata");
-			const file = saved.pending.file; const directory = path.dirname(file);
+	async restore(saved: unknown) {
+		if (!object(saved) || saved.version !== 1 || saved.sessionId !== this.sessionId || typeof saved.root !== "string" || !Array.isArray(saved.ids) || saved.ids.some((id) => !idOK(id))) throw new Error("No recovery metadata for this Pi session/branch");
+		this.root = await resolveDirectory(saved.root); this.ids = (saved.ids as string[]).slice(-64);
+		if (saved.pending !== undefined) {
+			if (!object(saved.pending) || typeof saved.pending.file !== "string" || typeof saved.pending.id !== "string" || typeof saved.pending.token !== "string" || typeof saved.pending.hash !== "string" || typeof saved.pending.receivedAt !== "number" || !Number.isFinite(saved.pending.receivedAt)) throw new Error("Malformed recovery event metadata");
+			const { file, hash, id, receivedAt } = saved.pending; const directory = path.dirname(file);
 			if (path.dirname(directory) !== await physicalPath(os.tmpdir()) || !path.basename(directory).startsWith("pi-impeccable-live-") || path.basename(file) !== "event.json") throw new Error("Invalid owned recovery sidecar path");
 			const info = await lstat(directory); const fileInfo = await lstat(file);
 			if (!info.isDirectory() || info.isSymbolicLink() || fileInfo.isSymbolicLink() || !fileInfo.isFile() || fileInfo.size > 4 * 1024 * 1024 || process.getuid && (info.uid !== process.getuid() || (info.mode & 0o077) !== 0)) throw new Error("Unsafe recovery sidecar");
 			const raw = await readFile(file, "utf8");
-			if (digest(raw) !== saved.pending.hash) throw new Error("Recovery payload changed; inspect canonical journal");
-			this.directory = directory; this.pending = { ...saved.pending, event: validateLiveEvent(JSON.parse(raw)), token: randomUUID() };
+			if (digest(raw) !== hash) throw new Error("Recovery payload changed; inspect canonical journal");
+			this.directory = directory; this.pending = { file, hash, id, receivedAt, event: validateLiveEvent(JSON.parse(raw)), token: randomUUID() };
 		}
 		this.phase = "paused"; this.message = "Recovered own session metadata; explicit resume required"; this.notify();
 	}

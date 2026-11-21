@@ -8,8 +8,6 @@ import type {
 	Message,
 	Model,
 	TextContent,
-	ToolCall,
-	ToolResultMessage,
 	Usage,
 } from "@earendil-works/pi-ai";
 import {
@@ -23,16 +21,11 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import {
 	buildSpokesmanPrompt,
 	evaluateProseForSpokesman,
-	stripNonProse,
-	type ProseEvaluation,
 	type SpokesmanMode,
-	type SpokesmanPromptInput,
 	type TurnWorkItem,
 } from "./filter.ts";
 import {
 	createSpokesmanEntryRenderer,
-	formatSpokesmanSeparator,
-	hasNerdFonts,
 	type SpokesmanRewriteData,
 } from "./ui.ts";
 
@@ -303,7 +296,7 @@ function effectiveMode(
 	state: SpokesmanBranchState,
 	configured: SpokesmanConfig,
 ): SpokesmanMode {
-	return state.switchMode ?? state.baseMode ?? configured.mode ?? "auto";
+	return state.switchMode ?? state.baseMode ?? configured.mode;
 }
 
 function isEligible(ctx: ExtensionContext): boolean {
@@ -570,23 +563,21 @@ function extractDialogueAndWorkFromBranch(
 		const msg = entry.message;
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
 			for (const block of msg.content) {
-				if (block && typeof block === "object" && (block as ToolCall).type === "toolCall") {
-					const tc = block as ToolCall;
-					toolArgsById.set(tc.id, {
-						name: tc.name,
-						summary: summarizeToolArgs(tc.name, tc.arguments),
+				if (block.type === "toolCall") {
+					toolArgsById.set(block.id, {
+						name: block.name,
+						summary: summarizeToolArgs(block.name, block.arguments),
 					});
 				}
 			}
 		} else if (msg.role === "toolResult") {
-			const tr = msg as ToolResultMessage;
-			const callInfo = toolArgsById.get(tr.toolCallId);
-			const outputText = extractTextFromContent(tr.content);
+			const callInfo = toolArgsById.get(msg.toolCallId);
+			const outputText = extractTextFromContent(msg.content);
 			workItems.push({
-				toolName: tr.toolName || callInfo?.name || "tool",
-				summary: callInfo?.summary ?? tr.toolName,
+				toolName: msg.toolName || callInfo?.name || "tool",
+				summary: callInfo?.summary ?? msg.toolName,
 				outputExcerpt: compactExcerpt(outputText),
-				isError: tr.isError,
+				isError: msg.isError,
 			});
 		}
 	}
@@ -602,7 +593,7 @@ async function callSpokesmanModel(
 	model: Model<Api>,
 	prompt: { systemPrompt: string; userPrompt: string },
 	ctx: ExtensionContext,
-): Promise<{ text: string; usage?: Usage; provider?: string } | undefined> {
+): Promise<{ text: string; usage?: Usage; provider: string } | undefined> {
 	const context: Context = {
 		systemPrompt: prompt.systemPrompt,
 		messages: [
@@ -620,7 +611,7 @@ async function callSpokesmanModel(
 		let streamedText = "";
 		try {
 			for await (const event of stream) {
-				if (event.type === "text_delta" && typeof event.delta === "string") {
+				if (event.type === "text_delta") {
 					streamedText += event.delta;
 					if (ctx.mode === "tui" && streamedText.trim()) {
 						try {
@@ -649,7 +640,7 @@ async function callSpokesmanModel(
 		return {
 			text: finalText,
 			usage: finalMessage.usage,
-			provider: finalMessage.provider ?? model.provider,
+			provider: finalMessage.provider,
 		};
 	}
 
@@ -663,7 +654,7 @@ async function callSpokesmanModel(
 		return {
 			text: finalText,
 			usage: finalMessage.usage,
-			provider: finalMessage.provider ?? model.provider,
+			provider: finalMessage.provider,
 		};
 	}
 
@@ -686,7 +677,7 @@ function collectSessionStats(ctx: ExtensionContext): {
 
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type === "message" && entry.message.role === "assistant") {
-			const msg = entry.message as AssistantMessage;
+			const msg = entry.message;
 			const hasToolCall =
 				Array.isArray(msg.content) && msg.content.some((part) => part.type === "toolCall");
 			if (msg.stopReason === "stop" && !hasToolCall) {
@@ -794,7 +785,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 		const configured = await readConfig(ctx);
 		if (!state.pinned) {
 			const pinBase = state.base !== undefined ? state.base : (configured.default ?? null);
-			const pinMode = state.baseMode ?? configured.mode ?? "auto";
+			const pinMode = state.baseMode ?? configured.mode;
 			pi.appendEntry<SpokesmanEntry>(SPOKESMAN_STATE_ENTRY, {
 				base: pinBase,
 				baseMode: pinMode,
@@ -841,7 +832,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 		if (!isEligible(ctx)) return undefined;
 		if (event.message.role !== "assistant") return undefined;
 
-		const msg = event.message as AssistantMessage;
+		const msg = event.message;
 		if (msg.stopReason !== "stop") return undefined;
 		if (!Array.isArray(msg.content)) return undefined;
 		if (msg.content.some((part) => part.type === "toolCall")) return undefined;
@@ -929,7 +920,10 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 
 		try {
 			const result = await callSpokesmanModel(spokesmanModel, prompt, ctx);
-			const rewrittenText = result?.text.trim();
+			if (!result) {
+				return undefined;
+			}
+			const rewrittenText = result.text.trim();
 			if (!rewrittenText) {
 				return undefined;
 			}
@@ -945,8 +939,8 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 					mode === "always" && evaluation.signals.length === 0
 						? ["always"]
 						: evaluation.signals,
-				usage: result?.usage,
-				provider: result?.provider ?? spokesmanModel.provider,
+				usage: result.usage,
+				provider: result.provider,
 				durationMs: Date.now() - startTime,
 				timestamp: Date.now(),
 			};
@@ -1026,7 +1020,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 
 		const messages = event.messages.map((message) => {
 			if (message.role !== "assistant") return message;
-			const assistantMsg = message as AssistantMessage;
+			const assistantMsg = message;
 			// Pi sends copies and may leave an entry out, so pair a message with the next entry that
 			// stores the same response. A message without such an entry gets no rewrite.
 			const entryIdx = branchAssistantEntries.findIndex(
@@ -1129,7 +1123,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i]!;
 			if (entry.type === "message" && entry.message.role === "assistant") {
-				const msg = entry.message as AssistantMessage;
+				const msg = entry.message;
 				const hasToolCall =
 					Array.isArray(msg.content) && msg.content.some((part) => part.type === "toolCall");
 				if (!hasToolCall && extractTextFromContent(msg.content).trim()) {
@@ -1457,7 +1451,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 			if (raw.toLowerCase() === "reset") {
 				const state = readBranch(ctx);
 				const targetBase = state.base === undefined ? configured.default : (state.base ?? undefined);
-				const targetMode = state.baseMode ?? configured.mode ?? "auto";
+				const targetMode = state.baseMode ?? configured.mode;
 				if (!state.switchedOff && state.switchActive === undefined && state.switchMode === undefined) {
 					ctx.ui.notify("No spokesman switch is active.", "info");
 					return;

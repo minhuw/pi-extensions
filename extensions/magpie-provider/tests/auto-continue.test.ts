@@ -36,13 +36,13 @@ function harness(mode: ExtensionContext["mode"] = "tui", child = false) {
 	const sendMessage = vi.fn();
 	const controller = new AbortController();
 	let activeSession = session;
-	const makeCtx = (targetSession: SessionManager, targetStatuses: Map<string, string>, targetSetStatus: typeof setStatus, targetMode = mode) => ({
+	const makeCtx = (targetSession: SessionManager, targetSetStatus: typeof setStatus, targetMode = mode) => ({
 		mode: targetMode, hasUI: true, model: { ...model }, sessionManager: targetSession,
 		modelRegistry: { getApiKeyAndHeaders: auth }, signal: controller.signal,
 		isIdle: () => idle, hasPendingMessages: () => pending,
 		ui: { notify, setStatus: targetSetStatus },
 	}) as unknown as ExtensionContext;
-	let activeCtx = makeCtx(session, statuses, setStatus);
+	let activeCtx = makeCtx(session, setStatus);
 	const appendEntry = vi.fn((type: string, data: unknown) => activeSession.appendCustomEntry(type, structuredClone(data)));
 	const pi = {
 		on: (event: string, handler: any) => handlers.set(event, handler),
@@ -76,7 +76,7 @@ function harness(mode: ExtensionContext["mode"] = "tui", child = false) {
 			if (text === undefined) nextStatuses.delete(key);
 			else nextStatuses.set(key, text);
 		});
-		const nextCtx = makeCtx(nextSession, nextStatuses, nextSetStatus, nextMode);
+		const nextCtx = makeCtx(nextSession, nextSetStatus, nextMode);
 		activeSession = nextSession;
 		activeCtx = nextCtx;
 		return { session: nextSession, ctx: nextCtx, statuses: nextStatuses, setStatus: nextSetStatus };
