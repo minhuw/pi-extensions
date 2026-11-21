@@ -1,3 +1,4 @@
+import { agentFetch, formatTransportError, formatUnexpectedHttpError, mapAuthHttpError } from "../../agent-client.ts";
 import { MemoryServerError, timing } from "../client.ts";
 
 /**
@@ -10,42 +11,25 @@ export interface LeaseServer { url: string; token: string }
 /** No answer came: the server could not be reached, did not answer in time, or sent an unreadable 200. */
 export class NoAnswer extends Error {}
 
-const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
-
 /**
  * Sends `{url}/api/agent/v1/<path>` to `server` and returns the 200 answer's JSON. Any other status throws a
  * `MemoryServerError` with the answer's body; no answer throws `NoAnswer`.
  */
 export async function send<T>(server: LeaseServer, method: "GET" | "POST", path: string, options: { body?: unknown; timeoutMs?: number } = {}): Promise<T> {
-	const timeoutMs = options.timeoutMs ?? timing.httpTimeoutMs;
-	const headers: Record<string, string> = { Authorization: `Bearer ${server.token}`, Accept: "application/json" };
-	if (options.body !== undefined) headers["Content-Type"] = "application/json";
-	let response: Response;
-	try {
-		response = await fetch(`${server.url}/api/agent/v1/${path}`, {
-			method, headers, signal: AbortSignal.timeout(timeoutMs), redirect: "error", ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
-		});
-	} catch (error) {
-		const why = error instanceof Error && error.name === "TimeoutError" ? `no answer within ${Math.round(timeoutMs / 100) / 10} s` : errorText(error);
-		throw new NoAnswer(`could not reach the pika server at ${server.url}: ${why}.`);
+	const result = await agentFetch<T>(server, method, path, {
+		...options,
+		timeoutMs: options.timeoutMs ?? timing.httpTimeoutMs,
+	});
+	if (result.ok) return result.data;
+	if (result.kind === "http") {
+		const message = mapAuthHttpError(result, { readAction: "use agent memory on", includeAdvice: false })
+			?? formatUnexpectedHttpError(result);
+		throw new MemoryServerError(message, result.status, result.body);
 	}
-	if (response.status === 200) {
-		try {
-			return await response.json() as T;
-		} catch (error) {
-			throw new NoAnswer(`the pika server at ${server.url} sent an unreadable answer: ${errorText(error)}.`);
-		}
+	if (result.kind === "credentials_in_url") {
+		throw new Error(formatTransportError(result, "memory"));
 	}
-	let body: Record<string, unknown> = {};
-	try {
-		const parsed = await response.json() as unknown;
-		if (parsed && typeof parsed === "object") body = parsed as Record<string, unknown>;
-	} catch { /* not JSON */ }
-	const code = typeof body.error === "string" ? body.error : undefined;
-	const message = response.status === 401 ? `the pika server at ${server.url} rejected this device's token (HTTP 401).`
-		: response.status === 403 && code === "read_access_denied" ? `this device may not use agent memory on the pika server at ${server.url} (HTTP 403 read_access_denied).`
-		: `unexpected HTTP ${response.status}${code ? ` (${code})` : ""} from the pika server at ${server.url}.`;
-	throw new MemoryServerError(message, response.status, body);
+	throw new NoAnswer(formatTransportError(result, "dream"));
 }
 
 /** Whether a failed request may still have been applied: no answer, or a 5xx (from pika or a proxy in front of it). */
