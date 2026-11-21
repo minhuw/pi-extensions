@@ -9,6 +9,11 @@ on:
       - extensions/**
       - plugins/pika-relay/**
       - themes/**
+      - tests/**
+      - README.md
+      - AGENTS.md
+      - services/pika/web/docs/sources.ts
+      - services/pika-node/src/protocol.ts
       - .github/workflows/extensions.yml
       - package.json
       - package-lock.json
@@ -21,6 +26,11 @@ on:
       - extensions/**
       - plugins/pika-relay/**
       - themes/**
+      - tests/**
+      - README.md
+      - AGENTS.md
+      - services/pika/web/docs/sources.ts
+      - services/pika-node/src/protocol.ts
       - .github/workflows/extensions.yml
       - package.json
       - package-lock.json
