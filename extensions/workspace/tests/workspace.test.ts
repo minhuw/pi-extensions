@@ -2079,4 +2079,29 @@ describe("AC-10: wrapper option flags, process_start, and agent_browser external
 		expect(overQuota).toMatchObject({ block: true });
 		expect(overQuota?.reason).toContain("desktop-ws-over");
 	});
+
+	it('prompts only once on "Allow once" when a relative ../ cwd matches a write target in process_start or agent_browser', async () => {
+		const toolCall = loadToolCallHandler();
+		const canonicalOutside = resolveCanonicalPath(outsideDir);
+		const canonicalTmpdir = resolveCanonicalPath(os.tmpdir());
+
+		const cases: [toolName: "process_start" | "agent_browser", input: Record<string, unknown>, expectedPath: string][] = [
+			["process_start", { command: "touch .", cwd: "../outside" }, canonicalOutside],
+			["process_start", { command: "touch .", cwd: "../.." }, canonicalTmpdir],
+			["agent_browser", { argv: ["--profile", ".", "open", "https://example.com"], cwd: "../outside" }, canonicalOutside],
+			["agent_browser", { argv: ["--profile", ".", "open", "https://example.com"], cwd: "../.." }, canonicalTmpdir],
+		];
+
+		for (const [toolName, input, expectedPath] of cases) {
+			const prompts: string[] = [];
+			const res = await toolCall(
+				{ toolName, input },
+				makeCtx({ hasUI: true, prompts, choice: "Allow once" }),
+			);
+			expect(res, `${toolName} ${JSON.stringify(input)}`).toBeUndefined();
+			expect(prompts, `${toolName} ${JSON.stringify(input)}`).toEqual([
+				`Allow write outside workspace (${expectedPath})?`,
+			]);
+		}
+	});
 });

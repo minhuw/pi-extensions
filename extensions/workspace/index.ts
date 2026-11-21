@@ -8,14 +8,10 @@ import {
 	denyProjectPath,
 	ensureWorkspacesClosure,
 	evaluatePathAccess,
-	extractAgentBrowserExternalTargets,
 	extractAgentBrowserWriteTargets,
-	extractAgentDesktopExternalTargets,
 	extractAgentDesktopWriteTargets,
-	extractBashExternalWriteTargets,
-	extractTaggedBashWriteTargets,
 	extractWorkspaceNameFromPath,
-	findBashNamedStateFile,
+	inspectBashCommand,
 	normalizeAgentDesktopCwd,
 	normalizeFileToolPath,
 	policyFilePath,
@@ -449,13 +445,13 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			const input = event.input as { command?: unknown } | undefined;
 			const command = typeof input?.command === "string" ? input.command : undefined;
 			if (!command || !command.trim()) return undefined;
-			// The extractors read each word the way bash does and resolve it, so every check below reads these paths literally too.
-			targetPaths = extractBashExternalWriteTargets(command, ctx.cwd);
-			const tagged = extractTaggedBashWriteTargets(command, ctx.cwd);
-			localWritePaths = tagged.map((target) => target.path);
-			workspaceTouchPaths = tagged.filter((target) => !target.deletes).map((target) => target.path);
+			// The extractor reads each word the way bash does and resolves it, so every check below reads these paths literally too.
 			// A command that names a state file counts whatever it is, not only the writes the extractor knows.
-			namedStateFile = findBashNamedStateFile(command, ctx.cwd, managedStateFiles(ctx.cwd));
+			const inspected = inspectBashCommand(command, ctx.cwd, ctx.cwd, managedStateFiles(ctx.cwd));
+			localWritePaths = inspected.writeTargets.map((target) => target.path);
+			workspaceTouchPaths = inspected.writeTargets.filter((target) => !target.deletes).map((target) => target.path);
+			namedStateFile = inspected.namedStateFile;
+			targetPaths = localWritePaths;
 		} else if (event.toolName === "process_start") {
 			const input = event.input as { command?: unknown; cwd?: unknown } | undefined;
 			const command = typeof input?.command === "string" ? input.command : undefined;
@@ -463,21 +459,14 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			const cleanedCwd = rawCwd ? (rawCwd.startsWith("@") ? rawCwd.slice(1) : rawCwd) : undefined;
 			if ((!command || !command.trim()) && !cleanedCwd) return undefined;
 			const targetCwd = cleanedCwd ? resolveLiteralPath(cleanedCwd, ctx.cwd) : ctx.cwd;
-			const externalTargets: string[] = [];
-			if (cleanedCwd) {
-				const cwdCheck = evaluatePathAccess({ targetPath: cleanedCwd, cwd: ctx.cwd, literal: true });
-				if (!cwdCheck.allowed) {
-					externalTargets.push(cwdCheck.resolvedPath);
-				}
-			}
 			if (command && command.trim()) {
-				externalTargets.push(...extractBashExternalWriteTargets(command, ctx.cwd, targetCwd));
-				const tagged = extractTaggedBashWriteTargets(command, targetCwd, ctx.cwd);
-				localWritePaths = tagged.map((target) => target.path);
-				workspaceTouchPaths = tagged.filter((target) => !target.deletes).map((target) => target.path);
-				namedStateFile = findBashNamedStateFile(command, targetCwd, managedStateFiles(ctx.cwd));
+				const inspected = inspectBashCommand(command, targetCwd, ctx.cwd, managedStateFiles(ctx.cwd));
+				localWritePaths = inspected.writeTargets.map((target) => target.path);
+				workspaceTouchPaths = inspected.writeTargets.filter((target) => !target.deletes).map((target) => target.path);
+				namedStateFile = inspected.namedStateFile;
 			}
-			targetPaths = [...new Set(externalTargets)];
+			// Keep raw `cleanedCwd` first so `isRelativeParentTraversal` still fires in `evaluatePathAccess`.
+			targetPaths = [...(cleanedCwd ? [cleanedCwd] : []), ...localWritePaths];
 		} else if (event.toolName === "agent_browser") {
 			const input = event.input as { argv?: unknown; cwd?: unknown } | undefined;
 			const argv = Array.isArray(input?.argv)
@@ -489,7 +478,8 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			const writeTargets = extractAgentBrowserWriteTargets(argv, targetCwd);
 			localWritePaths = writeTargets;
 			workspaceTouchPaths = writeTargets;
-			targetPaths = extractAgentBrowserExternalTargets(argv, ctx.cwd, rawCwd);
+			// Keep raw `rawCwd` first so `isRelativeParentTraversal` still fires in `evaluatePathAccess`.
+			targetPaths = [...(rawCwd ? [rawCwd] : []), ...localWritePaths];
 		} else if (event.toolName === "agent_desktop") {
 			const input = event.input as { argv?: unknown; cwd?: unknown } | undefined;
 			const argv = Array.isArray(input?.argv)
@@ -503,7 +493,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			if (writeTargets.length === 0) return undefined;
 			localWritePaths = writeTargets;
 			workspaceTouchPaths = writeTargets;
-			targetPaths = extractAgentDesktopExternalTargets(argv, ctx.cwd, rawCwd);
+			targetPaths = writeTargets;
 		} else {
 			return undefined;
 		}
@@ -550,6 +540,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 
 		const policy = await readProjectPolicy(ctx.cwd);
 		const sessionAllowed = getEffectiveSessionAllowedPaths(ctx);
+		const seenResolved = new Set<string>();
 
 		for (const rawTarget of targetPaths) {
 			const check = evaluatePathAccess({
@@ -560,9 +551,12 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 				projectAllowed: policy.allowedPaths,
 			});
 
+			const resolvedPath = check.resolvedPath;
+			if (seenResolved.has(resolvedPath)) continue;
+			seenResolved.add(resolvedPath);
+
 			if (check.allowed) continue;
 
-			const resolvedPath = check.resolvedPath;
 			const blockedReason = `Blocked write outside project working directory: "${resolvedPath}". Use "${workspacesDir(ctx.cwd)}/<name>" for side workspaces or "/tmp" for temporary files, or ask the user to run "/workspace allow ${resolvedPath}".`;
 
 			if (!ctx.hasUI || isChildSession(ctx) || typeof ctx.ui?.select !== "function") {
@@ -582,13 +576,13 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			}
 
 			// Both lasting choices cover exactly the path the prompt shows, never its parent directory.
-			if (choice === "Allow for this session" || choice === "Allow for session") {
+			if (choice === "Allow for this session") {
 				addSessionAllowedPath(ctx, resolvedPath);
 				sessionAllowed.add(resolvedPath);
 				continue;
 			}
 
-			if (choice === "Allow for this project" || choice === "Allow for project") {
+			if (choice === "Allow for this project") {
 				const saved = await allowProjectPath(ctx.cwd, resolvedPath, true);
 				policy.allowedPaths.push(saved);
 				addSessionAllowedPath(ctx, saved);

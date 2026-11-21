@@ -1047,25 +1047,19 @@ export interface BashWriteTarget {
 	deletes: boolean;
 }
 
+/** Result of inspecting a shell command in a single parse and walk. */
+export interface BashCommandInspection {
+	writeTargets: BashWriteTarget[];
+	namedStateFile?: string;
+}
+
 /** Verbs that only delete what they name. */
 const DELETING_VERBS = new Set(["rm", "rmdir"]);
 
-/**
- * Extracts all resolved filesystem write/creation target paths from a shell command.
- * Commands for other machines (`ssh host mkdir /x`) and heredoc bodies are data unless a
- * local shell reads them (`bash <<EOF`, `cat <<EOF | sh`).
- */
-export function extractBashWriteTargets(command: string, cwd: string, projectCwd?: string): string[] {
-	return [...new Set(extractTaggedBashWriteTargets(command, cwd, projectCwd).map((target) => target.path))];
-}
-
-/**
- * The targets of `extractBashWriteTargets`, each tagged with whether it is only deleted. A path both deleted and
- * written in one command (`rm -rf d; mkdir d`) is tagged as written.
- */
-export function extractTaggedBashWriteTargets(command: string, cwd: string, projectCwd?: string): BashWriteTarget[] {
-	const startCwd = resolveCanonicalPath(cwd);
-	const canonicalCwd = resolveCanonicalPath(projectCwd ?? cwd);
+function createBashWriteTargetCollector(canonicalCwd: string): {
+	visitor: BashWalkVisitor;
+	results: () => BashWriteTarget[];
+} {
 	const targets: string[] = [];
 	const written = new Set<string>();
 	let deleting = false;
@@ -1210,13 +1204,15 @@ export function extractTaggedBashWriteTargets(command: string, cwd: string, proj
 		}
 	};
 
-	walkBashCommands(command, startCwd, {
-		command: inspectCommand,
-		writeRedirect: (target, effectiveCwd) => {
-			push(resolveBashWord(target, effectiveCwd));
+	return {
+		visitor: {
+			command: inspectCommand,
+			writeRedirect: (target, effectiveCwd) => {
+				push(resolveBashWord(target, effectiveCwd));
+			},
 		},
-	});
-	return [...new Set(targets)].map((target) => ({ path: target, deletes: !written.has(target) }));
+		results: () => [...new Set(targets)].map((target) => ({ path: target, deletes: !written.has(target) })),
+	};
 }
 
 /** Verbs that only read the files they name. */
@@ -1235,13 +1231,10 @@ function wordPathForms(word: string): string[] {
 	return forms.filter((form) => form !== "");
 }
 
-/**
- * Returns the first of `stateFiles` that a simple command of `command` names, whatever that command is,
- * unless its verb only reads: one of its words resolves to the file, or one resolves to the file's
- * directory while another word's last path segment is the file's name (`cp /tmp/policy.json .pi/workspaces/`).
- * Words resolve as write targets do, and letter case is ignored.
- */
-export function findBashNamedStateFile(command: string, cwd: string, stateFiles: string[]): string | undefined {
+function createBashStateFileFinder(stateFiles: readonly string[]): {
+	visitor: BashWalkVisitor;
+	result: () => string | undefined;
+} {
 	const states = stateFiles.map((file) => ({
 		file,
 		resolved: resolveCanonicalPath(file).toLowerCase(),
@@ -1250,25 +1243,87 @@ export function findBashNamedStateFile(command: string, cwd: string, stateFiles:
 	}));
 	let named: string | undefined;
 
-	walkBashCommands(command, resolveCanonicalPath(cwd), {
-		command: (words, effectiveCwd) => {
-			if (named || READ_ONLY_VERBS.has(words[0]!)) return;
-			const resolved = words.map((word) =>
-				wordPathForms(word).map((form) => resolveBashWord(form, effectiveCwd).toLowerCase()),
-			);
-			named = states.find(
-				(state) =>
-					resolved.some((forms) => forms.includes(state.resolved)) ||
-					resolved.some(
-						(forms, index) =>
-							forms.includes(state.dir) &&
-							words.some((other, otherIndex) => otherIndex !== index && path.basename(other).toLowerCase() === state.name),
-					),
-			)?.file;
+	return {
+		visitor: {
+			command: (words, effectiveCwd) => {
+				if (named || states.length === 0 || READ_ONLY_VERBS.has(words[0]!)) return;
+				const resolved = words.map((word) =>
+					wordPathForms(word).map((form) => resolveBashWord(form, effectiveCwd).toLowerCase()),
+				);
+				named = states.find(
+					(state) =>
+						resolved.some((forms) => forms.includes(state.resolved)) ||
+						resolved.some(
+							(forms, index) =>
+								forms.includes(state.dir) &&
+								words.some((other, otherIndex) => otherIndex !== index && path.basename(other).toLowerCase() === state.name),
+						),
+				)?.file;
+			},
+			writeRedirect: () => {},
 		},
-		writeRedirect: () => {},
+		result: () => named,
+	};
+}
+
+/**
+ * Parses and walks `command` once to collect both tagged write targets and any managed state file named
+ * by a non-read-only command.
+ */
+export function inspectBashCommand(
+	command: string,
+	cwd: string,
+	projectCwd?: string,
+	stateFiles: readonly string[] = [],
+): BashCommandInspection {
+	const startCwd = resolveCanonicalPath(cwd);
+	const canonicalCwd = projectCwd !== undefined && projectCwd !== cwd ? resolveCanonicalPath(projectCwd) : startCwd;
+	const collector = createBashWriteTargetCollector(canonicalCwd);
+	const finder = stateFiles.length > 0 ? createBashStateFileFinder(stateFiles) : undefined;
+
+	walkBashCommands(command, startCwd, {
+		command: (words, effectiveCwd) => {
+			collector.visitor.command(words, effectiveCwd);
+			finder?.visitor.command(words, effectiveCwd);
+		},
+		writeRedirect: (target, effectiveCwd) => {
+			collector.visitor.writeRedirect(target, effectiveCwd);
+		},
 	});
-	return named;
+
+	return {
+		writeTargets: collector.results(),
+		namedStateFile: finder?.result(),
+	};
+}
+
+/**
+ * Extracts all resolved filesystem write/creation target paths from a shell command.
+ * Commands for other machines (`ssh host mkdir /x`) and heredoc bodies are data unless a
+ * local shell reads them (`bash <<EOF`, `cat <<EOF | sh`).
+ */
+export function extractBashWriteTargets(command: string, cwd: string, projectCwd?: string): string[] {
+	return [...new Set(extractTaggedBashWriteTargets(command, cwd, projectCwd).map((target) => target.path))];
+}
+
+/**
+ * The targets of `extractBashWriteTargets`, each tagged with whether it is only deleted. A path both deleted and
+ * written in one command (`rm -rf d; mkdir d`) is tagged as written.
+ */
+export function extractTaggedBashWriteTargets(command: string, cwd: string, projectCwd?: string): BashWriteTarget[] {
+	return inspectBashCommand(command, cwd, projectCwd).writeTargets;
+}
+
+/**
+ * Returns the first of `stateFiles` that a simple command of `command` names, whatever that command is,
+ * unless its verb only reads: one of its words resolves to the file, or one resolves to the file's
+ * directory while another word's last path segment is the file's name (`cp /tmp/policy.json .pi/workspaces/`).
+ * Words resolve as write targets do, and letter case is ignored.
+ */
+export function findBashNamedStateFile(command: string, cwd: string, stateFiles: string[]): string | undefined {
+	const finder = createBashStateFileFinder(stateFiles);
+	walkBashCommands(command, resolveCanonicalPath(cwd), finder.visitor);
+	return finder.result();
 }
 
 /**
