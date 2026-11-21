@@ -240,17 +240,62 @@ export function recordSpan(record: TraceRecord): { start: number | undefined; en
 	return { start: record.start ?? record.end, end: record.end ?? record.start };
 }
 
+/** Pre-indexed tool calls by `callId` and `childSessionId`, preserving first-match record order. */
+export interface SpawningCallIndex {
+	readonly byCallId: ReadonlyMap<string | undefined, { record: TraceToolRecord; index: number }>;
+	readonly byChildSessionId: ReadonlyMap<string | undefined, { record: TraceToolRecord; index: number }>;
+}
+
+/** Indexes a trace's tool records once so `spawningCall` and `childSpan` resolve each child in O(1). */
+export function indexSpawningCalls(records: readonly TraceRecord[]): SpawningCallIndex {
+	const byCallId = new Map<string | undefined, { record: TraceToolRecord; index: number }>();
+	const byChildSessionId = new Map<string | undefined, { record: TraceToolRecord; index: number }>();
+	for (let i = 0; i < records.length; i++) {
+		const record = records[i];
+		if (record.kind !== "tool") continue;
+		const entry = { record, index: i };
+		if (!byCallId.has(record.callId)) byCallId.set(record.callId, entry);
+		if (!byChildSessionId.has(record.childSessionId)) byChildSessionId.set(record.childSessionId, entry);
+	}
+	return { byCallId, byChildSessionId };
+}
+
+const spawningCallCache = new WeakMap<
+	readonly TraceRecord[],
+	{ length: number; first: TraceRecord | undefined; last: TraceRecord | undefined; index: SpawningCallIndex }
+>();
+
+function cachedSpawningCallIndex(records: readonly TraceRecord[]): SpawningCallIndex {
+	const length = records.length;
+	const first = records[0];
+	const last = length > 0 ? records[length - 1] : undefined;
+	const cached = spawningCallCache.get(records);
+	if (cached && cached.length === length && cached.first === first && cached.last === last) return cached.index;
+	const index = indexSpawningCalls(records);
+	spawningCallCache.set(records, { length, first, last, index });
+	return index;
+}
+
+function lookupSpawningCall(index: SpawningCallIndex, child: TraceChild): TraceToolRecord | undefined {
+	const byCall = index.byCallId.get(child.parentToolCallId);
+	const bySession = index.byChildSessionId.get(child.sessionId);
+	if (byCall && bySession) return byCall.index <= bySession.index ? byCall.record : bySession.record;
+	return byCall?.record ?? bySession?.record;
+}
+
 /**
  * A child session's span. A child without entries yet, such as a subagent that just started, has no times of its
  * own; it runs within the tool call that spawned it, so it borrows that call's start and, once known, its end.
  */
-export function childSpan(trace: Pick<SessionTrace, "records">, child: TraceChild): { start: number | undefined; end: number | undefined } {
+export function childSpan(
+	trace: Pick<SessionTrace, "records">,
+	child: TraceChild,
+	index?: SpawningCallIndex,
+): { start: number | undefined; end: number | undefined } {
 	let start = child.startedAt;
 	let end = child.lastAt;
 	if (start === undefined || end === undefined) {
-		const call = trace.records.find(
-			(record): record is TraceToolRecord => record.kind === "tool" && (record.callId === child.parentToolCallId || record.childSessionId === child.sessionId),
-		);
+		const call = spawningCall(trace, child, index);
 		const span = call ? recordSpan(call) : undefined;
 		start ??= span?.start;
 		end ??= span?.end;
@@ -259,10 +304,8 @@ export function childSpan(trace: Pick<SessionTrace, "records">, child: TraceChil
 }
 
 /** The tool call that spawned a child, if the trace has it. */
-export function spawningCall(trace: Pick<SessionTrace, "records">, child: TraceChild): TraceToolRecord | undefined {
-	return trace.records.find(
-		(record): record is TraceToolRecord => record.kind === "tool" && (record.callId === child.parentToolCallId || record.childSessionId === child.sessionId),
-	);
+export function spawningCall(trace: Pick<SessionTrace, "records">, child: TraceChild, index?: SpawningCallIndex): TraceToolRecord | undefined {
+	return lookupSpawningCall(index ?? cachedSpawningCallIndex(trace.records), child);
 }
 
 /**

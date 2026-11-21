@@ -1,7 +1,19 @@
 // The overview's time axis: idle gaps folded into fixed-width breaks, a pixel scale over the
 // remaining active time, ticks, and the layout and hit-testing of the drawn records.
 import type { SessionTrace, TraceRecord } from "../lib/types";
-import { childSpan, contextTokens, llmPhases, recordFamily, recordIsError, recordKey, recordSpan, type Family, type LlmPhases } from "./kinds";
+import {
+	childSpan,
+	contextTokens,
+	indexSpawningCalls,
+	llmPhases,
+	recordFamily,
+	recordIsError,
+	recordKey,
+	recordSpan,
+	type Family,
+	type LlmPhases,
+	type SpawningCallIndex,
+} from "./kinds";
 
 /** Idle stretches longer than this fold into a break marker. */
 export const GAP_MS = 120_000;
@@ -36,7 +48,8 @@ export function foldGaps(intervals: Interval[], gapMs = GAP_MS): Axis {
 	if (sorted.length === 0) return { origin: 0, segments: [{ start: 0, end: MIN_SEGMENT_MS, offset: 0 }], gaps: [], activeMs: MIN_SEGMENT_MS };
 	const clusters: Interval[] = [];
 	let current = { ...sorted[0] };
-	for (const item of sorted.slice(1)) {
+	for (let i = 1; i < sorted.length; i++) {
+		const item = sorted[i];
 		if (item.start - current.end > gapMs) {
 			clusters.push(current);
 			current = { ...item };
@@ -66,8 +79,10 @@ export function traceIntervals(trace: SessionTrace): Interval[] {
 		if (start !== undefined) out.push({ start, end: end ?? start });
 	}
 	for (const turn of trace.turns) if (turn.at !== undefined) out.push({ start: turn.at, end: turn.at + Math.max(0, turn.durationMs || 0) });
+	let spawning: SpawningCallIndex | undefined;
 	for (const child of trace.children) {
-		const { start, end } = childSpan(trace, child);
+		const index = child.startedAt === undefined || child.lastAt === undefined ? (spawning ??= indexSpawningCalls(trace.records)) : undefined;
+		const { start, end } = childSpan(trace, child, index);
 		if (start !== undefined) out.push({ start, end: end ?? start });
 	}
 	return out;
@@ -128,19 +143,22 @@ export function makeScale(axis: Axis, width: number, options: { breakPx?: number
 	const time = (px: number): number => {
 		const { segments } = axis;
 		if (!Number.isFinite(px)) return segments[0].start;
-		for (let i = 0; i < segments.length; i++) {
-			const x0 = startX(i);
-			if (px < x0 && i > 0) {
-				const gap = axis.gaps[i - 1];
-				const fraction = Math.max(0, Math.min(1, (px - endX(i - 1)) / Math.max(1, breakPx)));
-				return gap.start + fraction * (gap.end - gap.start);
-			}
-			if (px <= endX(i) || i === segments.length - 1) {
-				const t = segments[i].start + Math.max(0, px - x0) / pxPerMs;
-				return Math.min(segments[i].end, t);
-			}
+		let lo = 0;
+		let hi = segments.length - 1;
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1;
+			if (endX(mid) < px) lo = mid + 1;
+			else hi = mid;
 		}
-		return segments[segments.length - 1].end;
+		const i = lo;
+		const x0 = startX(i);
+		if (px < x0 && i > 0) {
+			const gap = axis.gaps[i - 1];
+			const fraction = Math.max(0, Math.min(1, (px - endX(i - 1)) / Math.max(1, breakPx)));
+			return gap.start + fraction * (gap.end - gap.start);
+		}
+		const t = segments[i].start + Math.max(0, px - x0) / pxPerMs;
+		return Math.min(segments[i].end, t);
 	};
 
 	const position = (t: number): number => {
@@ -155,10 +173,16 @@ export function makeScale(axis: Axis, width: number, options: { breakPx?: number
 	const timeAt = (p: number): number => {
 		const { segments } = axis;
 		const clamped = Number.isFinite(p) ? Math.max(0, Math.min(axis.activeMs, p)) : 0;
-		for (const segment of segments) {
-			const length = segment.end - segment.start;
-			if (clamped <= segment.offset + length) return segment.start + (clamped - segment.offset);
+		let lo = 0;
+		let hi = segments.length - 1;
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1;
+			const segment = segments[mid];
+			if (segment.offset + (segment.end - segment.start) < clamped) lo = mid + 1;
+			else hi = mid;
 		}
+		const segment = segments[lo];
+		if (clamped <= segment.offset + (segment.end - segment.start)) return segment.start + (clamped - segment.offset);
 		return segments[segments.length - 1].end;
 	};
 
@@ -193,18 +217,34 @@ export function isFullWindow(axis: Axis, window: Interval | undefined): boolean 
  * unchanged, so clock labels still count from the session's start.
  */
 export function windowAxis(axis: Axis, window: Interval): Axis {
+	const { segments: src } = axis;
+	if (!(window.end > window.start) || src.length === 0) return axis;
+	let lo = 0;
+	let hi = src.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >> 1;
+		const segment = src[mid];
+		if (segment.offset + (segment.end - segment.start) <= window.start) lo = mid + 1;
+		else hi = mid;
+	}
 	const segments: AxisSegment[] = [];
 	const gaps: Interval[] = [];
-	axis.segments.forEach((segment, i) => {
+	let activeMs = 0;
+	for (let i = lo; i < src.length; i++) {
+		const segment = src[i];
+		if (segment.offset >= window.end) break;
 		const a = Math.max(window.start, segment.offset);
 		const b = Math.min(window.end, segment.offset + (segment.end - segment.start));
-		if (b <= a) return;
+		if (b <= a) continue;
 		// The window is one stretch of active time, so kept segments are neighbours and the gap between them is theirs.
 		if (segments.length) gaps.push(axis.gaps[i - 1]);
-		segments.push({ start: segment.start + (a - segment.offset), end: segment.start + (b - segment.offset), offset: a - window.start });
-	});
+		const start = segment.start + (a - segment.offset);
+		const end = segment.start + (b - segment.offset);
+		segments.push({ start, end, offset: a - window.start });
+		activeMs += end - start;
+	}
 	if (segments.length === 0) return axis;
-	return { origin: axis.origin, segments, gaps, activeMs: segments.reduce((total, segment) => total + segment.end - segment.start, 0) };
+	return { origin: axis.origin, segments, gaps, activeMs };
 }
 
 /** The scale of a window: the whole axis when there is none. */
@@ -347,9 +387,13 @@ export interface AgentRows {
  * whatever runs there. Children without a start are not drawn and get no row. Packing by time, not pixels, keeps the
  * rows the same at every zoom.
  */
-export function packChildren(trace: Pick<SessionTrace, "records" | "children">): AgentRows {
+function packChildrenIndexed(trace: Pick<SessionTrace, "records" | "children">, spawning?: SpawningCallIndex): AgentRows {
+	let index = spawning;
 	const spans = trace.children
-		.map((child) => ({ child, ...childSpan(trace, child) }))
+		.map((child) => {
+			const lookup = child.startedAt === undefined || child.lastAt === undefined ? (index ??= indexSpawningCalls(trace.records)) : undefined;
+			return { child, ...childSpan(trace, child, lookup) };
+		})
 		.filter((span): span is typeof span & { start: number } => span.start !== undefined && Number.isFinite(span.start))
 		.sort((a, b) => a.start - b.start || (a.child.sessionId < b.child.sessionId ? -1 : a.child.sessionId > b.child.sessionId ? 1 : 0));
 	const ends: number[] = [];
@@ -369,6 +413,10 @@ export function packChildren(trace: Pick<SessionTrace, "records" | "children">):
 		rowOf.set(span.child.sessionId, row);
 	}
 	return { rows: Math.max(1, ends.length), rowOf, overflow };
+}
+
+export function packChildren(trace: Pick<SessionTrace, "records" | "children">): AgentRows {
+	return packChildrenIndexed(trace);
 }
 
 /** The vertical extent of branch row `row` in the subagents band. */
@@ -514,9 +562,11 @@ export function layoutOverview(trace: SessionTrace, scale: Scale, lanes: LaneBox
 			items.push({ key, lane: "llm", family, error: false, x0: x0 - 1, x1: x0 + 2, y0: box.llm.y0, y1: box.llm.y1, start, end, record });
 		}
 	}
-	const packing = packChildren(trace);
+	const needsSpawning = trace.children.some((child) => child.startedAt === undefined || child.lastAt === undefined);
+	const spawning = needsSpawning ? indexSpawningCalls(trace.records) : undefined;
+	const packing = packChildrenIndexed(trace, spawning);
 	for (const child of trace.children) {
-		const span = childSpan(trace, child);
+		const span = childSpan(trace, child, spawning);
 		if (span.start === undefined) continue;
 		const { start } = span;
 		const end = span.end ?? start;
