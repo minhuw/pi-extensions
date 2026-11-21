@@ -11,9 +11,9 @@
  * so existing memories aren't orphaned.
  */
 
-import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { MemoryScope } from "./types.js";
 
@@ -41,16 +41,132 @@ export function isSymlink(filePath: string): boolean {
 }
 
 /**
- * Safely read a file, rejecting symlinks.
+ * Safely read a file, rejecting symlinks (including dangling symlinks).
+ * Checks lstat before reading so dangling symlinks are detected directly
+ * without relying on existsSync.
  * Returns undefined if the file doesn't exist, is a symlink, or can't be read.
  */
 export function safeReadFile(filePath: string): string | undefined {
-  if (!existsSync(filePath)) return undefined;
-  if (isSymlink(filePath)) return undefined;
   try {
+    if (lstatSync(filePath).isSymbolicLink()) return undefined;
     return readFileSync(filePath, "utf-8");
   } catch {
     return undefined;
+  }
+}
+
+type PathCheckResult =
+  | { status: "ok"; exists: boolean; isDirectory: boolean }
+  | { status: "symlink"; symlinkPath: string }
+  | { status: "outside-root" }
+  | { status: "error"; error: unknown };
+
+/**
+ * Infer the scope root for a memory directory when the caller did not supply
+ * one explicitly. Recognizes the standard memory directory layouts:
+ *   - `<root>/.pi/agent-memory/<agent>`
+ *   - `<root>/.pi/agent-memory-local/<agent>`
+ *   - `<root>/agent-memory/<agent>`
+ * Falls back to `dirname(target)` so only the leaf component is inspected and
+ * OS-level symlink prefixes above the root (e.g. macOS `/var` -> `/private/var`)
+ * are never rejected.
+ */
+function inferScopeRoot(memoryDir: string): string {
+  const resolved = resolve(memoryDir);
+  const parent = dirname(resolved);
+  const parentName = basename(parent);
+  if (parentName === "agent-memory" || parentName === "agent-memory-local") {
+    const grandParent = dirname(parent);
+    if (basename(grandParent) === ".pi") {
+      return dirname(grandParent);
+    }
+    if (parentName === "agent-memory") {
+      return grandParent;
+    }
+  }
+  return parent;
+}
+
+/**
+ * Walk every relative path segment strictly beneath `scopeRoot` down to
+ * `targetPath`, calling `lstatSync` on each segment without checking `scopeRoot`
+ * itself or any OS-level symlink prefixes above it.
+ *
+ * Detects live and dangling symlinks at any intermediate or leaf segment before
+ * any `existsSync` or filesystem mutation can short-circuit.
+ */
+function inspectPathBeneathRoot(targetPath: string, scopeRoot: string): PathCheckResult {
+  const resolvedRoot = resolve(scopeRoot);
+  const resolvedTarget = resolve(targetPath);
+  const rel = relative(resolvedRoot, resolvedTarget);
+
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    return { status: "outside-root" };
+  }
+
+  const segments = rel === "" ? [] : rel.split(sep).filter(Boolean);
+  const pathsToCheck =
+    segments.length === 0
+      ? [resolvedTarget]
+      : segments.map((_, i) => join(resolvedRoot, ...segments.slice(0, i + 1)));
+
+  let lastStat: ReturnType<typeof lstatSync> | undefined;
+  for (const currentPath of pathsToCheck) {
+    try {
+      const stat = lstatSync(currentPath);
+      if (stat.isSymbolicLink()) {
+        return { status: "symlink", symlinkPath: currentPath };
+      }
+      lastStat = stat;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT") {
+        // This component (and therefore everything beneath it) does not exist.
+        return { status: "ok", exists: false, isDirectory: false };
+      }
+      return { status: "error", error: err };
+    }
+  }
+
+  return {
+    status: "ok",
+    exists: true,
+    isDirectory: lastStat?.isDirectory() ?? false,
+  };
+}
+
+interface ResolvedMemoryLocation {
+  memoryDir: string;
+  scopeRoot: string;
+}
+
+function resolveMemoryLocation(agentName: string, scope: MemoryScope, cwd: string): ResolvedMemoryLocation {
+  if (isUnsafeName(agentName)) {
+    throw new Error(`Unsafe agent name for memory directory: "${agentName}"`);
+  }
+  switch (scope) {
+    case "user": {
+      const agentDir = getAgentDir();
+      const current = join(agentDir, "agent-memory", agentName);
+      // Legacy location from when this path was hardcoded. Keep using it if it
+      // already holds this agent's memory and the new location hasn't been
+      // created yet — otherwise existing memories would be silently orphaned.
+      const home = homedir();
+      const legacy = join(home, ".pi", "agent-memory", agentName);
+      const currentCheck = inspectPathBeneathRoot(current, agentDir);
+      const currentMissing = currentCheck.status === "ok" && !currentCheck.exists;
+      if (currentMissing) {
+        const legacyCheck = inspectPathBeneathRoot(legacy, home);
+        if (legacyCheck.status === "ok" && legacyCheck.exists) {
+          return { memoryDir: legacy, scopeRoot: home };
+        }
+      }
+      return { memoryDir: current, scopeRoot: agentDir };
+    }
+    case "project":
+      return { memoryDir: join(cwd, ".pi", "agent-memory", agentName), scopeRoot: cwd };
+    case "local":
+      return { memoryDir: join(cwd, ".pi", "agent-memory-local", agentName), scopeRoot: cwd };
   }
 }
 
@@ -59,38 +175,36 @@ export function safeReadFile(filePath: string): string | undefined {
  * Throws if agentName contains path traversal characters.
  */
 export function resolveMemoryDir(agentName: string, scope: MemoryScope, cwd: string): string {
-  if (isUnsafeName(agentName)) {
-    throw new Error(`Unsafe agent name for memory directory: "${agentName}"`);
-  }
-  switch (scope) {
-    case "user": {
-      const current = join(getAgentDir(), "agent-memory", agentName);
-      // Legacy location from when this path was hardcoded. Keep using it if it
-      // already holds this agent's memory and the new location hasn't been
-      // created yet — otherwise existing memories would be silently orphaned.
-      const legacy = join(homedir(), ".pi", "agent-memory", agentName);
-      if (!existsSync(current) && existsSync(legacy) && !isSymlink(legacy)) {
-        return legacy;
-      }
-      return current;
-    }
-    case "project":
-      return join(cwd, ".pi", "agent-memory", agentName);
-    case "local":
-      return join(cwd, ".pi", "agent-memory-local", agentName);
-  }
+  return resolveMemoryLocation(agentName, scope, cwd).memoryDir;
 }
 
 /**
  * Ensure the memory directory exists, creating it if needed.
- * Refuses to create directories if any component in the path is a symlink
- * to prevent symlink-based directory traversal attacks.
+ * Refuses to create or use directories if the target or any relative component
+ * beneath the scope root is a symlink (including dangling symlinks), while
+ * allowing OS-level symlink prefixes above the scope root (e.g. macOS `/var`).
  */
-export function ensureMemoryDir(memoryDir: string): void {
-  // If the directory already exists, verify it's not a symlink
-  if (existsSync(memoryDir)) {
-    if (isSymlink(memoryDir)) {
-      throw new Error(`Refusing to use symlinked memory directory: ${memoryDir}`);
+export function ensureMemoryDir(memoryDir: string, scopeRoot?: string): void {
+  const root = scopeRoot ?? inferScopeRoot(memoryDir);
+  const check = inspectPathBeneathRoot(memoryDir, root);
+
+  if (check.status === "symlink") {
+    const detail =
+      check.symlinkPath === resolve(memoryDir)
+        ? memoryDir
+        : `${memoryDir} (symlink component: ${check.symlinkPath})`;
+    throw new Error(`Refusing to use symlinked memory directory: ${detail}`);
+  }
+  if (check.status === "outside-root") {
+    throw new Error(`Memory directory escapes scope root: ${memoryDir}`);
+  }
+  if (check.status === "error") {
+    throw check.error;
+  }
+
+  if (check.exists) {
+    if (!check.isDirectory) {
+      throw new Error(`Memory path exists and is not a directory: ${memoryDir}`);
     }
     return;
   }
@@ -99,13 +213,17 @@ export function ensureMemoryDir(memoryDir: string): void {
 
 /**
  * Read the first N lines of MEMORY.md from the memory directory, if it exists.
- * Returns undefined if no MEMORY.md exists or if the path is a symlink.
+ * Returns undefined if no MEMORY.md exists, or if MEMORY.md or any relative
+ * component beneath the scope root is a symlink (including dangling symlinks).
  */
-export function readMemoryIndex(memoryDir: string): string | undefined {
-  // Reject symlinked memory directories
-  if (isSymlink(memoryDir)) return undefined;
-
+export function readMemoryIndex(memoryDir: string, scopeRoot?: string): string | undefined {
+  const root = scopeRoot ?? inferScopeRoot(memoryDir);
   const memoryFile = join(memoryDir, "MEMORY.md");
+  const check = inspectPathBeneathRoot(memoryFile, root);
+  if (check.status !== "ok" || !check.exists || check.isDirectory) {
+    return undefined;
+  }
+
   const content = safeReadFile(memoryFile);
   if (content === undefined) return undefined;
 
@@ -121,11 +239,11 @@ export function readMemoryIndex(memoryDir: string): string | undefined {
  * Also ensures the memory directory exists (creates it if needed).
  */
 export function buildMemoryBlock(agentName: string, scope: MemoryScope, cwd: string): string {
-  const memoryDir = resolveMemoryDir(agentName, scope, cwd);
+  const { memoryDir, scopeRoot } = resolveMemoryLocation(agentName, scope, cwd);
   // Create the memory directory so the agent can immediately write to it
-  ensureMemoryDir(memoryDir);
+  ensureMemoryDir(memoryDir, scopeRoot);
 
-  const existingMemory = readMemoryIndex(memoryDir);
+  const existingMemory = readMemoryIndex(memoryDir, scopeRoot);
 
   const header = `# Agent Memory
 
@@ -163,8 +281,8 @@ This memory persists across sessions. Use it to build up knowledge over time.`;
  * Does NOT create the memory directory — agents can only consume existing memory.
  */
 export function buildReadOnlyMemoryBlock(agentName: string, scope: MemoryScope, cwd: string): string {
-  const memoryDir = resolveMemoryDir(agentName, scope, cwd);
-  const existingMemory = readMemoryIndex(memoryDir);
+  const { memoryDir, scopeRoot } = resolveMemoryLocation(agentName, scope, cwd);
+  const existingMemory = readMemoryIndex(memoryDir, scopeRoot);
 
   const header = `# Agent Memory (read-only)
 

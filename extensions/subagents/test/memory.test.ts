@@ -145,6 +145,77 @@ describe("memory", () => {
       symlinkSync(realDir, linkDir);
       expect(() => ensureMemoryDir(linkDir)).toThrow("symlinked memory directory");
     });
+
+    it("throws on dangling leaf symlink before existsSync can short-circuit", () => {
+      const missingTarget = join(tmpDir, "missing-target");
+      const memDir = join(tmpDir, ".pi", "agent-memory", "dangling-agent");
+      mkdirSync(join(tmpDir, ".pi", "agent-memory"), { recursive: true });
+      symlinkSync(missingTarget, memDir);
+
+      expect(existsSync(memDir)).toBe(false);
+      expect(isSymlink(memDir)).toBe(true);
+      expect(() => ensureMemoryDir(memDir, tmpDir)).toThrow("symlinked memory directory");
+      expect(() => ensureMemoryDir(memDir)).toThrow("symlinked memory directory");
+      expect(existsSync(missingTarget)).toBe(false);
+    });
+
+    it("throws when .pi ancestor directory is a symlink", () => {
+      const externalDir = join(tmpDir, "external");
+      mkdirSync(externalDir, { recursive: true });
+      symlinkSync(externalDir, join(tmpDir, ".pi"));
+
+      const memDir = join(tmpDir, ".pi", "agent-memory", "agent");
+      expect(() => ensureMemoryDir(memDir, tmpDir)).toThrow("symlinked memory directory");
+      expect(() => ensureMemoryDir(memDir)).toThrow("symlinked memory directory");
+      expect(existsSync(join(externalDir, "agent-memory"))).toBe(false);
+    });
+
+    it("throws when .pi/agent-memory ancestor directory is a symlink (live or dangling)", () => {
+      const externalDir = join(tmpDir, "external-mem");
+      mkdirSync(externalDir, { recursive: true });
+      mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+      symlinkSync(externalDir, join(tmpDir, ".pi", "agent-memory"));
+
+      const memDir = join(tmpDir, ".pi", "agent-memory", "agent");
+      expect(() => ensureMemoryDir(memDir, tmpDir)).toThrow("symlinked memory directory");
+      expect(() => ensureMemoryDir(memDir)).toThrow("symlinked memory directory");
+      expect(existsSync(join(externalDir, "agent"))).toBe(false);
+
+      // Dangling ancestor symlink (.pi/agent-memory-local)
+      symlinkSync(join(tmpDir, "nonexistent-local"), join(tmpDir, ".pi", "agent-memory-local"));
+      const localMemDir = join(tmpDir, ".pi", "agent-memory-local", "agent");
+      expect(() => ensureMemoryDir(localMemDir, tmpDir)).toThrow("symlinked memory directory");
+    });
+
+    it("throws when agent-memory ancestor beneath agentDir is a symlink", () => {
+      const agentDir = join(tmpDir, "agent-dir");
+      const externalDir = join(tmpDir, "external-user-mem");
+      mkdirSync(agentDir, { recursive: true });
+      mkdirSync(externalDir, { recursive: true });
+      symlinkSync(externalDir, join(agentDir, "agent-memory"));
+
+      const memDir = join(agentDir, "agent-memory", "agent");
+      expect(() => ensureMemoryDir(memDir, agentDir)).toThrow("symlinked memory directory");
+      expect(() => ensureMemoryDir(memDir)).toThrow("symlinked memory directory");
+      expect(existsSync(join(externalDir, "agent"))).toBe(false);
+    });
+
+    it("allows valid paths whose scope root sits under a symlinked parent prefix", () => {
+      // Simulates OS-level symlinked prefixes above the scope root (e.g. macOS /var -> /private/var).
+      const realPrefix = join(tmpDir, "private-var");
+      const symlinkPrefix = join(tmpDir, "var");
+      mkdirSync(join(realPrefix, "workspace"), { recursive: true });
+      symlinkSync(realPrefix, symlinkPrefix);
+
+      const workspace = join(symlinkPrefix, "workspace");
+      const memDir = join(workspace, ".pi", "agent-memory", "agent");
+
+      ensureMemoryDir(memDir, workspace);
+      expect(existsSync(memDir)).toBe(true);
+      // Re-running on existing dir under symlinked prefix also succeeds (with or without explicit scopeRoot).
+      ensureMemoryDir(memDir, workspace);
+      ensureMemoryDir(memDir);
+    });
   });
 
   describe("isSymlink", () => {
@@ -217,6 +288,94 @@ describe("memory", () => {
       expect(readMemoryIndex(memDir)).toBeUndefined();
     });
 
+    it("rejects dangling leaf symlinks (memory directory and MEMORY.md)", () => {
+      const parent = join(tmpDir, ".pi", "agent-memory");
+      mkdirSync(parent, { recursive: true });
+
+      const danglingDir = join(parent, "dangling-dir-agent");
+      symlinkSync(join(tmpDir, "missing-dir"), danglingDir);
+      expect(existsSync(danglingDir)).toBe(false);
+      expect(isSymlink(danglingDir)).toBe(true);
+      expect(readMemoryIndex(danglingDir, tmpDir)).toBeUndefined();
+      expect(readMemoryIndex(danglingDir)).toBeUndefined();
+
+      const realDir = join(parent, "dangling-file-agent");
+      mkdirSync(realDir, { recursive: true });
+      const danglingFile = join(realDir, "MEMORY.md");
+      symlinkSync(join(tmpDir, "missing-file.md"), danglingFile);
+      expect(existsSync(danglingFile)).toBe(false);
+      expect(isSymlink(danglingFile)).toBe(true);
+      expect(readMemoryIndex(realDir, tmpDir)).toBeUndefined();
+      expect(readMemoryIndex(realDir)).toBeUndefined();
+    });
+
+    it("rejects symlinked .pi ancestor directory", () => {
+      const externalPi = join(tmpDir, "external-pi");
+      const externalAgent = join(externalPi, "agent-memory", "agent");
+      mkdirSync(externalAgent, { recursive: true });
+      writeFileSync(join(externalAgent, "MEMORY.md"), "# Secret via .pi");
+      symlinkSync(externalPi, join(tmpDir, ".pi"));
+
+      const memDir = join(tmpDir, ".pi", "agent-memory", "agent");
+      expect(readMemoryIndex(memDir, tmpDir)).toBeUndefined();
+      expect(readMemoryIndex(memDir)).toBeUndefined();
+    });
+
+    it("rejects symlinked .pi/agent-memory ancestor directory", () => {
+      const externalMem = join(tmpDir, "external-mem");
+      const externalAgent = join(externalMem, "agent");
+      mkdirSync(externalAgent, { recursive: true });
+      writeFileSync(join(externalAgent, "MEMORY.md"), "# Secret via agent-memory");
+      mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+      symlinkSync(externalMem, join(tmpDir, ".pi", "agent-memory"));
+
+      const memDir = join(tmpDir, ".pi", "agent-memory", "agent");
+      expect(readMemoryIndex(memDir, tmpDir)).toBeUndefined();
+      expect(readMemoryIndex(memDir)).toBeUndefined();
+    });
+
+    it("rejects symlinked agent-memory ancestor beneath agentDir", () => {
+      const agentDir = join(tmpDir, "agent-dir");
+      const externalMem = join(tmpDir, "external-user-mem");
+      mkdirSync(join(externalMem, "agent"), { recursive: true });
+      writeFileSync(join(externalMem, "agent", "MEMORY.md"), "# Secret user mem");
+      mkdirSync(agentDir, { recursive: true });
+      symlinkSync(externalMem, join(agentDir, "agent-memory"));
+
+      const memDir = join(agentDir, "agent-memory", "agent");
+      expect(readMemoryIndex(memDir, agentDir)).toBeUndefined();
+      expect(readMemoryIndex(memDir)).toBeUndefined();
+    });
+
+    it("reads MEMORY.md when scope root sits under a symlinked parent prefix", () => {
+      const realPrefix = join(tmpDir, "private-var");
+      const symlinkPrefix = join(tmpDir, "var");
+      mkdirSync(join(realPrefix, "workspace", ".pi", "agent-memory", "agent"), { recursive: true });
+      writeFileSync(join(realPrefix, "workspace", ".pi", "agent-memory", "agent", "MEMORY.md"), "# Valid\n- safe");
+      symlinkSync(realPrefix, symlinkPrefix);
+
+      const workspace = join(symlinkPrefix, "workspace");
+      const memDir = join(workspace, ".pi", "agent-memory", "agent");
+      expect(readMemoryIndex(memDir, workspace)).toBe("# Valid\n- safe");
+      expect(readMemoryIndex(memDir)).toBe("# Valid\n- safe");
+    });
+
+    it("still rejects symlinked components beneath a scope root under a symlinked parent prefix", () => {
+      const realPrefix = join(tmpDir, "private-var");
+      const symlinkPrefix = join(tmpDir, "var");
+      const externalMem = join(tmpDir, "external-secret");
+      mkdirSync(join(externalMem, "agent"), { recursive: true });
+      writeFileSync(join(externalMem, "agent", "MEMORY.md"), "# Escaped");
+      mkdirSync(join(realPrefix, "workspace", ".pi"), { recursive: true });
+      symlinkSync(externalMem, join(realPrefix, "workspace", ".pi", "agent-memory"));
+      symlinkSync(realPrefix, symlinkPrefix);
+
+      const workspace = join(symlinkPrefix, "workspace");
+      const memDir = join(workspace, ".pi", "agent-memory", "agent");
+      expect(readMemoryIndex(memDir, workspace)).toBeUndefined();
+      expect(() => ensureMemoryDir(memDir, workspace)).toThrow("symlinked memory directory");
+    });
+
     it("truncates content beyond 200 lines", () => {
       const lines = Array.from({ length: 250 }, (_, i) => `Line ${i + 1}`);
       writeFileSync(join(tmpDir, "MEMORY.md"), lines.join("\n"));
@@ -283,6 +442,37 @@ describe("memory", () => {
       expect(buildMemoryBlock("a", "local", tmpDir)).toContain("Memory scope: local");
       expect(buildMemoryBlock("a", "user", tmpDir)).toContain("Memory scope: user");
     });
+
+    it("works when cwd or agentDir sits under a symlinked parent prefix", () => {
+      const realPrefix = join(tmpDir, "private-var");
+      const symlinkPrefix = join(tmpDir, "var");
+      mkdirSync(join(realPrefix, "workspace"), { recursive: true });
+      mkdirSync(join(realPrefix, "agent-dir"), { recursive: true });
+      symlinkSync(realPrefix, symlinkPrefix);
+
+      const workspace = join(symlinkPrefix, "workspace");
+      const block = buildMemoryBlock("prefix-agent", "project", workspace);
+      expect(block).toContain("No MEMORY.md exists yet");
+      expect(existsSync(join(workspace, ".pi", "agent-memory", "prefix-agent"))).toBe(true);
+
+      const originalEnv = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = join(symlinkPrefix, "agent-dir");
+      try {
+        const userBlock = buildMemoryBlock("prefix-agent", "user", workspace);
+        expect(userBlock).toContain("No MEMORY.md exists yet");
+        expect(existsSync(join(symlinkPrefix, "agent-dir", "agent-memory", "prefix-agent"))).toBe(true);
+      } finally {
+        if (originalEnv == null) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = originalEnv;
+      }
+    });
+
+    it("rejects symlinked .pi ancestor in buildMemoryBlock", () => {
+      const externalPi = join(tmpDir, "external-pi");
+      mkdirSync(externalPi, { recursive: true });
+      symlinkSync(externalPi, join(tmpDir, ".pi"));
+      expect(() => buildMemoryBlock("test-agent", "project", tmpDir)).toThrow("symlinked memory directory");
+    });
   });
 
   describe("buildReadOnlyMemoryBlock", () => {
@@ -338,6 +528,18 @@ describe("memory", () => {
       // Should not read through the symlink
       const block = buildReadOnlyMemoryBlock("linked-agent", "project", tmpDir);
       expect(block).toContain("No memory is available yet");
+    });
+
+    it("rejects symlinked ancestor directory in read-only mode", () => {
+      const externalMem = join(tmpDir, "external-ro");
+      mkdirSync(join(externalMem, "agent"), { recursive: true });
+      writeFileSync(join(externalMem, "agent", "MEMORY.md"), "# Secret");
+      mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+      symlinkSync(externalMem, join(tmpDir, ".pi", "agent-memory"));
+
+      const block = buildReadOnlyMemoryBlock("agent", "project", tmpDir);
+      expect(block).toContain("No memory is available yet");
+      expect(block).not.toContain("# Secret");
     });
   });
 });
