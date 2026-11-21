@@ -13,9 +13,10 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Cron } from "croner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
-import { SubagentScheduler } from "../src/schedule.js";
+import { MAX_TIMEOUT_MS, SubagentScheduler } from "../src/schedule.js";
 import { ScheduleStore } from "../src/schedule-store.js";
 
 function makeMockManager() {
@@ -90,6 +91,47 @@ describe("SubagentScheduler — static format parsers", () => {
     expect(r.normalized).toBe(iso);
 
     expect(() => SubagentScheduler.detectSchedule("garbage")).toThrow(/Invalid schedule/);
+  });
+
+  it("rejects non-positive (<= 0) intervals and relative durations", () => {
+    for (const bad of ["+0s", "+0m", "+0h", "+0d", "+00s", "-5s", "+-5s", "0", "-10"]) {
+      expect(SubagentScheduler.parseRelativeTime(bad)).toBeNull();
+    }
+    for (const bad of ["0s", "0m", "0h", "0d", "00s", "-5s", "-1m", "0", "-10"]) {
+      expect(SubagentScheduler.parseInterval(bad)).toBeNull();
+    }
+    for (const bad of ["0s", "0m", "0h", "0d", "+0s", "+0m", "0", "-5s", "-10"]) {
+      expect(() => SubagentScheduler.detectSchedule(bad)).toThrow(/Invalid schedule/);
+    }
+  });
+
+  it("validateCronExpression does not leak active Cron timers", () => {
+    vi.useFakeTimers();
+    const stopSpy = vi.spyOn(Cron.prototype, "stop");
+    try {
+      expect(vi.getTimerCount()).toBe(0);
+
+      expect(SubagentScheduler.validateCronExpression("0 0 9 * * 1")).toEqual({ valid: true });
+      expect(vi.getTimerCount()).toBe(0);
+
+      expect(SubagentScheduler.validateCronExpression("* * * * * *")).toEqual({ valid: true });
+      expect(vi.getTimerCount()).toBe(0);
+
+      expect(SubagentScheduler.validateCronExpression("60 0 9 * * *").valid).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+
+      expect(SubagentScheduler.detectSchedule("0 0 9 * * 1")).toEqual({
+        type: "cron",
+        normalized: "0 0 9 * * 1",
+      });
+      expect(vi.getTimerCount()).toBe(0);
+
+      // Each successfully constructed Cron validation instance was explicitly stopped.
+      expect(stopSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      stopSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -226,6 +268,64 @@ describe("SubagentScheduler — lifecycle", () => {
     expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
       type: "error", jobId: "reload-test", error: expect.stringMatching(/in the past/),
     }));
+  });
+
+  it("addJob rejects zero and negative intervals/relatives without creating records", () => {
+    for (const schedule of ["0s", "0m", "+0s", "0", "-5s"]) {
+      expect(() => scheduler.addJob({
+        name: `bad-${schedule}`,
+        description: "x",
+        schedule,
+        subagent_type: "worker",
+        prompt: "p",
+      })).toThrow(/Invalid schedule/);
+    }
+    expect(scheduler.list()).toEqual([]);
+  });
+
+  it("disables a reloaded interval job whose persisted intervalMs is <= 0", () => {
+    const now = new Date().toISOString();
+    store.add({
+      id: "zero-interval",
+      name: "zero-interval",
+      description: "bad persisted interval",
+      schedule: "0s",
+      scheduleType: "interval",
+      intervalMs: 0,
+      subagent_type: "worker",
+      prompt: "x",
+      enabled: true,
+      createdAt: now,
+      runCount: 0,
+    });
+    store.add({
+      id: "neg-interval",
+      name: "neg-interval",
+      description: "negative persisted interval",
+      schedule: "-5s",
+      scheduleType: "interval",
+      intervalMs: -5_000,
+      subagent_type: "worker",
+      prompt: "x",
+      enabled: true,
+      createdAt: now,
+      runCount: 0,
+    });
+
+    scheduler.stop();
+    scheduler.start(pi, ctx, manager, store);
+
+    for (const id of ["zero-interval", "neg-interval"]) {
+      const reloaded = scheduler.list().find(j => j.id === id);
+      expect(reloaded?.enabled).toBe(false);
+      expect(reloaded?.lastStatus).toBe("error");
+      expect(scheduler.getNextRun(id)).toBeUndefined();
+      expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+        type: "error",
+        jobId: id,
+        error: expect.stringMatching(/Invalid interval/),
+      }));
+    }
   });
 });
 
@@ -563,6 +663,146 @@ describe("SubagentScheduler — fire path", () => {
 
       expect(scheduler.list().find(j => j.id === a.id)?.lastStatus).toBe("error");
       expect(scheduler.list().find(j => j.id === b.id)?.lastStatus).toBe("error");
+    });
+  });
+
+  describe("delays exceeding 32-bit signed setTimeout limit (> 2_147_483_647 ms)", () => {
+    it("chains one-shot timers across MAX_TIMEOUT_MS hops instead of firing early", () => {
+      const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+      try {
+        const thirtyDaysMs = 30 * 86_400_000; // 2_592_000_000 ms > MAX_TIMEOUT_MS
+        const job = scheduler.addJob({
+          name: "far-once", description: "30d out", schedule: "+30d",
+          subagent_type: "worker", prompt: "future",
+        });
+
+        // First hop must be clamped to MAX_TIMEOUT_MS, never exceeding 2^31 - 1.
+        expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+        expect(setTimeoutSpy.mock.calls[0][1]).toBe(MAX_TIMEOUT_MS);
+
+        // Must not overflow into an immediate 1ms firing.
+        vi.advanceTimersByTime(1_000);
+        expect(manager.spawn).not.toHaveBeenCalled();
+
+        // Advance through the first MAX_TIMEOUT_MS hop — wakes up, sees remaining
+        // time, and schedules the next hop without firing.
+        vi.advanceTimersByTime(MAX_TIMEOUT_MS - 1_000);
+        expect(manager.spawn).not.toHaveBeenCalled();
+        expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
+        const remaining = thirtyDaysMs - MAX_TIMEOUT_MS;
+        expect(setTimeoutSpy.mock.calls[1][1]).toBe(remaining);
+
+        // Still not fired 1ms before target.
+        vi.advanceTimersByTime(remaining - 1);
+        expect(manager.spawn).not.toHaveBeenCalled();
+
+        // Fires at the exact target time and auto-disables.
+        vi.advanceTimersByTime(1);
+        expect(manager.spawn).toHaveBeenCalledTimes(1);
+        expect(scheduler.list().find(j => j.id === job.id)?.enabled).toBe(false);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
+    });
+
+    it("chains multi-hop one-shot delays (> 2 * MAX_TIMEOUT_MS)", () => {
+      const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+      try {
+        const sixtyDaysMs = 60 * 86_400_000; // 5_184_000_000 ms > 2 * MAX_TIMEOUT_MS
+        scheduler.addJob({
+          name: "very-far-once", description: "60d out", schedule: "+60d",
+          subagent_type: "worker", prompt: "future",
+        });
+
+        vi.advanceTimersByTime(MAX_TIMEOUT_MS);
+        expect(manager.spawn).not.toHaveBeenCalled();
+
+        vi.advanceTimersByTime(MAX_TIMEOUT_MS);
+        expect(manager.spawn).not.toHaveBeenCalled();
+
+        const tail = sixtyDaysMs - 2 * MAX_TIMEOUT_MS;
+        vi.advanceTimersByTime(tail - 1);
+        expect(manager.spawn).not.toHaveBeenCalled();
+
+        vi.advanceTimersByTime(1);
+        expect(manager.spawn).toHaveBeenCalledTimes(1);
+
+        // Every scheduled step stayed within Node's 32-bit signed limit.
+        for (const call of setTimeoutSpy.mock.calls) {
+          const delay = call[1] as number;
+          expect(delay).toBeGreaterThan(0);
+          expect(delay).toBeLessThanOrEqual(MAX_TIMEOUT_MS);
+        }
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
+    });
+
+    it("cleanly cancels a chained one-shot mid-chain via removeJob and stop", () => {
+      const jobA = scheduler.addJob({
+        name: "cancel-remove", description: "30d", schedule: "+30d",
+        subagent_type: "worker", prompt: "a",
+      });
+      scheduler.addJob({
+        name: "cancel-stop", description: "30d", schedule: "+30d",
+        subagent_type: "worker", prompt: "b",
+      });
+
+      // Advance past the first MAX_TIMEOUT_MS hop so both jobs are on hop #2.
+      vi.advanceTimersByTime(MAX_TIMEOUT_MS);
+      expect(manager.spawn).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(2);
+
+      // Remove jobA mid-chain; only jobB's hop #2 remains.
+      scheduler.removeJob(jobA.id);
+      expect(vi.getTimerCount()).toBe(1);
+
+      // Stop scheduler mid-chain; zero timers remain.
+      scheduler.stop();
+      expect(vi.getTimerCount()).toBe(0);
+
+      // Advancing well past target never fires either job.
+      vi.advanceTimersByTime(60 * 86_400_000);
+      expect(manager.spawn).not.toHaveBeenCalled();
+    });
+
+    it("chains repeating intervals exceeding MAX_TIMEOUT_MS without overflowing", () => {
+      const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+      try {
+        const thirtyDaysMs = 30 * 86_400_000;
+        scheduler.addJob({
+          name: "monthly", description: "every 30d", schedule: "30d",
+          subagent_type: "worker", prompt: "tick",
+        });
+
+        vi.advanceTimersByTime(MAX_TIMEOUT_MS);
+        expect(manager.spawn).not.toHaveBeenCalled();
+
+        // First fire at 30d.
+        vi.advanceTimersByTime(thirtyDaysMs - MAX_TIMEOUT_MS);
+        expect(manager.spawn).toHaveBeenCalledTimes(1);
+
+        // Second fire at 60d (another chained cycle).
+        vi.advanceTimersByTime(MAX_TIMEOUT_MS);
+        expect(manager.spawn).toHaveBeenCalledTimes(1);
+        vi.advanceTimersByTime(thirtyDaysMs - MAX_TIMEOUT_MS);
+        expect(manager.spawn).toHaveBeenCalledTimes(2);
+
+        for (const call of setTimeoutSpy.mock.calls) {
+          const delay = call[1] as number;
+          expect(delay).toBeGreaterThan(0);
+          expect(delay).toBeLessThanOrEqual(MAX_TIMEOUT_MS);
+        }
+
+        // Stop clears the armed next cycle cleanly.
+        scheduler.stop();
+        expect(vi.getTimerCount()).toBe(0);
+        vi.advanceTimersByTime(60 * 86_400_000);
+        expect(manager.spawn).toHaveBeenCalledTimes(2);
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
     });
   });
 });

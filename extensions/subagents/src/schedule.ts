@@ -28,6 +28,9 @@ import { modelSupportsServiceTier } from "./service-tier.js";
 import type { ScheduleStore } from "./schedule-store.js";
 import type { IsolationMode, ScheduledSubagent, ServiceTierInput, SubagentType, ThinkingLevel } from "./types.js";
 
+/** Maximum delay accepted by Node's 32-bit signed timer API (~24.85 days). */
+export const MAX_TIMEOUT_MS = 2_147_483_647;
+
 /** Event emitted on `pi.events` for cross-extension consumers. */
 export type ScheduleChangeEvent =
   | { type: "added"; job: ScheduledSubagent }
@@ -159,9 +162,9 @@ export class SubagentScheduler {
     const job = this.store?.get(jobId);
     if (!job?.enabled) return undefined;
     if (job.scheduleType === "once") return job.schedule;
-    if (job.scheduleType === "interval" && job.intervalMs) {
+    if (job.scheduleType === "interval" && typeof job.intervalMs === "number" && Number.isFinite(job.intervalMs) && job.intervalMs > 0) {
       // Before the first fire there's no `lastRun`, so fall back to "now" —
-      // accurate at create time (setInterval was just armed) and within
+      // accurate at create time (the timer was just armed) and within
       // intervalMs of correct in any pre-first-fire view.
       const base = job.lastRun ? new Date(job.lastRun).getTime() : Date.now();
       return new Date(base + job.intervalMs).toISOString();
@@ -174,21 +177,30 @@ export class SubagentScheduler {
   private scheduleJob(job: ScheduledSubagent): void {
     const store = this.store;
     if (!store) return;
+    this.unscheduleJob(job.id);
     try {
-      if (job.scheduleType === "interval" && job.intervalMs) {
-        const t = setInterval(() => this.executeJob(job.id), job.intervalMs);
-        this.intervals.set(job.id, t);
+      if (job.scheduleType === "interval") {
+        const intervalMs = job.intervalMs;
+        if (typeof intervalMs !== "number" || !Number.isFinite(intervalMs) || intervalMs <= 0) {
+          this.persist(job.id, { enabled: false, lastStatus: "error" });
+          this.emit({
+            type: "error",
+            jobId: job.id,
+            error: `Invalid interval ${String(intervalMs)}ms: must be a positive number.`,
+          });
+          return;
+        }
+        this.scheduleInterval(job.id, intervalMs);
       } else if (job.scheduleType === "once") {
         const target = new Date(job.schedule).getTime();
         const delay = target - Date.now();
         if (delay > 0) {
-          const t = setTimeout(() => {
+          this.scheduleTimeoutAt(job.id, target, () => {
             this.executeJob(job.id);
             // Auto-disable one-shots after they fire (mirrors pi-cron-schedule)
             const updated = this.persist(job.id, { enabled: false });
             if (updated) this.emit({ type: "updated", job: updated });
-          }, delay);
-          this.intervals.set(job.id, t);
+          });
         } else {
           // Past timestamp — disable, mark error, never fire
           store.update(job.id, { enabled: false, lastStatus: "error" });
@@ -201,6 +213,49 @@ export class SubagentScheduler {
     } catch (err) {
       this.emit({ type: "error", jobId: job.id, error: err instanceof Error ? err.message : String(err) });
     }
+  }
+
+  /**
+   * Arm a one-shot timer for an absolute epoch target, chaining intermediate
+   * `MAX_TIMEOUT_MS` hops so delays > 2^31-1 ms never overflow Node's 32-bit
+   * signed timer limit into an immediate 1ms firing.
+   */
+  private scheduleTimeoutAt(jobId: string, targetMs: number, onFire: () => void): void {
+    const remaining = targetMs - Date.now();
+    if (remaining <= 0) {
+      this.intervals.delete(jobId);
+      onFire();
+      return;
+    }
+    const step = Math.min(remaining, MAX_TIMEOUT_MS);
+    const t = setTimeout(() => {
+      // Guard against stale callbacks if the job was unscheduled, re-armed, or stopped.
+      if (this.intervals.get(jobId) !== t) return;
+      const left = targetMs - Date.now();
+      if (left > 0) {
+        this.scheduleTimeoutAt(jobId, targetMs, onFire);
+        return;
+      }
+      this.intervals.delete(jobId);
+      onFire();
+    }, step);
+    this.intervals.set(jobId, t);
+  }
+
+  /**
+   * Arm a repeating interval via chained `scheduleTimeoutAt` hops so intervals
+   * exceeding `MAX_TIMEOUT_MS` never overflow `setInterval`'s 32-bit limit.
+   */
+  private scheduleInterval(jobId: string, intervalMs: number): void {
+    const armNext = () => {
+      const targetMs = Date.now() + intervalMs;
+      this.scheduleTimeoutAt(jobId, targetMs, () => {
+        if (!this.store || !this.store.get(jobId)?.enabled) return;
+        armNext();
+        this.executeJob(jobId);
+      });
+    };
+    armNext();
   }
 
   private unscheduleJob(id: string): void {
@@ -360,7 +415,7 @@ export class SubagentScheduler {
     if (ivl !== null) return { type: "interval", intervalMs: ivl, normalized: trimmed };
     // ISO timestamp — one-shot. Reject past timestamps upfront so we never
     // create a dead-on-arrival record (scheduleJob's safety net still catches
-    // micro-races from `+0s`-style relatives).
+    // micro-races and stale records reloaded from disk).
     if (/^\d{4}-\d{2}-\d{2}T/.test(trimmed)) {
       const d = new Date(trimmed);
       if (!Number.isNaN(d.getTime())) {
@@ -380,34 +435,44 @@ export class SubagentScheduler {
 
   /** 6-field cron — 'second minute hour dom month dow'. */
   static validateCronExpression(expr: string): { valid: boolean; error?: string } {
-    const fields = expr.trim().split(/\s+/);
+    const trimmed = expr.trim();
+    const fields = trimmed.split(/\s+/);
     if (fields.length !== 6) {
       return {
         valid: false,
         error: `Cron must have 6 fields (second minute hour dom month dow), got ${fields.length}. Example: "0 0 9 * * 1" for 9am every Monday.`,
       };
     }
+    let cron: Cron | undefined;
     try {
-      // Croner validates by construction.
-      new Cron(expr, () => {});
+      // Croner validates by construction; keep paused without a callback and
+      // stop in finally so validation never leaks a live timer handle.
+      cron = new Cron(trimmed, { paused: true });
       return { valid: true };
     } catch (e) {
       return { valid: false, error: e instanceof Error ? e.message : "Invalid cron expression" };
+    } finally {
+      cron?.stop();
     }
   }
 
-  /** "+10s"/"+5m"/"+1h"/"+2d" → ISO timestamp. */
+  /** "+10s"/"+5m"/"+1h"/"+2d" → ISO timestamp. Non-positive durations return null. */
   static parseRelativeTime(s: string): string | null {
     const m = s.match(/^\+(\d+)(s|m|h|d)$/);
     if (!m) return null;
     const ms = parseInt(m[1], 10) * { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] as "s" | "m" | "h" | "d"];
-    return new Date(Date.now() + ms).toISOString();
+    if (!Number.isFinite(ms) || ms <= 0) return null;
+    const target = new Date(Date.now() + ms);
+    if (Number.isNaN(target.getTime())) return null;
+    return target.toISOString();
   }
 
-  /** "10s"/"5m"/"1h"/"2d" → milliseconds. */
+  /** "10s"/"5m"/"1h"/"2d" → milliseconds. Non-positive intervals return null. */
   static parseInterval(s: string): number | null {
     const m = s.match(/^(\d+)(s|m|h|d)$/);
     if (!m) return null;
-    return parseInt(m[1], 10) * { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] as "s" | "m" | "h" | "d"];
+    const ms = parseInt(m[1], 10) * { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] as "s" | "m" | "h" | "d"];
+    if (!Number.isSafeInteger(ms) || ms <= 0) return null;
+    return ms;
   }
 }
