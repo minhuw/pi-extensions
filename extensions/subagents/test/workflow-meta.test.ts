@@ -215,4 +215,127 @@ describe("extractMeta — isolation", () => {
     const { meta } = extractMeta(`${HEADER}\nthrow new Error('body ran')`);
     expect(meta.name).toBe("wf");
   });
+
+  it("blocks host-realm prototype escapes via this / globalThis constructor chains", () => {
+    const markerKey = "__piWorkflowMetaEscapeThis__";
+    const hostGlobal = globalThis as Record<string, unknown>;
+    delete hostGlobal[markerKey];
+
+    const payloads = [
+      `export const meta = { name: this.constructor.constructor("globalThis.${markerKey} = 'pwned'; return process.version")(), description: 'b' }\nreturn 1`,
+      `export const meta = { name: globalThis.constructor.constructor("globalThis.${markerKey} = 'pwned'; return process.version")(), description: 'b' }\nreturn 1`,
+      `export const meta = { name: Object.getPrototypeOf(this).constructor.constructor("globalThis.${markerKey} = 'pwned'; return process.version")(), description: 'b' }\nreturn 1`,
+      `export const meta = { name: Object.getPrototypeOf(globalThis).constructor.constructor("globalThis.${markerKey} = 'pwned'; return process.version")(), description: 'b' }\nreturn 1`,
+    ];
+
+    try {
+      for (const script of payloads) {
+        expect(() => extractMeta(script)).toThrow(WorkflowMetaError);
+        expect(() => extractMeta(script)).toThrow(/PURE LITERAL/);
+      }
+      expect(hostGlobal[markerKey]).toBeUndefined();
+    } finally {
+      delete hostGlobal[markerKey];
+    }
+  });
+
+  it("disables string and WebAssembly code generation inside the meta context", () => {
+    const payloads = [
+      `export const meta = { name: ({}).constructor.constructor("return process.version")(), description: 'b' }\nreturn 1`,
+      `export const meta = { name: (() => {}).constructor("return 'ok'")(), description: 'b' }\nreturn 1`,
+      `export const meta = { name: (async () => {}).constructor("return 'ok'")(), description: 'b' }\nreturn 1`,
+      `export const meta = { name: Function("return 'ok'")(), description: 'b' }\nreturn 1`,
+      `export const meta = { name: eval("'ok'"), description: 'b' }\nreturn 1`,
+      `export const meta = { name: (0, eval)("'ok'"), description: 'b' }\nreturn 1`,
+      `export const meta = { name: String(new WebAssembly.Module(new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]))), description: 'b' }\nreturn 1`,
+    ];
+
+    for (const script of payloads) {
+      expect(() => extractMeta(script)).toThrow(WorkflowMetaError);
+      expect(() => extractMeta(script)).toThrow(/disallowed/i);
+    }
+  });
+
+  it("does not pass host callbacks to vm-realm phases.map or Array.prototype.map", () => {
+    const markerKey = "__piWorkflowMetaEscapeMap__";
+    const hostGlobal = globalThis as Record<string, unknown>;
+    delete hostGlobal[markerKey];
+
+    try {
+      const ownMapResult = extractMeta(`export const meta = {
+        name: 'a',
+        description: 'b',
+        phases: Object.assign([{ title: 'ok' }], {
+          map(cb) {
+            cb.constructor("globalThis.${markerKey} = 'own-map'")();
+            return [{ title: cb.constructor("return process.version")() }];
+          },
+        }),
+      }\nreturn 1`);
+      expect(ownMapResult.meta.phases).toEqual([{ title: "ok" }]);
+      expect(hostGlobal[markerKey]).toBeUndefined();
+
+      const protoMapResult = extractMeta(`export const meta = {
+        name: (Array.prototype.map = function(cb) {
+          cb.constructor("globalThis.${markerKey} = 'proto-map'")();
+          return [{ title: cb.constructor("return process.version")() }];
+        }, 'a'),
+        description: 'b',
+        phases: [{ title: 'ok' }],
+      }\nreturn 1`);
+      expect(protoMapResult.meta.phases).toEqual([{ title: "ok" }]);
+      expect(hostGlobal[markerKey]).toBeUndefined();
+    } finally {
+      delete hostGlobal[markerKey];
+    }
+  });
+
+  it("cannot pollute host Object.prototype", () => {
+    const key = "__piWorkflowMetaPolluted__";
+    const proto = Object.prototype as Record<string, unknown>;
+    delete proto[key];
+
+    try {
+      extractMeta(`export const meta = {
+        name: (Object.prototype.${key} = true, 'a'),
+        description: 'b',
+        ["__proto__"]: { ${key}: true },
+      }\nreturn 1`);
+      expect(proto[key]).toBeUndefined();
+      expect(({} as Record<string, unknown>)[key]).toBeUndefined();
+    } finally {
+      delete proto[key];
+    }
+  });
+
+  it("bounds non-terminating getters, thrown toString(), and microtask loops", () => {
+    const payloads = [
+      "export const meta = { get name() { while (true); }, description: 'b' }\nreturn 1",
+      "export const meta = { name: (() => { throw { toString() { while (true); } }; })(), description: 'b' }\nreturn 1",
+      "export const meta = { name: (Promise.resolve().then(function loop() { return Promise.resolve().then(loop); }), 'a'), description: 'b' }\nreturn 1",
+    ];
+
+    for (const script of payloads) {
+      const started = Date.now();
+      expect(() => extractMeta(script)).toThrow(/did not finish evaluating/);
+      expect(Date.now() - started).toBeLessThan(2000);
+    }
+  });
+
+  it("does not expose wrapper helper bindings to the meta fragment", () => {
+    for (const ident of ["__eval", "__stringify", "__isArray", "__String", "__TypeError"]) {
+      expect(() => extractMeta(
+        `export const meta = { name: String(${ident}), description: 'b' }\nreturn 1`,
+      )).toThrow(/is not defined/);
+    }
+  });
+
+  it("rejects functions and symbols inside meta properties", () => {
+    expect(() => extractMeta(
+      "export const meta = { name: 'a', description: 'b', whenToUse: () => 'now' }\nreturn 1",
+    )).toThrow(/PURE LITERAL/);
+    expect(() => extractMeta(
+      "export const meta = { name: 'a', description: 'b', phases: () => [] }\nreturn 1",
+    )).toThrow(/PURE LITERAL/);
+  });
 });

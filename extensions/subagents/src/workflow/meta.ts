@@ -9,15 +9,18 @@
  * Claude Code solves this by parsing with acorn and requiring `meta` to be a
  * pure literal (no variables, calls, spreads, or template interpolation). We
  * take the same contract without the dependency: scan to the matching brace,
- * then evaluate *only* that fragment in an empty vm context. A pure literal has
- * nothing to call, so evaluating it cannot reach anything — and anything that
- * isn't a pure literal either throws (unbound identifier) or is rejected below.
+ * then evaluate *only* that fragment in a null-prototype vm context with
+ * dynamic code generation disabled, serializing the result to a JSON primitive
+ * before crossing back to the host. A pure literal has nothing to call, so
+ * evaluating it cannot reach anything — and anything that isn't a pure literal
+ * either throws (unbound identifier / disallowed codegen) or is rejected below.
  *
  * The scanner is string-, comment-, and regex-aware. That matters: a workflow's
  * `detail` text routinely contains braces, and `phases: [{ title: "a}b" }]` must
  * not terminate the scan early.
  */
 
+import { types } from "node:util";
 import { createContext, Script } from "node:vm";
 
 /** A phase declared up front, so the UI can show it before any agent runs. */
@@ -186,6 +189,21 @@ function fail(message: string): never {
   throw new WorkflowMetaError(message);
 }
 
+function readNativeErrorDetail(error: unknown): { code?: string; message: string } {
+  if (types.isNativeError(error)) {
+    const codeDesc = Object.getOwnPropertyDescriptor(error, "code");
+    const msgDesc = Object.getOwnPropertyDescriptor(error, "message");
+    const code = codeDesc && "value" in codeDesc && typeof codeDesc.value === "string"
+      ? codeDesc.value
+      : undefined;
+    const message = msgDesc && "value" in msgDesc && typeof msgDesc.value === "string"
+      ? msgDesc.value
+      : "unknown evaluation error";
+    return { code, message };
+  }
+  return { message: "unknown evaluation error" };
+}
+
 function assertPhases(value: unknown): WorkflowPhaseMeta[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) fail("`meta.phases` must be an array of { title, detail?, model? } objects.");
@@ -239,19 +257,68 @@ export function extractMeta(source: string): MetaExtraction {
   const fragment = source.slice(open, close);
   let value: unknown;
   try {
-    // Empty context: a pure literal needs no globals, so anything reaching for
-    // one (a variable, a helper call) throws here and is reported as impure.
+    // Validate `fragment` as a standalone parenthesized expression before
+    // embedding it in the serializer wrapper so crafted syntax cannot break
+    // out of the wrapper expression, and syntax errors point at the literal.
+    new Script(`"use strict"; (${fragment})`, { filename: "workflow-meta.js" });
+
+    // Null-prototype context with dynamic code generation disabled and isolated
+    // microtasks: no host objects cross into the realm (`this` / `globalThis`
+    // have no host prototype chain), `eval`/`Function`/Wasm are blocked, and
+    // microtask loops stay bounded by the timeout.
     //
-    // The timeout is not belt-and-braces. An IIFE needs no globals either, so
-    // `name: (() => { while (true); })()` is evaluable — and this runs on the
-    // host thread, before the script ever reaches the worker. Without a bound it
-    // would wedge pi itself. `timeout` only governs synchronous execution, which
-    // is all a literal can contain.
-    value = new Script(`(${fragment})`, { filename: "workflow-meta.js" })
-      .runInContext(createContext({}), { timeout: META_EVAL_TIMEOUT_MS });
+    // Serialize to a JSON primitive string *inside* the vm so no vm-realm
+    // object, getter, Proxy, thrown object, or overridden method (e.g.
+    // `phases.map`) can execute on the host thread or receive a host callback.
+    const context = createContext(Object.create(null), {
+      codeGeneration: { strings: false, wasm: false },
+      microtaskMode: "afterEvaluate",
+    });
+    const wrapper = `"use strict";
+((__eval) => {
+  const __stringify = JSON.stringify;
+  const __isArray = Array.isArray;
+  const __String = String;
+  const __TypeError = TypeError;
+  try {
+    const __value = __eval();
+    if (!__value || typeof __value !== "object" || __isArray(__value)) {
+      return "N";
+    }
+    const __json = __stringify(__value, (_key, __v) => {
+      if (typeof __v === "function" || typeof __v === "symbol") {
+        throw new __TypeError("functions and symbols are not allowed in meta");
+      }
+      return __v;
+    });
+    return typeof __json === "string" ? "O:" + __json : "N";
+  } catch (__err) {
+    try {
+      const __msg =
+        __err && typeof __err === "object" && typeof __err.message === "string"
+          ? __err.message
+          : __String(__err);
+      return "E:" + __String(__msg);
+    } catch {
+      return "E:unreadable error";
+    }
+  }
+})(() => (${fragment}))`;
+
+    const serialized = new Script(wrapper, { filename: "workflow-meta.js" })
+      .runInContext(context, { timeout: META_EVAL_TIMEOUT_MS });
+
+    if (typeof serialized !== "string") {
+      fail("`meta` must be an object literal.\n" + PURE_LITERAL_HINT);
+    }
+    if (serialized.startsWith("E:")) {
+      fail(`\`meta\` could not be evaluated: ${serialized.slice(2)}\n${PURE_LITERAL_HINT}`);
+    }
+    value = serialized.startsWith("O:") ? JSON.parse(serialized.slice(2)) : null;
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    if (/timed out|Script execution/i.test(detail)) {
+    if (error instanceof WorkflowMetaError) throw error;
+    const { code, message: detail } = readNativeErrorDetail(error);
+    if (code === "ERR_SCRIPT_EXECUTION_TIMEOUT" || /timed out|Script execution/i.test(detail)) {
       fail(
         `\`meta\` did not finish evaluating within ${META_EVAL_TIMEOUT_MS}ms — it must be a literal, not a computation.\n` +
         PURE_LITERAL_HINT,
