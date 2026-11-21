@@ -458,7 +458,11 @@ async fn image(State(state): State<AppState>, Extension(scope): Extension<Scope>
         Err(e) => return read_error(e),
     };
     let Ok(index) = index.parse::<usize>() else { return read_error(read::bad("index must be an integer")) };
-    match scoped_query(&state, scope, Some(id.clone()), move |store, conn| read::entries::image(conn, &store.blobs, &id, seq, index)).await {
+    match scoped_query(&state, scope, Some(id.clone()), move |store, conn| {
+        read::entries::image_scoped(conn, &store.blobs, &id, seq, index, scope.redact)
+    })
+    .await
+    {
         // Stored lines never change, so neither do their images.
         Ok((content_type, bytes)) => (
             [

@@ -214,7 +214,25 @@ fn image_type(mime: Option<&str>) -> &str {
 
 /// The decoded bytes and content type of image `index` of entry `seq`.
 pub fn image(conn: &Connection, blobs: &BlobStore, id: &str, seq: i64, index: usize) -> ReadResult<(String, Vec<u8>)> {
-    let mut raw = parse(raw(conn, blobs, id, seq)?);
+    image_scoped(conn, blobs, id, seq, index, false)
+}
+
+/// The decoded bytes and content type of image `index` of entry `seq` for a namespace: when `redact`ed, agent memory
+/// is omitted (`redaction::omit_memory`) before images are numbered, matching `list_scoped`.
+pub fn image_scoped(
+    conn: &Connection,
+    blobs: &BlobStore,
+    id: &str,
+    seq: i64,
+    index: usize,
+    redact: bool,
+) -> ReadResult<(String, Vec<u8>)> {
+    let sid = session_sid(conn, id)?;
+    let mut raw = parse(raw_by_sid(conn, blobs, sid, seq)?);
+    if redact {
+        let memory_calls = crate::derive::memory_calls(conn, sid, seq, seq)?;
+        super::redaction::omit_memory(&mut raw, &memory_calls);
+    }
     let mut found = None;
     for_each_image(&mut raw, &mut 0, &mut |i, image| {
         if i == index {

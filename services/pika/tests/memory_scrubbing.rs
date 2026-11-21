@@ -139,6 +139,14 @@ impl App {
         text
     }
 
+    async fn get_bytes(&self, uri: &str) -> (StatusCode, Vec<u8>) {
+        let request = Request::builder().method(Method::GET).uri(uri).body(Body::empty()).unwrap();
+        let response = self.app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, body.to_vec())
+    }
+
     async fn json_in(&self, namespace: &str, path: &str) -> Value {
         serde_json::from_str(&self.read_in(namespace, path).await).unwrap()
     }
@@ -326,4 +334,142 @@ async fn opening_a_database_repairs_nested_memory_calls_once() {
     drop(router);
     let app = App::reopen(env, token);
     assert_eq!(one(&app.env.store, "SELECT COUNT(*) AS n FROM entries WHERE custom_type = 'pika-memory-calls'")["n"], json!(0));
+}
+
+const MEM_IMG_A_B64: &str = "TUVNQQ=="; // "MEMA"
+const MEM_IMG_A_BYTES: &[u8] = b"MEMA";
+const MEM_IMG_B_B64: &str = "TUVNQg=="; // "MEMB"
+const MEM_IMG_B_BYTES: &[u8] = b"MEMB";
+const MEM_IMG_C_B64: &str = "TUVNQw=="; // "MEMC"
+const MEM_IMG_C_BYTES: &[u8] = b"MEMC";
+const PUB_IMG_B64: &str = "UFVCQQ=="; // "PUBA"
+const PUB_IMG_BYTES: &[u8] = b"PUBA";
+
+fn img(b64: &str) -> Value {
+    json!({ "type": "image", "data": b64, "mimeType": "image/png" })
+}
+
+/// Public image endpoints omit memory images (in `pika-memory` custom entries, direct memory tool results, and
+/// nested memory tool results) with 404 while leaving owner `/api/v1/` unchanged.
+#[tokio::test]
+async fn public_image_omits_memory_images() {
+    let app = App::new();
+    let lines = vec![
+        json!({ "type": "session", "version": 3, "id": ID, "timestamp": "2026-10-20T09:00:00.000Z", "cwd": "/home/me/code/widgets" })
+            .to_string(),
+        // seq 1: pika-memory custom entry containing an image block
+        json!({ "type": "custom", "id": "m0", "parentId": null, "timestamp": "2026-10-20T09:00:00.500Z", "customType": "pika-memory",
+                "data": { "index": "notes", "preview": img(MEM_IMG_A_B64) } })
+            .to_string(),
+        // seq 2: assistant calling memory_read and codemode (which nests memory_save)
+        message("m1", "m0", "2026-10-20T09:00:01.000Z", json!({ "role": "assistant", "api": "openai-responses", "provider": "openai",
+            "model": "gpt-5", "stopReason": "toolUse", "timestamp": 1792486801000_i64,
+            "content": [
+                { "type": "toolCall", "id": "call_mem", "name": "memory_read", "arguments": { "id": "0123456789ab" } },
+                { "type": "toolCall", "id": "call_cm_only", "name": "codemode", "arguments": { "code": memory_script() } },
+            ] })),
+        // seq 3: direct memory tool result with image block in content
+        message("m2", "m1", "2026-10-20T09:00:02.000Z", json!({ "role": "toolResult", "toolCallId": "call_mem", "toolName": "memory_read",
+            "isError": false, "timestamp": 1792486802000_i64,
+            "content": [{ "type": "text", "text": "note" }, img(MEM_IMG_B_B64)] })),
+        // seq 4: nested memory tool result with images in content and nested memory call
+        message("m3", "m2", "2026-10-20T09:00:03.000Z", json!({ "role": "toolResult", "toolCallId": "call_cm_only", "toolName": "codemode",
+            "isError": false, "timestamp": 1792486803000_i64,
+            "content": [img(MEM_IMG_A_B64)],
+            "nestedCalls": { "calls": [
+                { "id": "call_cm_only/1", "name": "memory_save", "status": "ok", "durationMs": 5,
+                  "arguments": { "title": TITLE_MARK, "attachment": img(MEM_IMG_C_B64) } }
+            ], "complete": true } })),
+    ];
+    upload(&app.env.store, &format!("session:{ID}"), "session", &lines, 5);
+    app.publish().await;
+
+    for (seq, expected) in [
+        (1, vec![MEM_IMG_A_BYTES]),
+        (3, vec![MEM_IMG_B_BYTES]),
+        (4, vec![MEM_IMG_A_BYTES, MEM_IMG_C_BYTES]),
+    ] {
+        for (idx, bytes) in expected.iter().enumerate() {
+            let (status, _) = app.get_bytes(&format!("/api/public/v1/sessions/{ID}/entries/{seq}/image/{idx}")).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "public seq {seq} image {idx} should be 404");
+
+            let (status, body) = app.get_bytes(&format!("/api/v1/sessions/{ID}/entries/{seq}/image/{idx}")).await;
+            assert_eq!(status, StatusCode::OK, "owner seq {seq} image {idx} should be 200");
+            assert_eq!(body, *bytes, "owner seq {seq} image {idx} bytes");
+        }
+    }
+}
+
+/// When an entry has omitted memory images before a non-memory image (in assistant tool call arguments or in a
+/// nested-memory toolResult's non-memory nested call), public `/image/0` serves the non-memory image matching the
+/// rewritten URL in `/api/public/v1/.../entries`, while owner `/api/v1/` keeps pre-omission indices.
+#[tokio::test]
+async fn public_image_preserves_post_omission_indices() {
+    let app = App::new();
+    let lines = vec![
+        json!({ "type": "session", "version": 3, "id": ID, "timestamp": "2026-10-20T09:00:00.000Z", "cwd": "/home/me/code/widgets" })
+            .to_string(),
+        // seq 1: assistant message with memory_save image, memory-calling codemode image, then non-memory read image
+        message("m1", "s0", "2026-10-20T09:00:01.000Z", json!({ "role": "assistant", "api": "openai-responses", "provider": "openai",
+            "model": "gpt-5", "stopReason": "toolUse", "timestamp": 1792486801000_i64,
+            "content": [
+                { "type": "toolCall", "id": "call_mem_arg", "name": "memory_save", "arguments": { "title": TITLE_MARK, "img": img(MEM_IMG_A_B64) } },
+                { "type": "toolCall", "id": "call_cm_mix", "name": "codemode", "arguments": { "code": memory_script(), "img": img(MEM_IMG_B_B64) } },
+                { "type": "toolCall", "id": "call_plain_read", "name": "read", "arguments": { "path": "src/wombat.rs", "img": img(PUB_IMG_B64) } },
+            ] })),
+        // seq 2: codemode toolResult with omitted memory images in content, details, and memory_save nestedCall,
+        // followed by a preserved non-memory nestedCall image
+        message("m2", "m1", "2026-10-20T09:00:02.000Z", json!({ "role": "toolResult", "toolCallId": "call_cm_mix", "toolName": "codemode",
+            "isError": false, "timestamp": 1792486802000_i64,
+            "content": [img(MEM_IMG_A_B64)],
+            "details": { "preview": img(MEM_IMG_B_B64) },
+            "nestedCalls": { "calls": [
+                { "id": "call_cm_mix/1", "name": "memory_save", "status": "ok", "durationMs": 5,
+                  "arguments": { "title": TITLE_MARK, "img": img(MEM_IMG_C_B64) } },
+                { "id": "call_cm_mix/2", "name": "read", "status": "ok", "durationMs": 3,
+                  "arguments": { "path": "src/nested.rs", "img": img(PUB_IMG_B64) } },
+            ], "complete": true } })),
+    ];
+    upload(&app.env.store, &format!("session:{ID}"), "session", &lines, 3);
+    app.publish().await;
+
+    let public_entries = app.json_in("public/v1", &format!("sessions/{ID}/entries")).await;
+
+    // seq 1: assistant entry — public rewrites the surviving non-memory image to index 0
+    let seq1_src = public_entries["items"][1]["raw"]["message"]["content"][2]["arguments"]["img"]["src"]
+        .as_str()
+        .expect("public entries seq 1 non-memory image should have src");
+    assert_eq!(seq1_src, format!("/api/public/v1/sessions/{ID}/entries/1/image/0"));
+    let (status, body) = app.get_bytes(seq1_src).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, PUB_IMG_BYTES);
+    for omitted_idx in [1, 2] {
+        let (status, _) = app.get_bytes(&format!("/api/public/v1/sessions/{ID}/entries/1/image/{omitted_idx}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    // Owner still sees all three images at their original indices
+    for (idx, expected) in [MEM_IMG_A_BYTES, MEM_IMG_B_BYTES, PUB_IMG_BYTES].into_iter().enumerate() {
+        let (status, body) = app.get_bytes(&format!("/api/v1/sessions/{ID}/entries/1/image/{idx}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, expected);
+    }
+
+    // seq 2: nested-memory toolResult — public rewrites the surviving non-memory nested call image to index 0
+    let seq2_src = public_entries["items"][2]["raw"]["message"]["nestedCalls"]["calls"][1]["arguments"]["img"]["src"]
+        .as_str()
+        .expect("public entries seq 2 non-memory nested call image should have src");
+    assert_eq!(seq2_src, format!("/api/public/v1/sessions/{ID}/entries/2/image/0"));
+    let (status, body) = app.get_bytes(seq2_src).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, PUB_IMG_BYTES);
+    for omitted_idx in [1, 2, 3] {
+        let (status, _) = app.get_bytes(&format!("/api/public/v1/sessions/{ID}/entries/2/image/{omitted_idx}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    // Owner still sees all four images at their original indices (content, details, nested memory_save, nested read)
+    for (idx, expected) in [MEM_IMG_A_BYTES, MEM_IMG_B_BYTES, MEM_IMG_C_BYTES, PUB_IMG_BYTES].into_iter().enumerate() {
+        let (status, body) = app.get_bytes(&format!("/api/v1/sessions/{ID}/entries/2/image/{idx}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, expected);
+    }
 }
