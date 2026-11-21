@@ -2651,3 +2651,165 @@ async fn browser_save_room_edits_preserves_and_clears_topics_across_restarts() {
     assert!(final_room.get("topic").is_none(), "{final_room}");
     assert_eq!(member_ids(&final_room), ["sess-a", "sess-b"]);
 }
+
+#[tokio::test]
+async fn room_member_cap_is_enforced_across_save_room_and_member_routes() {
+    let s = server().await;
+    let cap = pika::relay::MAX_ROOM_MEMBERS;
+
+    // Submitting more than `MAX_ROOM_MEMBERS` in `save_room` is rejected immediately (before SQLite lookup)
+    // and creates no room, even when the ids are not recorded.
+    let too_many: Vec<String> = (0..=cap).map(|i| format!("unrecorded-{i:03}")).collect();
+    let rejected = http(&s.app, post("/api/v1/relay/rooms", json!({ "name": "huge", "members": too_many }), None)).await;
+    assert_eq!((rejected.status, rejected.json()), (StatusCode::TOO_MANY_REQUESTS, json!({ "error": "room_full" })));
+    let missing = http(&s.app, get("/api/v1/relay/rooms/huge", None, None)).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+
+    // Record `cap + 1` sessions in a single ingest batch.
+    let ids: Vec<String> = (0..=cap).map(|i| format!("cap-sess-{i:03}")).collect();
+    let streams: Vec<Value> = ids
+        .iter()
+        .map(|id| {
+            let line = json!({
+                "type": "session", "version": 3, "id": id,
+                "timestamp": "2026-10-20T09:00:00.000Z", "cwd": "/home/me/code/widgets",
+            })
+            .to_string();
+            stream(&format!("session:{id}"), "session", 0, &[line])
+        })
+        .collect();
+    let batch: Batch = serde_json::from_value(json!({ "streams": streams })).unwrap();
+    pika::ingest::apply(&s.env.store, DEVICE, &batch).unwrap();
+
+    // Creating a room with exactly `MAX_ROOM_MEMBERS` recorded sessions succeeds.
+    let full = http(
+        &s.app,
+        post("/api/v1/relay/rooms", json!({ "name": "full-room", "topic": "At cap", "members": &ids[..cap] }), None),
+    )
+    .await;
+    assert_eq!(full.status, StatusCode::OK);
+    assert_eq!(full.json()["room"]["members"].as_array().unwrap().len(), cap);
+
+    let extra = &ids[cap];
+
+    // Adding one more member via `save_room` is rejected with 429 `room_full` and leaves membership unchanged.
+    let over_save = http(
+        &s.app,
+        post("/api/v1/relay/rooms", json!({ "name": "full-room", "members": [extra] }), None),
+    )
+    .await;
+    assert_eq!((over_save.status, over_save.json()), (StatusCode::TOO_MANY_REQUESTS, json!({ "error": "room_full" })));
+    assert_eq!(room_detail(&s, "full-room").await["room"]["members"].as_array().unwrap().len(), cap);
+
+    // Adding or representing a non-member via the browser member route is rejected with 429 `room_full`.
+    for action in ["add", "represent"] {
+        let r = http(
+            &s.app,
+            post("/api/v1/relay/rooms/full-room/members", json!({ "sessionId": extra, "action": action }), None),
+        )
+        .await;
+        assert_eq!((r.status, r.json()), (StatusCode::TOO_MANY_REQUESTS, json!({ "error": "room_full" })), "{action}");
+    }
+
+    // Joining or representing a non-member via the device room route is also rejected with 429 `room_full`.
+    for action in ["join", "represent"] {
+        let r = room_action(
+            &s,
+            Some(&s.laptop),
+            json!({ "room": "full-room", "sessionId": extra, "action": action }),
+        )
+        .await;
+        assert_eq!((r.status, r.json()), (StatusCode::TOO_MANY_REQUESTS, json!({ "error": "room_full" })), "{action}");
+    }
+
+    // Existing members can still update the topic, re-save, or become representative while the room is full.
+    let topic_update = http(
+        &s.app,
+        post("/api/v1/relay/rooms", json!({ "name": "full-room", "topic": "Still editable", "members": [&ids[0]] }), None),
+    )
+    .await;
+    assert_eq!((topic_update.status, &topic_update.json()["room"]["topic"]), (StatusCode::OK, &json!("Still editable")));
+    let rep = http(
+        &s.app,
+        post("/api/v1/relay/rooms/full-room/members", json!({ "sessionId": &ids[0], "action": "represent" }), None),
+    )
+    .await;
+    assert_eq!((rep.status, &rep.json()["room"]["representative"]), (StatusCode::OK, &json!(&ids[0])));
+
+    // After one member leaves, the extra session can join and brings the count back to `cap`.
+    let leave = http(
+        &s.app,
+        post("/api/v1/relay/rooms/full-room/members", json!({ "sessionId": &ids[0], "action": "remove" }), None),
+    )
+    .await;
+    assert_eq!(leave.status, StatusCode::OK);
+    assert_eq!(leave.json()["room"]["members"].as_array().unwrap().len(), cap - 1);
+
+    let joined = room_action(
+        &s,
+        Some(&s.laptop),
+        json!({ "room": "full-room", "sessionId": extra, "action": "join" }),
+    )
+    .await;
+    assert_eq!(joined.status, StatusCode::OK);
+    assert_eq!(joined.json()["room"]["members"].as_array().unwrap().len(), cap);
+}
+
+#[tokio::test]
+async fn save_room_batches_recorded_member_validation() {
+    let s = server().await;
+    record(&s.env.store, "rec-laptop", DEVICE);
+    record(&s.env.store, "rec-desktop", OTHER);
+    let (_online, _) = Client::online(&s, &s.laptop, "online-only").await;
+
+    // Direct `recorded_batch` check: empty, mixed recorded/unrecorded, and duplicates.
+    assert!(pika::relay::recorded_batch(&s.env.store, &[]).unwrap().is_empty());
+    let batch_map = pika::relay::recorded_batch(
+        &s.env.store,
+        &[
+            "rec-laptop".to_owned(),
+            "rec-desktop".to_owned(),
+            "rec-laptop".to_owned(),
+            "missing-sess".to_owned(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(batch_map.len(), 2);
+    assert_eq!(batch_map["rec-laptop"].device, DEVICE);
+    assert_eq!(batch_map["rec-desktop"].device, OTHER);
+
+    // If any member in `save_room` is neither online nor recorded, the whole request fails atomically.
+    let bad = http(
+        &s.app,
+        post(
+            "/api/v1/relay/rooms",
+            json!({ "name": "atomic-room", "members": ["rec-laptop", "missing-sess", "online-only"] }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!((bad.status, bad.json()), (StatusCode::BAD_REQUEST, json!({ "error": "unknown_session" })));
+    assert_eq!(http(&s.app, get("/api/v1/relay/rooms/atomic-room", None, None)).await.status, StatusCode::NOT_FOUND);
+
+    // Valid mix of recorded offline sessions, online unrecorded session, and duplicates succeeds with metadata intact.
+    let ok = http(
+        &s.app,
+        post(
+            "/api/v1/relay/rooms",
+            json!({ "name": "batch-room", "members": ["rec-laptop", "rec-desktop", "online-only", "rec-laptop"] }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(ok.status, StatusCode::OK);
+    let members = ok.json()["room"]["members"].as_array().unwrap().clone();
+    assert_eq!(members.len(), 3);
+    let by_id: std::collections::HashMap<&str, &Value> =
+        members.iter().map(|m| (m["sessionId"].as_str().unwrap(), m)).collect();
+    assert_eq!(by_id["rec-laptop"]["device"], DEVICE);
+    assert_eq!(by_id["rec-laptop"]["online"], false);
+    assert_eq!(by_id["rec-desktop"]["device"], OTHER);
+    assert_eq!(by_id["rec-desktop"]["online"], false);
+    assert_eq!(by_id["online-only"]["device"], DEVICE);
+    assert_eq!(by_id["online-only"]["online"], true);
+}

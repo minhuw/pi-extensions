@@ -59,7 +59,9 @@ const MAX_MESSAGE_ID_CHARS: usize = 64;
 const MAX_ROOM_CHARS: usize = 64;
 const MAX_ROOMS: usize = 200;
 const MAX_ROOM_MESSAGES: usize = 200;
+pub const MAX_ROOM_MEMBERS: usize = 200;
 const MAX_MENTIONS: usize = 64;
+const PERSIST_CHANNEL_CAPACITY: usize = 4096;
 
 /// A pi session id: 1-128 characters of `[A-Za-z0-9._-]`.
 pub fn valid_session_id(id: &str) -> bool {
@@ -421,6 +423,33 @@ pub fn recorded(store: &Store, id: &str) -> Result<Option<Recorded>> {
     })?)
 }
 
+/// The recorded sessions among `ids`, fetched in a single SQLite read.
+pub fn recorded_batch(store: &Store, ids: &[String]) -> Result<HashMap<String, Recorded>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids_json = serde_json::to_string(ids)?;
+    Ok(store.read(|conn| {
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, device, name, title, project
+             FROM sessions
+             WHERE id IN (SELECT value FROM json_each(?1))",
+        )?;
+        let rows = stmt.query_map([&ids_json], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                Recorded { device: r.get(1)?, name: r.get(2)?, title: r.get(3)?, project: r.get(4)? },
+            ))
+        })?;
+        let mut found = HashMap::new();
+        for row in rows {
+            let (id, rec) = row?;
+            found.insert(id, rec);
+        }
+        Ok::<_, rusqlite::Error>(found)
+    })?)
+}
+
 /// Which of `ids` pika has recorded.
 pub fn recorded_ids(store: &Store, ids: &[String]) -> Result<HashSet<String>> {
     Ok(store.read(|conn| {
@@ -533,6 +562,8 @@ pub enum Reason {
     MailboxFull,
     /// A device acted for a session that another device owns; room actions only.
     NotOwner,
+    /// Adding members would exceed `MAX_ROOM_MEMBERS`.
+    RoomFull,
 }
 
 impl Reason {
@@ -547,6 +578,7 @@ impl Reason {
             Reason::NotMember => "not_member",
             Reason::MailboxFull => "mailbox_full",
             Reason::NotOwner => "not_owner",
+            Reason::RoomFull => "room_full",
         }
     }
 
@@ -561,6 +593,7 @@ impl Reason {
             "not_member" => Some(Reason::NotMember),
             "mailbox_full" => Some(Reason::MailboxFull),
             "not_owner" => Some(Reason::NotOwner),
+            "room_full" => Some(Reason::RoomFull),
             _ => None,
         }
     }
@@ -1325,13 +1358,31 @@ struct Inner {
     /// Counts in-process renames, so that a snapshot of the store read before one does not undo it.
     names_generation: u64,
     /// Ordered persistence queue to the background SQLite writer thread (`None` in memory-only mode).
-    persist: Option<std::sync::mpsc::Sender<PersistCmd>>,
+    persist: Option<std::sync::mpsc::SyncSender<PersistCmd>>,
+}
+
+fn remembered_owner_in<'a>(
+    remembered: &'a HashMap<String, Remembered>,
+    queues: &HashMap<String, VecDeque<String>>,
+    session: &str,
+    now: Instant,
+) -> Option<&'a str> {
+    let r = remembered.get(session)?;
+    (now < r.until || queues.contains_key(session)).then_some(r.device.as_str())
 }
 
 impl Inner {
     fn persist(&self, op: PersistOp) {
         if let Some(tx) = &self.persist {
-            let _ = tx.send(PersistCmd::Op(op));
+            match tx.try_send(PersistCmd::Op(op)) {
+                Ok(()) => {}
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    tracing::warn!("relay: persistence queue full; dropping persistence op");
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    tracing::warn!("relay: persistence worker disconnected; dropping persistence op");
+                }
+            }
         }
     }
 
@@ -1404,8 +1455,7 @@ impl Inner {
 
     /// The device that last held the offline `session` online, while it is remembered.
     fn remembered_owner(&self, session: &str) -> Option<&str> {
-        let r = self.remembered.get(session)?;
-        (Instant::now() < r.until || self.queues.contains_key(session)).then_some(r.device.as_str())
+        remembered_owner_in(&self.remembered, &self.queues, session, Instant::now())
     }
 
     /// The owner of `session` ("Ownership" in `docs/RELAY.md`): `recorded_device`, the device pika's sessions table
@@ -1913,7 +1963,7 @@ impl Relay {
             })?;
         }
 
-        let (persist_tx, persist_rx) = std::sync::mpsc::channel();
+        let (persist_tx, persist_rx) = std::sync::mpsc::sync_channel(PERSIST_CHANNEL_CAPACITY);
         let writer_store = store.clone();
         let worker = std::thread::Builder::new()
             .name("pika-relay-persist".into())
@@ -1985,15 +2035,21 @@ impl Relay {
 
     /// Waits until every persistence operation queued so far has been committed to SQLite.
     pub async fn flush(&self) {
-        let rx = {
+        let (pending, rx) = {
             let inner = self.lock();
-            let Some(persist) = &inner.persist else { return };
+            let Some(persist) = inner.persist.clone() else { return };
             let (tx, rx) = oneshot::channel();
-            if persist.send(PersistCmd::Flush(tx)).is_err() {
-                return;
+            match persist.try_send(PersistCmd::Flush(tx)) {
+                Ok(()) => (None, rx),
+                Err(std::sync::mpsc::TrySendError::Full(cmd)) => (Some((persist, cmd)), rx),
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
             }
-            rx
         };
+        if let Some((persist, cmd)) = pending
+            && !tokio::task::spawn_blocking(move || persist.send(cmd).is_ok()).await.unwrap_or(false)
+        {
+            return;
+        }
         let _ = rx.await;
     }
 
@@ -2422,20 +2478,16 @@ impl Relay {
         let mut named = vec![false; tokens.len()];
         let mut refreshed_members: Vec<RoomMember> = Vec::new();
         {
-            let online_snapshot: HashMap<String, Online> = inner.online.clone();
-            let remembered_owners: HashMap<String, String> = inner
-                .remembered
-                .iter()
-                .filter_map(|(sid, _)| inner.remembered_owner(sid).map(|d| (sid.clone(), d.to_owned())))
-                .collect();
-            if let Some(room) = inner.rooms.get_mut(&room_name) {
+            let Inner { rooms, online, remembered, queues, .. } = &mut *inner;
+            let now_inst = Instant::now();
+            if let Some(room) = rooms.get_mut(&room_name) {
                 for member in room.members.values_mut() {
-                    if let Some(online) = online_snapshot.get(&member.session_id)
+                    let online = online.get(&member.session_id);
+                    if let Some(online) = online
                         && member.refresh(online)
                     {
                         refreshed_members.push(member.clone());
                     }
-                    let online = online_snapshot.get(&member.session_id);
                     let mut matched = mention_all;
                     for (token, named) in tokens.iter().zip(named.iter_mut()) {
                         if !everyone(token) && member.matches_mention(token, online) {
@@ -2449,7 +2501,9 @@ impl Relay {
                     if matched {
                         let owner = online
                             .map(|o| o.device.clone())
-                            .or_else(|| remembered_owners.get(&member.session_id).cloned())
+                            .or_else(|| {
+                                remembered_owner_in(remembered, queues, &member.session_id, now_inst).map(str::to_owned)
+                            })
                             .or_else(|| member.device.clone());
                         resolved_ids.push(member.session_id.clone());
                         let target = member.target(online);
@@ -2594,22 +2648,28 @@ impl Relay {
         let now = now_ms();
         let topic_update =
             topic.map(|t| t.map(|s| cut_chars(s.trim(), 200).to_owned()).filter(|s| !s.is_empty()));
-        let online_snapshot: HashMap<String, Online> =
-            inner.online.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let existing_count = inner.rooms.get(name).map_or(0, |r| r.members.len());
+        let mut new_members = HashSet::new();
         for (sid, rec) in members {
             if !valid_session_id(sid) {
                 return Err(Reason::Invalid);
             }
             let already_member = inner.rooms.get(name).is_some_and(|r| r.members.contains_key(sid));
-            if !online_snapshot.contains_key(sid) && rec.is_none() && !already_member {
+            if !inner.online.contains_key(sid) && rec.is_none() && !already_member {
                 return Err(Reason::UnknownSession);
             }
+            if !already_member {
+                new_members.insert(sid.as_str());
+            }
+        }
+        if existing_count + new_members.len() > MAX_ROOM_MEMBERS {
+            return Err(Reason::RoomFull);
         }
         let mut upserted_members = Vec::new();
         let room_row = {
+            let Inner { rooms, online, .. } = &mut *inner;
             let initial_topic = topic_update.clone().flatten();
-            let room = inner
-                .rooms
+            let room = rooms
                 .entry(name.to_owned())
                 .or_insert_with(|| Room::new(name.to_owned(), initial_topic, now));
             if let Some(new_topic) = topic_update {
@@ -2617,7 +2677,7 @@ impl Relay {
             }
             room.updated_at = now;
             for (sid, rec) in members {
-                if let Some(online) = online_snapshot.get(sid) {
+                if let Some(online) = online.get(sid) {
                     let member = room
                         .members
                         .entry(sid.clone())
@@ -2642,7 +2702,7 @@ impl Relay {
         for member in upserted_members {
             inner.persist(PersistOp::UpsertRoomMember { room: name.to_owned(), member });
         }
-        Ok(inner.rooms[name].detail_json(&online_snapshot, &inner.names, MAX_ROOM_MESSAGES, 0))
+        Ok(inner.rooms[name].detail_json(&inner.online, &inner.names, MAX_ROOM_MESSAGES, 0))
     }
 
     /// Joins, leaves, represents, or stops representing a chatroom for `session_id`. Joining and representing create
@@ -2678,28 +2738,29 @@ impl Relay {
             }
         }
         let now = now_ms();
-        let online_snapshot: HashMap<String, Online> = inner.online.clone();
         let previous = inner.rooms.get(name).and_then(|r| r.representative.clone());
         if matches!(action, RoomAction::Join | RoomAction::Represent) {
             if !inner.rooms.contains_key(name) && inner.rooms.len() >= MAX_ROOMS {
                 return Err(Reason::MailboxFull);
             }
-            let online = online_snapshot.get(session_id);
             let already_member = inner.rooms.get(name).is_some_and(|r| r.members.contains_key(session_id));
-            if online.is_none() && recorded.is_none() && !already_member {
+            if !inner.online.contains_key(session_id) && recorded.is_none() && !already_member {
                 return Err(Reason::UnknownSession);
+            }
+            if !already_member && inner.rooms.get(name).is_some_and(|r| r.members.len() >= MAX_ROOM_MEMBERS) {
+                return Err(Reason::RoomFull);
             }
             let clean_topic = topic.map(|t| cut_chars(t.trim(), 200).to_owned()).filter(|t| !t.is_empty());
             let (room_row, member) = {
-                let room = inner
-                    .rooms
+                let Inner { rooms, online, .. } = &mut *inner;
+                let room = rooms
                     .entry(name.to_owned())
                     .or_insert_with(|| Room::new(name.to_owned(), clean_topic.clone(), now));
                 if clean_topic.is_some() {
                     room.topic = clean_topic;
                 }
                 room.updated_at = now;
-                let member = if let Some(online) = online {
+                let member = if let Some(online) = online.get(session_id) {
                     room.members
                         .entry(session_id.to_owned())
                         .and_modify(|m| {
@@ -2754,7 +2815,7 @@ impl Relay {
             sessions.extend(previous);
             inner.announce_representative(name, current.as_deref(), sessions);
         }
-        Ok(inner.rooms[name].detail_json(&online_snapshot, &inner.names, MAX_ROOM_MESSAGES, 0))
+        Ok(inner.rooms[name].detail_json(&inner.online, &inner.names, MAX_ROOM_MESSAGES, 0))
     }
 
     /// Deletes a chatroom; returns whether it existed. A room that had a representative tells its online members

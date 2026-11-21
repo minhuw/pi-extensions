@@ -109,7 +109,7 @@ async fn recorded(state: &AppState, draft: &Draft) -> anyhow::Result<Option<rela
 
 fn reason_response(reason: Reason) -> Response {
     let status = match reason {
-        Reason::RateLimited | Reason::MailboxFull => StatusCode::TOO_MANY_REQUESTS,
+        Reason::RateLimited | Reason::MailboxFull | Reason::RoomFull => StatusCode::TOO_MANY_REQUESTS,
         Reason::NotOwner | Reason::NotMember => StatusCode::FORBIDDEN,
         Reason::UnknownRoom => StatusCode::NOT_FOUND,
         _ => StatusCode::BAD_REQUEST,
@@ -285,6 +285,9 @@ pub async fn save_room(State(state): State<AppState>, body: Result<Json<Value>, 
     let member_ids: Vec<String> = match obj.get("members") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(items)) => {
+            if items.len() > relay::MAX_ROOM_MEMBERS {
+                return reason_response(Reason::RoomFull);
+            }
             let mut ids = Vec::with_capacity(items.len());
             for item in items {
                 match item.as_str() {
@@ -297,20 +300,22 @@ pub async fn save_room(State(state): State<AppState>, body: Result<Json<Value>, 
         Some(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
     };
     refresh_names(&state).await;
-    let store = state.store.clone();
-    let lookup_ids = member_ids.clone();
-    let members_with_rec = match blocking(move || {
-        let mut out = Vec::with_capacity(lookup_ids.len());
-        for sid in lookup_ids {
-            let rec = relay::recorded(&store, &sid)?;
-            out.push((sid, rec));
-        }
-        Ok(out)
-    })
-    .await
-    {
-        Ok(list) => list,
-        Err(e) => return internal_error(e),
+    let members_with_rec = if member_ids.is_empty() {
+        Vec::new()
+    } else {
+        let store = state.store.clone();
+        let lookup_ids = member_ids.clone();
+        let recorded = match blocking(move || relay::recorded_batch(&store, &lookup_ids)).await {
+            Ok(map) => map,
+            Err(e) => return internal_error(e),
+        };
+        member_ids
+            .into_iter()
+            .map(|sid| {
+                let rec = recorded.get(&sid).cloned();
+                (sid, rec)
+            })
+            .collect()
     };
     match state.relay.save_room(name, topic, &members_with_rec) {
         Ok(detail) => Json(detail).into_response(),
