@@ -16,6 +16,14 @@ const UPDATE_HANDOFF = "Upgrade or change this vendored distribution through thi
 const UPDATE_AVAILABLE_HANDOFF = `A newer upstream Impeccable is published. Do not run or offer \`npx impeccable update\`: it installs foreign harness skills and leaves this Pi package unchanged. ${UPDATE_HANDOFF}`;
 const execFileAsync = promisify(execFile);
 
+const ACCOUNT_VALUE_FLAGS = new Set([
+	"--target", "-t",
+	"--config", "--cwd", "--dir",
+	"--file", "--files", "--reason",
+	"--format", "--output", "--out", "--out-dir",
+	"--scope", "--url", "--port", "--host", "--timeout",
+]);
+
 /**
  * Account sign-in and the switches that turn on account uploads (scan health
  * counts and foundations, full DESIGN.md, critique reports, daily setup status).
@@ -23,13 +31,26 @@ const execFileAsync = promisify(execFile);
  * whoami pass through.
  */
 function accountEnableCommand(argv: readonly string[]): string | undefined {
-	const args = argv[0] === "skills" ? argv.slice(1) : argv;
-	const verb = args[0]?.toLowerCase();
-	const positional = args.slice(1).filter((arg) => !arg.startsWith("-")).map((arg) => arg.toLowerCase());
+	const positional: string[] = [];
+	let endOfFlags = false;
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i]!;
+		if (!endOfFlags) {
+			if (arg === "--") { endOfFlags = true; continue; }
+			if (ACCOUNT_VALUE_FLAGS.has(arg)) {
+				if (i + 1 < argv.length && !argv[i + 1]!.startsWith("-")) i++;
+				continue;
+			}
+			if (arg.startsWith("-")) continue;
+		}
+		positional.push(arg.toLowerCase());
+	}
+	const args = positional[0] === "skills" ? positional.slice(1) : positional;
+	const [verb, first, second] = args;
 	if (verb === "login") return "login";
-	if ((verb === "critiques" || verb === "setup") && positional[0] === "on") return `${verb} on`;
-	if (verb === "health" && positional[0] === "on") return "health on";
-	if (verb === "health" && positional[0] === "design" && positional[1] === "on") return "health design on";
+	if ((verb === "critiques" || verb === "setup") && first === "on") return `${verb} on`;
+	if (verb === "health" && first === "on") return "health on";
+	if (verb === "health" && first === "design" && second === "on") return "health design on";
 	return undefined;
 }
 /** Establish local-config privacy before any real local-config commit. */

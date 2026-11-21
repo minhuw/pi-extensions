@@ -119,6 +119,50 @@ it("never signs in or turns on account uploads, while status and off controls re
 	} finally { await h.close(); }
 });
 
+it("refuses account upload enable commands even when value-taking flags precede on", async () => {
+	const h = await detectorFixture();
+	try {
+		process.env.IMPECCABLE_BIN = h.binary;
+		const refusedCases: ReadonlyArray<{ argv: string[]; expected: string }> = [
+			{ argv: ["health", "--target", "dir", "on"], expected: "health on" },
+			{ argv: ["health", "-t", "dir", "on"], expected: "health on" },
+			{ argv: ["health", "--target=dir", "on"], expected: "health on" },
+			{ argv: ["health", "--target", "dir", "--", "on"], expected: "health on" },
+			{ argv: ["--target", "dir", "health", "on"], expected: "health on" },
+			{ argv: ["skills", "health", "-t", "dir", "on"], expected: "health on" },
+			{ argv: ["health", "--target", "dir", "design", "on"], expected: "health design on" },
+			{ argv: ["health", "-t", "dir", "design", "on"], expected: "health design on" },
+			{ argv: ["health", "design", "--target", "dir", "on"], expected: "health design on" },
+			{ argv: ["health", "design", "-t", "dir", "on"], expected: "health design on" },
+			{ argv: ["critiques", "--target", "dir", "on"], expected: "critiques on" },
+			{ argv: ["critiques", "-t", "dir", "on"], expected: "critiques on" },
+			{ argv: ["setup", "--target", "dir", "on"], expected: "setup on" },
+			{ argv: ["setup", "-t", "dir", "on"], expected: "setup on" },
+			{ argv: ["setup", "-t", "dir", "ON"], expected: "setup on" },
+			{ argv: ["--target", "dir", "login"], expected: "login" },
+		];
+		for (const { argv, expected } of refusedCases) {
+			const refused = await runOperation({ argv, cwd: h.directory }, h.api);
+			expect(refused.ok).toBe(false);
+			expect(refused.binary).toBe("");
+			expect(refused.integration?.engineRun).toBe(false);
+			expect(refused.message).toContain("never signs in to an Impeccable account or turns on account uploads");
+			expect(JSON.parse(refused.stdout)).toMatchObject({ handoff: "user", command: expect.stringMatching(new RegExp(`impeccable ${expected}$`)) });
+		}
+		for (const argv of [
+			["health", "--target", "dir", "off"],
+			["health", "--target", "on", "off"],
+			["health", "-t", "design", "off"],
+			["critiques", "-t", "dir", "forget"],
+			["setup", "--target", "dir", "status"],
+		]) {
+			const passed = await runOperation({ argv, cwd: h.directory }, h.api);
+			expect(passed.binary).toBe(h.binary);
+			expect(passed.message ?? "").not.toContain("never signs in");
+		}
+	} finally { await h.close(); }
+});
+
 it("pins native prompts without shadowing discovered commands and unpins only owned files", async () => {
 	const h = await detectorFixture(undefined, [fileURLToPath(new URL("../../writer/prompts/polish.md", import.meta.url))]);
 	try {
