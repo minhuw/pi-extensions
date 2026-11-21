@@ -98,6 +98,38 @@ fn at_time(conn: &Connection, p: &Params, now: i64) -> ReadResult<Statistics> {
     at_time_scoped(conn, p, now, false)
 }
 
+pub(super) fn statistics_sql(filter: &str, public: bool) -> String {
+    format!(
+        "{ctes}
+         SELECT 0 AS tag, day AS k, NULL AS name, 0 AS sessions,
+                SUM(requests), SUM(input), SUM(output), SUM(cache_read), SUM(cache_write),
+                SUM(cost), SUM(estimated_cost), SUM(unpriced_requests),
+                0, 0, 0, 0, 0.0, 0, 0.0, 0.0, 0
+         FROM u_agg
+         GROUP BY day
+         UNION ALL
+         SELECT 1 AS tag, day AS k, NULL AS name, COUNT(*) AS sessions,
+                0, 0, 0, 0, 0, 0.0, 0.0, 0,
+                0, 0, 0, 0, 0.0, 0, 0.0, 0.0, 0
+         FROM activity
+         GROUP BY day
+         UNION ALL
+         SELECT 1 AS tag, -1 AS k, NULL AS name, COUNT(DISTINCT sid) AS sessions,
+                0, 0, 0, 0, 0, 0.0, 0.0, 0,
+                0, 0, 0, 0, 0.0, 0, 0.0, 0.0, 0
+         FROM activity
+         UNION ALL
+         {arms}",
+        ctes = breakdown::ctes_sql(true, filter, public),
+        arms = breakdown::BREAKDOWN_ARMS_SQL,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn breakdown_sql(filter: &str, public: bool) -> String {
+    breakdown::breakdown_sql(filter, public)
+}
+
 fn at_time_scoped(conn: &Connection, p: &Params, now: i64, public: bool) -> ReadResult<Statistics> {
     let days = match p.0.get("days").map(String::as_str) {
         None => Some(30),
@@ -134,62 +166,82 @@ fn at_time_scoped(conn: &Connection, p: &Params, now: i64, public: bool) -> Read
         estimated_cost: 0.0,
         unpriced_requests: 0,
     };
-    // Relative offsets stay nonnegative even for dates before the Unix epoch.
-    let mut statement = tx.prepare(&format!(
-        "SELECT (u.at - ?1) / {DAY_MS}, SUM(u.requests), SUM(u.input), SUM(u.output),
-                SUM(u.cache_read), SUM(u.cache_write), SUM(u.cost),
-                SUM(CASE WHEN u.pricing = 1 THEN u.cost ELSE 0 END), SUM(u.pricing = 2)
-         FROM usage_events u JOIN sessions s ON s.sid = u.sid
-         WHERE u.at >= ?1 AND u.at < ?2 AND {filter}
-         GROUP BY 1"
-    ))?;
+    let mut breakdown = breakdown::BreakdownBuilder::default();
+    // Single pass over `usage_events` and `entries` in `[from, end)`: SQL aggregates daily totals, session activity,
+    // project/model breakdowns, and request metrics so only compact summary rows cross FFI.
+    let mut statement = tx.prepare(&statistics_sql(filter, public))?;
     let rows = statement.query_map(params![from, end], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            Counts {
-                requests: r.get(1)?,
-                tokens: Tokens {
-                    input: r.get(2)?,
-                    output: r.get(3)?,
-                    cache_read: r.get(4)?,
-                    cache_write: r.get(5)?,
+        let tag: i64 = r.get(0)?;
+        let key: i64 = r.get(1)?;
+        match tag {
+            0 => Ok((
+                tag,
+                key,
+                None,
+                breakdown::read_counts(r, 3)?,
+                r.get::<_, f64>(10)?,
+                r.get::<_, i64>(11)?,
+                breakdown::Metrics::default(),
+            )),
+            1 => Ok((
+                tag,
+                key,
+                None,
+                Counts {
+                    sessions: r.get(3)?,
+                    ..Counts::default()
                 },
-                cost: r.get(6)?,
-                ..Counts::default()
-            },
-            r.get::<_, f64>(7)?,
-            r.get::<_, i64>(8)?,
-        ))
+                0.0,
+                0,
+                breakdown::Metrics::default(),
+            )),
+            2 => Ok((
+                tag,
+                key,
+                r.get(2)?,
+                Counts {
+                    sessions: r.get(3)?,
+                    ..Counts::default()
+                },
+                0.0,
+                0,
+                breakdown::Metrics::default(),
+            )),
+            3 | 4 => Ok((
+                tag,
+                key,
+                r.get(2)?,
+                breakdown::read_counts(r, 3)?,
+                0.0,
+                0,
+                breakdown::read_metrics(r, 12)?,
+            )),
+            _ => unreachable!("unexpected statistics row tag {tag}"),
+        }
     })?;
     for row in rows {
-        let (day, counts, estimated, unpriced) = row?;
-        daily[day as usize].counts = counts;
-        totals.estimated_cost += estimated;
-        totals.unpriced_requests += unpriced;
-    }
-    // UNION deduplicates each (day, sid), including entries that also have a usage row. Children are
-    // independent sessions, never recursively added to a parent's usage. The total deduplicates across days too.
-    let mut statement = tx.prepare(&format!(
-        "WITH activity AS (
-            SELECT (e.ts - ?1) / {DAY_MS} AS day, e.sid
-            FROM entries e JOIN sessions s ON s.sid = e.sid
-            WHERE e.ts >= ?1 AND e.ts < ?2 AND {filter}
-            UNION
-            SELECT (u.at - ?1) / {DAY_MS} AS day, u.sid
-            FROM usage_events u JOIN sessions s ON s.sid = u.sid
-            WHERE u.at >= ?1 AND u.at < ?2 AND {filter}
-         )
-         SELECT day, COUNT(*) FROM activity GROUP BY day
-         UNION ALL SELECT -1, COUNT(DISTINCT sid) FROM activity"
-    ))?;
-    let rows = statement.query_map(params![from, end], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
-    for row in rows {
-        let (day, sessions) = row?;
-        if day == -1 {
-            totals.counts.sessions = sessions;
-        } else {
-            daily[day as usize].counts.sessions = sessions;
-            totals.active_days += 1;
+        let (tag, key, name, counts, estimated, unpriced, metrics) = row?;
+        match tag {
+            0 => {
+                let slot = &mut daily[key as usize].counts;
+                slot.requests = counts.requests;
+                slot.tokens = counts.tokens;
+                slot.cost = counts.cost;
+                totals.estimated_cost += estimated;
+                totals.unpriced_requests += unpriced;
+            }
+            1 => {
+                if key == -1 {
+                    totals.counts.sessions = counts.sessions;
+                } else {
+                    daily[key as usize].counts.sessions = counts.sessions;
+                    totals.active_days += 1;
+                }
+            }
+            2 => breakdown.add_project_sessions(key, name, counts.sessions),
+            3 => breakdown.add_project_usage(key, name, counts, metrics),
+            4 => breakdown.add_model(key, name, counts, metrics),
+            _ => unreachable!("unexpected statistics row tag {tag}"),
         }
     }
     for day in &daily {
@@ -200,7 +252,7 @@ fn at_time_scoped(conn: &Connection, p: &Params, now: i64, public: bool) -> Read
         totals.counts.tokens.cache_write += day.counts.tokens.cache_write;
         totals.counts.cost += day.counts.cost;
     }
-    let breakdown = breakdown::query(&tx, from, end, filter, public)?;
+    let breakdown = breakdown.finish();
     Ok(Statistics {
         from: date(from),
         to: date(today),
@@ -444,5 +496,278 @@ mod tests {
                 assert_eq!(stats.totals.active_days, 1, "{label} public={public}");
             }
         }
+    }
+
+    #[test]
+    fn single_scan_statistics_matches_reference_across_devices_projects_models_pricing_and_visibility() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let now_ms = parse_iso_ms("2026-11-05T12:00:00Z").unwrap();
+        let today = now_ms.div_euclid(DAY_MS) * DAY_MS;
+        let day = |offset: i64| today - offset * DAY_MS + 3_600_000;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .write(|tx| {
+                // Multi-device, published/unpublished/hidden/empty/null projects.
+                tx.execute_batch(
+                    "INSERT INTO sessions (sid, id, device, project) VALUES
+                        (1, 'pub-a-1', 'laptop', 'pub-a'),
+                        (2, 'pub-a-hidden', 'desktop', 'pub-a'),
+                        (3, 'pub-b-prompt', 'workstation', 'pub-b'),
+                        (4, 'secret-1', 'laptop', 'secret-x'),
+                        (5, 'empty-proj', 'desktop', ''),
+                        (6, 'null-proj', 'workstation', NULL),
+                        (7, 'secret-prompt', 'laptop', 'secret-y');",
+                )?;
+                publishing::update(tx, "pub-a", true).unwrap();
+                publishing::update(tx, "pub-b", true).unwrap();
+                crate::hidden::set(tx, "pub-a-hidden", true, 1).unwrap();
+
+                tx.execute_batch(
+                    "INSERT INTO request_sessions (id, session_id) VALUES (1, 'pub-a-1'), (2, 'secret-1');
+                     INSERT INTO requests (id, session_id, rs, device, fidelity, skeleton, block_count, complete, received_at, timing) VALUES
+                        ('r1', 'pub-a-1', 1, 'laptop', 'payload', '{}', 0, 1, 0, '{\"sentAt\":1100,\"firstTokenAt\":1500}'),
+                        ('r2', 'secret-1', 2, 'laptop', 'payload', '{}', 0, 1, 0, '{\"sentAt\":2000,\"firstTokenAt\":2300}'),
+                        ('r3', 'secret-1', 2, 'laptop', 'payload', '{}', 0, 1, 0, 'not-json');",
+                )?;
+
+                // (sid, seq, at, requests, in, out, cr, cw, cost, pricing, model, stop, err, m_ts, m_at, req_id)
+                let usage_rows: &[(i64, i64, i64, i64, i64, i64, i64, i64, f64, i64, Option<&str>, Option<&str>, Option<&str>, Option<i64>, Option<i64>, Option<&str>)] = &[
+                    // In 3-day window (offsets 0, 1, 2):
+                    (1, 1, day(2), 1, 100, 40, 20, 10, 0.25, 0, Some("relay/gpt-6-luna"), Some("stop"), None, Some(1000), Some(2500), Some("r1")),
+                    (1, 2, day(0), 1, 200, 80, 30, 5, 0.5, 1, Some("gpt-6-luna@1m"), Some("toolUse"), None, Some(1000), Some(3000), None),
+                    (1, 3, day(0), 0, 50, 0, 10, 0, 0.125, 0, None, None, None, None, None, None),
+                    // Hidden session inside published project (excluded by excludeUnpublished, anonymized in public view):
+                    (2, 1, day(1), 1, 60, 20, 0, 0, 0.0, 2, Some("claude-opus-5-5"), Some("error"), Some("boom"), Some(1000), Some(2000), None),
+                    // Unpublished project across two days + aborted + malformed timing:
+                    (4, 1, day(2), 1, 80, 100, 10, 20, 0.5, 1, Some("claude-opus-5-5"), Some("length"), None, Some(1900), Some(4000), Some("r2")),
+                    (4, 2, day(0), 1, 40, 50, 5, 5, 0.0, 2, Some("codex/gpt-6-luna"), Some("aborted"), Some("cancelled"), Some(1000), Some(2000), Some("r3")),
+                    // Empty and NULL projects + empty/NULL models:
+                    (5, 1, day(1), 1, 30, 10, 0, 0, 0.25, 0, Some(""), Some("stop"), None, Some(1000), Some(2000), None),
+                    (6, 1, day(0), 1, 25, 15, 0, 0, 0.125, 0, None, None, None, None, None, None),
+                    // Older than 3 days, within 30 days (offset 10):
+                    (1, 4, day(10), 1, 300, 120, 40, 10, 1.0, 0, Some("gpt-6-luna"), Some("stop"), None, Some(1000), Some(2200), None),
+                    // Ancient row beyond MAX_DAYS (clamped on days=all):
+                    (4, 9, today - usage::MAX_DAYS * DAY_MS - 1000, 1, 999, 999, 0, 0, 9.0, 0, Some("ancient-model"), Some("stop"), None, Some(1000), Some(2000), None),
+                    // Future row (always excluded):
+                    (1, 9, today + DAY_MS + 1000, 1, 777, 777, 0, 0, 7.0, 0, Some("future-model"), Some("stop"), None, Some(1000), Some(2000), None),
+                ];
+                for &(sid, seq, at, req, inp, out, cr, cw, cost, pricing, model, stop, err, mts, mat, req_id) in usage_rows {
+                    tx.execute(
+                        "INSERT INTO usage_events (sid, seq, at, requests, input, output, cache_read, cache_write, cost, pricing)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        params![sid, seq, at, req, inp, out, cr, cw, cost, pricing],
+                    )?;
+                    if model.is_some() || stop.is_some() || err.is_some() || mts.is_some() || mat.is_some() || req_id.is_some() {
+                        tx.execute(
+                            "INSERT INTO model_calls (sid, seq, model, stop_reason, error_message, ts, at, request_id)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                            params![sid, seq, model, stop, err, mts, mat, req_id],
+                        )?;
+                    }
+                }
+                // Entries: prompt-only published (sid=3), prompt-only secret (sid=7), plus overlapping entries on sid=1,6.
+                for (sid, seq, ts) in [
+                    (1, 0, day(2)),
+                    (1, 1, day(1)), // active day via entry only on day(1)
+                    (3, 0, day(1)), // prompt-only in published project
+                    (6, 0, day(2)), // prompt entry for null-proj on day(2)
+                    (7, 0, day(0)), // prompt-only in unpublished project
+                    (7, 1, today + DAY_MS), // future entry (excluded)
+                ] {
+                    tx.execute(
+                        "INSERT INTO entries (sid, seq, offset, type, ts) VALUES (?1, ?2, 0, 'message', ?3)",
+                        params![sid, seq, ts],
+                    )?;
+                }
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+
+        // Independent reference implementation using the original separate-query + per-row Rust streaming logic.
+        let reference = |conn: &Connection, days_param: &str, exclude_unpublished: bool, public: bool| -> Value {
+            let filter = if exclude_unpublished { publishing::SESSION_FILTER } else { "1" };
+            let end = today + DAY_MS;
+            let from = match days_param {
+                "all" => oldest_day(conn, filter, end, today).unwrap().max(today - (usage::MAX_DAYS - 1) * DAY_MS),
+                raw => today - (raw.parse::<i64>().unwrap() - 1) * DAY_MS,
+            };
+            let n_days = ((end - from) / DAY_MS) as usize;
+            let mut daily: Vec<Day> = (0..n_days)
+                .map(|i| Day { date: date(from + i as i64 * DAY_MS), counts: Counts::default() })
+                .collect();
+            let mut day_sids: Vec<BTreeSet<i64>> = vec![BTreeSet::new(); n_days];
+            let mut total_sids: BTreeSet<i64> = BTreeSet::new();
+            let mut estimated_cost = 0.0_f64;
+            let mut unpriced_requests = 0_i64;
+
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT (u.at - ?1) / {DAY_MS}, u.sid, u.requests, u.input, u.output, u.cache_read, u.cache_write,
+                            u.cost, u.pricing
+                     FROM usage_events u JOIN sessions s ON s.sid = u.sid
+                     WHERE u.at >= ?1 AND u.at < ?2 AND {filter}"
+                ))
+                .unwrap();
+            for r in stmt
+                .query_map(params![from, end], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, i64>(5)?,
+                        r.get::<_, i64>(6)?,
+                        r.get::<_, f64>(7)?,
+                        r.get::<_, i64>(8)?,
+                    ))
+                })
+                .unwrap()
+            {
+                let (d, sid, req, inp, out, cr, cw, cost, pricing) = r.unwrap();
+                let slot = &mut daily[d as usize].counts;
+                slot.requests += req;
+                slot.tokens.input += inp;
+                slot.tokens.output += out;
+                slot.tokens.cache_read += cr;
+                slot.tokens.cache_write += cw;
+                slot.cost += cost;
+                if pricing == 1 {
+                    estimated_cost += cost;
+                }
+                if pricing == 2 {
+                    unpriced_requests += 1;
+                }
+                day_sids[d as usize].insert(sid);
+                total_sids.insert(sid);
+            }
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT (e.ts - ?1) / {DAY_MS}, e.sid
+                     FROM entries e JOIN sessions s ON s.sid = e.sid
+                     WHERE e.ts >= ?1 AND e.ts < ?2 AND {filter}"
+                ))
+                .unwrap();
+            for r in stmt.query_map(params![from, end], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).unwrap() {
+                let (d, sid) = r.unwrap();
+                day_sids[d as usize].insert(sid);
+                total_sids.insert(sid);
+            }
+            let mut totals = Totals {
+                counts: Counts { sessions: total_sids.len() as i64, ..Counts::default() },
+                active_days: 0,
+                estimated_cost,
+                unpriced_requests,
+            };
+            for (d, sids) in daily.iter_mut().zip(&day_sids) {
+                d.counts.sessions = sids.len() as i64;
+                if !sids.is_empty() {
+                    totals.active_days += 1;
+                }
+                totals.counts.requests += d.counts.requests;
+                totals.counts.tokens.input += d.counts.tokens.input;
+                totals.counts.tokens.output += d.counts.tokens.output;
+                totals.counts.tokens.cache_read += d.counts.tokens.cache_read;
+                totals.counts.tokens.cache_write += d.counts.tokens.cache_write;
+                totals.counts.cost += d.counts.cost;
+            }
+            let bd = breakdown::query(conn, from, end, filter, public).unwrap();
+            serde_json::to_value(Statistics {
+                from: date(from),
+                to: date(today),
+                exclude_unpublished,
+                totals,
+                daily,
+                projects: bd.projects,
+                models: bd.models,
+                request_metrics: bd.metrics,
+            })
+            .unwrap()
+        };
+
+        for days_param in ["3", "30", "all"] {
+            for exclude_unpublished in [false, true] {
+                for public in [false, true] {
+                    let params = Params(BTreeMap::from([
+                        ("days".into(), days_param.into()),
+                        ("excludeUnpublished".into(), exclude_unpublished.to_string()),
+                    ]));
+                    let (actual, expected) = store
+                        .read(|conn| {
+                            let actual = serde_json::to_value(at_time_scoped(conn, &params, now_ms, public).unwrap()).unwrap();
+                            let expected = reference(conn, days_param, exclude_unpublished, public);
+                            Ok::<_, rusqlite::Error>((actual, expected))
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        actual, expected,
+                        "mismatch for days={days_param} excludeUnpublished={exclude_unpublished} public={public}"
+                    );
+                    if public {
+                        let serialized = actual.to_string();
+                        assert!(!serialized.contains("secret-x"), "{serialized}");
+                        assert!(!serialized.contains("secret-y"), "{serialized}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sql_aggregation_returns_compact_summary_rows_not_raw_events() {
+        let now_ms = parse_iso_ms("2026-11-05T12:00:00Z").unwrap();
+        let today = now_ms.div_euclid(DAY_MS) * DAY_MS;
+        let from = today - 2 * DAY_MS;
+        let end = today + DAY_MS;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO sessions (sid, id, device, project) VALUES (1, 's1', 'd', 'p1'), (2, 's2', 'd', 'p2')",
+                    [],
+                )?;
+                for i in 0..500_i64 {
+                    let sid = (i % 2) + 1;
+                    let ts = from + (i % 3) * DAY_MS + i * 10;
+                    tx.execute(
+                        "INSERT INTO usage_events (sid, seq, at, requests, input, output, cost) VALUES (?1, ?2, ?3, 1, 10, 5, 0.125)",
+                        params![sid, i, ts],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO model_calls (sid, seq, model, stop_reason, ts, at) VALUES (?1, ?2, ?3, 'stop', ?4, ?5)",
+                        params![sid, i, if i % 2 == 0 { "m1" } else { "m2" }, ts, ts + 500],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO entries (sid, seq, offset, type, ts) VALUES (?1, ?2, 0, 'message', ?3)",
+                        params![sid, i, ts],
+                    )?;
+                }
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+
+        let (stats, row_count) = store
+            .read(|conn| {
+                let mut stmt = conn.prepare(&statistics_sql("1", true))?;
+                let rows = stmt
+                    .query_map(params![from, end], |r| r.get::<_, i64>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let p = Params(std::collections::BTreeMap::from([("days".into(), "3".into())]));
+                let stats = at_time_scoped(conn, &p, now_ms, true).unwrap();
+                Ok::<_, rusqlite::Error>((stats, rows.len()))
+            })
+            .unwrap();
+
+        // 500 usage_events + 500 entries collapse to at most 3 daily usage + 4 session + 2 project + 2 model rows.
+        assert!(row_count <= 15, "expected compact SQL summary rows, got {row_count}");
+        assert_eq!(stats.totals.counts.requests, 500);
+        assert_eq!(stats.totals.counts.sessions, 2);
+        assert_eq!(stats.totals.counts.tokens.input, 5000);
+        assert_eq!(stats.request_metrics.completed, 500);
     }
 }

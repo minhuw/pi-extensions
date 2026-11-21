@@ -637,3 +637,136 @@ fn dream_scope_queries_are_bounded_by_their_scope() {
         })
         .unwrap();
 }
+
+/// Statistics and breakdown queries scan `usage_events` once via `usage_events_at` and `entries` once via the
+/// covering index `entries_activity`, joining `sessions`, `model_calls`, and `requests` by primary key only.
+#[test]
+fn statistics_queries_scan_usage_events_and_entries_once_through_indexes() {
+    use super::publishing::SESSION_FILTER;
+    use super::statistics::{breakdown_sql, statistics_sql};
+
+    with_conn(|conn| {
+        for (label, sql) in [
+            ("statistics owner all", statistics_sql("1", false)),
+            ("statistics public all", statistics_sql("1", true)),
+            ("statistics owner published", statistics_sql(SESSION_FILTER, false)),
+            ("statistics public published", statistics_sql(SESSION_FILTER, true)),
+            ("breakdown owner all", breakdown_sql("1", false)),
+            ("breakdown public all", breakdown_sql("1", true)),
+            ("breakdown owner published", breakdown_sql(SESSION_FILTER, false)),
+            ("breakdown public published", breakdown_sql(SESSION_FILTER, true)),
+        ] {
+            let steps = plan(conn, &sql, Some(vec![Sql::Integer(0), Sql::Integer(86_400_000)]));
+            let joined = steps.join("\n");
+            let usage_scans = steps.iter().filter(|s| s.contains("usage_events")).count();
+            assert_eq!(usage_scans, 1, "{label}: expected 1 usage_events scan:\n{joined}");
+            assert!(
+                steps.iter().any(|s| s == "SEARCH u USING INDEX usage_events_at (at>? AND at<?)"),
+                "{label}: expected usage_events_at range search:\n{joined}"
+            );
+            let entry_scans = steps.iter().filter(|s| s.contains("entries")).count();
+            assert_eq!(entry_scans, 1, "{label}: expected 1 entries scan:\n{joined}");
+            assert!(
+                steps.iter().any(|s| s == "SEARCH e USING COVERING INDEX entries_activity (ts>? AND ts<?)"),
+                "{label}: expected entries_activity covering index search:\n{joined}"
+            );
+            assert!(
+                steps.iter().any(|s| s == "SEARCH m USING PRIMARY KEY (sid=? AND seq=?) LEFT-JOIN"),
+                "{label}: expected model_calls PK left-join:\n{joined}"
+            );
+            assert!(
+                steps.iter().any(|s| s == "SEARCH r USING INDEX sqlite_autoindex_requests_1 (id=?) LEFT-JOIN"),
+                "{label}: expected requests PK left-join:\n{joined}"
+            );
+            assert!(
+                steps.iter().any(|s| s == "SEARCH s USING INTEGER PRIMARY KEY (rowid=?)"),
+                "{label}: expected sessions rowid lookup:\n{joined}"
+            );
+            for forbidden in ["SCAN u", "SCAN e", "SCAN s", "SCAN m", "SCAN r", "SCAN usage_events", "SCAN entries", "SCAN sessions", "SCAN model_calls", "SCAN requests"] {
+                assert!(
+                    !steps.iter().any(|s| s == forbidden || s.starts_with(&format!("{forbidden} "))),
+                    "{label}: unexpected full scan `{forbidden}`:\n{joined}"
+                );
+            }
+        }
+    });
+}
+
+/// Rows outside the requested `[from, end)` window must not add VM steps to the statistics query,
+/// both for all-activity public reads and for `excludeUnpublished=true` filtered reads.
+#[test]
+fn statistics_window_queries_are_bounded_by_date_range() {
+    use super::publishing::SESSION_FILTER;
+    use super::statistics::statistics_sql;
+    use rusqlite::{StatementStatus, params};
+
+    let day_ms: i64 = 86_400_000;
+    let from = 100 * day_ms;
+    let end = 103 * day_ms;
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(dir.path()).unwrap();
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sessions (sid, id, device, project) VALUES (1, 'in-window', 'd', 'pub'), (2, 'outside', 'd', 'priv')",
+                [],
+            )?;
+            super::publishing::update(tx, "pub", true).unwrap();
+            // Keep sentinel rows strictly outside both ends of `[from, end)` so range-end checks run in both passes.
+            tx.execute("INSERT INTO usage_events (sid, seq, at, requests, input, output, cost) VALUES (1, 0, ?1, 1, 5, 5, 0.1)", [from - 1])?;
+            tx.execute("INSERT INTO usage_events (sid, seq, at, requests, input, output, cost) VALUES (1, 1, ?1, 1, 10, 20, 0.5)", [from + 1000])?;
+            tx.execute("INSERT INTO usage_events (sid, seq, at, requests, input, output, cost) VALUES (1, 2, ?1, 1, 5, 5, 0.1)", [end])?;
+            tx.execute("INSERT INTO entries (sid, seq, offset, type, ts) VALUES (1, 0, 0, 'message', ?1)", [from - 1])?;
+            tx.execute("INSERT INTO entries (sid, seq, offset, type, ts) VALUES (1, 1, 0, 'message', ?1)", [from + 1000])?;
+            tx.execute("INSERT INTO entries (sid, seq, offset, type, ts) VALUES (1, 2, 0, 'message', ?1)", [end])?;
+
+            let queries = [
+                ("public all", statistics_sql("1", true)),
+                ("public published", statistics_sql(SESSION_FILTER, true)),
+            ];
+            let measure = || -> rusqlite::Result<Vec<(i32, usize)>> {
+                queries
+                    .iter()
+                    .map(|(_, sql)| {
+                        let mut stmt = tx.prepare(sql)?;
+                        let count = stmt
+                            .query_map(params![from, end], |r| r.get::<_, i64>(0))?
+                            .collect::<rusqlite::Result<Vec<_>>>()?
+                            .len();
+                        assert_eq!(stmt.get_status(StatementStatus::FullscanStep), 0);
+                        Ok((stmt.get_status(StatementStatus::VmStep), count))
+                    })
+                    .collect()
+            };
+
+            let before = measure()?;
+            // Insert thousands of out-of-window rows (for both the published and unpublished sessions) before `from` and after `end`.
+            for i in 10..1_010_i64 {
+                for sid in [1_i64, 2_i64] {
+                    tx.execute(
+                        "INSERT INTO usage_events (sid, seq, at, requests, input, output, cost) VALUES (?1, ?2, ?3, 1, 10, 10, 0.1)",
+                        params![sid, i, from - i * 1000 - sid],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO usage_events (sid, seq, at, requests, input, output, cost) VALUES (?1, ?2, ?3, 1, 10, 10, 0.1)",
+                        params![sid, i + 10_000, end + i * 1000 + sid],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO entries (sid, seq, offset, type, ts) VALUES (?1, ?2, 0, 'message', ?3)",
+                        params![sid, i, from - i * 1000 - sid],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO entries (sid, seq, offset, type, ts) VALUES (?1, ?2, 0, 'message', ?3)",
+                        params![sid, i + 10_000, end + i * 1000 + sid],
+                    )?;
+                }
+            }
+            let after = measure()?;
+            for ((label, _), (before_val, after_val)) in queries.iter().zip(before.iter().zip(after.iter())) {
+                assert_eq!(after_val.1, before_val.1, "{label}: row count changed");
+                assert_eq!(after_val.0, before_val.0, "{label}: out-of-window rows must not enlarge statistics query work");
+            }
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+}
