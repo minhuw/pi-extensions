@@ -266,3 +266,119 @@ describe("navigation", () => {
 		expect(h.notify).toHaveBeenLastCalledWith(expect.stringContaining("pika diff failed (unavailable)"), "error");
 	}, 10_000);
 });
+
+describe("/pika-node-status", () => {
+	it("is always registered and reports inactive modes before start, without env, and in non-top-level sessions", async () => {
+		delete process.env.PIKA_NODE_SOCKET;
+		delete process.env.PIKA_NODE_PANE_ID;
+		const h = create();
+		expect(h.commands.has("pika-node-status")).toBe(true);
+
+		await h.command("pika-node-status", "");
+		const beforeStart = h.notify.mock.lastCall?.[0] as string;
+		expect(h.notify.mock.lastCall?.[1]).toBe("info");
+		expect(beforeStart).toContain("pika-node bridge: inactive (session has not started)");
+		expect(beforeStart).toContain("Socket: unset");
+		expect(beforeStart).toContain("Daemon: disconnected (session has not started)");
+		expect(beforeStart).toContain("Pane: idle (main: 0; background: 0; prompts: 0)");
+		expect(h.appendEntry).toHaveBeenLastCalledWith("pi-extensions.command", { command: "pika-node-status", kind: "extension", extension: "pika-node-bridge" });
+
+		await h.fire("session_start");
+		await h.command("pika-node-status", "");
+		const missingEnv = h.notify.mock.lastCall?.[0] as string;
+		expect(missingEnv).toContain("pika-node bridge: inactive (PIKA_NODE_SOCKET or PIKA_NODE_PANE_ID is absent)");
+		expect(missingEnv).toContain("Socket: unset");
+		expect(missingEnv).toContain("Daemon: disconnected (PIKA_NODE_SOCKET or PIKA_NODE_PANE_ID is absent)");
+
+		process.env.PIKA_NODE_SOCKET = daemon.path;
+		process.env.PIKA_NODE_PANE_ID = "pane-1";
+		const child = create({ mode: "print" });
+		await child.fire("session_start");
+		await child.command("pika-node-status", "");
+		const nonTopLevel = child.notify.mock.lastCall?.[0] as string;
+		expect(nonTopLevel).toContain("pika-node bridge: inactive (not a top-level session)");
+		expect(nonTopLevel).toContain("Socket: configured (redacted)");
+		expect(nonTopLevel).toContain("Daemon: disconnected (not a top-level session)");
+		expect(nonTopLevel).not.toContain(daemon.path);
+		expect(child.sendUserMessage).not.toHaveBeenCalled();
+	});
+
+	it("reports active mode, ready daemon, pane activity/counts, and redacts socket path and secrets", async () => {
+		const secretDir = tempDir();
+		const secretSocket = join(secretDir.path, "secret-token-xyz.sock");
+		const secretDaemon = new FakeDaemon(secretSocket);
+		await secretDaemon.listen();
+		process.env.PIKA_NODE_SOCKET = secretSocket;
+		process.env.PIKA_NODE_TOKEN = "super-secret-env-token";
+		try {
+			const h = create();
+			await h.fire("session_start");
+			await until(() => secretDaemon.statuses().length > 0, 5000, "initial status");
+			await h.fire("agent_start");
+			await h.fire("ui_prompt_start");
+			h.snapshot("subagents", ["a1", "recon"]);
+			h.snapshot("herder", ["run-1", "Herder run"]);
+			await until(() => secretDaemon.last()?.state === "waiting" && secretDaemon.last()?.activityCount === 2, 5000, "waiting with activities");
+
+			await h.command("pika-node-status", "");
+			const report = h.notify.mock.lastCall?.[0] as string;
+			expect(h.notify.mock.lastCall?.[1]).toBe("info");
+			expect(report).toContain("pika-node bridge: active (top-level tui session)");
+			expect(report).toContain("Socket: configured (redacted)");
+			expect(report).toContain("Daemon: ready (connected)");
+			expect(report).toContain("Pane: waiting (main: 1; background: 2; prompts: 1)");
+			expect(report).toContain("- subagents/a1: recon");
+			expect(report).toContain("- herder/run-1: Herder run");
+			expect(report).toContain("Last status: sent");
+			expect(report).not.toContain(secretSocket);
+			expect(report).not.toContain(secretDir.path);
+			expect(report).not.toContain("secret-token-xyz");
+			expect(report).not.toContain("super-secret-env-token");
+			expect(h.sendUserMessage).not.toHaveBeenCalled();
+		} finally {
+			for (const h of live.splice(0)) await h.fire("session_shutdown");
+			await secretDaemon.close();
+			secretDir.cleanup();
+		}
+	});
+
+	it("reports disconnected, refused, and closed daemon states without leaking socket paths or throwing on stale UI", async () => {
+		async function untilStatus(h: Harness, expected: string, label: string): Promise<string> {
+			const deadline = Date.now() + 5000;
+			while (true) {
+				await h.command("pika-node-status", "");
+				const report = h.notify.mock.lastCall?.[0] as string;
+				if (report.includes(expected)) return report;
+				if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}: ${report}`);
+				await sleep(10);
+			}
+		}
+
+		const h = create();
+		await h.fire("session_start");
+		await until(() => daemon.hellos().length === 1);
+		await daemon.close();
+		const disconnected = await untilStatus(h, "Daemon: connecting (daemon socket closed)", "disconnected status");
+		expect(disconnected).toContain("pika-node bridge: active (top-level tui session)");
+		expect(disconnected).toContain("Socket: configured (redacted)");
+		expect(disconnected).not.toContain(daemon.path);
+
+		await h.fire("session_shutdown");
+		await h.command("pika-node-status", "");
+		const afterShutdown = h.notify.mock.lastCall?.[0] as string;
+		expect(afterShutdown).toContain("pika-node bridge: inactive (session shut down)");
+		expect(afterShutdown).toContain("Daemon: closed (closed)");
+		expect(afterShutdown).toContain("Pane: idle (main: 0; background: 0; prompts: 0)");
+
+		Object.defineProperty(h.context, "ui", { configurable: true, get() { throw new Error("stale ui"); } });
+		await expect(h.command("pika-node-status", "")).resolves.toBeUndefined();
+
+		daemon = new FakeDaemon(daemon.path);
+		await daemon.listen();
+		process.env.PIKA_NODE_PANE_ID = "unknown-pane";
+		const refused = create();
+		await refused.fire("session_start");
+		const refusedReport = await untilStatus(refused, "Daemon: refused (daemon refused this pane (not_found: no live terminal))", "refused status");
+		expect(refusedReport).not.toContain(daemon.path);
+	});
+});

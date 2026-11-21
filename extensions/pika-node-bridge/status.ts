@@ -6,7 +6,9 @@ import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Activities } from "./activity.ts";
+import type { Activation } from "./compatibility.ts";
 import { LIMITS, utf8Length, type BridgeStatus, type PaneSession, type PaneState } from "./protocol.ts";
+import type { DaemonLink } from "./transport.ts";
 
 /** Single-line text the daemon accepts as a label: controls removed, whitespace collapsed, cut to `max`. */
 export function clean(value: unknown, max: number): string | undefined {
@@ -82,4 +84,60 @@ export class PaneStatus {
 		this.promptDepth = 0;
 		this.activities.clear();
 	}
+}
+
+export interface DiagnosticsInput {
+	activation: Activation;
+	sessionMode?: string;
+	socket?: string;
+	redactValues?: readonly (string | undefined)[];
+	link?: Pick<DaemonLink, "state" | "reason">;
+	pane: PaneStatus;
+	lastResult?: string;
+}
+
+function escapeControls(text: string): string {
+	return text.replace(/[\u0000-\u001f\u007f-\u009f]/gu, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+function sanitizeDiagnostic(text: string, redactValues: readonly (string | undefined)[]): string {
+	let result = text;
+	for (const raw of redactValues) {
+		if (!raw) continue;
+		const candidates = raw.trim() && raw.trim() !== raw ? [raw, raw.trim()] : [raw];
+		for (const candidate of candidates) {
+			if (candidate.length >= 4 || candidate.includes("/") || candidate.includes("\\")) {
+				result = result.replaceAll(candidate, "<redacted>");
+			}
+		}
+	}
+	return escapeControls(result);
+}
+
+/** Formats `/pika-node-status` diagnostics without exposing raw socket paths or secret values. */
+export function formatBridgeDiagnostics(input: DiagnosticsInput): string {
+	const { activation, sessionMode, socket, link, pane, lastResult } = input;
+	const redactValues = [socket, ...(input.redactValues ?? [])];
+	const sanitize = (value: string) => sanitizeDiagnostic(value, redactValues);
+
+	const modeText = activation.mode === "active"
+		? `active (${sessionMode ? `top-level ${sanitize(sessionMode)} session` : "pika-node terminal"})`
+		: `inactive (${sanitize(activation.reason)})`;
+	const socketText = socket?.trim() ? "configured (redacted)" : "unset";
+	const daemonText = link
+		? `${link.state} (${sanitize(link.reason)})`
+		: `disconnected (${activation.mode === "inactive" ? sanitize(activation.reason) : "not connected"})`;
+	const rows = pane.activities.entries();
+	const overflow = pane.activities.size - rows.length;
+	const deliveryText = sanitize(lastResult ?? "not sent");
+
+	return [
+		`pika-node bridge: ${modeText}`,
+		`Socket: ${socketText}`,
+		`Daemon: ${daemonText}`,
+		`Pane: ${pane.state} (main: ${pane.parent ? 1 : 0}; background: ${pane.activities.size}; prompts: ${pane.promptDepth})`,
+		...rows.map(row => `- ${sanitize(row.source)}/${sanitize(row.id)}: ${sanitize(row.label)}`),
+		...(overflow > 0 ? [`- ... and ${overflow} more`] : []),
+		`Last status: ${deliveryText}`,
+	].join("\n");
 }

@@ -28,3 +28,12 @@ it("imports at runtime only Node, the Pi SDK types, and its own files", () => {
 		}
 	}
 });
+
+it("documents every bridge command in README.md and DOC_COMMANDS", () => {
+	const readme = readFileSync(join(directory, "README.md"), "utf8");
+	const sources = readFileSync(join(root, "services/pika/web/docs/sources.ts"), "utf8");
+	for (const command of ["pika-node-status", "pika-open", "pika-diff"]) {
+		expect(readme, `README.md should document /${command}`).toContain(`/${command}`);
+		expect(sources, `DOC_COMMANDS should include ${command}`).toContain(`["${command}", "pika-node-bridge",`);
+	}
+});

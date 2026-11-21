@@ -113,6 +113,7 @@ export function harness(options: { bus?: Bus; mode?: string; session?: Session }
 	const handlers = new Map<string, Set<Handler>>();
 	const commands = new Map<string, { handler: (args: string, context: ExtensionContext) => Promise<void> }>();
 	const notify = vi.fn();
+	const appendEntry = vi.fn();
 	const sendUserMessage = vi.fn();
 	const context = {
 		mode: options.mode ?? "tui",
@@ -134,12 +135,12 @@ export function harness(options: { bus?: Bus; mode?: string; session?: Session }
 			return () => { handlers.get(name)?.delete(fn); };
 		},
 		registerCommand: (name: string, command: unknown) => commands.set(name, command as never),
-		appendEntry: () => {},
+		appendEntry,
 		sendUserMessage,
 	} as unknown as ExtensionAPI;
 	bridge(api);
 	return {
-		bus, session, context, notify, sendUserMessage, handlers, commands,
+		bus, session, context, notify, appendEntry, sendUserMessage, handlers, commands,
 		async fire(name: string, event: unknown = {}, ctx = context) {
 			for (const fn of [...handlers.get(name) ?? []]) await fn(event, ctx);
 		},

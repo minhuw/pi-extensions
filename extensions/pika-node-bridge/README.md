@@ -1,6 +1,6 @@
 # pika-node bridge
 
-Reports what Pi is doing in a [pika-node](../../services/pika-node/README.md) terminal to the daemon that runs it, so the pika web UI's Nodes page can show the pane as busy, waiting, or idle with its background agents and session. It also adds `/pika-open` and `/pika-diff`, which open a file or a diff in the web UI. The wire contract is §5 of [NODE.md](../../services/pika/docs/NODE.md).
+Reports what Pi is doing in a [pika-node](../../services/pika-node/README.md) terminal to the daemon that runs it, so the pika web UI's Nodes page can show the pane as busy, waiting, or idle with its background agents and session. It also adds `/pika-node-status` diagnostics, plus `/pika-open` and `/pika-diff` to open a file or a diff in the web UI. The wire contract is §5 of [NODE.md](../../services/pika/docs/NODE.md).
 
 The collection registers this extension automatically. It has no runtime dependencies and imports no other extension. Try it on its own with:
 
@@ -10,7 +10,7 @@ pi --extension ./extensions/pika-node-bridge/index.ts
 
 ## Activation
 
-The bridge is active only when Pi runs in a terminal the daemon spawned, which sets `PIKA_NODE_SOCKET` (the daemon's unix socket) and `PIKA_NODE_PANE_ID` (the terminal's id). Otherwise it does nothing, and the two commands say so.
+The bridge is active only when Pi runs in a terminal the daemon spawned, which sets `PIKA_NODE_SOCKET` (the daemon's unix socket) and `PIKA_NODE_PANE_ID` (the terminal's id). Otherwise it does nothing: `/pika-open` and `/pika-diff` report that the bridge is inactive, while `/pika-node-status` stays available to show why.
 
 One bridge reports per pane: the first top-level (TUI or RPC) session at `session_start`.
 - Child sessions that run in the same process (subagents, Herder steps, council advisors) bind extensions without a TUI or RPC mode, and a process-global registry admits only one bridge per pane.
@@ -37,6 +37,7 @@ When the socket closes, the bridge reconnects after 1 s, doubling to at most 30 
 ## Commands
 
 ```text
+/pika-node-status
 /pika-open <path> [--line N] [--column N]
 /pika-diff <path> [--staged]
 
@@ -45,7 +46,9 @@ When the socket closes, the bridge reconnects after 1 s, doubling to at most 30 
 /pika-open -- "-leading-dash.md"
 ```
 
-Relative paths resolve against the session's working directory. Arguments are parsed like the Orca bridge's: matching quotes group a name with spaces, backslashes are literal, `--` ends options, duplicate or unknown options are errors, and `--column` needs `--line`. There is no shell expansion.
+`/pika-node-status` is always registered (including outside pika-node terminals) so you can diagnose why the bridge is active or inactive. It shows a `ctx.ui.notify` report with the activation mode and reason, redacted socket presence (`configured (redacted)` or `unset`, never printing raw socket paths or secrets), the `DaemonLink` connection state and reason, `PaneStatus` state and activity counts (with active rows), and the last status delivery result.
+
+Relative paths for `/pika-open` and `/pika-diff` resolve against the session's working directory. Arguments are parsed like the Orca bridge's: matching quotes group a name with spaces, backslashes are literal, `--` ends options, duplicate or unknown options are errors, and `--column` needs `--line`. There is no shell expansion.
 
 The daemon resolves the path with `realpath` and requires it inside the `roots` of `~/.pika-node/config.json`; `/pika-open` also requires a regular file, while `/pika-diff` accepts a deleted file. The command shows the daemon's answer with `ctx.ui.notify`: how many pika windows received the request, a warning when none is connected, or the error code and message (`outside_roots`, `not_found`, `is_a_directory`, or `unavailable` when the daemon is not connected). A request waits at most 5 s. The commands never send anything to the model.
 

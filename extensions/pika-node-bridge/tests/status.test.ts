@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Activities } from "../activity.ts";
 import { parse } from "../navigation.ts";
-import { clean, describeSession, PaneStatus } from "../status.ts";
+import { clean, describeSession, formatBridgeDiagnostics, PaneStatus } from "../status.ts";
 
 const snapshot = (source: string, ...rows: Array<[string, string] | Record<string, unknown>>) => ({
 	source,
@@ -132,5 +132,69 @@ describe("arguments", () => {
 		expect(() => parse("a.ts b.ts", "open")).toThrow(/Usage: \/pika-open/);
 		expect(() => parse(`"unclosed`, "diff")).toThrow(/Unclosed quote/);
 		expect(() => parse("", "diff")).toThrow(/Usage: \/pika-diff/);
+	});
+});
+
+describe("diagnostics formatting", () => {
+	it("reports active mode, daemon state, pane counts, activity rows, overflow, and redacted socket", () => {
+		const pane = new PaneStatus();
+		pane.agentStart();
+		pane.promptStart();
+		pane.promptStart();
+		for (let source = 0; source < 2; source++) {
+			pane.activities.update(snapshot(`s${source}`, ...Array.from({ length: 70 }, (_, i) => [`a${i}`, `task ${i}`] as [string, string])));
+		}
+		const secretSocket = "/tmp/pika-secret-token-999/daemon.sock";
+		const report = formatBridgeDiagnostics({
+			activation: { mode: "active", socket: secretSocket, pane: "pane-secret", release() {} },
+			sessionMode: "tui",
+			socket: secretSocket,
+			link: { state: "ready", reason: "connected" },
+			pane,
+			lastResult: "sent",
+		});
+		expect(report).toContain("pika-node bridge: active (top-level tui session)");
+		expect(report).toContain("Socket: configured (redacted)");
+		expect(report).toContain("Daemon: ready (connected)");
+		expect(report).toContain("Pane: waiting (main: 1; background: 140; prompts: 2)");
+		expect(report).toContain("- s0/a0: task 0");
+		expect(report).toContain("- ... and 12 more");
+		expect(report).toContain("Last status: sent");
+		expect(report).not.toContain(secretSocket);
+		expect(report).not.toContain("pika-secret-token-999");
+		expect(report).not.toContain("daemon.sock");
+		expect(report).not.toContain("pane-secret");
+	});
+
+	it("reports inactive mode, unset socket, disconnected daemon, and redacts leaked paths or control chars", () => {
+		const pane = new PaneStatus();
+		const report = formatBridgeDiagnostics({
+			activation: { mode: "inactive", reason: "PIKA_NODE_SOCKET or PIKA_NODE_PANE_ID is absent" },
+			socket: "   ",
+			pane,
+		});
+		expect(report).toBe([
+			"pika-node bridge: inactive (PIKA_NODE_SOCKET or PIKA_NODE_PANE_ID is absent)",
+			"Socket: unset",
+			"Daemon: disconnected (PIKA_NODE_SOCKET or PIKA_NODE_PANE_ID is absent)",
+			"Pane: idle (main: 0; background: 0; prompts: 0)",
+			"Last status: not sent",
+		].join("\n"));
+
+		const secretPath = "/Users/alice/.pika-node/token-abc123/bridge.sock";
+		const redacted = formatBridgeDiagnostics({
+			activation: { mode: "active", socket: secretPath, pane: "pane-1", release() {} },
+			sessionMode: "rpc",
+			socket: secretPath,
+			link: { state: "refused", reason: `connect ${secretPath} failed \x1b[2J` },
+			pane,
+			lastResult: `write failed: ${secretPath}\nnext`,
+		});
+		expect(redacted).toContain("pika-node bridge: active (top-level rpc session)");
+		expect(redacted).toContain("Socket: configured (redacted)");
+		expect(redacted).toContain("Daemon: refused (connect <redacted> failed \\u001b[2J)");
+		expect(redacted).toContain("Last status: write failed: <redacted>\\u000anext");
+		expect(redacted).not.toContain(secretPath);
+		expect(redacted).not.toContain("token-abc123");
 	});
 });

@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { activate, type Activation } from "./compatibility.ts";
 import { registerNavigationCommands } from "./navigation.ts";
-import type { BridgeStatus } from "./protocol.ts";
-import { PaneStatus } from "./status.ts";
+import { SOCKET_ENV, type BridgeStatus } from "./protocol.ts";
+import { formatBridgeDiagnostics, PaneStatus } from "./status.ts";
 import { DaemonLink, LatestSender } from "./transport.ts";
 
 const VERSION = "pika-node-bridge/1";
@@ -12,6 +12,8 @@ export default function pikaNodeBridge(pi: ExtensionAPI): void {
 	const pane = new PaneStatus();
 	const subscriptions: Array<() => void> = [];
 	let activation: Activation = { mode: "inactive", reason: "session has not started" };
+	let sessionMode: string | undefined;
+	let activeSocket: string | undefined;
 	let ctx: ExtensionContext | undefined;
 	let link: DaemonLink | undefined;
 	let sender: LatestSender<BridgeStatus> | undefined;
@@ -21,6 +23,23 @@ export default function pikaNodeBridge(pi: ExtensionAPI): void {
 	let shutdown: Promise<void> | undefined;
 
 	registerNavigationCommands(pi, () => link && (request => link!.request(request)));
+	pi.registerCommand("pika-node-status", {
+		description: "Show pika-node bridge mode, daemon connection, pane activity, and redacted socket status",
+		handler: async (_args, context) => {
+			pi.appendEntry("pi-extensions.command", { command: "pika-node-status", kind: "extension", extension: "pika-node-bridge" });
+			const rawSocket = activation.mode === "active" ? activation.socket : process.env[SOCKET_ENV];
+			const report = formatBridgeDiagnostics({
+				activation,
+				sessionMode,
+				socket: rawSocket,
+				redactValues: [activeSocket, process.env[SOCKET_ENV]],
+				link,
+				pane,
+				lastResult: sender?.lastResult,
+			});
+			try { context.ui.notify(report, "info"); } catch { /* stale or noninteractive UI */ }
+		},
+	});
 
 	function report(): void {
 		if (!started || replaying || disposed || !sender) return;
@@ -41,6 +60,8 @@ export default function pikaNodeBridge(pi: ExtensionAPI): void {
 		started = true;
 		if (activation.mode === "active") {
 			const active = activation;
+			sessionMode = context.mode;
+			activeSocket = active.socket;
 			link = new DaemonLink({ socket: active.socket, pane: active.pane, version: VERSION, onWelcome: () => report() });
 			sender = new LatestSender((status, signal) => link!.writeStatus(status, signal));
 			link.start();

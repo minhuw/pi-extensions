@@ -107,6 +107,7 @@ const commandEntries: [string, string, string][] = [
 	["orca-status", "orca-bridge", "Inspect Orca integration diagnostics."],
 	["orca-open", "orca-bridge", "Open a file in Orca."],
 	["orca-diff", "orca-bridge", "Open a diff in Orca."],
+	["pika-node-status", "pika-node-bridge", "Inspect pika-node bridge diagnostics, daemon connection, and pane activity."],
 	["pika-open", "pika-node-bridge", "Open a file in the pika web UI from a pika-node terminal."],
 	["pika-diff", "pika-node-bridge", "Open a file diff in the pika web UI from a pika-node terminal."],
 	["autoresearch", "autoresearch", "Measure a baseline, then optimize after your approval."],
