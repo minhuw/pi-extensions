@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
 import { drawGlyph, type GlyphName } from "../components/glyphs";
 import { TicketBadge } from "../components/Ticket";
 import { cx } from "../components/ui";
@@ -11,7 +11,6 @@ import {
 	centreWindow,
 	clampWindow,
 	foldGaps,
-	hitTest,
 	isFullWindow,
 	layoutOverview,
 	makeScale,
@@ -88,20 +87,184 @@ function context2d(canvas: HTMLCanvasElement | null): CanvasRenderingContext2D |
 	}
 }
 
-/** Follows `<html data-theme>` and the web font arriving, so the canvas repaints with both. */
-function usePaintVersion(): number {
-	const [version, setVersion] = useState(0);
+/** Follows `<html data-theme>` / `<html class>` for palette caching and web font arrival for repaints. */
+function usePaintState(): { palette: Palette; fontVersion: number } {
+	const [themeVersion, setThemeVersion] = useState(0);
+	const [fontVersion, setFontVersion] = useState(0);
 	useEffect(() => {
-		const observer = new MutationObserver(() => setVersion((v) => v + 1));
-		observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+		const observer = new MutationObserver(() => setThemeVersion((v) => v + 1));
+		observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "class"] });
 		let alive = true;
-		document.fonts?.ready.then(() => alive && setVersion((v) => v + 1)).catch(() => {});
+		document.fonts?.ready.then(() => alive && setFontVersion((v) => v + 1)).catch(() => {});
 		return () => {
 			alive = false;
 			observer.disconnect();
 		};
 	}, []);
-	return version;
+	const palette = useMemo(() => readPalette(), [themeVersion]);
+	return { palette, fontVersion };
+}
+
+interface IndexedEntry {
+	item: OverviewItem;
+	order: number;
+}
+
+interface HitBand {
+	y0: number;
+	y1: number;
+	entries: IndexedEntry[];
+	/** Segment tree of max `x1` over `entries` (sorted by `x0`), for O(log n + k) horizontal range lookup. */
+	maxX1: Float64Array;
+}
+
+export interface OverviewHitIndex {
+	bands: HitBand[];
+}
+
+function buildMaxTree(entries: IndexedEntry[]): Float64Array {
+	const n = entries.length;
+	const tree = new Float64Array(Math.max(1, n * 4));
+	if (n === 0) return tree;
+	const build = (node: number, left: number, right: number): number => {
+		if (left === right) {
+			const x1 = entries[left].item.x1;
+			const val = Number.isFinite(x1) ? x1 : Number.NEGATIVE_INFINITY;
+			tree[node] = val;
+			return val;
+		}
+		const mid = (left + right) >> 1;
+		const val = Math.max(build(node * 2, left, mid), build(node * 2 + 1, mid + 1, right));
+		tree[node] = val;
+		return val;
+	};
+	build(1, 0, n - 1);
+	return tree;
+}
+
+/**
+ * Indexes `OverviewItem`s by vertical band (`lane`, `y0`, `y1`) with a sorted horizontal interval index per band
+ * so pointer hit-testing inspects only matching bands and overlapping subtrees instead of scanning every item.
+ */
+export function buildHitIndex(items: readonly OverviewItem[]): OverviewHitIndex {
+	const grouped = new Map<string, { y0: number; y1: number; entries: IndexedEntry[] }>();
+	for (let order = 0; order < items.length; order++) {
+		const item = items[order];
+		if (!Number.isFinite(item.x0) || !Number.isFinite(item.x1) || !Number.isFinite(item.y0) || !Number.isFinite(item.y1)) continue;
+		const key = `${item.lane}:${item.y0}:${item.y1}`;
+		let bucket = grouped.get(key);
+		if (!bucket) {
+			bucket = { y0: item.y0, y1: item.y1, entries: [] };
+			grouped.set(key, bucket);
+		}
+		bucket.entries.push({ item, order });
+	}
+	const bands: HitBand[] = [];
+	for (const { y0, y1, entries } of grouped.values()) {
+		entries.sort((a, b) => a.item.x0 - b.item.x0 || a.order - b.order);
+		bands.push({ y0, y1, entries, maxX1: buildMaxTree(entries) });
+	}
+	return { bands };
+}
+
+/**
+ * Indexed equivalent of `hitTest(items, x, y, slop)`: checks only bands containing `y` within 1 px and prunes
+ * non-overlapping horizontal subtrees while preserving exact scoring and tie-breaking.
+ */
+export function hitTestIndex(index: OverviewHitIndex, x: number, y: number, slop = 3): OverviewItem | undefined {
+	if (!Number.isFinite(x) || !Number.isFinite(y)) return undefined;
+	const minX = x - slop;
+	const maxX = x + slop;
+	let best: OverviewItem | undefined;
+	let bestScore = Number.POSITIVE_INFINITY;
+	let bestOrder = Number.POSITIVE_INFINITY;
+
+	for (const band of index.bands) {
+		if (y < band.y0 - 1 || y > band.y1 + 1) continue;
+		const { entries, maxX1 } = band;
+		const n = entries.length;
+		if (n === 0) continue;
+
+		const search = (node: number, left: number, right: number) => {
+			if (maxX1[node] < minX || entries[left].item.x0 > maxX) return;
+			if (left === right) {
+				const { item, order } = entries[left];
+				const pad = Math.max(0, slop - (item.x1 - item.x0) / 2);
+				if (x < item.x0 - pad || x > item.x1 + pad) return;
+				const center = (item.x0 + item.x1) / 2;
+				const score = (item.lane === "turns" ? 1e6 : 0) + Math.abs(x - center) + (item.x1 - item.x0) * 0.01;
+				if (score < bestScore || (score === bestScore && order < bestOrder)) {
+					best = item;
+					bestScore = score;
+					bestOrder = order;
+				}
+				return;
+			}
+			const mid = (left + right) >> 1;
+			search(node * 2, left, mid);
+			search(node * 2 + 1, mid + 1, right);
+		};
+		search(1, 0, n - 1);
+	}
+	return best;
+}
+
+/** Lightweight subscription channel so external hover updates repaint the overlay without re-rendering parents. */
+export interface HoverChannel {
+	get(): string | undefined;
+	set(key: string | undefined): void;
+	subscribe(listener: () => void): () => void;
+}
+
+export function createHoverChannel(): HoverChannel {
+	let current: string | undefined;
+	const listeners = new Set<() => void>();
+	return {
+		get: () => current,
+		set(next) {
+			if (current === next) return;
+			current = next;
+			for (const listener of listeners) listener();
+		},
+		subscribe(listener) {
+			listeners.add(listener);
+			return () => {
+				listeners.delete(listener);
+			};
+		},
+	};
+}
+
+interface HoverState {
+	item: OverviewItem;
+	x: number;
+	y: number;
+}
+
+interface HoverStore {
+	get(): HoverState | undefined;
+	set(next: HoverState | undefined): void;
+	subscribe(listener: () => void): () => void;
+}
+
+function createHoverStore(): HoverStore {
+	let current: HoverState | undefined;
+	const listeners = new Set<() => void>();
+	return {
+		get: () => current,
+		set(next) {
+			if (current === next) return;
+			if (current && next && current.item === next.item && current.x === next.x && current.y === next.y) return;
+			current = next;
+			for (const listener of listeners) listener();
+		},
+		subscribe(listener) {
+			listeners.add(listener);
+			return () => {
+				listeners.delete(listener);
+			};
+		},
+	};
 }
 
 function useWidth(ref: React.RefObject<HTMLElement | null>): number {
@@ -637,6 +800,8 @@ export interface OverviewProps {
 	compact?: boolean;
 	selectedKey?: string;
 	hoveredKey?: string;
+	/** Optional ref-backed external hover subscription, avoiding parent React state updates. */
+	hoverChannel?: HoverChannel;
 	onHover?: (key: string | undefined) => void;
 	onSelect?: (item: OverviewItem) => void;
 	range?: Interval;
@@ -655,6 +820,7 @@ export function Overview({
 	compact = false,
 	selectedKey,
 	hoveredKey,
+	hoverChannel,
 	onHover,
 	onSelect,
 	range,
@@ -670,7 +836,7 @@ export function Overview({
 	const overlayRef = useRef<HTMLCanvasElement>(null);
 	const navigatorRef = useRef<HTMLCanvasElement>(null);
 	const width = useWidth(plotRef);
-	const theme = usePaintVersion();
+	const { palette, fontVersion } = usePaintState();
 	// The provider row only once some model call has its first token timed; older sessions keep the layout they had.
 	const timed = useMemo(() => hasProviderTiming(trace), [trace]);
 	const packing = useMemo(() => packChildren(trace), [trace]);
@@ -687,6 +853,7 @@ export function Overview({
 	const fullScale = useMemo(() => makeScale(axis, Math.max(1, width)), [axis, width]);
 	const scale = useMemo(() => (view ? makeScale(windowAxis(axis, view), Math.max(1, width)) : fullScale), [axis, view, width, fullScale]);
 	const items = useMemo(() => layoutOverview(trace, scale, lanes), [trace, scale, lanes]);
+	const hitIndex = useMemo(() => buildHitIndex(items), [items]);
 	// A provider bar shares its model call's key; the key means the model-call bar.
 	const byKey = useMemo(() => new Map(items.filter((item) => item.lane !== "provider").map((item) => [item.key, item])), [items]);
 	const breaks = useMemo(() => scale.breaks(), [scale]);
@@ -723,10 +890,47 @@ export function Overview({
 			return [{ left, text }];
 		});
 	}, [scale, gapLabels, width, compact, zoomed]);
-	const [hover, setHover] = useState<{ item: OverviewItem; x: number; y: number } | undefined>();
+	const hoverStore = useMemo(() => createHoverStore(), []);
 	const [brush, setBrush] = useState<{ x0: number; x1: number } | undefined>();
 	const drag = useRef<{ x0: number; moved: boolean; scrub: boolean } | null>(null);
+	const rafId = useRef<number | null>(null);
+	const pendingPoint = useRef<{ x: number; y: number } | null>(null);
 
+	const selected = selectedKey ? byKey.get(selectedKey) : undefined;
+	const overlayState = useRef({ width, height, palette, selected, compact, lanes, byKey, hoveredKey, hoverChannel });
+	overlayState.current = { width, height, palette, selected, compact, lanes, byKey, hoveredKey, hoverChannel };
+
+	const paintOverlay = useCallback(() => {
+		const canvas = overlayRef.current;
+		const ctx = context2d(canvas);
+		const { width, height, palette, selected, compact, lanes, byKey, hoveredKey, hoverChannel } = overlayState.current;
+		if (!canvas || !ctx || width <= 0) return;
+		const externalKey = hoveredKey ?? hoverChannel?.get();
+		const hovered = hoverStore.get()?.item ?? (externalKey ? byKey.get(externalKey) : undefined);
+		const dpr = sizeCanvas(canvas, width, height);
+		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+		drawOverlay(ctx, width, height, palette, hovered, selected, compact, lanes);
+	}, [hoverStore]);
+
+	const cancelHoverFrame = useCallback(() => {
+		if (rafId.current !== null) {
+			cancelAnimationFrame(rafId.current);
+			rafId.current = null;
+		}
+		pendingPoint.current = null;
+	}, []);
+
+	const clearLocalHover = useCallback(() => {
+		cancelHoverFrame();
+		const hadHover = hoverStore.get() !== undefined;
+		hoverStore.set(undefined);
+		if (hadHover) paintOverlay();
+	}, [cancelHoverFrame, hoverStore, paintOverlay]);
+
+	useEffect(() => cancelHoverFrame, [cancelHoverFrame]);
+	useEffect(() => {
+		clearLocalHover();
+	}, [trace.sessionId, clearLocalHover]);
 	useEffect(() => onScale?.(fullScale), [fullScale, onScale]);
 
 	const setWindow = useCallback(
@@ -734,9 +938,9 @@ export function Overview({
 			const window = next ? clampWindow(axis, next) : undefined;
 			setZoom(window && !isFullWindow(axis, window) ? { sessionId: trace.sessionId, window } : undefined);
 			// A hovered bar has moved; the next pointer move finds what is under it now.
-			setHover(undefined);
+			clearLocalHover();
 		},
-		[axis, trace.sessionId],
+		[axis, trace.sessionId, clearLocalHover],
 	);
 	/** Zooms by `factor` keeping the instant at `x` where it is. */
 	const zoomAt = useCallback(
@@ -813,8 +1017,8 @@ export function Overview({
 		if (!canvas || !ctx || width <= 0) return;
 		const dpr = sizeCanvas(canvas, width, height);
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-		drawBase(ctx, items, trace, scale, lanes, readPalette(), height, compact);
-	}, [items, trace, scale, lanes, height, width, theme, compact]);
+		drawBase(ctx, items, trace, scale, lanes, palette, height, compact);
+	}, [items, trace, scale, lanes, height, width, palette, fontVersion, compact]);
 
 	useEffect(() => {
 		const canvas = navigatorRef.current;
@@ -822,19 +1026,44 @@ export function Overview({
 		if (!zoomed || !canvas || !ctx || width <= 0) return;
 		const dpr = sizeCanvas(canvas, width, NAVIGATOR_HEIGHT);
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-		drawNavigator(ctx, trace, fullScale, NAVIGATOR_HEIGHT, readPalette());
-	}, [zoomed, trace, fullScale, width, theme]);
+		drawNavigator(ctx, trace, fullScale, NAVIGATOR_HEIGHT, palette);
+	}, [zoomed, trace, fullScale, width, palette]);
 
-	const hovered = hover?.item ?? (hoveredKey ? byKey.get(hoveredKey) : undefined);
-	const selected = selectedKey ? byKey.get(selectedKey) : undefined;
 	useEffect(() => {
-		const canvas = overlayRef.current;
-		const ctx = context2d(canvas);
-		if (!canvas || !ctx || width <= 0) return;
-		const dpr = sizeCanvas(canvas, width, height);
-		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-		drawOverlay(ctx, width, height, readPalette(), hovered, selected, compact, lanes);
-	}, [hovered, selected, width, height, theme, compact, lanes]);
+		paintOverlay();
+	}, [selected, width, height, palette, compact, lanes, byKey, hoveredKey, hoverChannel, paintOverlay]);
+
+	useEffect(() => {
+		if (!hoverChannel) return;
+		return hoverChannel.subscribe(paintOverlay);
+	}, [hoverChannel, paintOverlay]);
+
+	const pointerState = useRef({ hitIndex, onHover });
+	pointerState.current = { hitIndex, onHover };
+
+	const applyHoverAt = useCallback(
+		(x: number, y: number) => {
+			const { hitIndex, onHover } = pointerState.current;
+			const item = hitTestIndex(hitIndex, x, y);
+			const prevItem = hoverStore.get()?.item;
+			hoverStore.set(item ? { item, x, y } : undefined);
+			if (item !== prevItem) paintOverlay();
+			if (item?.key !== prevItem?.key) onHover?.(item?.key);
+		},
+		[hoverStore, paintOverlay],
+	);
+
+	const scheduleHoverFrame = useCallback(() => {
+		rafId.current = requestAnimationFrame(() => {
+			rafId.current = null;
+			const next = pendingPoint.current;
+			pendingPoint.current = null;
+			if (next) {
+				applyHoverAt(next.x, next.y);
+				scheduleHoverFrame();
+			}
+		});
+	}, [applyHoverAt]);
 
 	const point = (event: ReactPointerEvent<HTMLElement>) => {
 		const rect = plotRef.current!.getBoundingClientRect();
@@ -847,6 +1076,7 @@ export function Overview({
 
 	const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
 		if (event.button !== 0) return;
+		cancelHoverFrame();
 		const { x } = point(event);
 		const scrub = playheadX !== undefined && Math.abs(x - playheadX) <= 6 && onScrub !== undefined;
 		drag.current = { x0: x, moved: false, scrub };
@@ -865,9 +1095,12 @@ export function Overview({
 			if (current.moved && onRange) setBrush({ x0: current.x0, x1: Math.max(0, Math.min(width, x)) });
 			return;
 		}
-		const item = hitTest(items, x, y - 0);
-		setHover(item ? { item, x, y } : undefined);
-		if (item?.key !== hover?.item.key) onHover?.(item?.key);
+		if (rafId.current === null) {
+			applyHoverAt(x, y);
+			scheduleHoverFrame();
+		} else {
+			pendingPoint.current = { x, y };
+		}
 	};
 
 	const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -883,14 +1116,14 @@ export function Overview({
 			onRange({ start: scale.time(a), end: scale.time(b) });
 			return;
 		}
-		const item = hitTest(items, x, y);
+		const item = hitTestIndex(hitIndex, x, y);
 		if (item) onSelect?.(item);
 	};
 
 	const leave = useCallback(() => {
-		setHover(undefined);
-		onHover?.(undefined);
-	}, [onHover]);
+		clearLocalHover();
+		pointerState.current.onHover?.(undefined);
+	}, [clearLocalHover]);
 
 	// The text alternative; computed per trace, not per replay frame.
 	const label = useMemo(() => {
@@ -1026,7 +1259,7 @@ export function Overview({
 							<div className="absolute -top-[2px] -ml-[6px] size-[12px] rounded-full border-2 border-page bg-ink" />
 						</div>
 					)}
-					{hover && <OverviewTooltip item={hover.item} x={hover.x} y={hover.y} width={width} origin={axis.origin} trace={trace} />}
+					<OverviewHoverTooltip store={hoverStore} width={width} origin={axis.origin} trace={trace} />
 				</div>
 				{/* Elapsed time under the line, as a timetable's clock row; folded idle gaps say how long they were. */}
 				<div className="relative overflow-hidden" style={{ height: clockHeight }} aria-hidden="true">
@@ -1114,6 +1347,22 @@ function Navigator({
 		</div>
 	);
 }
+
+const OverviewHoverTooltip = memo(function OverviewHoverTooltip({
+	store,
+	width,
+	origin,
+	trace,
+}: {
+	store: HoverStore;
+	width: number;
+	origin: number;
+	trace: SessionTrace;
+}) {
+	const hover = useSyncExternalStore(store.subscribe, store.get, store.get);
+	if (!hover) return null;
+	return <OverviewTooltip item={hover.item} x={hover.x} y={hover.y} width={width} origin={origin} trace={trace} />;
+});
 
 function OverviewTooltip({ item, x, y, width, origin, trace }: { item: OverviewItem; x: number; y: number; width: number; origin: number; trace: SessionTrace }) {
 	const left = Math.min(Math.max(0, x + 12), Math.max(0, width - 280));

@@ -16,7 +16,7 @@ import { COST_DIAMETERS, COST_STEPS, formatCost, formatCount, plural } from "../
 import { FAMILIES, FAMILY_LABELS, hasProviderTiming, isSubagentTool, recordFamily, recordIsError, recordKey, recordSpan, type Family } from "./kinds";
 import { Ledger, type LedgerHandle } from "./Ledger";
 import { TimeBreakdown } from "./TimeBreakdown";
-import { Overview } from "./Overview";
+import { createHoverChannel, Overview } from "./Overview";
 import { KindBullet, PhaseSwatch } from "./parts";
 import { currentStop, initialReplay, REPLAY_SPEEDS, replayReducer, type ReplayState } from "./replay";
 import {
@@ -158,7 +158,11 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 	const [range, setRange] = useState<Interval | undefined>();
 	// Only the key: the record it names is read from the current trace, so a running tool shows its result once it has one.
 	const [selectedKey, setSelectedKey] = useState<string | undefined>();
-	const [hoveredKey, setHoveredKey] = useState<string | undefined>();
+	const hoverChannel = useMemo(() => createHoverChannel(), []);
+	const onLedgerHover = useCallback((key: string | undefined) => hoverChannel.set(key), [hoverChannel]);
+	useEffect(() => {
+		hoverChannel.set(undefined);
+	}, [sessionId, hoverChannel]);
 	const [highlightKey, setHighlightKey] = useState<string | undefined>();
 	const [viewport, setViewport] = useState<Interval | undefined>();
 	const [tab, setTabState] = useState<InspectorTab>(storedTab);
@@ -691,8 +695,7 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 					<Overview
 						trace={trace}
 						selectedKey={replay.status !== "stopped" && replayKey ? replayKey : selectedTopKey}
-						hoveredKey={hoveredKey}
-						onHover={setHoveredKey}
+						hoverChannel={hoverChannel}
 						onSelect={onOverviewSelect}
 						range={range}
 						onRange={setRange}
@@ -713,11 +716,10 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 						freshKeys={arrivals.keys}
 						startAtTail={startAtTail}
 						selectedKey={selectedKey}
-						hoveredKey={hoveredKey}
 						highlightKey={highlightKey}
 						replayKey={replayKey}
 						onSelect={onLedgerSelect}
-						onHover={setHoveredKey}
+						onHover={onLedgerHover}
 						onToggleTurn={onToggleTurn}
 						onToggleExpand={toggleExpand}
 						onViewport={setViewport}
