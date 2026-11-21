@@ -19,7 +19,20 @@ import { FileTree, visibleEntries, type TreeSnapshot } from "./tree";
  */
 
 // Monaco and its worker are the page's largest chunk; they load with the first open tab.
-const CodeEditor = lazy(() => import("./CodeEditor"));
+let pruneLoadedModels: ((scope: string, open: ReadonlySet<string>) => void) | undefined;
+const CodeEditor = lazy(() =>
+	import("./CodeEditor").then((mod) => {
+		if (Object.hasOwn(mod, "pruneModels") && typeof mod.pruneModels === "function") {
+			pruneLoadedModels = mod.pruneModels;
+		}
+		return mod;
+	}),
+);
+
+/** Drops Monaco models for tabs no longer open in `scope` (a no-op until the editor chunk has loaded). */
+export function pruneCodeEditorModels(scope: string, open: ReadonlySet<string>): void {
+	pruneLoadedModels?.(scope, open);
+}
 
 const noop = () => () => {};
 const EMPTY_TREE: TreeSnapshot = { root: "", expanded: new Set(), dirs: new Map() };
@@ -203,21 +216,32 @@ export interface EditorTabBodyProps {
 	onEdit?: (key: string) => void;
 }
 
-/** The diffs on screen, by tab key, for the diff shortcuts: the one focus is in moves. */
+/** The diffs on screen, by `(node, tab key)`, for the diff shortcuts: the one focus is in moves. */
 const DIFFS = new Map<string, DiffControl>();
+const diffEntryKey = (node: string, key: string) => `${node}\0${key}`;
 
 /** The diff that `element` (focus, usually) is in. */
 export function diffControlAt(element: Element | null): DiffControl | undefined {
-	const key = element?.closest("[data-diff-view]")?.getAttribute("data-diff-view");
-	return key ? DIFFS.get(key) : undefined;
+	const host = element?.closest("[data-diff-view]");
+	const key = host?.getAttribute("data-diff-view");
+	if (!key) return undefined;
+	const node = host?.getAttribute("data-diff-node");
+	return node !== null && node !== undefined ? DIFFS.get(diffEntryKey(node, key)) : DIFFS.get(key);
 }
 
 /** One editor tab's body in its group: the file in Monaco with its status, or a diff. Cmd/Ctrl-S saves it. */
 export function EditorTabBody(props: EditorTabBodyProps) {
-	const { tab, store } = props;
+	const { node, tab, store, keys } = props;
 	const diffControl = useRef<DiffControl | null>(null);
 	const [diffChanges, setDiffChanges] = useState<number>();
-	useEffect(() => () => void DIFFS.delete(tab.key), [tab.key]);
+	const diffKey = diffEntryKey(node, tab.key);
+	const openKey = JSON.stringify(keys);
+	const openRef = useRef(keys);
+	openRef.current = keys;
+	useEffect(() => () => void DIFFS.delete(diffKey), [diffKey]);
+	useEffect(() => {
+		pruneCodeEditorModels(node, new Set(openRef.current));
+	}, [node, openKey]);
 	return (
 		<div
 			className="flex min-h-0 min-w-0 flex-1 flex-col"
@@ -235,8 +259,8 @@ export function EditorTabBody(props: EditorTabBodyProps) {
 				diffChanges={diffChanges}
 				onDiff={(control) => {
 					diffControl.current = control;
-					if (control) DIFFS.set(tab.key, control);
-					else DIFFS.delete(tab.key);
+					if (control) DIFFS.set(diffKey, control);
+					else DIFFS.delete(diffKey);
 					setDiffChanges(control?.changes);
 				}}
 				diffControl={diffControl}
@@ -427,7 +451,7 @@ function DiffBody(props: EditorTabBodyProps & { tab: DiffTab; editor: ReactNode;
 	const showsDiff = tab.status !== "failed" && !tab.blocked && !empty && !(tab.status === "loading" && !tab.original && !tab.modified);
 	return (
 		// Focus anywhere in here counts as being in the diff, for its shortcuts.
-		<div className="flex min-h-0 flex-1 flex-col" data-diff-view={tab.key}>
+		<div className="flex min-h-0 flex-1 flex-col" data-diff-view={tab.key} data-diff-node={props.node}>
 			{/* Wraps in a narrow panel, the controls going to a second line, rather than clipping them. */}
 			<div className="flex min-h-9 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-line px-3 py-1 text-[12px] text-muted" data-diff-header={tab.path}>
 				<span className="min-w-0 max-w-full truncate" {...tip(sanitize(tab.path))}>

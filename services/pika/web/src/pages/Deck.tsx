@@ -18,7 +18,7 @@ import { homePath, liveBridge, NodesClient, paneLabel, paneSession, type NodesCl
 import { displayFingerprint, sanitize, type Checkout, type NodeEvent, type TerminalInfo } from "../nodes/contract";
 import { DeckProjects, keyItemOf, ProjectKeys, type DeckProjectsSnapshot } from "../nodes/deck-projects";
 import { EditorStore, isDirty, type EditorSnapshot } from "../nodes/editor";
-import { ChangesPanel, diffControlAt, Explorer, useChanges, usePageVisible } from "../nodes/FilePanel";
+import { ChangesPanel, diffControlAt, Explorer, pruneCodeEditorModels, useChanges, usePageVisible } from "../nodes/FilePanel";
 import { IndexedDbKeyStore } from "../nodes/identity";
 import { currentKeymap, focusOf, resolveKey, type PageCommands } from "../nodes/keys";
 import { clampWidth, LAYOUT_BOUNDS, loadLayout, saveLayout, type NodesLayout } from "../nodes/layout";
@@ -185,21 +185,39 @@ function useLayout(): [NodesLayout, (change: Partial<NodesLayout>, commit?: bool
 	return [layout, update];
 }
 
+/** Whether any open node's editor store has an unsaved tab. */
+export function hasDirtyEditorTab(stores: Iterable<EditorStore>): boolean {
+	for (const store of stores) {
+		if (store.getSnapshot().tabs.some(isDirty)) return true;
+	}
+	return false;
+}
+
+const EMPTY_EDITOR_KEYS: ReadonlySet<string> = new Set();
+
 /** One editor store per node, kept while the page is open: the content of every file and diff tab on that node. */
-function useEditors(client: NodesClient | null, snapshot: NodesSnapshot): (node: string) => EditorStore {
+function useEditors(client: NodesClient | null, snapshot: NodesSnapshot): { editorFor: (node: string) => EditorStore; hasDirty: boolean } {
 	const editors = useRef(new Map<string, EditorStore>());
 	const latestClient = useRef(client);
 	latestClient.current = client;
-	const editorFor = useCallback((node: string) => {
-		let store = editors.current.get(node);
-		if (!store) {
-			store = new EditorStore();
-			// A store first asked for on a route change, with no new snapshot to run the effect below, has its files now.
-			store.setFiles(latestClient.current?.files(node));
-			editors.current.set(node, store);
-		}
-		return store;
+	const [hasDirty, setHasDirty] = useState(false);
+	const syncDirty = useCallback(() => {
+		setHasDirty(hasDirtyEditorTab(editors.current.values()));
 	}, []);
+	const editorFor = useCallback(
+		(node: string) => {
+			let store = editors.current.get(node);
+			if (!store) {
+				store = new EditorStore();
+				// A store first asked for on a route change, with no new snapshot to run the effect below, has its files now.
+				store.setFiles(latestClient.current?.files(node));
+				store.subscribe(syncDirty);
+				editors.current.set(node, store);
+			}
+			return store;
+		},
+		[syncDirty],
+	);
 	// Each store follows its node's channel: undefined while disconnected, a new file layer on each new channel.
 	useEffect(() => {
 		for (const [node, store] of editors.current) store.setFiles(client?.files(node));
@@ -207,11 +225,14 @@ function useEditors(client: NodesClient | null, snapshot: NodesSnapshot): (node:
 	useEffect(() => {
 		const stores = editors.current;
 		return () => {
-			for (const store of stores.values()) store.dispose();
+			for (const [node, store] of stores) {
+				store.dispose();
+				pruneCodeEditorModels(node, EMPTY_EDITOR_KEYS);
+			}
 			stores.clear();
 		};
 	}, []);
-	return editorFor;
+	return { editorFor, hasDirty };
 }
 
 /**
@@ -423,7 +444,7 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	const { node: nodeId, terminal: routeTerminal } = useParams();
 	const selected = snapshot.nodes.find((item) => item.info.id === nodeId);
 	const [layout, setLayout] = useLayout();
-	const editorFor = useEditors(client, snapshot);
+	const { editorFor, hasDirty } = useEditors(client, snapshot);
 	const hub = useMemo(() => new WorkspaceHub(), []);
 	const hubVersion = useSyncExternalStore(hub.subscribe, hub.getVersion);
 	const registry = useMemo(() => new SlotRegistry(), []);
@@ -552,6 +573,7 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 				});
 			}
 			for (const tab of store.getSnapshot().tabs) if (!wanted.has(tab.key)) store.close(tab.key);
+			pruneCodeEditorModels(node, new Set(wanted.keys()));
 		}
 	}, [client, snapshot, hub, hubVersion, editorFor]);
 
@@ -771,14 +793,13 @@ function NodesWorkspace({ onTheme }: { onTheme: () => void }) {
 	const diffOpen = editorSnapshot.tabs.some((tab) => tab.kind === "diff");
 	useEffect(() => changes?.setActive(visible && ((layout.filesOpen && layout.sidebar === "changes") || diffOpen)), [changes, visible, layout.filesOpen, layout.sidebar, diffOpen]);
 
-	// Unsaved edits ask before the page goes.
-	const dirty = editorSnapshot.tabs.some(isDirty);
+	// Unsaved edits on any open node ask before the page goes.
 	useEffect(() => {
-		if (!dirty) return;
+		if (!hasDirty) return;
 		const warn = (event: BeforeUnloadEvent) => event.preventDefault();
 		window.addEventListener("beforeunload", warn);
 		return () => window.removeEventListener("beforeunload", warn);
-	}, [dirty]);
+	}, [hasDirty]);
 
 	// Focus asked for by the workspace (a revealed pane, a new terminal, a file opened from the explorer).
 	const focus = ws?.getSnapshot().focus;
