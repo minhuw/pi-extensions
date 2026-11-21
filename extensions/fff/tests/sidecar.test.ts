@@ -1189,4 +1189,316 @@ describe("SidecarFffBackend", () => {
 			}
 		}
 	});
+
+	async function startControllableHeadScanSidecar(
+		label: string,
+		pauseOnWaitNumbers: number[],
+	) {
+		const baseDir = makeTempDir(label);
+		const repoDir = path.join(baseDir, "repo");
+		const gitDir = path.join(repoDir, ".git");
+		const gateDir = path.join(baseDir, "gates");
+		fs.mkdirSync(gitDir, { recursive: true });
+		fs.mkdirSync(gateDir, { recursive: true });
+		fs.writeFileSync(path.join(repoDir, "sample.ts"), "export const ok = true;\n");
+		const headPath = path.join(gitDir, "HEAD");
+		fs.writeFileSync(headPath, "commit-A\n");
+
+		const fakeFffNodePath = path.join(baseDir, "fake-fff-node.mjs");
+		fs.writeFileSync(
+			fakeFffNodePath,
+			[
+				'import fs from "node:fs";',
+				'import path from "node:path";',
+				`const headPath = ${JSON.stringify(headPath)};`,
+				`const gateDir = ${JSON.stringify(gateDir)};`,
+				`const pauseOnWaitNumbers = new Set(${JSON.stringify(pauseOnWaitNumbers)});`,
+				"export class FileFinder {",
+				"\tconstructor() {",
+				"\t\tthis._destroyed = false;",
+				"\t\tthis._scanHeads = [];",
+				"\t\tthis._waitCount = 0;",
+				"\t}",
+				"\tstatic create() {",
+				"\t\treturn { ok: true, value: new FileFinder() };",
+				"\t}",
+				"\tget isDestroyed() {",
+				"\t\treturn this._destroyed;",
+				"\t}",
+				"\tscanFiles() {",
+				"\t\tconst head = fs.readFileSync(headPath, 'utf8').trim();",
+				"\t\tthis._scanHeads.push(head);",
+				"\t\treturn { ok: true };",
+				"\t}",
+				"\tasync waitForScan() {",
+				"\t\tconst waitNumber = ++this._waitCount;",
+				"\t\tif (pauseOnWaitNumbers.has(waitNumber)) {",
+				"\t\t\tfs.writeFileSync(path.join(gateDir, `wait-${waitNumber}-started`), '1');",
+				"\t\t\tconst releaseFile = path.join(gateDir, `wait-${waitNumber}-release`);",
+				"\t\t\tconst deadline = Date.now() + 5_000;",
+				"\t\t\twhile (!fs.existsSync(releaseFile) && Date.now() < deadline) {",
+				"\t\t\t\tawait new Promise((r) => setTimeout(r, 5));",
+				"\t\t\t}",
+				"\t\t}",
+				"\t\treturn { ok: true, value: true };",
+				"\t}",
+				"\thealthCheck() {",
+				"\t\treturn {",
+				"\t\t\tok: true,",
+				"\t\t\tvalue: {",
+				"\t\t\t\tversion: 'test',",
+				"\t\t\t\tscanHeads: [...this._scanHeads],",
+				"\t\t\t\twaitCount: this._waitCount,",
+				"\t\t\t\tgit: { repositoryFound: true },",
+				"\t\t\t\tfilePicker: { initialized: true },",
+				"\t\t\t\tfrecency: { initialized: false },",
+				"\t\t\t},",
+				"\t\t};",
+				"\t}",
+				"}",
+			].join("\n"),
+		);
+
+		const hooksPath = path.join(baseDir, "hooks.mjs");
+		fs.writeFileSync(
+			hooksPath,
+			[
+				`const targetUrl = ${JSON.stringify(pathToFileURL(fakeFffNodePath).href)};`,
+				"export async function resolve(specifier, context, nextResolve) {",
+				"\tif (specifier === '@ff-labs/fff-node') {",
+				"\t\treturn { url: targetUrl, shortCircuit: true };",
+				"\t}",
+				"\treturn nextResolve(specifier, context);",
+				"}",
+			].join("\n"),
+		);
+
+		const registerPath = path.join(baseDir, "register.mjs");
+		fs.writeFileSync(
+			registerPath,
+			[
+				'import { register } from "node:module";',
+				`register(${JSON.stringify(pathToFileURL(hooksPath).href)});`,
+			].join("\n"),
+		);
+
+		const sidecarPath = fileURLToPath(new URL("../sidecar.mjs", import.meta.url));
+		const proc: ChildProcess = fork(sidecarPath, [], {
+			execArgv: ["--import", pathToFileURL(registerPath).href],
+			stdio: ["ignore", "ignore", "ignore", "ipc"],
+			env: { ...process.env },
+		});
+		const pid = trackPid(proc.pid);
+
+		let nextId = 1;
+		const rpc = (method: string, params: Record<string, unknown>) =>
+			new Promise<{ ok: boolean; value?: unknown; error?: string }>((resolve, reject) => {
+				const id = nextId++;
+				const onMsg = (msg: unknown) => {
+					if (!msg || typeof msg !== "object" || (msg as { id?: number }).id !== id) return;
+					proc.off("message", onMsg);
+					proc.off("exit", onExit);
+					resolve(msg as { ok: boolean; value?: unknown; error?: string });
+				};
+				const onExit = () => {
+					proc.off("message", onMsg);
+					reject(new Error("sidecar exited before replying"));
+				};
+				proc.on("message", onMsg);
+				proc.once("exit", onExit);
+				proc.send({ id, method, params });
+			});
+
+		const readScanStats = async (root: string) => {
+			const res = await rpc("healthCheck", { root });
+			expect(res.ok).toBe(true);
+			const value = (res.value as { ok: boolean; value: { scanHeads: string[]; waitCount: number } })
+				.value;
+			return { scanHeads: value.scanHeads, waitCount: value.waitCount };
+		};
+
+		const waitForGateStart = async (waitNumber: number) => {
+			const started = await waitForCondition(
+				() => fs.existsSync(path.join(gateDir, `wait-${waitNumber}-started`)),
+				2_000,
+				5,
+			);
+			expect(started).toBe(true);
+		};
+
+		const releaseGate = (waitNumber: number) => {
+			fs.writeFileSync(path.join(gateDir, `wait-${waitNumber}-release`), "1");
+		};
+
+		const setHead = (head: string) => {
+			fs.writeFileSync(headPath, `${head}\n`);
+		};
+
+		return {
+			repoDir,
+			pid,
+			proc,
+			rpc,
+			readScanStats,
+			waitForGateStart,
+			releaseGate,
+			setHead,
+		};
+	}
+
+	it("defers headState update and triggers a follow-up rescan when HEAD changes during an in-flight scan with a concurrent caller", async () => {
+		// waitCount 1 = initial create scan, waitCount 2 = first HEAD-change refresh scan (commit-B).
+		const ctx = await startControllableHeadScanSidecar("head-race-concurrent", [2]);
+
+		try {
+			const initial = await ctx.rpc("ensure", { basePath: ctx.repoDir, kind: "workspace" });
+			expect(initial.ok).toBe(true);
+			const root = (initial.value as { root: string; created: boolean }).root;
+			expect((initial.value as { created: boolean }).created).toBe(true);
+			expect((await ctx.readScanStats(root)).scanHeads).toEqual([]);
+
+			// Switch HEAD to commit-B and start refresh scan #1 (paused inside waitForScan).
+			ctx.setHead("commit-B");
+			const ensureB = ctx.rpc("ensure", { basePath: ctx.repoDir, kind: "workspace" });
+			await ctx.waitForGateStart(2);
+
+			// While scan #1 (commit-B) is still in-flight, HEAD moves to commit-C and a second caller arrives.
+			ctx.setHead("commit-C");
+			const ensureC = ctx.rpc("ensure", { basePath: ctx.repoDir, kind: "workspace" });
+
+			// IPC messages are FIFO-ordered: awaiting healthCheck proves ensureC has entered
+			// refreshEntryIfHeadChanged and yielded on entry.refreshPromise.
+			const midStats = await ctx.readScanStats(root);
+			expect(midStats.scanHeads).toEqual(["commit-B"]);
+
+			// Unblock scan #1; sidecar must recheck HEAD and run a follow-up scan for commit-C.
+			ctx.releaseGate(2);
+			const [resB, resC] = await Promise.all([ensureB, ensureC]);
+			expect(resB.ok).toBe(true);
+			expect(resC.ok).toBe(true);
+
+			const afterStats = await ctx.readScanStats(root);
+			expect(afterStats.scanHeads).toEqual(["commit-B", "commit-C"]);
+
+			// Subsequent ensure while HEAD is unchanged at commit-C must not trigger a redundant scan.
+			const ensureSame = await ctx.rpc("ensure", { basePath: ctx.repoDir, kind: "workspace" });
+			expect(ensureSame.ok).toBe(true);
+			expect((await ctx.readScanStats(root)).scanHeads).toEqual(["commit-B", "commit-C"]);
+
+			// A later HEAD change to commit-D must still trigger a new scan.
+			ctx.setHead("commit-D");
+			const ensureD = await ctx.rpc("ensure", { basePath: ctx.repoDir, kind: "workspace" });
+			expect(ensureD.ok).toBe(true);
+			expect((await ctx.readScanStats(root)).scanHeads).toEqual([
+				"commit-B",
+				"commit-C",
+				"commit-D",
+			]);
+		} finally {
+			if (isPidAlive(ctx.pid)) {
+				ctx.proc.kill("SIGKILL");
+			}
+		}
+	});
+
+	it("rechecks HEAD after an in-flight scan completes even with no concurrent caller", async () => {
+		// waitCount 2 = first HEAD-change refresh scan (commit-B).
+		const ctx = await startControllableHeadScanSidecar("head-race-single-caller", [2]);
+
+		try {
+			const initial = await ctx.rpc("ensure", { basePath: ctx.repoDir, kind: "workspace" });
+			expect(initial.ok).toBe(true);
+			const root = (initial.value as { root: string; created: boolean }).root;
+
+			ctx.setHead("commit-B");
+			const ensureB = ctx.rpc("ensure", { basePath: ctx.repoDir, kind: "workspace" });
+			await ctx.waitForGateStart(2);
+
+			// Change HEAD to commit-C mid-scan with no second ensure caller arriving.
+			ctx.setHead("commit-C");
+			ctx.releaseGate(2);
+
+			const resB = await ensureB;
+			expect(resB.ok).toBe(true);
+
+			// The completing scan must recheck HEAD and run the follow-up scan for commit-C.
+			expect((await ctx.readScanStats(root)).scanHeads).toEqual(["commit-B", "commit-C"]);
+
+			// headState must now reflect commit-C so no extra scan runs when unchanged.
+			const ensureAgain = await ctx.rpc("ensure", { basePath: ctx.repoDir, kind: "workspace" });
+			expect(ensureAgain.ok).toBe(true);
+			expect((await ctx.readScanStats(root)).scanHeads).toEqual(["commit-B", "commit-C"]);
+		} finally {
+			if (isPidAlive(ctx.pid)) {
+				ctx.proc.kill("SIGKILL");
+			}
+		}
+	});
+
+	it("rechecks HEAD after initial create scan completes if HEAD changed during startup scan", async () => {
+		// waitCount 1 = initial waitForScan during FileFinder.create.
+		const ctx = await startControllableHeadScanSidecar("head-race-initial-scan", [1]);
+
+		try {
+			const ensureInit = ctx.rpc("ensure", { basePath: ctx.repoDir, kind: "workspace" });
+			await ctx.waitForGateStart(1);
+
+			// HEAD moves from commit-A to commit-B while initial scan is still running.
+			ctx.setHead("commit-B");
+			ctx.releaseGate(1);
+
+			const resInit = await ensureInit;
+			expect(resInit.ok).toBe(true);
+			const root = (resInit.value as { root: string; created: boolean }).root;
+			expect((resInit.value as { created: boolean }).created).toBe(true);
+
+			// Initial headState was commit-A, so completion must trigger a rescan for commit-B.
+			expect((await ctx.readScanStats(root)).scanHeads).toEqual(["commit-B"]);
+
+			// Follow-up ensure at commit-B must not rescan again.
+			const ensureAgain = await ctx.rpc("ensure", { basePath: ctx.repoDir, kind: "workspace" });
+			expect(ensureAgain.ok).toBe(true);
+			expect((await ctx.readScanStats(root)).scanHeads).toEqual(["commit-B"]);
+		} finally {
+			if (isPidAlive(ctx.pid)) {
+				ctx.proc.kill("SIGKILL");
+			}
+		}
+	});
+
+	it("rescans cleanly if HEAD flips away and back while an in-flight scan is observed by another caller", async () => {
+		const ctx = await startControllableHeadScanSidecar("head-race-flip-back", [2]);
+
+		try {
+			const initial = await ctx.rpc("ensure", { basePath: ctx.repoDir, kind: "workspace" });
+			expect(initial.ok).toBe(true);
+			const root = (initial.value as { root: string; created: boolean }).root;
+
+			ctx.setHead("commit-B");
+			const ensureB = ctx.rpc("ensure", { basePath: ctx.repoDir, kind: "workspace" });
+			await ctx.waitForGateStart(2);
+
+			// Caller 2 observes commit-C mid-scan, then HEAD switches back to commit-B before scan #1 finishes.
+			ctx.setHead("commit-C");
+			const ensureC = ctx.rpc("ensure", { basePath: ctx.repoDir, kind: "workspace" });
+			await ctx.readScanStats(root);
+
+			ctx.setHead("commit-B");
+			ctx.releaseGate(2);
+
+			const [resB, resC] = await Promise.all([ensureB, ensureC]);
+			expect(resB.ok).toBe(true);
+			expect(resC.ok).toBe(true);
+
+			expect((await ctx.readScanStats(root)).scanHeads).toEqual(["commit-B", "commit-B"]);
+
+			const ensureAgain = await ctx.rpc("ensure", { basePath: ctx.repoDir, kind: "workspace" });
+			expect(ensureAgain.ok).toBe(true);
+			expect((await ctx.readScanStats(root)).scanHeads).toEqual(["commit-B", "commit-B"]);
+		} finally {
+			if (isPidAlive(ctx.pid)) {
+				ctx.proc.kill("SIGKILL");
+			}
+		}
+	});
 });

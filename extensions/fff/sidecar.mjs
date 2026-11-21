@@ -126,33 +126,56 @@ function sweepMissingRoots() {
 }
 
 async function refreshEntryIfHeadChanged(entry, waitTimeoutMs) {
-	const currentHead = readGitHeadState(entry.root);
-	if (
-		currentHead !== null &&
-		entry.headState !== null &&
-		currentHead !== entry.headState
-	) {
-		entry.headState = currentHead;
-		if (entry.refreshPromise) {
-			await entry.refreshPromise;
-			return refreshEntryIfHeadChanged(entry, waitTimeoutMs);
+	while (true) {
+		if (entry.finder.isDestroyed) {
+			return;
 		}
+		const currentHead = readGitHeadState(entry.root);
+		const headChanged =
+			currentHead !== null &&
+			entry.headState !== null &&
+			currentHead !== entry.headState;
+
+		if (entry.refreshPromise) {
+			if (headChanged) {
+				entry.rescanRequested = true;
+			}
+			await entry.refreshPromise;
+			continue;
+		}
+
+		if (!headChanged && !entry.rescanRequested) {
+			return;
+		}
+
+		const previousHead = entry.headState;
+		const targetHead = currentHead !== null ? currentHead : entry.headState;
+		entry.rescanRequested = false;
+		entry.headState = targetHead;
+
 		const task = (async () => {
-			entry.finder.scanFiles();
-			await entry.finder.waitForScan(waitTimeoutMs);
+			const scanRes = entry.finder.scanFiles();
+			if (scanRes && scanRes.ok === false) {
+				throw new Error(scanRes.error ?? "scanFiles failed");
+			}
+			const waitRes = await entry.finder.waitForScan(waitTimeoutMs);
+			if (waitRes && waitRes.ok === false) {
+				throw new Error(waitRes.error ?? "waitForScan failed");
+			}
 		})();
 		entry.refreshPromise = task;
 		try {
 			await task;
+		} catch (err) {
+			if (entry.headState === targetHead) {
+				entry.headState = previousHead;
+			}
+			throw err;
 		} finally {
 			if (entry.refreshPromise === task) {
 				entry.refreshPromise = null;
 			}
 		}
-		return;
-	}
-	if (entry.refreshPromise) {
-		await entry.refreshPromise;
 	}
 }
 
@@ -278,6 +301,7 @@ async function ensureEntry(params) {
 	};
 	const createTask = (async () => {
 		const FileFinder = await loadFileFinder();
+		const initialHeadState = readGitHeadState(target);
 		const baseOptions = {
 			basePath: target,
 			aiMode: true,
@@ -329,8 +353,9 @@ async function ensureEntry(params) {
 			lastUsed: nextTick(),
 			configKey,
 			dbPathsKey,
-			headState: readGitHeadState(target),
+			headState: initialHeadState,
 			refreshPromise: null,
+			rescanRequested: false,
 			retired: false,
 			options: usedDbPaths
 				? {
@@ -354,14 +379,17 @@ async function ensureEntry(params) {
 	pendingRecord.promise = createTask;
 	pending.set(target, pendingRecord);
 
+	let entry;
 	try {
-		const entry = await createTask;
-		return buildEnsureResult(entry.root, true);
+		entry = await createTask;
 	} finally {
 		if (pending.get(target) === pendingRecord) {
 			pending.delete(target);
 		}
 	}
+	await refreshEntryIfHeadChanged(entry, waitTimeoutMs);
+	entry.lastUsed = nextTick();
+	return buildEnsureResult(entry.root, true);
 }
 
 function requireEntry(root) {
