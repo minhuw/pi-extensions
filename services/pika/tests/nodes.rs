@@ -684,7 +684,7 @@ async fn open_overflowing_node_outbox_never_delivers_close_before_opened() {
     config.max_outgoing_bytes = 512;
     let hub = Nodes::new(config);
 
-    let mut node = hub.connect_node("node-1", "hash".into());
+    let mut node = hub.connect_node("node-1");
     hub.hello(
         node.id,
         Hello { host: Some("node01.lan".into()), version: "0.1.0".into(), public_key: PUBLIC_KEY.into() },
@@ -773,7 +773,7 @@ async fn open_overflowing_client_outbox_does_not_open_on_node() {
     config.max_outgoing_bytes = 512;
     let hub = Nodes::new(config);
 
-    let mut node = hub.connect_node("node-1", "hash".into());
+    let mut node = hub.connect_node("node-1");
     hub.hello(
         node.id,
         Hello { host: Some("node01.lan".into()), version: "0.1.0".into(), public_key: PUBLIC_KEY.into() },

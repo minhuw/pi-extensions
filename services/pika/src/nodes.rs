@@ -356,7 +356,7 @@ fn close_json(channel: &str, code: &str, reason: Option<&str>) -> String {
 
 enum Role {
     /// A node socket, online once its `hello` succeeded.
-    Node { id: String, credential_hash: String, online: bool },
+    Node { id: String, online: bool },
     /// A browser socket: the owner session's id hash in `password` mode, the `client` object of `open`, and the
     /// times of its recent opens.
     Client { session: Option<String>, client: Value, opens: VecDeque<Instant> },
@@ -571,11 +571,10 @@ impl Nodes {
         Connection { id, outbox, frames, closing: closing_rx }
     }
 
-    /// Registers a node socket made with the credential whose SHA-256 is `credential_hash`; it stays offline until
-    /// `hello`.
-    pub fn connect_node(&self, id: &str, credential_hash: String) -> Connection {
+    /// Registers a node socket; it stays offline until `hello`.
+    pub fn connect_node(&self, id: &str) -> Connection {
         let mut inner = self.lock();
-        self.register(&mut inner, Role::Node { id: id.to_owned(), credential_hash, online: false })
+        self.register(&mut inner, Role::Node { id: id.to_owned(), online: false })
     }
 
     /// Registers a browser socket and queues its `welcome` and `nodes`, or `None` when the owner session has too many.
@@ -742,20 +741,6 @@ impl Nodes {
         inner.broadcast();
     }
 
-    /// Closes every socket of node `id`, as when its credential is revoked.
-    pub fn close_node(&self, id: &str, code: u16, reason: &'static str) {
-        let mut inner = self.lock();
-        let sockets: Vec<u64> = inner
-            .sockets
-            .iter()
-            .filter(|(_, s)| matches!(&s.role, Role::Node { id: node, .. } if node == id))
-            .map(|(socket, _)| *socket)
-            .collect();
-        for socket in sockets {
-            inner.close(socket, code, reason);
-        }
-    }
-
     /// Closes `socket` with `code`.
     pub fn close(&self, socket: u64, code: u16, reason: &'static str) {
         self.lock().close(socket, code, reason);
@@ -767,14 +752,6 @@ impl Nodes {
         let sockets: Vec<u64> = inner.sockets.keys().copied().collect();
         for socket in sockets {
             inner.close(socket, code, reason);
-        }
-    }
-
-    /// The credential hash a node socket was made with.
-    pub fn credential_of(&self, socket: u64) -> Option<String> {
-        match &self.lock().sockets.get(&socket)?.role {
-            Role::Node { credential_hash, .. } => Some(credential_hash.clone()),
-            Role::Client { .. } => None,
         }
     }
 

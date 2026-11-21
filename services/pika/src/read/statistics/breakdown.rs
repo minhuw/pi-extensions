@@ -544,12 +544,6 @@ mod tests {
     }
 
     struct Event {
-        #[allow(dead_code)]
-        sid: i64,
-        #[allow(dead_code)]
-        project: Key,
-        #[allow(dead_code)]
-        model: Key,
         requests: i64,
         counts: Counts,
         stop: Option<String>,
@@ -609,9 +603,6 @@ mod tests {
 
     fn event() -> Event {
         Event {
-            sid: 1,
-            project: Key("project", Some("p".into())),
-            model: Key("model", Some("m".into())),
             requests: 1,
             counts: Counts {
                 tokens: Tokens {
@@ -892,9 +883,6 @@ mod tests {
                         )?;
                     }
                     let ev = Event {
-                        sid: 1,
-                        project: Key("project", Some("p".into())),
-                        model: if requests == 0 { Key("other-usage", None) } else { Key("model", Some("m".into())) },
                         requests,
                         counts: Counts {
                             sessions: 0,

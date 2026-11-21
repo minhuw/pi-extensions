@@ -1024,7 +1024,7 @@ mod tests {
         };
         let arguments = r#"{"api_key":"FAKElettersOnly","region":"eu"}"#;
         assert_eq!(arguments_summary("configure", arguments), "FAKElettersOnly");
-        // AC-1 requires the displayed value's placeholder, not dropping the field or choosing the next argument.
+        // Redact the displayed value to its placeholder rather than dropping the field or choosing the next argument.
         assert_eq!(summary("configure", serde_json::from_str(arguments).unwrap()), "[REDACTED]");
         assert_eq!(summary("login", json!({ "password": "FAKEloginPhrase" })), "[REDACTED]");
         assert_eq!(summary("bash", json!({ "command": "ls", "token": "x" })), "ls");

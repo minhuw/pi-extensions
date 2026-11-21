@@ -265,7 +265,7 @@ pub fn entries(entries: &mut [Entry]) {
 
 /// An entry's verbatim line without its memory (`omit_memory`, with the ids of the calls it makes that are memory
 /// through their results), scrubbed as session content and written back as one line of JSON. Malformed text becomes a
-/// JSON string (AC-1); repaired JSON must be serialized even if it contains no credentials.
+/// JSON string; repaired JSON must be serialized even if it contains no credentials.
 pub fn raw(line: String, memory_calls: &HashSet<String>) -> String {
     let strict = serde_json::from_str::<serde_json::Value>(&line);
     let unchanged_bytes = strict.is_ok() && !line.contains(['\n', '\r']);
@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(out["message"]["arguments"]["api_key"], crate::redact::REDACTED);
         let plain = r#"{"a": 1,  "b": "plain"}"#.to_owned();
         assert_eq!(raw(plain.clone()), plain);
-        // AC-1 requires valid JSON even for an accepted non-JSON entry: the fallback is a string value.
+        // Valid JSON is required even for an accepted non-JSON entry: the fallback is a string value.
         assert_eq!(raw("not json DB_PASSWORD=Fake0000Example1111".into()), r#""not json DB_PASSWORD=[REDACTED:SECRET]""#);
         for text in ["ordinary malformed text", "bad \"quote\"\t\r\n\u{0001}\\path"] {
             let out = raw(text.into());

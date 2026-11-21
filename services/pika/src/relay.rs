@@ -2139,12 +2139,6 @@ impl Relay {
         targets.iter().map(|t| t.to_json(names)).collect()
     }
 
-    /// Session id held online by connection `conn`.
-    pub fn session_of(&self, conn: u64) -> Option<String> {
-        let inner = self.lock();
-        inner.conns.get(&conn).and_then(|c| c.session.clone())
-    }
-
     /// Registers a new connection of `device`, made with the token whose SHA-256 is `token_hash`, or `None` when the
     /// device has too many.
     pub fn connect(&self, device: &str, token_hash: String) -> Option<Connection> {

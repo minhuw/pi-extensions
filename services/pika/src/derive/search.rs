@@ -459,7 +459,7 @@ mod tests {
                     assert_eq!(texts[&doc.0], doc.5);
                     assert!(!doc.5.contains("FAKElettersOnly"));
                 }
-                // AC-3/4: requesting only the assistant or first call still discovers the last call's field.
+                // Requesting only the assistant or first call still discovers the last call's field.
                 for requested in [&docs[..1], &docs[1..2]] {
                     let mut sources = Sources::default();
                     let texts = sources.indexed(tx, &store.blobs, requested);

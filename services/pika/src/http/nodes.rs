@@ -21,7 +21,7 @@ use super::{AppState, blocking, error, internal_error};
 use crate::config::{AuthMode, origin_of};
 use crate::nodes::{self, Frame, close};
 use crate::relay::{Closing, Connection};
-use crate::util::{now_ms, sha256_hex};
+use crate::util::now_ms;
 
 /// 404 `{ error: "nodes_disabled" }` on every node route when nodes are off, before authentication.
 pub async fn require_enabled(State(state): State<AppState>, request: Request, next: Next) -> Response {
@@ -153,7 +153,7 @@ async fn run(state: AppState, socket: WebSocket, peer: Peer) {
     let config = hub.config().clone();
     let (mut sink, mut stream) = socket.split();
     let connection = match &peer {
-        Peer::Node { id, credential } => Some(hub.connect_node(id, sha256_hex(credential.as_bytes()))),
+        Peer::Node { id, .. } => Some(hub.connect_node(id)),
         Peer::Client { session, info } => {
             refresh(&state).await;
             hub.connect_client(session.clone(), info.clone())
