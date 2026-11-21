@@ -114,10 +114,11 @@ interface PendingRequest {
 	missingRounds: number;
 }
 
-/** A spooled block text and how many pending requests reference it. */
+/** A block referenced by pending requests: on disk in `spool/blobs/`, or in memory (`text`) when already acknowledged. */
 interface SpooledBlob {
 	size: number;
 	refs: number;
+	text?: string;
 }
 
 /** One unit of a batch; the unit that is parked after repeated 413s. */
@@ -349,6 +350,17 @@ export class Uploader {
 			if (count) this.blobs.set(hash, { size, refs: count });
 			else if (mtimeMs < cutoff && !this.closed) await this.store.deleteBlob(hash);
 		}
+		for (const [hash, blob] of previous?.blobs ?? []) {
+			if (this.blobs.has(hash) || blob.text === undefined) continue;
+			const count = refs.get(hash);
+			if (!count) continue;
+			if (!this.acked.has(hash) && !this.closed) {
+				await this.store.saveBlob(hash, blob.text);
+				this.blobs.set(hash, { size: blob.size, refs: count });
+			} else {
+				this.blobs.set(hash, { size: blob.size, refs: count, text: blob.text });
+			}
+		}
 		this.poke(0);
 	}
 
@@ -415,7 +427,19 @@ export class Uploader {
 			for (const [hash, text] of split.data) {
 				if (this.parked.has(hash)) continue;
 				const blob = this.blobs.get(hash);
-				if (blob) { blob.refs++; continue; }
+				if (blob) {
+					blob.refs++;
+					if (blob.text !== undefined && !this.acked.has(hash)) {
+						await this.store.saveBlob(hash, text);
+						if (this.blobs.get(hash) === blob) blob.text = undefined;
+						else if (!this.blobs.has(hash)) await this.store.deleteBlob(hash);
+					}
+					continue;
+				}
+				if (this.acked.has(hash)) {
+					this.blobs.set(hash, { size: Buffer.byteLength(text), refs: 1, text });
+					continue;
+				}
 				await this.store.saveBlob(hash, text);
 				this.blobs.set(hash, { size: Buffer.byteLength(text), refs: 1 });
 			}
@@ -731,8 +755,13 @@ export class Uploader {
 		const inBatch = new Set<string>();
 		// Blocks not spooled here are not waited for; the server reports them missing if it lacks them.
 		const needed = (hash: string) => !this.acked.has(hash) && !inBatch.has(hash) && !this.parked.has(hash) && this.blobs.has(hash);
+		const readBlob = async (hash: string): Promise<string | undefined> => {
+			const blob = this.blobs.get(hash);
+			if (!blob) return undefined;
+			return blob.text ?? await this.store.readBlob(hash);
+		};
 		const soloBlob = (hash: string) => async () => {
-			const data = await this.store.readBlob(hash);
+			const data = await readBlob(hash);
 			if (data === undefined) { this.blobs.delete(hash); return; }
 			batch.blobs.push({ hash, data });
 			add(jsonBytes(data) + BLOB_OVERHEAD, { kind: "blob", hash });
@@ -748,7 +777,7 @@ export class Uploader {
 				const blob = this.blobs.get(hash)!;
 				if (oversized(blob.size + BLOB_OVERHEAD)) { solo ??= soloBlob(hash); continue; }
 				if (!room(blob.size + BLOB_OVERHEAD)) continue;
-				const data = await this.store.readBlob(hash);
+				const data = await readBlob(hash);
 				if (data === undefined) { this.blobs.delete(hash); continue; }
 				const bytes = jsonBytes(data) + BLOB_OVERHEAD;
 				if (oversized(bytes)) { solo ??= soloBlob(hash); continue; }
@@ -888,8 +917,10 @@ export class Uploader {
 			}
 		} else if (item.kind === "blob") {
 			what = `block ${item.hash}`;
+			const blob = this.blobs.get(item.hash);
+			if (blob?.text !== undefined) await this.store.saveBlob(item.hash, blob.text);
 			await this.store.parkBlob(item.hash);
-			this.parked.set(item.hash, this.blobs.get(item.hash)?.size ?? 0);
+			this.parked.set(item.hash, blob?.size ?? 0);
 			this.blobs.delete(item.hash);
 		} else if (item.kind === "request") {
 			what = `request ${item.id}`;
@@ -915,7 +946,7 @@ export class Uploader {
 		this.noteError(`parked ${what}: the server keeps refusing it as too large (413); it stays in ${this.store.parked}`);
 	}
 
-	/** Forgets a request and returns the spooled blocks no other pending request references. */
+	/** Forgets a request and returns the on-disk spooled blocks no other pending request references. */
 	private forget(record: SpooledRequest): string[] {
 		this.requests.delete(record.id);
 		this.strikes.delete(itemId({ kind: "request", id: record.id }));
@@ -924,7 +955,7 @@ export class Uploader {
 			const blob = this.blobs.get(hash);
 			if (!blob || --blob.refs > 0) continue;
 			this.blobs.delete(hash);
-			unused.push(hash);
+			if (blob.text === undefined) unused.push(hash);
 		}
 		return unused;
 	}
@@ -976,13 +1007,25 @@ export class Uploader {
 		// The server lost these, or never had them: send them again with the requests that need them.
 		for (const hash of missing) this.acked.delete(hash);
 		let unavailable = 0;
+		const toPersist = new Set<string>();
 		for (const record of batch.requests) {
 			const pending = this.requests.get(record.id);
 			const lacking = record.blocks.filter((hash) => missing.has(hash) && !this.parked.has(hash));
-			const resend = lacking.filter((hash) => this.blobs.has(hash)).length;
-			if (resend && pending && ++pending.missingRounds <= MAX_MISSING_ROUNDS) continue;
+			const resend = lacking.filter((hash) => this.blobs.has(hash));
+			if (resend.length && pending && ++pending.missingRounds <= MAX_MISSING_ROUNDS) {
+				for (const hash of resend) toPersist.add(hash);
+				continue;
+			}
 			unavailable += lacking.length;
 			await this.finish(record);
+		}
+		for (const hash of toPersist) {
+			const blob = this.blobs.get(hash);
+			if (!blob || blob.text === undefined) continue;
+			await this.store.saveBlob(hash, blob.text);
+			const current = this.blobs.get(hash);
+			if (current) current.text = undefined;
+			else await this.store.deleteBlob(hash);
 		}
 		if (unavailable) this.noteError(`the server is missing ${unavailable} block(s) that cannot be sent; affected requests stay incomplete`);
 		for (const hash of this.acked) {

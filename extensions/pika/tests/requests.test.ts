@@ -422,3 +422,93 @@ it("answers missingBlobs when the server lost acknowledged blocks, and then dele
 		expect(h.errors).toEqual([]);
 	} finally { await h.shutdown(); }
 }, 20_000);
+
+const uploaderBlobs = (uploader: Uploader) =>
+	(uploader as unknown as { blobs: Map<string, { size: number; refs: number; text?: string }> }).blobs;
+
+it("skips rewriting and deleting already-acknowledged blocks on disk while refcounting in-memory texts until completion", async () => {
+	const uploader = new Uploader({ url: ingest.url, token: TOKEN, dir: workspace.pikaDir });
+	try {
+		await uploader.ready;
+		const shared1 = { role: "user", content: "shared-1" };
+		const shared2 = { role: "assistant", content: "shared-2" };
+		const turn2 = { role: "user", content: "turn-2" };
+		const turn3 = { role: "user", content: "turn-3" };
+		const [h1, h2] = splitPayload({ model: "m", messages: [shared1, shared2] }).blocks as [string, string];
+		const [hTurn2] = splitPayload({ model: "m", messages: [turn2] }).blocks as [string];
+		const [hTurn3] = splitPayload({ model: "m", messages: [turn3] }).blocks as [string];
+		const meta = (id: string, seq: number) => ({ id, sessionId: "s-acked", seq, at: new Date().toISOString(), fidelity: "payload" as const });
+
+		await uploader.enqueueRequest(meta("req-1", 1), { value: { model: "m", messages: [shared1, shared2] } });
+		await uploader.flush();
+		expect(ingest.payload("req-1")).toEqual({ model: "m", messages: [shared1, shared2] });
+		expect(await spooledBlobs()).toEqual([]);
+		expect(uploaderBlobs(uploader).size).toBe(0);
+
+		const saveBlob = vi.spyOn(uploader.store, "saveBlob");
+		const deleteBlob = vi.spyOn(uploader.store, "deleteBlob");
+
+		await uploader.enqueueRequest(meta("req-2", 2), { value: { model: "m", messages: [shared1, shared2, turn2] } }, { awaiting: true });
+		expect(saveBlob.mock.calls.map(([hash]) => hash)).toEqual([hTurn2]);
+		expect(await spooledBlobs()).toEqual([hTurn2]);
+		expect(uploaderBlobs(uploader).get(h1)).toMatchObject({ refs: 1, text: JSON.stringify(shared1) });
+		expect(uploaderBlobs(uploader).get(h2)).toMatchObject({ refs: 1, text: JSON.stringify(shared2) });
+		expect(uploaderBlobs(uploader).get(hTurn2)).toEqual({ size: Buffer.byteLength(JSON.stringify(turn2)), refs: 1 });
+
+		await uploader.enqueueRequest(meta("req-3", 3), { value: { model: "m", messages: [shared1, turn3] } }, { awaiting: true });
+		expect(saveBlob.mock.calls.map(([hash]) => hash)).toEqual([hTurn2, hTurn3]);
+		expect((await spooledBlobs()).sort()).toEqual([hTurn2, hTurn3].sort());
+		expect(uploaderBlobs(uploader).get(h1)).toMatchObject({ refs: 2, text: JSON.stringify(shared1) });
+
+		await uploader.completeRequest("req-2");
+		await uploader.flush();
+		expect(ingest.payload("req-2")).toEqual({ model: "m", messages: [shared1, shared2, turn2] });
+		expect(uploaderBlobs(uploader).get(h1)).toMatchObject({ refs: 1, text: JSON.stringify(shared1) });
+		expect(uploaderBlobs(uploader).has(h2)).toBe(false);
+		expect(uploaderBlobs(uploader).has(hTurn2)).toBe(false);
+		expect(deleteBlob.mock.calls.map(([hash]) => hash)).toEqual([hTurn2]);
+
+		await uploader.completeRequest("req-3");
+		await uploader.flush();
+		expect(ingest.payload("req-3")).toEqual({ model: "m", messages: [shared1, turn3] });
+		expect(uploaderBlobs(uploader).size).toBe(0);
+		expect(deleteBlob.mock.calls.map(([hash]) => hash)).toEqual([hTurn2, hTurn3]);
+		expect(await spooledBlobs()).toEqual([]);
+	} finally { await uploader.stop(); }
+}, 20_000);
+
+it("resends an already-acked block from refcounted in-memory text on missingBlobs and cleans up references afterward", async () => {
+	const uploader = new Uploader({ url: ingest.url, token: TOKEN, dir: workspace.pikaDir });
+	try {
+		await uploader.ready;
+		const shared = { role: "user", content: "shared-lost" };
+		const followUp = { role: "user", content: "follow-up" };
+		const [hShared] = splitPayload({ model: "m", messages: [shared] }).blocks as [string];
+		const [hFollowUp] = splitPayload({ model: "m", messages: [followUp] }).blocks as [string];
+		const meta = (id: string, seq: number) => ({ id, sessionId: "s-missing", seq, at: new Date().toISOString(), fidelity: "payload" as const });
+
+		await uploader.enqueueRequest(meta("req-1", 1), { value: { model: "m", messages: [shared] } });
+		await uploader.flush();
+		expect(ingest.payload("req-1")).toEqual({ model: "m", messages: [shared] });
+		expect(await spooledBlobs()).toEqual([]);
+		expect(uploaderBlobs(uploader).size).toBe(0);
+
+		// Server loses the previously acknowledged block.
+		ingest.blobs.clear();
+		const saveBlob = vi.spyOn(uploader.store, "saveBlob");
+
+		await uploader.enqueueRequest(meta("req-2", 2), { value: { model: "m", messages: [shared, followUp] } }, { awaiting: true });
+		// Enqueueing must not rewrite the already-acked block to disk; only the new block is spooled.
+		expect(saveBlob.mock.calls.map(([hash]) => hash)).toEqual([hFollowUp]);
+		expect(await spooledBlobs()).toEqual([hFollowUp]);
+		expect(uploaderBlobs(uploader).get(hShared)).toMatchObject({ refs: 1, text: JSON.stringify(shared) });
+
+		await uploader.completeRequest("req-2");
+		await uploader.flush();
+		expect(ingest.requestReceipts.get("req-2")).toBe(2);
+		expect(ingest.payload("req-2")).toEqual({ model: "m", messages: [shared, followUp] });
+		expect(uploaderBlobs(uploader).size).toBe(0);
+		expect(await spooledBlobs()).toEqual([]);
+		expect(uploader.status().lastError).toBeUndefined();
+	} finally { await uploader.stop(); }
+}, 20_000);
