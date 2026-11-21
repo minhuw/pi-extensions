@@ -492,6 +492,67 @@ async fn unidentified_buckets_obey_the_daily_row_limit() {
     assert_eq!(data["projects"], json!([]));
 }
 
+#[tokio::test]
+async fn daily_series_aggregates_sparse_days_and_zero_fills_gaps() {
+    let env = env();
+    let app = app(&env, VisitorAnalytics::Direct, AuthMode::None);
+    env.store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO visitor_views VALUES \
+                    (date('now', '-30 days'), 'US', 'one', x'01', 99), \
+                    (date('now', '-29 days'), 'US', 'one', x'01', 3), \
+                    (date('now', '-10 days'), 'US', 'one', x'01', 2), \
+                    (date('now', '-10 days'), 'US', 'two', x'01', 4), \
+                    (date('now', '-10 days'), 'GB', '', x'02', 5), \
+                    (date('now', '-10 days'), '', '', x'', 7), \
+                    (date('now'), 'JP', '', x'03', 1), \
+                    (date('now', '+1 day'), 'JP', '', x'04', 50);",
+            )
+        })
+        .unwrap();
+
+    let data = report(&app).await;
+    let daily = data["daily"].as_array().unwrap();
+    assert_eq!(daily.len(), 30);
+
+    let today = daily[29]["date"].as_str().unwrap();
+    let expected_dates: Vec<String> = (0..30)
+        .rev()
+        .map(|offset| {
+            one(
+                &env.store,
+                &format!("SELECT date('{today}', '-{offset} days') AS d"),
+            )["d"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    let actual_dates: Vec<&str> = daily
+        .iter()
+        .map(|entry| entry["date"].as_str().unwrap())
+        .collect();
+    assert_eq!(actual_dates, expected_dates);
+
+    assert_eq!(daily[0]["views"], 3);
+    assert_eq!(daily[0]["dailyVisitors"], 1);
+    assert_eq!(daily[19]["views"], 18); // 2 + 4 + 5 + 7
+    assert_eq!(daily[19]["dailyVisitors"], 2); // distinct x'01', x'02'; x'' excluded
+    assert_eq!(daily[29]["views"], 1);
+    assert_eq!(daily[29]["dailyVisitors"], 1);
+
+    for (idx, entry) in daily.iter().enumerate() {
+        if !matches!(idx, 0 | 19 | 29) {
+            assert_eq!(entry["views"], 0, "day index {idx}");
+            assert_eq!(entry["dailyVisitors"], 0, "day index {idx}");
+        }
+    }
+
+    assert_eq!(data["views"], 22);
+    assert_eq!(data["dailyVisitors"], 4);
+}
+
 #[test]
 fn upgrade_from_eight_preserves_existing_settings() {
     let env = env();

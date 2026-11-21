@@ -1,4 +1,5 @@
 //! Anonymous, bounded public view counters. No raw address or user agent is persisted.
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
@@ -249,6 +250,68 @@ pub(super) async fn view(State(state): State<AppState>, request: Request) -> Res
     }
 }
 
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { yoe + era * 400 + 1 } else { yoe + era * 400 }, m, d)
+}
+
+fn parse_day(s: &str) -> anyhow::Result<i64> {
+    let b = s.as_bytes();
+    if b.len() != 10
+        || !b.iter().enumerate().all(|(i, c)| {
+            if i == 4 || i == 7 {
+                *c == b'-'
+            } else {
+                c.is_ascii_digit()
+            }
+        })
+    {
+        anyhow::bail!("invalid SQLite day: {s:?}");
+    }
+    let year: i64 = s[0..4].parse()?;
+    let month: i64 = s[5..7].parse()?;
+    let day: i64 = s[8..10].parse()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        anyhow::bail!("out-of-range SQLite day: {s:?}");
+    }
+    let serial = days_from_civil(year, month, day);
+    if civil_from_days(serial) != (year, month, day) {
+        anyhow::bail!("non-existent SQLite day: {s:?}");
+    }
+    Ok(serial)
+}
+
+fn format_day(serial: i64) -> String {
+    let (y, m, d) = civil_from_days(serial);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+fn day_window(today: &str, count: usize) -> anyhow::Result<Vec<String>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let end = parse_day(today)?;
+    let start = end - (count as i64 - 1);
+    Ok((start..=end).map(format_day).collect())
+}
+
 pub(super) async fn origins(State(state): State<AppState>) -> Response {
     let store = state.store.clone();
     let mode = state.config.visitor_analytics;
@@ -257,15 +320,37 @@ pub(super) async fn origins(State(state): State<AppState>) -> Response {
             // Keep all report queries on one read snapshot without holding the ingest writer.
             let tx = conn.unchecked_transaction()?;
             let today: String = tx.query_row("SELECT date('now')", [], |r| r.get(0))?;
-            let mut daily = Vec::new();
-            for offset in (0..30).rev() {
-                let modifier = format!("-{offset} days");
-                let date: String = tx.query_row("SELECT date(?1, ?2)", params![today, modifier], |r| r.get(0))?;
-                let (views, visitors): (i64, i64) = tx.query_row("SELECT COALESCE(SUM(views),0), COUNT(DISTINCT NULLIF(visitor,x'')) FROM visitor_views WHERE day=?1", [&date], |r| Ok((r.get(0)?,r.get(1)?)))?;
-                daily.push(json!({"date": date, "views": views, "dailyVisitors": visitors}));
+            let days = day_window(&today, 30)?;
+            let first_day = days.first().map(String::as_str).unwrap_or(today.as_str());
+            let mut by_day: HashMap<String, (i64, i64)> = HashMap::new();
+            {
+                let mut stmt = tx.prepare(
+                    "SELECT day, COALESCE(SUM(views), 0), COUNT(DISTINCT NULLIF(visitor, x'')) \
+                     FROM visitor_views \
+                     WHERE day BETWEEN ?1 AND ?2 \
+                     GROUP BY day",
+                )?;
+                let rows = stmt.query_map(params![first_day, &today], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (day, views, visitors) = row?;
+                    by_day.insert(day, (views, visitors));
+                }
             }
-            let views: i64 = daily.iter().map(|v| v["views"].as_i64().unwrap()).sum();
-            let visitors: i64 = daily.iter().map(|v| v["dailyVisitors"].as_i64().unwrap()).sum();
+            let mut daily = Vec::with_capacity(days.len());
+            let mut views: i64 = 0;
+            let mut visitors: i64 = 0;
+            for date in days {
+                let (day_views, day_visitors) = by_day.get(&date).copied().unwrap_or((0, 0));
+                views += day_views;
+                visitors += day_visitors;
+                daily.push(json!({"date": date, "views": day_views, "dailyVisitors": day_visitors}));
+            }
             fn groups(tx: &rusqlite::Transaction<'_>, today: &str, column: &str, filter: &str, label: &str) -> rusqlite::Result<Vec<Value>> {
                 let sql = format!("SELECT {column}, SUM(views), SUM(visitors) FROM (SELECT {column}, day, SUM(views) AS views, COUNT(DISTINCT NULLIF(visitor,x'')) AS visitors FROM visitor_views WHERE {filter} GROUP BY {column}, day) GROUP BY {column} ORDER BY SUM(views) DESC, {column}");
                 let mut stmt = tx.prepare(&sql)?;
@@ -279,5 +364,43 @@ pub(super) async fn origins(State(state): State<AppState>) -> Response {
         Ok(Ok(v)) => Json(v).into_response(),
         Ok(Err(e)) => internal_error(e),
         Err(e) => internal_error(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn day_window_matches_sqlite_across_calendar_boundaries() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for today in [
+            "2024-02-29", // leap day itself
+            "2024-03-01", // leap year day after Feb 29
+            "2024-03-15", // leap year window straddling Feb 29
+            "2025-03-01", // non-leap year day after Feb 28
+            "2025-01-10", // year boundary into December
+            "2025-05-01", // 30-day month boundary (April)
+            "2025-08-01", // 31-day month boundary (July)
+            "2000-03-01", // 400-year leap century
+            "2100-03-01", // 100-year non-leap century
+        ] {
+            let expected: Vec<String> = (0..30)
+                .rev()
+                .map(|offset| {
+                    let modifier = format!("-{offset} days");
+                    conn.query_row("SELECT date(?1, ?2)", params![today, modifier], |r| r.get(0))
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(day_window(today, 30).unwrap(), expected, "anchor {today}");
+        }
+    }
+
+    #[test]
+    fn parse_day_rejects_invalid_dates() {
+        for bad in ["2025-02-29", "2100-02-29", "2025-04-31", "2025-13-01", "2025-00-10", "+025-01-01", "2025-1-1", ""] {
+            assert!(parse_day(bad).is_err(), "expected error for {bad:?}");
+        }
     }
 }
