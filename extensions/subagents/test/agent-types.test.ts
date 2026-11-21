@@ -650,6 +650,8 @@ describe("local fleet runtime tool selection", () => {
       "pi-fff",
       "statusline-footer",
       "orca-bridge",
+      "pika-node-bridge",
+      "session-name",
       "spokesman",
       "delegation",
       "molt",

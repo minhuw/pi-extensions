@@ -25,6 +25,8 @@ it("scopes extensions on recon, analyst, and worker while retaining built-in sea
     "pi-fff",
     "statusline-footer",
     "orca-bridge",
+    "pika-node-bridge",
+    "session-name",
     "spokesman",
     "delegation",
     "molt",
