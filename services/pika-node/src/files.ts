@@ -226,8 +226,9 @@ export class Files {
         }
         const info = await stat(path);
         const id = randomBytes(9).toString("base64url");
-        const watch: Watch = { id, peer, path, file: !info.isDirectory(), watcher: undefined as unknown as FSWatcher, timer: undefined, kind: undefined };
-        this.#arm(watch);
+        const watcher = watchPath(path, { persistent: false });
+        const watch: Watch = { id, peer, path, file: !info.isDirectory(), watcher, timer: undefined, kind: undefined };
+        this.#attach(watch, watcher);
         this.#watches.set(id, watch);
         return id;
     }
@@ -239,6 +240,10 @@ export class Files {
     #arm(watch: Watch): void {
         const watcher = watchPath(watch.path, { persistent: false });
         watch.watcher = watcher;
+        this.#attach(watch, watcher);
+    }
+
+    #attach(watch: Watch, watcher: FSWatcher): void {
         watcher.on("change", (event: string) => {
             watch.kind = watch.kind === "rename" || event === "rename" ? "rename" : "change";
             watch.timer ??= setTimeout(() => this.#fire(watch), timing.watchCoalesceMs);
@@ -446,8 +451,6 @@ export class Files {
             await rm(upload.path, { force: true });
         } catch (error) { this.#options.log(`upload ${upload.id}: cleanup failed: ${asNodeError(error).message}`); }
     }
-
-    // -----------------------------------------------------------------------------------------------------------
 
     /** A channel closed: its watches end and its uploads are deleted. */
     closePeer(peer: Peer): void {

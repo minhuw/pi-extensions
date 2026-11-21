@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, realpathSync, renameSync, statSync, symlinkSyn
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type { Peer } from "../src/daemon.ts";
-import { asNodeError, NodeError } from "../src/errors.ts";
+import { asNodeError } from "../src/errors.ts";
 import { Files, parseGitStatus } from "../src/files.ts";
 import { toBase64Url, type NodeMessage } from "../src/protocol.ts";
 import { tempHome, until } from "./support.ts";
@@ -49,8 +49,10 @@ describe("files", () => {
         const created = await files.write(path, Buffer.from("one"), { absent: true }, 0o755);
         expect(statSync(path).mode & 0o777).toBe(0o755);
         expect(await code(files.write(path, Buffer.from("two"), { absent: true }))).toBe("conflict");
-        try { await files.write(path, Buffer.from("two"), { hash: sha("stale") }); }
-        catch (error) { expect((error as NodeError).current).toMatchObject({ size: 3, hash: sha("one") }); }
+        await expect(files.write(path, Buffer.from("two"), { hash: sha("stale") })).rejects.toMatchObject({
+            code: "conflict",
+            current: { size: 3, hash: sha("one") },
+        });
         await files.write(path, Buffer.from("two"), { mtimeMs: created.mtimeMs, size: created.size });
         expect(readFileSync(path, "utf8")).toBe("two");
         expect(statSync(path).mode & 0o777).toBe(0o755);

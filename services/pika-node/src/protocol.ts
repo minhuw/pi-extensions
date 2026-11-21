@@ -130,11 +130,11 @@ export type ServerToClient = ClientWelcome | NodesFrame | Opened | Refused | Rou
 // ---------------------------------------------------------------------------------------------------------------
 // 3. End-to-end channel bodies
 
-export interface Hs1 { t: "hs1"; v: number; clientKey: string; eph: string; label?: string }
-export interface Hs2 { t: "hs2"; v: number; nodeKey: string; eph: string; sig: string }
-export interface Hs3 { t: "hs3"; sig: string }
-export interface HsError { t: "hs_error"; code: string; fingerprint?: string }
-export interface Rec { t: "rec"; n: number; ct: string }
+export type Hs1 = { t: "hs1"; v: number; clientKey: string; eph: string; label?: string };
+export type Hs2 = { t: "hs2"; v: number; nodeKey: string; eph: string; sig: string };
+export type Hs3 = { t: "hs3"; sig: string };
+export type HsError = { t: "hs_error"; code: string; fingerprint?: string };
+export type Rec = { t: "rec"; n: number; ct: string };
 export type ChannelBody = Hs1 | Hs2 | Hs3 | HsError | Rec;
 
 /** `clients.json` and `pending.json` on a node. */

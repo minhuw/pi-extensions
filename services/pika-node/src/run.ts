@@ -34,7 +34,7 @@ export async function runDaemon(p: Paths = defaultPaths(), options: { exitOnStop
     let stopped = false;
     const writeState = () => stopped || writeAtomic(p.state, `${JSON.stringify({
         version: VERSION, pid: process.pid, startedAt, socket: p.socket, fingerprint: identity.fingerprint,
-        terminals: daemon.terminalCount, liveTerminals: daemon.liveTerminals, link: link!.state,
+        terminals: daemon.terminalCount, liveTerminals: daemon.liveTerminals, link: link.state,
     }, null, 2)}\n`);
     link.onState = writeState;
     daemon.onTerminalsChanged = writeState;
@@ -46,7 +46,7 @@ export async function runDaemon(p: Paths = defaultPaths(), options: { exitOnStop
     const stop = (reason: string): Promise<void> => stopping ??= (async () => {
         log(`stopping (${reason})`);
         stopped = true;
-        link!.stop();
+        link.stop();
         server.close();
         await daemon.shutdown();
         try {

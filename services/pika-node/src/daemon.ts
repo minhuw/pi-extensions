@@ -15,7 +15,7 @@ import type { Paths } from "./paths.ts";
 import { VERSION } from "./paths.ts";
 import {
     CAPABILITIES, LIMITS, parseClientMessage, PROTOCOL_VERSION, SETUP_ENV, SETUP_ROLE, timing, utf8Length,
-    type BridgeStatus, type Checkout, type ClientMessage, type NodeEvent, type NodeMessage, type Notice, type Request,
+    type BridgeStatus, type Checkout, type NodeEvent, type NodeMessage, type Notice, type Request,
     type Requests, type Snapshot, type TerminalInfo, type Welcome, type Worktree,
 } from "./protocol.ts";
 import { account, spawnCommand, spawnEnv, SpawnError, type Account } from "./spawn.ts";
@@ -192,7 +192,7 @@ export class Daemon {
             }
             return;
         }
-        const message = parsed.message as ClientMessage;
+        const message = parsed.message;
         if (!("id" in message)) {
             try { this.#notice(peer, message); }
             catch (error) {
@@ -201,7 +201,7 @@ export class Daemon {
             }
             return;
         }
-        const request = message as Request;
+        const request = message;
         void (async () => {
             try { return { type: "reply", id: request.id, result: await this.#request(peer, request) } as NodeMessage; }
             catch (error) {
@@ -658,8 +658,6 @@ export class Daemon {
         if (!inside) throw new NodeError("outside_roots", `${path} is outside the configured roots`);
         return resolved;
     }
-
-    // -----------------------------------------------------------------------------------------------------------
 
     /** Hangs up every PTY (daemon stop) and deletes the raw logs once they exited. */
     async shutdown(): Promise<void> {

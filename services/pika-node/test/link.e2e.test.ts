@@ -14,7 +14,7 @@ import {
     type Body, type Hs2, type Rec, type Snapshot, type TerminalInfo,
 } from "../src/protocol.ts";
 import { runDaemon, type Running } from "../src/run.ts";
-import { allowPending, readPending, removeClient } from "../src/store.ts";
+import { allowPending, loadIdentity, readPending, removeClient } from "../src/store.ts";
 import { Inbox, innerClient, outputAfter, settle, tempHome, until, type InnerClient } from "./support.ts";
 
 const CREDENTIAL = `pkn_${randomBytes(32).toString("base64url")}`;
@@ -154,7 +154,8 @@ afterAll(async () => {
 describe("node link through a forwarding server", () => {
     it("says hello with its key and answers pings", async () => {
         expect(server.hello).toMatchObject({ type: "hello", version: "0.1.0", protocolVersions: [1] });
-        expect(fromBase64Url(server.hello!.publicKey as string)).toBeDefined();
+        const identity = await loadIdentity(home, false);
+        expect(server.hello!.publicKey).toBe(toBase64Url(identity.spki));
         const pong = new Promise<void>(resolve => server.node!.once("message", data => { if (JSON.parse(data.toString()).type === "pong") resolve(); }));
         server.node!.send(JSON.stringify({ type: "ping", at: Date.now() }));
         await pong;

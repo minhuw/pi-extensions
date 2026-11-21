@@ -60,7 +60,7 @@ class Channel implements Peer {
         this.sealing += text.length;
         this.session.seal(text).then(rec => {
             this.sealing -= text.length;
-            if (this.phase === "open") this.#link.sendRaw({ type: "frame", channel: this.id, body: rec as unknown as Body });
+            if (this.phase === "open") this.#link.sendRaw({ type: "frame", channel: this.id, body: rec });
         }, (error: unknown) => {
             this.sealing -= text.length;
             this.#link.closeChannel(this, error instanceof ChannelError ? error.code : "protocol_error", (error as Error).message);
@@ -233,7 +233,7 @@ export class Link {
                 const { hs2, pending } = await answerHandshake(this.#identity, ids, message);
                 channel.pending = pending;
                 channel.phase = "hs3";
-                this.sendRaw({ type: "frame", channel: channel.id, body: hs2 as unknown as Body });
+                this.sendRaw({ type: "frame", channel: channel.id, body: hs2 });
             } else if (channel.phase === "hs3" && message.t === "hs3") {
                 const { session, clientFingerprint } = await finishNodeHandshake(channel.pending!, message);
                 this.#reloadAllowlist();

@@ -37,11 +37,13 @@ function readJson(path: string): unknown {
 
 export function loadConfig(p: Paths): Config {
     if (!existsSync(p.config)) return { version: 1 };
-    const raw = readJson(p.config) as Partial<Config> | null;
-    if (!raw || typeof raw !== "object" || raw.version !== 1) throw new Error(`${p.config}: expected { "version": 1, ... }`);
+    const parsed = readJson(p.config);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${p.config}: expected { "version": 1, ... }`);
+    const raw = parsed as Record<string, unknown>;
+    if (raw.version !== 1) throw new Error(`${p.config}: expected { "version": 1, ... }`);
     const config: Config = { version: 1 };
     if (raw.server !== undefined) {
-        const { url, credential } = raw.server as Partial<ServerConfig>;
+        const { url, credential } = (raw.server && typeof raw.server === "object" ? raw.server : {}) as Partial<ServerConfig>;
         if (typeof url !== "string" || !/^https?:\/\/[^/]+/.test(url)) throw new Error(`${p.config}: server.url must be an http(s) URL`);
         if (typeof credential !== "string" || !CREDENTIAL.test(credential)) throw new Error(`${p.config}: server.credential must be a pkn_ node credential`);
         config.server = { url: url.replace(/\/+$/, ""), credential };
@@ -50,16 +52,16 @@ export function loadConfig(p: Paths): Config {
     for (const key of ["roots", "checkouts"] as const) {
         const list = raw[key];
         if (list === undefined) continue;
-        if (!Array.isArray(list) || !list.every(item => isAbsolutePath(item))) throw new Error(`${p.config}: ${key} must be a list of absolute paths`);
-        config[key] = list as string[];
+        if (!Array.isArray(list) || !list.every((item): item is string => isAbsolutePath(item))) throw new Error(`${p.config}: ${key} must be a list of absolute paths`);
+        config[key] = list;
     }
     if (raw.hiddenCheckouts !== undefined) {
-        const list = raw.hiddenCheckouts as unknown;
-        if (!Array.isArray(list) || !list.every(item => typeof item === "string" && CHECKOUT_ID.test(item))) throw new Error(`${p.config}: hiddenCheckouts must be a list of checkout ids`);
-        config.hiddenCheckouts = list as string[];
+        const list = raw.hiddenCheckouts;
+        if (!Array.isArray(list) || !list.every((item): item is string => typeof item === "string" && CHECKOUT_ID.test(item))) throw new Error(`${p.config}: hiddenCheckouts must be a list of checkout ids`);
+        config.hiddenCheckouts = list;
     }
     const byId = <T>(key: "checkoutNames" | "checkoutSettings", valid: (value: unknown) => boolean, what: string): Record<string, T> | undefined => {
-        const map = raw[key] as unknown;
+        const map = raw[key];
         if (map === undefined) return undefined;
         if (!map || typeof map !== "object" || Array.isArray(map) || !Object.entries(map).every(([id, value]) => CHECKOUT_ID.test(id) && valid(value))) {
             throw new Error(`${p.config}: ${key} must map checkout ids to ${what}`);

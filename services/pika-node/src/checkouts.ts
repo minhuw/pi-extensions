@@ -277,8 +277,6 @@ function folderCheckout(path: string, source: Checkout["source"], config: Config
     };
 }
 
-// ---------------------------------------------------------------------------------------------------------------
-
 export interface CheckoutsOptions {
     config: () => Config;
     save: (config: Config) => void;
@@ -400,7 +398,7 @@ export class Checkouts {
                 watcher = watchPath(dir, { persistent: false }, (_event, filename) => {
                     const entry = this.#watchers.get(dir);
                     if (!entry || entry.watcher !== watcher) return;
-                    if (entry.names === null || !filename || entry.names.has(String(filename))) this.poke();
+                    if (entry.names === null || !filename || entry.names.has(filename)) this.poke();
                 });
             } catch { continue; /* absent (a `.pi` not yet made); the parent's watch sees it appear */ }
             watcher.on("error", () => {

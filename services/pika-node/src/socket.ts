@@ -4,7 +4,7 @@
  * without the E2E layer).
  */
 import { closeSync, openSync, rmSync, statSync, unlinkSync } from "node:fs";
-import { connect, createServer, type Server, type Socket } from "node:net";
+import { connect, type Server, type Socket } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Daemon, Peer } from "./daemon.ts";
 import { asNodeError } from "./errors.ts";
@@ -165,5 +165,3 @@ export async function bind(server: Server, path: string): Promise<boolean> {
     }
     throw new Error(`could not bind ${path}`);
 }
-
-export { createServer };
