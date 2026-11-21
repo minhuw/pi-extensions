@@ -98,19 +98,34 @@ interface TrackedWorkItem extends TurnWorkItem {
 	toolCallId?: string;
 }
 
+interface SpokesmanRewriteTarget {
+	originalText: string;
+	originalModelId: string;
+	originalProvider: string | undefined;
+	targetEntryId?: string;
+	workItemsOverride?: TurnWorkItem[];
+}
+
+interface RunSpokesmanRewriteOptions {
+	ctx: ExtensionContext;
+	activeSpec: string;
+	restoreStatusSpec: string | undefined;
+	mode: SpokesmanMode;
+	mainModels: readonly string[] | undefined;
+	respectAutoFilter: boolean;
+	fallbackSignals?: string[];
+	resolveTarget: () => SpokesmanRewriteTarget | undefined;
+	onMissingModel?: (activeSpec: string) => void;
+	onMissingAuth?: (spokesmanModel: Model<Api>) => void;
+	onSameAsMainModel?: (spokesmanModel: Model<Api>) => void;
+	onEmptyOutput?: () => void;
+	onError?: (error: unknown) => void;
+}
+
 const configPath = () => join(getAgentDir(), "spokesman.json");
 
 function isMode(value: unknown): value is SpokesmanMode {
 	return value === "auto" || value === "always";
-}
-
-function validModelSpec(value: string): string | undefined {
-	if (/\p{Cc}/u.test(value)) return undefined;
-	const trimmed = value.trim();
-	if (trimmed.length < 1 || trimmed.length > 120) return undefined;
-	if (/\s/.test(trimmed)) return undefined;
-	if (RESERVED_SUBCOMMANDS.has(trimmed.toLowerCase())) return undefined;
-	return trimmed;
 }
 
 function validModelPattern(value: string): string | undefined {
@@ -118,6 +133,13 @@ function validModelPattern(value: string): string | undefined {
 	const trimmed = value.trim();
 	if (trimmed.length < 1 || trimmed.length > 120) return undefined;
 	if (/\s/.test(trimmed)) return undefined;
+	return trimmed;
+}
+
+function validModelSpec(value: string): string | undefined {
+	const trimmed = validModelPattern(value);
+	if (!trimmed) return undefined;
+	if (RESERVED_SUBCOMMANDS.has(trimmed.toLowerCase())) return undefined;
 	return trimmed;
 }
 
@@ -828,6 +850,104 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 		}
 	});
 
+	async function runSpokesmanRewrite(
+		options: RunSpokesmanRewriteOptions,
+	): Promise<{ data: SpokesmanRewriteData; spokesmanModel: Model<Api> } | undefined> {
+		const { ctx, activeSpec, restoreStatusSpec, mode, mainModels } = options;
+
+		const spokesmanModel = resolveSpokesmanModel(activeSpec, ctx);
+		if (!spokesmanModel) {
+			options.onMissingModel?.(activeSpec);
+			return undefined;
+		}
+
+		if (
+			typeof ctx.modelRegistry?.hasConfiguredAuth === "function" &&
+			!ctx.modelRegistry.hasConfiguredAuth(spokesmanModel)
+		) {
+			options.onMissingAuth?.(spokesmanModel);
+			return undefined;
+		}
+
+		const target = options.resolveTarget();
+		if (!target) {
+			return undefined;
+		}
+
+		if (
+			isSameAsMainModel(activeSpec, ctx, {
+				id: target.originalModelId,
+				provider: target.originalProvider,
+			})
+		) {
+			options.onSameAsMainModel?.(spokesmanModel);
+			return undefined;
+		}
+
+		const branchContext = extractDialogueAndWorkFromBranch(ctx, target.targetEntryId);
+		const workItems: TurnWorkItem[] =
+			target.workItemsOverride && target.workItemsOverride.length > 0
+				? target.workItemsOverride
+				: branchContext.workItems;
+
+		const evaluation = evaluateProseForSpokesman(target.originalText, workItems);
+		if (options.respectAutoFilter && mode === "auto" && !evaluation.rewrite) {
+			return undefined;
+		}
+
+		const prompt = buildSpokesmanPrompt({
+			userRequest: branchContext.userRequest,
+			recentDialogue: branchContext.recentDialogue,
+			workItems,
+			draftReply: target.originalText,
+			originalModel: target.originalModelId,
+			language: readActiveLanguage(ctx),
+		});
+
+		const startTime = Date.now();
+		setStatus(ctx, formatStatusLabel(activeSpec, mode, mainModels, ctx, true));
+		try {
+			ctx.ui.setWorkingMessage(`Spokesman (${spokesmanModel.id}) rewriting…`);
+		} catch {}
+
+		try {
+			const result = await callSpokesmanModel(spokesmanModel, prompt, ctx);
+			const rewrittenText = result?.text.trim();
+			if (!result || !rewrittenText) {
+				options.onEmptyOutput?.();
+				return undefined;
+			}
+
+			const data: SpokesmanRewriteData = {
+				...(target.targetEntryId ? { targetEntryId: target.targetEntryId } : {}),
+				originalText: target.originalText,
+				rewrittenText,
+				originalModel: target.originalModelId,
+				spokesmanModel: spokesmanModel.id,
+				spokesmanProvider: spokesmanModel.provider,
+				mode,
+				signals:
+					evaluation.signals.length > 0
+						? evaluation.signals
+						: (options.fallbackSignals ?? []),
+				usage: result.usage,
+				provider: result.provider ?? spokesmanModel.provider,
+				durationMs: Date.now() - startTime,
+				timestamp: Date.now(),
+			};
+
+			return { data, spokesmanModel };
+		} catch (error) {
+			options.onError?.(error);
+			return undefined;
+		} finally {
+			try {
+				ctx.ui.setWorkingMessage();
+			} catch {}
+			setStatus(ctx, formatStatusLabel(restoreStatusSpec, mode, mainModels, ctx, false));
+		}
+	}
+
 	pi.on("message_end", async (event, ctx) => {
 		if (!isEligible(ctx)) return undefined;
 		if (event.message.role !== "assistant") return undefined;
@@ -863,107 +983,55 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 			return undefined;
 		}
 
-		const spokesmanModel = resolveSpokesmanModel(activeSpec, ctx);
-		if (!spokesmanModel) {
-			if (!warnedMissingModels.has(activeSpec)) {
-				warnedMissingModels.add(activeSpec);
-				ctx.ui.notify(
-					`Spokesman model "${activeSpec}" was not found. Skipping rewrite.`,
-					"warning",
-				);
-			}
-			return undefined;
-		}
-
-		if (
-			typeof ctx.modelRegistry?.hasConfiguredAuth === "function" &&
-			!ctx.modelRegistry.hasConfiguredAuth(spokesmanModel)
-		) {
-			const authKey = `auth:${spokesmanModel.provider}/${spokesmanModel.id}`;
-			if (!warnedMissingModels.has(authKey)) {
-				warnedMissingModels.add(authKey);
-				ctx.ui.notify(
-					`No credentials configured for spokesman model "${spokesmanModel.provider}/${spokesmanModel.id}". Skipping rewrite.`,
-					"warning",
-				);
-			}
-			return undefined;
-		}
-
-		if (isSameAsMainModel(activeSpec, ctx, { id: originalModelId, provider: originalProvider })) {
-			return undefined;
-		}
-
-		const branchContext = extractDialogueAndWorkFromBranch(ctx);
-		const workItems: TurnWorkItem[] =
-			currentTurnWorkItems.length > 0 ? currentTurnWorkItems : branchContext.workItems;
-
-		const evaluation = evaluateProseForSpokesman(rawText, workItems);
-		if (mode === "auto" && !evaluation.rewrite) {
-			return undefined;
-		}
-
-		const prompt = buildSpokesmanPrompt({
-			userRequest: branchContext.userRequest,
-			recentDialogue: branchContext.recentDialogue,
-			workItems,
-			draftReply: rawText,
-			originalModel: originalModelId,
-			language: readActiveLanguage(ctx),
-		});
-
-		const startTime = Date.now();
-		setStatus(ctx, formatStatusLabel(activeSpec, mode, configured.mainModels, ctx, true));
-		try {
-			ctx.ui.setWorkingMessage(`Spokesman (${spokesmanModel.id}) rewriting…`);
-		} catch {}
-
-		try {
-			const result = await callSpokesmanModel(spokesmanModel, prompt, ctx);
-			if (!result) {
-				return undefined;
-			}
-			const rewrittenText = result.text.trim();
-			if (!rewrittenText) {
-				return undefined;
-			}
-
-			pendingRewrite = {
+		const rewrite = await runSpokesmanRewrite({
+			ctx,
+			activeSpec,
+			restoreStatusSpec: activeSpec,
+			mode,
+			mainModels: configured.mainModels,
+			respectAutoFilter: true,
+			fallbackSignals: mode === "always" ? ["always"] : undefined,
+			resolveTarget: () => ({
 				originalText: rawText,
-				rewrittenText,
-				originalModel: originalModelId,
-				spokesmanModel: spokesmanModel.id,
-				spokesmanProvider: spokesmanModel.provider,
-				mode,
-				signals:
-					mode === "always" && evaluation.signals.length === 0
-						? ["always"]
-						: evaluation.signals,
-				usage: result.usage,
-				provider: result.provider,
-				durationMs: Date.now() - startTime,
-				timestamp: Date.now(),
-			};
-			const nonTextBlocks = msg.content.filter((part) => part.type !== "text");
-			const replacedTextBlock: TextContent = {
-				type: "text",
-				text: `${HIDDEN_ORIGINAL_MARKER}${rewrittenText}`,
-			};
+				originalModelId,
+				originalProvider,
+				workItemsOverride: currentTurnWorkItems,
+			}),
+			onMissingModel: (spec) => {
+				if (!warnedMissingModels.has(spec)) {
+					warnedMissingModels.add(spec);
+					ctx.ui.notify(
+						`Spokesman model "${spec}" was not found. Skipping rewrite.`,
+						"warning",
+					);
+				}
+			},
+			onMissingAuth: (spokesmanModel) => {
+				const authKey = `auth:${spokesmanModel.provider}/${spokesmanModel.id}`;
+				if (!warnedMissingModels.has(authKey)) {
+					warnedMissingModels.add(authKey);
+					ctx.ui.notify(
+						`No credentials configured for spokesman model "${spokesmanModel.provider}/${spokesmanModel.id}". Skipping rewrite.`,
+						"warning",
+					);
+				}
+			},
+		});
+		if (!rewrite) return undefined;
 
-			return {
-				message: {
-					...msg,
-					content: [...nonTextBlocks, replacedTextBlock],
-				},
-			};
-		} catch {
-			return undefined;
-		} finally {
-			try {
-				ctx.ui.setWorkingMessage();
-			} catch {}
-			setStatus(ctx, formatStatusLabel(activeSpec, mode, configured.mainModels, ctx, false));
-		}
+		pendingRewrite = rewrite.data;
+		const nonTextBlocks = msg.content.filter((part) => part.type !== "text");
+		const replacedTextBlock: TextContent = {
+			type: "text",
+			text: `${HIDDEN_ORIGINAL_MARKER}${rewrite.data.rewrittenText}`,
+		};
+
+		return {
+			message: {
+				...msg,
+				content: [...nonTextBlocks, replacedTextBlock],
+			},
+		};
 	});
 
 	pi.on("turn_end", async (event) => {
@@ -1090,7 +1158,8 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 	): Promise<void> {
 		const configured = await readConfig(ctx);
 		const state = readBranch(ctx);
-		const activeSpec = overrideModelSpec?.trim() || effectiveActive(state, configured);
+		const restoreStatusSpec = effectiveActive(state, configured);
+		const activeSpec = overrideModelSpec?.trim() || restoreStatusSpec;
 		const mode = effectiveMode(state, configured);
 
 		if (!activeSpec) {
@@ -1101,128 +1170,92 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		const spokesmanModel = resolveSpokesmanModel(activeSpec, ctx);
-		if (!spokesmanModel) {
-			ctx.ui.notify(`Spokesman model "${activeSpec}" was not found.`, "warning");
-			return;
-		}
-
-		if (
-			typeof ctx.modelRegistry?.hasConfiguredAuth === "function" &&
-			!ctx.modelRegistry.hasConfiguredAuth(spokesmanModel)
-		) {
-			ctx.ui.notify(
-				`No credentials configured for spokesman model "${spokesmanModel.provider}/${spokesmanModel.id}".`,
-				"warning",
-			);
-			return;
-		}
-
-		const branch = ctx.sessionManager.getBranch();
-		let targetEntry: (SessionEntry & { type: "message"; message: AssistantMessage }) | undefined;
-		for (let i = branch.length - 1; i >= 0; i--) {
-			const entry = branch[i]!;
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				const msg = entry.message;
-				const hasToolCall =
-					Array.isArray(msg.content) && msg.content.some((part) => part.type === "toolCall");
-				if (!hasToolCall && extractTextFromContent(msg.content).trim()) {
-					targetEntry = entry as SessionEntry & {
-						type: "message";
-						message: AssistantMessage;
-					};
-					break;
+		const rewrite = await runSpokesmanRewrite({
+			ctx,
+			activeSpec,
+			restoreStatusSpec,
+			mode,
+			mainModels: configured.mainModels,
+			respectAutoFilter: false,
+			fallbackSignals: ["manual"],
+			resolveTarget: () => {
+				const branch = ctx.sessionManager.getBranch();
+				let targetEntry:
+					| (SessionEntry & { type: "message"; message: AssistantMessage })
+					| undefined;
+				for (let i = branch.length - 1; i >= 0; i--) {
+					const entry = branch[i]!;
+					if (entry.type === "message" && entry.message.role === "assistant") {
+						const msg = entry.message;
+						const hasToolCall =
+							Array.isArray(msg.content) && msg.content.some((part) => part.type === "toolCall");
+						if (!hasToolCall && extractTextFromContent(msg.content).trim()) {
+							targetEntry = entry as SessionEntry & {
+								type: "message";
+								message: AssistantMessage;
+							};
+							break;
+						}
+					}
 				}
-			}
-		}
 
-		if (!targetEntry) {
-			ctx.ui.notify("No assistant response found on the current branch to rewrite.", "warning");
-			return;
-		}
-
-		let originalText = stripHiddenOriginalMarker(
-			extractTextFromContent(targetEntry.message.content),
-		).trim();
-		for (let i = branch.length - 1; i >= 0; i--) {
-			const entry = branch[i]!;
-			if (entry.type === "custom" && entry.customType === SPOKESMAN_REWRITE_ENTRY) {
-				const data = entry.data as SpokesmanRewriteData | undefined;
-				if (data?.targetEntryId === targetEntry.id && data.originalText) {
-					originalText = data.originalText;
-					break;
+				if (!targetEntry) {
+					ctx.ui.notify("No assistant response found on the current branch to rewrite.", "warning");
+					return undefined;
 				}
-			}
-		}
 
-		const originalModelId = targetEntry.message.model || ctx.model?.id || "assistant";
-		const originalProvider = targetEntry.message.provider || ctx.model?.provider;
-		if (isSameAsMainModel(activeSpec, ctx, { id: originalModelId, provider: originalProvider })) {
-			ctx.ui.notify(
-				`Spokesman is disabled because the main model is already ${spokesmanModel.id}.`,
-				"info",
-			);
-			return;
-		}
+				let originalText = stripHiddenOriginalMarker(
+					extractTextFromContent(targetEntry.message.content),
+				).trim();
+				for (let i = branch.length - 1; i >= 0; i--) {
+					const entry = branch[i]!;
+					if (entry.type === "custom" && entry.customType === SPOKESMAN_REWRITE_ENTRY) {
+						const data = entry.data as SpokesmanRewriteData | undefined;
+						if (data?.targetEntryId === targetEntry.id && data.originalText) {
+							originalText = data.originalText;
+							break;
+						}
+					}
+				}
 
-		const branchContext = extractDialogueAndWorkFromBranch(ctx, targetEntry.id);
-		const evaluation = evaluateProseForSpokesman(originalText, branchContext.workItems);
-		const prompt = buildSpokesmanPrompt({
-			userRequest: branchContext.userRequest,
-			recentDialogue: branchContext.recentDialogue,
-			workItems: branchContext.workItems,
-			draftReply: originalText,
-			originalModel: originalModelId,
-			language: readActiveLanguage(ctx),
-		});
-
-		const startTime = Date.now();
-		setStatus(ctx, formatStatusLabel(activeSpec, mode, configured.mainModels, ctx, true));
-		try {
-			ctx.ui.setWorkingMessage(`Spokesman (${spokesmanModel.id}) rewriting…`);
-		} catch {}
-
-		try {
-			const result = await callSpokesmanModel(spokesmanModel, prompt, ctx);
-			const rewrittenText = result?.text.trim();
-			if (!rewrittenText) {
+				return {
+					originalText,
+					originalModelId: targetEntry.message.model || ctx.model?.id || "assistant",
+					originalProvider: targetEntry.message.provider || ctx.model?.provider,
+					targetEntryId: targetEntry.id,
+				};
+			},
+			onMissingModel: (spec) => {
+				ctx.ui.notify(`Spokesman model "${spec}" was not found.`, "warning");
+			},
+			onMissingAuth: (spokesmanModel) => {
+				ctx.ui.notify(
+					`No credentials configured for spokesman model "${spokesmanModel.provider}/${spokesmanModel.id}".`,
+					"warning",
+				);
+			},
+			onSameAsMainModel: (spokesmanModel) => {
+				ctx.ui.notify(
+					`Spokesman is disabled because the main model is already ${spokesmanModel.id}.`,
+					"info",
+				);
+			},
+			onEmptyOutput: () => {
 				ctx.ui.notify("Spokesman rewrite produced no output.", "warning");
-				return;
-			}
+			},
+			onError: (error) => {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(
+					`Spokesman rewrite failed${message ? `: ${message}` : "."}`,
+					"error",
+				);
+			},
+		});
+		if (!rewrite) return;
 
-			const data: SpokesmanRewriteData = {
-				targetEntryId: targetEntry.id,
-				originalText,
-				rewrittenText,
-				originalModel: originalModelId,
-				spokesmanModel: spokesmanModel.id,
-				spokesmanProvider: spokesmanModel.provider,
-				mode,
-				signals: evaluation.signals.length > 0 ? evaluation.signals : ["manual"],
-				usage: result?.usage,
-				provider: result?.provider ?? spokesmanModel.provider,
-				durationMs: Date.now() - startTime,
-				timestamp: Date.now(),
-			};
-
-			pi.appendEntry<SpokesmanRewriteData>(SPOKESMAN_REWRITE_ENTRY, data);
-			syncRewriteRecordsFromBranch(ctx);
-			ctx.ui.notify(`Rewrote the latest response with ${spokesmanModel.id}.`, "info");
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(
-				`Spokesman rewrite failed${message ? `: ${message}` : "."}`,
-				"error",
-			);
-		} finally {
-			try {
-				ctx.ui.setWorkingMessage();
-			} catch {}
-			setStatus(
-				ctx,
-				formatStatusLabel(effectiveActive(state, configured), mode, configured.mainModels, ctx, false),
-			);
-		}
+		pi.appendEntry<SpokesmanRewriteData>(SPOKESMAN_REWRITE_ENTRY, rewrite.data);
+		syncRewriteRecordsFromBranch(ctx);
+		ctx.ui.notify(`Rewrote the latest response with ${rewrite.spokesmanModel.id}.`, "info");
 	}
 
 	function refreshStatus(ctx: ExtensionContext, configured: SpokesmanConfig): void {

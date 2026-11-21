@@ -904,6 +904,143 @@ describe("spokesman extension in real Pi sessions", () => {
 		}
 	});
 
+	it("deduplicates missing-model/auth warnings, skips errors silently, and falls back to spokesmanModel.provider during automatic rewrites", async () => {
+		await writeConfig({ default: "missing-model", mode: "always" });
+		const h = await start();
+
+		// 1. Missing model warns once across repeated turns
+		h.mainQueue.push("First reply.", "Second reply.");
+		await h.session.prompt("Turn 1");
+		await h.session.prompt("Turn 2");
+		expect(
+			h.notes.filter((note) =>
+				note.message.includes('Spokesman model "missing-model" was not found. Skipping rewrite.'),
+			),
+		).toHaveLength(1);
+		expect(h.rewriteEntries()).toEqual([]);
+
+		// 2. Missing auth warns once across repeated turns
+		await h.command("/spokesman gpt-5.4 always");
+		const authSpy = vi
+			.spyOn(h.session.modelRuntime, "hasConfiguredAuth")
+			.mockReturnValue(false);
+		try {
+			h.mainQueue.push("Third reply.", "Fourth reply.");
+			await h.session.prompt("Turn 3");
+			await h.session.prompt("Turn 4");
+			expect(
+				h.notes.filter((note) =>
+					note.message.includes(
+						'No credentials configured for spokesman model "faux-openai/gpt-5.4". Skipping rewrite.',
+					),
+				),
+			).toHaveLength(1);
+			expect(h.rewriteEntries()).toEqual([]);
+		} finally {
+			authSpy.mockRestore();
+		}
+
+		// 3. Provider error skips silently and restores status/working state
+		const originalStreamSimple = h.session.modelRuntime.streamSimple.bind(h.session.modelRuntime);
+		const noteCountBeforeError = h.notes.length;
+		const errorSpy = vi
+			.spyOn(h.session.modelRuntime, "streamSimple")
+			.mockImplementation((model, context, options) => {
+				if (model.id === "gpt-5.4") {
+					throw new Error("boom");
+				}
+				return originalStreamSimple(model, context, options);
+			});
+		try {
+			h.mainQueue.push("Fifth reply.");
+			await h.session.prompt("Turn 5");
+			expect(h.notes).toHaveLength(noteCountBeforeError);
+			expect(h.rewriteEntries()).toEqual([]);
+			expect(textOf(h.assistantMessages().at(-1) as Message)).toBe("Fifth reply.");
+			expect(h.status).toBe("gpt-5.4 · always");
+			expect(h.workingMessages.at(-1)).toBeUndefined();
+		} finally {
+			errorSpy.mockRestore();
+		}
+
+		// 4. Unified provider fallback: when stream result omits provider, falls back to spokesmanModel.provider
+		const providerFallbackSpy = vi
+			.spyOn(h.session.modelRuntime, "streamSimple")
+			.mockImplementation((model, context, options) => {
+				const stream = originalStreamSimple(model, context, options);
+				if (model.id !== "gpt-5.4") return stream;
+				const originalResult = stream.result.bind(stream);
+				stream.result = async () => {
+					const message = await originalResult();
+					return { ...message, provider: undefined as unknown as string };
+				};
+				return stream;
+			});
+		try {
+			h.mainQueue.push("Sixth reply.");
+			h.spokesmanQueue.push("Clear rewritten sixth reply.");
+			await h.session.prompt("Turn 6");
+			expect(h.rewriteEntries()).toHaveLength(1);
+			expect(h.rewriteEntries()[0]).toMatchObject({
+				rewrittenText: "Clear rewritten sixth reply.",
+				provider: "faux-openai",
+				spokesmanProvider: "faux-openai",
+			});
+			expect(h.errors).toEqual([]);
+		} finally {
+			providerFallbackSpy.mockRestore();
+		}
+	});
+
+	it("validates model specs via base pattern rules plus reserved subcommands and restores status after override manual rewrite", async () => {
+		const h = await start();
+
+		// Reserved subcommands, control chars, and >120-char specs are rejected as model specs
+		for (const invalidSpec of ["status", "for", "gpt-5\u0007", "a".repeat(121)]) {
+			await h.command(`/spokesman default ${invalidSpec}`);
+			expect(h.lastNote?.type).toBe("warning");
+			expect(h.lastNote?.message).toContain("Invalid spokesman model name");
+		}
+		await h.command(`/spokesman for ${"a".repeat(121)}`);
+		expect(h.lastNote?.type).toBe("warning");
+
+		// Manual rewrite with an override model when spokesman is off restores status to undefined
+		h.mainQueue.push("Brief reply.");
+		await h.session.prompt("Do a quick task");
+		expect(h.status).toBeUndefined();
+
+		await h.command("/spokesman rewrite missing-model");
+		expect(h.lastNote).toEqual({
+			message: 'Spokesman model "missing-model" was not found.',
+			type: "warning",
+		});
+
+		h.spokesmanQueue.push("   ");
+		await h.command("/spokesman rewrite gpt-5.4");
+		expect(h.lastNote).toEqual({
+			message: "Spokesman rewrite produced no output.",
+			type: "warning",
+		});
+		expect(h.status).toBeUndefined();
+		expect(h.workingMessages.at(-1)).toBeUndefined();
+
+		h.spokesmanQueue.push("A clear manual rewrite using an override model.");
+		await h.command("/spokesman rewrite gpt-5.4");
+		expect(h.lastNote).toEqual({
+			message: "Rewrote the latest response with gpt-5.4.",
+			type: "info",
+		});
+		expect(h.rewriteEntries()).toHaveLength(1);
+		expect(h.rewriteEntries()[0]).toMatchObject({
+			rewrittenText: "A clear manual rewrite using an override model.",
+			signals: ["manual"],
+			provider: "faux-openai",
+		});
+		expect(h.status).toBeUndefined();
+		expect(h.workingMessages.at(-1)).toBeUndefined();
+		expect(h.errors).toEqual([]);
+	});
+
 	it("disables spokesman in auto, always, manual rewrite, and footer status when the main model is the spokesman model", async () => {
 		await writeConfig({ default: "gpt-6-sol", mode: "always" });
 		const h = await start();
