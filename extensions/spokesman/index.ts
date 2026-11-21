@@ -480,7 +480,7 @@ function stripHiddenOriginalMarker(text: string): string {
 	return text;
 }
 
-function summarizeToolArgs(toolName: string, args: unknown): string {
+export function summarizeToolArgs(toolName: string, args: unknown): string {
 	if (!args || typeof args !== "object") {
 		return typeof args === "string" ? args.slice(0, 120) : toolName;
 	}
@@ -488,12 +488,13 @@ function summarizeToolArgs(toolName: string, args: unknown): string {
 	if (typeof record.command === "string") {
 		return record.command.replace(/\s+/g, " ").trim().slice(0, 140);
 	}
+	if (typeof record.pattern === "string" && record.pattern.trim()) {
+		const trimmedPath = typeof record.path === "string" ? record.path.trim() : "";
+		const pathSuffix = trimmedPath ? ` in ${trimmedPath}` : "";
+		return `${record.pattern.trim()}${pathSuffix}`.slice(0, 140);
+	}
 	if (typeof record.path === "string") {
 		return record.path.trim().slice(0, 140);
-	}
-	if (typeof record.pattern === "string") {
-		const pathSuffix = typeof record.path === "string" ? ` in ${record.path}` : "";
-		return `${record.pattern}${pathSuffix}`.slice(0, 140);
 	}
 	if (typeof record.query === "string") {
 		return record.query.trim().slice(0, 140);
@@ -1043,27 +1044,40 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 				: undefined;
 
 			let messageModified = false;
-			const nextContent = assistantMsg.content.map((block) => {
-				if (block.type !== "text") return block;
+			let emittedRewrite = false;
+			const nextContent: AssistantMessage["content"] = [];
+			for (const block of assistantMsg.content) {
+				if (block.type !== "text") {
+					nextContent.push(block);
+					continue;
+				}
 				if (targetRewrite !== undefined) {
+					if (emittedRewrite) {
+						messageModified = true;
+						continue;
+					}
+					emittedRewrite = true;
 					if (block.text !== targetRewrite) {
 						messageModified = true;
-						return { ...block, text: targetRewrite };
+						nextContent.push({ ...block, text: targetRewrite });
+					} else {
+						nextContent.push(block);
 					}
-					return block;
+					continue;
 				}
 				if (
 					block.text.startsWith(HIDDEN_ORIGINAL_MARKER) ||
 					block.text.startsWith(HIDDEN_ORIGINAL_MARKER.trim())
 				) {
 					messageModified = true;
-					return {
+					nextContent.push({
 						...block,
 						text: stripHiddenOriginalMarker(block.text),
-					};
+					});
+					continue;
 				}
-				return block;
-			});
+				nextContent.push(block);
+			}
 
 			if (!messageModified) return message;
 			changed = true;
@@ -1096,6 +1110,17 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 		const spokesmanModel = resolveSpokesmanModel(activeSpec, ctx);
 		if (!spokesmanModel) {
 			ctx.ui.notify(`Spokesman model "${activeSpec}" was not found.`, "warning");
+			return;
+		}
+
+		if (
+			typeof ctx.modelRegistry?.hasConfiguredAuth === "function" &&
+			!ctx.modelRegistry.hasConfiguredAuth(spokesmanModel)
+		) {
+			ctx.ui.notify(
+				`No credentials configured for spokesman model "${spokesmanModel.provider}/${spokesmanModel.id}".`,
+				"warning",
+			);
 			return;
 		}
 
@@ -1189,6 +1214,12 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 			pi.appendEntry<SpokesmanRewriteData>(SPOKESMAN_REWRITE_ENTRY, data);
 			syncRewriteRecordsFromBranch(ctx);
 			ctx.ui.notify(`Rewrote the latest response with ${spokesmanModel.id}.`, "info");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(
+				`Spokesman rewrite failed${message ? `: ${message}` : "."}`,
+				"error",
+			);
 		} finally {
 			try {
 				ctx.ui.setWorkingMessage();

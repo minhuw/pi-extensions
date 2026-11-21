@@ -37,6 +37,7 @@ import {
 	SPOKESMAN_REWRITE_ENTRY,
 	SPOKESMAN_STATE_ENTRY,
 	stripNonProse,
+	summarizeToolArgs,
 	type SpokesmanRewriteData,
 	type TurnWorkItem,
 } from "../index.ts";
@@ -199,6 +200,33 @@ describe("main-model filter", () => {
 		expect(isMainModelEnabled(["claude-*", "gpt-6-*"], sol)).toBe(true);
 		expect(isMainModelEnabled(["claude-*"], sol)).toBe(false);
 		expect(isMainModelEnabled(["claude-*"], undefined)).toBe(false);
+	});
+});
+
+describe("summarizeToolArgs", () => {
+	it("emits pattern with pathSuffix when both pattern and path are provided", () => {
+		expect(
+			summarizeToolArgs("grep", {
+				pattern: "hasConfiguredAuth",
+				path: "extensions/spokesman",
+			}),
+		).toBe("hasConfiguredAuth in extensions/spokesman");
+		expect(
+			summarizeToolArgs("grep", {
+				pattern: "  hasConfiguredAuth  ",
+				path: "  extensions/spokesman  ",
+			}),
+		).toBe("hasConfiguredAuth in extensions/spokesman");
+		expect(summarizeToolArgs("grep", { pattern: "hasConfiguredAuth" })).toBe(
+			"hasConfiguredAuth",
+		);
+		expect(summarizeToolArgs("grep", { pattern: "hasConfiguredAuth", path: "   " })).toBe(
+			"hasConfiguredAuth",
+		);
+		expect(summarizeToolArgs("read", { path: "src/index.ts" })).toBe("src/index.ts");
+		expect(summarizeToolArgs("grep", { pattern: "   ", path: "src/index.ts" })).toBe(
+			"src/index.ts",
+		);
 	});
 });
 
@@ -795,38 +823,85 @@ describe("spokesman extension in real Pi sessions", () => {
 		expect(step3AssistantTexts).toEqual(["Done.", "Second manual rewrite of Step 2."]);
 	});
 
-	it("disables spokesman in auto, always, manual rewrite, and footer status when the main model is the spokesman model", async () => {
-		await writeConfig({ default: "gpt-6-sol", mode: "always" });
+	it("collapses multiple assistant text blocks into one rewritten text block in context while preserving non-text blocks", async () => {
+		await writeConfig({ default: "gpt-5.4", mode: "auto" });
 		const h = await start();
 
-		// Footer status is hidden when main model (gpt-6-sol) == spokesman model (gpt-6-sol)
-		expect(h.status).toBeUndefined();
-
-		await h.command("/spokesman status");
-		expect(h.lastNote?.message).toContain(
-			"Active spokesman: gpt-6-sol (disabled: same as main model)",
+		// Turn 1: assistant replies with thinking + two short text blocks (skipped by auto)
+		h.mainQueue.push(() =>
+			fauxAssistantMessage([
+				{ type: "thinking", thinking: "Internal reasoning step." },
+				{ type: "text", text: "First short part." },
+				{ type: "text", text: "Second short part." },
+			]),
 		);
-
-		// Even in always mode with dense draft, spokesman does not run when main model == spokesman model
-		h.mainQueue.push(DENSE_SOL_DRAFT);
-		await h.session.prompt("Explain the architecture");
-		expect(h.mainRequests).toHaveLength(1);
-		expect(h.spokesmanRequests).toHaveLength(0);
+		await h.session.prompt("Summarize the change");
 		expect(h.rewriteEntries()).toHaveLength(0);
-		expect(textOf(h.assistantMessages().at(-1) as Message)).toBe(DENSE_SOL_DRAFT);
 
-		// Manual /spokesman rewrite is also disabled when main model == spokesman model
+		// Manually rewrite Turn 1 so the branch entry still holds both original text blocks
+		h.spokesmanQueue.push("Single clear rewritten reply.");
 		await h.command("/spokesman rewrite");
-		expect(h.spokesmanRequests).toHaveLength(0);
-		expect(h.rewriteEntries()).toHaveLength(0);
-		expect(h.lastNote).toEqual({
-			message: "Spokesman is disabled because the main model is already gpt-6-sol.",
-			type: "info",
-		});
+		expect(h.rewriteEntries()).toHaveLength(1);
 
-		// Switching spokesman to a different model (gpt-5.4) re-enables status and rewriting
-		await h.command("/spokesman gpt-5.4");
-		expect(h.status).toBe("gpt-5.4 · always");
+		// Turn 2: context hook must collapse the two text blocks into a single rewritten text block
+		h.mainQueue.push("Ack.");
+		await h.session.prompt("Follow-up question");
+		const rewrittenMsg = h.mainRequests
+			.at(-1)!
+			.conversation.find((msg) => msg.role === "assistant");
+		expect(rewrittenMsg).toBeDefined();
+		expect(Array.isArray(rewrittenMsg!.content)).toBe(true);
+
+		const blocks = rewrittenMsg!.content as { type: string; text?: string; thinking?: string }[];
+		const textBlocks = blocks.filter((block) => block.type === "text");
+		const thinkingBlocks = blocks.filter((block) => block.type === "thinking");
+		expect(textBlocks).toEqual([{ type: "text", text: "Single clear rewritten reply." }]);
+		expect(thinkingBlocks).toEqual([{ type: "thinking", thinking: "Internal reasoning step." }]);
+		expect(h.errors).toEqual([]);
+	});
+
+	it("checks hasConfiguredAuth and catches provider errors cleanly during /spokesman rewrite", async () => {
+		await writeConfig({ default: "gpt-5.4", mode: "auto" });
+		const h = await start();
+
+		h.mainQueue.push("Updated config.json.");
+		await h.session.prompt("Update config.json");
+		expect(h.rewriteEntries()).toHaveLength(0);
+
+		// Missing auth blocks the provider call and reports a warning
+		const authSpy = vi
+			.spyOn(h.session.modelRuntime, "hasConfiguredAuth")
+			.mockReturnValue(false);
+		try {
+			await h.command("/spokesman rewrite");
+			expect(h.spokesmanRequests).toHaveLength(0);
+			expect(h.rewriteEntries()).toHaveLength(0);
+			expect(h.lastNote).toEqual({
+				message: 'No credentials configured for spokesman model "faux-openai/gpt-5.4".',
+				type: "warning",
+			});
+			expect(h.errors).toEqual([]);
+		} finally {
+			authSpy.mockRestore();
+		}
+
+		// Provider error is caught, reported cleanly via UI notification, and restores status/working state
+		const streamSpy = vi.spyOn(h.session.modelRuntime, "streamSimple").mockImplementation(() => {
+			throw new Error("spokesman upstream timeout");
+		});
+		try {
+			await h.command("/spokesman rewrite");
+			expect(h.rewriteEntries()).toHaveLength(0);
+			expect(h.lastNote).toEqual({
+				message: "Spokesman rewrite failed: spokesman upstream timeout",
+				type: "error",
+			});
+			expect(h.status).toBe("gpt-5.4");
+			expect(h.workingMessages.at(-1)).toBeUndefined();
+			expect(h.errors).toEqual([]);
+		} finally {
+			streamSpy.mockRestore();
+		}
 	});
 
 	it("disables spokesman in auto, always, manual rewrite, and footer status when the main model is the spokesman model", async () => {
