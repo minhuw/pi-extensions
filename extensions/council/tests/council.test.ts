@@ -73,11 +73,7 @@ function createDispatchingBus() {
 	};
 }
 
-const DEFAULT_COUNCIL_MODELS = [
-	"magpie/gemini-4-carbon",
-	"magpie/gpt-6.2-astra",
-	"magpie/claude-fable-5-2",
-] as const;
+const DEFAULT_COUNCIL_MODELS = Object.values(COUNCIL_MEMBERS).map((m) => m.model);
 
 interface HarnessOptions {
 	minimalPi?: boolean;
@@ -470,11 +466,9 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 }
 
 describe("council agent definitions in extensions/council/agents/", () => {
-	it.each([
-		["council-caspar", "magpie/gemini-4-carbon", "high"],
-		["council-melchior", "magpie/gpt-6.2-astra", "xhigh"],
-		["council-balthasar", "magpie/claude-fable-5-2", "high"],
-	] as const)("validates %s frontmatter and read-only deliberation sections", async (name, model, thinking) => {
+	it.each(
+		Object.values(COUNCIL_MEMBERS).map((m) => [m.agentType, m.model, m.thinking] as const),
+	)("validates %s frontmatter and read-only deliberation sections", async (name, model, thinking) => {
 		const filePath = path.join(agentsDir, `${name}.md`);
 		const raw = await readFile(filePath, "utf8");
 		const { frontmatter, body } = parseAgentFrontmatter<Record<string, unknown>>(raw);
@@ -629,6 +623,43 @@ describe("pure council helpers", () => {
 		expect(r2).toContain("`converged`");
 		expect(r2).toContain("`tradeoff`");
 		expect(r2).not.toMatch(/caspar|melchior|balthasar|gemini|gpt|claude/i);
+	});
+
+	it("matches regex-special characters in pinned model IDs literally when scrubbing Round 2 peer text", () => {
+		const melchiorModel = COUNCIL_MEMBERS.melchior.model;
+		const bareMelchiorModel = melchiorModel.slice(melchiorModel.indexOf("/") + 1);
+		const wildcardFull = melchiorModel.replace(".", "x");
+		const wildcardBare = bareMelchiorModel.replace(".", "x");
+
+		expect(wildcardFull).not.toBe(melchiorModel);
+		expect(wildcardBare).not.toBe(bareMelchiorModel);
+
+		const r2 = buildRound2Prompt({
+			topic: "Check regex escaping",
+			peers: [
+				{
+					label: "Peer A",
+					text: `Keep ${wildcardBare} and ${wildcardFull}, redact ${melchiorModel} and ${bareMelchiorModel}.`,
+				},
+			],
+		});
+
+		expect(r2).toContain(
+			`Keep ${wildcardBare} and ${wildcardFull}, redact [redacted-advisor] and [redacted-advisor].`,
+		);
+		expect(r2).not.toContain(melchiorModel);
+		expect(r2).not.toContain(bareMelchiorModel);
+	});
+
+	it("derives member labels and council tool description from COUNCIL_MEMBERS", () => {
+		expect(COUNCIL_MEMBERS.caspar.label).toBe(`Caspar (${COUNCIL_MEMBERS.caspar.model})`);
+		expect(COUNCIL_MEMBERS.melchior.label).toBe(`Melchior (${COUNCIL_MEMBERS.melchior.model})`);
+		expect(COUNCIL_MEMBERS.balthasar.label).toBe(`Balthasar (${COUNCIL_MEMBERS.balthasar.model})`);
+
+		const harness = bootCouncilHarness();
+		expect(harness.tool.description).toContain(
+			`(Caspar on ${COUNCIL_MEMBERS.caspar.model}, Melchior on ${COUNCIL_MEMBERS.melchior.model}, Balthasar on ${COUNCIL_MEMBERS.balthasar.model})`,
+		);
 	});
 });
 

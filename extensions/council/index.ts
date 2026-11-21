@@ -14,28 +14,25 @@ export interface CouncilMemberSpec {
 	label: string;
 }
 
+function defineCouncilMember(
+	id: CouncilMemberId,
+	displayName: string,
+	model: string,
+	thinking: "high" | "xhigh",
+): CouncilMemberSpec {
+	return {
+		id,
+		agentType: `council-${id}`,
+		model,
+		thinking,
+		label: `${displayName} (${model})`,
+	};
+}
+
 export const COUNCIL_MEMBERS: Record<CouncilMemberId, CouncilMemberSpec> = {
-	caspar: {
-		id: "caspar",
-		agentType: "council-caspar",
-		model: "magpie/gemini-4-carbon",
-		thinking: "high",
-		label: "Caspar (magpie/gemini-4-carbon)",
-	},
-	melchior: {
-		id: "melchior",
-		agentType: "council-melchior",
-		model: "magpie/gpt-6.2-astra",
-		thinking: "xhigh",
-		label: "Melchior (magpie/gpt-6.2-astra)",
-	},
-	balthasar: {
-		id: "balthasar",
-		agentType: "council-balthasar",
-		model: "magpie/claude-fable-5-2",
-		thinking: "high",
-		label: "Balthasar (magpie/claude-fable-5-2)",
-	},
+	caspar: defineCouncilMember("caspar", "Caspar", "magpie/gemini-4-carbon", "high"),
+	melchior: defineCouncilMember("melchior", "Melchior", "magpie/gpt-6.2-astra", "xhigh"),
+	balthasar: defineCouncilMember("balthasar", "Balthasar", "magpie/claude-fable-5-2", "high"),
 };
 
 const COUNCIL_AGENT_TYPES = new Set<string>(Object.values(COUNCIL_MEMBERS).map((m) => m.agentType));
@@ -211,17 +208,24 @@ export function rotatePeersForMember<T extends { member: CouncilMemberId }>(
 	return rotated;
 }
 
-const IDENTITY_LEAK_PATTERNS: readonly RegExp[] = [
-	/\bmagpie\/gemini-4-carbon\b/gi,
-	/\bmagpie\/gpt-6\.2-astra\b/gi,
-	/\bmagpie\/claude-fable-5-2\b/gi,
-	/\bcouncil-caspar\b/gi,
-	/\bcouncil-melchior\b/gi,
-	/\bcouncil-balthasar\b/gi,
-	/\bgemini-4-carbon\b/gi,
-	/\bgpt-6\.2-astra\b/gi,
-	/\bclaude-fable-5-2\b/gi,
-];
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildIdentityLeakPatterns(members: readonly CouncilMemberSpec[]): readonly RegExp[] {
+	const tokens = [
+		...members.map((m) => m.model),
+		...members.map((m) => m.agentType),
+		...members.flatMap((m) => {
+			const slashIdx = m.model.indexOf("/");
+			const bareModelId = slashIdx > 0 ? m.model.slice(slashIdx + 1) : "";
+			return bareModelId ? [bareModelId] : [];
+		}),
+	];
+	return tokens.map((token) => new RegExp(`\\b${escapeRegExp(token)}\\b`, "gi"));
+}
+
+const IDENTITY_LEAK_PATTERNS: readonly RegExp[] = buildIdentityLeakPatterns(Object.values(COUNCIL_MEMBERS));
 
 function scrubModelIdentity(text: string): string {
 	let sanitized = text;
@@ -584,8 +588,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 		name: "council",
 		label: "Council",
 		defaultActive: false,
-		description:
-			"Convene a 3-model read-only technical council (Caspar on magpie/gemini-4-carbon, Melchior on magpie/gpt-6.2-astra, Balthasar on magpie/claude-fable-5-2) asynchronously for a 2-round deliberation on difficult architecture, design, or tradeoff questions. Returns immediately with a launch receipt once Round 1 advisors are spawned; Round 1 independent proposals and Round 2 anonymized, position-swapped peer cross-examination (Peer A, Peer B) run in the background, and the completed report arrives automatically as a follow-up message for stake-free synthesis. After calling this tool, end your turn and wait for the follow-up report — do not poll, sleep, or re-invoke council to wait for it.",
+		description: `Convene a 3-model read-only technical council (Caspar on ${COUNCIL_MEMBERS.caspar.model}, Melchior on ${COUNCIL_MEMBERS.melchior.model}, Balthasar on ${COUNCIL_MEMBERS.balthasar.model}) asynchronously for a 2-round deliberation on difficult architecture, design, or tradeoff questions. Returns immediately with a launch receipt once Round 1 advisors are spawned; Round 1 independent proposals and Round 2 anonymized, position-swapped peer cross-examination (Peer A, Peer B) run in the background, and the completed report arrives automatically as a follow-up message for stake-free synthesis. After calling this tool, end your turn and wait for the follow-up report — do not poll, sleep, or re-invoke council to wait for it.`,
 		promptSnippet:
 			"Convene the 3-model read-only technical council (Caspar, Melchior, Balthasar) asynchronously for 2-round architectural deliberation (returns immediately; report arrives as a follow-up message)",
 		promptGuidelines: [
