@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
-import { isEligibleModel, type NativeCompactionConfig } from "./types.ts";
+import { resolveMagpieAlias } from "../model-aliases.ts";
 import {
 	buildCompactHeaders,
 	buildCompactRequestBody,
@@ -18,8 +18,34 @@ import {
 	type ResponseItem,
 } from "./native-compaction.ts";
 
-function localMarker(label: string): string {
-	return `${label} native compaction checkpoint (${randomUUID()}).`;
+const MAGPIE_PROVIDER_ID = "magpie";
+const MAGPIE_RESPONSES_API = "openai-responses";
+const MAGPIE_COMPACTION_COMMAND = "magpie-native-compaction";
+const MAGPIE_COMPACTION_LABEL = "Magpie";
+
+export interface MagpieCompactionConfig {
+	enabled: boolean;
+	models: string[];
+	/** When native compact fails and the session has no native checkpoint, let Pi's built-in summarizer run. */
+	fallbackToBuiltin: boolean;
+}
+
+export function isEligibleModel(
+	model: { provider?: unknown; api?: unknown; id?: unknown } | undefined,
+	config: MagpieCompactionConfig,
+): boolean {
+	return Boolean(
+		config.enabled &&
+		model &&
+		model.provider === MAGPIE_PROVIDER_ID &&
+		model.api === MAGPIE_RESPONSES_API &&
+		typeof model.id === "string" &&
+		config.models.includes(model.id),
+	);
+}
+
+function localMarker(): string {
+	return `${MAGPIE_COMPACTION_LABEL} native compaction checkpoint (${randomUUID()}).`;
 }
 
 function errorMessage(error: unknown): string {
@@ -30,41 +56,34 @@ function notify(ctx: ExtensionContext, message: string, type: "info" | "warning"
 	if (ctx.hasUI) ctx.ui.notify(message, type);
 }
 
-export interface NativeCompactionOptions {
-	loadConfig: (ctx: ExtensionContext) => NativeCompactionConfig;
-	ownsProvider: (providerId: string, config: NativeCompactionConfig) => boolean;
-	command: string;
-	label: string;
-	/** Resolve a local selection alias to its physical request/checkpoint identity. */
-	resolveModel?: (model: Model<any>) => Model<any>;
-}
-
-export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompactionOptions): void {
+export function registerNativeCompaction(
+	pi: ExtensionAPI,
+	loadConfig: (ctx: ExtensionContext) => MagpieCompactionConfig,
+): void {
 	const activeModel = (ctx: ExtensionContext): Model<any> | undefined =>
-		ctx.model ? (options.resolveModel?.(ctx.model) ?? ctx.model) : undefined;
-	const inScope = (ctx: ExtensionContext, checkpoint: CheckpointLookup, config: NativeCompactionConfig): boolean => {
+		ctx.model ? resolveMagpieAlias(ctx.model) : undefined;
+	const inScope = (ctx: ExtensionContext, checkpoint: CheckpointLookup): boolean => {
 		const model = activeModel(ctx);
 		// Guard corrupt/foreign history even when its original provider extension is no longer loaded.
 		return checkpoint.status === "invalid" ||
 			(checkpoint.status === "valid" && (!model || checkpoint.checkpoint.details.modelKey !== modelKey(model))) ||
-			Boolean(model && options.ownsProvider(model.provider, config)) ||
+			model?.provider === MAGPIE_PROVIDER_ID ||
 			(checkpoint.status === "valid" &&
-				options.ownsProvider(checkpoint.checkpoint.details.modelKey.split(":")[0]!, config));
+				checkpoint.checkpoint.details.modelKey.split(":")[0] === MAGPIE_PROVIDER_ID);
 	};
 
 	const createNativeCheckpoint = async (params: {
 		ctx: ExtensionContext;
 		model: Model<any>;
 		input: ResponseItem[];
-		config: NativeCompactionConfig;
 		signal?: AbortSignal;
 	}): Promise<{ details: NativeCompactionDetails; usage?: Awaited<ReturnType<typeof callRemoteCompaction>>["usage"] }> => {
 		const auth = await params.ctx.modelRegistry.getApiKeyAndHeaders(params.model);
 		if (!auth.ok || !auth.apiKey) {
-			throw new Error(auth.ok ? `${options.label} authentication is unavailable.` : auth.error);
+			throw new Error(auth.ok ? `${MAGPIE_COMPACTION_LABEL} authentication is unavailable.` : auth.error);
 		}
 		const sessionId = params.ctx.sessionManager.getSessionId();
-		const endpoint = resolveCompactUrl(auth.baseUrl ?? params.model.baseUrl, params.config.endpoint);
+		const endpoint = resolveCompactUrl(auth.baseUrl ?? params.model.baseUrl);
 		const remote = await callRemoteCompaction({
 			url: endpoint,
 			headers: buildCompactHeaders({ apiKey: auth.apiKey, headers: auth.headers, sessionId }),
@@ -87,7 +106,7 @@ export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompac
 	pi.on("context", (event, ctx) => {
 		const checkpoint = findNativeCheckpoint(ctx.sessionManager.getBranch());
 		if (checkpoint.status === "none") return undefined;
-		if (!inScope(ctx, checkpoint, options.loadConfig(ctx))) return undefined;
+		if (!inScope(ctx, checkpoint)) return undefined;
 		return {
 			messages: event.messages.filter((message) => message.role !== "compactionSummary"),
 		};
@@ -100,7 +119,7 @@ export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompac
 
 		const model = activeModel(ctx);
 		try {
-			if (!inScope(ctx, checkpoint, options.loadConfig(ctx))) return undefined;
+			if (!inScope(ctx, checkpoint)) return undefined;
 			if (!model) throw new Error("No active model is selected.");
 			const input = effectiveInputForBranch({ branch, model, tools: pi.getAllTools() });
 			if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
@@ -112,7 +131,7 @@ export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompac
 			return payload;
 		} catch (error) {
 			ctx.abort();
-			notify(ctx, `${options.label} native-compaction request blocked: ${errorMessage(error)}`, "error");
+			notify(ctx, `${MAGPIE_COMPACTION_LABEL} native-compaction request blocked: ${errorMessage(error)}`, "error");
 			if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) return undefined;
 			const payload: Record<string, unknown> = { ...(event.payload as Record<string, unknown>), input: [] };
 			delete payload.messages;
@@ -123,18 +142,18 @@ export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompac
 
 	pi.on("session_before_compact", async (event, ctx) => {
 		const model = activeModel(ctx);
-		let config: NativeCompactionConfig;
+		let config: MagpieCompactionConfig;
 		try {
-			config = options.loadConfig(ctx);
+			config = loadConfig(ctx);
 		} catch (error) {
 			// Pi swallows thrown hook errors, which would otherwise permit unsafe built-in fallback.
-			notify(ctx, `${options.label} native compaction configuration failed: ${errorMessage(error)}`, "error");
+			notify(ctx, `${MAGPIE_COMPACTION_LABEL} native compaction configuration failed: ${errorMessage(error)}`, "error");
 			return { cancel: true };
 		}
 		const checkpoint = findNativeCheckpoint(event.branchEntries);
-		if (!inScope(ctx, checkpoint, config)) return undefined;
+		if (!inScope(ctx, checkpoint)) return undefined;
 
-		if (!model || !options.ownsProvider(model.provider, config) || !isEligibleModel(model, config)) {
+		if (!model || !isEligibleModel(model, config)) {
 			if (checkpoint.status === "none") return undefined;
 			notify(
 				ctx,
@@ -158,13 +177,12 @@ export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompac
 				ctx,
 				model,
 				input,
-				config,
 				signal: event.signal,
 			});
-			notify(ctx, `${options.label} native compaction complete (${native.details.replacementHistory.length} canonical items).`, "info");
+			notify(ctx, `${MAGPIE_COMPACTION_LABEL} native compaction complete (${native.details.replacementHistory.length} canonical items).`, "info");
 			return {
 				compaction: {
-					summary: localMarker(options.label),
+					summary: localMarker(),
 					firstKeptEntryId: event.preparation.firstKeptEntryId,
 					tokensBefore: event.preparation.tokensBefore,
 					usage: native.usage,
@@ -176,28 +194,28 @@ export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompac
 			if (shouldFallbackToBuiltinCompaction({ checkpoint, fallbackToBuiltin: config.fallbackToBuiltin })) {
 				notify(
 					ctx,
-					`${options.label} native compaction failed; falling back to Pi's built-in summarizer. ${errorMessage(error)}`,
+					`${MAGPIE_COMPACTION_LABEL} native compaction failed; falling back to Pi's built-in summarizer. ${errorMessage(error)}`,
 					"warning",
 				);
 				return undefined;
 			}
-			notify(ctx, `${options.label} native compaction failed: ${errorMessage(error)}`, "error");
+			notify(ctx, `${MAGPIE_COMPACTION_LABEL} native compaction failed: ${errorMessage(error)}`, "error");
 			return { cancel: true };
 		}
 	});
 
-	pi.registerCommand(options.command, {
-		description: `Show whether native ${options.label} compaction is active for the selected model.`,
+	pi.registerCommand(MAGPIE_COMPACTION_COMMAND, {
+		description: `Show whether native ${MAGPIE_COMPACTION_LABEL} compaction is active for the selected model.`,
 		handler: async (args, ctx) => {
-			pi.appendEntry("pi-extensions.command", { command: options.command, kind: "extension", extension: "magpie-provider" });
+			pi.appendEntry("pi-extensions.command", { command: MAGPIE_COMPACTION_COMMAND, kind: "extension", extension: "magpie-provider" });
 			if (args.trim()) {
-				ctx.ui.notify(`Usage: /${options.command}`, "error");
+				ctx.ui.notify(`Usage: /${MAGPIE_COMPACTION_COMMAND}`, "error");
 				return;
 			}
-			const config = options.loadConfig(ctx);
+			const config = loadConfig(ctx);
 			const selected = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
 			const model = activeModel(ctx);
-			const enabled = Boolean(model && options.ownsProvider(model.provider, config) && isEligibleModel(model, config));
+			const enabled = isEligibleModel(model, config);
 			ctx.ui.notify(
 				`${enabled ? "Enabled" : "Disabled"} for ${selected}. Fallback to built-in: ${config.fallbackToBuiltin ? "on" : "off"}. Allowlist: ${config.models.join(", ") || "(empty)"}.`,
 				enabled ? "info" : "warning",

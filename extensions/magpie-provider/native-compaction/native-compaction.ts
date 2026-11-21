@@ -9,16 +9,16 @@ import { calculateCost, type Message, type Model, type Usage } from "@earendil-w
 
 // Keep the persisted discriminator so existing v1/v2 sessions remain replayable.
 export const NATIVE_COMPACTION_KIND = "cliproxyapi-openai-native-compaction";
-export const LEGACY_NATIVE_COMPACTION_VERSION = 1;
+const LEGACY_NATIVE_COMPACTION_VERSION = 1;
 export const NATIVE_COMPACTION_VERSION = 2;
-export const OPAQUE_COMPACTION_TYPES = new Set(["compaction", "compaction_summary"]);
+const OPAQUE_COMPACTION_TYPES = new Set(["compaction", "compaction_summary"]);
 const REMOTE_COMPACTION_V2_RETAINED_TOKEN_BUDGET = 64_000;
 const REMOTE_COMPACTION_V2_MAX_AGENT_MESSAGE_TOKENS = 10_000;
 const MAX_REMOTE_RETRIES = 2;
 export const MAX_RETRY_DELAY_MS = 30_000;
 export const DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS = 120_000;
 
-export type JsonObject = Record<string, unknown>;
+type JsonObject = Record<string, unknown>;
 export type ResponseItem = JsonObject & { type?: string };
 
 export type NativeCompactionDetails = {
@@ -31,7 +31,7 @@ export type NativeCompactionDetails = {
 		| { version: typeof NATIVE_COMPACTION_VERSION; endpoint: "responses" }
 	);
 
-export type NativeCheckpoint = {
+type NativeCheckpoint = {
 	entryIndex: number;
 	entryId: string;
 	details: NativeCompactionDetails;
@@ -42,17 +42,17 @@ export type CheckpointLookup =
 	| { status: "invalid"; entryIndex: number; entryId: string }
 	| { status: "valid"; checkpoint: NativeCheckpoint };
 
-export interface CompactResponse {
+interface CompactResponse {
 	output: ResponseItem[];
 	usage?: unknown;
 }
 
-export interface RemoteCompactionResult {
+interface RemoteCompactionResult {
 	replacementHistory: ResponseItem[];
 	usage?: Usage;
 }
 
-export function isJsonObject(value: unknown): value is JsonObject {
+function isJsonObject(value: unknown): value is JsonObject {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -60,7 +60,7 @@ function clone<T>(value: T): T {
 	return structuredClone(value);
 }
 
-export function normalizeResponseInputItem(item: ResponseItem): ResponseItem {
+function normalizeResponseInputItem(item: ResponseItem): ResponseItem {
 	const normalized = clone(item);
 	// Compaction rejects output-only status on replayed message and reasoning
 	// items, even though ordinary Responses turns may accept it.
@@ -74,7 +74,7 @@ export function modelKey(model: Pick<Model<any>, "provider" | "api" | "id">): st
 	return `${model.provider}:${model.api}:${model.id}`;
 }
 
-export function isResponseItem(value: unknown): value is ResponseItem {
+function isResponseItem(value: unknown): value is ResponseItem {
 	if (!isJsonObject(value)) return false;
 	return (
 		typeof value.type === "string" ||
@@ -82,7 +82,7 @@ export function isResponseItem(value: unknown): value is ResponseItem {
 	);
 }
 
-export function isOpaqueCompactionItem(value: unknown): value is ResponseItem {
+function isOpaqueCompactionItem(value: unknown): value is ResponseItem {
 	return (
 		isResponseItem(value) &&
 		typeof value.type === "string" &&
@@ -92,7 +92,7 @@ export function isOpaqueCompactionItem(value: unknown): value is ResponseItem {
 	);
 }
 
-export function validateReplacementHistory(value: unknown): ResponseItem[] {
+function validateReplacementHistory(value: unknown): ResponseItem[] {
 	if (!Array.isArray(value) || value.length === 0 || !value.every(isResponseItem)) {
 		throw new Error("Native Responses returned an invalid or empty compacted output window.");
 	}
@@ -215,7 +215,7 @@ export function buildRemoteCompactionV2ReplacementHistory(
 	return [...retainedReversed, clone(compactionItem)];
 }
 
-export function parseNativeCompactionDetails(value: unknown): NativeCompactionDetails | undefined {
+function parseNativeCompactionDetails(value: unknown): NativeCompactionDetails | undefined {
 	if (!isJsonObject(value) || value.kind !== NATIVE_COMPACTION_KIND || typeof value.modelKey !== "string") {
 		return undefined;
 	}
@@ -337,7 +337,7 @@ function responseTool(tool: ToolInfo, deferLoading = false): JsonObject {
 	};
 }
 
-export function messagesToResponseItems(model: Model<any>, messages: Message[], tools: ToolInfo[]): ResponseItem[] {
+function messagesToResponseItems(model: Model<any>, messages: Message[], tools: ToolInfo[]): ResponseItem[] {
 	const items: ResponseItem[] = [];
 	const toolsByName = new Map(tools.map((tool) => [tool.name, tool]));
 	const pendingToolCalls = new Map<string, string>();
@@ -479,20 +479,31 @@ export function effectiveInputForBranch(params: {
 	return messagesToResponseItems(params.model, convertToLlm(context.messages), params.tools);
 }
 
-export function resolveCompactUrl(baseUrl: string | undefined, configuredEndpoint?: string): string {
-	if (configuredEndpoint?.trim()) {
-		const endpoint = configuredEndpoint.trim().replace(/\/+$/, "");
-		if (endpoint.endsWith("/responses/compact")) {
-			throw new Error("The legacy /responses/compact endpoint is unsafe with native Responses; configure the normal /responses endpoint.");
-		}
-		return endpoint;
+export function resolveCompactUrl(baseUrl: string | undefined): string {
+	const trimmed = baseUrl?.trim();
+	if (!trimmed) throw new Error("The native Responses model has no base URL.");
+	let url: URL;
+	try {
+		url = new URL(trimmed);
+	} catch {
+		throw new Error("The native Responses model has an invalid base URL.");
 	}
-	const normalized = baseUrl?.trim().replace(/\/+$/, "");
-	if (!normalized) throw new Error("The native Responses model has no base URL.");
-	if (normalized.endsWith("/codex/responses")) return normalized;
-	if (normalized.endsWith("/backend-api")) return `${normalized}/codex/responses`;
-	if (normalized.endsWith("/v1")) return `${normalized}/responses`;
-	return `${normalized}/backend-api/codex/responses`;
+	if (
+		!["http:", "https:"].includes(url.protocol) ||
+		url.username ||
+		url.password ||
+		url.href.includes("?") ||
+		url.href.includes("#")
+	) {
+		throw new Error("The native Responses model base URL must be an HTTP(S) origin or /v1 URL without credentials, query, or fragment.");
+	}
+	if (/\/responses\/compact\/?$/.test(url.pathname)) {
+		throw new Error("The legacy /responses/compact endpoint is unsafe with native Responses; use the Magpie gateway origin or /v1 base URL.");
+	}
+	if (!/^\/(?:v1\/?)?$/.test(url.pathname)) {
+		throw new Error("The native Responses model base URL must be an HTTP(S) origin, optionally ending in /v1.");
+	}
+	return `${url.origin}/v1/responses`;
 }
 
 export function buildCompactHeaders(params: {
@@ -526,7 +537,7 @@ export function buildCompactRequestBody(model: Model<any>, input: ResponseItem[]
 	};
 }
 
-export function isAuthUnavailableMessage(value: string): boolean {
+function isAuthUnavailableMessage(value: string): boolean {
 	return /auth_unavailable|no auth available/i.test(value);
 }
 

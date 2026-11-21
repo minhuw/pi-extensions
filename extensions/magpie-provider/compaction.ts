@@ -2,10 +2,8 @@ import type { Model } from "@earendil-works/pi-ai";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { registerNativeCompaction } from "./native-compaction/lifecycle.ts";
-import type { NativeCompactionConfig } from "./native-compaction/types.ts";
+import { registerNativeCompaction, type MagpieCompactionConfig } from "./native-compaction/lifecycle.ts";
 import { magpieModelName } from "./model-identity.ts";
-import { resolveMagpieAlias } from "./model-aliases.ts";
 
 export const COMPACTION_CONFIG_FILE = "magpie-native-compaction.json";
 
@@ -30,8 +28,8 @@ export function loadMagpieCompactionConfig(
 	cwd: string,
 	projectTrusted: boolean,
 	catalog: readonly Pick<Model<any>, "provider" | "api" | "id">[] = [],
-): NativeCompactionConfig {
-	const config: NativeCompactionConfig = {
+): MagpieCompactionConfig & { providerId: "magpie"; apiId: "openai-responses" } {
+	const config: MagpieCompactionConfig & { providerId: "magpie"; apiId: "openai-responses" } = {
 		enabled: true,
 		providerId: "magpie",
 		apiId: "openai-responses",
@@ -79,11 +77,7 @@ export function loadMagpieCompactionConfig(
 }
 
 export function registerMagpieCompaction(pi: ExtensionAPI): void {
-	registerNativeCompaction(pi, {
-		loadConfig: ctx => loadMagpieCompactionConfig(ctx.cwd, ctx.isProjectTrusted(), ctx.modelRegistry.getAll()),
-		ownsProvider: providerId => providerId === "magpie",
-		command: "magpie-native-compaction",
-		label: "Magpie",
-		resolveModel: resolveMagpieAlias,
-	});
+	registerNativeCompaction(pi, ctx =>
+		loadMagpieCompactionConfig(ctx.cwd, ctx.isProjectTrusted(), ctx.modelRegistry.getAll()),
+	);
 }

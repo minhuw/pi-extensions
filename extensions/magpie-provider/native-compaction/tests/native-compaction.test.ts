@@ -4,8 +4,8 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
 	isEligibleModel,
-	type NativeCompactionConfig,
-} from "../types.ts";
+	type MagpieCompactionConfig,
+} from "../lifecycle.ts";
 import {
 	buildCompactHeaders,
 	buildCompactRequestBody,
@@ -24,11 +24,11 @@ import {
 } from "../native-compaction.ts";
 
 const model = {
-	id: "gpt-6-luna",
+	id: "codex/gpt-6-luna",
 	name: "GPT-6 Luna",
-	api: "cliproxyapi-codex-responses",
-	provider: "cliproxyapi",
-	baseUrl: "https://proxy.example/backend-api/",
+	api: "openai-responses",
+	provider: "magpie",
+	baseUrl: "http://127.0.0.1:3425/v1",
 	reasoning: true,
 	input: ["text"],
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -36,35 +36,50 @@ const model = {
 	maxTokens: 16384,
 } as Model<any>;
 
-const config: NativeCompactionConfig = {
+const config: MagpieCompactionConfig = {
 	enabled: true,
-	providerId: "cliproxyapi",
-	apiId: "cliproxyapi-codex-responses",
 	models: [model.id],
 	fallbackToBuiltin: true,
 };
 
 describe("compact endpoint transport", () => {
-	it("derives the Responses endpoint used by remote compaction v2", () => {
-		expect(resolveCompactUrl("https://proxy.example/backend-api/")).toBe(
-			"https://proxy.example/backend-api/codex/responses",
-		);
-		expect(resolveCompactUrl("https://proxy.example/v1")).toBe("https://proxy.example/v1/responses");
+	it("derives the Magpie /v1/responses endpoint from an origin or /v1 base URL", () => {
+		expect(resolveCompactUrl("https://gateway.example")).toBe("https://gateway.example/v1/responses");
+		expect(resolveCompactUrl("https://gateway.example/")).toBe("https://gateway.example/v1/responses");
+		expect(resolveCompactUrl("https://gateway.example/v1")).toBe("https://gateway.example/v1/responses");
+		expect(resolveCompactUrl("https://gateway.example/v1/")).toBe("https://gateway.example/v1/responses");
+		expect(resolveCompactUrl("http://127.0.0.1:3425/v1")).toBe("http://127.0.0.1:3425/v1/responses");
 	});
 
-	it("rejects an explicitly configured legacy compact endpoint", () => {
-		expect(() =>
-			resolveCompactUrl(undefined, "https://proxy.example/backend-api/codex/responses/compact"),
-		).toThrow(/legacy \/responses\/compact endpoint is unsafe/);
+	it.each([
+		"https://gateway.example/v1/responses/compact",
+		"https://gateway.example/responses/compact/",
+	])("rejects legacy compact endpoint %s", (legacyUrl) => {
+		expect(() => resolveCompactUrl(legacyUrl)).toThrow(/legacy \/responses\/compact endpoint is unsafe/);
 	});
 
-	it("uses a plain CLIProxyAPI bearer key without a ChatGPT account header", () => {
+	it.each([
+		undefined,
+		"",
+		"   ",
+		"not-a-url",
+		"ftp://gateway.example/v1",
+		"https://user:pass@gateway.example/v1",
+		"https://gateway.example/v1?x=1",
+		"https://gateway.example/v1#frag",
+		"https://gateway.example/v1/responses",
+		"https://gateway.example/v2",
+	])("fails closed on invalid base URL %j", (invalidUrl) => {
+		expect(() => resolveCompactUrl(invalidUrl)).toThrow();
+	});
+
+	it("uses a plain gateway bearer key without a ChatGPT account header", () => {
 		const headers = buildCompactHeaders({
-			apiKey: "plain-cpa-key",
+			apiKey: "plain-gateway-key",
 			headers: { "chatgpt-account-id": "must-be-removed", "x-extra": "kept" },
 			sessionId: "session-1",
 		});
-		expect(headers.get("authorization")).toBe("Bearer plain-cpa-key");
+		expect(headers.get("authorization")).toBe("Bearer plain-gateway-key");
 		expect(headers.get("chatgpt-account-id")).toBeNull();
 		expect(headers.get("x-extra")).toBe("kept");
 		expect(headers.get("accept")).toBe("text/event-stream, application/json");
@@ -74,7 +89,7 @@ describe("compact endpoint transport", () => {
 	it("appends the documented compaction_trigger to canonical input", () => {
 		const input = [{ role: "user", content: [{ type: "input_text", text: "hello" }] }];
 		expect(buildCompactRequestBody(model, input)).toEqual({
-			model: "gpt-6-luna",
+			model: model.id,
 			stream: true,
 			instructions: "",
 			input: [...input, { type: "compaction_trigger" }],
@@ -101,7 +116,7 @@ describe("compact endpoint transport", () => {
 		];
 
 		expect(buildCompactRequestBody(model, input)).toEqual({
-			model: "gpt-6-luna",
+			model: model.id,
 			stream: true,
 			instructions: "",
 			input: [
@@ -225,43 +240,36 @@ describe.each(["compaction", "custom"] as const)("%s checkpoint context edits", 
 	});
 });
 
-describe("provider-neutral configuration", () => {
-	const magpieModel = {
+describe("Magpie eligibility and replay", () => {
+	const foreignModel = {
 		...model,
-		provider: "magpie",
+		provider: "other",
 		api: "openai-responses",
-		id: "codex/gpt-6-luna",
-		baseUrl: "http://127.0.0.1:3425/v1",
-	};
-	const magpieConfig = {
-		...config,
-		providerId: "magpie",
-		apiId: "openai-responses",
-		models: [magpieModel.id],
+		id: "gpt-6-luna",
 	};
 
-	it("requires explicit retargeting and an exact Responses model", () => {
-		expect(isEligibleModel(magpieModel, config)).toBe(false);
-		expect(isEligibleModel(magpieModel, magpieConfig)).toBe(true);
-		expect(isEligibleModel({ ...magpieModel, api: "openai-completions" }, magpieConfig)).toBe(false);
-		expect(isEligibleModel({ ...magpieModel, id: "group/fast" }, magpieConfig)).toBe(false);
-		expect(isEligibleModel(model, magpieConfig)).toBe(false);
+	it("requires Magpie provider, openai-responses API, and an exact allowlisted model", () => {
+		expect(isEligibleModel(model, config)).toBe(true);
+		expect(isEligibleModel(model, { ...config, enabled: false })).toBe(false);
+		expect(isEligibleModel({ ...model, api: "openai-completions" }, config)).toBe(false);
+		expect(isEligibleModel({ ...model, id: "group/fast" }, config)).toBe(false);
+		expect(isEligibleModel(foreignModel, config)).toBe(false);
 	});
 
 	it("uses the inline JSON contract and replays its checkpoint only on the same model", async () => {
 		const input = [{ role: "user", content: [{ type: "input_text", text: "remember this" }] }];
 		const opaque = { type: "compaction", encrypted_content: "upstream-sealed-checkpoint" };
 		const remote = await callRemoteCompaction({
-			url: resolveCompactUrl(magpieModel.baseUrl),
+			url: resolveCompactUrl(model.baseUrl),
 			headers: buildCompactHeaders({ apiKey: "magpie-pi", sessionId: "test-session" }),
-			body: buildCompactRequestBody(magpieModel, input),
-			model: magpieModel,
+			body: buildCompactRequestBody(model, input),
+			model,
 			fetchImpl: (async (url, init) => {
 				expect(url).toBe("http://127.0.0.1:3425/v1/responses");
 				expect(init?.redirect).toBe("error");
 				expect(new Headers(init?.headers).get("authorization")).toBe("Bearer magpie-pi");
 				expect(JSON.parse(String(init?.body))).toEqual({
-					model: magpieModel.id,
+					model: model.id,
 					stream: true,
 					instructions: "",
 					input: [...input, { type: "compaction_trigger" }],
@@ -276,15 +284,15 @@ describe("provider-neutral configuration", () => {
 			kind: NATIVE_COMPACTION_KIND,
 			version: NATIVE_COMPACTION_VERSION,
 			endpoint: "responses",
-			modelKey: modelKey(magpieModel),
+			modelKey: modelKey(model),
 			replacementHistory: remote.replacementHistory,
 		});
 		session.appendMessage({ role: "user", content: "continue", timestamp: 1 });
 		const branch = session.getBranch();
-		expect(effectiveInputForBranch({ branch, model: magpieModel, tools: [] })).toEqual([
+		expect(effectiveInputForBranch({ branch, model, tools: [] })).toEqual([
 			...input, opaque, { role: "user", content: [{ type: "input_text", text: "continue" }] },
 		]);
-		expect(() => effectiveInputForBranch({ branch, model, tools: [] })).toThrow();
+		expect(() => effectiveInputForBranch({ branch, model: foreignModel, tools: [] })).toThrow();
 	});
 });
 
@@ -405,7 +413,7 @@ describe("canonical compacted output", () => {
 			);
 		const input = [{ role: "user", content: [{ type: "input_text", text: "keep me" }] }];
 		const result = await callRemoteCompaction({
-			url: "https://proxy.example/backend-api/codex/responses",
+			url: "https://gateway.example/v1/responses",
 			headers: new Headers(),
 			body: buildCompactRequestBody(model, input),
 			model,
@@ -435,9 +443,9 @@ describe("canonical compacted output", () => {
 
 		await expect(
 			callRemoteCompaction({
-				url: "https://proxy.example/backend-api/codex/responses",
+				url: "https://gateway.example/v1/responses",
 				headers: new Headers(),
-				body: { model: "gpt-6-luna", input: [] },
+				body: { model: model.id, input: [] },
 				model,
 				fetchImpl,
 			}),
@@ -454,9 +462,9 @@ describe("canonical compacted output", () => {
 		try {
 			const assertion = expect(
 				callRemoteCompaction({
-					url: "https://proxy.example/backend-api/codex/responses",
+					url: "https://gateway.example/v1/responses",
 					headers: new Headers(),
-					body: { model: "gpt-6-luna", input: [] },
+					body: { model: model.id, input: [] },
 					model,
 					fetchImpl,
 				}),

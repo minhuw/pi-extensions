@@ -1,100 +1,124 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
-import { registerNativeCompaction } from "../lifecycle.ts";
+import { registerNativeCompaction, type MagpieCompactionConfig } from "../lifecycle.ts";
 import { modelKey, NATIVE_COMPACTION_KIND, NATIVE_COMPACTION_VERSION } from "../native-compaction.ts";
-import type { NativeCompactionConfig } from "../types.ts";
 
-const model = (provider: string): Model<any> => ({
-	provider, api: "openai-responses", id: "test-model", name: "Test",
+const model = (provider = "magpie", id = "test-model"): Model<any> => ({
+	provider, api: "openai-responses", id, name: "Test",
 	baseUrl: "https://gateway.example/v1", reasoning: true, input: ["text"],
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000,
 });
 const opaque = { type: "compaction", encrypted_content: "sealed" };
 
-function registration(provider: string, overrides: Partial<NativeCompactionConfig> = {}, brokenConfig = false) {
+function registration(overrides: Partial<MagpieCompactionConfig> = {}, brokenConfig = false) {
 	const handlers: Record<string, (event: any, ctx: ExtensionContext) => any> = {};
 	const commands: Record<string, any> = {};
-	const config: NativeCompactionConfig = {
-		enabled: true, providerId: provider, apiId: "openai-responses", models: ["test-model"],
-		fallbackToBuiltin: true, ...overrides,
+	const config: MagpieCompactionConfig = {
+		enabled: true, models: ["test-model"], fallbackToBuiltin: true, ...overrides,
 	};
-	// Separate API objects match Pi's per-extension registration contract.
 	const pi = {
 		on: (name: string, handler: any) => { handlers[name] = handler; },
 		registerCommand: (name: string, command: any) => { commands[name] = command; },
 		appendEntry: () => {},
 		getAllTools: () => [],
 	} as unknown as ExtensionAPI;
-	registerNativeCompaction(pi, {
-		loadConfig: () => { if (brokenConfig) throw new Error("bad config"); return config; },
-		ownsProvider: (id, config) => id === config.providerId,
-		command: `${provider}-compact`, label: provider,
+	registerNativeCompaction(pi, () => {
+		if (brokenConfig) throw new Error("bad config");
+		return config;
 	});
 	return { handlers, commands };
 }
 
-function fixture(currentProvider: string, checkpointProvider?: string, malformed = false) {
+function fixture(
+	current: string | Model<any> = "magpie",
+	checkpoint?: string | Model<any>,
+	malformed = false,
+) {
+	const currentModel = typeof current === "string" ? model(current) : current;
+	const checkpointModel = typeof checkpoint === "string" ? model(checkpoint) : checkpoint;
 	const session = SessionManager.inMemory();
 	const firstId = session.appendMessage({ role: "user", content: "task", timestamp: 0 });
-	if (checkpointProvider) session.appendCompaction("marker", firstId, 100, {
+	if (checkpointModel) session.appendCompaction("marker", firstId, 100, {
 		kind: NATIVE_COMPACTION_KIND, version: NATIVE_COMPACTION_VERSION, endpoint: "responses",
-		modelKey: modelKey(model(checkpointProvider)), replacementHistory: malformed ? [] : [opaque],
+		modelKey: modelKey(checkpointModel), replacementHistory: malformed ? [] : [opaque],
 	});
 	const abort = vi.fn();
 	const notify = vi.fn();
 	const auth = vi.fn(async () => ({ ok: true, apiKey: "secret", headers: {} }));
 	const ctx = {
-		model: model(currentProvider), sessionManager: session, abort, hasUI: true, ui: { notify },
+		model: currentModel, sessionManager: session, abort, hasUI: true, ui: { notify },
 		modelRegistry: { getApiKeyAndHeaders: auth },
 	} as unknown as ExtensionContext;
 	const event = {
 		type: "session_before_compact", branchEntries: session.getBranch(), reason: "manual", willRetry: false,
 		preparation: { firstKeptEntryId: firstId, tokensBefore: 100 }, signal: new AbortController().signal,
 	};
-	const payload = { model: "test-model", input: ["stale"], messages: ["stale"], previous_response_id: "stale" };
+	const payload = { model: currentModel.id, input: ["stale"], messages: ["stale"], previous_response_id: "stale" };
 	return { ctx, event, payload, abort, notify, auth };
 }
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe("provider-scoped lifecycle", () => {
-	it.each(["alpha", "beta"])("only %s acts on its healthy checkpoint with two registrations", async (owner) => {
-		const f = fixture(owner, owner);
-		const fetchMock = vi.fn(async () => Response.json({ output: [opaque] }));
+describe("Magpie-owned lifecycle", () => {
+	it("replays, strips local markers, and compacts healthy Magpie checkpoints", async () => {
+		const { handlers } = registration();
+		const f = fixture("magpie", "magpie");
+		const fetchMock = vi.fn<typeof fetch>(async () => Response.json({ output: [opaque] }));
 		vi.stubGlobal("fetch", fetchMock);
-		for (const provider of ["alpha", "beta"]) {
-			const { handlers } = registration(provider);
-			const replay = handlers.before_provider_request!({ payload: f.payload }, f.ctx);
-			const context = handlers.context!({ messages: [{ role: "compactionSummary" }, { role: "user" }] }, f.ctx);
-			const compact = await handlers.session_before_compact!(f.event, f.ctx);
-			if (provider === owner) {
-				expect(replay).toEqual({ model: "test-model", input: [opaque] });
-				expect(context).toEqual({ messages: [{ role: "user" }] });
-				expect(compact.compaction.details.modelKey).toBe(modelKey(model(owner)));
-				expect(compact.compaction.summary).toContain(owner);
-			} else {
-				expect(replay).toBeUndefined();
-				expect(context).toBeUndefined();
-				expect(compact).toBeUndefined();
-			}
-		}
+		expect(handlers.before_provider_request!({ payload: f.payload }, f.ctx)).toEqual({ model: "test-model", input: [opaque] });
+		expect(handlers.context!({ messages: [{ role: "compactionSummary" }, { role: "user" }] }, f.ctx)).toEqual({
+			messages: [{ role: "user" }],
+		});
+		const compact = await handlers.session_before_compact!(f.event, f.ctx);
+		expect(compact.compaction.details.modelKey).toBe(modelKey(model("magpie")));
+		expect(compact.compaction.summary).toContain("Magpie");
 		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock.mock.calls[0]?.[0]).toBe("https://gateway.example/v1/responses");
+		expect(f.abort).not.toHaveBeenCalled();
+	});
+
+	it("ignores non-Magpie sessions without native checkpoints", async () => {
+		const { handlers } = registration();
+		const f = fixture("other");
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		expect(handlers.before_provider_request!({ payload: f.payload }, f.ctx)).toBeUndefined();
+		expect(handlers.context!({ messages: [{ role: "compactionSummary" }, { role: "user" }] }, f.ctx)).toBeUndefined();
+		expect(await handlers.session_before_compact!(f.event, f.ctx)).toBeUndefined();
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(f.abort).not.toHaveBeenCalled();
+	});
+
+	it("resolves Magpie selection aliases to their physical checkpoint and request target", async () => {
+		const target = model("magpie", "auto/gpt-6-astra");
+		const alias = { ...target, id: "gpt-6-astra", magpieAliasTarget: target.id };
+		const { handlers } = registration({ models: [target.id] });
+		const f = fixture(alias, target);
+		const fetchMock = vi.fn<typeof fetch>(async () => Response.json({ output: [opaque] }));
+		vi.stubGlobal("fetch", fetchMock);
+		expect(handlers.before_provider_request!({ payload: f.payload }, f.ctx)).toEqual({ model: alias.id, input: [opaque] });
+		const compact = await handlers.session_before_compact!(f.event, f.ctx);
+		expect(compact.compaction.details.modelKey).toBe(modelKey(target));
+		expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).model).toBe(target.id);
 		expect(f.abort).not.toHaveBeenCalled();
 	});
 
 	it.each([{ enabled: false }, { models: [] }])("replays existing checkpoints despite %j, but creates no new ones", async (config) => {
-		const { handlers } = registration("alpha", config);
-		const f = fixture("alpha", "alpha");
+		const { handlers } = registration(config);
+		const f = fixture("magpie", "magpie");
 		expect(handlers.before_provider_request!({ payload: f.payload }, f.ctx).input).toEqual([opaque]);
 		expect(await handlers.session_before_compact!(f.event, f.ctx)).toEqual({ cancel: true });
 		expect(f.auth).not.toHaveBeenCalled();
-		const fresh = fixture("alpha");
+		const fresh = fixture("magpie");
 		expect(await handlers.session_before_compact!(fresh.event, fresh.ctx)).toBeUndefined();
 	});
 
-	it.each([ ["alpha", "beta"], ["beta", "alpha"] ])("blocks model/checkpoint mismatch %s/%s", async (current, checkpoint) => {
-		const { handlers } = registration("alpha");
+	it.each([
+		["magpie", "other"],
+		["other", "magpie"],
+	])("blocks model/checkpoint mismatch %s/%s", async (current, checkpoint) => {
+		const { handlers } = registration();
 		const f = fixture(current, checkpoint);
 		expect(handlers.before_provider_request!({ payload: f.payload }, f.ctx)).toEqual({ model: "test-model", input: [] });
 		expect(f.abort).toHaveBeenCalledOnce();
@@ -102,17 +126,17 @@ describe("provider-scoped lifecycle", () => {
 		expect(f.auth).not.toHaveBeenCalled();
 	});
 
-	it("fails closed on malformed recognized checkpoints in the current provider scope", async () => {
-		const { handlers } = registration("alpha");
-		const f = fixture("alpha", "alpha", true);
+	it("fails closed on malformed recognized checkpoints in Magpie scope", async () => {
+		const { handlers } = registration();
+		const f = fixture("magpie", "magpie", true);
 		expect(handlers.before_provider_request!({ payload: f.payload }, f.ctx).input).toEqual([]);
 		expect(f.abort).toHaveBeenCalledOnce();
 		expect(await handlers.session_before_compact!(f.event, f.ctx)).toEqual({ cancel: true });
 		expect(f.auth).not.toHaveBeenCalled();
 	});
 
-	it.each([false, true])("guards foreign history after its owning extension is removed (malformed=%s)", async malformed => {
-		const { handlers } = registration("alpha");
+	it.each([false, true])("guards foreign history after its owning extension is removed (malformed=%s)", async (malformed) => {
+		const { handlers } = registration();
 		const f = fixture("third-party", "removed-provider", malformed);
 		expect(handlers.before_provider_request!({ payload: f.payload }, f.ctx).input).toEqual([]);
 		expect(f.abort).toHaveBeenCalledOnce();
@@ -120,9 +144,18 @@ describe("provider-scoped lifecycle", () => {
 		expect(f.auth).not.toHaveBeenCalled();
 	});
 
+	it("fails closed on malformed foreign checkpoints even when the foreign provider matches", async () => {
+		const { handlers } = registration();
+		const f = fixture("removed-provider", "removed-provider", true);
+		expect(handlers.before_provider_request!({ payload: f.payload }, f.ctx).input).toEqual([]);
+		expect(f.abort).toHaveBeenCalledOnce();
+		expect(await handlers.session_before_compact!(f.event, f.ctx)).toEqual({ cancel: true });
+		expect(f.auth).not.toHaveBeenCalled();
+	});
+
 	it("cancels rather than throwing on configuration errors", async () => {
-		const { handlers } = registration("alpha", {}, true);
-		const f = fixture("alpha");
+		const { handlers } = registration({}, true);
+		const f = fixture("magpie");
 		expect(await handlers.session_before_compact!(f.event, f.ctx)).toEqual({ cancel: true });
 		expect(f.auth).not.toHaveBeenCalled();
 	});
@@ -130,28 +163,28 @@ describe("provider-scoped lifecycle", () => {
 	it.each([
 		{ checkpoint: undefined, fallbackToBuiltin: true, expected: undefined },
 		{ checkpoint: undefined, fallbackToBuiltin: false, expected: { cancel: true } },
-		{ checkpoint: "alpha", fallbackToBuiltin: true, expected: { cancel: true } },
+		{ checkpoint: "magpie", fallbackToBuiltin: true, expected: { cancel: true } },
 	])("limits failure fallback: %j", async ({ checkpoint, fallbackToBuiltin, expected }) => {
-		const { handlers } = registration("alpha", { fallbackToBuiltin });
-		const f = fixture("alpha", checkpoint);
+		const { handlers } = registration({ fallbackToBuiltin });
+		const f = fixture("magpie", checkpoint);
 		f.auth.mockRejectedValue(new Error("authentication failed"));
 		expect(await handlers.session_before_compact!(f.event, f.ctx)).toEqual(expected);
 	});
 
 	it("cancels an aborted compaction without falling back", async () => {
-		const { handlers } = registration("alpha");
-		const f = fixture("alpha");
+		const { handlers } = registration();
+		const f = fixture("magpie");
 		f.event.signal = AbortSignal.abort();
 		f.auth.mockRejectedValue(new Error("aborted"));
 		expect(await handlers.session_before_compact!(f.event, f.ctx)).toEqual({ cancel: true });
 	});
 
-	it("uses the configured command and retains argument validation", async () => {
-		const { commands } = registration("alpha");
-		const f = fixture("alpha");
-		await commands["alpha-compact"].handler("unexpected", f.ctx);
-		expect(f.notify).toHaveBeenLastCalledWith("Usage: /alpha-compact", "error");
-		await commands["alpha-compact"].handler("", f.ctx);
-		expect(f.notify).toHaveBeenLastCalledWith(expect.stringContaining("Enabled for alpha/test-model"), "info");
+	it("registers /magpie-native-compaction and retains argument validation", async () => {
+		const { commands } = registration();
+		const f = fixture("magpie");
+		await commands["magpie-native-compaction"].handler("unexpected", f.ctx);
+		expect(f.notify).toHaveBeenLastCalledWith("Usage: /magpie-native-compaction", "error");
+		await commands["magpie-native-compaction"].handler("", f.ctx);
+		expect(f.notify).toHaveBeenLastCalledWith(expect.stringContaining("Enabled for magpie/test-model"), "info");
 	});
 });
