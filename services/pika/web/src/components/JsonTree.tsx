@@ -42,7 +42,7 @@ function Node({ name, value, depth, defaultOpen }: { name?: string; value: unkno
 			</div>
 		);
 	}
-	const entries: [string, unknown][] = Array.isArray(value) ? value.map((item, index) => [String(index), item]) : Object.entries(value as object);
+	const entries: [string, unknown][] = Array.isArray(value) ? value.map((item, index) => [String(index), item]) : Object.entries(value);
 	return (
 		<div data-json-node="">
 			<button

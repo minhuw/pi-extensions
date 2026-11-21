@@ -335,19 +335,21 @@ describe("the rail's + menu", () => {
 
 	it("is never a list of disabled items, and gives each disabled one its own reason", () => {
 		const old = { ...mac, canCheckouts: false };
-		const states: Partial<AddMenuState>[] = [
-			{},
-			{ offline: ["mac"] },
-			{ unpaired: [{ id: "m", name: "mac" }] },
-			{ nodes: [old] },
-			{ nodes: [old], current: { node: "m", place: { place: "c:/p", name: "p", checkout: gitCheckout("c", "/p") } } },
-			{ nodes: [old, node01] },
-			{ nodes: [old, node01], current: { node: "m" } },
+		const cases: { state: Partial<AddMenuState>; actionable: boolean; disabled: string[] }[] = [
+			{ state: {}, actionable: false, disabled: [] },
+			{ state: { offline: ["mac"] }, actionable: false, disabled: [] },
+			{ state: { unpaired: [{ id: "m", name: "mac" }] }, actionable: true, disabled: [] },
+			{ state: { nodes: [old] }, actionable: true, disabled: ["add-checkout"] },
+			{ state: { nodes: [old], current: { node: "m", place: { place: "c:/p", name: "p", checkout: gitCheckout("c", "/p") } } }, actionable: true, disabled: ["new-worktree", "add-checkout"] },
+			{ state: { nodes: [old, node01] }, actionable: true, disabled: ["m:add-checkout"] },
+			{ state: { nodes: [old, node01], current: { node: "m" } }, actionable: true, disabled: ["add-checkout"] },
 		];
-		for (const state of states) {
+		for (const { state, actionable, disabled } of cases) {
 			const items = menuItems(plus(state));
-			if (items.length) expect(items.some((entry) => !entry.disabled), JSON.stringify(state)).toBe(true);
-			for (const entry of items.filter((entry) => entry.disabled)) expect(entry.reason).toBe("Update pika-node on mac to use this");
+			expect(items.some((entry) => !entry.disabled), JSON.stringify(state)).toBe(actionable);
+			const disabledItems = items.filter((entry) => entry.disabled);
+			expect(disabledItems.map((entry) => entry.id), JSON.stringify(state)).toEqual(disabled);
+			expect(disabledItems.map((entry) => entry.reason), JSON.stringify(state)).toEqual(disabled.map(() => "Update pika-node on mac to use this"));
 		}
 	});
 });

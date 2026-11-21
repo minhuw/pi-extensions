@@ -152,10 +152,6 @@ export function Properties({ items }: { items: Property[] }) {
 	);
 }
 
-export function Divider({ className }: { className?: string }) {
-	return <hr className={cx("border-0 border-t border-line", className)} />;
-}
-
 /** Every top-level page's column, so page titles start at the same x on every page. */
 export const PAGE_COLUMN = "mx-auto w-full max-w-[1240px] px-8 max-sm:px-4";
 

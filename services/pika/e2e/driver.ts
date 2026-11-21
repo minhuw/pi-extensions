@@ -20,7 +20,7 @@ import { check, checkEqual, env, log, sleep, waitFor } from "./util.ts";
 import { checkEdgeTraces, checkTrace } from "./trajectory.ts";
 import { SessionWatcher } from "./watch.ts";
 
-/** AC-1: each entry is retrievable from the read API within this long of being written. */
+/** Each entry is retrievable from the read API within this long of being written. */
 const UPLOAD_MS = 5_000;
 /** How long the uploader may take to deliver what it queued while the server was down, given its backoff. */
 const RECOVERY_MS = 120_000;

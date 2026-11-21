@@ -267,8 +267,6 @@ export class NodeWorkspaces {
 		return keys;
 	}
 
-	// ---------------------------------------------------------------------------------------------------------------
-
 	#load(): void {
 		let parsed: unknown;
 		try {

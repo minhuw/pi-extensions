@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pika's end-to-end check (AC-1, AC-2, AC-8): installs and builds everything from a fresh checkout, checks that the
+# pika's end-to-end check: installs and builds everything from a fresh checkout, checks that the
 # release binary refuses to start without a password, serves it with its embedded UI under /pika with a password, then
 # runs services/pika/e2e/driver.ts: a real pi runtime with Subagents, Herder, and pika against a mock provider, read API
 # and fidelity assertions across a server outage and a pi restart, a 5,000-entry session, the trace route against what

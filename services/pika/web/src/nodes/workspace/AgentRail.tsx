@@ -985,7 +985,7 @@ function ProjectBlock(props: BlockProps & { project: RailProject }) {
 						<InlineRename
 							initial={renaming === row && project.serverKey ? project.name : sanitize(only?.name ?? project.name)}
 							label={`Rename ${project.name}`}
-							onCommit={(next) => commitRename(renaming!, next)}
+							onCommit={(next) => commitRename(renaming, next)}
 							onCancel={() => setRenaming(undefined)}
 						/>
 					</div>

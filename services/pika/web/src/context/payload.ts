@@ -153,7 +153,7 @@ function anthropicBlocks(content: unknown): Block[] {
 			case "image":
 			case "document": {
 				const source = isRecord(block.source) ? block.source : {};
-				return { kind: "image", label: `${String(block.type)}${source.media_type ? ` · ${String(source.media_type)}` : ""}` };
+				return { kind: "image", label: `${block.type}${source.media_type ? ` · ${String(source.media_type)}` : ""}` };
 			}
 			default:
 				return { kind: "json", label: String(block.type ?? "block"), value: block };

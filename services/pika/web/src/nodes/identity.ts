@@ -119,8 +119,7 @@ export class IndexedDbKeyStore implements KeyStore {
 	}
 
 	async loadIdentity(): Promise<Identity | undefined> {
-		const value = (await promised((await this.#store(IDENTITY, "readonly")).get(CLIENT_KEY))) as Identity | undefined;
-		return value ?? undefined;
+		return (await promised((await this.#store(IDENTITY, "readonly")).get(CLIENT_KEY))) as Identity | undefined;
 	}
 
 	async saveIdentity(identity: Identity): Promise<void> {

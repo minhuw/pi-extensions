@@ -321,8 +321,6 @@ export class EditorStore {
 		this.#listeners.clear();
 	}
 
-	// ---------------------------------------------------------------------------------------------------------------
-
 	/** A side's content: not found (a new or deleted file) is absent; binary and too large are named, not shown. */
 	async #side(files: NodeFiles, source: DiffSource): Promise<Side> {
 		if (source.ref === "none") return { kind: "absent" };

@@ -268,7 +268,6 @@ export function PhaseSwatch({ phase, className }: { phase: "waiting" | "streamin
 	);
 }
 
-/** The record's bar on its turn's time scale. */
 /**
  * A record's bar on its row's time scale. `tail`, a later time, extends a spawning call with a dashed line to when its
  * child last worked, cut at the window's edge.

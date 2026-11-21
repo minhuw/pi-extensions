@@ -119,7 +119,7 @@ export class NodeChannel {
 		const pending = await startHandshake(this.#options.identity, { channel: this.route.channel, node: this.route.node }, this.#options.label);
 		if (this.#state.kind !== "handshaking") return;
 		this.#pending = pending;
-		this.route.send(pending.hs1 as unknown as Body);
+		this.route.send(pending.hs1);
 	}
 
 	onState(listener: (state: ChannelState) => void): () => void {
@@ -165,7 +165,7 @@ export class NodeChannel {
 		const sealed = session.seal(text);
 		const sent = this.#outbox.then(async () => {
 			const rec = await sealed;
-			if (this.#state.kind === "ready") this.route.send(rec as unknown as Body);
+			if (this.#state.kind === "ready") this.route.send(rec);
 		});
 		this.#outbox = sent.catch((error: unknown) => this.#failWith(error));
 		return sent;
@@ -202,7 +202,7 @@ export class NodeChannel {
 			this.#nodeKey = finished.nodeKey;
 			// `hs3` is a handshake message, not an inner one: without a pin it goes out only so the node can record
 			// this client for enrolment, or show that it is already allowed.
-			this.route.send(finished.hs3 as unknown as Body);
+			this.route.send(finished.hs3);
 		} catch (error) {
 			if (error instanceof ChannelError && error.code === "node_key_changed") {
 				const spki = fromBase64Url(hs2.nodeKey);

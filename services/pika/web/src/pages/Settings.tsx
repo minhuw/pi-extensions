@@ -158,7 +158,7 @@ export function SettingsPage() {
 											onClick={() => update.mutate({ project, published: !published })}
 											className={cx(published ? BUTTON.quiet : BUTTON.secondary, "h-7 min-w-[96px] justify-center")}
 										>
-											{update.isPending && update.variables?.project === project ? "Saving…" : published ? "Unpublish" : "Publish"}
+											{update.isPending && update.variables.project === project ? "Saving…" : published ? "Unpublish" : "Publish"}
 										</button>
 										<button
 											type="button"

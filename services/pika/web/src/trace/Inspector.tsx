@@ -304,7 +304,7 @@ function RawTab({ sessionId, entries }: { sessionId: string; entries: (Entry | n
 function useExitLabel(target: InspectorTarget): string | undefined {
 	const record = target.kind === "record" ? target.record : undefined;
 	const shell = record?.kind === "tool" && record.isError && toolFamily(toolName(record)) === "shell";
-	const result = useLoadedEntry(target.kind === "record" ? target.sessionId : "", shell && record?.kind === "tool" ? record.resultSeq : undefined);
+	const result = useLoadedEntry(target.kind === "record" ? target.sessionId : "", shell ? record.resultSeq : undefined);
 	if (!shell) return undefined;
 	const code = /Command exited with code (-?\d+)/.exec(JSON.stringify(result?.raw.message ?? ""))?.[1];
 	return code !== undefined ? `exit ${code}` : "failed";
@@ -516,7 +516,7 @@ export const Inspector = forwardRef<HTMLDivElement, InspectorProps>(function Ins
 	const record = target?.kind === "record" ? target.record : undefined;
 	const sessionId = target?.kind === "record" ? target.sessionId : "";
 	const load = !preview && record !== undefined;
-	const entry = useEntry(sessionId, record?.seq, load && record !== undefined);
+	const entry = useEntry(sessionId, record?.seq, load);
 	const resultSeq = record?.kind === "tool" ? record.resultSeq : undefined;
 	const resultEntry = useEntry(sessionId, resultSeq, load && resultSeq !== undefined);
 	const call = record?.kind === "tool" ? callIn(entry.data, record.callId) : undefined;

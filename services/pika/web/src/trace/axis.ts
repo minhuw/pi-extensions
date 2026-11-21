@@ -3,7 +3,6 @@
 import type { SessionTrace, TraceRecord } from "../lib/types";
 import {
 	childSpan,
-	contextTokens,
 	indexSpawningCalls,
 	llmPhases,
 	recordFamily,
@@ -591,24 +590,6 @@ export function layoutOverview(trace: SessionTrace, scale: Scale, lanes: LaneBox
 		});
 	}
 	return items;
-}
-
-/** Context size per model call, as points for the sparkline behind the LLM lane. */
-export function contextSeries(trace: SessionTrace, scale: Scale): { x: number; value: number }[] {
-	const points: { x: number; value: number }[] = [];
-	for (const record of trace.records) {
-		if (record.kind === "compaction") {
-			const { start } = recordSpan(record);
-			if (start !== undefined) points.push({ x: scale.x(start), value: 0 });
-			continue;
-		}
-		if (record.kind !== "llm") continue;
-		const { start, end } = recordSpan(record);
-		const at = end ?? start;
-		if (at === undefined) continue;
-		points.push({ x: scale.x(at), value: contextTokens(record) });
-	}
-	return points;
 }
 
 /**

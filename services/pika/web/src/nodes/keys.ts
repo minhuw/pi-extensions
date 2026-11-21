@@ -272,7 +272,7 @@ export function buildKeymap(settings: unknown, mac: boolean = IS_MAC): Keymap {
 					problems.push({ message: `Unknown action "${name}".` });
 					continue;
 				}
-				const texts = typeof value === "string" ? [value] : Array.isArray(value) && value.every((item) => typeof item === "string") ? (value as string[]) : undefined;
+				const texts = typeof value === "string" ? [value] : Array.isArray(value) && value.every((item) => typeof item === "string") ? value : undefined;
 				if (!texts) {
 					problems.push({ action: spec.id, message: `${spec.label}: give a chord, a list of chords, or [] for none.` });
 					continue;

@@ -90,10 +90,6 @@ export function plural(n: number, word: string, pluralWord = `${word}s`): string
 	return `${formatCount(n)} ${n === 1 ? word : pluralWord}`;
 }
 
-export function truncateText(text: string, max: number): string {
-	return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
-
 /** What a cost is the cost of: one record, or a whole session or family. */
 export type CostScale = "record" | "session";
 

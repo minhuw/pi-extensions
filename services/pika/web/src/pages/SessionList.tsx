@@ -361,7 +361,7 @@ function RowSkeleton() {
 	);
 }
 
-/** The project and device shortcuts the sidebar used to list: each links to the list filtered by it. */
+/** Project and device shortcuts; each links to the list filtered by it. */
 function BrowseSection({ title, items, param }: { title: string; items: FilterOption[]; param: string }) {
 	const [params] = useSearchParams();
 	if (items.length === 0) return null;

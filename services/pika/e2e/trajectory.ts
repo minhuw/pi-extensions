@@ -161,7 +161,7 @@ export async function checkTrace(api: ReadApi, ids: { mainId: string; childId: s
 
 	// Gzipped when the client accepts it, plain otherwise.
 	const path = `${api.base}/api/v1/sessions/${encodeURIComponent(largeId)}/trace`;
-	const cookie = (api as unknown as { cookie: string }).cookie;
+	const cookie = api.authCookie;
 	const plain = await fetch(path, { headers: { cookie, "accept-encoding": "identity" } });
 	checkEqual({ status: plain.status, encoding: plain.headers.get("content-encoding") }, { status: 200, encoding: null }, "the large trace without gzip");
 	const rawBytes = Buffer.from(await plain.arrayBuffer());
@@ -214,8 +214,7 @@ async function openTrajectory(ui: Ui, sessionId: string, query = ""): Promise<vo
 
 /** Pixels of the overview's base canvas that are drawn on, and how many distinct colors they use. */
 async function canvasInk(ui: Ui): Promise<{ painted: number; colors: number; width: number; height: number }> {
-	return ui.page.$eval("[data-overview] canvas", (node) => {
-		const canvas = node as HTMLCanvasElement;
+	return ui.page.$eval("[data-overview] canvas", (canvas) => {
 		const data = canvas.getContext("2d")!.getImageData(0, 0, canvas.width, canvas.height).data;
 		let painted = 0;
 		const colors = new Set<number>();

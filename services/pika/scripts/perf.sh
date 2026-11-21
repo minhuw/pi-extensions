@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pika's performance check (AC-7): builds the release binaries, generates one year of data from five machines and
+# pika's performance check: builds the release binaries, generates one year of data from five machines and
 # loads it through the ingest code, serves it on a free localhost port, and measures the read API. Exits non-zero
 # when the dataset falls short of the required shape or a query class exceeds its p95 limit. See docs/PERF.md.
 #

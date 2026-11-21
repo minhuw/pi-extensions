@@ -99,7 +99,3 @@ export function ToolErrorCallout({ result, title = "Tool error" }: { result: Too
 export function PendingResult() {
 	return <div className="mt-1 text-[13px] text-muted italic">No result recorded</div>;
 }
-
-export function Label({ children }: { children: string }) {
-	return <div className="mt-3 mb-1 text-[12px] font-medium text-muted">{children}</div>;
-}

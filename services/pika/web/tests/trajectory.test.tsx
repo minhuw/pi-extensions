@@ -198,7 +198,10 @@ describe("trajectory ledger", () => {
 		});
 		expect(server.calls).toContain("/api/v1/requests/r1");
 		expect(panel.querySelector("[data-system-sections]")).not.toBeNull();
-		expect(panel.querySelectorAll("[data-tool-decl]").length + panel.querySelectorAll("[data-raw-json]").length).toBeGreaterThanOrEqual(0);
+		fireEvent.click(within(panel).getByRole("button", { name: "1 tool declaration" }));
+		fireEvent.click(within(panel).getByRole("button", { name: "Show the reconstructed request" }));
+		expect(panel.querySelector("[data-tool-decl='read']")).not.toBeNull();
+		expect(panel.querySelector("[data-raw-json]")).not.toBeNull();
 		expect(within(panel).getByText("Anthropic messages")).toBeTruthy();
 		// A model call without a captured request says so.
 		fireEvent.click(row("[data-seq='9']"));

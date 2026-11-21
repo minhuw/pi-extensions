@@ -326,9 +326,10 @@ describe("the live tail", () => {
 				fixture.detail = { ...fixture.detail, entryCount: fixture.entries.length, lastAt: new Date().toISOString() };
 			};
 			// Not at the tail: a new record does not pull the reader down.
+			const beforeAppend = bottom();
 			append(45);
 			await traceFetches(server, "live", 2);
-			await waitFor(() => expect(document.querySelector("[data-turn='45']") ?? rows().length).toBeTruthy());
+			await waitFor(() => expect(bottom()).toBeGreaterThan(beforeAppend));
 			expect(pane().scrollTop).toBe(top);
 
 			// Back at the tail, the ledger follows, and the arriving row fades in.

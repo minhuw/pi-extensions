@@ -80,7 +80,7 @@ export class RpcPi {
 		this.child = child;
 		appendFileSync(pidFile, `${child.pid}\n`);
 		const log = createWriteStream(logFile, { flags: "a" });
-		child.stderr!.pipe(log);
+		child.stderr.pipe(log);
 		this.exited = new Promise((resolve) => child.once("exit", (code, signal) => {
 			const error = new Error(`pi ${this.options.label} exited (code ${code}, signal ${signal}); see ${logFile}`);
 			for (const pending of this.pending.values()) pending.reject(error);
@@ -88,8 +88,8 @@ export class RpcPi {
 			resolve();
 		}));
 		// Records are split on LF only: JSON strings may hold U+2028, which readline would split on.
-		child.stdout!.setEncoding("utf8");
-		child.stdout!.on("data", (chunk: string) => {
+		child.stdout.setEncoding("utf8");
+		child.stdout.on("data", (chunk: string) => {
 			this.buffer += chunk;
 			for (let end = this.buffer.indexOf("\n"); end >= 0; end = this.buffer.indexOf("\n")) {
 				const line = this.buffer.slice(0, end).replace(/\r$/, "");

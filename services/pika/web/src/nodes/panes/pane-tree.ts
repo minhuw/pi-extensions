@@ -167,7 +167,7 @@ export function setRatio(tree: PaneTree, path: PanePath, ratio: number, size?: n
         if (node.type !== "split") throw new PaneTreeError(`No split at ${path.join("/") || "the root"}.`);
         if (rest.length === 0) return { ...node, ratio: clamped };
         const [side, ...tail] = rest;
-        return { ...node, [side!]: update(node[side!], tail) };
+        return { ...node, [side]: update(node[side], tail) };
     };
     return update(tree, path);
 }

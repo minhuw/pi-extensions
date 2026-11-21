@@ -6,7 +6,7 @@ import { Icon } from "../components/icons";
 import { Markdown } from "../components/Markdown";
 import { Pill, Toggle } from "../components/ui";
 import { useApi } from "../lib/api";
-import { formatDuration, formatRelative, plural } from "../lib/format";
+import { formatDuration, plural } from "../lib/format";
 import { childLabel } from "../lib/labels";
 import type { ChildSession, SessionDetail } from "../lib/types";
 import { useViewState } from "../lib/viewState";
@@ -176,35 +176,3 @@ registerToolRenderer({
 	summary: (call) => argString(call, "name") ?? argString(call, "scriptPath"),
 	Component: WorkflowTool,
 });
-
-const PROPERTY_LIMIT = 8;
-
-/** The session page's "Subagents" property value. */
-export function SubagentList({ items }: { items: ChildSession[] }) {
-	const [all, setAll] = useViewState("subagents-all", false);
-	const shown = all ? items : items.slice(0, PROPERTY_LIMIT);
-	return (
-		<div className="flex w-full min-w-0 flex-col py-1" data-subagents="">
-			{shown.map((child) => {
-				const { type, description } = childLabel(child);
-				return (
-					<Link
-						key={child.id}
-						to={`/s/${encodeURIComponent(child.id)}`}
-						className="-mx-1 flex min-w-0 items-center gap-2 rounded-sm px-1 hover:bg-hover"
-						title={child.title}
-					>
-						<Pill>{type}</Pill>
-						<span className="min-w-0 truncate">{description}</span>
-						<span className="ml-auto shrink-0 text-[12px] text-muted">{formatRelative(child.startedAt)}</span>
-					</Link>
-				);
-			})}
-			{items.length > PROPERTY_LIMIT && (
-				<button type="button" onClick={() => setAll(!all)} className="self-start rounded-sm px-1 text-[13px] text-muted hover:bg-hover">
-					{all ? "Show fewer" : `Show all ${items.length}`}
-				</button>
-			)}
-		</div>
-	);
-}

@@ -111,7 +111,8 @@ function reportFrom(value: unknown): TicketReport | undefined {
 	const branch = cleanBranch(record.branch);
 	if (branch) report.branch = branch;
 	for (const key of ["summary", "question", "reason"] as const) {
-		const text = typeof record[key] === "string" ? (record[key] as string).trim() : "";
+		const value = record[key];
+		const text = typeof value === "string" ? value.trim() : "";
 		if (text) report[key] = text.slice(0, 4000);
 	}
 	return report;

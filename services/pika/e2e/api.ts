@@ -9,6 +9,10 @@ export class ReadApi {
 		this.password = password;
 	}
 
+	get authCookie(): string {
+		return this.cookie;
+	}
+
 	async login(): Promise<void> {
 		const response = await fetch(`${this.base}/api/v1/login`, {
 			method: "POST",

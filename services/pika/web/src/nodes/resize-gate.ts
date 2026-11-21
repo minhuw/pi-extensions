@@ -31,12 +31,6 @@ function install(): void {
 	window.addEventListener("blur", up);
 }
 
-/** Whether a pointer is down now. */
-export function pointerHeld(): boolean {
-	install();
-	return down > 0;
-}
-
 /** Runs `fn` now, or once the pointer is up. Returns a function that drops it if it has not run. */
 export function whenSettled(fn: () => void): () => void {
 	install();

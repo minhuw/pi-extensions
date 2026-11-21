@@ -42,7 +42,10 @@ export function loadLayout(storage: Pick<Storage, "getItem"> | undefined = globa
 		const value = stored[pane];
 		return typeof value === "number" && Number.isFinite(value) ? clampWidth(pane, value) : LAYOUT_DEFAULTS[pane];
 	};
-	const flag = (name: "railOpen" | "filesOpen" | "hidden" | "diffInline") => (typeof stored[name] === "boolean" ? (stored[name] as boolean) : LAYOUT_DEFAULTS[name]);
+	const flag = (name: "railOpen" | "filesOpen" | "hidden" | "diffInline") => {
+		const value = stored[name];
+		return typeof value === "boolean" ? value : LAYOUT_DEFAULTS[name];
+	};
 	const sidebar = stored.sidebar === "changes" || stored.sidebar === "files" ? stored.sidebar : LAYOUT_DEFAULTS.sidebar;
 	return {
 		rail: width("rail"),

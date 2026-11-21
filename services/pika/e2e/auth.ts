@@ -95,7 +95,7 @@ async function openRequest(browser: Ui, code: string, link: string, request: { n
 	check(text.includes(code) && /Expires in \d+:\d\d/.test(text), `the pairing request shows ${JSON.stringify(text)}`);
 	checkEqual(await browser.textOf(`${card} [data-pairing-name]`), `Requested name ${request.name}`, "the requested name on the approval page");
 	const { recognized } = request;
-	const proposed = await browser.page.$eval(`${card} input:not([type=radio])`, (input) => (input as HTMLInputElement).value);
+	const proposed = await browser.page.$eval(`${card} input:not([type=radio])`, (input) => input.value);
 	checkEqual(proposed, recognized?.name ?? request.name, "the device name the approval page proposes");
 	if (recognized) {
 		checkEqual(await browser.page.$eval(card, (node) => node.getAttribute("data-pairing-match")), recognized.id, "the device the approval page recognized");
@@ -160,7 +160,7 @@ function savedKey(machine: NewMachine): string {
 async function deviceIdShown(browser: Ui, row: string): Promise<{ text: string; full: string }> {
 	const [text, full, title] = await browser.page.$eval(`${row} [data-device-id]`, (node) => [(node as HTMLElement).innerText, node.getAttribute("data-device-id") ?? "", node.getAttribute("title") ?? ""]);
 	checkEqual(title, full, "the title of a device row's id");
-	return { text: text!, full: full! };
+	return { text, full };
 }
 
 /** The session that ran `/pika login` uploads `prompt`'s entries at once, attributed to `id`; returns its summary. */
@@ -273,9 +273,9 @@ export async function checkRename(browser: Ui, t: AuthTargets, paired: Paired): 
 	const open = async () => {
 		await browser.click(`${row} button[aria-label^="Rename"]`);
 		await browser.visible(`${dialog} input`);
-		checkEqual(await browser.page.$eval(`${dialog} input`, (input) => (input as HTMLInputElement).value), t.device, "the name the rename dialog starts with");
+		checkEqual(await browser.page.$eval(`${dialog} input`, (input) => input.value), t.device, "the name the rename dialog starts with");
 		check((await browser.textOf(dialog)).includes(`Rename ${t.device}`), "the rename dialog does not name the device");
-		await browser.page.$eval(`${dialog} input`, (input) => (input as HTMLInputElement).select());
+		await browser.page.$eval(`${dialog} input`, (input) => input.select());
 		await browser.page.type(`${dialog} input`, t.renamed);
 	};
 	// The dialog is modal, so the theme changes with it closed; Cancel keeps the old name.
@@ -432,7 +432,7 @@ export async function checkLoginRateLimit(browser: Ui, t: AuthTargets): Promise<
 		await browser.page.click("button[type=submit]");
 		return waitFor(async () => {
 			const text = await alert();
-			const idle = await browser.page.$eval("button[type=submit]", (node) => (node as HTMLButtonElement).innerText === "Continue");
+			const idle = await browser.page.$eval("button[type=submit]", (node) => node.innerText === "Continue");
 			return idle && text !== undefined && want(text) ? text : undefined;
 		}, 10_000, label);
 	};

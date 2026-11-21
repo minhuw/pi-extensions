@@ -815,12 +815,6 @@ export interface Usage {
 	cost?: { total?: number };
 }
 
-export interface UserMessage {
-	role: "user";
-	content: string | (TextContent | ImageContent)[];
-	timestamp: number;
-}
-
 export interface AssistantMessage {
 	role: "assistant";
 	content: ContentBlock[];
@@ -854,18 +848,6 @@ export interface BashExecutionMessage {
 	fullOutputPath?: string;
 	timestamp: number;
 }
-
-export interface OtherMessage {
-	role: string;
-	[key: string]: unknown;
-}
-
-export type AgentMessage =
-	| UserMessage
-	| AssistantMessage
-	| ToolResultMessage
-	| BashExecutionMessage
-	| OtherMessage;
 
 export interface RawEntry {
 	type: string;

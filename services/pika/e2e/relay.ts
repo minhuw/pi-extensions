@@ -283,7 +283,7 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 		await browser.go("/devices");
 		await browser.click(`[data-device="${A.deviceId}"] button[aria-label^="Rename"]`);
 		await browser.visible("[data-dialog=rename] input");
-		await browser.page.$eval("[data-dialog=rename] input", (input) => (input as HTMLInputElement).select());
+		await browser.page.$eval("[data-dialog=rename] input", (input) => input.select());
 		await browser.page.type("[data-dialog=rename] input", RENAMED_A);
 		await browser.click("[data-dialog=rename] button[type=submit]");
 		await browser.visible("[data-notice=green]");

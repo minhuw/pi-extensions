@@ -36,7 +36,7 @@ export function extractDocHeadings(tree: Root): DocHeading[] {
 	visitHeadings(tree, (heading) => {
 		if (heading.depth === 2 || heading.depth === 3) {
 			headings.push({
-				id: String(heading.data?.hProperties?.id ?? ""),
+				id: heading.data?.hProperties?.id ?? "",
 				title: headingText(heading),
 				depth: heading.depth,
 			});
