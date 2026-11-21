@@ -685,6 +685,12 @@ impl Nodes {
             return;
         }
         let channel = base64url_encode(&random_bytes::<16>());
+        // Queue `opened` before `open` so overflowing the node's outbox delivers `close(node_offline)` after `opened`,
+        // and register the channel only if `opened` fits so overflowing the client's outbox leaves the node untouched.
+        inner.push(socket, json!({ "type": "opened", "ref": reference, "channel": channel, "node": node }).to_string());
+        if inner.sockets.get(&socket).is_none_or(Socket::closed) {
+            return;
+        }
         inner.channels.insert(channel.clone(), Channel { node_socket, client_socket: socket });
         for side in [node_socket, socket] {
             if let Some(s) = inner.sockets.get_mut(&side) {
@@ -692,7 +698,6 @@ impl Nodes {
             }
         }
         inner.push(node_socket, json!({ "type": "open", "channel": channel, "client": client }).to_string());
-        inner.push(socket, json!({ "type": "opened", "ref": reference, "channel": channel, "node": node }).to_string());
     }
 
     /// The other side of `channel` from `socket`, when `socket` is one of its sides.

@@ -661,3 +661,216 @@ async fn a_browser_that_stops_reading_is_closed_with_1008() {
     // The node is unaffected.
     assert_eq!(s.state.nodes.online(), 1);
 }
+
+#[tokio::test]
+async fn open_overflowing_node_outbox_never_delivers_close_before_opened() {
+    use std::collections::HashSet;
+
+    use pika::config::NodesConfig;
+    use pika::nodes::{Hello, Nodes, close};
+    use serde_json::value::RawValue;
+
+    let mut config = NodesConfig::default();
+    config.enabled = true;
+    config.max_outgoing_bytes = 512;
+    let hub = Nodes::new(config);
+
+    let mut node = hub.connect_node("node-1", "hash".into());
+    hub.hello(
+        node.id,
+        Hello { host: Some("node01.lan".into()), version: "0.1.0".into(), public_key: PUBLIC_KEY.into() },
+        "node01".into(),
+    )
+    .unwrap();
+    let welcome = node.frames.recv().await.unwrap();
+    node.frames.written(welcome.len());
+
+    let mut client = hub.connect_client(None, json!({ "session": "test" })).unwrap();
+    for _ in 0..2 {
+        let frame = client.frames.recv().await.unwrap();
+        client.frames.written(frame.len());
+    }
+
+    // Open a seed channel so we can fill the node's outbox right up to its limit.
+    hub.open(client.id, "seed", "node-1");
+    let seed_open = node.frames.recv().await.unwrap();
+    node.frames.written(seed_open.len());
+    let seed_opened = client.frames.recv().await.unwrap();
+    client.frames.written(seed_opened.len());
+    let seed_channel = serde_json::from_str::<Value>(&seed_opened).unwrap()["channel"].as_str().unwrap().to_owned();
+
+    // Fill the node's outbox to within 48 bytes of max_outgoing_bytes without marking it written, so the next `open`
+    // frame overflows the node's outbox inside `Nodes::open`.
+    let pad_len = 512 - 48 - format!("{{\"type\":\"frame\",\"channel\":\"{seed_channel}\",\"body\":{{\"p\":\"\"}}}}").len();
+    let body = RawValue::from_string(format!("{{\"p\":\"{}\"}}", "x".repeat(pad_len))).unwrap();
+    hub.forward(client.id, &seed_channel, &body);
+    assert_eq!(node.outbox.queued(), 512 - 48);
+    assert_eq!(hub.online(), 1);
+
+    // Opening a new channel overflows `node`'s outbox and detaches it.
+    hub.open(client.id, "r1", "node-1");
+    assert_eq!(node.closing.try_recv().unwrap().0, close::SLOW_READER);
+    assert_eq!(hub.online(), 0);
+    assert_eq!(hub.channels(), 0);
+
+    // Every frame queued for the client must respect protocol order: never `close` before `opened`.
+    let mut opened_channels = HashSet::from([seed_channel.clone()]);
+    let mut closed_channels = HashSet::new();
+    let mut r1_channel: Option<String> = None;
+    let mut r1_refused = false;
+    while let Ok(Some(raw)) = tokio::time::timeout(Duration::from_millis(50), client.frames.recv()).await {
+        client.frames.written(raw.len());
+        let frame: Value = serde_json::from_str(&raw).unwrap();
+        match frame["type"].as_str() {
+            Some("opened") => {
+                assert_eq!(frame["ref"], "r1");
+                let ch = frame["channel"].as_str().unwrap().to_owned();
+                assert!(!closed_channels.contains(&ch), "received close before opened for {ch}");
+                opened_channels.insert(ch.clone());
+                r1_channel = Some(ch);
+            }
+            Some("close") => {
+                let ch = frame["channel"].as_str().unwrap().to_owned();
+                assert_eq!(frame["code"], "node_offline", "{frame}");
+                assert!(opened_channels.contains(&ch), "received close before opened: {frame}");
+                closed_channels.insert(ch);
+            }
+            Some("refused") => {
+                assert_eq!(frame["ref"], "r1");
+                assert_eq!(frame["code"], "node_offline");
+                r1_refused = true;
+            }
+            Some("nodes") => {}
+            other => panic!("unexpected frame {other:?}: {frame}"),
+        }
+    }
+    assert!(closed_channels.contains(&seed_channel), "seed channel was not closed");
+    if let Some(ch) = r1_channel {
+        assert!(closed_channels.contains(&ch), "opened channel {ch} was not closed with node_offline");
+    } else {
+        assert!(r1_refused, "expected opened+close(node_offline) or refused(node_offline) for r1");
+    }
+}
+
+#[tokio::test]
+async fn open_overflowing_client_outbox_does_not_open_on_node() {
+    use pika::config::NodesConfig;
+    use pika::nodes::{Hello, Nodes, close};
+    use serde_json::value::RawValue;
+
+    let mut config = NodesConfig::default();
+    config.enabled = true;
+    config.max_outgoing_bytes = 512;
+    let hub = Nodes::new(config);
+
+    let mut node = hub.connect_node("node-1", "hash".into());
+    hub.hello(
+        node.id,
+        Hello { host: Some("node01.lan".into()), version: "0.1.0".into(), public_key: PUBLIC_KEY.into() },
+        "node01".into(),
+    )
+    .unwrap();
+    let welcome = node.frames.recv().await.unwrap();
+    node.frames.written(welcome.len());
+
+    let mut client = hub.connect_client(None, json!({ "session": "test" })).unwrap();
+    for _ in 0..2 {
+        let frame = client.frames.recv().await.unwrap();
+        client.frames.written(frame.len());
+    }
+
+    hub.open(client.id, "seed", "node-1");
+    let seed_open = node.frames.recv().await.unwrap();
+    node.frames.written(seed_open.len());
+    let seed_opened = client.frames.recv().await.unwrap();
+    client.frames.written(seed_opened.len());
+    let seed_channel = serde_json::from_str::<Value>(&seed_opened).unwrap()["channel"].as_str().unwrap().to_owned();
+
+    // Fill the client's outbox so queueing `opened` overflows it.
+    let pad_len = 512 - 48 - format!("{{\"type\":\"frame\",\"channel\":\"{seed_channel}\",\"body\":{{\"p\":\"\"}}}}").len();
+    let body = RawValue::from_string(format!("{{\"p\":\"{}\"}}", "x".repeat(pad_len))).unwrap();
+    hub.forward(node.id, &seed_channel, &body);
+    assert_eq!(client.outbox.queued(), 512 - 48);
+
+    hub.open(client.id, "r1", "node-1");
+    assert_eq!(client.closing.try_recv().unwrap().0, close::SLOW_READER);
+    assert_eq!(hub.online(), 1);
+    assert_eq!(hub.channels(), 0);
+
+    // The node gets only `close(seed_channel, "client_gone")` — neither `open` nor a spurious `close` for r1.
+    let mut frames = Vec::new();
+    while let Ok(Some(raw)) = tokio::time::timeout(Duration::from_millis(50), node.frames.recv()).await {
+        node.frames.written(raw.len());
+        frames.push(serde_json::from_str::<Value>(&raw).unwrap());
+    }
+    assert_eq!(frames, vec![json!({ "type": "close", "channel": seed_channel, "code": "client_gone" })]);
+}
+
+#[tokio::test]
+async fn a_node_that_stops_reading_never_sends_close_before_opened() {
+    use std::collections::HashSet;
+
+    let s = server_with(|c| {
+        c.nodes.max_outgoing_bytes = 256 << 10;
+        c.nodes.max_channels_per_client = 4096;
+        c.nodes.max_channels_per_node = 4096;
+        c.nodes.opens_per_minute = 4096;
+    })
+    .await;
+    let cookie = s.login().await;
+    let (mut node, _) = Peer::node(&s, &s.credential).await;
+    let (mut browser, _) = Peer::client(&s, &cookie).await;
+    let seed = browser.open("seed", &s.node).await.unwrap();
+    assert_eq!(node.next().await["channel"], seed);
+
+    // The node reads nothing from here on. Each iteration sends a frame just below `max_outgoing_bytes` (~1.5 KiB
+    // headroom) followed by 16 `open` requests (~2 KiB total) so once the TCP buffers fill, an `open` overflows the
+    // node's outbox.
+    let pad = "x".repeat(260_500);
+    let mut sent_refs = HashSet::new();
+    let mut ref_seq = 0usize;
+    for n in 0..128 {
+        if s.state.nodes.online() == 0 {
+            break;
+        }
+        browser.send(json!({ "type": "frame", "channel": seed, "body": { "n": n, "pad": pad } })).await;
+        for _ in 0..16 {
+            let r = format!("r{ref_seq}");
+            ref_seq += 1;
+            sent_refs.insert(r.clone());
+            browser.send(json!({ "type": "open", "ref": r, "node": s.node })).await;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    until("node detached as slow reader", || s.state.nodes.online() == 0).await;
+
+    let mut opened_channels = HashSet::from([seed.clone()]);
+    let mut closed_channels = HashSet::new();
+    let mut answered_refs = HashSet::new();
+    while answered_refs.len() < sent_refs.len() || closed_channels.len() < opened_channels.len() {
+        let frame = browser.next_routed().await;
+        match frame["type"].as_str() {
+            Some("opened") => {
+                let r = frame["ref"].as_str().unwrap().to_owned();
+                let ch = frame["channel"].as_str().unwrap().to_owned();
+                assert!(!closed_channels.contains(&ch), "received close before opened for {ch}");
+                answered_refs.insert(r);
+                opened_channels.insert(ch);
+            }
+            Some("close") => {
+                let ch = frame["channel"].as_str().unwrap().to_owned();
+                assert_eq!(frame["code"], "node_offline", "{frame}");
+                assert!(opened_channels.contains(&ch), "received close before opened: {frame}");
+                closed_channels.insert(ch);
+            }
+            Some("refused") => {
+                let r = frame["ref"].as_str().unwrap().to_owned();
+                assert_eq!(frame["code"], "node_offline", "{frame}");
+                answered_refs.insert(r);
+            }
+            other => panic!("unexpected frame {other:?}: {frame}"),
+        }
+    }
+    assert_eq!(node.closed().await, 1008);
+    assert_eq!(s.state.nodes.online(), 0);
+}
