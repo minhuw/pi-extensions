@@ -457,11 +457,32 @@ export class AgentWidget {
     this.update();
   }
 
-  /** Ensure the widget update timer is running. */
-  ensureTimer() {
+  /** Whether any visible internal or external agent is actively running or queued. */
+  private hasActiveWork(): boolean {
+    if (this.widgetAgents().some(a => a.status === "running" || a.status === "queued")) {
+      return true;
+    }
+    return this.mode() !== "off" && this.external().some(view => view.agent.status === "running");
+  }
+
+  private startTimer() {
     if (!this.widgetInterval) {
       this.widgetInterval = setInterval(() => this.update(), 80);
+      this.widgetInterval.unref?.();
     }
+  }
+
+  private stopTimer() {
+    if (this.widgetInterval) {
+      clearInterval(this.widgetInterval);
+      this.widgetInterval = undefined;
+    }
+  }
+
+  /** Ensure the widget update timer is running when active work exists. */
+  ensureTimer() {
+    if (!this.uiCtx || !this.hasActiveWork()) return;
+    this.startTimer();
   }
 
   /** Check if a finished agent should still be shown in the widget. */
@@ -800,7 +821,10 @@ export class AgentWidget {
 
   /** Force an immediate widget update. */
   update() {
-    if (!this.uiCtx) return;
+    if (!this.uiCtx) {
+      this.stopTimer();
+      return;
+    }
     const allAgents = this.widgetAgents();
 
     // Lightweight existence checks — full categorization happens in renderWidget()
@@ -813,7 +837,9 @@ export class AgentWidget {
       else if (a.completedAt && this.shouldShowFinished(a.id, a.status)) { hasFinished = true; }
     }
     const hasActive = runningCount > 0 || queuedCount > 0;
-    const hasExternal = this.visibleExternal().length > 0;
+    const visibleExternal = this.visibleExternal();
+    const hasExternal = visibleExternal.length > 0;
+    const hasActiveWork = hasActive || visibleExternal.some(view => view.agent.status === "running");
 
     // Nothing to show — clear widget
     if (!hasActive && !hasFinished && !hasExternal) {
@@ -826,7 +852,7 @@ export class AgentWidget {
         this.uiCtx.setStatus("subagents", undefined);
         this.lastStatusText = undefined;
       }
-      if (this.widgetInterval) { clearInterval(this.widgetInterval); this.widgetInterval = undefined; }
+      this.stopTimer();
       // Clean up stale entries; an external agent keeps its age while its source lists it, so it cannot reappear.
       const externalIds = new Set(this.external().map(view => view.agent.id));
       for (const [id] of this.finishedTurnAge) {
@@ -849,7 +875,9 @@ export class AgentWidget {
       this.lastStatusText = newStatusText;
     }
 
-    this.widgetFrame++;
+    if (hasActiveWork) {
+      this.widgetFrame++;
+    }
 
     // Register widget callback once; subsequent updates use requestRender()
     // which re-invokes render() without replacing the component (avoids layout thrashing).
@@ -870,14 +898,19 @@ export class AgentWidget {
       // Widget already registered — just request a re-render of existing components.
       this.tui?.requestRender();
     }
+
+    // Stop the 80ms render loop once all internal and external agents settle;
+    // resume automatically whenever active work appears again.
+    if (hasActiveWork) {
+      this.startTimer();
+    } else {
+      this.stopTimer();
+    }
   }
 
   dispose() {
     this.finishedTurnAge.clear();
-    if (this.widgetInterval) {
-      clearInterval(this.widgetInterval);
-      this.widgetInterval = undefined;
-    }
+    this.stopTimer();
     if (this.uiCtx) {
       this.uiCtx.setWidget("agents", undefined);
       this.uiCtx.setStatus("subagents", undefined);

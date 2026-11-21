@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ExternalAgentView } from "../src/external-agents.js";
 import { renderRunningAgentStatus } from "../src/index.js";
 import type { AgentInvocation, WidgetMode } from "../src/types.js";
 import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatCost, formatSessionTokens } from "../src/ui/agent-widget.js";
@@ -101,10 +102,14 @@ describe("AgentWidget", () => {
       setWidget: (_key, content) => { factory = content; },
     });
     widget.update();
-    if (!factory) return "";
-    return factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme)
-      .render()
-      .join("\n");
+    try {
+      if (!factory) return "";
+      return factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme)
+        .render()
+        .join("\n");
+    } finally {
+      widget.dispose();
+    }
   }
 
   // "all" (and the no-policy constructor default) shows every agent.
@@ -215,6 +220,7 @@ describe("AgentWidget", () => {
     for (const r of records) if (r.status === "completed") widget.markFinished(r.id);
     widget.update();
     const lines = factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render().join("\n");
+    widget.dispose();
 
     expect(lines).toContain("7 queued");
     expect(lines).not.toContain("q1 description");
@@ -305,7 +311,9 @@ describe("AgentWidget cost display", () => {
     let factory: any;
     widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } });
     widget.update();
-    return factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render().join("\n");
+    const out = factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render().join("\n");
+    widget.dispose();
+    return out;
   }
 
   it("shows the cost beside the token count when enabled", () => {
@@ -364,6 +372,7 @@ describe("AgentWidget cost display", () => {
     widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } });
     widget.update();
     const out = factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render().join("\n");
+    widget.dispose();
 
     expect(out).toContain(" 1.2k");
     expect(out).toContain("~$0.0042");
@@ -382,8 +391,9 @@ describe("AgentWidget cost display", () => {
     let factory: any;
     widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } });
     widget.update();
-    expect(factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render().join("\n"))
-      .not.toContain("$");
+    const out = factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render().join("\n");
+    widget.dispose();
+    expect(out).not.toContain("$");
   });
 });
 
@@ -422,8 +432,12 @@ describe("AgentWidget overflow accounting", () => {
     let factory: any;
     widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } });
     widget.update();
-    if (!factory) return [];
-    return factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render();
+    try {
+      if (!factory) return [];
+      return factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render();
+    } finally {
+      widget.dispose();
+    }
   }
 
   /** The `+N more (…)` footer, if the widget overflowed. */
@@ -527,5 +541,245 @@ describe("AgentWidget overflow accounting", () => {
     agent.status = "completed";
     widget.markFinished(agent.id);
     expect(render()).toContain("resumed description");
+    widget.dispose();
+  });
+});
+
+describe("AgentWidget timer lifecycle", () => {
+  const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function makeInternal(id: string, status: string) {
+    return {
+      id,
+      type: "worker",
+      description: `${id} description`,
+      status,
+      toolUses: 0,
+      startedAt: Date.now(),
+      completedAt: status === "running" || status === "queued" ? undefined : Date.now(),
+      lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      compactionCount: 0,
+      isBackground: true,
+    };
+  }
+
+  function makeExternal(id: string, status: ExternalAgentView["agent"]["status"]): ExternalAgentView {
+    return {
+      agent: {
+        id,
+        source: "herder",
+        group: "Herder run-1",
+        name: id,
+        role: "worker",
+        description: `${id} external`,
+        status,
+        startedAt: Date.now(),
+        completedAt: status === "running" ? undefined : Date.now(),
+      },
+      activity: { activeTools: new Map(), toolUses: 0, responseText: "", turnCount: 1 },
+      usage: { input: 0, output: 0, cacheWrite: 0 },
+      compactions: 0,
+    };
+  }
+
+  function mountWidget(
+    agents: () => any[],
+    external: () => readonly ExternalAgentView[] = () => [],
+    mode: () => WidgetMode = () => "all",
+  ) {
+    const widget = new AgentWidget(
+      { listAgents: agents } as any,
+      new Map(),
+      mode,
+      () => false,
+      () => false,
+      external,
+    );
+    const requestRender = vi.fn();
+    const setStatus = vi.fn();
+    let component: { render(): string[]; invalidate(): void } | undefined;
+    const setWidget = vi.fn((_key: string, content: any) => {
+      component = content
+        ? content({ terminal: { columns: 200 }, requestRender }, theme)
+        : undefined;
+    });
+    widget.setUICtx({ setStatus, setWidget });
+    return {
+      widget,
+      requestRender,
+      setStatus,
+      setWidget,
+      render: () => (component ? component.render().join("\n") : ""),
+    };
+  }
+
+  it("ticks every 80ms while an internal agent runs, stops once settled (while staying visible), and resumes on new active work", () => {
+    const a1 = makeInternal("a1", "running");
+    const list: any[] = [a1];
+    const { widget, requestRender, setStatus, render } = mountWidget(() => list);
+
+    widget.ensureTimer();
+    widget.update();
+    expect(vi.getTimerCount()).toBe(1);
+    expect(render()).toContain("a1 description");
+
+    vi.advanceTimersByTime(240);
+    expect(requestRender).toHaveBeenCalledTimes(3);
+
+    // Agent settles — completed entry stays visible in the widget, but the 80ms timer must stop.
+    a1.status = "completed";
+    a1.completedAt = Date.now();
+    widget.markFinished(a1.id);
+    requestRender.mockClear();
+
+    widget.update();
+    expect(requestRender).toHaveBeenCalledTimes(1);
+    expect(setStatus).toHaveBeenLastCalledWith("subagents", undefined);
+    expect(render()).toContain("✓");
+    expect(render()).toContain("a1 description");
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.advanceTimersByTime(800);
+    expect(requestRender).toHaveBeenCalledTimes(1);
+
+    // New active internal agent starts — timer resumes automatically.
+    list.push(makeInternal("a2", "running"));
+    requestRender.mockClear();
+    widget.update();
+    expect(vi.getTimerCount()).toBe(1);
+    expect(requestRender).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(160);
+    expect(requestRender).toHaveBeenCalledTimes(3);
+
+    widget.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps the 80ms timer running while an internal agent is queued and stops on the tick that observes settlement", () => {
+    const q1 = makeInternal("q1", "queued");
+    const { widget, requestRender, render } = mountWidget(() => [q1]);
+
+    widget.update();
+    expect(vi.getTimerCount()).toBe(1);
+    expect(render()).toContain("1 queued");
+
+    vi.advanceTimersByTime(160);
+    expect(requestRender).toHaveBeenCalledTimes(2);
+
+    // Transition without calling widget.update() directly — the next 80ms tick renders the settled view and stops the timer.
+    q1.status = "aborted";
+    q1.completedAt = Date.now();
+    widget.markFinished(q1.id);
+    requestRender.mockClear();
+
+    vi.advanceTimersByTime(80);
+    expect(requestRender).toHaveBeenCalledTimes(1);
+    expect(render()).toContain("aborted");
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.advanceTimersByTime(800);
+    expect(requestRender).toHaveBeenCalledTimes(1);
+
+    widget.dispose();
+  });
+
+  it("runs the 80ms timer for an active external agent, stops when it settles, and resumes for new external work", () => {
+    const ext1 = makeExternal("ext-1", "running");
+    const externals: ExternalAgentView[] = [ext1];
+    const { widget, requestRender, render } = mountWidget(() => [], () => externals);
+
+    widget.ensureTimer();
+    widget.update();
+    expect(vi.getTimerCount()).toBe(1);
+    expect(render()).toContain("ext-1");
+
+    vi.advanceTimersByTime(240);
+    expect(requestRender).toHaveBeenCalledTimes(3);
+
+    // External agent settles — still visible in the widget, timer stops after rendering the settled view.
+    ext1.agent.status = "completed";
+    ext1.agent.completedAt = Date.now();
+    requestRender.mockClear();
+
+    widget.update();
+    expect(requestRender).toHaveBeenCalledTimes(1);
+    expect(render()).toContain("✓");
+    expect(render()).toContain("ext-1");
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.advanceTimersByTime(800);
+    expect(requestRender).toHaveBeenCalledTimes(1);
+
+    // A new running external agent resumes the 80ms timer.
+    externals.push(makeExternal("ext-2", "running"));
+    requestRender.mockClear();
+    widget.update();
+    expect(vi.getTimerCount()).toBe(1);
+
+    vi.advanceTimersByTime(160);
+    expect(requestRender).toHaveBeenCalledTimes(3);
+
+    widget.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps ticking until both internal and external agents settle, and does not start when idle", () => {
+    const internal = makeInternal("int-1", "running");
+    const external = makeExternal("ext-1", "running");
+    const { widget, requestRender } = mountWidget(() => [internal], () => [external]);
+
+    widget.update();
+    expect(vi.getTimerCount()).toBe(1);
+
+    // Internal finishes, external still running -> timer stays active.
+    internal.status = "completed";
+    internal.completedAt = Date.now();
+    widget.markFinished(internal.id);
+    widget.update();
+    expect(vi.getTimerCount()).toBe(1);
+
+    requestRender.mockClear();
+    vi.advanceTimersByTime(160);
+    expect(requestRender).toHaveBeenCalledTimes(2);
+
+    // External finishes too -> both settled -> timer stops.
+    external.agent.status = "failed";
+    external.agent.completedAt = Date.now();
+    requestRender.mockClear();
+    widget.update();
+    expect(requestRender).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Calling ensureTimer() while idle does not start a timer.
+    widget.ensureTimer();
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.advanceTimersByTime(800);
+    expect(requestRender).toHaveBeenCalledTimes(1);
+
+    widget.dispose();
+  });
+
+  it("clears an active timer cleanly on dispose", () => {
+    const a1 = makeInternal("a1", "running");
+    const { widget, requestRender } = mountWidget(() => [a1]);
+
+    widget.update();
+    expect(vi.getTimerCount()).toBe(1);
+
+    widget.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.advanceTimersByTime(800);
+    expect(requestRender).not.toHaveBeenCalled();
   });
 });
