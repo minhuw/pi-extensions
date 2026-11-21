@@ -717,6 +717,227 @@ describe("bash", () => {
 			expect(bashBlockReason(malformed, outside, [repo]), malformed).toBe(reasons.analysis);
 		}
 	});
+
+	it("propagates effective cwd through env -C / --chdir into wrapped commands, nested shells, and heredocs", () => {
+		const workspaceCwd = join(repo, ".pi", "workspaces", "side");
+		const nestedWtCwd = join(repo, "nested-wt");
+		const herderWtCwd = join(repo, ".git", "herder", "worktrees", "w1");
+
+		// Blocked: env -C / --chdir into the protected checkout propagates into nested shells, heredocs, and commands.
+		expect(bashBlockReason(`env -C "${repo}" sh -c 'echo x > src/a.ts'`, outside, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`env --chdir="${repo}" bash -c 'rm -f src/a.ts'`, outside, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`env --chdir "${repo}" sh -c 'git commit -m x'`, outside, [repo])).toContain("would change your user's checkout");
+		expect(bashBlockReason(`env -C"${repo}" sh -c 'echo x > .git/config'`, outside, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, ".git", "config")}`),
+		);
+		expect(bashBlockReason(`env -C "${repo}" sh <<'EOF'\necho x > src/a.ts\nEOF`, outside, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`env --chdir="${repo}" bash <<< 'rm -f src/a.ts'`, outside, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`cat <<'EOF' | env --chdir "${repo}" sh\necho x > src/a.ts\nEOF`, outside, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`env -S '-C "${repo}" sh -c' 'echo x > src/a.ts'`, outside, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`env -S '--chdir=${repo} sh' <<< 'echo x > src/a.ts'`, outside, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`env -C "${repo}" env -C src sh -c 'rm -f a.ts'`, outside, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`env -C "${outside}" -C "${repo}" sh -c 'rm -f src/a.ts'`, outside, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`env -C "${alias}" sh -c 'echo x > src/a.ts'`, outside, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`env -C "${repo}" sh -c 'echo x > src/a.ts' > safe.txt`, outside, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`env -C .pi/workspaces/side sh -c 'echo x > notes.md' > src/a.ts`, repo, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`env -C .pi/workspaces/side sh -c 'echo ok'; echo x > src/a.ts`, repo, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`env -C "${repo}" find src -execdir rm a.ts \\;`, outside, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`env -C "${repo}" find src -exec rm {} \\;`, outside, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "src")}`),
+		);
+
+		// Allowed: env -C / --chdir into exempt workspaces or read-only commands in the checkout.
+		expect(bashBlockReason(`env -C "${workspaceCwd}" sh -c 'echo x > notes.md'`, repo, [repo])).toBeUndefined();
+		expect(bashBlockReason(`env --chdir="${workspaceCwd}" bash <<'EOF'\necho x > notes.md\nEOF`, repo, [repo])).toBeUndefined();
+		expect(bashBlockReason(`env --chdir "${herderWtCwd}" sh <<< 'rm -f file.ts'`, repo, [repo])).toBeUndefined();
+		expect(bashBlockReason(`cat <<'EOF' | env -C "${nestedWtCwd}" sh\necho x > src/a.ts\nEOF`, repo, [repo])).toBeUndefined();
+		expect(bashBlockReason(`env -C "${repo}" -C "${workspaceCwd}" sh -c 'rm -f notes.md'`, repo, [repo])).toBeUndefined();
+		expect(bashBlockReason(`env -C "${repo}" sh -c 'echo ok'; echo x > local.txt`, outside, [repo])).toBeUndefined();
+		expect(bashBlockReason(`env -C "${repo}" sh -c 'git status'`, outside, [repo])).toBeUndefined();
+	});
+
+	it("propagates effective directory for find -execdir and -okdir into executed command checks", () => {
+		// Blocked: -execdir / -okdir targeting the protected checkout or its ancestors.
+		expect(bashBlockReason(`find "${repo}" -name '*.ts' -execdir sh -c 'echo x > a.ts' \\;`, outside, [repo])).toContain(
+			"would change your user's checkout",
+		);
+		expect(bashBlockReason(`find "${repo}/src" -name '*.ts' -execdir rm a.ts \\;`, outside, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`find "${repo}/src" -name '*.ts' -okdir rm a.ts \\;`, outside, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`find "${repo}/src" -name '*.ts' -okdir sh -c 'echo x > a.ts' \\;`, outside, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`find "${repo}/src" -execdir sh -c 'cat <<EOF > a.ts\nbad\nEOF' \\;`, outside, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`find "${repo}/src" -execdir bash -c 'sh <<EOF\necho x > a.ts\nEOF' \\;`, outside, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`find "${repo}" -execdir git commit -m x \\;`, outside, [repo])).toContain("would change your user's checkout");
+		expect(bashBlockReason(`find "${repo}" -execdir npm install \\;`, outside, [repo])).toContain("would change your user's checkout");
+		expect(bashBlockReason(`find "${repo}/src" -execdir sed -i 's/a/b/' {} \\;`, outside, [repo])).toContain("would change your user's checkout");
+		expect(bashBlockReason(`find "${repo}/src/a.ts" -execdir rm {} \\;`, outside, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`find "${repo}/src/a.ts" -execdir rm b.ts \\;`, outside, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "src", "b.ts")}`),
+		);
+		expect(bashBlockReason(`find "${repo}/.git/hooks" -execdir chmod +x pre-commit \\;`, outside, [repo])).toBe(
+			reasons.checkout(`chmod ${join(repo, ".git", "hooks", "pre-commit")}`),
+		);
+		expect(bashBlockReason(`find "${alias}" -execdir sh -c 'echo x > src/a.ts' \\;`, outside, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`find "${outside}" "${repo}/src" -execdir rm a.ts \\;`, outside, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`find -L "${repo}/src" -execdir rm a.ts \\;`, outside, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason("find .. -name '*.ts' -execdir rm a.ts \\;", outside, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "a.ts")}`),
+		);
+		expect(bashBlockReason(`find "${repo}" -execdir sh -c 'echo x > ../a.ts' \\;`, outside, [repo])).toBe(
+			reasons.checkout(`a redirection to ${join(repo, "a.ts")}`),
+		);
+		expect(bashBlockReason("find .pi/workspaces/side -execdir rm ../../../src/a.ts \\;", repo, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`find "${outside}" "${repo}/src" -exec rm {} \\;`, outside, [repo])).toBe(
+			reasons.checkout(`rm ${join(repo, "src")}`),
+		);
+		expect(bashBlockReason(`find "${repo}" -exec cp {} {}.bak \\;`, outside, [repo])).toContain("would change your user's checkout");
+
+		// Allowed: -execdir / -okdir in exempt workspaces, outside paths, or read-only commands.
+		expect(bashBlockReason("find .pi/workspaces/side -execdir sh -c 'echo x > notes.md' \\;", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("find .pi/workspaces/side -okdir rm notes.md \\;", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("find nested-wt -execdir sed -i 's/a/b/' src/a.ts \\;", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("find .git/herder/worktrees/w1 -execdir rm file.ts \\;", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("find link-out -execdir sh -c 'echo x > a.ts' \\;", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason(`find "${outside}" -execdir rm a.ts \\;`, repo, [repo])).toBeUndefined();
+		expect(bashBlockReason(`find "${repo}" -execdir grep -l a {} +`, outside, [repo])).toBeUndefined();
+		expect(bashBlockReason("find .. -execdir grep -l a {} +", outside, [repo])).toBeUndefined();
+	});
+
+	it("parses sed -i --expression=/--file= options and distinguishes dot-prefixed paths from backup suffixes", () => {
+		const workspaceCwd = join(repo, ".pi", "workspaces", "side");
+		const nestedWtSrcCwd = join(repo, "nested-wt", "src");
+
+		// Blocked: --expression=/--expression and --file=/--file must not drop positional targets.
+		expect(bashBlockReason(`sed -i --expression='s/a/b/' "${repo}/src/a.ts"`, outside, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`sed -i --expression 's/a/b/' "${repo}/src/a.ts"`, outside, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`sed -i --file=/tmp/script.sed "${repo}/src/a.ts"`, outside, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`sed -i --file /tmp/script.sed "${repo}/src/a.ts"`, outside, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`sed -i --expression='s/a/b/' "${repo}/src/a.ts" /tmp/other.txt`, outside, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`sed -i --file=/tmp/script.sed "${repo}/src/a.ts" /tmp/other.txt`, outside, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`sed --in-place --expression='s/a/b/' "${repo}/src/a.ts"`, outside, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`sed --in-place=.bak --file=/tmp/script.sed "${repo}/src/a.ts"`, outside, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+
+		// Blocked: dot-prefixed paths with path separators (and lone dotfiles) must not be swallowed as backup suffixes.
+		expect(bashBlockReason("sed -e 's/a/b/' -i ../../src/a.ts", nestedWtSrcCwd, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason("sed --expression='s/a/b/' -i ../../src/a.ts", nestedWtSrcCwd, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason("sed --file=/tmp/script.sed -i ../../src/a.ts", nestedWtSrcCwd, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason("sed -e 's/a/b/' -i ../../../src/a.ts", workspaceCwd, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason("sed -e 's/a/b/' -i .git/config", repo, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, ".git", "config")}`),
+		);
+		expect(bashBlockReason("sed --expression='s/a/b/' -i .git/config", repo, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, ".git", "config")}`),
+		);
+		expect(bashBlockReason("sed --file=/tmp/script.sed -i .git/config", repo, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, ".git", "config")}`),
+		);
+		expect(bashBlockReason("sed -e 's/a/b/' -i ./src/a.ts", repo, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason("sed -e 's/a/b/' -i ../repo/src/a.ts", outside, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason("sed -e 's/a/b/' -i .bak ../../src/a.ts", nestedWtSrcCwd, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason("sed -e 's/a/b/' -i .gitignore", repo, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, ".gitignore")}`),
+		);
+		expect(bashBlockReason("sed -Ei '' 's/a/b/' src/a.ts", repo, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, "src", "a.ts")}`),
+		);
+		expect(bashBlockReason(`env -C "${repo}" sh -c "sed --expression='s/a/b/' -i .git/config"`, outside, [repo])).toBe(
+			reasons.checkout(`sed -i ${join(repo, ".git", "config")}`),
+		);
+
+		// Allowed: exempt workspaces, outside targets, script files read from checkout, and BSD backup suffixes.
+		expect(bashBlockReason("sed -i --expression='s/a/b/' .pi/workspaces/side/notes.md", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("sed -i --expression 's/a/b/' .pi/workspaces/side/notes.md", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("sed -i --file=/tmp/script.sed .pi/workspaces/side/notes.md", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("sed -i --file /tmp/script.sed .pi/workspaces/side/notes.md", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason(`sed -i --file="${repo}/script.sed" /tmp/safe.txt`, outside, [repo])).toBeUndefined();
+		expect(bashBlockReason(`sed -i --file "${repo}/script.sed" /tmp/safe.txt`, outside, [repo])).toBeUndefined();
+		expect(bashBlockReason("sed -e 's/a/b/' -i ./.pi/workspaces/side/notes.md", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("sed -e 's/a/b/' -i .pi/workspaces/side/notes.md", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("sed -e 's/a/b/' -i ../outside/ok.txt", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("sed -i .bak 's/a/b/' .pi/workspaces/side/notes.md", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("sed -e 's/a/b/' -i .bak .pi/workspaces/side/notes.md", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("sed -Ei '' 's/a/b/' .pi/workspaces/side/notes.md", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("sed -Ei .bak 's/a/b/' .pi/workspaces/side/notes.md", repo, [repo])).toBeUndefined();
+		expect(bashBlockReason("sed --expression='s/a/b/' -i ./notes.md", workspaceCwd, [repo])).toBeUndefined();
+		expect(bashBlockReason("sed -e 's/a/b/' -i .gitignore", workspaceCwd, [repo])).toBeUndefined();
+	});
 });
 
 describe("process_start", () => {

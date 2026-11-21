@@ -274,6 +274,8 @@ const expandHome = (word: string): string => {
 	return tilde.replace(/\$\{HOME\}|\$HOME(?=$|\/)/g, home);
 };
 
+const resolveFrom = (dir: string, word: string): string => canonical(resolve(dir, expandHome(word)));
+
 const positionals = (args: string[], withValue: Set<string> = new Set()): string[] => {
 	const out: string[] = [];
 	let options = true;
@@ -311,10 +313,11 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 	const canonicalToplevels = [...new Set(toplevels.map((dir) => canonical(dir)))];
 	const protectedGitDirs = protectedGitDirsOf(canonicalToplevels, commonDirs);
 	const inCheckout = (path: string): boolean => inWorktreeCheckout(path, canonicalToplevels) || inProtectedGitDir(path, protectedGitDirs);
-	const at = (dir: string, word: string): string => canonical(resolve(dir, expandHome(word)));
+	const at = resolveFrom;
 	let effectiveCwd = canonical(cwd);
 	let shellReadsStdin = false;
 	let stdinEnv: Map<string, string> | undefined;
+	let stdinCwd: string | undefined;
 	let shellVars = new Map<string, string>();
 	let exportedEnv = new Map<string, string>();
 
@@ -323,9 +326,31 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 		if (hit) found.push(reasons.checkout(`${what} ${hit}`));
 	};
 
-	const inspect = (all: string[], depth: number, prefixAssignments?: Map<string, string>): void => {
+	const findExecDirTargets = (root: string, dir: string): Array<{ execDir: string; placeholder: string }> => {
+		const resolvedRoot = at(dir, root);
+		if (isExistingFile(resolvedRoot)) {
+			return [{ execDir: dirname(resolvedRoot), placeholder: `./${basename(resolvedRoot)}` }];
+		}
+		const dirs: string[] = [resolvedRoot];
+		const seen = new Set<string>(dirs);
+		const addDir = (candidate: string): void => {
+			if (!seen.has(candidate)) {
+				seen.add(candidate);
+				dirs.push(candidate);
+			}
+		};
+		for (const protectedDir of [...canonicalToplevels, ...protectedGitDirs]) {
+			if (within(resolvedRoot, protectedDir) !== undefined) addDir(protectedDir);
+		}
+		for (const candidate of [...dirs]) {
+			if (inCheckout(candidate)) addDir(join(candidate, "_"));
+		}
+		return dirs.map((execDir) => ({ execDir, placeholder: "." }));
+	};
+
+	const inspect = (all: string[], depth: number, prefixAssignments?: Map<string, string>, baseDir: string = effectiveCwd): void => {
 		let words = all;
-		let dir = effectiveCwd;
+		let dir = baseDir;
 		const cmdEnv = new Map<string, string>(exportedEnv);
 		if (prefixAssignments) {
 			for (const [name, value] of prefixAssignments) cmdEnv.set(name, value);
@@ -339,10 +364,9 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 				cmdEnv.set(words[0]!.slice(0, eq), words[0]!.slice(eq + 1));
 				words = words.slice(1);
 			} else if (verb === "env") {
-				const unwrapped = unwrapEnv(words, cmdEnv, depth, (target) => {
-					dir = at(dir, target);
-				});
+				const unwrapped = unwrapEnv(words, cmdEnv, depth);
 				if (!unwrapped.ok) return void found.push(unwrapped.reason);
+				if (unwrapped.chdir !== undefined) dir = at(dir, unwrapped.chdir);
 				words = unwrapped.words;
 				depth = unwrapped.depth;
 			} else if (verb === "exec") {
@@ -380,7 +404,7 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 				const flag = args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg));
 				return flag >= 0 ? args.slice(flag + 1).find((arg) => !arg.startsWith("-")) : undefined;
 			})();
-			if (script) run(script, depth + 1, cmdEnv);
+			if (script) run(script, depth + 1, cmdEnv, dir);
 			return;
 		}
 
@@ -532,14 +556,34 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 			return;
 		}
 		if (verb === "find") {
-			const start = args.findIndex((arg) => arg.startsWith("-") || arg === "(" || arg === "!");
-			const roots = (start < 0 ? args : args.slice(0, start));
-			const root = roots[0] ?? ".";
-			if (args.includes("-delete")) writes("find -delete", roots.length > 0 ? roots : ["."], dir);
+			const roots = findRoots(args);
+			if (args.includes("-delete")) writes("find -delete", roots, dir);
 			for (let i = 0; i < args.length; i++) {
-				if (!["-exec", "-execdir", "-ok", "-okdir"].includes(args[i]!)) continue;
+				const action = args[i]!;
+				if (!["-exec", "-execdir", "-ok", "-okdir"].includes(action)) continue;
+				const isExecDir = action === "-execdir" || action === "-okdir";
 				const end = args.findIndex((arg, k) => k > i && (arg === ";" || arg === "+"));
-				inspect(args.slice(i + 1, end < 0 ? undefined : end).map((arg) => (arg === "{}" ? root : arg)), depth);
+				const template = args.slice(i + 1, end < 0 ? undefined : end);
+				for (const root of roots) {
+					if (isExecDir) {
+						for (const { execDir, placeholder } of findExecDirTargets(root, dir)) {
+							inspect(
+								template.map((arg) => (arg === "{}" ? placeholder : arg.includes("{}") ? arg.replaceAll("{}", placeholder) : arg)),
+								depth,
+								cmdEnv,
+								execDir,
+							);
+						}
+					} else {
+						const embedded = isExistingFile(at(dir, root)) ? root : join(root, "_");
+						inspect(
+							template.map((arg) => (arg === "{}" ? root : arg.includes("{}") ? arg.replaceAll("{}", embedded) : arg)),
+							depth,
+							cmdEnv,
+							dir,
+						);
+					}
+				}
 				if (end < 0) break;
 				i = end;
 			}
@@ -555,7 +599,7 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 		if (targets) writes(verb, targets.length > 0 ? targets : ["."], dir);
 	};
 
-	const run = (script: string, depth: number, nextEnv?: Map<string, string>): void => {
+	const run = (script: string, depth: number, nextEnv?: Map<string, string>, nextCwd?: string): void => {
 		if (depth > MAX_NESTING_DEPTH) {
 			found.push(reasons.nesting);
 			return;
@@ -563,14 +607,17 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 		const savedCwd = effectiveCwd;
 		const savedStdin = shellReadsStdin;
 		const savedStdinEnv = stdinEnv;
+		const savedStdinCwd = stdinCwd;
 		const savedShellVars = new Map(shellVars);
 		const savedExported = new Map(exportedEnv);
+		if (nextCwd !== undefined) effectiveCwd = nextCwd;
 		if (nextEnv) {
 			shellVars = new Map(nextEnv);
 			exportedEnv = new Map(nextEnv);
 		}
 		shellReadsStdin = false;
 		stdinEnv = undefined;
+		stdinCwd = undefined;
 		try {
 			visit(guardRuntime.parse(script), depth);
 		} catch {
@@ -579,6 +626,7 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 		effectiveCwd = savedCwd;
 		shellReadsStdin = savedStdin;
 		stdinEnv = savedStdinEnv;
+		stdinCwd = savedStdinCwd;
 		shellVars = savedShellVars;
 		exportedEnv = savedExported;
 	};
@@ -611,13 +659,18 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 					cwd: effectiveCwd,
 					shellReadsStdin,
 					stdinEnv,
+					stdinCwd,
 					shellVars: new Map(shellVars),
 					exportedEnv: new Map(exportedEnv),
 				};
-				const shellStage = node.commands.find(isLocalShell);
-				if (shellStage) {
-					shellReadsStdin = true;
-					stdinEnv = shellCommandEnv(shellStage, saved.exportedEnv);
+				for (const stage of node.commands) {
+					const stageShell = shellCommandContext(stage, saved.exportedEnv, saved.cwd, depth);
+					if (stageShell) {
+						shellReadsStdin = true;
+						stdinEnv = stageShell.env;
+						stdinCwd = stageShell.cwd;
+						break;
+					}
 				}
 				for (const stage of node.commands) {
 					effectiveCwd = saved.cwd;
@@ -628,6 +681,7 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 				effectiveCwd = saved.cwd;
 				shellReadsStdin = saved.shellReadsStdin;
 				stdinEnv = saved.stdinEnv;
+				stdinCwd = saved.stdinCwd;
 				shellVars = saved.shellVars;
 				exportedEnv = saved.exportedEnv;
 				return;
@@ -653,20 +707,23 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 			case "HereString": {
 				children();
 				const script = node.type === "HereDoc" ? node.body.text : node.target?.value;
-				if (shellReadsStdin && script) run(script, depth + 1, stdinEnv);
+				if (shellReadsStdin && script) run(script, depth + 1, stdinEnv, stdinCwd);
 				return;
 			}
 			case "Command": {
 				const savedStdin = shellReadsStdin;
 				const savedStdinEnv = stdinEnv;
-				const stageEnv = shellCommandEnv(node, exportedEnv);
-				if (stageEnv) {
+				const savedStdinCwd = stdinCwd;
+				const stageShell = shellCommandContext(node, exportedEnv, effectiveCwd, depth);
+				if (stageShell) {
 					shellReadsStdin = true;
-					stdinEnv = stageEnv;
+					stdinEnv = stageShell.env;
+					stdinCwd = stageShell.cwd;
 				}
 				children();
 				shellReadsStdin = savedStdin;
 				stdinEnv = savedStdinEnv;
+				stdinCwd = savedStdinCwd;
 				const prefix = prefixEnv(node);
 				if (node.name === undefined) {
 					for (const [name, value] of prefix) {
@@ -825,13 +882,14 @@ function splitEnvString(input: string, env: Map<string, string>): string[] | und
 	return tokens;
 }
 
-type UnwrapEnvResult = { ok: true; words: string[]; depth: number } | { ok: false; reason: string };
+type UnwrapEnvResult = { ok: true; words: string[]; depth: number; chdir?: string } | { ok: false; reason: string };
 
 /** Unwraps `env` options, `-S`/`--split-string` expansions (spliced with trailing args), and `NAME=VALUE` assignments. */
-function unwrapEnv(allWords: string[], cmdEnv: Map<string, string>, depth: number, chdir?: (target: string) => void): UnwrapEnvResult {
+function unwrapEnv(allWords: string[], cmdEnv: Map<string, string>, depth: number): UnwrapEnvResult {
 	let words = allWords.slice(1);
 	let options = true;
 	let currentDepth = depth;
+	let chdir: string | undefined;
 	// In GNU/BSD `env`, `-i` clears the utility's environment after option parsing while `-u` removes immediately.
 	const lookupEnv = new Map(cmdEnv);
 
@@ -848,11 +906,11 @@ function unwrapEnv(allWords: string[], cmdEnv: Map<string, string>, depth: numbe
 			}
 			if (word === "--chdir") {
 				if (i + 1 >= words.length) return { ok: false, reason: reasons.analysis };
-				chdir?.(words[++i]!);
+				chdir = words[++i]!;
 				continue;
 			}
 			if (word.startsWith("--chdir=")) {
-				chdir?.(word.slice("--chdir=".length));
+				chdir = word.slice("--chdir=".length);
 				continue;
 			}
 			if (word === "--unset") {
@@ -920,7 +978,7 @@ function unwrapEnv(allWords: string[], cmdEnv: Map<string, string>, depth: numbe
 					} else if (flag === "C") {
 						const val = k + 1 < word.length ? word.slice(k + 1) : words[++i];
 						if (val === undefined) return { ok: false, reason: reasons.analysis };
-						chdir?.(val);
+						chdir = val;
 						break;
 					} else if (flag === "u") {
 						const val = k + 1 < word.length ? word.slice(k + 1) : words[++i];
@@ -955,10 +1013,10 @@ function unwrapEnv(allWords: string[], cmdEnv: Map<string, string>, depth: numbe
 			cmdEnv.set(word.slice(0, eq), word.slice(eq + 1));
 			continue;
 		}
-		return { ok: true, words: words.slice(i), depth: currentDepth };
+		return { ok: true, words: words.slice(i), depth: currentDepth, chdir };
 	}
 
-	return { ok: true, words: [], depth: currentDepth };
+	return { ok: true, words: [], depth: currentDepth, chdir };
 }
 
 type UnwrapExecResult = { ok: true; words: string[] } | { ok: false; reason: string };
@@ -993,12 +1051,18 @@ function unwrapExec(allWords: string[], cmdEnv: Map<string, string>): UnwrapExec
 	return { ok: true, words: allWords.slice(i) };
 }
 
-function shellCommandEnv(node: SyntaxNode, base: Map<string, string>): Map<string, string> | undefined {
+function shellCommandContext(
+	node: SyntaxNode,
+	baseEnv: Map<string, string>,
+	baseCwd: string,
+	initialDepth = 0,
+): { env: Map<string, string>; cwd: string } | undefined {
 	if (node.type !== "Command") return undefined;
-	const env = new Map(base);
+	const env = new Map(baseEnv);
+	let dir = baseCwd;
 	for (const [name, value] of prefixEnv(node)) env.set(name, value);
 	let words = commandWords(node);
-	let depth = 0;
+	let depth = initialDepth;
 	for (;;) {
 		const verb = words[0] === undefined ? undefined : basename(words[0]);
 		if (verb === undefined) return undefined;
@@ -1009,6 +1073,7 @@ function shellCommandEnv(node: SyntaxNode, base: Map<string, string>): Map<strin
 		} else if (verb === "env") {
 			const unwrapped = unwrapEnv(words, env, depth);
 			if (!unwrapped.ok) return undefined;
+			if (unwrapped.chdir !== undefined) dir = resolveFrom(dir, unwrapped.chdir);
 			words = unwrapped.words;
 			depth = unwrapped.depth;
 		} else if (verb === "exec") {
@@ -1022,15 +1087,57 @@ function shellCommandEnv(node: SyntaxNode, base: Map<string, string>): Map<strin
 				words = words.slice(1);
 				if (opt === "--") break;
 			}
+		} else if (verb === "nice" || verb === "timeout" || verb === "stdbuf") {
+			const withValue = verb === "nice" ? ["-n"] : verb === "timeout" ? ["-s", "-k", "--signal", "--kill-after"] : ["-i", "-o", "-e"];
+			let i = 1;
+			while (i < words.length && words[i]!.startsWith("-")) i += withValue.includes(words[i]!) ? 2 : 1;
+			if (verb === "timeout") i++;
+			words = words.slice(i);
 		} else if (verb === "sudo") {
 			words = words.slice(1);
 		} else break;
 	}
-	return words[0] !== undefined && LOCAL_SHELLS.has(basename(words[0])) ? env : undefined;
+	return words[0] !== undefined && LOCAL_SHELLS.has(basename(words[0])) ? { env, cwd: dir } : undefined;
 }
 
-function isLocalShell(node: SyntaxNode): boolean {
-	return shellCommandEnv(node, new Map()) !== undefined;
+function isExistingFile(path: string): boolean {
+	try {
+		return !statSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+function findRoots(args: string[]): string[] {
+	const roots: string[] = [];
+	let i = 0;
+	while (i < args.length) {
+		const arg = args[i]!;
+		if (arg === "--") {
+			i++;
+			break;
+		}
+		if (arg === "-D") {
+			i += 2;
+			continue;
+		}
+		if (arg === "-f" && i + 1 < args.length) {
+			roots.push(args[i + 1]!);
+			i += 2;
+			continue;
+		}
+		if (/^-[HLPEXdsx]+$/.test(arg) || /^-O\d+$/.test(arg)) {
+			i++;
+			continue;
+		}
+		break;
+	}
+	for (; i < args.length; i++) {
+		const arg = args[i]!;
+		if (arg.startsWith("-") || arg === "(" || arg === "!") break;
+		roots.push(arg);
+	}
+	return roots.length > 0 ? roots : ["."];
 }
 
 function dangerousGitConfig(rest: string[]): string | undefined {
@@ -1170,6 +1277,14 @@ function ghApiMutates(args: string[]): boolean {
 	return input || endpoint !== "graphql" || fields.some((field) => /\bmutation\b/.test(field));
 }
 
+function isSedBackupSuffix(next: string | undefined, hasMoreArgs: boolean): boolean {
+	if (next === undefined) return false;
+	if (next === "") return true;
+	if (!hasMoreArgs) return false;
+	if (!next.startsWith(".") || next === "." || next === "..") return false;
+	return !next.includes("/") && !next.includes("\\");
+}
+
 /** The files `sed -i` / `perl -i` edit in place (empty: unknown, such as names read from stdin), or undefined without `-i`. */
 function inPlaceEdit(verb: "sed" | "perl", args: string[]): string[] | undefined {
 	let inPlace = false;
@@ -1185,14 +1300,18 @@ function inPlaceEdit(verb: "sed" | "perl", args: string[]): string[] | undefined
 		else if (verb === "sed" && (arg === "--expression" || arg === "--file")) {
 			inlineScript = true;
 			i++;
+		} else if (verb === "sed" && (arg.startsWith("--expression=") || arg.startsWith("--file="))) {
+			inlineScript = true;
+		} else if (verb === "sed" && arg === "--line-length") {
+			i++;
 		} else if (arg.startsWith("--") || arg === "-") continue;
 		else if (arg.startsWith("-")) {
 			for (let k = 1; k < arg.length; k++) {
 				const letter = arg[k]!;
 				if (letter === "i") {
 					inPlace = true;
-					// BSD sed takes the backup suffix as the next word (`sed -i '' …`).
-					if (verb === "sed" && arg === "-i" && (args[i + 1] === "" || args[i + 1]?.startsWith("."))) i++;
+					// BSD sed takes the backup suffix as the next word (`sed -i '' …`, `sed -Ei .bak …`).
+					if (verb === "sed" && k === arg.length - 1 && isSedBackupSuffix(args[i + 1], i + 2 < args.length)) i++;
 					break;
 				}
 				if (letter === "e" || letter === "E" && verb === "perl" || verb === "sed" && letter === "f") {
