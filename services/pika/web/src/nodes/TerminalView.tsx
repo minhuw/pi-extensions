@@ -48,12 +48,39 @@ export const TERMINAL_OPTIONS = {
 	allowProposedApi: true,
 } as const satisfies ITerminalOptions;
 
-function webgl2Available(): boolean {
+let webgl2AvailableCache: boolean | undefined;
+
+export function resetWebgl2AvailableCacheForTest(): void {
+	webgl2AvailableCache = undefined;
+}
+
+export function webgl2Available(): boolean {
+	if (webgl2AvailableCache !== undefined) return webgl2AvailableCache;
+	let available = false;
+	let canvas: HTMLCanvasElement | undefined;
+	let gl: WebGL2RenderingContext | null = null;
 	try {
-		return document.createElement("canvas").getContext("webgl2") !== null;
+		canvas = document.createElement("canvas");
+		gl = canvas.getContext("webgl2");
+		available = gl != null;
 	} catch {
-		return false;
+		available = false;
+	} finally {
+		if (gl) {
+			try {
+				const lose = typeof gl.getExtension === "function" ? gl.getExtension("WEBGL_lose_context") : null;
+				if (lose && typeof lose.loseContext === "function") lose.loseContext();
+			} catch {
+				// Ignore cleanup errors when releasing the probe context.
+			}
+		}
+		if (canvas) {
+			canvas.width = 0;
+			canvas.height = 0;
+		}
 	}
+	webgl2AvailableCache = available;
+	return available;
 }
 
 const clamp = (value: number, max: number): number => Math.max(1, Math.min(max, Math.floor(value)));
