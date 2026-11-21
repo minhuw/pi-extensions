@@ -420,7 +420,7 @@ fn schema_version_22_adds_deck_projects_without_a_reindex() {
     upload(&store, &format!("session:{SESSION_ID}"), "session", &fixture("session.jsonl"), 4096);
     let before = dump_derived(&store);
     let created = pika::nodes::create_node(&store, "node01").unwrap();
-    store.write(|tx| tx.execute_batch(&format!("{UNDO_V22} PRAGMA user_version = 21;"))).unwrap();
+    store.write(|tx| Ok::<_, rusqlite::Error>(rewind(tx, 21))).unwrap();
     drop(store);
     let store = pika::store::Store::open(env.dir.path().join("data")).unwrap();
     assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(22));

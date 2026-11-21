@@ -2129,7 +2129,7 @@ fn schema_v18_migrates_from_v17_without_a_reindex() {
         record(&store, SESSION_ID, DEVICE);
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V18} PRAGMA user_version = 17;")).unwrap();
+    rewind(&conn, 17);
     drop(conn);
 
     let store = Store::open(&data).unwrap();

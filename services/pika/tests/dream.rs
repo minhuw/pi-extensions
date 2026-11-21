@@ -739,7 +739,7 @@ fn an_older_database_gains_the_dream_tables() {
         store.write(|tx| pika::memory::save(tx, DEVICE, request)).unwrap();
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V15} PRAGMA user_version = 14;")).unwrap();
+    rewind(&conn, 14);
     drop(conn);
     let store = Store::open(&data).unwrap();
     assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(22));
@@ -1654,11 +1654,7 @@ fn an_older_database_gains_commit_ids() {
         store.write(|tx| pika::memory::dream::commit(tx, DEVICE, &granted.lease.id, commit, now_ms())).unwrap();
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!(
-        "DROP INDEX memory_dream_batches_commit; DROP INDEX memory_dream_batches_lease;
-         ALTER TABLE memory_dream_batches DROP COLUMN commit_id; {UNDO_V17} PRAGMA user_version = 15;"
-    ))
-    .unwrap();
+    rewind(&conn, 15);
     drop(conn);
     let store = Store::open(&data).unwrap();
     assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(22));

@@ -1242,7 +1242,7 @@ fn upgrading_from_version_3_keeps_tokens() {
         common::device(&store, DEVICE);
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V8} {UNDO_V6} {UNDO_V5} {UNDO_V4} PRAGMA user_version = 3;")).unwrap();
+    rewind(&conn, 3);
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
@@ -1267,9 +1267,9 @@ async fn upgrading_from_version_4_keeps_device_names_as_ids() {
         dump_derived(&store)
     };
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    rewind(&conn, 4);
     conn.execute_batch(&format!(
-        "{UNDO_V8} {UNDO_V6} {UNDO_V5} PRAGMA user_version = 4;
-         INSERT INTO tokens (name, hash, created_at, created_via) VALUES ('{DEVICE}', '{}', 100, 'pairing'), ('phone', '{}', 200, 'cli');
+        "INSERT INTO tokens (name, hash, created_at, created_via) VALUES ('{DEVICE}', '{}', 100, 'pairing'), ('phone', '{}', 200, 'cli');
          UPDATE streams SET created_at = 50 WHERE device = 'old-desk';
          INSERT INTO pairings (id_hash, code, device, requested_at, expires_at)
              VALUES ('{}', 'ABCDEFGH', 'tablet', 1, 9999999999999);

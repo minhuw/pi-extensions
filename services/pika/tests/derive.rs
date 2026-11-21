@@ -593,10 +593,8 @@ fn opening_a_version_7_database_derives_repositories_from_stored_meta() {
         dump_derived(&store)
     };
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!(
-        "UPDATE sessions SET project = 'widgets-feature' WHERE id = 'wt-1'; {UNDO_V8} PRAGMA user_version = 7;"
-    ))
-    .unwrap();
+    conn.execute_batch("UPDATE sessions SET project = 'widgets-feature' WHERE id = 'wt-1';").unwrap();
+    rewind(&conn, 7);
     drop(conn);
 
     let store = pika::store::Store::open(&data).unwrap();

@@ -287,7 +287,7 @@ fn upgrading_from_version_5_adds_request_timing_and_backfills_usage() {
         dump_derived(&store)
     };
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V8} {UNDO_V6} PRAGMA user_version = 5;")).unwrap();
+    rewind(&conn, 5);
     drop(conn);
 
     let store = pika::store::Store::open(&data).unwrap();

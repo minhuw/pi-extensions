@@ -262,7 +262,7 @@ async fn new_databases_and_devices_start_with_read_access() {
         device(&store, DEVICE);
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V13} PRAGMA user_version = 12;")).unwrap();
+    rewind(&conn, 12);
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
     assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(22));

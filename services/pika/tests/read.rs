@@ -1039,13 +1039,7 @@ fn opening_a_version_1_database_builds_the_search_index() {
         upload(&store, &skey(SESSION_ID), "session", &fixture("session.jsonl"), 100);
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    // Dropping the full-text index needs its tokenizer.
-    pika::tokenizer::register(&conn).unwrap();
-    conn.execute_batch(&format!(
-        "DROP TABLE search_fts; DROP TABLE search_docs; DROP INDEX sessions_device_project; DROP INDEX sessions_root_device;
-         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V8} {UNDO_V6} {UNDO_V5} {UNDO_V4} PRAGMA user_version = 1;"
-    ))
-    .unwrap();
+    rewind(&conn, 1);
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
     let mut params = pika::read::Params::default();
@@ -1109,8 +1103,7 @@ fn opening_a_version_6_database_rebuilds_the_search_index() {
         ["flaky", "spin", "pytest"].map(|q| search(&store, &[("q", q)]))
     };
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    pika::tokenizer::register(&conn).unwrap();
-    conn.execute_batch(&format!("{UNDO_V8} {UNDO_V7} PRAGMA user_version = 6;")).unwrap();
+    rewind(&conn, 6);
     let count = |q: &str| conn.query_row("SELECT count(*) FROM search_fts WHERE search_fts MATCH ?1", [q], |r| r.get::<_, i64>(0)).unwrap();
     assert_eq!((count("\"缓存\""), count("\"spin\"")), (0, before[1].len() as i64));
     drop(conn);
@@ -1199,7 +1192,7 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
         upload(&store, &skey(SESSION_ID), "session", &source, 100);
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V11} PRAGMA user_version = 10;")).unwrap();
+    rewind(&conn, 10);
     drop(conn);
 
     // The large line's blob is unreadable, so the reindex after the upgrade fails.
@@ -2594,7 +2587,7 @@ fn statistics_version_10_upgrade_backfills_ledger_without_changing_source_lines(
         dump_derived(&store)
     };
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V11} PRAGMA user_version = 10;")).unwrap();
+    rewind(&conn, 10);
     // Replaying the source must leave it intact.
     conn.execute_batch("CREATE TRIGGER no_source_updates BEFORE UPDATE ON lines
         BEGIN SELECT RAISE(ABORT, 'source modified'); END;
@@ -2881,7 +2874,7 @@ fn schema_v19_adds_the_extension_usage_indexes_without_a_reindex() {
     let env = env();
     let data = env.dir.path().join("data");
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V19} PRAGMA user_version = 18;")).unwrap();
+    rewind(&conn, 18);
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
     assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 22);

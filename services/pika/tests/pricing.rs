@@ -6,8 +6,6 @@ use pika::store::Store;
 use serde_json::{Value, json};
 
 const KEY: &str = "session:0c5a7e00-pricing";
-/// SQL that removes schema versions 22..=12 for tests that rewind `user_version`.
-const UNDO_V12: &str = "DROP TABLE deck_projects; DROP TABLE nodes; DROP TABLE relay_boards; DROP INDEX entries_custom_type; DROP INDEX tool_calls_started; DROP TABLE relay_mailbox; DROP TABLE relay_events; DROP TABLE relay_room_messages; DROP TABLE relay_room_members; DROP TABLE relay_rooms; DROP TABLE memory_checkpoints; DROP TABLE memory_dream_batches; DROP TABLE memory_dream_leases; DROP TABLE memory_revisions; DROP TABLE memory_notes; DROP TABLE memory_scopes; ALTER TABLE devices DROP COLUMN read_access; DROP INDEX usage_events_pricing; ALTER TABLE usage_events DROP COLUMN pricing;";
 
 fn lines(values: &[Value]) -> Vec<String> {
     values.iter().map(Value::to_string).collect()
@@ -132,7 +130,7 @@ fn the_upgrade_marks_existing_calls_without_a_reindex() {
     let events = costs(&env.store)["events"].clone();
     let data = env.dir.path().join("data");
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V12} PRAGMA user_version = 11;")).unwrap();
+    rewind(&conn, 11);
     drop(conn);
 
     let store = Store::open(&data).unwrap();
@@ -194,7 +192,7 @@ fn only_magpie_zeros_wait_for_a_price() {
     // The upgrade marks existing calls by the same rule.
     let data = env.dir.path().join("data");
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V12} PRAGMA user_version = 11;")).unwrap();
+    rewind(&conn, 11);
     drop(conn);
     let store = Store::open(&data).unwrap();
     assert_eq!(costs(&store)["events"], events);

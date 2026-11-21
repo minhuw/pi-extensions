@@ -621,7 +621,7 @@ fn version_9_databases_gain_tombstones_and_hidden_sessions() {
     let path = env.dir.path().join("data");
     drop(env.store);
     let conn = rusqlite::Connection::open(path.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V10} PRAGMA user_version = 9;")).unwrap();
+    rewind(&conn, 9);
     drop(conn);
     let store = pika::store::Store::open(&path).unwrap();
     assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(22));

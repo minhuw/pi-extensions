@@ -275,7 +275,7 @@ fn schema_v20_adds_relay_boards_without_a_reindex() {
     let env = env();
     let data = env.dir.path().join("data");
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V20} PRAGMA user_version = 19;")).unwrap();
+    rewind(&conn, 19);
     drop(conn);
     let store = Store::open(&data).unwrap();
     assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 22);

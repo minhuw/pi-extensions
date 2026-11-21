@@ -740,7 +740,7 @@ fn an_older_database_gains_the_memory_tables() {
         device(&store, DEVICE);
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V14} PRAGMA user_version = 13;")).unwrap();
+    rewind(&conn, 13);
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
     assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(22));
@@ -1406,7 +1406,7 @@ fn an_older_database_gains_last_used_times() {
         store.write(|tx| pika::memory::save(tx, DEVICE, request)).unwrap();
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V17} PRAGMA user_version = 16;")).unwrap();
+    rewind(&conn, 16);
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
     assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(22));
