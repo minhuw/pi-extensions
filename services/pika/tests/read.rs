@@ -702,6 +702,46 @@ async fn requests_reconstruct_and_complete_when_blobs_arrive() {
 }
 
 #[tokio::test]
+async fn ingest_rejects_pika_runs_and_read_handles_corrupt_stored_runs() {
+    let app = world().await;
+    for skeleton in [
+        json!({ "$pika_runs": [[0, 1]] }),
+        json!({ "messages": { "$pika_runs": [[0, 1]] } }),
+    ] {
+        let batch = json!({
+            "requests": [{
+                "id": "req-injected", "sessionId": SESSION_ID, "fidelity": "payload",
+                "skeleton": skeleton, "blocks": [],
+            }]
+        });
+        let req = Request::post(format!("{BASE}/api/ingest/v1/batch"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", app.tokens[DEVICE]))
+            .body(Body::from(batch.to_string()))
+            .unwrap();
+        let reply = app.send(req).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}: {}", skeleton, reply.text());
+        assert_eq!(reply.json()["error"], "bad_request");
+    }
+    assert_eq!(app.status("requests/req-injected").await, StatusCode::NOT_FOUND);
+
+    // Corrupt stored runs (overflow or negative len) fail cleanly instead of panicking.
+    for bad in [
+        json!({ "messages": { "$pika_runs": [[i64::MAX, 1]] } }).to_string(),
+        json!({ "messages": { "$pika_runs": [[0, -1]] } }).to_string(),
+    ] {
+        app.env
+            .store
+            .write(|tx| {
+                tx.execute("UPDATE requests SET skeleton = ?1 WHERE id = 'req-1'", [&bad])?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+        assert_eq!(app.status("requests/req-1").await, StatusCode::INTERNAL_SERVER_ERROR, "{bad}");
+    }
+}
+
+#[tokio::test]
 async fn herder_runs_and_run_detail() {
     let app = world().await;
     let runs = app.json("herder/runs").await;

@@ -89,11 +89,18 @@ fn rejects_malformed_batches() {
         json!({ "blobs": [{ "hash": "../../etc/passwd", "data": "y" }] }),
         json!({ "requests": [{ "id": "r", "sessionId": "s", "fidelity": "payload",
                                "skeleton": { "messages": [{ "$pika": "zz" }] }, "blocks": [] }] }),
+        json!({ "requests": [{ "id": "r-runs-top", "sessionId": "s", "fidelity": "payload",
+                               "skeleton": { "$pika_runs": [[0, 1]] }, "blocks": [] }] }),
+        json!({ "requests": [{ "id": "r-runs-nested", "sessionId": "s", "fidelity": "payload",
+                               "skeleton": { "messages": { "$pika_runs": [[0, 1]] } }, "blocks": [] }] }),
+        json!({ "requests": [{ "id": "r-runs-item", "sessionId": "s", "fidelity": "payload",
+                               "skeleton": { "messages": [{ "$pika_runs": [[0, 1]] }] }, "blocks": [] }] }),
     ];
     for batch in bad {
         let r = ingest(&env.store, batch.clone());
         assert!(matches!(r, Err(IngestError::BadRequest(_))), "{batch}: {r:?}");
     }
+    assert_eq!(one(&env.store, "SELECT COUNT(*) AS n FROM requests")["n"], 0);
 }
 
 fn request(id: &str, session: &str, skeleton: &Value, blocks: &[(String, String)], ts: i64) -> Value {
@@ -397,4 +404,44 @@ fn export_is_byte_identical_with_unicode_and_large_lines() {
     let r = ingest(&env.store, json!({ "streams": [stream(&key, "session", byte_len(&lines[..2]), &lines[2..3])] })).unwrap();
     assert_eq!(r.streams[&key].length, byte_len(&lines));
     assert_eq!(export(&env, id), joined(&lines));
+}
+
+#[test]
+fn load_rejects_malformed_runs_and_enforces_byte_cap() {
+    let env = env();
+    let payload = json!({ "messages": [{ "role": "user", "content": "x".repeat(256) }] });
+    let (skeleton, blocks) = requests::split(&payload);
+    ingest(
+        &env.store,
+        json!({ "blobs": blobs(&blocks), "requests": [request("req-cap", "s1", &skeleton, &blocks, 1)] }),
+    )
+    .unwrap();
+
+    // A stored skeleton with repeated references to block 0 trips the byte cap without panic.
+    let repeated = json!({ "messages": { "$pika_runs": vec![[0, 1]; 10] } }).to_string();
+    env.store
+        .write(|tx| {
+            tx.execute("UPDATE requests SET skeleton = ?1 WHERE id = 'req-cap'", [repeated])?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    let err = env.store.read(|conn| requests::load_limited(conn, &env.store.blobs, "req-cap", 512)).unwrap_err();
+    assert!(err.to_string().contains("byte limit"), "{err:#}");
+
+    // Overflowing and negative runs in stored skeletons are rejected cleanly.
+    for bad_skeleton in [
+        json!({ "messages": { "$pika_runs": [[i64::MAX, 1]] } }).to_string(),
+        json!({ "messages": { "$pika_runs": [[0, -1]] } }).to_string(),
+    ] {
+        env.store
+            .write(|tx| {
+                tx.execute("UPDATE requests SET skeleton = ?1 WHERE id = 'req-cap'", [&bad_skeleton])?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+        assert!(
+            env.store.read(|conn| requests::load(conn, &env.store.blobs, "req-cap")).is_err(),
+            "load accepted {bad_skeleton}"
+        );
+    }
 }
