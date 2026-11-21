@@ -79,6 +79,13 @@ pub const UNDO_STEPS: &[(usize, &str)] = &[
     (21, "DROP TABLE nodes;"),
     (22, "DROP TABLE deck_projects;"),
     (23, "DROP INDEX IF EXISTS entries_spokesman;"),
+    (
+        24,
+        "CREATE INDEX IF NOT EXISTS sessions_root ON sessions(last_at DESC, id DESC) WHERE parent_session_id IS NULL;
+         CREATE INDEX IF NOT EXISTS sessions_root_device ON sessions(device, last_at DESC, id DESC) WHERE parent_session_id IS NULL;
+         CREATE INDEX IF NOT EXISTS sessions_root_project ON sessions(project, last_at DESC, id DESC) WHERE parent_session_id IS NULL;
+         CREATE INDEX IF NOT EXISTS sessions_root_device_project ON sessions(device, project, last_at DESC, id DESC) WHERE parent_session_id IS NULL;",
+    ),
 ];
 
 /// Rewinds `conn` from its current `PRAGMA user_version` down to `target_version`, running each intermediate undo step

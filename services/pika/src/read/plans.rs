@@ -420,3 +420,57 @@ fn spokesman_rewrites_use_the_partial_index() {
         );
     });
 }
+
+/// Schema v24 drops the four unused `sessions_root*` partial indexes both on freshly created databases and when
+/// upgrading an existing v23 database, without triggering a reindex.
+#[test]
+fn unused_sessions_root_indexes_are_dropped() {
+    let present = |conn: &Connection| -> Vec<String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'index' \
+                 AND name IN ('sessions_root', 'sessions_root_device', 'sessions_root_project', 'sessions_root_device_project') \
+                 ORDER BY name",
+            )
+            .unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+
+    with_conn(|conn| {
+        assert_eq!(present(conn), Vec::<String>::new());
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let derived_gen = {
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        store.setting(crate::store::DERIVED_GENERATION).unwrap()
+    };
+    let conn = Connection::open(dir.path().join("pika.db")).unwrap();
+    conn.execute_batch(
+        "CREATE INDEX sessions_root ON sessions(last_at DESC, id DESC) WHERE parent_session_id IS NULL;
+         CREATE INDEX sessions_root_device ON sessions(device, last_at DESC, id DESC) WHERE parent_session_id IS NULL;
+         CREATE INDEX sessions_root_project ON sessions(project, last_at DESC, id DESC) WHERE parent_session_id IS NULL;
+         CREATE INDEX sessions_root_device_project ON sessions(device, project, last_at DESC, id DESC) WHERE parent_session_id IS NULL;",
+    )
+    .unwrap();
+    conn.pragma_update(None, "user_version", 23).unwrap();
+    assert_eq!(present(&conn).len(), 4);
+    conn.execute_batch(
+        "CREATE TRIGGER no_v24_reindex BEFORE DELETE ON sessions
+         BEGIN SELECT RAISE(ABORT, 'reindexed during v24 upgrade'); END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = crate::store::Store::open(dir.path()).unwrap();
+    assert_eq!(store.setting(crate::store::NEEDS_REINDEX).unwrap(), None);
+    assert_eq!(store.setting(crate::store::DERIVED_GENERATION).unwrap(), derived_gen);
+    store
+        .read(|conn| {
+            let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            assert_eq!(version, 24);
+            assert_eq!(present(conn), Vec::<String>::new());
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+}
