@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -86,7 +86,9 @@ function unwrapExpression(expr: ts.Expression): ts.Expression {
 	while (
 		ts.isAsExpression(expr) ||
 		ts.isSatisfiesExpression(expr) ||
-		ts.isParenthesizedExpression(expr)
+		ts.isParenthesizedExpression(expr) ||
+		ts.isNonNullExpression(expr) ||
+		ts.isTypeAssertionExpression(expr)
 	) {
 		expr = expr.expression;
 	}
@@ -194,6 +196,946 @@ function extractAgentsLayoutExtensions(layoutSection: string): Set<string> {
 	return listed;
 }
 
+type EvalValue =
+	| { kind: "strings"; values: string[] }
+	| { kind: "object"; props: Map<string, EvalValue> }
+	| { kind: "param"; fnId: string; paramIndex: number; propPath: string[]; prefix: string; suffix: string };
+
+interface DiscoveredCommand {
+	command: string;
+	filePath: string;
+	extension: string | null;
+}
+
+interface DocCommandEntry {
+	command: string;
+	extension: string | null;
+}
+
+interface CommandParityDiff {
+	missingFromDocs: string[];
+	staleInDocs: string[];
+}
+
+const EXCLUDED_SOURCE_DIRS = new Set([
+	"tests",
+	"test",
+	"fixtures",
+	"vendor",
+	"examples",
+	"scripts",
+	"node_modules",
+	"dist",
+	"build",
+]);
+
+const SOURCE_FILE_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs"]);
+
+function scriptKindForPath(filePath: string): ts.ScriptKind {
+	const ext = path.extname(filePath).toLowerCase();
+	switch (ext) {
+		case ".tsx":
+			return ts.ScriptKind.TSX;
+		case ".jsx":
+			return ts.ScriptKind.JSX;
+		case ".js":
+		case ".mjs":
+		case ".cjs":
+			return ts.ScriptKind.JS;
+		default:
+			return ts.ScriptKind.TS;
+	}
+}
+
+function getPropertyKeyName(name: ts.PropertyName): string | null {
+	if (ts.isIdentifier(name) || ts.isNumericLiteral(name)) return name.text;
+	return getStringLiteralValue(name);
+}
+
+function combineStringParts(left: string[], right: string[]): string[] {
+	const result: string[] = [];
+	for (const a of left) {
+		for (const b of right) {
+			result.push(`${a}${b}`);
+		}
+	}
+	return result;
+}
+
+function evaluateExpression(expr: ts.Expression, env: Map<string, EvalValue>): EvalValue | null {
+	const node = unwrapExpression(expr);
+
+	const literal = getStringLiteralValue(node);
+	if (literal !== null) {
+		return { kind: "strings", values: [literal] };
+	}
+
+	if (ts.isIdentifier(node)) {
+		return env.get(node.text) ?? null;
+	}
+
+	if (ts.isPropertyAccessExpression(node)) {
+		const target = evaluateExpression(node.expression, env);
+		if (!target) return null;
+		if (target.kind === "object") {
+			return target.props.get(node.name.text) ?? null;
+		}
+		if (target.kind === "param" && target.prefix === "" && target.suffix === "") {
+			return {
+				kind: "param",
+				fnId: target.fnId,
+				paramIndex: target.paramIndex,
+				propPath: [...target.propPath, node.name.text],
+				prefix: "",
+				suffix: "",
+			};
+		}
+		return null;
+	}
+
+	if (ts.isElementAccessExpression(node)) {
+		const target = evaluateExpression(node.expression, env);
+		const key = getStringLiteralValue(unwrapExpression(node.argumentExpression));
+		if (!target || key === null) return null;
+		if (target.kind === "object") {
+			return target.props.get(key) ?? null;
+		}
+		if (target.kind === "param" && target.prefix === "" && target.suffix === "") {
+			return {
+				kind: "param",
+				fnId: target.fnId,
+				paramIndex: target.paramIndex,
+				propPath: [...target.propPath, key],
+				prefix: "",
+				suffix: "",
+			};
+		}
+		return null;
+	}
+
+	if (ts.isObjectLiteralExpression(node)) {
+		const props = new Map<string, EvalValue>();
+		for (const prop of node.properties) {
+			if (ts.isPropertyAssignment(prop)) {
+				const key = getPropertyKeyName(prop.name);
+				if (key === null) continue;
+				const value = evaluateExpression(prop.initializer, env);
+				if (value) props.set(key, value);
+			} else if (ts.isShorthandPropertyAssignment(prop)) {
+				const value = env.get(prop.name.text);
+				if (value) props.set(prop.name.text, value);
+			} else if (ts.isSpreadAssignment(prop)) {
+				const spreadVal = evaluateExpression(prop.expression, env);
+				if (spreadVal?.kind === "object") {
+					for (const [k, v] of spreadVal.props) {
+						props.set(k, v);
+					}
+				}
+			}
+		}
+		return { kind: "object", props };
+	}
+
+	if (ts.isArrayLiteralExpression(node)) {
+		const values: string[] = [];
+		for (const elem of node.elements) {
+			if (ts.isOmittedExpression(elem)) return null;
+			const targetExpr = ts.isSpreadElement(elem) ? elem.expression : elem;
+			const val = evaluateExpression(targetExpr, env);
+			if (!val || val.kind !== "strings") return null;
+			values.push(...val.values);
+		}
+		return { kind: "strings", values };
+	}
+
+	if (ts.isTemplateExpression(node)) {
+		if (node.templateSpans.length === 1) {
+			const span = node.templateSpans[0]!;
+			const spanVal = evaluateExpression(span.expression, env);
+			if (spanVal?.kind === "param") {
+				return {
+					kind: "param",
+					fnId: spanVal.fnId,
+					paramIndex: spanVal.paramIndex,
+					propPath: spanVal.propPath,
+					prefix: `${node.head.text}${spanVal.prefix}`,
+					suffix: `${spanVal.suffix}${span.literal.text}`,
+				};
+			}
+		}
+		let current = [node.head.text];
+		for (const span of node.templateSpans) {
+			const spanVal = evaluateExpression(span.expression, env);
+			if (!spanVal || spanVal.kind !== "strings") return null;
+			current = combineStringParts(current, spanVal.values);
+			if (span.literal.text.length > 0) {
+				current = combineStringParts(current, [span.literal.text]);
+			}
+		}
+		return { kind: "strings", values: current };
+	}
+
+	if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+		const left = evaluateExpression(node.left, env);
+		const right = evaluateExpression(node.right, env);
+		if (left?.kind === "strings" && right?.kind === "strings") {
+			return { kind: "strings", values: combineStringParts(left.values, right.values) };
+		}
+		return null;
+	}
+
+	return null;
+}
+
+function bindBindingName(name: ts.BindingName, value: EvalValue | null, env: Map<string, EvalValue>): void {
+	if (ts.isIdentifier(name)) {
+		if (value) env.set(name.text, value);
+		else env.delete(name.text);
+		return;
+	}
+	if (ts.isObjectBindingPattern(name)) {
+		for (const elem of name.elements) {
+			if (elem.dotDotDotToken) continue;
+			const propName = elem.propertyName
+				? getPropertyKeyName(elem.propertyName)
+				: ts.isIdentifier(elem.name)
+					? elem.name.text
+					: null;
+			let propVal: EvalValue | null = null;
+			if (propName !== null && value) {
+				if (value.kind === "object") {
+					propVal = value.props.get(propName) ?? null;
+				} else if (value.kind === "param" && value.prefix === "" && value.suffix === "") {
+					propVal = {
+						kind: "param",
+						fnId: value.fnId,
+						paramIndex: value.paramIndex,
+						propPath: [...value.propPath, propName],
+						prefix: "",
+						suffix: "",
+					};
+				}
+			}
+			bindBindingName(elem.name, propVal, env);
+		}
+		return;
+	}
+	if (ts.isArrayBindingPattern(name)) {
+		for (const elem of name.elements) {
+			if (ts.isBindingElement(elem)) {
+				bindBindingName(elem.name, null, env);
+			}
+		}
+	}
+}
+
+function resolvePropPath(value: EvalValue | null, propPath: readonly string[], prefix: string, suffix: string): EvalValue | null {
+	let current = value;
+	for (const key of propPath) {
+		if (!current) return null;
+		if (current.kind === "object") {
+			current = current.props.get(key) ?? null;
+		} else if (current.kind === "param" && current.prefix === "" && current.suffix === "") {
+			current = {
+				kind: "param",
+				fnId: current.fnId,
+				paramIndex: current.paramIndex,
+				propPath: [...current.propPath, key],
+				prefix: "",
+				suffix: "",
+			};
+		} else {
+			return null;
+		}
+	}
+	if (!current) return null;
+	if (current.kind === "strings") {
+		return { kind: "strings", values: current.values.map((v) => `${prefix}${v}${suffix}`) };
+	}
+	if (current.kind === "param") {
+		return {
+			kind: "param",
+			fnId: current.fnId,
+			paramIndex: current.paramIndex,
+			propPath: current.propPath,
+			prefix: `${prefix}${current.prefix}`,
+			suffix: `${current.suffix}${suffix}`,
+		};
+	}
+	return null;
+}
+
+function resolveRelativeImport(fromFile: string, specifier: string, knownFiles: Set<string>): string | null {
+	if (!specifier.startsWith(".")) return null;
+	const base = path.resolve(path.dirname(fromFile), specifier);
+	const candidates = [base];
+	const ext = path.extname(base);
+	if (ext === ".js" || ext === ".mjs" || ext === ".cjs") {
+		const stem = base.slice(0, -ext.length);
+		candidates.push(`${stem}.ts`, `${stem}.tsx`, `${stem}.mts`, `${stem}.cts`);
+	}
+	candidates.push(
+		`${base}.ts`,
+		`${base}.tsx`,
+		`${base}.mts`,
+		`${base}.js`,
+		`${base}.mjs`,
+		path.join(base, "index.ts"),
+		path.join(base, "index.tsx"),
+		path.join(base, "index.js"),
+	);
+	for (const candidate of candidates) {
+		if (knownFiles.has(candidate)) return candidate;
+	}
+	return null;
+}
+
+function extensionNameFromFilePath(filePath: string): string | null {
+	const normalized = filePath.replaceAll("\\", "/");
+	const match = normalized.match(/(?:^|\/)extensions\/([^/]+)\//);
+	return match ? match[1]! : null;
+}
+
+function normalizeSlashCommand(raw: string): string {
+	return raw.startsWith("/") ? raw : `/${raw}`;
+}
+
+function lineNumberAt(sourceFile: ts.SourceFile, pos: number): number {
+	return sourceFile.getLineAndCharacterOfPosition(pos).line + 1;
+}
+
+function collectProductionExtensionSourceFiles(rootDir: string): string[] {
+	const files: string[] = [];
+	const walk = (dir: string): void => {
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			if (entry.name.startsWith(".")) continue;
+			const fullPath = path.join(dir, entry.name);
+			if (entry.isDirectory()) {
+				if (EXCLUDED_SOURCE_DIRS.has(entry.name)) continue;
+				walk(fullPath);
+			} else if (entry.isFile()) {
+				const ext = path.extname(entry.name).toLowerCase();
+				if (!SOURCE_FILE_EXTENSIONS.has(ext)) continue;
+				if (
+					entry.name.endsWith(".d.ts") ||
+					/\.test\.[^.]+$/.test(entry.name) ||
+					/\.spec\.[^.]+$/.test(entry.name) ||
+					/^vitest(?:\.[^.]+)?\.config\.[^.]+$/.test(entry.name)
+				) {
+					continue;
+				}
+				files.push(fullPath);
+			}
+		}
+	};
+	walk(rootDir);
+	return files.sort();
+}
+
+interface ParsedModuleInfo {
+	filePath: string;
+	sourceFile: ts.SourceFile;
+	namedImports: Map<string, { targetFile: string; exportName: string }>;
+	namespaceImports: Map<string, string>;
+	reExports: Map<string, { targetFile: string; exportName: string }>;
+	exportedConsts: Map<string, EvalValue>;
+	topLevelEnv: Map<string, EvalValue>;
+}
+
+interface HelperRequirement {
+	fnId: string;
+	paramIndex: number;
+	propPath: string[];
+	prefix: string;
+	suffix: string;
+	definedAt: string;
+}
+
+interface RecordedCall {
+	targetFnId: string;
+	args: (EvalValue | null)[];
+	filePath: string;
+	line: number;
+}
+
+function isExportedStatement(node: ts.Node): boolean {
+	if (!ts.canHaveModifiers(node)) return false;
+	const modifiers = ts.getModifiers(node);
+	return Boolean(modifiers?.some((mod) => mod.kind === ts.SyntaxKind.ExportKeyword));
+}
+
+function isDefaultExported(node: ts.Node): boolean {
+	if (!ts.canHaveModifiers(node)) return false;
+	const modifiers = ts.getModifiers(node);
+	return Boolean(modifiers?.some((mod) => mod.kind === ts.SyntaxKind.DefaultKeyword));
+}
+
+function discoverRegisteredCommandsFromSources(files: Map<string, string>): DiscoveredCommand[] {
+	const knownFiles = new Set(files.keys());
+	const modules = new Map<string, ParsedModuleInfo>();
+
+	for (const [filePath, sourceText] of files) {
+		const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true, scriptKindForPath(filePath));
+		const namedImports = new Map<string, { targetFile: string; exportName: string }>();
+		const namespaceImports = new Map<string, string>();
+		const reExports = new Map<string, { targetFile: string; exportName: string }>();
+		const exportedConsts = new Map<string, EvalValue>();
+		const topLevelEnv = new Map<string, EvalValue>();
+
+		for (const stmt of sourceFile.statements) {
+			if (ts.isImportDeclaration(stmt) && ts.isStringLiteral(stmt.moduleSpecifier)) {
+				const targetFile = resolveRelativeImport(filePath, stmt.moduleSpecifier.text, knownFiles);
+				if (!targetFile || !stmt.importClause) continue;
+				if (stmt.importClause.name) {
+					namedImports.set(stmt.importClause.name.text, { targetFile, exportName: "default" });
+				}
+				const bindings = stmt.importClause.namedBindings;
+				if (bindings) {
+					if (ts.isNamespaceImport(bindings)) {
+						namespaceImports.set(bindings.name.text, targetFile);
+					} else if (ts.isNamedImports(bindings)) {
+						for (const spec of bindings.elements) {
+							const exportName = spec.propertyName ? spec.propertyName.text : spec.name.text;
+							namedImports.set(spec.name.text, { targetFile, exportName });
+						}
+					}
+				}
+			} else if (ts.isExportDeclaration(stmt) && stmt.moduleSpecifier && ts.isStringLiteral(stmt.moduleSpecifier)) {
+				const targetFile = resolveRelativeImport(filePath, stmt.moduleSpecifier.text, knownFiles);
+				if (!targetFile || !stmt.exportClause || !ts.isNamedExports(stmt.exportClause)) continue;
+				for (const spec of stmt.exportClause.elements) {
+					const origName = spec.propertyName ? spec.propertyName.text : spec.name.text;
+					reExports.set(spec.name.text, { targetFile, exportName: origName });
+				}
+			}
+		}
+
+		for (const stmt of sourceFile.statements) {
+			if (!ts.isVariableStatement(stmt)) continue;
+			const exported = isExportedStatement(stmt);
+			for (const decl of stmt.declarationList.declarations) {
+				if (!decl.initializer) continue;
+				const val = evaluateExpression(decl.initializer, topLevelEnv);
+				bindBindingName(decl.name, val, topLevelEnv);
+				if (exported && ts.isIdentifier(decl.name) && val) {
+					exportedConsts.set(decl.name.text, val);
+				}
+			}
+		}
+
+		modules.set(filePath, {
+			filePath,
+			sourceFile,
+			namedImports,
+			namespaceImports,
+			reExports,
+			exportedConsts,
+			topLevelEnv,
+		});
+	}
+
+	const resolveExportTarget = (
+		filePath: string,
+		exportName: string,
+		visited = new Set<string>(),
+	): { targetFile: string; exportName: string } => {
+		const key = `${filePath}::${exportName}`;
+		if (visited.has(key)) return { targetFile: filePath, exportName };
+		visited.add(key);
+		const mod = modules.get(filePath);
+		const reExport = mod?.reExports.get(exportName);
+		if (reExport) {
+			return resolveExportTarget(reExport.targetFile, reExport.exportName, visited);
+		}
+		return { targetFile: filePath, exportName };
+	};
+
+	// Populate imported top-level constants across modules.
+	for (const mod of modules.values()) {
+		for (const [localName, imp] of mod.namedImports) {
+			const resolved = resolveExportTarget(imp.targetFile, imp.exportName);
+			const exportedVal = modules.get(resolved.targetFile)?.exportedConsts.get(resolved.exportName);
+			if (exportedVal && !mod.topLevelEnv.has(localName)) {
+				mod.topLevelEnv.set(localName, exportedVal);
+			}
+		}
+	}
+
+	const discovered: DiscoveredCommand[] = [];
+	const helperRequirements: HelperRequirement[] = [];
+	const callsByTarget = new Map<string, RecordedCall[]>();
+
+	const recordCall = (call: RecordedCall): void => {
+		const list = callsByTarget.get(call.targetFnId);
+		if (list) list.push(call);
+		else callsByTarget.set(call.targetFnId, [call]);
+	};
+
+	for (const mod of modules.values()) {
+		const { filePath, sourceFile } = mod;
+		const localFnIds = new Map<string, string>();
+		for (const stmt of sourceFile.statements) {
+			if (ts.isFunctionDeclaration(stmt) && stmt.name) {
+				const fnId = `${filePath}::${stmt.name.text}`;
+				localFnIds.set(stmt.name.text, fnId);
+				if (isDefaultExported(stmt)) {
+					localFnIds.set("default", `${filePath}::default`);
+				}
+			} else if (ts.isVariableStatement(stmt)) {
+				for (const decl of stmt.declarationList.declarations) {
+					if (ts.isIdentifier(decl.name) && decl.initializer) {
+						const init = unwrapExpression(decl.initializer);
+						if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
+							localFnIds.set(decl.name.text, `${filePath}::${decl.name.text}`);
+						}
+					}
+				}
+			}
+		}
+
+		const visitFunctionLike = (
+			fnNode: ts.FunctionLikeDeclarationBase,
+			fnId: string | null,
+			env: Map<string, EvalValue>,
+			forEachItemVal: EvalValue | null,
+			scopedFns: Map<string, string>,
+		): void => {
+			const fnEnv = new Map(env);
+			fnNode.parameters.forEach((param, index) => {
+				if (index === 0 && forEachItemVal) {
+					bindBindingName(param.name, forEachItemVal, fnEnv);
+					return;
+				}
+				const paramVal: EvalValue | null = fnId
+					? { kind: "param", fnId, paramIndex: index, propPath: [], prefix: "", suffix: "" }
+					: null;
+				bindBindingName(param.name, paramVal, fnEnv);
+			});
+			if (fnNode.body) {
+				visitNode(fnNode.body, fnEnv, scopedFns);
+			}
+		};
+
+		const visitStatementList = (
+			statements: readonly ts.Statement[],
+			env: Map<string, EvalValue>,
+			parentScopedFns: Map<string, string>,
+			isTopLevel: boolean,
+		): void => {
+			const blockEnv = new Map(env);
+			const scopedFns = new Map(parentScopedFns);
+			if (!isTopLevel) {
+				for (const stmt of statements) {
+					if (ts.isFunctionDeclaration(stmt) && stmt.name) {
+						scopedFns.set(stmt.name.text, `${filePath}::local@${stmt.pos}:${stmt.name.text}`);
+					} else if (ts.isVariableStatement(stmt)) {
+						for (const decl of stmt.declarationList.declarations) {
+							if (ts.isIdentifier(decl.name) && decl.initializer) {
+								const init = unwrapExpression(decl.initializer);
+								if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
+									scopedFns.set(decl.name.text, `${filePath}::local@${decl.pos}:${decl.name.text}`);
+								}
+							}
+						}
+					}
+				}
+			}
+
+			for (const stmt of statements) {
+				if (ts.isVariableStatement(stmt)) {
+					for (const decl of stmt.declarationList.declarations) {
+						if (!decl.initializer) continue;
+						const init = unwrapExpression(decl.initializer);
+						const val = evaluateExpression(decl.initializer, blockEnv);
+						bindBindingName(decl.name, val, blockEnv);
+						if (ts.isIdentifier(decl.name) && (ts.isArrowFunction(init) || ts.isFunctionExpression(init))) {
+							const fnId = scopedFns.get(decl.name.text) ?? null;
+							visitFunctionLike(init, fnId, blockEnv, null, scopedFns);
+						} else {
+							visitNode(decl.initializer, blockEnv, scopedFns);
+						}
+					}
+					continue;
+				}
+				if (ts.isFunctionDeclaration(stmt)) {
+					const fnId = stmt.name
+						? scopedFns.get(stmt.name.text) ?? `${filePath}::${stmt.name.text}`
+						: isDefaultExported(stmt)
+							? `${filePath}::default`
+							: null;
+					visitFunctionLike(stmt, fnId, blockEnv, null, scopedFns);
+					continue;
+				}
+				visitNode(stmt, blockEnv, scopedFns);
+			}
+		};
+
+		const resolveCallTarget = (callee: ts.Expression, scopedFns: Map<string, string>): string | null => {
+			const unwrapped = unwrapExpression(callee);
+			if (ts.isIdentifier(unwrapped)) {
+				const imp = mod.namedImports.get(unwrapped.text);
+				if (imp) {
+					const resolved = resolveExportTarget(imp.targetFile, imp.exportName);
+					return `${resolved.targetFile}::${resolved.exportName}`;
+				}
+				return scopedFns.get(unwrapped.text) ?? null;
+			}
+			if (ts.isPropertyAccessExpression(unwrapped) && ts.isIdentifier(unwrapped.expression)) {
+				const targetFile = mod.namespaceImports.get(unwrapped.expression.text);
+				if (targetFile) {
+					const resolved = resolveExportTarget(targetFile, unwrapped.name.text);
+					return `${resolved.targetFile}::${resolved.exportName}`;
+				}
+			}
+			return null;
+		};
+
+		const visitNode = (node: ts.Node, env: Map<string, EvalValue>, scopedFns: Map<string, string>): void => {
+			if (ts.isBlock(node)) {
+				visitStatementList(node.statements, env, scopedFns, false);
+				return;
+			}
+
+			if (ts.isCaseClause(node) || ts.isDefaultClause(node)) {
+				visitStatementList(node.statements, env, scopedFns, false);
+				return;
+			}
+
+			if (ts.isForOfStatement(node)) {
+				const loopEnv = new Map(env);
+				const iterVal = evaluateExpression(node.expression, env);
+				if (ts.isVariableDeclarationList(node.initializer) && node.initializer.declarations.length > 0) {
+					const decl = node.initializer.declarations[0]!;
+					bindBindingName(decl.name, iterVal?.kind === "strings" ? iterVal : null, loopEnv);
+				}
+				visitNode(node.expression, env, scopedFns);
+				visitNode(node.statement, loopEnv, scopedFns);
+				return;
+			}
+
+			if (ts.isCallExpression(node)) {
+				const callee = unwrapExpression(node.expression);
+				if (ts.isPropertyAccessExpression(callee) && callee.name.text === "registerCommand") {
+					const line = lineNumberAt(sourceFile, node.getStart(sourceFile));
+					if (node.arguments.length === 0) {
+						throw new Error(`registerCommand() called without a command name at ${filePath}:${line}`);
+					}
+					const firstArg = node.arguments[0]!;
+					const evaluated = evaluateExpression(firstArg, env);
+					if (evaluated?.kind === "strings" && evaluated.values.length > 0) {
+						for (const rawName of evaluated.values) {
+							discovered.push({
+								command: normalizeSlashCommand(rawName),
+								filePath,
+								extension: extensionNameFromFilePath(filePath),
+							});
+						}
+					} else if (evaluated?.kind === "param") {
+						helperRequirements.push({
+							fnId: evaluated.fnId,
+							paramIndex: evaluated.paramIndex,
+							propPath: evaluated.propPath,
+							prefix: evaluated.prefix,
+							suffix: evaluated.suffix,
+							definedAt: `${filePath}:${line}`,
+						});
+					} else {
+						throw new Error(
+							`Could not statically resolve registerCommand(...) at ${filePath}:${line}: ${firstArg.getText(sourceFile)}`,
+						);
+					}
+				}
+
+				const targetFnId = resolveCallTarget(callee, scopedFns);
+				if (targetFnId) {
+					recordCall({
+						targetFnId,
+						args: node.arguments.map((arg) => evaluateExpression(arg, env)),
+						filePath,
+						line: lineNumberAt(sourceFile, node.getStart(sourceFile)),
+					});
+				}
+
+				if (
+					ts.isPropertyAccessExpression(callee) &&
+					callee.name.text === "forEach" &&
+					node.arguments.length > 0
+				) {
+					const iterVal = evaluateExpression(callee.expression, env);
+					const callback = unwrapExpression(node.arguments[0]!);
+					if (
+						iterVal?.kind === "strings" &&
+						(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))
+					) {
+						visitNode(callee.expression, env, scopedFns);
+						visitFunctionLike(callback, null, env, iterVal, scopedFns);
+						for (let i = 1; i < node.arguments.length; i++) {
+							visitNode(node.arguments[i]!, env, scopedFns);
+						}
+						return;
+					}
+				}
+			}
+
+			if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+				visitFunctionLike(node, null, env, null, scopedFns);
+				return;
+			}
+
+			ts.forEachChild(node, (child) => visitNode(child, env, scopedFns));
+		};
+
+		visitStatementList(sourceFile.statements, mod.topLevelEnv, localFnIds, true);
+	}
+
+	// Resolve helper functions that wrap pi.registerCommand(...) via their call sites (supporting multi-hop helpers).
+	const pending: HelperRequirement[] = [...helperRequirements];
+	const seenReqs = new Set<string>();
+	while (pending.length > 0) {
+		const req = pending.shift()!;
+		const reqKey = `${req.fnId}|${req.paramIndex}|${req.propPath.join(".")}|${req.prefix}|${req.suffix}`;
+		if (seenReqs.has(reqKey)) continue;
+		seenReqs.add(reqKey);
+
+		const calls = callsByTarget.get(req.fnId) ?? [];
+		if (calls.length === 0) {
+			throw new Error(
+				`Found registerCommand helper ${req.fnId} (at ${req.definedAt}) with no production call sites to resolve its command name`,
+			);
+		}
+		for (const call of calls) {
+			const argVal = call.args[req.paramIndex] ?? null;
+			const resolved = resolvePropPath(argVal, req.propPath, req.prefix, req.suffix);
+			if (resolved?.kind === "strings" && resolved.values.length > 0) {
+				for (const rawName of resolved.values) {
+					discovered.push({
+						command: normalizeSlashCommand(rawName),
+						filePath: call.filePath,
+						extension: extensionNameFromFilePath(call.filePath),
+					});
+				}
+			} else if (resolved?.kind === "param") {
+				pending.push({
+					fnId: resolved.fnId,
+					paramIndex: resolved.paramIndex,
+					propPath: resolved.propPath,
+					prefix: resolved.prefix,
+					suffix: resolved.suffix,
+					definedAt: `${call.filePath}:${call.line}`,
+				});
+			} else {
+				throw new Error(
+					`Could not statically resolve argument ${req.paramIndex} (${req.propPath.join(".") || "<direct>"}) in call to ${req.fnId} at ${call.filePath}:${call.line}`,
+				);
+			}
+		}
+	}
+
+	return discovered;
+}
+
+function discoverRegisteredExtensionCommands(rootDir = extensionsRoot): DiscoveredCommand[] {
+	const files = new Map<string, string>();
+	for (const filePath of collectProductionExtensionSourceFiles(rootDir)) {
+		files.set(filePath, readFileSync(filePath, "utf8"));
+	}
+	return discoverRegisteredCommandsFromSources(files);
+}
+
+function extractManifestPromptCommands(manifest: RootManifest, rootDir = repoRoot): DiscoveredCommand[] {
+	const prompts: DiscoveredCommand[] = [];
+	const collectMarkdownFiles = (targetPath: string): void => {
+		const stat = statSync(targetPath);
+		if (stat.isDirectory()) {
+			for (const entry of readdirSync(targetPath, { withFileTypes: true })) {
+				if (entry.name.startsWith(".")) continue;
+				collectMarkdownFiles(path.join(targetPath, entry.name));
+			}
+			return;
+		}
+		if (stat.isFile() && targetPath.endsWith(".md")) {
+			prompts.push({
+				command: `/${path.basename(targetPath, ".md")}`,
+				filePath: targetPath,
+				extension: extensionNameFromFilePath(targetPath),
+			});
+		}
+	};
+
+	for (const entry of manifest.pi.prompts) {
+		const resolved = path.resolve(rootDir, entry);
+		collectMarkdownFiles(resolved);
+	}
+	return prompts;
+}
+
+function extractDocCommandsFromSource(
+	sourceText: string,
+	filePath: string,
+): { entries: DocCommandEntry[]; duplicates: string[] } {
+	const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true);
+	const tupleArrays = new Map<string, (string | null)[][]>();
+	let docCommandsInit: ts.Expression | undefined;
+
+	for (const statement of sourceFile.statements) {
+		if (!ts.isVariableStatement(statement)) continue;
+		for (const decl of statement.declarationList.declarations) {
+			if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
+			const init = unwrapExpression(decl.initializer);
+			if (decl.name.text === "DOC_COMMANDS") {
+				docCommandsInit = init;
+				continue;
+			}
+			if (!ts.isArrayLiteralExpression(init)) continue;
+			const rows: (string | null)[][] = [];
+			let allTuples = init.elements.length > 0;
+			for (const elem of init.elements) {
+				const unwrapped = unwrapExpression(elem);
+				if (!ts.isArrayLiteralExpression(unwrapped) || unwrapped.elements.length === 0) {
+					allTuples = false;
+					break;
+				}
+				rows.push(unwrapped.elements.map((item) => getStringLiteralValue(unwrapExpression(item))));
+			}
+			if (allTuples) {
+				tupleArrays.set(decl.name.text, rows);
+			}
+		}
+	}
+
+	if (!docCommandsInit) {
+		throw new Error(`Could not find DOC_COMMANDS initializer in ${filePath}`);
+	}
+
+	const entries: DocCommandEntry[] = [];
+
+	const extractFromObjectLiteral = (obj: ts.ObjectLiteralExpression, env: Map<string, EvalValue>): void => {
+		let command: string | null = null;
+		let extension: string | null = null;
+		for (const prop of obj.properties) {
+			if (ts.isPropertyAssignment(prop)) {
+				const key = getPropertyKeyName(prop.name);
+				if (key === "command") {
+					const val = evaluateExpression(prop.initializer, env);
+					if (val?.kind === "strings" && val.values.length === 1) command = val.values[0]!;
+				} else if (key === "extension") {
+					const val = evaluateExpression(prop.initializer, env);
+					if (val?.kind === "strings" && val.values.length === 1) extension = val.values[0]!;
+				}
+			} else if (ts.isShorthandPropertyAssignment(prop)) {
+				const key = prop.name.text;
+				const val = env.get(key);
+				if (key === "command" && val?.kind === "strings" && val.values.length === 1) {
+					command = val.values[0]!;
+				} else if (key === "extension" && val?.kind === "strings" && val.values.length === 1) {
+					extension = val.values[0]!;
+				}
+			}
+		}
+		if (!command) {
+			throw new Error(`Could not statically extract command property from DOC_COMMANDS entry in ${filePath}`);
+		}
+		entries.push({ command, extension });
+	};
+
+	const extractFromMapCall = (call: ts.CallExpression): boolean => {
+		if (
+			!ts.isPropertyAccessExpression(call.expression) ||
+			call.expression.name.text !== "map" ||
+			!ts.isIdentifier(call.expression.expression)
+		) {
+			return false;
+		}
+		const tuples = tupleArrays.get(call.expression.expression.text);
+		if (!tuples) return false;
+
+		const callbackArg = call.arguments[0] ? unwrapExpression(call.arguments[0]) : undefined;
+		if (!callbackArg || (!ts.isArrowFunction(callbackArg) && !ts.isFunctionExpression(callbackArg))) {
+			throw new Error(`Unsupported DOC_COMMANDS .map(...) callback in ${filePath}`);
+		}
+
+		let returnExpr: ts.Expression | undefined;
+		if (ts.isBlock(callbackArg.body)) {
+			const retStmt = callbackArg.body.statements.find(ts.isReturnStatement);
+			returnExpr = retStmt?.expression ? unwrapExpression(retStmt.expression) : undefined;
+		} else {
+			returnExpr = unwrapExpression(callbackArg.body);
+		}
+		if (!returnExpr || !ts.isObjectLiteralExpression(returnExpr)) {
+			throw new Error(`Expected DOC_COMMANDS .map(...) callback to return an object literal in ${filePath}`);
+		}
+
+		const firstParam = callbackArg.parameters[0];
+		const paramNames: (string | null)[] = [];
+		if (firstParam && ts.isArrayBindingPattern(firstParam.name)) {
+			for (const elem of firstParam.name.elements) {
+				if (ts.isBindingElement(elem) && ts.isIdentifier(elem.name)) {
+					paramNames.push(elem.name.text);
+				} else {
+					paramNames.push(null);
+				}
+			}
+		}
+
+		for (const row of tuples) {
+			const env = new Map<string, EvalValue>();
+			paramNames.forEach((name, idx) => {
+				const cell = row[idx];
+				if (name && cell !== null && cell !== undefined) {
+					env.set(name, { kind: "strings", values: [cell] });
+				}
+			});
+			extractFromObjectLiteral(returnExpr, env);
+		}
+		return true;
+	};
+
+	if (ts.isCallExpression(docCommandsInit)) {
+		if (!extractFromMapCall(docCommandsInit)) {
+			throw new Error(`Unsupported DOC_COMMANDS initializer expression in ${filePath}`);
+		}
+	} else if (ts.isArrayLiteralExpression(docCommandsInit)) {
+		const emptyEnv = new Map<string, EvalValue>();
+		for (const elem of docCommandsInit.elements) {
+			if (ts.isSpreadElement(elem)) {
+				const spread = unwrapExpression(elem.expression);
+				if (!ts.isCallExpression(spread) || !extractFromMapCall(spread)) {
+					throw new Error(`Unsupported spread element in DOC_COMMANDS in ${filePath}`);
+				}
+			} else {
+				const unwrapped = unwrapExpression(elem);
+				if (!ts.isObjectLiteralExpression(unwrapped)) {
+					throw new Error(`Unsupported element in DOC_COMMANDS in ${filePath}`);
+				}
+				extractFromObjectLiteral(unwrapped, emptyEnv);
+			}
+		}
+	} else {
+		throw new Error(`Unsupported DOC_COMMANDS initializer in ${filePath}`);
+	}
+
+	const seen = new Set<string>();
+	const duplicates: string[] = [];
+	for (const entry of entries) {
+		if (seen.has(entry.command)) duplicates.push(entry.command);
+		seen.add(entry.command);
+	}
+
+	return { entries, duplicates };
+}
+
+function extractDocCommands(filePath: string): { entries: DocCommandEntry[]; duplicates: string[] } {
+	return extractDocCommandsFromSource(readFileSync(filePath, "utf8"), filePath);
+}
+
+function diffCommandParity(actualCommands: Iterable<string>, documentedCommands: Iterable<string>): CommandParityDiff {
+	const actual = new Set(actualCommands);
+	const documented = new Set(documentedCommands);
+	const missingFromDocs = [...actual].filter((cmd) => !documented.has(cmd)).sort();
+	const staleInDocs = [...documented].filter((cmd) => !actual.has(cmd)).sort();
+	return { missingFromDocs, staleInDocs };
+}
+
 describe("collection manifest contracts", () => {
 	it("points every package.json pi.{extensions,prompts,skills,themes} entry at an existing path", () => {
 		const manifest = readManifest();
@@ -281,5 +1223,192 @@ describe("collection manifest contracts", () => {
 			missingFromLayout,
 			`Extension directories missing from AGENTS.md ## Layout: ${missingFromLayout.join(", ")}`,
 		).toEqual([]);
+	});
+
+	it("enforces bidirectional parity between registered slash commands/prompts and DOC_COMMANDS in services/pika/web/docs/sources.ts", () => {
+		const manifest = readManifest();
+		const registeredCommands = discoverRegisteredExtensionCommands();
+		const promptCommands = extractManifestPromptCommands(manifest);
+		const allDiscovered = [...registeredCommands, ...promptCommands];
+
+		expect(registeredCommands.length, "Expected registered slash commands under extensions/").toBeGreaterThan(0);
+		expect(promptCommands.length, "Expected prompt templates in package.json pi.prompts").toBeGreaterThan(0);
+
+		const { entries: docEntries, duplicates: docDuplicates } = extractDocCommands(docSourcesPath);
+		expect(
+			docDuplicates,
+			`Duplicate commands in DOC_COMMANDS (${docSourcesPath}): ${docDuplicates.join(", ")}`,
+		).toEqual([]);
+
+		const discoveredNames = [...new Set(allDiscovered.map((item) => item.command))].sort();
+		const documentedNames = docEntries.map((item) => item.command).sort();
+		const { missingFromDocs, staleInDocs } = diffCommandParity(discoveredNames, documentedNames);
+
+		expect(
+			missingFromDocs,
+			`Registered slash commands or prompt templates missing from DOC_COMMANDS in services/pika/web/docs/sources.ts: ${missingFromDocs.join(", ")}`,
+		).toEqual([]);
+		expect(
+			staleInDocs,
+			`Stale or removed commands still listed in DOC_COMMANDS in services/pika/web/docs/sources.ts: ${staleInDocs.join(", ")}`,
+		).toEqual([]);
+		expect(documentedNames).toEqual(discoveredNames);
+
+		const documentedByCommand = new Map(docEntries.map((entry) => [entry.command, entry.extension]));
+		const extensionMismatches: string[] = [];
+		for (const item of allDiscovered) {
+			if (!item.extension) continue;
+			const docExtension = documentedByCommand.get(item.command);
+			if (docExtension !== item.extension) {
+				extensionMismatches.push(`${item.command}: discovered in extensions/${item.extension}, documented under ${docExtension ?? "<none>"}`);
+			}
+		}
+		expect(
+			extensionMismatches,
+			`DOC_COMMANDS extension mismatches:\n${extensionMismatches.join("\n")}`,
+		).toEqual([]);
+	});
+});
+
+describe("command parity helpers", () => {
+	it("detects both missing and stale commands (including renames) in diffCommandParity", () => {
+		expect(diffCommandParity(["/alpha", "/beta"], ["/alpha", "/beta"])).toEqual({
+			missingFromDocs: [],
+			staleInDocs: [],
+		});
+
+		// Added command missing from DOC_COMMANDS
+		expect(diffCommandParity(["/alpha", "/beta", "/gamma"], ["/alpha", "/beta"])).toEqual({
+			missingFromDocs: ["/gamma"],
+			staleInDocs: [],
+		});
+
+		// Removed command left stale in DOC_COMMANDS
+		expect(diffCommandParity(["/alpha"], ["/alpha", "/beta"])).toEqual({
+			missingFromDocs: [],
+			staleInDocs: ["/beta"],
+		});
+
+		// Renamed command triggers both directions simultaneously
+		expect(diffCommandParity(["/alpha", "/beta-v2"], ["/alpha", "/beta"])).toEqual({
+			missingFromDocs: ["/beta-v2"],
+			staleInDocs: ["/beta"],
+		});
+	});
+
+	it("discovers direct, loop-template, constant, and cross-file helper registerCommand calls", () => {
+		const files = new Map<string, string>([
+			[
+				"/repo/extensions/alpha/index.ts",
+				`
+				const CONST_CMD = "alpha-const";
+				export default function alpha(pi: any) {
+					pi.registerCommand("alpha-direct", { handler: async () => {} });
+					pi.registerCommand(CONST_CMD, { handler: async () => {} });
+					for (const kind of ["one", "two"] as const) {
+						pi.registerCommand(\`alpha-\${kind}\`, { handler: async () => {} });
+					}
+				}
+				`,
+			],
+			[
+				"/repo/extensions/beta/switch.ts",
+				`
+				export function registerMode(pi: any, mode: { name: string }) {
+					const { name } = mode;
+					pi.registerCommand(name, { handler: async () => {} });
+				}
+				`,
+			],
+			[
+				"/repo/extensions/beta/index.ts",
+				`
+				import { registerMode } from "./switch.ts";
+				const MODE = "beta-mode";
+				export default function beta(pi: any) {
+					registerMode(pi, { name: MODE });
+				}
+				`,
+			],
+			[
+				"/repo/extensions/gamma/lifecycle.ts",
+				`
+				export function registerLifecycle(pi: any, options: { command: string }) {
+					pi.registerCommand(options.command, { handler: async () => {} });
+				}
+				`,
+			],
+			[
+				"/repo/extensions/gamma/index.ts",
+				`
+				import { registerLifecycle } from "./lifecycle.ts";
+				export default function gamma(pi: any) {
+					registerLifecycle(pi, { command: "gamma-cmd" });
+				}
+				`,
+			],
+		]);
+
+		const discovered = discoverRegisteredCommandsFromSources(files);
+		expect(discovered.map((d) => `${d.command}:${d.extension}`).sort()).toEqual([
+			"/alpha-const:alpha",
+			"/alpha-direct:alpha",
+			"/alpha-one:alpha",
+			"/alpha-two:alpha",
+			"/beta-mode:beta",
+			"/gamma-cmd:gamma",
+		]);
+	});
+
+	it("fails loudly when a production registerCommand call cannot be statically resolved", () => {
+		const files = new Map<string, string>([
+			[
+				"/repo/extensions/dynamic/index.ts",
+				`
+				export default function dyn(pi: any, getName: () => string) {
+					pi.registerCommand(getName(), { handler: async () => {} });
+				}
+				`,
+			],
+		]);
+
+		expect(() => discoverRegisteredCommandsFromSources(files)).toThrow(
+			/Could not statically resolve registerCommand/,
+		);
+	});
+
+	it("extracts DOC_COMMANDS from mapped tuple arrays and direct object literals and flags duplicates", () => {
+		const mapped = extractDocCommandsFromSource(
+			`
+			const commandEntries: [string, string, string][] = [
+				["foo", "ext-a", "Foo"],
+				["bar", "ext-b", "Bar"],
+				["foo", "ext-a", "Duplicate"],
+			];
+			export const DOC_COMMANDS = commandEntries.map(([command, extension, description]) => ({
+				command: \`/\${command}\`,
+				extension,
+				description,
+			}));
+			`,
+			"sources.ts",
+		);
+		expect(mapped.entries).toEqual([
+			{ command: "/foo", extension: "ext-a" },
+			{ command: "/bar", extension: "ext-b" },
+			{ command: "/foo", extension: "ext-a" },
+		]);
+		expect(mapped.duplicates).toEqual(["/foo"]);
+
+		const literal = extractDocCommandsFromSource(
+			`
+			export const DOC_COMMANDS = [
+				{ command: "/baz", extension: "ext-c", description: "Baz" },
+			];
+			`,
+			"sources.ts",
+		);
+		expect(literal.entries).toEqual([{ command: "/baz", extension: "ext-c" }]);
+		expect(literal.duplicates).toEqual([]);
 	});
 });
