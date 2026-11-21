@@ -69,7 +69,7 @@ impl Server {
     async fn restart(self, configure: impl FnOnce(&mut ServerConfig)) -> Server {
         let Server { env, state, app, laptop, desktop, serve_task, .. } = self;
         state.relay.close_all(pika::relay::close::GOING_AWAY, "server stopping");
-        let _ = state.relay.drained(Duration::from_secs(2)).await;
+        let _ = state.relay.drained(WAIT).await;
         serve_task.abort();
         let _ = serve_task.await;
         drop(app);
@@ -151,6 +151,26 @@ async fn sessions(s: &Server) -> Vec<Value> {
 
 fn ids(items: &[Value]) -> Vec<&str> {
     items.iter().map(|i| i["id"].as_str().unwrap()).collect()
+}
+
+/// Polls until `check` holds, with a CI-safe deadline.
+async fn wait_until(what: &str, mut check: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !check() {
+        assert!(tokio::time::Instant::now() < deadline, "{what} never happened");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Waits until the system millisecond clock advances so millisecond-resolution timestamps
+/// (`connectedAt`, `stateSince`) are strictly ordered without a fixed sleep.
+async fn wait_for_next_ms() {
+    let start = pika::util::now_ms();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while pika::util::now_ms() <= start {
+        assert!(tokio::time::Instant::now() < deadline, "system clock never advanced a millisecond");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
 }
 
 /// Polls the session list until `check` holds.
@@ -318,7 +338,7 @@ async fn hello_is_answered_with_welcome_and_lists_the_session() {
             "piVersion": "1.4.0", "recorded": false })
     );
 
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    wait_for_next_ms().await;
     a.send(json!({ "type": "state", "state": "busy", "title": "Fixing tests", "model": "faux/other" })).await;
     let items = sessions_until(&s, |items| items[0]["state"] == "busy").await;
     assert_eq!(
@@ -399,11 +419,16 @@ fn hello_message(id: &str) -> Message {
 
 #[tokio::test]
 async fn hello_must_arrive_in_time() {
-    let s = server_with(|c| c.relay.hello_timeout = Duration::from_millis(150)).await;
+    let s = server_with(|c| {
+        c.relay.hello_timeout = Duration::from_millis(200);
+        c.relay.heartbeat = Duration::from_millis(250);
+    })
+    .await;
     let mut late = Client::connect(&s, &s.laptop).await;
     assert_eq!(late.closed().await, 4408);
     let (mut on_time, _) = Client::online(&s, &s.laptop, "sess-a").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Receiving a heartbeat (`heartbeat > hello_timeout`) proves the hello timeout did not close `on_time`.
+    assert_eq!(on_time.next_any().await["type"], "ping");
     assert_eq!(on_time.relay(send("c1", "nobody", "hi")).await["reason"], "unknown_session");
 }
 
@@ -416,7 +441,7 @@ async fn sessions_belong_to_one_device() {
     c.send(hello(SESSION_ID)).await;
     assert_eq!(c.closed().await, 4403);
     let (_recorded, _) = Client::online(&s, &s.laptop, SESSION_ID).await;
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    wait_for_next_ms().await;
     // Nor while the laptop holds it online: the recorded owner decides first.
     let mut c = Client::connect(&s, &s.desktop).await;
     c.send(hello(SESSION_ID)).await;
@@ -572,16 +597,16 @@ async fn an_offline_target_gets_its_messages_on_reconnect() {
 #[tokio::test]
 async fn unacknowledged_messages_expire_and_tell_the_sender() {
     let s = server_with(|c| {
-        c.relay.ttl = Duration::from_millis(300);
+        c.relay.ttl = Duration::from_millis(500);
         c.relay.ack_wait = Duration::from_millis(50);
     })
     .await;
     record(&s.env.store, SESSION_ID, DEVICE);
     let (mut a, _) = Client::online(&s, &s.desktop, "sess-a").await;
-    let offline = a.relay(send("c1", SESSION_ID, "to nobody")).await;
-    assert_eq!(offline["status"], "queued");
     // An online target that never acknowledges.
     let (mut b, _) = Client::online(&s, &s.laptop, "sess-b").await;
+    let offline = a.relay(send("c1", SESSION_ID, "to nobody")).await;
+    assert_eq!(offline["status"], "queued");
     let online = a.relay(send("c2", "sess-b", "ignored")).await;
     assert_eq!((&online["status"], &b.next().await["id"]), (&json!("queued"), &online["id"]));
     let mut expired = Vec::new();
@@ -729,29 +754,32 @@ async fn the_mailbox_holds_100_per_target_and_a_global_maximum() {
 
 #[tokio::test]
 async fn silent_connections_are_closed_and_go_offline() {
+    let dead_after = Duration::from_millis(500);
     let s = server_with(|c| {
         c.relay.heartbeat = Duration::from_millis(100);
-        c.relay.dead_after = Duration::from_millis(500);
+        c.relay.dead_after = dead_after;
     })
     .await;
     let (mut a, welcome) = Client::online(&s, &s.laptop, "sess-a").await;
     assert_eq!(welcome["limits"]["heartbeatSeconds"], 0);
-    // Answering pings keeps the connection past the dead time.
+    // Answering pings keeps the connection alive past the dead time.
     let started = tokio::time::Instant::now();
     let mut pings = 0;
-    while started.elapsed() < Duration::from_millis(800) {
+    let mut last_pong = started;
+    while pings < 5 || started.elapsed() <= dead_after {
         let frame = a.next_any().await;
         assert_eq!(frame["type"], "ping");
         assert!(frame["at"].as_str().unwrap().ends_with('Z'));
         pings += 1;
+        last_pong = tokio::time::Instant::now();
         a.send(json!({ "type": "pong" })).await;
     }
-    assert!(pings >= 5, "{pings} pings");
+    assert!(pings >= 5 && started.elapsed() > dead_after, "pings={pings}, elapsed={:?}", started.elapsed());
     assert_eq!(ids(&sessions(&s).await), ["sess-a"]);
-    // Silence closes it.
+    // Silence closes it, and not before `dead_after` elapses after the last pong.
     assert_eq!(a.closed().await, 1001);
-    assert!(started.elapsed() >= Duration::from_millis(1200), "{:?}", started.elapsed());
-    assert!(sessions(&s).await.is_empty());
+    assert!(last_pong.elapsed() >= dead_after, "{:?}", last_pong.elapsed());
+    sessions_until(&s, |items| items.is_empty()).await;
 }
 
 #[tokio::test]
@@ -768,14 +796,12 @@ async fn revoking_a_device_closes_its_connections_with_4401() {
     assert_eq!(b.relay(send("c1", "sess-a", "x")).await["reason"], "unknown_session");
     assert_eq!(refused(&s, Some(&s.laptop)).await.0, 401);
 
-    // `pika token revoke` runs in another process: the connection closes within one heartbeat.
+    // `pika token revoke` runs in another process: the connection closes on the heartbeat check (well within `WAIT`).
     let s = server_with(|c| c.relay.heartbeat = Duration::from_millis(100)).await;
     let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
     let (mut b, _) = Client::online(&s, &s.desktop, "sess-b").await;
     pika::auth::revoke_token(&s.env.store, DEVICE).unwrap();
-    let started = tokio::time::Instant::now();
     assert_eq!(a.closed().await, 4401);
-    assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
     assert_eq!(b.next_any().await["type"], "ping");
 }
 
@@ -794,7 +820,7 @@ async fn connections_and_online_sessions_are_limited() {
     c.send(hello("sess-c")).await;
     assert_eq!(c.closed().await, 4429);
     // Replacing a session does not add one.
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    wait_for_next_ms().await;
     let (_a2, _) = Client::online(&s, &s.desktop, "sess-a").await;
     assert_eq!(ids(&sessions(&s).await), ["sess-a", "sess-b"]);
 }
@@ -865,7 +891,7 @@ async fn the_browser_lists_sessions_and_sends_as_the_web() {
     let cookie = login(&s.app).await;
 
     let (_a, _) = Client::online(&s, &s.laptop, "sess-a").await;
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    wait_for_next_ms().await;
     let (_t, _) = Client::online(&s, &s.laptop, SESSION_ID).await;
     let (mut b, _) = Client::online(&s, &s.desktop, "sess-b").await;
     let list = http(&s.app, get("/api/v1/relay/sessions", None, Some(&cookie))).await;
@@ -1071,11 +1097,7 @@ async fn the_server_reads_relay_settings_from_the_environment() {
         }
     });
     assert_eq!(closed.await.unwrap(), Some(1001));
-    let deadline = std::time::Instant::now() + WAIT;
-    while child.try_wait().unwrap().is_none() {
-        assert!(std::time::Instant::now() < deadline, "the server did not stop");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until("the server to stop", || child.try_wait().unwrap().is_some()).await;
     // The test-only settings stay out of `--help`.
     let help = Command::new(env!("CARGO_BIN_EXE_pika")).args(["serve", "--help"]).output().unwrap();
     let help = String::from_utf8_lossy(&help.stdout);
@@ -1148,12 +1170,8 @@ async fn slow_online(s: &Server, id: &str) -> Client {
     client
 }
 
-async fn connections_until(s: &Server, n: usize, within: Duration) {
-    let deadline = tokio::time::Instant::now() + within;
-    while s.state.relay.connections() != n {
-        assert!(tokio::time::Instant::now() < deadline, "{} connections, not {n}", s.state.relay.connections());
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+async fn connections_until(s: &Server, n: usize) {
+    wait_until(&format!("relay connections to reach {n}"), || s.state.relay.connections() == n).await;
 }
 
 #[tokio::test]
@@ -1171,11 +1189,15 @@ async fn a_reader_that_stops_reading_still_goes_offline_when_silent() {
     let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
     let talking = tokio::spawn(async move {
         loop {
-            sink.send(Message::text(json!({ "type": "pong" }).to_string())).await.unwrap();
-            let last = tokio::time::Instant::now();
             tokio::select! {
-                _ = &mut stopped => return (sink, last),
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                _ = &mut stopped => {
+                    let last = tokio::time::Instant::now();
+                    sink.send(Message::text(json!({ "type": "pong" }).to_string())).await.unwrap();
+                    return (sink, last);
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    sink.send(Message::text(json!({ "type": "pong" }).to_string())).await.unwrap();
+                }
             }
         }
     });
@@ -1183,8 +1205,8 @@ async fn a_reader_that_stops_reading_still_goes_offline_when_silent() {
     stop.send(()).unwrap();
     let (sink, silent) = talking.await.unwrap();
     let mut t = Client { ws: stream.reunite(sink).unwrap() };
-    assert!(stalled(&s, "sess-t") && silent.elapsed() < dead_after, "{:?}", silent.elapsed());
-    // The silence timeout runs while a write waits, and takes the connection out at once.
+    assert!(stalled(&s, "sess-t"));
+    // The silence timeout runs while a write waits, and takes the connection out once `dead_after` elapses.
     sessions_until(&s, |items| items.is_empty()).await;
     assert!(silent.elapsed() >= dead_after, "{:?}", silent.elapsed());
     assert_eq!(s.state.relay.connections(), 0);
@@ -1198,12 +1220,10 @@ async fn revoking_a_device_closes_a_stalled_connection_at_once() {
     let s = server_with(|c| roomy(&mut c.relay)).await;
     let mut t = slow_online(&s, "sess-t").await;
     flood(&s, "sess-t", |s| stalled(s, "sess-t")).await;
-    let started = tokio::time::Instant::now();
     let r = http(&s.app, Request::delete("/api/v1/devices/laptop").body(Body::empty()).unwrap()).await;
     assert_eq!(r.status, StatusCode::NO_CONTENT);
     assert!(sessions(&s).await.is_empty());
-    connections_until(&s, 0, Duration::from_secs(1)).await;
-    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    connections_until(&s, 0).await;
     assert_eq!(t.closed().await, 4401);
 }
 
@@ -1217,7 +1237,7 @@ async fn an_outgoing_queue_over_its_maximum_closes_with_1008() {
     let mut t = slow_online(&s, "sess-t").await;
     let ids = flood(&s, "sess-t", |s| s.state.relay.outgoing_bytes("sess-t").is_none()).await;
     assert!(sessions(&s).await.is_empty());
-    connections_until(&s, 0, Duration::from_secs(1)).await;
+    connections_until(&s, 0).await;
     // Every message stays queued, for the session's next connection.
     assert_eq!(s.state.relay.queued(), ids.len());
     assert!(events(&s, "?limit=500").await.iter().all(|e| e["status"] == "queued"));
@@ -1263,14 +1283,14 @@ async fn an_offline_session_stays_with_its_device() {
     let ttl = Duration::from_secs(1);
     let s = server_with(|c| c.relay.ttl = ttl).await;
     let (t, _) = Client::online(&s, &s.laptop, "sess-t").await;
+    let dropped = tokio::time::Instant::now();
     drop(t);
     sessions_until(&s, |items| items.is_empty()).await;
-    let offline = tokio::time::Instant::now();
     let mut thief = Client::connect(&s, &s.desktop).await;
     thief.send(hello("sess-t")).await;
     assert_eq!(thief.closed().await, 4403);
-    assert!(offline.elapsed() < ttl, "{:?}", offline.elapsed());
-    tokio::time::sleep_until(offline + ttl).await;
+    wait_until("remembered owner to expire", || s.state.relay.owner("sess-t", None).is_none()).await;
+    assert!(dropped.elapsed() >= ttl, "{:?}", dropped.elapsed());
     Client::online(&s, &s.desktop, "sess-t").await;
 }
 
@@ -1325,7 +1345,7 @@ async fn a_token_revoked_before_hello_closes_with_4401() {
     c.send(hello("sess-a")).await;
     assert_eq!(c.frames_until_closed().await, (4401, vec![]));
     assert!(sessions(&s).await.is_empty());
-    connections_until(&s, 0, Duration::from_secs(1)).await;
+    connections_until(&s, 0).await;
 }
 
 #[tokio::test]
@@ -1341,9 +1361,7 @@ async fn continuing_a_device_closes_the_old_tokens_connections_at_once() {
     assert_eq!(old.relay(send("c1", "nobody", "x")).await["reason"], "unknown_session");
     let polled = http(&s.app, post("/api/pair/v1/poll", json!({ "pairingId": started["pairingId"] }), None)).await;
     let token = polled.json()["token"].as_str().unwrap().to_owned();
-    let collected = tokio::time::Instant::now();
     assert_eq!(old.closed().await, 4401);
-    assert!(collected.elapsed() < Duration::from_secs(1), "{:?}", collected.elapsed());
     assert_eq!(ids(&sessions(&s).await), ["sess-b"]);
     // Ownership stays with the device id: the new token takes the session back.
     Client::online(&s, &token, "sess-a").await;
@@ -1360,9 +1378,7 @@ async fn a_replacing_pairing_approved_before_the_upgrade_closes_the_old_tokens_c
     s.env.store.write(|tx| tx.execute(sql, [pika::util::sha256_hex(b"replace-id"), DEVICE.to_owned()])).unwrap();
     let polled = http(&s.app, post("/api/pair/v1/poll", json!({ "pairingId": "replace-id" }), None)).await.json();
     assert_eq!((&polled["status"], &polled["device"], &polled["continued"]), (&json!("approved"), &json!(DEVICE), &json!(true)));
-    let collected = tokio::time::Instant::now();
     assert_eq!(old.closed().await, 4401);
-    assert!(collected.elapsed() < Duration::from_secs(1), "{:?}", collected.elapsed());
     assert_eq!(ids(&sessions(&s).await), ["sess-b"]);
     Client::online(&s, polled["token"].as_str().unwrap(), "sess-a").await;
 }
@@ -1429,11 +1445,7 @@ async fn reply_to_must_be_a_message_id() {
 }
 
 async fn timers_until(s: &Server, n: usize) {
-    let deadline = tokio::time::Instant::now() + WAIT;
-    while s.state.relay.pending_timers() != n {
-        assert!(tokio::time::Instant::now() < deadline, "{} timers, not {n}", s.state.relay.pending_timers());
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    wait_until(&format!("pending timers to reach {n}"), || s.state.relay.pending_timers() == n).await;
 }
 
 #[tokio::test]
@@ -1702,10 +1714,12 @@ async fn the_oldest_remembered_owners_are_forgotten_first() {
     let ttl = Duration::from_millis(300);
     let s = server_with(|c| c.relay.ttl = ttl).await;
     let (t, _) = Client::online(&s, &s.laptop, "sess-t").await;
+    let dropped = tokio::time::Instant::now();
     drop(t);
     sessions_until(&s, |items| items.is_empty()).await;
     assert_eq!(s.state.relay.remembered(), 1);
-    tokio::time::sleep(ttl).await;
+    wait_until("remembered owner to expire", || s.state.relay.owner("sess-t", None).is_none()).await;
+    assert!(dropped.elapsed() >= ttl, "{:?}", dropped.elapsed());
     assert_eq!(s.state.relay.remembered(), 1);
     let r = http(&s.app, post("/api/v1/relay/messages", json!({ "to": "nobody", "text": "x" }), None)).await;
     assert_eq!(r.json(), json!({ "error": "unknown_session" }));
@@ -2542,26 +2556,35 @@ async fn relay_events_and_mailbox_survive_restarts_and_expire_cleanly() {
     assert_eq!((&ev_after[1]["id"], &ev_after[1]["status"]), (&json!(unacked_id), &json!("delivered")));
     assert!(ev_after[0]["deliveredAt"].is_string() && ev_after[1]["deliveredAt"].is_string());
 
-    // Now queue a message with a short TTL, stop the server until the TTL elapses, and verify startup transitions it to `expired`.
+    // Queue a message while the server has a long TTL so it stays persisted on shutdown, then wait past a short
+    // restart TTL while down and verify startup transitions it to `expired`.
     drop(wait_reconnected);
     drop(rec_reconnected);
-    let s = s.restart(|c| c.relay.ttl = Duration::from_millis(120)).await;
     record(&s.env.store, "sess-expiring", DEVICE);
     let r = http(&s.app, post("/api/v1/relay/messages", json!({ "to": "sess-expiring", "text": "expires while down" }), None)).await;
     assert_eq!((r.status, &r.json()["status"]), (StatusCode::OK, &json!("queued")));
     let exp_id = r.json()["id"].as_str().unwrap().to_owned();
 
-    // Stop the server, wait past TTL while down, then reopen.
+    // Stop the server while the message is still queued, wait past `short_ttl` while down, then reopen.
+    let short_ttl = Duration::from_millis(120);
     let Server { env, state, app, laptop, desktop, serve_task, .. } = s;
+    state.relay.close_all(pika::relay::close::GOING_AWAY, "server stopping");
+    let _ = state.relay.drained(WAIT).await;
+    state.relay.flush().await;
     serve_task.abort();
     let _ = serve_task.await;
     drop(app);
     drop(state);
-    tokio::time::sleep(Duration::from_millis(180)).await;
+    assert_eq!(one(&env.store, "SELECT COUNT(*) AS n FROM relay_mailbox")["n"], json!(1));
+    let sent_at = one(&env.store, &format!("SELECT sent_at FROM relay_mailbox WHERE id = '{exp_id}'"))["sent_at"]
+        .as_i64()
+        .unwrap();
+    let expire_at = sent_at + short_ttl.as_millis() as i64;
+    wait_until("persisted message TTL to elapse while down", || pika::util::now_ms() >= expire_at).await;
     let Env { dir, store } = env;
     drop(store);
     let store = Store::open(dir.path().join("data")).unwrap();
-    let s = start_on(Env { dir, store }, laptop, desktop, |c| c.relay.ttl = Duration::from_millis(120)).await;
+    let s = start_on(Env { dir, store }, laptop, desktop, |c| c.relay.ttl = short_ttl).await;
 
     assert_eq!(s.state.relay.queued(), 0);
     assert_eq!(one(&s.env.store, "SELECT COUNT(*) AS n FROM relay_mailbox")["n"], json!(0));

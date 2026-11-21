@@ -7,7 +7,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::*;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use pika::config::{AuthMode, ServerConfig};
 use pika::http::{AppState, router};
 use serde_json::{Value, json};
@@ -590,9 +590,10 @@ async fn limits_are_enforced() {
 
 #[tokio::test]
 async fn silent_sockets_are_closed_and_heartbeats_flow() {
+    let dead_after = Duration::from_millis(500);
     let s = server_with(|c| {
-        c.nodes.heartbeat = Duration::from_millis(50);
-        c.nodes.dead_after = Duration::from_millis(400);
+        c.nodes.heartbeat = Duration::from_millis(100);
+        c.nodes.dead_after = dead_after;
     })
     .await;
     let mut node = Peer { ws: open_node(&s, Some(&s.credential)).await.unwrap() };
@@ -600,19 +601,27 @@ async fn silent_sockets_are_closed_and_heartbeats_flow() {
     assert_eq!(node.next().await["type"], "welcome");
     // Pings arrive; answering keeps the socket alive past `dead_after`.
     let started = tokio::time::Instant::now();
-    while started.elapsed() < Duration::from_millis(800) {
+    let mut pings = 0usize;
+    let mut last_pong = started;
+    while pings < 3 || started.elapsed() <= dead_after {
         match tokio::time::timeout(WAIT, node.ws.next()).await.unwrap() {
             Some(Ok(Message::Text(text))) => {
                 let frame: Value = serde_json::from_str(text.as_str()).unwrap();
                 assert_eq!(frame["type"], "ping");
                 assert!(frame["at"].as_i64().unwrap() > 0);
+                pings += 1;
+                last_pong = tokio::time::Instant::now();
                 node.send(json!({ "type": "pong" })).await;
             }
             other => panic!("{other:?}"),
         }
     }
-    // Silence closes it with 1001.
+    assert!(pings >= 3 && started.elapsed() > dead_after, "pings={pings}, elapsed={:?}", started.elapsed());
+    assert_eq!(s.state.nodes.online(), 1);
+    // Silence closes it with 1001, and not before `dead_after` elapses after the last pong.
     assert_eq!(node.closed().await, 1001);
+    assert!(last_pong.elapsed() >= dead_after, "{:?}", last_pong.elapsed());
+    until("node goes offline", || s.state.nodes.online() == 0).await;
 }
 
 #[tokio::test]
@@ -718,7 +727,7 @@ async fn open_overflowing_node_outbox_never_delivers_close_before_opened() {
     let mut closed_channels = HashSet::new();
     let mut r1_channel: Option<String> = None;
     let mut r1_refused = false;
-    while let Ok(Some(raw)) = tokio::time::timeout(Duration::from_millis(50), client.frames.recv()).await {
+    while let Some(Some(raw)) = client.frames.recv().now_or_never() {
         client.frames.written(raw.len());
         let frame: Value = serde_json::from_str(&raw).unwrap();
         match frame["type"].as_str() {
@@ -744,6 +753,7 @@ async fn open_overflowing_node_outbox_never_delivers_close_before_opened() {
             other => panic!("unexpected frame {other:?}: {frame}"),
         }
     }
+    assert_eq!(client.outbox.queued(), 0);
     assert!(closed_channels.contains(&seed_channel), "seed channel was not closed");
     if let Some(ch) = r1_channel {
         assert!(closed_channels.contains(&ch), "opened channel {ch} was not closed with node_offline");
@@ -799,10 +809,11 @@ async fn open_overflowing_client_outbox_does_not_open_on_node() {
 
     // The node gets only `close(seed_channel, "client_gone")` — neither `open` nor a spurious `close` for r1.
     let mut frames = Vec::new();
-    while let Ok(Some(raw)) = tokio::time::timeout(Duration::from_millis(50), node.frames.recv()).await {
+    while let Some(Some(raw)) = node.frames.recv().now_or_never() {
         node.frames.written(raw.len());
         frames.push(serde_json::from_str::<Value>(&raw).unwrap());
     }
+    assert_eq!(node.outbox.queued(), 0);
     assert_eq!(frames, vec![json!({ "type": "close", "channel": seed_channel, "code": "client_gone" })]);
 }
 
@@ -840,7 +851,7 @@ async fn a_node_that_stops_reading_never_sends_close_before_opened() {
             sent_refs.insert(r.clone());
             browser.send(json!({ "type": "open", "ref": r, "node": s.node })).await;
         }
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        tokio::task::yield_now().await;
     }
     until("node detached as slow reader", || s.state.nodes.online() == 0).await;
 
