@@ -334,24 +334,30 @@ pub fn list(conn: &Connection, p: &Params) -> ReadResult<Page<SessionSummary>> {
 }
 
 pub fn list_scoped(conn: &Connection, p: &Params, public: bool) -> ReadResult<Page<SessionSummary>> {
+    // One snapshot for the page query and public summary enrichment when called outside scoped_query.
+    let _tx = (public && conn.is_autocommit()).then(|| conn.unchecked_transaction()).transpose()?;
     let limit = p.limit(LIST_LIMIT, MAX_LIST_LIMIT)?;
     let (sql, args) = if public { list_query_scoped(p, limit, true)? } else { list_query(p, limit)? };
     let items = conn
         .prepare_cached(&sql)?
         .query_map(params_from_iter(args), summary)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut result = page(items, limit, |s| vec![json!(s.last_at_ms), json!(s.id)]);
+    if result.items.is_empty() {
+        return Ok(result);
+    }
     let names = DeviceNames::load(conn)?;
-    let items = items
-        .into_iter()
-        .map(|s| s.named(&names))
-        .map(|mut s| {
-            if public {
-                super::publishing::summary(conn, &mut s)?;
-            }
-            Ok(s)
-        })
-        .collect::<ReadResult<Vec<_>>>()?;
-    Ok(page(items, limit, |s| vec![json!(s.last_at_ms), json!(s.id)]))
+    for s in &mut result.items {
+        s.device_name = names.of(&s.device);
+    }
+    if public {
+        let mut published = super::publishing::Published::load(conn)?;
+        for s in &result.items {
+            published.record_visible(&s.id, true);
+        }
+        published.summaries(conn, &mut result.items)?;
+    }
+    Ok(result)
 }
 
 pub(crate) fn detail_sql() -> String {
@@ -440,6 +446,7 @@ pub fn tree_limited(conn: &Connection, id: &str, public: bool, max_nodes: usize,
         root = row;
     }
     drop(stmt);
+    let mut published = if public { Some(super::publishing::Published::load(conn)?) } else { None };
     let mut walk = TreeWalk {
         conn,
         public,
@@ -453,6 +460,23 @@ pub fn tree_limited(conn: &Connection, id: &str, public: bool, max_nodes: usize,
     };
     let root_id = root.summary.id.clone();
     walk.visit(root)?;
+    if let Some(published) = &mut published {
+        for node in &walk.nodes {
+            published.record_visible(&node.summary.id, true);
+        }
+        published.preload_visible(
+            conn,
+            walk.nodes.iter().filter_map(|n| n.summary.parent_session_id.as_deref()),
+        )?;
+        for node in &mut walk.nodes {
+            let child_count = node.summary.child_count;
+            published.apply_summary(conn, &mut node.summary, child_count)?;
+            // A tool call of an unpublished parent is not published either.
+            if node.summary.parent_session_id.is_none() {
+                node.parent_tool_call_id = None;
+            }
+        }
+    }
     Ok(SessionTree { root_id, nodes: walk.nodes, truncated: walk.truncated.then_some(true) })
 }
 
@@ -475,19 +499,16 @@ impl TreeWalk<'_> {
         let (id, depth) = (node.summary.id.clone(), node.depth);
         self.visited.insert(id.clone());
         node.summary.device_name = self.names.of(&node.summary.device);
-        if self.public {
-            super::publishing::summary(self.conn, &mut node.summary)?;
-            // A tool call of an unpublished parent is not published either.
-            if node.summary.parent_session_id.is_none() {
-                node.parent_tool_call_id = None;
-            }
-        }
+        let idx = self.nodes.len();
         self.nodes.push(node);
         let children = self
             .conn
             .prepare_cached(&tree_children_sql(self.public))?
             .query_map([&id], |r| tree_node(r, depth + 1))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        if self.public {
+            self.nodes[idx].summary.child_count = children.len() as i64;
+        }
         for child in children {
             if self.visited.contains(&child.summary.id) {
                 continue;
