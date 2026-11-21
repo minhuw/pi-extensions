@@ -365,46 +365,18 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 	};
 
 	const inspect = (all: string[], depth: number, prefixAssignments?: Map<string, string>, baseDir: string = effectiveCwd): void => {
-		let words = all;
-		let dir = baseDir;
 		const cmdEnv = new Map<string, string>(exportedEnv);
 		if (prefixAssignments) {
 			for (const [name, value] of prefixAssignments) cmdEnv.set(name, value);
 		}
 		// Wrappers that run the rest of the line as a command.
-		for (;;) {
-			const verb = words[0] === undefined ? undefined : basename(words[0]);
-			if (verb === undefined) return;
-			if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]!)) {
-				const eq = words[0]!.indexOf("=");
-				cmdEnv.set(words[0]!.slice(0, eq), words[0]!.slice(eq + 1));
-				words = words.slice(1);
-			} else if (verb === "env") {
-				const unwrapped = unwrapEnv(words, cmdEnv, depth);
-				if (!unwrapped.ok) return void found.push(unwrapped.reason);
-				if (unwrapped.chdir !== undefined) dir = at(dir, unwrapped.chdir);
-				words = unwrapped.words;
-				depth = unwrapped.depth;
-			} else if (verb === "exec") {
-				const unwrapped = unwrapExec(words, cmdEnv);
-				if (!unwrapped.ok) return void found.push(unwrapped.reason);
-				words = unwrapped.words;
-			} else if (verb === "command" || verb === "builtin" || verb === "nohup" || verb === "time") {
-				words = words.slice(1);
-				while (words[0]?.startsWith("-")) {
-					const opt = words[0];
-					words = words.slice(1);
-					if (opt === "--") break;
-				}
-			} else if (verb === "nice" || verb === "timeout" || verb === "xargs" || verb === "stdbuf") {
-				const withValue = verb === "nice" ? ["-n"] : verb === "timeout" ? ["-s", "-k", "--signal", "--kill-after"] : verb === "xargs" ? ["-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"] : ["-i", "-o", "-e"];
-				let i = 1;
-				while (i < words.length && words[i]!.startsWith("-")) i += withValue.includes(words[i]!) ? 2 : 1;
-				if (verb === "timeout") i++;
-				words = words.slice(i);
-			} else break;
-		}
-		const verb = basename(words[0]!);
+		const unwrapped = unwrapCommandWrappers(all, cmdEnv, baseDir, depth, { unwrapXargs: true });
+		if (!unwrapped.ok) return void found.push(unwrapped.reason);
+		const words = unwrapped.words;
+		if (words[0] === undefined) return;
+		const dir = unwrapped.dir;
+		depth = unwrapped.depth;
+		const verb = basename(words[0]);
 		const args = words.slice(1);
 
 		if (PRIVILEGE.has(verb) || SYSTEM.has(verb)) return void found.push(reasons.system(verb));
@@ -498,9 +470,10 @@ export function bashBlockReason(command: string, cwd: string, toplevels: string[
 			const sub = args[i];
 			const rest = args.slice(i + 1);
 			if (sub === "config") {
-				const key = dangerousGitConfig(rest);
+				const parsed = parseGitConfig(rest);
+				const key = dangerousGitConfig(parsed);
 				if (key) return void found.push(reasons.system(`git config ${key}`));
-				const mutation = gitConfigMutation(rest);
+				const mutation = gitConfigMutation(parsed);
 				if (mutation) {
 					const explicitFile = mutation.file ?? (mutation.scope === undefined ? cmdEnv.get("GIT_CONFIG") : undefined);
 					if (explicitFile !== undefined) {
@@ -1067,34 +1040,34 @@ function unwrapExec(allWords: string[], cmdEnv: Map<string, string>): UnwrapExec
 	return { ok: true, words: allWords.slice(i) };
 }
 
-function shellCommandContext(
-	node: SyntaxNode,
-	baseEnv: Map<string, string>,
-	baseCwd: string,
-	initialDepth = 0,
-): { env: Map<string, string>; cwd: string } | undefined {
-	if (node.type !== "Command") return undefined;
-	const env = new Map(baseEnv);
-	let dir = baseCwd;
-	for (const [name, value] of prefixEnv(node)) env.set(name, value);
-	let words = commandWords(node);
+type UnwrapCommandWrappersResult = { ok: true; words: string[]; dir: string; depth: number } | { ok: false; reason: string };
+
+function unwrapCommandWrappers(
+	initialWords: string[],
+	env: Map<string, string>,
+	initialDir: string,
+	initialDepth: number,
+	options: { unwrapXargs?: boolean; unwrapSudo?: boolean } = {},
+): UnwrapCommandWrappersResult {
+	let words = initialWords;
+	let dir = initialDir;
 	let depth = initialDepth;
 	for (;;) {
 		const verb = words[0] === undefined ? undefined : basename(words[0]);
-		if (verb === undefined) return undefined;
+		if (verb === undefined) break;
 		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]!)) {
 			const eq = words[0]!.indexOf("=");
 			env.set(words[0]!.slice(0, eq), words[0]!.slice(eq + 1));
 			words = words.slice(1);
 		} else if (verb === "env") {
 			const unwrapped = unwrapEnv(words, env, depth);
-			if (!unwrapped.ok) return undefined;
+			if (!unwrapped.ok) return unwrapped;
 			if (unwrapped.chdir !== undefined) dir = resolveFrom(dir, unwrapped.chdir);
 			words = unwrapped.words;
 			depth = unwrapped.depth;
 		} else if (verb === "exec") {
 			const unwrapped = unwrapExec(words, env);
-			if (!unwrapped.ok) return undefined;
+			if (!unwrapped.ok) return unwrapped;
 			words = unwrapped.words;
 		} else if (verb === "command" || verb === "builtin" || verb === "nohup" || verb === "time") {
 			words = words.slice(1);
@@ -1103,17 +1076,41 @@ function shellCommandContext(
 				words = words.slice(1);
 				if (opt === "--") break;
 			}
-		} else if (verb === "nice" || verb === "timeout" || verb === "stdbuf") {
-			const withValue = verb === "nice" ? ["-n"] : verb === "timeout" ? ["-s", "-k", "--signal", "--kill-after"] : ["-i", "-o", "-e"];
+		} else if (verb === "nice" || verb === "timeout" || verb === "stdbuf" || (options.unwrapXargs && verb === "xargs")) {
+			const withValue =
+				verb === "nice"
+					? ["-n"]
+					: verb === "timeout"
+						? ["-s", "-k", "--signal", "--kill-after"]
+						: verb === "xargs"
+							? ["-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"]
+							: ["-i", "-o", "-e"];
 			let i = 1;
 			while (i < words.length && words[i]!.startsWith("-")) i += withValue.includes(words[i]!) ? 2 : 1;
 			if (verb === "timeout") i++;
 			words = words.slice(i);
-		} else if (verb === "sudo") {
+		} else if (options.unwrapSudo && verb === "sudo") {
 			words = words.slice(1);
-		} else break;
+		} else {
+			break;
+		}
 	}
-	return words[0] !== undefined && LOCAL_SHELLS.has(basename(words[0])) ? { env, cwd: dir } : undefined;
+	return { ok: true, words, dir, depth };
+}
+
+function shellCommandContext(
+	node: SyntaxNode,
+	baseEnv: Map<string, string>,
+	baseCwd: string,
+	initialDepth = 0,
+): { env: Map<string, string>; cwd: string } | undefined {
+	if (node.type !== "Command") return undefined;
+	const env = new Map(baseEnv);
+	for (const [name, value] of prefixEnv(node)) env.set(name, value);
+	const unwrapped = unwrapCommandWrappers(commandWords(node), env, baseCwd, initialDepth, { unwrapSudo: true });
+	if (!unwrapped.ok) return undefined;
+	const first = unwrapped.words[0];
+	return first !== undefined && LOCAL_SHELLS.has(basename(first)) ? { env, cwd: unwrapped.dir } : undefined;
 }
 
 function isExistingFile(path: string): boolean {
@@ -1156,10 +1153,23 @@ function findRoots(args: string[]): string[] {
 	return roots.length > 0 ? roots : ["."];
 }
 
-function dangerousGitConfig(rest: string[]): string | undefined {
+type ParsedGitConfig = {
+	readOnly: boolean;
+	writeFlag: boolean;
+	editFlag: boolean;
+	sectionFlag: boolean;
+	file?: string;
+	scope?: "global" | "system" | "local" | "worktree";
+	pos: string[];
+};
+
+function parseGitConfig(rest: string[]): ParsedGitConfig {
 	let readOnly = false;
 	let writeFlag = false;
+	let editFlag = false;
 	let sectionFlag = false;
+	let file: string | undefined;
+	let scope: "global" | "system" | "local" | "worktree" | undefined;
 	const pos: string[] = [];
 	let options = true;
 	for (let i = 0; i < rest.length; i++) {
@@ -1169,15 +1179,31 @@ function dangerousGitConfig(rest: string[]): string | undefined {
 			continue;
 		}
 		if (options && arg.startsWith("-") && arg !== "-") {
-			if (GIT_CONFIG_READ_FLAGS.has(arg)) readOnly = true;
+			if (arg === "-f" || arg === "--file") file = rest[++i];
+			else if (arg.startsWith("--file=")) file = arg.slice("--file=".length);
+			else if (arg.startsWith("-f") && arg.length > 2) file = arg.slice(2);
+			else if (arg === "--global") scope = "global";
+			else if (arg === "--system") scope = "system";
+			else if (arg === "--local") scope = "local";
+			else if (arg === "--worktree") scope = "worktree";
+			else if (arg === "-e" || arg === "--edit") editFlag = true;
+			else if (GIT_CONFIG_READ_FLAGS.has(arg)) readOnly = true;
 			else if (GIT_CONFIG_WRITE_FLAGS.has(arg)) writeFlag = true;
 			else if (GIT_CONFIG_SECTION_FLAGS.has(arg)) sectionFlag = true;
 			else if (GIT_CONFIG_OPTIONS_WITH_VALUE.has(arg)) i++;
-			else if (/^-[A-Za-z]+$/.test(arg) && !arg.startsWith("-f") && arg.includes("l")) readOnly = true;
+			else if (/^-[A-Za-z]+$/.test(arg)) {
+				if (arg.includes("e")) editFlag = true;
+				if (arg.includes("l")) readOnly = true;
+			}
 			continue;
 		}
 		pos.push(arg);
 	}
+	return { readOnly, writeFlag, editFlag, sectionFlag, file, scope, pos };
+}
+
+function dangerousGitConfig(parsed: ParsedGitConfig): string | undefined {
+	const { readOnly, writeFlag, sectionFlag, pos } = parsed;
 	if (pos.length === 0) return undefined;
 
 	const first = pos[0]!;
@@ -1199,42 +1225,9 @@ function dangerousGitConfig(rest: string[]): string | undefined {
 	return undefined;
 }
 
-function gitConfigMutation(rest: string[]): { file?: string; scope?: "global" | "system" | "local" | "worktree" } | undefined {
-	let readOnly = false;
-	let writeFlag = false;
-	let sectionFlag = false;
-	let file: string | undefined;
-	let scope: "global" | "system" | "local" | "worktree" | undefined;
-	const pos: string[] = [];
-	let options = true;
-	for (let i = 0; i < rest.length; i++) {
-		const arg = rest[i]!;
-		if (options && arg === "--") {
-			options = false;
-			continue;
-		}
-		if (options && arg.startsWith("-") && arg !== "-") {
-			if (arg === "-f" || arg === "--file") file = rest[++i];
-			else if (arg.startsWith("--file=")) file = arg.slice("--file=".length);
-			else if (arg.startsWith("-f") && arg.length > 2) file = arg.slice(2);
-			else if (arg === "--global") scope = "global";
-			else if (arg === "--system") scope = "system";
-			else if (arg === "--local") scope = "local";
-			else if (arg === "--worktree") scope = "worktree";
-			else if (arg === "-e" || arg === "--edit") writeFlag = true;
-			else if (GIT_CONFIG_READ_FLAGS.has(arg)) readOnly = true;
-			else if (GIT_CONFIG_WRITE_FLAGS.has(arg)) writeFlag = true;
-			else if (GIT_CONFIG_SECTION_FLAGS.has(arg)) sectionFlag = true;
-			else if (GIT_CONFIG_OPTIONS_WITH_VALUE.has(arg)) i++;
-			else if (/^-[A-Za-z]+$/.test(arg)) {
-				if (arg.includes("e")) writeFlag = true;
-				if (arg.includes("l")) readOnly = true;
-			}
-			continue;
-		}
-		pos.push(arg);
-	}
-	if (writeFlag || sectionFlag) return { file, scope };
+function gitConfigMutation(parsed: ParsedGitConfig): { file?: string; scope?: "global" | "system" | "local" | "worktree" } | undefined {
+	const { readOnly, writeFlag, editFlag, sectionFlag, file, scope, pos } = parsed;
+	if (writeFlag || editFlag || sectionFlag) return { file, scope };
 	if (readOnly || pos.length === 0) return undefined;
 	const first = pos[0]!;
 	if (first === "list" || first === "get") return undefined;
@@ -1515,24 +1508,34 @@ function normalizeAgentDesktopCwd(rawCwd: unknown): string | undefined {
 	return stripped;
 }
 
-/**
- * Extracts canonical file-writing target paths from an `agent_browser` CLI `argv` array relative to `cwd`.
- * Self-contained: never imports from `extensions/workspace/` or `extensions/agent-browser/`.
- */
-export function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: string): string[] {
-	const baseCwd = canonical(cwd);
+type CliWriteArgvSpec = {
+	globalValueFlags: ReadonlySet<string>;
+	writeValueFlags: ReadonlySet<string>;
+	subcommandValueFlags: Readonly<Record<string, ReadonlySet<string>>>;
+	extraCaptureFlags?: Readonly<Record<string, ReadonlySet<string>>>;
+};
+
+type ScannedCliWriteArgv = {
+	subcommand?: string;
+	positionals: string[];
+	rawTargets: string[];
+	captured?: string;
+	hasHelpOrVersion: boolean;
+};
+
+function scanCliWriteArgv(tokens: readonly string[], spec: CliWriteArgvSpec): ScannedCliWriteArgv {
 	const rawTargets: string[] = [];
 	let subcommand: string | undefined;
 	let subcommandIndex = -1;
 	let afterDoubleDash = false;
 	let hasHelpOrVersion = false;
 
-	for (let i = 0; i < argv.length; i++) {
-		const token = argv[i]!;
+	for (let i = 0; i < tokens.length; i++) {
+		const token = tokens[i]!;
 		if (token === "--") {
 			afterDoubleDash = true;
-			if (i + 1 < argv.length) {
-				subcommand = argv[i + 1];
+			if (i + 1 < tokens.length) {
+				subcommand = tokens[i + 1];
 				subcommandIndex = i + 1;
 			}
 			break;
@@ -1541,18 +1544,18 @@ export function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: st
 			hasHelpOrVersion = true;
 			continue;
 		}
-		const eqVal = extractEqualsFlagValue(token, AGENT_BROWSER_WRITE_VALUE_FLAGS);
+		const eqVal = extractEqualsFlagValue(token, spec.writeValueFlags);
 		if (eqVal !== undefined) {
 			if (eqVal.length > 0) rawTargets.push(eqVal);
 			continue;
 		}
-		if (AGENT_BROWSER_WRITE_VALUE_FLAGS.has(token)) {
-			const next = argv[i + 1];
+		if (spec.writeValueFlags.has(token)) {
+			const next = tokens[i + 1];
 			if (typeof next === "string" && next.length > 0) rawTargets.push(next);
 			i++;
 			continue;
 		}
-		if (AGENT_BROWSER_GLOBAL_VALUE_FLAGS.has(token)) {
+		if (spec.globalValueFlags.has(token)) {
 			i++;
 			continue;
 		}
@@ -1562,16 +1565,17 @@ export function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: st
 		break;
 	}
 
+	const positionals: string[] = [];
+	let captured: string | undefined;
+
 	if (subcommand && !hasHelpOrVersion) {
-		const rest = argv.slice(subcommandIndex + 1);
-		const valueFlags =
-			subcommand === "screenshot"
-				? AGENT_BROWSER_SCREENSHOT_VALUE_FLAGS
-				: subcommand === "pdf"
-					? AGENT_BROWSER_PDF_VALUE_FLAGS
-					: new Set<string>();
-		const positionals: string[] = [];
-		let restHasHelp = false;
+		const rest = tokens.slice(subcommandIndex + 1);
+		const valueFlags = Object.hasOwn(spec.subcommandValueFlags, subcommand)
+			? spec.subcommandValueFlags[subcommand]!
+			: undefined;
+		const extraFlags = spec.extraCaptureFlags && Object.hasOwn(spec.extraCaptureFlags, subcommand)
+			? spec.extraCaptureFlags[subcommand]!
+			: undefined;
 
 		if (afterDoubleDash) {
 			positionals.push(...rest);
@@ -1583,21 +1587,34 @@ export function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: st
 					break;
 				}
 				if (token === "--help" || token === "-h" || token === "--version" || token === "-V") {
-					restHasHelp = true;
+					hasHelpOrVersion = true;
 					continue;
 				}
-				const eqVal = extractEqualsFlagValue(token, AGENT_BROWSER_WRITE_VALUE_FLAGS);
-				if (eqVal !== undefined) {
-					if (eqVal.length > 0) rawTargets.push(eqVal);
+				if (extraFlags) {
+					const eqExtra = extractEqualsFlagValue(token, extraFlags);
+					if (eqExtra !== undefined) {
+						if (eqExtra.length > 0) captured = eqExtra;
+						continue;
+					}
+					if (extraFlags.has(token)) {
+						const next = rest[i + 1];
+						if (typeof next === "string" && next.length > 0) captured = next;
+						i++;
+						continue;
+					}
+				}
+				const eqWrite = extractEqualsFlagValue(token, spec.writeValueFlags);
+				if (eqWrite !== undefined) {
+					if (eqWrite.length > 0) rawTargets.push(eqWrite);
 					continue;
 				}
-				if (AGENT_BROWSER_WRITE_VALUE_FLAGS.has(token)) {
+				if (spec.writeValueFlags.has(token)) {
 					const next = rest[i + 1];
 					if (typeof next === "string" && next.length > 0) rawTargets.push(next);
 					i++;
 					continue;
 				}
-				if (AGENT_BROWSER_GLOBAL_VALUE_FLAGS.has(token) || valueFlags.has(token)) {
+				if (spec.globalValueFlags.has(token) || valueFlags?.has(token)) {
 					i++;
 					continue;
 				}
@@ -1605,28 +1622,46 @@ export function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: st
 				positionals.push(token);
 			}
 		}
+	}
 
-		if (!restHasHelp) {
-			if (subcommand === "screenshot" || subcommand === "pdf") {
-				if (positionals[0]) rawTargets.push(positionals[0]);
-			} else if (subcommand === "trace") {
-				if ((positionals[0] === "start" || positionals[0] === "stop") && positionals[1]) {
-					rawTargets.push(positionals[1]);
-				}
-			} else if (subcommand === "state") {
-				if (positionals[0] === "save" && positionals[1]) {
-					rawTargets.push(positionals[1]);
-				}
-			} else if (subcommand === "download") {
-				if (positionals.length >= 2) {
-					rawTargets.push(positionals[1]!);
-				} else if (positionals.length === 1) {
-					rawTargets.push(positionals[0]!);
-				}
-			} else if (subcommand === "record") {
-				if ((positionals[0] === "start" || positionals[0] === "restart") && positionals[1]) {
-					rawTargets.push(positionals[1]);
-				}
+	return { subcommand, positionals, rawTargets, captured, hasHelpOrVersion };
+}
+
+/**
+ * Extracts canonical file-writing target paths from an `agent_browser` CLI `argv` array relative to `cwd`.
+ * Self-contained: never imports from `extensions/workspace/` or `extensions/agent-browser/`.
+ */
+export function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: string): string[] {
+	const baseCwd = canonical(cwd);
+	const { subcommand, positionals, rawTargets, hasHelpOrVersion } = scanCliWriteArgv(argv, {
+		globalValueFlags: AGENT_BROWSER_GLOBAL_VALUE_FLAGS,
+		writeValueFlags: AGENT_BROWSER_WRITE_VALUE_FLAGS,
+		subcommandValueFlags: {
+			screenshot: AGENT_BROWSER_SCREENSHOT_VALUE_FLAGS,
+			pdf: AGENT_BROWSER_PDF_VALUE_FLAGS,
+		},
+	});
+
+	if (subcommand && !hasHelpOrVersion) {
+		if (subcommand === "screenshot" || subcommand === "pdf") {
+			if (positionals[0]) rawTargets.push(positionals[0]);
+		} else if (subcommand === "trace") {
+			if ((positionals[0] === "start" || positionals[0] === "stop") && positionals[1]) {
+				rawTargets.push(positionals[1]);
+			}
+		} else if (subcommand === "state") {
+			if (positionals[0] === "save" && positionals[1]) {
+				rawTargets.push(positionals[1]);
+			}
+		} else if (subcommand === "download") {
+			if (positionals.length >= 2) {
+				rawTargets.push(positionals[1]!);
+			} else if (positionals.length === 1) {
+				rawTargets.push(positionals[0]!);
+			}
+		} else if (subcommand === "record") {
+			if ((positionals[0] === "start" || positionals[0] === "restart") && positionals[1]) {
+				rawTargets.push(positionals[1]);
 			}
 		}
 	}
@@ -1642,110 +1677,24 @@ export function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: st
 export function extractAgentDesktopWriteTargets(argv: readonly string[], cwd: string): string[] {
 	const baseCwd = canonical(cwd);
 	const cleaned = argv.filter((arg): arg is string => typeof arg === "string" && arg.trim().length > 0);
-	const rawTargets: string[] = [];
-	let subcommand: string | undefined;
-	let subcommandIndex = -1;
-	let afterDoubleDash = false;
-	let hasHelpOrVersion = false;
-
-	for (let i = 0; i < cleaned.length; i++) {
-		const token = cleaned[i]!;
-		if (token === "--") {
-			afterDoubleDash = true;
-			if (i + 1 < cleaned.length) {
-				subcommand = cleaned[i + 1];
-				subcommandIndex = i + 1;
-			}
-			break;
-		}
-		if (token === "--help" || token === "-h" || token === "--version" || token === "-V") {
-			hasHelpOrVersion = true;
-			continue;
-		}
-		const eqVal = extractEqualsFlagValue(token, AGENT_DESKTOP_WRITE_VALUE_FLAGS);
-		if (eqVal !== undefined) {
-			if (eqVal.length > 0) rawTargets.push(eqVal);
-			continue;
-		}
-		if (AGENT_DESKTOP_WRITE_VALUE_FLAGS.has(token)) {
-			const next = cleaned[i + 1];
-			if (typeof next === "string" && next.length > 0) rawTargets.push(next);
-			i++;
-			continue;
-		}
-		if (AGENT_DESKTOP_GLOBAL_VALUE_FLAGS.has(token)) {
-			i++;
-			continue;
-		}
-		if (token.startsWith("-")) continue;
-		subcommand = token;
-		subcommandIndex = i;
-		break;
-	}
+	const { subcommand, positionals, rawTargets, captured, hasHelpOrVersion } = scanCliWriteArgv(cleaned, {
+		globalValueFlags: AGENT_DESKTOP_GLOBAL_VALUE_FLAGS,
+		writeValueFlags: AGENT_DESKTOP_WRITE_VALUE_FLAGS,
+		subcommandValueFlags: {
+			screenshot: AGENT_DESKTOP_SCREENSHOT_VALUE_FLAGS,
+			trace: AGENT_DESKTOP_TRACE_VALUE_FLAGS,
+		},
+		extraCaptureFlags: {
+			trace: AGENT_DESKTOP_TRACE_OUT_FLAGS,
+		},
+	});
 
 	if (subcommand && !hasHelpOrVersion) {
-		const rest = cleaned.slice(subcommandIndex + 1);
-		const valueFlags =
-			subcommand === "screenshot"
-				? AGENT_DESKTOP_SCREENSHOT_VALUE_FLAGS
-				: subcommand === "trace"
-					? AGENT_DESKTOP_TRACE_VALUE_FLAGS
-					: new Set<string>();
-		const positionals: string[] = [];
-		let traceOutPath: string | undefined;
-		let restHasHelp = false;
-
-		if (afterDoubleDash) {
-			positionals.push(...rest);
-		} else {
-			for (let i = 0; i < rest.length; i++) {
-				const token = rest[i]!;
-				if (token === "--") {
-					positionals.push(...rest.slice(i + 1));
-					break;
-				}
-				if (token === "--help" || token === "-h" || token === "--version" || token === "-V") {
-					restHasHelp = true;
-					continue;
-				}
-				if (subcommand === "trace") {
-					const eqOut = extractEqualsFlagValue(token, AGENT_DESKTOP_TRACE_OUT_FLAGS);
-					if (eqOut !== undefined) {
-						if (eqOut.length > 0) traceOutPath = eqOut;
-						continue;
-					}
-					if (AGENT_DESKTOP_TRACE_OUT_FLAGS.has(token)) {
-						const next = rest[i + 1];
-						if (typeof next === "string" && next.length > 0) traceOutPath = next;
-						i++;
-						continue;
-					}
-				}
-				const eqWrite = extractEqualsFlagValue(token, AGENT_DESKTOP_WRITE_VALUE_FLAGS);
-				if (eqWrite !== undefined) {
-					if (eqWrite.length > 0) rawTargets.push(eqWrite);
-					continue;
-				}
-				if (AGENT_DESKTOP_WRITE_VALUE_FLAGS.has(token)) {
-					const next = rest[i + 1];
-					if (typeof next === "string" && next.length > 0) rawTargets.push(next);
-					i++;
-					continue;
-				}
-				if (AGENT_DESKTOP_GLOBAL_VALUE_FLAGS.has(token) || valueFlags.has(token)) {
-					i++;
-					continue;
-				}
-				if (token.startsWith("-")) continue;
-				positionals.push(token);
-			}
-		}
-
-		if (subcommand === "screenshot" && !restHasHelp) {
+		if (subcommand === "screenshot") {
 			if (positionals[0]) rawTargets.push(positionals[0]);
-		} else if (subcommand === "trace" && positionals[0] === "export" && !restHasHelp) {
-			if (traceOutPath) {
-				rawTargets.push(traceOutPath);
+		} else if (subcommand === "trace" && positionals[0] === "export") {
+			if (captured) {
+				rawTargets.push(captured);
 			} else {
 				// `trace export` without `--out` writes `trace-<session>.html` in `cwd`.
 				rawTargets.push(".");
