@@ -1,10 +1,12 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { groupAlive } from "../../src/core/group.ts";
 import { createProcessManager, createProcessManagerForTest } from "../../src/manager.ts";
-import type { ManagerOptions, ProcessEvent, ProcessManager, StartOptions } from "../../src/types.ts";
+import type { ManagerOptions, ProcessEvent, ProcessInfo, ProcessManager, StartOptions } from "../../src/types.ts";
 
 const NODE = JSON.stringify(process.execPath);
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -742,6 +744,337 @@ describe("error isolation", () => {
 		expect(fs.existsSync(freshDir)).toBe(true);
 		const { process: info } = await manager.start({ command: "true", cwd: stateDir, owner: "test", ready: false });
 		expect(info.status).toBe("exited");
+	});
+});
+
+function isLive(info: ProcessInfo): boolean {
+	return info.status === "starting" || info.status === "running" || info.status === "ready" || info.status === "stopping";
+}
+
+function watchdogAlive(pgid: number): boolean {
+	const out = execFileSync("ps", ["-eo", "pid=,args="], { encoding: "utf8" });
+	const marker = `processes-watchdog ${process.pid} ${pgid}`;
+	return out.split("\n").some((line) => {
+		const trimmed = line.trim();
+		if (!trimmed) return false;
+		const space = trimmed.indexOf(" ");
+		if (space < 0) return false;
+		const pid = Number(trimmed.slice(0, space));
+		return pid !== process.pid && trimmed.includes(marker);
+	});
+}
+
+async function until(condition: () => boolean, ms = 2000): Promise<boolean> {
+	const deadline = Date.now() + ms;
+	while (!condition()) {
+		if (Date.now() > deadline) return false;
+		await sleep(25);
+	}
+	return true;
+}
+
+function trackActiveTimeouts() {
+	const active = new Set<ReturnType<typeof setTimeout>>();
+	const realSetTimeout = globalThis.setTimeout;
+	const realClearTimeout = globalThis.clearTimeout;
+	const setSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+		let handle!: ReturnType<typeof setTimeout>;
+		handle = realSetTimeout(
+			(...cbArgs: unknown[]) => {
+				active.delete(handle);
+				callback(...cbArgs);
+			},
+			ms,
+			...args,
+		);
+		active.add(handle);
+		return handle;
+	}) as typeof setTimeout);
+	const clearSpy = vi.spyOn(globalThis, "clearTimeout").mockImplementation(((handle?: ReturnType<typeof setTimeout>) => {
+		if (handle !== undefined) active.delete(handle);
+		return realClearTimeout(handle);
+	}) as typeof clearTimeout);
+	return {
+		active,
+		restore() {
+			setSpy.mockRestore();
+			clearSpy.mockRestore();
+		},
+	};
+}
+
+function killRecordedPids(file: string): void {
+	if (!fs.existsSync(file)) return;
+	for (const line of fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean)) {
+		for (const raw of line.split(",")) {
+			const pid = Number(raw.trim());
+			if (Number.isInteger(pid) && pid > 0) {
+				try {
+					process.kill(-pid, "SIGKILL");
+				} catch {
+					// Not a process group or already gone.
+				}
+				try {
+					process.kill(pid, "SIGKILL");
+				} catch {
+					// Already gone.
+				}
+			}
+		}
+	}
+}
+
+describe("shutdown concurrency", () => {
+	it("rejects start() and restart() once shutdown() has begun and after it completes", async () => {
+		const { manager, start, cwd } = setup();
+		const script = path.join(cwd, "slow-term.cjs");
+		fs.writeFileSync(
+			script,
+			`process.on("SIGTERM", () => setTimeout(() => process.exit(0), 250));
+console.log("up");
+setInterval(() => {}, 1000);
+`,
+		);
+		const command = `exec ${NODE} ${JSON.stringify(script)}`;
+		const { process: info } = await start(command, { name: "slow", ready: { pattern: "^up$" } });
+
+		const shuttingDown = manager.shutdown();
+
+		// Reject immediately while shutdown() is still draining the running process.
+		await expect(start("sleep 30", { ready: false })).rejects.toThrow(/shutting down/i);
+		await expect(start(command, { name: "slow", ready: false })).rejects.toThrow(/shutting down/i);
+		await expect(manager.restart(info.id)).rejects.toThrow(/shutting down/i);
+
+		await shuttingDown;
+
+		// Continue rejecting after shutdown() has finished.
+		await expect(start("sleep 30", { ready: false })).rejects.toThrow(/shutting down/i);
+		await expect(manager.restart(info.id)).rejects.toThrow(/shutting down/i);
+		expect(groupAlive(info.pid!)).toBe(false);
+		expect(manager.list().filter(isLive)).toEqual([]);
+	});
+
+	it("aborts concurrent restart() calls racing with shutdown() while stopping without leaving live children", async () => {
+		const { manager, start, events, cwd } = setup();
+		const runsFile = path.join(cwd, "runs.log");
+		const script = path.join(cwd, "slow-restart-worker.cjs");
+		fs.writeFileSync(
+			script,
+			`const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+fs.appendFileSync(${JSON.stringify(runsFile)}, process.pid + "," + child.pid + "\\n");
+process.on("SIGTERM", () => {
+	setTimeout(() => {
+		try { child.kill("SIGKILL"); } catch {}
+		process.exit(0);
+	}, 200);
+});
+console.log("ready " + process.pid);
+setInterval(() => {}, 1000);
+`,
+		);
+		cleanups.push(() => killRecordedPids(runsFile));
+
+		const { process: first } = await start(`exec ${NODE} ${JSON.stringify(script)}`, {
+			name: "srv",
+			ready: { pattern: "^ready \\d+$" },
+		});
+		await next(events, "ready", 5000, (event) => event.process.pid === first.pid);
+
+		const r1 = manager.restart(first.id);
+		const r2 = manager.restart(first.id);
+		const r1Check = expect(r1).rejects.toThrow(/shutting down/i);
+		const r2Check = expect(r2).rejects.toThrow(/shutting down/i);
+		const shuttingDown = manager.shutdown();
+
+		await Promise.all([shuttingDown, r1Check, r2Check]);
+
+		await sleep(250);
+		const recorded = fs
+			.readFileSync(runsFile, "utf8")
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => line.split(",").map(Number) as [number, number]);
+		expect(recorded).toHaveLength(1);
+		for (const [parentPid, childPid] of recorded) {
+			expect(groupAlive(parentPid)).toBe(false);
+			expect(pidAlive(childPid)).toBe(false);
+			expect(await until(() => !watchdogAlive(parentPid), 1000)).toBe(true);
+		}
+		expect(manager.list().filter(isLive)).toEqual([]);
+	});
+
+	it("terminates a replacement child if restart() races with shutdown() mid-launch and drains live()", async () => {
+		const { manager, start, events, cwd } = setup();
+		const runsFile = path.join(cwd, "runs.log");
+		const script = path.join(cwd, "launch-restart-worker.cjs");
+		fs.writeFileSync(
+			script,
+			`const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+fs.appendFileSync(${JSON.stringify(runsFile)}, process.pid + "," + child.pid + "\\n");
+console.log("ready " + process.pid);
+setInterval(() => {}, 1000);
+`,
+		);
+		cleanups.push(() => killRecordedPids(runsFile));
+
+		const { process: first } = await start(`exec ${NODE} ${JSON.stringify(script)}`, {
+			name: "srv",
+			ready: { pattern: "^ready \\d+$", timeoutSeconds: 0.2 },
+		});
+		await next(events, "ready", 5000, (event) => event.process.pid === first.pid);
+
+		let replacementPid: number | undefined;
+		let shuttingDown: Promise<void> | undefined;
+		manager.subscribe((event) => {
+			if (event.type === "changed" && event.process.restarts === 1 && event.process.status === "starting" && !shuttingDown) {
+				replacementPid = event.process.pid;
+				shuttingDown = manager.shutdown();
+			}
+		});
+
+		const restartPromise = manager.restart(first.id);
+		await expect(restartPromise).rejects.toThrow(/shutting down/i);
+		expect(shuttingDown).toBeDefined();
+		await shuttingDown!;
+
+		expect(replacementPid).toBeDefined();
+		expect(replacementPid).not.toBe(first.pid);
+		expect(groupAlive(replacementPid!)).toBe(false);
+		expect(await until(() => !watchdogAlive(replacementPid!), 1000)).toBe(true);
+
+		const recorded = fs
+			.readFileSync(runsFile, "utf8")
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => line.split(",").map(Number) as [number, number]);
+		for (const [parentPid, childPid] of recorded) {
+			expect(groupAlive(parentPid)).toBe(false);
+			expect(pidAlive(childPid)).toBe(false);
+		}
+		expect(manager.list().filter(isLive)).toEqual([]);
+
+		// Wait past ready.timeoutSeconds to confirm readiness timer was cleared.
+		await sleep(300);
+		expect(events.filter((event) => event.type === "ready_timeout")).toEqual([]);
+	});
+
+	it("terminates a child spawned by concurrent start() racing with shutdown() with no orphan group, watchdog, or leaked timers", async () => {
+		// Window 1: shutdown() starts before the child's "spawn" event fires.
+		{
+			const cwd = tempDir();
+			const pidsFile = path.join(cwd, "prespawn.pids");
+			const grandchildrenFile = path.join(cwd, "prespawn.grandchildren");
+			cleanups.push(() => {
+				killRecordedPids(pidsFile);
+				killRecordedPids(grandchildrenFile);
+			});
+
+			const manager = createProcessManager({
+				stateDir: path.join(cwd, "state"),
+				shell: {
+					shell: "/bin/sh",
+					args: ["-c", 'echo $$ >> "$1"; exec /bin/sh -c "$2"', "wrapper", pidsFile],
+				},
+			});
+			cleanups.push(() => manager.shutdown());
+			const events: ProcessEvent[] = [];
+			manager.subscribe((event) => events.push(event));
+
+			const timeouts = trackActiveTimeouts();
+			cleanups.push(() => timeouts.restore());
+
+			const startPromise = manager.start({
+				command: `sleep 30 & echo $! >> ${JSON.stringify(grandchildrenFile)}; wait`,
+				cwd,
+				owner: "test",
+				ready: { pattern: "never", timeoutSeconds: 0.2 },
+			});
+			const startCheck = expect(startPromise).rejects.toThrow(/shutting down/i);
+			const shutdownPromise = manager.shutdown();
+
+			await Promise.all([shutdownPromise, startCheck]);
+			expect(timeouts.active.size).toBe(0);
+			timeouts.restore();
+
+			expect(manager.list()).toEqual([]);
+			expect(events).toEqual([]);
+
+			await sleep(250);
+			for (const file of [pidsFile, grandchildrenFile]) {
+				if (!fs.existsSync(file)) continue;
+				for (const raw of fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean)) {
+					const pid = Number(raw);
+					expect(groupAlive(pid)).toBe(false);
+					expect(pidAlive(pid)).toBe(false);
+					expect(watchdogAlive(pid)).toBe(false);
+				}
+			}
+			expect(events.filter((event) => event.type === "ready_timeout")).toEqual([]);
+		}
+
+		// Window 2: shutdown() starts right after "spawn" attached the run, watchdog, readiness timer, and port probe.
+		{
+			const { manager, start, events, cwd } = setup();
+			const runsFile = path.join(cwd, "postspawn.log");
+			const script = path.join(cwd, "postspawn-worker.cjs");
+			fs.writeFileSync(
+				script,
+				`const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+fs.appendFileSync(${JSON.stringify(runsFile)}, process.pid + "," + child.pid + "\\n");
+setInterval(() => {}, 1000);
+`,
+			);
+			cleanups.push(() => killRecordedPids(runsFile));
+
+			const unusedPort = await freePort();
+			let spawnedPid: number | undefined;
+			let shutdownPromise: Promise<void> | undefined;
+			manager.subscribe((event) => {
+				if (event.type === "changed" && event.process.status === "starting" && !shutdownPromise) {
+					spawnedPid = event.process.pid;
+					shutdownPromise = manager.shutdown();
+				}
+			});
+
+			const timeouts = trackActiveTimeouts();
+			cleanups.push(() => timeouts.restore());
+
+			const startPromise = start(`exec ${NODE} ${JSON.stringify(script)}`, {
+				ready: { pattern: "never", port: unusedPort, timeoutSeconds: 0.2 },
+			});
+			await expect(startPromise).rejects.toThrow(/shutting down/i);
+			expect(shutdownPromise).toBeDefined();
+			await shutdownPromise!;
+			expect(timeouts.active.size).toBe(0);
+			timeouts.restore();
+
+			expect(spawnedPid).toBeDefined();
+			expect(groupAlive(spawnedPid!)).toBe(false);
+			expect(await until(() => !watchdogAlive(spawnedPid!), 1000)).toBe(true);
+			expect(manager.list()).toEqual([]);
+
+			if (fs.existsSync(runsFile)) {
+				for (const line of fs.readFileSync(runsFile, "utf8").trim().split("\n").filter(Boolean)) {
+					for (const raw of line.split(",")) {
+						const pid = Number(raw);
+						expect(groupAlive(pid)).toBe(false);
+						expect(pidAlive(pid)).toBe(false);
+					}
+				}
+			}
+
+			// Wait past ready.timeoutSeconds to ensure neither readiness timer nor port probe fires.
+			await sleep(300);
+			expect(events.filter((event) => event.type === "ready_timeout")).toEqual([]);
+		}
 	});
 });
 

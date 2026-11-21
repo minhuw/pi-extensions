@@ -58,6 +58,7 @@ interface Run {
 	pending: Set<string>;
 	autoProbing: boolean;
 	stopProbes: Array<() => void>;
+	stopWatchdog?: () => void;
 	readyTimer?: NodeJS.Timeout;
 	errorLines: string[];
 	suppressed: number;
@@ -124,6 +125,57 @@ function createManagerCore(options: ManagerOptions) {
 	const records = new Map<string, ProcessRecord>();
 	const waits = new Map<string, Wait>();
 	const listeners = new Set<(event: ProcessEvent) => void>();
+	const inFlight = new Set<Promise<unknown>>();
+	const spawningPids = new Set<number>();
+	const shutdownController = new AbortController();
+	let shuttingDown = false;
+	let shutdownPromise: Promise<void> | undefined;
+
+	const assertNotShuttingDown = () => {
+		if (shuttingDown) throw new Error("Process manager is shutting down.");
+	};
+
+	function trackInFlight<T>(work: () => Promise<T>): Promise<T> {
+		let settled = false;
+		let promise!: Promise<T>;
+		const done = () => {
+			settled = true;
+			if (promise) inFlight.delete(promise);
+		};
+		promise = (async () => {
+			try {
+				return await work();
+			} finally {
+				done();
+			}
+		})();
+		if (!settled) inFlight.add(promise);
+		return promise;
+	}
+
+	function attachWatchdog(pgid: number): () => void {
+		const watchdog = spawnWatchdog(process.pid, pgid);
+		let stopped = false;
+		const reap = () => {
+			if (watchdog.exitCode !== null || watchdog.signalCode !== null) return;
+			const wpid = watchdog.pid;
+			if (wpid === undefined) return;
+			if (!signalGroup(wpid, "SIGKILL")) {
+				try {
+					watchdog.kill("SIGKILL");
+				} catch {
+					// Already exited.
+				}
+			}
+		};
+		watchdog.once("spawn", () => {
+			if (stopped) reap();
+		});
+		return () => {
+			stopped = true;
+			reap();
+		};
+	}
 
 	const emit = (event: ProcessEvent) => {
 		for (const listener of [...listeners]) {
@@ -176,74 +228,113 @@ function createManagerCore(options: ManagerOptions) {
 		if (live().length >= maxLive) throw new Error(`Live process limit reached (${maxLive}); stop one first.`);
 	}
 
-	async function launch(record: ProcessRecord): Promise<void> {
-		const { options: start, plan } = record;
-		const child = spawn(options.shell.shell, [...options.shell.args, start.command], {
-			cwd: start.cwd,
-			env: { ...process.env, ...start.env },
-			detached: true,
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-		const exited = new Promise<[number | null, NodeJS.Signals | null]>((resolve) => child.once("exit", (code, signal) => resolve([code, signal])));
-		const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
-		await new Promise<void>((resolve, reject) => {
-			const onError = (error: Error) => reject(new Error(`Failed to start "${start.command}" in ${start.cwd}: ${error.message}`));
-			child.once("error", onError);
-			child.once("spawn", () => {
-				child.off("error", onError);
-				resolve();
+	function launch(record: ProcessRecord): Promise<void> {
+		return trackInFlight(async () => {
+			assertNotShuttingDown();
+			const { options: start, plan } = record;
+			const child = spawn(options.shell.shell, [...options.shell.args, start.command], {
+				cwd: start.cwd,
+				env: { ...process.env, ...start.env },
+				detached: true,
+				stdio: ["ignore", "pipe", "pipe"],
 			});
+			const initialPid = child.pid;
+			if (initialPid !== undefined) spawningPids.add(initialPid);
+			const exited = new Promise<[number | null, NodeJS.Signals | null]>((resolve) => child.once("exit", (code, signal) => resolve([code, signal])));
+			const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+			try {
+				await new Promise<void>((resolve, reject) => {
+					const onError = (error: Error) => reject(new Error(`Failed to start "${start.command}" in ${start.cwd}: ${error.message}`));
+					child.once("error", onError);
+					child.once("spawn", () => {
+						child.off("error", onError);
+						resolve();
+					});
+				});
+			} catch (error) {
+				if (initialPid !== undefined) spawningPids.delete(initialPid);
+				child.stdout?.destroy();
+				child.stderr?.destroy();
+				throw error;
+			}
+			const pid = child.pid;
+			if (pid === undefined) {
+				if (initialPid !== undefined) spawningPids.delete(initialPid);
+				child.stdout?.destroy();
+				child.stderr?.destroy();
+				throw new Error(`Spawned "${start.command}" without a pid.`);
+			}
+			if (shuttingDown) {
+				try {
+					const outcome = await terminateGroup(pid, DEFAULT_GRACE_MS);
+					if (outcome !== "stuck") await exited;
+				} finally {
+					if (initialPid !== undefined) spawningPids.delete(initialPid);
+					spawningPids.delete(pid);
+					child.stdout?.destroy();
+					child.stderr?.destroy();
+				}
+				throw new Error("Process manager is shutting down.");
+			}
+			const stopWatchdog = attachWatchdog(pid);
+
+			const pending = new Set<string>();
+			if (plan.pattern) pending.add("pattern");
+			if (plan.port !== undefined) pending.add("port");
+			if (plan.url !== undefined) pending.add("url");
+			if (!plan.disabled && pending.size === 0) pending.add("auto-url");
+			const run: Run = { child, pid, pending, autoProbing: false, stopProbes: [], stopWatchdog, errorLines: [], suppressed: 0, errorMuted: false, exited: false, finished: Promise.resolve() };
+			if (record.run) {
+				stopReadiness(record.run);
+				clearTimeout(record.run.errorTimer);
+			}
+			record.run = run;
+			const { info } = record;
+			info.pid = pid;
+			info.status = plan.disabled ? "running" : "starting";
+			info.startedAt = Date.now();
+			info.urls = [];
+			for (const key of ["readyAt", "endedAt", "exitCode", "signal"] as const) delete info[key];
+			if (initialPid !== undefined) spawningPids.delete(initialPid);
+			spawningPids.delete(pid);
+
+			const splitters = [new LineSplitter(), new LineSplitter()];
+			const output = (splitter: LineSplitter) => (chunk: Buffer) => {
+				if (!current(record, run)) return;
+				record.log.append(chunk);
+				record.lastByte = chunk.at(-1);
+				record.info.logBytes = record.log.bytes;
+				for (const line of splitter.push(chunk)) onLine(record, run, line);
+				if (record.info.attached) record.options.onOutput?.(chunk);
+			};
+			child.stdout!.on("data", output(splitters[0]));
+			child.stderr!.on("data", output(splitters[1]));
+
+			if (!plan.disabled) {
+				if (plan.port !== undefined) {
+					const port = plan.port;
+					run.stopProbes.push(pollUntil(() => tcpOpen(port), 500, () => satisfy(record, run, "port")));
+				}
+				if (plan.url !== undefined) {
+					const url = plan.url;
+					run.stopProbes.push(pollUntil(() => httpUp(url), 1000, () => satisfy(record, run, "url")));
+				}
+				run.readyTimer = setTimeout(() => {
+					if (active(record, run) && record.info.status === "starting") emit({ type: "ready_timeout", process: snapshot(record), tail: tail(record) });
+				}, plan.timeoutMs);
+			}
+			run.finished = track(record, run, exited, closed, splitters).catch(() => {});
+			changed(record);
+			try {
+				await delay(START_SETTLE_MS, undefined, { signal: shutdownController.signal });
+			} catch (error) {
+				if ((error as { name?: string }).name !== "AbortError") throw error;
+			}
+			if (shuttingDown) {
+				await stop(record, DEFAULT_GRACE_MS);
+				throw new Error("Process manager is shutting down.");
+			}
 		});
-		const pid = child.pid;
-		if (pid === undefined) throw new Error(`Spawned "${start.command}" without a pid.`);
-		spawnWatchdog(process.pid, pid);
-
-		const pending = new Set<string>();
-		if (plan.pattern) pending.add("pattern");
-		if (plan.port !== undefined) pending.add("port");
-		if (plan.url !== undefined) pending.add("url");
-		if (!plan.disabled && pending.size === 0) pending.add("auto-url");
-		const run: Run = { child, pid, pending, autoProbing: false, stopProbes: [], errorLines: [], suppressed: 0, errorMuted: false, exited: false, finished: Promise.resolve() };
-		if (record.run) {
-			stopReadiness(record.run);
-			clearTimeout(record.run.errorTimer);
-		}
-		record.run = run;
-		const { info } = record;
-		info.pid = pid;
-		info.status = plan.disabled ? "running" : "starting";
-		info.startedAt = Date.now();
-		info.urls = [];
-		for (const key of ["readyAt", "endedAt", "exitCode", "signal"] as const) delete info[key];
-
-		const splitters = [new LineSplitter(), new LineSplitter()];
-		const output = (splitter: LineSplitter) => (chunk: Buffer) => {
-			if (!current(record, run)) return;
-			record.log.append(chunk);
-			record.lastByte = chunk.at(-1);
-			record.info.logBytes = record.log.bytes;
-			for (const line of splitter.push(chunk)) onLine(record, run, line);
-			if (record.info.attached) record.options.onOutput?.(chunk);
-		};
-		child.stdout!.on("data", output(splitters[0]));
-		child.stderr!.on("data", output(splitters[1]));
-
-		if (!plan.disabled) {
-			if (plan.port !== undefined) {
-				const port = plan.port;
-				run.stopProbes.push(pollUntil(() => tcpOpen(port), 500, () => satisfy(record, run, "port")));
-			}
-			if (plan.url !== undefined) {
-				const url = plan.url;
-				run.stopProbes.push(pollUntil(() => httpUp(url), 1000, () => satisfy(record, run, "url")));
-			}
-			run.readyTimer = setTimeout(() => {
-				if (active(record, run) && record.info.status === "starting") emit({ type: "ready_timeout", process: snapshot(record), tail: tail(record) });
-			}, plan.timeoutMs);
-		}
-		run.finished = track(record, run, exited, closed, splitters).catch(() => {});
-		changed(record);
-		await delay(START_SETTLE_MS);
 	}
 
 	async function track(record: ProcessRecord, run: Run, exited: Promise<[number | null, NodeJS.Signals | null]>, closed: Promise<void>, splitters: LineSplitter[]): Promise<void> {
@@ -256,6 +347,7 @@ function createManagerCore(options: ManagerOptions) {
 			const pgid = run.pid;
 			// We own the group: nothing the shell left behind may outlive it.
 			const reap = (async () => {
+				if (run.stopping) return;
 				await delay(LEFTOVER_PAUSE_MS);
 				if (current(record, run) && !run.stopping && groupAlive(pgid)) await terminateGroup(pgid, LEFTOVER_GRACE_MS);
 			})().catch(() => {});
@@ -273,6 +365,7 @@ function createManagerCore(options: ManagerOptions) {
 			clearTimeout(run.errorTimer);
 			run.child.stdout!.destroy();
 			run.child.stderr!.destroy();
+			if (!groupAlive(run.pid)) run.stopWatchdog?.();
 			if (current(record, run)) {
 				try {
 					record.log.close();
@@ -308,7 +401,7 @@ function createManagerCore(options: ManagerOptions) {
 			info.urls.push(...fresh.slice(0, MAX_URLS - info.urls.length));
 			changed(record);
 		}
-		if (run.pending.has("auto-url") && !run.autoProbing && info.urls.length && !run.exited) {
+		if (run.pending.has("auto-url") && !run.autoProbing && info.urls.length && !run.exited && !run.stopping) {
 			run.autoProbing = true;
 			const port = urlPort(info.urls[0]);
 			run.stopProbes.push(pollUntil(() => tcpOpen(port), 500, () => satisfy(record, run, "auto-url")));
@@ -386,79 +479,108 @@ function createManagerCore(options: ManagerOptions) {
 				changed(record);
 			}
 			const outcome = await terminateGroup(run.pid, graceMs);
-			if (outcome !== "stuck") await run.finished;
+			if (outcome !== "stuck") {
+				run.stopWatchdog?.();
+				await run.finished;
+			}
 			return { process: snapshot(record), outcome };
 		})();
 		return run.stopping;
 	}
 
 	async function restartRecord(record: ProcessRecord): Promise<ProcessInfo> {
-		const previous = record.restarting ?? Promise.resolve();
-		const next = previous.then(async () => {
-			if (records.get(record.info.id) !== record) throw new Error(`Unknown process "${record.info.id}".`);
-			const result = await stop(record, DEFAULT_GRACE_MS);
-			if (result.outcome === "stuck") throw new Error(`Process "${record.info.name}" survived SIGKILL; not restarting.`);
-			const clash = live().find((other) => other !== record && other.info.name === record.info.name);
-			if (clash) throw new Error(`Another live process (${clash.info.id}) is named "${record.info.name}".`);
-			checkCapacity();
-			record.info.restarts++;
-			const separator = `${record.lastByte === undefined || record.lastByte === 10 ? "" : "\n"}--- restart ${record.info.restarts} ---\n`;
-			record.log.append(Buffer.from(separator));
-			record.lastByte = 10;
-			record.info.logBytes = record.log.bytes;
-			await launch(record);
-			return snapshot(record);
+		assertNotShuttingDown();
+		return trackInFlight(async () => {
+			const previous = record.restarting ?? Promise.resolve();
+			const next = previous.then(async () => {
+				assertNotShuttingDown();
+				if (records.get(record.info.id) !== record) throw new Error(`Unknown process "${record.info.id}".`);
+				const result = await stop(record, DEFAULT_GRACE_MS);
+				assertNotShuttingDown();
+				if (result.outcome === "stuck") throw new Error(`Process "${record.info.name}" survived SIGKILL; not restarting.`);
+				const clash = live().find((other) => other !== record && other.info.name === record.info.name);
+				if (clash) throw new Error(`Another live process (${clash.info.id}) is named "${record.info.name}".`);
+				checkCapacity();
+				record.info.restarts++;
+				const separator = `${record.lastByte === undefined || record.lastByte === 10 ? "" : "\n"}--- restart ${record.info.restarts} ---\n`;
+				record.log.append(Buffer.from(separator));
+				record.lastByte = 10;
+				record.info.logBytes = record.log.bytes;
+				try {
+					await launch(record);
+				} catch (error) {
+					try {
+						record.log.close();
+					} catch {
+						// Ignore close failure so restart rejection surfaces cleanly.
+					}
+					throw error;
+				}
+				return snapshot(record);
+			});
+			const tailPromise = next.then(
+				() => undefined,
+				() => undefined,
+			);
+			record.restarting = tailPromise;
+			try {
+				return await next;
+			} finally {
+				if (record.restarting === tailPromise) record.restarting = undefined;
+			}
 		});
-		const tailPromise = next.then(
-			() => undefined,
-			() => undefined,
-		);
-		record.restarting = tailPromise;
-		try {
-			return await next;
-		} finally {
-			if (record.restarting === tailPromise) record.restarting = undefined;
-		}
 	}
 
 	const manager: ProcessManager = {
 		async start(start) {
-			if (!start.command.trim()) throw new Error("command must not be empty.");
-			if (!path.isAbsolute(start.cwd)) throw new Error(`cwd must be absolute, got "${start.cwd}".`);
-			const plan = compile(start);
-			const twin = start.reuse === false ? undefined : live().find((record) =>
-				start.name === undefined ? record.options.command === start.command && record.options.cwd === start.cwd : record.info.name === start.name,
-			);
-			if (twin) {
-				if (twin.options.command !== start.command || twin.options.cwd !== start.cwd) {
-					throw new Error(`Process "${twin.info.name}" is already running "${twin.options.command}" in ${twin.options.cwd}; stop it or pick another name.`);
+			assertNotShuttingDown();
+			return trackInFlight(async () => {
+				assertNotShuttingDown();
+				if (!start.command.trim()) throw new Error("command must not be empty.");
+				if (!path.isAbsolute(start.cwd)) throw new Error(`cwd must be absolute, got "${start.cwd}".`);
+				const plan = compile(start);
+				const twin = start.reuse === false ? undefined : live().find((record) =>
+					start.name === undefined ? record.options.command === start.command && record.options.cwd === start.cwd : record.info.name === start.name,
+				);
+				if (twin) {
+					if (twin.options.command !== start.command || twin.options.cwd !== start.cwd) {
+						throw new Error(`Process "${twin.info.name}" is already running "${twin.options.command}" in ${twin.options.cwd}; stop it or pick another name.`);
+					}
+					return { process: snapshot(twin), reused: true };
 				}
-				return { process: snapshot(twin), reused: true };
-			}
-			checkCapacity();
-			const id = uniqueId("p", (candidate) => records.has(candidate));
-			const logPath = path.join(runDir, `${id}.log`);
-			const fd = fs.openSync(logPath, "a", 0o600);
-			try {
-				fs.fchmodSync(fd, 0o600);
-			} finally {
-				fs.closeSync(fd);
-			}
-			const record: ProcessRecord = {
-				info: { id, name: start.name ?? defaultName(start.command), command: start.command, cwd: start.cwd, owner: start.owner, pid: undefined, status: "starting", startedAt: Date.now(), urls: [], logPath, logBytes: 0, restarts: 0, attached: start.attached ?? false },
-				options: { ...start, env: start.env && { ...start.env } },
-				plan,
-				log: new LogFile(logPath, maxLogBytes),
-			};
-			records.set(id, record);
-			try {
-				await launch(record);
-			} catch (error) {
-				records.delete(id);
-				record.log.remove();
-				throw error;
-			}
-			return { process: snapshot(record), reused: false };
+				checkCapacity();
+				const id = uniqueId("p", (candidate) => records.has(candidate));
+				const logPath = path.join(runDir, `${id}.log`);
+				const fd = fs.openSync(logPath, "a", 0o600);
+				try {
+					fs.fchmodSync(fd, 0o600);
+				} finally {
+					fs.closeSync(fd);
+				}
+				const record: ProcessRecord = {
+					info: { id, name: start.name ?? defaultName(start.command), command: start.command, cwd: start.cwd, owner: start.owner, pid: undefined, status: "starting", startedAt: Date.now(), urls: [], logPath, logBytes: 0, restarts: 0, attached: start.attached ?? false },
+					options: { ...start, env: start.env && { ...start.env } },
+					plan,
+					log: new LogFile(logPath, maxLogBytes),
+				};
+				records.set(id, record);
+				try {
+					await launch(record);
+				} catch (error) {
+					if (!record.run || !LIVE.has(record.info.status)) {
+						for (const wait of [...waits.values()]) {
+							if (wait.record === record) {
+								clearTimeout(wait.timer);
+								waits.delete(wait.id);
+							}
+						}
+						records.delete(id);
+						record.log.remove();
+					}
+					throw error;
+				}
+				return { process: snapshot(record), reused: false };
+			});
 		},
 
 		list: () => [...records.values()].map(snapshot),
@@ -473,6 +595,7 @@ function createManagerCore(options: ManagerOptions) {
 		stop: (idOrName, graceMs = DEFAULT_GRACE_MS) => stop(find(idOrName), graceMs),
 
 		async restart(idOrName) {
+			assertNotShuttingDown();
 			return restartRecord(find(idOrName));
 		},
 
@@ -537,14 +660,35 @@ function createManagerCore(options: ManagerOptions) {
 		},
 
 		killAllSync() {
+			for (const pid of spawningPids) signalGroup(pid, "SIGKILL");
 			for (const record of live()) {
 				const pid = record.run?.pid ?? record.info.pid;
 				if (pid !== undefined) signalGroup(pid, "SIGKILL");
 			}
 		},
 
-		async shutdown() {
-			await Promise.all(live().map((record) => stop(record, DEFAULT_GRACE_MS)));
+		shutdown() {
+			shuttingDown = true;
+			shutdownController.abort();
+			shutdownPromise ??= (async () => {
+				const stuck = new Set<Run>();
+				for (;;) {
+					const pending = [...inFlight];
+					const toStop = live().filter((record) => record.run !== undefined && !stuck.has(record.run));
+					if (pending.length === 0 && toStop.length === 0) break;
+					await Promise.all([
+						Promise.allSettled(pending),
+						Promise.all(
+							toStop.map(async (record) => {
+								const run = record.run!;
+								const result = await stop(record, DEFAULT_GRACE_MS);
+								if (result.outcome === "stuck") stuck.add(run);
+							}),
+						),
+					]);
+				}
+			})();
+			return shutdownPromise;
 		},
 	};
 
