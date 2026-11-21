@@ -35,6 +35,8 @@ const PYPI_TOKEN: &str = concat!("pypi-", f16!(), f16!(), f16!(), "FAKE");
 const DO_TOKEN: &str = "dop_v1_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 /// pika's own device token: pika_ and 64 lowercase hex.
 const PIKA_TOKEN: &str = "pika_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// pika's own node credential: pkn_ and 43 base64url characters.
+const PIKA_NODE_CREDENTIAL: &str = concat!("pkn_", f16!(), "-_fake", f16!(), "01234");
 const SENDGRID_KEY: &str = concat!("SG.", f16!(), "FAKE00", ".", f16!(), f16!(), "FAKEFAKE000");
 const JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJGQUtFIn0.FAKEsignatureEXAMPLE";
 const PEM_BODY: &str = "MIIEFAKEFAKEFAKEFAKEEXAMPLEKEYBODY0000";
@@ -69,6 +71,9 @@ fn redact_cases() -> Vec<(String, &'static str, &'static str)> {
         s(format!("doctl auth init --access-token {DO_TOKEN}"), DO_TOKEN, "API_KEY"),
         s(format!("node seed.mjs http://127.0.0.1:7171 {PIKA_TOKEN}"), PIKA_TOKEN, "API_KEY"),
         s(format!("Paired: the device token is {PIKA_TOKEN}."), PIKA_TOKEN, "API_KEY"),
+        s(PIKA_NODE_CREDENTIAL.to_owned(), PIKA_NODE_CREDENTIAL, "API_KEY"),
+        s(format!("pika-node --credential {PIKA_NODE_CREDENTIAL}"), PIKA_NODE_CREDENTIAL, "API_KEY"),
+        s(format!("Registered node credential {PIKA_NODE_CREDENTIAL}."), PIKA_NODE_CREDENTIAL, "API_KEY"),
         // AC-6 replaces a secret-named JSON field's whole value, even when a vendor rule also matches it.
         s(format!(r#"{{"mail":{{"provider":"sendgrid","apiKey":"{SENDGRID_KEY}"}}}}"#), SENDGRID_KEY, ""),
         // ---- tokens
@@ -164,6 +169,13 @@ const KEEP: &[&str] = &[
     "pika_0123456789abcdef is too short for a device token",
     "pika_0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
     "pika_0123456789abcdefg123456789abcdef0123456789abcdef0123456789abcdef",
+    // pika's own node credential prefix before non-credentials, wrong lengths, or inside a longer token
+    "pkn_foo is not a node credential",
+    "pkn_FAKEFAKEFAKEFAKE-_fakeFAKEFAKEFAKEFAKE0123 is 42 chars (too short)",
+    "pkn_FAKEFAKEFAKEFAKE-_fakeFAKEFAKEFAKEFAKE012345 is 44 chars (too long)",
+    "prefix_pkn_FAKEFAKEFAKEFAKE-_fakeFAKEFAKEFAKEFAKE01234 is embedded in a longer token",
+    "pkn_FAKEFAKEFAKEFAKE-_fakeFAKEFAKEFAKEFAKE01234_suffix is embedded in a longer token",
+    "pkn_FAKEFAKEFAKEFAKE+/fakeFAKEFAKEFAKEFAKE01234 has non-base64url chars",
 ];
 
 #[test]
@@ -655,6 +667,8 @@ fn cut_text_redacts_a_credentials_start_at_its_end() {
         ("publish with npm_FAKE0", "publish with [REDACTED:API_KEY]"),
         ("upload with pypi-FAKE0", "upload with [REDACTED:API_KEY]"),
         ("node seed.mjs http://127.0.0.1:7171 pika_0123abc", "node seed.mjs http://127.0.0.1:7171 [REDACTED:API_KEY]"),
+        ("pika-node --credential pkn_FAKE-0123_abc", "pika-node --credential [REDACTED:API_KEY]"),
+        ("pkn_FAKE01", "[REDACTED:API_KEY]"),
         // a secret's name before a value of 8 or more: the SECRET rule's find wins, as for whole text
         ("_authToken=npm_FAKE0000", "_authToken=[REDACTED:SECRET]"),
         ("export OPENAI_API_KEY=sk-proj-FAKE00", "export OPENAI_API_KEY=[REDACTED:SECRET]"),
@@ -701,6 +715,8 @@ fn cut_text_keeps_ordinary_text() {
         "from huggingface_hub import hf_hub_downl",
         "load it with pika_config",
         "a pika_v2",
+        "a pkn_foo",
+        "prefix_pkn_FAKE01",
         "the request set max_tokens: 4096 and input_tokens: 12",
         "Remaining tokens: lo",
         "listening on https://example.org:8443",
@@ -1414,4 +1430,4 @@ fn large_cut_json_prefix_uses_bounded_discovery() {
     assert_eq!(scrub_cut_text(&source), source.replace("FAKElettersOnly", REDACTED));
 }
 
-const _: () = assert!(RULES_VERSION >= 13);
+const _: () = assert!(RULES_VERSION >= 14);
