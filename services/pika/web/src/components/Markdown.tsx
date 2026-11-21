@@ -1,6 +1,7 @@
 import { memo } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type Components, type UrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { classifyImageSrc } from "../lib/safe-image";
 import { CodeBlock } from "./code";
 import { cx } from "./ui";
 
@@ -74,6 +75,16 @@ function rehypeHighlightMentions() {
 
 const REHYPE_MENTIONS = [rehypeHighlightMentions];
 
+const urlTransform: UrlTransform = (url, key, node) => {
+	if (key === "src" && node.tagName === "img") {
+		const classified = classifyImageSrc(url);
+		if (classified.kind === "allowed") return classified.src;
+		if (classified.kind === "external") return classified.href;
+		return "";
+	}
+	return defaultUrlTransform(url);
+};
+
 const components: Components = {
 	pre: ({ children }) => <>{children}</>,
 	code: ({ className, children }) => {
@@ -94,7 +105,46 @@ const components: Components = {
 			<table>{children}</table>
 		</div>
 	),
-	img: ({ src, alt }) => <img src={typeof src === "string" ? src : undefined} alt={alt ?? ""} className="max-w-full rounded-sm" />,
+	img: ({ src, alt, title }) => {
+		const classified = classifyImageSrc(typeof src === "string" ? src : undefined);
+		if (classified.kind === "allowed") {
+			return (
+				<img
+					src={classified.src}
+					alt={alt ?? ""}
+					title={title}
+					referrerPolicy="no-referrer"
+					loading="lazy"
+					className="max-w-full rounded-sm"
+				/>
+			);
+		}
+		if (classified.kind === "external") {
+			const label = alt?.trim() || classified.href;
+			return (
+				<a
+					href={classified.href}
+					title={title ?? classified.href}
+					target="_blank"
+					rel="noopener noreferrer"
+					data-blocked-external-image=""
+					className="inline-flex max-w-full items-center rounded-sm border border-line bg-soft px-1.5 py-0.5 text-[12.5px] text-muted underline decoration-ink/30 underline-offset-[3px] hover:text-ink hover:decoration-ink"
+				>
+					[External image: {label}]
+				</a>
+			);
+		}
+		const label = alt?.trim();
+		return (
+			<span
+				title={title}
+				data-blocked-image=""
+				className="inline-flex max-w-full items-center rounded-sm border border-line bg-soft px-1.5 py-0.5 text-[12.5px] text-muted"
+			>
+				{label ? `[Blocked image: ${label}]` : "[Blocked image]"}
+			</span>
+		);
+	},
 };
 
 export const Markdown = memo(function Markdown({
@@ -111,6 +161,7 @@ export const Markdown = memo(function Markdown({
 			<ReactMarkdown
 				remarkPlugins={[remarkGfm]}
 				rehypePlugins={highlightMentions ? REHYPE_MENTIONS : undefined}
+				urlTransform={urlTransform}
 				components={components}
 			>
 				{text}

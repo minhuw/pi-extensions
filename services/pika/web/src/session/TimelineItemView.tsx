@@ -8,6 +8,7 @@ import { useApi } from "../lib/api";
 import { messageReports, REPORT_TYPE, reportsLabel } from "../lib/tickets";
 import { formatCount, formatTime } from "../lib/format";
 import { bareModelOf } from "../lib/model";
+import { classifyImageContent } from "../lib/safe-image";
 import { useViewState } from "../lib/viewState";
 import { formatFineCost, formatSpan } from "../trace/format";
 import { firstStringArg, recordBadge, showsToolName, toolFamily, toolGlyph } from "../trace/kinds";
@@ -178,14 +179,45 @@ function Images({ content }: { content: unknown }) {
 	if (images.length === 0) return null;
 	return (
 		<div className="mt-2 flex flex-wrap gap-2">
-			{images.map((image, index) => (
-				<img
-					key={index}
-					src={image.src ?? (image.data ? `data:${image.mimeType};base64,${image.data}` : undefined)}
-					alt={`Image ${index + 1}`}
-					className="max-h-80 max-w-full rounded-sm border border-line"
-				/>
-			))}
+			{images.map((image, index) => {
+				const classified = classifyImageContent(image);
+				if (classified.kind === "allowed") {
+					return (
+						<img
+							key={index}
+							src={classified.src}
+							alt={`Image ${index + 1}`}
+							referrerPolicy="no-referrer"
+							className="max-h-80 max-w-full rounded-sm border border-line"
+						/>
+					);
+				}
+				if (classified.kind === "external") {
+					return (
+						<a
+							key={index}
+							href={classified.href}
+							target="_blank"
+							rel="noopener noreferrer"
+							data-blocked-external-image=""
+							className="inline-flex items-center rounded-sm border border-line bg-soft px-2.5 py-1.5 text-[12px] text-muted underline decoration-ink/30 underline-offset-[3px] hover:text-ink hover:decoration-ink"
+						>
+							[External image: Image {index + 1}]
+						</a>
+					);
+				}
+				const mime = typeof image.mimeType === "string" && image.mimeType.trim() ? image.mimeType.trim() : "unsupported type";
+				const detail = classified.reason === "disallowed-mime" ? ` (${mime})` : "";
+				return (
+					<div
+						key={index}
+						data-blocked-image=""
+						className="inline-flex items-center rounded-sm border border-line bg-soft px-2.5 py-1.5 text-[12px] text-muted"
+					>
+						Blocked image{detail}
+					</div>
+				);
+			})}
 		</div>
 	);
 }

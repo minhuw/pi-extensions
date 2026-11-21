@@ -1,4 +1,5 @@
 import { Callout } from "../../components/ui";
+import { classifyImageContent } from "../../lib/safe-image";
 import type { Entry, ToolCall, ToolResultMessage } from "../../lib/types";
 import { contentImages, contentText } from "../timeline";
 
@@ -43,14 +44,45 @@ export function ResultImages({ result }: { result: ToolResultMessage | undefined
 	if (images.length === 0) return null;
 	return (
 		<div className="mt-2 flex flex-wrap gap-2">
-			{images.map((image, index) => (
-				<img
-					key={index}
-					src={image.src ?? (image.data ? `data:${image.mimeType};base64,${image.data}` : undefined)}
-					alt={`Tool result image ${index + 1}`}
-					className="max-h-80 max-w-full rounded-sm border border-line"
-				/>
-			))}
+			{images.map((image, index) => {
+				const classified = classifyImageContent(image);
+				if (classified.kind === "allowed") {
+					return (
+						<img
+							key={index}
+							src={classified.src}
+							alt={`Tool result image ${index + 1}`}
+							referrerPolicy="no-referrer"
+							className="max-h-80 max-w-full rounded-sm border border-line"
+						/>
+					);
+				}
+				if (classified.kind === "external") {
+					return (
+						<a
+							key={index}
+							href={classified.href}
+							target="_blank"
+							rel="noopener noreferrer"
+							data-blocked-external-image=""
+							className="inline-flex items-center rounded-sm border border-line bg-soft px-2.5 py-1.5 text-[12px] text-muted underline decoration-ink/30 underline-offset-[3px] hover:text-ink hover:decoration-ink"
+						>
+							[External image: Tool result image {index + 1}]
+						</a>
+					);
+				}
+				const mime = typeof image.mimeType === "string" && image.mimeType.trim() ? image.mimeType.trim() : "unsupported type";
+				const detail = classified.reason === "disallowed-mime" ? ` (${mime})` : "";
+				return (
+					<div
+						key={index}
+						data-blocked-image=""
+						className="inline-flex items-center rounded-sm border border-line bg-soft px-2.5 py-1.5 text-[12px] text-muted"
+					>
+						Blocked image{detail}
+					</div>
+				);
+			})}
 		</div>
 	);
 }
