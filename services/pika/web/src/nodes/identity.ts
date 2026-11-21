@@ -73,17 +73,44 @@ export class IndexedDbKeyStore implements KeyStore {
 	#db: Promise<IDBDatabase> | undefined;
 
 	#open(): Promise<IDBDatabase> {
-		this.#db ??= new Promise((resolve, reject) => {
-			const request = indexedDB.open(DB_NAME, DB_VERSION);
-			request.onupgradeneeded = () => {
-				const db = request.result;
-				if (!db.objectStoreNames.contains(IDENTITY)) db.createObjectStore(IDENTITY);
-				if (!db.objectStoreNames.contains(PINS)) db.createObjectStore(PINS, { keyPath: "node" });
-			};
-			request.onsuccess = () => resolve(request.result);
-			request.onerror = () => reject(request.error ?? new Error("IndexedDB failed to open"));
-			request.onblocked = () => reject(new Error("IndexedDB is blocked by another tab"));
-		});
+		if (!this.#db) {
+			const pending: Promise<IDBDatabase> = new Promise<IDBDatabase>((resolve, reject) => {
+				let failed = false;
+				const request = indexedDB.open(DB_NAME, DB_VERSION);
+				request.onupgradeneeded = () => {
+					const db = request.result;
+					if (!db.objectStoreNames.contains(IDENTITY)) db.createObjectStore(IDENTITY);
+					if (!db.objectStoreNames.contains(PINS)) db.createObjectStore(PINS, { keyPath: "node" });
+				};
+				request.onsuccess = () => {
+					const db = request.result;
+					if (failed) {
+						db.close?.();
+						return;
+					}
+					db.onclose = () => {
+						if (this.#db === pending) this.#db = undefined;
+					};
+					db.onversionchange = () => {
+						db.close?.();
+						if (this.#db === pending) this.#db = undefined;
+					};
+					resolve(db);
+				};
+				request.onerror = () => {
+					failed = true;
+					reject(request.error ?? new Error("IndexedDB failed to open"));
+				};
+				request.onblocked = () => {
+					failed = true;
+					reject(new Error("IndexedDB is blocked by another tab"));
+				};
+			}).catch((error) => {
+				if (this.#db === pending) this.#db = undefined;
+				throw error;
+			});
+			this.#db = pending;
+		}
 		return this.#db;
 	}
 

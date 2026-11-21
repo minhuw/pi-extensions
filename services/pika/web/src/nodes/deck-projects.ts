@@ -139,6 +139,8 @@ export interface DeckProjectsSnapshot {
 export class DeckProjects {
 	#api: DeckProjectsApi;
 	#rows = new Map<string, DeckProjectRow>();
+	#revs = new Map<string, number>();
+	#rev = 0;
 	#loaded = false;
 	#error: string | undefined;
 	#snapshot: DeckProjectsSnapshot = { rows: new Map(), loaded: false };
@@ -152,6 +154,7 @@ export class DeckProjects {
 		try {
 			const { projects } = await this.#api.list();
 			this.#rows = new Map(projects.map((row) => [row.key, row]));
+			this.#revs.clear();
 			this.#error = undefined;
 		} catch (error) {
 			this.#error = error instanceof Error ? error.message : String(error);
@@ -186,6 +189,9 @@ export class DeckProjects {
 		const before = this.#rows.get(key);
 		const next: DeckProjectRow = { key, name: null, collapsed: false, updatedAt: new Date().toISOString(), ...before, ...change };
 		const atDefaults = next.name === null && !next.collapsed;
+		const optimistic = atDefaults ? undefined : next;
+		const rev = ++this.#rev;
+		this.#revs.set(key, rev);
 		if (atDefaults) this.#rows.delete(key);
 		else this.#rows.set(key, next);
 		this.#emit();
@@ -195,15 +201,19 @@ export class DeckProjects {
 			} else {
 				const row = await this.#api.patch(key, change);
 				// A later change of the same row may have landed while this one was in flight.
-				if (this.#rows.get(key) === next) this.#rows.set(key, row);
+				if (this.#rows.get(key) === optimistic && this.#revs.get(key) === rev) {
+					this.#rows.set(key, row);
+					this.#emit();
+				}
 			}
 		} catch (error) {
-			if (before) this.#rows.set(key, before);
-			else this.#rows.delete(key);
-			this.#emit();
+			if (this.#rows.get(key) === optimistic && this.#revs.get(key) === rev) {
+				if (before) this.#rows.set(key, before);
+				else this.#rows.delete(key);
+				this.#emit();
+			}
 			throw error;
 		}
-		this.#emit();
 	}
 
 	#emit(): void {

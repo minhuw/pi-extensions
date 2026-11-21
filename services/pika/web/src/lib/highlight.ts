@@ -5,10 +5,18 @@ type Highlighter = (code: string, language: string) => string | null;
 let loader: Promise<Highlighter> | null = null;
 
 export function loadHighlighter(): Promise<Highlighter> {
-	loader ??= import("./highlight-languages").then(({ default: hljs }) => (code: string, language: string) => {
-		if (!hljs.getLanguage(language)) return null;
-		return hljs.highlight(code, { language, ignoreIllegals: true }).value;
-	});
+	if (!loader) {
+		const pending: Promise<Highlighter> = import("./highlight-languages")
+			.then(({ default: hljs }) => (code: string, language: string) => {
+				if (!hljs.getLanguage(language)) return null;
+				return hljs.highlight(code, { language, ignoreIllegals: true }).value;
+			})
+			.catch((error) => {
+				if (loader === pending) loader = null;
+				throw error;
+			});
+		loader = pending;
+	}
 	return loader;
 }
 
