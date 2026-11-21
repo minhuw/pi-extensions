@@ -78,6 +78,7 @@ pub const UNDO_STEPS: &[(usize, &str)] = &[
     (20, "DROP TABLE relay_boards;"),
     (21, "DROP TABLE nodes;"),
     (22, "DROP TABLE deck_projects;"),
+    (23, "DROP INDEX IF EXISTS entries_spokesman;"),
 ];
 
 /// Rewinds `conn` from its current `PRAGMA user_version` down to `target_version`, running each intermediate undo step

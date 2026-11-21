@@ -406,3 +406,17 @@ fn reprice_uses_the_pricing_partial_index() {
         );
     });
 }
+
+#[test]
+fn spokesman_rewrites_use_the_partial_index() {
+    use super::spokesman::REWRITES_SQL;
+    with_conn(|conn| {
+        assert_eq!(
+            plan(conn, REWRITES_SQL, None),
+            [
+                "SEARCH e USING INDEX entries_spokesman (sid=?)",
+                "SEARCH l USING INDEX lines_position (stream_id=? AND offset=?)",
+            ]
+        );
+    });
+}

@@ -35,13 +35,13 @@ pub struct Rewrites {
     target_turns: HashMap<i64, i64>,
 }
 
+pub(super) const REWRITES_SQL: &str = "SELECT e.seq, l.data, l.blob FROM entries e INDEXED BY entries_spokesman
+     JOIN lines l ON l.stream_id = e.sid AND l.offset = e.offset
+     WHERE e.sid = ?1 AND e.type = 'custom' AND e.custom_type = 'spokesman-rewrite' ORDER BY e.seq";
+
 impl Rewrites {
     pub fn load(conn: &Connection, blobs: &BlobStore, sid: i64) -> ReadResult<Self> {
-        let mut stmt = conn.prepare_cached(
-            "SELECT e.seq, l.data, l.blob FROM entries e
-             JOIN lines l ON l.stream_id = e.sid AND l.offset = e.offset
-             WHERE e.sid = ?1 AND e.type = 'custom' AND e.custom_type = 'spokesman-rewrite' ORDER BY e.seq",
-        )?;
+        let mut stmt = conn.prepare_cached(REWRITES_SQL)?;
         let mut rows = stmt.query([sid])?;
         let mut candidates = Vec::new();
         while let Some(row) = rows.next()? {

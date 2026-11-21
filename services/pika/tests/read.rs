@@ -1245,7 +1245,7 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
     std::fs::rename(&blob, &aside).unwrap();
     assert!(pika::store::Store::open(&data).is_err());
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 22);
+    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 23);
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM settings WHERE key = 'needs_reindex'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     drop(conn);
@@ -2635,7 +2635,7 @@ fn statistics_version_10_upgrade_backfills_ledger_without_changing_source_lines(
         BEGIN SELECT RAISE(ABORT, 'source deleted'); END;").unwrap();
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 22);
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 23);
     assert_eq!(dump_derived(&store), expected);
     assert!(store.setting(pika::store::NEEDS_REINDEX).unwrap().is_none());
     assert!(store.setting(pika::store::DERIVED_GENERATION).unwrap().is_some());
@@ -2917,8 +2917,53 @@ fn schema_v19_adds_the_extension_usage_indexes_without_a_reindex() {
     rewind(&conn, 18);
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 22);
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 23);
     assert_eq!(store.setting(pika::store::NEEDS_REINDEX).unwrap(), None);
     let indexes = query(&store, "SELECT name FROM sqlite_master WHERE name IN ('entries_custom_type', 'tool_calls_started') ORDER BY name");
     assert_eq!(indexes.len(), 2);
+}
+
+#[test]
+fn schema_v23_adds_the_spokesman_partial_index_without_a_reindex() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let id = "spokesman-v22-upgrade";
+    let (expected, derived_gen) = {
+        let store = pika::store::Store::open(&data).unwrap();
+        let input = lines(&[
+            spokesman_header(id),
+            spokesman_message("u1", json!({ "role": "user", "content": "Explain the change" })),
+            spokesman_message("a1", assistant("<!-- spokesman:rewritten -->\nClear rewrite", "gpt-6", 1)),
+            spokesman_rewrite("r1", "a1", "Original draft", "Clear rewrite"),
+        ]);
+        upload(&store, &skey(id), "session", &input, 10);
+        (dump_derived(&store), store.setting(pika::store::DERIVED_GENERATION).unwrap())
+    };
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    rewind(&conn, 22);
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'entries_spokesman'", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    conn.execute_batch("CREATE TRIGGER no_v23_reindex BEFORE DELETE ON entries
+        BEGIN SELECT RAISE(ABORT, 'reindexed during v23 upgrade'); END;").unwrap();
+    drop(conn);
+
+    let store = pika::store::Store::open(&data).unwrap();
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 23);
+    assert_eq!(store.setting(pika::store::NEEDS_REINDEX).unwrap(), None);
+    assert_eq!(store.setting(pika::store::DERIVED_GENERATION).unwrap(), derived_gen);
+    assert_eq!(dump_derived(&store), expected);
+    let indexes = query(&store, "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'entries_spokesman'");
+    assert_eq!(indexes.len(), 1);
+
+    let turns = store.read(|conn| pika::read::sessions::turns(conn, &store.blobs, id, &pika::read::Params::default())).unwrap();
+    assert_eq!(turns.items.len(), 1);
+    assert_eq!(turns.items[0].final_text, "Clear rewrite");
+    let spokesman = turns.items[0].spokesman.as_ref().expect("existing spokesman rewrite survives v22 -> v23");
+    assert_eq!(spokesman.seq, 3);
+    assert_eq!(spokesman.target_seq, 2);
+    assert_eq!(spokesman.original_text, "Original draft");
+    assert_eq!(spokesman.rewritten_text, "Clear rewrite");
 }
