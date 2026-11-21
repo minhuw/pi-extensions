@@ -4,6 +4,7 @@ import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent
 
 export const COUNCIL_MEMBER_IDS = ["caspar", "melchior", "balthasar"] as const;
 export type CouncilMemberId = (typeof COUNCIL_MEMBER_IDS)[number];
+export const COUNCIL_REPORT_MESSAGE_TYPE = "council-report";
 
 export interface CouncilMemberSpec {
 	id: CouncilMemberId;
@@ -79,6 +80,7 @@ export interface CouncilMemberFailure {
 }
 
 export interface CouncilReportInput {
+	councilId?: string;
 	topic: string;
 	paths?: readonly string[];
 	rounds: 1 | 2;
@@ -325,6 +327,7 @@ export function formatCouncilReport(input: CouncilReportInput): string {
 	const lines: string[] = [
 		"# Council Deliberation Report",
 		"",
+		...(input.councilId ? [`- **Council ID:** \`${input.councilId}\``] : []),
 		`- **Topic:** ${input.topic}`,
 		...(input.paths && input.paths.length > 0
 			? [`- **Paths:** ${input.paths.map((p) => `\`${p}\``).join(", ")}`]
@@ -395,8 +398,65 @@ interface LifecycleSettlePayload {
 
 const DEFAULT_PING_TIMEOUT_MS = 1000;
 
+function formatElapsed(ms: number): string {
+	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+	const minutes = Math.floor(totalSeconds / 60);
+	const seconds = totalSeconds % 60;
+	if (minutes === 0) return `${seconds}s`;
+	return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+}
+
+function formatCouncilFailure(input: {
+	councilId: string;
+	topic: string;
+	paths?: readonly string[];
+	rounds: 1 | 2;
+	members: readonly CouncilMemberId[];
+	failures: readonly CouncilMemberFailure[];
+	error: string;
+}): string {
+	const lines: string[] = [
+		`# Council Deliberation Failed (\`${input.councilId}\`)`,
+		"",
+		`- **Topic:** ${input.topic}`,
+		...(input.paths && input.paths.length > 0
+			? [`- **Paths:** ${input.paths.map((p) => `\`${p}\``).join(", ")}`]
+			: []),
+		`- **Rounds:** ${input.rounds}`,
+		`- **Panel:** ${input.members.map((id) => COUNCIL_MEMBERS[id].label).join(", ")}`,
+		`- **Error:** ${input.error}`,
+	];
+
+	if (input.failures.length > 0) {
+		lines.push("", "## Member Failures");
+		for (const failure of input.failures) {
+			lines.push(
+				`- **${COUNCIL_MEMBERS[failure.member].label}** (Round ${failure.round}): ${failure.error}`,
+			);
+		}
+	}
+
+	return lines.join("\n");
+}
+
+interface ActiveCouncilRun {
+	councilId: string;
+	topic: string;
+	shortTopic: string;
+	rounds: 1 | 2;
+	members: CouncilMemberId[];
+	phase: 1 | 2;
+	completedInPhase: number;
+	totalInPhase: number;
+	startedAt: number;
+	cancel: (reason: string) => void;
+}
+
 export const COUNCIL_USAGE = [
-	"Usage: /council <topic or design question>",
+	"Usage:",
+	"  /council <topic or design question>   start a background council deliberation",
+	"  /council status                        show active council deliberations",
+	"  /council stop [councilId]              cancel active council deliberation(s)",
 	"Pinned council members:",
 	`  - caspar: ${COUNCIL_MEMBERS.caspar.agentType} (${COUNCIL_MEMBERS.caspar.model}, thinking: ${COUNCIL_MEMBERS.caspar.thinking})`,
 	`  - melchior: ${COUNCIL_MEMBERS.melchior.agentType} (${COUNCIL_MEMBERS.melchior.model}, thinking: ${COUNCIL_MEMBERS.melchior.thinking})`,
@@ -419,6 +479,39 @@ function hasCouncilBranchState(branch: readonly SessionEntry[] | undefined): boo
 }
 
 export default function councilExtension(pi: ExtensionAPI): void {
+	const activeRuns = new Map<string, ActiveCouncilRun>();
+	const globalOwnedAgentIds = new Set<string>();
+	let statusSetter: ((key: string, text: string | undefined) => void) | undefined;
+
+	function refreshStatus(overrideSetter?: (key: string, text: string | undefined) => void): void {
+		if (overrideSetter) {
+			statusSetter = overrideSetter;
+		}
+		if (!statusSetter) return;
+		let nextText: string | undefined;
+		if (activeRuns.size === 1) {
+			const run = activeRuns.values().next().value!;
+			nextText = `council R${run.phase} (${run.completedInPhase}/${run.totalInPhase})`;
+		} else if (activeRuns.size > 1) {
+			nextText = `council ×${activeRuns.size}`;
+		}
+		try {
+			statusSetter("council", nextText);
+		} catch {
+			// Ignore stale/disposed UI handles during shutdown or session switch.
+		}
+	}
+
+	function cancelAllActiveRuns(reason: string): string[] {
+		const runs = [...activeRuns.values()];
+		const stoppedIds: string[] = [];
+		for (const run of runs) {
+			stoppedIds.push(run.councilId);
+			run.cancel(reason);
+		}
+		return stoppedIds;
+	}
+
 	function activateCouncilTool(): void {
 		if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
 		const active = pi.getActiveTools();
@@ -437,6 +530,12 @@ export default function councilExtension(pi: ExtensionAPI): void {
 
 		pi.on("session_start", restoreFromBranch);
 		pi.on("session_tree", restoreFromBranch);
+		pi.on("session_shutdown", () => {
+			cancelAllActiveRuns("Council deliberation cancelled: session shutdown.");
+		});
+		pi.on("session_before_switch", () => {
+			cancelAllActiveRuns("Council deliberation cancelled: session switched.");
+		});
 		pi.on("before_agent_start", (event) => {
 			if (
 				event.messageType === "user" &&
@@ -486,12 +585,13 @@ export default function councilExtension(pi: ExtensionAPI): void {
 		label: "Council",
 		defaultActive: false,
 		description:
-			"Convene a 3-model read-only technical council (Caspar on magpie/gemini-4-carbon, Melchior on magpie/gpt-6.2-astra, Balthasar on magpie/claude-fable-5-2) for a 2-round deliberation on difficult architecture, design, or tradeoff questions. Round 1 gathers independent codebase-grounded proposals in parallel; Round 2 resumes each advisor with anonymized, position-swapped peer proposals (Peer A, Peer B) and a verbosity-normalized rubric before returning the full deliberation for stake-free synthesis.",
+			"Convene a 3-model read-only technical council (Caspar on magpie/gemini-4-carbon, Melchior on magpie/gpt-6.2-astra, Balthasar on magpie/claude-fable-5-2) asynchronously for a 2-round deliberation on difficult architecture, design, or tradeoff questions. Returns immediately with a launch receipt once Round 1 advisors are spawned; Round 1 independent proposals and Round 2 anonymized, position-swapped peer cross-examination (Peer A, Peer B) run in the background, and the completed report arrives automatically as a follow-up message for stake-free synthesis. After calling this tool, end your turn and wait for the follow-up report — do not poll, sleep, or re-invoke council to wait for it.",
 		promptSnippet:
-			"Convene the 3-model read-only technical council (Caspar, Melchior, Balthasar) for 2-round architectural deliberation",
+			"Convene the 3-model read-only technical council (Caspar, Melchior, Balthasar) asynchronously for 2-round architectural deliberation (returns immediately; report arrives as a follow-up message)",
 		promptGuidelines: [
 			"Use `council` when the user invokes `/council`, asks for the council, or faces a high-stakes architectural or design tradeoff that benefits from multi-model deliberation.",
 			"Never pass a `model` override to `council`; council advisors are pinned to their dedicated agent definitions.",
+			"`council` runs asynchronously in the background and returns a launch receipt immediately. End your turn and wait for the `council-report` follow-up message — never poll, sleep, or call `council` again to wait for an in-flight deliberation.",
 		],
 		parameters: CouncilParameters,
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -529,20 +629,46 @@ export default function councilExtension(pi: ExtensionAPI): void {
 
 			assertCouncilModelsAvailable(specs, ctx?.modelRegistry);
 
+			const councilId = `council-${randomUUID().replace(/-/g, "").slice(0, 8)}`;
+			const memberIds = specs.map((s) => s.id);
+			const selectedAgentTypes = new Set<string>(specs.map((s) => s.agentType));
+			const shortTopic = topic.replace(/\s+/g, " ").slice(0, 60);
+			const expectedSpawnDescriptions = new Set<string>(
+				specs.map((spec) => `Council R1 (${spec.id}): ${shortTopic}`),
+			);
+			const runStatusSetter =
+				typeof ctx?.ui?.setStatus === "function" ? ctx.ui.setStatus.bind(ctx.ui) : undefined;
+
 			const ownedAgentIds = new Set<string>();
 			const activeAgentIds = new Set<string>();
 			const settledAgents = new Set<string>();
 			const round1StoppedIds = new Set<string>();
 			const releasedAgentIds = new Set<string>();
-			const pendingWaiters = new Map<string, (outcome: { event: "completed" | "failed"; data: LifecycleSettlePayload }) => void>();
-			const earlySettles = new Map<string, { event: "completed" | "failed"; data: LifecycleSettlePayload }>();
-			const abortWaiters = new Set<(err: Error) => void>();
+			const pendingWaiters = new Map<
+				string,
+				(outcome: { event: "completed" | "failed"; data: LifecycleSettlePayload }) => void
+			>();
+			const earlySettles = new Map<
+				string,
+				{ event: "completed" | "failed"; data: LifecycleSettlePayload }
+			>();
+			const cancelWaiters = new Set<(err: Error) => void>();
+
 			let inFlightSpawns = 0;
 			let inRound2 = false;
-			let aborted = false;
+			let cancelled = false;
+			let cancelReason = "Council deliberation aborted.";
 			let cleanedUp = false;
+			let registeredInActiveRuns = false;
 
-			const isCancelledOrDone = () => aborted || cleanedUp || Boolean(signal?.aborted);
+			const isCancelledOrDone = () => cancelled || cleanedUp;
+
+			const claimAgent = (agentId: string) => {
+				ownedAgentIds.add(agentId);
+				if (!cleanedUp) {
+					globalOwnedAgentIds.add(agentId);
+				}
+			};
 
 			const stopAgent = (agentId: string) => {
 				activeAgentIds.delete(agentId);
@@ -570,27 +696,73 @@ export default function councilExtension(pi: ExtensionAPI): void {
 				}
 			};
 
-			const onAbort = () => {
-				if (aborted) return;
-				aborted = true;
+			let unsubStarted: (() => void) | undefined;
+			let unsubCompleted: (() => void) | undefined;
+			let unsubFailed: (() => void) | undefined;
+
+			const cleanup = () => {
+				if (cleanedUp) return;
+				cleanedUp = true;
 				stopActiveAgents();
-				const abortError = new Error("Council deliberation aborted.");
-				for (const rejectWaiter of abortWaiters) {
-					rejectWaiter(abortError);
+				releaseOwnedAgents();
+				signal?.removeEventListener("abort", onLaunchAbort);
+				unsubStarted?.();
+				unsubCompleted?.();
+				unsubFailed?.();
+				unsubStarted = undefined;
+				unsubCompleted = undefined;
+				unsubFailed = undefined;
+				pendingWaiters.clear();
+				earlySettles.clear();
+				cancelWaiters.clear();
+				for (const agentId of ownedAgentIds) {
+					globalOwnedAgentIds.delete(agentId);
 				}
-				abortWaiters.clear();
+				if (registeredInActiveRuns) {
+					activeRuns.delete(councilId);
+					refreshStatus();
+				}
 			};
 
-			const abortPromise = new Promise<never>((_resolve, reject) => {
-				if (aborted || signal?.aborted) {
-					reject(new Error("Council deliberation aborted."));
+			const cancel = (reason: string) => {
+				if (cancelled) return;
+				cancelled = true;
+				cancelReason = reason;
+				const cancelError = new Error(reason);
+				for (const rejectWaiter of [...cancelWaiters]) {
+					rejectWaiter(cancelError);
+				}
+				cancelWaiters.clear();
+				cleanup();
+			};
+
+			const onLaunchAbort = () => {
+				cancel("Council deliberation aborted.");
+			};
+
+			const cancelPromise = new Promise<never>((_resolve, reject) => {
+				if (cancelled || signal?.aborted) {
+					reject(new Error(cancelReason));
 					return;
 				}
-				abortWaiters.add(reject);
+				cancelWaiters.add(reject);
 			});
-			abortPromise.catch(() => {});
+			cancelPromise.catch(() => {});
 
-			signal?.addEventListener("abort", onAbort, { once: true });
+			signal?.addEventListener("abort", onLaunchAbort, { once: true });
+
+			const matchesInFlightSpawn = (data: {
+				id?: string;
+				type?: string;
+				description?: string;
+			}): boolean =>
+				Boolean(data.id) &&
+				!globalOwnedAgentIds.has(data.id!) &&
+				inFlightSpawns > 0 &&
+				typeof data.type === "string" &&
+				selectedAgentTypes.has(data.type) &&
+				COUNCIL_AGENT_TYPES.has(data.type) &&
+				(!data.description || expectedSpawnDescriptions.has(data.description));
 
 			const handleSettle = (event: "completed" | "failed", raw: unknown) => {
 				const data = raw as LifecycleSettlePayload | undefined;
@@ -598,11 +770,10 @@ export default function councilExtension(pi: ExtensionAPI): void {
 				if (!agentId) return;
 
 				const isKnownCouncilAgent =
-					ownedAgentIds.has(agentId) ||
-					(inFlightSpawns > 0 && typeof data.type === "string" && COUNCIL_AGENT_TYPES.has(data.type));
+					ownedAgentIds.has(agentId) || matchesInFlightSpawn(data);
 				if (!isKnownCouncilAgent) return;
 
-				ownedAgentIds.add(agentId);
+				claimAgent(agentId);
 				activeAgentIds.delete(agentId);
 				settledAgents.add(agentId);
 
@@ -619,37 +790,33 @@ export default function councilExtension(pi: ExtensionAPI): void {
 				}
 			};
 
-			const unsubStarted = pi.events.on("subagents:started", (raw: unknown) => {
-				const data = raw as { id?: string; type?: string } | undefined;
-				if (
-					data?.id &&
-					(ownedAgentIds.has(data.id) ||
-						(inFlightSpawns > 0 && typeof data.type === "string" && COUNCIL_AGENT_TYPES.has(data.type)))
-				) {
-					ownedAgentIds.add(data.id);
+			unsubStarted = pi.events.on("subagents:started", (raw: unknown) => {
+				const data = raw as { id?: string; type?: string; description?: string } | undefined;
+				if (!data?.id) return;
+				if (ownedAgentIds.has(data.id) || matchesInFlightSpawn(data)) {
+					claimAgent(data.id);
 					if (isCancelledOrDone()) {
 						if (inRound2 || !round1StoppedIds.has(data.id)) {
 							stopAgent(data.id);
 						}
-						releaseAgent(data.id);
+						releaseAgent(data.id, inRound2);
 					} else {
 						activeAgentIds.add(data.id);
 					}
 				}
 			});
-			const unsubCompleted = pi.events.on("subagents:completed", (raw: unknown) =>
+			unsubCompleted = pi.events.on("subagents:completed", (raw: unknown) =>
 				handleSettle("completed", raw),
 			);
-			const unsubFailed = pi.events.on("subagents:failed", (raw: unknown) =>
+			unsubFailed = pi.events.on("subagents:failed", (raw: unknown) =>
 				handleSettle("failed", raw),
 			);
 
 			const waitForAgentSettle = (
 				agentId: string,
 			): Promise<{ event: "completed" | "failed"; data: LifecycleSettlePayload }> => {
-				if (aborted || signal?.aborted) {
-					onAbort();
-					return Promise.reject(new Error("Council deliberation aborted."));
+				if (cancelled) {
+					return Promise.reject(new Error(cancelReason));
 				}
 				const early = earlySettles.get(agentId);
 				if (early) {
@@ -657,24 +824,25 @@ export default function councilExtension(pi: ExtensionAPI): void {
 					return Promise.resolve(early);
 				}
 				return new Promise((resolve, reject) => {
-					const onWaitAbort = (err: Error) => {
+					const onWaitCancel = (err: Error) => {
 						pendingWaiters.delete(agentId);
-						abortWaiters.delete(onWaitAbort);
+						cancelWaiters.delete(onWaitCancel);
 						reject(err);
 					};
-					abortWaiters.add(onWaitAbort);
+					cancelWaiters.add(onWaitCancel);
 					pendingWaiters.set(agentId, (outcome) => {
-						abortWaiters.delete(onWaitAbort);
+						cancelWaiters.delete(onWaitCancel);
 						resolve(outcome);
 					});
 				});
 			};
 
+			let spawned: Array<{ spec: CouncilMemberSpec; agentId: string }>;
+			let launchFailures: CouncilMemberFailure[];
+
 			try {
 				const round1Prompt = buildRound1Prompt({ topic, paths });
-				const shortTopic = topic.replace(/\s+/g, " ").slice(0, 60);
-
-				const round1Outcomes = await Promise.all(
+				const spawnResults = await Promise.all(
 					specs.map(async (spec) => {
 						inFlightSpawns++;
 						let handledLateSpawn = false;
@@ -716,7 +884,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 							});
 						lateSpawnCleanup.catch(() => {});
 
-						const spawnReply = await Promise.race([lateSpawnCleanup, abortPromise]);
+						const spawnReply = await Promise.race([lateSpawnCleanup, cancelPromise]);
 
 						if (!spawnReply?.success || !spawnReply.data?.id) {
 							return {
@@ -727,63 +895,36 @@ export default function councilExtension(pi: ExtensionAPI): void {
 						}
 
 						const agentId = spawnReply.data.id;
-						ownedAgentIds.add(agentId);
-						if (isCancelledOrDone()) {
+						claimAgent(agentId);
+						if (isCancelledOrDone() || signal?.aborted) {
 							stopAndReleaseLateSpawn(agentId);
-							onAbort();
+							cancel("Council deliberation aborted.");
 							throw new Error("Council deliberation aborted.");
 						}
 						if (!settledAgents.has(agentId)) {
 							activeAgentIds.add(agentId);
 						}
 
-						const settled = await waitForAgentSettle(agentId);
-						const status = settled.data.status;
-						const isSuccessStatus =
-							settled.event === "completed" &&
-							(status === undefined || status === "completed" || status === "steered");
-						const proposal = typeof settled.data.result === "string" ? settled.data.result.trim() : "";
-
-						if (!isSuccessStatus || !proposal) {
-							return {
-								spec,
-								ok: false as const,
-								error:
-									settled.data.error ??
-									(!proposal ? `${spec.agentType} returned an empty proposal` : `status ${String(status)}`),
-							};
-						}
-
 						return {
 							spec,
 							ok: true as const,
-							entry: {
-								member: spec.id,
-								agentType: spec.agentType,
-								model: spec.model,
-								label: spec.label,
-								agentId,
-								proposal,
-								durationMs: settled.data.durationMs,
-								toolUses: settled.data.runToolUses ?? settled.data.toolUses,
-							} satisfies CouncilRound1Entry,
+							agentId,
 						};
 					}),
 				);
 
-				if (aborted || signal?.aborted) {
-					onAbort();
+				if (cancelled || signal?.aborted) {
+					cancel("Council deliberation aborted.");
 					throw new Error("Council deliberation aborted.");
 				}
 
-				const round1: CouncilRound1Entry[] = [];
-				const failures: CouncilMemberFailure[] = [];
-
-				for (const outcome of round1Outcomes) {
+				spawned = [];
+				launchFailures = [];
+				for (const outcome of spawnResults) {
 					if (outcome.ok) {
-						round1.push(outcome.entry);
+						spawned.push({ spec: outcome.spec, agentId: outcome.agentId });
 					} else {
-						failures.push({
+						launchFailures.push({
 							member: outcome.spec.id,
 							agentType: outcome.spec.agentType,
 							model: outcome.spec.model,
@@ -793,160 +934,292 @@ export default function councilExtension(pi: ExtensionAPI): void {
 					}
 				}
 
-				if (round1.length < 2) {
-					const detail = failures.map((f) => `${f.member} (${f.error})`).join("; ");
+				if (spawned.length < 2) {
+					const detail = launchFailures.map((f) => `${f.member} (${f.error})`).join("; ");
 					throw new Error(
-						`Council deliberation failed: at least 2 members must succeed in Round 1, but only ${round1.length} succeeded. Failures: ${detail}`,
+						`Council deliberation failed: at least 2 members must succeed in Round 1, but only ${spawned.length} succeeded. Failures: ${detail}`,
 					);
 				}
+			} catch (err) {
+				cleanup();
+				throw err;
+			}
 
+			// Launch succeeded: detach from tool call's AbortSignal and hand off to background orchestration.
+			signal?.removeEventListener("abort", onLaunchAbort);
+
+			const phaseSettledIds = new Set<string>(
+				spawned.filter((s) => settledAgents.has(s.agentId)).map((s) => s.agentId),
+			);
+			const activeRun: ActiveCouncilRun = {
+				councilId,
+				topic,
+				shortTopic,
+				rounds,
+				members: memberIds,
+				phase: 1,
+				completedInPhase: phaseSettledIds.size,
+				totalInPhase: spawned.length,
+				startedAt: Date.now(),
+				cancel,
+			};
+			registeredInActiveRuns = true;
+			activeRuns.set(councilId, activeRun);
+			refreshStatus(runStatusSetter);
+
+			void (async () => {
+				const round1: CouncilRound1Entry[] = [];
 				const round2: CouncilRound2Entry[] = [];
+				const failures: CouncilMemberFailure[] = [...launchFailures];
 
-				if (rounds === 2) {
-					inRound2 = true;
-					const round2Outcomes = await Promise.all(
-						round1.map(async (r1Entry, index) => {
-							const rotatedPeers = rotatePeersForMember(round1, index);
-							const round2Prompt = buildRound2Prompt({
-								topic,
-								peers: rotatedPeers.map((peer) => ({
-									label: peer.label,
-									text: peer.proposal,
-								})),
-							});
+				const deliverReport = (content: string, details: Record<string, unknown>) => {
+					if (cancelled) return;
+					try {
+						pi.sendMessage?.(
+							{
+								customType: COUNCIL_REPORT_MESSAGE_TYPE,
+								content,
+								display: true,
+								details,
+							},
+							{ triggerTurn: true, deliverAs: "followUp" },
+						);
+					} catch {
+						// Ignore stale/disposed session handles if shutdown raced with delivery.
+					}
+				};
 
-							earlySettles.delete(r1Entry.agentId);
-							settledAgents.delete(r1Entry.agentId);
-							const settlePromise = waitForAgentSettle(r1Entry.agentId);
-							// Suppress unhandled rejection if Promise.race rejects or send fails
-							settlePromise.catch(() => {});
+				try {
+					const round1Outcomes = await Promise.all(
+						spawned.map(async ({ spec, agentId }) => {
+							const settled = await waitForAgentSettle(agentId);
+							phaseSettledIds.add(agentId);
+							activeRun.completedInPhase = phaseSettledIds.size;
+							if (!cancelled && !cleanedUp) refreshStatus();
 
-							let handledLateSend = false;
-							const stopAndReleaseLateSend = (reply: RpcReply<{ delivery?: string }> | undefined) => {
-								if (handledLateSend) return;
-								handledLateSend = true;
-								activeAgentIds.delete(r1Entry.agentId);
-								pendingWaiters.delete(r1Entry.agentId);
-								if (reply?.success) {
-									if (!settledAgents.has(r1Entry.agentId)) {
-										stopAgent(r1Entry.agentId);
-									}
-									// Force re-emit release so a newly resumed late Round 2 run
-									// is guaranteed to tear down on settle even if `finally` ran first.
-									releaseAgent(r1Entry.agentId, true);
-								} else {
-									releaseAgent(r1Entry.agentId);
-								}
-							};
-
-							const sendPromise = callRpc<{ delivery?: string }>("send", {
-								agentId: r1Entry.agentId,
-								text: round2Prompt,
-							});
-							const lateSendCleanup = sendPromise.then((reply) => {
-								if (isCancelledOrDone()) {
-									stopAndReleaseLateSend(reply);
-								}
-								return reply;
-							});
-							lateSendCleanup.catch(() => {});
-
-							const sendReply = await Promise.race([lateSendCleanup, abortPromise]);
-
-							if (!sendReply?.success) {
-								activeAgentIds.delete(r1Entry.agentId);
-								pendingWaiters.delete(r1Entry.agentId);
-								return {
-									r1Entry,
-									ok: false as const,
-									error: sendReply?.error ?? `Failed to resume ${r1Entry.agentType} for Round 2`,
-								};
-							}
-
-							if (isCancelledOrDone()) {
-								stopAndReleaseLateSend(sendReply);
-								onAbort();
-								throw new Error("Council deliberation aborted.");
-							}
-							if (!settledAgents.has(r1Entry.agentId)) {
-								activeAgentIds.add(r1Entry.agentId);
-							}
-
-							const settled = await settlePromise;
 							const status = settled.data.status;
 							const isSuccessStatus =
 								settled.event === "completed" &&
 								(status === undefined || status === "completed" || status === "steered");
-							const response = typeof settled.data.result === "string" ? settled.data.result.trim() : "";
+							const proposal = typeof settled.data.result === "string" ? settled.data.result.trim() : "";
 
-							if (!isSuccessStatus || !response) {
+							if (!isSuccessStatus || !proposal) {
 								return {
-									r1Entry,
+									spec,
 									ok: false as const,
 									error:
 										settled.data.error ??
-										(!response
-											? `${r1Entry.agentType} returned an empty Round 2 response`
+										(!proposal
+											? `${spec.agentType} returned an empty proposal`
 											: `status ${String(status)}`),
 								};
 							}
 
 							return {
-								r1Entry,
+								spec,
 								ok: true as const,
 								entry: {
-									member: r1Entry.member,
-									agentType: r1Entry.agentType,
-									model: r1Entry.model,
-									label: r1Entry.label,
-									agentId: r1Entry.agentId,
-									peers: rotatedPeers.map((peer) => ({
-										label: peer.label,
-										member: peer.member,
-										model: peer.model,
-									})),
-									response,
+									member: spec.id,
+									agentType: spec.agentType,
+									model: spec.model,
+									label: spec.label,
+									agentId,
+									proposal,
 									durationMs: settled.data.durationMs,
 									toolUses: settled.data.runToolUses ?? settled.data.toolUses,
-								} satisfies CouncilRound2Entry,
+								} satisfies CouncilRound1Entry,
 							};
 						}),
 					);
 
-					if (aborted || signal?.aborted) {
-						onAbort();
-						throw new Error("Council deliberation aborted.");
-					}
+					if (cancelled) return;
 
-					for (const outcome of round2Outcomes) {
+					for (const outcome of round1Outcomes) {
 						if (outcome.ok) {
-							round2.push(outcome.entry);
+							round1.push(outcome.entry);
 						} else {
 							failures.push({
-								member: outcome.r1Entry.member,
-								agentType: outcome.r1Entry.agentType,
-								model: outcome.r1Entry.model,
-								round: 2,
+								member: outcome.spec.id,
+								agentType: outcome.spec.agentType,
+								model: outcome.spec.model,
+								round: 1,
 								error: outcome.error,
 							});
 						}
 					}
-				}
 
-				const memberIds = specs.map((s) => s.id);
-				const report = formatCouncilReport({
-					topic,
-					paths,
-					rounds,
-					members: memberIds,
-					round1,
-					round2,
-					failures,
-				});
+					if (round1.length < 2) {
+						const detail = failures.map((f) => `${f.member} (${f.error})`).join("; ");
+						const errorMessage = `Council deliberation failed: at least 2 members must succeed in Round 1, but only ${round1.length} succeeded. Failures: ${detail}`;
+						cleanup();
+						deliverReport(
+							formatCouncilFailure({
+								councilId,
+								topic,
+								paths,
+								rounds,
+								members: memberIds,
+								failures,
+								error: errorMessage,
+							}),
+							{
+								councilId,
+								status: "failed",
+								topic,
+								paths,
+								rounds,
+								members: memberIds,
+								round1,
+								round2: [],
+								failures,
+								error: errorMessage,
+							},
+						);
+						return;
+					}
 
-				return {
-					content: [{ type: "text", text: report }],
-					details: {
+					if (rounds === 2) {
+						inRound2 = true;
+						activeRun.phase = 2;
+						phaseSettledIds.clear();
+						activeRun.completedInPhase = 0;
+						activeRun.totalInPhase = round1.length;
+						if (!cancelled && !cleanedUp) refreshStatus();
+
+						const round2Outcomes = await Promise.all(
+							round1.map(async (r1Entry, index) => {
+								const rotatedPeers = rotatePeersForMember(round1, index);
+								const round2Prompt = buildRound2Prompt({
+									topic,
+									peers: rotatedPeers.map((peer) => ({
+										label: peer.label,
+										text: peer.proposal,
+									})),
+								});
+
+								earlySettles.delete(r1Entry.agentId);
+								settledAgents.delete(r1Entry.agentId);
+								const settlePromise = waitForAgentSettle(r1Entry.agentId);
+								// Suppress unhandled rejection if Promise.race rejects or send fails
+								settlePromise.catch(() => {});
+
+								let handledLateSend = false;
+								const stopAndReleaseLateSend = (reply: RpcReply<{ delivery?: string }> | undefined) => {
+									if (handledLateSend) return;
+									handledLateSend = true;
+									activeAgentIds.delete(r1Entry.agentId);
+									pendingWaiters.delete(r1Entry.agentId);
+									if (reply?.success) {
+										if (!settledAgents.has(r1Entry.agentId)) {
+											stopAgent(r1Entry.agentId);
+										}
+										// Force re-emit release so a newly resumed late Round 2 run
+										// is guaranteed to tear down on settle even if cleanup ran first.
+										releaseAgent(r1Entry.agentId, true);
+									} else {
+										releaseAgent(r1Entry.agentId);
+									}
+								};
+
+								const sendPromise = callRpc<{ delivery?: string }>("send", {
+									agentId: r1Entry.agentId,
+									text: round2Prompt,
+								});
+								const lateSendCleanup = sendPromise.then((reply) => {
+									if (isCancelledOrDone()) {
+										stopAndReleaseLateSend(reply);
+									}
+									return reply;
+								});
+								lateSendCleanup.catch(() => {});
+
+								const sendReply = await Promise.race([lateSendCleanup, cancelPromise]);
+
+								if (!sendReply?.success) {
+									activeAgentIds.delete(r1Entry.agentId);
+									pendingWaiters.delete(r1Entry.agentId);
+									phaseSettledIds.add(r1Entry.agentId);
+									activeRun.completedInPhase = phaseSettledIds.size;
+									if (!cancelled && !cleanedUp) refreshStatus();
+									return {
+										r1Entry,
+										ok: false as const,
+										error: sendReply?.error ?? `Failed to resume ${r1Entry.agentType} for Round 2`,
+									};
+								}
+
+								if (isCancelledOrDone()) {
+									stopAndReleaseLateSend(sendReply);
+									throw new Error(cancelReason);
+								}
+								if (!settledAgents.has(r1Entry.agentId)) {
+									activeAgentIds.add(r1Entry.agentId);
+								}
+
+								const settled = await settlePromise;
+								phaseSettledIds.add(r1Entry.agentId);
+								activeRun.completedInPhase = phaseSettledIds.size;
+								if (!cancelled && !cleanedUp) refreshStatus();
+
+								const status = settled.data.status;
+								const isSuccessStatus =
+									settled.event === "completed" &&
+									(status === undefined || status === "completed" || status === "steered");
+								const response = typeof settled.data.result === "string" ? settled.data.result.trim() : "";
+
+								if (!isSuccessStatus || !response) {
+									return {
+										r1Entry,
+										ok: false as const,
+										error:
+											settled.data.error ??
+											(!response
+												? `${r1Entry.agentType} returned an empty Round 2 response`
+												: `status ${String(status)}`),
+									};
+								}
+
+								return {
+									r1Entry,
+									ok: true as const,
+									entry: {
+										member: r1Entry.member,
+										agentType: r1Entry.agentType,
+										model: r1Entry.model,
+										label: r1Entry.label,
+										agentId: r1Entry.agentId,
+										peers: rotatedPeers.map((peer) => ({
+											label: peer.label,
+											member: peer.member,
+											model: peer.model,
+										})),
+										response,
+										durationMs: settled.data.durationMs,
+										toolUses: settled.data.runToolUses ?? settled.data.toolUses,
+									} satisfies CouncilRound2Entry,
+								};
+							}),
+						);
+
+						if (cancelled) return;
+
+						for (const outcome of round2Outcomes) {
+							if (outcome.ok) {
+								round2.push(outcome.entry);
+							} else {
+								failures.push({
+									member: outcome.r1Entry.member,
+									agentType: outcome.r1Entry.agentType,
+									model: outcome.r1Entry.model,
+									round: 2,
+									error: outcome.error,
+								});
+							}
+						}
+					}
+
+					const report = formatCouncilReport({
+						councilId,
 						topic,
 						paths,
 						rounds,
@@ -954,29 +1227,146 @@ export default function councilExtension(pi: ExtensionAPI): void {
 						round1,
 						round2,
 						failures,
-					},
-				};
-			} finally {
-				cleanedUp = true;
-				stopActiveAgents();
-				releaseOwnedAgents();
-				signal?.removeEventListener("abort", onAbort);
-				unsubStarted?.();
-				unsubCompleted?.();
-				unsubFailed?.();
-			}
+					});
+
+					cleanup();
+					deliverReport(report, {
+						councilId,
+						status: "completed",
+						topic,
+						paths,
+						rounds,
+						members: memberIds,
+						round1,
+						round2,
+						failures,
+					});
+				} catch (err) {
+					cleanup();
+					if (!cancelled) {
+						const errorMessage = err instanceof Error ? err.message : String(err);
+						deliverReport(
+							formatCouncilFailure({
+								councilId,
+								topic,
+								paths,
+								rounds,
+								members: memberIds,
+								failures,
+								error: errorMessage,
+							}),
+							{
+								councilId,
+								status: "failed",
+								topic,
+								paths,
+								rounds,
+								members: memberIds,
+								round1,
+								round2: [],
+								failures,
+								error: errorMessage,
+							},
+						);
+					}
+				} finally {
+					cleanup();
+				}
+			})();
+
+			const spawnedAgentIds = spawned.map((s) => s.agentId);
+			const panelText = memberIds.map((id) => COUNCIL_MEMBERS[id].label).join(", ");
+			const receiptLines = [
+				`Council deliberation started in the background (\`${councilId}\`).`,
+				`- **Topic:** ${shortTopic}`,
+				`- **Rounds:** ${rounds}`,
+				`- **Panel:** ${panelText}`,
+				...(launchFailures.length > 0
+					? [
+							`- **Launch failures:** ${launchFailures.map((f) => `${f.member} (${f.error})`).join("; ")}`,
+						]
+					: []),
+				"",
+				"End your turn now and wait for the completion report — it will arrive automatically as a follow-up message. Do not poll, sleep, or call `council` again to wait for it.",
+			];
+
+			return {
+				content: [{ type: "text", text: receiptLines.join("\n") }],
+				details: {
+					councilId,
+					status: "running" as const,
+					topic,
+					paths,
+					rounds,
+					members: memberIds,
+					agentIds: spawnedAgentIds,
+					...(launchFailures.length > 0 ? { failures: launchFailures } : {}),
+				},
+			};
 		},
 	});
 
 	pi.registerCommand("council", {
 		description:
-			"Convene the 3-model technical council (caspar, melchior, balthasar) for 2-round deliberation: /council <topic or design question>",
+			"Convene the 3-model technical council (caspar, melchior, balthasar) asynchronously: /council <topic>, /council status, or /council stop [councilId]",
 		handler: async (args, ctx) => {
 			pi.appendEntry("pi-extensions.command", { command: "council", kind: "extension", extension: "council" });
 			const trimmed = (args ?? "").trim();
 			const lower = trimmed.toLowerCase();
-			if (!trimmed || lower === "help" || lower === "status") {
+			if (!trimmed || lower === "help") {
 				ctx.ui.notify(COUNCIL_USAGE, "info");
+				return;
+			}
+
+			if (lower === "status") {
+				if (activeRuns.size === 0) {
+					ctx.ui.notify(COUNCIL_USAGE, "info");
+					return;
+				}
+				const now = Date.now();
+				const activeLines = [...activeRuns.values()].map(
+					(run) =>
+						`  - ${run.councilId}: R${run.phase} (${run.completedInPhase}/${run.totalInPhase}), elapsed ${formatElapsed(now - run.startedAt)}, topic: ${run.shortTopic}`,
+				);
+				ctx.ui.notify(
+					[
+						`Active council deliberations (${activeRuns.size}):`,
+						...activeLines,
+						"Use `/council stop` or `/council stop <councilId>` to cancel.",
+						"",
+						COUNCIL_USAGE,
+					].join("\n"),
+					"info",
+				);
+				return;
+			}
+
+			const stopMatch = /^stop(?:\s+(\S+))?$/i.exec(trimmed);
+			if (stopMatch) {
+				const targetId = stopMatch[1];
+				if (targetId) {
+					const target = activeRuns.get(targetId);
+					if (!target) {
+						const activeHint =
+							activeRuns.size > 0
+								? ` Active: ${[...activeRuns.keys()].join(", ")}.`
+								: " No council deliberations are currently active.";
+						ctx.ui.notify(`Unknown council ID "${targetId}".${activeHint}`, "warning");
+						return;
+					}
+					target.cancel("Council deliberation stopped by user.");
+					ctx.ui.notify(`Stopped council deliberation ${targetId}.`, "info");
+					return;
+				}
+				if (activeRuns.size === 0) {
+					ctx.ui.notify("No active council deliberations to stop.", "info");
+					return;
+				}
+				const stoppedIds = cancelAllActiveRuns("Council deliberation stopped by user.");
+				ctx.ui.notify(
+					`Stopped ${stoppedIds.length} active council deliberation(s): ${stoppedIds.join(", ")}.`,
+					"info",
+				);
 				return;
 			}
 
@@ -985,7 +1375,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 				"",
 				trimmed,
 				"",
-				"Pass any relevant repository `paths` if identified. Once the `council` tool returns the Round 1 and Round 2 deliberation report, synthesize the consensus, tradeoffs, and recommended design as a stake-free judge.",
+				"Pass any relevant repository `paths` if identified. Once the `council` tool starts the deliberation in the background, end your turn and wait for the Round 1 and Round 2 report to arrive as a follow-up message; then synthesize the consensus, tradeoffs, and recommended design as a stake-free judge.",
 			].join("\n");
 
 			activateCouncilTool();

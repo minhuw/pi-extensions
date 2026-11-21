@@ -35,6 +35,7 @@ import councilExtension, {
 	buildRound2Prompt,
 	COUNCIL_MEMBERS,
 	COUNCIL_MENTION_RE,
+	COUNCIL_REPORT_MESSAGE_TYPE,
 	formatCouncilReport,
 	resolveCouncilMembers,
 	rotatePeersForMember,
@@ -83,6 +84,13 @@ interface HarnessOptions {
 	pingVersion?: number | null;
 	availableModels?: readonly string[] | null;
 	unauthenticatedModels?: readonly string[];
+	/** Optional custom spawn reply (e.g. to simulate Round 1 spawn RPC failures). */
+	spawnHandler?: (req: {
+		id: string;
+		type: string;
+		prompt: string;
+		options: Record<string, unknown>;
+	}) => { success: boolean; error?: string } | undefined;
 	round1Handler?: (req: {
 		id: string;
 		type: string;
@@ -113,6 +121,11 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 	const tools = new Map<string, any>();
 	const commands = new Map<string, any>();
 	const sendUserMessage = vi.fn();
+	const sentMessages: Array<{ message: any; options: any }> = [];
+	const sendMessage = vi.fn((message: any, options?: any) => {
+		sentMessages.push({ message, options });
+	});
+	const setStatus = vi.fn();
 
 	const spawns: Array<{
 		requestId: string;
@@ -150,6 +163,36 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 	const agentTypesById = new Map<string, string>();
 	let currentlySettlingAgentId: string | undefined;
 	let agentSeq = 0;
+
+	const settleAgent = (
+		agentId: string,
+		outcome: {
+			event: "completed" | "failed";
+			result?: string;
+			error?: string;
+			status?: string;
+			toolUses?: number;
+			runToolUses?: number;
+			durationMs?: number;
+		},
+	) => {
+		const type = agentTypesById.get(agentId) ?? "unknown";
+		currentlySettlingAgentId = agentId;
+		try {
+			bus.emit(`subagents:${outcome.event}`, {
+				id: agentId,
+				type,
+				status: outcome.status ?? (outcome.event === "completed" ? "completed" : "error"),
+				result: outcome.result,
+				error: outcome.error,
+				toolUses: outcome.toolUses ?? 2,
+				runToolUses: outcome.runToolUses ?? 1,
+				durationMs: outcome.durationMs ?? 100,
+			});
+		} finally {
+			currentlySettlingAgentId = undefined;
+		}
+	};
 
 	if (opts.pingVersion !== null) {
 		bus.on("subagents:rpc:ping", (raw: any) => {
@@ -189,6 +232,20 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 			prompt: raw.prompt,
 			options: raw.options ?? {},
 		});
+
+		const customSpawn = opts.spawnHandler?.({
+			id,
+			type: raw.type,
+			prompt: raw.prompt,
+			options: raw.options ?? {},
+		});
+		if (customSpawn && !customSpawn.success) {
+			bus.emit(`subagents:rpc:spawn:reply:${raw.requestId}`, {
+				success: false,
+				error: customSpawn.error ?? `Failed to spawn ${raw.type}`,
+			});
+			return;
+		}
 
 		if (opts.deferSpawn?.({ id, type: raw.type })) {
 			deferredSpawns.push({
@@ -324,6 +381,11 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 		list.push(handler);
 		eventHandlers.set(event, list);
 	});
+	const emitPiEvent = async (event: string, payload?: unknown, eventCtx?: unknown) => {
+		for (const handler of [...(eventHandlers.get(event) ?? [])]) {
+			await handler(payload, eventCtx);
+		}
+	};
 
 	const pi = (
 		opts.minimalPi
@@ -343,6 +405,7 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 					registerCommand: vi.fn((name: string, cmd: any) => commands.set(name, cmd)),
 					appendEntry: vi.fn(),
 					sendUserMessage,
+					sendMessage,
 				}
 	) as unknown as ExtensionAPI;
 
@@ -350,7 +413,7 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 
 	let ctx: ExtensionContext;
 	if (opts.availableModels === null) {
-		ctx = {} as ExtensionContext;
+		ctx = { ui: { setStatus } } as unknown as ExtensionContext;
 	} else {
 		const registeredKeys = opts.availableModels ?? DEFAULT_COUNCIL_MODELS;
 		const unauthSet = new Set(opts.unauthenticatedModels ?? []);
@@ -375,7 +438,7 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 				return registeredMap.has(key) && !unauthSet.has(key);
 			},
 		};
-		ctx = { modelRegistry } as unknown as ExtensionContext;
+		ctx = { modelRegistry, ui: { setStatus } } as unknown as ExtensionContext;
 	}
 
 	return {
@@ -392,6 +455,11 @@ function bootCouncilHarness(opts: HarnessOptions = {}) {
 		deferredSends,
 		consumes,
 		sendUserMessage,
+		sendMessage,
+		sentMessages,
+		setStatus,
+		settleAgent,
+		emitPiEvent,
 		on,
 		getActiveTools,
 		setActiveTools,
@@ -565,6 +633,65 @@ describe("pure council helpers", () => {
 });
 
 describe("council tool execution and RPC deliberation", () => {
+	it("returns immediately while advisors run in the background, updates footer status, and delivers the completed report via followUp sendMessage", async () => {
+		const harness = bootCouncilHarness({
+			round1Handler: () => "hang",
+			round2Handler: () => "hang",
+		});
+
+		const receipt = await harness.tool.execute(
+			"tc-council-async",
+			{
+				topic: "Design async background deliberation",
+				paths: ["extensions/council/index.ts"],
+			},
+			undefined,
+			undefined,
+			harness.ctx,
+		);
+
+		expect(harness.spawns).toHaveLength(3);
+		expect(harness.sentMessages).toHaveLength(0);
+		expect(receipt.details.status).toBe("running");
+		expect(receipt.details.councilId).toMatch(/^council-[0-9a-f]{8}$/);
+		expect(receipt.details.agentIds).toEqual(harness.spawns.map((s) => s.id));
+		const receiptText = receipt.content[0].text as string;
+		expect(receiptText).toContain(receipt.details.councilId);
+		expect(receiptText).toContain("End your turn now");
+		expect(receiptText).toMatch(/do not poll/i);
+		expect(harness.setStatus).toHaveBeenCalledWith("council", "council R1 (0/3)");
+
+		// Settle Round 1 advisors one by one and confirm progress updates
+		const [a1, a2, a3] = harness.spawns.map((s) => s.id);
+		harness.settleAgent(a1!, { event: "completed", result: "Proposal from caspar" });
+		await vi.waitFor(() => expect(harness.setStatus).toHaveBeenCalledWith("council", "council R1 (1/3)"));
+		harness.settleAgent(a2!, { event: "completed", result: "Proposal from melchior" });
+		await vi.waitFor(() => expect(harness.setStatus).toHaveBeenCalledWith("council", "council R1 (2/3)"));
+		harness.settleAgent(a3!, { event: "completed", result: "Proposal from balthasar" });
+
+		await vi.waitFor(() => expect(harness.sends).toHaveLength(3));
+		expect(harness.setStatus).toHaveBeenCalledWith("council", "council R2 (0/3)");
+		expect(harness.sentMessages).toHaveLength(0);
+
+		// Settle Round 2 advisors
+		harness.settleAgent(a1!, { event: "completed", result: "R2 from caspar" });
+		await vi.waitFor(() => expect(harness.setStatus).toHaveBeenCalledWith("council", "council R2 (1/3)"));
+		harness.settleAgent(a2!, { event: "completed", result: "R2 from melchior" });
+		harness.settleAgent(a3!, { event: "completed", result: "R2 from balthasar" });
+
+		await vi.waitFor(() => expect(harness.sentMessages).toHaveLength(1));
+		const delivered = harness.sentMessages[0]!;
+		expect(delivered.message.customType).toBe(COUNCIL_REPORT_MESSAGE_TYPE);
+		expect(delivered.message.display).toBe(true);
+		expect(delivered.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+		expect(delivered.message.details.councilId).toBe(receipt.details.councilId);
+		expect(delivered.message.details.status).toBe("completed");
+		expect(delivered.message.details.round1).toHaveLength(3);
+		expect(delivered.message.details.round2).toHaveLength(3);
+		expect(delivered.message.content).toContain("# Council Deliberation Report");
+		expect(harness.setStatus).toHaveBeenLastCalledWith("council", undefined);
+	});
+
 	it("runs a 2-round deliberation in parallel, counterbalances anonymized peers, and consumes every settle synchronously", async () => {
 		const harness = bootCouncilHarness({
 			round1Handler: ({ type }) => {
@@ -577,7 +704,7 @@ describe("council tool execution and RPC deliberation", () => {
 			},
 		});
 
-		const result = await harness.tool.execute(
+		const receipt = await harness.tool.execute(
 			"tc-council-1",
 			{
 				topic: "Evaluate state machine transition guards",
@@ -588,6 +715,8 @@ describe("council tool execution and RPC deliberation", () => {
 			harness.ctx,
 		);
 
+		expect(receipt.details.status).toBe("running");
+		expect(receipt.details.councilId).toMatch(/^council-[0-9a-f]{8}$/);
 		expect(harness.spawns).toHaveLength(3);
 		expect(harness.spawns.map((s) => s.type)).toEqual([
 			"council-caspar",
@@ -602,6 +731,8 @@ describe("council tool execution and RPC deliberation", () => {
 			expect(spawn.options.model).toBeUndefined();
 			expect(spawn.prompt).toContain("`src/state.ts`");
 		}
+
+		await vi.waitFor(() => expect(harness.sentMessages).toHaveLength(1));
 
 		expect(harness.sends).toHaveLength(3);
 		const sendByType = new Map(harness.sends.map((s) => [s.type, s.text]));
@@ -643,7 +774,10 @@ describe("council tool execution and RPC deliberation", () => {
 		expect(harness.consumes).toHaveLength(6);
 		expect(harness.consumes.every((c) => c.settledSynchronously)).toBe(true);
 
-		const text = result.content[0].text as string;
+		const delivered = harness.sentMessages[0]!;
+		expect(delivered.message.customType).toBe(COUNCIL_REPORT_MESSAGE_TYPE);
+		expect(delivered.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+		const text = delivered.message.content as string;
 		expect(text).toContain("# Council Deliberation Report");
 		expect(text).toContain("## Round 1 — Independent Proposals");
 		expect(text).toContain("## Round 2 — Cross-Examination & Revised Designs");
@@ -651,14 +785,16 @@ describe("council tool execution and RPC deliberation", () => {
 		expect(text).toContain(COUNCIL_MEMBERS.caspar.label);
 		expect(text).toContain(COUNCIL_MEMBERS.melchior.label);
 		expect(text).toContain(COUNCIL_MEMBERS.balthasar.label);
-		expect(result.details.round1).toHaveLength(3);
-		expect(result.details.round2).toHaveLength(3);
-		expect(result.details.failures).toEqual([]);
+		expect(delivered.message.details.councilId).toBe(receipt.details.councilId);
+		expect(delivered.message.details.status).toBe("completed");
+		expect(delivered.message.details.round1).toHaveLength(3);
+		expect(delivered.message.details.round2).toHaveLength(3);
+		expect(delivered.message.details.failures).toEqual([]);
 	});
 
 	it("supports rounds: 1 without sending Round 2 or retaining sessions", async () => {
 		const harness = bootCouncilHarness();
-		const result = await harness.tool.execute(
+		const receipt = await harness.tool.execute(
 			"tc-council-r1",
 			{
 				topic: "Single-round design check",
@@ -670,16 +806,20 @@ describe("council tool execution and RPC deliberation", () => {
 			harness.ctx,
 		);
 
+		expect(receipt.details.status).toBe("running");
 		expect(harness.spawns).toHaveLength(2);
 		expect(harness.spawns.map((s) => s.type)).toEqual(["council-caspar", "council-balthasar"]);
 		for (const spawn of harness.spawns) {
 			expect(spawn.options.retain).toBe(false);
 			expect(spawn.options.notifyParent).toBe(false);
 		}
+		await vi.waitFor(() => expect(harness.sentMessages).toHaveLength(1));
 		expect(harness.sends).toHaveLength(0);
 		expect(harness.consumes).toHaveLength(2);
-		expect(result.details.round1).toHaveLength(2);
-		expect(result.details.round2).toHaveLength(0);
+		const details = harness.sentMessages[0]!.message.details;
+		expect(details.status).toBe("completed");
+		expect(details.round1).toHaveLength(2);
+		expect(details.round2).toHaveLength(0);
 	});
 
 	it("rejects raw model overrides, invalid member lists, empty topics, and missing RPC v3 support", async () => {
@@ -754,7 +894,7 @@ describe("council tool execution and RPC deliberation", () => {
 		expect(missingMelchiorHarness.spawns).toHaveLength(0);
 
 		// Explicit 2-member subset whose pinned models ARE available succeeds even when unselected 3rd is unavailable
-		const subsetResult = await missingMelchiorHarness.tool.execute(
+		const subsetReceipt = await missingMelchiorHarness.tool.execute(
 			"tc-subset-ok",
 			{
 				topic: "Two-member subset with available models",
@@ -764,13 +904,15 @@ describe("council tool execution and RPC deliberation", () => {
 			undefined,
 			missingMelchiorHarness.ctx,
 		);
+		expect(subsetReceipt.details.status).toBe("running");
 		expect(missingMelchiorHarness.spawns).toHaveLength(2);
 		expect(missingMelchiorHarness.spawns.map((s) => s.type)).toEqual([
 			"council-caspar",
 			"council-balthasar",
 		]);
-		expect(subsetResult.details.round1).toHaveLength(2);
-		expect(subsetResult.details.round2).toHaveLength(2);
+		await vi.waitFor(() => expect(missingMelchiorHarness.sentMessages).toHaveLength(1));
+		expect(missingMelchiorHarness.sentMessages[0]!.message.details.round1).toHaveLength(2);
+		expect(missingMelchiorHarness.sentMessages[0]!.message.details.round2).toHaveLength(2);
 
 		// 1 of 3 pinned models registered in find() but missing credentials
 		const unauthMelchiorHarness = bootCouncilHarness({
@@ -826,7 +968,34 @@ describe("council tool execution and RPC deliberation", () => {
 		expect(missingRegistryHarness.spawns).toHaveLength(0);
 	});
 
-	it("completes deliberation when 1 of 3 members fails in Round 1 or Round 2, and throws when 2 of 3 fail in Round 1", async () => {
+	it("throws immediately without sending a follow-up message when fewer than 2 Round 1 spawns succeed", async () => {
+		const harness = bootCouncilHarness({
+			spawnHandler: ({ type }) => {
+				if (type !== "council-caspar") {
+					return { success: false, error: `${type} spawn rejected` };
+				}
+				return undefined;
+			},
+			round1Handler: () => "hang",
+		});
+
+		await expect(
+			harness.tool.execute(
+				"tc-launch-fail",
+				{ topic: "Launch failure threshold check" },
+				undefined,
+				undefined,
+				harness.ctx,
+			),
+		).rejects.toThrow(/at least 2 members must succeed in Round 1, but only 1 succeeded/i);
+
+		const casparId = harness.spawns.find((s) => s.type === "council-caspar")!.id;
+		expect(harness.stops.map((s) => s.agentId)).toEqual([casparId]);
+		expect(harness.releases.map((r) => r.agentId)).toEqual([casparId]);
+		expect(harness.sentMessages).toHaveLength(0);
+	});
+
+	it("completes deliberation when 1 of 3 members fails in Round 1 or Round 2, and delivers a failure follow-up when 2 of 3 fail in Round 1", async () => {
 		const r1PartialHarness = bootCouncilHarness({
 			round1Handler: ({ type }) => {
 				if (type === "council-melchior") {
@@ -840,17 +1009,21 @@ describe("council tool execution and RPC deliberation", () => {
 			},
 		});
 
-		const r1PartialResult = await r1PartialHarness.tool.execute(
+		const r1PartialReceipt = await r1PartialHarness.tool.execute(
 			"tc-partial-r1",
 			{ topic: "Resilience check" },
 			undefined,
 			undefined,
 			r1PartialHarness.ctx,
 		);
+		expect(r1PartialReceipt.details.status).toBe("running");
 
-		expect(r1PartialResult.details.round1).toHaveLength(2);
-		expect(r1PartialResult.details.round2).toHaveLength(2);
-		expect(r1PartialResult.details.failures).toEqual([
+		await vi.waitFor(() => expect(r1PartialHarness.sentMessages).toHaveLength(1));
+		const r1Delivered = r1PartialHarness.sentMessages[0]!;
+		expect(r1Delivered.message.details.status).toBe("completed");
+		expect(r1Delivered.message.details.round1).toHaveLength(2);
+		expect(r1Delivered.message.details.round2).toHaveLength(2);
+		expect(r1Delivered.message.details.failures).toEqual([
 			{
 				member: "melchior",
 				agentType: "council-melchior",
@@ -859,8 +1032,8 @@ describe("council tool execution and RPC deliberation", () => {
 				error: "Gateway timeout on melchior",
 			},
 		]);
-		expect(r1PartialResult.content[0].text).toContain("## Member Failures");
-		expect(r1PartialResult.content[0].text).toContain("Gateway timeout on melchior");
+		expect(r1Delivered.message.content).toContain("## Member Failures");
+		expect(r1Delivered.message.content).toContain("Gateway timeout on melchior");
 
 		const r2PartialHarness = bootCouncilHarness({
 			round2Handler: ({ type }) => {
@@ -875,17 +1048,21 @@ describe("council tool execution and RPC deliberation", () => {
 			},
 		});
 
-		const r2PartialResult = await r2PartialHarness.tool.execute(
+		const r2PartialReceipt = await r2PartialHarness.tool.execute(
 			"tc-partial-r2",
 			{ topic: "R2 partial failure check" },
 			undefined,
 			undefined,
 			r2PartialHarness.ctx,
 		);
+		expect(r2PartialReceipt.details.status).toBe("running");
 
-		expect(r2PartialResult.details.round1).toHaveLength(3);
-		expect(r2PartialResult.details.round2).toHaveLength(2);
-		expect(r2PartialResult.details.failures).toEqual([
+		await vi.waitFor(() => expect(r2PartialHarness.sentMessages).toHaveLength(1));
+		const r2Delivered = r2PartialHarness.sentMessages[0]!;
+		expect(r2Delivered.message.details.status).toBe("completed");
+		expect(r2Delivered.message.details.round1).toHaveLength(3);
+		expect(r2Delivered.message.details.round2).toHaveLength(2);
+		expect(r2Delivered.message.details.failures).toEqual([
 			{
 				member: "balthasar",
 				agentType: "council-balthasar",
@@ -904,38 +1081,26 @@ describe("council tool execution and RPC deliberation", () => {
 			},
 		});
 
-		await expect(
-			r1TwoFailedHarness.tool.execute(
-				"tc-two-failed",
-				{ topic: "Majority failure check" },
-				undefined,
-				undefined,
-				r1TwoFailedHarness.ctx,
-			),
-		).rejects.toThrow(/at least 2 members must succeed in Round 1/i);
-	});
-
-	it("emits subagents:rpc:stop and subagents:rpc:release for all active council subagents when AbortSignal aborts", async () => {
-		const harness = bootCouncilHarness({
-			round1Handler: () => "hang",
-		});
-
-		const controller = new AbortController();
-		const promise = harness.tool.execute(
-			"tc-abort",
-			{ topic: "Abort while Round 1 is running" },
-			controller.signal,
+		const r1TwoFailedReceipt = await r1TwoFailedHarness.tool.execute(
+			"tc-two-failed",
+			{ topic: "Majority failure check" },
 			undefined,
-			harness.ctx,
+			undefined,
+			r1TwoFailedHarness.ctx,
 		);
+		expect(r1TwoFailedReceipt.details.status).toBe("running");
 
-		await vi.waitFor(() => expect(harness.spawns).toHaveLength(3));
-		controller.abort();
-
-		await expect(promise).rejects.toThrow(/aborted/i);
-		const expectedIds = harness.spawns.map((s) => s.id).sort();
-		expect(harness.stops.map((s) => s.agentId).sort()).toEqual(expectedIds);
-		expect(harness.releases.map((r) => r.agentId).sort()).toEqual(expectedIds);
+		await vi.waitFor(() => expect(r1TwoFailedHarness.sentMessages).toHaveLength(1));
+		const failedDelivered = r1TwoFailedHarness.sentMessages[0]!;
+		expect(failedDelivered.message.customType).toBe(COUNCIL_REPORT_MESSAGE_TYPE);
+		expect(failedDelivered.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+		expect(failedDelivered.message.details.status).toBe("failed");
+		expect(failedDelivered.message.details.councilId).toBe(r1TwoFailedReceipt.details.councilId);
+		expect(failedDelivered.message.details.error).toMatch(/at least 2 members must succeed in Round 1/i);
+		expect(failedDelivered.message.details.round1).toHaveLength(1);
+		expect(failedDelivered.message.details.round2).toEqual([]);
+		expect(failedDelivered.message.details.failures).toHaveLength(2);
+		expect(failedDelivered.message.content).toContain("at least 2 members must succeed in Round 1");
 	});
 
 	it("releases retained sessions across normal 2-round completion, Round 1 failure, and Round 2 failure", async () => {
@@ -954,6 +1119,7 @@ describe("council tool execution and RPC deliberation", () => {
 			undefined,
 			mockCtx,
 		);
+		await vi.waitFor(() => expect(normalHarness.sentMessages).toHaveLength(1));
 		expect(normalHarness.releases.map((r) => r.agentId).sort()).toEqual(
 			normalHarness.spawns.map((s) => s.id).sort(),
 		);
@@ -967,15 +1133,15 @@ describe("council tool execution and RPC deliberation", () => {
 				return { event: "completed", status: "completed", result: "Caspar proposal" };
 			},
 		});
-		await expect(
-			r1FailHarness.tool.execute(
-				"tc-rel-r1-fail",
-				{ topic: "Round 1 failure release check" },
-				undefined,
-				undefined,
-				mockCtx,
-			),
-		).rejects.toThrow(/at least 2 members must succeed/i);
+		await r1FailHarness.tool.execute(
+			"tc-rel-r1-fail",
+			{ topic: "Round 1 failure release check" },
+			undefined,
+			undefined,
+			mockCtx,
+		);
+		await vi.waitFor(() => expect(r1FailHarness.sentMessages).toHaveLength(1));
+		expect(r1FailHarness.sentMessages[0]!.message.details.status).toBe("failed");
 		expect(r1FailHarness.releases.map((r) => r.agentId).sort()).toEqual(
 			r1FailHarness.spawns.map((s) => s.id).sort(),
 		);
@@ -997,12 +1163,13 @@ describe("council tool execution and RPC deliberation", () => {
 			undefined,
 			mockCtx,
 		);
+		await vi.waitFor(() => expect(r2FailHarness.sentMessages).toHaveLength(1));
 		expect(r2FailHarness.releases.map((r) => r.agentId).sort()).toEqual(
 			r2FailHarness.spawns.map((s) => s.id).sort(),
 		);
 	});
 
-	it("stops and releases late-returning advisor agents when cancelled while spawn RPC is still in-flight", async () => {
+	it("stops and releases late-returning advisor agents when aborted while spawn RPC is still in-flight without sending follow-up", async () => {
 		const harness = bootCouncilHarness({
 			deferSpawn: ({ type }) => type === "council-balthasar",
 			round1Handler: () => "hang",
@@ -1038,7 +1205,7 @@ describe("council tool execution and RPC deliberation", () => {
 		expect(harness.stops.map((s) => s.agentId).sort()).toEqual(earlyIds);
 		expect(harness.releases.map((r) => r.agentId).sort()).toEqual(earlyIds);
 
-		// Now the late spawn RPC resolves after cancellation and finally cleanup.
+		// Now the late spawn RPC resolves after cancellation and cleanup.
 		lateSpawn.resolve();
 		await vi.waitFor(() => expect(harness.stops.map((s) => s.agentId)).toContain(lateSpawn.id));
 		await vi.waitFor(() => expect(harness.releases.map((r) => r.agentId)).toContain(lateSpawn.id));
@@ -1046,9 +1213,10 @@ describe("council tool execution and RPC deliberation", () => {
 		const allIds = harness.spawns.map((s) => s.id).sort();
 		expect(harness.stops.map((s) => s.agentId).sort()).toEqual(allIds);
 		expect(harness.releases.map((r) => r.agentId).sort()).toEqual(allIds);
+		expect(harness.sentMessages).toHaveLength(0);
 	});
 
-	it("stops and releases all advisors when cancelled while all spawn RPCs are still in-flight", async () => {
+	it("stops and releases all advisors when aborted while all spawn RPCs are still in-flight without sending follow-up", async () => {
 		const harness = bootCouncilHarness({
 			deferSpawn: () => true,
 		});
@@ -1080,44 +1248,40 @@ describe("council tool execution and RPC deliberation", () => {
 		const allIds = harness.spawns.map((s) => s.id).sort();
 		await vi.waitFor(() => expect(harness.stops.map((s) => s.agentId).sort()).toEqual(allIds));
 		await vi.waitFor(() => expect(harness.releases.map((r) => r.agentId).sort()).toEqual(allIds));
+		expect(harness.sentMessages).toHaveLength(0);
 	});
 
-	it("stops and releases late-returning advisor agents when cancelled while Round 2 send RPC is in-flight", async () => {
+	it("stops and releases late-returning advisor agents when cancelled via /council stop while Round 2 send RPC is in-flight", async () => {
 		const harness = bootCouncilHarness({
 			deferSend: ({ type }) => type === "council-melchior",
 			round2Handler: () => "hang",
 		});
 
-		const mockCtx = {
-			modelRegistry: {
-				find: (provider: string, id: string) => ({ provider, id }),
-			},
-		} as unknown as ExtensionContext;
-
-		const controller = new AbortController();
-		const promise = harness.tool.execute(
-			"tc-abort-inflight-send",
-			{ topic: "Abort while Round 2 send is in flight", members: ["caspar", "melchior"] },
-			controller.signal,
+		const receipt = await harness.tool.execute(
+			"tc-cancel-inflight-send",
+			{ topic: "Cancel while Round 2 send is in flight", members: ["caspar", "melchior"] },
 			undefined,
-			mockCtx,
+			undefined,
+			harness.ctx,
 		);
+		expect(receipt.details.status).toBe("running");
 
 		await vi.waitFor(() => expect(harness.sends).toHaveLength(2));
 		expect(harness.deferredSends).toHaveLength(1);
 		const lateSend = harness.deferredSends[0]!;
 		const earlyR2Id = harness.sends.find((s) => s.agentId !== lateSend.agentId)!.agentId;
 
-		controller.abort();
-		await expect(promise).rejects.toThrow(/aborted/i);
+		const notify = vi.fn();
+		await harness.command.handler("stop", { ui: { notify }, isIdle: () => true } as unknown as ExtensionContext);
 
-		// Early Round 2 advisor was stopped immediately; all owned agents released in finally.
+		// Early Round 2 advisor was stopped immediately; all owned agents released.
 		expect(harness.stops.map((s) => s.agentId)).toEqual([earlyR2Id]);
 		expect(new Set(harness.releases.map((r) => r.agentId))).toEqual(
 			new Set(harness.spawns.map((s) => s.id)),
 		);
+		expect(harness.setStatus).toHaveBeenLastCalledWith("council", undefined);
 
-		// Late Round 2 send resolves after abort/finally: must immediately stop and re-release.
+		// Late Round 2 send resolves after cancellation/cleanup: must immediately stop and re-release.
 		const releasesBeforeLateSend = harness.releases.filter((r) => r.agentId === lateSend.agentId).length;
 		lateSend.resolve({ success: true, data: { delivery: "resumed" } });
 
@@ -1127,7 +1291,99 @@ describe("council tool execution and RPC deliberation", () => {
 				releasesBeforeLateSend,
 			),
 		);
+		expect(harness.sentMessages).toHaveLength(0);
 	});
+
+	it("supports /council status while running, /council stop by ID and all, and isolates concurrent council runs", async () => {
+		const harness = bootCouncilHarness({
+			round1Handler: () => "hang",
+			round2Handler: () => "hang",
+		});
+
+		const run1 = await harness.tool.execute(
+			"tc-concurrent-1",
+			{ topic: "First concurrent topic", rounds: 1, members: ["caspar", "melchior"] },
+			undefined,
+			undefined,
+			harness.ctx,
+		);
+		expect(harness.setStatus).toHaveBeenLastCalledWith("council", "council R1 (0/2)");
+
+		const run2 = await harness.tool.execute(
+			"tc-concurrent-2",
+			{ topic: "Second concurrent topic", rounds: 1, members: ["caspar", "balthasar"] },
+			undefined,
+			undefined,
+			harness.ctx,
+		);
+		expect(harness.setStatus).toHaveBeenLastCalledWith("council", "council ×2");
+
+		const notify = vi.fn();
+		const cmdCtx = { ui: { notify }, isIdle: () => true } as unknown as ExtensionContext;
+
+		// /council status reports both active runs without activating the council tool
+		await harness.command.handler("status", cmdCtx);
+		expect(harness.activeTools).toEqual(["bash"]);
+		const statusMsg = notify.mock.calls[0]![0] as string;
+		expect(statusMsg).toContain(run1.details.councilId);
+		expect(statusMsg).toContain(run2.details.councilId);
+		expect(statusMsg).toContain("First concurrent topic");
+		expect(statusMsg).toContain("Second concurrent topic");
+		expect(statusMsg).toContain("/council stop");
+
+		// Unknown ID warns without cancelling either run
+		await harness.command.handler("stop council-00000000", cmdCtx);
+		expect(notify.mock.calls[1]![1]).toBe("warning");
+		expect(harness.stops).toHaveLength(0);
+
+		// Stop only run1 by ID
+		await harness.command.handler(`stop ${run1.details.councilId}`, cmdCtx);
+		expect(harness.activeTools).toEqual(["bash"]);
+		expect(harness.stops.map((s) => s.agentId).sort()).toEqual([...run1.details.agentIds].sort());
+		expect(harness.releases.map((r) => r.agentId).sort()).toEqual([...run1.details.agentIds].sort());
+		expect(harness.setStatus).toHaveBeenLastCalledWith("council", "council R1 (0/2)");
+
+		// Settle run2's advisors -> run2 completes cleanly without cross-contamination
+		for (const agentId of run2.details.agentIds as string[]) {
+			harness.settleAgent(agentId, { event: "completed", result: `Proposal from ${agentId}` });
+		}
+		await vi.waitFor(() => expect(harness.sentMessages).toHaveLength(1));
+		expect(harness.sentMessages[0]!.message.details.councilId).toBe(run2.details.councilId);
+		expect(harness.sentMessages[0]!.message.details.status).toBe("completed");
+		expect(harness.setStatus).toHaveBeenLastCalledWith("council", undefined);
+
+		// Stopping when no runs are active notifies cleanly without activating council
+		await harness.command.handler("stop", cmdCtx);
+		expect(notify.mock.calls.at(-1)![0]).toMatch(/No active council deliberations/i);
+		expect(harness.activeTools).toEqual(["bash"]);
+	});
+
+	it.each(["session_shutdown", "session_before_switch"] as const)(
+		"cancels active background council runs cleanly on %s without sending a follow-up report",
+		async (lifecycleEvent) => {
+			const harness = bootCouncilHarness({
+				round1Handler: () => "hang",
+			});
+
+			const receipt = await harness.tool.execute(
+				`tc-${lifecycleEvent}`,
+				{ topic: `Lifecycle cancel on ${lifecycleEvent}` },
+				undefined,
+				undefined,
+				harness.ctx,
+			);
+			expect(receipt.details.status).toBe("running");
+			expect(harness.setStatus).toHaveBeenLastCalledWith("council", "council R1 (0/3)");
+
+			await harness.emitPiEvent(lifecycleEvent, { type: lifecycleEvent });
+
+			const expectedIds = harness.spawns.map((s) => s.id).sort();
+			expect(harness.stops.map((s) => s.agentId).sort()).toEqual(expectedIds);
+			expect(harness.releases.map((r) => r.agentId).sort()).toEqual(expectedIds);
+			expect(harness.setStatus).toHaveBeenLastCalledWith("council", undefined);
+			expect(harness.sentMessages).toHaveLength(0);
+		},
+	);
 });
 
 describe("/council command and package contracts", () => {
@@ -1261,7 +1517,11 @@ function extractPromptSection(systemPrompt: string, tag: "tools" | "rules"): str
 }
 
 async function createCouncilAgentSession(
-	options: { sessionManager?: SessionManager; magpieModels?: Array<{ id: string }> } = {},
+	options: {
+		sessionManager?: SessionManager;
+		magpieModels?: Array<{ id: string }>;
+		deferComplete?: boolean;
+	} = {},
 ) {
 	const directory = await mkdtemp(path.join(tmpdir(), "pi-council-runtime-"));
 	let session: AgentSession | undefined;
@@ -1301,6 +1561,7 @@ async function createCouncilAgentSession(
 					})
 				: undefined;
 		let spawnSeq = 0;
+		const pendingCompletions: Array<() => void> = [];
 		const resources = new DefaultResourceLoader({
 			cwd: directory,
 			agentDir: directory,
@@ -1324,6 +1585,12 @@ async function createCouncilAgentSession(
 					pi.events.on("subagents:rpc:consume", (raw: any) => {
 						pi.events.emit(`subagents:rpc:consume:reply:${raw.requestId}`, { success: true });
 					});
+					pi.events.on("subagents:rpc:release", (raw: any) => {
+						pi.events.emit(`subagents:rpc:release:reply:${raw.requestId}`, { success: true });
+					});
+					pi.events.on("subagents:rpc:stop", (raw: any) => {
+						pi.events.emit(`subagents:rpc:stop:reply:${raw.requestId}`, { success: true });
+					});
 					pi.events.on("subagents:rpc:spawn", (raw: any) => {
 						const id = `runtime-council-${++spawnSeq}`;
 						pi.events.emit("subagents:started", { id, type: raw.type });
@@ -1331,7 +1598,7 @@ async function createCouncilAgentSession(
 							success: true,
 							data: { id },
 						});
-						queueMicrotask(() => {
+						const emitCompleted = () => {
 							pi.events.emit("subagents:completed", {
 								id,
 								type: raw.type,
@@ -1341,7 +1608,12 @@ async function createCouncilAgentSession(
 								runToolUses: 1,
 								durationMs: 25,
 							});
-						});
+						};
+						if (options.deferComplete) {
+							pendingCompletions.push(emitCompleted);
+						} else {
+							queueMicrotask(emitCompleted);
+						}
 					});
 					councilExtension(pi);
 				},
@@ -1367,10 +1639,11 @@ async function createCouncilAgentSession(
 				errors.push(err);
 			},
 		});
+		await runtime.refresh({ allowNetwork: false });
 
 		const current = session;
-		const runPrompt = async (text: string) => {
-			const settled = new Promise<void>((resolve) => {
+		const waitForNextSettled = () =>
+			new Promise<void>((resolve) => {
 				const unsubscribe = current.subscribe((event) => {
 					if (event.type === "agent_settled") {
 						unsubscribe();
@@ -1378,8 +1651,16 @@ async function createCouncilAgentSession(
 					}
 				});
 			});
+
+		const runPrompt = async (text: string) => {
+			const settled = waitForNextSettled();
 			await current.prompt(text);
 			await settled;
+		};
+
+		const completeAllAdvisors = () => {
+			const callbacks = pendingCompletions.splice(0, pendingCompletions.length);
+			for (const cb of callbacks) cb();
 		};
 
 		return {
@@ -1390,7 +1671,12 @@ async function createCouncilAgentSession(
 			get spawnCount() {
 				return spawnSeq;
 			},
+			get pendingCompletionCount() {
+				return pendingCompletions.length;
+			},
 			runPrompt,
+			waitForNextSettled,
+			completeAllAdvisors,
 			cleanup,
 		};
 	} catch (error) {
@@ -1472,6 +1758,7 @@ describe("council tool activation in real AgentSession + fauxProvider", () => {
 							}),
 						]),
 					),
+					inspect(fauxAssistantMessage("Council launched in the background; waiting for the report.")),
 					inspect(fauxAssistantMessage("Synthesized retry contract.")),
 				]);
 			} else {
@@ -1516,6 +1803,7 @@ describe("council tool activation in real AgentSession + fauxProvider", () => {
 						members: ["caspar", "melchior"],
 					}),
 				]),
+				fauxAssistantMessage("Council started in the background; waiting for report."),
 				fauxAssistantMessage("Synthesized retry design."),
 			]);
 			await h.runPrompt("Convene the council on lock leases");
@@ -1579,6 +1867,90 @@ describe("council tool activation in real AgentSession + fauxProvider", () => {
 			}
 		}
 	}, 20_000);
+
+	it("returns immediate async receipt on Turn 1 and automatically triggers Turn 2 synthesis via council-report follow-up message", async () => {
+		const h = await createCouncilAgentSession({ deferComplete: true });
+		const seenCustomReports: string[] = [];
+
+		try {
+			h.faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("council", {
+						topic: "Design async council handoff",
+						rounds: 1,
+						members: ["caspar", "melchior"],
+					}),
+				]),
+				fauxAssistantMessage("Council launched in the background; ending turn while advisors run."),
+				(context) => {
+					for (const msg of context.messages) {
+						if (msg.role === "user") {
+							const text =
+								typeof msg.content === "string"
+									? msg.content
+									: msg.content
+											.filter((b): b is { type: "text"; text: string } => b.type === "text")
+											.map((b) => b.text)
+											.join("\n");
+							if (text.includes("# Council Deliberation Report")) {
+								seenCustomReports.push(text);
+							}
+						}
+					}
+					return fauxAssistantMessage("Synthesized async council report.");
+				},
+			]);
+
+			// Turn 1 settles immediately with the launch receipt while advisors are still pending
+			await h.runPrompt("/council Design async council handoff");
+			expect(h.spawnCount).toBe(2);
+			expect(h.pendingCompletionCount).toBe(2);
+			expect(h.faux.state.callCount).toBe(2);
+
+			const toolResults = h.session.sessionManager
+				.getBranch()
+				.filter(
+					(entry): entry is Extract<typeof entry, { type: "message" }> =>
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						entry.message.toolName === "council",
+				);
+			expect(toolResults).toHaveLength(1);
+			const receiptMsg = toolResults[0]!.message;
+			if (receiptMsg.role === "toolResult") {
+				expect(receiptMsg.isError).toBe(false);
+				const receiptText = receiptMsg.content
+					.filter((b): b is { type: "text"; text: string } => b.type === "text")
+					.map((b) => b.text)
+					.join("\n");
+				expect(receiptText).toContain("Council deliberation started in the background");
+				expect(receiptText).toMatch(/End your turn now/i);
+			}
+
+			// Now complete advisors -> council-report follow-up triggers Turn 2 automatically
+			const turn2Settled = h.waitForNextSettled();
+			h.completeAllAdvisors();
+			await turn2Settled;
+
+			expect(h.faux.state.callCount).toBe(3);
+			expect(seenCustomReports).toHaveLength(1);
+			expect(seenCustomReports[0]).toContain("# Council Deliberation Report");
+			expect(seenCustomReports[0]).toContain("Proposal from council-caspar");
+			expect(seenCustomReports[0]).toContain("Proposal from council-melchior");
+
+			const customReports = h.session.sessionManager
+				.getBranch()
+				.filter(
+					(entry): entry is Extract<typeof entry, { type: "custom_message" }> =>
+						entry.type === "custom_message" &&
+						entry.customType === COUNCIL_REPORT_MESSAGE_TYPE,
+				);
+			expect(customReports).toHaveLength(1);
+			expect(h.errors).toEqual([]);
+		} finally {
+			await h.cleanup();
+		}
+	}, 15_000);
 
 	it("fails fast with isError toolResult and zero subagent spawns when a selected pinned model is missing from ModelRegistry", async () => {
 		const h = await createCouncilAgentSession({
