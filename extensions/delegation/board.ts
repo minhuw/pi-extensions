@@ -269,7 +269,7 @@ function sessionLink(ctx: ExtensionContext): SessionLink | undefined {
 	return link;
 }
 
-/** Top-level TUI and RPC sessions, as in `switch.ts`: a persisted child carries a session link. */
+/** Top-level TUI and RPC sessions, as in `swarm.ts`: a persisted child carries a session link. */
 const isCoordinator = (ctx: ExtensionContext) => (ctx.mode === "tui" || ctx.mode === "rpc") && sessionLink(ctx) === undefined;
 
 interface ChildRole { boardId: string; agentId: string; link: SessionLink }

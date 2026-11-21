@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { SwarmBoard, SwarmBoards } from "./board.ts";
+import { swarmBoards, type SwarmBoard } from "./board.ts";
 
 /**
  * A nudge once when the context is `contextShare` percent full, a wake-up when a running background agent has sent no
@@ -10,13 +10,7 @@ export const COACH = { contextShare: 50, stallMs: 10 * 60_000, activeToolStallMs
 
 /** Not "swarm": swarm's own state reads its "swarm" messages to tell what the model was told. */
 const ENTRY = "swarm-coach";
-const BOARDS = Symbol.for("pi-extensions.swarm-boards");
 const COORDINATOR = "coordinator";
-
-function boardRegistry(): SwarmBoards {
-	const global = globalThis as Record<symbol, SwarmBoards | undefined>;
-	return (global[BOARDS] ??= { version: 1, boards: new Map(), listeners: new Set() });
-}
 
 export const contextText = (percent: number) => `Swarm mode: your context is ${percent}% full. Delegate the remaining investigation and implementation to background agents and keep only their summaries.`;
 
@@ -114,7 +108,7 @@ export function registerCoach(pi: ExtensionAPI, isOn: (ctx: ExtensionContext) =>
 		} catch {
 			return;
 		}
-		const board = boardRegistry().boards.get(sessionId);
+		const board = swarmBoards().boards.get(sessionId);
 		if (!board) return;
 		for (const card of board.cards) {
 			if (card.status === "blocked") reportedBlocked.set(card.id, card.note ?? "");
@@ -201,7 +195,7 @@ export function registerCoach(pi: ExtensionAPI, isOn: (ctx: ExtensionContext) =>
 		agents.clear();
 		stopTimer();
 		seedBlocked(ctx);
-		boardRegistry().listeners.add(onBoard);
+		swarmBoards().listeners.add(onBoard);
 	});
 	pi.on("session_tree", (_event, ctx) => {
 		nudged = false;
@@ -214,7 +208,7 @@ export function registerCoach(pi: ExtensionAPI, isOn: (ctx: ExtensionContext) =>
 		agents.clear();
 		reportedBlocked.clear();
 		stopTimer();
-		boardRegistry().listeners.delete(onBoard);
+		swarmBoards().listeners.delete(onBoard);
 	});
 
 	pi.events.on("subagents:telemetry", (data) => {
