@@ -12,6 +12,8 @@ use tempfile::TempDir;
 pub const DEVICE: &str = "laptop";
 pub const SESSION_ID: &str = "7f3c2a10-5b1e-4c3d-9a8e-1f2e3d4c5b6a";
 pub const RUN_ID: &str = "20261021-100000-abcd";
+/// Current schema `PRAGMA user_version`, kept in sync with `UNDO_STEPS`.
+pub const SCHEMA_VERSION: i64 = 25;
 /// Per-version SQL that undoes schema version `v` back to `v - 1`, in ascending version order.
 /// Dropping v7's `search_fts` needs `pika::tokenizer::register`, which `rewind` calls before that step.
 pub const UNDO_STEPS: &[(usize, &str)] = &[
@@ -144,7 +146,8 @@ pub fn device(store: &Store, id: &str) -> String {
 }
 
 pub fn fixture(name: &str) -> Vec<String> {
-    let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_owned());
+    let path = format!("{manifest_dir}/tests/fixtures/{name}");
     std::fs::read_to_string(path).unwrap().lines().map(str::to_owned).collect()
 }
 

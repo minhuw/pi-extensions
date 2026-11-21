@@ -423,7 +423,7 @@ fn schema_version_22_adds_deck_projects_without_a_reindex() {
     store.write(|tx| Ok::<_, rusqlite::Error>(rewind(tx, 21))).unwrap();
     drop(store);
     let store = pika::store::Store::open(env.dir.path().join("data")).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(22));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(SCHEMA_VERSION));
     assert!(query(&store, "SELECT * FROM deck_projects").is_empty());
     assert!(query(&store, "SELECT 1 FROM settings WHERE key = 'needs_reindex'").is_empty());
     assert_eq!(dump_derived(&store), before);

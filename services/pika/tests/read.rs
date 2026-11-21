@@ -1245,7 +1245,7 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
     std::fs::rename(&blob, &aside).unwrap();
     assert!(pika::store::Store::open(&data).is_err());
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 23);
+    assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), SCHEMA_VERSION);
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM settings WHERE key = 'needs_reindex'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     drop(conn);
@@ -2635,7 +2635,7 @@ fn statistics_version_10_upgrade_backfills_ledger_without_changing_source_lines(
         BEGIN SELECT RAISE(ABORT, 'source deleted'); END;").unwrap();
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 23);
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], SCHEMA_VERSION);
     assert_eq!(dump_derived(&store), expected);
     assert!(store.setting(pika::store::NEEDS_REINDEX).unwrap().is_none());
     assert!(store.setting(pika::store::DERIVED_GENERATION).unwrap().is_some());
@@ -2917,7 +2917,7 @@ fn schema_v19_adds_the_extension_usage_indexes_without_a_reindex() {
     rewind(&conn, 18);
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 23);
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], SCHEMA_VERSION);
     assert_eq!(store.setting(pika::store::NEEDS_REINDEX).unwrap(), None);
     let indexes = query(&store, "SELECT name FROM sqlite_master WHERE name IN ('entries_custom_type', 'tool_calls_started') ORDER BY name");
     assert_eq!(indexes.len(), 2);
@@ -2951,7 +2951,7 @@ fn schema_v23_adds_the_spokesman_partial_index_without_a_reindex() {
     drop(conn);
 
     let store = pika::store::Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 23);
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], SCHEMA_VERSION);
     assert_eq!(store.setting(pika::store::NEEDS_REINDEX).unwrap(), None);
     assert_eq!(store.setting(pika::store::DERIVED_GENERATION).unwrap(), derived_gen);
     assert_eq!(dump_derived(&store), expected);

@@ -624,7 +624,7 @@ fn version_9_databases_gain_tombstones_and_hidden_sessions() {
     rewind(&conn, 9);
     drop(conn);
     let store = pika::store::Store::open(&path).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(22));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(SCHEMA_VERSION));
     for table in ["deleted_streams", "hidden_sessions", "session_hidden"] {
         assert_eq!(one(&store, &format!("SELECT COUNT(*) AS n FROM {table}"))["n"], json!(0), "{table}");
     }

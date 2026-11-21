@@ -278,7 +278,7 @@ fn schema_v20_adds_relay_boards_without_a_reindex() {
     rewind(&conn, 19);
     drop(conn);
     let store = Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], 22);
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], SCHEMA_VERSION);
     assert_eq!(store.setting(pika::store::NEEDS_REINDEX).unwrap(), None);
     assert!(query(&store, "SELECT * FROM relay_boards").is_empty());
 }
