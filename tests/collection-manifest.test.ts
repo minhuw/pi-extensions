@@ -3,10 +3,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
+import { DOC_COMMANDS, DOC_SOURCES } from "../services/pika/web/docs/sources.ts";
 
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 const extensionsRoot = path.join(repoRoot, "extensions");
-const docSourcesPath = path.join(repoRoot, "services/pika/web/docs/sources.ts");
 
 interface RootManifest {
 	scripts: Record<string, string>;
@@ -103,78 +103,6 @@ function getStringLiteralValue(node: ts.Node | undefined): string | null {
 	return null;
 }
 
-function extractPublishedDocExtensions(filePath: string): Set<string> {
-	const sourceText = readFileSync(filePath, "utf8");
-	const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true);
-
-	const tupleArrays = new Map<string, string[]>();
-	let docSourcesInit: ts.ArrayLiteralExpression | undefined;
-
-	for (const statement of sourceFile.statements) {
-		if (!ts.isVariableStatement(statement)) continue;
-		for (const decl of statement.declarationList.declarations) {
-			if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
-			const init = unwrapExpression(decl.initializer);
-			if (!ts.isArrayLiteralExpression(init)) continue;
-
-			if (decl.name.text === "DOC_SOURCES") {
-				docSourcesInit = init;
-			} else {
-				const firstElements: string[] = [];
-				for (const elem of init.elements) {
-					const unwrapped = unwrapExpression(elem);
-					if (!ts.isArrayLiteralExpression(unwrapped) || unwrapped.elements.length === 0) continue;
-					const first = getStringLiteralValue(unwrapped.elements[0]);
-					if (first !== null) firstElements.push(first);
-				}
-				if (firstElements.length > 0) {
-					tupleArrays.set(decl.name.text, firstElements);
-				}
-			}
-		}
-	}
-
-	if (!docSourcesInit) {
-		throw new Error(`Could not find DOC_SOURCES array literal in ${filePath}`);
-	}
-
-	const published = new Set<string>();
-	const extensionSourcePattern = /^(?:\.\/)?extensions\/([^/]+)(?:\/|$)/;
-
-	for (const elem of docSourcesInit.elements) {
-		if (ts.isObjectLiteralExpression(elem)) {
-			for (const prop of elem.properties) {
-				if (!ts.isPropertyAssignment(prop)) continue;
-				const propName = ts.isIdentifier(prop.name)
-					? prop.name.text
-					: getStringLiteralValue(prop.name);
-				if (propName !== "source") continue;
-				const sourceValue = getStringLiteralValue(unwrapExpression(prop.initializer));
-				const match = sourceValue?.match(extensionSourcePattern);
-				if (match) published.add(match[1]!);
-			}
-		} else if (ts.isSpreadElement(elem)) {
-			const spreadExpr = unwrapExpression(elem.expression);
-			if (
-				ts.isCallExpression(spreadExpr) &&
-				ts.isPropertyAccessExpression(spreadExpr.expression) &&
-				spreadExpr.expression.name.text === "map" &&
-				ts.isIdentifier(spreadExpr.expression.expression) &&
-				spreadExpr.arguments[0]?.getText(sourceFile).includes("extensions/")
-			) {
-				const entries = tupleArrays.get(spreadExpr.expression.expression.text);
-				if (entries) {
-					for (const dir of entries) {
-						published.add(dir);
-					}
-				}
-			}
-		}
-	}
-
-	return published;
-}
-
 function extractAgentsLayoutSection(markdown: string): string {
 	const normalized = markdown.replaceAll("\r\n", "\n");
 	const headingMatch = /^## Layout[ \t]*$/m.exec(normalized);
@@ -204,11 +132,6 @@ type EvalValue =
 interface DiscoveredCommand {
 	command: string;
 	filePath: string;
-	extension: string | null;
-}
-
-interface DocCommandEntry {
-	command: string;
 	extension: string | null;
 }
 
@@ -969,165 +892,6 @@ function extractManifestPromptCommands(manifest: RootManifest, rootDir = repoRoo
 	return prompts;
 }
 
-function extractDocCommandsFromSource(
-	sourceText: string,
-	filePath: string,
-): { entries: DocCommandEntry[]; duplicates: string[] } {
-	const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true);
-	const tupleArrays = new Map<string, (string | null)[][]>();
-	let docCommandsInit: ts.Expression | undefined;
-
-	for (const statement of sourceFile.statements) {
-		if (!ts.isVariableStatement(statement)) continue;
-		for (const decl of statement.declarationList.declarations) {
-			if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
-			const init = unwrapExpression(decl.initializer);
-			if (decl.name.text === "DOC_COMMANDS") {
-				docCommandsInit = init;
-				continue;
-			}
-			if (!ts.isArrayLiteralExpression(init)) continue;
-			const rows: (string | null)[][] = [];
-			let allTuples = init.elements.length > 0;
-			for (const elem of init.elements) {
-				const unwrapped = unwrapExpression(elem);
-				if (!ts.isArrayLiteralExpression(unwrapped) || unwrapped.elements.length === 0) {
-					allTuples = false;
-					break;
-				}
-				rows.push(unwrapped.elements.map((item) => getStringLiteralValue(unwrapExpression(item))));
-			}
-			if (allTuples) {
-				tupleArrays.set(decl.name.text, rows);
-			}
-		}
-	}
-
-	if (!docCommandsInit) {
-		throw new Error(`Could not find DOC_COMMANDS initializer in ${filePath}`);
-	}
-
-	const entries: DocCommandEntry[] = [];
-
-	const extractFromObjectLiteral = (obj: ts.ObjectLiteralExpression, env: Map<string, EvalValue>): void => {
-		let command: string | null = null;
-		let extension: string | null = null;
-		for (const prop of obj.properties) {
-			if (ts.isPropertyAssignment(prop)) {
-				const key = getPropertyKeyName(prop.name);
-				if (key === "command") {
-					const val = evaluateExpression(prop.initializer, env);
-					if (val?.kind === "strings" && val.values.length === 1) command = val.values[0]!;
-				} else if (key === "extension") {
-					const val = evaluateExpression(prop.initializer, env);
-					if (val?.kind === "strings" && val.values.length === 1) extension = val.values[0]!;
-				}
-			} else if (ts.isShorthandPropertyAssignment(prop)) {
-				const key = prop.name.text;
-				const val = env.get(key);
-				if (key === "command" && val?.kind === "strings" && val.values.length === 1) {
-					command = val.values[0]!;
-				} else if (key === "extension" && val?.kind === "strings" && val.values.length === 1) {
-					extension = val.values[0]!;
-				}
-			}
-		}
-		if (!command) {
-			throw new Error(`Could not statically extract command property from DOC_COMMANDS entry in ${filePath}`);
-		}
-		entries.push({ command, extension });
-	};
-
-	const extractFromMapCall = (call: ts.CallExpression): boolean => {
-		if (
-			!ts.isPropertyAccessExpression(call.expression) ||
-			call.expression.name.text !== "map" ||
-			!ts.isIdentifier(call.expression.expression)
-		) {
-			return false;
-		}
-		const tuples = tupleArrays.get(call.expression.expression.text);
-		if (!tuples) return false;
-
-		const callbackArg = call.arguments[0] ? unwrapExpression(call.arguments[0]) : undefined;
-		if (!callbackArg || (!ts.isArrowFunction(callbackArg) && !ts.isFunctionExpression(callbackArg))) {
-			throw new Error(`Unsupported DOC_COMMANDS .map(...) callback in ${filePath}`);
-		}
-
-		let returnExpr: ts.Expression | undefined;
-		if (ts.isBlock(callbackArg.body)) {
-			const retStmt = callbackArg.body.statements.find(ts.isReturnStatement);
-			returnExpr = retStmt?.expression ? unwrapExpression(retStmt.expression) : undefined;
-		} else {
-			returnExpr = unwrapExpression(callbackArg.body);
-		}
-		if (!returnExpr || !ts.isObjectLiteralExpression(returnExpr)) {
-			throw new Error(`Expected DOC_COMMANDS .map(...) callback to return an object literal in ${filePath}`);
-		}
-
-		const firstParam = callbackArg.parameters[0];
-		const paramNames: (string | null)[] = [];
-		if (firstParam && ts.isArrayBindingPattern(firstParam.name)) {
-			for (const elem of firstParam.name.elements) {
-				if (ts.isBindingElement(elem) && ts.isIdentifier(elem.name)) {
-					paramNames.push(elem.name.text);
-				} else {
-					paramNames.push(null);
-				}
-			}
-		}
-
-		for (const row of tuples) {
-			const env = new Map<string, EvalValue>();
-			paramNames.forEach((name, idx) => {
-				const cell = row[idx];
-				if (name && cell !== null && cell !== undefined) {
-					env.set(name, { kind: "strings", values: [cell] });
-				}
-			});
-			extractFromObjectLiteral(returnExpr, env);
-		}
-		return true;
-	};
-
-	if (ts.isCallExpression(docCommandsInit)) {
-		if (!extractFromMapCall(docCommandsInit)) {
-			throw new Error(`Unsupported DOC_COMMANDS initializer expression in ${filePath}`);
-		}
-	} else if (ts.isArrayLiteralExpression(docCommandsInit)) {
-		const emptyEnv = new Map<string, EvalValue>();
-		for (const elem of docCommandsInit.elements) {
-			if (ts.isSpreadElement(elem)) {
-				const spread = unwrapExpression(elem.expression);
-				if (!ts.isCallExpression(spread) || !extractFromMapCall(spread)) {
-					throw new Error(`Unsupported spread element in DOC_COMMANDS in ${filePath}`);
-				}
-			} else {
-				const unwrapped = unwrapExpression(elem);
-				if (!ts.isObjectLiteralExpression(unwrapped)) {
-					throw new Error(`Unsupported element in DOC_COMMANDS in ${filePath}`);
-				}
-				extractFromObjectLiteral(unwrapped, emptyEnv);
-			}
-		}
-	} else {
-		throw new Error(`Unsupported DOC_COMMANDS initializer in ${filePath}`);
-	}
-
-	const seen = new Set<string>();
-	const duplicates: string[] = [];
-	for (const entry of entries) {
-		if (seen.has(entry.command)) duplicates.push(entry.command);
-		seen.add(entry.command);
-	}
-
-	return { entries, duplicates };
-}
-
-function extractDocCommands(filePath: string): { entries: DocCommandEntry[]; duplicates: string[] } {
-	return extractDocCommandsFromSource(readFileSync(filePath, "utf8"), filePath);
-}
-
 function diffCommandParity(actualCommands: Iterable<string>, documentedCommands: Iterable<string>): CommandParityDiff {
 	const actual = new Set(actualCommands);
 	const documented = new Set(documentedCommands);
@@ -1204,7 +968,12 @@ describe("collection manifest contracts", () => {
 			`Extension directories not linked in README.md: ${missingFromReadme.join(", ")}`,
 		).toEqual([]);
 
-		const publishedInDocs = extractPublishedDocExtensions(docSourcesPath);
+		const publishedInDocs = new Set<string>();
+		const extensionSourcePattern = /^(?:\.\/)?extensions\/([^/]+)(?:\/|$)/;
+		for (const entry of DOC_SOURCES) {
+			const match = entry.source.match(extensionSourcePattern);
+			if (match) publishedInDocs.add(match[1]!);
+		}
 		const missingFromDocs = extensionDirs.filter((dir) => !publishedInDocs.has(dir));
 		expect(
 			missingFromDocs,
@@ -1234,14 +1003,19 @@ describe("collection manifest contracts", () => {
 		expect(registeredCommands.length, "Expected registered slash commands under extensions/").toBeGreaterThan(0);
 		expect(promptCommands.length, "Expected prompt templates in package.json pi.prompts").toBeGreaterThan(0);
 
-		const { entries: docEntries, duplicates: docDuplicates } = extractDocCommands(docSourcesPath);
+		const seenDocCommands = new Set<string>();
+		const docDuplicates: string[] = [];
+		for (const entry of DOC_COMMANDS) {
+			if (seenDocCommands.has(entry.command)) docDuplicates.push(entry.command);
+			seenDocCommands.add(entry.command);
+		}
 		expect(
 			docDuplicates,
-			`Duplicate commands in DOC_COMMANDS (${docSourcesPath}): ${docDuplicates.join(", ")}`,
+			`Duplicate commands in DOC_COMMANDS (services/pika/web/docs/sources.ts): ${docDuplicates.join(", ")}`,
 		).toEqual([]);
 
 		const discoveredNames = [...new Set(allDiscovered.map((item) => item.command))].sort();
-		const documentedNames = docEntries.map((item) => item.command).sort();
+		const documentedNames = DOC_COMMANDS.map((item) => item.command).sort();
 		const { missingFromDocs, staleInDocs } = diffCommandParity(discoveredNames, documentedNames);
 
 		expect(
@@ -1254,7 +1028,7 @@ describe("collection manifest contracts", () => {
 		).toEqual([]);
 		expect(documentedNames).toEqual(discoveredNames);
 
-		const documentedByCommand = new Map(docEntries.map((entry) => [entry.command, entry.extension]));
+		const documentedByCommand = new Map(DOC_COMMANDS.map((entry) => [entry.command, entry.extension]));
 		const extensionMismatches: string[] = [];
 		for (const item of allDiscovered) {
 			if (!item.extension) continue;
@@ -1375,40 +1149,5 @@ describe("command parity helpers", () => {
 		expect(() => discoverRegisteredCommandsFromSources(files)).toThrow(
 			/Could not statically resolve registerCommand/,
 		);
-	});
-
-	it("extracts DOC_COMMANDS from mapped tuple arrays and direct object literals and flags duplicates", () => {
-		const mapped = extractDocCommandsFromSource(
-			`
-			const commandEntries: [string, string, string][] = [
-				["foo", "ext-a", "Foo"],
-				["bar", "ext-b", "Bar"],
-				["foo", "ext-a", "Duplicate"],
-			];
-			export const DOC_COMMANDS = commandEntries.map(([command, extension, description]) => ({
-				command: \`/\${command}\`,
-				extension,
-				description,
-			}));
-			`,
-			"sources.ts",
-		);
-		expect(mapped.entries).toEqual([
-			{ command: "/foo", extension: "ext-a" },
-			{ command: "/bar", extension: "ext-b" },
-			{ command: "/foo", extension: "ext-a" },
-		]);
-		expect(mapped.duplicates).toEqual(["/foo"]);
-
-		const literal = extractDocCommandsFromSource(
-			`
-			export const DOC_COMMANDS = [
-				{ command: "/baz", extension: "ext-c", description: "Baz" },
-			];
-			`,
-			"sources.ts",
-		);
-		expect(literal.entries).toEqual([{ command: "/baz", extension: "ext-c" }]);
-		expect(literal.duplicates).toEqual([]);
 	});
 });

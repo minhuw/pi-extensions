@@ -1,4 +1,4 @@
-import type { DocCommand, DocPage } from "../src/docs/types";
+import type { DocCommand, DocPage } from "../src/docs/types.ts";
 
 type Source = Pick<DocPage, "source" | "slug" | "title" | "description" | "section">;
 
