@@ -2476,18 +2476,12 @@ impl Relay {
         let mut notified_targets: Vec<(Target, String)> = Vec::new();
         let mut resolved_ids: Vec<String> = Vec::new();
         let mut named = vec![false; tokens.len()];
-        let mut refreshed_members: Vec<RoomMember> = Vec::new();
         {
-            let Inner { rooms, online, remembered, queues, .. } = &mut *inner;
+            let Inner { rooms, online, remembered, queues, .. } = &*inner;
             let now_inst = Instant::now();
-            if let Some(room) = rooms.get_mut(&room_name) {
-                for member in room.members.values_mut() {
+            if let Some(room) = rooms.get(&room_name) {
+                for member in room.members.values() {
                     let online = online.get(&member.session_id);
-                    if let Some(online) = online
-                        && member.refresh(online)
-                    {
-                        refreshed_members.push(member.clone());
-                    }
                     let mut matched = mention_all;
                     for (token, named) in tokens.iter().zip(named.iter_mut()) {
                         if !everyone(token) && member.matches_mention(token, online) {
@@ -2516,8 +2510,30 @@ impl Relay {
                 }
             }
         }
-        for member in refreshed_members {
-            inner.persist(PersistOp::UpsertRoomMember { room: room_name.clone(), member });
+
+        // Recheck the final frame size after expanding mentions (e.g. `@all` or aliases) into full session IDs.
+        let parts = (draft.text.as_str(), draft.urgent, &draft.reply_to, draft.hops);
+        if message_frame_with_room(&id, &sender, parts, Some(&room_name), &resolved_ids, now, &inner.names).len()
+            > config.max_frame_bytes
+        {
+            let event = Event {
+                id,
+                at: now,
+                from: sender,
+                to: room_target,
+                room: Some(room_name),
+                mentions: Vec::new(),
+                status: Status::Rejected,
+                reason: Some(Reason::TooLarge),
+                delivered_at: None,
+                urgent: draft.urgent,
+                reply_to: draft.reply_to,
+                hops: draft.hops,
+                text: cut_bytes(&draft.text, config.max_text_bytes).to_owned(),
+            };
+            inner.record(event, config.event_ring);
+            inner.answer(reply, Outcome::Rejected(Reason::TooLarge));
+            return;
         }
 
         let unmatched: Vec<String> = (tokens.into_iter().zip(named))
@@ -2525,29 +2541,43 @@ impl Relay {
             .map(|(token, _)| token)
             .collect();
         let notified: Vec<Target> = notified_targets.iter().map(|(t, _)| t.clone()).collect();
+        let mut refreshed_members: Vec<RoomMember> = Vec::new();
         let mut room_persistence = None;
-        if let Some(room) = inner.rooms.get_mut(&room_name) {
-            let seq = room.next_seq;
-            room.next_seq += 1;
-            room.updated_at = now;
-            if room.messages.len() >= MAX_ROOM_MESSAGES {
-                room.messages.pop_front();
+        {
+            let Inner { rooms, online, .. } = &mut *inner;
+            if let Some(room) = rooms.get_mut(&room_name) {
+                for member in room.members.values_mut() {
+                    if let Some(online) = online.get(&member.session_id)
+                        && member.refresh(online)
+                    {
+                        refreshed_members.push(member.clone());
+                    }
+                }
+                let seq = room.next_seq;
+                room.next_seq += 1;
+                room.updated_at = now;
+                if room.messages.len() >= MAX_ROOM_MESSAGES {
+                    room.messages.pop_front();
+                }
+                let room_msg = RoomMessage {
+                    id: id.clone(),
+                    seq,
+                    room: room_name.clone(),
+                    from: sender.clone(),
+                    text: cut_bytes(&draft.text, config.max_text_bytes).to_owned(),
+                    mentions: resolved_ids.clone(),
+                    notified: notified.clone(),
+                    urgent: draft.urgent,
+                    reply_to: draft.reply_to.clone(),
+                    hops: draft.hops,
+                    at: now,
+                };
+                room.messages.push_back(room_msg.clone());
+                room_persistence = Some((RoomRow::from_room(room), room_msg));
             }
-            let room_msg = RoomMessage {
-                id: id.clone(),
-                seq,
-                room: room_name.clone(),
-                from: sender.clone(),
-                text: cut_bytes(&draft.text, config.max_text_bytes).to_owned(),
-                mentions: resolved_ids.clone(),
-                notified: notified.clone(),
-                urgent: draft.urgent,
-                reply_to: draft.reply_to.clone(),
-                hops: draft.hops,
-                at: now,
-            };
-            room.messages.push_back(room_msg.clone());
-            room_persistence = Some((RoomRow::from_room(room), room_msg));
+        }
+        for member in refreshed_members {
+            inner.persist(PersistOp::UpsertRoomMember { room: room_name.clone(), member });
         }
         if let Some((room_row, room_msg)) = room_persistence {
             inner.persist(PersistOp::UpsertRoom(room_row));

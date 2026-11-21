@@ -1518,6 +1518,99 @@ async fn a_message_frame_over_64_kib_is_too_large() {
 }
 
 #[tokio::test]
+async fn a_room_message_frame_over_64_kib_after_mention_expansion_is_too_large() {
+    let s = server().await;
+    let (mut a, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    let (mut b, _) = Client::online(&s, &s.desktop, "sess-b").await;
+
+    // Record enough additional room members that expanding `@all` into full session IDs adds > 2.5 KiB.
+    let extra_ids: Vec<String> =
+        (0..60).map(|i| format!("member-session-id-padding-for-expansion-{i:03}")).collect();
+    let streams: Vec<Value> = extra_ids
+        .iter()
+        .map(|id| {
+            let line = json!({
+                "type": "session", "version": 3, "id": id,
+                "timestamp": "2026-10-20T09:00:00.000Z", "cwd": "/home/me/code/widgets",
+            })
+            .to_string();
+            stream(&format!("session:{id}"), "session", 0, &[line])
+        })
+        .collect();
+    let batch: Batch = serde_json::from_value(json!({ "streams": streams })).unwrap();
+    pika::ingest::apply(&s.env.store, DEVICE, &batch).unwrap();
+
+    let mut members = vec!["sess-a".to_owned(), "sess-b".to_owned()];
+    members.extend(extra_ids);
+    let created = http(
+        &s.app,
+        post("/api/v1/relay/rooms", json!({ "name": "crowd", "members": members }), None),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK);
+
+    // 10,700 control characters serialize to 64,200 bytes in JSON: under 64 KiB before mention expansion,
+    // over 64 KiB once `@all` expands to all 61 other members' session IDs.
+    let body = escaped_text(10_700, 0);
+    let ws_frame = json!({
+        "type": "send",
+        "clientId": "r1",
+        "room": "crowd",
+        "text": format!("@all {body}"),
+        "hops": 1,
+    });
+    assert!(ws_frame.to_string().len() <= 64 * 1024);
+    let rejected_ws = a.relay(ws_frame).await;
+    assert_eq!((&rejected_ws["status"], &rejected_ws["reason"]), (&json!("rejected"), &json!("too_large")));
+
+    let rejected_web = http(
+        &s.app,
+        post("/api/v1/relay/messages", json!({ "room": "crowd", "text": &body, "mentions": ["all"] }), None),
+    )
+    .await;
+    assert_eq!(
+        (rejected_web.status, rejected_web.json()),
+        (StatusCode::BAD_REQUEST, json!({ "error": "too_large" }))
+    );
+
+    // Neither rejected send mutated room history, queued notifications, or recorded a delivered event.
+    let detail = http(&s.app, get("/api/v1/relay/rooms/crowd", None, None)).await;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_eq!(detail.json()["messages"], json!([]));
+    assert_eq!(s.state.relay.queued(), 0);
+    let evs = events(&s, "").await;
+    assert_eq!(evs.len(), 2);
+    assert!(
+        evs.iter().all(|e| e["status"] == "rejected" && e["reason"] == "too_large" && e["room"] == "crowd"),
+        "{evs:?}"
+    );
+
+    // The same body mentioning only `@sess-b` stays under 64 KiB, succeeds as seq 1, and is the first frame `b` gets.
+    let ok_text = format!("@sess-b {body}");
+    a.send(json!({
+        "type": "send",
+        "clientId": "r2",
+        "room": "crowd",
+        "text": ok_text,
+        "hops": 1,
+    }))
+    .await;
+    let sent = a.next().await;
+    assert_eq!((&sent["type"], &sent["status"], &sent["room"]), (&json!("sent"), &json!("delivered"), &json!("crowd")));
+    let pushed_b = b.next().await;
+    assert_eq!(
+        (&pushed_b["type"], &pushed_b["room"], &pushed_b["mentions"], &pushed_b["text"]),
+        (&json!("message"), &json!("crowd"), &json!(["sess-b"]), &json!(ok_text))
+    );
+    b.send(json!({ "type": "ack", "id": pushed_b["id"] })).await;
+
+    let detail_after = http(&s.app, get("/api/v1/relay/rooms/crowd", None, None)).await.json();
+    let msgs = detail_after["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0]["seq"], 1);
+}
+
+#[tokio::test]
 async fn a_message_frame_of_exactly_64_kib_is_accepted() {
     let s = server_with(|c| c.relay.ack_wait = Duration::from_millis(1)).await;
     let (mut b, _) = Client::online(&s, &s.desktop, "sess-b").await;
