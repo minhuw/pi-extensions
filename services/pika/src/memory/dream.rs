@@ -296,61 +296,96 @@ fn held(conn: &Connection, device: &str, id: &str, now: i64) -> Result<Lease, Dr
     load_lease(conn, id)?.filter(|l| l.device_id == device && l.live(now)).ok_or(DreamError::LeaseLost)
 }
 
+/// Distinct non-null raw `sessions.repository` values, read via a loose index scan on `sessions_repo_last`
+/// (`O(distinct repos * log N)` seeks instead of scanning `sessions`).
+pub(crate) const SCOPE_REPOSITORIES_SQL: &str = "WITH RECURSIVE repos(repository) AS (
+     SELECT MIN(repository) FROM sessions WHERE repository IS NOT NULL
+     UNION ALL
+     SELECT (SELECT MIN(repository) FROM sessions WHERE repository IS NOT NULL AND repository > repos.repository)
+     FROM repos WHERE repos.repository IS NOT NULL
+ )
+ SELECT repository FROM repos WHERE repository IS NOT NULL";
+
+macro_rules! scope_sessions_sql {
+    ($filter:literal, $limit:literal) => {
+        concat!(
+            "WITH RECURSIVE dream(id) AS (
+                 SELECT s.id FROM session_links l JOIN sessions s ON s.sid = l.sid WHERE l.agent_type = 'memory-dream'
+                 UNION SELECT c.id FROM sessions c JOIN dream d ON c.parent_session_id = d.id
+             )
+             SELECT s.id, s.title, s.project, s.last_at, s.entry_count - 1 AS to_seq, COALESCE(c.seq, -1) AS checkpoint
+             FROM sessions s
+             LEFT JOIN memory_checkpoints c ON c.scope_key = ?1 AND c.session_id = s.id
+             WHERE ",
+            $filter,
+            " AND s.entry_count > 0
+               AND (s.entry_count - 1) > COALESCE(c.seq, -1)
+               AND (s.parent_session_id IS NULL OR s.link IS NULL)
+               AND s.id NOT IN (SELECT id FROM dream)
+             ORDER BY s.last_at, s.id
+             LIMIT ",
+            $limit
+        )
+    };
+}
+
+pub(crate) const SCOPE_LOCAL_SESSIONS_SQL: &str = scope_sessions_sql!("s.device = ?2 AND s.project = ?3", "?4");
+pub(crate) const SCOPE_REPO_ONE_SESSIONS_SQL: &str =
+    scope_sessions_sql!("s.repository IS NOT NULL AND s.repository = ?2", "?3");
+pub(crate) const SCOPE_REPO_MANY_SESSIONS_SQL: &str =
+    scope_sessions_sql!("s.repository IS NOT NULL AND s.repository IN (SELECT value FROM json_each(?2))", "?3");
+
+fn dream_session_row(r: &rusqlite::Row) -> rusqlite::Result<DreamSession> {
+    let title: Option<String> = r.get(1)?;
+    let checkpoint: i64 = r.get(5)?;
+    Ok(DreamSession {
+        id: r.get(0)?,
+        title: title.map(|t| scrub_cut_text(&t).into_owned()),
+        project: r.get(2)?,
+        last_at: r.get(3)?,
+        from_seq: checkpoint + 1,
+        to_seq: r.get(4)?,
+    })
+}
+
 /// The scope's sessions with entries past their checkpoint, oldest activity first, at most `DREAM_SESSION_LIMIT`:
 /// for a `repo:` scope the sessions whose repository normalizes to its URL, for a `local:` scope the sessions of its
 /// project recorded from its device. Child sessions, whose session link names their parent (subagents, Herder steps,
 /// tickets), are not scope sessions: their parent's transcript holds their reports. Forks, whose parent only their
 /// header names, are. Nor are dream sessions (session-link `agentType` `memory-dream`) and their descendants.
 pub fn scope_sessions(conn: &Connection, key: &str) -> rusqlite::Result<Vec<DreamSession>> {
-    let (filter, repository, local) = if let Some(url) = key.strip_prefix("repo:") {
-        ("s.repository IS NOT NULL", Some(url), None)
-    } else if let Some((project, device)) = key.strip_prefix("local:").and_then(|rest| rest.rsplit_once('@')) {
-        ("s.project = ?3 AND s.device = ?4", None, Some((project, device)))
-    } else {
-        return Ok(Vec::new());
-    };
-    let (project, device) = local.unzip();
-    let sql = format!(
-        "WITH RECURSIVE dream(id) AS (
-             SELECT s.id FROM session_links l JOIN sessions s ON s.sid = l.sid WHERE l.agent_type = ?2
-             UNION SELECT c.id FROM sessions c JOIN dream d ON c.parent_session_id = d.id
-         )
-         SELECT id, title, project, last_at, repository, to_seq, checkpoint FROM (
-             SELECT s.id, s.title, s.project, s.last_at, s.repository,
-                 (SELECT MAX(e.seq) FROM entries e WHERE e.sid = s.sid) AS to_seq,
-                 COALESCE((SELECT c.seq FROM memory_checkpoints c WHERE c.scope_key = ?1 AND c.session_id = s.id), -1)
-                     AS checkpoint
-             FROM sessions s WHERE {filter} AND (s.parent_session_id IS NULL OR s.link IS NULL)
-                 AND s.id NOT IN (SELECT id FROM dream)
-         ) WHERE to_seq > checkpoint ORDER BY last_at, id"
-    );
-    let mut stmt = conn.prepare_cached(&sql)?;
-    let mut rows = match local {
-        Some(_) => stmt.query(params![key, AGENT_TYPE, project, device])?,
-        None => stmt.query(params![key, AGENT_TYPE])?,
-    };
-    let mut sessions = Vec::new();
-    while sessions.len() < DREAM_SESSION_LIMIT
-        && let Some(r) = rows.next()?
-    {
-        if let Some(url) = repository {
-            let theirs: String = r.get(4)?;
-            if super::normalize_repository(&theirs).as_deref() != Some(url) {
-                continue;
+    let limit = DREAM_SESSION_LIMIT as i64;
+    if let Some(url) = key.strip_prefix("repo:") {
+        let mut repos_stmt = conn.prepare_cached(SCOPE_REPOSITORIES_SQL)?;
+        let raw_repos = repos_stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut matched = Vec::new();
+        for raw in raw_repos {
+            let raw = raw?;
+            if super::normalize_repository(&raw).as_deref() == Some(url) {
+                matched.push(raw);
             }
         }
-        let title: Option<String> = r.get(1)?;
-        let checkpoint: i64 = r.get(6)?;
-        sessions.push(DreamSession {
-            id: r.get(0)?,
-            title: title.map(|t| scrub_cut_text(&t).into_owned()),
-            project: r.get(2)?,
-            last_at: r.get(3)?,
-            from_seq: checkpoint + 1,
-            to_seq: r.get(5)?,
-        });
+        return match matched.as_slice() {
+            [] => Ok(Vec::new()),
+            [single] => conn
+                .prepare_cached(SCOPE_REPO_ONE_SESSIONS_SQL)?
+                .query_map(params![key, single, limit], dream_session_row)?
+                .collect(),
+            many => {
+                let json = serde_json::to_string(many).expect("repository list serializes");
+                conn.prepare_cached(SCOPE_REPO_MANY_SESSIONS_SQL)?
+                    .query_map(params![key, json, limit], dream_session_row)?
+                    .collect()
+            }
+        };
     }
-    Ok(sessions)
+    if let Some((project, device)) = key.strip_prefix("local:").and_then(|rest| rest.rsplit_once('@')) {
+        return conn
+            .prepare_cached(SCOPE_LOCAL_SESSIONS_SQL)?
+            .query_map(params![key, device, project, limit], dream_session_row)?
+            .collect();
+    }
+    Ok(Vec::new())
 }
 
 /// `POST memory/dream/lease`: grants `device` a lease on the project scope the request names, unless a live lease

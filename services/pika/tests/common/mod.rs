@@ -86,6 +86,7 @@ pub const UNDO_STEPS: &[(usize, &str)] = &[
          CREATE INDEX IF NOT EXISTS sessions_root_project ON sessions(project, last_at DESC, id DESC) WHERE parent_session_id IS NULL;
          CREATE INDEX IF NOT EXISTS sessions_root_device_project ON sessions(device, project, last_at DESC, id DESC) WHERE parent_session_id IS NULL;",
     ),
+    (25, "DROP INDEX IF EXISTS session_links_dream; DROP INDEX IF EXISTS sessions_repo_last;"),
 ];
 
 /// Rewinds `conn` from its current `PRAGMA user_version` down to `target_version`, running each intermediate undo step

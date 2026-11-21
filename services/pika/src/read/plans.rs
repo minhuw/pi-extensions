@@ -447,7 +447,9 @@ fn unused_sessions_root_indexes_are_dropped() {
     };
     let conn = Connection::open(dir.path().join("pika.db")).unwrap();
     conn.execute_batch(
-        "CREATE INDEX sessions_root ON sessions(last_at DESC, id DESC) WHERE parent_session_id IS NULL;
+        "DROP INDEX IF EXISTS session_links_dream;
+         DROP INDEX IF EXISTS sessions_repo_last;
+         CREATE INDEX sessions_root ON sessions(last_at DESC, id DESC) WHERE parent_session_id IS NULL;
          CREATE INDEX sessions_root_device ON sessions(device, last_at DESC, id DESC) WHERE parent_session_id IS NULL;
          CREATE INDEX sessions_root_project ON sessions(project, last_at DESC, id DESC) WHERE parent_session_id IS NULL;
          CREATE INDEX sessions_root_device_project ON sessions(device, project, last_at DESC, id DESC) WHERE parent_session_id IS NULL;",
@@ -468,8 +470,169 @@ fn unused_sessions_root_indexes_are_dropped() {
     store
         .read(|conn| {
             let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            assert_eq!(version, 24);
+            assert_eq!(version, 25);
             assert_eq!(present(conn), Vec::<String>::new());
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+}
+
+/// Dream scope discovery uses `session_links_dream` (no full `session_links` scan), `sessions_repo_last` /
+/// `sessions_device_project` (no full `sessions` scan), `LEFT JOIN memory_checkpoints` by primary key, and no
+/// correlated scalar subqueries per row.
+#[test]
+fn dream_scope_sessions_use_indexes_without_duplicate_subqueries() {
+    use crate::memory::dream::{
+        SCOPE_LOCAL_SESSIONS_SQL, SCOPE_REPO_MANY_SESSIONS_SQL, SCOPE_REPO_ONE_SESSIONS_SQL, SCOPE_REPOSITORIES_SQL,
+    };
+    with_conn(|conn| {
+        assert_eq!(
+            plan(conn, SCOPE_REPOSITORIES_SQL, None),
+            [
+                "CO-ROUTINE repos",
+                "SETUP",
+                "SEARCH sessions USING COVERING INDEX sessions_repo_last (repository>?)",
+                "RECURSIVE STEP",
+                "SCAN repos",
+                "CORRELATED SCALAR SUBQUERY 2",
+                "SEARCH sessions USING COVERING INDEX sessions_repo_last (repository>?)",
+                "SCAN repos",
+            ]
+        );
+        let local = plan(conn, SCOPE_LOCAL_SESSIONS_SQL, None);
+        assert_eq!(
+            local,
+            [
+                "SEARCH s USING INDEX sessions_device_project (device=? AND project=?)",
+                "LIST SUBQUERY 3",
+                "MATERIALIZE dream",
+                "SETUP",
+                "SCAN l USING COVERING INDEX session_links_dream",
+                "SEARCH s USING INTEGER PRIMARY KEY (rowid=?)",
+                "RECURSIVE STEP",
+                "SCAN d",
+                "SEARCH c USING INDEX sessions_parent (parent_session_id=?)",
+                "SCAN dream",
+                "CREATE BLOOM FILTER",
+                "SEARCH c USING PRIMARY KEY (scope_key=? AND session_id=?) LEFT-JOIN",
+            ]
+        );
+        let repo_one = plan(conn, SCOPE_REPO_ONE_SESSIONS_SQL, None);
+        assert_eq!(
+            repo_one,
+            [
+                "SEARCH s USING INDEX sessions_repo_last (repository=?)",
+                "LIST SUBQUERY 3",
+                "MATERIALIZE dream",
+                "SETUP",
+                "SCAN l USING COVERING INDEX session_links_dream",
+                "SEARCH s USING INTEGER PRIMARY KEY (rowid=?)",
+                "RECURSIVE STEP",
+                "SCAN d",
+                "SEARCH c USING INDEX sessions_parent (parent_session_id=?)",
+                "SCAN dream",
+                "CREATE BLOOM FILTER",
+                "SEARCH c USING PRIMARY KEY (scope_key=? AND session_id=?) LEFT-JOIN",
+            ]
+        );
+        let repo_many = plan(
+            conn,
+            SCOPE_REPO_MANY_SESSIONS_SQL,
+            Some(vec![
+                Sql::Text("repo:https://github.com/a/b".into()),
+                Sql::Text("[\"https://github.com/a/b\",\"https://GitHub.com/a/b.git\"]".into()),
+                Sql::Integer(20),
+            ]),
+        );
+        assert_eq!(
+            repo_many,
+            [
+                "SEARCH s USING INDEX sessions_repo_last (repository=?)",
+                "LIST SUBQUERY 3",
+                "SCAN json_each VIRTUAL TABLE INDEX 1:",
+                "LIST SUBQUERY 4",
+                "MATERIALIZE dream",
+                "SETUP",
+                "SCAN l USING COVERING INDEX session_links_dream",
+                "SEARCH s USING INTEGER PRIMARY KEY (rowid=?)",
+                "RECURSIVE STEP",
+                "SCAN d",
+                "SEARCH c USING INDEX sessions_parent (parent_session_id=?)",
+                "SCAN dream",
+                "CREATE BLOOM FILTER",
+                "SEARCH c USING PRIMARY KEY (scope_key=? AND session_id=?) LEFT-JOIN",
+                "USE TEMP B-TREE FOR ORDER BY",
+            ]
+        );
+        for steps in [&local, &repo_one, &repo_many] {
+            assert!(!steps.iter().any(|s| s == "SCAN l" || s == "SCAN s" || s == "SCAN sessions"), "{steps:?}");
+            assert!(!steps.iter().any(|s| s.contains("CORRELATED SCALAR SUBQUERY")), "{steps:?}");
+        }
+    });
+}
+
+/// Unrelated sessions and non-dream `session_links` must not enlarge `scope_sessions` work.
+#[test]
+fn dream_scope_queries_are_bounded_by_their_scope() {
+    use crate::memory::dream::{SCOPE_LOCAL_SESSIONS_SQL, SCOPE_REPO_ONE_SESSIONS_SQL, SCOPE_REPOSITORIES_SQL};
+    use rusqlite::{StatementStatus, params};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(dir.path()).unwrap();
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sessions (sid, id, device, project, repository, last_at, entry_count)
+                 VALUES (1, 'target-repo', 'd1', 'widgets', 'https://github.com/me/widgets', 1000, 3),
+                        (2, 'target-local', 'd1', 'local-only', NULL, 1000, 2),
+                        (3, 'other-0', 'd2', 'other', 'https://github.com/me/other', 1000, 2)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO session_links (sid, source, agent_type) VALUES (3, 'entry', 'worker')",
+                [],
+            )?;
+
+            let measure = || -> rusqlite::Result<(i32, i32, i32)> {
+                let mut repos = tx.prepare(SCOPE_REPOSITORIES_SQL)?;
+                let repo_list: Vec<String> = repos.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+                assert_eq!(repo_list, ["https://github.com/me/other", "https://github.com/me/widgets"]);
+                assert_eq!(repos.get_status(StatementStatus::FullscanStep), 0);
+                let repos_steps = repos.get_status(StatementStatus::VmStep);
+
+                let mut repo_one = tx.prepare(SCOPE_REPO_ONE_SESSIONS_SQL)?;
+                let repo_ids: Vec<String> = repo_one
+                    .query_map(params!["repo:https://github.com/me/widgets", "https://github.com/me/widgets", 20_i64], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                assert_eq!(repo_ids, ["target-repo"]);
+                assert_eq!(repo_one.get_status(StatementStatus::FullscanStep), 0);
+                let repo_steps = repo_one.get_status(StatementStatus::VmStep);
+
+                let mut local = tx.prepare(SCOPE_LOCAL_SESSIONS_SQL)?;
+                let local_ids: Vec<String> = local
+                    .query_map(params!["local:local-only@d1", "d1", "local-only", 20_i64], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                assert_eq!(local_ids, ["target-local"]);
+                assert_eq!(local.get_status(StatementStatus::FullscanStep), 0);
+                let local_steps = local.get_status(StatementStatus::VmStep);
+
+                Ok((repos_steps, repo_steps, local_steps))
+            };
+
+            let before = measure()?;
+            for i in 1..=5_000_i64 {
+                let sid = 10 + i;
+                tx.execute(
+                    "INSERT INTO sessions (sid, id, device, project, repository, last_at, entry_count)
+                     VALUES (?1, ?2, 'd2', 'other', 'https://github.com/me/other', ?3, 2)",
+                    params![sid, format!("other-{i}"), 1000 + i],
+                )?;
+                tx.execute(
+                    "INSERT INTO session_links (sid, source, agent_type) VALUES (?1, 'entry', 'worker')",
+                    [sid],
+                )?;
+            }
+            assert_eq!(measure()?, before, "unrelated sessions and links must not enlarge dream scope queries");
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap();

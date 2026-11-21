@@ -742,7 +742,7 @@ fn an_older_database_gains_the_dream_tables() {
     rewind(&conn, 14);
     drop(conn);
     let store = Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(22));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(25));
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     assert_eq!(one(&store, "SELECT sources FROM memory_notes")["sources"], json!("[]"));
     let revision = one(&store, "SELECT provenance, sources, batch_id FROM memory_revisions");
@@ -1657,9 +1657,55 @@ fn an_older_database_gains_commit_ids() {
     rewind(&conn, 15);
     drop(conn);
     let store = Store::open(&data).unwrap();
-    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(22));
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(25));
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     assert_eq!(one(&store, "SELECT commit_id FROM memory_dream_batches")["commit_id"], Value::Null);
     let indexes = "SELECT COUNT(*) AS n FROM sqlite_master WHERE name IN ('memory_dream_batches_commit', 'memory_dream_batches_lease')";
     assert_eq!(one(&store, indexes)["n"], json!(2));
+}
+
+/// Schema version 25 adds `session_links_dream` and `sessions_repo_last` to a version 24 database without a reindex;
+/// `scope_sessions` lists both single-URL and multi-variant repository scopes and local scopes after the upgrade.
+#[test]
+fn an_older_database_gains_dream_scope_indexes() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let derived_gen = {
+        let store = Store::open(&data).unwrap();
+        device(&store, DEVICE);
+        repo_session(&store, "s1", BASE, 2);
+        let alt = [header("s2", BASE + HOUR, None), prompts(BASE + HOUR, 0, 1)].concat();
+        upload_as(&store, DEVICE, "s2", &[], &alt, repo_meta("s2", "https://GitHub.com/me/widgets.git"));
+        let local_lines = [header("l1", BASE, None), prompts(BASE, 0, 1)].concat();
+        upload_as(&store, DEVICE, "l1", &[], &local_lines, json!({ "sessionId": "l1", "cwd": "/x", "project": "gadgets" }));
+        store.setting(pika::store::DERIVED_GENERATION).unwrap()
+    };
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    rewind(&conn, 24);
+    let present = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('session_links_dream', 'sessions_repo_last')";
+    assert_eq!(conn.query_row(present, [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    conn.execute_batch(
+        "CREATE TRIGGER no_v25_reindex BEFORE DELETE ON sessions
+         BEGIN SELECT RAISE(ABORT, 'reindexed during v25 upgrade'); END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::open(&data).unwrap();
+    assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(25));
+    assert_eq!(store.setting(pika::store::NEEDS_REINDEX).unwrap(), None);
+    assert_eq!(store.setting(pika::store::DERIVED_GENERATION).unwrap(), derived_gen);
+    let indexes = "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN ('session_links_dream', 'sessions_repo_last')";
+    assert_eq!(one(&store, indexes)["n"], json!(2));
+
+    let repo_listed = store.read(|conn| pika::memory::dream::scope_sessions(conn, KEY)).unwrap();
+    let repo_ids: Vec<&str> = repo_listed.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(repo_ids, ["s1", "s2"]);
+    assert_eq!((repo_listed[0].from_seq, repo_listed[0].to_seq), (0, 2));
+    assert_eq!((repo_listed[1].from_seq, repo_listed[1].to_seq), (0, 1));
+
+    let local_listed = store.read(|conn| pika::memory::dream::scope_sessions(conn, LOCAL)).unwrap();
+    let local_ids: Vec<&str> = local_listed.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(local_ids, ["l1"]);
+    assert_eq!((local_listed[0].from_seq, local_listed[0].to_seq), (0, 1));
 }
