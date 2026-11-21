@@ -294,7 +294,13 @@ export default function sessionName(pi: ExtensionAPI): void {
 		void name(ctx, exchange, contextTokens(ctx)?.tokens ?? null, controller.signal);
 	});
 
-	pi.on("session_shutdown", () => {
+	function reset(): void {
 		controller?.abort();
-	});
+		controller = undefined;
+		firstTried = false;
+		failedAt = undefined;
+	}
+
+	pi.on("session_start", reset);
+	pi.on("session_shutdown", reset);
 }

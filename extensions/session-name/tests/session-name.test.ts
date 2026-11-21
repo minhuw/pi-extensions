@@ -80,10 +80,12 @@ function harness(options: {
 	const emit = async (event: string, payload: unknown = {}) => {
 		for (const handler of handlers.get(event) ?? []) await handler(payload, ctx);
 	};
+	const setName = (next: string | undefined) => { name = next; };
+	const setEntries = (next: unknown[]) => { entries.splice(0, entries.length, ...(next as never[])); };
 	const setUsage = (next: typeof usage) => { usage = next; };
 	const autoEntries = () => entries.filter((entry: { type: string; customType?: string }) => entry.type === "custom" && entry.customType === AUTO_ENTRY)
 		.map((entry: { data: unknown }) => entry.data);
-	return { pi, ctx, complete, notify, emit, entries, setUsage, autoEntries, name: () => name };
+	return { pi, ctx, complete, notify, emit, entries, setName, setEntries, setUsage, autoEntries, name: () => name };
 }
 
 /** Lets the fire-and-forget naming request finish. */
@@ -426,4 +428,106 @@ it("warns once per failed refresh and retries only after another step of growth"
 	expect(h.complete).toHaveBeenCalledTimes(3);
 	expect(h.name()).toBe("Goal retry backoff");
 	expect(h.notify).toHaveBeenCalledOnce();
+});
+
+it("resets firstTried on session_shutdown and session_start so later sessions still auto-name", async () => {
+	const replies = [new Error("503 upstream"), "Second session title", "Third session title"];
+	const h = harness({
+		complete: async () => {
+			const next = replies.shift();
+			if (next instanceof Error) throw next;
+			return reply(next!);
+		},
+	});
+
+	// First session fails naming, setting firstTried = true.
+	await settle(h, 1_000);
+	expect(h.name()).toBeUndefined();
+	expect(h.complete).toHaveBeenCalledTimes(1);
+
+	// Shutting down resets closure state so the next session auto-names cleanly.
+	await h.emit("session_shutdown", { reason: "quit" });
+	h.setName(undefined);
+	h.setEntries(firstRun);
+	await settle(h, 1_000);
+	expect(h.name()).toBe("Second session title");
+	expect(h.complete).toHaveBeenCalledTimes(2);
+
+	// Starting a new session directly (session_start) also resets firstTried.
+	await h.emit("session_start", { reason: "new" });
+	h.setName(undefined);
+	h.setEntries(firstRun);
+	await settle(h, 1_000);
+	expect(h.name()).toBe("Third session title");
+	expect(h.complete).toHaveBeenCalledTimes(3);
+});
+
+it("aborts and clears an in-flight controller on session_shutdown and session_start", async () => {
+	const signals: Array<AbortSignal | undefined> = [];
+	const resolvers: Array<(message: AssistantMessage) => void> = [];
+	const h = harness({
+		complete: (_model, _context, options) => new Promise((resolve) => {
+			signals.push(options.signal);
+			resolvers.push(resolve);
+		}),
+	});
+
+	// In-flight request aborted on session_shutdown must not block the next session.
+	await h.emit("agent_settled", { aborted: false });
+	await drain();
+	await h.emit("session_shutdown", { reason: "quit" });
+	expect(signals[0]?.aborted).toBe(true);
+
+	h.setName(undefined);
+	h.setEntries(firstRun);
+	await h.emit("agent_settled", { aborted: false });
+	await drain();
+	expect(h.complete).toHaveBeenCalledTimes(2);
+
+	// Settling the aborted first request must not clobber the active second request.
+	resolvers[0]!(reply("Stale first title"));
+	await drain();
+	expect(h.name()).toBeUndefined();
+
+	// In-flight request aborted on session_start must also clear controller for the new session.
+	await h.emit("session_start", { reason: "new" });
+	expect(signals[1]?.aborted).toBe(true);
+	resolvers[1]!(reply("Stale second title"));
+	await drain();
+
+	h.setName(undefined);
+	h.setEntries(firstRun);
+	await h.emit("agent_settled", { aborted: false });
+	await drain();
+	expect(h.complete).toHaveBeenCalledTimes(3);
+	resolvers[2]!(reply("Third session title"));
+	await drain();
+	expect(h.name()).toBe("Third session title");
+});
+
+it("resets failedAt on session_shutdown and session_start so later sessions refresh cleanly", async () => {
+	const h = refreshing([new Error("503 upstream"), "Refreshed after shutdown", new Error("503 upstream"), "Refreshed after start"]);
+
+	// Session 1 names at 1_000 and fails refresh at 150_000, setting failedAt = 150_000.
+	await settle(h, 1_000);
+	await settle(h, 150_000);
+	expect(h.complete).toHaveBeenCalledTimes(2);
+
+	// Session 2 after session_shutdown has baseline 10_000 and usage 60_000 (< 150_000 + 50_000); it must refresh.
+	await h.emit("session_shutdown", { reason: "quit" });
+	h.setName("Resumed title");
+	h.setEntries([...firstRun, { type: "custom", customType: AUTO_ENTRY, data: { name: "Resumed title", tokens: 10_000 } }]);
+	await settle(h, 60_000);
+	expect(h.complete).toHaveBeenCalledTimes(3);
+	expect(h.name()).toBe("Refreshed after shutdown");
+
+	// Fail refresh at 160_000, then switch via session_start and verify failedAt is cleared.
+	await settle(h, 160_000);
+	expect(h.complete).toHaveBeenCalledTimes(4);
+	await h.emit("session_start", { reason: "resume" });
+	h.setName("Another resumed title");
+	h.setEntries([...firstRun, { type: "custom", customType: AUTO_ENTRY, data: { name: "Another resumed title", tokens: 10_000 } }]);
+	await settle(h, 60_000);
+	expect(h.complete).toHaveBeenCalledTimes(5);
+	expect(h.name()).toBe("Refreshed after start");
 });
