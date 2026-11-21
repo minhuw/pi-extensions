@@ -183,9 +183,38 @@ export interface LoginControl {
 /** A control for a lone login: only the command's signal, when pi gives one, cancels it. */
 const lone = (ctx: ExtensionCommandContext): LoginControl => ({ signal: ctx.signal ?? new AbortController().signal, isCurrent: () => true, isOpen: () => true });
 
-async function promptToken(ctx: ExtensionCommandContext, url: string, signal: AbortSignal): Promise<string | undefined> {
+export async function promptToken(ctx: ExtensionCommandContext, url: string, signal?: AbortSignal): Promise<string | undefined> {
+	if (signal?.aborted) return undefined;
 	const title = `pika token for ${url}`;
-	if (ctx.mode === "tui") return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => new MaskedInput(title, tui, theme, done));
+	if (ctx.mode === "tui") {
+		let cleanup: (() => void) | undefined;
+		try {
+			const answer = await ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
+				let settled = false;
+				const finish = (token: string | undefined) => {
+					if (settled) return;
+					settled = true;
+					cleanup?.();
+					done(token);
+				};
+				const component = new MaskedInput(title, tui, theme, finish);
+				if (signal?.aborted) {
+					finish(undefined);
+				} else if (signal) {
+					const onAbort = () => finish(undefined);
+					cleanup = () => {
+						cleanup = undefined;
+						signal.removeEventListener("abort", onAbort);
+					};
+					signal.addEventListener("abort", onAbort, { once: true });
+				}
+				return component;
+			});
+			return signal?.aborted ? undefined : answer;
+		} finally {
+			cleanup?.();
+		}
+	}
 	return ctx.ui.input(`${title} (pika cannot mask it in this client)`, undefined, { signal });
 }
 

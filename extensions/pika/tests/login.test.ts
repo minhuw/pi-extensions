@@ -1,13 +1,14 @@
+import { getEventListeners } from "node:events";
 import { existsSync } from "node:fs";
 import { appendFile, chmod, lstat, mkdir, readdir, readFile, readlink, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, visibleWidth } from "@earendil-works/pi-tui";
 import { loadConfig, normalizeUrl } from "../config.ts";
 import pikaExtension, { CHILD_SESSION_HOOKS, statusText, type ChildSessionHook } from "../index.ts";
-import { isPlainRemote, login, MaskedInput, PASTE, URL_TITLE } from "../login.ts";
+import { isPlainRemote, login, MaskedInput, PASTE, promptToken, URL_TITLE } from "../login.ts";
 import { currentUploader } from "../uploader.ts";
 import { MockIngest, TOKEN } from "./support/ingest-server.ts";
 import { readText, startSession, waitFor, Workspace, type Harness } from "./support/runtime.ts";
@@ -237,6 +238,37 @@ describe("/pika login", () => {
 		expect(await fileText()).toBe(before);
 		await expectNoSecret(cancelled, [WRONG.slice(5, 11)]);
 	}, 20_000);
+
+	it("settles the TUI MaskedInput token prompt immediately when its AbortSignal aborts during /pika login", async () => {
+		const ui = new ScriptedUI();
+		ui.choices = [PASTE];
+		ui.keys = [[]];
+		const controller = new AbortController();
+		const addSpy = vi.spyOn(controller.signal, "addEventListener");
+		const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+		const ctx = { hasUI: true, mode: "tui", ui: ui.context() } as unknown as ExtensionCommandContext;
+
+		const pending = login(ctx, configFile(), ingest.url, undefined, undefined, {
+			signal: controller.signal,
+			isCurrent: () => !controller.signal.aborted,
+			isOpen: () => true,
+		});
+		await waitFor(() => ui.rendered.includes(`pika token for ${ingest.url}`), 2_000, "TUI token prompt to open");
+		expect(getEventListeners(controller.signal, "abort")).toHaveLength(1);
+		expect(addSpy).toHaveBeenCalledWith("abort", expect.any(Function), { once: true });
+
+		controller.abort("a newer /pika login started");
+		const result = await Promise.race([
+			pending,
+			new Promise<string>((resolve) => setTimeout(() => resolve("timed-out"), 500)),
+		]);
+		expect(result).toBeUndefined();
+		expect(ui.unfinished).toBe(0);
+		expect(ui.last).toEqual({ type: "info", message: "pika login cancelled: a newer /pika login started. Nothing changed." });
+		expect(await fileText()).toBeUndefined();
+		expect(removeSpy).toHaveBeenCalledWith("abort", addSpy.mock.calls[0]![1]);
+		expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+	});
 
 	it("needs a UI", async () => {
 		const notify = vi.fn();
@@ -621,6 +653,150 @@ describe("MaskedInput", () => {
 		const escaped = make();
 		escaped.type("abc", ESC, ENTER);
 		expect(escaped.results).toEqual([undefined]);
+	});
+});
+
+describe("promptToken (TUI AbortSignal)", () => {
+	type CustomFactory = (
+		tui: { requestRender(): void },
+		theme: typeof plainTheme,
+		keybindings: unknown,
+		done: (value: string | undefined) => void,
+	) => Component | Promise<Component>;
+
+	const tuiHarness = () => {
+		let component: Component | undefined;
+		let finish!: (value: string | undefined) => void;
+		const doneCalls: (string | undefined)[] = [];
+		const custom = vi.fn((factory: CustomFactory) => new Promise<string | undefined>((resolve, reject) => {
+			finish = (value) => {
+				doneCalls.push(value);
+				resolve(value);
+			};
+			Promise.resolve(factory({ requestRender: () => {} }, plainTheme, {}, finish))
+				.then((c) => { component = c; })
+				.catch(reject);
+		}));
+		const ctx = { hasUI: true, mode: "tui", ui: { custom } } as unknown as ExtensionCommandContext;
+		return { ctx, custom, doneCalls, component: () => component };
+	};
+
+	it("returns undefined immediately without opening the custom prompt when the signal is already aborted", async () => {
+		const { ctx, custom } = tuiHarness();
+		const controller = new AbortController();
+		controller.abort("already aborted");
+		const addSpy = vi.spyOn(controller.signal, "addEventListener");
+		const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+
+		await expect(promptToken(ctx, "https://h/pika", controller.signal)).resolves.toBeUndefined();
+		expect(custom).not.toHaveBeenCalled();
+		expect(addSpy).not.toHaveBeenCalled();
+		expect(removeSpy).not.toHaveBeenCalled();
+		expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+	});
+
+	it("settles immediately with undefined and removes the abort listener when aborted while open", async () => {
+		const { ctx, custom, doneCalls, component } = tuiHarness();
+		const controller = new AbortController();
+		const addSpy = vi.spyOn(controller.signal, "addEventListener");
+		const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+
+		const pending = promptToken(ctx, "https://h/pika", controller.signal);
+		await waitFor(() => component() !== undefined, 1_000, "MaskedInput to mount");
+		expect(custom).toHaveBeenCalledTimes(1);
+		expect(getEventListeners(controller.signal, "abort")).toHaveLength(1);
+		expect(addSpy).toHaveBeenCalledTimes(1);
+
+		controller.abort("cancelled");
+		const settled = await Promise.race([
+			pending,
+			new Promise<string>((resolve) => setTimeout(() => resolve("timed-out"), 500)),
+		]);
+		expect(settled).toBeUndefined();
+		expect(doneCalls).toEqual([undefined]);
+		expect(removeSpy).toHaveBeenCalledTimes(1);
+		expect(removeSpy).toHaveBeenCalledWith("abort", addSpy.mock.calls[0]![1]);
+		expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+
+		// Late input after abort cannot settle the prompt a second time.
+		component()!.handleInput?.(ENTER);
+		expect(doneCalls).toEqual([undefined]);
+	});
+
+	it("settles immediately with undefined when the signal aborts right before the custom factory runs", async () => {
+		const controller = new AbortController();
+		const addSpy = vi.spyOn(controller.signal, "addEventListener");
+		const doneCalls: (string | undefined)[] = [];
+		const custom = vi.fn((factory: CustomFactory) => new Promise<string | undefined>((resolve, reject) => {
+			controller.abort("raced");
+			Promise.resolve(factory({ requestRender: () => {} }, plainTheme, {}, (value) => {
+				doneCalls.push(value);
+				resolve(value);
+			})).catch(reject);
+		}));
+		const ctx = { hasUI: true, mode: "tui", ui: { custom } } as unknown as ExtensionCommandContext;
+
+		await expect(promptToken(ctx, "https://h/pika", controller.signal)).resolves.toBeUndefined();
+		expect(doneCalls).toEqual([undefined]);
+		expect(addSpy).not.toHaveBeenCalled();
+		expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+	});
+
+	it("cleans up the abort listener on submit, Escape/cancel, and custom UI error", async () => {
+		// Submit path
+		{
+			const { ctx, component } = tuiHarness();
+			const controller = new AbortController();
+			const addSpy = vi.spyOn(controller.signal, "addEventListener");
+			const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+
+			const pending = promptToken(ctx, "https://h/pika", controller.signal);
+			await waitFor(() => component() !== undefined, 1_000, "MaskedInput to mount for submit");
+			expect(getEventListeners(controller.signal, "abort")).toHaveLength(1);
+			component()!.handleInput?.(paste(TOKEN));
+			component()!.handleInput?.(ENTER);
+
+			await expect(pending).resolves.toBe(TOKEN);
+			expect(removeSpy).toHaveBeenCalledTimes(1);
+			expect(removeSpy).toHaveBeenCalledWith("abort", addSpy.mock.calls[0]![1]);
+			expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+		}
+
+		// Escape/cancel path
+		{
+			const { ctx, component } = tuiHarness();
+			const controller = new AbortController();
+			const addSpy = vi.spyOn(controller.signal, "addEventListener");
+			const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+
+			const pending = promptToken(ctx, "https://h/pika", controller.signal);
+			await waitFor(() => component() !== undefined, 1_000, "MaskedInput to mount for cancel");
+			expect(getEventListeners(controller.signal, "abort")).toHaveLength(1);
+			component()!.handleInput?.(ESC);
+
+			await expect(pending).resolves.toBeUndefined();
+			expect(removeSpy).toHaveBeenCalledTimes(1);
+			expect(removeSpy).toHaveBeenCalledWith("abort", addSpy.mock.calls[0]![1]);
+			expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+		}
+
+		// Error path
+		{
+			const controller = new AbortController();
+			const addSpy = vi.spyOn(controller.signal, "addEventListener");
+			const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+			const custom = vi.fn(async (factory: CustomFactory) => {
+				await factory({ requestRender: () => {} }, plainTheme, {}, () => {});
+				expect(getEventListeners(controller.signal, "abort")).toHaveLength(1);
+				throw new Error("custom UI failed");
+			});
+			const ctx = { hasUI: true, mode: "tui", ui: { custom } } as unknown as ExtensionCommandContext;
+
+			await expect(promptToken(ctx, "https://h/pika", controller.signal)).rejects.toThrow("custom UI failed");
+			expect(removeSpy).toHaveBeenCalledTimes(1);
+			expect(removeSpy).toHaveBeenCalledWith("abort", addSpy.mock.calls[0]![1]);
+			expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+		}
 	});
 });
 
