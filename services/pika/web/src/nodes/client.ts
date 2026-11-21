@@ -2,10 +2,22 @@ import { ChannelClosed, NodeChannel, NodeRequestError, type ChannelState } from 
 import { sanitize, type BridgeStatus, type Checkout, type CheckoutSettings, type Identity, type NodeEvent, type NodeInfo, type PaneView, type RequestType, type Requests, type Results, type TerminalInfo } from "./contract";
 import { NodeFiles } from "./files";
 import { clientIdentity, webCryptoAvailable, type KeyStore, type PinnedNode } from "./identity";
-import { NodeSocket, OpenRefused, type NodeSocketOptions, type SocketStatus } from "./socket";
+import { NodeSocket, OpenRefused, type NodeSocketOptions, type SocketCloseInfo, type SocketStatus } from "./socket";
 
 /** Channel closes after which the page opens a new channel on its own; any other close waits for the user. */
 const TRANSIENT = new Set(["disconnected", "node_offline", "client_gone"]);
+
+const FATAL_CLOSE_MESSAGES: Readonly<Record<number, string>> = {
+	4401: "session unauthorized or revoked",
+	4429: "too many node connections",
+	4503: "nodes are unavailable on this server",
+};
+
+function formatFatalClose(close: SocketCloseInfo | undefined): string {
+	if (!close) return "The node socket closed fatally.";
+	const reason = sanitize(close.reason).trim() || FATAL_CLOSE_MESSAGES[close.code] || "connection rejected";
+	return `Closed (${close.code}): ${reason}`;
+}
 
 export type NodeLink =
 	| { kind: "idle" }
@@ -35,9 +47,10 @@ export interface NodeView {
 }
 
 export interface NodesSnapshot {
-	/** `insecure`: no WebCrypto (not a secure context). `failed`: the client key could not be loaded. */
+	/** `insecure`: no WebCrypto (not a secure context). `failed`: the client key could not be loaded. `fatal`: the server closed the socket with a terminal code. */
 	status: "loading" | "insecure" | "failed" | SocketStatus;
 	failure?: string;
+	fatalClose?: SocketCloseInfo;
 	fingerprint?: string;
 	nodes: NodeView[];
 }
@@ -87,6 +100,7 @@ export class NodesClient {
 	#snapshot: NodesSnapshot = { status: "loading", nodes: [] };
 	#status: NodesSnapshot["status"] = "loading";
 	#failure: string | undefined;
+	#fatalClose: SocketCloseInfo | undefined;
 	#disposed = false;
 
 	constructor(options: NodesClientOptions) {
@@ -361,7 +375,10 @@ export class NodesClient {
 		const socket = this.#socket;
 		if (!socket) return;
 		this.#status = socket.status;
-		if (socket.status === "open") {
+		if (socket.status === "fatal") {
+			this.#fatalClose = socket.fatalClose;
+			this.#failure = formatFatalClose(socket.fatalClose);
+		} else if (socket.status === "open") {
 			for (const info of socket.nodes) {
 				const entry = this.#entry(info.id);
 				if (!entry.pin || !info.online) continue;
@@ -521,6 +538,7 @@ export class NodesClient {
 		this.#snapshot = {
 			status: this.#status,
 			...(this.#failure ? { failure: this.#failure } : {}),
+			...(this.#fatalClose ? { fatalClose: this.#fatalClose } : {}),
 			...(this.#identity ? { fingerprint: this.#identity.fingerprint } : {}),
 			nodes: [...online.values()].map((info) => {
 				const entry = this.#entry(info.id);

@@ -34,7 +34,15 @@ export class OpenRefused extends Error {
 	}
 }
 
-export type SocketStatus = "connecting" | "open" | "closed";
+/** Server close codes that stop reconnecting (NODE.md §2): unauthorized/revoked, rate/connection limit, nodes unavailable. */
+export const FATAL_CLOSE_CODES: ReadonlySet<number> = new Set([4401, 4429, 4503]);
+
+export type SocketStatus = "connecting" | "open" | "closed" | "fatal";
+
+export interface SocketCloseInfo {
+	readonly code: number;
+	readonly reason: string;
+}
 
 export interface NodeSocketOptions {
 	create?: (url: string) => WebSocketLike;
@@ -64,8 +72,9 @@ export class NodeSocket {
 	#deadTimer: ReturnType<typeof setTimeout> | undefined;
 	#retryTimer: ReturnType<typeof setTimeout> | undefined;
 	#disposed = false;
+	#fatalClose: SocketCloseInfo | undefined;
 	/** Why the last socket closed, for display. */
-	lastClose: { code: number; reason: string } | undefined;
+	lastClose: SocketCloseInfo | undefined;
 
 	constructor(url: string, options: NodeSocketOptions = {}) {
 		this.url = url;
@@ -76,6 +85,10 @@ export class NodeSocket {
 
 	get status(): SocketStatus {
 		return this.#status;
+	}
+
+	get fatalClose(): SocketCloseInfo | undefined {
+		return this.#fatalClose;
 	}
 
 	get nodes(): readonly NodeInfo[] {
@@ -90,7 +103,9 @@ export class NodeSocket {
 	/** Asks the server for a channel to `node`; rejects with `OpenRefused`. */
 	open(node: string): Promise<ChannelRoute> {
 		const ws = this.#ws;
-		if (!ws || ws.readyState !== OPEN || this.#status !== "open") return Promise.reject(new OpenRefused("disconnected"));
+		if (!ws || ws.readyState !== OPEN || this.#status !== "open") {
+			return Promise.reject(new OpenRefused(this.#status === "fatal" ? "fatal" : "disconnected"));
+		}
 		const ref = `open-${++this.#refs}`;
 		return new Promise((resolve, reject) => {
 			this.#opening.set(ref, { resolve, reject });
@@ -101,9 +116,11 @@ export class NodeSocket {
 	dispose(): void {
 		this.#disposed = true;
 		clearTimeout(this.#retryTimer);
+		this.#retryTimer = undefined;
 		this.#teardown("disconnected");
-		this.#ws?.close(1000, "page closed");
+		const ws = this.#ws;
 		this.#ws = undefined;
+		ws?.close(1000, "page closed");
 		this.#setStatus("closed");
 	}
 
@@ -122,13 +139,14 @@ export class NodeSocket {
 	}
 
 	#connect(): void {
-		if (this.#disposed) return;
+		if (this.#disposed || this.#status === "fatal") return;
+		clearTimeout(this.#retryTimer);
+		this.#retryTimer = undefined;
 		this.#setStatus("connecting");
 		const ws = this.#create(this.url);
 		this.#ws = ws;
 		ws.onopen = () => {
 			if (this.#ws !== ws) return;
-			this.#attempt = 0;
 			this.#alive();
 		};
 		ws.onmessage = (event) => {
@@ -138,7 +156,12 @@ export class NodeSocket {
 		};
 		ws.onclose = (event) => {
 			if (this.#ws !== ws) return;
-			this.lastClose = { code: event.code, reason: event.reason };
+			const closeInfo: SocketCloseInfo = { code: event.code, reason: event.reason ?? "" };
+			this.lastClose = closeInfo;
+			if (FATAL_CLOSE_CODES.has(event.code)) {
+				this.#fatal(closeInfo);
+				return;
+			}
 			this.#lost();
 		};
 		ws.onerror = () => {};
@@ -149,13 +172,29 @@ export class NodeSocket {
 		clearTimeout(this.#deadTimer);
 		this.#deadTimer = setTimeout(() => {
 			this.lastClose = { code: 1001, reason: "no frame from the server in 45 s" };
-			this.#ws?.close(1000, "silent");
+			const ws = this.#ws;
+			this.#ws = undefined;
+			ws?.close(1000, "silent");
 			this.#lost();
 		}, timing.deadAfterMs);
 	}
 
+	#fatal(closeInfo: SocketCloseInfo): void {
+		clearTimeout(this.#deadTimer);
+		this.#deadTimer = undefined;
+		clearTimeout(this.#retryTimer);
+		this.#retryTimer = undefined;
+		this.#ws = undefined;
+		this.#fatalClose = closeInfo;
+		const changed = this.#status !== "fatal";
+		this.#status = "fatal";
+		this.#teardown("fatal", closeInfo.reason || undefined);
+		if (changed) this.#emit();
+	}
+
 	#lost(): void {
 		clearTimeout(this.#deadTimer);
+		this.#deadTimer = undefined;
 		this.#ws = undefined;
 		this.#teardown("disconnected");
 		this.#setStatus("closed");
@@ -164,14 +203,15 @@ export class NodeSocket {
 		this.#retryTimer = setTimeout(() => this.#connect(), delay);
 	}
 
-	#teardown(code: string): void {
+	#teardown(code: string, reason?: string): void {
 		clearTimeout(this.#deadTimer);
+		this.#deadTimer = undefined;
 		const opening = [...this.#opening.values()];
 		this.#opening.clear();
 		for (const pending of opening) pending.reject(new OpenRefused(code));
 		const routes = [...this.#routes.values()];
 		this.#routes.clear();
-		for (const route of routes) route.onClose(code);
+		for (const route of routes) route.onClose(code, reason);
 	}
 
 	#receive(text: string): void {
@@ -184,6 +224,7 @@ export class NodeSocket {
 		const frame = parsed.message;
 		switch (frame.type) {
 			case "welcome":
+				this.#attempt = 0;
 				this.#setStatus("open");
 				return;
 			case "nodes":
