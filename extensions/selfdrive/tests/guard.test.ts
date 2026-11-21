@@ -1014,6 +1014,160 @@ describe("process_start", () => {
 	});
 });
 
+describe("agent_browser and agent_desktop", () => {
+	const judgeBrowser = (input: Record<string, unknown>, cwd = repo, active = [grant]) =>
+		blockReason("agent_browser", input, cwd, "some-session", active);
+	const judgeDesktop = (input: Record<string, unknown>, cwd = repo, active = [grant]) =>
+		blockReason("agent_desktop", input, cwd, "some-session", active);
+
+	it("blocks agent_browser writes into the protected checkout and .git internals", () => {
+		const cases: Array<[string, Record<string, unknown>, string, string]> = [
+			["screenshot relative path", { argv: ["screenshot", "src/shot.png"] }, repo, join(repo, "src", "shot.png")],
+			["screenshot with selector value flag", { argv: ["screenshot", "--selector", ".hero", "src/hero.png"] }, repo, join(repo, "src", "hero.png")],
+			["screenshot with --output", { argv: ["screenshot", "--output", "src/out.png"] }, repo, join(repo, "src", "out.png")],
+			["screenshot with -o", { argv: ["screenshot", "-o", "src/out.png"] }, repo, join(repo, "src", "out.png")],
+			["screenshot with --output=", { argv: ["screenshot", "--output=src/out.png"] }, repo, join(repo, "src", "out.png")],
+			["screenshot after --", { argv: ["screenshot", "--", "-shot.png"] }, repo, join(repo, "-shot.png")],
+			["pdf with global --session", { argv: ["--session", "s1", "pdf", "src/out.pdf"] }, repo, join(repo, "src", "out.pdf")],
+			["state save", { argv: ["state", "save", "src/auth.json"] }, repo, join(repo, "src", "auth.json")],
+			["trace start", { argv: ["trace", "start", "src/trace.zip"] }, repo, join(repo, "src", "trace.zip")],
+			["trace stop", { argv: ["trace", "stop", "src/trace.zip"] }, repo, join(repo, "src", "trace.zip")],
+			["record start", { argv: ["record", "start", "src/demo.webm"] }, repo, join(repo, "src", "demo.webm")],
+			["record restart", { argv: ["record", "restart", "src/demo.webm"] }, repo, join(repo, "src", "demo.webm")],
+			["download selector + path", { argv: ["download", "@e1", "src/file.zip"] }, repo, join(repo, "src", "file.zip")],
+			["download single path", { argv: ["download", "src/file.zip"] }, repo, join(repo, "src", "file.zip")],
+			["global --profile", { argv: ["--profile", "src/prof", "open", "https://example.com"] }, repo, join(repo, "src", "prof")],
+			["global --profile=", { argv: ["--profile=src/prof", "open", "https://example.com"] }, repo, join(repo, "src", "prof")],
+			["global --download-path", { argv: ["--download-path", "src/dl", "open", "https://example.com"] }, repo, join(repo, "src", "dl")],
+			["global --download-path=", { argv: ["open", "https://example.com", "--download-path=src/dl"] }, repo, join(repo, "src", "dl")],
+			["tool cwd inside checkout", { argv: ["screenshot", "shot.png"], cwd: "src" }, repo, join(repo, "src", "shot.png")],
+			["tool cwd targeting repo from outside", { argv: ["pdf", "out.pdf"], cwd: repo }, outside, join(repo, "out.pdf")],
+			["climbing out of exempt workspace", { argv: ["screenshot", "../../../src/shot.png"], cwd: ".pi/workspaces/side" }, repo, join(repo, "src", "shot.png")],
+			["symlink alias to checkout", { argv: ["screenshot", join(alias, "src", "shot.png")] }, outside, join(repo, "src", "shot.png")],
+			["protected .git internal", { argv: ["state", "save", ".git/config"] }, repo, join(repo, ".git", "config")],
+		];
+
+		for (const [_label, input, cwd, expectedTarget] of cases) {
+			expect(judgeBrowser(input, cwd)).toBe(reasons.checkout(`agent_browser ${expectedTarget}`));
+		}
+	});
+
+	it("allows agent_browser read-only commands and writes to exempt workspaces or /tmp", () => {
+		const allowed: Array<[Record<string, unknown>, string]> = [
+			[{ argv: ["open", "https://example.com"] }, repo],
+			[{ argv: ["snapshot", "-i"] }, repo],
+			[{ argv: ["click", "@e1"] }, repo],
+			[{ argv: ["fill", "@e2", "hello"] }, repo],
+			[{ argv: ["state", "load", "src/auth.json"] }, repo],
+			[{ argv: ["record", "stop"] }, repo],
+			[{ argv: ["close"] }, repo],
+			[{ argv: ["screenshot"] }, repo],
+			[{ argv: ["screenshot", "--full"] }, repo],
+			[{ argv: ["screenshot", "--selector", ".hero"] }, repo],
+			[{ argv: ["screenshot", "--help", "src/shot.png"] }, repo],
+			[{ argv: ["screenshot", ".pi/workspaces/side/shot.png"] }, repo],
+			[{ argv: ["screenshot", "nested-wt/shot.png"] }, repo],
+			[{ argv: ["screenshot", ".git/herder/worktrees/w1/shot.png"] }, repo],
+			[{ argv: ["screenshot", "link-out/shot.png"] }, repo],
+			[{ argv: ["screenshot", "/tmp/agent-browser-shot.png"] }, repo],
+			[{ argv: ["screenshot", "shot.png"], cwd: ".pi/workspaces/side" }, repo],
+			[{ argv: ["pdf", "out.pdf"], cwd: outside }, repo],
+			[{ argv: ["--profile", "/tmp/ab-profile", "open", "https://example.com"] }, repo],
+			[{ argv: ["--download-path=.pi/workspaces/side/dl", "open", "https://example.com"] }, repo],
+		];
+
+		for (const [input, cwd] of allowed) {
+			expect(judgeBrowser(input, cwd)).toBeUndefined();
+		}
+	});
+
+	it("blocks agent_desktop writes into the protected checkout and .git internals", () => {
+		const cases: Array<[string, Record<string, unknown>, string, string]> = [
+			["screenshot positional before flags", { argv: ["screenshot", "src/notes.png", "--app", "Notes"] }, repo, join(repo, "src", "notes.png")],
+			["screenshot positional after value flags", { argv: ["screenshot", "--app", "Notes", "--region", "0,0,100,100", "src/notes.png"] }, repo, join(repo, "src", "notes.png")],
+			["screenshot --output", { argv: ["screenshot", "--output", "src/notes.png", "--app", "Notes"] }, repo, join(repo, "src", "notes.png")],
+			["screenshot --output=", { argv: ["screenshot", "--output=src/notes.png"] }, repo, join(repo, "src", "notes.png")],
+			["screenshot -o", { argv: ["screenshot", "-o", "src/notes.png"] }, repo, join(repo, "src", "notes.png")],
+			["global --screenshot", { argv: ["--screenshot", "src/snap.png", "snapshot"] }, repo, join(repo, "src", "snap.png")],
+			["global --screenshot=", { argv: ["--screenshot=src/snap.png", "snapshot"] }, repo, join(repo, "src", "snap.png")],
+			["trailing --screenshot on click", { argv: ["click", "@s1:e1", "--screenshot", "src/after.png"] }, repo, join(repo, "src", "after.png")],
+			["global --trace", { argv: ["--trace", "src/trace.jsonl", "click", "@s1:e1"] }, repo, join(repo, "src", "trace.jsonl")],
+			["global --trace=", { argv: ["--trace=src/trace.jsonl", "click", "@s1:e1"] }, repo, join(repo, "src", "trace.jsonl")],
+			["trace export default cwd in checkout", { argv: ["trace", "export"] }, repo, repo],
+			["trace export --out", { argv: ["trace", "export", "--out", "src/trace.html"] }, repo, join(repo, "src", "trace.html")],
+			["trace export --out=", { argv: ["trace", "export", "--out=src/trace.html"] }, repo, join(repo, "src", "trace.html")],
+			["tool cwd relative to repo", { argv: ["screenshot", "shot.png"], cwd: "src" }, repo, join(repo, "src", "shot.png")],
+			["tool @-prefixed cwd", { argv: ["screenshot", "shot.png"], cwd: "@src" }, repo, join(repo, "src", "shot.png")],
+			["tool cwd=none falls back to session repo", { argv: ["screenshot", "shot.png"], cwd: "none" }, repo, join(repo, "shot.png")],
+			["climbing out of exempt workspace", { argv: ["screenshot", "../../../src/shot.png"], cwd: ".pi/workspaces/side" }, repo, join(repo, "src", "shot.png")],
+			["symlink alias to checkout", { argv: ["screenshot", join(alias, "src", "shot.png")] }, outside, join(repo, "src", "shot.png")],
+			["protected .git internal", { argv: ["--trace", ".git/config", "snapshot"] }, repo, join(repo, ".git", "config")],
+			["headed: true when also writing file into checkout", { argv: ["click", "@s1:e1", "--screenshot", "src/headed.png"], headed: true }, repo, join(repo, "src", "headed.png")],
+		];
+
+		for (const [_label, input, cwd, expectedTarget] of cases) {
+			expect(judgeDesktop(input, cwd)).toBe(reasons.checkout(`agent_desktop ${expectedTarget}`));
+		}
+	});
+
+	it("allows agent_desktop read-only calls, headed GUI mutations without checkout writes, and exempt writes", () => {
+		const allowed: Array<[Record<string, unknown>, string]> = [
+			[{ argv: ["status"] }, repo],
+			[{ argv: ["snapshot", "-i", "--app", "Finder"] }, repo],
+			[{ argv: ["list-windows"] }, repo],
+			[{ argv: ["get", "@s1:e1"] }, repo],
+			[{ argv: ["click", "@s1:e1"] }, repo],
+			[{ argv: ["type", "@s1:e1", "hello"] }, repo],
+			[{ argv: ["session", "end"] }, repo],
+			[{ argv: ["screenshot"] }, repo],
+			[{ argv: ["screenshot", "--app", "Notes"] }, repo],
+			[{ argv: ["screenshot", "--help", "src/shot.png"] }, repo],
+			[{ argv: ["trace", "export", "--help"] }, repo],
+			// Non-file-writing headed GUI mutations are explicitly out of scope and allowed.
+			[{ argv: ["hover", "@s1:e1"], headed: true }, repo],
+			[{ argv: ["drag", "@s1:e1", "@s1:e2"], headed: true }, repo],
+			[{ argv: ["mouse-click", "100", "200"], headed: true }, repo],
+			// Exempt workspace and /tmp writes are allowed.
+			[{ argv: ["screenshot", ".pi/workspaces/side/shot.png"] }, repo],
+			[{ argv: ["screenshot", "nested-wt/shot.png"] }, repo],
+			[{ argv: ["screenshot", ".git/herder/worktrees/w1/shot.png"] }, repo],
+			[{ argv: ["screenshot", "link-out/shot.png"] }, repo],
+			[{ argv: ["screenshot", "/tmp/agent-desktop-shot.png"] }, repo],
+			[{ argv: ["screenshot", "shot.png"], cwd: ".pi/workspaces/side" }, repo],
+			[{ argv: ["screenshot", "shot.png"], cwd: "@.pi/workspaces/side" }, repo],
+			[{ argv: ["trace", "export", "--out", "/tmp/trace.html"] }, repo],
+			[{ argv: ["trace", "export"], cwd: ".pi/workspaces/side" }, repo],
+			[{ argv: ["trace", "export"], cwd: outside }, repo],
+			[{ argv: ["--trace", "/tmp/trace.jsonl", "click", "@s1:e1"] }, repo],
+		];
+
+		for (const [input, cwd] of allowed) {
+			expect(judgeDesktop(input, cwd)).toBeUndefined();
+		}
+	});
+
+	it("blocks agent_browser and agent_desktop checkout writes through the tool_call hook while a grant exists", () => {
+		let hook: ((event: { toolName: string; input: unknown }, ctx: { cwd: string }) => unknown) | undefined;
+		registerGuard({ on: (_event: string, handler: typeof hook) => void (hook = handler) } as unknown as ExtensionAPI);
+
+		publishGrant(grant);
+		expect(hook!({ toolName: "agent_browser", input: { argv: ["screenshot", "src/a.png"] } }, { cwd: repo })).toEqual({
+			block: true,
+			reason: reasons.checkout(`agent_browser ${join(repo, "src", "a.png")}`),
+		});
+		expect(hook!({ toolName: "agent_desktop", input: { argv: ["screenshot", "src/b.png"] } }, { cwd: repo })).toEqual({
+			block: true,
+			reason: reasons.checkout(`agent_desktop ${join(repo, "src", "b.png")}`),
+		});
+		expect(hook!({ toolName: "agent_browser", input: { argv: ["snapshot", "-i"] } }, { cwd: repo })).toBeUndefined();
+		expect(hook!({ toolName: "agent_desktop", input: { argv: ["hover", "@s1:e1"], headed: true } }, { cwd: repo })).toBeUndefined();
+
+		withdrawGrant(grant.id);
+		expect(hook!({ toolName: "agent_browser", input: { argv: ["screenshot", "src/a.png"] } }, { cwd: repo })).toBeUndefined();
+		expect(hook!({ toolName: "agent_desktop", input: { argv: ["screenshot", "src/b.png"] } }, { cwd: repo })).toBeUndefined();
+	});
+});
+
 describe("the hook in a Pi session", () => {
 	it("blocks a write into the checkout while a grant exists, and stands aside without one", async () => {
 		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;

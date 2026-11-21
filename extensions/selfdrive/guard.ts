@@ -53,6 +53,22 @@ export function blockReason(toolName: string, input: unknown, cwd: string, sessi
 		const dir = typeof args.cwd === "string" ? resolve(cwd, args.cwd.replace(/^@/, "")) : cwd;
 		return bashBlockReason(args.command, dir, toplevels, commonDirs);
 	}
+	if (toolName === "agent_browser") {
+		const argv = Array.isArray(args.argv) ? args.argv.filter((arg): arg is string => typeof arg === "string") : [];
+		if (argv.length === 0) return undefined;
+		const rawCwd = typeof args.cwd === "string" && args.cwd.length > 0 ? args.cwd : undefined;
+		const dir = rawCwd ? canonical(resolve(canonical(cwd), rawCwd)) : canonical(cwd);
+		const hit = extractAgentBrowserWriteTargets(argv, dir).find((target) => insideCheckout(target, toplevels, commonDirs));
+		return hit ? reasons.checkout(`agent_browser ${hit}`) : undefined;
+	}
+	if (toolName === "agent_desktop") {
+		const argv = Array.isArray(args.argv) ? args.argv.filter((arg): arg is string => typeof arg === "string" && arg.trim().length > 0) : [];
+		if (argv.length === 0) return undefined;
+		const rawCwd = normalizeAgentDesktopCwd(args.cwd);
+		const dir = rawCwd ? canonical(resolve(canonical(cwd), rawCwd)) : canonical(cwd);
+		const hit = extractAgentDesktopWriteTargets(argv, dir).find((target) => insideCheckout(target, toplevels, commonDirs));
+		return hit ? reasons.checkout(`agent_desktop ${hit}`) : undefined;
+	}
 	return undefined;
 }
 
@@ -1400,4 +1416,342 @@ function fileTargets(verb: string, args: string[]): string[] | undefined {
 		default:
 			return undefined;
 	}
+}
+
+// ---- Direct CLI automation tools (agent_browser, agent_desktop) ----
+
+const AGENT_BROWSER_GLOBAL_VALUE_FLAGS = new Set([
+	"--session",
+	"-s",
+	"--cdp",
+	"--provider",
+	"-p",
+	"--engine",
+	"--config",
+	"--namespace",
+	"--profile",
+	"--allowed-domains",
+	"--idle-timeout",
+	"--user-agent",
+	"--proxy",
+	"--headers",
+	"--session-name",
+	"--executable-path",
+	"--extensions",
+	"--args",
+	"--proxy-bypass",
+	"--state",
+	"--download-path",
+	"--output",
+	"-o",
+	"--out",
+]);
+
+const AGENT_BROWSER_WRITE_VALUE_FLAGS = new Set(["--profile", "--download-path", "--output", "-o", "--out"]);
+
+const AGENT_BROWSER_SCREENSHOT_VALUE_FLAGS = new Set([
+	"--selector",
+	"-S",
+	"--format",
+	"--quality",
+	"-q",
+	"--clip",
+]);
+
+const AGENT_BROWSER_PDF_VALUE_FLAGS = new Set([
+	"--format",
+	"--margin",
+	"--scale",
+	"--header-template",
+	"--footer-template",
+	"--width",
+	"--height",
+	"--page-ranges",
+]);
+
+const AGENT_DESKTOP_GLOBAL_VALUE_FLAGS = new Set([
+	"--session",
+	"-s",
+	"--agent-id",
+	"--trace",
+	"--wait-for",
+	"-w",
+	"--wait-for-gone",
+	"--wait-timeout",
+	"--screenshot",
+	"--output",
+	"-o",
+	"--out",
+]);
+
+const AGENT_DESKTOP_WRITE_VALUE_FLAGS = new Set(["--screenshot", "--trace", "--output", "-o", "--out"]);
+const AGENT_DESKTOP_TRACE_OUT_FLAGS = new Set(["--out", "--output", "-o"]);
+
+const AGENT_DESKTOP_SCREENSHOT_VALUE_FLAGS = new Set([
+	"--app",
+	"--window-id",
+	"--screen",
+	"--format",
+	"--quality",
+	"-q",
+	"--region",
+]);
+
+const AGENT_DESKTOP_TRACE_VALUE_FLAGS = new Set(["--out", "--output", "-o", "--limit"]);
+
+function extractEqualsFlagValue(token: string, flagNames: ReadonlySet<string>): string | undefined {
+	const eq = token.indexOf("=");
+	if (eq <= 0) return undefined;
+	if (!flagNames.has(token.slice(0, eq))) return undefined;
+	return token.slice(eq + 1);
+}
+
+function normalizeAgentDesktopCwd(rawCwd: unknown): string | undefined {
+	if (typeof rawCwd !== "string") return undefined;
+	const trimmed = rawCwd.trim();
+	if (trimmed.length === 0 || trimmed.toLowerCase() === "none") return undefined;
+	const stripped = trimmed.replace(/^@/, "").trim();
+	if (stripped.length === 0 || stripped.toLowerCase() === "none") return undefined;
+	return stripped;
+}
+
+/**
+ * Extracts canonical file-writing target paths from an `agent_browser` CLI `argv` array relative to `cwd`.
+ * Self-contained: never imports from `extensions/workspace/` or `extensions/agent-browser/`.
+ */
+export function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: string): string[] {
+	const baseCwd = canonical(cwd);
+	const rawTargets: string[] = [];
+	let subcommand: string | undefined;
+	let subcommandIndex = -1;
+	let afterDoubleDash = false;
+	let hasHelpOrVersion = false;
+
+	for (let i = 0; i < argv.length; i++) {
+		const token = argv[i]!;
+		if (token === "--") {
+			afterDoubleDash = true;
+			if (i + 1 < argv.length) {
+				subcommand = argv[i + 1];
+				subcommandIndex = i + 1;
+			}
+			break;
+		}
+		if (token === "--help" || token === "-h" || token === "--version" || token === "-V") {
+			hasHelpOrVersion = true;
+			continue;
+		}
+		const eqVal = extractEqualsFlagValue(token, AGENT_BROWSER_WRITE_VALUE_FLAGS);
+		if (eqVal !== undefined) {
+			if (eqVal.length > 0) rawTargets.push(eqVal);
+			continue;
+		}
+		if (AGENT_BROWSER_WRITE_VALUE_FLAGS.has(token)) {
+			const next = argv[i + 1];
+			if (typeof next === "string" && next.length > 0) rawTargets.push(next);
+			i++;
+			continue;
+		}
+		if (AGENT_BROWSER_GLOBAL_VALUE_FLAGS.has(token)) {
+			i++;
+			continue;
+		}
+		if (token.startsWith("-")) continue;
+		subcommand = token;
+		subcommandIndex = i;
+		break;
+	}
+
+	if (subcommand && !hasHelpOrVersion) {
+		const rest = argv.slice(subcommandIndex + 1);
+		const valueFlags =
+			subcommand === "screenshot"
+				? AGENT_BROWSER_SCREENSHOT_VALUE_FLAGS
+				: subcommand === "pdf"
+					? AGENT_BROWSER_PDF_VALUE_FLAGS
+					: new Set<string>();
+		const positionals: string[] = [];
+		let restHasHelp = false;
+
+		if (afterDoubleDash) {
+			positionals.push(...rest);
+		} else {
+			for (let i = 0; i < rest.length; i++) {
+				const token = rest[i]!;
+				if (token === "--") {
+					positionals.push(...rest.slice(i + 1));
+					break;
+				}
+				if (token === "--help" || token === "-h" || token === "--version" || token === "-V") {
+					restHasHelp = true;
+					continue;
+				}
+				const eqVal = extractEqualsFlagValue(token, AGENT_BROWSER_WRITE_VALUE_FLAGS);
+				if (eqVal !== undefined) {
+					if (eqVal.length > 0) rawTargets.push(eqVal);
+					continue;
+				}
+				if (AGENT_BROWSER_WRITE_VALUE_FLAGS.has(token)) {
+					const next = rest[i + 1];
+					if (typeof next === "string" && next.length > 0) rawTargets.push(next);
+					i++;
+					continue;
+				}
+				if (AGENT_BROWSER_GLOBAL_VALUE_FLAGS.has(token) || valueFlags.has(token)) {
+					i++;
+					continue;
+				}
+				if (token.startsWith("-")) continue;
+				positionals.push(token);
+			}
+		}
+
+		if (!restHasHelp) {
+			if (subcommand === "screenshot" || subcommand === "pdf") {
+				if (positionals[0]) rawTargets.push(positionals[0]);
+			} else if (subcommand === "trace") {
+				if ((positionals[0] === "start" || positionals[0] === "stop") && positionals[1]) {
+					rawTargets.push(positionals[1]);
+				}
+			} else if (subcommand === "state") {
+				if (positionals[0] === "save" && positionals[1]) {
+					rawTargets.push(positionals[1]);
+				}
+			} else if (subcommand === "download") {
+				if (positionals.length >= 2) {
+					rawTargets.push(positionals[1]!);
+				} else if (positionals.length === 1) {
+					rawTargets.push(positionals[0]!);
+				}
+			} else if (subcommand === "record") {
+				if ((positionals[0] === "start" || positionals[0] === "restart") && positionals[1]) {
+					rawTargets.push(positionals[1]);
+				}
+			}
+		}
+	}
+
+	return [...new Set(rawTargets.map((target) => canonical(resolve(baseCwd, target))))];
+}
+
+/**
+ * Extracts canonical file-writing target paths from an `agent_desktop` CLI `argv` array relative to `cwd`.
+ * Read-only subcommands and non-file-writing GUI mutations (including `headed: true`) return an empty array.
+ * Self-contained: never imports from `extensions/workspace/` or `extensions/agent-desktop/`.
+ */
+export function extractAgentDesktopWriteTargets(argv: readonly string[], cwd: string): string[] {
+	const baseCwd = canonical(cwd);
+	const cleaned = argv.filter((arg): arg is string => typeof arg === "string" && arg.trim().length > 0);
+	const rawTargets: string[] = [];
+	let subcommand: string | undefined;
+	let subcommandIndex = -1;
+	let afterDoubleDash = false;
+	let hasHelpOrVersion = false;
+
+	for (let i = 0; i < cleaned.length; i++) {
+		const token = cleaned[i]!;
+		if (token === "--") {
+			afterDoubleDash = true;
+			if (i + 1 < cleaned.length) {
+				subcommand = cleaned[i + 1];
+				subcommandIndex = i + 1;
+			}
+			break;
+		}
+		if (token === "--help" || token === "-h" || token === "--version" || token === "-V") {
+			hasHelpOrVersion = true;
+			continue;
+		}
+		const eqVal = extractEqualsFlagValue(token, AGENT_DESKTOP_WRITE_VALUE_FLAGS);
+		if (eqVal !== undefined) {
+			if (eqVal.length > 0) rawTargets.push(eqVal);
+			continue;
+		}
+		if (AGENT_DESKTOP_WRITE_VALUE_FLAGS.has(token)) {
+			const next = cleaned[i + 1];
+			if (typeof next === "string" && next.length > 0) rawTargets.push(next);
+			i++;
+			continue;
+		}
+		if (AGENT_DESKTOP_GLOBAL_VALUE_FLAGS.has(token)) {
+			i++;
+			continue;
+		}
+		if (token.startsWith("-")) continue;
+		subcommand = token;
+		subcommandIndex = i;
+		break;
+	}
+
+	if (subcommand && !hasHelpOrVersion) {
+		const rest = cleaned.slice(subcommandIndex + 1);
+		const valueFlags =
+			subcommand === "screenshot"
+				? AGENT_DESKTOP_SCREENSHOT_VALUE_FLAGS
+				: subcommand === "trace"
+					? AGENT_DESKTOP_TRACE_VALUE_FLAGS
+					: new Set<string>();
+		const positionals: string[] = [];
+		let traceOutPath: string | undefined;
+		let restHasHelp = false;
+
+		if (afterDoubleDash) {
+			positionals.push(...rest);
+		} else {
+			for (let i = 0; i < rest.length; i++) {
+				const token = rest[i]!;
+				if (token === "--") {
+					positionals.push(...rest.slice(i + 1));
+					break;
+				}
+				if (token === "--help" || token === "-h" || token === "--version" || token === "-V") {
+					restHasHelp = true;
+					continue;
+				}
+				if (subcommand === "trace") {
+					const eqOut = extractEqualsFlagValue(token, AGENT_DESKTOP_TRACE_OUT_FLAGS);
+					if (eqOut !== undefined) {
+						if (eqOut.length > 0) traceOutPath = eqOut;
+						continue;
+					}
+					if (AGENT_DESKTOP_TRACE_OUT_FLAGS.has(token)) {
+						const next = rest[i + 1];
+						if (typeof next === "string" && next.length > 0) traceOutPath = next;
+						i++;
+						continue;
+					}
+				}
+				const eqWrite = extractEqualsFlagValue(token, AGENT_DESKTOP_WRITE_VALUE_FLAGS);
+				if (eqWrite !== undefined) {
+					if (eqWrite.length > 0) rawTargets.push(eqWrite);
+					continue;
+				}
+				if (AGENT_DESKTOP_WRITE_VALUE_FLAGS.has(token)) {
+					const next = rest[i + 1];
+					if (typeof next === "string" && next.length > 0) rawTargets.push(next);
+					i++;
+					continue;
+				}
+				if (AGENT_DESKTOP_GLOBAL_VALUE_FLAGS.has(token) || valueFlags.has(token)) {
+					i++;
+					continue;
+				}
+				if (token.startsWith("-")) continue;
+				positionals.push(token);
+			}
+		}
+
+		if (subcommand === "screenshot" && !restHasHelp) {
+			if (positionals[0]) rawTargets.push(positionals[0]);
+		} else if (subcommand === "trace" && positionals[0] === "export" && !restHasHelp) {
+			if (traceOutPath) {
+				rawTargets.push(traceOutPath);
+			} else {
+				// `trace export` without `--out` writes `trace-<session>.html` in `cwd`.
+				rawTargets.push(".");
+			}
+		}
+	}
+
+	return [...new Set(rawTargets.map((target) => canonical(resolve(baseCwd, target))))];
 }
