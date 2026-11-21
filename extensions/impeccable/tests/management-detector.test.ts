@@ -5,11 +5,22 @@ import { fileURLToPath } from "node:url";
 import { getSkillDir } from "../src/resources.ts";
 import { runEngine } from "../src/engine.ts";
 import path from "node:path";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { Type } from "typebox";
+
+vi.mock("../src/project.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/project.ts")>();
+	return {
+		...actual,
+		hookStatus: vi.fn(actual.hookStatus),
+		readConfigs: vi.fn(actual.readConfigs),
+		resolveProject: vi.fn(actual.resolveProject),
+	};
+});
+
 import { runOperation } from "../src/operations.ts";
-import { hookStatus, patchJson, readConfigs, resolveProject } from "../src/project.ts";
+import { hookStatus, patchJson, readConfigs, resolveProject, saveConfig } from "../src/project.ts";
 import { detectorFixture } from "./support/detector-fixture.ts";
 import { isolateEngineEnvironment } from "./support/engine-environment.ts";
 
@@ -488,5 +499,166 @@ it("honors local consent/enablement and legacy disabled/quiet/log overrides", as
 		expect((await readFile(path.join(h.directory, "audit with spaces.ndjson"), "utf8")).trim().split('\n').map((line) => JSON.parse(line).event)).toEqual(["PostToolUse", "Stop"]);
 		expect(h.errors).toEqual([]);
 	} finally { names.forEach((name, index) => { if (previous[index] === undefined) delete process.env[name]; else process.env[name] = previous[index]; }); await h.close(); }
+});
+
+it("avoids redundant ancestor walks and config reads for repeated edits in disabled projects and on ineligible files", async () => {
+	const h = await detectorFixture();
+	try {
+		process.env.IMPECCABLE_BIN = h.binary;
+		const nested = path.join(h.directory, "apps/web/src/components");
+		await mkdir(nested, { recursive: true });
+		vi.mocked(resolveProject).mockClear();
+		vi.mocked(readConfigs).mockClear();
+		vi.mocked(hookStatus).mockClear();
+
+		h.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("write", { path: "apps/web/src/components/a.txt", content: "one" })]),
+			fauxAssistantMessage([fauxToolCall("edit", { path: "apps/web/src/components/a.txt", edits: [{ oldText: "one", newText: "two" }] })]),
+			fauxAssistantMessage([fauxToolCall("write", { path: "apps/web/src/components/b.html", content: "<main>b</main>" })]),
+			fauxAssistantMessage([fauxToolCall("write", { path: "apps/web/src/components/c.tsx", content: "export const C = () => null;" })]),
+			fauxAssistantMessage("Done disabled"),
+		]);
+		await h.session.prompt("Repeated edits in disabled project");
+		expect(vi.mocked(resolveProject)).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(readConfigs)).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(hookStatus)).toHaveBeenCalledTimes(0);
+		expect(await h.calls()).toEqual([]);
+
+		// A subsequent prompt in the same disabled project reuses cached project and config state.
+		h.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("write", { path: "apps/web/src/components/d.html", content: "<main>d</main>" })]),
+			fauxAssistantMessage("Done disabled 2"),
+		]);
+		await h.session.prompt("Another disabled edit");
+		expect(vi.mocked(resolveProject)).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(readConfigs)).toHaveBeenCalledTimes(1);
+		expect(await h.calls()).toEqual([]);
+
+		// Enabled project with repeated edits to ineligible files avoids repeated ancestor walks and config reads.
+		await h.config({ hook: { enabled: true }, fixtureClean: true });
+		vi.mocked(resolveProject).mockClear();
+		vi.mocked(readConfigs).mockClear();
+		vi.mocked(hookStatus).mockClear();
+		h.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("write", { path: "apps/web/src/components/notes.md", content: "note 1" })]),
+			fauxAssistantMessage([fauxToolCall("edit", { path: "apps/web/src/components/notes.md", edits: [{ oldText: "note 1", newText: "note 2" }] })]),
+			fauxAssistantMessage([fauxToolCall("write", { path: "apps/web/src/components/data.json", content: '{"ok":true}' })]),
+			fauxAssistantMessage([fauxToolCall("write", { path: "apps/web/src/components/readme.txt", content: "plain" })]),
+			fauxAssistantMessage("Done ineligible"),
+		]);
+		await h.session.prompt("Repeated edits to ineligible files");
+		// Config changed externally once so project/config re-resolve once, never per edit.
+		expect(vi.mocked(resolveProject)).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(readConfigs)).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(hookStatus)).toHaveBeenCalledTimes(0);
+		expect(await h.calls()).toEqual([]);
+		expect(h.errors).toEqual([]);
+	} finally { await h.close(); }
+});
+
+it("reads configs at most once for an eligible edit and reuses the snapshot across scans", async () => {
+	const h = await detectorFixture();
+	try {
+		process.env.IMPECCABLE_BIN = h.binary;
+		await h.config({ hook: { enabled: true }, detector: { extensions: [".twig"] }, fixtureClean: true });
+		vi.mocked(resolveProject).mockClear();
+		vi.mocked(readConfigs).mockClear();
+		vi.mocked(hookStatus).mockClear();
+
+		h.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("write", { path: "page.html", content: "<main>eligible</main>" })]),
+			fauxAssistantMessage([fauxToolCall("write", { path: "card.twig", content: "<section>twig</section>" })]),
+			fauxAssistantMessage("Done"),
+		]);
+		await h.session.prompt("Edit eligible built-in and configured files");
+		expect((await h.calls()).map((call) => call.event.hook_event_name)).toEqual(["PostToolUse", "PostToolUse", "Stop"]);
+		expect(vi.mocked(resolveProject)).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(readConfigs)).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(hookStatus)).toHaveBeenCalledTimes(0);
+		expect(h.errors).toEqual([]);
+	} finally { await h.close(); }
+});
+
+it("invalidates cached detector state immediately after operations, saveConfig, direct config edits, and session_start", async () => {
+	const h = await detectorFixture();
+	try {
+		process.env.IMPECCABLE_BIN = h.binary;
+
+		// 1. Warm the cache in disabled state.
+		h.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("write", { path: "page.html", content: "<main>v1</main>" })]),
+			fauxAssistantMessage("Disabled v1"),
+		]);
+		await h.session.prompt("Disabled edit");
+		expect(await h.calls()).toEqual([]);
+
+		// 2. Enable via runOperation (hooks on) -> takes effect immediately.
+		expect((await runOperation({ argv: ["hooks", "on"], cwd: h.directory }, h.api)).ok).toBe(true);
+		h.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("write", { path: "page.html", content: "<main>v2</main>" })]),
+			fauxAssistantMessage("Enabled v2"),
+			fauxAssistantMessage("Assessed v2"),
+		]);
+		await h.session.prompt("Enabled edit after hooks on");
+		expect((await h.calls()).map((call) => call.event.hook_event_name)).toEqual(["PostToolUse", "Stop"]);
+
+		// 3. Verify .twig is ineligible while cached, then add .twig via saveConfig -> takes effect immediately.
+		h.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("write", { path: "view.twig", content: "<p>v1</p>" })]),
+			fauxAssistantMessage("Ineligible twig"),
+		]);
+		await h.session.prompt("Ineligible twig edit");
+		expect(await h.calls()).toHaveLength(2);
+
+		const [shared] = await readConfigs(h.directory);
+		await saveConfig(shared!, { ...shared!.value, detector: { extensions: [".twig"] } });
+		h.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("write", { path: "view.twig", content: "<p>v2</p>" })]),
+			fauxAssistantMessage("Eligible twig"),
+			fauxAssistantMessage("Assessed twig"),
+		]);
+		await h.session.prompt("Eligible twig edit after saveConfig");
+		expect((await h.calls()).slice(2).map((call) => call.event.hook_event_name)).toEqual(["PostToolUse", "Stop"]);
+
+		// 4. Disable via runOperation (hooks off) -> takes effect immediately.
+		expect((await runOperation({ argv: ["hooks", "off"], cwd: h.directory }, h.api)).ok).toBe(true);
+		h.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("write", { path: "page.html", content: "<main>v3</main>" })]),
+			fauxAssistantMessage("Disabled v3"),
+		]);
+		await h.session.prompt("Disabled edit after hooks off");
+		expect(await h.calls()).toHaveLength(4);
+
+		// 5. Direct write/edit tool calls to .impeccable/config.json invalidate immediately.
+		h.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("write", { path: ".impeccable/config.json", content: JSON.stringify({ hook: { enabled: true }, detector: { extensions: [".erb"] } }) })]),
+			fauxAssistantMessage([fauxToolCall("write", { path: "layout.erb", content: "<div>erb v1</div>" })]),
+			fauxAssistantMessage("Enabled via direct write"),
+			fauxAssistantMessage("Assessed erb"),
+		]);
+		await h.session.prompt("Enable and add .erb via write tool");
+		expect((await h.calls()).slice(4).map((call) => call.event.hook_event_name)).toEqual(["PostToolUse", "Stop"]);
+
+		h.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("edit", { path: ".impeccable/config.json", edits: [{ oldText: '"enabled":true', newText: '"enabled":false' }] })]),
+			fauxAssistantMessage([fauxToolCall("write", { path: "layout.erb", content: "<div>erb v2</div>" })]),
+			fauxAssistantMessage("Disabled via direct edit"),
+		]);
+		await h.session.prompt("Disable via edit tool");
+		expect(await h.calls()).toHaveLength(6);
+
+		// 6. session_start clears cached project/config state.
+		vi.mocked(resolveProject).mockClear();
+		vi.mocked(readConfigs).mockClear();
+		await h.session.extensionRunner.emit({ type: "session_start", reason: "startup" });
+		h.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("write", { path: "page.html", content: "<main>after-session-start</main>" })]),
+			fauxAssistantMessage("Done after session_start"),
+		]);
+		await h.session.prompt("Edit after session_start");
+		expect(vi.mocked(resolveProject)).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(readConfigs)).toHaveBeenCalledTimes(1);
+		expect(h.errors).toEqual([]);
+	} finally { await h.close(); }
 });
 

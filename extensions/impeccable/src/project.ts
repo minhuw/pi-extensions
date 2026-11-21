@@ -284,6 +284,17 @@ async function projectForDirectory(base: string, dir: string): Promise<string> {
 	return markers[0] ?? (outside(path.relative(base, start)) ? start : base);
 }
 
+let projectConfigGeneration = 0;
+
+/** Monotonic generation bumped whenever managed config or project state mutates in this process. */
+export function getProjectConfigGeneration(): number {
+	return projectConfigGeneration;
+}
+
+export function invalidateProjectConfigCache(): void {
+	projectConfigGeneration++;
+}
+
 export interface ConfigFile { file: string; text: string | undefined; value: ObjectValue }
 export async function readConfigs(root: string, signal?: AbortSignal): Promise<ConfigFile[]> {
 	return Promise.all(configPaths(root).map(async (file) => {
@@ -296,11 +307,20 @@ export async function readConfigs(root: string, signal?: AbortSignal): Promise<C
 	}));
 }
 
+/** Match upstream normalize_extension_entries for eligibility only; the hook still owns engine selection and detector rules. */
+export function extractHookExtensions(configs: readonly ConfigFile[]): string[] {
+	return configs.flatMap((config) => [config.value.hook, config.value.detector].flatMap((section) => object(section) && Array.isArray(section.extensions) ? section.extensions.flatMap((item) => {
+		const raw = typeof item === "string" ? item : object(item) ? item.ext : undefined;
+		if (typeof raw !== "string" || !raw.trim()) return [];
+		const extension = raw.trim().toLowerCase();
+		return [extension.startsWith(".") ? extension : `.${extension}`];
+	}) : []));
+}
+
 export type AuditLogSource = "env" | "local" | "shared";
 export interface HookAuditLog { path: string; source: AuditLogSource }
 
-export async function hookStatus(root: string, signal?: AbortSignal) {
-	const configs = await readConfigs(root, signal);
+export function hookStatusFromConfigs(root: string, configs: readonly ConfigFile[]) {
 	const localHook = object(configs[1]?.value.hook) ? configs[1].value.hook : undefined;
 	const hook = Object.assign({}, ...configs.map((config) => config.value.hook ?? {})) as ObjectValue;
 	const enabled = hook.enabled === true && (hook.consent === undefined || hook.consent === "accepted") && !truthy(process.env.IMPECCABLE_HOOK_DISABLED);
@@ -311,6 +331,10 @@ export async function hookStatus(root: string, signal?: AbortSignal) {
 			? { path: hook.auditLog, source: localHook && Object.hasOwn(localHook, "auditLog") ? "local" : "shared" }
 			: undefined;
 	return { root, enabled, hook, ...(auditLog ? { auditLog } : {}), detectorSources: configs.map((config) => ({ file: config.file, detector: config.value.detector ?? {}, legacyHookIgnores: config.value.hook ?? {} })), envOverrides: { disabled: process.env.IMPECCABLE_HOOK_DISABLED, quiet: process.env.IMPECCABLE_HOOK_QUIET, log: process.env.IMPECCABLE_HOOK_LOG }, delivery: "Actionable Pi boundary events required; verified on SDK 1.4", configPaths: configs.map((config) => config.file), provider: "pi", adapter: "pi-lifecycle", optInRequired: true, upgrades: "Update the vendored distribution through this repository; runtime update/install/link is disabled." };
+}
+
+export async function hookStatus(root: string, signal?: AbortSignal) {
+	return hookStatusFromConfigs(root, await readConfigs(root, signal));
 }
 
 /** Resolve a path to its canonical physical target, following existing and dangling symlinks. */
@@ -503,7 +527,10 @@ export async function saveConfig(config: ConfigFile, next: ObjectValue, signal?:
 		if (fresh !== config.text) throw new Error(`${config.file} changed concurrently; retry`);
 		const text = patchJson(fresh ?? "{}\n", next);
 		if (text === fresh) return;
-		await atomicWrite(file, text, signal, () => committed?.push(config.file));
+		await atomicWrite(file, text, signal, () => {
+			invalidateProjectConfigCache();
+			committed?.push(config.file);
+		});
 	});
 }
 

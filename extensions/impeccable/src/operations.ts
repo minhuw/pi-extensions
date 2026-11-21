@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { runEngine, type EngineRunResult, type RunEngineOptions } from "./engine.ts";
 import { getLauncherPath, getSkillDir } from "./resources.ts";
-import { atomicWrite, hookStatus, object, optionalText, parseTargetArgs, physicalPath, readConfigs, resolveDirectory, resolveProject, saveConfig, serialized, withGitExcludeMutation, withManagedFileMutation } from "./project.ts";
+import { atomicWrite, hookStatus, invalidateProjectConfigCache, object, optionalText, parseTargetArgs, physicalPath, readConfigs, resolveDirectory, resolveProject, saveConfig, serialized, withGitExcludeMutation, withManagedFileMutation } from "./project.ts";
 
 export interface IntegrationMetadata { adapter: "pi"; engineRun: boolean; operation: string; root: string; [key: string]: unknown }
 export type OperationResult = EngineRunResult & { integration?: IntegrationMetadata };
@@ -165,7 +165,10 @@ export async function runOperation(options: RunEngineOptions, pi: Pick<Extension
 		const action = options.argv[0] === "live" ? "start" : options.argv[0] === "live-generate" ? "generate" : options.argv[0] === "live-complete" ? "reply" : "status";
 		return adapterResult(options, options.cwd ?? sessionCwd, { handoff: "impeccable_live", action, argv: options.argv.slice(1) }, `Use impeccable_live ${action}; the Pi session owner exclusively manages native boot, polling, acknowledgements and helper cleanup. Do not launch a competing poller or shell helper.`);
 	}
-	if (!["hooks", "hook-admin", "pin", "unpin", "ignores", "doctor", "context", "update", "install", "link", "skills"].includes(options.argv[0] ?? "")) return runEngine(options);
+	if (!["hooks", "hook-admin", "pin", "unpin", "ignores", "doctor", "context", "update", "install", "link", "skills"].includes(options.argv[0] ?? "")) {
+		try { return await runEngine(options); }
+		finally { invalidateProjectConfigCache(); }
+	}
 	return serialized("pi-impeccable-management", () => runOperationUnqueued(options, pi, path.resolve(sessionCwd)));
 }
 
@@ -209,7 +212,9 @@ async function runOperationUnqueued(options: RunEngineOptions, pi: Pick<Extensio
 		const managed = { ...options, argv, cwd: root };
 		if (verb === "doctor") return await serialized(root, async () => {
 			options.signal?.throwIfAborted();
-			const result = await runEngine(managed);
+			let result: EngineRunResult;
+			try { result = await runEngine(managed); }
+			finally { invalidateProjectConfigCache(); }
 			// Return the actual engine outcome even after cancellation: upstream
 			// artifact mutations are not tracked by the adapter's commit list.
 			return { ...result, integration: { adapter: "pi", engineRun: true, operation: verb, root, ...(target === undefined ? {} : { originalTarget: target, effectiveTarget: root }), hooks: await reportMetadata(root), upstreamManifestDiscovery: "Upstream cannot discover this external Pi package; its genuine artifact findings remain in stdout." } };
@@ -290,7 +295,9 @@ async function runOperationUnqueued(options: RunEngineOptions, pi: Pick<Extensio
 				} finally { await rm(stage, { recursive: true, force: true }); }
 			}
 			if (verb === "hooks") throw new Error(`Unknown hook action: ${argv[1]}`);
-			const result = await runEngine({ ...options, argv, cwd });
+			let result: EngineRunResult;
+			try { result = await runEngine({ ...options, argv, cwd }); }
+			finally { invalidateProjectConfigCache(); }
 			return { ...result, integration: { adapter: "pi", engineRun: true, operation: verb ?? "", root } };
 		});
 		options.signal?.throwIfAborted();

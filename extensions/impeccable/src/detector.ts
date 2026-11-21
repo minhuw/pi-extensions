@@ -1,16 +1,49 @@
 import type { ExtensionAPI, ExtensionContext, SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { appendFile, lstat, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runEngine, sha256, truncateText } from "./engine.ts";
-import { hookStatus, object, optionalText, readConfigs, resolveAuditLogPath, resolveEditPath, resolveProject, serialized, withGitExcludeMutation } from "./project.ts";
+import { configPaths, extractHookExtensions, getProjectConfigGeneration, hookStatusFromConfigs, invalidateProjectConfigCache, object, optionalText, readConfigs, resolveAuditLogPath, resolveEditPath, resolveProject, serialized, withGitExcludeMutation, type ConfigFile } from "./project.ts";
 
 const MAX_SOURCE_BYTES = 512 * 1024;
 const MAX_SCANS = 24;
 const MAX_FILES = 20;
 const MAX_FEEDBACK_BYTES = 12_000;
+const MAX_PROJECT_CACHE = 256;
+const MAX_CONFIG_CACHE = 64;
 const UI_EXTENSIONS = [".tsx", ".jsx", ".html", ".htm", ".vue", ".svelte", ".astro", ".css", ".scss", ".sass", ".less", ".ts", ".js"];
+const PROJECT_MARKER_FILES = new Set(["package.json", "pnpm-workspace.yaml", "turbo.json", "nx.json", "lerna.json", "product.md", "design.md"]);
+
+interface ConfigStamp { exists: boolean; dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }
+interface CachedConfig { configs: ConfigFile[]; extraExtensions: string[]; stamps: ConfigStamp[] }
+
+function classifyInvalidationFile(file: string): "config" | "marker" | undefined {
+	const base = path.basename(file).toLowerCase();
+	if (base === ".impeccable.json" || base === ".impeccable.local.json") return "config";
+	const parent = path.basename(path.dirname(file)).toLowerCase();
+	if (parent === ".impeccable" && (base === "config.json" || base === "config.local.json")) return "config";
+	if (PROJECT_MARKER_FILES.has(base)) return "marker";
+	return undefined;
+}
+
+async function statConfigFile(file: string): Promise<ConfigStamp> {
+	try {
+		const info = await stat(file, { bigint: true });
+		return { exists: true, dev: info.dev, ino: info.ino, size: info.size, mtimeNs: info.mtimeNs, ctimeNs: info.ctimeNs };
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ENOTDIR") return { exists: false, dev: 0n, ino: 0n, size: 0n, mtimeNs: 0n, ctimeNs: 0n };
+		throw error;
+	}
+}
+
+function sameStamps(a: readonly ConfigStamp[], b: readonly ConfigStamp[]): boolean {
+	return a.length === b.length && a.every((stamp, index) => {
+		const other = b[index]!;
+		return stamp.exists === other.exists && stamp.dev === other.dev && stamp.ino === other.ino && stamp.size === other.size && stamp.mtimeNs === other.mtimeNs && stamp.ctimeNs === other.ctimeNs;
+	});
+}
 
 /** T5 seam: these are the upstream hook's exact temporary preview markers. */
 export function hasLivePreviewMarkers(content: string): boolean {
@@ -58,18 +91,77 @@ export function registerDetector(pi: ExtensionAPI): () => Promise<void> {
 	let feedback: DetectorFeedback[] = [];
 	const seen = new Map<string, string>();
 	const pending = new Map<string, BeforeEdit>();
+	const pendingInvalidations = new Map<string, "config" | "marker">();
 	const roots = new Map<string, RootState>();
 	const directories = new Set<string>();
 	const workRoots = new Set<string>();
+	const projectCache = new Map<string, string>();
+	const configCache = new Map<string, CachedConfig>();
+	let cacheGeneration = getProjectConfigGeneration();
 
-	const invalidate = () => { generation++; controller.abort(); controller = new AbortController(); pending.clear(); feedback = []; };
+	const clearCaches = () => {
+		projectCache.clear();
+		configCache.clear();
+		cacheGeneration = getProjectConfigGeneration();
+	};
+	const syncCacheGeneration = () => {
+		const current = getProjectConfigGeneration();
+		if (cacheGeneration !== current) {
+			projectCache.clear();
+			configCache.clear();
+			cacheGeneration = current;
+		}
+	};
+
+	async function cachedResolveProject(cwd: string, file: string): Promise<{ root: string; fromCache: boolean }> {
+		syncCacheGeneration();
+		const startGen = cacheGeneration;
+		const info = await lstat(file).catch(() => undefined);
+		if (info && !info.isFile()) return { root: await resolveProject(cwd, file, { sourcePath: true }), fromCache: false };
+		const key = `${cwd}\0${path.dirname(file)}`;
+		const cached = projectCache.get(key);
+		if (cached !== undefined) return { root: cached, fromCache: true };
+		const root = await resolveProject(cwd, file, { sourcePath: true });
+		if (startGen === getProjectConfigGeneration() && startGen === cacheGeneration) {
+			if (projectCache.size >= MAX_PROJECT_CACHE && !projectCache.has(key)) projectCache.delete(projectCache.keys().next().value!);
+			projectCache.set(key, root);
+		}
+		return { root, fromCache: false };
+	}
+
+	async function cachedHookSnapshot(root: string) {
+		syncCacheGeneration();
+		const startGen = cacheGeneration;
+		const stamps = await Promise.all(configPaths(root).map((file) => statConfigFile(file)));
+		const cached = configCache.get(root);
+		if (cached && startGen === getProjectConfigGeneration() && sameStamps(cached.stamps, stamps)) {
+			return { status: hookStatusFromConfigs(root, cached.configs), extraExtensions: cached.extraExtensions, configChanged: false };
+		}
+		const configChanged = cached !== undefined;
+		if (configChanged) {
+			configCache.delete(root);
+			projectCache.clear();
+		}
+		const configs = await readConfigs(root);
+		const extraExtensions = extractHookExtensions(configs);
+		if (startGen === getProjectConfigGeneration() && startGen === cacheGeneration) {
+			if (configCache.size >= MAX_CONFIG_CACHE && !configCache.has(root)) configCache.delete(configCache.keys().next().value!);
+			configCache.set(root, { configs, extraExtensions, stamps });
+		}
+		return { status: hookStatusFromConfigs(root, configs), extraExtensions, configChanged };
+	}
+
+	const invalidate = () => {
+		generation++; controller.abort(); controller = new AbortController(); pending.clear(); feedback = [];
+		if (pendingInvalidations.size) { pendingInvalidations.clear(); clearCaches(); }
+	};
 	async function cleanup() {
-		stopped = true; invalidate();
+		stopped = true; invalidate(); clearCaches(); pendingInvalidations.clear();
 		await Promise.all([...new Set([...roots.keys(), ...workRoots])].map((root) => serialized(root, async () => {})));
 		await Promise.all([...directories].map((directory) => rm(directory, { recursive: true, force: true })));
 		directories.clear(); roots.clear(); seen.clear(); workRoots.clear();
 	}
-	pi.on("session_start", () => { stopped = false; });
+	pi.on("session_start", () => { stopped = false; clearCaches(); pendingInvalidations.clear(); });
 	pi.on("session_shutdown", cleanup);
 	pi.on("session_tree", async () => { await cleanup(); stopped = false; sessionId = randomUUID(); });
 	pi.on("input", () => { invalidate(); seen.clear(); });
@@ -99,7 +191,7 @@ export function registerDetector(pi: ExtensionAPI): () => Promise<void> {
 		if (scans >= MAX_SCANS) { add({ phase, root, status: "truncated", text: "Automatic scan budget reached; narrow a manual detect run for remaining work.", attribution: "upstream-conservative" }); return; }
 		scans++;
 		const ownerSignal = controller.signal;
-		const status = await hookStatus(root);
+		const { status } = await cachedHookSnapshot(root);
 		if (!status.enabled) return;
 		const state = await stateFor(root);
 		if (stopped || revision !== generation || ctx.signal?.aborted) return;
@@ -156,34 +248,45 @@ export function registerDetector(pi: ExtensionAPI): () => Promise<void> {
 	}
 
 	pi.on("tool_call", async (event, ctx) => {
-		if (stopped || !["write", "edit"].includes(event.toolName) || pending.size + captures >= 64) return;
+		if (stopped || !["write", "edit"].includes(event.toolName)) return;
 		const input = event.input as Record<string, unknown>;
 		const supplied = input.path ?? input.file_path;
 		if (typeof supplied !== "string") return;
-		const revision = generation;
 		const file = resolveEditPath(supplied, ctx.cwd);
+		const invalidation = classifyInvalidationFile(file);
+		if (invalidation) pendingInvalidations.set(event.toolCallId, invalidation);
+		if (pending.size + captures >= 64) return;
+		const revision = generation;
 		captures++;
 		try {
-			const root = await resolveProject(ctx.cwd, file, { sourcePath: true });
-			const status = await hookStatus(root);
+			let { root, fromCache } = await cachedResolveProject(ctx.cwd, file);
+			let snapshot = await cachedHookSnapshot(root);
+			if (fromCache && snapshot.configChanged) {
+				({ root } = await cachedResolveProject(ctx.cwd, file));
+				snapshot = await cachedHookSnapshot(root);
+			}
+			const { status, extraExtensions } = snapshot;
 			if (!status.enabled || revision !== generation) return;
 			if (roots.size >= 4 && !roots.has(root)) { add({ phase: "immediate", root, status: "truncated", text: "Automatic project limit reached; scan this target manually.", attribution: "upstream-conservative" }); return; }
-			const configs = await readConfigs(root);
-			const extra = configs.flatMap((config) => [config.value.hook, config.value.detector].flatMap((section) => object(section) && Array.isArray(section.extensions) ? section.extensions.flatMap((item) => {
-				// Match upstream normalize_extension_entries for eligibility only;
-				// the hook still owns engine selection and detector rules.
-				const raw = typeof item === "string" ? item : object(item) ? item.ext : undefined;
-				if (typeof raw !== "string" || !raw.trim()) return [];
-				const extension = raw.trim().toLowerCase();
-				return [extension.startsWith(".") ? extension : `.${extension}`];
-			}) : []));
-			if (![...UI_EXTENSIONS, ...extra].some((extension) => file.toLowerCase().endsWith(extension.toLowerCase()))) return;
+			if (![...UI_EXTENSIONS, ...extraExtensions].some((extension) => file.toLowerCase().endsWith(extension.toLowerCase()))) return;
 			const before = await boundedSource(file);
 			if (revision === generation) pending.set(event.toolCallId, { file, root, before, input: structuredClone(input), generation: revision });
 		} catch (error) { add({ phase: "immediate", root: ctx.cwd, status: "error", text: String(error), attribution: "upstream-conservative" }); }
 		finally { captures--; }
 	});
 	pi.on("tool_result", async (event, ctx) => {
+		const invalidation = pendingInvalidations.get(event.toolCallId);
+		if (invalidation) {
+			pendingInvalidations.delete(event.toolCallId);
+			if (!event.isError) {
+				if (invalidation === "config") {
+					invalidateProjectConfigCache();
+					clearCaches();
+				} else {
+					projectCache.clear();
+				}
+			}
+		}
 		const edit = pending.get(event.toolCallId); pending.delete(event.toolCallId);
 		if (!edit || event.isError || stopped || edit.generation !== generation || ctx.signal?.aborted) return;
 		workRoots.add(edit.root);
