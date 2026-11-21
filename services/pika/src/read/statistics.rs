@@ -120,7 +120,7 @@ fn at_time_scoped(conn: &Connection, p: &Params, now: i64, public: bool) -> Read
     let tx = conn.unchecked_transaction()?;
     let from = match days {
         Some(days) => today - (days - 1) * DAY_MS,
-        None => oldest_day(&tx, filter, end, today)?,
+        None => oldest_day(&tx, filter, end, today)?.max(today - (usage::MAX_DAYS - 1) * DAY_MS),
     };
     let mut daily: Vec<Day> = (0..(end - from) / DAY_MS)
         .map(|i| Day {
@@ -381,5 +381,68 @@ mod tests {
         let gap = read(&store, Some("5"), "2026-11-02T12:00:00Z");
         assert_eq!(gap["daily"][0]["sessions"], 0);
         assert_eq!(gap["daily"][0]["requests"], 0);
+    }
+
+    #[test]
+    fn all_clamps_ancient_timestamps_to_usage_max_days() {
+        let now_ms = parse_iso_ms("2026-11-02T12:00:00Z").unwrap();
+        let today = now_ms.div_euclid(DAY_MS) * DAY_MS;
+        let expected_from = date(today - (usage::MAX_DAYS - 1) * DAY_MS);
+        let expected_to = date(today);
+        let params = Params(std::collections::BTreeMap::from([(
+            "days".into(),
+            "all".into(),
+        )]));
+
+        for (label, ancient_ts) in [
+            ("epoch-1970-01-01", 0_i64),
+            ("year-0000-01-01", FIRST_MS),
+            (
+                "one-ms-before-window",
+                today - (usage::MAX_DAYS - 1) * DAY_MS - 1,
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path()).unwrap();
+            store
+                .write(|tx| {
+                    tx.execute(
+                        "INSERT INTO sessions (sid, id, device) VALUES (1, 'ancient', 'd')",
+                        [],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO entries (sid, seq, offset, type, ts) VALUES (1, 0, 0, 'session', ?1)",
+                        [ancient_ts],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO usage_events (sid, seq, at, requests, input) VALUES (1, 0, ?1, 1, 10)",
+                        [ancient_ts],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO usage_events (sid, seq, at, requests, input) VALUES (1, 1, ?1, 2, 20)",
+                        [today],
+                    )?;
+                    Ok::<_, rusqlite::Error>(())
+                })
+                .unwrap();
+
+            for public in [false, true] {
+                let stats = store
+                    .read(|c| at_time_scoped(c, &params, now_ms, public))
+                    .unwrap();
+                assert_eq!(stats.daily.len(), usage::MAX_DAYS as usize, "{label} public={public}");
+                assert_eq!(stats.from, expected_from, "{label} public={public}");
+                assert_eq!(stats.to, expected_to, "{label} public={public}");
+                assert_eq!(stats.daily[0].date, expected_from, "{label} public={public}");
+                assert_eq!(
+                    stats.daily.last().unwrap().date,
+                    expected_to,
+                    "{label} public={public}"
+                );
+                assert_eq!(stats.totals.counts.requests, 2, "{label} public={public}");
+                assert_eq!(stats.totals.counts.tokens.input, 20, "{label} public={public}");
+                assert_eq!(stats.totals.active_days, 1, "{label} public={public}");
+            }
+        }
     }
 }
