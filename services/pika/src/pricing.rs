@@ -243,16 +243,23 @@ pub fn from_models_dev(catalog: &Value) -> Result<PriceTable> {
     Ok(PriceTable { prices })
 }
 
+pub(crate) const REPRICE_ALL_SQL: &str =
+    "SELECT u.sid, u.seq, u.cost, u.pricing, m.model, u.input, u.output, u.cache_read, u.cache_write
+     FROM usage_events u INDEXED BY usage_events_pricing LEFT JOIN model_calls m ON m.sid = u.sid AND m.seq = u.seq
+     WHERE u.pricing != 0";
+
+pub(crate) const REPRICE_SESSION_SQL: &str =
+    "SELECT u.sid, u.seq, u.cost, u.pricing, m.model, u.input, u.output, u.cache_read, u.cache_write
+     FROM usage_events u INDEXED BY usage_events_pricing LEFT JOIN model_calls m ON m.sid = u.sid AND m.seq = u.seq
+     WHERE u.pricing != 0 AND u.sid = ?1";
+
 /// Gives every call that needs a price, in one session or in all, its model's price from `table` (or zero without
 /// one), then recomputes the costs of the sessions and turns whose calls changed as derivation sums them: in entry
 /// order. Returns the number of calls whose cost or pricing changed.
 pub fn reprice(tx: &Transaction, table: &PriceTable, sid: Option<i64>) -> Result<usize> {
-    let sql = "SELECT u.sid, u.seq, u.cost, u.pricing, m.model, u.input, u.output, u.cache_read, u.cache_write
-         FROM usage_events u LEFT JOIN model_calls m ON m.sid = u.sid AND m.seq = u.seq
-         WHERE u.pricing != 0";
     let mut statement = match sid {
-        Some(_) => tx.prepare_cached(&format!("{sql} AND u.sid = ?1"))?,
-        None => tx.prepare_cached(sql)?,
+        Some(_) => tx.prepare_cached(REPRICE_SESSION_SQL)?,
+        None => tx.prepare_cached(REPRICE_ALL_SQL)?,
     };
     /// `sid`, `seq`, `cost`, `pricing`, the call's model, and its input, output, cache read, and cache write tokens.
     type Row = (i64, i64, f64, i64, Option<String>, [i64; 4]);

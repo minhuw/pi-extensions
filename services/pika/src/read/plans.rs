@@ -385,3 +385,24 @@ fn extension_usage_reads_its_window_through_indexes() {
         assert!(commands.contains("SEARCH l USING INDEX lines_position (stream_id=? AND offset=?)"), "{commands}");
     });
 }
+
+#[test]
+fn reprice_uses_the_pricing_partial_index() {
+    use crate::pricing::{REPRICE_ALL_SQL, REPRICE_SESSION_SQL};
+    with_conn(|conn| {
+        assert_eq!(
+            plan(conn, REPRICE_SESSION_SQL, None),
+            [
+                "SEARCH u USING INDEX usage_events_pricing (sid=?)",
+                "SEARCH m USING PRIMARY KEY (sid=? AND seq=?) LEFT-JOIN",
+            ]
+        );
+        assert_eq!(
+            plan(conn, REPRICE_ALL_SQL, None),
+            [
+                "SCAN u USING INDEX usage_events_pricing",
+                "SEARCH m USING PRIMARY KEY (sid=? AND seq=?) LEFT-JOIN",
+            ]
+        );
+    });
+}
