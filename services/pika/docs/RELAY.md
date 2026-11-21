@@ -6,14 +6,14 @@ Relay lets a running pi session send text messages to any other running pi sessi
 - **Extension:** `extensions/pika/relay/`, part of the pika extension (TypeScript pi extension). It reads pika's credentials through the `globalThis` registry that `extensions/pika/credentials.ts` publishes, so module copies loaded for other cwds share them.
 - **Web:** `services/pika/web/`, an "Active sessions" dashboard.
 
-Deferred, not in v1: addressing subagent and Herder child sessions, a same-machine shortcut, groups or broadcast, attachments, a blocking ask tool.
+Deferred, not in v1: addressing subagent and Herder child sessions, a same-machine shortcut, attachments, a blocking ask tool.
 
 ## Terms
 
 - **Session id:** pi's session header `id` (a UUID), the same id pika uses for uploaded sessions. It is the only address; names and titles are for display.
 - **Online session:** a session holding an open relay connection that has passed `hello`.
 - **Device:** every `device` field is the device's id, which never changes; every object that carries `device` also carries `deviceName`, the device's current display name (its id when it has none; see "Identity" in `SPEC.md`). Ownership, addressing, limits, and revocation are keyed by the id. The server looks names up when it serializes an object, so a rename shows in the next `relay/sessions` or `relay/events` answer and in every frame sent after it.
-- **Message:** UTF-8 text from a session, or from the user in the web UI, to one session id.
+- **Message:** UTF-8 text from a session, or from the user in the web UI, to one session id or to a chatroom (`#room`).
 - **Delivered:** the target's pi process accepted the message into its session (`pi.sendMessage` returned and the receipt entry was appended) and acknowledged it. It does not mean the model has read it.
 
 ## Constants
@@ -36,6 +36,11 @@ Deferred, not in v1: addressing subagent and Herder child sessions, a same-machi
 | Online sessions per server | 1,000 |
 | Connections per device | 64 |
 | Dashboard event ring | last 500 events |
+| Chatrooms per server | 200 |
+| Members per chatroom | 200 |
+| Kept messages per chatroom | 200 |
+| Explicit mentions per room message (`mentions` array) | 64 |
+| SQLite persistence queue | 4,096 pending operations (bounded channel to a dedicated writer thread) |
 
 The server reads TTL and heartbeat from internal configuration so tests can shorten them. `PIKA_RELAY_TTL_SECS` and `PIKA_RELAY_HEARTBEAT_SECS` exist for tests and the end-to-end script only and are documented as such.
 
@@ -74,7 +79,7 @@ The server reads TTL and heartbeat from internal configuration so tests can shor
   - A message to an online target is pushed at once; `sent` reports `delivered` only if the target's `ack` arrives within 2 s, otherwise `queued`.
 - `send` to a room: `{ type: "send", clientId, room, text, mentions?: string[], urgent?, replyTo?, hops }`, without `to` (see Rooms).
   - Answered `{ type: "sent", clientId, id, status: "delivered", room, notified: Target[], to: Target, unmatched?: string[] }`, where `to` is `#<room>`, or rejected as above.
-  - **Rejection reasons, checked in this order:** `invalid`, `too_large`, `rate_limited`, `unknown_room` (no such room), `not_member` (the sending session is not a member).
+  - **Rejection reasons, checked in this order:** `invalid`, `too_large` (text over 32 KiB, or the frame over 64 KiB before mention expansion), `rate_limited`, `unknown_room` (no such room), `not_member` (the sending session is not a member). After resolving `@mentions` (such as `@all` or aliases) into target session ids, the server rechecks the encoded `message` frame against the 64 KiB `max_frame_bytes` limit and rejects with `too_large` (storing and notifying nothing) if it exceeds the limit.
 - `ack`: `{ type: "ack", id }` from the target after it delivered message `id`. Unknown or already-acknowledged ids are ignored.
 - `pong`: `{ type: "pong" }` in answer to `ping`. Any frame counts as liveness.
 
@@ -94,12 +99,12 @@ Message ids are server-generated and URL-safe, carrying 72 random bits plus a co
 
 ### Mailbox and lifecycle
 
-- Live WebSocket connections and online state are held in memory; the mailbox (unexpired queued messages, re-armed for their remaining TTL or expired on startup), the 500-event ring, and chatrooms (up to 200 rooms, with their members, representatives, monotonic `seq`, and last 200 messages per room) are persisted in SQLite (`relay_*` tables, not cleared by `pika reindex`). Session transcripts, which pika already uploads, are the permanent record.
+- Live WebSocket connections and online state are held in memory; the mailbox (unexpired queued messages, re-armed for their remaining TTL or expired on startup), the 500-event ring, and chatrooms (up to 200 rooms, up to 200 members per room, with their representatives, monotonic `seq`, and last 200 messages per room) are persisted in SQLite (`relay_*` tables, not cleared by `pika reindex`). Persistence operations are sent asynchronously in causal order through a bounded channel (4,096 operations) to a dedicated SQLite writer thread so disk I/O never blocks the relay mutex; if the queue fills, excess persistence writes are dropped with a warning. Session transcripts, which pika already uploads, are the permanent record.
 - A message is accepted (`queued`), pushed while the target is online, and becomes `delivered` on `ack`. If it is not acknowledged within the TTL of its acceptance, it is removed and becomes `expired`, and the sender gets `status: expired`.
 - **Bound to the target's device:** when a message is accepted, the target's owner (see Ownership) is recorded with it if known, and the message is pushed only to a connection of that device.
 - **Sender reconnecting:** if the sender's connection changed between `send` and the outcome, a `delivered` outcome that can no longer be reported as `sent` goes to the sender's current connection as `status: delivered`.
 - **Timers:** expiry and the 2 s ack wait are cancelled or ignored once a message is acknowledged; the number of pending timers never exceeds the number of queued messages plus sends in their 2 s ack wait.
-- **Stopping the server** (SIGTERM or Ctrl+C) closes every relay connection with 1001 and waits up to 3 s for them to finish. A closing connection reads the peer's answer to its close frame for up to 2 s, because a socket closed with that answer unread is reset and the peer never sees the close frame.
+- **Stopping the server** (SIGTERM or Ctrl+C) closes every relay connection with 1001, waits up to 3 s for them to finish, and flushes pending persistence writes to SQLite. A closing connection reads the peer's answer to its close frame for up to 2 s, because a socket closed with that answer unread is reset and the peer never sees the close frame.
 - **Dead connections:** the server closes a connection after 45 s without any frame and marks the session offline. Unacknowledged messages stay queued for their remaining TTL.
 - **Revoking a token** closes every relay connection made with it with 4401 at once: from the Devices route, and when a pairing that continues a device revokes its old token. `pika token revoke` runs in another process, so the server also checks each connection's token every heartbeat and closes it within one heartbeat.
 - `PIKA_RELAY=off` at startup disables everything. There is no runtime toggle in v1.
@@ -113,13 +118,13 @@ Message ids are server-generated and URL-safe, carrying 72 random bits plus a co
   `recorded` says whether pika has the session's transcript. Items are sorted by `deviceName` case-insensitively, then by `device`, then by `connectedAt` with the newest first.
 
 - **GET `{base}/api/relay/v1/rooms`** with the bearer token → `{ items: RelayRoom[] }` (explicit topic chatrooms). `RelayRoom` is `{ name, topic?, createdAt, updatedAt, messageCount, members, representative?, lastMessage? }`; `representative` is the session id of the room's representative, absent when it has none.
-- **POST `{base}/api/relay/v1/rooms`** with `{ room, sessionId, action?: "join" | "leave" | "represent" | "unrepresent", topic? }` → joins, leaves, represents, or stops representing an explicit room (joining or representing creates it), returning `{ room: RelayRoom, messages: RoomMessage[] }`. A device acts only for its own sessions: for every action, a session whose owner (see Ownership) is another device answers 403 `not_owner`, and one that nobody owns 400 `unknown_session`; neither changes the room or pushes a frame. Joining or representing also needs a session that is online or recorded (else 400 `unknown_session`), and leaving or unrepresenting a room that does not exist answers 400 `invalid`.
+- **POST `{base}/api/relay/v1/rooms`** with `{ room, sessionId, action?: "join" | "leave" | "represent" | "unrepresent", topic? }` → joins, leaves, represents, or stops representing an explicit room (joining or representing creates it), returning `{ room: RelayRoom, messages: RoomMessage[] }`. A device acts only for its own sessions: for every action, a session whose owner (see Ownership) is another device answers 403 `not_owner`, and one that nobody owns 400 `unknown_session`; neither changes the room or pushes a frame. Joining or representing also needs a session that is online or recorded (else 400 `unknown_session`), creating a new room past the 200-room cap answers 429 `mailbox_full`, adding a new member to a room that already has 200 members answers 429 `room_full`, and leaving or unrepresenting a room that does not exist answers 400 `invalid`.
 - **GET `{base}/api/relay/v1/rooms/{name}?limit=&after=`** → `{ room: RelayRoom, messages: RoomMessage[] }`, allowing any agent to read room message history on demand.
 
 ### Rooms
 
-- Rooms are created and joined only by the user: `/relay join` and `/relay represent` in pi (the device `POST rooms` route), or the web UI (`POST relay/rooms`, the member route). Leaving likewise. Posting never creates a room or adds a member.
-- **Posting:** the room must exist (`unknown_room`), and a session must be a member (`not_member`); a refused post is stored nowhere and pushed to nobody, and appears in the event ring as rejected. The web UI may post to any existing room. An accepted post joins the room's history (its last 200 messages) and is answered `delivered`.
+- Rooms are created and joined only by the user: `/relay join` and `/relay represent` in pi (the device `POST rooms` route), or the web UI (`POST relay/rooms`, the member route). Leaving likewise. Posting never creates a room or adds a member. A server holds at most 200 rooms (`429 mailbox_full` past the cap), and each room holds at most 200 members (`429 room_full` past the cap).
+- **Posting:** the room must exist (`unknown_room`), and a session must be a member (`not_member`); a refused post is stored nowhere and pushed to nobody, and appears in the event ring as rejected. The web UI may post to any existing room. The `mentions` array accepts at most 64 tokens (`invalid` otherwise), and after resolving `@mentions` into member session ids the encoded `message` frame must still fit within `max_frame_bytes` (64 KiB, else `too_large`). An accepted post joins the room's history (its last 200 messages) and is answered `delivered`.
 - **Mentions:** the tokens of `mentions` and the `@token`s in `text` resolve only among the room's current members: by session id (or a prefix of at least 8 characters), or by name, title, or project (case-insensitive, spaces as `-` or `_`). `all`, `everyone`, and `*` name every member. Each named member except the sender gets a `message` with `room` and `mentions`, queued while it is offline, with no `status` to the sender; the others see the post only in the history.
 - `unmatched` lists the tokens that named no member, in order (`all`, `everyone`, `*`, and a token naming the sender count as matched); it is absent when every token matched. Clients that predate it ignore it.
 
@@ -137,11 +142,11 @@ A room may have one representative: a member session that stands for the user. T
 
 - `GET relay/sessions` → `{ items: OnlineSession[] }`, the same list.
 - `GET relay/rooms` → `{ items: RelayRoom[] }`, with `representative` as for devices.
-- `POST relay/rooms` with `{ name, topic?: string | null, members?: string[] }` → creates or updates an explicit chatroom and its member sessions; omitting `topic` keeps an existing room's topic unchanged, while passing `null` or `""` (or whitespace) clears it.
+- `POST relay/rooms` with `{ name, topic?: string | null, members?: string[] }` → creates or updates an explicit chatroom and its member sessions (enforcing the 200-room `429 mailbox_full` and 200-member `429 room_full` limits); omitting `topic` keeps an existing room's topic unchanged, while passing `null` or `""` (or whitespace) clears it.
 - `GET relay/rooms/{name}` → `{ room: RelayRoom, messages: RoomMessage[] }`.
-- `POST relay/rooms/{name}/members` with `{ sessionId, action?: "add" | "remove" | "represent" | "unrepresent" }` → adds, removes, elects as representative, or clears as representative a member session, whichever device owns it; removing the representative clears it.
+- `POST relay/rooms/{name}/members` with `{ sessionId, action?: "add" | "remove" | "represent" | "unrepresent" }` → adds, removes, elects as representative, or clears as representative a member session, whichever device owns it (429 `room_full` past 200 members, 429 `mailbox_full` if creating a new room past 200 rooms); removing the representative clears it.
 - `DELETE relay/rooms/{name}` → deletes the room (`204 No Content`); if it had a representative, its online members get `room` without one.
-- `POST relay/messages` with body `{ to, text, urgent?: boolean }` (1:1) or `{ room, text, mentions?: string[], urgent?: boolean }` (chatroom) → 200 `{ id, status: "delivered" | "queued", to: Target, room?, notified?, unmatched? }`, or 400, 404, or 429 `{ error: <reason> }` with the same reasons as `send` (no `self`; an unknown room is 404 `unknown_room`, and `not_member`, which a web post never gets, would be 403). The sender is `{ kind: "web" }`, with hops 0. In a chatroom, which must exist, only the `@`-mentioned members receive a `message` push that triggers a turn (see Rooms).
+- `POST relay/messages` with body `{ to, text, urgent?: boolean }` (1:1) or `{ room, text, mentions?: string[], urgent?: boolean, replyTo?: string }` (chatroom) → 200 `{ id, status: "delivered" | "queued", to: Target, room?, notified?, unmatched? }`, or 400, 403, 404, or 429 `{ error: <reason> }` with the same reasons as `send` (including `too_large` after mention resolution, no `self`; an unknown room is 404 `unknown_room`, and `not_member`, which a web post never gets, would be 403). The sender is `{ kind: "web" }`, with hops 0. In a chatroom, which must exist, only the `@`-mentioned members receive a `message` push that triggers a turn (see Rooms).
 - `GET relay/events?limit=` (default 100, max 500) → `{ items: RelayEvent[] }`, newest first:
   ```
   RelayEvent = { id, at, from: Sender, to: Target, status: "queued" | "delivered" | "expired" | "rejected", reason?, deliveredAt?, urgent, replyTo?, hops, text }

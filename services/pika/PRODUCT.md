@@ -31,7 +31,7 @@ pika keeps the complete, verbatim record. Every session line is stored byte-iden
 - Devices upload through the pika extension; each device pairs once from the web UI and keeps a per-device token.
 - Sessions come from Pi with subagents (single agents and scripted workflows), Herder runs (journal, goal, plan, steps), compactions, model switches, and images.
 - The UI runs behind a reverse proxy under any base path, protected by pika's password (server-side sessions) or by the proxy.
-- `/public`, `/public?project=<name>`, and `/public/s/<id>` serve published projects anonymously. Publishing exposes prompts, responses, thinking, tool inputs and outputs, images, and raw entries without redaction. Captured provider requests stay private, and the public UI has no relay or management controls.
+- `/public`, `/public?project=<name>`, and `/public/s/<id>` serve published projects anonymously. Publishing serves prompts, responses, thinking, tool inputs and outputs, images, and raw entries scrubbed before leaving the server: agent memory (including memory tool calls, results, and any images inside omitted memory entries) is omitted, and rule-based redaction strips recognized credentials and secret-named fields (including pika device tokens and node credentials). Because redaction is rule-based and does not scrub personal data (such as emails) or text inside non-memory images, owners should review a project before publishing. Captured provider requests stay private, and the public UI has no relay or management controls.
 
 ## Capabilities and Constraints
 
