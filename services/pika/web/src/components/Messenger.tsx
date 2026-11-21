@@ -79,6 +79,8 @@ type ThreadItem = DmThread | RoomThread;
 /** One message in a conversation: a direct relay event, or a post in a room's history. */
 interface ChatMessage {
 	id: string;
+	/** Room posts only: monotonic sequence number within the room. */
+	seq?: number;
 	at: string;
 	from: RelaySender;
 	/** Direct messages only: who it went to. */
@@ -102,10 +104,20 @@ interface MentionCandidate {
 }
 
 const ROOM_NAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
+/** Room history window fetched from the server; auto-scroll must keep firing once a room stays at this cap. */
+const MAX_ROOM_MESSAGES = 150;
 /** From this width a long message opens in a reader beside the conversation; below it, Show all expands in place. */
 const READER_QUERY = "(min-width: 1280px)";
 /** How close to the bottom the conversation must be for a new message to keep it pinned there. */
 const STICK_PX = 80;
+const REFUSED_STATUSES = new Set([400, 403, 404, 409, 429]);
+
+function formatError(cause: unknown): string {
+	if (cause instanceof ApiError && REFUSED_STATUSES.has(cause.status)) {
+		return reasonMessage(cause.message);
+	}
+	return cause instanceof Error ? cause.message : String(cause);
+}
 
 const STATE_WORD: Record<PeerState, string> = { busy: "Busy", idle: "Idle", offline: "Offline" };
 
@@ -308,6 +320,10 @@ function MessageRecord({
 	const bodyId = useId();
 	const readLabelId = useId();
 	const [copied, setCopied] = useState(false);
+	const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	useEffect(() => () => {
+		if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+	}, []);
 	const shape = useMemo(() => messageShape(message.text), [message.text]);
 	const whole = !shape.long || (!readerMode && expanded);
 	const where = senderWhere(message.from);
@@ -316,11 +332,14 @@ function MessageRecord({
 	const readLabel = readerMode ? (selected ? "Close reader" : "Read in full") : expanded ? "Show less" : "Show all";
 
 	const handleCopy = () => {
-		void copyText(message.text).then((ok) => {
-			if (!ok) return;
-			setCopied(true);
-			setTimeout(() => setCopied(false), 1_600);
-		});
+		void copyText(message.text)
+			.then((ok) => {
+				if (!ok) return;
+				setCopied(true);
+				if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+				copyTimerRef.current = setTimeout(() => setCopied(false), 1_600);
+			})
+			.catch(() => {});
 	};
 
 	return (
@@ -587,7 +606,7 @@ function Reader({
 				/>
 				<button
 					type="button"
-					onClick={() => void copyText(message.text).then(setCopied)}
+					onClick={() => void copyText(message.text).then(setCopied, () => setCopied(false))}
 					data-imessage-copy=""
 					className="ml-auto inline-flex h-7 items-center gap-1.5 rounded-sm border border-ink bg-page px-2.5 text-[12.5px] font-medium whitespace-nowrap text-ink hover:bg-hover"
 				>
@@ -696,6 +715,14 @@ function RoomMembersRail({
 	const [filter, setFilter] = useState("");
 	const [customSessionId, setCustomSessionId] = useState("");
 	const [addError, setAddError] = useState<string | null>(null);
+	const [memberError, setMemberError] = useState<string | null>(null);
+
+	const [prevRoomName, setPrevRoomName] = useState(room.name);
+	if (prevRoomName !== room.name) {
+		setPrevRoomName(room.name);
+		setAddError(null);
+		setMemberError(null);
+	}
 
 	const recentSessionsQuery = useQuery({
 		queryKey: ["sessions", "relay-picker"],
@@ -744,15 +771,34 @@ function RoomMembersRail({
 		);
 	}, [onlineSessions, recentSessionsQuery.data, memberIds, filter]);
 
+	const handleMemberToggle = async (sessionId: string, isMember: boolean) => {
+		setMemberError(null);
+		try {
+			await onToggleMember(room.name, sessionId, isMember);
+		} catch (cause) {
+			setMemberError(formatError(cause));
+		}
+	};
+
+	const handleRepresentativeToggle = async (sessionId: string, isRep: boolean) => {
+		setMemberError(null);
+		try {
+			await onToggleRepresentative(room.name, sessionId, isRep);
+		} catch (cause) {
+			setMemberError(formatError(cause));
+		}
+	};
+
 	const handleAddById = async () => {
 		const sid = customSessionId.trim();
 		if (!sid) return;
 		setAddError(null);
+		setMemberError(null);
 		try {
 			await onToggleMember(room.name, sid, false);
 			setCustomSessionId("");
 		} catch (cause) {
-			setAddError(cause instanceof ApiError ? reasonMessage(cause.message) : cause instanceof Error ? cause.message : String(cause));
+			setAddError(formatError(cause));
 		}
 	};
 
@@ -779,6 +825,24 @@ function RoomMembersRail({
 					<Icon name="close" size={14} className="shrink-0" />
 				</button>
 			</div>
+
+			{memberError && (
+				<div
+					role="alert"
+					data-imessage-member-error=""
+					className="flex items-start justify-between gap-2 border-b border-line bg-red-soft px-4 py-2 text-[12.5px] text-red"
+				>
+					<span className="min-w-0 flex-1">{memberError}</span>
+					<button
+						type="button"
+						onClick={() => setMemberError(null)}
+						aria-label="Dismiss member error"
+						className="shrink-0 font-medium underline hover:no-underline"
+					>
+						Dismiss
+					</button>
+				</div>
+			)}
 
 			<div className="min-h-0 flex-1 overflow-y-auto">
 				<section aria-label="Current members">
@@ -831,7 +895,7 @@ function RoomMembersRail({
 											<button
 												type="button"
 												disabled={memberBusyId === m.sessionId}
-												onClick={() => void onToggleRepresentative(room.name, m.sessionId, isRep)}
+												onClick={() => void handleRepresentativeToggle(m.sessionId, isRep)}
 												data-imessage-represent-member={m.sessionId}
 												className={cx(
 													"rounded-sm border bg-page px-2.5 py-1 text-[12.5px] whitespace-nowrap disabled:cursor-default disabled:opacity-45",
@@ -845,9 +909,7 @@ function RoomMembersRail({
 											<button
 												type="button"
 												disabled={memberBusyId === m.sessionId}
-												onClick={() =>
-													void onToggleMember(room.name, m.sessionId, true).catch(() => {})
-												}
+												onClick={() => void handleMemberToggle(m.sessionId, true)}
 												data-imessage-toggle-member={m.sessionId}
 												className="rounded-sm border border-line bg-page px-2.5 py-1 text-[12.5px] whitespace-nowrap text-muted hover:border-red hover:bg-hover hover:text-red disabled:cursor-default disabled:opacity-45"
 											>
@@ -876,6 +938,23 @@ function RoomMembersRail({
 							/>
 						</div>
 
+						{recentSessionsQuery.isError && (
+							<div
+								role="alert"
+								data-imessage-recent-sessions-error=""
+								className="mt-2 flex items-center justify-between gap-2 rounded-sm bg-red-soft px-2.5 py-1.5 text-[12px] text-red"
+							>
+								<span className="min-w-0 flex-1">Couldn’t load recent sessions: {formatError(recentSessionsQuery.error)}</span>
+								<button
+									type="button"
+									onClick={() => void recentSessionsQuery.refetch()}
+									className="shrink-0 font-medium underline hover:no-underline"
+								>
+									Retry
+								</button>
+							</div>
+						)}
+
 						{availableToAdd.length === 0 ? (
 							<p className="pt-3 text-[12px] text-muted">
 								{filter.trim() ? `No sessions matching “${filter.trim()}”.` : "No other online or recent sessions to add."}
@@ -894,7 +973,7 @@ function RoomMembersRail({
 										<button
 											type="button"
 											disabled={memberBusyId === c.id}
-											onClick={() => void onToggleMember(room.name, c.id, false).catch(() => {})}
+											onClick={() => void handleMemberToggle(c.id, false)}
 											data-imessage-toggle-member={c.id}
 											className="shrink-0 rounded-sm border border-ink bg-page px-2.5 py-1 text-[12.5px] font-medium text-ink hover:bg-hover disabled:cursor-default disabled:opacity-45"
 										>
@@ -1064,6 +1143,7 @@ export function Messenger({
 	const [memberBusyId, setMemberBusyId] = useState<string | null>(null);
 	const [confirmingDelete, setConfirmingDelete] = useState(false);
 	const [deletingRoom, setDeletingRoom] = useState(false);
+	const [deleteError, setDeleteError] = useState<string | null>(null);
 	const deleteCancelRef = useRef<HTMLButtonElement>(null);
 
 	useEffect(() => {
@@ -1076,6 +1156,13 @@ export function Messenger({
 	const [highlightedId, setHighlightedId] = useState<string | null>(null);
 	const [scrolledUp, setScrolledUp] = useState(false);
 	const [copiedDmId, setCopiedDmId] = useState(false);
+	const dmCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+	useEffect(() => () => {
+		if (dmCopyTimerRef.current) clearTimeout(dmCopyTimerRef.current);
+		if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+	}, []);
 
 	useEffect(() => {
 		if (!readerMode) setReaderId(null);
@@ -1223,7 +1310,7 @@ export function Messenger({
 	const activeRoomName = resolvedSelection?.kind === "room" ? resolvedSelection.room : null;
 	const roomDetailQuery = useQuery({
 		queryKey: relayRoomKey(activeRoomName ?? ""),
-		queryFn: () => api.relayRoom(activeRoomName!, 150),
+		queryFn: () => api.relayRoom(activeRoomName!, MAX_ROOM_MESSAGES),
 		enabled: Boolean(activeRoomName) && !signingOut,
 		staleTime: 0,
 		refetchInterval: (query) =>
@@ -1248,6 +1335,7 @@ export function Messenger({
 		setManagingMembers(false);
 		setRoomView("messages");
 		setConfirmingDelete(false);
+		setDeleteError(null);
 		setEditingTopic(false);
 		setTopicError(null);
 		setReaderId(null);
@@ -1258,8 +1346,9 @@ export function Messenger({
 		setCopiedDmId(false);
 		setDismissedMentionAt(null);
 	}
-	useEffect(() => {
-		stickToBottom.current = true;
+	const resolvedKeyRef = useRef(resolvedKey);
+	useLayoutEffect(() => {
+		resolvedKeyRef.current = resolvedKey;
 	}, [resolvedKey]);
 
 	const activeRoom: RelayRoom | undefined = useMemo(() => {
@@ -1277,6 +1366,7 @@ export function Messenger({
 			const posts: RelayRoomMessage[] = roomDetailQuery.data?.messages ?? [];
 			return posts.map((m) => ({
 				id: m.id,
+				seq: m.seq,
 				at: m.at,
 				from: m.from,
 				notified: m.notified,
@@ -1313,14 +1403,21 @@ export function Messenger({
 
 	const messagesById = useMemo(() => new Map(messages.map((m) => [m.id, m])), [messages]);
 	const readerMessage = readerId ? messagesById.get(readerId) : undefined;
+	const lastMessage = messages[messages.length - 1];
+	const lastMessageKey = lastMessage ? `${lastMessage.id}:${lastMessage.seq ?? ""}:${lastMessage.at}` : "";
+	const prevScrollThreadKeyRef = useRef(resolvedKey);
 
 	useLayoutEffect(() => {
+		if (prevScrollThreadKeyRef.current !== resolvedKey) {
+			prevScrollThreadKeyRef.current = resolvedKey;
+			stickToBottom.current = true;
+		}
 		const node = streamRef.current;
 		if (node && stickToBottom.current) {
 			node.scrollTop = node.scrollHeight;
 			setScrolledUp(false);
 		}
-	}, [messages.length, resolvedKey]);
+	}, [resolvedKey, roomView, messages.length, lastMessageKey]);
 
 	useLayoutEffect(() => {
 		const node = inputRef.current;
@@ -1419,7 +1516,8 @@ export function Messenger({
 		const target = streamRef.current?.querySelector<HTMLElement>(`[data-imessage-bubble="${CSS.escape(id)}"]`);
 		target?.scrollIntoView?.({ block: "center", behavior: "smooth" });
 		setHighlightedId(id);
-		setTimeout(() => {
+		if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+		highlightTimerRef.current = setTimeout(() => {
 			setHighlightedId((current) => (current === id ? null : current));
 		}, 1_800);
 	};
@@ -1470,6 +1568,7 @@ export function Messenger({
 	};
 
 	const handleCreateRoom = async () => {
+		if (savingRoom) return;
 		const cleanName = newRoomName.trim().replace(/^#/, "");
 		if (!ROOM_NAME_RE.test(cleanName)) {
 			setRoomFormError("Use 1–64 letters, digits, dots, hyphens, or underscores, such as auth-sync.");
@@ -1493,13 +1592,15 @@ export function Messenger({
 			setNewRoomMembers(new Set());
 			selectThread({ kind: "room", room: created.room.name });
 		} catch (cause) {
-			setRoomFormError(cause instanceof ApiError ? reasonMessage(cause.message) : cause instanceof Error ? cause.message : String(cause));
+			setRoomFormError(formatError(cause));
 		} finally {
 			setSavingRoom(false);
 		}
 	};
 
 	const handleSaveTopic = async (roomName: string) => {
+		if (savingTopic) return;
+		const targetKey = `room:${roomName}`;
 		setSavingTopic(true);
 		setTopicError(null);
 		try {
@@ -1509,9 +1610,13 @@ export function Messenger({
 				queryClient.invalidateQueries({ queryKey: RELAY_ROOMS_KEY }),
 				queryClient.invalidateQueries({ queryKey: relayRoomKey(roomName) }),
 			]);
-			setEditingTopic(false);
+			if (resolvedKeyRef.current === targetKey) {
+				setEditingTopic(false);
+			}
 		} catch (cause) {
-			setTopicError(cause instanceof Error ? cause.message : String(cause));
+			if (resolvedKeyRef.current === targetKey) {
+				setTopicError(formatError(cause));
+			}
 		} finally {
 			setSavingTopic(false);
 		}
@@ -1526,7 +1631,7 @@ export function Messenger({
 				queryClient.invalidateQueries({ queryKey: relayRoomKey(roomName) }),
 			]);
 		} finally {
-			setMemberBusyId(null);
+			setMemberBusyId((current) => (current === sessionId ? null : current));
 		}
 	};
 
@@ -1539,18 +1644,30 @@ export function Messenger({
 				queryClient.invalidateQueries({ queryKey: relayRoomKey(roomName) }),
 			]);
 		} finally {
-			setMemberBusyId(null);
+			setMemberBusyId((current) => (current === sessionId ? null : current));
 		}
 	};
 
 	const handleDeleteRoom = async (roomName: string) => {
+		if (deletingRoom) return;
+		const targetKey = `room:${roomName}`;
 		setDeletingRoom(true);
+		setDeleteError(null);
 		try {
 			await api.deleteRelayRoom(roomName);
-			setConfirmingDelete(false);
+			if (resolvedKeyRef.current === targetKey) {
+				setConfirmingDelete(false);
+				setDeleteError(null);
+			}
 			queryClient.removeQueries({ queryKey: relayRoomKey(roomName) });
 			await queryClient.invalidateQueries({ queryKey: RELAY_ROOMS_KEY });
-			selectThread(null);
+			if (resolvedKeyRef.current === targetKey) {
+				selectThread(null);
+			}
+		} catch (cause) {
+			if (resolvedKeyRef.current === targetKey) {
+				setDeleteError(formatError(cause));
+			}
 		} finally {
 			setDeletingRoom(false);
 		}
@@ -1558,9 +1675,9 @@ export function Messenger({
 
 	const handleSend = async () => {
 		if (!canSend || !resolvedSelection) return;
+		const targetKey = resolvedKey;
 		setSending(true);
 		setSendFeedback(null);
-		stickToBottom.current = true;
 		try {
 			if (resolvedSelection.kind === "dm") {
 				const sent = await api.sendRelayMessage({
@@ -1569,14 +1686,17 @@ export function Messenger({
 					urgent,
 					...(replyTo ? { replyTo: replyTo.id } : {}),
 				});
-				setText("");
-				setCursorPos(0);
-				setUrgent(false);
-				setReplyTo(null);
-				setSendFeedback({
-					tone: sent.status === "delivered" ? "ok" : "queued",
-					message: sent.status === "delivered" ? "Delivered" : "Queued: delivered when the session takes it, or dropped after 5 minutes",
-				});
+				if (resolvedKeyRef.current === targetKey) {
+					stickToBottom.current = true;
+					setText("");
+					setCursorPos(0);
+					setUrgent(false);
+					setReplyTo(null);
+					setSendFeedback({
+						tone: sent.status === "delivered" ? "ok" : "queued",
+						message: sent.status === "delivered" ? "Delivered" : "Queued: delivered when the session takes it, or dropped after 5 minutes",
+					});
+				}
 				await queryClient.invalidateQueries({ queryKey: RELAY_EVENTS_KEY });
 			} else {
 				const mentions = [...selectedMentions];
@@ -1587,19 +1707,22 @@ export function Messenger({
 					urgent,
 					...(replyTo ? { replyTo: replyTo.id } : {}),
 				});
-				setText("");
-				setCursorPos(0);
-				setUrgent(false);
-				setReplyTo(null);
-				setSelectedMentions(new Set());
-				const notified = sent.notified?.length ?? 0;
-				const unmatched = sent.unmatched ?? [];
-				setSendFeedback({
-					tone: "ok",
-					message:
-						(notified > 0 ? `Posted and notified ${plural(notified, "agent")}` : "Posted to the room's history")
-						+ (unmatched.length > 0 ? `. Not members: ${unmatched.map((token) => `@${token.replace(/^@/, "")}`).join(", ")}` : ""),
-				});
+				if (resolvedKeyRef.current === targetKey) {
+					stickToBottom.current = true;
+					setText("");
+					setCursorPos(0);
+					setUrgent(false);
+					setReplyTo(null);
+					setSelectedMentions(new Set());
+					const notified = sent.notified?.length ?? 0;
+					const unmatched = sent.unmatched ?? [];
+					setSendFeedback({
+						tone: "ok",
+						message:
+							(notified > 0 ? `Posted and notified ${plural(notified, "agent")}` : "Posted to the room's history")
+							+ (unmatched.length > 0 ? `. Not members: ${unmatched.map((token) => `@${token.replace(/^@/, "")}`).join(", ")}` : ""),
+					});
+				}
 				await Promise.all([
 					queryClient.invalidateQueries({ queryKey: RELAY_ROOMS_KEY }),
 					queryClient.invalidateQueries({ queryKey: relayRoomKey(resolvedSelection.room) }),
@@ -1607,11 +1730,12 @@ export function Messenger({
 				]);
 			}
 		} catch (cause) {
-			const refused = cause instanceof ApiError && [400, 403, 404, 409, 429].includes(cause.status);
-			setSendFeedback({
-				tone: "error",
-				message: refused ? reasonMessage(cause.message) : cause instanceof Error ? cause.message : String(cause),
-			});
+			if (resolvedKeyRef.current === targetKey) {
+				setSendFeedback({
+					tone: "error",
+					message: formatError(cause),
+				});
+			}
 		} finally {
 			setSending(false);
 		}
@@ -1741,7 +1865,10 @@ export function Messenger({
 						</button>
 						<button
 							type="button"
-							onClick={() => setConfirmingDelete(true)}
+							onClick={() => {
+								setDeleteError(null);
+								setConfirmingDelete(true);
+							}}
 							data-imessage-delete-room-ask=""
 							aria-label={`Delete room #${activeRoom.name}`}
 							className="inline-flex h-7 items-center gap-1.5 rounded-sm border border-line bg-page px-2.5 text-[12.5px] font-medium whitespace-nowrap text-muted hover:border-red hover:bg-hover hover:text-red"
@@ -1778,7 +1905,10 @@ export function Messenger({
 							<input
 								type="text"
 								value={draftTopic}
-								onChange={(e) => setDraftTopic(e.target.value)}
+								onChange={(e) => {
+									setDraftTopic(e.target.value);
+									setTopicError(null);
+								}}
 								onKeyDown={(e) => {
 									if (e.key === "Escape") {
 										e.preventDefault();
@@ -1805,7 +1935,11 @@ export function Messenger({
 							>
 								Cancel
 							</button>
-							{topicError && <span className="w-full text-[12px] text-red">{topicError}</span>}
+							{topicError && (
+								<span role="alert" data-imessage-topic-error="" className="w-full text-[12px] text-red">
+									{topicError}
+								</span>
+							)}
 						</form>
 					) : (
 						<div className="flex min-w-0 items-center gap-2.5 text-[13px]">
@@ -1814,6 +1948,7 @@ export function Messenger({
 								<span
 									onClick={() => {
 										setDraftTopic(activeRoom.topic ?? "");
+										setTopicError(null);
 										setEditingTopic(true);
 									}}
 									data-imessage-topic=""
@@ -1829,6 +1964,7 @@ export function Messenger({
 								type="button"
 								onClick={() => {
 									setDraftTopic(activeRoom.topic ?? "");
+									setTopicError(null);
 									setEditingTopic(true);
 								}}
 								data-imessage-edit-topic=""
@@ -1898,11 +2034,14 @@ export function Messenger({
 					<button
 						type="button"
 						onClick={() =>
-							void copyText(activeDm.sessionId).then((ok) => {
-								if (!ok) return;
-								setCopiedDmId(true);
-								setTimeout(() => setCopiedDmId(false), 1_600);
-							})
+							void copyText(activeDm.sessionId)
+								.then((ok) => {
+									if (!ok) return;
+									setCopiedDmId(true);
+									if (dmCopyTimerRef.current) clearTimeout(dmCopyTimerRef.current);
+									dmCopyTimerRef.current = setTimeout(() => setCopiedDmId(false), 1_600);
+								})
+								.catch(() => {})
 						}
 						title={`Copy session ID ${activeDm.sessionId}`}
 						aria-label={copiedDmId ? "Copied session ID" : `Copy session ID ${activeDm.sessionId}`}
@@ -1931,8 +2070,25 @@ export function Messenger({
 			? `Wakes ${plural(selectedMentions.size, "agent")}`
 			: "History only unless @mentioned";
 
+	const roomDetailIs404 =
+		roomDetailQuery.error instanceof ApiError && roomDetailQuery.error.status === 404;
+	const roomLoadError =
+		resolvedSelection?.kind === "room" && roomDetailQuery.isError && !isRelayDisabled(roomDetailQuery.error)
+			? roomDetailQuery.error
+			: null;
+	const dmLoadError =
+		resolvedSelection?.kind === "dm"
+		&& dmSessionQuery.isError
+		&& !(dmSessionQuery.error instanceof ApiError && dmSessionQuery.error.status === 404)
+			? dmSessionQuery.error
+			: null;
+
 	const missingRoomName =
-		resolvedSelection?.kind === "room" && !activeRoom && !roomsQuery.isPending && !roomDetailQuery.isPending
+		resolvedSelection?.kind === "room"
+		&& !activeRoom
+		&& !roomsQuery.isPending
+		&& !roomDetailQuery.isPending
+		&& (!roomLoadError || roomDetailIs404)
 			? resolvedSelection.room
 			: null;
 
@@ -1989,6 +2145,24 @@ export function Messenger({
 						/>
 					</div>
 				</div>
+
+				{roomsQuery.isError && !isRelayDisabled(roomsQuery.error) && (
+					<div
+						role="alert"
+						data-imessage-rooms-error=""
+						className="flex items-start justify-between gap-2 border-b border-line bg-red-soft px-3.5 py-2 text-[12px] text-red"
+					>
+						<span className="min-w-0 flex-1">Couldn’t load rooms: {formatError(roomsQuery.error)}</span>
+						<button
+							type="button"
+							disabled={roomsQuery.isFetching}
+							onClick={() => void roomsQuery.refetch()}
+							className="shrink-0 font-medium underline hover:no-underline disabled:opacity-45"
+						>
+							{roomsQuery.isFetching ? "Retrying…" : "Retry"}
+						</button>
+					</div>
+				)}
 
 				<nav aria-label="Conversations" className="min-h-0 flex-1 overflow-y-auto" data-imessage-threads="">
 					{visibleThreads.length === 0 ? (
@@ -2055,6 +2229,30 @@ export function Messenger({
 							</button>
 						)}
 					</div>
+				) : resolvedSelection?.kind === "room" && !activeRoom && roomLoadError ? (
+					<div role="alert" data-imessage-room-error="" className="flex flex-1 flex-col items-center justify-center p-8 text-center">
+						<button
+							type="button"
+							onClick={() => setMobileView("list")}
+							className={cx(BUTTON.secondary, "mb-4 md:hidden")}
+						>
+							<Icon name="arrowLeft" size={14} />
+							Threads
+						</button>
+						<Icon name="alert" size={22} className="text-red" />
+						<p className="mt-3 text-[15px] font-medium text-red">
+							Couldn’t load <span className="mono">#{resolvedSelection.room}</span>
+						</p>
+						<p className="mt-1 max-w-[46ch] text-[13px] text-muted">{formatError(roomLoadError)}</p>
+						<button
+							type="button"
+							disabled={roomDetailQuery.isFetching}
+							onClick={() => void Promise.all([roomsQuery.refetch(), roomDetailQuery.refetch()])}
+							className={cx(BUTTON.secondary, "mt-4")}
+						>
+							{roomDetailQuery.isFetching ? "Retrying…" : "Retry"}
+						</button>
+					</div>
 				) : !resolvedSelection || (!activeRoom && !activeDm) ? (
 					<div className="flex flex-1 flex-col items-center justify-center p-8 text-center">
 						<Icon name="message" size={22} className="text-muted" />
@@ -2080,6 +2278,40 @@ export function Messenger({
 						) : (
 							<>
 								<div className="relative flex min-h-0 flex-1 flex-col">
+									{roomLoadError && messages.length > 0 && (
+										<div
+											role="alert"
+											data-imessage-room-error=""
+											className="flex shrink-0 items-center justify-between gap-2 border-b border-line bg-red-soft px-5 py-2 text-[12.5px] text-red max-sm:px-4"
+										>
+											<span className="min-w-0 flex-1">Couldn’t refresh room history: {formatError(roomLoadError)}</span>
+											<button
+												type="button"
+												disabled={roomDetailQuery.isFetching}
+												onClick={() => void roomDetailQuery.refetch()}
+												className="shrink-0 font-medium underline hover:no-underline disabled:opacity-45"
+											>
+												{roomDetailQuery.isFetching ? "Retrying…" : "Retry"}
+											</button>
+										</div>
+									)}
+									{dmLoadError && (
+										<div
+											role="alert"
+											data-imessage-dm-error=""
+											className="flex shrink-0 items-center justify-between gap-2 border-b border-line bg-red-soft px-5 py-2 text-[12.5px] text-red max-sm:px-4"
+										>
+											<span className="min-w-0 flex-1">Couldn’t load session details: {formatError(dmLoadError)}</span>
+											<button
+												type="button"
+												disabled={dmSessionQuery.isFetching}
+												onClick={() => void dmSessionQuery.refetch()}
+												className="shrink-0 font-medium underline hover:no-underline disabled:opacity-45"
+											>
+												{dmSessionQuery.isFetching ? "Retrying…" : "Retry"}
+											</button>
+										</div>
+									)}
 									<div
 										ref={streamRef}
 										data-imessage-stream=""
@@ -2092,7 +2324,26 @@ export function Messenger({
 										className="min-h-0 flex-1 overflow-y-auto"
 									>
 										{messages.length === 0 ? (
-											emptyConversation
+											roomLoadError ? (
+												<div
+													role="alert"
+													data-imessage-room-error=""
+													className="mx-auto max-w-[54ch] px-6 py-16 text-center text-[13px] text-muted"
+												>
+													<p className="text-[14px] font-medium text-red">Couldn’t load room history</p>
+													<p className="mt-1">{formatError(roomLoadError)}</p>
+													<button
+														type="button"
+														disabled={roomDetailQuery.isFetching}
+														onClick={() => void roomDetailQuery.refetch()}
+														className={cx(BUTTON.secondary, "mt-3")}
+													>
+														{roomDetailQuery.isFetching ? "Retrying…" : "Retry"}
+													</button>
+												</div>
+											) : (
+												emptyConversation
+											)
 										) : (
 											<ol aria-label="Messages">
 												{messages.map((message) => (
@@ -2435,6 +2686,21 @@ export function Messenger({
 									/>
 								</div>
 							)}
+							{recentForNewRoom.isError && (
+								<div
+									role="alert"
+									className="mt-1.5 flex items-center justify-between gap-2 rounded-sm bg-red-soft px-2.5 py-1.5 text-[12px] text-red"
+								>
+									<span className="min-w-0 flex-1">Couldn’t load recent sessions: {formatError(recentForNewRoom.error)}</span>
+									<button
+										type="button"
+										onClick={() => void recentForNewRoom.refetch()}
+										className="shrink-0 font-medium underline hover:no-underline"
+									>
+										Retry
+									</button>
+								</div>
+							)}
 							{newRoomCandidates.length === 0 ? (
 								<p className="mt-1.5 text-[12px] text-muted">
 									{newRoomFilter.trim() ? `No sessions matching “${newRoomFilter.trim()}”.` : "No online or recent sessions available yet."}
@@ -2494,18 +2760,29 @@ export function Messenger({
 					title={`Delete #${activeRoom.name}?`}
 					label="delete-room"
 					locked={deletingRoom}
-					onCancel={() => setConfirmingDelete(false)}
+					onCancel={() => {
+						setConfirmingDelete(false);
+						setDeleteError(null);
+					}}
 				>
 					<p className="mt-2 text-[14px] text-muted">
 						Deletes <span className="mono text-ink">#{activeRoom.name}</span> and its room message history. Sessions in the room
 						are not stopped.
 					</p>
+					{deleteError && (
+						<p role="alert" data-imessage-delete-error="" className="mt-3 text-[12.5px] text-red">
+							{deleteError}
+						</p>
+					)}
 					<div className="mt-5 flex justify-end gap-2">
 						<button
 							ref={deleteCancelRef}
 							type="button"
 							disabled={deletingRoom}
-							onClick={() => setConfirmingDelete(false)}
+							onClick={() => {
+								setConfirmingDelete(false);
+								setDeleteError(null);
+							}}
 							className={BUTTON.secondary}
 						>
 							Cancel
