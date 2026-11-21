@@ -1,20 +1,34 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { FilterChip, MenuOption, optionLabel, plainOptions } from "../components/FilterChip";
 import { Icon, type IconName } from "../components/icons";
 import { PikaLink as Link } from "../components/PikaLink";
-import { EmptyState, ErrorState, Page, PageTitle, SkeletonLines } from "../components/ui";
-import { useApi } from "../lib/api";
+import { BUTTON, cx, EmptyState, ErrorState, Page, PageTitle, Segmented, SkeletonLines } from "../components/ui";
+import { useApi, type SearchSort } from "../lib/api";
 import { deviceOptions } from "../lib/devices";
 import { formatRelative } from "../lib/format";
 import { useShortcuts } from "../lib/keyboard";
 import { parseSnippet } from "../lib/snippet";
-import type { SearchHit } from "../lib/types";
+import type { SearchHit, SessionMatches } from "../lib/types";
 
 export const SEARCH_DEBOUNCE_MS = 250;
 /** Sessions per search; the server ranks the newest matches, so more would mostly be older ones. */
 export const SESSION_LIMIT = 20;
+/** Flat matches per page when browsing individual hits (`group=entry`). */
+export const ENTRY_LIMIT = 50;
+
+type SearchGroup = "session" | "entry";
+
+const SORT_OPTIONS: readonly (readonly [SearchSort, string])[] = [
+	["newest", "Newest"],
+	["relevance", "Relevance"],
+];
+
+const GROUP_OPTIONS: readonly (readonly [SearchGroup, string])[] = [
+	["session", "Sessions"],
+	["entry", "Matches"],
+];
 
 const KINDS: Record<SearchHit["kind"], { icon: IconName; label: string }> = {
 	user: { icon: "user", label: "Prompt" },
@@ -45,15 +59,26 @@ function hitLink(hit: SearchHit): string {
 	return `/s/${encodeURIComponent(hit.sessionId)}?seq=${hit.seq}`;
 }
 
+function hitKey(hit: SearchHit): string {
+	return `${hit.sessionId}:${hit.seq}:${hit.kind}:${hit.entryId ?? ""}`;
+}
+
 function SearchFilters() {
 	const api = useApi();
 	const [params, setParams] = useSearchParams();
 	const facets = useQuery({ queryKey: ["facets"], queryFn: () => api.facets(), staleTime: 60_000 });
+	const sort: SearchSort = params.get("sort") === "relevance" ? "relevance" : "newest";
+	const group: SearchGroup = params.get("group") === "entry" ? "entry" : "session";
 	const set = (key: string, value: string | undefined) => {
-		const next = new URLSearchParams(params);
-		if (value) next.set(key, value);
-		else next.delete(key);
-		setParams(next, { replace: true });
+		setParams(
+			(current) => {
+				const next = new URLSearchParams(current);
+				if (value) next.set(key, value);
+				else next.delete(key);
+				return next;
+			},
+			{ replace: true },
+		);
 	};
 	return (
 		<div className="flex flex-wrap items-center gap-2" aria-label="Filters">
@@ -91,6 +116,22 @@ function SearchFilters() {
 					)}
 				</FilterChip>
 			))}
+			<div className="ml-auto flex flex-wrap items-center gap-2">
+				<Segmented
+					size="sm"
+					label="Sort"
+					value={sort}
+					options={SORT_OPTIONS}
+					onChange={(value) => set("sort", value === "relevance" ? "relevance" : undefined)}
+				/>
+				<Segmented
+					size="sm"
+					label="Group"
+					value={group}
+					options={GROUP_OPTIONS}
+					onChange={(value) => set("group", value === "entry" ? "entry" : undefined)}
+				/>
+			</div>
 		</div>
 	);
 }
@@ -101,6 +142,8 @@ export function SearchPage() {
 	const q = params.get("q") ?? "";
 	const device = params.get("device") ?? undefined;
 	const project = params.get("project") ?? undefined;
+	const sort: SearchSort = params.get("sort") === "relevance" ? "relevance" : "newest";
+	const group: SearchGroup = params.get("group") === "entry" ? "entry" : "session";
 	const [input, setInput] = useState(q);
 	const [syncedQ, setSyncedQ] = useState(q);
 	// Follow `q` when it changes from outside the input, e.g. history navigation.
@@ -131,12 +174,70 @@ export function SearchPage() {
 
 	// A trailing space stays: it marks the last word finished, so it no longer matches as a prefix.
 	const query = q.trimStart();
-	const results = useQuery({
-		queryKey: ["search", query, device, project],
-		queryFn: () => api.searchSessions({ q: query, device, project, limit: SESSION_LIMIT }),
-		enabled: query.trim().length > 0,
+	const hasQuery = query.trim().length > 0;
+	const sortParam = sort === "relevance" ? "relevance" : undefined;
+
+	const sessionResults = useInfiniteQuery({
+		queryKey: ["search", "session", query, device, project, sort],
+		queryFn: ({ pageParam }) =>
+			api.searchSessions({ q: query, device, project, sort: sortParam, cursor: pageParam, limit: SESSION_LIMIT }),
+		initialPageParam: undefined as string | undefined,
+		getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+		enabled: hasQuery && group === "session",
 	});
-	const groups = results.data?.items ?? [];
+
+	const entryResults = useInfiniteQuery({
+		queryKey: ["search", "entry", query, device, project, sort],
+		queryFn: ({ pageParam }) =>
+			api.searchEntries({ q: query, device, project, sort: sortParam, cursor: pageParam, limit: ENTRY_LIMIT }),
+		initialPageParam: undefined as string | undefined,
+		getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+		enabled: hasQuery && group === "entry",
+	});
+
+	const groups = useMemo(() => {
+		const pages = sessionResults.data?.pages ?? [];
+		const seen = new Set<string>();
+		const items: SessionMatches[] = [];
+		for (const page of pages) {
+			for (const item of page.items) {
+				if (seen.has(item.sessionId)) continue;
+				seen.add(item.sessionId);
+				items.push(item);
+			}
+		}
+		return items;
+	}, [sessionResults.data]);
+
+	const entries = useMemo(() => {
+		const pages = entryResults.data?.pages ?? [];
+		const seen = new Set<string>();
+		const items: SearchHit[] = [];
+		for (const page of pages) {
+			for (const item of page.items) {
+				const key = hitKey(item);
+				if (seen.has(key)) continue;
+				seen.add(key);
+				items.push(item);
+			}
+		}
+		return items;
+	}, [entryResults.data]);
+
+	const setGroup = (value: SearchGroup) => {
+		setParams(
+			(current) => {
+				const next = new URLSearchParams(current);
+				if (value === "entry") next.set("group", "entry");
+				else next.delete("group");
+				return next;
+			},
+			{ replace: true },
+		);
+	};
+
+	const active = group === "session" ? sessionResults : entryResults;
+	const activeCount = group === "session" ? groups.length : entries.length;
 
 	return (
 		<Page className="pb-24">
@@ -159,40 +260,40 @@ export function SearchPage() {
 				<SearchFilters />
 			</div>
 			<hr className="mt-5 mb-1 border-0 border-t border-ink" />
-			{!query.trim() ? (
+			{!hasQuery ? (
 				<EmptyState title={api.publicView ? "Search published trajectories" : "Search every session"}>
 					Type to search prompts, answers, tool calls, results, and titles.
 				</EmptyState>
-			) : results.isPending ? (
+			) : active.isPending ? (
 				<div className="py-3">
 					<SkeletonLines lines={4} />
 				</div>
-			) : results.isError ? (
-				<ErrorState error={results.error} onRetry={() => void results.refetch()} />
-			) : groups.length === 0 ? (
+			) : active.isError && activeCount === 0 ? (
+				<ErrorState error={active.error} onRetry={() => void active.refetch()} />
+			) : activeCount === 0 ? (
 				<EmptyState title="No results">Nothing matches “{query.trim()}”.</EmptyState>
-			) : (
+			) : group === "session" ? (
 				<div data-search-results="">
-					{groups.map((group) => (
-						<section key={group.sessionId} className="mt-5 first:mt-2" data-result-group={group.sessionId}>
+					{groups.map((item) => (
+						<section key={item.sessionId} className="mt-5 first:mt-2" data-result-group={item.sessionId}>
 							<Link
-								to={`/s/${encodeURIComponent(group.sessionId)}`}
+								to={`/s/${encodeURIComponent(item.sessionId)}`}
 								className="flex min-w-0 items-baseline gap-2 border-b border-line px-1.5 pb-1 text-[14px] hover:bg-hover"
 							>
-								<span className="min-w-0 truncate font-medium">{group.sessionTitle || "Untitled session"}</span>
+								<span className="min-w-0 truncate font-medium">{item.sessionTitle || "Untitled session"}</span>
 								<span className="mono shrink-0 text-[11.5px] text-muted" aria-hidden="true">
-									{group.sessionId.slice(0, 8)}
+									{item.sessionId.slice(0, 8)}
 								</span>
 								<span className="tnum ml-auto shrink-0 text-[12px] text-muted" data-matches="">
-									{group.matches} {group.matches === 1 ? "match" : "matches"}
+									{item.matches} {item.matches === 1 ? "match" : "matches"}
 								</span>
 							</Link>
 							<div>
-								{group.hits.map((hit) => {
+								{item.hits.map((hit) => {
 									const kind = KINDS[hit.kind] ?? KINDS.assistant;
 									return (
 										<Link
-											key={`${hit.sessionId}:${hit.seq}:${hit.kind}:${hit.entryId ?? ""}`}
+											key={hitKey(hit)}
 											to={hitLink(hit)}
 											className="flex gap-3 border-b border-line px-1.5 py-1 text-[13px] leading-5 hover:bg-hover"
 											data-hit={hit.seq}
@@ -210,10 +311,88 @@ export function SearchPage() {
 							</div>
 						</section>
 					))}
-					{groups.length === SESSION_LIMIT && (
-						<p className="mt-4 px-1.5 text-[12px] text-muted">
-							Showing the {SESSION_LIMIT} most recent sessions. Add words or a filter to narrow the search.
-						</p>
+					{sessionResults.isFetchNextPageError && (
+						<ErrorState error={sessionResults.error} onRetry={() => void sessionResults.fetchNextPage()} />
+					)}
+					{sessionResults.hasNextPage ? (
+						<button
+							type="button"
+							disabled={sessionResults.isFetchingNextPage}
+							onClick={() => void sessionResults.fetchNextPage()}
+							className={cx(BUTTON.secondary, "mt-4")}
+						>
+							{sessionResults.isFetchingNextPage ? "Loading…" : "Load more"}
+						</button>
+					) : (
+						groups.length === SESSION_LIMIT && (
+							<p className="mt-4 px-1.5 text-[12px] text-muted">
+								Showing the {SESSION_LIMIT} most {sort === "relevance" ? "relevant" : "recent"} sessions. Add words or a filter to narrow the search
+								{sort === "newest" && (
+									<>
+										, or{" "}
+										<button
+											type="button"
+											onClick={() => setGroup("entry")}
+											className="underline decoration-ink/30 underline-offset-2 hover:text-ink hover:decoration-ink"
+										>
+											view all matches
+										</button>
+									</>
+								)}
+								.
+							</p>
+						)
+					)}
+				</div>
+			) : (
+				<div data-search-results="" data-result-view="entry">
+					{entries.map((hit) => {
+						const kind = KINDS[hit.kind] ?? KINDS.assistant;
+						return (
+							<Link
+								key={hitKey(hit)}
+								to={hitLink(hit)}
+								className="flex gap-3 border-b border-line px-1.5 py-1.5 text-[13px] leading-5 hover:bg-hover"
+								data-result-entry={`${hit.sessionId}:${hit.seq}`}
+								data-hit={hit.seq}
+								data-kind={hit.kind}
+							>
+								<Icon name={kind.icon} className="mt-[3px] shrink-0 text-muted" />
+								<span className="sr-only">{kind.label}</span>
+								<span className="min-w-0 flex-1">
+									<span className="flex min-w-0 items-baseline gap-2">
+										<span className="min-w-0 truncate font-medium text-ink">{hit.sessionTitle || "Untitled session"}</span>
+										<span className="mono shrink-0 text-[11.5px] text-muted" aria-hidden="true">
+											{hit.sessionId.slice(0, 8)}
+										</span>
+									</span>
+									<span className="mt-0.5 block">
+										<Snippet text={hit.snippet} />
+									</span>
+								</span>
+								<span className="tnum shrink-0 text-[12px] text-muted">{formatRelative(hit.at)}</span>
+							</Link>
+						);
+					})}
+					{entryResults.isFetchNextPageError && (
+						<ErrorState error={entryResults.error} onRetry={() => void entryResults.fetchNextPage()} />
+					)}
+					{entryResults.hasNextPage ? (
+						<button
+							type="button"
+							disabled={entryResults.isFetchingNextPage}
+							onClick={() => void entryResults.fetchNextPage()}
+							className={cx(BUTTON.secondary, "mt-4")}
+						>
+							{entryResults.isFetchingNextPage ? "Loading…" : "Load more"}
+						</button>
+					) : (
+						sort === "relevance" &&
+						entries.length === ENTRY_LIMIT && (
+							<p className="mt-4 px-1.5 text-[12px] text-muted">
+								Showing the {ENTRY_LIMIT} most relevant matches. Add words or a filter to narrow the search.
+							</p>
+						)
 					)}
 				</div>
 			)}

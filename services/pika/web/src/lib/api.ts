@@ -25,6 +25,7 @@ import type {
 	RelaySendResult,
 	RunDetail,
 	RunSummary,
+	SearchHit,
 	SessionDetail,
 	SessionMatches,
 	SessionSummary,
@@ -106,6 +107,8 @@ export interface DeckProjectRow {
 	collapsed: boolean;
 	updatedAt: string;
 }
+
+export type SearchSort = "newest" | "relevance";
 
 export interface SessionFilters {
 	device?: string;
@@ -337,10 +340,30 @@ export class PikaApi {
 		return this.send(`memory/batches/${encodeURIComponent(id)}/revert`, "POST");
 	}
 
-	/** Sessions matching `q`, with their newest hits; the word being typed also matches as a prefix. One page. */
-	searchSessions(params: { q: string; device?: string; project?: string; limit?: number }): Promise<Page<SessionMatches>> {
-		const { q, device, project, limit } = params;
-		return this.request("search", { q, device, project, group: "session", prefix: true, limit });
+	/** Sessions matching `q`, with their top hits; the word being typed also matches as a prefix. */
+	searchSessions(params: {
+		q: string;
+		device?: string;
+		project?: string;
+		sort?: SearchSort;
+		cursor?: string;
+		limit?: number;
+	}): Promise<Page<SessionMatches>> {
+		const { q, device, project, sort, cursor, limit } = params;
+		return this.request("search", { q, device, project, group: "session", prefix: true, sort, cursor, limit });
+	}
+
+	/** Flat search hits matching `q`; the word being typed also matches as a prefix. */
+	searchEntries(params: {
+		q: string;
+		device?: string;
+		project?: string;
+		sort?: SearchSort;
+		cursor?: string;
+		limit?: number;
+	}): Promise<Page<SearchHit>> {
+		const { q, device, project, sort, cursor, limit } = params;
+		return this.request("search", { q, device, project, group: "entry", prefix: true, sort, cursor, limit });
 	}
 
 	me(): Promise<Me> {

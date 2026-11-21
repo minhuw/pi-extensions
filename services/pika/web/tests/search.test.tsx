@@ -1,11 +1,18 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PikaApi } from "../src/lib/api";
 import { parseSnippet } from "../src/lib/snippet";
-import type { Entry, SearchHit, Turn } from "../src/lib/types";
-import { SEARCH_DEBOUNCE_MS, SESSION_LIMIT, Snippet } from "../src/pages/Search";
+import type { Entry, SearchHit, SessionMatches, Turn } from "../src/lib/types";
+import { ENTRY_LIMIT, SEARCH_DEBOUNCE_MS, SESSION_LIMIT, SearchPage, Snippet } from "../src/pages/Search";
 import { assistantMessage, entry, header, iso, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
-import { firstRender, mockLayout, renderApp } from "./support/render";
+import { firstRender, mockLayout, renderApp, renderWithApi } from "./support/render";
 import { createFakeServer, type FakeSession } from "./support/server";
+
+function LocationSearch() {
+	const { search } = useLocation();
+	return <output data-location-search="">{search}</output>;
+}
 
 function hit(sessionId: string, seq: number, kind: SearchHit["kind"], snippet: string, sessionTitle = `Session ${sessionId}`): SearchHit {
 	return { sessionId, sessionTitle, seq, entryId: `e${seq}`, kind, snippet, at: iso(seq * 1000) };
@@ -227,6 +234,186 @@ describe("search page", () => {
 		expect(server.calls).toContain(`/api/v1/sessions/long/entries?from=${target - 1}&to=${target}&limit=200`);
 		expect(screen.getByText(`Answer 120`)).toBeTruthy();
 		expect(screen.queryByText("Question 0")).toBeNull();
+	});
+
+	it("syncs sort with URL search params and requests sort=relevance when selected", async () => {
+		const server = createFakeServer({ sessions: sessions(), hits: HITS });
+		renderWithApi(
+			<>
+				<SearchPage />
+				<LocationSearch />
+			</>,
+			server.fetch,
+			"/search?q=base",
+		);
+		await screen.findAllByText("base", { selector: "mark" });
+		const sortGroup = screen.getByRole("group", { name: "Sort" });
+		const newest = within(sortGroup).getByRole("button", { name: "Newest" });
+		const relevance = within(sortGroup).getByRole("button", { name: "Relevance" });
+		expect(newest.getAttribute("aria-pressed")).toBe("true");
+		expect(relevance.getAttribute("aria-pressed")).toBe("false");
+		expect(server.calls).toContain("/api/v1/search?q=base&group=session&prefix=true&limit=20");
+
+		fireEvent.click(relevance);
+		await waitFor(() => expect(document.querySelector("[data-location-search]")?.textContent).toBe("?q=base&sort=relevance"));
+		expect(relevance.getAttribute("aria-pressed")).toBe("true");
+		expect(newest.getAttribute("aria-pressed")).toBe("false");
+		await waitFor(() => expect(server.calls).toContain("/api/v1/search?q=base&group=session&prefix=true&sort=relevance&limit=20"));
+
+		fireEvent.click(newest);
+		await waitFor(() => expect(document.querySelector("[data-location-search]")?.textContent).toBe("?q=base"));
+		expect(newest.getAttribute("aria-pressed")).toBe("true");
+		expect(relevance.getAttribute("aria-pressed")).toBe("false");
+	});
+
+	it("initializes sort=relevance from the URL and requests relevance immediately", async () => {
+		const server = createFakeServer({ sessions: sessions(), hits: HITS });
+		renderApp("/search?q=base&sort=relevance", server.fetch);
+		await screen.findAllByText("base", { selector: "mark" });
+		const sortGroup = screen.getByRole("group", { name: "Sort" });
+		expect(within(sortGroup).getByRole("button", { name: "Relevance" }).getAttribute("aria-pressed")).toBe("true");
+		expect(within(sortGroup).getByRole("button", { name: "Newest" }).getAttribute("aria-pressed")).toBe("false");
+		expect(server.calls.filter((call) => call.includes("/search?"))).toEqual([
+			"/api/v1/search?q=base&group=session&prefix=true&sort=relevance&limit=20",
+		]);
+	});
+
+	it("loads more session results using nextCursor and hides the button when exhausted", async () => {
+		const base = createFakeServer({ sessions: sessions(), hits: HITS });
+		const calls: string[] = [];
+		const page1: SessionMatches[] = [
+			{ sessionId: "s1", sessionTitle: "Fix the base path", matches: 2, hits: [HITS[0], HITS[2]] },
+		];
+		const page2: SessionMatches[] = [
+			// Duplicate s1 verifies deduplication across pages.
+			{ sessionId: "s1", sessionTitle: "Fix the base path", matches: 2, hits: [HITS[0], HITS[2]] },
+			{ sessionId: "s2", sessionTitle: "Rename the base div", matches: 1, hits: [HITS[1]] },
+		];
+		const fetchImpl: typeof fetch = async (input, init) => {
+			const url = String(input);
+			calls.push(url);
+			if (url.startsWith("/api/v1/search?")) {
+				const params = new URL(url, "http://localhost").searchParams;
+				if (params.get("group") === "session") {
+					const cursor = params.get("cursor");
+					if (!cursor) {
+						return new Response(JSON.stringify({ items: page1, nextCursor: "c-page-2" }), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						});
+					}
+					if (cursor === "c-page-2") {
+						return new Response(JSON.stringify({ items: page2, nextCursor: null }), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						});
+					}
+				}
+			}
+			return base.fetch(input, init);
+		};
+
+		renderApp("/search?q=base", fetchImpl);
+		await screen.findAllByText("base", { selector: "mark" });
+		expect([...document.querySelectorAll("[data-result-group]")].map((g) => g.getAttribute("data-result-group"))).toEqual(["s1"]);
+
+		const loadMore = screen.getByRole("button", { name: "Load more" });
+		fireEvent.click(loadMore);
+
+		await waitFor(() =>
+			expect([...document.querySelectorAll("[data-result-group]")].map((g) => g.getAttribute("data-result-group"))).toEqual(["s1", "s2"]),
+		);
+		expect(calls).toContain("/api/v1/search?q=base&group=session&prefix=true&limit=20");
+		expect(calls).toContain("/api/v1/search?q=base&group=session&prefix=true&cursor=c-page-2&limit=20");
+		expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+	});
+
+	it("paginates flat entry results with nextCursor and works cleanly with sort=relevance", async () => {
+		const manyHits = Array.from({ length: ENTRY_LIMIT + 3 }, (_, i) =>
+			hit(`e${i}`, i + 1, "user", `Entry <mark>base</mark> #${i}`, `Session e${i}`),
+		);
+		const base = createFakeServer({ sessions: sessions(), hits: manyHits });
+		const calls: string[] = [];
+		const fetchImpl: typeof fetch = async (input, init) => {
+			const url = String(input);
+			calls.push(url);
+			if (url.startsWith("/api/v1/search?")) {
+				const params = new URL(url, "http://localhost").searchParams;
+				// Mirror the Rust server contract: sort=relevance returns one page and rejects cursor.
+				if (params.get("sort") === "relevance") {
+					if (params.get("cursor")) {
+						return new Response(JSON.stringify({ error: "sort=relevance returns one page" }), {
+							status: 400,
+							headers: { "Content-Type": "application/json" },
+						});
+					}
+					const limit = Number(params.get("limit") ?? ENTRY_LIMIT);
+					return new Response(JSON.stringify({ items: manyHits.slice(0, limit), nextCursor: null }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+			}
+			return base.fetch(input, init);
+		};
+
+		renderWithApi(
+			<>
+				<SearchPage />
+				<LocationSearch />
+			</>,
+			fetchImpl,
+			"/search?q=base",
+		);
+		await screen.findAllByText("base", { selector: "mark" });
+
+		const groupControl = screen.getByRole("group", { name: "Group" });
+		fireEvent.click(within(groupControl).getByRole("button", { name: "Matches" }));
+
+		await waitFor(() => expect(document.querySelector("[data-location-search]")?.textContent).toBe("?q=base&group=entry"));
+		await waitFor(() => expect(document.querySelectorAll("[data-result-entry]")).toHaveLength(ENTRY_LIMIT));
+		expect(calls).toContain("/api/v1/search?q=base&group=entry&prefix=true&limit=50");
+
+		const firstEntry = document.querySelector<HTMLElement>("[data-result-entry]")!;
+		expect(firstEntry.getAttribute("href")).toBe("/s/e0?seq=1");
+		expect(within(firstEntry).getByText("Session e0")).toBeTruthy();
+
+		fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+		await waitFor(() => expect(document.querySelectorAll("[data-result-entry]")).toHaveLength(ENTRY_LIMIT + 3));
+		expect(calls).toContain("/api/v1/search?q=base&group=entry&prefix=true&cursor=50&limit=50");
+		expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+
+		// Switching to relevance requests sort=relevance without a cursor and stays single-page.
+		const sortGroup = screen.getByRole("group", { name: "Sort" });
+		fireEvent.click(within(sortGroup).getByRole("button", { name: "Relevance" }));
+		await waitFor(() => expect(document.querySelector("[data-location-search]")?.textContent).toBe("?q=base&group=entry&sort=relevance"));
+		await waitFor(() => expect(calls).toContain("/api/v1/search?q=base&group=entry&prefix=true&sort=relevance&limit=50"));
+		await waitFor(() => expect(document.querySelectorAll("[data-result-entry]")).toHaveLength(ENTRY_LIMIT));
+		expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+		expect(screen.getByText(/Showing the 50 most relevant matches/)).toBeTruthy();
+
+		// Switching back to Sessions clears `group` from the URL while preserving `sort`.
+		fireEvent.click(within(groupControl).getByRole("button", { name: "Sessions" }));
+		await waitFor(() => expect(document.querySelector("[data-location-search]")?.textContent).toBe("?q=base&sort=relevance"));
+	});
+
+	it("builds searchSessions and searchEntries URLs omitting undefined sort and cursor", async () => {
+		const calls: string[] = [];
+		const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+			calls.push(String(input));
+			return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+		});
+		const api = new PikaApi("/", fetchImpl as unknown as typeof fetch);
+		await api.searchSessions({ q: "foo", limit: 20 });
+		await api.searchSessions({ q: "foo", sort: "relevance", cursor: "c1", limit: 20 });
+		await api.searchEntries({ q: "foo", device: "mini", limit: 50 });
+		await api.searchEntries({ q: "foo", project: "pika", sort: "relevance", cursor: "50", limit: 50 });
+		expect(calls).toEqual([
+			"/api/v1/search?q=foo&group=session&prefix=true&limit=20",
+			"/api/v1/search?q=foo&group=session&prefix=true&sort=relevance&cursor=c1&limit=20",
+			"/api/v1/search?q=foo&device=mini&group=entry&prefix=true&limit=50",
+			"/api/v1/search?q=foo&project=pika&group=entry&prefix=true&sort=relevance&cursor=50&limit=50",
+		]);
 	});
 });
 
