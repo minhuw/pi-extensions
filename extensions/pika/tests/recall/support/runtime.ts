@@ -8,6 +8,7 @@ import {
 	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
 	type AgentSession, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory, type ExtensionContext, type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
+import { isExcluded } from "../../../config.ts";
 import { type CredentialsRegistry, credentialsRegistry } from "../../../credentials.ts";
 import { timing } from "../../../recall/client.ts";
 import recallExtension from "../../../recall/index.ts";
@@ -39,9 +40,15 @@ export class Workspace {
 }
 
 /** Publishes credentials as pika would. */
-export function setCredentials(url: string | undefined, options: { token?: string; repository?: CredentialsRegistry["repository"] } = {}): void {
+export function setCredentials(
+	url: string | undefined,
+	options: { token?: string; excluded?: boolean; exclude?: readonly string[]; repository?: CredentialsRegistry["repository"] } = {},
+): void {
 	const registry = credentialsRegistry();
-	registry.current = url === undefined ? undefined : { url, token: options.token ?? TOKEN, isExcluded: () => false };
+	registry.current = url === undefined ? undefined : {
+		url, token: options.token ?? TOKEN,
+		isExcluded: options.exclude ? (cwd) => isExcluded(cwd, options.exclude!) : () => options.excluded ?? false,
+	};
 	if (options.repository) registry.repository = options.repository;
 	for (const listener of [...registry.listeners]) listener();
 }

@@ -5,10 +5,11 @@ export const timing = { httpTimeoutMs: 15_000, healthTimeoutMs: 5_000, projectTi
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
-/** The credentials to read with; throws the text the tool's error shows. */
-export function current(): PikaCredentials {
+/** The credentials to read with for a session in `cwd`; throws the text the tool's error shows. */
+export function current(cwd: string): PikaCredentials {
 	const value = credentialsRegistry().current;
 	if (!value) throw new Error("recall needs the pika extension logged in to a pika server, and it is not. Ask the user to run /pika login.");
+	if (value.isExcluded(cwd)) throw new Error(`pika's exclude list covers this session's working directory (${cwd}), so recall is off in this session.`);
 	return value;
 }
 
@@ -28,8 +29,8 @@ async function hasAgentApi(url: string): Promise<boolean> {
  * GETs `{url}/api/agent/v1/<path>` and returns its JSON. Every failure throws with the text the
  * tool's error shows; `missing` is that text for a 404 from a server that has the agent API.
  */
-export async function get<T>(path: string, options: { signal?: AbortSignal; missing: string }): Promise<T> {
-	const { url, token } = current();
+export async function get<T>(cwd: string, path: string, options: { signal?: AbortSignal; missing: string }): Promise<T> {
+	const { url, token } = current(cwd);
 	const timeout = AbortSignal.timeout(timing.httpTimeoutMs);
 	const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
 	let response: Response;

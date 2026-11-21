@@ -24,7 +24,41 @@ it("without credentials, both tools fail and ask for /pika login", async () => {
 	const message = "recall needs the pika extension logged in to a pika server, and it is not. Ask the user to run /pika login.";
 	expect(await callTool(h, "recall_search", { query: "x" })).toMatchObject({ isError: true, text: message });
 	expect(await callTool(h, "recall_read", { sessionId: "s-1" })).toMatchObject({ isError: true, text: message });
+	expect(await callTool(h, "recall_herder", {})).toMatchObject({ isError: true, text: message });
 	expect(pika.requests).toEqual([]);
+});
+
+it("refuses recall_search, recall_read, and recall_herder when cwd matches pika's exclude list, with zero HTTP requests", async () => {
+	const message = `pika's exclude list covers this session's working directory (${workspace.cwd}), so recall is off in this session.`;
+	const calls: [string, Parameters<typeof callTool>[2]][] = [
+		["recall_search", { query: "x" }],
+		["recall_search", { query: "x", scope: "project" }],
+		["recall_read", { sessionId: "s-1" }],
+		["recall_read", { sessionId: "s-1", seq: 1 }],
+		["recall_herder", {}],
+		["recall_herder", { scope: "project" }],
+		["recall_herder", { runId: "r-1" }],
+	];
+	for (const exclude of [[workspace.cwd], [`${workspace.root}/my-*`]]) {
+		let resolved = 0;
+		setCredentials(pika.url, { exclude, repository: async () => { resolved++; return { project: "p" }; } });
+		for (const [name, args] of calls) {
+			expect(await callTool(h, name, args)).toMatchObject({ isError: true, text: message });
+		}
+		expect(pika.requests).toEqual([]);
+		expect(resolved).toBe(0);
+	}
+
+	// An exclude list that does not match cwd allows every recall tool through.
+	setCredentials(pika.url, { exclude: [`${workspace.root}/other`] });
+	pika.routes.set("search", { body: { items: [], nextCursor: null } });
+	pika.routes.set("sessions/s-1", { body: { id: "s-1", children: [] } });
+	pika.routes.set("sessions/s-1/trace", { body: { turns: [], records: [], children: [] } });
+	pika.routes.set("sessions/s-1/turns", { body: { items: [], nextCursor: null } });
+	pika.routes.set("herder/runs", { body: { items: [], nextCursor: null } });
+	expect((await callTool(h, "recall_search", { query: "x" })).isError).toBe(false);
+	expect((await callTool(h, "recall_read", { sessionId: "s-1" })).isError).toBe(false);
+	expect((await callTool(h, "recall_herder", {})).isError).toBe(false);
 });
 
 it("maps a rejected token to /pika login", async () => {

@@ -4,7 +4,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { credentialsRegistry } from "../credentials.ts";
 import { sanitize } from "../relay/protocol.ts";
-import { get, timing } from "./client.ts";
+import { current, get, timing } from "./client.ts";
 import {
 	type Entry, formatEntries, formatOverview, formatRun, formatRuns, formatSearch, type RunDetail, type RunSummary, type SearchGroup,
 	type SessionSummary, type Trace, type Turn,
@@ -84,12 +84,14 @@ export function recallSearchTool() {
 		async execute(_id, params, signal, _onUpdate, ctx) {
 			const query = params.query.trim();
 			if (!query) throw new Error("recall_search needs a non-empty query.");
+			const cwd = cwdOf(ctx);
+			current(cwd);
 			const sort = params.sort ?? "relevance";
 			const limit = Math.min(20, Math.max(1, Math.trunc(params.limit ?? 8)));
-			const project = params.project?.trim() || (params.scope === "project" ? await currentProject(cwdOf(ctx)) : undefined);
+			const project = params.project?.trim() || (params.scope === "project" ? await currentProject(cwd) : undefined);
 			const search = new URLSearchParams({ q: query, group: "session", sort, limit: String(limit), exclude: ctx.sessionManager.getSessionId() });
 			if (project) search.set("project", project);
-			const body = await get<{ items?: SearchGroup[] }>(`search?${search}`, { signal, missing: "the pika server has no search route (HTTP 404)." });
+			const body = await get<{ items?: SearchGroup[] }>(cwd, `search?${search}`, { signal, missing: "the pika server has no search route (HTTP 404)." });
 			const groups = Array.isArray(body.items) ? body.items.slice(0, limit) : [];
 			const details: SearchDetails = { query, ...(project ? { project } : {}), sort, limit, sessionIds: groups.map((group) => group.sessionId) };
 			return { content: [{ type: "text", text: formatSearch(groups, { query, project, sort }) }], details };
@@ -127,11 +129,12 @@ export function recallReadTool() {
 			seq: Type.Optional(Type.Integer({ minimum: 0, description: "Entries around this seq; omit fromTurn, especially when seq is 0" })),
 			fromTurn: Type.Optional(Type.Integer({ minimum: 0, description: "The overview's first turn; omit seq" })),
 		}),
-		async execute(_id, params, signal) {
+		async execute(_id, params, signal, _onUpdate, ctx) {
 			const sessionId = params.sessionId.trim();
 			if (!sessionId) throw new Error("recall_read needs a sessionId.");
 			const mode = readMode(params);
 			if (mode === "conflict") throw new Error("recall_read: choose either seq for entries or fromTurn for an overview, not both. Omit fromTurn to read entries around seq 0.");
+			const cwd = cwdOf(ctx);
 			const id = encodeURIComponent(sessionId);
 			const missing = `no recorded session has id ${sessionId}; use the full sessionId or find it with recall_search.`;
 			const both = params.seq !== undefined && params.fromTurn !== undefined;
@@ -140,8 +143,8 @@ export function recallReadTool() {
 				const from = Math.max(0, seq - BEFORE);
 				const to = seq + AFTER;
 				const [session, entries] = await Promise.all([
-					get<SessionSummary>(`sessions/${id}`, { signal, missing }),
-					get<{ items?: Entry[] }>(`sessions/${id}/entries?${new URLSearchParams({ from: String(from), to: String(to), limit: String(to - from + 1) })}`, { signal, missing }),
+					get<SessionSummary>(cwd, `sessions/${id}`, { signal, missing }),
+					get<{ items?: Entry[] }>(cwd, `sessions/${id}/entries?${new URLSearchParams({ from: String(from), to: String(to), limit: String(to - from + 1) })}`, { signal, missing }),
 				]);
 				const items = (Array.isArray(entries.items) ? entries.items : []).filter((entry) => entry.seq >= from && entry.seq <= to);
 				const { text, next } = formatEntries({ session, entries: items, seq, from, to });
@@ -151,9 +154,9 @@ export function recallReadTool() {
 			}
 			const fromTurn = Math.max(0, Math.trunc(params.fromTurn ?? 0));
 			const [session, trace, turns] = await Promise.all([
-				get<SessionSummary>(`sessions/${id}`, { signal, missing }),
-				get<Trace>(`sessions/${id}/trace`, { signal, missing }),
-				readTurns(id, fromTurn, signal, missing),
+				get<SessionSummary>(cwd, `sessions/${id}`, { signal, missing }),
+				get<Trace>(cwd, `sessions/${id}/trace`, { signal, missing }),
+				readTurns(cwd, id, fromTurn, signal, missing),
 			]);
 			const total = Array.isArray(trace.turns) ? trace.turns.length : turns.count;
 			const { text, shown, next } = formatOverview({ session, turns: turns.items, total, trace, fromTurn });
@@ -196,15 +199,16 @@ export function recallHerderTool() {
 			limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Listing: at most this many runs (default 10)" })),
 		}),
 		async execute(_id, params, signal, _onUpdate, ctx) {
+			const cwd = cwdOf(ctx);
 			const runId = params.runId?.trim();
 			if (runId) {
 				const missing = `no recorded Herder run has id ${runId}; list runs with recall_herder().`;
 				let detail: RunDetail;
 				try {
-					detail = await get<RunDetail>(`herder/runs/${encodeURIComponent(runId)}`, { signal, missing });
+					detail = await get<RunDetail>(cwd, `herder/runs/${encodeURIComponent(runId)}`, { signal, missing });
 				} catch (error) {
 					// An unknown run, unless the server has no runs at all.
-					if (error instanceof Error && error.message === missing) await get("herder/runs?limit=1", { signal, missing: NO_RUNS });
+					if (error instanceof Error && error.message === missing) await get(cwd, "herder/runs?limit=1", { signal, missing: NO_RUNS });
 					throw error;
 				}
 				const fromEvent = Math.max(0, Math.trunc(params.fromEvent ?? 0));
@@ -212,10 +216,11 @@ export function recallHerderTool() {
 				const details: RunDetails = { runId, events: shown, ...(next !== undefined ? { next: { fromEvent: next } } : {}) };
 				return { content: [{ type: "text", text }], details };
 			}
+			current(cwd);
 			const limit = Math.min(50, Math.max(1, Math.trunc(params.limit ?? 10)));
-			const project = params.project?.trim() || (params.scope === "project" ? await currentProject(cwdOf(ctx)) : undefined);
+			const project = params.project?.trim() || (params.scope === "project" ? await currentProject(cwd) : undefined);
 			const search = new URLSearchParams({ limit: String(limit), ...(project ? { repo: project } : {}) });
-			const body = await get<{ items?: RunSummary[]; nextCursor?: string | null }>(`herder/runs?${search}`, { signal, missing: NO_RUNS });
+			const body = await get<{ items?: RunSummary[]; nextCursor?: string | null }>(cwd, `herder/runs?${search}`, { signal, missing: NO_RUNS });
 			const runs = Array.isArray(body.items) ? body.items.slice(0, limit) : [];
 			const more = typeof body.nextCursor === "string" && body.nextCursor !== "";
 			const details: RunsDetails = { ...(project ? { project } : {}), limit, runIds: runs.map((run) => run.runId) };
@@ -247,14 +252,14 @@ export function recallHerderTool() {
 }
 
 /** The turns from `fromTurn` on, page by page, until there are about enough for one overview. */
-async function readTurns(id: string, fromTurn: number, signal: AbortSignal | undefined, missing: string): Promise<{ items: Turn[]; count: number }> {
+async function readTurns(cwd: string, id: string, fromTurn: number, signal: AbortSignal | undefined, missing: string): Promise<{ items: Turn[]; count: number }> {
 	const items: Turn[] = [];
 	let count = 0;
 	let size = 0;
 	let cursor: string | undefined;
 	for (let page = 0; page < TURN_PAGES; page++) {
 		const search = new URLSearchParams({ limit: String(TURN_PAGE), ...(cursor ? { cursor } : {}) });
-		const body = await get<{ items?: Turn[]; nextCursor?: string | null }>(`sessions/${id}/turns?${search}`, { signal, missing });
+		const body = await get<{ items?: Turn[]; nextCursor?: string | null }>(cwd, `sessions/${id}/turns?${search}`, { signal, missing });
 		const turns = Array.isArray(body.items) ? body.items : [];
 		count += turns.length;
 		for (const turn of turns) {
