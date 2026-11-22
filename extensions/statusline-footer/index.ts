@@ -844,7 +844,6 @@ function fmtTokPerSec(tps: number): string {
 
 interface GitStat {
 	status: "pending" | "clean" | "dirty" | "unavailable";
-	files?: number;
 	adds?: number;
 	dels?: number;
 	ahead: number;
@@ -891,12 +890,10 @@ function getSessionState(ctx: ExtensionContext): SessionState | undefined {
 	return sessionStates.get(ctx.sessionManager.getSessionId());
 }
 
-export function parseGitShortstat(stdout: string): Pick<GitStat, "files" | "adds" | "dels"> {
-	const files = /(\d+) files? changed/.exec(stdout);
+export function parseGitShortstat(stdout: string): Pick<GitStat, "adds" | "dels"> {
 	const adds = /(\d+) insertions?\(\+\)/.exec(stdout);
 	const dels = /(\d+) deletions?\(-\)/.exec(stdout);
 	return {
-		files: files ? Number(files[1]) : 0,
 		adds: adds ? Number(adds[1]) : 0,
 		dels: dels ? Number(dels[1]) : 0,
 	};
@@ -940,7 +937,7 @@ function refreshGitStat(cwd: string, state: SessionState) {
 	state.gitStatCwd = cwd;
 	const opts = { cwd, timeout: 5000 };
 	let status: GitStat["status"] | undefined;
-	let shortstat: Pick<GitStat, "files" | "adds" | "dels"> | undefined;
+	let shortstat: Pick<GitStat, "adds" | "dels"> | undefined;
 	let aheadBehind = { ahead: 0, behind: 0 };
 	let pending = 3;
 	const finish = () => {

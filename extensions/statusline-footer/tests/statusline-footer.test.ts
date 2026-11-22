@@ -307,7 +307,6 @@ describe("statusline footer visual language", () => {
 
 	it("parses git shortstat and upstream ahead/behind", () => {
 		expect(parseGitShortstat(" 3 files changed, 12 insertions(+), 4 deletions(-)\n")).toEqual({
-			files: 3,
 			adds: 12,
 			dels: 4,
 		});
