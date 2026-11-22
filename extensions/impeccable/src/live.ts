@@ -12,14 +12,15 @@ const actionable = new Set(["generate", "steer", "accept", "discard", "manual_ed
 const idOK = (id: unknown): id is string => typeof id === "string" && /^[a-f0-9]{8}$/.test(id);
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; } };
 
+export type LivePhase = "stopped" | "starting" | "polling" | "pending" | "paused";
 export interface LiveSaved {
-	version: 1; sessionId: string; root: string; ids: string[]; phase: string;
+	version: 1; sessionId: string; root: string; ids: string[]; phase: LivePhase;
 	pending?: { file: string; hash: string; id: string; token: string; receivedAt: number };
 }
 export interface Pending { id: string; token: string; event: ObjectValue; file: string; hash: string; receivedAt: number }
 export interface LiveReply { id: string; eventToken: string; status: "done" | "steer_done" | "error" | "complete" | "verified" | "read"; file?: string; data?: unknown; message?: string }
 export interface LiveView {
-	ok: boolean; phase: string; root?: string; owner: string; message?: string; result?: unknown;
+	ok: boolean; phase: LivePhase; root?: string; owner: string; message?: string; result?: unknown;
 	engine?: { binary: string; trustedOverride: boolean };
 	pending?: { id: string; eventToken: string; receivedAt: number; event: ObjectValue | { payloadPath: string; bytes: number }; protocolAcknowledged: boolean };
 }
@@ -80,7 +81,7 @@ async function lease(root: string, sessionId: string, activation: string): Promi
 /** Session resource owner. Native CLI owns all transport, source transactions and journal transitions. */
 export class LiveOwner {
 	readonly activation = randomUUID();
-	phase = "stopped";
+	phase: LivePhase = "stopped";
 	root?: string;
 	pending?: Pending;
 	result?: unknown;
@@ -111,7 +112,7 @@ export class LiveOwner {
 	view(): LiveView {
 		const event = this.pending?.event;
 		const raw = event ? JSON.stringify(event) : "";
-		return { ok: !["paused", "error"].includes(this.phase), owner: this.activation, phase: this.phase, root: this.root, message: this.message, result: this.result, engine: this.resolved ? { binary: this.resolved.binary, trustedOverride: this.resolved.trustedOverride } : undefined,
+		return { ok: this.phase !== "paused", owner: this.activation, phase: this.phase, root: this.root, message: this.message, result: this.result, engine: this.resolved ? { binary: this.resolved.binary, trustedOverride: this.resolved.trustedOverride } : undefined,
 			...(this.pending ? { pending: { id: this.pending.id, eventToken: this.pending.token, receivedAt: this.pending.receivedAt, event: Buffer.byteLength(raw) > 16_000 ? { payloadPath: this.pending.file, bytes: Buffer.byteLength(raw) } : this.pending.event, protocolAcknowledged: this.acknowledged(this.pending.event) } } : {}) };
 	}
 	private notify() { this.changed(this); }
@@ -281,15 +282,13 @@ export class LiveOwner {
 		if (!pending || reply.id !== pending.id || reply.eventToken !== pending.token || this.phase !== "pending" || !this.release) throw new Error("Wrong/stale event id or token; resume the owning Pi session first");
 		if (this.replying) throw new Error("Live reply already in progress");
 		this.replying = true;
-		try { return await this.applyReply(reply); }
+		try { return await this.applyReply(reply, pending); }
 		catch (error) {
 			await this.pause(`Reply failed; inspect native status/resume before retry: ${String(error)}`);
 			throw error;
 		} finally { this.replying = false; }
 	}
-	private async applyReply(reply: LiveReply) {
-		const pending = this.pending;
-		if (!pending || reply.id !== pending.id || reply.eventToken !== pending.token || this.phase !== "pending" || !this.release) throw new Error("Wrong/stale event id or token; resume the owning Pi session first");
+	private async applyReply(reply: LiveReply, pending: Pending) {
 		if (pending.event.type === "manual_edit_apply" && pending.receivedAt + Number(pending.event.deadlineMs) <= Date.now()) throw new Error("Manual Apply relative soft deadline elapsed; inspect native status/resume");
 		await this.checkIdentity();
 		const event = pending.event;
