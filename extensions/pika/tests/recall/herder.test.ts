@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { BUDGET, GOAL_MAX, PLAN_MAX, PREAMBLE } from "../../recall/format.ts";
-import { FakePika } from "./support/pika-server.ts";
+import { FakePika, TOKEN } from "./support/pika-server.ts";
 import { callTool, type Harness, setCredentials, startSession, Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;
@@ -63,7 +63,7 @@ it("lists runs, newest first, with the current project's filter and a hint at ol
 	expect(result.isError).toBe(false);
 	const request = pika.requestsTo("herder/runs")[0]!;
 	expect(Object.fromEntries(request.query)).toEqual({ limit: "2", repo: "widgets" });
-	expect(request.authorization).toBe("Bearer recall-test-token");
+	expect(request.authorization).toBe(`Bearer ${TOKEN}`);
 	expect(result.text).toBe([
 		PREAMBLE,
 		"2 Herder runs in project widgets, newest first:",

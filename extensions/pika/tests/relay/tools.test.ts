@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { NOTICE_TYPE, timing } from "../../relay/protocol.ts";
 import { FakeRelay } from "./support/relay-server.ts";
-import { Notes, setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
+import { Notes, queueToolCall as callTool, setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
 
 const ANSWER_HINT = "Any answer arrives as a new [relay] message after your current turn ends, never during it: do not sleep or poll for it. End your turn now, telling your user what you are waiting for if that helps.";
 
@@ -29,11 +29,6 @@ function results(h: Harness, tool: string): { text: string; isError: boolean }[]
 		const result = message as { content: { type: string; text?: string }[]; isError: boolean };
 		return { text: result.content.map((part) => part.text ?? "").join(""), isError: result.isError };
 	});
-}
-
-/** Makes the model call one tool in its next turn, then answer `after`. */
-function callTool(h: Harness, name: string, args: Parameters<typeof fauxToolCall>[1], after = "done"): void {
-	h.faux.appendResponses([fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" }), fauxAssistantMessage(after)]);
 }
 
 it("lists the other online sessions, with filters", async () => {

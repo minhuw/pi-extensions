@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { PREAMBLE } from "../../recall/format.ts";
-import { FakePika } from "./support/pika-server.ts";
+import { FakePika, TOKEN } from "./support/pika-server.ts";
 import { callTool, type Harness, setCredentials, startSession, Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;
@@ -36,7 +36,7 @@ it("searches sessions with the device token, excluding the current session, and 
 	const result = await callTool(h, "recall_search", { query: "parser \"refactor it\"" });
 	expect(result.isError).toBe(false);
 	const [request] = pika.requestsTo("search");
-	expect(request!.authorization).toBe("Bearer recall-test-token");
+	expect(request!.authorization).toBe(`Bearer ${TOKEN}`);
 	expect(Object.fromEntries(request!.query)).toEqual({ q: "parser \"refactor it\"", group: "session", sort: "relevance", limit: "8", exclude: h.session.sessionId });
 	expect(result.text).toBe([
 		PREAMBLE,

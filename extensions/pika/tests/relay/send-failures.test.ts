@@ -3,7 +3,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/provid
 import { RelayConnection, RequestError } from "../../relay/connection.ts";
 import { RELAY_VERSION, timing } from "../../relay/protocol.ts";
 import { FakeRelay, TOKEN } from "./support/relay-server.ts";
-import { setCredentials, sleep, startSession, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
+import { queueToolCall as callTool, setCredentials, sleep, startSession, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
 
 let workspace: Workspace;
 let relay: FakeRelay;
@@ -44,10 +44,6 @@ function results(h: Harness, tool: string): { text: string; isError: boolean }[]
 		const result = message as { content: { type: string; text?: string }[]; isError: boolean };
 		return { text: result.content.map((part) => part.text ?? "").join(""), isError: result.isError };
 	});
-}
-
-function callTool(h: Harness, name: string, args: Parameters<typeof fauxToolCall>[1], after = "done"): void {
-	h.faux.appendResponses([fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" }), fauxAssistantMessage(after)]);
 }
 
 const statusLines = (h: Harness) => results(h, "relay_status").at(-1)!.text.split("\n").map((line) => line.replace(/, sent \d+s ago/, ""));

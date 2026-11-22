@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { ExtensionUIContext, SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { LogViewer } from "../../log-viewer.ts";
 import { RECEIVED_TYPE, timing } from "../../relay/protocol.ts";
 import { type LogItem, logItems, relayView, SENT_TYPE, size } from "../../relay/viewer.ts";
 import { FakeRelay } from "./support/relay-server.ts";
-import { Notes, setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
+import { Notes, queueToolCall as callTool, setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
 
 const KEYS = { up: "\x1b[A", down: "\x1b[B", pageUp: "\x1b[5~", pageDown: "\x1b[6~", home: "\x1b[H", end: "\x1b[F", enter: "\r", esc: "\x1b" };
 const BINDINGS: Record<string, string> = {
@@ -50,10 +50,6 @@ async function online(options: Partial<Parameters<typeof startSession>[0]> = {})
 	harnesses.push(h);
 	await waitOnline(relay, h.session.sessionId);
 	return h;
-}
-
-function callTool(h: Harness, name: string, args: Parameters<typeof fauxToolCall>[1], after = "done"): void {
-	h.faux.appendResponses([fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" }), fauxAssistantMessage(after)]);
 }
 
 const sentData = (h: Harness) => h.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom" && entry.customType === SENT_TYPE ? [entry.data] : []);

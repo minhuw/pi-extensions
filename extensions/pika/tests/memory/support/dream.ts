@@ -1,8 +1,9 @@
-import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { dreamLimits, dreamRuntime } from "../../../memory/dream/index.ts";
 import type { Batch, ChildEvent, DreamChild, DreamSession, Grant, Lease, SpawnOptions } from "../../../memory/dream/run.ts";
 import type { Answer, FakePika, Recorded } from "./pika-server.ts";
 import { PROJECT, PROJECT_SCOPE } from "./runtime.ts";
+
+export { RecordingUI } from "../../support/runtime.ts";
 
 const DEFAULT_LIMITS = { ...dreamLimits };
 const DEFAULT_SPAWN = dreamRuntime.spawn;
@@ -103,20 +104,4 @@ export function fakeSpawner(): { children: FakeChild[]; spawns: SpawnOptions[] }
 		return child;
 	};
 	return record;
-}
-
-/** A UI context that records notifications and footer statuses. */
-export class RecordingUI {
-	readonly notes: { message: string; type?: string }[] = [];
-	readonly statuses: [string, string | undefined][] = [];
-	status(key = "pika-memory"): string | undefined { return this.statuses.filter(([name]) => name === key).at(-1)?.[1]; }
-	context(): ExtensionUIContext {
-		const methods: Partial<ExtensionUIContext> = {
-			notify: (message, type) => { this.notes.push({ message, type }); },
-			setStatus: (key, text) => { this.statuses.push([key, text]); },
-		};
-		return new Proxy(methods, {
-			get: (target, name) => name in target ? target[name as keyof ExtensionUIContext] : name === "then" ? undefined : () => undefined,
-		}) as ExtensionUIContext;
-	}
 }

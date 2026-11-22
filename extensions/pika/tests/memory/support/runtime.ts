@@ -1,70 +1,45 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { expect, vi } from "vitest";
-import { getCurrentSystemPrompt, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxProviderHandle, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
-import {
-	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
-	type AgentSession, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory, type ExtensionContext, type ExtensionFactory, type ExtensionUIContext,
-} from "@earendil-works/pi-coding-agent";
-import { credentialsRegistry } from "../../../credentials.ts";
+import { expect } from "vitest";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import type { ExtensionContext, ExtensionFactory, ExtensionUIContext, SessionManager } from "@earendil-works/pi-coding-agent";
 import { timing } from "../../../memory/client.ts";
 import memoryExtension from "../../../memory/index.ts";
 import type { Note } from "../../../memory/format.ts";
-import { TOKEN } from "./pika-server.ts";
+import {
+	callTool, recordSystem, setCredentials, startSession as startBaseSession, Workspace as BaseWorkspace, type Harness as BaseHarness, type WorkspaceOptions,
+} from "../../support/runtime.ts";
+
+export { callTool, setCredentials };
 
 const DEFAULT_TIMING = { ...timing };
 export const REMOTE = "git@github.com:me/widgets.git";
 export const REPOSITORY = "https://github.com/me/widgets";
 export const PROJECT = "my-project";
 
-// Real pi sessions load slowly on a cold, busy worker; every memory test file imports this module.
-vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
-
 /** A temp directory holding the agent dir, session dir, and project cwd (a git repository with an origin) of one test. */
-export class Workspace {
-	private constructor(readonly root: string) {}
-	static async create(options: { git?: boolean } = {}): Promise<Workspace> {
-		const workspace = new Workspace(await mkdtemp(join(tmpdir(), "pi-memory-")));
-		for (const dir of [workspace.agentDir, workspace.sessionDir, workspace.cwd]) await mkdir(dir, { recursive: true });
+export class Workspace extends BaseWorkspace {
+	static override async create(options: WorkspaceOptions & { git?: boolean } = {}): Promise<Workspace> {
+		const workspace = await BaseWorkspace.create({
+			prefix: "pi-memory-", project: PROJECT,
+			onCleanup: () => { setCredentials(undefined); },
+			...options,
+		});
 		if (options.git !== false) {
 			execFileSync("git", ["init", "-q", workspace.cwd]);
 			execFileSync("git", ["-C", workspace.cwd, "remote", "add", "origin", REMOTE]);
 		}
-		for (const name of ["PIKA_URL", "PIKA_TOKEN", "PIKA_DISABLED"]) delete process.env[name];
-		process.env.PI_CODING_AGENT_DIR = workspace.agentDir;
 		Object.assign(timing, DEFAULT_TIMING);
 		return workspace;
 	}
-	get agentDir() { return join(this.root, "agent"); }
-	get sessionDir() { return join(this.root, "sessions"); }
-	get cwd() { return join(this.root, PROJECT); }
-	async cleanup(): Promise<void> {
-		setCredentials(undefined);
-		await rm(this.root, { recursive: true, force: true });
-	}
 }
 
-/** Publishes credentials as pika would. */
-export function setCredentials(url: string | undefined, options: { token?: string; excluded?: boolean } = {}): void {
-	const registry = credentialsRegistry();
-	registry.current = url === undefined ? undefined : { url, token: options.token ?? TOKEN, isExcluded: () => options.excluded ?? false };
-	for (const listener of [...registry.listeners]) listener();
-}
-
-export interface Harness {
-	runtime: AgentSessionRuntime;
-	readonly session: AgentSession;
-	faux: FauxProviderHandle;
+export interface Harness extends BaseHarness {
 	/** The system prompt of every provider request, in order. */
 	systems: string[];
 	/** Runs one prompt the model answers with text, and returns the system prompt of its request. */
 	run(prompt: string): Promise<string>;
 	/** The session's `pika-memory` entries on the current branch. */
 	pins(): unknown[];
-	shutdown(): Promise<void>;
 }
 
 /** A real pi session runtime with memory and the faux provider. */
@@ -75,67 +50,25 @@ export async function startSession(options: {
 	/** The faux provider's model ids; default `test`. */
 	models?: string[];
 }): Promise<Harness> {
-	const cwd = options.cwd ?? options.workspace.cwd;
-	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-	const faux = fauxProvider({ api: "memory-test-api", provider: "memory-test", models: (options.models ?? ["test"]).map((id) => ({ id })) as [{ id: string }, ...{ id: string }[]] });
-	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd: runtimeCwd, agentDir, sessionManager, sessionStartEvent }) => {
-		const services = await createAgentSessionServices({
-			cwd: runtimeCwd, agentDir, settingsManager, modelRuntime,
-			resourceLoaderOptions: {
-				noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-				extensionFactories: [(pi) => { pi.registerProvider(faux.provider); }, ...(options.memory === false ? [] : [memoryExtension]), ...(options.extensions ?? [])],
-			},
-		});
-		expect(services.resourceLoader.getExtensions().errors).toEqual([]);
-		const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, model: faux.getModel("test") });
-		return { ...created, services, diagnostics: services.diagnostics };
-	};
-	const runtime = await createAgentSessionRuntime(createRuntime, {
-		cwd, agentDir: options.workspace.agentDir, sessionManager: options.sessionManager ?? SessionManager.create(cwd, options.workspace.sessionDir),
+	const base = await startBaseSession({
+		...options,
+		provider: "memory-test",
+		extensions: [...(options.memory === false ? [] : [memoryExtension]), ...(options.extensions ?? [])],
 	});
-	const bind = () => runtime.session.bindExtensions(options.bindAsChild ? {} : { mode: options.mode ?? "rpc", onError: () => {}, ...(options.ui ? { uiContext: options.ui } : {}) });
-	runtime.setRebindSession(bind);
-	await bind();
 	const systems: string[] = [];
-	let closed = false;
 	return {
-		runtime, faux, systems,
-		get session() { return runtime.session; },
+		runtime: base.runtime, faux: base.faux, errors: base.errors, systems,
+		get session() { return base.runtime.session; },
 		async run(prompt) {
 			const before = systems.length;
-			faux.appendResponses([recording(systems, () => fauxAssistantMessage("ok"))]);
-			await runtime.session.prompt(prompt);
+			base.faux.appendResponses([recordSystem(systems, () => fauxAssistantMessage("ok"))]);
+			await base.runtime.session.prompt(prompt);
 			expect(systems.length).toBe(before + 1);
 			return systems.at(-1)!;
 		},
-		pins: () => runtime.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom" && entry.customType === "pika-memory" ? [entry.data] : []),
-		async shutdown() {
-			if (closed) return;
-			closed = true;
-			await runtime.dispose();
-		},
+		pins: () => base.runtime.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom" && entry.customType === "pika-memory" ? [entry.data] : []),
+		shutdown: () => base.shutdown(),
 	};
-}
-
-function recording(systems: string[], answer: () => ReturnType<typeof fauxAssistantMessage>): FauxResponseFactory {
-	return ({ messages }) => {
-		systems.push(getCurrentSystemPrompt(messages));
-		return answer();
-	};
-}
-
-/** Makes the model call one tool in its next turn, then answer "done", and runs that turn. */
-export async function callTool(h: Harness, name: string, args: Parameters<typeof fauxToolCall>[1]): Promise<{ text: string; isError: boolean; details: unknown }> {
-	h.faux.appendResponses([
-		recording(h.systems, () => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" })),
-		recording(h.systems, () => fauxAssistantMessage("done")),
-	]);
-	await h.session.prompt(`call ${name}`);
-	const result = h.session.messages.filter((message) => message.role === "toolResult" && message.toolName === name).at(-1) as
-		{ content: { type: string; text?: string }[]; isError: boolean; details: unknown } | undefined;
-	if (!result) throw new Error(`${name} was not called`);
-	return { text: result.content.map((part) => part.text ?? "").join(""), isError: result.isError, details: result.details };
 }
 
 /** The `memory` section of a system prompt, or undefined. */

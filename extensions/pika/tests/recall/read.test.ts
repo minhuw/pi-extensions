@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { BUDGET, PREAMBLE } from "../../recall/format.ts";
-import { FakePika } from "./support/pika-server.ts";
+import { FakePika, TOKEN } from "./support/pika-server.ts";
 import { callTool, type Harness, setCredentials, startSession, Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;
@@ -49,7 +49,7 @@ it("reads an overview: the session, its children, and every turn with its tool c
 	expect(result.isError).toBe(false);
 	for (const path of ["sessions/s-1", "sessions/s-1/trace", "sessions/s-1/turns"]) {
 		expect(pika.requestsTo(path)).toHaveLength(1);
-		expect(pika.requestsTo(path)[0]!.authorization).toBe("Bearer recall-test-token");
+		expect(pika.requestsTo(path)[0]!.authorization).toBe(`Bearer ${TOKEN}`);
 	}
 	expect(pika.requestsTo("sessions/s-1/turns")[0]!.query.get("limit")).toBe("100");
 	expect(result.text).toBe([
