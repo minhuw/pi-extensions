@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ExtensionUIContext, SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { LogViewer } from "../../log-viewer.ts";
 import { RECEIVED_TYPE, timing } from "../../relay/protocol.ts";
-import { type LogItem, logItems, RelayLog, SENT_TYPE, size } from "../../relay/viewer.ts";
+import { type LogItem, logItems, relayView, SENT_TYPE, size } from "../../relay/viewer.ts";
 import { FakeRelay } from "./support/relay-server.ts";
 import { Notes, setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
 
@@ -29,12 +30,12 @@ afterEach(async () => {
 
 /** A UI that records notifications and opens `ui.custom` components on a fake terminal. */
 class LogUI extends Notes {
-	viewer: RelayLog | undefined;
+	viewer: LogViewer | undefined;
 	options: { overlay?: boolean; overlayOptions?: () => unknown } | undefined;
 	readonly tui = { mode: "regular" as const, terminal: { rows: 30 }, requestRender: vi.fn() };
 	override context(): ExtensionUIContext {
 		const base = super.context();
-		const custom = (factory: (...args: unknown[]) => RelayLog, options: LogUI["options"]) => new Promise((resolve) => {
+		const custom = (factory: (...args: unknown[]) => LogViewer, options: LogUI["options"]) => new Promise((resolve) => {
 			this.options = options;
 			this.viewer = factory(this.tui, plainTheme, keybindings, resolve);
 		});
@@ -232,7 +233,7 @@ describe("logItems", () => {
 	});
 });
 
-describe("RelayLog", () => {
+describe("the relay log view", () => {
 	const item = (index: number, overrides: Partial<LogItem> = {}): LogItem => ({
 		incoming: index % 2 === 0, id: `msg-${index}`, at: new Date(2026, 10, 9, 10, index).toISOString(), peer: index % 2 === 0 ? "Builder on desktop · api" : "s-1",
 		urgent: false, text: `message ${index}`, ...(index % 2 === 0 ? {} : { status: "delivered" }), ...overrides,
@@ -240,7 +241,7 @@ describe("RelayLog", () => {
 	function viewer(items: LogItem[], { rows = 20, mode = "regular" as "regular" | "fullscreen", keys = keybindings as typeof keybindings | undefined } = {}) {
 		const done = vi.fn();
 		const tui = { mode, terminal: { rows }, requestRender: vi.fn() };
-		const log = new RelayLog(tui, colorTheme, keys, items, done);
+		const log = new LogViewer(tui, colorTheme, keys, relayView(colorTheme, items), done);
 		return { log, done, tui, press: (...input: string[]) => { for (const key of input) log.handleInput(key); }, text: (width = 80) => log.render(width).map(plain) };
 	}
 	const selected = (lines: string[]) => lines.find((line) => line.startsWith("│ ▸"));

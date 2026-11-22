@@ -4,7 +4,7 @@
  * with it, and `size`, re-exported. Every field shown comes from another device or the model.
  */
 import type { ExtensionCommandContext, SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
-import { localTime, LogViewer, type LogView, type LogViewItem, showLog, size } from "../log-viewer.ts";
+import { localTime, type LogView, type LogViewItem, showLog, size } from "../log-viewer.ts";
 import { deviceLabel, headerField, RECEIVED_TYPE, sanitize } from "./protocol.ts";
 
 export { size } from "../log-viewer.ts";
@@ -78,13 +78,6 @@ export function relayView(theme: Theme, items: readonly LogItem[]): LogView {
 			};
 		}),
 	};
-}
-
-/** The relay log as a component. */
-export class RelayLog extends LogViewer {
-	constructor(tui: ConstructorParameters<typeof LogViewer>[0], theme: Theme, keys: ConstructorParameters<typeof LogViewer>[2], items: readonly LogItem[], done: () => void) {
-		super(tui, theme, keys, relayView(theme, items), done);
-	}
 }
 
 /** Opens the log over the transcript until Esc or q closes it. */
