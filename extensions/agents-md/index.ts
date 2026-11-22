@@ -22,7 +22,7 @@ export interface LintDetails {
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
 /** Lints `path` (resolved against `cwd`), or every context file of the repository holding `cwd`. */
-export function lintReport(cwd: string, path?: string): LintDetails {
+function lintReport(cwd: string, path?: string): LintDetails {
 	let root: string;
 	let files: string[];
 	const raw = path?.trim();
@@ -61,7 +61,7 @@ export function formatReport(details: LintDetails): string {
 	}).join("\n");
 }
 
-export function registerLintTool(pi: ExtensionAPI): void {
+function registerLintTool(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "agents_md_lint",
 		label: "AGENTS.md Lint",

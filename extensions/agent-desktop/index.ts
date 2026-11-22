@@ -11,10 +11,10 @@ export const AGENT_DESKTOP_STATUS_KEY = "agent-desktop";
 export const AGENT_DESKTOP_SHARED_KEY = Symbol.for("pi-extensions.agent-desktop");
 export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
 
-export const DEFAULT_TIMEOUT_MS = 120_000;
-export const EXIT_STDIO_GRACE_MS = 100;
-export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
-export const MAX_RESULT_BYTES = 50 * 1024;
+const DEFAULT_TIMEOUT_MS = 120_000;
+const EXIT_STDIO_GRACE_MS = 100;
+const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
+const MAX_RESULT_BYTES = 50 * 1024;
 export const MAX_RESULT_LINES = 2000;
 
 export const INSTALL_HINT =
@@ -51,7 +51,7 @@ export interface ChildSessionHook {
 	extensionFactory: (pi: ExtensionAPI) => void;
 }
 
-export interface AgentDesktopSharedState {
+interface AgentDesktopSharedState {
 	openInstances: Set<object>;
 	hook?: ChildSessionHook;
 }
@@ -106,7 +106,6 @@ export interface ParsedAgentDesktopArgv {
 	hasHeadedFlag: boolean;
 	hasStdinFlag: boolean;
 	subcommand?: string;
-	subcommandIndex: number;
 	sessionAction?: string;
 	sessionTargetId?: string;
 	screenshotPath?: string;
@@ -126,7 +125,6 @@ interface AgentDesktopPlatformEntry {
 
 interface AgentDesktopPlatformModule {
 	MACOS_HELPER_NAME: string;
-	LINUX_HELPER_NAME: string;
 	resolve(osPlatform: string, osArch: string): AgentDesktopPlatformEntry | undefined;
 	helperNames(entry: AgentDesktopPlatformEntry): string[];
 }
@@ -268,7 +266,6 @@ export function parseAgentDesktopArgv(argv: readonly string[]): ParsedAgentDeskt
 	let hasHeadedFlag = false;
 	let hasStdinFlag = false;
 	let subcommand: string | undefined;
-	let subcommandIndex = -1;
 	let sessionAction: string | undefined;
 	let sessionTargetId: string | undefined;
 	let screenshotPath: string | undefined;
@@ -314,14 +311,12 @@ export function parseAgentDesktopArgv(argv: readonly string[]): ParsedAgentDeskt
 			}
 			if (token === "--help" || token === "-h" || token === "--version" || token === "-V") {
 				subcommand = token;
-				subcommandIndex = i;
 				continue;
 			}
 			if (token.startsWith("-")) {
 				continue;
 			}
 			subcommand = token;
-			subcommandIndex = i;
 			continue;
 		}
 
@@ -363,7 +358,6 @@ export function parseAgentDesktopArgv(argv: readonly string[]): ParsedAgentDeskt
 		hasHeadedFlag,
 		hasStdinFlag,
 		subcommand,
-		subcommandIndex,
 		sessionAction,
 		sessionTargetId,
 		screenshotPath,
@@ -402,7 +396,7 @@ class BoundedOutput {
 	}
 }
 
-export function truncateText(
+function truncateText(
 	input: string,
 	maxBytes = MAX_RESULT_BYTES,
 	maxLines = MAX_RESULT_LINES,
@@ -867,7 +861,7 @@ export async function runAgentDesktop(
 	}
 }
 
-export function renderAgentDesktopResult(result: AgentDesktopRunResult): string {
+function renderAgentDesktopResult(result: AgentDesktopRunResult): string {
 	if (result.status === "unavailable") {
 		return result.message ?? INSTALL_HINT;
 	}
@@ -900,7 +894,7 @@ export function renderAgentDesktopResult(result: AgentDesktopRunResult): string 
 	return truncateText(parts.join("\n\n"), MAX_RESULT_BYTES, MAX_RESULT_LINES).text;
 }
 
-export const AgentDesktopToolParameters = Type.Object({
+const AgentDesktopToolParameters = Type.Object({
 	argv: Type.Array(Type.String(), {
 		minItems: 1,
 		maxItems: 64,
@@ -940,7 +934,7 @@ export const AgentDesktopToolParameters = Type.Object({
 	),
 });
 
-export type AgentDesktopToolInput = Static<typeof AgentDesktopToolParameters>;
+type AgentDesktopToolInput = Static<typeof AgentDesktopToolParameters>;
 
 function prepareAgentDesktopToolArguments(raw: unknown): AgentDesktopToolInput {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {

@@ -39,7 +39,7 @@ export function describeSession(ctx: ExtensionContext | undefined): PaneSession 
 	return session;
 }
 
-export function describeModel(ctx: ExtensionContext | undefined): string | undefined {
+function describeModel(ctx: ExtensionContext | undefined): string | undefined {
 	const model = attempt(() => ctx?.model);
 	return model ? clean(`${model.provider}/${model.id}`, 240) : undefined;
 }

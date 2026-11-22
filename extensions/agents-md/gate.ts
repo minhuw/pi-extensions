@@ -11,7 +11,7 @@ import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@earen
 import { CONTEXT_FILE_NAMES, formatFinding, lintContextFile, newFindings, repositoryContextFiles, type LintFinding } from "./lint.ts";
 import { CHOICES, DEFAULT_CONTEXT, lineText, MAX_FINDINGS, promptReviewDialog, REVIEW_CHOICES, reviewAction } from "./review-ui.ts";
 
-export const SESSION_LINK_TYPE = "pi-extensions.session-link";
+const SESSION_LINK_TYPE = "pi-extensions.session-link";
 /** selfdrive publishes its grants here while the user is away; read it, never import selfdrive. */
 export const STANDING_APPROVAL_KEY = Symbol.for("pi-extensions.standing-approval");
 
@@ -52,7 +52,7 @@ export function userAway(): boolean {
 // ---- Paths (as selfdrive's guard resolves them; extensions do not import each other) ----
 
 /** The deepest existing ancestor's real path followed by the missing rest, following a dangling symlink. */
-export function canonical(path: string, seen = new Set<string>()): string {
+function canonical(path: string, seen = new Set<string>()): string {
 	const absolute = resolve(path);
 	const trailing: string[] = [];
 	let current = absolute;
@@ -206,7 +206,7 @@ export function truncateDiff(lines: string[], max = MAX_DIFF_LINES): string[] {
 // ---- Review ----
 
 /** The findings `after` adds to `before`, or the error lint threw. */
-export function addedFindings(before: string, after: string, file: string, root: string): { findings: LintFinding[] } | { error: string } {
+function addedFindings(before: string, after: string, file: string, root: string): { findings: LintFinding[] } | { error: string } {
 	try {
 		return { findings: newFindings(lintContextFile(before, { file, root }), lintContextFile(after, { file, root })) };
 	} catch (error) {
@@ -215,7 +215,7 @@ export function addedFindings(before: string, after: string, file: string, root:
 }
 
 /** The dialog's text: what changes, its diff, and the lint findings it adds. */
-export function reviewText(path: string, tool: "edit" | "write", before: string, after: string, added: ReturnType<typeof addedFindings>, existed: boolean): string {
+function reviewText(path: string, tool: "edit" | "write", before: string, after: string, added: ReturnType<typeof addedFindings>, existed: boolean): string {
 	const action = reviewAction(tool, existed);
 	const diff = unifiedDiff(before, after);
 	const lines = [`Review this change to ${path}: the agent's ${tool} ${action} it.`, ""];

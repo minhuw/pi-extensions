@@ -249,35 +249,30 @@ describe("AC-2 & AC-3 — Direct argv execution, session isolation, inline scree
 		expect(parseAgentBrowserArgv(["open", "https://example.com"])).toEqual({
 			explicitSession: undefined,
 			subcommand: "open",
-			subcommandIndex: 0,
 			screenshotPath: undefined,
 			screenshotBase64: false,
 		});
 		expect(parseAgentBrowserArgv(["--session", "custom-1", "snapshot", "-i"])).toEqual({
 			explicitSession: "custom-1",
 			subcommand: "snapshot",
-			subcommandIndex: 2,
 			screenshotPath: undefined,
 			screenshotBase64: false,
 		});
 		expect(parseAgentBrowserArgv(["--session=custom-2", "--headed", "click", "@e1"])).toEqual({
 			explicitSession: "custom-2",
 			subcommand: "click",
-			subcommandIndex: 2,
 			screenshotPath: undefined,
 			screenshotBase64: false,
 		});
 		expect(parseAgentBrowserArgv(["screenshot", "--full", "--selector", "#app", "out/shot.png"])).toEqual({
 			explicitSession: undefined,
 			subcommand: "screenshot",
-			subcommandIndex: 0,
 			screenshotPath: "out/shot.png",
 			screenshotBase64: false,
 		});
 		expect(parseAgentBrowserArgv(["screenshot", "--base64"])).toEqual({
 			explicitSession: undefined,
 			subcommand: "screenshot",
-			subcommandIndex: 0,
 			screenshotPath: undefined,
 			screenshotBase64: true,
 		});
@@ -299,7 +294,6 @@ describe("AC-2 & AC-3 — Direct argv execution, session isolation, inline scree
 			expect(parseAgentBrowserArgv([flag, value, "open", "https://example.com"])).toEqual({
 				explicitSession: undefined,
 				subcommand: "open",
-				subcommandIndex: 2,
 				screenshotPath: undefined,
 				screenshotBase64: false,
 			});
@@ -308,7 +302,6 @@ describe("AC-2 & AC-3 — Direct argv execution, session isolation, inline scree
 			expect(parseAgentBrowserArgv([`${flag}=${value}`, "open", "https://example.com"])).toEqual({
 				explicitSession: undefined,
 				subcommand: "open",
-				subcommandIndex: 1,
 				screenshotPath: undefined,
 				screenshotBase64: false,
 			});
@@ -317,7 +310,6 @@ describe("AC-2 & AC-3 — Direct argv execution, session isolation, inline scree
 			expect(parseAgentBrowserArgv([flag, value, "screenshot"])).toEqual({
 				explicitSession: undefined,
 				subcommand: "screenshot",
-				subcommandIndex: 2,
 				screenshotPath: undefined,
 				screenshotBase64: false,
 			});
@@ -326,7 +318,6 @@ describe("AC-2 & AC-3 — Direct argv execution, session isolation, inline scree
 			expect(parseAgentBrowserArgv([`${flag}=${value}`, "screenshot", "out/shot.png"])).toEqual({
 				explicitSession: undefined,
 				subcommand: "screenshot",
-				subcommandIndex: 1,
 				screenshotPath: "out/shot.png",
 				screenshotBase64: false,
 			});
@@ -335,7 +326,6 @@ describe("AC-2 & AC-3 — Direct argv execution, session isolation, inline scree
 			expect(parseAgentBrowserArgv(["screenshot", flag, value, "out/shot.png"])).toEqual({
 				explicitSession: undefined,
 				subcommand: "screenshot",
-				subcommandIndex: 0,
 				screenshotPath: "out/shot.png",
 				screenshotBase64: false,
 			});
@@ -344,7 +334,6 @@ describe("AC-2 & AC-3 — Direct argv execution, session isolation, inline scree
 			expect(parseAgentBrowserArgv([flag, value, "close"])).toEqual({
 				explicitSession: undefined,
 				subcommand: "close",
-				subcommandIndex: 2,
 				screenshotPath: undefined,
 				screenshotBase64: false,
 			});
@@ -353,7 +342,6 @@ describe("AC-2 & AC-3 — Direct argv execution, session isolation, inline scree
 			expect(parseAgentBrowserArgv([`${flag}=${value}`, "close"])).toEqual({
 				explicitSession: undefined,
 				subcommand: "close",
-				subcommandIndex: 1,
 				screenshotPath: undefined,
 				screenshotBase64: false,
 			});
@@ -384,7 +372,6 @@ describe("AC-2 & AC-3 — Direct argv execution, session isolation, inline scree
 		).toEqual({
 			explicitSession: "explicit-1",
 			subcommand: "screenshot",
-			subcommandIndex: 16,
 			screenshotPath: "out/combined.png",
 			screenshotBase64: false,
 		});

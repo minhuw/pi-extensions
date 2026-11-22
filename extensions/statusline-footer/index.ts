@@ -58,7 +58,7 @@ type Rgb = { r: number; g: number; b: number };
 // Before Node 26, stripVTControlCharacters leaves colon-separated SGR parameters (`\x1b[38:2::255:0:0m`) in the text.
 const stripAnsi = (text: string): string => stripVTControlCharacters(text.replace(/\x1b\[[0-9;:]*m/g, ""));
 
-export function fmtTokens(n: number): string {
+function fmtTokens(n: number): string {
 	if (n < 1000) return `${n}`;
 	if (n < 10_000) return `${(n / 1000).toFixed(1)}k`;
 	if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
@@ -114,7 +114,7 @@ function positionColor(pos: number, width: number, start: Rgb, mid: Rgb, end: Rg
 	return mix(mid, end, (t - midFrac) / Math.max(1 - midFrac, 0.0001));
 }
 
-export function resolveThemeRgb(theme: Theme, token: ThemeToken): Rgb | null {
+function resolveThemeRgb(theme: Theme, token: ThemeToken): Rgb | null {
 	try {
 		const probed = theme.fg(token, "X");
 		const match = /\x1b\[38;2;(\d+);(\d+);(\d+)m/.exec(probed);
@@ -374,7 +374,7 @@ let cachedSkin: { key: string; skin: Skin } | undefined;
  * footer one theme object for the whole session and swaps the theme behind it, so the skin
  * is cached by the sequences it draws with, never by the object.
  */
-export function skinFor(theme: Theme): Skin {
+function skinFor(theme: Theme): Skin {
 	const [surface] = tokenAnsi(text => theme.bg(BAND_TOKEN, text));
 	// A terminal-default surface leaves no band to draw.
 	if (!surface.startsWith("\x1b[48;")) return FLAT_SKIN;
@@ -1048,7 +1048,7 @@ function glyph(theme: Theme, icon: string, color?: ThemeToken): string {
 
 // ── rendering ───────────────────────────────────────────────────────
 
-export function thinkingCaps(level: string): string {
+function thinkingCaps(level: string): string {
 	return level.toUpperCase();
 }
 
@@ -1375,7 +1375,7 @@ function ttftColor(ms: number): "success" | "warning" | "error" {
  */
 export const FOOTER_TIERS = { deskMin: 175, phoneMax: 71 } as const;
 
-export type FooterTier = "desk" | "laptop" | "phone";
+type FooterTier = "desk" | "laptop" | "phone";
 
 /**
  * How long each group of a tier's rows lasts when the row is short of space; lower ranks drop first.
@@ -1384,7 +1384,7 @@ export type FooterTier = "desk" | "laptop" | "phone";
 export const DESK_RANKS = { memory: 0, think: 1, tools: 2, tokens: 3, latency: 4, turns: 5, toolErrors: 6, cost: 7 } as const;
 export const LAPTOP_RANKS = { cache: 0, latency: 1, turns: 2, cwd: 3, cost: 4, errors: 5, git: 6 } as const;
 
-export function footerTier(width: number): FooterTier {
+function footerTier(width: number): FooterTier {
 	if (width >= FOOTER_TIERS.deskMin) return "desk";
 	return width <= FOOTER_TIERS.phoneMax ? "phone" : "laptop";
 }
@@ -1419,7 +1419,7 @@ function renderFull(
 }
 
 /** A model id without its vendor prefix, keeping the version: `claude-opus-5-5` reads `opus-5-5`. */
-export function shortModelName(id: string): string {
+function shortModelName(id: string): string {
 	return id.replace(/^.*\//, "").replace(/^(?:claude|anthropic)-/i, "") || id;
 }
 
@@ -1427,7 +1427,7 @@ export function shortModelName(id: string): string {
  * `herder blocked`, `quota awaiting`, `bg 1 failed`: a status's leading word and its marker, with the
  * marker's count. A status that opens with a symbol or with the marker itself is named by its key.
  */
-export function phoneAlert(plain: string, key = ""): string | undefined {
+function phoneAlert(plain: string, key = ""): string | undefined {
 	const marker = severityMarker(plain);
 	if (!marker) return undefined;
 	const match = new RegExp(`(?:^|[\\s:])${marker}(?=$|[\\s,.;:)])`).exec(plain)!;

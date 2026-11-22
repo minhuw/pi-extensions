@@ -9,10 +9,10 @@ export const AGENT_BROWSER_STATUS_KEY = "agent-browser";
 export const AGENT_BROWSER_SHARED_KEY = Symbol.for("pi-extensions.agent-browser");
 export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
 
-export const DEFAULT_TIMEOUT_MS = 120_000;
-export const EXIT_STDIO_GRACE_MS = 100;
-export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
-export const MAX_RESULT_BYTES = 50 * 1024;
+const DEFAULT_TIMEOUT_MS = 120_000;
+const EXIT_STDIO_GRACE_MS = 100;
+const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
+const MAX_RESULT_BYTES = 50 * 1024;
 export const MAX_RESULT_LINES = 2000;
 
 export const INSTALL_HINT =
@@ -23,7 +23,7 @@ export interface ChildSessionHook {
 	extensionFactory: (pi: ExtensionAPI) => void;
 }
 
-export interface AgentBrowserSharedState {
+interface AgentBrowserSharedState {
 	openInstances: Set<object>;
 	hook?: ChildSessionHook;
 }
@@ -73,7 +73,6 @@ export interface RunAgentBrowserOptions {
 export interface ParsedAgentBrowserArgv {
 	explicitSession?: string;
 	subcommand?: string;
-	subcommandIndex: number;
 	screenshotPath?: string;
 	screenshotBase64: boolean;
 }
@@ -198,7 +197,6 @@ export function deriveBrowserSessionId(ctx?: {
 export function parseAgentBrowserArgv(argv: readonly string[]): ParsedAgentBrowserArgv {
 	let explicitSession: string | undefined;
 	let subcommand: string | undefined;
-	let subcommandIndex = -1;
 	let screenshotPath: string | undefined;
 	let screenshotBase64 = false;
 
@@ -230,14 +228,12 @@ export function parseAgentBrowserArgv(argv: readonly string[]): ParsedAgentBrows
 			}
 			if (token === "--help" || token === "-h" || token === "--version" || token === "-V") {
 				subcommand = token;
-				subcommandIndex = i;
 				continue;
 			}
 			if (token.startsWith("-")) {
 				continue;
 			}
 			subcommand = token;
-			subcommandIndex = i;
 			continue;
 		}
 
@@ -262,7 +258,6 @@ export function parseAgentBrowserArgv(argv: readonly string[]): ParsedAgentBrows
 	return {
 		explicitSession,
 		subcommand,
-		subcommandIndex,
 		screenshotPath,
 		screenshotBase64,
 	};
@@ -300,7 +295,7 @@ class BoundedOutput {
 	}
 }
 
-export function truncateText(
+function truncateText(
 	input: string,
 	maxBytes = MAX_RESULT_BYTES,
 	maxLines = MAX_RESULT_LINES,
@@ -582,7 +577,7 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 	}
 }
 
-export function renderAgentBrowserResult(result: AgentBrowserRunResult): string {
+function renderAgentBrowserResult(result: AgentBrowserRunResult): string {
 	if (result.status === "unavailable") {
 		return result.message ?? INSTALL_HINT;
 	}
@@ -615,7 +610,7 @@ export function renderAgentBrowserResult(result: AgentBrowserRunResult): string 
 	return truncateText(parts.join("\n\n"), MAX_RESULT_BYTES, MAX_RESULT_LINES).text;
 }
 
-export const AgentBrowserToolParameters = Type.Object({
+const AgentBrowserToolParameters = Type.Object({
 	argv: Type.Array(Type.String({ minLength: 1 }), {
 		minItems: 1,
 		maxItems: 64,
@@ -644,7 +639,7 @@ export const AgentBrowserToolParameters = Type.Object({
 	),
 });
 
-export type AgentBrowserToolInput = Static<typeof AgentBrowserToolParameters>;
+type AgentBrowserToolInput = Static<typeof AgentBrowserToolParameters>;
 
 export default function agentBrowserExtension(pi: ExtensionAPI): void {
 	if (boundApis.has(pi)) return;

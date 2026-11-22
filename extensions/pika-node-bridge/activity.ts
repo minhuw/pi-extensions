@@ -46,7 +46,7 @@ function parseActivity(value: unknown): Row | undefined {
 	return row;
 }
 
-export function parseSnapshot(value: unknown): Snapshot | undefined {
+function parseSnapshot(value: unknown): Snapshot | undefined {
 	try {
 		const source = data(value, "source");
 		const rows = data(value, "activities");

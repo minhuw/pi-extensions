@@ -1,5 +1,5 @@
 /** Versioned, metadata-only contract shared by Pi and the optional Orca plugin. */
-export const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 1;
 export const HEARTBEAT_MS = 5_000;
 export const STALE_MS = 20_000;
 export const RETAIN_MS = 5 * 60_000;
@@ -42,8 +42,8 @@ export interface ActivityView {
 	unavailable: boolean;
 }
 
-export const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
-export const SOURCE = /^[a-zA-Z0-9_.-]+$/;
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const SOURCE = /^[a-zA-Z0-9_.-]+$/;
 export const isText = (value: unknown, max: number): value is string =>
 	typeof value === "string" && value.trim().length > 0 && value.length <= max && !/[\x00-\x1f\x7f-\x9f]/.test(value);
 export const timestamp = (value: unknown): value is number =>

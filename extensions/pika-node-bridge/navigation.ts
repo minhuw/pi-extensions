@@ -10,7 +10,7 @@ type Mode = "open" | "diff";
 export type Options = { path: string; staged: boolean; line?: number; column?: number };
 export type Send = (request: { type: "open"; path: string; line?: number; column?: number } | { type: "diff"; path: string; staged?: boolean }) => Promise<Reply>;
 
-export class NavigationError extends Error {}
+class NavigationError extends Error {}
 
 const usage = (mode: Mode): string => mode === "open"
 	? "Usage: /pika-open <path> [--line N] [--column N]"
@@ -88,7 +88,7 @@ function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "
 	try { ctx.ui.notify(safe, level); } catch { /* stale or noninteractive UI */ }
 }
 
-export async function navigate(send: Send | undefined, input: string, ctx: ExtensionCommandContext, mode: Mode): Promise<void> {
+async function navigate(send: Send | undefined, input: string, ctx: ExtensionCommandContext, mode: Mode): Promise<void> {
 	let options: Options;
 	try { options = parse(input, mode); }
 	catch (error) {
