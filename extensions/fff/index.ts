@@ -48,8 +48,6 @@ import {
 } from "./paths.ts";
 import { buildQuery, rootCovers, routePathConstraint } from "./query.ts";
 
-export { SCAN_TIMEOUT_MS } from "./client.ts";
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -117,25 +115,23 @@ function syncChildSessionHook(nextHook?: ChildSessionHook): void {
 	}
 }
 
-function hasRegisteredFffTools(pi: ExtensionAPI): boolean {
+function hasAnyTool(
+	pi: ExtensionAPI,
+	names: readonly string[],
+	fallback: boolean,
+): boolean {
+	const api = pi as { getAllTools?: () => Array<{ name?: unknown }> };
+	if (typeof api.getAllTools !== "function") return fallback;
 	try {
-		const allTools = (
-			pi as { getAllTools?: () => Array<{ name?: unknown }> }
-		).getAllTools?.();
-		if (
-			Array.isArray(allTools) &&
-			allTools.some(
-				(tool) =>
-					tool?.name === FFF_TOOL_NAMES.find ||
-					tool?.name === FFF_TOOL_NAMES.grep,
-			)
-		) {
-			return true;
-		}
+		const allTools = api.getAllTools();
+		if (!Array.isArray(allTools)) return fallback;
+		return allTools.some(
+			(tool) => typeof tool?.name === "string" && names.includes(tool.name),
+		);
 	} catch {
 		// Action methods throw during DefaultResourceLoader's load phase; expected.
+		return fallback;
 	}
-	return false;
 }
 
 const DEFAULT_GREP_LIMIT = 20;
@@ -436,6 +432,265 @@ function createFffMentionProvider(
 }
 
 // ---------------------------------------------------------------------------
+// Option parsing helpers
+// ---------------------------------------------------------------------------
+
+function parseBoolean(value: unknown): boolean | undefined {
+	if (typeof value === "boolean") return value;
+	if (value === "1" || value === "true") return true;
+	if (value === "0" || value === "false") return false;
+	return undefined;
+}
+
+function parseMode(value: unknown): FffMode | undefined {
+	return typeof value === "string" && VALID_MODES.includes(value as FffMode)
+		? (value as FffMode)
+		: undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Shared render helpers
+// ---------------------------------------------------------------------------
+
+class CollapsedText implements Component {
+	private readonly preview: string;
+	private readonly suffix: string;
+	private readonly marker: string;
+
+	constructor(preview: string, suffix: string, marker: string) {
+		this.preview = preview;
+		this.suffix = suffix;
+		this.marker = marker;
+	}
+
+	render(width: number): string[] {
+		const availableWidth = Math.max(1, width);
+		if (!this.suffix) {
+			if (visibleWidth(this.preview) <= availableWidth) {
+				return [this.preview];
+			}
+			const markerWidth = visibleWidth(this.marker);
+			if (markerWidth >= availableWidth) {
+				return [sliceByColumn(this.marker, 0, availableWidth, true)];
+			}
+			return [
+				`${sliceByColumn(this.preview, 0, availableWidth - markerWidth, true)}${this.marker}`,
+			];
+		}
+
+		const suffixWidth = visibleWidth(this.suffix);
+		if (suffixWidth >= availableWidth) {
+			return [sliceByColumn(this.suffix, 0, availableWidth, true)];
+		}
+
+		const previewWidth = availableWidth - suffixWidth - 1;
+		if (visibleWidth(this.preview) <= previewWidth) {
+			return [`${this.preview} ${this.suffix}`];
+		}
+
+		const markerWidth = visibleWidth(this.marker);
+		return [
+			`${sliceByColumn(this.preview, 0, Math.max(0, previewWidth - markerWidth), true)}${this.marker} ${this.suffix}`,
+		];
+	}
+
+	invalidate(): void {}
+}
+
+// Pi wraps returned components in its own click-to-expand MouseRegion and passes
+// the toggled state via options.expanded, so no custom mouse handling is needed.
+function renderCompactTextResult(
+	result: { content?: { type: string; text?: string }[] },
+	renderOptions: { expanded?: boolean },
+	theme: Theme,
+	context: { isError?: boolean },
+): Component {
+	const output =
+		result.content?.find((c) => c.type === "text")?.text?.trim() ?? "";
+	if (!output) return new Text(theme.fg("muted", "No output"), 0, 0);
+
+	const lines = output.split("\n");
+	const color = context.isError ? "error" : "toolOutput";
+	if (renderOptions.expanded) {
+		return new Text(
+			lines.map((line) => theme.fg(color, line)).join("\n"),
+			0,
+			0,
+		);
+	}
+
+	const suffix =
+		lines.length > 1
+			? theme.fg("muted", `... (${lines.length - 1} more lines)`)
+			: "";
+	return new CollapsedText(
+		theme.fg(color, lines[0] ?? ""),
+		suffix,
+		theme.fg("muted", "..."),
+	);
+}
+
+function renderPreviewResult(
+	result: { content?: { type: string; text?: string }[] },
+	renderOptions: { expanded?: boolean },
+	theme: Theme,
+	context: { lastComponent?: Component },
+	maxLines = 15,
+): Component {
+	const text =
+		(context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+	const output =
+		result.content?.find((c) => c.type === "text")?.text?.trim() ?? "";
+	if (!output) {
+		text.setText(theme.fg("muted", "No output"));
+		return text;
+	}
+
+	const lines = output.split("\n");
+	const displayLines = lines.slice(
+		0,
+		renderOptions.expanded ? lines.length : maxLines,
+	);
+	let content = `\n${displayLines.map((line: string) => theme.fg("toolOutput", line)).join("\n")}`;
+	if (lines.length > displayLines.length) {
+		content += theme.fg(
+			"muted",
+			`\n... (${lines.length - displayLines.length} more lines)`,
+		);
+	}
+	text.setText(content);
+	return text;
+}
+
+// ---------------------------------------------------------------------------
+// Tool parameter schemas
+// ---------------------------------------------------------------------------
+
+const pathConstraintSchema = Type.Optional(
+	Type.String({
+		description:
+			"Path constraint. Directory prefix (src/ or src/foo/), bare filename with extension (main.rs), or glob (*.ts, src/**/*.cc, {src,lib}/**). Applied to the full repo-relative path. Absolute, ~/, and ../ paths outside the workspace are also supported and searched with a separate index.",
+	}),
+);
+
+const excludePathsSchema = Type.Optional(
+	Type.Union([Type.String(), Type.Array(Type.String())], {
+		description:
+			"Exclude paths (comma/space-separated or array). Same syntax as path: directory prefix ('test/'), filename with extension ('config.json'), or glob ('*.min.js', '**/*.{rs,go}'). A leading '!' is optional and ignored — both 'test/' and '!test/' work. Example: 'test/,*.min.js,!vendor/'.",
+	}),
+);
+
+const grepSchema = Type.Object({
+	pattern: Type.String({
+		description: "Search pattern (literal text or regex)",
+	}),
+	path: pathConstraintSchema,
+	exclude: excludePathsSchema,
+	caseSensitive: Type.Optional(
+		Type.Boolean({
+			description:
+				"Force case-sensitive matching. Default uses smart-case (case-insensitive when pattern is all lowercase).",
+		}),
+	),
+	context: Type.Optional(
+		Type.Number({
+			description: `Context lines before+after each match (0-${GREP_CONTEXT_MAX})`,
+		}),
+	),
+	limit: Type.Optional(
+		Type.Number({
+			description: `Max matches (default ${DEFAULT_GREP_LIMIT})`,
+		}),
+	),
+	cursor: Type.Optional(
+		Type.String({ description: "Pagination cursor from previous result" }),
+	),
+});
+
+const findSchema = Type.Object({
+	pattern: Type.String({
+		description:
+			"Fuzzy filename search and glob search. Frecency-ranked, git-aware. Multi-word = narrower (AND) not bound to order, use for multi word related concept search. Prefer this over ls/find/bash as the first exploration step whenever the user names a concept, feature, or symbol — it surfaces the relevant files in one call. Only use ls/read on a directory when you specifically need the alphabetical layout of an unknown repo, or when a concept search returned nothing.",
+	}),
+	path: pathConstraintSchema,
+	exclude: excludePathsSchema,
+	limit: Type.Optional(
+		Type.Number({
+			description: `Max results per page (default ${DEFAULT_FIND_LIMIT})`,
+		}),
+	),
+	cursor: Type.Optional(
+		Type.String({ description: "Pagination cursor from previous result" }),
+	),
+});
+
+const multiGrepSchema = Type.Object({
+	patterns: Type.Array(Type.String(), {
+		description:
+			"Literal patterns (OR). Include snake_case/camelCase/PascalCase variants.",
+	}),
+	constraints: Type.Optional(
+		Type.String({
+			description: "File filter, e.g. '*.{ts,tsx} !test/'",
+		}),
+	),
+	context: Type.Optional(
+		Type.Number({
+			description: `Context lines before+after (0-${GREP_CONTEXT_MAX})`,
+		}),
+	),
+	limit: Type.Optional(
+		Type.Number({
+			description: `Max matches (default ${DEFAULT_GREP_LIMIT})`,
+		}),
+	),
+	cursor: Type.Optional(Type.String({ description: "Pagination cursor" })),
+});
+
+type ToolExecuteFn = ToolDefinition<TSchema, unknown, unknown>["execute"];
+type RenderCallContext<TState> = Parameters<
+	NonNullable<ToolDefinition<TSchema, unknown, TState>["renderCall"]>
+>[2];
+
+type PendingToolDefinition<
+	TParams extends TSchema,
+	TDetails = unknown,
+	TState = unknown,
+> = Omit<
+	ToolDefinition<TSchema, TDetails, TState>,
+	| "name"
+	| "label"
+	| "parameters"
+	| "promptGuidelines"
+	| "execute"
+	| "renderCall"
+	| "renderResult"
+> & {
+	parameters: TParams;
+	promptGuidelines?: (names: ToolNames) => string[];
+	execute: (
+		toolCallId: string,
+		params: Static<TParams>,
+		signal: AbortSignal | undefined,
+		onUpdate: Parameters<
+			ToolDefinition<TSchema, TDetails, TState>["execute"]
+		>[3],
+		ctx: Parameters<ToolExecuteFn>[4],
+	) => Promise<AgentToolResult<TDetails>>;
+	renderCall?: (
+		args: Static<TParams>,
+		theme: Theme,
+		context: RenderCallContext<TState>,
+	) => Component;
+	renderResult?: (
+		result: AgentToolResult<TDetails>,
+		renderOptions: ToolRenderResultOptions,
+		theme: Theme,
+		context: RenderCallContext<TState>,
+	) => Component;
+};
+
+// ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
@@ -460,7 +715,12 @@ export function createFffExtension(
 	): void {
 		const sharedState = getSharedSessionState();
 		if (sharedState.boundApis.has(pi)) return;
-		if (fromChildHook && hasRegisteredFffTools(pi)) return;
+		if (
+			fromChildHook &&
+			hasAnyTool(pi, [FFF_TOOL_NAMES.find, FFF_TOOL_NAMES.grep], false)
+		) {
+			return;
+		}
 
 		// Deduplicate when a child session loads `fff` both by discovered path and via `CHILD_SESSION_HOOKS`.
 		let inLoadPass = true;
@@ -499,21 +759,6 @@ export function createFffExtension(
 		let childSession = fromChildHook;
 		let startupConfigResolved = false;
 
-		function hasAdmittedFffTool(): boolean {
-			const getAllTools = (
-				pi as { getAllTools?: () => Array<{ name?: unknown }> }
-			).getAllTools;
-			if (typeof getAllTools !== "function") return true;
-			try {
-				const admitted = new Set(
-					getAllTools().map((t) => (typeof t?.name === "string" ? t.name : "")),
-				);
-				return toolNameList(toolNames).some((name) => admitted.has(name));
-			} catch {
-				return true;
-			}
-		}
-
 		// All startup options use the same flag > env > file > fallback order.
 		function getConfigValue<T>(
 			flagName: string,
@@ -535,20 +780,6 @@ export function createFffExtension(
 			}
 
 			return fileValue ?? fallback;
-		}
-
-		function parseBoolean(value: unknown): boolean | undefined {
-			if (typeof value === "boolean") return value;
-			if (value === "1" || value === "true") return true;
-			if (value === "0" || value === "false") return false;
-			return undefined;
-		}
-
-		function parseMode(value: unknown): FffMode | undefined {
-			return typeof value === "string" &&
-				VALID_MODES.includes(value as FffMode)
-				? (value as FffMode)
-				: undefined;
 		}
 
 		let currentMode: FffMode = "tools-and-ui";
@@ -907,49 +1138,6 @@ export function createFffExtension(
 			});
 		}
 
-		type ToolExecuteFn = ToolDefinition<TSchema, unknown, unknown>["execute"];
-		type RenderCallContext<TState> = Parameters<
-			NonNullable<ToolDefinition<TSchema, unknown, TState>["renderCall"]>
-		>[2];
-
-		type PendingToolDefinition<
-			TParams extends TSchema,
-			TDetails = unknown,
-			TState = unknown,
-		> = Omit<
-			ToolDefinition<TSchema, TDetails, TState>,
-			| "name"
-			| "label"
-			| "parameters"
-			| "promptGuidelines"
-			| "execute"
-			| "renderCall"
-			| "renderResult"
-		> & {
-			parameters: TParams;
-			promptGuidelines?: (names: ToolNames) => string[];
-			execute: (
-				toolCallId: string,
-				params: Static<TParams>,
-				signal: AbortSignal | undefined,
-				onUpdate: Parameters<
-					ToolDefinition<TSchema, TDetails, TState>["execute"]
-				>[3],
-				ctx: Parameters<ToolExecuteFn>[4],
-			) => Promise<AgentToolResult<TDetails>>;
-			renderCall?: (
-				args: Static<TParams>,
-				theme: Theme,
-				context: RenderCallContext<TState>,
-			) => Component;
-			renderResult?: (
-				result: AgentToolResult<TDetails>,
-				renderOptions: ToolRenderResultOptions,
-				theme: Theme,
-				context: RenderCallContext<TState>,
-			) => Component;
-		};
-
 		const pendingTools: (() => string)[] = [];
 		const registeredToolNames = new Set<string>();
 		// A renderer is attached to a concrete registered name. Keep that name outside
@@ -1150,7 +1338,7 @@ export function createFffExtension(
 				prepareSession(ctx);
 				if (!childSession) {
 					registerAutocompleteProvider(ctx);
-				} else if (!hasAdmittedFffTool()) {
+				} else if (!hasAnyTool(pi, toolNameList(toolNames), true)) {
 					return;
 				}
 
@@ -1200,159 +1388,7 @@ export function createFffExtension(
 			syncChildSessionHook();
 		});
 
-		// --- Shared render helpers ---
-
-		class CollapsedText implements Component {
-			private readonly preview: string;
-			private readonly suffix: string;
-			private readonly marker: string;
-
-			constructor(preview: string, suffix: string, marker: string) {
-				this.preview = preview;
-				this.suffix = suffix;
-				this.marker = marker;
-			}
-
-			render(width: number): string[] {
-				const availableWidth = Math.max(1, width);
-				if (!this.suffix) {
-					if (visibleWidth(this.preview) <= availableWidth) {
-						return [this.preview];
-					}
-					const markerWidth = visibleWidth(this.marker);
-					if (markerWidth >= availableWidth) {
-						return [sliceByColumn(this.marker, 0, availableWidth, true)];
-					}
-					return [
-						`${sliceByColumn(this.preview, 0, availableWidth - markerWidth, true)}${this.marker}`,
-					];
-				}
-
-				const suffixWidth = visibleWidth(this.suffix);
-				if (suffixWidth >= availableWidth) {
-					return [sliceByColumn(this.suffix, 0, availableWidth, true)];
-				}
-
-				const previewWidth = availableWidth - suffixWidth - 1;
-				if (visibleWidth(this.preview) <= previewWidth) {
-					return [`${this.preview} ${this.suffix}`];
-				}
-
-				const markerWidth = visibleWidth(this.marker);
-				return [
-					`${sliceByColumn(this.preview, 0, Math.max(0, previewWidth - markerWidth), true)}${this.marker} ${this.suffix}`,
-				];
-			}
-
-			invalidate(): void {}
-		}
-
-		// Pi wraps returned components in its own click-to-expand MouseRegion and passes
-		// the toggled state via options.expanded, so no custom mouse handling is needed.
-		const renderCompactTextResult = (
-			result: { content?: { type: string; text?: string }[] },
-			renderOptions: { expanded?: boolean },
-			theme: Theme,
-			context: { isError?: boolean },
-		): Component => {
-			const output =
-				result.content?.find((c) => c.type === "text")?.text?.trim() ?? "";
-			if (!output) return new Text(theme.fg("muted", "No output"), 0, 0);
-
-			const lines = output.split("\n");
-			const color = context.isError ? "error" : "toolOutput";
-			if (renderOptions.expanded) {
-				return new Text(
-					lines.map((line) => theme.fg(color, line)).join("\n"),
-					0,
-					0,
-				);
-			}
-
-			const suffix =
-				lines.length > 1
-					? theme.fg("muted", `... (${lines.length - 1} more lines)`)
-					: "";
-			return new CollapsedText(
-				theme.fg(color, lines[0] ?? ""),
-				suffix,
-				theme.fg("muted", "..."),
-			);
-		};
-
-		const renderPreviewResult = (
-			result: { content?: { type: string; text?: string }[] },
-			renderOptions: { expanded?: boolean },
-			theme: Theme,
-			context: { lastComponent?: Component },
-			maxLines = 15,
-		): Component => {
-			const text =
-				(context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			const output =
-				result.content?.find((c) => c.type === "text")?.text?.trim() ?? "";
-			if (!output) {
-				text.setText(theme.fg("muted", "No output"));
-				return text;
-			}
-
-			const lines = output.split("\n");
-			const displayLines = lines.slice(
-				0,
-				renderOptions.expanded ? lines.length : maxLines,
-			);
-			let content = `\n${displayLines.map((line: string) => theme.fg("toolOutput", line)).join("\n")}`;
-			if (lines.length > displayLines.length) {
-				content += theme.fg(
-					"muted",
-					`\n... (${lines.length - displayLines.length} more lines)`,
-				);
-			}
-			text.setText(content);
-			return text;
-		};
-
-		const pathConstraintSchema = Type.Optional(
-			Type.String({
-				description:
-					"Path constraint. Directory prefix (src/ or src/foo/), bare filename with extension (main.rs), or glob (*.ts, src/**/*.cc, {src,lib}/**). Applied to the full repo-relative path. Absolute, ~/, and ../ paths outside the workspace are also supported and searched with a separate index.",
-			}),
-		);
-		const excludePathsSchema = Type.Optional(
-			Type.Union([Type.String(), Type.Array(Type.String())], {
-				description:
-					"Exclude paths (comma/space-separated or array). Same syntax as path: directory prefix ('test/'), filename with extension ('config.json'), or glob ('*.min.js', '**/*.{rs,go}'). A leading '!' is optional and ignored — both 'test/' and '!test/' work. Example: 'test/,*.min.js,!vendor/'.",
-			}),
-		);
-
 		// --- grep tool ---
-
-		const grepSchema = Type.Object({
-			pattern: Type.String({
-				description: "Search pattern (literal text or regex)",
-			}),
-			path: pathConstraintSchema,
-			exclude: excludePathsSchema,
-			caseSensitive: Type.Optional(
-				Type.Boolean({
-					description:
-						"Force case-sensitive matching. Default uses smart-case (case-insensitive when pattern is all lowercase).",
-				}),
-			),
-			context: Type.Optional(
-				Type.Number({
-					description: `Context lines before+after each match (0-${GREP_CONTEXT_MAX})`,
-				}),
-			),
-			limit: Type.Optional(
-				Type.Number({
-					description: `Max matches (default ${DEFAULT_GREP_LIMIT})`,
-				}),
-			),
-			cursor: Type.Optional(
-				Type.String({ description: "Pagination cursor from previous result" }),
-			),
-		});
 
 		queueTool(() => toolNames.grep, {
 			description: `Grep file contents. Smart-case, auto-detects regex vs literal, git-aware. Results are ranked by frecency (most-accessed files first); matches within a file stay in source order. Default limit ${DEFAULT_GREP_LIMIT}.`,
@@ -1547,23 +1583,6 @@ export function createFffExtension(
 
 		// --- find tool ---
 
-		const findSchema = Type.Object({
-			pattern: Type.String({
-				description:
-					"Fuzzy filename search and glob search. Frecency-ranked, git-aware. Multi-word = narrower (AND) not bound to order, use for multi word related concept search. Prefer this over ls/find/bash as the first exploration step whenever the user names a concept, feature, or symbol — it surfaces the relevant files in one call. Only use ls/read on a directory when you specifically need the alphabetical layout of an unknown repo, or when a concept search returned nothing.",
-			}),
-			path: pathConstraintSchema,
-			exclude: excludePathsSchema,
-			limit: Type.Optional(
-				Type.Number({
-					description: `Max results per page (default ${DEFAULT_FIND_LIMIT})`,
-				}),
-			),
-			cursor: Type.Optional(
-				Type.String({ description: "Pagination cursor from previous result" }),
-			),
-		});
-
 		queueTool(() => toolNames.find, {
 			description: `Fuzzy path search and glob search. Matches against the whole repo-relative path, not just the filename. Frecency-ranked, git-aware. Multi-word = narrower (AND). Default limit ${DEFAULT_FIND_LIMIT}.`,
 			promptSnippet: "Find files by path or glob",
@@ -1713,29 +1732,6 @@ export function createFffExtension(
 		const enableMultiGrep = process.env.PI_FFF_MULTIGREP === "1";
 
 		if (enableMultiGrep) {
-			const multiGrepSchema = Type.Object({
-				patterns: Type.Array(Type.String(), {
-					description:
-						"Literal patterns (OR). Include snake_case/camelCase/PascalCase variants.",
-				}),
-				constraints: Type.Optional(
-					Type.String({
-						description: "File filter, e.g. '*.{ts,tsx} !test/'",
-					}),
-				),
-				context: Type.Optional(
-					Type.Number({
-						description: `Context lines before+after (0-${GREP_CONTEXT_MAX})`,
-					}),
-				),
-				limit: Type.Optional(
-					Type.Number({
-						description: `Max matches (default ${DEFAULT_GREP_LIMIT})`,
-					}),
-				),
-				cursor: Type.Optional(Type.String({ description: "Pagination cursor" })),
-			});
-
 			queueTool(() => toolNames.multiGrep, {
 				description:
 					"Search file contents for ANY of multiple literal patterns (OR, SIMD Aho-Corasick). Faster than regex alternation.",
