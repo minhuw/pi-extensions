@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -155,15 +155,19 @@ export function isSubpath(parentPath: string, candidatePath: string): boolean {
 	return containsPath(resolveCanonicalPath(parentPath), resolveCanonicalPath(candidatePath));
 }
 
-async function writeJsonAtomic(filePath: string, data: unknown): Promise<void> {
+export function writeJsonAtomicSync(filePath: string, data: unknown): void {
 	const dir = path.dirname(filePath);
-	await mkdir(dir, { recursive: true });
-	const tempPath = `${filePath}.${randomUUID()}.tmp`;
+	fs.mkdirSync(dir, { recursive: true });
+	const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 	try {
-		await writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-		await rename(tempPath, filePath);
+		fs.writeFileSync(tempPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+		fs.renameSync(tempPath, filePath);
 	} finally {
-		await rm(tempPath, { force: true });
+		try {
+			fs.rmSync(tempPath, { force: true });
+		} catch {
+			// Ignore cleanup error.
+		}
 	}
 }
 
@@ -197,7 +201,7 @@ export async function allowProjectPath(cwd: string, targetPath: string, literal 
 	await ensureWorkspacesClosure(cwd);
 	const policy = await readProjectPolicy(cwd);
 	const allowedPaths = [...new Set([...policy.allowedPaths, canonical])];
-	await writeJsonAtomic(policyFilePath(cwd), {
+	writeJsonAtomicSync(policyFilePath(cwd), {
 		allowedPaths,
 		...(policy.defaultTtlMs > 0 ? { defaultTtlMs: policy.defaultTtlMs } : {}),
 	});
@@ -209,7 +213,7 @@ export async function denyProjectPath(cwd: string, targetPath: string): Promise<
 	await ensureWorkspacesClosure(cwd);
 	const policy = await readProjectPolicy(cwd);
 	const allowedPaths = policy.allowedPaths.filter((entry) => entry !== canonical);
-	await writeJsonAtomic(policyFilePath(cwd), {
+	writeJsonAtomicSync(policyFilePath(cwd), {
 		allowedPaths,
 		...(policy.defaultTtlMs > 0 ? { defaultTtlMs: policy.defaultTtlMs } : {}),
 	});
@@ -717,6 +721,46 @@ const MUTATING_VERBS = new Set([
 	"cargo",
 ]);
 
+const GIT_CLONE_VALUE_FLAGS = new Set([
+	"-b",
+	"--branch",
+	"-o",
+	"--origin",
+	"--depth",
+	"--reference",
+	"--separate-git-dir",
+	"-c",
+	"--config",
+	"--upload-pack",
+	"--template",
+	"--jobs",
+	"-j",
+	"--filter",
+]);
+const GIT_INIT_VALUE_FLAGS = new Set([
+	"-b",
+	"--initial-branch",
+	"--template",
+	"--separate-git-dir",
+	"--object-format",
+	"--ref-format",
+]);
+const GIT_WORKTREE_ADD_VALUE_FLAGS = new Set(["-b", "-B", "--reason"]);
+
+function extractGitPositionals(args: string[], valueFlags: ReadonlySet<string>): string[] {
+	const positionals: string[] = [];
+	for (let i = 0; i < args.length; i++) {
+		const token = args[i]!;
+		if (valueFlags.has(token)) {
+			i++;
+			continue;
+		}
+		if (token.startsWith("-")) continue;
+		positionals.push(token);
+	}
+	return positionals;
+}
+
 function extractGitTargets(args: string[], baseCwd: string): string[] {
 	let gitCwd = baseCwd;
 	let idx = 0;
@@ -744,17 +788,7 @@ function extractGitTargets(args: string[], baseCwd: string): string[] {
 	const rest = args.slice(idx + 1);
 
 	if (subcommand === "clone") {
-		const positionals: string[] = [];
-		const flagsWithValue = new Set(["-b", "--branch", "-o", "--origin", "--depth", "--reference", "--separate-git-dir", "-c", "--config", "--upload-pack", "--template", "--jobs", "-j", "--filter"]);
-		for (let i = 0; i < rest.length; i++) {
-			const token = rest[i]!;
-			if (flagsWithValue.has(token)) {
-				i++;
-				continue;
-			}
-			if (token.startsWith("-")) continue;
-			positionals.push(token);
-		}
+		const positionals = extractGitPositionals(rest, GIT_CLONE_VALUE_FLAGS);
 		if (positionals.length >= 2) {
 			return [resolveBashWord(positionals[1]!, gitCwd)];
 		}
@@ -766,33 +800,12 @@ function extractGitTargets(args: string[], baseCwd: string): string[] {
 	}
 
 	if (subcommand === "init") {
-		const positionals: string[] = [];
-		const flagsWithValue = new Set(["-b", "--initial-branch", "--template", "--separate-git-dir", "--object-format", "--ref-format"]);
-		for (let i = 0; i < rest.length; i++) {
-			const token = rest[i]!;
-			if (flagsWithValue.has(token)) {
-				i++;
-				continue;
-			}
-			if (token.startsWith("-")) continue;
-			positionals.push(token);
-		}
+		const positionals = extractGitPositionals(rest, GIT_INIT_VALUE_FLAGS);
 		return [positionals[0] ? resolveBashWord(positionals[0], gitCwd) : gitCwd];
 	}
 
 	if (subcommand === "worktree" && rest[0] === "add") {
-		const wtArgs = rest.slice(1);
-		const positionals: string[] = [];
-		const flagsWithValue = new Set(["-b", "-B", "--reason"]);
-		for (let i = 0; i < wtArgs.length; i++) {
-			const token = wtArgs[i]!;
-			if (flagsWithValue.has(token)) {
-				i++;
-				continue;
-			}
-			if (token.startsWith("-")) continue;
-			positionals.push(token);
-		}
+		const positionals = extractGitPositionals(rest.slice(1), GIT_WORKTREE_ADD_VALUE_FLAGS);
 		if (positionals[0]) {
 			return [resolveBashWord(positionals[0], gitCwd)];
 		}
@@ -850,6 +863,30 @@ function extractTargetDirectoryOption(
 		}
 	}
 	return undefined;
+}
+
+function scanTargetDirArgs(
+	args: string[],
+	otherValueShort: ReadonlySet<string>,
+): { targetDirs: string[]; positionals: string[] } {
+	const targetDirs: string[] = [];
+	const positionals: string[] = [];
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i]!;
+		if (arg === "--") {
+			positionals.push(...args.slice(i + 1));
+			break;
+		}
+		const parsed = extractTargetDirectoryOption(args, i, otherValueShort);
+		if (parsed) {
+			if (parsed.targetDir) targetDirs.push(parsed.targetDir);
+			i = parsed.nextIdx;
+			continue;
+		}
+		if (arg.startsWith("-")) continue;
+		positionals.push(arg);
+	}
+	return { targetDirs, positionals };
 }
 
 const TAR_OTHER_VALUE_SHORT = new Set(["b", "H", "I", "K", "L", "N", "T", "V", "X"]);
@@ -1110,24 +1147,8 @@ function createBashWriteTargetCollector(canonicalCwd: string): {
 		}
 
 		if (verb === "cp" || verb === "ln" || verb === "install") {
-			const targetDirs: string[] = [];
-			const positionals: string[] = [];
 			const otherValueShort = verb === "install" ? INSTALL_OTHER_VALUE_SHORT : CP_LN_MV_OTHER_VALUE_SHORT;
-			for (let i = 0; i < args.length; i++) {
-				const arg = args[i]!;
-				if (arg === "--") {
-					positionals.push(...args.slice(i + 1));
-					break;
-				}
-				const parsed = extractTargetDirectoryOption(args, i, otherValueShort);
-				if (parsed) {
-					if (parsed.targetDir) targetDirs.push(parsed.targetDir);
-					i = parsed.nextIdx;
-					continue;
-				}
-				if (arg.startsWith("-")) continue;
-				positionals.push(arg);
-			}
+			const { targetDirs, positionals } = scanTargetDirArgs(args, otherValueShort);
 			if (targetDirs.length > 0) {
 				for (const targetDir of targetDirs) {
 					push(resolveBashWord(targetDir, effectiveCwd));
@@ -1141,23 +1162,7 @@ function createBashWriteTargetCollector(canonicalCwd: string): {
 		}
 
 		if (verb === "mv") {
-			const targetDirs: string[] = [];
-			const positionals: string[] = [];
-			for (let i = 0; i < args.length; i++) {
-				const arg = args[i]!;
-				if (arg === "--") {
-					positionals.push(...args.slice(i + 1));
-					break;
-				}
-				const parsed = extractTargetDirectoryOption(args, i, CP_LN_MV_OTHER_VALUE_SHORT);
-				if (parsed) {
-					if (parsed.targetDir) targetDirs.push(parsed.targetDir);
-					i = parsed.nextIdx;
-					continue;
-				}
-				if (arg.startsWith("-")) continue;
-				positionals.push(arg);
-			}
+			const { targetDirs, positionals } = scanTargetDirArgs(args, CP_LN_MV_OTHER_VALUE_SHORT);
 			for (const p of positionals) {
 				push(resolveBashWord(p, effectiveCwd));
 			}

@@ -7,11 +7,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runWorkspaceGc } from "../gc.ts";
 import { ensureWorkspacesClosure } from "../policy.ts";
 import {
-	createOrTouchWorkspace,
 	inspectWorkspaceSafety,
 	readRegistry,
 	registerProjectInIndex,
 	registryFilePath,
+	touchWorkspace,
 	type WorkspaceEntry,
 	type WorkspaceSafetyReport,
 } from "../registry.ts";
@@ -196,7 +196,7 @@ describe("gc.ts & registry.ts — symlinked .pi/workspaces/<name> entries", () =
 	});
 
 	it("does not remove a pinned workspace through a link to it", async () => {
-		const pinned = await createOrTouchWorkspace(projectCwd, { name: "pinned-ws", pinned: true }, agentDir);
+		const { entry: pinned } = await touchWorkspace(projectCwd, { name: "pinned-ws", pinned: true }, agentDir);
 		await symlink("pinned-ws", path.join(wsRoot, "alias"));
 
 		const result = await runWorkspaceGc({ cwd: projectCwd, agentDir });
@@ -236,7 +236,7 @@ describe("gc.ts & registry.ts — symlinked .pi/workspaces/<name> entries", () =
 
 	it("refuses to remove a workspace that became a symlink while it was under review", async () => {
 		// A plain directory and a linked git worktree, both REVIEW, each swapped for a link before "Remove anyway".
-		const plain = await createOrTouchWorkspace(projectCwd, { name: "plain" }, agentDir);
+		const { entry: plain } = await touchWorkspace(projectCwd, { name: "plain" }, agentDir);
 		await writeFile(path.join(plain.path, "draft.md"), "draft\n", "utf8");
 		const mainRepo = path.join(sandboxRoot, "main-repo");
 		initGitRepo(mainRepo);
@@ -270,8 +270,8 @@ describe("gc.ts & registry.ts — symlinked .pi/workspaces/<name> entries", () =
 	});
 
 	it("still removes real SAFE workspace directories next to a symlinked entry", async () => {
-		const emptyWs = await createOrTouchWorkspace(projectCwd, { name: "real-empty" }, agentDir);
-		const cloneWs = await createOrTouchWorkspace(projectCwd, { name: "real-clone" }, agentDir);
+		const { entry: emptyWs } = await touchWorkspace(projectCwd, { name: "real-empty" }, agentDir);
+		const { entry: cloneWs } = await touchWorkspace(projectCwd, { name: "real-clone" }, agentDir);
 		cloneCleanRepo(cloneWs.path);
 		await symlink(outsideDir, path.join(wsRoot, "link"));
 

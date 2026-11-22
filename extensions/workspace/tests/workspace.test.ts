@@ -44,7 +44,6 @@ import {
 	workspacesDir,
 } from "../policy.ts";
 import {
-	createOrTouchWorkspace,
 	inspectWorkspaceSafety,
 	markSessionWorkspacesClosed,
 	pruneProjectsIndex,
@@ -54,6 +53,7 @@ import {
 	releaseWorkspace,
 	setWorkspacePin,
 	syncWorkspaces,
+	touchWorkspace,
 	WORKSPACE_LIMITS,
 } from "../registry.ts";
 
@@ -400,7 +400,7 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 describe("registry.ts & gc.ts — workspace lifecycle, safety classification, and garbage collection", () => {
 	it("tracks workspaces, classifies PINNED / ACTIVE / SAFE / REVIEW accurately, and runs GC", async () => {
 		// 1. Empty workspace -> SAFE
-		const emptyEntry = await createOrTouchWorkspace(
+		const { entry: emptyEntry } = await touchWorkspace(
 			projectCwd,
 			{ name: "empty-ws", purpose: "empty scratch" },
 			agentDir,
@@ -410,7 +410,7 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		expect(emptyReport.reasons).toEqual(["empty workspace directory"]);
 
 		// 2. Pinned workspace -> PINNED
-		const pinnedEntry = await createOrTouchWorkspace(
+		const { entry: pinnedEntry } = await touchWorkspace(
 			projectCwd,
 			{ name: "pinned-ws", pinned: true },
 			agentDir,
@@ -421,7 +421,7 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		expect(pinnedReport.reasons).toEqual(["pinned"]);
 
 		// 3. Active workspace by sessionId, PID, and TTL -> ACTIVE
-		const activeSessionEntry = await createOrTouchWorkspace(
+		const { entry: activeSessionEntry } = await touchWorkspace(
 			projectCwd,
 			{ name: "active-session-ws", sessionId: "sess-live" },
 			agentDir,
@@ -431,7 +431,7 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		).toBe("ACTIVE");
 
 		// Another live process (the test runner's parent) owns it.
-		const activePidEntry = await createOrTouchWorkspace(
+		const { entry: activePidEntry } = await touchWorkspace(
 			projectCwd,
 			{ name: "active-pid-ws", pid: process.ppid },
 			agentDir,
@@ -440,7 +440,7 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		expect(pidReport.status).toBe("ACTIVE");
 		expect(pidReport.reasons[0]).toContain(`owning process (pid ${process.ppid}) is still running`);
 
-		const ttlEntry = await createOrTouchWorkspace(
+		const { entry: ttlEntry } = await touchWorkspace(
 			projectCwd,
 			{ name: "ttl-ws", ttlMs: 3600_000, now: new Date(1000) },
 			agentDir,
@@ -455,14 +455,14 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		expect((await inspectWorkspaceSafety(released!)).status).toBe("SAFE");
 
 		// 4. Non-git files -> REVIEW
-		const nonGitEntry = await createOrTouchWorkspace(projectCwd, { name: "non-git-ws" }, agentDir);
+		const { entry: nonGitEntry } = await touchWorkspace(projectCwd, { name: "non-git-ws" }, agentDir);
 		await writeFile(path.join(nonGitEntry.path, "notes.md"), "# draft\n", "utf8");
 		const nonGitReport = await inspectWorkspaceSafety(nonGitEntry);
 		expect(nonGitReport.status).toBe("REVIEW");
 		expect(nonGitReport.reasons).toContain("contains non-git files");
 
 		// 5. Local git repo with no remote -> REVIEW
-		const localGitEntry = await createOrTouchWorkspace(projectCwd, { name: "local-git-ws" }, agentDir);
+		const { entry: localGitEntry } = await touchWorkspace(projectCwd, { name: "local-git-ws" }, agentDir);
 		initGitRepo(localGitEntry.path);
 		commitFile(localGitEntry.path, "README.md", "local only\n");
 		const localGitReport = await inspectWorkspaceSafety(localGitEntry);
@@ -478,7 +478,7 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		git(seedRepo, ["remote", "add", "origin", bareRemote]);
 		git(seedRepo, ["push", "-u", "origin", "HEAD"]);
 
-		const cloneEntry = await createOrTouchWorkspace(projectCwd, { name: "clean-clone-ws" }, agentDir);
+		const { entry: cloneEntry } = await touchWorkspace(projectCwd, { name: "clean-clone-ws" }, agentDir);
 		git(projectCwd, ["clone", bareRemote, path.join(cloneEntry.path, "repo")]);
 
 		const cleanCloneReport = await inspectWorkspaceSafety(cloneEntry);
@@ -486,7 +486,7 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		expect(cleanCloneReport.reasons).toEqual(["clean git workspace with all commits backed up"]);
 
 		// Dirty clone -> REVIEW
-		const dirtyCloneEntry = await createOrTouchWorkspace(projectCwd, { name: "dirty-clone-ws" }, agentDir);
+		const { entry: dirtyCloneEntry } = await touchWorkspace(projectCwd, { name: "dirty-clone-ws" }, agentDir);
 		git(projectCwd, ["clone", bareRemote, dirtyCloneEntry.path]);
 		await writeFile(path.join(dirtyCloneEntry.path, "untracked.txt"), "dirty\n", "utf8");
 		const dirtyCloneReport = await inspectWorkspaceSafety(dirtyCloneEntry);
@@ -494,7 +494,7 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		expect(dirtyCloneReport.reasons).toContain("uncommitted or untracked changes");
 
 		// Unpushed commit -> REVIEW
-		const unpushedEntry = await createOrTouchWorkspace(projectCwd, { name: "unpushed-clone-ws" }, agentDir);
+		const { entry: unpushedEntry } = await touchWorkspace(projectCwd, { name: "unpushed-clone-ws" }, agentDir);
 		git(projectCwd, ["clone", bareRemote, unpushedEntry.path]);
 		git(unpushedEntry.path, ["config", "user.email", "test@example.com"]);
 		git(unpushedEntry.path, ["config", "user.name", "Test User"]);
@@ -504,7 +504,7 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		expect(unpushedReport.reasons).toContain("unpushed local commits");
 
 		// Stash present -> REVIEW
-		const stashEntry = await createOrTouchWorkspace(projectCwd, { name: "stash-clone-ws" }, agentDir);
+		const { entry: stashEntry } = await touchWorkspace(projectCwd, { name: "stash-clone-ws" }, agentDir);
 		git(projectCwd, ["clone", bareRemote, stashEntry.path]);
 		git(stashEntry.path, ["config", "user.email", "test@example.com"]);
 		git(stashEntry.path, ["config", "user.name", "Test User"]);
@@ -582,8 +582,8 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 
 	it("prunes missing project closures from <agentDir>/workspaces-index.json", async () => {
 		const ephemeralProject = path.join(sandboxRoot, "ephemeral-project");
-		await createOrTouchWorkspace(ephemeralProject, { name: "temp-ws" }, agentDir);
-		await createOrTouchWorkspace(projectCwd, { name: "keep-ws" }, agentDir);
+		await touchWorkspace(ephemeralProject, { name: "temp-ws" }, agentDir);
+		await touchWorkspace(projectCwd, { name: "keep-ws" }, agentDir);
 
 		const beforeIndex = await readProjectsIndex(agentDir);
 		expect(beforeIndex).toContain(resolveCanonicalPath(ephemeralProject));
@@ -595,7 +595,7 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		expect(pruned.kept).toEqual([resolveCanonicalPath(projectCwd)]);
 
 		// Also verify markSessionWorkspacesClosed and setWorkspacePin
-		await createOrTouchWorkspace(projectCwd, { name: "sess-ws", sessionId: "s-close" }, agentDir);
+		await touchWorkspace(projectCwd, { name: "sess-ws", sessionId: "s-close" }, agentDir);
 		await markSessionWorkspacesClosed(projectCwd, "s-close", new Date(5000), agentDir);
 		const reg = await readRegistry(projectCwd);
 		expect(reg.find((e) => e.name === "sess-ws")?.closedAt).toBe(new Date(5000).toISOString());
@@ -605,18 +605,18 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		await registerProjectInIndex(projectCwd, agentDir);
 
 		// Rejects invalid workspace names
-		await expect(createOrTouchWorkspace(projectCwd, { name: "../escape" }, agentDir)).rejects.toThrow(
+		await expect(touchWorkspace(projectCwd, { name: "../escape" }, agentDir)).rejects.toThrow(
 			/Invalid workspace name/,
 		);
-		await expect(createOrTouchWorkspace(projectCwd, { name: "nested/name" }, agentDir)).rejects.toThrow(
+		await expect(touchWorkspace(projectCwd, { name: "nested/name" }, agentDir)).rejects.toThrow(
 			/Invalid workspace name/,
 		);
-		await expect(createOrTouchWorkspace(projectCwd, { name: ".hidden" }, agentDir)).rejects.toThrow(
+		await expect(touchWorkspace(projectCwd, { name: ".hidden" }, agentDir)).rejects.toThrow(
 			/Invalid workspace name/,
 		);
 
 		// Detects non-git files outside a nested git root at depth 1
-		const mixedWs = await createOrTouchWorkspace(projectCwd, { name: "mixed-ws" }, agentDir);
+		const { entry: mixedWs } = await touchWorkspace(projectCwd, { name: "mixed-ws" }, agentDir);
 		const bareOrigin = path.join(sandboxRoot, "mixed-origin.git");
 		git(sandboxRoot, ["init", "--bare", bareOrigin]);
 		const seed = path.join(sandboxRoot, "mixed-seed");
@@ -642,7 +642,7 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		git(seedRepo, ["push", "-u", "origin", "HEAD"]);
 
 		// 1. Clean, pushed clone with a gitignored file -> REVIEW ("gitignored files present")
-		const ignoredFileWs = await createOrTouchWorkspace(projectCwd, { name: "ignored-file-ws" }, agentDir);
+		const { entry: ignoredFileWs } = await touchWorkspace(projectCwd, { name: "ignored-file-ws" }, agentDir);
 		git(projectCwd, ["clone", bareRemote, ignoredFileWs.path]);
 		await writeFile(path.join(ignoredFileWs.path, ".env"), "API_KEY=secret\n", "utf8");
 		const ignoredFileReport = await inspectWorkspaceSafety(ignoredFileWs);
@@ -650,7 +650,7 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		expect(ignoredFileReport.reasons).toEqual(["gitignored files present"]);
 
 		// 2. Clean, pushed clone with a gitignored directory containing local output -> REVIEW
-		const ignoredDirWs = await createOrTouchWorkspace(projectCwd, { name: "ignored-dir-ws" }, agentDir);
+		const { entry: ignoredDirWs } = await touchWorkspace(projectCwd, { name: "ignored-dir-ws" }, agentDir);
 		git(projectCwd, ["clone", bareRemote, ignoredDirWs.path]);
 		await mkdir(path.join(ignoredDirWs.path, "outputs"), { recursive: true });
 		await writeFile(path.join(ignoredDirWs.path, "outputs", "result.json"), '{"ok":true}\n', "utf8");
@@ -659,7 +659,7 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		expect(ignoredDirReport.reasons).toEqual(["gitignored files present"]);
 
 		// 3. Clone with both a non-ignored untracked file and a gitignored file reports both reasons
-		const bothWs = await createOrTouchWorkspace(projectCwd, { name: "both-dirty-and-ignored-ws" }, agentDir);
+		const { entry: bothWs } = await touchWorkspace(projectCwd, { name: "both-dirty-and-ignored-ws" }, agentDir);
 		git(projectCwd, ["clone", bareRemote, bothWs.path]);
 		await writeFile(path.join(bothWs.path, ".env"), "API_KEY=secret\n", "utf8");
 		await writeFile(path.join(bothWs.path, "scratch.txt"), "untracked\n", "utf8");
@@ -669,7 +669,7 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		expect(bothReport.reasons).toContain("gitignored files present");
 
 		// 4. Truly clean, pushed clone without ignored files -> SAFE
-		const cleanWs = await createOrTouchWorkspace(projectCwd, { name: "truly-clean-ws" }, agentDir);
+		const { entry: cleanWs } = await touchWorkspace(projectCwd, { name: "truly-clean-ws" }, agentDir);
 		git(projectCwd, ["clone", bareRemote, cleanWs.path]);
 		const cleanReport = await inspectWorkspaceSafety(cleanWs);
 		expect(cleanReport.status).toBe("SAFE");
@@ -740,7 +740,7 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 			expect(h2.errors).toEqual([]);
 
 			// Touch a workspace owned by h1, then shut down h1 while h2 remains active
-			await createOrTouchWorkspace(
+			await touchWorkspace(
 				projectCwd,
 				{ name: "s1-ws", sessionId: h1.session.sessionId },
 				agentDir,
@@ -1118,7 +1118,7 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 			expect(fs.existsSync(path.join(workspacesDir(projectCwd), "exp-alpha"))).toBe(false);
 
 			// An empty workspace no session owns: SAFE for the commands below.
-			await createOrTouchWorkspace(projectCwd, { name: "exp-alpha" }, agentDir);
+			await touchWorkspace(projectCwd, { name: "exp-alpha" }, agentDir);
 
 			// 2. Create two REVIEW workspaces ("exp-dirty-pin" and "exp-dirty-remove") and a linked git worktree ("exp-wt")
 			initGitRepo(projectCwd);
@@ -1126,14 +1126,14 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 			const wtPath = path.join(workspacesDir(projectCwd), "exp-wt");
 			git(projectCwd, ["worktree", "add", "-b", "exp-wt-branch", wtPath, "HEAD"]);
 
-			const dirtyPinEntry = await createOrTouchWorkspace(
+			const { entry: dirtyPinEntry } = await touchWorkspace(
 				projectCwd,
 				{ name: "exp-dirty-pin", purpose: "keep via pin" },
 				agentDir,
 			);
 			await writeFile(path.join(dirtyPinEntry.path, "draft.txt"), "unfinished work\n", "utf8");
 
-			const dirtyRemoveEntry = await createOrTouchWorkspace(
+			const { entry: dirtyRemoveEntry } = await touchWorkspace(
 				projectCwd,
 				{ name: "exp-dirty-remove", purpose: "remove on review" },
 				agentDir,
@@ -1188,9 +1188,9 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 
 			// 8. Test /workspace gc --all across a second project closure and a deleted project closure
 			const otherProject = path.join(sandboxRoot, "other-project");
-			const otherSafe = await createOrTouchWorkspace(otherProject, { name: "other-safe" }, agentDir);
+			const { entry: otherSafe } = await touchWorkspace(otherProject, { name: "other-safe" }, agentDir);
 			const deletedProject = path.join(sandboxRoot, "deleted-project");
-			await createOrTouchWorkspace(deletedProject, { name: "gone-ws" }, agentDir);
+			await touchWorkspace(deletedProject, { name: "gone-ws" }, agentDir);
 			await rm(deletedProject, { recursive: true, force: true });
 
 			await h.session.prompt("/workspace gc --all --yes");

@@ -12,6 +12,7 @@ import {
 	readProjectPolicy,
 	resolveCanonicalPath,
 	workspacesDir,
+	writeJsonAtomicSync,
 } from "./policy.ts";
 
 const execFileAsync = promisify(execFile);
@@ -327,7 +328,7 @@ async function acquireRegistryLockFile(lockPath: string, options?: RegistryLockO
 	}
 }
 
-export function releaseRegistryLock(lockPath: string, token: string): void {
+function releaseRegistryLock(lockPath: string, token: string): void {
 	activeRegistryLockTokens.delete(token);
 	try {
 		const snapshot = readLockFileSnapshot(lockPath);
@@ -407,26 +408,6 @@ export function validateWorkspaceName(name: string): string {
 	return trimmed;
 }
 
-function writeJsonAtomicSync(filePath: string, data: unknown): void {
-	const dir = path.dirname(filePath);
-	fs.mkdirSync(dir, { recursive: true });
-	const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-	try {
-		fs.writeFileSync(tempPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-		fs.renameSync(tempPath, filePath);
-	} finally {
-		try {
-			fs.rmSync(tempPath, { force: true });
-		} catch {
-			// Ignore cleanup error.
-		}
-	}
-}
-
-async function writeJsonAtomic(filePath: string, data: unknown): Promise<void> {
-	writeJsonAtomicSync(filePath, data);
-}
-
 export async function readProjectsIndex(agentDir?: string): Promise<string[]> {
 	const indexFile = projectsIndexFilePath(agentDir);
 	try {
@@ -442,7 +423,7 @@ export async function registerProjectInIndex(cwd: string, agentDir?: string): Pr
 	const canonicalCwd = resolveCanonicalPath(cwd);
 	const current = await readProjectsIndex(agentDir);
 	const projects = [...new Set([...current, canonicalCwd])];
-	await writeJsonAtomic(projectsIndexFilePath(agentDir), { projects });
+	writeJsonAtomicSync(projectsIndexFilePath(agentDir), { projects });
 	return projects;
 }
 
@@ -461,7 +442,7 @@ export async function pruneProjectsIndex(agentDir?: string): Promise<{ kept: str
 	}
 
 	const uniqueKept = [...new Set(kept)];
-	await writeJsonAtomic(projectsIndexFilePath(agentDir), { projects: uniqueKept });
+	writeJsonAtomicSync(projectsIndexFilePath(agentDir), { projects: uniqueKept });
 	return { kept: uniqueKept, removed };
 }
 
@@ -594,14 +575,6 @@ export function assertWorkspaceQuota(
 	if (requested.length > 0 && held.length + requested.length > limit) {
 		throw new WorkspaceQuotaError(requested, held, limit);
 	}
-}
-
-export async function createOrTouchWorkspace(
-	cwd: string,
-	input: CreateOrTouchWorkspaceInput,
-	agentDir?: string,
-): Promise<WorkspaceEntry> {
-	return (await touchWorkspace(cwd, input, agentDir)).entry;
 }
 
 export async function touchWorkspace(

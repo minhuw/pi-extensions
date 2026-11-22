@@ -14,7 +14,6 @@ import {
 import { inspectBashCommand, resolveCanonicalPath, workspacesDir } from "../policy.ts";
 import {
 	assertWorkspaceQuota,
-	createOrTouchWorkspace,
 	hasLiveOtherOwner,
 	inspectWorkspaceSafety,
 	isPidAlive,
@@ -109,12 +108,12 @@ describe("workspace names", () => {
 
 describe("pid lease", () => {
 	it("treats a foreign live pid as ACTIVE and this process's pid without an active session as saying nothing", async () => {
-		const foreign = await createOrTouchWorkspace(projectCwd, { name: "foreign", pid: process.ppid }, agentDir);
+		const { entry: foreign } = await touchWorkspace(projectCwd, { name: "foreign", pid: process.ppid }, agentDir);
 		const foreignReport = await inspectWorkspaceSafety(foreign);
 		expect(foreignReport.status).toBe("ACTIVE");
 		expect(foreignReport.reasons).toEqual([`owning process (pid ${process.ppid}) is still running`]);
 
-		const own = await createOrTouchWorkspace(
+		const { entry: own } = await touchWorkspace(
 			projectCwd,
 			{ name: "own", sessionId: "ended", pid: process.pid },
 			agentDir,
@@ -159,10 +158,10 @@ describe("pid lease", () => {
 describe("per-session quota", () => {
 	it("counts only workspaces the session holds, and child sessions separately", async () => {
 		const entries = [
-			await createOrTouchWorkspace(projectCwd, { name: "a", sessionId: "s" }, agentDir),
-			await createOrTouchWorkspace(projectCwd, { name: "b", sessionId: "s" }, agentDir),
-			await createOrTouchWorkspace(projectCwd, { name: "pinned", sessionId: "s", pinned: true }, agentDir),
-			await createOrTouchWorkspace(projectCwd, { name: "other", sessionId: "child" }, agentDir),
+			(await touchWorkspace(projectCwd, { name: "a", sessionId: "s" }, agentDir)).entry,
+			(await touchWorkspace(projectCwd, { name: "b", sessionId: "s" }, agentDir)).entry,
+			(await touchWorkspace(projectCwd, { name: "pinned", sessionId: "s", pinned: true }, agentDir)).entry,
+			(await touchWorkspace(projectCwd, { name: "other", sessionId: "child" }, agentDir)).entry,
 		];
 		assertWorkspaceQuota(entries, "s", ["c"], 3);
 		assertWorkspaceQuota(entries, "s", ["a", "b", "pinned"], 2);
@@ -174,12 +173,12 @@ describe("per-session quota", () => {
 	});
 
 	it("tells a live other owner (open session or foreign live pid) from a gone one", async () => {
-		const open = await createOrTouchWorkspace(projectCwd, { name: "open", sessionId: "p", pid: process.pid }, agentDir);
+		const { entry: open } = await touchWorkspace(projectCwd, { name: "open", sessionId: "p", pid: process.pid }, agentDir);
 		expect(hasLiveOtherOwner(open, "c", new Set(["p"]))).toBe(true);
 		expect(hasLiveOtherOwner(open, "c", new Set())).toBe(false);
 		expect(hasLiveOtherOwner(open, "p", new Set(["p"]))).toBe(false);
 
-		const foreign = await createOrTouchWorkspace(projectCwd, { name: "foreign", sessionId: "q", pid: process.ppid }, agentDir);
+		const { entry: foreign } = await touchWorkspace(projectCwd, { name: "foreign", sessionId: "q", pid: process.ppid }, agentDir);
 		expect(hasLiveOtherOwner(foreign, "c")).toBe(true);
 		expect(hasLiveOtherOwner({ ...foreign, closedAt: new Date().toISOString() }, "c")).toBe(false);
 		expect(hasLiveOtherOwner({ ...foreign, releasedAt: new Date().toISOString() }, "c")).toBe(false);
@@ -278,7 +277,7 @@ describe("removal is never a touch", () => {
 	});
 
 	it("lets a session at quota rm -rf any workspace without registering it, while the write guard still sees the targets", async () => {
-		await createOrTouchWorkspace(projectCwd, { name: "unheld" }, agentDir);
+		await touchWorkspace(projectCwd, { name: "unheld" }, agentDir);
 		await mkdir(path.join(workspacesDir(projectCwd), "unregistered", "sub"), { recursive: true });
 		await recordWorkspaceSweep(projectCwd, new Date());
 		const outside = path.join(sandboxRoot, "outside");
@@ -468,7 +467,7 @@ describe("release", () => {
 
 		// Automatic sweep also preserves the released workspace with gitignored files and collects a clean clone.
 		await settleWorkspaceSweeps();
-		const sweepClean = await createOrTouchWorkspace(projectCwd, { name: "sweep-clean" }, agentDir);
+		const { entry: sweepClean } = await touchWorkspace(projectCwd, { name: "sweep-clean" }, agentDir);
 		git(projectCwd, ["clone", bareRemote, sweepClean.path]);
 
 		const sweep = await runScheduledSweep({
@@ -544,7 +543,7 @@ describe("release", () => {
 	});
 
 	it("refuses to release a workspace owned by another live process and allows release once that pid is dead", async () => {
-		const liveForeign = await createOrTouchWorkspace(
+		const { entry: liveForeign } = await touchWorkspace(
 			projectCwd,
 			{ name: "foreign-live", sessionId: "remote-session", pid: process.ppid },
 			agentDir,
@@ -552,7 +551,7 @@ describe("release", () => {
 		const exited = spawnSync(process.execPath, ["-e", ""]);
 		const deadPid = exited.pid!;
 		expect(isPidAlive(deadPid)).toBe(false);
-		const deadForeign = await createOrTouchWorkspace(
+		const { entry: deadForeign } = await touchWorkspace(
 			projectCwd,
 			{ name: "foreign-dead", sessionId: "dead-session", pid: deadPid },
 			agentDir,
@@ -613,12 +612,12 @@ describe("release", () => {
 describe("automatic sweep", () => {
 	it("runs at most once per interval per project and stamps lastSweepAt only after it runs", async () => {
 		const interval = WORKSPACE_LIMITS.sweepIntervalMs;
-		await createOrTouchWorkspace(projectCwd, { name: "orphan-1" }, agentDir);
+		await touchWorkspace(projectCwd, { name: "orphan-1" }, agentDir);
 		const first = await runScheduledSweep({ cwd: projectCwd, intervalMs: interval, agentDir, now: 1_000_000 });
 		expect(first?.result.removed.map((report) => report.entry.name)).toEqual(["orphan-1"]);
 		expect((await readRegistryState(projectCwd)).lastSweepAt).toBe(new Date(1_000_000).toISOString());
 
-		await createOrTouchWorkspace(projectCwd, { name: "orphan-2" }, agentDir);
+		await touchWorkspace(projectCwd, { name: "orphan-2" }, agentDir);
 		expect(
 			await runScheduledSweep({ cwd: projectCwd, intervalMs: interval, agentDir, now: 1_000_000 + interval - 1 }),
 		).toBeUndefined();
@@ -629,9 +628,9 @@ describe("automatic sweep", () => {
 	});
 
 	it("sweeps SAFE workspaces at a top-level session start, keeps REVIEW ones, records telemetry, and notifies past the review threshold", async () => {
-		await createOrTouchWorkspace(projectCwd, { name: "orphan" }, agentDir);
+		await touchWorkspace(projectCwd, { name: "orphan" }, agentDir);
 		for (let i = 0; i < WORKSPACE_LIMITS.reviewNoticeThreshold; i += 1) {
-			const entry = await createOrTouchWorkspace(projectCwd, { name: `draft-${i}` }, agentDir);
+			const { entry } = await touchWorkspace(projectCwd, { name: `draft-${i}` }, agentDir);
 			await writeFile(path.join(entry.path, "notes.md"), "x", "utf8");
 		}
 
@@ -676,7 +675,7 @@ describe("automatic sweep", () => {
 		}
 
 		// A second top-level session within the interval does not sweep.
-		await createOrTouchWorkspace(projectCwd, { name: "orphan-late" }, agentDir);
+		await touchWorkspace(projectCwd, { name: "orphan-late" }, agentDir);
 		const again = await startSession();
 		try {
 			await settleWorkspaceSweeps();
@@ -708,18 +707,18 @@ function runChildRegistryScript(script: string, args: string[]): Promise<{ code:
 describe("registry concurrency and locking", () => {
 	it("serializes concurrent in-process touch, pin, close, sync, sweep, and release updates without lost writes or leftover locks", async () => {
 		for (let i = 0; i < 4; i += 1) {
-			await createOrTouchWorkspace(
+			await touchWorkspace(
 				projectCwd,
 				{ name: `pin-target-${i}`, sessionId: `pin-sess-${i}`, pid: process.pid },
 				agentDir,
 			);
-			await createOrTouchWorkspace(
+			await touchWorkspace(
 				projectCwd,
 				{ name: `close-target-${i}`, sessionId: `close-sess-${i}`, pid: process.pid },
 				agentDir,
 			);
 		}
-		await createOrTouchWorkspace(projectCwd, { name: "gc-release-target" }, agentDir);
+		await touchWorkspace(projectCwd, { name: "gc-release-target" }, agentDir);
 
 		const closeTime = new Date(5_000_000);
 		const sweepTime = new Date(6_000_000);
@@ -769,8 +768,8 @@ describe("registry concurrency and locking", () => {
 	});
 
 	it("serializes concurrent cross-process registry mutations without lost writes or leftover locks", async () => {
-		await createOrTouchWorkspace(projectCwd, { name: "shared-pin", sessionId: "owner-pin", pid: process.pid }, agentDir);
-		await createOrTouchWorkspace(
+		await touchWorkspace(projectCwd, { name: "shared-pin", sessionId: "owner-pin", pid: process.pid }, agentDir);
+		await touchWorkspace(
 			projectCwd,
 			{ name: "shared-close", sessionId: "owner-close", pid: process.pid },
 			agentDir,
