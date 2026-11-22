@@ -449,6 +449,11 @@ function statusRank(text: string): number {
 	return tone === "problem" ? 3 : tone === "attention" ? 2 : 1;
 }
 
+function severityMarker(plain: string, rank = statusRank(plain)): string | undefined {
+	if (rank < 2) return undefined;
+	return (rank === 3 ? STATUS_PROBLEM : STATUS_ATTENTION).exec(plain)?.[0].replace(/^[\s:]/, "");
+}
+
 function activityStatuses(statuses: ReadonlyMap<string, string>): [string, string][] {
 	return [
 		...statusKeys("activity").flatMap((key): [string, string][] => statuses.get(key) ? [[key, statuses.get(key)!]] : []),
@@ -1306,7 +1311,9 @@ function renderCompact(
 	const workflow = statuses.get("herder") || statuses.get("goal")
 		? compactKeys.map((key, index): CompactStatus => {
 			const text = statuses.get(key)!;
-			const severity = statusRank(text);
+			const plain = stripAnsi(text);
+			const severity = statusRank(plain);
+			const marker = severityMarker(plain, severity);
 			let short = text;
 			if (!text.includes("\x1b[")) {
 				// Herder's operation precedes its optional task count.
@@ -1322,14 +1329,12 @@ function renderCompact(
 			return {
 				text: renderStatus(theme, text, key),
 				shortText: short !== text ? renderStatus(theme, short, key) : undefined,
-				fallbackText: key === "magpie-quota" && severity > 1
-					? renderStatus(theme, `quota ${stripAnsi(text).match(severity === 3 ? STATUS_PROBLEM : STATUS_ATTENTION)![0].trim()}`, key)
+				fallbackText: key === "magpie-quota" && marker
+					? renderStatus(theme, `quota ${marker}`, key)
 					: undefined,
 				abbreviate: key === "herder" || key === "goal",
 				abbreviateAbove: key === "goal" ? 16 : undefined,
-				severityMarker: (key === "herder" || key === "goal") && severity > 1
-					? stripAnsi(text).match(severity === 3 ? STATUS_PROBLEM : STATUS_ATTENTION)?.[0].trim()
-					: undefined,
+				severityMarker: key === "herder" || key === "goal" ? marker : undefined,
 				rank: severity * (compactKeys.length + 2) + (key === "herder" ? compactKeys.length + 1 : key === "goal" ? compactKeys.length : compactKeys.length - index - 1),
 			};
 		})
@@ -1423,10 +1428,9 @@ export function shortModelName(id: string): string {
  * marker's count. A status that opens with a symbol or with the marker itself is named by its key.
  */
 export function phoneAlert(plain: string, key = ""): string | undefined {
-	const rank = statusRank(plain);
-	if (rank < 2) return undefined;
-	const match = (rank === 3 ? STATUS_PROBLEM : STATUS_ATTENTION).exec(plain)!;
-	const marker = match[0].replace(/^[\s:]/, "");
+	const marker = severityMarker(plain);
+	if (!marker) return undefined;
+	const match = new RegExp(`(?:^|[\\s:])${marker}(?=$|[\\s,.;:)])`).exec(plain)!;
 	const count = /(?:^|\s)(\d+)\s+$/.exec(plain.slice(0, match.index + match[0].length - marker.length))?.[1];
 	const word = /^\p{L}[\p{L}\p{N}_-]*/u.exec(plain)?.[0];
 	const label = word && word.toLowerCase() !== marker.toLowerCase() ? word : key.replace(/^(?:magpie|pi)-/, "");
@@ -1600,14 +1604,15 @@ function renderDetailRows(
 			&& visibleWidth(renderStatus(theme, text, key, hasNerdFonts())) <= railRoom(width))
 			|| Boolean(representative && statusRank(representative) === statusRank(herderText)
 				&& visibleWidth(renderStatus(theme, representative, "representative")) <= railRoom(width)));
-	const leftStatuses = activityEntries.map(([key, text], index) => ({
-		text: renderStatus(theme, text, key, hasNerdFonts()),
-		severityMarker: (key === "herder" || key === "goal") && statusRank(text) > 1
-			? stripAnsi(text).match(statusRank(text) === 3 ? STATUS_PROBLEM : STATUS_ATTENTION)?.[0].trim()
-			: undefined,
-		statusKey: key,
-		rank: statusRank(text) * rankStep + (key === "herder" ? (fittingPeer ? -activityEntries.length : 3) : key === "goal" && statusRank(text) === 1 ? 2 : -index),
-	}));
+	const leftStatuses = activityEntries.map(([key, text], index) => {
+		const rank = statusRank(text);
+		return {
+			text: renderStatus(theme, text, key, hasNerdFonts()),
+			severityMarker: key === "herder" || key === "goal" ? severityMarker(stripAnsi(text), rank) : undefined,
+			statusKey: key,
+			rank: rank * rankStep + (key === "herder" ? (fittingPeer ? -activityEntries.length : 3) : key === "goal" && rank === 1 ? 2 : -index),
+		};
+	});
 	const relay = cluster([
 		additionalRooms(statuses),
 		s.relayIn > 0 && `${s.relayIn} in`,

@@ -1108,6 +1108,68 @@ describe("statusline footer rendering", () => {
 		}
 	});
 
+	it("strips leading colons from severity markers in detail, compact, and phone tiers", async () => {
+		const strip = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
+		const cases = [
+			{
+				key: "herder",
+				long: "herder: T2 test operation across all modules and integration suites · herder:blocked",
+				short: "herder:blocked",
+				marker: "blocked",
+				phone: "herder blocked",
+			},
+			{
+				key: "goal",
+				long: "goal: migrate the entire application across all modules and suites · goal:paused",
+				short: "goal:paused",
+				marker: "paused",
+				phone: "goal paused",
+			},
+		] as const;
+
+		vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+		const harness = createHarness("colon-severity-markers", "tui", {
+			model: { id: "claude-opus-4-6" },
+			extensionStatuses: [],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			for (const { key, long, short, marker, phone } of cases) {
+				await harness.runCommand("footer", "full");
+				harness.setStatus(key, long);
+				const detail = harness.getFooter()!.render(72)[1]!;
+				expect(strip(detail)).toContain(`… ${marker}`);
+				expect(strip(detail)).not.toContain(`:${marker}`);
+				expect(visibleWidth(detail)).toBeLessThanOrEqual(72);
+
+				harness.setStatus(key, short);
+				const phoneRow = strip(harness.getFooter()!.render(FOOTER_TIERS.phoneMax)[0]!);
+				expect(phoneRow).toContain(phone);
+				expect(phoneRow).not.toContain(`:${marker}`);
+
+				await harness.runCommand("footer", "compact");
+				harness.setStatus(key, long);
+				const compact = harness.getFooter()!.render(80)[0]!;
+				expect(strip(compact)).toContain(`… ${marker}`);
+				expect(strip(compact)).not.toContain(`:${marker}`);
+				expect(visibleWidth(compact)).toBeLessThanOrEqual(80);
+				harness.setStatus(key);
+			}
+
+			await harness.runCommand("footer", "compact");
+			harness.setStatus("herder", "herder: T2 integrate");
+			harness.setStatus("magpie-quota", "quota:awaiting · retry in 2h 10m · Nov 12, 14:30");
+			const quotaFallback = harness.getFooter()!.render(55)[0]!;
+			expect(strip(quotaFallback)).toContain("quota awaiting");
+			expect(strip(quotaFallback)).not.toContain("quota :awaiting");
+			expect(visibleWidth(quotaFallback)).toBeLessThanOrEqual(55);
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
 	it.each(["full", "compact"])("restores the exact %s layout after Herder clears", async (mode) => {
 		const statuses = {
 			"magpie-quota": "quota · checking reset time", autoresearch: "research · run 3/20", subagents: "2 running agents",
