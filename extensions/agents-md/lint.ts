@@ -26,6 +26,11 @@ export interface LintFinding {
 	message: string;
 }
 
+/** Formats one finding with its 1-based line prefix when present. */
+export function formatFinding(finding: LintFinding): string {
+	return finding.line === undefined ? finding.message : `line ${finding.line}: ${finding.message}`;
+}
+
 /** Whether `path` (absolute or relative) names a context file by its base name. */
 export function isContextFile(path: string): boolean {
 	return (CONTEXT_FILE_NAMES as readonly string[]).includes(basename(path));

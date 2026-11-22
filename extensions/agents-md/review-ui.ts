@@ -14,9 +14,11 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type { LintFinding } from "./lint.ts";
+import { formatFinding, type LintFinding } from "./lint.ts";
 
-export type ReviewChoice = "Apply" | "Reject" | "Reject with a note";
+export const CHOICES = { apply: "Apply", reject: "Reject", note: "Reject with a note" } as const;
+export type ReviewChoice = (typeof CHOICES)[keyof typeof CHOICES];
+export const REVIEW_CHOICES: readonly ReviewChoice[] = [CHOICES.apply, CHOICES.reject, CHOICES.note];
 
 export interface ReviewInput {
 	path: string;
@@ -33,10 +35,10 @@ export interface DiffStats {
 	hunks: number;
 }
 
-const DEFAULT_CONTEXT = 3;
-const MAX_FINDINGS = 10;
+export const DEFAULT_CONTEXT = 3;
+/** The new findings the dialog lists at most. */
+export const MAX_FINDINGS = 10;
 const NO_NEWLINE_MARKER = "\\ No newline at end of file";
-const REVIEW_CHOICES: readonly ReviewChoice[] = ["Apply", "Reject", "Reject with a note"];
 const HINTS = "←→/tab choose · enter confirm · a apply · r reject · n note · ↑↓/j k scroll · esc cancel";
 /** Rows of chat context kept visible above the bottom-anchored overlay when the terminal is spacious. */
 const TOP_CONTEXT_ROWS = 4;
@@ -54,17 +56,17 @@ export const REVIEW_OVERLAY_OPTIONS: OverlayOptions = {
 	margin: 0,
 };
 
-const lineText = (t: string): string => {
-	const lf = t.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+export function lineText(text: string): string {
+	const lf = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 	return lf === "" ? "" : lf.endsWith("\n") ? lf : `${lf}\n`;
-};
+}
+
+export function reviewAction(tool: "edit" | "write", existed: boolean): "creates" | "rewrites" | "edits" {
+	return !existed ? "creates" : tool === "write" ? "rewrites" : "edits";
+}
 
 function sanitizeText(text: string): string {
 	return replaceControlCharacters(stripTerminalSequences(text.replace(/\t/g, "   ")));
-}
-
-function formatFinding(finding: LintFinding): string {
-	return finding.line === undefined ? finding.message : `line ${finding.line}: ${finding.message}`;
 }
 
 export function diffStats(before: string, after: string, context = DEFAULT_CONTEXT): DiffStats {
@@ -403,9 +405,9 @@ export class ReviewDialog implements Component {
 
 	handleInput(data: string): void {
 		const { keybindings } = this;
-		if (matchesKey(data, "a")) return this.done("Apply");
-		if (matchesKey(data, "r")) return this.done("Reject");
-		if (matchesKey(data, "n")) return this.done("Reject with a note");
+		if (matchesKey(data, "a")) return this.done(CHOICES.apply);
+		if (matchesKey(data, "r")) return this.done(CHOICES.reject);
+		if (matchesKey(data, "n")) return this.done(CHOICES.note);
 		if (keybindings?.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape)) {
 			return this.done(undefined);
 		}
@@ -451,7 +453,7 @@ export class ReviewDialog implements Component {
 		const dialogBudget = rows > MIN_SPACIOUS_ROWS ? Math.max(MIN_SPACIOUS_ROWS, rows - TOP_CONTEXT_ROWS) : rows;
 		const { theme, input, stats } = this;
 
-		const action = !input.existed ? "creates" : input.tool === "write" ? "rewrites" : "edits";
+		const action = reviewAction(input.tool, input.existed);
 		const counts =
 			stats.added || stats.removed
 				? `  ${theme.fg("toolDiffAdded", `+${stats.added}`)} ${theme.fg("toolDiffRemoved", `-${stats.removed}`)}`

@@ -8,20 +8,17 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { fileURLToPath } from "node:url";
 import { structuredPatch } from "diff";
 import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
-import { CONTEXT_FILE_NAMES, lintContextFile, newFindings, repositoryContextFiles, type LintFinding } from "./lint.ts";
-import { promptReviewDialog } from "./review-ui.ts";
+import { CONTEXT_FILE_NAMES, formatFinding, lintContextFile, newFindings, repositoryContextFiles, type LintFinding } from "./lint.ts";
+import { CHOICES, DEFAULT_CONTEXT, lineText, MAX_FINDINGS, promptReviewDialog, REVIEW_CHOICES, reviewAction } from "./review-ui.ts";
 
 export const SESSION_LINK_TYPE = "pi-extensions.session-link";
 /** selfdrive publishes its grants here while the user is away; read it, never import selfdrive. */
 export const STANDING_APPROVAL_KEY = Symbol.for("pi-extensions.standing-approval");
 
-export const CHOICES = { apply: "Apply", reject: "Reject", note: "Reject with a note" } as const;
+export { CHOICES, formatFinding, MAX_FINDINGS };
 /** The diff lines (hunk headers and body) the dialog shows at most. */
 export const MAX_DIFF_LINES = 40;
-/** The new findings the dialog lists at most. */
-export const MAX_FINDINGS = 10;
 const MAX_LINE_CHARS = 300;
-const CONTEXT_LINES = 3;
 
 export const reasons = {
 	rejected: (path: string, note?: string) => {
@@ -178,13 +175,8 @@ export function applyEdits(current: string, edits: readonly { oldText: string; n
 
 // ---- Diff ----
 
-const lineText = (t: string): string => {
-	const lf = t.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-	return lf === "" ? "" : lf.endsWith("\n") ? lf : `${lf}\n`;
-};
-
 /** A unified diff of `before` → `after` (hunks only, without file headers), or [] when the lines are the same. */
-export function unifiedDiff(before: string, after: string, context = CONTEXT_LINES): string[] {
+export function unifiedDiff(before: string, after: string, context = DEFAULT_CONTEXT): string[] {
 	const oldStr = lineText(before);
 	const newStr = lineText(after);
 	if (oldStr === newStr) return [];
@@ -213,8 +205,6 @@ export function truncateDiff(lines: string[], max = MAX_DIFF_LINES): string[] {
 
 // ---- Review ----
 
-export const formatFinding = (finding: LintFinding): string => (finding.line === undefined ? finding.message : `line ${finding.line}: ${finding.message}`);
-
 /** The findings `after` adds to `before`, or the error lint threw. */
 export function addedFindings(before: string, after: string, file: string, root: string): { findings: LintFinding[] } | { error: string } {
 	try {
@@ -226,7 +216,7 @@ export function addedFindings(before: string, after: string, file: string, root:
 
 /** The dialog's text: what changes, its diff, and the lint findings it adds. */
 export function reviewText(path: string, tool: "edit" | "write", before: string, after: string, added: ReturnType<typeof addedFindings>, existed: boolean): string {
-	const action = !existed ? "creates" : tool === "write" ? "rewrites" : "edits";
+	const action = reviewAction(tool, existed);
 	const diff = unifiedDiff(before, after);
 	const lines = [`Review this change to ${path}: the agent's ${tool} ${action} it.`, ""];
 	if (diff.length > 0) lines.push(`--- a/${path}`, `+++ b/${path}`, ...truncateDiff(diff));
@@ -298,7 +288,7 @@ export async function reviewToolCall(toolName: string, input: unknown, ctx: Exte
 	} else {
 		const text = reviewText(path, toolName, proposal.before, proposal.after, added, proposal.existed);
 		try {
-			choice = await ctx.ui.select(text, [CHOICES.apply, CHOICES.reject, CHOICES.note], options);
+			choice = await ctx.ui.select(text, [...REVIEW_CHOICES], options);
 		} catch {
 			choice = undefined;
 		}

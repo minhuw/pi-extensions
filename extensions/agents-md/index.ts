@@ -4,8 +4,8 @@ import { readFileSync, statSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { displayPath, formatFinding, registerGate, resolveToolPath, rootFor } from "./gate.ts";
-import { lintContextFile, repositoryContextFiles, type LintFinding } from "./lint.ts";
+import { displayPath, registerGate, resolveToolPath, rootFor } from "./gate.ts";
+import { formatFinding, lintContextFile, repositoryContextFiles, type LintFinding } from "./lint.ts";
 
 export interface FileReport {
 	/** Relative to the repository root when inside it, else absolute. */
