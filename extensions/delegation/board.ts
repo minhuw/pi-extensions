@@ -68,8 +68,11 @@ interface CoordinatorInstance {
 	isActive(): boolean;
 }
 
-interface SessionModesRegistry {
+/** The modes each top-level session has on, shared in the process: Relay reads it, as a room's representative needs swarm mode. */
+export interface SessionModesRegistry {
+	/** Mode names ("swarm") active on each top-level session's current branch, by session id. */
 	modes: Map<string, Set<string>>;
+	/** Called with a session id whenever its set changes. */
 	listeners: Set<(sessionId: string) => void>;
 }
 
@@ -96,7 +99,8 @@ export function swarmBoards(): SwarmBoards {
 const members = () => (swarmBoards().members ??= new Map());
 const coordinators = () => (swarmBoards().coordinators ??= new Set());
 
-function sessionModes(): SessionModesRegistry {
+/** The registry, created here unless another extension came first. */
+export function sessionModes(): SessionModesRegistry {
 	const shared = globalThis as Record<symbol, unknown>;
 	return (shared[SESSION_MODES] ??= { modes: new Map(), listeners: new Set() }) as SessionModesRegistry;
 }
@@ -269,8 +273,13 @@ function sessionLink(ctx: ExtensionContext): SessionLink | undefined {
 	return link;
 }
 
-/** Top-level TUI and RPC sessions, as in `swarm.ts`: a persisted child carries a session link. */
-const isCoordinator = (ctx: ExtensionContext) => (ctx.mode === "tui" || ctx.mode === "rpc") && sessionLink(ctx) === undefined;
+/**
+ * Top-level TUI and RPC sessions. Live children bind extensions with no mode, which Pi runs as print, and persisted
+ * children carry a session link when child-session hooks are registered. `parentSession` cannot identify a child: Pi
+ * also sets it on forks.
+ */
+export const isCoordinator = (ctx: ExtensionContext): boolean =>
+	(ctx.mode === "tui" || ctx.mode === "rpc") && sessionLink(ctx) === undefined;
 
 interface ChildRole { boardId: string; agentId: string; link: SessionLink }
 

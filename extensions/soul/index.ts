@@ -393,32 +393,26 @@ export default function soulExtension(pi: ExtensionAPI): void {
 
 		const child = isChildSession(ctx);
 		let state = readBranch(ctx);
+		let desiredDefault: boolean;
+		let desiredActive: boolean;
 
 		if (child) {
-			const inherited = resolveInheritedActive(ctx);
-			const active = inherited ?? sessionDefault(state) ?? await readDefault(ctx, false);
-			if (!state.pinned) {
-				writePin(state, active, active, ctx);
-				state = readBranch(ctx);
-			}
-			recordSessionState(ctx, active, true, instanceToken);
-			if (state.base) event.systemPromptOptions.sections.soul = SECTION_TEXT;
-			const base = state.base ?? false;
-			const seen = readSeen(ctx, base);
-			const send = seen === undefined ? active !== base || readTold(ctx, base) !== active : seen !== active;
-			return send ? hidden(active ? ON_TEXT : OFF_TEXT) : undefined;
+			const childActive = resolveInheritedActive(ctx) ?? sessionDefault(state) ?? await readDefault(ctx, false);
+			desiredDefault = childActive;
+			desiredActive = childActive;
+		} else {
+			// Standalone print/json sessions without a pin still honor the configured default; top-level UI sessions warn on bad config once.
+			const configured = state.base === undefined ? await readDefault(ctx, false) : undefined;
+			desiredDefault = sessionDefault(state) ?? configured ?? true;
+			desiredActive = state.explicitActive ?? desiredDefault;
 		}
 
-		// Standalone print/json sessions without a pin still honor the configured default; top-level UI sessions warn on bad config once.
-		const configured = state.base === undefined ? await readDefault(ctx, false) : undefined;
-		const desiredDefault = sessionDefault(state) ?? configured ?? true;
-		const desiredActive = state.explicitActive ?? desiredDefault;
 		if (!state.pinned) {
 			writePin(state, desiredDefault, desiredActive, ctx);
 			state = readBranch(ctx);
 		}
-		const active = state.explicitActive ?? sessionDefault(state) ?? false;
-		recordSessionState(ctx, active, false, instanceToken);
+		const active = child ? desiredActive : (state.explicitActive ?? sessionDefault(state) ?? false);
+		recordSessionState(ctx, active, child, instanceToken);
 
 		// Set on every run: Pi diffs each run's sections against the transcript, so a missing one would be removed.
 		if (state.base) event.systemPromptOptions.sections.soul = SECTION_TEXT;

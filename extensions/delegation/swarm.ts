@@ -8,13 +8,11 @@ import {
 	type ExtensionContext,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { formatBoard, pruneSettled, swarmBoards, type SwarmBoard } from "./board.ts";
+import { formatBoard, isCoordinator, pruneSettled, sessionModes, swarmBoards, type SwarmBoard } from "./board.ts";
 
 const NAME = "swarm";
 const STATUS = "🐝 swarm";
 const USAGE = "Usage: /swarm [on | off | status | board [clear] | default [on | off]]";
-const SESSION_LINK_TYPE = "pi-extensions.session-link";
-const SESSION_MODES = Symbol.for("pi-extensions.session-modes");
 const ON_PREFIX = "Swarm mode 🐝 is on";
 const ON_TEXT = `${ON_PREFIX}: the user explicitly opts in to background agents, so this session stays free to answer them and other pi sessions that message it through pika relay, which reach it only between turns. `
 	+ "Work as the coordinator: run each development task that needs more than a few quick tool calls or a long command (implementation, tests, builds, benchmarks, broad research) in background agents (Agent with run_in_background: true; worker for changes and verification, recon for research), "
@@ -55,16 +53,6 @@ const isPin = (entry: SessionEntry): entry is CustomEntry<{ base: boolean }> =>
 	entry.type === "custom" && entry.customType === NAME && "base" in (entry.data as SwarmEntry);
 
 const hidden = (content: string) => ({ message: { customType: NAME, content, display: false } });
-
-/**
- * Top-level TUI and RPC sessions. Live children bind extensions with no mode, which Pi runs as print, and persisted
- * children carry a session link when child-session hooks are registered. `parentSession` cannot identify a child: Pi
- * also sets it on forks.
- */
-function isEligible(ctx: ExtensionContext): boolean {
-	if (ctx.mode !== "tui" && ctx.mode !== "rpc") return false;
-	return !ctx.sessionManager.getEntries().some((entry) => entry.type === "custom" && entry.customType === SESSION_LINK_TYPE);
-}
 
 /**
  * What a swarm message says: true for on, false for off, undefined when it says neither. The readers below take what
@@ -123,25 +111,6 @@ async function writeDefault(enabled: boolean): Promise<void> {
 	} finally {
 		await rm(temporary, { force: true });
 	}
-}
-
-/** The modes each top-level session has on, shared in the process: Relay reads it, as a room's representative needs swarm mode. */
-interface SessionModesRegistry {
-	/** Mode names ("swarm") active on each top-level session's current branch, by session id. */
-	modes: Map<string, Set<string>>;
-	/** Called with a session id whenever its set changes. */
-	listeners: Set<(sessionId: string) => void>;
-}
-
-/** The registry, created here unless its reader came first. */
-function sessionModes(): SessionModesRegistry {
-	const shared = globalThis as Record<symbol, unknown>;
-	let registry = shared[SESSION_MODES] as SessionModesRegistry | undefined;
-	if (!registry) {
-		registry = { modes: new Map(), listeners: new Set() };
-		shared[SESSION_MODES] = registry;
-	}
-	return registry;
 }
 
 /** Keep "swarm" in the session's set exactly while the mode is on, and tell every listener about a change. */
@@ -256,14 +225,14 @@ export function registerSwarm(pi: ExtensionAPI): (ctx: ExtensionContext) => bool
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
-		if (!isEligible(ctx)) return;
+		if (!isCoordinator(ctx)) return;
 		await refreshDefault();
 		showBranch(ctx);
 	});
-	pi.on("session_tree", async (_event, ctx) => { if (isEligible(ctx)) showBranch(ctx); });
+	pi.on("session_tree", async (_event, ctx) => { if (isCoordinator(ctx)) showBranch(ctx); });
 
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (!isEligible(ctx)) return undefined;
+		if (!isCoordinator(ctx)) return undefined;
 		if (readBranch(ctx).base === undefined) await refreshDefault();
 		let state = readBranch(ctx);
 		if (!state.pinned) {
@@ -292,7 +261,7 @@ export function registerSwarm(pi: ExtensionAPI): (ctx: ExtensionContext) => bool
 		description: "Toggle swarm mode 🐝, background agents so the session keeps answering: /swarm [on | off | status | board [clear] | default [on | off]]",
 		handler: async (args, ctx) => {
 			pi.appendEntry("pi-extensions.command", { command: NAME, kind: "extension", extension: "delegation" });
-			if (!isEligible(ctx)) {
+			if (!isCoordinator(ctx)) {
 				ctx.ui.notify(`/${NAME} works only in top-level TUI and RPC sessions.`, "warning");
 				return;
 			}
@@ -336,5 +305,5 @@ export function registerSwarm(pi: ExtensionAPI): (ctx: ExtensionContext) => bool
 		},
 	});
 
-	return (ctx) => isEligible(ctx) && readBranch(ctx).active;
+	return (ctx) => isCoordinator(ctx) && readBranch(ctx).active;
 }
