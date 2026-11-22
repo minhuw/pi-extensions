@@ -194,9 +194,7 @@ export class LiveOwner {
 		const deadline = Date.now() + 12_000;
 		while (Date.now() < deadline) {
 			this.controller.signal.throwIfAborted();
-			let info: unknown = null;
-			try { info = JSON.parse(await optionalText(file) ?? "null"); }
-			catch (error) { if (!(error instanceof SyntaxError)) throw error; }
+			const info: unknown = JSON.parse(await optionalText(file) ?? "null");
 			if (object(info) && info.pid === helper.child.pid) { this.helperInfo = info; return; }
 			if (helper.child.exitCode !== null || helper.spawnError) throw new Error(`Owned helper failed to start: ${helper.stderr.text().slice(0, 2000)}`);
 			await delay(25, undefined, { signal: this.controller.signal });
