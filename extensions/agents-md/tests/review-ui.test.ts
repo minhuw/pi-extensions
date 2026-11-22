@@ -1,8 +1,6 @@
 // Rich TUI diff review UI for agents-md: diff statistics, ANSI diff + word-level highlight + wrapped gutter rendering,
 // interactive ReviewDialog navigation/scrolling, and the TUI custom-dialog path in reviewToolCall.
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionContext, Theme, ThemeBg, ThemeColor, ThemeStyle } from "@earendil-works/pi-coding-agent";
@@ -29,6 +27,7 @@ import {
 	type ReviewChoice,
 	type ReviewInput,
 } from "../review-ui.ts";
+import { initGitRepo, makeTempDir } from "./support/git.ts";
 
 const KEYS = {
 	up: "\x1b[A",
@@ -688,25 +687,17 @@ describe("ReviewDialog", () => {
 });
 
 describe("promptReviewDialog and reviewToolCall TUI custom UI", () => {
-	const git = (cwd: string, ...args: string[]) =>
-		execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-
 	const RULES = "# Rules\n\n- Run the tests.\n- Keep `src/a.ts` small.\n";
 	let root: string;
 	let repo: string;
 
 	beforeAll(() => {
-		root = realpathSync(mkdtempSync(join(tmpdir(), "pi-agents-md-review-ui-")));
-		repo = join(root, "repo");
-		mkdirSync(join(repo, "src"), { recursive: true });
-		git(repo, "init", "-q");
-		git(repo, "config", "user.email", "test@example.com");
-		git(repo, "config", "user.name", "Test");
-		writeFileSync(join(repo, "src", "a.ts"), "export const a = 1;\n");
-		writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "fixture", scripts: { test: "true" } }));
-		writeFileSync(join(repo, "AGENTS.md"), RULES);
-		git(repo, "add", ".");
-		git(repo, "commit", "-q", "-m", "init");
+		root = makeTempDir("pi-agents-md-review-ui-");
+		repo = initGitRepo(join(root, "repo"), {
+			"src/a.ts": "export const a = 1;\n",
+			"package.json": JSON.stringify({ name: "fixture", scripts: { test: "true" } }),
+			"AGENTS.md": RULES,
+		});
 	});
 
 	afterAll(() => {

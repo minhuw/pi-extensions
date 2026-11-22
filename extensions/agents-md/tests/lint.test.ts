@@ -1,10 +1,10 @@
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isContextFile, lintContextFile, MAX_BYTES, MAX_LINES, newFindings, repositoryContextFiles, repositoryRoot, type LintFinding } from "../lint.ts";
+import { initGitRepo, makeTempDir, writeFiles as write } from "./support/git.ts";
 
 const repoRoot = fileURLToPath(new URL("../../..", import.meta.url)).replace(/\/$/, "");
 
@@ -17,16 +17,9 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllEnvs());
 
-function write(root: string, files: Record<string, string>): void {
-	for (const [path, content] of Object.entries(files)) {
-		mkdirSync(dirname(join(root, path)), { recursive: true });
-		writeFileSync(join(root, path), content);
-	}
-}
-
 /** A temporary directory holding `files`, removed after `fn` (also when it throws). */
 function withDirectory<T>(files: Record<string, string>, fn: (root: string) => T): T {
-	const root = realpathSync(mkdtempSync(join(tmpdir(), "agents-md-lint-")));
+	const root = makeTempDir("agents-md-lint-");
 	try {
 		write(root, files);
 		return fn(root);
@@ -37,13 +30,13 @@ function withDirectory<T>(files: Record<string, string>, fn: (root: string) => T
 
 /** A temporary git repository with `files` committed, removed after `fn`. */
 function withRepository<T>(files: Record<string, string>, fn: (root: string) => T): T {
-	return withDirectory(files, (root) => {
-		const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=Lint Test", "-c", "user.email=lint@example.test", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args], { cwd: root, stdio: "ignore" });
-		git("init", "-q");
-		git("add", "-A");
-		git("commit", "-q", "--allow-empty", "-m", "fixture");
+	const root = makeTempDir("agents-md-lint-");
+	try {
+		initGitRepo(root, files, "fixture");
 		return fn(root);
-	});
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 }
 
 /** Lints `text` as `<root>/<file>` (default the root AGENTS.md). */

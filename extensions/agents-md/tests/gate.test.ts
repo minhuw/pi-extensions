@@ -1,9 +1,7 @@
 // agents-md's review gate: the edit/diff helpers, the verdict for each kind of session and answer on a real git
 // repository with the real lint, and the hook in a real Pi session on the faux provider. `hooks.throwLint` makes
 // lintContextFile fail on purpose.
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
@@ -30,8 +28,7 @@ import agentsMdExtension from "../index.ts";
 import {
 	applyEdits, CHOICES, isChildSession, isGatedContextFile, MAX_DIFF_LINES, reasons, reviewToolCall, STANDING_APPROVAL_KEY, truncateDiff, unifiedDiff, userAway,
 } from "../gate.ts";
-
-const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+import { initGitRepo, makeTempDir } from "./support/git.ts";
 
 const RULES = "# Rules\n\n- Use `old/gone.ts` for fixtures.\n- Run the tests.\n- Keep `src/a.ts` small.\n";
 
@@ -39,19 +36,13 @@ let root: string;
 let repo: string;
 
 beforeAll(() => {
-	root = realpathSync(mkdtempSync(join(tmpdir(), "pi-agents-md-gate-")));
-	repo = join(root, "repo");
-	mkdirSync(join(repo, "src"), { recursive: true });
-	mkdirSync(join(repo, "docs"), { recursive: true });
-	git(repo, "init", "-q");
-	git(repo, "config", "user.email", "test@example.com");
-	git(repo, "config", "user.name", "Test");
-	writeFileSync(join(repo, "src", "a.ts"), "export const a = 1;\n");
-	writeFileSync(join(repo, "docs", "guide.md"), "# Guide\n");
-	writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "fixture", scripts: { test: "true" } }));
-	writeFileSync(join(repo, "AGENTS.md"), RULES);
-	git(repo, "add", ".");
-	git(repo, "commit", "-q", "-m", "init");
+	root = makeTempDir("pi-agents-md-gate-");
+	repo = initGitRepo(join(root, "repo"), {
+		"src/a.ts": "export const a = 1;\n",
+		"docs/guide.md": "# Guide\n",
+		"package.json": JSON.stringify({ name: "fixture", scripts: { test: "true" } }),
+		"AGENTS.md": RULES,
+	});
 	symlinkSync("AGENTS.md", join(repo, "RULES.md"));
 	mkdirSync(join(repo, "linked"));
 	symlinkSync(join("..", "docs", "guide.md"), join(repo, "linked", "AGENTS.md"));

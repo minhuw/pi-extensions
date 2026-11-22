@@ -1,45 +1,27 @@
 // agents_md_lint: registration, the report for every context file or one on real git repositories with the real lint,
 // and its renderers.
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ExtensionAPI, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import agentsMdExtension, { formatReport, type LintDetails } from "../index.ts";
-
-const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+import { initGitRepo, makeTempDir } from "./support/git.ts";
 
 let root: string;
 let repo: string;
 let empty: string;
 
-const initRepo = (dir: string, files: Record<string, string>) => {
-	mkdirSync(dir, { recursive: true });
-	git(dir, "init", "-q");
-	git(dir, "config", "user.email", "test@example.com");
-	git(dir, "config", "user.name", "Test");
-	for (const [path, text] of Object.entries(files)) {
-		mkdirSync(join(dir, path, ".."), { recursive: true });
-		writeFileSync(join(dir, path), text);
-	}
-	git(dir, "add", ".");
-	git(dir, "commit", "-q", "--allow-empty", "-m", "init");
-};
-
 beforeAll(() => {
-	root = realpathSync(mkdtempSync(join(tmpdir(), "pi-agents-md-tools-")));
-	repo = join(root, "repo");
-	empty = join(root, "empty");
-	initRepo(repo, {
+	root = makeTempDir("pi-agents-md-tools-");
+	repo = initGitRepo(join(root, "repo"), {
 		"package.json": JSON.stringify({ name: "fixture", scripts: { test: "true" } }),
 		"src/a.ts": "export const a = 1;\n",
 		"AGENTS.md": "# Rules\n\n- Run `npm test` before committing.\n- Keep `src/a.ts` small.\n",
 		"sub/CLAUDE.md": "# Sub\n- Read `gone/x.ts` first.\n",
 		"sub/notes.md": "- Not a context file: `gone/y.ts`.\n",
 	});
-	initRepo(empty, { "README.md": "# Empty\n" });
+	empty = initGitRepo(join(root, "empty"), { "README.md": "# Empty\n" });
 });
 
 afterAll(() => {
