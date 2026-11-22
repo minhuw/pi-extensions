@@ -1,8 +1,9 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { checkCredentials } from "../../agent-client.ts";
 import { loadMemorySettings, type MemorySettings } from "../../config.ts";
 import { credentialsRegistry } from "../../credentials.ts";
 import { resolveRepository } from "../../repository.ts";
-import { disabledCause, MemoryServerError } from "../client.ts";
+import { MemoryServerError } from "../client.ts";
 import { DREAM_ENTRY, type DreamRecord } from "../entries.ts";
 import type { MemoryView, Note } from "../format.ts";
 import { memoryLogItems, showMemoryLog } from "../log.ts";
@@ -61,15 +62,20 @@ function isTopLevel(ctx: ExtensionContext): boolean {
 	return !ctx.sessionManager.getEntries().some((entry) => entry.type === "custom" && entry.customType === SESSION_LINK_TYPE);
 }
 
-/** Why this session cannot dream, if it cannot: disabled, logged out, or excluded. */
+/** Why this session cannot dream, if it cannot: disabled, logged out, excluded, or URL credentials. */
 function credentialsProblem(cwd: string): string | undefined {
-	const value = credentialsRegistry().current;
-	if (!value) {
-		const cause = disabledCause();
-		return cause ? `pika is disabled: ${cause}` : "pika is not logged in to a server; run /pika login";
+	const check = checkCredentials(cwd);
+	if (check.ok) return undefined;
+	switch (check.kind) {
+		case "disabled":
+			return `pika is disabled: ${check.cause}`;
+		case "unconfigured":
+			return "pika is not logged in to a server; run /pika login";
+		case "excluded":
+			return `pika's exclude list covers ${cwd}`;
+		case "credentials_in_url":
+			return "pika's server URL contains a user name or password; remove them from PIKA_URL or the url in pika.json";
 	}
-	if (value.isExcluded(cwd)) return `pika's exclude list covers ${cwd}`;
-	return undefined;
 }
 
 type Model = NonNullable<ExtensionContext["model"]>;

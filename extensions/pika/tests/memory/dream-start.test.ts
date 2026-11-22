@@ -66,3 +66,23 @@ it("input while the repository is resolved sends no lease request", async () => 
 	expect(leaseRequests(pika)).toEqual([]);
 	expect(spawner.children).toEqual([]);
 });
+
+it("/memory status and /memory dream catch URL-embedded credentials in pre-flight", async () => {
+	const spawner = fakeSpawner();
+	setCredentials(pika.url.replace("http://", "http://alice:secret@"));
+	const entered = gate.entered;
+	const expected = "pika's server URL contains a user name or password; remove them from PIKA_URL or the url in pika.json";
+	await h.session.prompt("/memory status");
+	const status = ui.notes.at(-1)!;
+	expect(status.message).toContain(`This session cannot dream: ${expected}.`);
+	expect(status.message).not.toContain("alice");
+	expect(status.message).not.toContain("secret");
+	await h.session.prompt("/memory dream");
+	const dream = ui.notes.at(-1)!;
+	expect(dream).toEqual({ message: `pika memory: no dream: ${expected}.`, type: "warning" });
+	expect(dream.message).not.toContain("alice");
+	expect(dream.message).not.toContain("secret");
+	expect(gate.entered).toBe(entered);
+	expect(leaseRequests(pika)).toEqual([]);
+	expect(spawner.children).toEqual([]);
+});

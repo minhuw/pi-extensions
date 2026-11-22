@@ -1,4 +1,4 @@
-import { agentFetch, formatTransportError, formatUnexpectedHttpError, mapAuthHttpError } from "../../agent-client.ts";
+import { agentFetch, type AgentServer, formatTransportError, formatUnexpectedHttpError, mapAuthHttpError } from "../../agent-client.ts";
 import { MemoryServerError, timing } from "../client.ts";
 
 /**
@@ -6,7 +6,7 @@ import { MemoryServerError, timing } from "../client.ts";
  * release) with them, so they reach that server even after `/pika logout` or a login elsewhere; `memory/client.ts`
  * always uses the current credentials.
  */
-export interface LeaseServer { url: string; token: string }
+export type LeaseServer = AgentServer;
 
 /** No answer came: the server could not be reached, did not answer in time, or sent an unreadable 200. */
 export class NoAnswer extends Error {}

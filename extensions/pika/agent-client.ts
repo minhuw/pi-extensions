@@ -46,24 +46,43 @@ export function disabledCause(): string | undefined {
 	return undefined;
 }
 
+export type CredentialsCheckResult =
+	| { ok: true; credentials: PikaCredentials }
+	| { ok: false; kind: "disabled"; cause: string }
+	| { ok: false; kind: "unconfigured" | "excluded" | "credentials_in_url"; cause?: undefined };
+
+/**
+ * Checks whether pika has usable credentials for a session in `cwd`, returning either the
+ * credentials or the structured reason they cannot be used.
+ */
+export function checkCredentials(cwd: string): CredentialsCheckResult {
+	const value = credentialsRegistry().current;
+	if (!value) {
+		const cause = disabledCause();
+		return cause ? { ok: false, kind: "disabled", cause } : { ok: false, kind: "unconfigured" };
+	}
+	if (value.isExcluded(cwd)) return { ok: false, kind: "excluded" };
+	if (withoutCredentials(value.url) !== value.url) return { ok: false, kind: "credentials_in_url" };
+	return { ok: true, credentials: value };
+}
+
 /**
  * The credentials to use for `feature` in a session in `cwd`. Throws the user-facing error text
  * when pika is disabled, not logged in, excludes `cwd`, or has credentials embedded in its URL.
  */
 export function requireCredentials(cwd: string, feature: string): PikaCredentials {
-	const value = credentialsRegistry().current;
-	if (!value) {
-		const cause = disabledCause();
-		if (cause) throw new Error(`${feature} is off because pika is disabled: ${cause}. Tell the user; /pika shows why.`);
-		throw new Error(`${feature} needs the pika extension logged in to a pika server, and it is not. Ask the user to run /pika login.`);
+	const check = checkCredentials(cwd);
+	if (check.ok) return check.credentials;
+	switch (check.kind) {
+		case "disabled":
+			throw new Error(`${feature} is off because pika is disabled: ${check.cause}. Tell the user; /pika shows why.`);
+		case "unconfigured":
+			throw new Error(`${feature} needs the pika extension logged in to a pika server, and it is not. Ask the user to run /pika login.`);
+		case "excluded":
+			throw new Error(`pika's exclude list covers this session's working directory (${cwd}), so ${feature} is off in this session.`);
+		case "credentials_in_url":
+			throw new Error(credentialsInUrlMessage(feature));
 	}
-	if (value.isExcluded(cwd)) {
-		throw new Error(`pika's exclude list covers this session's working directory (${cwd}), so ${feature} is off in this session.`);
-	}
-	if (withoutCredentials(value.url) !== value.url) {
-		throw new Error(credentialsInUrlMessage(feature));
-	}
-	return value;
 }
 
 /**
