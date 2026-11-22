@@ -1,16 +1,11 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { expect, it } from "vitest";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import goalExtension from "../index.ts";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import selfdriveExtension, { runtime as selfdriveRuntime, timing } from "../../selfdrive/index.ts";
+import { createGoalTestEnv } from "./support/session.ts";
 
 it("coordinates real Goal and Selfdrive sessions at the activation boundary", async () => {
- const directory = await mkdtemp(join(tmpdir(), "pi-goal-boundary-"));
- const sessions: Awaited<ReturnType<typeof createAgentSession>>["session"][] = [];
+ const env = await createGoalTestEnv("pi-goal-boundary-");
  const oldAwake = selfdriveRuntime.keepAwake;
  const oldTiming = { ...timing };
  selfdriveRuntime.keepAwake = () => ({ kill() {} });
@@ -19,16 +14,13 @@ it("coordinates real Goal and Selfdrive sessions at the activation boundary", as
  const notes: string[] = [];
  const ui = { confirm: async () => true, notify: (message: string) => notes.push(message), setStatus: noop, setWidget: noop, setWorkingMessage: noop, setWorkingVisible: noop, setWorkingIndicator: noop, setHiddenThinkingLabel: noop } as unknown as ExtensionUIContext;
  try {
-  const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
   async function start() {
-   const faux = fauxProvider({ api: `goal-boundary-${sessions.length}`, provider: `goal-boundary-${sessions.length}`, models: [{ id: "test" }] });
+   const { session, faux, errors } = await env.createSession({
+    api: `goal-boundary-${env.sessionCount}`,
+    extraExtensions: [selfdriveExtension],
+    uiContext: ui,
+   });
    faux.setResponses(Array.from({ length: 50 }, () => fauxAssistantMessage("ok")));
-   const resources = new DefaultResourceLoader({ cwd: directory, agentDir: directory, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, extensionFactories: [pi => pi.registerProvider(faux.provider), goalExtension, selfdriveExtension] });
-   await resources.reload();
-   const { session } = await createAgentSession({ cwd: directory, agentDir: directory, modelRuntime, model: faux.getModel("test")!, resourceLoader: resources, sessionManager: SessionManager.inMemory(directory), settingsManager: SettingsManager.inMemory({ defaultTools: [], retry: { enabled: false } }) });
-   sessions.push(session);
-   const errors: unknown[] = [];
-   await session.bindExtensions({ mode: "rpc", uiContext: ui, onError: error => errors.push(error) });
    const goal = () => session.sessionManager.getBranch().findLast(e => e.type === "custom" && e.customType === "goal-state");
    return { session, faux, errors, goal };
   }
@@ -64,9 +56,11 @@ it("coordinates real Goal and Selfdrive sessions at the activation boundary", as
   expect(a.errors).toEqual([]);
   expect(b.errors).toEqual([]);
  } finally {
-  for (const session of sessions) { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); }
-  selfdriveRuntime.keepAwake = oldAwake;
-  Object.assign(timing, oldTiming);
-  await rm(directory, { recursive: true, force: true });
+  try {
+   await env.dispose();
+  } finally {
+   selfdriveRuntime.keepAwake = oldAwake;
+   Object.assign(timing, oldTiming);
+  }
  }
 }, 10000);

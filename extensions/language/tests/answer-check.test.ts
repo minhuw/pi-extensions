@@ -1,19 +1,20 @@
 // The answer-language check: its classifier, and real Pi sessions on the faux provider asserting on what the provider receives.
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getCurrentSystemPrompt, InMemoryCredentialStore, type AssistantMessage } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
-import {
-	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
-	type CreateAgentSessionRuntimeFactory, type ExtensionContext, type ExtensionUIContext,
-} from "@earendil-works/pi-coding-agent";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ANSWER_CHECK, checkAnswer, languageScripts, proseOf } from "../index.ts";
+import {
+	afterPrompt,
+	capture,
+	createLanguageSessionRuntime,
+	createLanguageTestEnv,
+	expectSamePrefix,
+	textOf,
+	type Captured,
+	type Message,
+} from "./support/harness.ts";
 
-// Load by path, as Pi does.
-const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 const correction = (language: string) => `Your last answer was not in ${language}. Write it again in ${language}, in full; keep code, identifiers, commands, and paths unchanged.`;
 const switchMessage = (active: string) => `Respond in ${active}, whatever language the user writes in. This overrides the default language. Keep code, identifiers, commands, and file paths unchanged.`;
 
@@ -82,100 +83,21 @@ describe("the classifier", () => {
 	});
 });
 
-type Message = { role: string; content: unknown };
-interface Captured { system: string; conversation: Message[] }
 type Step = string | AssistantMessage | (() => AssistantMessage | Promise<AssistantMessage>);
 
-const capture = (messages: Parameters<typeof getCurrentSystemPrompt>[0]): Captured => {
-	const copy = JSON.parse(JSON.stringify(messages)) as Message[];
-	return { system: getCurrentSystemPrompt(messages), conversation: copy.filter((message) => message.role !== "system") };
-};
-const textOf = ({ content }: Message) => typeof content === "string" ? content : (content as { text?: string }[]).map((part) => part.text ?? "").join("");
-/** What followed the run's starting message in a request. */
-const afterPrompt = (request: Captured, prompt: string) => {
-	const texts = request.conversation.map(textOf);
-	const start = texts.lastIndexOf(prompt);
-	expect(start).toBeGreaterThanOrEqual(0);
-	return texts.slice(start + 1);
-};
-/** The system prompt is unchanged, and `later` starts with every conversation message of `earlier`, byte for byte. */
-const expectSamePrefix = (later: Captured, earlier: Captured) => {
-	expect(later.system).toBe(earlier.system);
-	expect(JSON.stringify(later.conversation.slice(0, earlier.conversation.length))).toBe(JSON.stringify(earlier.conversation));
-};
+const env = createLanguageTestEnv("pi-language-check-");
+const writeDefault = (name: string) => env.writeConfig({ default: name });
 
-let root: string;
-let previousAgentDir: string | undefined;
-const started: { dispose(): Promise<void> }[] = [];
-const agentDir = () => join(root, "agent");
-const sessionDir = () => join(root, "sessions");
-const cwd = () => join(root, "work");
-const writeDefault = (name: string) => writeFile(join(agentDir(), "language.json"), JSON.stringify({ default: name }));
-
-beforeEach(async () => {
-	root = await mkdtemp(join(tmpdir(), "pi-language-check-"));
-	await Promise.all([agentDir(), sessionDir(), cwd()].map((path) => mkdir(path)));
-	previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = agentDir();
-});
-
-afterEach(async () => {
-	try {
-		for (const harness of started.splice(0)) await harness.dispose();
-	} finally {
-		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		await rm(root, { recursive: true, force: true });
-	}
-});
-
-/** A UI context that records notifications. A plain object: Pi spreads it. */
-function recordingUi() {
-	const noop = () => {};
-	return {
-		select: async () => undefined, confirm: async () => false, input: async () => undefined, editor: async () => undefined, custom: async () => undefined,
-		onTerminalInput: () => noop, setWorkingMessage: noop, setWorkingVisible: noop, setWorkingIndicator: noop, setHiddenThinkingLabel: noop, setWidget: noop,
-		setFooter: noop, setHeader: noop, setTitle: noop, pasteToEditor: noop, setEditorText: noop, getEditorText: () => "",
-		addAutocompleteProvider: noop, setEditorComponent: noop, getEditorComponent: () => undefined, getAllThemes: () => [], getTheme: () => undefined,
-		setTheme: () => ({ success: false, error: "UI not available" }), getToolsExpanded: () => false, setToolsExpanded: noop, notify: noop, setStatus: noop,
-	} as unknown as ExtensionUIContext;
-}
+beforeEach(() => env.setup());
+afterEach(() => env.teardown());
 
 async function start(options: { mode?: ExtensionContext["mode"] } = {}) {
-	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-	const faux = fauxProvider({ api: "language-check-test-api", provider: "language-check-test", models: [{ id: "test" }] });
-	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false, keepRecentTokens: 1 } });
 	const requests: Captured[] = [];
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd: runtimeCwd, agentDir: runtimeAgentDir, sessionManager, sessionStartEvent }) => {
-		const services = await createAgentSessionServices({
-			cwd: runtimeCwd, agentDir: runtimeAgentDir, settingsManager, modelRuntime,
-			resourceLoaderOptions: {
-				noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-				additionalExtensionPaths: [extensionPath],
-				extensionFactories: [(pi) => { pi.registerProvider(faux.provider); }],
-			},
-		});
-		expect(services.resourceLoader.getExtensions().errors).toEqual([]);
-		const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, model: faux.getModel("test") });
-		return { ...created, services, diagnostics: services.diagnostics };
-	};
-	const runtime = await createAgentSessionRuntime(createRuntime, { cwd: cwd(), agentDir: agentDir(), sessionManager: SessionManager.create(cwd(), sessionDir()) });
-	const errors: unknown[] = [];
-	const bind = () => runtime.session.bindExtensions({
-		mode: options.mode ?? "rpc",
-		uiContext: recordingUi(),
-		onError: (error) => { errors.push(error); },
-		commandContextActions: {
-			waitForIdle: () => runtime.session.waitForIdle(),
-			newSession: (newOptions) => runtime.newSession(newOptions),
-			fork: (entryId, forkOptions) => runtime.fork(entryId, forkOptions),
-			navigateTree: (targetId, treeOptions) => runtime.session.navigateTree(targetId, treeOptions),
-			switchSession: (sessionPath, switchOptions) => runtime.switchSession(sessionPath, switchOptions),
-			reload: () => runtime.session.reload(),
-		},
+	const { runtime, faux, errors, dispose } = await createLanguageSessionRuntime(env, {
+		api: "language-check-test-api",
+		provider: "language-check-test",
+		mode: options.mode,
 	});
-	runtime.setRebindSession(bind);
-	await bind();
 	const harness = {
 		runtime, requests, errors,
 		get session() { return runtime.session; },
@@ -201,9 +123,8 @@ async function start(options: { mode?: ExtensionContext["mode"] } = {}) {
 			const entry = runtime.session.sessionManager.getBranch().findLast((candidate) => candidate.type === "message" && candidate.message.role === "assistant");
 			return entry?.type === "message" ? textOf(entry.message as Message) : undefined;
 		},
-		dispose: () => runtime.dispose(),
+		dispose,
 	};
-	started.push(harness);
 	return harness;
 }
 
