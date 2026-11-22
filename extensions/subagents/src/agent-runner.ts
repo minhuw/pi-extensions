@@ -36,6 +36,7 @@ import { isCouncilAgentName } from "./model-overrides.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, inheritableParentPrompt, type PromptExtras } from "./prompts.js";
 import { applyServiceTier, modelSupportsServiceTier, type ServiceTierInput } from "./service-tier.js";
+import { formatConversationMessages } from "./session-transcript.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
@@ -1683,29 +1684,5 @@ export async function steerAgent(
  * Get the subagent's conversation messages as formatted text.
  */
 export function getAgentConversation(session: AgentSession): string {
-  const parts: string[] = [];
-
-  for (const msg of session.messages) {
-    if (msg.role === "user") {
-      const text = typeof msg.content === "string"
-        ? msg.content
-        : extractText(msg.content);
-      if (text.trim()) parts.push(`[User]: ${text.trim()}`);
-    } else if (msg.role === "assistant") {
-      const textParts: string[] = [];
-      const toolCalls: string[] = [];
-      for (const c of msg.content) {
-        if (c.type === "text" && c.text) textParts.push(c.text);
-        else if (c.type === "toolCall") toolCalls.push(`  Tool: ${(c as any).name ?? (c as any).toolName ?? "unknown"}`);
-      }
-      if (textParts.length > 0) parts.push(`[Assistant]: ${textParts.join("\n")}`);
-      if (toolCalls.length > 0) parts.push(`[Tool Calls]:\n${toolCalls.join("\n")}`);
-    } else if (msg.role === "toolResult") {
-      const text = extractText(msg.content);
-      const truncated = text.length > 200 ? text.slice(0, 200) + "..." : text;
-      parts.push(`[Tool Result (${msg.toolName})]: ${truncated}`);
-    }
-  }
-
-  return parts.join("\n\n");
+  return formatConversationMessages(session.messages);
 }

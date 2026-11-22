@@ -18,14 +18,13 @@ import {
   type ToolDefinition,
   type ToolRenderers,
 } from "@earendil-works/pi-coding-agent";
-import { getAgentConversation } from "./agent-runner.js";
 import { extractText } from "./context.js";
 import type { AgentRecord } from "./types.js";
 
 export type AgentMessage = AgentSession["messages"][number];
 export type RecordSessionSource = Pick<AgentRecord, "session" | "sessionFile">;
 
-/** Format `messages` identically to `getAgentConversation(session)`. */
+/** Format conversation messages as readable text. */
 export function formatConversationMessages(messages: readonly AgentMessage[]): string {
   const parts: string[] = [];
 
@@ -74,9 +73,6 @@ export function getRecordMessages(record: RecordSessionSource): AgentMessage[] |
 
 /** Format a record's conversation from its live session or on-demand from `sessionFile`. */
 export function getRecordConversation(record: RecordSessionSource): string | undefined {
-  if (record.session) {
-    return Array.isArray(record.session.messages) ? getAgentConversation(record.session) : undefined;
-  }
   const messages = getRecordMessages(record);
   return messages ? formatConversationMessages(messages) : undefined;
 }
