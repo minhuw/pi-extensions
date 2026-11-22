@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { Type } from "typebox";
-import { noise, summarize, type HarnessMessages, type Measurement } from "../benchmark/core.ts";
-import { number, Parameters, quantity, renderReport, restoreReport, updateReport, type Metric, type Report } from "./report.ts";
+import { bounded, noise, record, spread, summarize, type HarnessMessages, type Measurement } from "../benchmark/core.ts";
+import { Parameters, renderReport, restoreReport, updateReport, type Metric, type Report } from "./report.ts";
 
 export const ITERATION = "autoresearch:iteration";
 /** A dispatched pass must start within DISPATCH_LIMIT_MS; a started pass then has its setup or iteration limit. */
@@ -59,8 +59,6 @@ export function approvalKey(state: State): string {
 	return hash(JSON.stringify({ id: c?.id, goal: c?.goal, maxIterations: c?.maxIterations, benchmark: c?.benchmark, baseline: c?.baseline,
 		metrics: state.report?.metrics.map(({ value: _value, ...definition }) => definition) }));
 }
-function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
-const bounded = (value: unknown, max: number): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= max;
 function measurement(value: unknown, names: string[]): value is Measurement {
 	if (!record(value) || !Array.isArray(value.samples) || !value.samples.length || value.samples.length > 10 || typeof value.timestamp !== "number" || !Number.isFinite(value.timestamp)) return false;
 	return [value.values, ...value.samples].every(row => record(row) && Object.keys(row).length === names.length && names.every(name => typeof row[name] === "number" && Number.isFinite(row[name])));
@@ -106,14 +104,11 @@ export function measuredReport(report: Report, measurement: Measurement, baselin
 	return next;
 }
 const column = (metric: Metric, measurement: Measurement) => measurement.samples.map(sample => sample[metric.name]!);
-function spread(metric: Metric, measurement: Measurement): string {
-	const s = summarize(column(metric, measurement));
-	return `${quantity(s.median, metric.unit)} (range ${number(s.min)}–${quantity(s.max, metric.unit)}, n=${s.count})`;
-}
+const metricSpread = (metric: Metric, measurement: Measurement) => spread(summarize(column(metric, measurement)), metric.unit);
 /** Per-metric baseline lines, with the latest measurement and the objective's noise verdict when `latest` is set. */
 export function ranges(state: State, latest = false): string {
 	const c = state.campaign!; const metrics = state.report!.metrics;
-	const lines = metrics.map(metric => `${metric.label}: baseline ${spread(metric, c.baseline!)}${latest ? `; latest ${spread(metric, c.latest!)}` : ""}`);
+	const lines = metrics.map(metric => `${metric.label}: baseline ${metricSpread(metric, c.baseline!)}${latest ? `; latest ${metricSpread(metric, c.latest!)}` : ""}`);
 	const objective = metrics.find(metric => metric.role === "objective")!;
 	if (latest) lines.push(`Noise check for ${objective.label} (objective): ${noise(column(objective, c.baseline!), column(objective, c.latest!))}.`);
 	return lines.join("\n");

@@ -16,8 +16,8 @@ export interface Measurement { samples: Record<string, number>[]; values: Record
 export interface HarnessMessages { moved: string; changed: string }
 const PINNED: HarnessMessages = { moved: "Benchmark working directory changed.", changed: "Benchmark harness changed." };
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
-function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
-const bounded = (value: unknown, max: number): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= max;
+export function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
+export const bounded = (value: unknown, max: number): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= max;
 
 /** Fingerprint declared harness files, rejecting escapes through paths and symlinks. */
 export async function fingerprint(cwd: string, files: string[]): Promise<Record<string, string>> {
@@ -137,10 +137,28 @@ export interface Verdict { verdict: string; reason?: string }
 export interface Comparison { metrics: MetricResult[]; verdict: Verdict }
 export interface Roles { objective: string; errors?: string; work?: string }
 
-function change(a: number, b: number): Change {
+export function change(a: number, b: number): Change {
+	if (!Number.isFinite(a) || !Number.isFinite(b)) return { absolute: Number.NaN };
 	if (a === b) return { percent: 0 };
 	return a === 0 ? { absolute: b - a } : { percent: (b - a) / Math.abs(a) * 100 };
 }
+const NUMBER_FORMAT = new Intl.NumberFormat("en-US", { maximumSignificantDigits: 6 });
+export function number(value: number): string { return NUMBER_FORMAT.format(value); }
+export function quantity(value: number | undefined, unit: string): string {
+	return value === undefined ? "—" : `${number(value)}${unit ? ` ${unit}` : ""}`;
+}
+export function spread(summary: Summary, unit: string): string {
+	return `${quantity(summary.median, unit)} (range ${number(summary.min)}–${quantity(summary.max, unit)}, n=${summary.count})`;
+}
+export function formatChange(delta: Change | undefined, unit: string): string {
+	if (!delta) return "—";
+	const value = "percent" in delta ? delta.percent : delta.absolute;
+	if (!Number.isFinite(value)) return "—";
+	const sign = value > 0 ? "+" : "";
+	// Relative change is undefined at a zero baseline; show the absolute change instead.
+	return "percent" in delta ? `${sign}${number(value)}%` : `${sign}${quantity(value, unit)} (absolute)`;
+}
+export const cell = (text: string): string => text.replaceAll("\\", "\\\\").replaceAll("|", "\\|").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 /**
  * Summarize every metric for one or two sides and judge the objective. Two sides compare B against A;
  * one side is only checked for errors and unequal work, and is otherwise "measured".

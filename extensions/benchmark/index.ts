@@ -1,7 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { compare, fingerprint, runRounds, type Change, type Comparison, type MetricDefinition, type Side, type Summary } from "./core.ts";
+import { cell, compare, fingerprint, formatChange, runRounds, spread, type Comparison, type MetricDefinition, type Side } from "./core.ts";
 
 const line = (maxLength: number) => Type.String({ minLength: 1, maxLength, pattern: "^[^\\x00-\\x1f\\x7f-\\x9f]+$" });
 export const Parameters = Type.Object({
@@ -24,25 +24,13 @@ export const Parameters = Type.Object({
 });
 type Role = "objective" | "informational" | "errors" | "work";
 
-const number = (value: number) => new Intl.NumberFormat("en-US", { maximumSignificantDigits: 6 }).format(value);
-const quantity = (value: number, unit: string) => `${number(value)}${unit ? ` ${unit}` : ""}`;
-const spread = (s: Summary, unit: string) => `${quantity(s.median, unit)} (range ${number(s.min)}–${quantity(s.max, unit)}, n=${s.count})`;
-function delta(change: Change, unit: string): string {
-	const value = "percent" in change ? change.percent : change.absolute;
-	if (!Number.isFinite(value)) return "—";
-	const sign = value > 0 ? "+" : "";
-	// Relative change is undefined at a zero A median; show the absolute change instead.
-	return "percent" in change ? `${sign}${number(value)}%` : `${sign}${quantity(value, unit)} (absolute)`;
-}
-const cell = (text: string) => text.replaceAll("\\", "\\\\").replaceAll("|", "\\|").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-
 function render(metrics: (MetricDefinition & { role: Role })[], sides: Side[], result: Comparison): string {
 	const [a, b] = sides as [Side, Side | undefined];
 	const objective = metrics.find(metric => metric.role === "objective")!;
 	const header = ["Metric", ...sides.map(side => side.label), ...(b ? [`Change (${b.label} vs ${a.label})`] : [])];
 	const rows = metrics.map((metric, index) => {
 		const { summaries, change } = result.metrics[index]!;
-		return [`${metric.label} (${metric.role}, ${metric.direction} is better)`, ...summaries.map(s => spread(s, metric.unit)), ...(change ? [delta(change, metric.unit)] : [])];
+		return [`${metric.label} (${metric.role}, ${metric.direction} is better)`, ...summaries.map(s => spread(s, metric.unit)), ...(change ? [formatChange(change, metric.unit)] : [])];
 	});
 	const { verdict, reason } = result.verdict;
 	const because = reason ?? (verdict === "measured" ? "one command, nothing compared"

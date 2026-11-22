@@ -1,4 +1,5 @@
 import { Type, type Static } from "typebox";
+import { cell, change as relativeChange, formatChange, number, quantity } from "../benchmark/core.ts";
 
 export const SNAPSHOT = "autoresearch:report";
 export const STATUS_KEY = "autoresearch";
@@ -110,28 +111,15 @@ export function restoreReport(data: unknown): Report | null {
 	return structuredClone(snapshot.report);
 }
 
-export function number(value: number): string {
-	return new Intl.NumberFormat("en-US", { maximumSignificantDigits: 6 }).format(value);
-}
-export function quantity(value: number | undefined, unit: string): string {
-	return value === undefined ? "—" : `${number(value)}${unit ? ` ${unit}` : ""}`;
-}
+export { number, quantity };
 export function change(metric: Metric): string {
 	if (metric.baseline === undefined || metric.value === undefined) return "—";
-	const delta = metric.value - metric.baseline;
-	if (delta === 0) return "0%";
-	// Relative change is undefined at a zero baseline; preserve the absolute change instead.
-	const percent = metric.baseline === 0 ? undefined : delta / Math.abs(metric.baseline) * 100;
-	if (!Number.isFinite(delta) || (percent !== undefined && !Number.isFinite(percent))) return "—";
-	return percent === undefined
-		? `${delta > 0 ? "+" : ""}${quantity(delta, metric.unit)} (absolute)`
-		: `${percent > 0 ? "+" : ""}${number(percent)}%`;
+	return formatChange(relativeChange(metric.baseline, metric.value), metric.unit);
 }
 export function summary(report: Report): string {
 	const metric = report.metrics.find(m => m.role === "objective");
 	return `research · ${report.phase} · ${report.provenance === "tool-measured" ? "measured" : "reported"}${metric ? ` · ${metric.label} ${quantity(metric.value, metric.unit)} (${change(metric)})` : ""}`;
 }
-const cell = (text: string) => text.replaceAll("\\", "\\\\").replaceAll("|", "\\|").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 export function renderReport(report: Report): string {
 	const rows = report.metrics.map(metric => `| ${cell(metric.label)} | ${metric.role} | ${metric.direction} | ${cell(quantity(metric.baseline, metric.unit))} | ${cell(quantity(metric.value, metric.unit))} | ${cell(change(metric))} |`);
 	return [
