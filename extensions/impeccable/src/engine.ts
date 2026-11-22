@@ -356,7 +356,6 @@ export async function resolveEngine(options: ResolveEngineOptions = {}): Promise
 export class BoundedOutput {
 	private readonly chunks: Buffer[] = [];
 	private storedBytes = 0;
-	private totalBytes = 0;
 	private overflowed = false;
 	readonly maxBytes: number;
 	constructor(maxBytes: number) {
@@ -368,7 +367,6 @@ export class BoundedOutput {
 	}
 
 	push(chunk: Buffer): void {
-		this.totalBytes += chunk.length;
 		if (this.overflowed) return;
 		if (this.storedBytes + chunk.length > this.maxBytes) {
 			const keep = this.maxBytes - this.storedBytes;
@@ -545,12 +543,22 @@ async function resolveCwd(cwd: string | undefined): Promise<{ cwd: string } | { 
 	}
 }
 
-function unavailableResult(options: RunEngineOptions, cwd: string, kind: EngineUnavailableKind, message: string): EngineRunResult {
+function failedResult(
+	options: RunEngineOptions,
+	cwd: string,
+	overrides: {
+		status: EngineStatus;
+		message: string;
+		kind?: EngineUnavailableKind;
+		binary?: string;
+		trustedOverride?: boolean;
+	},
+): EngineRunResult {
 	return {
 		ok: false,
-		status: "unavailable",
-		kind,
-		message,
+		status: overrides.status,
+		...(overrides.kind !== undefined ? { kind: overrides.kind } : {}),
+		message: overrides.message,
 		exitCode: null,
 		signal: null,
 		findings: false,
@@ -558,10 +566,10 @@ function unavailableResult(options: RunEngineOptions, cwd: string, kind: EngineU
 		stderr: "",
 		stdoutTruncated: false,
 		stderrTruncated: false,
-		binary: "",
+		binary: overrides.binary ?? "",
 		cwd,
 		argv: options.argv,
-		trustedOverride: false,
+		trustedOverride: overrides.trustedOverride ?? false,
 	};
 }
 
@@ -575,22 +583,10 @@ export async function runEngine(options: RunEngineOptions): Promise<EngineRunRes
 	if (options.stdin !== undefined && Buffer.byteLength(options.stdin) > 2 * 1024 * 1024) throw new Error("Engine stdin exceeds 2 MiB");
 	const cwdResult = await resolveCwd(options.cwd);
 	if ("error" in cwdResult) {
-		return {
-			ok: false,
+		return failedResult(options, path.resolve(options.cwd ?? process.cwd()), {
 			status: "error",
 			message: cwdResult.error,
-			exitCode: null,
-			signal: null,
-			findings: false,
-			stdout: "",
-			stderr: "",
-			stdoutTruncated: false,
-			stderrTruncated: false,
-			binary: "",
-			cwd: path.resolve(options.cwd ?? process.cwd()),
-			argv: options.argv,
-			trustedOverride: false,
-		};
+		});
 	}
 	const cwd = cwdResult.cwd;
 
@@ -623,49 +619,32 @@ export async function runEngine(options: RunEngineOptions): Promise<EngineRunRes
 			resolved = await resolveEngine({ ...options, signal: controller.signal });
 		} catch (error) {
 			if (controller.signal.aborted) {
-				return {
-					ok: false,
+				return failedResult(options, cwd, {
 					status: reason === "timeout" ? "timeout" : "cancelled",
 					message: reason === "timeout" ? `engine setup did not finish within ${timeoutMs} ms` : "engine setup was cancelled",
-					exitCode: null,
-					signal: null,
-					findings: false,
-					stdout: "",
-					stderr: "",
-					stdoutTruncated: false,
-					stderrTruncated: false,
-					binary: "",
-					cwd,
-					argv: options.argv,
-					trustedOverride: false,
-				};
+				});
 			}
 			if (error instanceof EngineUnavailableError) {
-				return unavailableResult(options, cwd, error.kind, error.message);
+				return failedResult(options, cwd, {
+					status: "unavailable",
+					kind: error.kind,
+					message: error.message,
+				});
 			}
-			return {
-				ok: false,
+			return failedResult(options, cwd, {
 				status: "error",
 				message: `engine setup failed: ${String(error)}`,
-				exitCode: null,
-				signal: null,
-				findings: false,
-				stdout: "",
-				stderr: "",
-				stdoutTruncated: false,
-				stderrTruncated: false,
-				binary: "",
-				cwd,
-				argv: options.argv,
-				trustedOverride: false,
-			};
+			});
 		}
 
-		if (controller.signal.aborted) return {
-			ok: false, status: reason === "timeout" ? "timeout" : "cancelled", exitCode: null, signal: null, findings: false,
-			stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, binary: resolved.binary, cwd,
-			argv: options.argv, trustedOverride: resolved.trustedOverride, message: "Engine cancelled before spawn",
-		};
+		if (controller.signal.aborted) {
+			return failedResult(options, cwd, {
+				status: reason === "timeout" ? "timeout" : "cancelled",
+				message: "Engine cancelled before spawn",
+				binary: resolved.binary,
+				trustedOverride: resolved.trustedOverride,
+			});
+		}
 		const proc = spawnEngine(resolved, options.argv, { cwd, env: options.env, stdin: options.stdin });
 		const onAborted = () => proc.cancel(reason ?? "cancelled");
 		controller.signal.addEventListener("abort", onAborted, { once: true });
