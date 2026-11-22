@@ -5,27 +5,21 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import {
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-	ModelRuntime,
-	SessionManager,
-	SettingsManager,
-	type CreateAgentSessionRuntimeFactory,
-	type ExtensionFactory,
-	type InlineExtension,
-} from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { type ExtensionFactory, type InlineExtension } from "@earendil-works/pi-coding-agent";
 import { publishGrant, repositoryOf, standingRegistry, withdrawGrant, type StandingApproval } from "../grants.ts";
 import selfdriveExtension, { CHILD_SESSION_HOOKS, type ChildSessionHook } from "../index.ts";
+import {
+	scopeAgentDir,
+	startChildSession as bootChildSession,
+	startSelfdriveSession,
+} from "./support/session-harness.ts";
 
 let root: string;
 let repo: string;
 let worktree: string;
 let grant: StandingApproval;
-let previousAgentDir: string | undefined;
+let restoreAgentDir: (() => void) | undefined;
 const disposables: { dispose(): Promise<void> | void }[] = [];
 
 const git = (cwd: string, ...args: string[]) =>
@@ -37,127 +31,32 @@ function registeredSelfdriveHooks(): ChildSessionHook[] {
 	return [...(hooks as Set<ChildSessionHook>)].filter((hook) => hook?.name === "selfdrive");
 }
 
-function childHookFactories(): InlineExtension[] {
-	const hooks = (globalThis as Record<symbol, unknown>)[CHILD_SESSION_HOOKS];
-	if (!(hooks instanceof Set)) return [];
-	return [...(hooks as Set<ChildSessionHook>)]
-		.filter((hook) => typeof hook?.name === "string" && typeof hook.extensionFactory === "function")
-		.map((hook) => ({ name: hook.name, factory: hook.extensionFactory }));
-}
-
 async function startParentSession(cwd = repo) {
-	const faux = fauxProvider({ api: `selfdrive-parent-${Math.random()}`, provider: "selfdrive-parent", models: [{ id: "test" }] });
-	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd: runtimeCwd, agentDir, sessionManager, sessionStartEvent }) => {
-		const services = await createAgentSessionServices({
-			cwd: runtimeCwd,
-			agentDir,
-			settingsManager,
-			modelRuntime,
-			resourceLoaderOptions: {
-				noExtensions: true,
-				noSkills: true,
-				noPromptTemplates: true,
-				noThemes: true,
-				noContextFiles: true,
-				extensionFactories: [(pi) => pi.registerProvider(faux.provider), selfdriveExtension],
-			},
-		});
-		expect(services.resourceLoader.getExtensions().errors).toEqual([]);
-		const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, model: faux.getModel("test") });
-		return { ...created, services, diagnostics: services.diagnostics };
-	};
-	const runtime = await createAgentSessionRuntime(createRuntime, {
+	const handle = await startSelfdriveSession({
 		cwd,
 		agentDir: join(root, "agent"),
-		sessionManager: SessionManager.inMemory(cwd),
+		api: `selfdrive-parent-${Math.random()}`,
+		provider: "selfdrive-parent",
+		noExtensions: true,
+		bindAsChild: true,
+		extensionFactories: [selfdriveExtension],
 	});
-	await runtime.session.bindExtensions({});
-	let disposed = false;
-	const handle = {
-		runtime,
-		session: runtime.session,
-		dispose: async () => {
-			if (!disposed) {
-				disposed = true;
-				await runtime.dispose();
-			}
-		},
-	};
 	disposables.push(handle);
 	return handle;
 }
 
 async function startChildSession(options: { cwd: string; extraFactories?: (ExtensionFactory | InlineExtension)[]; linkParentId?: string }) {
-	const faux = fauxProvider({ api: `selfdrive-child-${Math.random()}`, provider: "selfdrive-child", models: [{ id: "test" }] });
-	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
-	const sessionManager = SessionManager.inMemory(options.cwd);
-	if (options.linkParentId) {
-		sessionManager.appendCustomEntry("pi-extensions.session-link", {
-			kind: "subagent",
-			parentSessionId: options.linkParentId,
-			agentType: "worker",
-		});
-	}
-	const services = await createAgentSessionServices({
-		cwd: options.cwd,
+	const handle = await bootChildSession({
+		...options,
 		agentDir: join(root, "agent"),
-		settingsManager,
-		modelRuntime,
-		resourceLoaderOptions: {
-			noExtensions: true,
-			noSkills: true,
-			noPromptTemplates: true,
-			noThemes: true,
-			noContextFiles: true,
-			extensionFactories: [
-				(pi) => pi.registerProvider(faux.provider),
-				...(options.extraFactories ?? []),
-				...childHookFactories(),
-			],
-		},
 	});
-	const loaded = services.resourceLoader.getExtensions();
-	expect(loaded.errors).toEqual([]);
-	const { session } = await createAgentSessionFromServices({
-		services,
-		sessionManager,
-		model: faux.getModel("test"),
-	});
-	await session.bindExtensions({});
-	let disposed = false;
-	const handle = {
-		faux,
-		session,
-		extensions: loaded.extensions,
-		toolResults: () => session.sessionManager.getBranch().flatMap((entry) =>
-			entry.type === "message" && entry.message.role === "toolResult"
-				? [{
-					isError: Boolean(entry.message.isError),
-					text: entry.message.content.map((part) => (part.type === "text" ? part.text : "")).join(""),
-				}]
-				: []),
-		dispose: async () => {
-			if (!disposed) {
-				disposed = true;
-				const runner = session.extensionRunner;
-				if (runner.hasHandlers("session_shutdown")) {
-					await runner.emit({ type: "session_shutdown", reason: "quit" });
-				}
-				session.dispose();
-			}
-		},
-	};
 	disposables.push(handle);
 	return handle;
 }
 
 beforeAll(() => {
-	previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	root = realpathSync(mkdtempSync(join(tmpdir(), "pi-selfdrive-child-guard-")));
-	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+	restoreAgentDir = scopeAgentDir(join(root, "agent"));
 	mkdirSync(join(root, "agent"), { recursive: true });
 	repo = join(root, "repo");
 	mkdirSync(join(repo, "src"), { recursive: true });
@@ -191,8 +90,7 @@ afterEach(async () => {
 
 afterAll(() => {
 	rmSync(root, { recursive: true, force: true });
-	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+	restoreAgentDir?.();
 });
 
 describe("selfdrive child-session guard hook", () => {

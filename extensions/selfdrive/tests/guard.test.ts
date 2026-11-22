@@ -6,14 +6,12 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import {
-	createAgentSessionFromServices, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI,
-} from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { grants, publishGrant, repositoryOf, standingRegistry, withdrawGrant, type StandingApproval } from "../grants.ts";
 import { bashBlockReason, blockReason, guardRuntime, insideCheckout, reasons, registerGuard } from "../guard.ts";
-import selfdriveExtension, { runtime as selfdriveRuntime } from "../index.ts";
+import selfdriveExtension from "../index.ts";
+import { scopeAgentDir, startGuardSession, stubKeepAwake, type GuardSessionHarness } from "./support/session-harness.ts";
 
 let root: string;
 let repo: string;
@@ -1176,56 +1174,40 @@ describe("agent_browser and agent_desktop", () => {
 
 describe("the hook in a Pi session", () => {
 	it("blocks a write into the checkout while a grant exists, and stands aside without one", async () => {
-		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-		process.env.PI_CODING_AGENT_DIR = join(root, "agent");
-		const faux = fauxProvider({ api: "selfdrive-guard-api", provider: "selfdrive-guard", models: [{ id: "test" }] });
-		const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-		const services = await createAgentSessionServices({
-			cwd: repo,
-			agentDir: join(root, "agent"),
-			settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } }),
-			modelRuntime,
-			resourceLoaderOptions: {
-				noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-				extensionFactories: [(pi) => pi.registerProvider(faux.provider), registerGuard],
-			},
-		});
-		expect(services.resourceLoader.getExtensions().errors).toEqual([]);
-		const { session } = await createAgentSessionFromServices({
-			services, sessionManager: SessionManager.inMemory(repo), model: faux.getModel("test"),
-		});
+		const restoreAgentDir = scopeAgentDir(join(root, "agent"));
+		let h: GuardSessionHarness | undefined;
 		try {
-			await session.bindExtensions({});
+			h = await startGuardSession({
+				cwd: repo,
+				agentDir: join(root, "agent"),
+				api: "selfdrive-guard-api",
+				provider: "selfdrive-guard",
+				extensionFactories: [registerGuard],
+			});
 			const target = join(repo, "src", "guarded.ts");
-			const results = () => session.sessionManager.getBranch().flatMap((entry) =>
-				entry.type === "message" && entry.message.role === "toolResult"
-					? [{ isError: Boolean(entry.message.isError), text: entry.message.content.map((part) => (part.type === "text" ? part.text : "")).join("") }]
-					: []);
 
-			publishGrant({ ...grant, id: session.sessionId });
-			faux.setResponses([fauxAssistantMessage([fauxToolCall("write", { path: target, content: "x\n" })]), fauxAssistantMessage("done")]);
-			await session.prompt("write it");
+			publishGrant({ ...grant, id: h.session.sessionId });
+			h.faux.setResponses([fauxAssistantMessage([fauxToolCall("write", { path: target, content: "x\n" })]), fauxAssistantMessage("done")]);
+			await h.session.prompt("write it");
 			expect(existsSync(target)).toBe(false);
-			expect(results().at(-1)).toEqual({ isError: true, text: expect.stringContaining(`Blocked by self-driving mode: write ${target} would change your user's checkout.`) });
+			expect(h.toolResults().at(-1)).toEqual({ isError: true, text: expect.stringContaining(`Blocked by self-driving mode: write ${target} would change your user's checkout.`) });
 
-			withdrawGrant(session.sessionId);
-			faux.setResponses([fauxAssistantMessage([fauxToolCall("write", { path: target, content: "x\n" })]), fauxAssistantMessage("done")]);
-			await session.prompt("write it again");
+			withdrawGrant(h.session.sessionId);
+			h.faux.setResponses([fauxAssistantMessage([fauxToolCall("write", { path: target, content: "x\n" })]), fauxAssistantMessage("done")]);
+			await h.session.prompt("write it again");
 			expect(existsSync(target)).toBe(true);
-			expect(results().at(-1)?.isError).toBe(false);
+			expect(h.toolResults().at(-1)?.isError).toBe(false);
 		} finally {
-			session.dispose();
+			await h?.dispose();
 			rmSync(join(repo, "src", "guarded.ts"), { force: true });
-			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			restoreAgentDir();
 		}
 	});
 });
 
 describe("published standing grants", () => {
 	it("attach checkCommand backed by selfdrive's bash guard", async () => {
-		const savedKeepAwake = selfdriveRuntime.keepAwake;
-		selfdriveRuntime.keepAwake = () => ({ kill: () => {} });
+		const keepAwake = stubKeepAwake();
 		const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
 		const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
 		const pi = {
@@ -1272,15 +1254,14 @@ describe("published standing grants", () => {
 			}
 		} finally {
 			for (const handler of handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, ctx);
-			selfdriveRuntime.keepAwake = savedKeepAwake;
+			keepAwake.restore();
 		}
 	});
 
 	it("passes commonDir into published checkCommand so separate git dirs are protected", async () => {
-		const savedKeepAwake = selfdriveRuntime.keepAwake;
+		const keepAwake = stubKeepAwake();
 		const savedGitDir = process.env.GIT_DIR;
 		const savedGitWorkTree = process.env.GIT_WORK_TREE;
-		selfdriveRuntime.keepAwake = () => ({ kill: () => {} });
 
 		// A bare/external git dir paired via GIT_DIR + GIT_WORK_TREE has no `.git` file inside toplevel,
 		// so checkCommand protects `<commonDir>` internals only when publishGrant passes `[canonical(repo.commonDir)]`.
@@ -1357,7 +1338,7 @@ describe("published standing grants", () => {
 			else process.env.GIT_DIR = savedGitDir;
 			if (savedGitWorkTree === undefined) delete process.env.GIT_WORK_TREE;
 			else process.env.GIT_WORK_TREE = savedGitWorkTree;
-			selfdriveRuntime.keepAwake = savedKeepAwake;
+			keepAwake.restore();
 		}
 	});
 });

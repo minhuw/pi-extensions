@@ -6,84 +6,59 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { Type } from "typebox";
-import { InMemoryCredentialStore, type ToolCall } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseFactory, type FauxResponseStep } from "@earendil-works/pi-ai/providers/faux";
-import {
-	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
-	type CreateAgentSessionRuntimeFactory, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext,
-} from "@earendil-works/pi-coding-agent";
+import { type ToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai/providers/faux";
+import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { grants } from "../grants.ts";
-import selfdriveExtension, { runtime as selfdriveRuntime, timing } from "../index.ts";
+import selfdriveExtension, { timing } from "../index.ts";
+import {
+	scopeAgentDir,
+	sleep,
+	startSelfdriveSession,
+	stubKeepAwake,
+	textOf,
+	until,
+	type KeepAwakeCounter,
+	type KeepAwakeStub,
+} from "./support/session-harness.ts";
 
 const RULES_START = "Self-driving mode 🚗 is on. Your user is away";
 const BACK = "[selfdrive] Your user is back, so self-driving mode is off";
 const CONTINUE = "[selfdrive] Continue self-driving";
 
-type Message = { role: string; content: unknown };
-interface Request { texts: string[] }
-const textOf = ({ content }: Message) => typeof content === "string" ? content : (content as { text?: string }[]).map((part) => part.text ?? "").join("");
 const calls = (...blocks: ToolCall[]) => fauxAssistantMessage(blocks, { stopReason: "toolUse" });
 const next = (action: string, extra: Record<string, unknown> = {}) => fauxToolCall("selfdrive_next", { action, reason: "test", ...extra });
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-async function until(condition: () => boolean, timeoutMs = 4_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (!condition()) {
-		if (Date.now() > deadline) throw new Error("timed out waiting");
-		await sleep(5);
-	}
-}
 
 const savedTiming = { ...timing };
-const savedKeepAwake = selfdriveRuntime.keepAwake;
 let root: string;
-let previousAgentDir: string | undefined;
-let awake: { started: number; killed: number };
+let restoreAgentDir: (() => void) | undefined;
+let keepAwake: KeepAwakeStub | undefined;
+let awake: KeepAwakeCounter;
 const started: { dispose(): Promise<void> }[] = [];
 const agentDir = () => join(root, "agent");
 const sessionDir = () => join(root, "sessions");
 const cwd = () => join(root, "work");
 
 beforeAll(() => { Object.assign(timing, { continueMs: 30, busyRetryMs: 20, startMs: 3_000, statusMs: 60_000, minWaitSeconds: 1, maxWaitSeconds: 60 }); });
-afterAll(() => { Object.assign(timing, savedTiming); selfdriveRuntime.keepAwake = savedKeepAwake; });
+afterAll(() => { Object.assign(timing, savedTiming); });
 
 beforeEach(async () => {
 	root = await mkdtemp(join(tmpdir(), "pi-selfdrive-"));
 	await Promise.all([agentDir(), sessionDir(), cwd()].map((path) => mkdir(path)));
-	previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = agentDir();
-	awake = { started: 0, killed: 0 };
-	selfdriveRuntime.keepAwake = () => { awake.started++; return { kill: () => { awake.killed++; } }; };
+	restoreAgentDir = scopeAgentDir(agentDir());
+	keepAwake = stubKeepAwake();
+	awake = keepAwake.awake;
 });
 
 afterEach(async () => {
 	try {
 		for (const harness of started.splice(0)) await harness.dispose();
 	} finally {
-		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		keepAwake?.restore();
+		restoreAgentDir?.();
 		await rm(root, { recursive: true, force: true });
 	}
 });
-
-/** A UI context that records notifications, statuses, and confirms, whose answers the test chooses. A plain object: Pi spreads it. */
-function recordingUi() {
-	const notes: { message: string; type?: string }[] = [];
-	const statuses = new Map<string, string | undefined>();
-	const confirms: { title: string; body: string }[] = [];
-	const control = { confirm: (_title: string): Promise<boolean> => Promise.resolve(true) };
-	const noop = () => {};
-	const context = {
-		select: async () => undefined, input: async () => undefined, editor: async () => undefined, custom: async () => undefined,
-		confirm: (title: string, body: string) => { confirms.push({ title, body }); return control.confirm(title); },
-		onTerminalInput: () => noop, setWorkingMessage: noop, setWorkingVisible: noop, setWorkingIndicator: noop, setHiddenThinkingLabel: noop, setWidget: noop,
-		setFooter: noop, setHeader: noop, setTitle: noop, pasteToEditor: noop, setEditorText: noop, getEditorText: () => "",
-		addAutocompleteProvider: noop, setEditorComponent: noop, getEditorComponent: () => undefined, getAllThemes: () => [], getTheme: () => undefined,
-		setTheme: () => ({ success: false, error: "UI not available" }), getToolsExpanded: () => false, setToolsExpanded: noop,
-		notify: (message: string, type?: string) => { notes.push({ message, type }); },
-		setStatus: (key: string, text: string | undefined) => { statuses.set(key, text); },
-	} as unknown as ExtensionUIContext;
-	return { notes, statuses, confirms, control, context };
-}
 
 /** A tool that does nothing, so a run counts as work. */
 function registerProbe(pi: ExtensionAPI): void {
@@ -94,70 +69,20 @@ function registerProbe(pi: ExtensionAPI): void {
 }
 
 async function start(options: { mode?: ExtensionContext["mode"]; bindAsChild?: boolean; script?: FauxResponseStep[]; register?: (pi: ExtensionAPI) => void } = {}) {
-	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-	const faux = fauxProvider({ api: "selfdrive-test-api", provider: "selfdrive-test", models: [{ id: "test" }] });
-	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false, keepRecentTokens: 1 } });
-	const ui = recordingUi();
-	const requests: Request[] = [];
-	let api: ExtensionAPI | undefined;
-	const script = [...(options.script ?? [])];
-	const respond: FauxResponseFactory = (context, streamOptions, state, model) => {
-		const messages = context.messages as unknown as Message[];
-		requests.push({ texts: messages.filter((message) => message.role !== "system").map(textOf) });
-		const step = script.shift();
-		return typeof step === "function" ? step(context, streamOptions, state, model) : step ?? fauxAssistantMessage("ok");
-	};
-	faux.setResponses(Array.from({ length: 200 }, () => respond));
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd: runtimeCwd, agentDir: runtimeAgentDir, sessionManager, sessionStartEvent }) => {
-		const services = await createAgentSessionServices({
-			cwd: runtimeCwd, agentDir: runtimeAgentDir, settingsManager, modelRuntime,
-			resourceLoaderOptions: {
-				noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-				extensionFactories: [(pi) => { pi.registerProvider(faux.provider); api = pi; registerProbe(pi); options.register?.(pi); }, selfdriveExtension],
-			},
-		});
-		expect(services.resourceLoader.getExtensions().errors).toEqual([]);
-		const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, model: faux.getModel("test") });
-		return { ...created, services, diagnostics: services.diagnostics };
-	};
-	const runtime = await createAgentSessionRuntime(createRuntime, { cwd: cwd(), agentDir: agentDir(), sessionManager: SessionManager.create(cwd(), sessionDir()) });
-	const bind = () => runtime.session.bindExtensions(options.bindAsChild ? {} : {
-		mode: options.mode ?? "rpc",
-		uiContext: ui.context,
-		commandContextActions: {
-			waitForIdle: () => runtime.session.waitForIdle(),
-			newSession: (newOptions) => runtime.newSession(newOptions),
-			fork: (entryId, forkOptions) => runtime.fork(entryId, forkOptions),
-			navigateTree: (targetId, treeOptions) => runtime.session.navigateTree(targetId, treeOptions),
-			switchSession: (sessionPath, switchOptions) => runtime.switchSession(sessionPath, switchOptions),
-			reload: () => runtime.session.reload(),
+	const harness = await startSelfdriveSession({
+		cwd: cwd(),
+		agentDir: agentDir(),
+		sessionDir: sessionDir(),
+		keepRecentTokens: 1,
+		mode: options.mode,
+		bindAsChild: options.bindAsChild,
+		script: options.script,
+		extensionFactories: [selfdriveExtension],
+		register: (pi) => {
+			registerProbe(pi);
+			options.register?.(pi);
 		},
 	});
-	runtime.setRebindSession(bind);
-	await bind();
-	let disposed = false;
-	const branch = () => runtime.session.sessionManager.getBranch();
-	const harness = {
-		runtime, requests, script, ...ui,
-		get session() { return runtime.session; },
-		get status() { return ui.statuses.get("selfdrive"); },
-		activeTools: () => api!.getActiveTools(),
-		get lastNote() { return ui.notes.at(-1); },
-		get grant() { return grants().find((grant) => grant.id === runtime.session.sessionManager.getSessionId()); },
-		command: (text: string) => runtime.session.prompt(text),
-		/** Wait until the provider saw `count` requests and the session settled. */
-		async settle(count: number) {
-			await until(() => requests.length >= count);
-			await runtime.session.waitForIdle();
-			await sleep(10);
-			expect(requests.length).toBe(count);
-		},
-		entries: () => branch().flatMap((entry) => entry.type === "custom" && entry.customType === "selfdrive" ? [entry.data as Record<string, unknown>] : []),
-		tasks: () => branch().flatMap((entry) => entry.type === "custom" && entry.customType === "selfdrive-task" ? [entry.data as Record<string, unknown>] : []),
-		toolResults: () => branch().flatMap((entry) => entry.type === "message" && entry.message.role === "toolResult" ? [entry.message] : []),
-		messages: () => branch().flatMap((entry) => entry.type === "custom_message" && entry.customType === "selfdrive" ? [{ content: entry.content as string, details: entry.details as Record<string, unknown> }] : []),
-		dispose: async () => { if (!disposed) { disposed = true; await runtime.dispose(); } },
-	};
 	started.push(harness);
 	return harness;
 }

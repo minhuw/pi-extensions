@@ -6,16 +6,18 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { InMemoryCredentialStore, type Context, type ToolCall } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseFactory, type FauxResponseStep } from "@earendil-works/pi-ai/providers/faux";
-import {
-	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
-	type CreateAgentSessionRuntimeFactory, type ExtensionUIContext,
-} from "@earendil-works/pi-coding-agent";
+import { type Context, type ToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai/providers/faux";
 import { openRun } from "../../herder/src/run/store.ts";
 import { createGitFixture, type GitFixture } from "../../herder/tests/support/git-fixture.ts";
 import { grants } from "../grants.ts";
 import { reasons } from "../guard.ts";
+import {
+	scopeAgentDir,
+	startSelfdriveSession,
+	textOf,
+	type RecordedToolResult as ToolResult,
+} from "./support/session-harness.ts";
 
 const SELFDRIVE = fileURLToPath(new URL("../index.ts", import.meta.url));
 const HERDER = fileURLToPath(new URL("../../herder/index.ts", import.meta.url));
@@ -35,18 +37,7 @@ Readers want the README to match the code.
 `;
 const PLAN = "# Plan\n\n- [ ] T1 (AC-1) Rewrite the README\n";
 
-type Message = { role: string; content: unknown };
-type ToolResult = { role: "toolResult"; toolName: string; isError: boolean; content: { type: string; text?: string }[]; details?: Record<string, unknown> };
-const textOf = ({ content }: { content: unknown }) => typeof content === "string" ? content : (content as { text?: string }[]).map((part) => part.text ?? "").join("");
 const calls = (...blocks: ToolCall[]) => fauxAssistantMessage(blocks, { stopReason: "toolUse" });
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-async function until(condition: () => boolean, timeoutMs = 20_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (!condition()) {
-		if (Date.now() > deadline) throw new Error("timed out waiting");
-		await sleep(5);
-	}
-}
 /** The artifact path the latest `herder_run start` result names, read from the provider's context like a model would. */
 function artifactPath(context: Context, name: "goal.md" | "plan.md"): string {
 	const result = [...context.messages].reverse().find((message) => message.role === "toolResult" && message.toolName === "herder_run");
@@ -57,15 +48,14 @@ function artifactPath(context: Context, name: "goal.md" | "plan.md"): string {
 
 let root: string;
 let fixture: GitFixture;
-let previousAgentDir: string | undefined;
+let restoreAgentDir: (() => void) | undefined;
 let previousPath: string | undefined;
 const started: { dispose(): Promise<void> }[] = [];
 
 beforeEach(async () => {
 	root = await mkdtemp(join(tmpdir(), "pi-selfdrive-herder-"));
 	await Promise.all(["agent", "sessions", "bin"].map((name) => mkdir(join(root, name))));
-	previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+	restoreAgentDir = scopeAgentDir(join(root, "agent"));
 	// The by-path module is not the one this file imports, so its keep-awake cannot be replaced: shadow caffeinate instead.
 	writeFileSync(join(root, "bin", "caffeinate"), "#!/bin/sh\nexit 0\n");
 	chmodSync(join(root, "bin", "caffeinate"), 0o755);
@@ -79,91 +69,24 @@ afterEach(async () => {
 		for (const harness of started.splice(0)) await harness.dispose();
 	} finally {
 		fixture.cleanup();
-		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		restoreAgentDir?.();
 		process.env.PATH = previousPath;
 		await rm(root, { recursive: true, force: true });
 	}
 });
 
-/** A UI context that records notifications and confirms, whose answers the test chooses. A plain object: Pi spreads it. */
-function recordingUi() {
-	const notes: { message: string; type?: string }[] = [];
-	const confirms: { title: string; body: string }[] = [];
-	const control = { confirm: (_title: string): Promise<boolean> => Promise.resolve(true) };
-	const noop = () => {};
-	const context = {
-		select: async () => undefined, input: async () => undefined, editor: async () => undefined, custom: async () => undefined,
-		confirm: (title: string, body: string) => { confirms.push({ title, body }); return control.confirm(title); },
-		onTerminalInput: () => noop, setWorkingMessage: noop, setWorkingVisible: noop, setWorkingIndicator: noop, setHiddenThinkingLabel: noop, setWidget: noop,
-		setFooter: noop, setHeader: noop, setTitle: noop, pasteToEditor: noop, setEditorText: noop, getEditorText: () => "",
-		addAutocompleteProvider: noop, setEditorComponent: noop, getEditorComponent: () => undefined, getAllThemes: () => [], getTheme: () => undefined,
-		setTheme: () => ({ success: false, error: "UI not available" }), getToolsExpanded: () => false, setToolsExpanded: noop,
-		notify: (message: string, type?: string) => { notes.push({ message, type }); }, setStatus: noop,
-	} as unknown as ExtensionUIContext;
-	return { notes, confirms, control, context };
-}
-
 async function start(script: FauxResponseStep[]) {
-	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-	const faux = fauxProvider({ api: "selfdrive-herder-test-api", provider: "selfdrive-herder-test", models: [{ id: "test" }] });
-	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false, keepRecentTokens: 1 } });
-	const ui = recordingUi();
-	const requests: string[][] = [];
-	const respond: FauxResponseFactory = (context, streamOptions, state, model) => {
-		requests.push((context.messages as unknown as Message[]).filter((message) => message.role !== "system").map(textOf));
-		const step = script.shift();
-		return typeof step === "function" ? step(context, streamOptions, state, model) : step ?? fauxAssistantMessage("ok");
-	};
-	faux.setResponses(Array.from({ length: 200 }, () => respond));
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd: runtimeCwd, agentDir: runtimeAgentDir, sessionManager, sessionStartEvent }) => {
-		const services = await createAgentSessionServices({
-			cwd: runtimeCwd, agentDir: runtimeAgentDir, settingsManager, modelRuntime,
-			resourceLoaderOptions: {
-				noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-				additionalExtensionPaths: [SELFDRIVE, HERDER],
-				extensionFactories: [(pi) => { pi.registerProvider(faux.provider); }],
-			},
-		});
-		expect(services.resourceLoader.getExtensions().errors).toEqual([]);
-		const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, model: faux.getModel("test") });
-		return { ...created, services, diagnostics: services.diagnostics };
-	};
-	const runtime = await createAgentSessionRuntime(createRuntime, { cwd: fixture.dir, agentDir: join(root, "agent"), sessionManager: SessionManager.create(fixture.dir, join(root, "sessions")) });
-	const bind = () => runtime.session.bindExtensions({
-		mode: "rpc",
-		uiContext: ui.context,
-		commandContextActions: {
-			waitForIdle: () => runtime.session.waitForIdle(),
-			newSession: (newOptions) => runtime.newSession(newOptions),
-			fork: (entryId, forkOptions) => runtime.fork(entryId, forkOptions),
-			navigateTree: (targetId, treeOptions) => runtime.session.navigateTree(targetId, treeOptions),
-			switchSession: (sessionPath, switchOptions) => runtime.switchSession(sessionPath, switchOptions),
-			reload: () => runtime.session.reload(),
-		},
+	const harness = await startSelfdriveSession({
+		cwd: fixture.dir,
+		agentDir: join(root, "agent"),
+		sessionDir: join(root, "sessions"),
+		api: "selfdrive-herder-test-api",
+		provider: "selfdrive-herder-test",
+		keepRecentTokens: 1,
+		settleTimeoutMs: 20_000,
+		additionalExtensionPaths: [SELFDRIVE, HERDER],
+		script,
 	});
-	runtime.setRebindSession(bind);
-	await bind();
-	let disposed = false;
-	const branch = () => runtime.session.sessionManager.getBranch();
-	const harness = {
-		requests, ...ui,
-		get session() { return runtime.session; },
-		get id() { return runtime.session.sessionManager.getSessionId(); },
-		get grant() { return grants().find((grant) => grant.id === runtime.session.sessionManager.getSessionId()); },
-		command: (text: string) => runtime.session.prompt(text),
-		/** Wait until the provider saw `count` requests and the session settled. */
-		async settle(count: number) {
-			await until(() => requests.length >= count);
-			await runtime.session.waitForIdle();
-			await sleep(10);
-			expect(requests.length).toBe(count);
-		},
-		/** Tool results on the branch, in order. */
-		results: () => branch().flatMap((entry) => entry.type === "message" && entry.message.role === "toolResult" ? [entry.message as unknown as ToolResult] : []),
-		modes: () => branch().flatMap((entry) => entry.type === "custom" && entry.customType === "selfdrive" ? [entry.data as Record<string, unknown>] : []),
-		dispose: async () => { if (!disposed) { disposed = true; await runtime.dispose(); } },
-	};
 	started.push(harness);
 	return harness;
 }
@@ -205,7 +128,7 @@ describe("selfdrive with Herder", () => {
 		expect(grant.text).toContain("Focus: fix the docs.");
 		await h.settle(10);
 
-		const results = h.results();
+		const results = h.toolResults();
 		expect(results.map((result) => [result.toolName, result.isError])).toEqual([
 			["herder_run", false], ["write", false], ["herder_run", false],
 			["write", true], ["bash", true], ["write", false], ["herder_deliver", true], ["herder_run", false],
@@ -242,11 +165,11 @@ describe("selfdrive with Herder", () => {
 
 		// 4. The user's own input ends the mode and withdraws the grant; a fresh run's goal asks the user again.
 		await h.session.prompt("I'm back: start another run", { source: "interactive" });
-		expect(h.modes().at(-1)).toMatchObject({ active: false, reason: "returned" });
+		expect(h.entries().at(-1)).toMatchObject({ active: false, reason: "returned" });
 		expect(grants().some((value) => value.id === grant.id)).toBe(false);
 		await h.settle(14);
-		expect(h.requests[10]!.at(-1)).toBe("I'm back: start another run");
-		const later = h.results().slice(results.length);
+		expect(h.requests[10]!.texts.at(-1)).toBe("I'm back: start another run");
+		const later = h.toolResults().slice(results.length);
 		expect(later.map((result) => [result.toolName, result.isError])).toEqual([["herder_run", false], ["write", false], ["herder_run", false]]);
 		const runId2 = later[0]!.details!.runId as string;
 		expect(runId2).not.toBe(runId);
