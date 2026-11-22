@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { expect, it, vi } from "vitest";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import { hookStatus, resolveAuditLogPath } from "../src/project.ts";
+import { hookStatus, physicalPath, resolveAuditLogPath } from "../src/project.ts";
 import { detectorFixture } from "./support/detector-fixture.ts";
 import { isolateEngineEnvironment } from "./support/engine-environment.ts";
 
@@ -63,6 +63,7 @@ it("confines shared repo hook.auditLog paths while allowing trusted local and en
 	await symlink(path.join(outside, "multi-hop.ndjson"), path.join(root, "hop2"));
 	await symlink("loop-b", path.join(root, "loop-a"));
 	await symlink("loop-a", path.join(root, "loop-b"));
+	await symlink("missing/../dangling-loop", path.join(root, "dangling-loop"));
 	await symlink(path.join(root, "logs/real.ndjson"), path.join(root, "internal-link.ndjson"));
 
 	vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
@@ -83,6 +84,7 @@ it("confines shared repo hook.auditLog paths while allowing trusted local and en
 			"nested/rel-link.ndjson",
 			"hop1",
 			"loop-a",
+			"dangling-loop",
 		]) {
 			await expect(resolveAuditLogPath(root, { path: bad, source: "shared" }), bad).rejects.toThrow();
 		}
@@ -99,6 +101,31 @@ it("confines shared repo hook.auditLog paths while allowing trusted local and en
 		}
 	} finally {
 		vi.restoreAllMocks();
+		await rm(base, { recursive: true, force: true });
+	}
+});
+
+it("resolves dangling symlinks and guards against symlink loops in physicalPath", async () => {
+	const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-impeccable-physical-path-")));
+	const root = path.join(base, "project");
+	const outside = path.join(base, "outside");
+	await mkdir(path.join(root, "nested"), { recursive: true });
+	await mkdir(outside, { recursive: true });
+	try {
+		await symlink(path.join(outside, "missing-dir"), path.join(root, "dangling-dir"));
+		await symlink("../../outside/missing.json", path.join(root, "nested/dangling-rel.json"));
+		await symlink("hop2", path.join(root, "hop1"));
+		await symlink(path.join(outside, "multi-hop.json"), path.join(root, "hop2"));
+		await symlink("loop-b", path.join(root, "loop-a"));
+		await symlink("loop-a", path.join(root, "loop-b"));
+		await symlink("missing/../dangling-loop", path.join(root, "dangling-loop"));
+
+		expect(await physicalPath(path.join(root, "dangling-dir/sub/leaf.json"))).toBe(path.join(outside, "missing-dir/sub/leaf.json"));
+		expect(await physicalPath(path.join(root, "nested/dangling-rel.json"))).toBe(path.join(outside, "missing.json"));
+		expect(await physicalPath(path.join(root, "hop1"))).toBe(path.join(outside, "multi-hop.json"));
+		await expect(physicalPath(path.join(root, "loop-a"))).rejects.toMatchObject({ code: "ELOOP" });
+		await expect(physicalPath(path.join(root, "dangling-loop"))).rejects.toThrow("Too many symbolic links");
+	} finally {
 		await rm(base, { recursive: true, force: true });
 	}
 });

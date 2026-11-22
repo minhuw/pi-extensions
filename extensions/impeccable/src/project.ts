@@ -337,29 +337,6 @@ export async function hookStatus(root: string, signal?: AbortSignal) {
 	return hookStatusFromConfigs(root, await readConfigs(root, signal));
 }
 
-/** Resolve a path to its canonical physical target, following existing and dangling symlinks. */
-async function resolvePhysicalTarget(file: string, depth = 0): Promise<string> {
-	if (depth > 40) throw new Error(`Too many symbolic links while resolving ${file}`);
-	const resolved = path.resolve(file);
-	try { return await realpath(resolved); }
-	catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-	const parent = path.dirname(resolved);
-	if (parent === resolved) return resolved;
-	const physicalParent = await resolvePhysicalTarget(parent, depth);
-	const candidate = path.join(physicalParent, path.basename(resolved));
-	try {
-		const info = await lstat(candidate);
-		if (info.isSymbolicLink()) {
-			const linkTarget = await readlink(candidate);
-			return resolvePhysicalTarget(path.resolve(physicalParent, linkTarget), depth + 1);
-		}
-		return candidate;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return candidate;
-		throw error;
-	}
-}
-
 /** Confine repo-tracked .impeccable/config.json hook.auditLog to the canonical project root. */
 export async function resolveAuditLogPath(root: string, auditLog: HookAuditLog): Promise<string> {
 	if (auditLog.source !== "shared") {
@@ -372,7 +349,7 @@ export async function resolveAuditLogPath(root: string, auditLog: HookAuditLog):
 		throw new Error(`Refusing repository hook.auditLog ${JSON.stringify(auditLog.path)}: tilde expansion is not allowed in .impeccable/config.json`);
 	}
 	const canonicalRoot = await realpath(root);
-	const destination = await resolvePhysicalTarget(path.resolve(canonicalRoot, auditLog.path));
+	const destination = await physicalPath(path.resolve(canonicalRoot, auditLog.path));
 	const relative = path.relative(canonicalRoot, destination);
 	if (!relative || outside(relative)) {
 		throw new Error(`Refusing repository hook.auditLog ${JSON.stringify(auditLog.path)}: destination escapes project root ${canonicalRoot}`);
@@ -438,14 +415,26 @@ export function patchJson(text: string, next: ObjectValue): string {
 	return text;
 }
 
-/** Resolve missing files through their nearest existing physical ancestor too. */
-export async function physicalPath(file: string): Promise<string> {
-	try { return await realpath(file); }
-	catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		const parent = path.dirname(file);
-		if (parent === file) throw error;
-		return path.join(await physicalPath(parent), path.basename(file));
+/** Resolve a path to its canonical physical target, following existing and dangling symlinks. */
+export async function physicalPath(file: string, depth = 0): Promise<string> {
+	if (depth > 40) throw new Error(`Too many symbolic links while resolving ${file}`);
+	const resolved = path.resolve(file);
+	try { return await realpath(resolved); }
+	catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+	const parent = path.dirname(resolved);
+	if (parent === resolved) return resolved;
+	const physicalParent = await physicalPath(parent, depth);
+	const candidate = path.join(physicalParent, path.basename(resolved));
+	try {
+		const info = await lstat(candidate);
+		if (info.isSymbolicLink()) {
+			const linkTarget = await readlink(candidate);
+			return physicalPath(path.resolve(physicalParent, linkTarget), depth + 1);
+		}
+		return candidate;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return candidate;
+		throw error;
 	}
 }
 
