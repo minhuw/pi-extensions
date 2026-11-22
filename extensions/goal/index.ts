@@ -67,7 +67,7 @@ function matches(target: Target, identity: string, key: string): boolean {
 export default function goalExtension(pi: ExtensionAPI): void {
  let goal: Goal | undefined;
  let broken = false, uiDepth = 0, owned = false, preparing = false, inactiveSent = false;
- let abortable = false, completedInRun = false;
+ let completedInRun = false;
  let wake: string | undefined;
  let lastAnswer = "", currentAnswer = "", repeated = 0, didWork = false;
  let lastFailure = "", failures = 0, lastInspections: string | undefined, inspections = "";
@@ -95,7 +95,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
   save(ctx);
   ctx.ui.notify(`Goal ${state}: ${reason}`, state === "completed" || state === "stopped" ? "info" : "warning");
  }
- function abortOwned(ctx: ExtensionContext) { if (owned && abortable) ctx.abort(); }
+ function abortOwned(ctx: ExtensionContext) { if (owned) ctx.abort(); }
  const modeListener = (id: string) => {
   if (id === sessionId && selfdrive() && goal?.state === "active" && sessionCtx) {
    change(sessionCtx, "paused", "Selfdrive enabled; turn it off and resume Goal explicitly");
@@ -105,7 +105,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
  function detach() { registry().listeners.delete(modeListener); sessionCtx = undefined; sessionId = undefined; }
  function restore(ctx: ExtensionContext) {
   detach(); sessionCtx = ctx; sessionId = ctx.sessionManager.getSessionId(); registry().listeners.add(modeListener);
-  goal = undefined; broken = false; owned = false; abortable = false; completedInRun = false; wake = undefined; preparing = false; inactiveSent = false; uiDepth = 0;
+  goal = undefined; broken = false; owned = false; completedInRun = false; wake = undefined; preparing = false; inactiveSent = false; uiDepth = 0;
   lastAnswer = ""; currentAnswer = ""; repeated = 0; didWork = false; lastFailure = ""; failures = 0; lastInspections = undefined; inspections = ""; calls.clear(); waiting = undefined; seen.clear(); consumed.clear();
   try {
    goal = readGoal(ctx);
@@ -200,17 +200,17 @@ export default function goalExtension(pi: ExtensionAPI): void {
   if (event.messageType === "custom" && event.message.customType === MESSAGE) {
    if (!preparing || goal?.state !== "active") { ctx.abort(); return; }
    activateTool();
-   preparing = false; owned = true; abortable = true; inactiveSent = false; return;
+   preparing = false; owned = true; inactiveSent = false; return;
   }
   const match = event.messageType === "custom" ? observe(event.message.customType, event.message.details) : undefined;
   if (match && (ctx.hasPendingMessages() || uiDepth)) wake = match;
   else if (match && activateWake(ctx, match)) {
    activateTool();
-   owned = true; abortable = true; completedInRun = false; inactiveSent = false;
+   owned = true; completedInRun = false; inactiveSent = false;
    return { message: { customType: MESSAGE, content: instruction(goal!), display: false } };
   }
   if (goal?.state === "active") change(ctx, "paused", "user or another prompt took over; resume to continue");
-  owned = false; abortable = false; completedInRun = false; preparing = false;
+  owned = false; completedInRun = false; preparing = false;
  });
  pi.on("message_start", (event, ctx) => {
   if (event.message.role === "custom") {
@@ -273,7 +273,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
  pi.on("agent_settled", (event, ctx) => {
   if (owned && event.aborted && completedInRun && goal?.state === "completed") change(ctx, "paused", `completion uncertain: agent aborted after reported completion: ${goal.reason}`);
   else if (owned && event.aborted && goal?.state === "active") change(ctx, "paused", "agent interrupted; resume to continue");
-  owned = false; abortable = false; completedInRun = false; preparing = false; calls.clear();
+  owned = false; completedInRun = false; preparing = false; calls.clear();
   if (wake && goal?.state === "waiting") {
    if (event.aborted) { change(ctx, "paused", "interruption before pending wake; resume to continue"); return; }
    if (ctx.hasPendingMessages() || uiDepth) return;
