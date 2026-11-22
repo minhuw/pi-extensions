@@ -1,5 +1,4 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -12,7 +11,7 @@ import type { RoleDefinition, Vcs } from "../../src/types.ts";
 import { hasHerderTrailer } from "../../src/vcs/git.ts";
 import { isolateGitConfig } from "../support/env.ts";
 import { FakeRunner, type FakeRule, fakeRole } from "../support/fake-runner.ts";
-import { type GitFixture, withGitFixture } from "../support/git-fixture.ts";
+import { checkout, type GitFixture, withGitFixture } from "../support/git-fixture.ts";
 import { check, events, type Run, setupRun, stepCommit } from "../support/helpers.ts";
 
 isolateGitConfig();
@@ -74,16 +73,6 @@ const run_ = (run: Run, request: DeliveryRequest, options?: Options) => {
 	const d = deps(run, options);
 	return deliver(d.deps, request).then((outcome) => ({ outcome, summaries: d.summaries }));
 };
-
-/** HEAD, branch, branch list, index bytes, and status of the user's checkout (invariant 1). */
-function checkout(fixture: GitFixture) {
-	const status = fixture.status();
-	return {
-		status, head: fixture.head(), branch: fixture.git("symbolic-ref", "-q", "--short", "HEAD"),
-		branches: fixture.git("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"),
-		index: createHash("sha256").update(readFileSync(join(fixture.commonDir, "index"))).digest("hex"),
-	};
-}
 
 function expectCleanedUp(run: Run) {
 	expect(run.fixture.git("for-each-ref", `refs/herder/${run.runId}`)).toBe("");

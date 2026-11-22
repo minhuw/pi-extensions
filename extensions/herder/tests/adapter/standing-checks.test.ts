@@ -1,53 +1,32 @@
 // Standing-approval check-command validation across approve_goal and runCheck via the standing-approval contract.
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { blockedCheckCommand, standingRegistry, type StandingApproval } from "../../src/adapter/standing.ts";
 import { runCheck } from "../../src/checks/runner.ts";
 import { openRun } from "../../src/run/store.ts";
-import type { CheckSpec, OutputStore } from "../../src/types.ts";
-import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
+import type { CheckSpec } from "../../src/types.ts";
+import { type GitFixture, useGitFixtures } from "../support/git-fixture.ts";
+import { tempOutputs } from "../support/helpers.ts";
 import { harness } from "./harness.ts";
 
-const fixtures: GitFixture[] = [];
-const cleanups: Array<() => Promise<void> | void> = [];
-
-afterEach(async () => {
-	standingRegistry().grants.clear();
-	for (const cleanup of cleanups.splice(0)) await cleanup();
-	for (const fixture of fixtures.splice(0)) fixture.cleanup();
-});
+const fixtures = useGitFixtures({ beforeCleanup: () => { standingRegistry().grants.clear(); } });
 
 function repo(): GitFixture {
-	const fixture = createGitFixture();
-	fixtures.push(fixture);
-	return fixture;
+	return fixtures.create();
 }
 
 function session(fixture: GitFixture, options: Partial<Parameters<typeof harness>[0]> = {}) {
 	const h = harness({ cwd: fixture.dir, ...options });
-	cleanups.push(h.shutdown);
+	fixtures.cleanup(h.shutdown);
 	return h;
 }
 
 function tempDir(prefix: string): string {
 	const dir = mkdtempSync(join(tmpdir(), prefix));
-	cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+	fixtures.cleanup(() => rmSync(dir, { recursive: true, force: true }));
 	return dir;
-}
-
-function tempOutputs(dir: string): OutputStore {
-	return {
-		put(content) {
-			const ref = `outputs/${createHash("sha256").update(content).digest("hex")}.txt`;
-			mkdirSync(join(dir, "outputs"), { recursive: true });
-			writeFileSync(join(dir, ref), content);
-			return ref;
-		},
-		read: (ref) => readFileSync(join(dir, ref), "utf8"),
-	};
 }
 
 const AUTHORIZATION = "The user lets this session implement and verify Herder runs in this repository while away; delivery waits for their return.";

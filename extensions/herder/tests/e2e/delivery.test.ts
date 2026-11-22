@@ -1,27 +1,21 @@
 // create → approve → plan → launch → verify → deliver, through the real extension with a fake runner.
 import { writeFileSync } from "node:fs";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { readLock } from "../../src/run/lock.ts";
 import { integrationRef } from "../../src/run/paths.ts";
 import { FakeRunner } from "../support/fake-runner.ts";
-import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
+import { type GitFixture, useGitFixtures } from "../support/git-fixture.ts";
 import {
 	approve, checkout, expectCleanedUp, expectRuntimeViews, expectUntouched, GOAL, launchAndWait, openSession, PLAN, README, rules, SCRIPT, startRun,
 	type Session, type Started,
 } from "./support.ts";
 
-const fixtures: GitFixture[] = [];
-const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => {
-	for (const cleanup of cleanups.splice(0)) await cleanup();
-	for (const fixture of fixtures.splice(0)) fixture.cleanup();
-});
+const fixtures = useGitFixtures();
 
 function setup() {
-	const fixture = createGitFixture();
-	fixtures.push(fixture);
+	const fixture = fixtures.create();
 	const runner = new FakeRunner(rules());
-	const h = openSession(fixture, runner, cleanups);
+	const h = openSession(fixture, runner, fixtures);
 	return { fixture, runner, h, before: checkout(fixture), base: fixture.head() };
 }
 
@@ -129,7 +123,7 @@ describe("end to end: series delivery", () => {
 	it("refuses delivery in a non-interactive session", async () => {
 		const { fixture, runner, h, before } = setup();
 		const { run } = await verified(h, fixture, before);
-		const print = openSession(fixture, runner, cleanups, { sessionId: "session-print", hasUI: false });
+		const print = openSession(fixture, runner, fixtures, { sessionId: "session-print", hasUI: false });
 		const journal = run.journal.read().length;
 		await expect(print.tool("herder_deliver", { mode: "series" })).rejects.toThrow(/interactive session/);
 		await expect(print.tool("herder_run", { action: "approve_goal" })).rejects.toThrow();
@@ -195,8 +189,7 @@ describe("end to end: other delivery modes", () => {
 
 describe("end to end: concurrent runs across sessions", () => {
 	it("runs two sessions concurrently from the same base and replays the second series delivery onto the first", async () => {
-		const fixture = createGitFixture();
-		fixtures.push(fixture);
+		const fixture = fixtures.create();
 		const base = fixture.head();
 		const before = checkout(fixture);
 
@@ -206,8 +199,8 @@ describe("end to end: concurrent runs across sessions", () => {
 		const runnerB = new FakeRunner([
 			{ match: "Create farewell.txt", files: { "farewell.txt": "goodbye\n" }, text: "created farewell.txt" },
 		]);
-		const a = openSession(fixture, runnerA, cleanups, { sessionId: "session-a" });
-		const b = openSession(fixture, runnerB, cleanups, { sessionId: "session-b" });
+		const a = openSession(fixture, runnerA, fixtures, { sessionId: "session-a" });
+		const b = openSession(fixture, runnerB, fixtures, { sessionId: "session-b" });
 
 		const startedA = await startRun(a, fixture, "Greet the user");
 		const startedB = await startRun(b, fixture, "Bid farewell");

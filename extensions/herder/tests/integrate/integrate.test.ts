@@ -7,7 +7,7 @@ import type { FaultPoint, Faults, StepResult } from "../../src/types.ts";
 import { hasHerderTrailer } from "../../src/vcs/git.ts";
 import { isolateGitConfig } from "../support/env.ts";
 import { withGitFixture } from "../support/git-fixture.ts";
-import { check, events, type Run, setupRun, show, stepCommit } from "./support.ts";
+import { check, events, type Run, setupRun, show, stepCommit } from "../support/helpers.ts";
 
 isolateGitConfig();
 

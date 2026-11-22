@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { EXTERNAL_AGENTS, externalAgents, StepAgents, type ExternalAgent, type ExternalAgentRegistry } from "../../src/adapter/external-agents.ts";
 import { EXTERNAL_AGENT_TTL_MS } from "../../src/config.ts";
 import { activeRun, openRun } from "../../src/run/store.ts";
-import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
+import { useGitFixtures } from "../support/git-fixture.ts";
 import { harness, VALID_GOAL } from "./harness.ts";
 
 const SCOPE = { ownerSessionId: "session-a", runId: "run-1", launch: 2 };
@@ -130,18 +130,12 @@ describe("StepAgents", () => {
 });
 
 describe("the adapter's external agents", () => {
-	const fixtures: GitFixture[] = [];
-	const cleanups: Array<() => Promise<void>> = [];
-	afterEach(async () => {
-		for (const cleanup of cleanups.splice(0)) await cleanup();
-		for (const fixture of fixtures.splice(0)) fixture.cleanup();
-	});
+	const fixtures = useGitFixtures();
 
 	async function launched(options: Parameters<typeof harness>[0]["options"] = {}) {
-		const fixture = createGitFixture();
-		fixtures.push(fixture);
+		const fixture = fixtures.create();
 		const h = harness({ cwd: fixture.dir, options });
-		cleanups.push(h.shutdown);
+		fixtures.cleanup(h.shutdown);
 		await h.command("add a greeting to the CLI");
 		const run = openRun(fixture.commonDir, activeRun(fixture.commonDir)!);
 		writeFileSync(run.paths.goal, VALID_GOAL);

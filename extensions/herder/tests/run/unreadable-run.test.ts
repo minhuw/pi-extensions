@@ -1,31 +1,24 @@
 // A run whose journal cannot be read is still a run: it blocks a new one, is reported where "no run" would be, and goes
 // with `/herder clean <runId>`.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createRuntimeFactory } from "../../src/adapter/runtime.ts";
 import { JOURNAL_SCHEMA_VERSION } from "../../src/config.ts";
 import { baseRef, integrationRef, refPrefix, worktreePath } from "../../src/run/paths.ts";
 import { createRun, listRuns, openRun, type RunStore } from "../../src/run/store.ts";
 import { harness } from "../adapter/harness.ts";
-import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
+import { type GitFixture, useGitFixtures } from "../support/git-fixture.ts";
 
-const fixtures: GitFixture[] = [];
-const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => {
-	for (const cleanup of cleanups.splice(0)) await cleanup();
-	for (const fixture of fixtures.splice(0)) fixture.cleanup();
-});
+const fixtures = useGitFixtures();
 
 function repository(): GitFixture {
-	const fixture = createGitFixture();
-	fixtures.push(fixture);
-	return fixture;
+	return fixtures.create();
 }
 
 /** A session on the real runtime, so that a run it starts owns its refs. */
 function session(fixture: GitFixture, sessionId = "session-b") {
 	const h = harness({ cwd: fixture.dir, sessionId, options: { createRuntime: createRuntimeFactory({ roles: () => new Map() }) } });
-	cleanups.push(h.shutdown);
+	fixtures.cleanup(h.shutdown);
 	return h;
 }
 type Session = ReturnType<typeof session>;

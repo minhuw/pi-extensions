@@ -1,11 +1,12 @@
 // Vitest-free test helpers shared across Herder suites and child processes.
-import { mkdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { loadRoles } from "../../src/agents/roles.ts";
 import { baseRef, integrationRef, worktreePath } from "../../src/run/paths.ts";
 import { createRun, type RunStore } from "../../src/run/store.ts";
-import type { CheckSpec, JournalEvent, JournalEventType, RoleDefinition, Vcs } from "../../src/types.ts";
+import type { CheckSpec, JournalEvent, JournalEventType, OutputStore, RoleDefinition, Vcs } from "../../src/types.ts";
 import { openVcs } from "../../src/vcs/git.ts";
 import type { GitFixture } from "./git-fixture.ts";
 
@@ -99,4 +100,19 @@ export function stepCommit(run: Run, base: string, files: Record<string, string 
 
 export function events<T extends JournalEventType>(store: RunStore, t: T): Extract<JournalEvent, { t: T }>[] {
 	return store.journal.read().filter((event): event is Extract<JournalEvent, { t: T }> => event.t === t);
+}
+
+/** Contents of `file` at `commit`. */
+export const show = (run: Run, commit: string, file: string) => run.fixture.git("show", `${commit}:${file}`);
+
+export function tempOutputs(dir: string): OutputStore {
+	return {
+		put(content) {
+			const ref = `outputs/${createHash("sha256").update(content).digest("hex")}.txt`;
+			mkdirSync(join(dir, "outputs"), { recursive: true });
+			writeFileSync(join(dir, ref), content);
+			return ref;
+		},
+		read: (ref) => readFileSync(join(dir, ref), "utf8"),
+	};
 }

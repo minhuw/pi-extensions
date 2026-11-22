@@ -10,7 +10,7 @@ import {
 	checkGitVersion, GitError, hasHerderTrailer, openVcs, projectNameFromConfig, RefConflictError, repositoryName, requireGit, savedProjectName,
 } from "../../src/vcs/git.ts";
 import { isolateGitConfig } from "../support/env.ts";
-import { type GitFixture, withGitFixture } from "../support/git-fixture.ts";
+import { checkout, type GitFixture, withGitFixture } from "../support/git-fixture.ts";
 
 // The cases pika's projectFromCommonDir tests share (extensions/pika/tests/repository.test.ts): a run's `repo` is a session's project.
 const PROJECT_NAMES = JSON.parse(readFileSync(new URL("../../../../services/pika/docs/project-names.json", import.meta.url), "utf8")) as {
@@ -26,12 +26,6 @@ isolateGitConfig();
 const herderRoot = (fixture: GitFixture) => join(fixture.commonDir, "herder", "worktrees");
 const slot = (fixture: GitFixture, name = "s1", runId = "20260101-000000-abcd") => join(herderRoot(fixture), runId, name);
 
-/** HEAD, branch, and index bytes of the user's checkout; compare before and after, then expect `status()` empty. */
-function checkout(fixture: GitFixture) {
-	fixture.status(); // let git refresh the index first so later comparisons see only real writes
-	return { head: fixture.head(), branch: fixture.git("symbolic-ref", "-q", "HEAD"), index: createHash("sha256").update(readFileSync(join(fixture.commonDir, "index"))).digest("hex") };
-}
-
 /** Runs `fn` against a fresh repository (after `setup`) and asserts the user's checkout was left untouched. */
 function untouched(fn: (fixture: GitFixture, vcs: Vcs) => void, files?: Record<string, string>, setup?: (fixture: GitFixture) => void) {
 	return withGitFixture((fixture) => {
@@ -40,7 +34,7 @@ function untouched(fn: (fixture: GitFixture, vcs: Vcs) => void, files?: Record<s
 		const before = checkout(fixture);
 		fn(fixture, vcs);
 		const indexAfter = createHash("sha256").update(readFileSync(join(fixture.commonDir, "index"))).digest("hex");
-		expect({ ...checkout(fixture), index: indexAfter }).toEqual(before);
+		expect({ ...checkout(fixture), branches: before.branches, index: indexAfter }).toEqual(before);
 		expect(fixture.status()).toBe("");
 	}, files);
 }

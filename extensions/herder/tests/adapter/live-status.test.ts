@@ -1,29 +1,23 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { externalAgents } from "../../src/adapter/external-agents.ts";
 import { createRuntimeFactory } from "../../src/adapter/runtime.ts";
 import { STATUS_KEY } from "../../src/config.ts";
 import { activeRun, openRun } from "../../src/run/store.ts";
 import { FakeRunner } from "../support/fake-runner.ts";
-import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
+import { useGitFixtures } from "../support/git-fixture.ts";
 import { builtinRoles, deferred, until } from "../support/helpers.ts";
 import { harness, VALID_GOAL } from "./harness.ts";
 
-const fixtures: GitFixture[] = [];
-const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => {
-	for (const cleanup of cleanups.splice(0)) await cleanup();
-	for (const fixture of fixtures.splice(0)) fixture.cleanup();
-});
+const fixtures = useGitFixtures();
 
 async function approved(real = false, slowCheck = false) {
-	const fixture = createGitFixture();
-	fixtures.push(fixture);
+	const fixture = fixtures.create();
 	const runner = new FakeRunner([{ match: "make change", files: { "change.txt": "changed\n" } }]);
 	const createRuntime = createRuntimeFactory({ roles: builtinRoles });
 	const h = harness({ cwd: fixture.dir, ...(real && { options: { createRuntime, runner: () => runner } }) });
-	cleanups.push(h.shutdown);
+	fixtures.cleanup(h.shutdown);
 	await h.command("make change");
 	const run = openRun(fixture.commonDir, activeRun(fixture.commonDir)!);
 	const flag = join(fixture.dir, "check-release");
@@ -37,10 +31,9 @@ const status = (h: ReturnType<typeof harness>) => h.statuses.get(STATUS_KEY) ?? 
 
 describe("live Herder status", () => {
 	it("reports awaiting goal and abort confirmations", async () => {
-		const fixture = createGitFixture();
-		fixtures.push(fixture);
+		const fixture = fixtures.create();
 		const h = harness({ cwd: fixture.dir });
-		cleanups.push(h.shutdown);
+		fixtures.cleanup(h.shutdown);
 		await h.command("make change");
 		const run = openRun(fixture.commonDir, activeRun(fixture.commonDir)!);
 		writeFileSync(run.paths.goal, VALID_GOAL);

@@ -12,7 +12,7 @@ import { refPrefix } from "../../src/run/paths.ts";
 import { openRun, type RunStore } from "../../src/run/store.ts";
 import { harness } from "../adapter/harness.ts";
 import { FakeRunner, type FakeRule } from "../support/fake-runner.ts";
-import type { GitFixture } from "../support/git-fixture.ts";
+import type { GitFixture, GitFixtureLifecycle } from "../support/git-fixture.ts";
 import { builtinRoles, deferred, until } from "../support/helpers.ts";
 
 export { deferred, until };
@@ -72,10 +72,10 @@ export function rules(hold?: Promise<unknown>): FakeRule[] {
 }
 
 /** A new adapter instance (as a new Pi session would load it) with the real runtime and `runner`. */
-export function openSession(fixture: GitFixture, runner: FakeRunner, cleanups: Array<() => Promise<void>>, opts: { sessionId?: string; hasUI?: boolean; lock?: LockOptions } = {}): Session {
+export function openSession(fixture: GitFixture, runner: FakeRunner, fixtures: GitFixtureLifecycle, opts: { sessionId?: string; hasUI?: boolean; lock?: LockOptions } = {}): Session {
 	const createRuntime = createRuntimeFactory({ roles: builtinRoles });
 	const h = harness({ cwd: fixture.dir, sessionId: opts.sessionId ?? "session-a", hasUI: opts.hasUI ?? true, options: { createRuntime, runner: () => runner, ...(opts.lock ? { lock: opts.lock } : {}) } });
-	cleanups.push(h.shutdown);
+	fixtures.cleanup(h.shutdown);
 	return h;
 }
 

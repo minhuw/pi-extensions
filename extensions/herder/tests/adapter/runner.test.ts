@@ -5,11 +5,11 @@ import { basename, join } from "node:path";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { createRuntimeFactory } from "../../src/adapter/runtime.ts";
 import { activeRun, openRun } from "../../src/run/store.ts";
 import type { StepCompletedEvent, StepFailedEvent } from "../../src/types.ts";
-import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
+import { useGitFixtures } from "../support/git-fixture.ts";
 import { builtinRoles } from "../support/helpers.ts";
 import { harness } from "./harness.ts";
 
@@ -29,8 +29,6 @@ The project needs a survey.
 
 let dir: string;
 let previousAgentDir: string | undefined;
-const fixtures: GitFixture[] = [];
-const cleanups: Array<() => Promise<void>> = [];
 
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "herder-runner-"));
@@ -38,26 +36,25 @@ beforeEach(() => {
 	previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
 });
-afterEach(async () => {
-	for (const cleanup of cleanups.splice(0)) await cleanup();
-	for (const fixture of fixtures.splice(0)) fixture.cleanup();
-	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-	rmSync(dir, { recursive: true, force: true });
+const fixtures = useGitFixtures({
+	afterCleanup: () => {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		rmSync(dir, { recursive: true, force: true });
+	},
 });
 
 const emptyRuntime = () => ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
 
 /** An approved run held by `session-a`, whose context exposes `runtime` and `model` as a Pi session's would. */
 async function approvedRun(runtime: ModelRuntime, context: Record<string, unknown>, sessionFile?: string, linked = false) {
-	const fixture = createGitFixture();
-	fixtures.push(fixture);
+	const fixture = fixtures.create();
 	// A linked worktree outside the checkout, under the test's temporary directory, with a folder name of its own.
 	const cwd = linked ? join(dir, "feature-checkout") : fixture.dir;
 	if (linked) fixture.git("worktree", "add", "-q", "-b", "feature", cwd);
 	const createRuntime = createRuntimeFactory({ roles: builtinRoles });
 	const h = harness({ cwd, sessionFile, context: { modelRegistry: new ModelRegistry(runtime), ...context }, options: { createRuntime } });
-	cleanups.push(h.shutdown);
+	fixtures.cleanup(h.shutdown);
 	await h.command("look around");
 	const run = openRun(fixture.commonDir, activeRun(fixture.commonDir)!);
 	writeFileSync(run.paths.goal, GOAL);

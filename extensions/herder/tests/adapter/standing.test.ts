@@ -2,32 +2,24 @@
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { STANDING_APPROVAL_KEY, STANDING_NOTE, standingGrant, standingRegistry, type StandingApproval } from "../../src/adapter/standing.ts";
 import { isBlocked, isParked } from "../../src/adapter/status.ts";
 import { STATUS_KEY } from "../../src/config.ts";
 import { readLock } from "../../src/run/lock.ts";
 import { listRuns, openRun, type RunStore } from "../../src/run/store.ts";
-import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
+import { type GitFixture, useGitFixtures } from "../support/git-fixture.ts";
 import { harness, VALID_GOAL } from "./harness.ts";
 
-const fixtures: GitFixture[] = [];
-const cleanups: Array<() => Promise<void> | void> = [];
-afterEach(async () => {
-	standingRegistry().grants.clear();
-	for (const cleanup of cleanups.splice(0)) await cleanup();
-	for (const fixture of fixtures.splice(0)) fixture.cleanup();
-});
+const fixtures = useGitFixtures({ beforeCleanup: () => { standingRegistry().grants.clear(); } });
 
 function repo() {
-	const fixture = createGitFixture();
-	fixtures.push(fixture);
-	return fixture;
+	return fixtures.create();
 }
 
 function session(fixture: GitFixture, options: Partial<Parameters<typeof harness>[0]> = {}) {
 	const h = harness({ cwd: fixture.dir, ...options });
-	cleanups.push(h.shutdown);
+	fixtures.cleanup(h.shutdown);
 	return h;
 }
 
@@ -77,7 +69,7 @@ describe("the standing-approval registry", () => {
 		expect(standingGrant(fixture.commonDir)).toBeUndefined();
 		expect((globalThis as Record<symbol, unknown>)[STANDING_APPROVAL_KEY]).toEqual({ grants: new Map() });
 		const links = mkdtempSync(join(tmpdir(), "herder-standing-"));
-		cleanups.push(() => rmSync(links, { recursive: true, force: true }));
+		fixtures.cleanup(() => rmSync(links, { recursive: true, force: true }));
 		symlinkSync(fixture.dir, join(links, "checkout"));
 		const value = grant(fixture, { commonDir: join(links, "checkout", ".git") });
 		expect(standingGrant(fixture.commonDir)).toBe(value);

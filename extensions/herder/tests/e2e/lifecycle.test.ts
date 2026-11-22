@@ -1,33 +1,27 @@
 // Stop and resume in a new session, run lock ownership across sessions, abort, and clean.
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { LOCK_STALE_MS } from "../../src/config.ts";
 import { readLock } from "../../src/run/lock.ts";
 import { integrationRef } from "../../src/run/paths.ts";
 import { activeRun, listRuns } from "../../src/run/store.ts";
 import { FakeRunner } from "../support/fake-runner.ts";
-import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
+import { useGitFixtures } from "../support/git-fixture.ts";
 import {
 	approve, checkout, deferred, expectCleanedUp, expectRuntimeViews, expectUntouched, followUps, launchAndWait, openSession, PLAN, refsOf, rules, SCRIPT,
 	startRun, until, worktrees, type Session,
 } from "./support.ts";
 
-const fixtures: GitFixture[] = [];
-const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => {
-	for (const cleanup of cleanups.splice(0)) await cleanup();
-	for (const fixture of fixtures.splice(0)) fixture.cleanup();
-});
+const fixtures = useGitFixtures();
 
 /** An approved, planned run whose launch 1 has integrated T1 and holds the T2 writer in flight. */
 async function heldLaunch() {
-	const fixture = createGitFixture();
-	fixtures.push(fixture);
+	const fixture = fixtures.create();
 	const before = checkout(fixture);
 	const hold = deferred();
 	const runner = new FakeRunner(rules(hold.promise));
-	const a = openSession(fixture, runner, cleanups, { sessionId: "session-a" });
+	const a = openSession(fixture, runner, fixtures, { sessionId: "session-a" });
 	const started = await startRun(a, fixture);
 	await approve(a, started);
 	writeFileSync(started.planPath, PLAN);
@@ -66,7 +60,7 @@ describe("end to end: resume in a new session", () => {
 
 		// A new Pi session: a new adapter instance with its own runner, on the same repository.
 		const runnerB = new FakeRunner(rules());
-		const b = openSession(fixture, runnerB, cleanups, { sessionId: "session-b" });
+		const b = openSession(fixture, runnerB, fixtures, { sessionId: "session-b" });
 		await b.command(`resume ${runId}`);
 		expect(b.lastNotice()).toMatchObject({ level: "error", text: expect.stringContaining(`Herder run ${runId} is in use`) });
 		await expect(b.tool("herder_verify", {})).rejects.toThrow(/is in use/);
@@ -113,7 +107,7 @@ describe("end to end: resume in a new session", () => {
 		expectUntouched(fixture, before);
 
 		const runnerB = new FakeRunner(rules());
-		const b = openSession(fixture, runnerB, cleanups, { sessionId: "session-b" });
+		const b = openSession(fixture, runnerB, fixtures, { sessionId: "session-b" });
 		const followUp = await relaunch(b, runId, join(run.paths.scripts, "1.js"));
 		expect(followUp).toContain("Steps: 1 reused, 0 changed, 1 new.");
 		expect(runnerB.callsMatching("Create greeting.txt")).toEqual([]);
@@ -124,22 +118,21 @@ describe("end to end: resume in a new session", () => {
 	});
 
 	it("takes over a lock only once its heartbeat is stale", async () => {
-		const fixture = createGitFixture();
-		fixtures.push(fixture);
+		const fixture = fixtures.create();
 		const before = checkout(fixture);
 		const runner = new FakeRunner(rules());
-		const a = openSession(fixture, runner, cleanups, { sessionId: "session-a" });
+		const a = openSession(fixture, runner, fixtures, { sessionId: "session-a" });
 		const started = await startRun(a, fixture);
 		await approve(a, started);
 		const { run, runId } = started;
 
-		const b = openSession(fixture, runner, cleanups, { sessionId: "session-b" });
+		const b = openSession(fixture, runner, fixtures, { sessionId: "session-b" });
 		await b.command(`resume ${runId}`);
 		expect(b.lastNotice()).toMatchObject({ level: "error", text: expect.stringContaining("is in use") });
 		expect(readLock(run.paths.lock)?.sessionId).toMatch(/^session-a#/);
 
 		const later = new Date(Date.now() + LOCK_STALE_MS + 60_000);
-		const c = openSession(fixture, runner, cleanups, { sessionId: "session-c", lock: { now: () => later } });
+		const c = openSession(fixture, runner, fixtures, { sessionId: "session-c", lock: { now: () => later } });
 		await c.command(`resume ${runId}`);
 		expect(c.lastNotice()).toMatchObject({ level: "info", text: `Resumed Herder run ${runId}.` });
 		expect(readLock(run.paths.lock)?.sessionId).toMatch(/^session-c#/);

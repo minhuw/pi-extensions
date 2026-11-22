@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { afterEach } from "vitest";
 
 export interface GitFixture {
 	/** Real path of the repository's top level. */
@@ -64,4 +66,66 @@ export async function withGitFixture<T>(fn: (fixture: GitFixture) => T | Promise
 	} finally {
 		fixture.cleanup();
 	}
+}
+
+export interface GitFixtureLifecycle {
+	/** Creates a fresh repository fixture that will be removed in `afterEach`. */
+	create(files?: Record<string, string>): GitFixture;
+	/** Registers a teardown callback that runs before fixtures are removed in `afterEach`. */
+	cleanup(fn: () => Promise<void> | void): void;
+}
+
+export interface GitFixtureLifecycleOptions {
+	/** Runs before registered cleanups in `afterEach`. */
+	beforeCleanup?: () => Promise<void> | void;
+	/** Runs after fixtures are removed in `afterEach`. */
+	afterCleanup?: () => Promise<void> | void;
+}
+
+/**
+ * Registers an `afterEach` hook that runs registered cleanups (such as session shutdowns)
+ * and then removes every git fixture created via `create()`.
+ */
+export function useGitFixtures(options?: GitFixtureLifecycleOptions): GitFixtureLifecycle {
+	const created: GitFixture[] = [];
+	const cleanups: Array<() => Promise<void> | void> = [];
+	afterEach(async () => {
+		try {
+			await options?.beforeCleanup?.();
+			for (const fn of cleanups.splice(0)) await fn();
+		} finally {
+			for (const fixture of created.splice(0)) fixture.cleanup();
+			await options?.afterCleanup?.();
+		}
+	});
+	return {
+		create(files) {
+			const fixture = createGitFixture(files);
+			created.push(fixture);
+			return fixture;
+		},
+		cleanup(fn) {
+			cleanups.push(fn);
+		},
+	};
+}
+
+export interface CheckoutSnapshot {
+	status: string;
+	head: string;
+	branch: string;
+	branches: string;
+	index: string;
+}
+
+/** HEAD, branch, branch list, index bytes, and status of the user's checkout (invariant 1). */
+export function checkout(fixture: GitFixture): CheckoutSnapshot {
+	const status = fixture.status();
+	return {
+		status,
+		head: fixture.head(),
+		branch: fixture.git("symbolic-ref", "-q", "--short", "HEAD"),
+		branches: fixture.git("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"),
+		index: createHash("sha256").update(readFileSync(join(fixture.commonDir, "index"))).digest("hex"),
+	};
 }

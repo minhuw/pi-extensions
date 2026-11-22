@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createEventBus, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import herderExtension from "../../index.ts";
 import { parseCommand, UsageError } from "../../src/adapter/commands.ts";
 import { FOLLOW_UP_TYPE } from "../../src/adapter/session.ts";
@@ -10,21 +10,15 @@ import { runCheck } from "../../src/checks/runner.ts";
 import { ACTIVITY_REQUEST_EVENT, FOLLOWUP_RESULT_LIMIT, LOCK_STALE_MS, MAX_CLARIFYING_QUESTIONS, RUN_EVENT, STATUS_KEY } from "../../src/config.ts";
 import { readLock } from "../../src/run/lock.ts";
 import { activeRun, listRuns, openRun } from "../../src/run/store.ts";
-import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
+import { useGitFixtures } from "../support/git-fixture.ts";
 import { harness, VALID_GOAL } from "./harness.ts";
 
-const fixtures: GitFixture[] = [];
-const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => {
-	for (const cleanup of cleanups.splice(0)) await cleanup();
-	for (const fixture of fixtures.splice(0)) fixture.cleanup();
-});
+const fixtures = useGitFixtures();
 
 function setup(options: Parameters<typeof harness>[0] extends infer O ? Partial<O> : never = {}) {
-	const fixture = createGitFixture();
-	fixtures.push(fixture);
+	const fixture = fixtures.create();
 	const h = harness({ cwd: fixture.dir, ...options });
-	cleanups.push(h.shutdown);
+	fixtures.cleanup(h.shutdown);
 	return { fixture, h };
 }
 
@@ -466,7 +460,7 @@ describe("locks across sessions", () => {
 		const clock = { now: () => new Date(now) };
 		const { fixture, h: a, runId, run } = await started({ options: { lock: clock } });
 		const b = harness({ cwd: fixture.dir, sessionId: "session-b", options: { lock: clock } });
-		cleanups.push(b.shutdown);
+		fixtures.cleanup(b.shutdown);
 		await b.command("resume");
 		expect(b.lastNotice()).toMatchObject({ level: "error" });
 		expect(b.lastNotice()!.text).toMatch(/in use: run is locked by session session-a/);
@@ -503,7 +497,7 @@ describe("resume, abort, clean", () => {
 		await h.tool("herder_workflow", { mode: "run", script: "return 1", args: { tasks: ["T1"] } });
 		await h.shutdown();
 		const b = harness({ cwd: fixture.dir, sessionId: "session-b" });
-		cleanups.push(b.shutdown);
+		fixtures.cleanup(b.shutdown);
 		await b.command("resume");
 		const prompt = b.sent.at(-1).content as string;
 		expect(prompt).toContain(`Launch 1 stopped`);
@@ -596,7 +590,7 @@ describe("run ownership", () => {
 		expect(runtime.launches[0]!.stopped).toBe("session shutdown");
 		expect(readLock(run.paths.lock)?.sessionId).toMatch(/^session-a#/);
 		const reloaded = harness({ cwd: fixture.dir, sessionId: "session-a" });
-		cleanups.push(reloaded.shutdown);
+		fixtures.cleanup(reloaded.shutdown);
 		await reloaded.command(`resume ${runId}`);
 		expect(reloaded.lastNotice()).toMatchObject({ level: "error" });
 		expect(reloaded.lastNotice()!.text).toMatch(/in use/);
@@ -815,15 +809,14 @@ describe("herder:run events", () => {
 		await new Promise((resolve) => setTimeout(resolve, 60));
 		expect(announced).toHaveLength(3);
 		const b = harness({ cwd: fixture.dir, sessionId: "session-b", events });
-		cleanups.push(b.shutdown);
+		fixtures.cleanup(b.shutdown);
 		await b.command(`resume ${runId}`);
 		expect(announced).toHaveLength(4);
 		expect(announced.every((payload) => JSON.stringify(payload) === JSON.stringify(expected))).toBe(true);
 	});
 
 	it("name the main checkout's folder as the repo for a run started in a linked worktree", async () => {
-		const fixture = createGitFixture();
-		fixtures.push(fixture);
+		const fixture = fixtures.create();
 		const linked = realpathSync(mkdtempSync(join(tmpdir(), "herder-linked-")));
 		try {
 			const worktree = join(linked, "feature-checkout");
@@ -832,7 +825,7 @@ describe("herder:run events", () => {
 			const announced: Array<{ repo: string }> = [];
 			events.on(RUN_EVENT, (payload) => announced.push(payload as { repo: string }));
 			const h = harness({ cwd: worktree, events });
-			cleanups.push(h.shutdown);
+			fixtures.cleanup(h.shutdown);
 			await h.command("add a greeting to the CLI");
 			const runId = activeRun(fixture.commonDir)!;
 			expect(openRun(fixture.commonDir, runId).journal.read()[0]).toMatchObject({ t: "run.started", repo: worktree });
@@ -845,8 +838,7 @@ describe("herder:run events", () => {
 	});
 
 	it("name the repo as pika files it when the user named it with /pika project", async () => {
-		const fixture = createGitFixture();
-		fixtures.push(fixture);
+		const fixture = fixtures.create();
 		// As /pika project writes it: ignored by its own .gitignore.
 		mkdirSync(join(fixture.dir, ".pi", "pika"), { recursive: true });
 		writeFileSync(join(fixture.dir, ".pi", "pika", ".gitignore"), "*\n");
@@ -855,7 +847,7 @@ describe("herder:run events", () => {
 		const announced: Array<{ repo: string }> = [];
 		events.on(RUN_EVENT, (payload) => announced.push(payload as { repo: string }));
 		const h = harness({ cwd: fixture.dir, events });
-		cleanups.push(h.shutdown);
+		fixtures.cleanup(h.shutdown);
 		await h.command("add a greeting to the CLI");
 		const runId = activeRun(fixture.commonDir)!;
 		expect(announced).toEqual([expect.objectContaining({ runId, repo: "named-app" })]);
@@ -878,7 +870,7 @@ function peerSession(h: ReturnType<typeof harness>, sessionId: string) {
 		modelRegistry: {}, model: undefined,
 	} as unknown as ExtensionContext;
 	const shutdown = async () => { for (const handler of h.handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, ctx); };
-	cleanups.push(shutdown);
+	fixtures.cleanup(shutdown);
 	return {
 		ctx, statuses, notices, confirm,
 		command: (args: string) => h.commands.get("herder").handler(args, ctx) as Promise<void>,
@@ -963,7 +955,7 @@ describe("concurrent active runs across sessions", () => {
 	it("shutting down one session aborts its check without killing another session's live check", async () => {
 		const { fixture, h: a, run: runA } = await approved();
 		const b = harness({ cwd: fixture.dir, sessionId: "session-b" });
-		cleanups.push(b.shutdown);
+		fixtures.cleanup(b.shutdown);
 		const r2 = (await b.tool("herder_run", { action: "start", goal: "parallel check goal" })).details.runId as string;
 		const runB = openRun(fixture.commonDir, r2);
 		writeFileSync(runB.paths.goal, VALID_GOAL);
@@ -987,7 +979,7 @@ describe("concurrent active runs across sessions", () => {
 	it("reports other unfinished runs and their lock holders in /herder status and herder_run status", async () => {
 		const { fixture, h: a } = setup();
 		const b = harness({ cwd: fixture.dir, sessionId: "session-b" });
-		cleanups.push(b.shutdown);
+		fixtures.cleanup(b.shutdown);
 
 		const r1 = (await a.tool("herder_run", { action: "start", goal: "first feature" })).details.runId as string;
 		const r2 = (await b.tool("herder_run", { action: "start", goal: "second feature" })).details.runId as string;

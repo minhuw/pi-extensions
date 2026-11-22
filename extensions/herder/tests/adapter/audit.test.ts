@@ -1,7 +1,7 @@
 // herder_run { action: "start" } and the /herder-improve and /herder-simplify audit commands.
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { parseAudit, PROMPT_TYPE } from "../../src/adapter/commands.ts";
 import { auditSkillDir, skillText } from "../../src/adapter/prompts.ts";
 import { createRuntimeFactory } from "../../src/adapter/runtime.ts";
@@ -9,22 +9,16 @@ import { MAX_CLARIFYING_QUESTIONS, STATUS_KEY } from "../../src/config.ts";
 import { readLock } from "../../src/run/lock.ts";
 import { refPrefix } from "../../src/run/paths.ts";
 import { activeRun, listRuns, openRun } from "../../src/run/store.ts";
-import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
+import { useGitFixtures } from "../support/git-fixture.ts";
 import { builtinRoles } from "../support/helpers.ts";
 import { FakeRuntime, harness, VALID_GOAL } from "./harness.ts";
 
-const fixtures: GitFixture[] = [];
-const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => {
-	for (const cleanup of cleanups.splice(0)) await cleanup();
-	for (const fixture of fixtures.splice(0)) fixture.cleanup();
-});
+const fixtures = useGitFixtures();
 
 function setup(options: Partial<Parameters<typeof harness>[0]> = {}) {
-	const fixture = createGitFixture();
-	fixtures.push(fixture);
+	const fixture = fixtures.create();
 	const h = harness({ cwd: fixture.dir, ...options });
-	cleanups.push(h.shutdown);
+	fixtures.cleanup(h.shutdown);
 	const audit = (kind: "improve" | "simplify", args: string) => h.commands.get(`herder-${kind}`).handler(args, h.ctx) as Promise<void>;
 	return { fixture, h, audit };
 }
@@ -224,7 +218,7 @@ describe("/herder-improve and /herder-simplify", () => {
 
 		// Session B in the same repository can audit and start its own run concurrently.
 		const b = harness({ cwd: fixture.dir, sessionId: "session-b" });
-		cleanups.push(b.shutdown);
+		fixtures.cleanup(b.shutdown);
 		await b.commands.get("herder-improve").handler("quick", b.ctx);
 		expect(b.lastNotice()).toEqual({ level: "info", text: "Started the read-only /herder-improve audit." });
 		await b.commands.get("herder-simplify").handler("quick", b.ctx);

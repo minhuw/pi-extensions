@@ -1,24 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { killAllChecks, runCheck, runChecks, summarizeOutput } from "../../src/checks/runner.ts";
 import { CHECK_ERROR_LINES, CHECK_TAIL_LINES } from "../../src/config.ts";
 import type { CheckSpec, OutputStore } from "../../src/types.ts";
-
-function tempOutputs(dir: string): OutputStore {
-	return {
-		put(content) {
-			const ref = `outputs/${createHash("sha256").update(content).digest("hex")}.txt`;
-			mkdirSync(join(dir, "outputs"), { recursive: true });
-			writeFileSync(join(dir, ref), content);
-			return ref;
-		},
-		read: (ref) => readFileSync(join(dir, ref), "utf8"),
-	};
-}
+import { tempOutputs } from "../support/helpers.ts";
 
 const alive = (pid: number) => {
 	try { process.kill(pid, 0); return true; } catch { return false; }

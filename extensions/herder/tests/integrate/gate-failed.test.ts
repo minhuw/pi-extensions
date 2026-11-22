@@ -1,6 +1,6 @@
 // A gate_failed step keeps its commit so that a fix can build on it; neither integrate() nor herder_integrate takes it.
 import { writeFileSync } from "node:fs";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createRuntimeFactory } from "../../src/adapter/runtime.ts";
 import type { HerderOptions } from "../../src/adapter/session.ts";
 import { createIntegrator } from "../../src/integrate/integrate.ts";
@@ -11,9 +11,8 @@ import { launchScript } from "../../src/steps/launch.ts";
 import { harness } from "../adapter/harness.ts";
 import { isolateGitConfig } from "../support/env.ts";
 import { FakeRunner, fakeRole, type FakeRule } from "../support/fake-runner.ts";
-import { createGitFixture, type GitFixture, withGitFixture } from "../support/git-fixture.ts";
-import { builtinRoles } from "../support/helpers.ts";
-import { check, events, type Run, setupRun, show, stepCommit } from "./support.ts";
+import { type GitFixture, useGitFixtures, withGitFixture } from "../support/git-fixture.ts";
+import { builtinRoles, check, events, type Run, setupRun, show, stepCommit } from "../support/helpers.ts";
 
 isolateGitConfig();
 
@@ -150,19 +149,13 @@ The project needs a fixed out.txt.
 | fixed | grep -q fixed out.txt | 1m | no |
 `;
 
-	const fixtures: GitFixture[] = [];
-	const cleanups: Array<() => Promise<void>> = [];
-	afterEach(async () => {
-		for (const cleanup of cleanups.splice(0)) await cleanup();
-		for (const fixture of fixtures.splice(0)) fixture.cleanup();
-	});
+	const fixtures = useGitFixtures();
 
 	/** A run with an approved goal, on the harness's fake runtime unless `options` names another. */
 	async function approvedRun(options: Partial<HerderOptions> = {}) {
-		const fixture = createGitFixture();
-		fixtures.push(fixture);
+		const fixture = fixtures.create();
 		const h = harness({ cwd: fixture.dir, options });
-		cleanups.push(h.shutdown);
+		fixtures.cleanup(h.shutdown);
 		await h.command("write out.txt");
 		const run = openRun(fixture.commonDir, activeRun(fixture.commonDir)!);
 		writeFileSync(run.paths.goal, GOAL);
