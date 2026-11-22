@@ -677,7 +677,6 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 		const gcResult = await runWorkspaceGc({
 			cwd: projectCwd,
 			agentDir,
-			yes: true,
 		});
 		expect(gcResult.removed.map((r) => r.entry.name)).toEqual(["truly-clean-ws"]);
 		expect(gcResult.kept.map((r) => r.entry.name).sort()).toEqual([

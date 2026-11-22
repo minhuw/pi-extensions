@@ -628,7 +628,7 @@ describe("workspace write guard — lasting approvals store and match the exact 
 		}
 	});
 
-	it("reads sessionAllowed, projectAllowed, and extraAllowed entries literally with or without literal", async () => {
+	it("reads sessionAllowed and projectAllowed entries literally with or without literal", async () => {
 		const link = path.join(projectCwd, "outside-link");
 		await symlink(outsideDir, link);
 		const literalHomeEntry = path.join(canonicalOutside, "$HOME", "a.txt");
@@ -637,7 +637,7 @@ describe("workspace write guard — lasting approvals store and match the exact 
 		const trimmedTarget = path.join(canonicalOutside, "spaced.txt");
 
 		for (const literal of [false, true]) {
-			for (const listName of ["sessionAllowed", "projectAllowed", "extraAllowed"] as const) {
+			for (const listName of ["sessionAllowed", "projectAllowed"] as const) {
 				expect(
 					evaluatePathAccess({
 						targetPath: literalHomeEntry,

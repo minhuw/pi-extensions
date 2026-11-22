@@ -831,7 +831,6 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 					cwd: ctx.cwd,
 					allProjects,
 					dryRun,
-					yes,
 					activeSessionIds: activeIds,
 					confirmReview:
 						ctx.hasUI && !yes && !dryRun && typeof ctx.ui?.select === "function"

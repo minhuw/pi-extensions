@@ -27,7 +27,6 @@ export interface GcOptions {
 	agentDir?: string;
 	allProjects?: boolean;
 	dryRun?: boolean;
-	yes?: boolean;
 	activeSessionIds?: ReadonlySet<string>;
 	now?: number;
 	checkPid?: boolean;
@@ -268,7 +267,6 @@ export async function runScheduledSweep(options: {
 	const result = await runWorkspaceGc({
 		cwd: projectCwd,
 		agentDir: options.agentDir,
-		yes: true,
 		activeSessionIds: options.activeSessionIds,
 		now: options.now,
 	});

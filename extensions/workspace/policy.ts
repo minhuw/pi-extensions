@@ -18,7 +18,6 @@ export interface PathAccessOptions {
 	literal?: boolean;
 	sessionAllowed?: Iterable<string>;
 	projectAllowed?: Iterable<string>;
-	extraAllowed?: Iterable<string>;
 }
 
 export interface PathAccessEvaluation {
@@ -289,8 +288,8 @@ export function evaluatePathAccess(options: PathAccessOptions): PathAccessEvalua
 		}
 	}
 
-	// 3. Always allow sessionAllowed, projectAllowed, and extraAllowed roots.
-	for (const group of [options.sessionAllowed, options.projectAllowed, options.extraAllowed]) {
+	// 3. Always allow sessionAllowed and projectAllowed roots.
+	for (const group of [options.sessionAllowed, options.projectAllowed]) {
 		if (!group) continue;
 		for (const allowedEntry of group) {
 			const canonicalAllowed = resolveLiteralPath(allowedEntry, canonicalCwd);
@@ -1312,18 +1311,6 @@ export function extractBashWriteTargets(command: string, cwd: string, projectCwd
  */
 export function extractTaggedBashWriteTargets(command: string, cwd: string, projectCwd?: string): BashWriteTarget[] {
 	return inspectBashCommand(command, cwd, projectCwd).writeTargets;
-}
-
-/**
- * Returns the first of `stateFiles` that a simple command of `command` names, whatever that command is,
- * unless its verb only reads: one of its words resolves to the file, or one resolves to the file's
- * directory while another word's last path segment is the file's name (`cp /tmp/policy.json .pi/workspaces/`).
- * Words resolve as write targets do, and letter case is ignored.
- */
-export function findBashNamedStateFile(command: string, cwd: string, stateFiles: string[]): string | undefined {
-	const finder = createBashStateFileFinder(stateFiles);
-	walkBashCommands(command, resolveCanonicalPath(cwd), finder.visitor);
-	return finder.result();
 }
 
 /**
