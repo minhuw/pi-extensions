@@ -110,7 +110,7 @@ const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
  * A `write`/`edit` path resolved the way Pi's file tools resolve it (Unicode spaces become spaces, one leading `@` is
  * dropped, `~` is expanded, a `file://` URL becomes its path), then canonicalized. Undefined when Pi could not resolve it.
  */
-export function resolveToolPath(raw: string, cwd: string): string | undefined {
+function resolveToolPath(raw: string, cwd: string): string | undefined {
 	let path = raw.replace(UNICODE_SPACES, " ");
 	if (path.startsWith("@")) path = path.slice(1);
 	if (path === "~") path = homedir();
@@ -1631,7 +1631,7 @@ function scanCliWriteArgv(tokens: readonly string[], spec: CliWriteArgvSpec): Sc
  * Extracts canonical file-writing target paths from an `agent_browser` CLI `argv` array relative to `cwd`.
  * Self-contained: never imports from `extensions/workspace/` or `extensions/agent-browser/`.
  */
-export function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: string): string[] {
+function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: string): string[] {
 	const baseCwd = canonical(cwd);
 	const { subcommand, positionals, rawTargets, hasHelpOrVersion } = scanCliWriteArgv(argv, {
 		globalValueFlags: AGENT_BROWSER_GLOBAL_VALUE_FLAGS,
@@ -1674,7 +1674,7 @@ export function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: st
  * Read-only subcommands and non-file-writing GUI mutations (including `headed: true`) return an empty array.
  * Self-contained: never imports from `extensions/workspace/` or `extensions/agent-desktop/`.
  */
-export function extractAgentDesktopWriteTargets(argv: readonly string[], cwd: string): string[] {
+function extractAgentDesktopWriteTargets(argv: readonly string[], cwd: string): string[] {
 	const baseCwd = canonical(cwd);
 	const cleaned = argv.filter((arg): arg is string => typeof arg === "string" && arg.trim().length > 0);
 	const { subcommand, positionals, rawTargets, captured, hasHelpOrVersion } = scanCliWriteArgv(cleaned, {

@@ -43,7 +43,7 @@ type Message = { role?: unknown; content?: unknown; stopReason?: unknown };
  * with no mode, which Pi runs as print, and persisted children carry a session link. `parentSession` cannot identify a
  * child: Pi also sets it on forks.
  */
-export function isChildSession(ctx: Pick<ExtensionContext, "mode" | "sessionManager">): boolean {
+function isChildSession(ctx: Pick<ExtensionContext, "mode" | "sessionManager">): boolean {
 	if (ctx.mode !== "tui" && ctx.mode !== "rpc") return true;
 	return ctx.sessionManager.getEntries().some((entry) => entry.type === "custom" && entry.customType === SESSION_LINK_TYPE);
 }
@@ -57,7 +57,7 @@ function textOf(content: unknown): string {
 }
 
 /** The first user prompt and the first final assistant answer on the current branch, or undefined before both exist. */
-export function firstExchange(ctx: Pick<ExtensionContext, "sessionManager">): { prompt: string; answer: string } | undefined {
+function firstExchange(ctx: Pick<ExtensionContext, "sessionManager">): { prompt: string; answer: string } | undefined {
 	let prompt: string | undefined;
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type !== "message") continue;
@@ -74,7 +74,7 @@ export function firstExchange(ctx: Pick<ExtensionContext, "sessionManager">): { 
 }
 
 /** The latest automatic naming on the current branch; `tokens` is null when the context size was unknown then. */
-export function lastAutoName(ctx: Pick<ExtensionContext, "sessionManager">): { name: string; tokens: number | null } | undefined {
+function lastAutoName(ctx: Pick<ExtensionContext, "sessionManager">): { name: string; tokens: number | null } | undefined {
 	const branch = ctx.sessionManager.getBranch();
 	for (let index = branch.length - 1; index >= 0; index--) {
 		const entry = branch[index]!;
@@ -86,13 +86,13 @@ export function lastAutoName(ctx: Pick<ExtensionContext, "sessionManager">): { n
 	return undefined;
 }
 
-export type RefreshInput = { name: string; prompt: string; summary?: string; recent: string };
+type RefreshInput = { name: string; prompt: string; summary?: string; recent: string };
 
 /**
  * What a refresh sends: the first user prompt, the latest compaction summary, and the newest user and assistant text on
  * the branch, about 8000 characters with the newest kept.
  */
-export function refreshInput(ctx: Pick<ExtensionContext, "sessionManager">, name: string): RefreshInput | undefined {
+function refreshInput(ctx: Pick<ExtensionContext, "sessionManager">, name: string): RefreshInput | undefined {
 	const branch = ctx.sessionManager.getBranch();
 	let prompt: string | undefined;
 	let summary: string | undefined;
@@ -124,12 +124,12 @@ function truncate(text: string): string {
 	return text.length <= INPUT_LIMIT ? text : `${text.slice(0, INPUT_LIMIT)}…`;
 }
 
-export function buildContext(exchange: { prompt: string; answer: string }): Context {
+function buildContext(exchange: { prompt: string; answer: string }): Context {
 	const content = `<user-request>\n${truncate(exchange.prompt)}\n</user-request>\n\n<assistant-answer>\n${truncate(exchange.answer)}\n</assistant-answer>`;
 	return { systemPrompt: SYSTEM_PROMPT, messages: [{ role: "user", content, timestamp: Date.now() }] };
 }
 
-export function buildRefreshContext(input: RefreshInput): Context {
+function buildRefreshContext(input: RefreshInput): Context {
 	const sections = [
 		`<first-request>\n${truncate(input.prompt)}\n</first-request>`,
 		`<current-title>\n${input.name}\n</current-title>`,
@@ -174,7 +174,7 @@ async function reconModelSpec(): Promise<string | undefined> {
 	return value.trim();
 }
 
-export async function resolveNamingModel(ctx: Pick<ExtensionContext, "model" | "modelRegistry">): Promise<Model<Api>> {
+async function resolveNamingModel(ctx: Pick<ExtensionContext, "model" | "modelRegistry">): Promise<Model<Api>> {
 	const spec = await reconModelSpec();
 	if (spec === undefined) {
 		if (!ctx.model) throw new Error("the session has no model");

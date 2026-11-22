@@ -5,7 +5,7 @@ import type { ExtensionAPI, ExtensionToolContext } from "@earendil-works/pi-codi
 import { Type, type Static } from "typebox";
 import { getSkillDir, getScriptsDir } from "./resources.ts";
 
-export const DelegateSchema = Type.Object({
+const DelegateSchema = Type.Object({
 	role: Type.Union([Type.Literal("asset-producer"), Type.Literal("documenter"), Type.Literal("finish-reviewer"), Type.Literal("manual-edit-applier"), Type.Literal("assessment-a"), Type.Literal("assessment-b")]),
 	task: Type.String({ minLength: 1, maxLength: 32000, description: "Self-contained bounded packet: original request, actual answers, scope, constraints, required role inputs, evidence, output contract; no sibling assessment results" }),
 	artifactPaths: Type.Array(Type.String({ minLength: 1, description: "Artifact file path or inspected http(s) URL" }), { minItems: 1, maxItems: 64 }),

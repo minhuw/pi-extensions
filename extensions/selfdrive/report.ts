@@ -1,7 +1,7 @@
 // The self-driving ledger and the report built from it: pure, so tests can check the formatting directly.
 
-export const TASK_STATUSES = ["planned", "running", "proposed", "done", "failed", "dropped"] as const;
-export type TaskStatus = typeof TASK_STATUSES[number];
+const TASK_STATUSES = ["planned", "running", "proposed", "done", "failed", "dropped"] as const;
+type TaskStatus = typeof TASK_STATUSES[number];
 
 /** One ledger task, as the latest `selfdrive-task` entry for its id holds it. */
 export interface Task {
@@ -62,7 +62,7 @@ export function costOf(entries: readonly CostEntry[]): { cost: number; subagentC
 }
 const finite = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : 0;
 
-export interface ReportInput {
+interface ReportInput {
 	tasks: readonly Task[];
 	/** ISO times of the mode's start and end; an open mode runs to `now`. */
 	since: string;

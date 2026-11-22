@@ -3,7 +3,7 @@ import { Check } from "typebox/value";
 import { Type, type Static } from "typebox";
 import { promptTuiQuestion } from "./question-ui.ts";
 
-export const QuestionSchema = Type.Object({
+const QuestionSchema = Type.Object({
 	questions: Type.Array(Type.Object({
 		id: Type.String({ minLength: 1, maxLength: 80, pattern: "^[A-Za-z0-9_-]+$" }),
 		question: Type.String({ minLength: 1, maxLength: 2000 }),

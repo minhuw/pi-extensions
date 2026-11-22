@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
 
-export const COUNCIL_MEMBER_IDS = ["caspar", "melchior", "balthasar"] as const;
+const COUNCIL_MEMBER_IDS = ["caspar", "melchior", "balthasar"] as const;
 export type CouncilMemberId = (typeof COUNCIL_MEMBER_IDS)[number];
 export const COUNCIL_REPORT_MESSAGE_TYPE = "council-report";
 
-export interface CouncilMemberSpec {
+interface CouncilMemberSpec {
 	id: CouncilMemberId;
 	agentType: `council-${CouncilMemberId}`;
 	model: string;
@@ -37,15 +37,15 @@ export const COUNCIL_MEMBERS: Record<CouncilMemberId, CouncilMemberSpec> = {
 
 const COUNCIL_AGENT_TYPES = new Set<string>(Object.values(COUNCIL_MEMBERS).map((m) => m.agentType));
 
-export type PeerLabel = "Peer A" | "Peer B";
+type PeerLabel = "Peer A" | "Peer B";
 
-export interface CouncilPeerMapping {
+interface CouncilPeerMapping {
 	label: PeerLabel;
 	member: CouncilMemberId;
 	model: string;
 }
 
-export interface CouncilRound1Entry {
+interface CouncilRound1Entry {
 	member: CouncilMemberId;
 	agentType: string;
 	model: string;
@@ -56,7 +56,7 @@ export interface CouncilRound1Entry {
 	toolUses?: number;
 }
 
-export interface CouncilRound2Entry {
+interface CouncilRound2Entry {
 	member: CouncilMemberId;
 	agentType: string;
 	model: string;
@@ -68,7 +68,7 @@ export interface CouncilRound2Entry {
 	toolUses?: number;
 }
 
-export interface CouncilMemberFailure {
+interface CouncilMemberFailure {
 	member: CouncilMemberId;
 	agentType: string;
 	model: string;
@@ -76,7 +76,7 @@ export interface CouncilMemberFailure {
 	error: string;
 }
 
-export interface CouncilReportInput {
+interface CouncilReportInput {
 	councilId?: string;
 	topic: string;
 	paths?: readonly string[];
@@ -87,7 +87,7 @@ export interface CouncilReportInput {
 	failures: readonly CouncilMemberFailure[];
 }
 
-export const CouncilParameters = Type.Object({
+const CouncilParameters = Type.Object({
 	topic: Type.String({
 		minLength: 1,
 		description: "The architectural, design, or difficult technical question for the council to deliberate.",
@@ -467,7 +467,7 @@ interface ActiveCouncilRun {
 	cancel: (reason: string) => void;
 }
 
-export const COUNCIL_USAGE = [
+const COUNCIL_USAGE = [
 	"Usage:",
 	"  /council <topic or design question>   start a background council deliberation",
 	"  /council status                        show active council deliberations",

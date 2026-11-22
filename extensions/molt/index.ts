@@ -36,7 +36,7 @@ function textOf(content: unknown): string {
 		.join("\n");
 }
 
-export function handoverRequest(focus: string): string {
+function handoverRequest(focus: string): string {
 	return [
 		"Write a handover for a fresh agent that continues this work in a new session. That agent cannot see this conversation; your reply is sent to it verbatim as its first message.",
 		focus ? `The new session's task: ${focus}` : "The new session continues the current work from where it stands.",

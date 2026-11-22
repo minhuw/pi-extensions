@@ -15,7 +15,7 @@ const SESSION_LINK_TYPE = "pi-extensions.session-link";
 /** selfdrive publishes its grants here while the user is away; read it, never import selfdrive. */
 export const STANDING_APPROVAL_KEY = Symbol.for("pi-extensions.standing-approval");
 
-export { CHOICES, formatFinding, MAX_FINDINGS };
+export { CHOICES };
 /** The diff lines (hunk headers and body) the dialog shows at most. */
 export const MAX_DIFF_LINES = 40;
 const MAX_LINE_CHARS = 300;
@@ -143,7 +143,7 @@ const fuzzy = (text: string): string =>
 
 const occurrences = (text: string, part: string): number => text.split(part).length - 1;
 
-export type EditOutcome =
+type EditOutcome =
 	| { kind: "applied"; text: string }
 	/** The edit tool will fail on its own (missing, repeated, empty, overlapping, or no-op edits). */
 	| { kind: "invalid" }

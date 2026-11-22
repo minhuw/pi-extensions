@@ -34,12 +34,12 @@ export interface TuiQuestionAnswer {
 	choiceId?: string;
 }
 
-export interface QuestionTui {
+interface QuestionTui {
 	terminal?: { rows?: number; columns?: number };
 	requestRender(force?: boolean): void;
 }
 
-export interface KeybindingsLike {
+interface KeybindingsLike {
 	matches(data: string, keybinding: Keybinding): boolean;
 }
 
@@ -52,12 +52,12 @@ interface ChoiceOptionItem {
 }
 
 /** Strip terminal escape sequences first, then replace remaining C0/C1 control characters with spaces. */
-export function sanitizeInlineText(text: string): string {
+function sanitizeInlineText(text: string): string {
 	return replaceControlCharacters(stripTerminalSequences(text));
 }
 
 /** Strip terminal escape sequences while preserving line breaks across paragraphs. */
-export function sanitizeMultilineText(text: string): string[] {
+function sanitizeMultilineText(text: string): string[] {
 	const stripped = stripTerminalSequences(text).replace(/\r\n?/g, "\n");
 	return stripped.split("\n").map((line) => replaceControlCharacters(line.replace(/\t/g, "  ")));
 }
@@ -129,7 +129,7 @@ function renderChoiceItem(item: ChoiceOptionItem, selected: boolean, innerWidth:
 	return wrapped.map((line, index) => (index === 0 ? ` ${prefix}${line}` : `   ${line}`));
 }
 
-export class QuestionDialog implements Component, Focusable {
+class QuestionDialog implements Component, Focusable {
 	readonly capturesViewportInput = true;
 	private readonly question: QuestionItem;
 	private readonly questionIndex: number;

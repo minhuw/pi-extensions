@@ -46,7 +46,7 @@ function sameStamps(a: readonly ConfigStamp[], b: readonly ConfigStamp[]): boole
 }
 
 /** T5 seam: these are the upstream hook's exact temporary preview markers. */
-export function hasLivePreviewMarkers(content: string): boolean {
+function hasLivePreviewMarkers(content: string): boolean {
 	return content.includes("data-impeccable-variants=") || content.includes("impeccable-carbonize-start");
 }
 export interface DetectorFeedback {

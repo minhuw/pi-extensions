@@ -4,7 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { cell, compare, fingerprint, formatChange, runRounds, spread, type Comparison, type MetricDefinition, type Side } from "./core.ts";
 
 const line = (maxLength: number) => Type.String({ minLength: 1, maxLength, pattern: "^[^\\x00-\\x1f\\x7f-\\x9f]+$" });
-export const Parameters = Type.Object({
+const Parameters = Type.Object({
 	commands: Type.Array(Type.Object({
 		command: Type.String({ minLength: 1, maxLength: 2000 }),
 		label: Type.Optional(line(48)),

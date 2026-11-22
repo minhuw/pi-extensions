@@ -36,7 +36,7 @@ export function standingRegistry(): StandingApprovalRegistry {
 /** Every grant in this process. */
 export const grants = (): StandingApproval[] => [...standingRegistry().grants.values()];
 
-export const real = (path: string): string => {
+const real = (path: string): string => {
 	try { return realpathSync(path); } catch { return resolve(path); }
 };
 

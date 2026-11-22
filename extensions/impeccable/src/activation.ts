@@ -28,7 +28,7 @@ interface CompanionDetails {
 	companions: string[];
 }
 
-export const IMPECCABLE_MENTION_RE =
+const IMPECCABLE_MENTION_RE =
 	/\bimpeccable(?:_[a-z]+|-live)?\b|(?:^|\s)\/design(?:-[a-z-]+)?(?=\s|$)|<!--\s*pi-impeccable-owned-prompt:v1\s*-->/i;
 
 const ACTIVE_BRANCH_TYPES = new Set<string>([

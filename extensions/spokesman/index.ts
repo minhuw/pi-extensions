@@ -37,9 +37,6 @@ export {
 	buildSpokesmanPrompt,
 	evaluateProseForSpokesman,
 	stripNonProse,
-	type ProseEvaluation,
-	type SpokesmanMode,
-	type SpokesmanPromptInput,
 	type TurnWorkItem,
 } from "./filter.ts";
 export {
@@ -200,13 +197,13 @@ export function isMainModelEnabled(
 	return mainModels.some((pattern) => matchesModelPattern(pattern, model));
 }
 
-export function shortModelName(spec: string): string {
+function shortModelName(spec: string): string {
 	const trimmed = spec.trim();
 	const slashIndex = trimmed.indexOf("/");
 	return slashIndex >= 0 ? trimmed.slice(slashIndex + 1) : trimmed;
 }
 
-export function isSameAsMainModel(
+function isSameAsMainModel(
 	activeSpec: string | undefined,
 	ctx: ExtensionContext,
 	mainModel?: { id?: string; provider?: string },
@@ -436,7 +433,7 @@ function readActiveLanguage(ctx: ExtensionContext): string | undefined {
 	return latest?.active ?? base ?? fallback;
 }
 
-export function resolveSpokesmanModel(
+function resolveSpokesmanModel(
 	spec: string,
 	ctx: ExtensionContext,
 ): Model<Api> | undefined {

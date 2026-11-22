@@ -23,7 +23,7 @@ export const DEFAULT_DOWNLOAD_BASE = "https://github.com/pbakaus/impeccable/rele
 /** Default wall-clock bound for one engine invocation (download included). */
 export const DEFAULT_TIMEOUT_MS = 120_000;
 /** Hard memory bound per captured stream; output beyond this is counted but not stored. */
-export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
+const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 /** Model-facing output limits, matching Pi's built-in tool conventions. */
 export const MAX_RESULT_BYTES = 50 * 1024;
 export const MAX_RESULT_LINES = 2000;
@@ -53,7 +53,7 @@ export type EngineUnavailableKind =
 	| "chmod-failed"
 	| "rename-failed";
 
-export class EngineUnavailableError extends Error {
+class EngineUnavailableError extends Error {
 	readonly kind: EngineUnavailableKind;
 	constructor(kind: EngineUnavailableKind, message: string) {
 		super(message);

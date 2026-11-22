@@ -1,12 +1,12 @@
 import { Type, type Static } from "typebox";
-import { cell, change as relativeChange, formatChange, number, quantity } from "../benchmark/core.ts";
+import { cell, change as relativeChange, formatChange, quantity } from "../benchmark/core.ts";
 
 export const SNAPSHOT = "autoresearch:report";
 export const STATUS_KEY = "autoresearch";
 const line = (maxLength: number) => Type.String({ minLength: 1, maxLength, pattern: "^[^\\x00-\\x1f\\x7f-\\x9f]+$" });
 const Direction = Type.Union([Type.Literal("lower"), Type.Literal("higher")]);
 const Role = Type.Union([Type.Literal("objective"), Type.Literal("constraint"), Type.Literal("informational")]);
-export const Phase = Type.Union([
+const Phase = Type.Union([
 	Type.Literal("planning"), Type.Literal("editing"), Type.Literal("measuring"),
 	Type.Literal("checking"), Type.Literal("paused"), Type.Literal("complete"),
 ]);
@@ -41,7 +41,7 @@ export interface Report {
 	updatedAt: number;
 	provenance: "model-reported" | "tool-measured";
 }
-export interface Snapshot { version: 1; report: Report | null }
+interface Snapshot { version: 1; report: Report | null }
 
 function text(value: unknown, max: number, empty = false): value is string {
 	return typeof value === "string" && (empty || value.trim().length > 0) && value.length <= max && !/[\x00-\x1f\x7f-\x9f]/.test(value);
@@ -111,7 +111,6 @@ export function restoreReport(data: unknown): Report | null {
 	return structuredClone(snapshot.report);
 }
 
-export { number, quantity };
 export function change(metric: Metric): string {
 	if (metric.baseline === undefined || metric.value === undefined) return "—";
 	return formatChange(relativeChange(metric.baseline, metric.value), metric.unit);

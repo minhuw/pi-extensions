@@ -9,14 +9,14 @@ export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks
 export const SOUL_SHARED_KEY = Symbol.for("pi-extensions.soul");
 const LOAD_PROBE_EVENT = "pi-extensions.soul.load-probe";
 
-export const SOUL_PRINCIPLES = [
+const SOUL_PRINCIPLES = [
 	"- Fail fast and loud: ship the simplest working slice to test assumptions early. Never hide bugs behind silent fallbacks, speculative abstractions, or swallowed errors—let broken invariants fail immediately where they happen, and keep changes small and easy to fix or revert.",
 	"- Do the hard work; cut zero-information words: trace root causes and solve the real problem instead of papering over symptoms. State concrete, falsifiable claims backed by code, output, or measurements; omit truisms, filler caveats, and statements whose negation would be absurd.",
 	"- Stand on evidence, not sycophancy: never flatter the user or agree just to be agreeable. Push back directly when a premise or plan contradicts the codebase, data, or logic, and do not flip your position under pushback unless new evidence or an explicit tradeoff decision warrants it.",
 ].join("\n");
 
-export const ON_PREFIX = "Soul principles are on";
-export const OFF_PREFIX = "Soul principles are off";
+const ON_PREFIX = "Soul principles are on";
+const OFF_PREFIX = "Soul principles are off";
 export const SECTION_TEXT = `Core development principles (a later soul message overrides this):\n${SOUL_PRINCIPLES}`;
 export const ON_TEXT = `${ON_PREFIX}:\n${SOUL_PRINCIPLES}`;
 export const OFF_TEXT = `${OFF_PREFIX}. Ignore earlier soul instructions for the rest of this branch unless turned back on.`;
@@ -26,7 +26,7 @@ export interface ChildSessionHook {
 	extensionFactory: (pi: ExtensionAPI) => void;
 }
 
-export interface SoulSharedState {
+interface SoulSharedState {
 	openInstances: Set<object>;
 	ownerBySession: Map<string, object>;
 	topLevelSessions: Set<string>;
@@ -130,7 +130,7 @@ function isExcludedHelperChild(ctx: ExtensionContext): boolean {
 }
 
 /** Top-level TUI and RPC sessions (never linked children, even if bound with a UI context). */
-export function isTopLevelSession(ctx: ExtensionContext): boolean {
+function isTopLevelSession(ctx: ExtensionContext): boolean {
 	if (ctx.mode !== "tui" && ctx.mode !== "rpc") return false;
 	return sessionLinks(ctx).length === 0;
 }
@@ -163,7 +163,7 @@ function directParentIds(ctx: ExtensionContext, allowHeaderParent: boolean): str
  * persisted Subagents and Herder steps carry a `pi-extensions.session-link` entry; unlinked in-memory
  * children bind without `tui`/`rpc` while a parent session is open in this process.
  */
-export function isChildSession(ctx: ExtensionContext): boolean {
+function isChildSession(ctx: ExtensionContext): boolean {
 	if (sessionLinks(ctx).length > 0) return true;
 	if (ctx.mode === "tui" || ctx.mode === "rpc") return false;
 	if (directParentIds(ctx, true).length > 0) return true;

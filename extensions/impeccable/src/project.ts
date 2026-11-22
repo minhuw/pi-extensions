@@ -12,7 +12,7 @@ import { sha256 } from "./engine.ts";
 
 export type ObjectValue = Record<string, unknown>;
 export const object = (value: unknown): value is ObjectValue => value !== null && typeof value === "object" && !Array.isArray(value);
-export const truthy = (value: string | undefined): boolean => /^(1|true|yes|on)$/i.test(value ?? "");
+const truthy = (value: string | undefined): boolean => /^(1|true|yes|on)$/i.test(value ?? "");
 export const configPaths = (root: string): string[] => ["config.json", "config.local.json"].map((name) => path.join(root, ".impeccable", name));
 export function isPrivateDirectory(info: Stats): boolean {
 	return info.isDirectory() && !info.isSymbolicLink() && (!process.getuid || (info.uid === process.getuid() && (info.mode & 0o077) === 0));
@@ -157,7 +157,7 @@ export async function resolveDirectory(cwd: string): Promise<string> {
 }
 
 /** Resolve selection BEFORE ancestor/app-boundary resolution. No missing directory fallback. */
-export async function resolveTargetPath(cwd: string, target: string): Promise<string> {
+async function resolveTargetPath(cwd: string, target: string): Promise<string> {
 	const base = await resolveDirectory(cwd);
 	if (!target.trim()) throw new Error("--target requires a path value");
 	const absolute = await physicalPath(path.resolve(cwd, target));
