@@ -1,6 +1,6 @@
-import { randomBytes } from "node:crypto";
-import { appendFile, chmod, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readdir, readFile, rename, rm, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import { writeFileAtomic } from "./atomic-write.ts";
 
 export type StreamKind = "session" | "herder-journal";
 
@@ -70,18 +70,6 @@ async function tighten(path: string, mode: number): Promise<void> {
 		await chmod(path, mode);
 	} catch (error) {
 		if (!missing(error)) throw error;
-	}
-}
-
-async function atomicWrite(file: string, data: string): Promise<void> {
-	const temp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-	try {
-		await writeFile(temp, data, { mode: FILE_MODE });
-		await chmod(temp, FILE_MODE);
-		await rename(temp, file);
-	} catch (error) {
-		await rm(temp, { force: true }).catch(() => undefined);
-		throw error;
 	}
 }
 
@@ -163,12 +151,12 @@ export class Store {
 	}
 
 	async saveStream(state: StreamState): Promise<void> {
-		await atomicWrite(this.streamFile(this.streams, state.key), JSON.stringify(state));
+		await writeFileAtomic(this.streamFile(this.streams, state.key), JSON.stringify(state), { mode: FILE_MODE, sync: false });
 	}
 
 	/** Moves a fully uploaded, closed stream out of the set scanned at startup. */
 	async archiveStream(state: StreamState): Promise<void> {
-		await atomicWrite(this.streamFile(this.done, state.key), JSON.stringify(state));
+		await writeFileAtomic(this.streamFile(this.done, state.key), JSON.stringify(state), { mode: FILE_MODE, sync: false });
 		await unlink(this.streamFile(this.streams, state.key)).catch((error) => { if (!missing(error)) throw error; });
 	}
 
@@ -197,7 +185,7 @@ export class Store {
 	async saveRequest(record: SpooledRequest): Promise<number> {
 		if (!REQUEST_ID.test(record.id)) throw new Error(`invalid request id ${record.id}`);
 		const text = JSON.stringify(record);
-		await atomicWrite(join(this.requests, `${record.id}.json`), text);
+		await writeFileAtomic(join(this.requests, `${record.id}.json`), text, { mode: FILE_MODE, sync: false });
 		return Buffer.byteLength(text);
 	}
 
@@ -217,7 +205,7 @@ export class Store {
 
 	async saveBlob(hash: string, text: string): Promise<void> {
 		if (!HASH.test(hash)) throw new Error(`invalid blob hash ${hash}`);
-		await atomicWrite(join(this.blobs, hash), text);
+		await writeFileAtomic(join(this.blobs, hash), text, { mode: FILE_MODE, sync: false });
 	}
 
 	async readBlob(hash: string): Promise<string | undefined> {
@@ -249,7 +237,7 @@ export class Store {
 	}
 
 	async parkDocument(name: string, content: string): Promise<void> {
-		await atomicWrite(join(this.parked, name), content);
+		await writeFileAtomic(join(this.parked, name), content, { mode: FILE_MODE, sync: false });
 	}
 
 	/** The acknowledged hashes, oldest first, and the server URL that acknowledged them. */
@@ -271,6 +259,6 @@ export class Store {
 	}
 
 	async rewriteAcked(url: string, hashes: readonly string[]): Promise<void> {
-		await atomicWrite(this.ackedLog, `${ACKED_URL}${url}\n${hashes.map((hash) => `${hash}\n`).join("")}`);
+		await writeFileAtomic(this.ackedLog, `${ACKED_URL}${url}\n${hashes.map((hash) => `${hash}\n`).join("")}`, { mode: FILE_MODE, sync: false });
 	}
 }

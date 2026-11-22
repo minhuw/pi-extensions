@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readlink, realpath, rename, rm, type FileHandle } from "node:fs/promises";
+import { mkdir, readFile, readlink, realpath } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Input, truncateToWidth } from "@earendil-works/pi-tui";
+import { writeFileAtomic } from "./atomic-write.ts";
 import { normalizeUrl } from "./config.ts";
 import { bindDeviceKey, deviceKey } from "./device-key.ts";
 import { defaultDeviceName, LEGACY_DEVICE_NAME, legacyDeviceName, type PairedDevice, PairingView, pairingLimits, startPairing, validDeviceName, waitForApproval } from "./pairing.ts";
@@ -92,22 +92,7 @@ export async function writeConfigFile(file: string, fields: Record<string, unkno
 		await refuseDangling(file);
 	}
 	await mkdir(dirname(target), { recursive: true });
-	const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
-	let handle: FileHandle | undefined;
-	try {
-		handle = await open(temp, "wx", 0o600);
-		await handle.writeFile(`${JSON.stringify(fields, null, 2)}\n`);
-		// The umask may have narrowed the mode further; the file is complete on disk before it replaces the old one.
-		await handle.chmod(0o600);
-		await handle.sync();
-		await handle.close();
-		handle = undefined;
-		await rename(temp, target);
-	} catch (error) {
-		await handle?.close().catch(() => {});
-		await rm(temp, { force: true });
-		throw error;
-	}
+	await writeFileAtomic(target, `${JSON.stringify(fields, null, 2)}\n`, { mode: 0o600, sync: true });
 }
 
 /**

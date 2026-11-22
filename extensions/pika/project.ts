@@ -1,6 +1,7 @@
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { writeFileAtomic } from "./atomic-write.ts";
 import { credentialsRegistry } from "./credentials.ts";
 import { inspectRepository, PROJECT_CONFIG, type ProjectConfig, type RepositoryState, validProjectName } from "./repository.ts";
 
@@ -33,14 +34,7 @@ export async function ensureIgnoredDir(dir: string): Promise<void> {
 export async function writeProjectConfig(checkout: string, config: ProjectConfig): Promise<string> {
 	const file = join(checkout, PROJECT_CONFIG);
 	await ensureIgnoredDir(dirname(file));
-	const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
-	try {
-		await writeFile(temp, `${JSON.stringify(config, null, "\t")}\n`);
-		await rename(temp, file);
-	} catch (error) {
-		await rm(temp, { force: true });
-		throw error;
-	}
+	await writeFileAtomic(file, `${JSON.stringify(config, null, "\t")}\n`, { sync: false });
 	return file;
 }
 

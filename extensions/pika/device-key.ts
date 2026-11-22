@@ -1,6 +1,7 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, type FileHandle } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { writeFileAtomic } from "./atomic-write.ts";
 import { normalizeUrl } from "./config.ts";
 import { type MachineSource, machineSource } from "./uploader.ts";
 
@@ -39,21 +40,7 @@ async function readKey(file: string): Promise<{ key: string; machine: string | n
 /** Replaces `file` atomically with a file only its owner can read. */
 async function writeKey(file: string, dir: string, fields: Record<string, unknown>): Promise<void> {
 	await mkdir(dir, { recursive: true });
-	const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-	let handle: FileHandle | undefined;
-	try {
-		handle = await open(temp, "wx", 0o600);
-		await handle.writeFile(`${JSON.stringify(fields)}\n`);
-		await handle.chmod(0o600);
-		await handle.sync();
-		await handle.close();
-		handle = undefined;
-		await rename(temp, file);
-	} catch (error) {
-		await handle?.close().catch(() => {});
-		await rm(temp, { force: true });
-		throw error;
-	}
+	await writeFileAtomic(file, `${JSON.stringify(fields)}\n`, { mode: 0o600, sync: true });
 }
 
 /**
