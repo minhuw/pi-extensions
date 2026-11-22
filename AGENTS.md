@@ -61,7 +61,7 @@ Run from the repository root with Node `>=22.19.0` (SDK baseline Pi 1.6.0; peer 
 ## Conventions
 
 - Use conventional commits with a scope (`fix(subagents): ...`, `test(extensions): ...`).
-- TypeScript is strict (`noEmit`). Commit, Continue Session, Recap, Quality, and Writer tests use `node --test`; all other extension suites use Vitest.
+- TypeScript is strict (`noEmit`). Extension suites use Vitest.
 - Keep `extensions/pika/index.ts` last in `package.json` `pi.extensions` so payload capture runs last.
 - Keep `systemPromptOptions.sections` fixed after a session's first request so Magpie's prefix cache holds; send mid-session mode or language switches as hidden custom messages appended to the conversation, re-sent only when compaction or branching drops them.
 - Cross-extension isolation: extensions never import each other (`plugins/pika-relay` copies its shared pika modules into `dist/shared/` at build time); share runtime hooks only via `Symbol.for("pi-extensions.child-session-hooks")`, `Symbol.for("pi-extensions.pika.credentials")`, `Symbol.for("pi-extensions.fff.backend")`, `Symbol.for("pi-extensions.session-modes")` (Swarm and Selfdrive publish; relay and Goal read), `Symbol.for("pi-extensions.swarm-boards")` (Delegation publishes; pika reads), `Symbol.for("pi-extensions.standing-approval")` (Selfdrive publishes; Herder, Agents MD, and Subagents read), `Symbol.for("pi-extensions.external-agents")` (Herder publishes; Subagents reads), `Symbol.for("pi-extensions.design-companions")` (ui-sdk publishes, Impeccable reads), `pi-extensions.session-link` entries, and `herder:run` events.
