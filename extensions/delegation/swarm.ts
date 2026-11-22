@@ -8,7 +8,7 @@ import {
 	type ExtensionContext,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { formatBoard, isCoordinator, pruneSettled, sessionModes, swarmBoards, type SwarmBoard } from "./board.ts";
+import { formatBoard, isConversation, isCoordinator, pruneSettled, sessionModes, swarmBoards, type SwarmBoard } from "./board.ts";
 
 const NAME = "swarm";
 const STATUS = "🐝 swarm";
@@ -44,10 +44,6 @@ interface SwarmState {
 	pinned: boolean;
 	active: boolean;
 }
-
-const isConversation = (entry: SessionEntry) => entry.type === "message"
-	? entry.message.role !== "system"
-	: entry.type === "custom_message" || entry.type === "compaction" || entry.type === "branch_summary";
 
 const isPin = (entry: SessionEntry): entry is CustomEntry<{ base: boolean }> =>
 	entry.type === "custom" && entry.customType === NAME && "base" in (entry.data as SwarmEntry);

@@ -493,7 +493,7 @@ const childTool = {
 
 const CHILD_SECTION = 'You are one of several agents sharing a swarm board with your coordinator. Call swarm_board with action "list" before editing files another card may own; post progress with note, set blocked with the reason when you need the coordinator, and add todo cards for follow-up work you find instead of doing it.';
 
-const isConversation = (entry: SessionEntry) => entry.type === "message"
+export const isConversation = (entry: SessionEntry) => entry.type === "message"
 	? entry.message.role !== "system"
 	: entry.type === "custom_message" || entry.type === "compaction" || entry.type === "branch_summary";
 

@@ -33,10 +33,7 @@ export const SESSION_MODES = Symbol.for("pi-extensions.session-modes");
 export const SWARM_BOARDS = Symbol.for("pi-extensions.swarm-boards");
 export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
 
-export interface SessionModesRegistry {
-	modes: Map<string, Set<string>>;
-	listeners: Set<(sessionId: string) => void>;
-}
+export type { SessionModesRegistry } from "../../board.ts";
 
 /** Clears process-global delegation registries and removes the swarm-board child-session hook. */
 export function clearDelegationGlobals(): void {
