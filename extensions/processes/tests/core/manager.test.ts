@@ -4,9 +4,9 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { groupAlive } from "../../src/core/group.ts";
+import { groupAlive, pidAlive } from "../../src/core/group.ts";
 import { createProcessManager, createProcessManagerForTest } from "../../src/manager.ts";
-import type { ManagerOptions, ProcessEvent, ProcessInfo, ProcessManager, StartOptions } from "../../src/types.ts";
+import { isLiveStatus, type ManagerOptions, type ProcessEvent, type ProcessManager, type StartOptions } from "../../src/types.ts";
 
 const NODE = JSON.stringify(process.execPath);
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -42,15 +42,6 @@ async function next<T extends ProcessEvent["type"]>(events: ProcessEvent[], type
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function pidAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
-	}
-}
 
 async function gone(pid: number, ms = 3000): Promise<boolean> {
 	const deadline = Date.now() + ms;
@@ -747,10 +738,6 @@ describe("error isolation", () => {
 	});
 });
 
-function isLive(info: ProcessInfo): boolean {
-	return info.status === "starting" || info.status === "running" || info.status === "ready" || info.status === "stopping";
-}
-
 function watchdogAlive(pgid: number): boolean {
 	const out = execFileSync("ps", ["-eo", "pid=,args="], { encoding: "utf8" });
 	const marker = `processes-watchdog ${process.pid} ${pgid}`;
@@ -851,7 +838,7 @@ setInterval(() => {}, 1000);
 		await expect(start("sleep 30", { ready: false })).rejects.toThrow(/shutting down/i);
 		await expect(manager.restart(info.id)).rejects.toThrow(/shutting down/i);
 		expect(groupAlive(info.pid!)).toBe(false);
-		expect(manager.list().filter(isLive)).toEqual([]);
+		expect(manager.list().filter((p) => isLiveStatus(p.status))).toEqual([]);
 	});
 
 	it("aborts concurrent restart() calls racing with shutdown() while stopping without leaving live children", async () => {
@@ -903,7 +890,7 @@ setInterval(() => {}, 1000);
 			expect(pidAlive(childPid)).toBe(false);
 			expect(await until(() => !watchdogAlive(parentPid), 1000)).toBe(true);
 		}
-		expect(manager.list().filter(isLive)).toEqual([]);
+		expect(manager.list().filter((p) => isLiveStatus(p.status))).toEqual([]);
 	});
 
 	it("terminates a replacement child if restart() races with shutdown() mid-launch and drains live()", async () => {
@@ -957,7 +944,7 @@ setInterval(() => {}, 1000);
 			expect(groupAlive(parentPid)).toBe(false);
 			expect(pidAlive(childPid)).toBe(false);
 		}
-		expect(manager.list().filter(isLive)).toEqual([]);
+		expect(manager.list().filter((p) => isLiveStatus(p.status))).toEqual([]);
 
 		// Wait past ready.timeoutSeconds to confirm readiness timer was cleared.
 		await sleep(300);

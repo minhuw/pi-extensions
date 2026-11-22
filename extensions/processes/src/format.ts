@@ -1,4 +1,4 @@
-import type { ProcessInfo } from "./types.ts";
+import { isLiveStatus, type ProcessInfo } from "./types.ts";
 
 /** Notifications and tool results quote at most this many trailing log lines. */
 export const TAIL_LINES = 20;
@@ -16,7 +16,7 @@ export function duration(ms: number): string {
 }
 
 export function isLive(process: ProcessInfo): boolean {
-	return process.status === "starting" || process.status === "running" || process.status === "ready" || process.status === "stopping";
+	return isLiveStatus(process.status);
 }
 
 /** Run time so far, or until it ended. */

@@ -4,24 +4,23 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Readable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
-import { groupAlive, signalGroup, spawnWatchdog, terminateGroup } from "./core/group.ts";
+import { groupAlive, pidAlive, signalGroup, spawnWatchdog, terminateGroup } from "./core/group.ts";
 import { LogFile } from "./core/logfile.ts";
 import { httpUp, pollUntil, tcpOpen } from "./core/probes.ts";
 import { compilePattern, findLocalUrls, LineSplitter, urlPort } from "./core/text.ts";
-import type {
-	LogQuery,
-	LogRead,
-	ManagerOptions,
-	ProcessEvent,
-	ProcessInfo,
-	ProcessManager,
-	ProcessStatus,
-	StartOptions,
-	StopResult,
-	WaitOptions,
+import {
+	isLiveStatus,
+	type LogQuery,
+	type LogRead,
+	type ManagerOptions,
+	type ProcessEvent,
+	type ProcessInfo,
+	type ProcessManager,
+	type StartOptions,
+	type StopResult,
+	type WaitOptions,
 } from "./types.ts";
 
-const LIVE = new Set<ProcessStatus>(["starting", "running", "ready", "stopping"]);
 const DEFAULT_MAX_LIVE = 16;
 const DEFAULT_MAX_LOG_BYTES = 32 * 1024 * 1024;
 const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -196,7 +195,7 @@ function createManagerCore(options: ManagerOptions) {
 			return [];
 		}
 	};
-	const live = () => [...records.values()].filter((record) => LIVE.has(record.info.status));
+	const live = () => [...records.values()].filter((record) => isLiveStatus(record.info.status));
 	const current = (record: ProcessRecord, run: Run) => record.run === run;
 	const active = (record: ProcessRecord, run: Run) => current(record, run) && !run.exited;
 
@@ -204,7 +203,7 @@ function createManagerCore(options: ManagerOptions) {
 		const byId = records.get(idOrName);
 		if (byId) return byId;
 		const named = [...records.values()].filter((record) => record.info.name === idOrName);
-		const found = named.find((record) => LIVE.has(record.info.status) || record.restarting !== undefined) ?? named.at(-1);
+		const found = named.find((record) => isLiveStatus(record.info.status) || record.restarting !== undefined) ?? named.at(-1);
 		if (!found) throw new Error(`Unknown process "${idOrName}".`);
 		return found;
 	}
@@ -468,7 +467,7 @@ function createManagerCore(options: ManagerOptions) {
 
 	async function stop(record: ProcessRecord, graceMs: number): Promise<StopResult> {
 		const run = record.run;
-		if (!run || !LIVE.has(record.info.status)) return { process: snapshot(record), outcome: "already" };
+		if (!run || !isLiveStatus(record.info.status)) return { process: snapshot(record), outcome: "already" };
 		if (run.exited) {
 			await run.finished;
 			return { process: snapshot(record), outcome: "already" };
@@ -568,7 +567,7 @@ function createManagerCore(options: ManagerOptions) {
 				try {
 					await launch(record);
 				} catch (error) {
-					if (!record.run || !LIVE.has(record.info.status)) {
+					if (!record.run || !isLiveStatus(record.info.status)) {
 						for (const wait of [...waits.values()]) {
 							if (wait.record === record) {
 								clearTimeout(wait.timer);
@@ -590,7 +589,7 @@ function createManagerCore(options: ManagerOptions) {
 
 		async logs(idOrName: string, query: LogQuery = {}): Promise<LogRead> {
 			const record = find(idOrName);
-			return record.log.read(query, !LIVE.has(record.info.status));
+			return record.log.read(query, !isLiveStatus(record.info.status));
 		},
 
 		stop: (idOrName, graceMs = DEFAULT_GRACE_MS) => stop(find(idOrName), graceMs),
@@ -615,7 +614,7 @@ function createManagerCore(options: ManagerOptions) {
 			const id = uniqueId("w", (candidate) => waits.has(candidate));
 			const wait: Wait = { id, record, options: { ...waitOptions }, pattern, timer: setTimeout(() => finishWait(wait, "timeout"), seconds * 1000) };
 			waits.set(id, wait);
-			const ended = !LIVE.has(record.info.status);
+			const ended = !isLiveStatus(record.info.status);
 			if (until === "ready" && record.info.status === "ready") process.nextTick(() => finishWait(wait, "satisfied"));
 			else if (ended) process.nextTick(() => finishWait(wait, until === "exit" ? "satisfied" : "exited"));
 			return id;
@@ -630,7 +629,7 @@ function createManagerCore(options: ManagerOptions) {
 
 		discard(idOrName) {
 			const record = find(idOrName);
-			if (LIVE.has(record.info.status) || record.restarting) {
+			if (isLiveStatus(record.info.status) || record.restarting) {
 				throw new Error(`Process "${record.info.name}" is still ${record.restarting ? "restarting" : record.info.status}; stop it first.`);
 			}
 			record.log.remove();
@@ -647,7 +646,7 @@ function createManagerCore(options: ManagerOptions) {
 		clear() {
 			let count = 0;
 			for (const [id, record] of records) {
-				if (LIVE.has(record.info.status) || record.restarting) continue;
+				if (isLiveStatus(record.info.status) || record.restarting) continue;
 				record.log.remove();
 				records.delete(id);
 				count++;
@@ -751,16 +750,4 @@ function sweep(stateDir: string, retentionMs: number): void {
 
 function isEnoent(error: unknown): boolean {
 	return (error as NodeJS.ErrnoException).code === "ENOENT";
-}
-
-function pidAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		const code = (error as NodeJS.ErrnoException).code;
-		if (code === "ESRCH") return false;
-		if (code === "EPERM") return true;
-		throw error;
-	}
 }

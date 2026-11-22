@@ -10,6 +10,11 @@ export type ProcessStatus =
 	| "exited" // exited on its own (exitCode or signal set)
 	| "stopped"; // exited after a stop request
 
+/** True while the process has not yet finished exiting. */
+export function isLiveStatus(status: ProcessStatus): boolean {
+	return status === "starting" || status === "running" || status === "ready" || status === "stopping";
+}
+
 export interface ReadinessSpec {
 	/** Regex (JavaScript syntax) matched against each output line (ANSI stripped). */
 	pattern?: string;

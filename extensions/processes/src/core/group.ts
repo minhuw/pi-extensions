@@ -1,10 +1,9 @@
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 
-/** True while any member of process group `pgid` exists (EPERM still means it exists). */
-export function groupAlive(pgid: number): boolean {
+function signalZeroAlive(target: number): boolean {
 	try {
-		process.kill(-pgid, 0);
+		process.kill(target, 0);
 		return true;
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
@@ -12,6 +11,16 @@ export function groupAlive(pgid: number): boolean {
 		if (code === "EPERM") return true;
 		throw error;
 	}
+}
+
+/** True while process `pid` exists (EPERM still means it exists). */
+export function pidAlive(pid: number): boolean {
+	return signalZeroAlive(pid);
+}
+
+/** True while any member of process group `pgid` exists (EPERM still means it exists). */
+export function groupAlive(pgid: number): boolean {
+	return signalZeroAlive(-pgid);
 }
 
 /** Signals process group `pgid`; false when it no longer exists. */
