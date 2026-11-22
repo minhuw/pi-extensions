@@ -1,9 +1,7 @@
 import {
-	agentFetch, disabledCause, formatTransportError, formatUnexpectedHttpError, mapAuthHttpError, requireCredentials, withoutCredentials,
+	agentFetch, formatTransportError, formatUnexpectedHttpError, mapAuthHttpError, requireCredentials, withoutCredentials,
 } from "../agent-client.ts";
 import { credentialsRegistry, type PikaCredentials } from "../credentials.ts";
-
-export { disabledCause, withoutCredentials };
 
 /** Timeouts; tests shorten them. `indexTimeoutMs` bounds the index fetch at a session's first run. */
 export const timing = { httpTimeoutMs: 15_000, indexTimeoutMs: 1_500 };
@@ -14,7 +12,7 @@ export class MemoryServerError extends Error {
 }
 
 /** The credentials to use for a session in `cwd`; throws the text the tool's error shows. */
-export function current(cwd: string): PikaCredentials {
+function current(cwd: string): PikaCredentials {
 	return requireCredentials(cwd, "memory");
 }
 

@@ -1,5 +1,4 @@
 import { data, isText as text, parseActivity, type Activity } from "./plugin/src/protocol.ts";
-export type { Activity } from "./plugin/src/protocol.ts";
 
 /** Bounded source snapshots; rejected updates leave the previous snapshot intact. */
 export interface Snapshot { source: string; activities: Activity[] }

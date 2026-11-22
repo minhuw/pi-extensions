@@ -15,7 +15,7 @@ import { acquireUploader, currentUploader, releaseUploader, type Uploader, type 
 import { usageExtension } from "./usage.ts";
 
 export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
-export const SHUTDOWN_FLUSH_MS = 2_000;
+const SHUTDOWN_FLUSH_MS = 2_000;
 /** How long the last session's shutdown waits for the binds it aborted. */
 const SHUTDOWN_BIND_MS = 1_000;
 export const SESSION_LINK_TYPE = "pi-extensions.session-link";

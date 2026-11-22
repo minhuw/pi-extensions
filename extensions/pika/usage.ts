@@ -19,7 +19,7 @@ export function extensionDir(path: string | undefined): string | undefined {
 }
 
 /** The entry for typed text that runs a prompt template or skill, or undefined for anything else. */
-export function commandEntry(text: string, commands: SlashCommandInfo[]): CommandEntry | undefined {
+function commandEntry(text: string, commands: SlashCommandInfo[]): CommandEntry | undefined {
 	const name = /^\/(\S+)/.exec(text)?.[1];
 	if (!name) return undefined;
 	const skill = name.startsWith("skill:");

@@ -3,14 +3,14 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, getKeybindings, truncateToWidth } from "@earendil-works/pi-tui";
 import { PIKA_VERSION } from "./uploader.ts";
 
-export const PAIR_REQUEST_TIMEOUT_MS = 5_000;
+const PAIR_REQUEST_TIMEOUT_MS = 5_000;
 /** How long `/pika login` waits for an approval, and the shortest poll interval it accepts; tests lower both. */
 export const pairingLimits = { timeoutMs: 10 * 60_000, minIntervalMs: 1_000 };
 const MAX_INTERVAL_MS = 30_000;
 /** Polls in a row that fail before pairing gives up; a single lost answer does not end it. */
 const MAX_POLL_FAILURES = 3;
 /** Every device id the server makes matches this; names are free text (`validDeviceName`). */
-export const DEVICE_ID = /^[A-Za-z0-9._-]{1,64}$/;
+const DEVICE_ID = /^[A-Za-z0-9._-]{1,64}$/;
 /** The only device names pika servers older than 0.4 accept. */
 export const LEGACY_DEVICE_NAME = DEVICE_ID;
 const CODE = /^[A-Za-z0-9-]{1,32}$/;

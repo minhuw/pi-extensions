@@ -10,7 +10,7 @@ export interface RepositoryInfo {
 	repository?: string;
 }
 
-export const GIT_TIMEOUT_MS = 2_000;
+const GIT_TIMEOUT_MS = 2_000;
 const MAX_NAME_BYTES = 255;
 const MAX_URL_BYTES = 2048;
 // Whitespace, C0 and C1 controls, and DEL.

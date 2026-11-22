@@ -40,7 +40,7 @@ export function loadConfig(agentDir, env = process.env) {
     const exclude = Array.isArray(raw.exclude) ? raw.exclude.filter((value) => typeof value === "string" && value.length > 0) : [];
     return { enabled: true, config: { url: url.replace(/\/+$/, ""), token, exclude }, file };
 }
-export const MEMORY_DEFAULTS = { autoDream: true, dreamIdleMinutes: 20 };
+const MEMORY_DEFAULTS = { autoDream: true, dreamIdleMinutes: 20 };
 /** The longest idle wait, in whole minutes, that a timer can hold: Node fires delays past 2^31 - 1 ms at once. */
 export const MAX_DREAM_IDLE_MINUTES = Math.floor((2 ** 31 - 1) / 60_000);
 /** An object field of `<agentDir>/pika.json`; empty when the file, or the field, is missing or invalid. */
@@ -69,7 +69,7 @@ export function loadMemorySettings(agentDir) {
         ...(slash > 0 && slash < model.length - 1 ? { dreamModel: model } : {}),
     };
 }
-export const RELAY_DEFAULTS = { sideAnswers: true, sideAnswerSeconds: 60 };
+const RELAY_DEFAULTS = { sideAnswers: true, sideAnswerSeconds: 60 };
 /**
  * Reads `relay` from `<agentDir>/pika.json` as `loadMemorySettings` reads `memory`; any positive number of seconds is
  * valid, up to the longest delay a timer can hold.

@@ -21,7 +21,7 @@ const BATCH_OVERHEAD = 512;
 const STREAM_OVERHEAD = 256;
 const BLOB_OVERHEAD = 90;
 /** 413s for a batch of one item before that item is parked. */
-export const MAX_TOO_LARGE = 3;
+const MAX_TOO_LARGE = 3;
 /** Batches in which the server still reports a request's resent blocks missing before the client gives up on them. */
 const MAX_MISSING_ROUNDS = 3;
 const MAX_BACKOFF_MS = 60_000;

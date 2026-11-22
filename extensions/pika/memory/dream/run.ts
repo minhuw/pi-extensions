@@ -46,9 +46,9 @@ export interface Usage { input: number; output: number; cacheRead: number; cache
  * tenth, about their price. Every call re-reads the whole cached context, so a plain sum would grow with the square
  * of the calls and stop a dream after a handful of them.
  */
-export const budgetTokens = (usage: Usage): number => usage.input + usage.output + usage.cacheWrite + Math.ceil(usage.cacheRead / 10);
+const budgetTokens = (usage: Usage): number => usage.input + usage.output + usage.cacheWrite + Math.ceil(usage.cacheRead / 10);
 /** The context an answer was given: its input and cache tokens. */
-export const contextTokens = (usage: Usage): number => usage.input + usage.cacheRead + usage.cacheWrite;
+const contextTokens = (usage: Usage): number => usage.input + usage.cacheRead + usage.cacheWrite;
 
 /** A dream's caps and timers; tests shorten them. */
 export const dreamLimits = {

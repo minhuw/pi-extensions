@@ -9,7 +9,7 @@ import { MemoryServerError, timing } from "../client.ts";
 export type LeaseServer = AgentServer;
 
 /** No answer came: the server could not be reached, did not answer in time, or sent an unreadable 200. */
-export class NoAnswer extends Error {}
+class NoAnswer extends Error {}
 
 /**
  * Sends `{url}/api/agent/v1/<path>` to `server` and returns the 200 answer's JSON. Any other status throws a

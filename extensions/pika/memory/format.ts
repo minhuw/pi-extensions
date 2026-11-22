@@ -28,7 +28,7 @@ export function bodyTooLong(body: string, nothing: string): string | undefined {
 		+ "Keep the rule, a one-sentence \"Why:\", and a one-sentence \"How to apply:\"; leave out how the rule came up (which session, which day, what was tried), then try again.";
 }
 /** About how many characters `memory_read` shows; notes past it are listed by title. */
-export const READ_BUDGET = 20_000;
+const READ_BUDGET = 20_000;
 /** A note nobody has read or changed for this many days is a candidate for the dream to forget. */
 export const UNUSED_DAYS = 90;
 

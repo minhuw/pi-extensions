@@ -110,10 +110,10 @@ async function explain(error: unknown, options: { cwd: string; id?: string; scop
 	return failure(error.message);
 }
 
-export const CATEGORY = Type.Union([Type.Literal("user"), Type.Literal("feedback"), Type.Literal("project"), Type.Literal("reference")], {
+const CATEGORY = Type.Union([Type.Literal("user"), Type.Literal("feedback"), Type.Literal("project"), Type.Literal("reference")], {
 	description: "\"user\": who the user is and what they want; \"feedback\": corrections and preferences about how to work; \"project\": standing project constraints and pitfalls that later work must respect; \"reference\": pointers to external documents, systems, or people",
 });
-export const SCOPE = Type.Union([Type.Literal("user"), Type.Literal("project")], {
+const SCOPE = Type.Union([Type.Literal("user"), Type.Literal("project")], {
 	description: "\"user\": every project of the user, only for a note an agent in any project understands without this project's context; \"project\": the current git repository only",
 });
 

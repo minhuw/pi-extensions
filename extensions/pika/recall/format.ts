@@ -27,18 +27,18 @@ export const PREAMBLE = "[recall] Recorded history from past pi sessions on the 
 /** About this many characters of session text per result. */
 export const BUDGET = 20_000;
 /** At most this many tool calls are listed per turn in an overview. */
-export const TOOLS_PER_TURN = 30;
+const TOOLS_PER_TURN = 30;
 /** At most this many children are listed in an overview. */
-export const CHILDREN_SHOWN = 30;
+const CHILDREN_SHOWN = 30;
 
-export const cut = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
+const cut = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
 const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
 const plural = (count: number, word: string, many = `${word}s`) => `${count} ${count === 1 ? word : many}`;
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: " " };
 
 /** A search snippet as plain text: `<mark>` becomes «…», HTML entities are decoded, whitespace folds. */
-export function snippetText(snippet: string): string {
+function snippetText(snippet: string): string {
 	const marked = snippet.replace(/<mark>/g, "«").replace(/<\/mark>/g, "»").replace(/<[^>]*>/g, "");
 	const decoded = marked.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (whole, name: string) => {
 		if (name[0] === "#") {
@@ -51,13 +51,13 @@ export function snippetText(snippet: string): string {
 }
 
 /** `YYYY-MM-DD` of an ISO time or Unix ms; "unknown" without one. */
-export function day(value: string | number | undefined): string {
+function day(value: string | number | undefined): string {
 	const date = value === undefined ? undefined : new Date(value);
 	return date && Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : "unknown";
 }
 
 /** `YYYY-MM-DD HH:MM UTC` of an ISO time or Unix ms; "unknown" without one. */
-export function minute(value: string | number | undefined): string {
+function minute(value: string | number | undefined): string {
 	const date = value === undefined ? undefined : new Date(value);
 	return date && Number.isFinite(date.getTime()) ? `${date.toISOString().slice(0, 16).replace("T", " ")} UTC` : "unknown";
 }
@@ -208,7 +208,7 @@ const runState = (run: RunSummary) => `${run.status ?? "unknown"}${run.verdict ?
 /** At most this many characters of a run's goal, of its plan, and steps listed in a run's overview. */
 export const GOAL_MAX = 4_000;
 export const PLAN_MAX = 6_000;
-export const STEPS_SHOWN = 60;
+const STEPS_SHOWN = 60;
 
 export interface RunInput { detail: RunDetail; fromEvent: number }
 
@@ -298,7 +298,7 @@ function checkResults(value: unknown): string {
 }
 
 /** One journal event as a line or a few. */
-export function eventLine(event: RunEvent): string {
+function eventLine(event: RunEvent): string {
 	const head = `[#${event.seq} · ${minute(event.at)}]`;
 	if (!event.data || typeof event.data !== "object" || Array.isArray(event.data)) {
 		return `${head} unreadable journal line: ${cut(oneLine(typeof event.data === "string" ? event.data : json(event.data)), DATA_MAX)}`;

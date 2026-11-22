@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const LONG_STRING = 2048;
+const LONG_STRING = 2048;
 
 export interface SplitPayload {
 	skeleton: unknown;

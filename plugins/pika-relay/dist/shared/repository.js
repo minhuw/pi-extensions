@@ -2,7 +2,7 @@
 import { execFile } from "node:child_process";
 import { readFile, realpath } from "node:fs/promises";
 import { dirname, join, resolve as resolvePath, win32 } from "node:path";
-export const GIT_TIMEOUT_MS = 2_000;
+const GIT_TIMEOUT_MS = 2_000;
 const MAX_NAME_BYTES = 255;
 const MAX_URL_BYTES = 2048;
 // Whitespace, C0 and C1 controls, and DEL.

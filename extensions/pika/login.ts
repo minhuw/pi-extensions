@@ -8,12 +8,12 @@ import { bindDeviceKey, deviceKey } from "./device-key.ts";
 import { defaultDeviceName, LEGACY_DEVICE_NAME, legacyDeviceName, type PairedDevice, PairingView, pairingLimits, startPairing, validDeviceName, waitForApproval } from "./pairing.ts";
 import { clientInfo } from "./uploader.ts";
 
-export const VALIDATE_TIMEOUT_MS = 5_000;
-export const METHOD_TITLE = "How should this machine log in?";
+const VALIDATE_TIMEOUT_MS = 5_000;
+const METHOD_TITLE = "How should this machine log in?";
 export const PAIR = "Pair with the pika web UI (recommended)";
 export const PASTE = "Paste a token";
 export const URL_TITLE = "pika server URL: the address you open the pika web UI at, e.g. https://pika.example.com or http://192.168.1.10:7171";
-export const URL_PLACEHOLDER = "https://pika.example.com";
+const URL_PLACEHOLDER = "https://pika.example.com";
 export const nameTitle = (suggested: string) => `Name for this machine in pika (any text up to 64 characters; blank uses ${suggested})`;
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -29,7 +29,7 @@ export function isPlainRemote(url: string): boolean {
  * Sends an empty batch with `token`; undefined when the server accepts it, otherwise why not.
  * The answer names only the URL: never the token, the headers, or the response body.
  */
-export async function validateToken(url: string, token: string, options: { piVersion?: string; signal?: AbortSignal } = {}): Promise<string | undefined> {
+async function validateToken(url: string, token: string, options: { piVersion?: string; signal?: AbortSignal } = {}): Promise<string | undefined> {
 	const signal = options.signal ? AbortSignal.any([AbortSignal.timeout(VALIDATE_TIMEOUT_MS), options.signal]) : AbortSignal.timeout(VALIDATE_TIMEOUT_MS);
 	let status: number;
 	let answer: unknown;

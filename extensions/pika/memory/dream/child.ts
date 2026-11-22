@@ -11,7 +11,7 @@ import { type DreamChild, dreamLimits, type SpawnOptions } from "./run.ts";
 
 export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
 export const SESSION_LINK_TYPE = "pi-extensions.session-link";
-export const DREAM_AGENT_TYPE = "memory-dream";
+const DREAM_AGENT_TYPE = "memory-dream";
 /** The built-in tools a dream gets: reading the code, never changing it. */
 export const READ_TOOLS = ["read", "grep", "find", "ls"];
 
@@ -20,7 +20,7 @@ type Settings = ReturnType<SettingsManager["getGlobalSettings"]>;
 const KEPT_SETTINGS: (keyof Settings)[] = ["transport", "retry", "compaction", "shellPath", "shellCommandPrefix", "images", "thinkingBudgets"];
 
 /** pika's folder in the project: `<cwd>/.pi/pika/`, kept out of git by its own `.gitignore`. */
-export const projectPikaDir = (cwd: string) => join(cwd, ".pi", "pika");
+const projectPikaDir = (cwd: string) => join(cwd, ".pi", "pika");
 /** Where dream sessions are kept: in the project, away from the user's sessions, so `/resume` does not list them. */
 export const dreamSessionDir = (cwd: string) => join(projectPikaDir(cwd), "dreams");
 
@@ -94,7 +94,7 @@ const pikaDirGuard = (cwd: string): InlineExtension => ({
 });
 
 /** The hooks registered in `globalThis[Symbol.for("pi-extensions.child-session-hooks")]`; the Set may not exist. */
-export function childSessionHooks(): InlineExtension[] {
+function childSessionHooks(): InlineExtension[] {
 	const hooks = (globalThis as Record<symbol, unknown>)[CHILD_SESSION_HOOKS];
 	if (!(hooks instanceof Set)) return [];
 	return [...hooks as Set<{ name?: unknown; extensionFactory?: unknown }>]

@@ -40,7 +40,7 @@ function refusal(run: DreamRun): string | undefined {
 	return undefined;
 }
 
-export function dreamSaveTool(run: DreamRun) {
+function dreamSaveTool(run: DreamRun) {
 	return defineTool({
 		name: "dream_save", label: "Dream Save",
 		description: "Stage a note to create or update in the user's memory; dream_commit writes the staged changes. "
@@ -74,7 +74,7 @@ export function dreamSaveTool(run: DreamRun) {
 	});
 }
 
-export function dreamForgetTool(run: DreamRun) {
+function dreamForgetTool(run: DreamRun) {
 	return defineTool({
 		name: "dream_forget", label: "Dream Forget",
 		description: "Stage a note to forget, by its id and current revision from memory_read; dream_commit writes the staged changes. "
@@ -220,7 +220,7 @@ function committedResult(texts: string[], run: DreamRun): AgentToolResult<Commit
 	return { content: [{ type: "text", text }], details: { ...(last ? { batchId: last.id, changes: last.changes.length } : {}) } };
 }
 
-export function dreamCommitTool(run: DreamRun) {
+function dreamCommitTool(run: DreamRun) {
 	return defineTool({
 		name: "dream_commit", label: "Dream Commit",
 		description: "Write every staged change as one batch, and mark the sessions you name as consolidated up to the entries this dream was given. "

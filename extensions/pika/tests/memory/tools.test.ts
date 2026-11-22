@@ -5,7 +5,8 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { request, timing, withoutCredentials } from "../../memory/client.ts";
+import { withoutCredentials } from "../../agent-client.ts";
+import { request, timing } from "../../memory/client.ts";
 import { FakePika } from "./support/pika-server.ts";
 import { callTool, type Harness, note, PROJECT, PROJECT_SCOPE, REPOSITORY, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 

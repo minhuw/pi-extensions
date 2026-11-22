@@ -41,10 +41,10 @@ const global = globalThis as { [SWARM_BOARDS]?: SwarmBoards; [SYNC]?: BoardSync 
 export const swarmBoards = (): SwarmBoards => global[SWARM_BOARDS] ??= { version: 1, boards: new Map(), listeners: new Set() };
 
 /** At most one upload per board in this time. */
-export const BOARD_INTERVAL_MS = 1_000;
+const BOARD_INTERVAL_MS = 1_000;
 /** The first wait after a failed upload; it doubles with each failure in a row, up to `BOARD_RETRY_MAX_MS`. */
-export const BOARD_RETRY_MS = 5_000;
-export const BOARD_RETRY_MAX_MS = 60_000;
+const BOARD_RETRY_MS = 5_000;
+const BOARD_RETRY_MAX_MS = 60_000;
 const UPLOAD_TIMEOUT_MS = 10_000;
 /** Answers that the same snapshot would get again: the board waits for new credentials. */
 const PERMANENT = new Set([400, 401, 403, 404, 413]);
@@ -230,7 +230,7 @@ export class BoardSync {
 }
 
 const SYNC = Symbol.for("pi-extensions.pika.boards");
-export const boardSync = (options: BoardSyncOptions): BoardSync => global[SYNC] ??= new BoardSync(options);
+const boardSync = (options: BoardSyncOptions): BoardSync => global[SYNC] ??= new BoardSync(options);
 
 /** How long the end of a session waits for its board's last upload. */
 const SHUTDOWN_FLUSH_MS = 2_000;

@@ -207,7 +207,7 @@ export const sanitize = (text: unknown): string => typeof text === "string" ? te
 export const headerField = (text: unknown): string => sanitize(text).replace(INVISIBLE, "").replace(/"/g, "").replace(/\s+/g, " ").trim();
 
 /** A time the server sent, as milliseconds since the epoch; NaN when it cannot be read. */
-export const millis = (at: string | number | undefined): number => typeof at === "number" ? at : typeof at === "string" ? Date.parse(at) : Number.NaN;
+const millis = (at: string | number | undefined): number => typeof at === "number" ? at : typeof at === "string" ? Date.parse(at) : Number.NaN;
 
 /** How a device is shown: its name, else its id. */
 export const deviceLabel = (device: { device?: unknown; deviceName?: unknown } | undefined): string => headerField(device?.deviceName) || headerField(device?.device);
@@ -222,7 +222,7 @@ export function targetLabel(target: Target | undefined, fallbackId?: string): st
 }
 
 /** "5 minutes" for the default TTL. */
-export function ttlText(seconds: number): string {
+function ttlText(seconds: number): string {
 	if (seconds % 60 === 0) return `${seconds / 60} minute${seconds === 60 ? "" : "s"}`;
 	return `${seconds} second${seconds === 1 ? "" : "s"}`;
 }

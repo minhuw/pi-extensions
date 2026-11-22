@@ -13,8 +13,8 @@ type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 /** The custom message that tells the turn what a side request answered for it. */
 export const SIDE_TYPE = "relay-side";
 /** What starts a side answer or a busy notice; a session never side-answers a message that starts with either. */
-export const SIDE_MARK = "[side answer]";
-export const BUSY_MARK = "[busy notice]";
+const SIDE_MARK = "[side answer]";
+const BUSY_MARK = "[busy notice]";
 export const automatic = (text: string): boolean => text.startsWith(SIDE_MARK) || text.startsWith(BUSY_MARK);
 
 /** A top-level tool call of the turn that has not finished. */

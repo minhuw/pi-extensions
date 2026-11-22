@@ -58,7 +58,7 @@ export interface MemorySettings {
 	dreamModel?: string;
 }
 
-export const MEMORY_DEFAULTS: Readonly<MemorySettings> = { autoDream: true, dreamIdleMinutes: 20 };
+const MEMORY_DEFAULTS: Readonly<MemorySettings> = { autoDream: true, dreamIdleMinutes: 20 };
 /** The longest idle wait, in whole minutes, that a timer can hold: Node fires delays past 2^31 - 1 ms at once. */
 export const MAX_DREAM_IDLE_MINUTES = Math.floor((2 ** 31 - 1) / 60_000);
 
@@ -96,7 +96,7 @@ export interface RelaySettings {
 	sideAnswerSeconds: number;
 }
 
-export const RELAY_DEFAULTS: Readonly<RelaySettings> = { sideAnswers: true, sideAnswerSeconds: 60 };
+const RELAY_DEFAULTS: Readonly<RelaySettings> = { sideAnswers: true, sideAnswerSeconds: 60 };
 
 /**
  * Reads `relay` from `<agentDir>/pika.json` as `loadMemorySettings` reads `memory`; any positive number of seconds is

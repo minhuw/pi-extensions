@@ -28,7 +28,7 @@ export const endedText = (name: string, was: RoomRole["role"]) => was === "repre
 const representativeOf = (relayRoom: RelayRoom) => relayRoom.members.find((member) => member.sessionId === relayRoom.representative);
 
 /** The representative's name for the footer: its name or title, else its id. Every field comes from another device. */
-export function representativeName(relayRoom: RelayRoom): string {
+function representativeName(relayRoom: RelayRoom): string {
 	const member = representativeOf(relayRoom);
 	return cut(headerField(member?.name) || headerField(member?.title), 32) || headerField(relayRoom.representative);
 }
@@ -41,7 +41,7 @@ export function representativeLabel(relayRoom: RelayRoom): string {
 }
 
 /** This session's role in each joined room that has a representative. */
-export function rolesOf(rooms: Iterable<RelayRoom>, sessionId: string): Map<string, RoomRole> {
+function rolesOf(rooms: Iterable<RelayRoom>, sessionId: string): Map<string, RoomRole> {
 	const roles = new Map<string, RoomRole>();
 	for (const relayRoom of rooms) {
 		const representative = relayRoom.representative;

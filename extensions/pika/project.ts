@@ -31,7 +31,7 @@ export async function ensureIgnoredDir(dir: string): Promise<void> {
 }
 
 /** Writes `<checkout>/.pi/pika/project.json` whole, so a reader never sees half of it; returns its path. */
-export async function writeProjectConfig(checkout: string, config: ProjectConfig): Promise<string> {
+async function writeProjectConfig(checkout: string, config: ProjectConfig): Promise<string> {
 	const file = join(checkout, PROJECT_CONFIG);
 	await ensureIgnoredDir(dirname(file));
 	await writeFileAtomic(file, `${JSON.stringify(config, null, "\t")}\n`, { sync: false });
@@ -39,7 +39,7 @@ export async function writeProjectConfig(checkout: string, config: ProjectConfig
 }
 
 /** How pika files the repository: under a remote's URL, or under a name on this device. */
-export function describeIdentity(state: RepositoryState): string {
+function describeIdentity(state: RepositoryState): string {
 	const { project, repository } = state.info;
 	if (!project) return "it is not in a git repository pika can name";
 	const where = repository ? `project ${project}, identified by ${repository}` : `project ${project} on this device only (it has no remote URL)`;
@@ -65,7 +65,7 @@ async function askName(ui: ExtensionUIContext, folder: string, fallback: string)
  * Asks which remote identifies the repository, or for a name when none does. Undefined when dismissed. A remote keeps
  * a saved name; a name pins the repository to no remote, so remotes added later do not move it.
  */
-export async function askIdentity(ui: ExtensionUIContext, state: RepositoryState, current?: string): Promise<ProjectConfig | undefined> {
+async function askIdentity(ui: ExtensionUIContext, state: RepositoryState, current?: string): Promise<ProjectConfig | undefined> {
 	const folder = state.folder!;
 	const candidates = state.remotes.filter((remote) => remote.url);
 	if (candidates.length) {

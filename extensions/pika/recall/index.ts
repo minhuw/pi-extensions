@@ -181,7 +181,7 @@ export function recallReadTool() {
 }
 
 /** `recall_herder`: past Herder runs, or one of them. */
-export function recallHerderTool() {
+function recallHerderTool() {
 	return defineTool({
 		name: "recall_herder", label: "Recall Herder",
 		description: "List the user's past Herder runs recorded on their pika server, newest first, or read one by runId. "

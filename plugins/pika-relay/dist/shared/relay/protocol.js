@@ -81,7 +81,7 @@ export const sanitize = (text) => typeof text === "string" ? text.replace(SEQUEN
  */
 export const headerField = (text) => sanitize(text).replace(INVISIBLE, "").replace(/"/g, "").replace(/\s+/g, " ").trim();
 /** A time the server sent, as milliseconds since the epoch; NaN when it cannot be read. */
-export const millis = (at) => typeof at === "number" ? at : typeof at === "string" ? Date.parse(at) : Number.NaN;
+const millis = (at) => typeof at === "number" ? at : typeof at === "string" ? Date.parse(at) : Number.NaN;
 /** How a device is shown: its name, else its id. */
 export const deviceLabel = (device) => headerField(device?.deviceName) || headerField(device?.device);
 /** How a target is named in tool results and notices. */
@@ -94,7 +94,7 @@ export function targetLabel(target, fallbackId) {
     return `pi session ${id}${name ? ` ("${name}")` : ""}${device ? ` on ${device}` : ""}`;
 }
 /** "5 minutes" for the default TTL. */
-export function ttlText(seconds) {
+function ttlText(seconds) {
     if (seconds % 60 === 0)
         return `${seconds / 60} minute${seconds === 60 ? "" : "s"}`;
     return `${seconds} second${seconds === 1 ? "" : "s"}`;
