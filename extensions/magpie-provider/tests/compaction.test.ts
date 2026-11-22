@@ -34,7 +34,7 @@ describe("Magpie-owned compaction configuration", () => {
 	it("defaults to enabled and does not read legacy configuration", () => {
 		writeFileSync(join(agentDir, "cliproxyapi-native-compaction.json"), JSON.stringify({ enabled: true, models: [model.id] }));
 		expect(loadMagpieCompactionConfig(project, false)).toEqual({
-			enabled: true, providerId: "magpie", apiId: "openai-responses", models: [], fallbackToBuiltin: true,
+			enabled: true, models: [], fallbackToBuiltin: true,
 		});
 	});
 	it("merges only trusted project overrides and deduplicates exact IDs", () => {

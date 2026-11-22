@@ -423,7 +423,7 @@ export default function selfdriveExtension(pi: ExtensionAPI): void {
 	function reportLines(r: Runtime | undefined, ctx: ExtensionContext): string[] | undefined {
 		const mode = readMode(ctx);
 		if (!mode) return undefined;
-		return buildReport({ tasks: mode.tasks, since: mode.start.since, ended: mode.end?.ended, runs: mode.runs, ...costOf(mode.after as CostEntry[]), doneReason: mode.done ?? r?.done });
+		return buildReport({ tasks: mode.tasks, since: mode.start.since, ended: mode.end?.ended, ...costOf(mode.after as CostEntry[]), doneReason: mode.done ?? r?.done });
 	}
 	/** The report message: appended before what comes next when idle, a steer into the running turn otherwise. */
 	function sendReport(r: Runtime, ctx: ExtensionContext, reason: EndReason, streaming: boolean): void {

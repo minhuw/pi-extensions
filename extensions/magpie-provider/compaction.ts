@@ -28,11 +28,9 @@ export function loadMagpieCompactionConfig(
 	cwd: string,
 	projectTrusted: boolean,
 	catalog: readonly Pick<Model<any>, "provider" | "api" | "id">[] = [],
-): MagpieCompactionConfig & { providerId: "magpie"; apiId: "openai-responses" } {
-	const config: MagpieCompactionConfig & { providerId: "magpie"; apiId: "openai-responses" } = {
+): MagpieCompactionConfig {
+	const config: MagpieCompactionConfig = {
 		enabled: true,
-		providerId: "magpie",
-		apiId: "openai-responses",
 		models: [...new Set(catalog.filter(model => {
 			if (model.provider !== "magpie" || model.api !== "openai-responses") return false;
 			const name = magpieModelName(model.id);

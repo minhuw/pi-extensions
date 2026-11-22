@@ -68,8 +68,6 @@ export interface ReportInput {
 	since: string;
 	ended?: string;
 	now?: number;
-	/** Driver starts: the kickoff and each continuation, not a count of tasks or model turns. */
-	runs: number;
 	/** Everything, subagents included. */
 	cost: number;
 	subagentCost: number;
