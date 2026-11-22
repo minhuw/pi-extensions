@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { sharedState } from "../../src/state.ts";
-import { ACTIONS, CLEAR, plain, processLabel, registerPsCommand } from "../../src/ui.ts";
+import { ACTIONS, CLEAR, processLabel, registerPsCommand } from "../../src/ui.ts";
 import { createCtx, createPi, FakeManager, info, resetShared } from "./fakes.ts";
 
 beforeEach(resetShared);
@@ -51,9 +51,17 @@ describe("/ps", () => {
 		expect(ctx.ui.notify).toHaveBeenLastCalledWith("dev: terminated.", "info");
 	});
 
-	it("labels processes and strips terminal sequences from log lines", () => {
+	it("labels processes", () => {
 		expect(processLabel(info({ status: "ready", urls: ["http://127.0.0.1:3000"] }))).toBe("dev  p_1  ready  pid 4242  http://127.0.0.1:3000");
 		expect(processLabel(info({ status: "exited", exitCode: 1, pid: undefined }))).toBe("dev  p_1  exited (code 1)");
-		expect(plain("\x1b[32mok\x1b[0m\x07 done\r")).toBe("ok done");
+	});
+
+	it("strips terminal sequences from shown logs", async () => {
+		const { manager, ctx, run } = setup({ mode: "rpc" });
+		manager.processes = [info()];
+		manager.logs = async () => ({ lines: ["\x1b[32mok\x1b[0m\x07 done\r", "\x1b]0;title\x07next\tline"], nextCursor: 0, truncated: false, more: false });
+		ctx.ui.select.mockResolvedValueOnce(processLabel(manager.processes[0]!)).mockResolvedValueOnce(ACTIONS.logs);
+		await run();
+		expect(ctx.ui.notify).toHaveBeenLastCalledWith("dev · /logs/p_1.log\nok done\nnext\tline", "info");
 	});
 });

@@ -47,7 +47,7 @@ export class FakeManager implements ProcessManager {
 	}
 	get(idOrName: string) {
 		const found = this.processes.find((p) => p.id === idOrName || p.name === idOrName);
-		if (!found) throw new Error(`Unknown process ${idOrName}`);
+		if (!found) throw new Error(`Unknown process "${idOrName}".`);
 		return found;
 	}
 	async logs(_idOrName: string, _query?: LogQuery) {

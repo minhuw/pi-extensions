@@ -2,6 +2,7 @@
 // restarts chosen here are reported to the owning session without starting a turn. Without a UI it prints the table.
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { cleanLine } from "./core/text.ts";
 import { exitDescription, isLive, processTable } from "./format.ts";
 import { withRequestedStop } from "./state.ts";
 import type { ProcessInfo, ProcessManager } from "./types.ts";
@@ -15,11 +16,6 @@ export function processLabel(process: ProcessInfo): string {
 	return [process.name, process.id, process.status + (exit ? ` (${exit})` : ""), process.pid === undefined ? "" : `pid ${process.pid}`, ...process.urls]
 		.filter(Boolean)
 		.join("  ");
-}
-
-/** Removes terminal escape sequences and control characters other than tabs. */
-export function plain(line: string): string {
-	return line.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
 }
 
 /** The last lines of a log, scrolled with the arrow keys and closed with Esc or q. */
@@ -69,7 +65,7 @@ class LogPane {
 
 async function showLogs(ctx: ExtensionCommandContext, manager: ProcessManager, process: ProcessInfo): Promise<void> {
 	const read = await manager.logs(process.id, { tail: LOG_LINES });
-	const lines = read.lines.map(plain);
+	const lines = read.lines.map(cleanLine);
 	const title = `${process.name} · ${process.logPath}`;
 	if (ctx.mode !== "tui") {
 		ctx.ui.notify(`${title}\n${lines.join("\n") || "(no output)"}`, "info");

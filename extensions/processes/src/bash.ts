@@ -36,7 +36,7 @@ function exitCode(process: ProcessInfo): number | null {
 }
 
 function isUnknownProcessError(error: unknown, id: string): boolean {
-	return error instanceof Error && (error.message === `Unknown process "${id}".` || error.message === `Unknown process ${id}`);
+	return error instanceof Error && error.message === `Unknown process "${id}".`;
 }
 
 function discardIfPresent(processes: ProcessManager, id: string): void {
