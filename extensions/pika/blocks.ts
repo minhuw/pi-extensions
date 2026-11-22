@@ -37,19 +37,3 @@ export function splitPayload(payload: unknown): SplitPayload {
 	}
 	return { skeleton, blocks, data };
 }
-
-/** Inverse of `splitPayload`; references nested anywhere in the skeleton are resolved. */
-export function reconstructPayload(skeleton: unknown, block: (hash: string) => string | undefined): unknown {
-	const visit = (value: unknown): unknown => {
-		if (Array.isArray(value)) return value.map(visit);
-		if (!value || typeof value !== "object") return value;
-		const record = value as Record<string, unknown>;
-		if (typeof record.$pika === "string") {
-			const text = block(record.$pika);
-			if (text === undefined) throw new Error(`missing block ${record.$pika}`);
-			return record.$type === "string" ? text : JSON.parse(text);
-		}
-		return Object.fromEntries(Object.entries(record).map(([key, inner]) => [key, visit(inner)]));
-	};
-	return visit(skeleton);
-}

@@ -1,8 +1,8 @@
-import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto";
+import { randomBytes, randomInt, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { gunzipSync } from "node:zlib";
-import { reconstructPayload, sha256 } from "../../blocks.ts";
+import { sha256 } from "../../blocks.ts";
 
 export const TOKEN = "test-token";
 
@@ -33,8 +33,23 @@ export const validName = (name: unknown): name is string => {
 	const length = [...name.trim()].length;
 	return length >= 1 && length <= 64 && !/[\p{Cc}\u2028\u2029]/u.test(name.trim());
 };
-const hashId = (id: string) => createHash("sha256").update(id).digest("hex");
 const normalizeCode = (code: string) => code.toUpperCase().replace(/-/g, "");
+
+/** Inverse of `splitPayload`; references nested anywhere in the skeleton are resolved. */
+function reconstructPayload(skeleton: unknown, block: (hash: string) => string | undefined): unknown {
+	const visit = (value: unknown): unknown => {
+		if (Array.isArray(value)) return value.map(visit);
+		if (!value || typeof value !== "object") return value;
+		const record = value as Record<string, unknown>;
+		if (typeof record.$pika === "string") {
+			const text = block(record.$pika);
+			if (text === undefined) throw new Error(`missing block ${record.$pika}`);
+			return record.$type === "string" ? text : JSON.parse(text);
+		}
+		return Object.fromEntries(Object.entries(record).map(([key, inner]) => [key, visit(inner)]));
+	};
+	return visit(skeleton);
+}
 
 /** A pending or decided pairing, keyed by the SHA-256 of its secret id as the server stores it. */
 export interface PollAnswer { status: number; body: Record<string, unknown> }
@@ -250,7 +265,7 @@ export class MockIngest {
 		const id = this.tokenDevice(authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : undefined);
 		if (!id) return answer(401, { error: "unauthorized" });
 		if (typeof body.key !== "string" || !KEY.test(body.key)) return answer(400, { error: "invalid_key" });
-		const hash = hashId(body.key);
+		const hash = sha256(body.key);
 		const device = this.devices.get(id)!;
 		if (device.keyHash === hash) return answer(204);
 		if (!device.keyHash && ![...this.devices.values()].some((other) => other.keyHash === hash)) {
@@ -286,11 +301,11 @@ export class MockIngest {
 			const pairingId = randomBytes(32).toString("base64url");
 			this.pairingIds.push(pairingId);
 			const expiresAt = now + this.pairExpiresIn * 1000;
-			const keyHash = typeof key === "string" && !this.legacyNames ? hashId(key) : undefined;
+			const keyHash = typeof key === "string" && !this.legacyNames ? sha256(key) : undefined;
 			const byToken = this.legacyNames ? undefined : this.tokenDevice(authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : undefined);
 			const byKey = keyHash === undefined ? undefined : [...this.devices].find(([, known]) => known.keyHash === keyHash)?.[0];
 			const match = byToken ? { id: byToken, by: "token" as const } : byKey ? { id: byKey, by: "key" as const } : undefined;
-			this.pairings.set(hashId(pairingId), {
+			this.pairings.set(sha256(pairingId), {
 				code, device: device.trim(), requestedAt: now, expiresAt, state: "pending", ip,
 				...(typeof host === "string" ? { host } : {}), ...(typeof pikaVersion === "string" ? { pikaVersion } : {}),
 				...(keyHash ? { keyHash } : {}), ...(match ? { match } : {}),
@@ -306,7 +321,7 @@ export class MockIngest {
 	}
 
 	private poll(body: Record<string, unknown>, now: number): PollAnswer {
-		const id = typeof body.pairingId === "string" ? hashId(body.pairingId) : undefined;
+		const id = typeof body.pairingId === "string" ? sha256(body.pairingId) : undefined;
 		const pairing = id === undefined ? undefined : this.pairings.get(id);
 		if (!id || !pairing) return { status: 404, body: { error: "unknown_pairing" } };
 		if (pairing.state === "approved") {

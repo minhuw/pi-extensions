@@ -1,7 +1,8 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
+import { sha256 } from "./blocks.ts";
 import { normalizeUrl } from "./config.ts";
 import { type MachineSource, machineSource } from "./uploader.ts";
 
@@ -15,8 +16,6 @@ const HEX64 = /^[0-9a-f]{64}$/;
 export const deviceKeyHooks: { afterWrite?: (file: string) => Promise<void> | void; machine?: () => Promise<MachineSource> } = {};
 
 export const deviceKeyFile = (dir: string) => join(dir, "device-key.json");
-
-const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
 /** This machine's fingerprint: the hash of its id, or null when the id is only the hostname fallback. */
 async function fingerprint(): Promise<string | null> {
