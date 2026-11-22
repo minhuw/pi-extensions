@@ -1,6 +1,5 @@
 import type { CreateAgentSessionOptions, ModelRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { credentialsRegistry, type PikaCredentials } from "../../credentials.ts";
-import type { RepositoryInfo } from "../../repository.ts";
 import { MemoryServerError } from "../client.ts";
 import type { DreamRecord } from "../entries.ts";
 import type { Category, Scope, ScopeKind } from "../format.ts";
@@ -122,15 +121,10 @@ export interface DreamRunOptions {
 	/** The server and token that granted the lease, which every lease request goes to. */
 	server: LeaseServer;
 	cwd: string;
-	repository: RepositoryInfo;
 	parentSessionId: string;
 	parentSessionFile?: string;
 	agentDir: string;
-	/** The memory index when the dream started, or null when it could not be read. */
-	index: string | null;
 	model: SpawnOptions["model"];
-	/** Why the model is not `memory.dreamModel`, when it is not. */
-	modelNote?: string;
 	thinkingLevel?: SpawnOptions["thinkingLevel"];
 	modelRuntime?: ModelRuntime;
 	ui?: DreamUi;

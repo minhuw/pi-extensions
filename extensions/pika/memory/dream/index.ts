@@ -187,7 +187,7 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 		const { url, token } = credentialsRegistry().current!;
 		const server: LeaseServer = { url, token };
 		const settings = loadMemorySettings(getAgentDir());
-		const { model, note } = pickModel(ctx, settings);
+		const { model } = pickModel(ctx, settings);
 		if (!model) return { text: "this session has no model to dream with; select one, or set memory.dreamModel" };
 		const starting: Starting = { owner: self };
 		state.starting = starting;
@@ -228,8 +228,8 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 			const thinkingLevel = ctx.thinkingLevel ?? pi.getThinkingLevel();
 			const modelRuntime = modelRuntimeOf(ctx.modelRegistry);
 			const run = new DreamRun({
-				owner: self, mode, grant, server, cwd, repository, parentSessionId, ...(parentSessionFile ? { parentSessionFile } : {}), agentDir: getAgentDir(),
-				index, model, ...(note ? { modelNote: note } : {}), ...(thinkingLevel ? { thinkingLevel } : {}), ...(modelRuntime ? { modelRuntime } : {}), ...(ui ? { ui } : {}),
+				owner: self, mode, grant, server, cwd, parentSessionId, ...(parentSessionFile ? { parentSessionFile } : {}), agentDir: getAgentDir(),
+				model, ...(thinkingLevel ? { thinkingLevel } : {}), ...(modelRuntime ? { modelRuntime } : {}), ...(ui ? { ui } : {}),
 				spawn: (options) => dreamRuntime.spawn(options),
 				tools: dreamTools,
 				kickoff: (current) => kickoffText(current, index, notes),
