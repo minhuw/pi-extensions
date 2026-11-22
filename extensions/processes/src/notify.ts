@@ -102,7 +102,7 @@ export function createNotifier(pi: Pick<ExtensionAPI, "sendMessage">, ctx: Pick<
 		handle(event) {
 			// An attached run belongs to the bash call waiting for it, which reports it in its own result.
 			if (event.type === "changed" || event.process.attached) return;
-			const { requested, waits } = sharedState();
+			const { userStops, waits } = sharedState();
 			if (event.type === "wait_done") {
 				if (waits.get(event.waitId) !== sessionId) return;
 				waits.delete(event.waitId);
@@ -118,8 +118,9 @@ export function createNotifier(pi: Pick<ExtensionAPI, "sendMessage">, ctx: Pick<
 			if (event.type === "exit" && event.requested) {
 				// The agent's own stops and restarts already returned their result; a stop the user chose in /ps is news,
 				// but not worth a turn. Stops nobody here asked for (another session, shutdown) are not reported.
-				const by = requested.get(event.process.id);
-				if (by?.by === "user") queue(event, `${label(event.process)} stopped by the user${event.process.signal ? ` (${exitDescription(event.process)})` : ""}`, false);
+				if ((userStops.get(event.process.id) ?? 0) > 0) {
+					queue(event, `${label(event.process)} stopped by the user${event.process.signal ? ` (${exitDescription(event.process)})` : ""}`, false);
+				}
 				return;
 			}
 			queue(event, text, true);

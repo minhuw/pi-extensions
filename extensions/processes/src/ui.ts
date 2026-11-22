@@ -4,7 +4,7 @@ import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-wor
 import { matchesKey, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import { cleanLine } from "./core/text.ts";
 import { exitDescription, isLive, processTable } from "./format.ts";
-import { withRequestedStop } from "./state.ts";
+import { withUserStop } from "./state.ts";
 import type { ProcessInfo, ProcessManager } from "./types.ts";
 
 export const LOG_LINES = 100;
@@ -100,14 +100,13 @@ export function registerPsCommand(pi: ExtensionAPI, manager: () => ProcessManage
 			const process = processes[labels.indexOf(picked)]!;
 			const actions = isLive(process) ? [ACTIONS.logs, ACTIONS.restart, ACTIONS.stop] : [ACTIONS.logs, ACTIONS.restart];
 			const action = await ctx.ui.select(processLabel(process), actions);
-			const user = { by: "user" as const, session: ctx.sessionManager.getSessionId() };
 			if (action === ACTIONS.logs) await showLogs(ctx, manager(), process);
 			else if (action === ACTIONS.restart) {
-				const restarted = await withRequestedStop(process.id, user, () => manager().restart(process.id));
+				const restarted = await withUserStop(process.id, () => manager().restart(process.id));
 				ctx.ui.notify(`Restarted ${restarted.name} (pid ${restarted.pid ?? "-"}).`, "info");
 			} else if (action === ACTIONS.stop) {
 				if (!(await ctx.ui.confirm("Stop process", `Stop ${process.name} (${process.command})?`))) return;
-				const result = await withRequestedStop(process.id, user, () => manager().stop(process.id));
+				const result = await withUserStop(process.id, () => manager().stop(process.id));
 				ctx.ui.notify(`${process.name}: ${result.outcome}.`, result.outcome === "stuck" ? "error" : "info");
 			}
 		},

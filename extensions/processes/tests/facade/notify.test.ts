@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { COALESCE_MS, createNotifier, describeEvent, MESSAGE_TYPE, readyKey } from "../../src/notify.ts";
-import { sharedState } from "../../src/state.ts";
+import { sharedState, withUserStop } from "../../src/state.ts";
 import type { ProcessEvent } from "../../src/types.ts";
 import { createCtx, createPi, info, resetShared } from "./fakes.ts";
 
@@ -72,31 +72,58 @@ describe("createNotifier", () => {
 		]);
 	});
 
-	it("skips exits the agent requested and reports the user's without a turn", () => {
+	it("skips unattributed requested exits and reports /ps user stops without a turn", async () => {
 		const { pi, notifier } = setup();
 		const stopped = info({ status: "stopped", signal: "SIGTERM", endedAt: 6_000 });
-		sharedState().requested.set("p_1", { by: "agent", session: "session-a" });
+		// Agent stops/restarts, shutdown, and other-session stops leave userStops empty and stay silent.
 		notifier.handle({ type: "exit", requested: true, tail: [], process: stopped });
 		vi.advanceTimersByTime(COALESCE_MS);
 		expect(pi.sent).toEqual([]);
 
-		sharedState().requested.set("p_1", { by: "user", session: "session-a" });
+		await withUserStop("p_1", async () => {
+			notifier.handle({ type: "exit", requested: true, tail: [], process: stopped });
+		});
+		vi.advanceTimersByTime(COALESCE_MS);
+		expect(pi.sent).toHaveLength(1);
+		expect(pi.sent[0]!.message.content).toBe("[process dev] stopped by the user (signal SIGTERM)");
+		expect(pi.sent[0]!.options).toEqual({ deliverAs: "steer", triggerTurn: false });
+		expect(sharedState().userStops.size).toBe(0);
+
+		// Once withUserStop settles, subsequent requested exits stay silent.
+		notifier.handle({ type: "exit", requested: true, tail: [], process: stopped });
+		vi.advanceTimersByTime(COALESCE_MS);
+		expect(pi.sent).toHaveLength(1);
+	});
+
+	it("counts overlapping withUserStop calls safely and cleans up on error", async () => {
+		const { pi, notifier } = setup();
+		const stopped = info({ status: "stopped", signal: "SIGTERM", endedAt: 6_000 });
+		let releaseOuter!: () => void;
+		const outer = withUserStop(
+			"p_1",
+			() =>
+				new Promise<void>((_resolve, reject) => {
+					releaseOuter = () => reject(new Error("boom"));
+				}),
+		);
+		await withUserStop("p_1", async () => {
+			expect(sharedState().userStops.get("p_1")).toBe(2);
+		});
+		expect(sharedState().userStops.get("p_1")).toBe(1);
 		notifier.handle({ type: "exit", requested: true, tail: [], process: stopped });
 		vi.advanceTimersByTime(COALESCE_MS);
 		expect(pi.sent).toHaveLength(1);
 		expect(pi.sent[0]!.message.content).toBe("[process dev] stopped by the user (signal SIGTERM)");
 		expect(pi.sent[0]!.options).toEqual({ deliverAs: "steer", triggerTurn: false });
 
-		// A requested exit nobody here asked for (shutdown, another session) is not reported.
-		sharedState().requested.clear();
-		notifier.handle({ type: "exit", requested: true, tail: [], process: stopped });
-		vi.advanceTimersByTime(COALESCE_MS);
-		expect(pi.sent).toHaveLength(1);
+		releaseOuter();
+		await expect(outer).rejects.toThrow("boom");
+		expect(sharedState().userStops.size).toBe(0);
 	});
 
 	it("a batch with any unrequested event triggers a turn", () => {
 		const { pi, notifier } = setup();
-		sharedState().requested.set("p_1", { by: "user", session: "session-a" });
+		sharedState().userStops.set("p_1", 1);
 		notifier.handle({ type: "exit", requested: true, tail: [], process: info({ status: "stopped" }) });
 		notifier.handle(crash);
 		vi.advanceTimersByTime(COALESCE_MS);

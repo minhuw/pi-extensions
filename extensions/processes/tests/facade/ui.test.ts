@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { COALESCE_MS, createNotifier } from "../../src/notify.ts";
 import { sharedState } from "../../src/state.ts";
 import { ACTIONS, CLEAR, processLabel, registerPsCommand } from "../../src/ui.ts";
 import { createCtx, createPi, FakeManager, info, resetShared } from "./fakes.ts";
@@ -10,7 +11,7 @@ function setup(ctxOverrides: Record<string, unknown> = {}) {
 	const manager = new FakeManager();
 	registerPsCommand(pi.api, () => manager);
 	const ctx = createCtx("session-a", ctxOverrides);
-	return { manager, ctx, run: () => pi.commands.get("ps")!.handler("", ctx) };
+	return { pi, manager, ctx, run: () => pi.commands.get("ps")!.handler("", ctx) };
 }
 
 describe("/ps", () => {
@@ -35,20 +36,61 @@ describe("/ps", () => {
 		expect(ctx.ui.notify).toHaveBeenLastCalledWith("Cleared 0 finished processes.", "info");
 	});
 
-	it("stops after confirmation, marked as the user's request", async () => {
-		const { manager, ctx, run } = setup();
-		manager.processes = [info()];
-		const seen: unknown[] = [];
-		manager.subscribe(() => seen.push(sharedState().requested.get("p_1")));
-		ctx.ui.select.mockResolvedValueOnce(processLabel(manager.processes[0]!)).mockResolvedValueOnce(ACTIONS.stop);
-		ctx.ui.confirm.mockResolvedValueOnce(false);
-		await run();
-		expect(seen).toEqual([]);
-		ctx.ui.select.mockResolvedValueOnce(processLabel(manager.processes[0]!)).mockResolvedValueOnce(ACTIONS.stop);
-		ctx.ui.confirm.mockResolvedValueOnce(true);
-		await run();
-		expect(seen).toEqual([{ by: "user", session: "session-a" }]);
-		expect(ctx.ui.notify).toHaveBeenLastCalledWith("dev: terminated.", "info");
+	it("stops after confirmation, emitting stopped by the user without a turn", async () => {
+		vi.useFakeTimers();
+		try {
+			const { pi, manager, ctx, run } = setup();
+			manager.processes = [info()];
+			const notifier = createNotifier(pi.api, ctx as never, "session-a");
+			const seen: Array<number | undefined> = [];
+			manager.subscribe((event) => {
+				seen.push(sharedState().userStops.get("p_1"));
+				notifier.handle(event);
+			});
+			ctx.ui.select.mockResolvedValueOnce(processLabel(manager.processes[0]!)).mockResolvedValueOnce(ACTIONS.stop);
+			ctx.ui.confirm.mockResolvedValueOnce(false);
+			await run();
+			vi.advanceTimersByTime(COALESCE_MS);
+			expect(seen).toEqual([]);
+			expect(pi.sent).toEqual([]);
+			ctx.ui.select.mockResolvedValueOnce(processLabel(manager.processes[0]!)).mockResolvedValueOnce(ACTIONS.stop);
+			ctx.ui.confirm.mockResolvedValueOnce(true);
+			await run();
+			vi.advanceTimersByTime(COALESCE_MS);
+			expect(seen).toEqual([1]);
+			expect(sharedState().userStops.size).toBe(0);
+			expect(ctx.ui.notify).toHaveBeenLastCalledWith("dev: terminated.", "info");
+			expect(pi.sent).toHaveLength(1);
+			expect(pi.sent[0]!.message.content).toBe("[process dev] stopped by the user (signal SIGTERM)");
+			expect(pi.sent[0]!.options).toEqual({ deliverAs: "steer", triggerTurn: false });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("restarts via /ps, emitting stopped by the user without a turn", async () => {
+		vi.useFakeTimers();
+		try {
+			const { pi, manager, ctx, run } = setup();
+			manager.processes = [info()];
+			const notifier = createNotifier(pi.api, ctx as never, "session-a");
+			const seen: Array<number | undefined> = [];
+			manager.subscribe((event) => {
+				seen.push(sharedState().userStops.get("p_1"));
+				notifier.handle(event);
+			});
+			ctx.ui.select.mockResolvedValueOnce(processLabel(manager.processes[0]!)).mockResolvedValueOnce(ACTIONS.restart);
+			await run();
+			vi.advanceTimersByTime(COALESCE_MS);
+			expect(seen).toEqual([1]);
+			expect(sharedState().userStops.size).toBe(0);
+			expect(ctx.ui.notify).toHaveBeenLastCalledWith("Restarted dev (pid 4242).", "info");
+			expect(pi.sent).toHaveLength(1);
+			expect(pi.sent[0]!.message.content).toBe("[process dev] stopped by the user (signal SIGTERM)");
+			expect(pi.sent[0]!.options).toEqual({ deliverAs: "steer", triggerTurn: false });
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("labels processes", () => {

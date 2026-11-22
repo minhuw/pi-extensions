@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { exitDescription, processTable } from "./format.ts";
 import { readyKey } from "./notify.ts";
-import { sharedState, withRequestedStop } from "./state.ts";
+import { sharedState } from "./state.ts";
 import type { ProcessInfo, ProcessManager, StartOptions } from "./types.ts";
 
 const NOTIFIED = "You will be notified when it becomes ready, prints errors, or exits. Do not sleep or poll; continue other work or end your turn.";
@@ -148,9 +148,9 @@ export function registerTools(pi: ExtensionAPI, manager: () => ProcessManager): 
 		label: "Process Stop",
 		description: "Stop a managed process: SIGTERM to its process group, then SIGKILL after a grace period.",
 		parameters: NameParameters,
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params) {
 			const target = manager().get(params.name);
-			const result = await withRequestedStop(target.id, { by: "agent", session: session(ctx) }, () => manager().stop(target.id));
+			const result = await manager().stop(target.id);
 			if (result.outcome === "stuck") throw new Error(`${target.name} (${target.id}) survived SIGKILL; its process group is still alive.`);
 			const how = { terminated: "stopped", killed: "killed after the grace period", already: "was not running" }[result.outcome];
 			return { content: text(`${result.process.name} ${how}.\n${describe(result.process)}`), details: result };
@@ -162,9 +162,9 @@ export function registerTools(pi: ExtensionAPI, manager: () => ProcessManager): 
 		label: "Process Restart",
 		description: "Stop a managed process and start it again with the same command, cwd, and options.",
 		parameters: NameParameters,
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params) {
 			const target = manager().get(params.name);
-			const process = await withRequestedStop(target.id, { by: "agent", session: session(ctx) }, () => manager().restart(target.id).then(reported));
+			const process = reported(await manager().restart(target.id));
 			return { content: text(`Restarted ${process.name}.\n${describe(process)}\n${NOTIFIED}`), details: { process } };
 		},
 	});

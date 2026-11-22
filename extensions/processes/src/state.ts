@@ -4,12 +4,6 @@ import type { ProcessManager } from "./types.ts";
 
 export const MANAGER_KEY = Symbol.for("pi-extensions.processes.manager");
 
-export interface RequestedStop {
-	by: "agent" | "user";
-	/** The session whose agent or user asked. */
-	session: string;
-}
-
 export interface SharedState {
 	manager: ProcessManager | undefined;
 	/**
@@ -21,8 +15,8 @@ export interface SharedState {
 	/** The root's session was replaced; the next non-startup session start becomes the root. */
 	handoff: boolean;
 	exitHookInstalled: boolean;
-	/** Stops and restarts in flight, by process id, so the exit they cause is reported as requested by whom. */
-	requested: Map<string, RequestedStop>;
+	/** In-flight `/ps` stops and restarts, counted per process id so overlapping calls decrement safely. */
+	userStops: Map<string, number>;
 	/** Pending process_wait ids and the session that registered each. */
 	waits: Map<string, string>;
 	/** "id:readyAt" of ready states a start or restart result already reported, so no notification repeats them. */
@@ -36,7 +30,7 @@ export function sharedState(): SharedState {
 		root: undefined,
 		handoff: false,
 		exitHookInstalled: false,
-		requested: new Map(),
+		userStops: new Map(),
 		waits: new Map(),
 		reportedReady: new Set(),
 	} satisfies SharedState) as SharedState;
@@ -49,13 +43,15 @@ export function requireManager(): ProcessManager {
 	return manager;
 }
 
-/** Runs a stop or restart, marking the exit it causes as requested by `who` until it settles. */
-export async function withRequestedStop<T>(processId: string, who: RequestedStop, run: () => Promise<T>): Promise<T> {
-	const { requested } = sharedState();
-	requested.set(processId, who);
+/** Runs a `/ps` stop or restart, marking requested exits it causes as user-initiated until it settles. */
+export async function withUserStop<T>(processId: string, run: () => Promise<T>): Promise<T> {
+	const { userStops } = sharedState();
+	userStops.set(processId, (userStops.get(processId) ?? 0) + 1);
 	try {
 		return await run();
 	} finally {
-		if (requested.get(processId) === who) requested.delete(processId);
+		const remaining = (userStops.get(processId) ?? 0) - 1;
+		if (remaining > 0) userStops.set(processId, remaining);
+		else userStops.delete(processId);
 	}
 }

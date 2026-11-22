@@ -1,7 +1,8 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { COALESCE_MS, createNotifier } from "../../src/notify.ts";
 import { sharedState } from "../../src/state.ts";
 import { registerTools, resolveProcessCwd } from "../../src/tools.ts";
 import { createCtx, createPi, FakeManager, info, resetShared } from "./fakes.ts";
@@ -105,15 +106,26 @@ describe("other tools", () => {
 		expect(text).toBe("one\ntwo\n\nnextCursor: 8\nMore output follows; read again with nextCursor.");
 	});
 
-	it("marks agent stops and restarts as requested while they run", async () => {
-		const { manager, run } = setup();
-		manager.processes = [info()];
-		const seen: unknown[] = [];
-		manager.subscribe(() => seen.push(sharedState().requested.get("p_1")));
-		await run("process_stop", { name: "dev" });
-		await run("process_restart", { name: "dev" });
-		expect(seen).toEqual([{ by: "agent", session: "session-a" }, { by: "agent", session: "session-a" }]);
-		expect(sharedState().requested.size).toBe(0);
+	it("keeps agent process_stop and process_restart exits silent without marking userStops", async () => {
+		vi.useFakeTimers();
+		try {
+			const { pi, manager, ctx, run } = setup();
+			manager.processes = [info()];
+			const notifier = createNotifier(pi.api, ctx as never, "session-a");
+			const seen: Array<number | undefined> = [];
+			manager.subscribe((event) => {
+				seen.push(sharedState().userStops.get("p_1"));
+				notifier.handle(event);
+			});
+			await run("process_stop", { name: "dev" });
+			await run("process_restart", { name: "dev" });
+			vi.advanceTimersByTime(COALESCE_MS);
+			expect(seen).toEqual([undefined, undefined]);
+			expect(sharedState().userStops.size).toBe(0);
+			expect(pi.sent).toEqual([]);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("registers waits for the calling session", async () => {
