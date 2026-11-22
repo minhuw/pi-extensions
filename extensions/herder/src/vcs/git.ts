@@ -206,11 +206,6 @@ export function savedProjectName(commonDir: string): string | undefined {
 	try { return projectNameFromConfig(readFileSync(join(dirname(commonDir), ".pi", "pika", "project.json"), "utf8")); } catch { return undefined; }
 }
 
-/** Removes every Herder worktree and stale registration under `dir` (a run's `<common>/herder/worktrees/<runId>/`). */
-export function removeWorktrees(vcs: Vcs, dir: string): void {
-	vcs.removeWorktree(dir);
-}
-
 /** Opens the repository containing `cwd`; "the user's checkout" is that cwd's top level (a linked worktree's own). */
 export function openVcs(cwd: string): Vcs & { resetWorktree(path: string, commit: string): void } {
 	requireGit();

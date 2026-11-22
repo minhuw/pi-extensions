@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { TRAILER_FINGERPRINT, TRAILER_STEP } from "../../src/config.ts";
 import type { Vcs } from "../../src/types.ts";
 import {
-	checkGitVersion, GitError, hasHerderTrailer, openVcs, projectNameFromConfig, RefConflictError, removeWorktrees, repositoryName, requireGit, savedProjectName,
+	checkGitVersion, GitError, hasHerderTrailer, openVcs, projectNameFromConfig, RefConflictError, repositoryName, requireGit, savedProjectName,
 } from "../../src/vcs/git.ts";
 import { type GitFixture, withGitFixture } from "../support/git-fixture.ts";
 
@@ -302,7 +302,7 @@ describe("worktrees", () => {
 			rmSync(gone, { recursive: true, force: true });
 			vcs.removeWorktree(live);
 			vcs.removeWorktree(gone);
-			removeWorktrees(vcs, join(herderRoot(fixture), "20260101-000000-abcd"));
+			vcs.removeWorktree(join(herderRoot(fixture), "20260101-000000-abcd"));
 			expect(worktreeList(fixture)).toContain(`worktree ${linked}`);
 			expect(worktreeList(fixture)).not.toContain(live);
 			expect(worktreeList(fixture)).not.toContain(gone);
@@ -318,12 +318,12 @@ describe("worktrees", () => {
 			rmSync(gone!, { recursive: true, force: true });
 			fixture.git("worktree", "lock", locked!);
 			mkdirSync(half!, { recursive: true });
-			removeWorktrees(vcs, run);
+			vcs.removeWorktree(run);
 			expect(existsSync(run)).toBe(false);
 			expect(worktreeList(fixture).match(/^worktree /gm)).toHaveLength(2);
 			expect(worktreeList(fixture)).toContain(other);
-			removeWorktrees(vcs, run);
-			expect(() => removeWorktrees(vcs, herderRoot(fixture))).toThrow(/only operates on worktrees inside/);
+			vcs.removeWorktree(run);
+			expect(() => vcs.removeWorktree(herderRoot(fixture))).toThrow(/only operates on worktrees inside/);
 			expect(existsSync(other)).toBe(true);
 			vcs.removeWorktree(other);
 		}));
@@ -953,7 +953,7 @@ describe("concurrency", () => {
 			vcsB.updateRef(`refs/herder/${runB}/steps/s2`, commitB2, null);
 
 			// Tear down runA completely; runB's worktrees and refs must remain untouched.
-			removeWorktrees(vcsA, join(herderRoot(fixture), runA));
+			vcsA.removeWorktree(join(herderRoot(fixture), runA));
 			vcsA.deleteRefs(`refs/herder/${runA}`);
 
 			expect(existsSync(join(herderRoot(fixture), runA))).toBe(false);
@@ -979,7 +979,7 @@ describe("concurrency", () => {
 			const commitB3 = vcsB.snapshot(b1, "b1-more\n", commitB1)!;
 			expect(commitB3).toMatch(/^[0-9a-f]{40}$/);
 
-			removeWorktrees(vcsB, join(herderRoot(fixture), runB));
+			vcsB.removeWorktree(join(herderRoot(fixture), runB));
 			vcsB.deleteRefs(`refs/herder/${runB}`);
 			expect(existsSync(join(herderRoot(fixture), runB))).toBe(false);
 			expect(vcsB.readRef(`refs/herder/${runB}/integration`)).toBeNull();

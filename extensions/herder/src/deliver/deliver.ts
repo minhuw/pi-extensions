@@ -5,7 +5,7 @@ import { integrationRef, refPrefix, runPaths, worktreePath } from "../run/paths.
 import type { RunStore } from "../run/store.ts";
 import { clearRunWorktreeState } from "../steps/worktrees.ts";
 import type { AgentRunner, CheckResult, CheckSpec, DeliveryCompletedEvent, DeliveryMode, DeliveryStartedEvent, Faults, JournalInput, RoleDefinition, Vcs } from "../types.ts";
-import { GitError, hasHerderTrailer, RefConflictError, removeWorktrees } from "../vcs/git.ts";
+import { GitError, hasHerderTrailer, RefConflictError } from "../vcs/git.ts";
 import { acceptCuration } from "./curate.ts";
 
 export interface DeliverDeps {
@@ -36,7 +36,7 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : S
 /** Deletes `refs/herder/<runId>/*` and the run's worktrees; the run directory stays. Attempts both, then throws the first error. */
 export function cleanupRun(vcs: Vcs, commonDir: string, runId: string): void {
 	const errors: unknown[] = [];
-	for (const step of [() => vcs.deleteRefs(refPrefix(runId)), () => removeWorktrees(vcs, runPaths(commonDir, runId).worktrees)]) {
+	for (const step of [() => vcs.deleteRefs(refPrefix(runId)), () => vcs.removeWorktree(runPaths(commonDir, runId).worktrees)]) {
 		try { step(); } catch (error) { errors.push(error); }
 	}
 	clearRunWorktreeState(commonDir, runId);

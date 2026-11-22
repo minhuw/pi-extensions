@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendConvergence, parsePlanTasks, validatePlan } from "../../src/artifacts/plan.ts";
+import { appendConvergence, parsePlanTasks } from "../../src/artifacts/plan.ts";
 import type { Gap } from "../../src/types.ts";
 
 const PLAN = `# Plan
@@ -25,38 +25,15 @@ describe("parsePlanTasks", () => {
 	it("ignores task lines inside code fences", () => {
 		const text = "- [ ] T1 (AC-1) real\n```md\n- [ ] T2 (AC-1) example\n- [ ] T bad\n~~~\n```\n~~~~\n- [ ] T3 (AC-1) also example\n```\n~~~~\n- [ ] T4 (AC-2) real\n";
 		expect(parsePlanTasks(text).map((task) => task.id)).toEqual(["T1", "T4"]);
-		expect(validatePlan(text, ["AC-1", "AC-2"])).toEqual([]);
-		expect(validatePlan("- [ ] T1 (AC-1) x\n```\n- [ ] T2 bad\n", ["AC-1"])).toEqual(["line 2: code fence ``` is never closed"]);
 	});
 
 	it("strips a leading BOM and normalizes criterion ids", () => {
 		expect(parsePlanTasks("\uFEFF- [ ] T1 (AC-01, AC-1, AC-2) x\n")).toEqual([{ id: "T1", criteria: ["AC-1", "AC-2"], text: "x", line: 1 }]);
-		expect(validatePlan("- [ ] T1 (AC-01) x\n", ["AC-1"])).toEqual([]);
-		expect(validatePlan("- [ ] T1 (AC-1) x\n", ["AC-001"])).toEqual([]);
 	});
 
 	it("handles CRLF and ignores non-task lines", () => {
 		expect(parsePlanTasks("- [ ] T1 (AC-1) one\r\n- [ ] T2 (AC-1)\r\nT3 (AC-1) bare\r\n")).toEqual([{ id: "T1", criteria: ["AC-1"], text: "one", line: 1 }]);
 		expect(parsePlanTasks("")).toEqual([]);
-	});
-});
-
-describe("validatePlan", () => {
-	it("accepts a well-formed plan", () => {
-		expect(validatePlan(PLAN, ["AC-1", "AC-2", "AC-3"])).toEqual([]);
-	});
-
-	it("reports malformed task-looking lines, duplicate ids, and unknown criteria", () => {
-		expect(validatePlan("- [ ] T1 add it\n- T2 (AC-1) no box\n- [ ] T3 (AC-1) ok\n- [ ] T3 (AC-1) again\n- [ ] T4 (AC-1, AC-9) unknown\n", ["AC-1"])).toEqual([
-			"line 1: task lines must look like `- [ ] T<n> (AC-<n>[, AC-<n>]) <text>`",
-			"line 2: task lines must look like `- [ ] T<n> (AC-<n>[, AC-<n>]) <text>`",
-			"line 4: duplicate task id T3 (first on line 3)",
-			"line 5: T4 references unknown criterion AC-9",
-		]);
-	});
-
-	it("skips the criterion check without a criterion list", () => {
-		expect(validatePlan("- [ ] T1 (AC-9) x\n")).toEqual([]);
 	});
 });
 
@@ -85,7 +62,6 @@ describe("appendConvergence", () => {
 	it("closes an unclosed fence before the new section", () => {
 		const result = appendConvergence("# Plan\n````\ncode\n", []);
 		expect(result.text).toBe("# Plan\n````\ncode\n````\n\n## Convergence 1\n\n- No gaps.\n");
-		expect(validatePlan(result.text)).toEqual([]);
 		expect(appendConvergence("# Plan\n```\ncode", []).text).toBe("# Plan\n```\ncode\n```\n\n## Convergence 1\n\n- No gaps.\n");
 	});
 

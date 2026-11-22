@@ -76,10 +76,3 @@ export function loadRoles(sources: RoleSources = {}): Map<string, RoleDefinition
 	readDir(sources.overrideDir ?? defaultOverrideDir(), roles);
 	return roles;
 }
-
-export function loadRole(name: string, sources?: RoleSources): RoleDefinition {
-	const roles = loadRoles(sources);
-	const role = roles.get(name);
-	if (!role) throw new Error(`Unknown Herder role ${JSON.stringify(name)}; known roles: ${[...roles.keys()].join(", ") || "none"}`);
-	return role;
-}

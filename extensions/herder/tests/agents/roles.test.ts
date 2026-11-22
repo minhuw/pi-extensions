@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadRole, loadRoles, parseRole, roleSha256 } from "../../src/agents/roles.ts";
+import { loadRoles, parseRole, roleSha256 } from "../../src/agents/roles.ts";
 import { BUILTIN_ROLES } from "../../src/config.ts";
 import { fakeRole } from "../support/fake-runner.ts";
 
@@ -75,12 +75,11 @@ describe("loadRoles", () => {
 		expect(roles.get("worker")).toMatchObject({ tools: ["read", "write"], model: "openai/gpt-x", prompt: "My worker." });
 		expect(roles.get("worker")!.sha256).not.toBe(builtin.get("worker")!.sha256);
 		expect(roles.get("reviewer")).toEqual(builtin.get("reviewer"));
-		expect(loadRole("auditor", { builtinDir, overrideDir }).prompt).toBe("Audit.");
+		expect(roles.get("auditor")!.prompt).toBe("Audit.");
 	});
 
-	it("reports unknown roles, name mismatches, and malformed files with their path", () => {
+	it("reports name mismatches and malformed files with their path", () => {
 		writeFileSync(join(builtinDir, "worker.md"), role({}));
-		expect(() => loadRole("ghost", { builtinDir, overrideDir })).toThrow(/Unknown Herder role "ghost"; known roles: worker/);
 		writeFileSync(join(overrideDir, "helper.md"), role({ name: "other" }));
 		expect(() => loadRoles({ builtinDir, overrideDir })).toThrow(`Invalid Herder role ${join(overrideDir, "helper.md")}: name "other" does not match the file name`);
 		rmSync(join(overrideDir, "helper.md"));
