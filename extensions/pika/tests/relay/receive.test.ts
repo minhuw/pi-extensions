@@ -1,29 +1,15 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { KeybindingHints } from "@earendil-works/pi-coding-agent";
 import { MESSAGE_TYPE, NOTICE_TYPE, RECEIVED_TYPE } from "../../relay/protocol.ts";
 import { plainTheme } from "../support/ui.ts";
-import { FakeRelay } from "./support/relay-server.ts";
-import { setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
+import type { FakeRelay } from "./support/relay-server.ts";
+import { relaySuite, sleep, texts, waitFor, type Harness } from "./support/runtime.ts";
 
-let workspace: Workspace;
 let relay: FakeRelay;
-const harnesses: Harness[] = [];
 // Pi 1.5 injects the user's configured keybindings into renderer options.
 const keys: KeybindingHints = { keyText: (keybinding) => keybinding, keyHint: (keybinding, description) => `${keybinding} ${description}` };
-beforeEach(async () => { workspace = await Workspace.create(); relay = await new FakeRelay().start(); setCredentials(relay.url); });
-afterEach(async () => {
-	for (const h of harnesses.splice(0)) await h.shutdown();
-	await relay.stop();
-	await workspace.cleanup();
-});
-
-async function online(options: Partial<Parameters<typeof startSession>[0]> = {}): Promise<Harness> {
-	const h = await startSession({ workspace, ...options });
-	harnesses.push(h);
-	await waitOnline(relay, h.session.sessionId);
-	return h;
-}
+const { online } = relaySuite({ beforeEach: (s) => { relay = s.relay; } });
 
 const received = (h: Harness) => h.session.sessionManager.getEntries().filter((entry) => entry.type === "custom" && entry.customType === RECEIVED_TYPE);
 const relayMessages = (h: Harness) => h.session.messages.filter((message) => message.role === "custom" && (message as { customType?: string }).customType === MESSAGE_TYPE);

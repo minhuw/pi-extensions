@@ -9,33 +9,21 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadRelaySettings } from "../../config.ts";
 import { MESSAGE_TYPE, timing } from "../../relay/protocol.ts";
 import { parseSide, SIDE_TYPE } from "../../relay/side.ts";
-import { FakeRelay } from "./support/relay-server.ts";
-import { Notes, setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
+import type { FakeRelay } from "./support/relay-server.ts";
+import { Notes, relaySuite, sleep, texts, waitFor, type Harness, type Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;
 let relay: FakeRelay;
-const harnesses: Harness[] = [];
-beforeEach(async () => {
-	workspace = await Workspace.create();
-	relay = await new FakeRelay().start();
-	setCredentials(relay.url);
-	relay.recorded.add("sender-session");
-	relay.recorded.add("peer");
-});
-afterEach(async () => {
-	for (const h of harnesses.splice(0)) await h.shutdown();
-	await relay.stop();
-	await workspace.cleanup();
+const { online } = relaySuite({
+	beforeEach: (s) => {
+		workspace = s.workspace;
+		relay = s.relay;
+		relay.recorded.add("sender-session");
+		relay.recorded.add("peer");
+	},
 });
 
 const settings = (relaySettings: Record<string, unknown>) => writeFile(join(workspace.agentDir, "pika.json"), JSON.stringify({ relay: relaySettings }));
-
-async function online(options: Partial<Parameters<typeof startSession>[0]> = {}): Promise<Harness> {
-	const h = await startSession({ workspace, ...options });
-	harnesses.push(h);
-	await waitOnline(relay, h.session.sessionId);
-	return h;
-}
 
 const PEER = { kind: "session", sessionId: "peer", device: "desktop", name: "Peer" };
 const FOLLOW_UP = { deliverAs: "followUp", triggerTurn: true };

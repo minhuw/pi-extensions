@@ -1,26 +1,11 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import type { KeybindingHints } from "@earendil-works/pi-coding-agent";
 import { plainTheme } from "../support/ui.ts";
-import { FakeRelay } from "./support/relay-server.ts";
-import { setCredentials, startSession, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
+import { relaySuite, type Harness, type Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;
-let relay: FakeRelay;
-const harnesses: Harness[] = [];
 const keys: KeybindingHints = { keyText: (keybinding) => keybinding, keyHint: (keybinding, description) => `${keybinding} ${description}` };
-beforeEach(async () => { workspace = await Workspace.create(); relay = await new FakeRelay().start(); setCredentials(relay.url); });
-afterEach(async () => {
-	for (const h of harnesses.splice(0)) await h.shutdown();
-	await relay.stop();
-	await workspace.cleanup();
-});
-
-async function online(): Promise<Harness> {
-	const h = await startSession({ workspace });
-	harnesses.push(h);
-	await waitOnline(relay, h.session.sessionId);
-	return h;
-}
+const { online } = relaySuite({ beforeEach: (s) => { workspace = s.workspace; } });
 
 type Args = Record<string, unknown>;
 type Result = { content: { type: string; text?: string }[]; details?: unknown };

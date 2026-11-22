@@ -1,28 +1,16 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { RelayConnection, RequestError } from "../../relay/connection.ts";
 import { RELAY_VERSION, timing } from "../../relay/protocol.ts";
-import { FakeRelay, TOKEN } from "./support/relay-server.ts";
-import { queueToolCall as callTool, setCredentials, sleep, startSession, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
+import { type FakeRelay, TOKEN } from "./support/relay-server.ts";
+import { queueToolCall as callTool, relaySuite, sleep, waitFor, waitOnline, type Harness } from "./support/runtime.ts";
 
-let workspace: Workspace;
 let relay: FakeRelay;
-const harnesses: Harness[] = [];
 const connections: RelayConnection[] = [];
-beforeEach(async () => { workspace = await Workspace.create(); relay = await new FakeRelay().start(); setCredentials(relay.url); });
-afterEach(async () => {
-	for (const connection of connections.splice(0)) connection.close();
-	for (const h of harnesses.splice(0)) await h.shutdown();
-	await relay.stop();
-	await workspace.cleanup();
+const { online } = relaySuite({
+	beforeEach: (s) => { relay = s.relay; },
+	beforeCleanup: () => { for (const connection of connections.splice(0)) connection.close(); },
 });
-
-async function online(): Promise<Harness> {
-	const h = await startSession({ workspace });
-	harnesses.push(h);
-	await waitOnline(relay, h.session.sessionId);
-	return h;
-}
 
 /** A bare connection, online at the fake server. */
 async function connect(id = "bare-session"): Promise<RelayConnection> {

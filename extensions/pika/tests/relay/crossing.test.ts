@@ -1,27 +1,15 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it } from "vitest";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { MESSAGE_TYPE, timing } from "../../relay/protocol.ts";
 import { SENT_TYPE } from "../../relay/viewer.ts";
-import { FakeRelay } from "./support/relay-server.ts";
-import { setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
+import type { FakeRelay } from "./support/relay-server.ts";
+import { relaySuite, sleep, texts, waitFor, type Harness } from "./support/runtime.ts";
 
-let workspace: Workspace;
 let relay: FakeRelay;
-const harnesses: Harness[] = [];
-beforeEach(async () => { workspace = await Workspace.create(); relay = await new FakeRelay().start(); setCredentials(relay.url); relay.recorded.add("peer"); });
-afterEach(async () => {
-	for (const h of harnesses.splice(0)) await h.shutdown();
-	await relay.stop();
-	await workspace.cleanup();
+const { online } = relaySuite({
+	beforeEach: (s) => { relay = s.relay; relay.recorded.add("peer"); },
 });
-
-async function online(): Promise<Harness> {
-	const h = await startSession({ workspace });
-	harnesses.push(h);
-	await waitOnline(relay, h.session.sessionId);
-	return h;
-}
 
 const PEER = { kind: "session", sessionId: "peer", device: "desktop", name: "Peer" };
 const STEER = { deliverAs: "steer", triggerTurn: true };

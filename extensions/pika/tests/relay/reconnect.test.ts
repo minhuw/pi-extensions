@@ -1,31 +1,22 @@
 import type { Socket } from "node:net";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { RelayConnection } from "../../relay/connection.ts";
 import { timing } from "../../relay/protocol.ts";
 import { FakeRelay, TOKEN } from "./support/relay-server.ts";
-import { Notes, relayStatus, setCredentials, sleep, startSession, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
+import { Notes, relayStatus, relaySuite, setCredentials, sleep, waitFor, waitOnline, type Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;
 let relay: FakeRelay;
-const harnesses: Harness[] = [];
-beforeEach(async () => {
-	workspace = await Workspace.create();
-	relay = await new FakeRelay().start();
-	Object.assign(timing, { backoffBaseMs: 100, backoffMaxMs: 800 });
+const { open } = relaySuite({
+	credentials: false,
+	beforeEach: (s) => {
+		workspace = s.workspace;
+		relay = s.relay;
+		Object.assign(timing, { backoffBaseMs: 100, backoffMaxMs: 800 });
+	},
 });
-afterEach(async () => {
-	for (const h of harnesses.splice(0)) await h.shutdown();
-	await relay.stop();
-	await workspace.cleanup();
-});
-
-async function open(notes = new Notes()): Promise<Harness> {
-	const h = await startSession({ workspace, ui: notes.context() });
-	harnesses.push(h);
-	return h;
-}
 
 it("schedules reconnects with doubling, jittered delays up to the maximum", async () => {
 	// Nothing listens at this URL, so every attempt fails at the health check.
@@ -109,8 +100,7 @@ it("stops after another pi process takes over the session, until /relay on takes
 	a.faux.setResponses([fauxAssistantMessage("saved")]);
 	await a.session.prompt("save the session");
 	// A second pi process opens the same session file.
-	const b = await startSession({ workspace, ui: notesB.context(), sessionManager: SessionManager.open(a.session.sessionFile!, workspace.sessionDir) });
-	harnesses.push(b);
+	const b = await open({ ui: notesB.context(), sessionManager: SessionManager.open(a.session.sessionFile!, workspace.sessionDir) });
 	expect(b.session.sessionId).toBe(id);
 	await waitFor(() => relay.connections.length === 2 && relay.connections[1]!.welcomed && relay.connections[0]!.closed?.code === 4410, 5_000, "the takeover");
 	await sleep(600);

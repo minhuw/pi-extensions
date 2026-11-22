@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -6,8 +6,8 @@ import { LogViewer } from "../../log-viewer.ts";
 import { RECEIVED_TYPE, timing } from "../../relay/protocol.ts";
 import { type LogItem, logItems, relayView, SENT_TYPE, size } from "../../relay/viewer.ts";
 import { colorTheme, LOG_KEYS, LogUI, plainTheme, stripAnsi } from "../support/ui.ts";
-import { FakeRelay } from "./support/relay-server.ts";
-import { Notes, queueToolCall as callTool, setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
+import type { FakeRelay } from "./support/relay-server.ts";
+import { Notes, queueToolCall as callTool, relaySuite, sleep, texts, waitFor, type Harness } from "./support/runtime.ts";
 
 const BINDINGS: Record<string, string> = {
 	"tui.select.up": LOG_KEYS.up, "tui.select.down": LOG_KEYS.down, "tui.select.pageUp": LOG_KEYS.pageUp, "tui.select.pageDown": LOG_KEYS.pageDown,
@@ -15,24 +15,10 @@ const BINDINGS: Record<string, string> = {
 };
 const keybindings = { matches: (data: string, binding: string) => BINDINGS[binding] === data };
 
-let workspace: Workspace;
 let relay: FakeRelay;
-const harnesses: Harness[] = [];
-beforeEach(async () => { workspace = await Workspace.create(); relay = await new FakeRelay().start(); setCredentials(relay.url); });
-afterEach(async () => {
-	for (const h of harnesses.splice(0)) await h.shutdown();
-	await relay.stop();
-	await workspace.cleanup();
-});
+const { online } = relaySuite({ beforeEach: (s) => { relay = s.relay; } });
 
 const logUI = () => new LogUI({ rows: 30, keybindings, requestRender: vi.fn() });
-
-async function online(options: Partial<Parameters<typeof startSession>[0]> = {}): Promise<Harness> {
-	const h = await startSession({ workspace, ...options });
-	harnesses.push(h);
-	await waitOnline(relay, h.session.sessionId);
-	return h;
-}
 
 const sentData = (h: Harness) => h.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom" && entry.customType === SENT_TYPE ? [entry.data] : []);
 

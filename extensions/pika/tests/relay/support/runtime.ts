@@ -1,3 +1,4 @@
+import { afterEach, beforeEach } from "vitest";
 import type { FauxProviderHandle } from "@earendil-works/pi-ai/providers/faux";
 import type { AgentSession, ExtensionAPI, ExtensionContext, ExtensionFactory, ExtensionUIContext, SessionManager } from "@earendil-works/pi-coding-agent";
 import relayExtension from "../../../relay/index.ts";
@@ -9,7 +10,7 @@ import {
 	queueToolCall, RecordingUI, setCredentials as setBaseCredentials, startSession as startBaseSession, waitFor, Workspace as BaseWorkspace,
 	type CredentialsOptions, type Harness as BaseHarness,
 } from "../../support/runtime.ts";
-import { TOKEN } from "./relay-server.ts";
+import { FakeRelay, TOKEN } from "./relay-server.ts";
 
 export { queueToolCall, RecordingUI as Notes, waitFor };
 
@@ -115,6 +116,100 @@ export const relayStatus = (sessionId: string): string | undefined =>
 /** Waits until the server welcomed the session and the session processed the welcome. */
 export async function waitOnline(server: { online(id: string): unknown }, sessionId: string): Promise<void> {
 	await waitFor(() => server.online(sessionId) !== undefined && relayStatus(sessionId) === "online", 5_000, `${sessionId} online`);
+}
+
+export type OpenOptions = Partial<Omit<SessionOptions, "workspace">> & { workspace?: Workspace };
+
+export interface RelaySuiteOptions {
+	/** Base path passed to `relay.start(base)`; default `""`. */
+	base?: string;
+	/** Publish `setCredentials(relay.url)` in `beforeEach`; default `true`. */
+	credentials?: boolean;
+	/** Runs at the end of `beforeEach`, after `workspace`, `relay`, and optional credentials are ready. */
+	beforeEach?: (env: { workspace: Workspace; relay: FakeRelay }) => void | Promise<void>;
+	/** Runs at the start of `afterEach`, before harnesses shut down and `relay`/`workspace` stop. */
+	beforeCleanup?: () => void | Promise<void>;
+	/** Runs at the end of `afterEach`, after harnesses shut down and `relay`/`workspace` stop. */
+	afterCleanup?: () => void | Promise<void>;
+}
+
+export interface RelaySuite {
+	readonly workspace: Workspace;
+	readonly relay: FakeRelay;
+	/** Starts a tracked session in the current test's workspace. */
+	open(options?: OpenOptions | RecordingUI): Promise<Harness>;
+	/** Starts a tracked session and waits until the fake relay welcomes it. */
+	online(options?: OpenOptions | RecordingUI): Promise<Harness>;
+	/** Registers a harness created outside `open()`/`online()` so `afterEach` shuts it down. */
+	track<T extends Harness>(harness: T): T;
+}
+
+/** Registers `beforeEach`/`afterEach` for a workspace, fake relay, and tracked session harnesses. */
+export function relaySuite(options: RelaySuiteOptions = {}): RelaySuite {
+	let workspace: Workspace | undefined;
+	let relay: FakeRelay | undefined;
+	const tracked = new Set<Harness>();
+
+	const currentWorkspace = () => {
+		if (!workspace) throw new Error("relaySuite used outside a test");
+		return workspace;
+	};
+	const currentRelay = () => {
+		if (!relay) throw new Error("relaySuite used outside a test");
+		return relay;
+	};
+
+	const track = <T extends Harness>(harness: T): T => {
+		tracked.add(harness);
+		return harness;
+	};
+	const toSessionOptions = (sessionOptions?: OpenOptions | RecordingUI): OpenOptions =>
+		sessionOptions instanceof RecordingUI ? { ui: sessionOptions.context() } : (sessionOptions ?? {});
+	const open = async (sessionOptions?: OpenOptions | RecordingUI): Promise<Harness> =>
+		track(await startSession({ workspace: currentWorkspace(), ...toSessionOptions(sessionOptions) }));
+	const online = async (sessionOptions?: OpenOptions | RecordingUI): Promise<Harness> => {
+		const h = await open(sessionOptions);
+		await waitOnline(currentRelay(), h.session.sessionId);
+		return h;
+	};
+
+	beforeEach(async () => {
+		workspace = await Workspace.create();
+		relay = await new FakeRelay().start(options.base);
+		if (options.credentials !== false) setCredentials(relay.url);
+		await options.beforeEach?.({ workspace, relay });
+	});
+
+	afterEach(async () => {
+		try {
+			await options.beforeCleanup?.();
+			const toClose = [...tracked];
+			tracked.clear();
+			for (const h of toClose) await h.shutdown();
+		} finally {
+			const current = relay;
+			const dir = workspace;
+			relay = undefined;
+			workspace = undefined;
+			try {
+				await current?.stop();
+			} finally {
+				try {
+					await dir?.cleanup();
+				} finally {
+					await options.afterCleanup?.();
+				}
+			}
+		}
+	});
+
+	return {
+		get workspace() { return currentWorkspace(); },
+		get relay() { return currentRelay(); },
+		open,
+		online,
+		track,
+	};
 }
 
 export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

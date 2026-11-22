@@ -1,27 +1,13 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { NOTICE_TYPE, timing } from "../../relay/protocol.ts";
-import { FakeRelay } from "./support/relay-server.ts";
-import { Notes, queueToolCall as callTool, setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
+import type { FakeRelay } from "./support/relay-server.ts";
+import { Notes, queueToolCall as callTool, relaySuite, sleep, texts, waitFor, type Harness } from "./support/runtime.ts";
 
 const ANSWER_HINT = "Any answer arrives as a new [relay] message after your current turn ends, never during it: do not sleep or poll for it. End your turn now, telling your user what you are waiting for if that helps.";
 
-let workspace: Workspace;
 let relay: FakeRelay;
-const harnesses: Harness[] = [];
-beforeEach(async () => { workspace = await Workspace.create(); relay = await new FakeRelay().start(); setCredentials(relay.url); });
-afterEach(async () => {
-	for (const h of harnesses.splice(0)) await h.shutdown();
-	await relay.stop();
-	await workspace.cleanup();
-});
-
-async function online(options: Partial<Parameters<typeof startSession>[0]> = {}): Promise<Harness> {
-	const h = await startSession({ workspace, ...options });
-	harnesses.push(h);
-	await waitOnline(relay, h.session.sessionId);
-	return h;
-}
+const { online } = relaySuite({ beforeEach: (s) => { relay = s.relay; } });
 
 /** Results of a tool in the session, in order. */
 function results(h: Harness, tool: string): { text: string; isError: boolean }[] {

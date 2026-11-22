@@ -1,28 +1,15 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { FakeRelay } from "./support/relay-server.ts";
-import { setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
+import type { FakeRelay } from "./support/relay-server.ts";
+import { relaySuite, sleep, texts, waitFor, type Harness, type Workspace } from "./support/runtime.ts";
 import { MESSAGE_TYPE, timing } from "../../relay/protocol.ts";
 
 let workspace: Workspace;
 let relay: FakeRelay;
-const harnesses: Harness[] = [];
-beforeEach(async () => { workspace = await Workspace.create(); relay = await new FakeRelay().start(); setCredentials(relay.url); });
-afterEach(async () => {
-	for (const h of harnesses.splice(0)) await h.shutdown();
-	await relay.stop();
-	await workspace.cleanup();
-});
-
-async function online(options: Partial<Parameters<typeof startSession>[0]> = {}): Promise<Harness> {
-	const h = await startSession({ workspace, ...options });
-	harnesses.push(h);
-	await waitOnline(relay, h.session.sessionId);
-	return h;
-}
+const { open, online } = relaySuite({ beforeEach: (s) => { workspace = s.workspace; relay = s.relay; } });
 
 const states = (id: string) => relay.frames(id, "state").map(({ type: _type, ...rest }) => rest);
 
@@ -160,7 +147,7 @@ it("reconnects after a /resume fails because the session's cwd is gone", async (
 	timing.leaveTimeoutMs = 500;
 	const gone = join(workspace.root, "gone");
 	await mkdir(gone);
-	const other = await startSession({ workspace, cwd: gone, noRelay: true });
+	const other = await open({ cwd: gone, noRelay: true });
 	other.faux.setResponses([fauxAssistantMessage("saved")]);
 	await other.session.prompt("save this session");
 	const file = other.session.sessionFile!;

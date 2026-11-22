@@ -1,30 +1,21 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { timing, UNANSWERED } from "../../relay/protocol.ts";
 import { endedText, memberText, representativeText, ROLE_TYPE } from "../../relay/roles.ts";
-import { FakeRelay } from "./support/relay-server.ts";
-import { type Harness, Notes, relayStatus, type SessionOptions, setCredentials, setModes, sleep, startSession, texts, waitFor, waitOnline, Workspace } from "./support/runtime.ts";
+import type { FakeRelay } from "./support/relay-server.ts";
+import { type Harness, Notes, type OpenOptions, relayStatus, relaySuite, setModes, sleep, texts, waitFor } from "./support/runtime.ts";
 
-let workspace: Workspace;
 let relay: FakeRelay;
-const harnesses: Harness[] = [];
-beforeEach(async () => { workspace = await Workspace.create(); relay = await new FakeRelay().start(); setCredentials(relay.url); });
-afterEach(async () => {
-	for (const h of harnesses.splice(0)) await h.shutdown();
-	await relay.stop();
-	await workspace.cleanup();
-});
+const { online } = relaySuite({ beforeEach: (s) => { relay = s.relay; } });
 
 interface Member { h: Harness; notes: Notes; id: string; status(): string | undefined; command(text: string): Promise<void>; lastNote(): string | undefined }
 
-async function online(options: Partial<SessionOptions> = {}): Promise<Member> {
+async function onlineMember(options: OpenOptions = {}): Promise<Member> {
 	const notes = new Notes();
-	const h = await startSession({ workspace, ui: notes.context(), ...options });
-	harnesses.push(h);
+	const h = await online({ ui: notes.context(), ...options });
 	h.faux.setResponses(Array.from({ length: 30 }, () => fauxAssistantMessage("ok")));
 	const id = h.session.sessionId;
-	await waitOnline(relay, id);
 	return {
 		h, notes, id,
 		status: () => notes.statuses.get("representative"),
@@ -34,9 +25,9 @@ async function online(options: Partial<SessionOptions> = {}): Promise<Member> {
 }
 
 /** Two sessions in #auth; the first is named Lead, and the server knows it. */
-async function room(options: Partial<SessionOptions> = {}): Promise<[Member, Member]> {
-	const lead = await online(options);
-	const other = await online(options);
+async function room(options: OpenOptions = {}): Promise<[Member, Member]> {
+	const lead = await onlineMember(options);
+	const other = await onlineMember(options);
 	lead.h.session.setSessionName("Lead");
 	await waitFor(() => relay.online(lead.id)?.session?.name === "Lead", 5_000, "the name");
 	for (const member of [lead, other]) await member.command("/relay join auth");

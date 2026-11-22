@@ -1,31 +1,23 @@
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { FakeRelay } from "./support/relay-server.ts";
-import { type Harness, Notes, type SessionOptions, setCredentials, setModes, startSession, waitFor, waitOnline, Workspace } from "./support/runtime.ts";
+import type { FakeRelay } from "./support/relay-server.ts";
+import { Notes, type OpenOptions, relaySuite, setModes, waitFor, waitOnline, type Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;
 let relay: FakeRelay;
-const harnesses: Harness[] = [];
-beforeEach(async () => { workspace = await Workspace.create(); relay = await new FakeRelay().start(); setCredentials(relay.url); });
-afterEach(async () => {
-	for (const h of harnesses.splice(0)) await h.shutdown();
-	await relay.stop();
-	await workspace.cleanup();
-});
+const { online } = relaySuite({ beforeEach: (s) => { workspace = s.workspace; relay = s.relay; } });
 
-async function online(options: Partial<SessionOptions> = {}) {
+async function onlineWithStatus(options: OpenOptions = {}) {
 	const notes = new Notes();
 	const ui = notes.context();
 	const publish = vi.spyOn(ui, "setStatus");
-	const h = await startSession({ workspace, ui, ...options });
-	harnesses.push(h);
-	await waitOnline(relay, h.session.sessionId);
+	const h = await online({ ui, ...options });
 	return { h, notes, publish, joined: () => notes.statuses.get("relay-rooms"), role: () => notes.statuses.get("representative") };
 }
 
 it("shows joins and leaves without a representative and clears the last membership", async () => {
-	const { h, joined, role } = await online();
+	const { h, joined, role } = await onlineWithStatus();
 	expect(joined()).toBeUndefined();
 	const before = h.session.sessionManager.getBranch();
 	await h.session.prompt("/relay join ops");
@@ -50,7 +42,7 @@ it("learns all joined rooms from full lists, sanitizes and sorts them stably, an
 	const id = manager.getSessionId();
 	for (const name of ["zeta", "ops", "infra", "docs", "dev", "build", "api", "\u001b[31malpha\u001b[0m\n\t\"\u202e\u200b"]) relay.addRoom(name, [id]);
 	relay.addRoom("unjoined", ["other-session"]);
-	const { h, joined, role, publish } = await online({ sessionManager: manager });
+	const { h, joined, role, publish } = await onlineWithStatus({ sessionManager: manager });
 	const expected = "#alpha #api #build #dev #docs #infra #ops #zeta";
 	await waitFor(() => joined() === expected);
 	expect(role()).toBeUndefined();
@@ -76,7 +68,7 @@ it("learns all joined rooms from full lists, sanitizes and sorts them stably, an
 });
 
 it("publishes memberships and representative changes independently and clears both on shutdown", async () => {
-	const { h, joined, role, publish, notes } = await online();
+	const { h, joined, role, publish, notes } = await onlineWithStatus();
 	const id = h.session.sessionId;
 	setModes(id, "swarm");
 	await h.session.prompt("/relay represent dev");
@@ -103,7 +95,7 @@ it("publishes memberships and representative changes independently and clears bo
 });
 
 it("clears joined rooms when switching to an empty session, restores them on resume and reload, and clears on shutdown", async () => {
-	const { h, joined, notes } = await online();
+	const { h, joined, notes } = await onlineWithStatus();
 	const first = h.session.sessionId;
 	await h.session.prompt("/relay join dev");
 	await waitFor(() => joined() === "#dev");

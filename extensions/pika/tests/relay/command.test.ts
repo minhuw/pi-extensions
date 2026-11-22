@@ -1,24 +1,10 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { FakeRelay } from "./support/relay-server.ts";
-import { Notes, setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
+import type { FakeRelay } from "./support/relay-server.ts";
+import { Notes, relaySuite, setCredentials, sleep, texts, waitFor } from "./support/runtime.ts";
 
-let workspace: Workspace;
 let relay: FakeRelay;
-const harnesses: Harness[] = [];
-beforeEach(async () => { workspace = await Workspace.create(); relay = await new FakeRelay().start(); setCredentials(relay.url); });
-afterEach(async () => {
-	for (const h of harnesses.splice(0)) await h.shutdown();
-	await relay.stop();
-	await workspace.cleanup();
-});
-
-async function online(notes = new Notes()): Promise<Harness> {
-	const h = await startSession({ workspace, ui: notes.context() });
-	harnesses.push(h);
-	await waitOnline(relay, h.session.sessionId);
-	return h;
-}
+const { open, online } = relaySuite({ beforeEach: (s) => { relay = s.relay; } });
 
 it("/relay shows the connection, the server, this session, and the other online sessions", async () => {
 	const notes = new Notes();
@@ -48,8 +34,8 @@ it("/relay shows the device name, and the id when an older server sends no name"
 
 	relay.deviceName = undefined;
 	const olderNotes = new Notes();
-	await online(olderNotes);
-	await harnesses.at(-1)!.session.prompt("/relay");
+	const older = await online(olderNotes);
+	await older.session.prompt("/relay");
 	expect(olderNotes.last!.message.split("\n")[0]).toBe("Relay is online as device 7f9c2ba4-e88f-4a1b-9a3c-0d2f6e1b5c47.");
 });
 
@@ -100,8 +86,7 @@ it("/relay off disconnects for the session's lifetime and /relay on reconnects",
 it("/relay on says why a session stays offline, and unknown subcommands show the usage", async () => {
 	const notes = new Notes();
 	setCredentials(undefined);
-	const h = await startSession({ workspace, ui: notes.context() });
-	harnesses.push(h);
+	const h = await open({ ui: notes.context() });
 	await h.session.prompt("/relay on");
 	expect(notes.last).toEqual({ type: "warning", message: "Relay stays offline: pika is not logged in or is disabled; run /pika login." });
 	for (const text of ["/relay bogus", "/relay off now", "/relay status now", "/relay log now", "/relay represent", "/relay represent a b"]) {

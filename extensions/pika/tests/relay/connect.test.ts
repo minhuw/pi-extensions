@@ -1,30 +1,22 @@
 import { hostname } from "node:os";
 import { basename, join } from "node:path";
 import { mkdir } from "node:fs/promises";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import { RELAY_VERSION, timing, wsUrl } from "../../relay/protocol.ts";
 import { credentialsRegistry } from "../../credentials.ts";
 import { shared } from "../../relay/shared.ts";
 import { FakeRelay, TOKEN } from "./support/relay-server.ts";
-import { Notes, setCredentials, sleep, startSession, waitFor, Workspace, type Harness } from "./support/runtime.ts";
+import { Notes, relaySuite, setCredentials, sleep, waitFor, type Harness, type Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;
 let relay: FakeRelay;
-const harnesses: Harness[] = [];
-beforeEach(async () => { workspace = await Workspace.create(); relay = await new FakeRelay().start("/pika"); });
-afterEach(async () => {
-	for (const h of harnesses.splice(0)) await h.shutdown();
-	await relay.stop();
-	await workspace.cleanup();
-	shared().unsupportedNotified = false;
+const { open } = relaySuite({
+	base: "/pika",
+	credentials: false,
+	beforeEach: (s) => { workspace = s.workspace; relay = s.relay; },
+	afterCleanup: () => { shared().unsupportedNotified = false; },
 });
-
-async function open(options: Partial<Parameters<typeof startSession>[0]> = {}): Promise<Harness> {
-	const h = await startSession({ workspace, ...options });
-	harnesses.push(h);
-	return h;
-}
 
 /** What `/relay` says in a session. */
 async function relayStatus(h: Harness, notes: Notes): Promise<string> {

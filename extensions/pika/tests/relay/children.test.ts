@@ -1,33 +1,21 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { timing } from "../../relay/protocol.ts";
 import { CHILD_SESSION_HOOKS, type ChildSessionHook, shared } from "../../relay/shared.ts";
-import { FakeRelay } from "./support/relay-server.ts";
-import { setCredentials, sleep, startSession, texts, waitFor, Workspace, type Harness } from "./support/runtime.ts";
+import type { FakeRelay } from "./support/relay-server.ts";
+import { relaySuite, setCredentials, sleep, texts, waitFor, type Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;
 let relay: FakeRelay;
-const harnesses: Harness[] = [];
-beforeEach(async () => { workspace = await Workspace.create(); relay = await new FakeRelay().start(); });
-afterEach(async () => {
-	for (const h of harnesses.splice(0)) await h.shutdown();
-	await relay.stop();
-	await workspace.cleanup();
-});
+const { open } = relaySuite({ credentials: false, beforeEach: (s) => { workspace = s.workspace; relay = s.relay; } });
 
 const registered = () => [...((globalThis as Record<symbol, Set<ChildSessionHook> | undefined>)[CHILD_SESSION_HOOKS] ?? [])];
 const statusOf = (sessionId: string) => [...shared().members.values()].find((member) => member.sessionId === sessionId)?.member.status();
 const RELAY_TOOLS = ["relay_list", "relay_send", "relay_status"];
-
-async function open(options: Partial<Parameters<typeof startSession>[0]> = {}): Promise<Harness> {
-	const h = await startSession({ workspace, ...options });
-	harnesses.push(h);
-	return h;
-}
 
 it("registers the child hook only while a relay session runs and pika has credentials", async () => {
 	expect(registered()).toEqual([]);
