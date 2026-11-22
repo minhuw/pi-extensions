@@ -342,35 +342,41 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 		"agent-browser";
 	const cwd = path.resolve(options.cwd ?? process.cwd());
 
-	if (
-		!Array.isArray(options.argv) ||
-		options.argv.length === 0 ||
-		!options.argv.every((arg) => typeof arg === "string" && arg.length > 0)
-	) {
-		const message = "argv must be a non-empty array of non-empty strings.";
-		return {
-			ok: false,
-			status: "error",
-			exitCode: null,
-			signal: null,
-			stdout: "",
-			stderr: message,
-			stdoutTruncated: false,
-			stderrTruncated: false,
-			binary,
-			cwd,
-			argv: options.argv ?? [],
-			session: options.session?.trim() || "pi-default",
-			message,
-		};
-	}
+	const parsed =
+		Array.isArray(options.argv) &&
+		options.argv.length > 0 &&
+		options.argv.every((arg) => typeof arg === "string" && arg.length > 0)
+			? parseAgentBrowserArgv(options.argv)
+			: undefined;
+	const session = parsed
+		? (parsed.explicitSession ??
+			(options.session?.trim() || undefined) ??
+			(options.env?.AGENT_BROWSER_SESSION?.trim() || undefined) ??
+			"pi-default")
+		: options.session?.trim() || "pi-default";
 
-	const parsed = parseAgentBrowserArgv(options.argv);
-	const session =
-		parsed.explicitSession ??
-		(options.session?.trim() || undefined) ??
-		(options.env?.AGENT_BROWSER_SESSION?.trim() || undefined) ??
-		"pi-default";
+	const makeResult = (
+		overrides: Partial<AgentBrowserRunResult> & { status: AgentBrowserRunStatus },
+	): AgentBrowserRunResult => ({
+		ok: false,
+		exitCode: null,
+		signal: null,
+		stdout: "",
+		stderr: "",
+		stdoutTruncated: false,
+		stderrTruncated: false,
+		binary,
+		cwd,
+		argv: options.argv ?? [],
+		session,
+		...(parsed ? { subcommand: parsed.subcommand } : {}),
+		...overrides,
+	});
+
+	if (!parsed) {
+		const message = "argv must be a non-empty array of non-empty strings.";
+		return makeResult({ status: "error", stderr: message, message });
+	}
 
 	let tempDir: string | undefined;
 	let tempScreenshotPath: string | undefined;
@@ -388,22 +394,10 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 		const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		let reason: "timeout" | "cancelled" | undefined;
 		if (options.signal?.aborted) {
-			return {
-				ok: false,
+			return makeResult({
 				status: "cancelled",
-				exitCode: null,
-				signal: null,
-				stdout: "",
-				stderr: "",
-				stdoutTruncated: false,
-				stderrTruncated: false,
-				binary,
-				cwd,
-				argv: options.argv,
-				session,
-				subcommand: parsed.subcommand,
 				message: "agent-browser invocation was cancelled before spawn.",
-			};
+			});
 		}
 
 		const stdoutCapture = new BoundedOutput(MAX_CAPTURE_BYTES);
@@ -485,40 +479,18 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 
 		if (spawnError) {
 			if (spawnError.code === "ENOENT") {
-				return {
-					ok: false,
+				return makeResult({
 					status: "unavailable",
-					exitCode: null,
-					signal: null,
-					stdout: "",
 					stderr: INSTALL_HINT,
-					stdoutTruncated: false,
-					stderrTruncated: false,
-					binary,
-					cwd,
-					argv: options.argv,
-					session,
-					subcommand: parsed.subcommand,
 					message: INSTALL_HINT,
-				};
+				});
 			}
 			const errMsg = `Failed to execute ${binary}: ${spawnError.message}`;
-			return {
-				ok: false,
+			return makeResult({
 				status: "error",
-				exitCode: null,
-				signal: null,
-				stdout: "",
 				stderr: errMsg,
-				stdoutTruncated: false,
-				stderrTruncated: false,
-				binary,
-				cwd,
-				argv: options.argv,
-				session,
-				subcommand: parsed.subcommand,
 				message: errMsg,
-			};
+			});
 		}
 
 		const stdout = truncateText(stdoutCapture.text(), MAX_RESULT_BYTES, MAX_RESULT_LINES);
@@ -528,8 +500,7 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 
 		if (reason === "timeout") {
 			const message = `agent-browser timed out after ${timeoutMs} ms.`;
-			return {
-				ok: false,
+			return makeResult({
 				status: "timeout",
 				exitCode: exit.code,
 				signal: exit.signal,
@@ -537,19 +508,13 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 				stderr: stderr.text || message,
 				stdoutTruncated,
 				stderrTruncated,
-				binary,
-				cwd,
-				argv: options.argv,
-				session,
-				subcommand: parsed.subcommand,
 				message,
-			};
+			});
 		}
 
 		if (reason === "cancelled") {
 			const message = "agent-browser invocation was cancelled.";
-			return {
-				ok: false,
+			return makeResult({
 				status: "cancelled",
 				exitCode: exit.code,
 				signal: exit.signal,
@@ -557,13 +522,8 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 				stderr: stderr.text,
 				stdoutTruncated,
 				stderrTruncated,
-				binary,
-				cwd,
-				argv: options.argv,
-				session,
-				subcommand: parsed.subcommand,
 				message,
-			};
+			});
 		}
 
 		let image: AgentBrowserImage | undefined;
@@ -603,7 +563,7 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 				: `agent-browser exited with code ${exit.code ?? "null"}.`;
 		}
 
-		return {
+		return makeResult({
 			ok,
 			status,
 			exitCode: exit.code,
@@ -612,14 +572,9 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 			stderr: stderr.text,
 			stdoutTruncated,
 			stderrTruncated,
-			binary,
-			cwd,
-			argv: options.argv,
-			session,
-			subcommand: parsed.subcommand,
 			message,
 			...(image ? { image } : {}),
-		};
+		});
 	} finally {
 		if (tempDir) {
 			await rm(tempDir, { recursive: true, force: true }).catch(() => {});

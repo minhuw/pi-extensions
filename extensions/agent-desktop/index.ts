@@ -177,11 +177,17 @@ function normalizeOptionalStdin(value: string | undefined): string | undefined {
 	return value;
 }
 
+const MIN_TIMEOUT_MS = 1_000;
+const MAX_TIMEOUT_MS = 600_000;
+
+function clampTimeoutMs(value: number): number | undefined {
+	if (!Number.isFinite(value) || value <= 0) return undefined;
+	return Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.trunc(value)));
+}
+
 function normalizeTimeoutMs(value: number | undefined): number {
-	if (value === undefined || typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-		return DEFAULT_TIMEOUT_MS;
-	}
-	return Math.min(600_000, Math.max(1_000, Math.trunc(value)));
+	if (typeof value !== "number") return DEFAULT_TIMEOUT_MS;
+	return clampTimeoutMs(value) ?? DEFAULT_TIMEOUT_MS;
 }
 
 function normalizeArgv(argv: readonly unknown[] | undefined): string[] {
@@ -584,79 +590,46 @@ export async function runAgentDesktop(
 	const cwd = path.resolve(normalizeOptionalCwd(options.cwd) ?? process.cwd());
 	const headed = Boolean(options.headed);
 	const cleanedArgv = normalizeArgv(options.argv);
-
-	if (cleanedArgv.length === 0) {
-		const message = "argv must be a non-empty array of non-empty strings.";
-		const fallbackSession =
-			normalizeOptionalString(options.session) ??
-			normalizeOptionalString(options.env?.AGENT_DESKTOP_SESSION) ??
-			"pi-default";
-		return {
-			ok: false,
-			status: "error",
-			exitCode: null,
-			signal: null,
-			stdout: "",
-			stderr: message,
-			stdoutTruncated: false,
-			stderrTruncated: false,
-			binary,
-			cwd,
-			argv: cleanedArgv,
-			session: fallbackSession,
-			headed,
-			message,
-		};
-	}
-
-	const parsed = parseAgentDesktopArgv(cleanedArgv);
+	const parsed = cleanedArgv.length > 0 ? parseAgentDesktopArgv(cleanedArgv) : undefined;
 	const session =
-		parsed.explicitSession ??
+		parsed?.explicitSession ??
 		normalizeOptionalString(options.session) ??
 		normalizeOptionalString(options.env?.AGENT_DESKTOP_SESSION) ??
 		"pi-default";
 
+	const makeResult = (
+		overrides: Partial<AgentDesktopRunResult> & { status: AgentDesktopRunStatus },
+	): AgentDesktopRunResult => ({
+		ok: false,
+		exitCode: null,
+		signal: null,
+		stdout: "",
+		stderr: "",
+		stdoutTruncated: false,
+		stderrTruncated: false,
+		binary,
+		cwd,
+		argv: cleanedArgv,
+		session,
+		headed,
+		...(parsed ? { subcommand: parsed.subcommand } : {}),
+		...overrides,
+	});
+
+	if (!parsed) {
+		const message = "argv must be a non-empty array of non-empty strings.";
+		return makeResult({ status: "error", stderr: message, message });
+	}
+
 	if (parsed.hasHeadedFlag) {
 		const message =
 			"Pass headed: true instead of --headed in argv so physical cursor/keyboard delivery is explicit.";
-		return {
-			ok: false,
-			status: "error",
-			exitCode: null,
-			signal: null,
-			stdout: "",
-			stderr: message,
-			stdoutTruncated: false,
-			stderrTruncated: false,
-			binary,
-			cwd,
-			argv: cleanedArgv,
-			session,
-			headed,
-			subcommand: parsed.subcommand,
-			message,
-		};
+		return makeResult({ status: "error", stderr: message, message });
 	}
 
 	if (parsed.subcommand && PHYSICAL_SUBCOMMANDS.has(parsed.subcommand) && !headed) {
 		const message = `"${parsed.subcommand}" moves the real cursor/keyboard; set headed: true when physical input is required.`;
-		return {
-			ok: false,
-			status: "error",
-			exitCode: null,
-			signal: null,
-			stdout: "",
-			stderr: message,
-			stdoutTruncated: false,
-			stderrTruncated: false,
-			binary,
-			cwd,
-			argv: cleanedArgv,
-			session,
-			headed,
-			subcommand: parsed.subcommand,
-			message,
-		};
+		return makeResult({ status: "error", stderr: message, message });
 	}
 
 	let tempDir: string | undefined;
@@ -666,23 +639,10 @@ export async function runAgentDesktop(
 		const timeoutMs = normalizeTimeoutMs(options.timeoutMs);
 		let reason: "timeout" | "cancelled" | undefined;
 		if (options.signal?.aborted) {
-			return {
-				ok: false,
+			return makeResult({
 				status: "cancelled",
-				exitCode: null,
-				signal: null,
-				stdout: "",
-				stderr: "",
-				stdoutTruncated: false,
-				stderrTruncated: false,
-				binary,
-				cwd,
-				argv: cleanedArgv,
-				session,
-				headed,
-				subcommand: parsed.subcommand,
 				message: "agent-desktop invocation was cancelled before spawn.",
-			};
+			});
 		}
 
 		let finalArgv = [...cleanedArgv];
@@ -792,42 +752,18 @@ export async function runAgentDesktop(
 
 		if (spawnError) {
 			if (spawnError.code === "ENOENT") {
-				return {
-					ok: false,
+				return makeResult({
 					status: "unavailable",
-					exitCode: null,
-					signal: null,
-					stdout: "",
 					stderr: INSTALL_HINT,
-					stdoutTruncated: false,
-					stderrTruncated: false,
-					binary,
-					cwd,
-					argv: cleanedArgv,
-					session,
-					headed,
-					subcommand: parsed.subcommand,
 					message: INSTALL_HINT,
-				};
+				});
 			}
 			const errMsg = `Failed to execute ${binary}: ${spawnError.message}`;
-			return {
-				ok: false,
+			return makeResult({
 				status: "error",
-				exitCode: null,
-				signal: null,
-				stdout: "",
 				stderr: errMsg,
-				stdoutTruncated: false,
-				stderrTruncated: false,
-				binary,
-				cwd,
-				argv: cleanedArgv,
-				session,
-				headed,
-				subcommand: parsed.subcommand,
 				message: errMsg,
-			};
+			});
 		}
 
 		const rawStdout = stdoutCapture.text();
@@ -838,8 +774,7 @@ export async function runAgentDesktop(
 
 		if (reason === "timeout") {
 			const message = `agent-desktop timed out after ${timeoutMs} ms.`;
-			return {
-				ok: false,
+			return makeResult({
 				status: "timeout",
 				exitCode: exit.code,
 				signal: exit.signal,
@@ -847,20 +782,13 @@ export async function runAgentDesktop(
 				stderr: stderr.text || message,
 				stdoutTruncated,
 				stderrTruncated,
-				binary,
-				cwd,
-				argv: cleanedArgv,
-				session,
-				headed,
-				subcommand: parsed.subcommand,
 				message,
-			};
+			});
 		}
 
 		if (reason === "cancelled") {
 			const message = "agent-desktop invocation was cancelled.";
-			return {
-				ok: false,
+			return makeResult({
 				status: "cancelled",
 				exitCode: exit.code,
 				signal: exit.signal,
@@ -868,14 +796,8 @@ export async function runAgentDesktop(
 				stderr: stderr.text,
 				stdoutTruncated,
 				stderrTruncated,
-				binary,
-				cwd,
-				argv: cleanedArgv,
-				session,
-				headed,
-				subcommand: parsed.subcommand,
 				message,
-			};
+			});
 		}
 
 		const envelope = inspectJsonEnvelopeFailure(rawStdout);
@@ -926,7 +848,7 @@ export async function runAgentDesktop(
 			message = envelope.errorMessage ?? fallbackExitMsg;
 		}
 
-		return {
+		return makeResult({
 			ok,
 			status,
 			exitCode: exit.code,
@@ -935,15 +857,9 @@ export async function runAgentDesktop(
 			stderr: stderr.text,
 			stdoutTruncated,
 			stderrTruncated,
-			binary,
-			cwd,
-			argv: cleanedArgv,
-			session,
-			headed,
-			subcommand: parsed.subcommand,
 			message,
 			...(image ? { image } : {}),
-		};
+		});
 	} finally {
 		if (tempDir) {
 			await rm(tempDir, { recursive: true, force: true }).catch(() => {});
@@ -1049,11 +965,9 @@ function prepareAgentDesktopToolArguments(raw: unknown): AgentDesktopToolInput {
 		else next.stdin = norm;
 	}
 	if (typeof next.timeoutMs === "number") {
-		if (!Number.isFinite(next.timeoutMs) || next.timeoutMs <= 0) {
-			delete next.timeoutMs;
-		} else {
-			next.timeoutMs = Math.min(600_000, Math.max(1_000, Math.trunc(next.timeoutMs)));
-		}
+		const clamped = clampTimeoutMs(next.timeoutMs);
+		if (clamped === undefined) delete next.timeoutMs;
+		else next.timeoutMs = clamped;
 	}
 	if (Array.isArray(next.argv)) {
 		const filtered = normalizeArgv(next.argv);
@@ -1257,6 +1171,27 @@ export default function agentDesktopExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	async function runDiagnosticCommand(
+		ctx: ExtensionContext,
+		piKey: string,
+		argv: readonly [string, ...string[]],
+	): Promise<void> {
+		const result = await runAgentDesktop({
+			argv,
+			session: piKey,
+			cwd: ctx.cwd,
+			timeoutMs: 30_000,
+		});
+		if (result.status === "unavailable") {
+			ctx.ui.notify(result.message ?? INSTALL_HINT, "warning");
+			return;
+		}
+		const output =
+			[result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n") ||
+			`agent-desktop ${argv[0]} exited with code ${result.exitCode ?? 0}`;
+		ctx.ui.notify(output, result.ok ? "info" : "warning");
+	}
+
 	pi.registerCommand("agent-desktop", {
 		description:
 			"Inspect or control the session's agent-desktop state: /agent-desktop [status | close | permissions [--guide|--request] | doctor]",
@@ -1293,20 +1228,7 @@ export default function agentDesktopExtension(pi: ExtensionAPI): void {
 			}
 
 			if (subcommand === "doctor" && tokens.length === 1) {
-				const result = await runAgentDesktop({
-					argv: ["status"],
-					session: piKey,
-					cwd: ctx.cwd,
-					timeoutMs: 30_000,
-				});
-				if (result.status === "unavailable") {
-					ctx.ui.notify(result.message ?? INSTALL_HINT, "warning");
-					return;
-				}
-				const output =
-					[result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n") ||
-					`agent-desktop status exited with code ${result.exitCode ?? 0}`;
-				ctx.ui.notify(output, result.ok ? "info" : "warning");
+				await runDiagnosticCommand(ctx, piKey, ["status"]);
 				return;
 			}
 
@@ -1319,20 +1241,7 @@ export default function agentDesktopExtension(pi: ExtensionAPI): void {
 					ctx.ui.notify(USAGE_MESSAGE, "warning");
 					return;
 				}
-				const result = await runAgentDesktop({
-					argv: ["permissions", ...extra],
-					session: piKey,
-					cwd: ctx.cwd,
-					timeoutMs: 30_000,
-				});
-				if (result.status === "unavailable") {
-					ctx.ui.notify(result.message ?? INSTALL_HINT, "warning");
-					return;
-				}
-				const output =
-					[result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n") ||
-					`agent-desktop permissions exited with code ${result.exitCode ?? 0}`;
-				ctx.ui.notify(output, result.ok ? "info" : "warning");
+				await runDiagnosticCommand(ctx, piKey, ["permissions", ...extra]);
 				return;
 			}
 
