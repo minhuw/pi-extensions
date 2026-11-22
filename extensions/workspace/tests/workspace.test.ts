@@ -20,6 +20,12 @@ import workspaceExtension, {
 	type ChildSessionHook,
 } from "../index.ts";
 import {
+	agentBrowserExternalPaths,
+	agentDesktopExternalPaths,
+	bashExternalWritePaths,
+	bashWritePaths,
+} from "./support/policy-helpers.ts";
+import {
 	createWorkspaceSandbox,
 	startWorkspaceSession,
 	type WorkspaceSandbox,
@@ -29,13 +35,9 @@ import {
 	denyProjectPath,
 	ensureWorkspacesClosure,
 	evaluatePathAccess,
-	extractAgentBrowserExternalTargets,
 	extractAgentBrowserWriteTargets,
-	extractAgentDesktopExternalTargets,
 	extractAgentDesktopWriteTargets,
-	extractBashExternalWriteTargets,
-	extractBashWriteTargets,
-	extractTaggedBashWriteTargets,
+	inspectBashCommand,
 	isSubpath,
 	readProjectPolicy,
 	resolveCanonicalPath,
@@ -176,27 +178,27 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 	});
 
 	it("extracts external write targets from bash commands while permitting internal and /tmp writes", () => {
-		expect(extractBashExternalWriteTargets("mkdir -p ~/projects/new-repo", projectCwd)).toEqual([
+		expect(bashExternalWritePaths("mkdir -p ~/projects/new-repo", projectCwd)).toEqual([
 			resolveCanonicalPath("~/projects/new-repo", projectCwd),
 		]);
 
 		expect(
-			extractBashExternalWriteTargets(
+			bashExternalWritePaths(
 				`git clone https://github.com/example/repo.git ${outsideDir}/repo`,
 				projectCwd,
 			),
 		).toEqual([path.join(resolveCanonicalPath(outsideDir), "repo")]);
 
 		expect(
-			extractBashExternalWriteTargets("git worktree add ../wt-leak HEAD", projectCwd),
+			bashExternalWritePaths("git worktree add ../wt-leak HEAD", projectCwd),
 		).toEqual([path.join(resolveCanonicalPath(sandboxRoot), "wt-leak")]);
 
 		expect(
-			extractBashExternalWriteTargets(`cd ${outsideDir} && touch created.txt`, projectCwd),
+			bashExternalWritePaths(`cd ${outsideDir} && touch created.txt`, projectCwd),
 		).toEqual([path.join(resolveCanonicalPath(outsideDir), "created.txt")]);
 
 		expect(
-			extractBashExternalWriteTargets(`echo "hello" > ${outsideDir}/out.log`, projectCwd),
+			bashExternalWritePaths(`echo "hello" > ${outsideDir}/out.log`, projectCwd),
 		).toEqual([path.join(resolveCanonicalPath(outsideDir), "out.log")]);
 
 		// dd, tar, unzip, and npm/pnpm/yarn explicit target options are inspected without a preceding cd
@@ -212,22 +214,22 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 			[`pnpm -C ${outsideDir} install`, canonicalOutside],
 			[`yarn --cwd ${outsideDir} add left-pad`, canonicalOutside],
 		]) {
-			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual([target]);
+			expect(bashExternalWritePaths(command, projectCwd), command).toEqual([target]);
 		}
 		// Reading an external archive or packing an external directory into the project is not a write outside
-		expect(extractBashExternalWriteTargets(`tar -xzf ${outsideDir}/in.tgz`, projectCwd)).toEqual([]);
-		expect(extractBashExternalWriteTargets(`tar -cf out.tar -C ${outsideDir} .`, projectCwd)).toEqual([]);
-		expect(extractBashExternalWriteTargets("dd if=/dev/zero of=/dev/null count=1", projectCwd)).toEqual([]);
+		expect(bashExternalWritePaths(`tar -xzf ${outsideDir}/in.tgz`, projectCwd)).toEqual([]);
+		expect(bashExternalWritePaths(`tar -cf out.tar -C ${outsideDir} .`, projectCwd)).toEqual([]);
+		expect(bashExternalWritePaths("dd if=/dev/zero of=/dev/null count=1", projectCwd)).toEqual([]);
 
 		// Internal and /tmp writes produce no external targets
 		expect(
-			extractBashExternalWriteTargets(
+			bashExternalWritePaths(
 				"mkdir -p .pi/workspaces/exp1 && git clone https://github.com/example/repo.git .pi/workspaces/exp1/repo",
 				projectCwd,
 			),
 		).toEqual([]);
-		expect(extractBashExternalWriteTargets("echo 'temp' > /tmp/pi-temp-test.txt", projectCwd)).toEqual([]);
-		expect(extractBashExternalWriteTargets(`ls -la ${outsideDir} && git -C ${outsideDir} status`, projectCwd)).toEqual([]);
+		expect(bashExternalWritePaths("echo 'temp' > /tmp/pi-temp-test.txt", projectCwd)).toEqual([]);
+		expect(bashExternalWritePaths(`ls -la ${outsideDir} && git -C ${outsideDir} status`, projectCwd)).toEqual([]);
 	});
 
 	it("treats ssh remote commands and heredoc bodies as data unless a local shell reads them", () => {
@@ -245,7 +247,7 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 			`python3 - <<-PY\n\topen("${outsideDir}/x", "w") > 0\n\tPY`,
 			`ssh host bash <<< "touch ${outsideDir}/x"`,
 		]) {
-			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual([]);
+			expect(bashExternalWritePaths(command, projectCwd), command).toEqual([]);
 		}
 
 		// Local writes around heredocs, local shells reading heredocs, and lines after arithmetic `<<` are still inspected.
@@ -259,7 +261,7 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 			[`bash <<< "touch ${outsideDir}/s"`, path.join(canonicalOutside, "s")],
 			[`cat <<EOF\n$(touch ${outsideDir}/e)\nEOF`, path.join(canonicalOutside, "e")],
 		]) {
-			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual([target]);
+			expect(bashExternalWritePaths(command, projectCwd), command).toEqual([target]);
 		}
 	});
 
@@ -277,7 +279,7 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 			["for p in 1 2; do (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null && echo open; done", []],
 			['n=$(for d in a b; do [ -n "$(git -C $d status 2>/dev/null)" ] && echo y; done | wc -l)', []],
 		] as const) {
-			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual(expected);
+			expect(bashExternalWritePaths(command, projectCwd), command).toEqual(expected);
 		}
 	});
 
@@ -307,14 +309,14 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 			[`env -u FOO /bin/mv -t${outsideDir} local.txt`, [canonicalOutside]],
 			[`cd ${outsideDir} && /usr/bin/tar -xzf /tmp/in.tgz`, [canonicalOutside]],
 		] as const) {
-			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual(expected);
+			expect(bashExternalWritePaths(command, projectCwd), command).toEqual(expected);
 		}
 
 		// Explicit deleting verbs keep deletes: true tagging
-		expect(extractTaggedBashWriteTargets("/bin/rm -rf .pi/workspaces/temp-ws", projectCwd)).toEqual([
+		expect(inspectBashCommand("/bin/rm -rf .pi/workspaces/temp-ws", projectCwd).writeTargets).toEqual([
 			{ path: path.join(canonicalProject, ".pi", "workspaces", "temp-ws"), deletes: true },
 		]);
-		expect(extractTaggedBashWriteTargets("/bin/rmdir .pi/workspaces/temp-ws", projectCwd)).toEqual([
+		expect(inspectBashCommand("/bin/rmdir .pi/workspaces/temp-ws", projectCwd).writeTargets).toEqual([
 			{ path: path.join(canonicalProject, ".pi", "workspaces", "temp-ws"), deletes: true },
 		]);
 
@@ -330,9 +332,9 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 			[`mv -t${outsideDir}/dst ${outsideDir}/src.txt`, [path.join(canonicalOutside, "src.txt"), path.join(canonicalOutside, "dst")]],
 			[`mv -t${outsideDir} -- -weird`, [canonicalOutside]],
 		] as const) {
-			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual(expected);
+			expect(bashExternalWritePaths(command, projectCwd), command).toEqual(expected);
 		}
-		expect(extractBashWriteTargets("mv --target-directory=.pi/workspaces/ws1 local.txt", projectCwd)).toEqual([
+		expect(bashWritePaths("mv --target-directory=.pi/workspaces/ws1 local.txt", projectCwd)).toEqual([
 			path.join(canonicalProject, "local.txt"),
 			path.join(canonicalProject, ".pi", "workspaces", "ws1"),
 		]);
@@ -353,7 +355,7 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 			[`install -oroot -m0755 -t${outsideDir} local.txt`, [canonicalOutside]],
 			[`/usr/bin/install -t${outsideDir} local.txt`, [canonicalOutside]],
 		] as const) {
-			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual(expected);
+			expect(bashExternalWritePaths(command, projectCwd), command).toEqual(expected);
 		}
 
 		// git and tar attached -C<dir> and existing forms
@@ -370,7 +372,7 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 			[`tar -czf${outsideDir}/out.tgz src`, [path.join(canonicalOutside, "out.tgz")]],
 			[`tar xf archive.tar --directory ${outsideDir}`, [canonicalOutside]],
 		] as const) {
-			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual(expected);
+			expect(bashExternalWritePaths(command, projectCwd), command).toEqual(expected);
 		}
 
 		// Read-only commands and internal bare/flagged commands stay unaffected
@@ -390,7 +392,7 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 			`mv local1.txt local2.txt`,
 			`mv -t./local local1.txt`,
 		]) {
-			expect(extractBashExternalWriteTargets(command, projectCwd), command).toEqual([]);
+			expect(bashExternalWritePaths(command, projectCwd), command).toEqual([]);
 		}
 	});
 });
@@ -1329,66 +1331,66 @@ describe("AC-10: wrapper option flags, process_start, and agent_browser external
 	it("skips wrapper option flags for env, sudo, command, nohup, nice, and timeout and tracks env -C / sudo -D", () => {
 		const canonicalOutside = resolveCanonicalPath(outsideDir);
 
-		expect(extractBashExternalWriteTargets(`env -u FOO cp a ${outsideDir}/b`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`env -u FOO cp a ${outsideDir}/b`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "b"),
 		]);
-		expect(extractBashExternalWriteTargets(`env -i -0 -u FOO cp a ${outsideDir}/b`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`env -i -0 -u FOO cp a ${outsideDir}/b`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "b"),
 		]);
-		expect(extractBashExternalWriteTargets(`env --unset=FOO VAR=1 tee ${outsideDir}/f`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`env --unset=FOO VAR=1 tee ${outsideDir}/f`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "f"),
 		]);
-		expect(extractBashExternalWriteTargets(`env -- cp a ${outsideDir}/b`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`env -- cp a ${outsideDir}/b`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "b"),
 		]);
-		expect(extractBashExternalWriteTargets(`env -S "VAR=1" cp a ${outsideDir}/b`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`env -S "VAR=1" cp a ${outsideDir}/b`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "b"),
 		]);
-		expect(extractBashExternalWriteTargets(`env -S "-C ${outsideDir}" touch x`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`env -S "-C ${outsideDir}" touch x`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "x"),
 		]);
 		// env -C / --chdir shifts cwd only for the wrapped command, not later commands.
 		expect(
-			extractBashExternalWriteTargets(`env -C ${outsideDir} touch x && touch local.txt`, projectCwd),
+			bashExternalWritePaths(`env -C ${outsideDir} touch x && touch local.txt`, projectCwd),
 		).toEqual([path.join(canonicalOutside, "x")]);
-		expect(extractBashExternalWriteTargets(`env --chdir=${outsideDir} touch x`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`env --chdir=${outsideDir} touch x`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "x"),
 		]);
 
-		expect(extractBashExternalWriteTargets(`sudo -u root cp a ${outsideDir}/b`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`sudo -u root cp a ${outsideDir}/b`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "b"),
 		]);
-		expect(extractBashExternalWriteTargets(`sudo -u root tee ${outsideDir}/file`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`sudo -u root tee ${outsideDir}/file`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "file"),
 		]);
-		expect(extractBashExternalWriteTargets(`sudo -g wheel -E rm ${outsideDir}/f`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`sudo -g wheel -E rm ${outsideDir}/f`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "f"),
 		]);
-		expect(extractBashExternalWriteTargets(`sudo -H -n -u root -C 3 cp a ${outsideDir}/b`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`sudo -H -n -u root -C 3 cp a ${outsideDir}/b`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "b"),
 		]);
-		expect(extractBashExternalWriteTargets(`sudo -D ${outsideDir} touch x`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`sudo -D ${outsideDir} touch x`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "x"),
 		]);
-		expect(extractBashExternalWriteTargets(`sudo --chdir=${outsideDir} cp /tmp/a b`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`sudo --chdir=${outsideDir} cp /tmp/a b`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "b"),
 		]);
 
-		expect(extractBashExternalWriteTargets(`command -p mv a ${outsideDir}/b`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`command -p mv a ${outsideDir}/b`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "b"),
 		]);
-		expect(extractBashExternalWriteTargets(`command -- cp a ${outsideDir}/b`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`command -- cp a ${outsideDir}/b`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "b"),
 		]);
-		expect(extractBashExternalWriteTargets(`command -v rm ${outsideDir}/f`, projectCwd)).toEqual([]);
+		expect(bashExternalWritePaths(`command -v rm ${outsideDir}/f`, projectCwd)).toEqual([]);
 
-		expect(extractBashExternalWriteTargets(`nohup cp a ${outsideDir}/b`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`nohup cp a ${outsideDir}/b`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "b"),
 		]);
-		expect(extractBashExternalWriteTargets(`nice -n 10 cp a ${outsideDir}/b`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`nice -n 10 cp a ${outsideDir}/b`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "b"),
 		]);
-		expect(extractBashExternalWriteTargets(`timeout -s TERM 5 cp a ${outsideDir}/b`, projectCwd)).toEqual([
+		expect(bashExternalWritePaths(`timeout -s TERM 5 cp a ${outsideDir}/b`, projectCwd)).toEqual([
 			path.join(canonicalOutside, "b"),
 		]);
 	});
@@ -1524,7 +1526,7 @@ describe("AC-10: wrapper option flags, process_start, and agent_browser external
 		expect(extractAgentBrowserWriteTargets(["screenshot", "--base64"], projectCwd)).toEqual([]);
 		expect(extractAgentBrowserWriteTargets(["open", "https://example.com"], projectCwd)).toEqual([]);
 		expect(extractAgentBrowserWriteTargets(["state", "load", `${outsideDir}/state.json`], projectCwd)).toEqual([]);
-		expect(extractAgentBrowserExternalTargets(["open", "https://example.com"], projectCwd, outsideDir)).toEqual([
+		expect(agentBrowserExternalPaths(["open", "https://example.com"], projectCwd, outsideDir)).toEqual([
 			canonicalOutside,
 		]);
 
@@ -1630,7 +1632,7 @@ describe("AC-10: wrapper option flags, process_start, and agent_browser external
 			),
 		).toEqual([path.join(canonicalProject, "my-profile"), path.join(canonicalProject, "my-dl")]);
 		expect(
-			extractAgentBrowserExternalTargets(
+			agentBrowserExternalPaths(
 				["--profile", "my-profile", "open", "https://example.com"],
 				projectCwd,
 				outsideDir,
@@ -1776,21 +1778,21 @@ describe("AC-10: wrapper option flags, process_start, and agent_browser external
 			extractAgentDesktopWriteTargets(["trace", "export", "--out", `${outsideDir}/viewer.html`], projectCwd),
 		).toEqual([path.join(canonicalOutside, "viewer.html")]);
 		expect(
-			extractAgentDesktopExternalTargets(["trace", "export"], projectCwd, outsideDir),
+			agentDesktopExternalPaths(["trace", "export"], projectCwd, outsideDir),
 		).toEqual([canonicalOutside]);
 
 		// Relative write targets resolve against cwd (including @-prefixed cwd)
 		expect(
-			extractAgentDesktopExternalTargets(["screenshot", "shot.png"], projectCwd, outsideDir),
+			agentDesktopExternalPaths(["screenshot", "shot.png"], projectCwd, outsideDir),
 		).toEqual([path.join(canonicalOutside, "shot.png")]);
 		expect(
-			extractAgentDesktopExternalTargets(["screenshot", "shot.png"], projectCwd, `@${outsideDir}`),
+			agentDesktopExternalPaths(["screenshot", "shot.png"], projectCwd, `@${outsideDir}`),
 		).toEqual([path.join(canonicalOutside, "shot.png")]);
 		expect(
-			extractAgentDesktopExternalTargets(["--trace", "t.jsonl", "click", "@s1:e1"], projectCwd, outsideDir),
+			agentDesktopExternalPaths(["--trace", "t.jsonl", "click", "@s1:e1"], projectCwd, outsideDir),
 		).toEqual([path.join(canonicalOutside, "t.jsonl")]);
 		expect(
-			extractAgentDesktopExternalTargets(["--screenshot=dbg.html", "snapshot"], projectCwd, outsideDir),
+			agentDesktopExternalPaths(["--screenshot=dbg.html", "snapshot"], projectCwd, outsideDir),
 		).toEqual([path.join(canonicalOutside, "dbg.html")]);
 
 		// Read-only calls & temp-only screenshot (without positional path) produce no write targets, even with external cwd
@@ -1808,7 +1810,7 @@ describe("AC-10: wrapper option flags, process_start, and agent_browser external
 			["type", "@s1:e1", "--", "--trace", `${outsideDir}/not-a-flag.jsonl`],
 		]) {
 			expect(extractAgentDesktopWriteTargets(argv, projectCwd), JSON.stringify(argv)).toEqual([]);
-			expect(extractAgentDesktopExternalTargets(argv, projectCwd, outsideDir), JSON.stringify(argv)).toEqual([]);
+			expect(agentDesktopExternalPaths(argv, projectCwd, outsideDir), JSON.stringify(argv)).toEqual([]);
 		}
 
 		// tool_call guard: external write targets are blocked / prompted

@@ -6,13 +6,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import workspaceExtension from "../index.ts";
-import {
-	extractBashExternalWriteTargets,
-	extractBashWriteTargets,
-	normalizeFileToolPath,
-	resolveCanonicalPath,
-} from "../policy.ts";
+import { normalizeFileToolPath, resolveCanonicalPath } from "../policy.ts";
 import { readRegistry } from "../registry.ts";
+import { bashExternalWritePaths, bashWritePaths } from "./support/policy-helpers.ts";
 import {
 	createWorkspaceSandbox,
 	startWorkspaceSession,
@@ -201,11 +197,11 @@ describe("workspace write guard — paths Pi's write and edit tools resolve diff
 	it("keeps in-project @ spellings allowed and bash words literal", async () => {
 		const canonicalCwd = resolveCanonicalPath(projectCwd);
 		// In a shell, `@name` and `file://...` are ordinary relative names.
-		expect(extractBashWriteTargets("echo shell > @at-name.txt", projectCwd)).toEqual([
+		expect(bashWritePaths("echo shell > @at-name.txt", projectCwd)).toEqual([
 			path.join(canonicalCwd, "@at-name.txt"),
 		]);
 		expect(
-			extractBashExternalWriteTargets(
+			bashExternalWritePaths(
 				`echo shell > @${outsideDir}/f.txt; touch @~/f.txt @../f.txt; mkdir -p file://${outsideDir}/d`,
 				projectCwd,
 			),
@@ -475,7 +471,7 @@ describe("workspace write guard — a write or edit path is taken literally once
 			}
 		}
 		// A shell follows the same links.
-		expect(extractBashExternalWriteTargets("touch a/home-link space-link", projectCwd)).toEqual(
+		expect(bashExternalWritePaths("touch a/home-link space-link", projectCwd)).toEqual(
 			links.map(([, target]) => target),
 		);
 
@@ -489,14 +485,14 @@ describe("workspace write guard — a write or edit path is taken literally once
 	it("still expands ~ and $HOME in bash words", async () => {
 		const toolCall = loadToolCallHandler();
 		const home = path.join(canonicalRoot, "home", "user");
-		expect(extractBashWriteTargets('touch $HOME/a.txt ~/b.txt "${HOME}/c.txt"; mkdir -p ~', projectCwd)).toEqual([
+		expect(bashWritePaths('touch $HOME/a.txt ~/b.txt "${HOME}/c.txt"; mkdir -p ~', projectCwd)).toEqual([
 			path.join(home, "a.txt"),
 			path.join(home, "b.txt"),
 			path.join(home, "c.txt"),
 			home,
 		]);
 		// The spelling `write` and `edit` are blocked for stays inside the project once a shell expands `$HOME`.
-		expect(extractBashExternalWriteTargets("echo shell > a/$HOME/../../../outside/f.txt", projectCwd)).toEqual([]);
+		expect(bashExternalWritePaths("echo shell > a/$HOME/../../../outside/f.txt", projectCwd)).toEqual([]);
 
 		const result = await toolCall(
 			{ toolName: "bash", input: { command: 'mkdir -p "$HOME/d" && touch ~/e.txt' } },
@@ -516,7 +512,7 @@ describe("workspace write guard — a write or edit path is taken literally once
 			// The directory `cd` entered keeps its name for the words that follow.
 			"cd 'a/$HOME' && touch ../../../outside/f.txt",
 		]) {
-			expect(extractBashWriteTargets(command, projectCwd), command).toEqual([target]);
+			expect(bashWritePaths(command, projectCwd), command).toEqual([target]);
 			const blocked = await toolCall({ toolName: "bash", input: { command } }, handlerContext());
 			expect(blocked, command).toMatchObject({ block: true });
 			expect(blocked?.reason, command).toContain(`Blocked write outside project working directory: "${target}"`);
@@ -552,7 +548,7 @@ describe("workspace write guard — a write or edit path is taken literally once
 			return "Deny";
 		});
 		for (const [command, file] of inProject) {
-			expect(extractBashWriteTargets(command, projectCwd), command).toEqual([file]);
+			expect(bashWritePaths(command, projectCwd), command).toEqual([file]);
 			expect(await toolCall({ toolName: "bash", input: { command } }, ui), command).toBeUndefined();
 			expect(await toolCall({ toolName: "bash", input: { command } }, handlerContext()), command).toBeUndefined();
 		}
@@ -594,7 +590,7 @@ describe("workspace write guard — a write or edit path is taken literally once
 			["touch ~\\\n/e.txt", path.join(home, "e.txt")],
 			["touch $HO\\\nME/e.txt", path.join(home, "e.txt")],
 		] as const) {
-			expect(extractBashWriteTargets(command, projectCwd), command).toEqual([target]);
+			expect(bashWritePaths(command, projectCwd), command).toEqual([target]);
 			const result = await toolCall({ toolName: "bash", input: { command } }, handlerContext());
 			expect(result, command).toMatchObject({ block: true });
 			expect(result?.reason, command).toContain(`Blocked write outside project working directory: "${target}"`);

@@ -11,7 +11,7 @@ import {
 	WORKSPACE_SHARED_KEY,
 	type WorkspaceSharedState,
 } from "../index.ts";
-import { extractTaggedBashWriteTargets, resolveCanonicalPath, workspacesDir } from "../policy.ts";
+import { inspectBashCommand, resolveCanonicalPath, workspacesDir } from "../policy.ts";
 import {
 	assertWorkspaceQuota,
 	createOrTouchWorkspace,
@@ -263,10 +263,10 @@ describe("removal is never a touch", () => {
 	it("tags rm and rmdir targets as deletions unless the same command also writes them", () => {
 		const ws = workspacesDir(projectCwd);
 		expect(
-			extractTaggedBashWriteTargets(
+			inspectBashCommand(
 				"rm -rf .pi/workspaces/a; rmdir .pi/workspaces/b; rm -rf .pi/workspaces/c && mkdir .pi/workspaces/c; rm x > .pi/workspaces/d/log",
 				projectCwd,
-			),
+			).writeTargets,
 		).toEqual([
 			{ path: path.join(ws, "a"), deletes: true },
 			{ path: path.join(ws, "b"), deletes: true },

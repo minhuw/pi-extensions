@@ -1267,7 +1267,9 @@ function createBashStateFileFinder(stateFiles: readonly string[]): {
 
 /**
  * Parses and walks `command` once to collect both tagged write targets and any managed state file named
- * by a non-read-only command.
+ * by a non-read-only command. Commands for other machines (`ssh host mkdir /x`) and heredoc bodies are
+ * data unless a local shell reads them (`bash <<EOF`, `cat <<EOF | sh`); a path both deleted and
+ * written in one command (`rm -rf d; mkdir d`) is tagged as written.
  */
 export function inspectBashCommand(
 	command: string,
@@ -1294,40 +1296,6 @@ export function inspectBashCommand(
 		writeTargets: collector.results(),
 		namedStateFile: finder?.result(),
 	};
-}
-
-/**
- * Extracts all resolved filesystem write/creation target paths from a shell command.
- * Commands for other machines (`ssh host mkdir /x`) and heredoc bodies are data unless a
- * local shell reads them (`bash <<EOF`, `cat <<EOF | sh`).
- */
-export function extractBashWriteTargets(command: string, cwd: string, projectCwd?: string): string[] {
-	return [...new Set(extractTaggedBashWriteTargets(command, cwd, projectCwd).map((target) => target.path))];
-}
-
-/**
- * The targets of `extractBashWriteTargets`, each tagged with whether it is only deleted. A path both deleted and
- * written in one command (`rm -rf d; mkdir d`) is tagged as written.
- */
-export function extractTaggedBashWriteTargets(command: string, cwd: string, projectCwd?: string): BashWriteTarget[] {
-	return inspectBashCommand(command, cwd, projectCwd).writeTargets;
-}
-
-/**
- * Inspects a shell command string for write/creation operations targeting paths outside
- * `<cwd>` and `/tmp`. When `baseCwd` is provided, relative paths in `command` resolve against
- * `baseCwd` while access policy is still evaluated against `cwd`.
- */
-export function extractBashExternalWriteTargets(command: string, cwd: string, baseCwd?: string): string[] {
-	const writeTargets = extractBashWriteTargets(command, baseCwd ?? cwd, cwd);
-	const external: string[] = [];
-	for (const targetPath of writeTargets) {
-		const check = evaluatePathAccess({ targetPath, cwd, literal: true });
-		if (!check.allowed) {
-			external.push(check.resolvedPath);
-		}
-	}
-	return [...new Set(external)];
 }
 
 const EMPTY_FLAGS: ReadonlySet<string> = new Set();
@@ -1533,33 +1501,6 @@ export function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: st
 	return [...new Set(rawTargets.map((target) => resolveLiteralPath(target, cwd)))];
 }
 
-/**
- * Extracts external paths (outside `projectCwd` and `/tmp`) from an `agent_browser` call's
- * optional `cwd` and file-writing `argv` targets.
- */
-export function extractAgentBrowserExternalTargets(
-	argv: readonly string[],
-	projectCwd: string,
-	rawCwd?: string,
-): string[] {
-	const hasCwd = typeof rawCwd === "string" && rawCwd.length > 0;
-	const targetCwd = hasCwd ? resolveLiteralPath(rawCwd, projectCwd) : projectCwd;
-	const external: string[] = [];
-	if (hasCwd) {
-		const cwdCheck = evaluatePathAccess({ targetPath: rawCwd, cwd: projectCwd, literal: true });
-		if (!cwdCheck.allowed) {
-			external.push(cwdCheck.resolvedPath);
-		}
-	}
-	for (const writeTarget of extractAgentBrowserWriteTargets(argv, targetCwd)) {
-		const check = evaluatePathAccess({ targetPath: writeTarget, cwd: projectCwd, literal: true });
-		if (!check.allowed) {
-			external.push(check.resolvedPath);
-		}
-	}
-	return [...new Set(external)];
-}
-
 const AGENT_DESKTOP_GLOBAL_VALUE_FLAGS = new Set([
 	"--session",
 	"--agent-id",
@@ -1640,26 +1581,4 @@ export function extractAgentDesktopWriteTargets(argv: readonly string[], cwd: st
 	}
 
 	return [...new Set(rawTargets.map((target) => resolveLiteralPath(target, cwd)))];
-}
-
-/**
- * Extracts external file-writing targets (outside `projectCwd` and `/tmp`) from an
- * `agent_desktop` call's optional `cwd` and file-writing `argv` options. Read-only calls
- * produce no write targets even when an external `cwd` is supplied.
- */
-export function extractAgentDesktopExternalTargets(
-	argv: readonly string[],
-	projectCwd: string,
-	rawCwd?: string,
-): string[] {
-	const normalizedCwd = normalizeAgentDesktopCwd(rawCwd);
-	const targetCwd = normalizedCwd ? resolveLiteralPath(normalizedCwd, projectCwd) : projectCwd;
-	const external: string[] = [];
-	for (const writeTarget of extractAgentDesktopWriteTargets(argv, targetCwd)) {
-		const check = evaluatePathAccess({ targetPath: writeTarget, cwd: projectCwd, literal: true });
-		if (!check.allowed) {
-			external.push(check.resolvedPath);
-		}
-	}
-	return [...new Set(external)];
 }
