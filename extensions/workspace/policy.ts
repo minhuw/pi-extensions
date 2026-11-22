@@ -1343,6 +1343,120 @@ export function extractBashExternalWriteTargets(command: string, cwd: string, ba
 	return [...new Set(external)];
 }
 
+const EMPTY_FLAGS: ReadonlySet<string> = new Set();
+
+interface CliWriteArgvSpec {
+	globalValueFlags: ReadonlySet<string>;
+	writeValueFlags: ReadonlySet<string>;
+	subcommandValueFlags: Readonly<Record<string, ReadonlySet<string>>>;
+	ignoreHelpFlags: boolean;
+	extraCaptureFlags?: Readonly<Record<string, ReadonlySet<string>>>;
+}
+
+interface CliWriteArgvScan {
+	subcommand?: string;
+	positionals: string[];
+	flagWriteTargets: string[];
+	capturedFlags: Map<string, string>;
+	helpRequested: boolean;
+}
+
+function extractEqualsFlagEntry(
+	token: string,
+	flagNames: ReadonlySet<string>,
+): { flag: string; value: string } | undefined {
+	const eq = token.indexOf("=");
+	if (eq <= 0) return undefined;
+	const flag = token.slice(0, eq);
+	if (!flagNames.has(flag)) return undefined;
+	return { flag, value: token.slice(eq + 1) };
+}
+
+function scanCliWriteArgv(tokens: readonly string[], spec: CliWriteArgvSpec): CliWriteArgvScan {
+	const positionals: string[] = [];
+	const flagWriteTargets: string[] = [];
+	const capturedFlags = new Map<string, string>();
+	let subcommand: string | undefined;
+	let valueFlags: ReadonlySet<string> = EMPTY_FLAGS;
+	let captureFlags: ReadonlySet<string> = EMPTY_FLAGS;
+	let helpRequested = false;
+
+	for (let i = 0; i < tokens.length; i++) {
+		const token = tokens[i]!;
+		if (token === "--") {
+			if (subcommand === undefined) {
+				if (i + 1 < tokens.length) {
+					subcommand = tokens[i + 1];
+					if (!helpRequested) {
+						positionals.push(...tokens.slice(i + 2));
+					}
+				}
+			} else {
+				positionals.push(...tokens.slice(i + 1));
+			}
+			break;
+		}
+		if (spec.ignoreHelpFlags) {
+			if (
+				token === "--help" ||
+				token === "-h" ||
+				(subcommand === undefined && (token === "--version" || token === "-V"))
+			) {
+				helpRequested = true;
+				continue;
+			}
+		}
+		const eqWrite = extractEqualsFlagEntry(token, spec.writeValueFlags);
+		if (eqWrite !== undefined) {
+			if (eqWrite.value.length > 0) flagWriteTargets.push(eqWrite.value);
+			continue;
+		}
+		if (spec.writeValueFlags.has(token)) {
+			const next = tokens[i + 1];
+			if (typeof next === "string" && next.length > 0) flagWriteTargets.push(next);
+			i++;
+			continue;
+		}
+		if (captureFlags.size > 0) {
+			const eqCapture = extractEqualsFlagEntry(token, captureFlags);
+			if (eqCapture !== undefined) {
+				if (eqCapture.value.length > 0) capturedFlags.set(eqCapture.flag, eqCapture.value);
+				continue;
+			}
+			if (captureFlags.has(token)) {
+				const next = tokens[i + 1];
+				if (typeof next === "string" && next.length > 0) capturedFlags.set(token, next);
+				i++;
+				continue;
+			}
+		}
+		if (spec.globalValueFlags.has(token) || valueFlags.has(token)) {
+			i++;
+			continue;
+		}
+		if (token.startsWith("-")) {
+			continue;
+		}
+		if (subcommand === undefined) {
+			subcommand = token;
+			if (helpRequested) {
+				break;
+			}
+			valueFlags = Object.hasOwn(spec.subcommandValueFlags, subcommand)
+				? spec.subcommandValueFlags[subcommand]!
+				: EMPTY_FLAGS;
+			captureFlags =
+				spec.extraCaptureFlags && Object.hasOwn(spec.extraCaptureFlags, subcommand)
+					? spec.extraCaptureFlags[subcommand]!
+					: EMPTY_FLAGS;
+		} else {
+			positionals.push(token);
+		}
+	}
+
+	return { subcommand, positionals, flagWriteTargets, capturedFlags, helpRequested };
+}
+
 const AGENT_BROWSER_GLOBAL_VALUE_FLAGS = new Set([
 	"--session",
 	"-s",
@@ -1389,127 +1503,43 @@ const AGENT_BROWSER_PDF_VALUE_FLAGS = new Set([
 
 const AGENT_BROWSER_WRITE_VALUE_FLAGS = new Set(["--profile", "--download-path"]);
 
-function extractEqualsFlagValue(token: string, flagNames: ReadonlySet<string>): string | undefined {
-	const eq = token.indexOf("=");
-	if (eq <= 0) return undefined;
-	if (!flagNames.has(token.slice(0, eq))) return undefined;
-	return token.slice(eq + 1);
-}
-
-function scanAgentBrowserRest(
-	tokens: readonly string[],
-	valueFlags: ReadonlySet<string>,
-	afterDoubleDash: boolean,
-): { positionals: string[]; flagWriteTargets: string[] } {
-	if (afterDoubleDash) {
-		return { positionals: [...tokens], flagWriteTargets: [] };
-	}
-	const positionals: string[] = [];
-	const flagWriteTargets: string[] = [];
-	for (let i = 0; i < tokens.length; i++) {
-		const token = tokens[i]!;
-		if (token === "--") {
-			positionals.push(...tokens.slice(i + 1));
-			break;
-		}
-		const eqVal = extractEqualsFlagValue(token, AGENT_BROWSER_WRITE_VALUE_FLAGS);
-		if (eqVal !== undefined) {
-			if (eqVal.length > 0) flagWriteTargets.push(eqVal);
-			continue;
-		}
-		if (AGENT_BROWSER_WRITE_VALUE_FLAGS.has(token)) {
-			const next = tokens[i + 1];
-			if (typeof next === "string" && next.length > 0) flagWriteTargets.push(next);
-			i++;
-			continue;
-		}
-		if (AGENT_BROWSER_GLOBAL_VALUE_FLAGS.has(token) || valueFlags.has(token)) {
-			i++;
-			continue;
-		}
-		if (token.startsWith("-")) {
-			continue;
-		}
-		positionals.push(token);
-	}
-	return { positionals, flagWriteTargets };
-}
+const AGENT_BROWSER_ARGV_SPEC: CliWriteArgvSpec = {
+	globalValueFlags: AGENT_BROWSER_GLOBAL_VALUE_FLAGS,
+	writeValueFlags: AGENT_BROWSER_WRITE_VALUE_FLAGS,
+	subcommandValueFlags: {
+		screenshot: AGENT_BROWSER_SCREENSHOT_VALUE_FLAGS,
+		pdf: AGENT_BROWSER_PDF_VALUE_FLAGS,
+	},
+	ignoreHelpFlags: false,
+};
 
 /**
  * Extracts resolved file-writing target paths from an `agent_browser` CLI `argv` array
  * relative to `cwd` (without importing the `agent-browser` extension).
  */
 export function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: string): string[] {
-	const rawTargets: string[] = [];
-	let subcommand: string | undefined;
-	let subcommandIndex = -1;
-	let afterDoubleDash = false;
-	for (let i = 0; i < argv.length; i++) {
-		const token = argv[i]!;
-		if (token === "--") {
-			afterDoubleDash = true;
-			if (i + 1 < argv.length) {
-				subcommand = argv[i + 1];
-				subcommandIndex = i + 1;
-			}
-			break;
-		}
-		const eqVal = extractEqualsFlagValue(token, AGENT_BROWSER_WRITE_VALUE_FLAGS);
-		if (eqVal !== undefined) {
-			if (eqVal.length > 0) rawTargets.push(eqVal);
-			continue;
-		}
-		if (AGENT_BROWSER_WRITE_VALUE_FLAGS.has(token)) {
-			const next = argv[i + 1];
-			if (typeof next === "string" && next.length > 0) rawTargets.push(next);
-			i++;
-			continue;
-		}
-		if (AGENT_BROWSER_GLOBAL_VALUE_FLAGS.has(token)) {
-			i++;
-			continue;
-		}
-		if (token.startsWith("-")) {
-			continue;
-		}
-		subcommand = token;
-		subcommandIndex = i;
-		break;
-	}
+	const { subcommand, positionals, flagWriteTargets } = scanCliWriteArgv(argv, AGENT_BROWSER_ARGV_SPEC);
+	const rawTargets = [...flagWriteTargets];
 
-	if (subcommand) {
-		const rest = argv.slice(subcommandIndex + 1);
-		const valueFlags =
-			subcommand === "screenshot"
-				? AGENT_BROWSER_SCREENSHOT_VALUE_FLAGS
-				: subcommand === "pdf"
-					? AGENT_BROWSER_PDF_VALUE_FLAGS
-					: new Set<string>();
-		const { positionals, flagWriteTargets } = scanAgentBrowserRest(rest, valueFlags, afterDoubleDash);
-		rawTargets.push(...flagWriteTargets);
-
-		if (subcommand === "screenshot") {
-			if (positionals[0]) rawTargets.push(positionals[0]);
-		} else if (subcommand === "pdf") {
-			if (positionals[0]) rawTargets.push(positionals[0]);
-		} else if (subcommand === "trace") {
-			if ((positionals[0] === "start" || positionals[0] === "stop") && positionals[1]) {
-				rawTargets.push(positionals[1]);
-			}
-		} else if (subcommand === "state") {
-			if (positionals[0] === "save" && positionals[1]) {
-				rawTargets.push(positionals[1]);
-			}
-		} else if (subcommand === "download") {
-			if (positionals.length >= 2) {
-				rawTargets.push(positionals[1]!);
-			} else if (positionals.length === 1) {
-				rawTargets.push(positionals[0]!);
-			}
-		} else if (subcommand === "record") {
-			if (positionals[0] === "start" && positionals[1]) {
-				rawTargets.push(positionals[1]);
-			}
+	if (subcommand === "screenshot" || subcommand === "pdf") {
+		if (positionals[0]) rawTargets.push(positionals[0]);
+	} else if (subcommand === "trace") {
+		if ((positionals[0] === "start" || positionals[0] === "stop") && positionals[1]) {
+			rawTargets.push(positionals[1]);
+		}
+	} else if (subcommand === "state") {
+		if (positionals[0] === "save" && positionals[1]) {
+			rawTargets.push(positionals[1]);
+		}
+	} else if (subcommand === "download") {
+		if (positionals.length >= 2) {
+			rawTargets.push(positionals[1]!);
+		} else if (positionals.length === 1) {
+			rawTargets.push(positionals[0]!);
+		}
+	} else if (subcommand === "record") {
+		if (positionals[0] === "start" && positionals[1]) {
+			rawTargets.push(positionals[1]);
 		}
 	}
 
@@ -1566,6 +1596,19 @@ const AGENT_DESKTOP_SCREENSHOT_VALUE_FLAGS = new Set([
 
 const AGENT_DESKTOP_TRACE_VALUE_FLAGS = new Set(["--out", "--limit"]);
 
+const AGENT_DESKTOP_ARGV_SPEC: CliWriteArgvSpec = {
+	globalValueFlags: AGENT_DESKTOP_GLOBAL_VALUE_FLAGS,
+	writeValueFlags: AGENT_DESKTOP_WRITE_VALUE_FLAGS,
+	subcommandValueFlags: {
+		screenshot: AGENT_DESKTOP_SCREENSHOT_VALUE_FLAGS,
+		trace: AGENT_DESKTOP_TRACE_VALUE_FLAGS,
+	},
+	ignoreHelpFlags: true,
+	extraCaptureFlags: {
+		trace: new Set(["--out"]),
+	},
+};
+
 /**
  * Normalizes an `agent_desktop` tool's optional `cwd` argument the same way `agent-desktop` does:
  * trims whitespace, ignores empty strings and `"none"`, and strips one leading `@`.
@@ -1589,112 +1632,17 @@ export function normalizeAgentDesktopCwd(rawCwd?: string): string | undefined {
  */
 export function extractAgentDesktopWriteTargets(argv: readonly string[], cwd: string): string[] {
 	const cleaned = argv.filter((arg): arg is string => typeof arg === "string" && arg.trim().length > 0);
-	const rawTargets: string[] = [];
-	let subcommand: string | undefined;
-	let subcommandIndex = -1;
-	let afterDoubleDash = false;
-	let hasHelpOrVersion = false;
+	const { subcommand, positionals, flagWriteTargets, capturedFlags, helpRequested } = scanCliWriteArgv(
+		cleaned,
+		AGENT_DESKTOP_ARGV_SPEC,
+	);
+	const rawTargets = [...flagWriteTargets];
 
-	for (let i = 0; i < cleaned.length; i++) {
-		const token = cleaned[i]!;
-		if (token === "--") {
-			afterDoubleDash = true;
-			if (i + 1 < cleaned.length) {
-				subcommand = cleaned[i + 1];
-				subcommandIndex = i + 1;
-			}
-			break;
-		}
-		if (token === "--help" || token === "-h" || token === "--version" || token === "-V") {
-			hasHelpOrVersion = true;
-			continue;
-		}
-		const eqVal = extractEqualsFlagValue(token, AGENT_DESKTOP_WRITE_VALUE_FLAGS);
-		if (eqVal !== undefined) {
-			if (eqVal.length > 0) rawTargets.push(eqVal);
-			continue;
-		}
-		if (AGENT_DESKTOP_WRITE_VALUE_FLAGS.has(token)) {
-			const next = cleaned[i + 1];
-			if (typeof next === "string" && next.length > 0) rawTargets.push(next);
-			i++;
-			continue;
-		}
-		if (AGENT_DESKTOP_GLOBAL_VALUE_FLAGS.has(token)) {
-			i++;
-			continue;
-		}
-		if (token.startsWith("-")) {
-			continue;
-		}
-		subcommand = token;
-		subcommandIndex = i;
-		break;
-	}
-
-	if (subcommand && !hasHelpOrVersion) {
-		const rest = cleaned.slice(subcommandIndex + 1);
-		const valueFlags =
-			subcommand === "screenshot"
-				? AGENT_DESKTOP_SCREENSHOT_VALUE_FLAGS
-				: subcommand === "trace"
-					? AGENT_DESKTOP_TRACE_VALUE_FLAGS
-					: new Set<string>();
-		const positionals: string[] = [];
-		let traceOutPath: string | undefined;
-		let restHasHelp = false;
-
-		if (afterDoubleDash) {
-			positionals.push(...rest);
-		} else {
-			for (let i = 0; i < rest.length; i++) {
-				const token = rest[i]!;
-				if (token === "--") {
-					positionals.push(...rest.slice(i + 1));
-					break;
-				}
-				if (token === "--help" || token === "-h") {
-					restHasHelp = true;
-					continue;
-				}
-				const eqWrite = extractEqualsFlagValue(token, AGENT_DESKTOP_WRITE_VALUE_FLAGS);
-				if (eqWrite !== undefined) {
-					if (eqWrite.length > 0) rawTargets.push(eqWrite);
-					continue;
-				}
-				if (AGENT_DESKTOP_WRITE_VALUE_FLAGS.has(token)) {
-					const next = rest[i + 1];
-					if (typeof next === "string" && next.length > 0) rawTargets.push(next);
-					i++;
-					continue;
-				}
-				if (subcommand === "trace") {
-					if (token === "--out") {
-						const next = rest[i + 1];
-						if (typeof next === "string" && next.length > 0) traceOutPath = next;
-						i++;
-						continue;
-					}
-					if (token.startsWith("--out=")) {
-						const val = token.slice("--out=".length);
-						if (val.length > 0) traceOutPath = val;
-						continue;
-					}
-				}
-				if (AGENT_DESKTOP_GLOBAL_VALUE_FLAGS.has(token) || valueFlags.has(token)) {
-					i++;
-					continue;
-				}
-				if (token.startsWith("-")) {
-					continue;
-				}
-				positionals.push(token);
-			}
-		}
-
-		if (subcommand === "screenshot" && !restHasHelp) {
+	if (subcommand && !helpRequested) {
+		if (subcommand === "screenshot") {
 			if (positionals[0]) rawTargets.push(positionals[0]);
-		} else if (subcommand === "trace" && positionals[0] === "export" && !restHasHelp) {
+		} else if (subcommand === "trace" && positionals[0] === "export") {
+			const traceOutPath = capturedFlags.get("--out");
 			if (traceOutPath) {
 				rawTargets.push(traceOutPath);
 			} else {
