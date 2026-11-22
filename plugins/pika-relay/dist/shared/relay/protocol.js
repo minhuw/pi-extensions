@@ -153,3 +153,63 @@ export function since(at, now = Date.now()) {
         return `${hours}h ${minutes % 60}m`;
     return `${Math.floor(hours / 24)}d`;
 }
+/** Default user-facing descriptions for server-side relay rejection codes; hosts may override host-specific keys. */
+export const BASE_REJECTIONS = {
+    invalid: "the message is invalid: empty text, a malformed session id, room name, replyTo, or mention, or bad hops",
+    self: "that is this session's own id",
+    too_large: "the text is too large",
+    rate_limited: "this session sent too many messages in the last minute; wait before sending more",
+    unknown_session: "no online or recorded pi session has that id; call relay_list for the online sessions",
+    mailbox_full: "the target's mailbox is full; try again later",
+    not_owner: "that session belongs to another device, so only that device may act for it in rooms",
+    unknown_room: "no such chatroom; your user creates rooms with /relay join",
+    not_member: "this session is not a member of that room; only your user can add it, with /relay join <room>",
+};
+/** Collapses whitespace and truncates a message preview to 60 characters for status listings. */
+export const preview = (text) => {
+    const line = text.replace(/\s+/g, " ").trim();
+    return line.length > 60 ? `${line.slice(0, 59)}…` : line;
+};
+/** The mention tokens of a room post that matched no member, cleaned for display. */
+export const unmatchedOf = (frame) => Array.isArray(frame.unmatched)
+    ? frame.unmatched.map((token) => cut(headerField(token), 64)).filter(Boolean)
+    : [];
+/** One online session; every field comes from another device. */
+export function sessionLine(session) {
+    const name = headerField(session.name) || headerField(session.title);
+    return [
+        headerField(session.id), deviceLabel(session), `project ${headerField(session.project)}`, name ? `"${name}"` : "untitled", headerField(session.state),
+        headerField(session.model) || "no model", `online ${since(session.connectedAt)}`,
+    ].join(" · ");
+}
+export function memberLabel(member) {
+    const name = headerField(member.name) || headerField(member.title) || headerField(member.sessionId);
+    const project = headerField(member.project);
+    return `${name}${project ? ` (${project})` : ""} [${headerField(member.sessionId)}, ${headerField(member.state)}]`;
+}
+export function roomLine(room) {
+    const topic = headerField(room.topic);
+    const members = room.members.map(memberLabel).join(", ") || "no members";
+    return `#${headerField(room.name)}${topic ? ` — ${topic}` : ""} · ${room.messageCount} msg${room.messageCount === 1 ? "" : "s"} · members: ${members}`;
+}
+export function roomMessageLine(msg) {
+    const sender = msg.from.kind === "web"
+        ? "user (web)"
+        : `${headerField(msg.from.name) || headerField(msg.from.title) || headerField(msg.from.sessionId)}${msg.from.project ? ` (${headerField(msg.from.project)})` : ""}`;
+    const mentions = msg.mentions?.length ? ` [notified: ${msg.mentions.map(headerField).join(", ")}]` : "";
+    return `[#${msg.seq} · ${headerField(msg.id)} · ${since(msg.at)} ago] ${sender}${mentions}: ${sanitize(msg.text)}`;
+}
+export function sendResult(answer, label, ttlSeconds) {
+    if (answer.room) {
+        const notified = answer.notified ?? [];
+        const who = notified.length
+            ? `notified ${notified.map((t) => targetLabel(t)).join(", ")}`
+            : "recorded in room history (no @mentions notified)";
+        const unmatched = unmatchedOf(answer);
+        return `Posted message ${answer.id} to room #${headerField(answer.room)} (${who}).`
+            + `${unmatched.length ? ` Mentions that reached nobody (not members): ${unmatched.join(", ")}.` : ""}`;
+    }
+    if (answer.status === "delivered")
+        return `Delivered message ${answer.id} to ${label}.`;
+    return `Queued message ${answer.id} for ${label}: it has not been delivered yet. If it is not delivered within ${ttlText(ttlSeconds)} it is dropped and you will get a notice.`;
+}

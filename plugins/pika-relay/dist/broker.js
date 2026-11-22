@@ -10,7 +10,7 @@ import { connect, createServer } from "node:net";
 import { homedir, hostname } from "node:os";
 import { basename } from "node:path";
 import { isExcluded, loadConfig } from "./shared/config.js";
-import { RelayConnection, RequestError } from "./shared/relay/connection.js";
+import { RelayConnection, relayHttpFetch, RequestError } from "./shared/relay/connection.js";
 import { cut, expiredContent, headerField, messageContent, RELAY_VERSION, since, targetLabel, UNANSWERED, } from "./shared/relay/protocol.js";
 import { resolveRepository } from "./shared/repository.js";
 import { preview, REJECTIONS, roomLine, roomMessageLine, sendResult, sessionLine } from "./format.js";
@@ -457,37 +457,15 @@ class Broker {
         const { config, reason } = this.blocked(thread);
         if (!config)
             throw new Error(`relay is offline in this session: ${reason}`);
-        let response;
-        try {
-            response = await fetch(`${config.url}${path}`, {
-                ...init,
-                headers: { Authorization: `Bearer ${config.token}`, ...(init?.headers ?? {}) },
-                signal: AbortSignal.timeout(5_000),
-                redirect: "error",
-            });
-        }
-        catch (error) {
-            throw new Error(`could not reach ${config.url}: ${errorText(error)}`);
-        }
-        if (response.status !== 200) {
-            let body;
-            try {
-                body = await response.json();
-            }
-            catch {
-                await response.body?.cancel().catch(() => { });
-            }
-            if (response.status === 401)
-                throw new Error("the server rejected this device's token (HTTP 401)");
-            if (response.status === 404 && body?.error === "not_found")
-                throw new Error(REJECTIONS.unknown_room);
-            if (response.status === 404)
-                throw new Error(`the pika server at ${config.url} has no relay (HTTP 404)`);
-            if (typeof body?.error === "string")
-                throw new Error(`relay error (${body.error}): ${REJECTIONS[body.error] ?? body.error}`);
-            throw new Error(`unexpected HTTP ${response.status} from ${config.url}`);
-        }
-        return await response.json();
+        return relayHttpFetch({
+            url: config.url,
+            token: config.token,
+            path,
+            init,
+            timeoutMs: 5_000,
+            rejections: REJECTIONS,
+            notFoundMessage: REJECTIONS.unknown_room,
+        });
     }
     /** Sends one message (1:1 or chatroom) and records it; throws with the text an error result shows. */
     async send(thread, to, body, options, signal) {

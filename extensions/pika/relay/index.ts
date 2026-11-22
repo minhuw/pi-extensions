@@ -5,11 +5,11 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { loadRelaySettings } from "../config.ts";
 import { credentialsRegistry } from "../credentials.ts";
-import { type ConnectionState, RelayConnection, RequestError } from "./connection.ts";
+import { type ConnectionState, RelayConnection, relayHttpFetch, RequestError } from "./connection.ts";
 import {
-	cut, deviceLabel, expiredContent, headerField, type HelloSession, MESSAGE_TYPE, type MessageFrame, messageContent, NOTICE_TYPE, type OnlineSession, RECEIVED_TYPE,
-	type RelayRoom, type RelayRoomDetail, RELAY_VERSION, type RoomFrame, type RoomMember, type RoomMessage, sanitize, type SentFrame, type SessionState, since, type StatusFrame, type Target, targetLabel, timing,
-	ttlText,
+	BASE_REJECTIONS, cut, deviceLabel, expiredContent, headerField, type HelloSession, MESSAGE_TYPE, type MessageFrame, messageContent, NOTICE_TYPE, type OnlineSession, preview, RECEIVED_TYPE,
+	type RelayRoom, type RelayRoomDetail, RELAY_VERSION, type RoomFrame, roomLine, roomMessageLine, sanitize, sendResult, type SentFrame, sessionLine, type SessionState, since, type StatusFrame, type Target, targetLabel, timing,
+	unmatchedOf,
 } from "./protocol.ts";
 import { hasMode, sessionModes } from "./modes.ts";
 import { representativeLabel, ROLE_TYPE, roleStatus, roleUpdate } from "./roles.ts";
@@ -45,22 +45,9 @@ interface Unread { peer: string; label: string; soon: boolean; told: boolean }
 export interface RelayMessageDetails { id: string; room?: string; mentions?: string[]; from: MessageFrame["from"]; text: string; urgent: boolean; replyTo?: string; hops: number; sentAt: string | number }
 export interface RelayNoticeDetails { id: string; to: Target; status: "expired"; at: string | number }
 
-const REJECTIONS: Record<string, string> = {
-	invalid: "the message is invalid: empty text, a malformed session id, room name, replyTo, or mention, or bad hops",
-	self: "that is this session's own id",
-	too_large: "the text is too large",
-	rate_limited: "this session sent too many messages in the last minute; wait before sending more",
-	unknown_session: "no online or recorded pi session has that id; call relay_list for the online sessions",
-	mailbox_full: "the target's mailbox is full; try again later",
-	not_owner: "that session belongs to another device, so only that device may act for it in rooms",
-	unknown_room: "no such chatroom; your user creates rooms with /relay join",
-	not_member: "this session is not a member of that room; only your user can add it, with /relay join <room>",
-};
-
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const roomKey = (name: string) => name.trim().replace(/^#/, "").trim();
 const supportedMode = (context: ExtensionContext) => context.mode === "tui" || context.mode === "rpc";
-const preview = (text: string) => { const line = text.replace(/\s+/g, " ").trim(); return line.length > 60 ? `${line.slice(0, 59)}…` : line; };
 
 interface SendArgs { to?: string; room?: string; text?: string; urgent?: boolean; replyTo?: string }
 type ToolResult = { content: readonly { type: string; text?: string }[]; details?: unknown };
@@ -102,11 +89,6 @@ function sentSummary(frame: Partial<Extract<SentFrame, { id: string }>> | undefi
 		? `${theme.fg("success", "delivered")} to ${peerLabel(frame.to)} ${id}`
 		: `${theme.fg("warning", "queued")} for ${peerLabel(frame.to)}, not delivered yet ${id}`;
 }
-
-/** The mention tokens of a room post that matched no member, cleaned for display. */
-const unmatchedOf = (frame: { unmatched?: unknown }): string[] => Array.isArray(frame.unmatched)
-	? frame.unmatched.map((token) => cut(headerField(token), 64)!).filter(Boolean)
-	: [];
 
 /** The conversation a message belongs to: `#room`, else the sending session's id; none for the web UI. */
 const peerOf = (frame: MessageFrame): string | undefined => frame.room ? `#${frame.room}` : frame.from.kind === "session" ? frame.from.sessionId : undefined;
@@ -719,27 +701,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		const current = credentialsRegistry().current;
 		const reason = blocked();
 		if (reason || !current) throw new Error(`relay is offline in this session: ${reason ?? "no credentials"}`);
-		let response: Response;
-		try {
-			response = await fetch(`${current.url}${path}`, {
-				...init,
-				headers: { Authorization: `Bearer ${current.token}`, ...(init?.headers ?? {}) },
-				signal: AbortSignal.timeout(timing.httpTimeoutMs),
-				redirect: "error",
-			});
-		} catch (error) {
-			throw new Error(`could not reach ${current.url}: ${errorText(error)}`);
-		}
-		if (response.status !== 200) {
-			let errBody: { error?: unknown } | undefined;
-			try { errBody = await response.json() as { error?: unknown }; } catch { await response.body?.cancel().catch(() => {}); }
-			if (response.status === 401) throw new Error("the server rejected this device's token (HTTP 401)");
-			if (response.status === 404 && errBody?.error === "not_found") throw new Error("no such chatroom exists yet");
-			if (response.status === 404) throw new Error(`the pika server at ${current.url} has no relay (HTTP 404)`);
-			if (typeof errBody?.error === "string") throw new Error(`relay error (${errBody.error}): ${REJECTIONS[errBody.error] ?? errBody.error}`);
-			throw new Error(`unexpected HTTP ${response.status} from ${current.url}`);
-		}
-		return await response.json() as T;
+		return relayHttpFetch<T>({ url: current.url, token: current.token, path, init });
 	}
 
 	async function onlineSessions(): Promise<OnlineSession[]> {
@@ -765,49 +727,6 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ room: clean, sessionId: sessionId!, action, ...(topic ? { topic } : {}) }),
 		});
-	}
-
-	/** One online session; every field comes from another device. */
-	function sessionLine(session: OnlineSession): string {
-		const name = headerField(session.name) || headerField(session.title);
-		return [
-			headerField(session.id), deviceLabel(session), `project ${headerField(session.project)}`, name ? `"${name}"` : "untitled", headerField(session.state),
-			headerField(session.model) || "no model", `online ${since(session.connectedAt)}`,
-		].join(" · ");
-	}
-
-	function memberLabel(member: RoomMember): string {
-		const name = headerField(member.name) || headerField(member.title) || headerField(member.sessionId);
-		const project = headerField(member.project);
-		return `${name}${project ? ` (${project})` : ""} [${headerField(member.sessionId)}, ${headerField(member.state)}]`;
-	}
-
-	function roomLine(room: RelayRoom): string {
-		const topic = headerField(room.topic);
-		const members = room.members.map(memberLabel).join(", ") || "no members";
-		return `#${headerField(room.name)}${topic ? ` — ${topic}` : ""} · ${room.messageCount} msg${room.messageCount === 1 ? "" : "s"} · members: ${members}`;
-	}
-
-	function roomMessageLine(msg: RoomMessage): string {
-		const sender = msg.from.kind === "web"
-			? "user (web)"
-			: `${headerField(msg.from.name) || headerField(msg.from.title) || headerField(msg.from.sessionId)}${msg.from.project ? ` (${headerField(msg.from.project)})` : ""}`;
-		const mentions = msg.mentions?.length ? ` [notified: ${msg.mentions.map(headerField).join(", ")}]` : "";
-		return `[#${msg.seq} · ${headerField(msg.id)} · ${since(msg.at)} ago] ${sender}${mentions}: ${sanitize(msg.text)}`;
-	}
-
-	function sendResult(answer: SentFrame & { status: "delivered" | "queued" }, label: string): string {
-		if (answer.room) {
-			const notified = answer.notified ?? [];
-			const who = notified.length
-				? `notified ${notified.map((t) => targetLabel(t)).join(", ")}`
-				: "recorded in room history (no @mentions notified)";
-			const unmatched = unmatchedOf(answer);
-			return `Posted message ${answer.id} to room #${headerField(answer.room)} (${who}).`
-				+ `${unmatched.length ? ` Mentions that reached nobody (not members): ${unmatched.join(", ")}.` : ""}`;
-		}
-		if (answer.status === "delivered") return `Delivered message ${answer.id} to ${label}.`;
-		return `Queued message ${answer.id} for ${label}: it has not been delivered yet. If it is not delivered within ${ttlText(ttlSeconds)} it is dropped and you will get a notice.`;
 	}
 
 	/** Sends one message (1:1 or chatroom) and records it; throws with the text an error result or notice shows. */
@@ -857,7 +776,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		}
 		if (answer.status === "rejected") {
 			record.status = "rejected"; record.reason = answer.reason; remember();
-			throw new Error(`relay rejected the message (${answer.reason}): ${REJECTIONS[answer.reason] ?? "see the reason"}.`);
+			throw new Error(`relay rejected the message (${answer.reason}): ${BASE_REJECTIONS[answer.reason] ?? "see the reason"}.`);
 		}
 		const now = Date.now();
 		exchanged.set(targetKey, now);
@@ -881,7 +800,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			status: answer.status,
 			at: new Date(record.at).toISOString(),
 		}));
-		return { text: sendResult(answer, record.label), answer };
+		return { text: sendResult(answer, record.label, ttlSeconds), answer };
 	}
 
 	function statusLines(id?: string): string {

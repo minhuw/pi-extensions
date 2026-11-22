@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-	CLOSE_REASONS, type HelloSession, type MessageFrame, type RoomFrame, type SentFrame, type StatusFrame, TERMINAL_CLOSES, timing, type Welcome, wsUrl,
+	BASE_REJECTIONS, CLOSE_REASONS, type HelloSession, type MessageFrame, type RoomFrame, type SentFrame, type StatusFrame, TERMINAL_CLOSES, timing, type Welcome, wsUrl,
 } from "./protocol.ts";
 
 export interface Credentials { url: string; token: string }
@@ -44,6 +44,50 @@ export class RequestError extends Error {
 }
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+export interface RelayHttpFetchOptions {
+	url: string;
+	token: string;
+	path: string;
+	init?: RequestInit;
+	timeoutMs?: number;
+	rejections?: Readonly<Record<string, string>>;
+	notFoundMessage?: string;
+}
+
+/** Fetches a `/api/relay/v1/*` endpoint and maps transport and HTTP error responses to user-facing errors. */
+export async function relayHttpFetch<T>(options: RelayHttpFetchOptions): Promise<T> {
+	const {
+		url,
+		token,
+		path,
+		init,
+		timeoutMs = timing.httpTimeoutMs,
+		rejections = BASE_REJECTIONS,
+		notFoundMessage = "no such chatroom exists yet",
+	} = options;
+	let response: Response;
+	try {
+		response = await fetch(`${url}${path}`, {
+			...init,
+			headers: { Authorization: `Bearer ${token}`, ...(init?.headers ?? {}) },
+			signal: AbortSignal.timeout(timeoutMs),
+			redirect: "error",
+		});
+	} catch (error) {
+		throw new Error(`could not reach ${url}: ${errorText(error)}`);
+	}
+	if (response.status !== 200) {
+		let errBody: { error?: unknown } | undefined;
+		try { errBody = await response.json() as { error?: unknown }; } catch { await response.body?.cancel().catch(() => {}); }
+		if (response.status === 401) throw new Error("the server rejected this device's token (HTTP 401)");
+		if (response.status === 404 && errBody?.error === "not_found") throw new Error(notFoundMessage);
+		if (response.status === 404) throw new Error(`the pika server at ${url} has no relay (HTTP 404)`);
+		if (typeof errBody?.error === "string") throw new Error(`relay error (${errBody.error}): ${rejections[errBody.error] ?? errBody.error}`);
+		throw new Error(`unexpected HTTP ${response.status} from ${url}`);
+	}
+	return await response.json() as T;
+}
 
 /** Why a server without relay is unsupported, from its health answer. */
 function unsupportedReason(url: string, health: { features?: unknown }): string | undefined {

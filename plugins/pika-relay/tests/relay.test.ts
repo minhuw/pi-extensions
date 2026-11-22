@@ -336,7 +336,7 @@ describe("MCP tools", () => {
         const posted = await server.call(A, "relay_room", { action: "send", room: "design", text: "deck is ready", mentions: [B, C] });
         expect(posted).toEqual({
             text: `Posted message ${relay.rooms.get("design")!.messages[0]!.id} to room #design (notified pi session ${B} ("codex-bbbb2222") on laptop). `
-                + `These mentions reached nobody, as they are not members: ${C}. ${ANSWER_HINT}`,
+                + `Mentions that reached nobody (not members): ${C}. ${ANSWER_HINT}`,
             isError: false,
         });
         expect([...relay.rooms.get("design")!.members].sort()).toEqual([A, B]);
