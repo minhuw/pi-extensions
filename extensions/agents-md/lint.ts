@@ -100,6 +100,12 @@ export function newFindings(before: LintFinding[], after: LintFinding[]): LintFi
 	});
 }
 
+/** The root of the git repository holding `cwd`, or the resolved `cwd` outside git. */
+export function repositoryRoot(cwd: string): string {
+	const start = resolve(cwd);
+	return git(start, ["rev-parse", "--show-toplevel"])?.trim() || start;
+}
+
 /**
  * The context files of the repository holding `cwd`: every tracked file with a context-file name (git ls-files),
  * or, outside git, the first context file in `cwd` and each of its ancestors. Absolute paths, root first.
@@ -108,23 +114,23 @@ export function newFindings(before: LintFinding[], after: LintFinding[]): LintFi
  * Outside git the root is `cwd`.
  */
 export function repositoryContextFiles(cwd: string): { root: string; files: string[] } {
-	const start = resolve(cwd);
-	const topLevel = git(start, ["rev-parse", "--show-toplevel"])?.trim();
-	if (topLevel) {
-		const files = (listRepositoryPaths(topLevel) ?? [])
+	const root = repositoryRoot(cwd);
+	const listed = listRepositoryPaths(root);
+	if (listed !== undefined) {
+		const files = listed
 			.filter((path) => isContextFile(path))
 			.sort(compareContextPaths)
-			.map((path) => join(topLevel, ...path.split("/")))
+			.map((path) => join(root, ...path.split("/")))
 			.filter(isFile);
-		return { root: topLevel, files };
+		return { root, files };
 	}
 	const files: string[] = [];
-	for (let directory = start; ; directory = dirname(directory)) {
+	for (let directory = root; ; directory = dirname(directory)) {
 		const found = CONTEXT_FILE_NAMES.map((name) => join(directory, name)).find(isFile);
 		if (found) files.push(found);
 		if (dirname(directory) === directory) break;
 	}
-	return { root: start, files: files.reverse() };
+	return { root, files: files.reverse() };
 }
 
 // ---------------------------------------------------------------------------------------------------------------

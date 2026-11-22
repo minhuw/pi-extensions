@@ -8,7 +8,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { fileURLToPath } from "node:url";
 import { structuredPatch } from "diff";
 import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
-import { CONTEXT_FILE_NAMES, formatFinding, lintContextFile, newFindings, repositoryContextFiles, type LintFinding } from "./lint.ts";
+import { CONTEXT_FILE_NAMES, formatFinding, lintContextFile, newFindings, repositoryRoot, type LintFinding } from "./lint.ts";
 import { CHOICES, DEFAULT_CONTEXT, lineText, MAX_FINDINGS, promptReviewDialog, REVIEW_CHOICES, reviewAction } from "./review-ui.ts";
 
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
@@ -122,7 +122,7 @@ export function rootFor(file: string): string {
 	let dir = dirname(file);
 	while (!existsSync(dir) && dirname(dir) !== dir) dir = dirname(dir);
 	try {
-		return repositoryContextFiles(dir).root;
+		return repositoryRoot(dir);
 	} catch {
 		return dirname(file);
 	}

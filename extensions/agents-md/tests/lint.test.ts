@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { isContextFile, lintContextFile, MAX_BYTES, MAX_LINES, newFindings, repositoryContextFiles, type LintFinding } from "../lint.ts";
+import { isContextFile, lintContextFile, MAX_BYTES, MAX_LINES, newFindings, repositoryContextFiles, repositoryRoot, type LintFinding } from "../lint.ts";
 
-const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url)).replace(/\/$/, "");
+const repoRoot = fileURLToPath(new URL("../../..", import.meta.url)).replace(/\/$/, "");
 
 // Isolate fixtures from the developer's git configuration (global excludes, hooks, signing) and from any
 // repository above the temporary directory.
@@ -283,6 +283,26 @@ describe("newFindings", () => {
 	});
 });
 
+describe("repositoryRoot", () => {
+	it("returns the git top-level for the repository root and nested subdirectories", () => {
+		withRepository({ "a/b/file.txt": "ok\n" }, (root) => {
+			expect(repositoryRoot(root)).toBe(root);
+			expect(repositoryRoot(join(root, "a/b"))).toBe(root);
+			mkdirSync(join(root, "a/b/c"), { recursive: true });
+			expect(repositoryRoot(join(root, "a/b/c"))).toBe(root);
+		});
+	});
+
+	it("outside git, returns the resolved cwd", () => {
+		withDirectory({ "a/b/file.txt": "ok\n" }, (root) => {
+			const nested = join(root, "a/b");
+			expect(repositoryRoot(root)).toBe(root);
+			expect(repositoryRoot(nested)).toBe(nested);
+			expect(repositoryRoot(join(root, "a", "b", "..", "b"))).toBe(nested);
+		});
+	});
+});
+
 describe("repositoryContextFiles", () => {
 	it("lists the repository's tracked and unignored context files, root first", () => {
 		withRepository({
@@ -327,8 +347,8 @@ describe("repositoryContextFiles", () => {
 describe("this repository", () => {
 	it("lints its own context files with no findings", () => {
 		vi.unstubAllEnvs();
-		const { root, files } = repositoryContextFiles(repositoryRoot);
-		expect(root).toBe(realpathSync(repositoryRoot));
+		const { root, files } = repositoryContextFiles(repoRoot);
+		expect(root).toBe(realpathSync(repoRoot));
 		expect(files).toContain(join(root, "AGENTS.md"));
 		for (const file of files) expect({ file, findings: lintContextFile(readFileSync(file, "utf8"), { file, root }) }).toEqual({ file, findings: [] });
 	});
