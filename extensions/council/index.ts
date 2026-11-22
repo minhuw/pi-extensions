@@ -327,17 +327,27 @@ export function buildRound2Prompt(input: {
 	].join("\n");
 }
 
-export function formatCouncilReport(input: CouncilReportInput): string {
+function formatCouncilReportHeader(input: {
+	title: string;
+	councilIdBullet?: string;
+	topic: string;
+	paths?: readonly string[];
+	rounds: 1 | 2;
+	members: readonly CouncilMemberId[];
+	error?: string;
+	failures: readonly CouncilMemberFailure[];
+}): string[] {
 	const lines: string[] = [
-		"# Council Deliberation Report",
+		input.title,
 		"",
-		...(input.councilId ? [`- **Council ID:** \`${input.councilId}\``] : []),
+		...(input.councilIdBullet ? [`- **Council ID:** \`${input.councilIdBullet}\``] : []),
 		`- **Topic:** ${input.topic}`,
 		...(input.paths && input.paths.length > 0
 			? [`- **Paths:** ${input.paths.map((p) => `\`${p}\``).join(", ")}`]
 			: []),
 		`- **Rounds:** ${input.rounds}`,
 		`- **Panel:** ${input.members.map((id) => COUNCIL_MEMBERS[id].label).join(", ")}`,
+		...(input.error !== undefined ? [`- **Error:** ${input.error}`] : []),
 	];
 
 	if (input.failures.length > 0) {
@@ -348,6 +358,20 @@ export function formatCouncilReport(input: CouncilReportInput): string {
 			);
 		}
 	}
+
+	return lines;
+}
+
+export function formatCouncilReport(input: CouncilReportInput): string {
+	const lines = formatCouncilReportHeader({
+		title: "# Council Deliberation Report",
+		councilIdBullet: input.councilId,
+		topic: input.topic,
+		paths: input.paths,
+		rounds: input.rounds,
+		members: input.members,
+		failures: input.failures,
+	});
 
 	lines.push("", "## Round 1 — Independent Proposals");
 	for (const entry of input.round1) {
@@ -419,28 +443,15 @@ function formatCouncilFailure(input: {
 	failures: readonly CouncilMemberFailure[];
 	error: string;
 }): string {
-	const lines: string[] = [
-		`# Council Deliberation Failed (\`${input.councilId}\`)`,
-		"",
-		`- **Topic:** ${input.topic}`,
-		...(input.paths && input.paths.length > 0
-			? [`- **Paths:** ${input.paths.map((p) => `\`${p}\``).join(", ")}`]
-			: []),
-		`- **Rounds:** ${input.rounds}`,
-		`- **Panel:** ${input.members.map((id) => COUNCIL_MEMBERS[id].label).join(", ")}`,
-		`- **Error:** ${input.error}`,
-	];
-
-	if (input.failures.length > 0) {
-		lines.push("", "## Member Failures");
-		for (const failure of input.failures) {
-			lines.push(
-				`- **${COUNCIL_MEMBERS[failure.member].label}** (Round ${failure.round}): ${failure.error}`,
-			);
-		}
-	}
-
-	return lines.join("\n");
+	return formatCouncilReportHeader({
+		title: `# Council Deliberation Failed (\`${input.councilId}\`)`,
+		topic: input.topic,
+		paths: input.paths,
+		rounds: input.rounds,
+		members: input.members,
+		error: input.error,
+		failures: input.failures,
+	}).join("\n");
 }
 
 interface ActiveCouncilRun {
@@ -840,6 +851,21 @@ export default function councilExtension(pi: ExtensionAPI): void {
 				});
 			};
 
+			const pushMemberFailure = (
+				target: CouncilMemberFailure[],
+				source: CouncilMemberSpec | Pick<CouncilRound1Entry, "member" | "agentType" | "model">,
+				round: 1 | 2,
+				error: string,
+			) => {
+				target.push({
+					member: "member" in source ? source.member : source.id,
+					agentType: source.agentType,
+					model: source.model,
+					round,
+					error,
+				});
+			};
+
 			let spawned: Array<{ spec: CouncilMemberSpec; agentId: string }>;
 			let launchFailures: CouncilMemberFailure[];
 
@@ -927,13 +953,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 					if (outcome.ok) {
 						spawned.push({ spec: outcome.spec, agentId: outcome.agentId });
 					} else {
-						launchFailures.push({
-							member: outcome.spec.id,
-							agentType: outcome.spec.agentType,
-							model: outcome.spec.model,
-							round: 1,
-							error: outcome.error,
-						});
+						pushMemberFailure(launchFailures, outcome.spec, 1, outcome.error);
 					}
 				}
 
@@ -970,6 +990,39 @@ export default function councilExtension(pi: ExtensionAPI): void {
 			activeRuns.set(councilId, activeRun);
 			refreshStatus(runStatusSetter);
 
+			const recordPhaseSettle = (agentId: string) => {
+				phaseSettledIds.add(agentId);
+				activeRun.completedInPhase = phaseSettledIds.size;
+				if (!isCancelledOrDone()) refreshStatus();
+			};
+
+			const parseSettledOutcome = (
+				settled: { event: "completed" | "failed"; data: LifecycleSettlePayload },
+				emptyError: string,
+			):
+				| { ok: true; text: string; durationMs?: number; toolUses?: number }
+				| { ok: false; error: string } => {
+				const status = settled.data.status;
+				const isSuccessStatus =
+					settled.event === "completed" &&
+					(status === undefined || status === "completed" || status === "steered");
+				const text = typeof settled.data.result === "string" ? settled.data.result.trim() : "";
+
+				if (!isSuccessStatus || !text) {
+					return {
+						ok: false,
+						error: settled.data.error ?? (!text ? emptyError : `status ${String(status)}`),
+					};
+				}
+
+				return {
+					ok: true,
+					text,
+					durationMs: settled.data.durationMs,
+					toolUses: settled.data.runToolUses ?? settled.data.toolUses,
+				};
+			};
+
 			void (async () => {
 				const round1: CouncilRound1Entry[] = [];
 				const round2: CouncilRound2Entry[] = [];
@@ -996,25 +1049,17 @@ export default function councilExtension(pi: ExtensionAPI): void {
 					const round1Outcomes = await Promise.all(
 						spawned.map(async ({ spec, agentId }) => {
 							const settled = await waitForAgentSettle(agentId);
-							phaseSettledIds.add(agentId);
-							activeRun.completedInPhase = phaseSettledIds.size;
-							if (!cancelled && !cleanedUp) refreshStatus();
+							recordPhaseSettle(agentId);
 
-							const status = settled.data.status;
-							const isSuccessStatus =
-								settled.event === "completed" &&
-								(status === undefined || status === "completed" || status === "steered");
-							const proposal = typeof settled.data.result === "string" ? settled.data.result.trim() : "";
-
-							if (!isSuccessStatus || !proposal) {
+							const parsed = parseSettledOutcome(
+								settled,
+								`${spec.agentType} returned an empty proposal`,
+							);
+							if (!parsed.ok) {
 								return {
 									spec,
 									ok: false as const,
-									error:
-										settled.data.error ??
-										(!proposal
-											? `${spec.agentType} returned an empty proposal`
-											: `status ${String(status)}`),
+									error: parsed.error,
 								};
 							}
 
@@ -1027,9 +1072,9 @@ export default function councilExtension(pi: ExtensionAPI): void {
 									model: spec.model,
 									label: spec.label,
 									agentId,
-									proposal,
-									durationMs: settled.data.durationMs,
-									toolUses: settled.data.runToolUses ?? settled.data.toolUses,
+									proposal: parsed.text,
+									durationMs: parsed.durationMs,
+									toolUses: parsed.toolUses,
 								} satisfies CouncilRound1Entry,
 							};
 						}),
@@ -1041,44 +1086,14 @@ export default function councilExtension(pi: ExtensionAPI): void {
 						if (outcome.ok) {
 							round1.push(outcome.entry);
 						} else {
-							failures.push({
-								member: outcome.spec.id,
-								agentType: outcome.spec.agentType,
-								model: outcome.spec.model,
-								round: 1,
-								error: outcome.error,
-							});
+							pushMemberFailure(failures, outcome.spec, 1, outcome.error);
 						}
 					}
 
 					if (round1.length < 2) {
 						const detail = failures.map((f) => `${f.member} (${f.error})`).join("; ");
 						const errorMessage = `Council deliberation failed: at least 2 members must succeed in Round 1, but only ${round1.length} succeeded. Failures: ${detail}`;
-						cleanup();
-						deliverReport(
-							formatCouncilFailure({
-								councilId,
-								topic,
-								paths,
-								rounds,
-								members: memberIds,
-								failures,
-								error: errorMessage,
-							}),
-							{
-								councilId,
-								status: "failed",
-								topic,
-								paths,
-								rounds,
-								members: memberIds,
-								round1,
-								round2: [],
-								failures,
-								error: errorMessage,
-							},
-						);
-						return;
+						throw new Error(errorMessage);
 					}
 
 					if (rounds === 2) {
@@ -1087,7 +1102,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 						phaseSettledIds.clear();
 						activeRun.completedInPhase = 0;
 						activeRun.totalInPhase = round1.length;
-						if (!cancelled && !cleanedUp) refreshStatus();
+						if (!isCancelledOrDone()) refreshStatus();
 
 						const round2Outcomes = await Promise.all(
 							round1.map(async (r1Entry, index) => {
@@ -1141,9 +1156,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 								if (!sendReply?.success) {
 									activeAgentIds.delete(r1Entry.agentId);
 									pendingWaiters.delete(r1Entry.agentId);
-									phaseSettledIds.add(r1Entry.agentId);
-									activeRun.completedInPhase = phaseSettledIds.size;
-									if (!cancelled && !cleanedUp) refreshStatus();
+									recordPhaseSettle(r1Entry.agentId);
 									return {
 										r1Entry,
 										ok: false as const,
@@ -1160,25 +1173,17 @@ export default function councilExtension(pi: ExtensionAPI): void {
 								}
 
 								const settled = await settlePromise;
-								phaseSettledIds.add(r1Entry.agentId);
-								activeRun.completedInPhase = phaseSettledIds.size;
-								if (!cancelled && !cleanedUp) refreshStatus();
+								recordPhaseSettle(r1Entry.agentId);
 
-								const status = settled.data.status;
-								const isSuccessStatus =
-									settled.event === "completed" &&
-									(status === undefined || status === "completed" || status === "steered");
-								const response = typeof settled.data.result === "string" ? settled.data.result.trim() : "";
-
-								if (!isSuccessStatus || !response) {
+								const parsed = parseSettledOutcome(
+									settled,
+									`${r1Entry.agentType} returned an empty Round 2 response`,
+								);
+								if (!parsed.ok) {
 									return {
 										r1Entry,
 										ok: false as const,
-										error:
-											settled.data.error ??
-											(!response
-												? `${r1Entry.agentType} returned an empty Round 2 response`
-												: `status ${String(status)}`),
+										error: parsed.error,
 									};
 								}
 
@@ -1196,9 +1201,9 @@ export default function councilExtension(pi: ExtensionAPI): void {
 											member: peer.member,
 											model: peer.model,
 										})),
-										response,
-										durationMs: settled.data.durationMs,
-										toolUses: settled.data.runToolUses ?? settled.data.toolUses,
+										response: parsed.text,
+										durationMs: parsed.durationMs,
+										toolUses: parsed.toolUses,
 									} satisfies CouncilRound2Entry,
 								};
 							}),
@@ -1210,13 +1215,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 							if (outcome.ok) {
 								round2.push(outcome.entry);
 							} else {
-								failures.push({
-									member: outcome.r1Entry.member,
-									agentType: outcome.r1Entry.agentType,
-									model: outcome.r1Entry.model,
-									round: 2,
-									error: outcome.error,
-								});
+								pushMemberFailure(failures, outcome.r1Entry, 2, outcome.error);
 							}
 						}
 					}
