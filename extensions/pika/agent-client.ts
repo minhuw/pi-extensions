@@ -35,7 +35,7 @@ const credentialsInUrlMessage = (feature: string) =>
 	`pika's server URL contains a user name or password, which pika never sends, so ${feature} is off. Ask the user to remove them from PIKA_URL or the url in pika.json.`;
 
 /** Why pika's configuration disables it, when it does; undefined when pika is merely not logged in. */
-export function disabledCause(): string | undefined {
+function disabledCause(): string | undefined {
 	try {
 		const config = loadConfig(getAgentDir());
 		if (!config.enabled && !config.unconfigured) {

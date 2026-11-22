@@ -1,13 +1,11 @@
 /**
  * `/relay log`: the relay messages of the current branch, read from its `relay-received` and
  * `relay-sent` entries, in the shared log viewer. Also the labels the transcript renderers share
- * with it, and `size`, re-exported. Every field shown comes from another device or the model.
+ * with it. Every field shown comes from another device or the model.
  */
 import type { ExtensionCommandContext, SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
 import { localTime, type LogView, type LogViewItem, showLog, size } from "../log-viewer.ts";
 import { deviceLabel, headerField, RECEIVED_TYPE, sanitize } from "./protocol.ts";
-
-export { size } from "../log-viewer.ts";
 
 export const SENT_TYPE = "relay-sent";
 

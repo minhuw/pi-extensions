@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Type, type Static } from "typebox";
+import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export const AGENT_BROWSER_STATUS_KEY = "agent-browser";
@@ -638,8 +638,6 @@ const AgentBrowserToolParameters = Type.Object({
 		}),
 	),
 });
-
-type AgentBrowserToolInput = Static<typeof AgentBrowserToolParameters>;
 
 export default function agentBrowserExtension(pi: ExtensionAPI): void {
 	if (boundApis.has(pi)) return;

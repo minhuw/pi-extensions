@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { dreamSessionDir } from "../../memory/dream/child.ts";
-import { currentDream, dreamLimits } from "../../memory/dream/index.ts";
-import { WRAP_UP } from "../../memory/dream/run.ts";
+import { currentDream } from "../../memory/dream/index.ts";
+import { dreamLimits, WRAP_UP } from "../../memory/dream/run.ts";
 import { commits, dream, fakeSpawner, fakeTimers, LEASE_ID, leaseRequests, releases, SAVE, serveDreams, settle, until, useDreamEnv } from "./support/dream.ts";
 import { PROJECT_SCOPE } from "./support/runtime.ts";
 

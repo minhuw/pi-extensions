@@ -2,8 +2,8 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import { currentDream, dreamLimits } from "../../memory/dream/index.ts";
-import { type Usage, WRAP_UP } from "../../memory/dream/run.ts";
+import { currentDream } from "../../memory/dream/index.ts";
+import { dreamLimits, type Usage, WRAP_UP } from "../../memory/dream/run.ts";
 import { dream, fakeTimers, LEASE_ID, releases, SAVE, until, useDreamEnv } from "./support/dream.ts";
 
 const MINUTE = 60_000;

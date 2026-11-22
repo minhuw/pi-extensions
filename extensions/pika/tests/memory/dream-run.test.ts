@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { currentDream, dreamLimits, dreamRuntime } from "../../memory/dream/index.ts";
-import { type Usage, WRAP_UP } from "../../memory/dream/run.ts";
+import { currentDream, dreamRuntime } from "../../memory/dream/index.ts";
+import { dreamLimits, type Usage, WRAP_UP } from "../../memory/dream/run.ts";
 import { batch, commits, dream, fakeTimers, LEASE_ID, releases, renewals, SAVE, serveDreams, settle, until, useDreamEnv } from "./support/dream.ts";
 import { note } from "./support/runtime.ts";
 

@@ -207,7 +207,7 @@ export async function promptToken(ctx: ExtensionCommandContext, url: string, sig
 type Paired = { kind: "approved"; device: ApprovedDevice; token: string } | { kind: "failed"; problem: string; device?: ApprovedDevice } | { kind: "cancelled" } | { kind: "unsupported" };
 
 /** What lets the server recognize a re-pairing: this install's device key, and the configured token when it belongs to `url`. */
-export interface Recognition { keyDir: string; configured: { url?: string; token?: string } }
+interface Recognition { keyDir: string; configured: { url?: string; token?: string } }
 
 /** Asks for this machine's device name until it is valid; blank takes the suggestion, and undefined means cancelled. */
 async function promptName(ctx: ExtensionCommandContext, signal: AbortSignal): Promise<string | undefined> {

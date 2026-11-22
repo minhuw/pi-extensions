@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, vi } from "vitest";
-import { currentDream, dreamLimits, dreamRuntime } from "../../../memory/dream/index.ts";
-import type { Batch, ChildEvent, DreamChild, DreamSession, Grant, Lease, SpawnOptions } from "../../../memory/dream/run.ts";
+import { currentDream, dreamRuntime } from "../../../memory/dream/index.ts";
+import { type Batch, type ChildEvent, type DreamChild, dreamLimits, type DreamSession, type Grant, type Lease, type SpawnOptions } from "../../../memory/dream/run.ts";
 import { type Answer, FakePika, type Route } from "../../support/pika-server.ts";
 import { RecordingUI } from "../../support/runtime.ts";
 import { type Harness, PROJECT, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./runtime.ts";

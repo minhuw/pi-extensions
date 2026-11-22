@@ -14,8 +14,6 @@ import { credentialsChange, type DreamChild, type DreamMode, DreamRun, dreamLimi
 import { type LeaseServer, send } from "./server.ts";
 import { dreamTools } from "./tools.ts";
 
-export { dreamLimits } from "./run.ts";
-
 /** How dreams spawn their child; tests replace it. */
 export const dreamRuntime: { spawn: (options: SpawnOptions) => Promise<DreamChild> } = { spawn: spawnDreamChild };
 

@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
-import { currentDream, dreamLimits } from "../../memory/dream/index.ts";
-import { outcomeOf } from "../../memory/dream/run.ts";
+import { currentDream } from "../../memory/dream/index.ts";
+import { dreamLimits, outcomeOf } from "../../memory/dream/run.ts";
 import type { Answer } from "../support/pika-server.ts";
 import { batch, dream, type FakeChild, LEASE_ID, releases, SAVE, until, useDreamEnv } from "./support/dream.ts";
 import { note } from "./support/runtime.ts";

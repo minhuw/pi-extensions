@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { Type, type Static } from "typebox";
+import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { releaseAndCollectWorkspace, runScheduledSweep, runWorkspaceGc, summarizeGc, type GcResult } from "./gc.ts";
 import {
@@ -212,8 +212,6 @@ export const WorkspaceToolParameters = Type.Object({
 	purpose: Type.Optional(Type.String({ maxLength: 500 })),
 	ttlHours: Type.Optional(Type.Number({ minimum: 0 })),
 });
-
-export type WorkspaceToolInput = Static<typeof WorkspaceToolParameters>;
 
 export type WorkspaceTelemetry =
 	| { event: "create"; name: string; source: "tool" | "guard"; held: number; projectTotal: number }

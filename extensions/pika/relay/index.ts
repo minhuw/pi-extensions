@@ -5,6 +5,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { loadRelaySettings } from "../config.ts";
 import { credentialsRegistry } from "../credentials.ts";
+import { size } from "../log-viewer.ts";
 import { type ConnectionState, RelayConnection, relayHttpFetch, RequestError } from "./connection.ts";
 import {
 	BASE_REJECTIONS, cut, deviceLabel, expiredContent, headerField, type HelloSession, MESSAGE_TYPE, type MessageFrame, messageContent, NOTICE_TYPE, type OnlineSession, preview, RECEIVED_TYPE,
@@ -18,7 +19,7 @@ import {
 	answerText, askSide, automatic, busyText, type Running, type SideAnswer, type SideDetails, type SideJob, sideNote, type SideOutcome, sideRequest,
 	SideScheduler, SIDE_TYPE, Transcript,
 } from "./side.ts";
-import { logItems, peerLabel, type RelaySentData, senderLabel, SENT_TYPE, showRelayLog, size } from "./viewer.ts";
+import { logItems, peerLabel, type RelaySentData, senderLabel, SENT_TYPE, showRelayLog } from "./viewer.ts";
 
 /** At most this many sent messages are remembered for relay_status, and this many shown. */
 const SENT_KEPT = 200;
