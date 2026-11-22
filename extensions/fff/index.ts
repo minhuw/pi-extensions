@@ -39,6 +39,7 @@ import {
 import { type FffMode, loadConfig, VALID_MODES } from "./config.ts";
 import {
 	canonicalRoot,
+	type DbPaths,
 	HOME_DIR,
 	isFsRoot,
 	isHomeDir,
@@ -490,7 +491,8 @@ export function createFffExtension(
 		const instanceToken = {};
 
 		const backend = options?.backend ?? getSharedFffBackend();
-		const config = loadConfig(options?.agentDir ?? piDataDir());
+		const agentDir = options?.agentDir ?? piDataDir();
+		const config = loadConfig(agentDir);
 
 		let activeCwd = process.cwd();
 		let currentWorkspaceRoot: string | null = null;
@@ -551,13 +553,7 @@ export function createFffExtension(
 
 		let currentMode: FffMode = "tools-and-ui";
 		let toolNames = resolveToolNames(currentMode);
-		let resolvedDbPaths = resolveDbPaths(
-			{
-				frecency: config.frecencyDbPath,
-				history: config.historyDbPath,
-			},
-			options?.agentDir ?? piDataDir(),
-		);
+		let resolvedDbPaths: DbPaths | undefined;
 		let enableFsRootScanning = false;
 		let enableHomeDirScanning = true;
 		let warnOnHomeDirScan = true;
@@ -568,7 +564,7 @@ export function createFffExtension(
 			toolNames = resolveToolNames(mode);
 		}
 
-		function resolveStartupConfig(): void {
+		function resolveStartupConfig(): DbPaths {
 			setMode(
 				fromChildHook
 					? "tools-only"
@@ -580,7 +576,7 @@ export function createFffExtension(
 							parseMode,
 						),
 			);
-			resolvedDbPaths = resolveDbPaths(
+			const dbPaths = resolveDbPaths(
 				{
 					frecency: getConfigValue(
 						"fff-frecency-db",
@@ -595,8 +591,9 @@ export function createFffExtension(
 						undefined,
 					),
 				},
-				options?.agentDir ?? piDataDir(),
+				agentDir,
 			);
+			resolvedDbPaths = dbPaths;
 
 			// Root scanning opt-in: FFF refuses to init at / unless this is set.
 			enableFsRootScanning = getConfigValue(
@@ -632,6 +629,7 @@ export function createFffExtension(
 				parseBoolean,
 			);
 			startupConfigResolved = true;
+			return dbPaths;
 		}
 
 		function getMode(): FffMode {
@@ -692,14 +690,17 @@ export function createFffExtension(
 			signal?: AbortSignal,
 			exact?: boolean,
 		): Promise<EnsureRootResult> {
-			if (!startupConfigResolved) resolveStartupConfig();
+			const dbPaths =
+				startupConfigResolved && resolvedDbPaths
+					? resolvedDbPaths
+					: resolveStartupConfig();
 			const res = await backend.ensureRoot(
 				{
 					basePath,
 					kind,
 					...(exact ? { exact: true } : {}),
-					frecencyDbPath: resolvedDbPaths.frecency,
-					historyDbPath: resolvedDbPaths.history,
+					frecencyDbPath: dbPaths.frecency,
+					historyDbPath: dbPaths.history,
 					enableHomeDirScanning,
 					enableFsRootScanning,
 					followSymlinks,
@@ -1311,24 +1312,27 @@ export function createFffExtension(
 			return text;
 		};
 
+		const pathConstraintSchema = Type.Optional(
+			Type.String({
+				description:
+					"Path constraint. Directory prefix (src/ or src/foo/), bare filename with extension (main.rs), or glob (*.ts, src/**/*.cc, {src,lib}/**). Applied to the full repo-relative path. Absolute, ~/, and ../ paths outside the workspace are also supported and searched with a separate index.",
+			}),
+		);
+		const excludePathsSchema = Type.Optional(
+			Type.Union([Type.String(), Type.Array(Type.String())], {
+				description:
+					"Exclude paths (comma/space-separated or array). Same syntax as path: directory prefix ('test/'), filename with extension ('config.json'), or glob ('*.min.js', '**/*.{rs,go}'). A leading '!' is optional and ignored — both 'test/' and '!test/' work. Example: 'test/,*.min.js,!vendor/'.",
+			}),
+		);
+
 		// --- grep tool ---
 
 		const grepSchema = Type.Object({
 			pattern: Type.String({
 				description: "Search pattern (literal text or regex)",
 			}),
-			path: Type.Optional(
-				Type.String({
-					description:
-						"Path constraint. Directory prefix (src/ or src/foo/), bare filename with extension (main.rs), or glob (*.ts, src/**/*.cc, {src,lib}/**). Applied to the full repo-relative path. Absolute, ~/, and ../ paths outside the workspace are also supported and searched with a separate index.",
-				}),
-			),
-			exclude: Type.Optional(
-				Type.Union([Type.String(), Type.Array(Type.String())], {
-					description:
-						"Exclude paths (comma/space-separated or array). Same syntax as path: directory prefix ('test/'), filename with extension ('config.json'), or glob ('*.min.js', '**/*.{rs,go}'). A leading '!' is optional and ignored — both 'test/' and '!test/' work. Example: 'test/,*.min.js,!vendor/'.",
-				}),
-			),
+			path: pathConstraintSchema,
+			exclude: excludePathsSchema,
 			caseSensitive: Type.Optional(
 				Type.Boolean({
 					description:
@@ -1548,18 +1552,8 @@ export function createFffExtension(
 				description:
 					"Fuzzy filename search and glob search. Frecency-ranked, git-aware. Multi-word = narrower (AND) not bound to order, use for multi word related concept search. Prefer this over ls/find/bash as the first exploration step whenever the user names a concept, feature, or symbol — it surfaces the relevant files in one call. Only use ls/read on a directory when you specifically need the alphabetical layout of an unknown repo, or when a concept search returned nothing.",
 			}),
-			path: Type.Optional(
-				Type.String({
-					description:
-						"Path constraint. Directory prefix (src/ or src/foo/), bare filename with extension (main.rs), or glob (*.ts, src/**/*.cc, {src,lib}/**). Applied to the full repo-relative path. Absolute, ~/, and ../ paths outside the workspace are also supported and searched with a separate index.",
-				}),
-			),
-			exclude: Type.Optional(
-				Type.Union([Type.String(), Type.Array(Type.String())], {
-					description:
-						"Exclude paths (comma/space-separated or array). Same syntax as path: directory prefix ('test/'), filename with extension ('config.json'), or glob ('*.min.js', '**/*.{rs,go}'). A leading '!' is optional and ignored — both 'test/' and '!test/' work. Example: 'test/,*.min.js,!vendor/'.",
-				}),
-			),
+			path: pathConstraintSchema,
+			exclude: excludePathsSchema,
 			limit: Type.Optional(
 				Type.Number({
 					description: `Max results per page (default ${DEFAULT_FIND_LIMIT})`,
@@ -1844,22 +1838,41 @@ export function createFffExtension(
 
 		// --- commands ---
 
+		function ensureCommandPrepared(ctx: ExtensionContext): boolean {
+			if (toolsRegistered) return true;
+			try {
+				prepareSession(ctx);
+				return true;
+			} catch (error: unknown) {
+				ctx.ui.notify(
+					`FFF init failed: ${error instanceof Error ? error.message : String(error)}`,
+					"error",
+				);
+				return false;
+			}
+		}
+
+		async function resolveCommandRoot(
+			ctx: ExtensionContext,
+		): Promise<string | undefined> {
+			if (!ensureCommandPrepared(ctx)) return undefined;
+			try {
+				return currentWorkspaceRoot ?? (await ensureWorkspaceRoot(ctx.cwd));
+			} catch (error: unknown) {
+				ctx.ui.notify(
+					`FFF not initialized: ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				);
+				return undefined;
+			}
+		}
+
 		pi.registerCommand("fff-mode", {
 			description:
 				"Show or set FFF mode: /fff-mode [tools-and-ui | tools-only | override]",
 			handler: async (args, ctx) => {
 				pi.appendEntry("pi-extensions.command", { command: "fff-mode", kind: "extension", extension: "fff" });
-				if (!toolsRegistered) {
-					try {
-						prepareSession(ctx);
-					} catch (error: unknown) {
-						ctx.ui.notify(
-							`FFF init failed: ${error instanceof Error ? error.message : String(error)}`,
-							"error",
-						);
-						return;
-					}
-				}
+				if (!ensureCommandPrepared(ctx)) return;
 
 				const arg = (args || "").trim();
 
@@ -1901,28 +1914,8 @@ export function createFffExtension(
 			description: "Show FFF file finder health and status",
 			handler: async (_args, ctx) => {
 				pi.appendEntry("pi-extensions.command", { command: "fff-health", kind: "extension", extension: "fff" });
-				if (!toolsRegistered) {
-					try {
-						prepareSession(ctx);
-					} catch (error: unknown) {
-						ctx.ui.notify(
-							`FFF init failed: ${error instanceof Error ? error.message : String(error)}`,
-							"error",
-						);
-						return;
-					}
-				}
-
-				let root: string;
-				try {
-					root = currentWorkspaceRoot ?? (await ensureWorkspaceRoot(ctx.cwd));
-				} catch (error: unknown) {
-					ctx.ui.notify(
-						`FFF not initialized: ${error instanceof Error ? error.message : String(error)}`,
-						"warning",
-					);
-					return;
-				}
+				const root = await resolveCommandRoot(ctx);
+				if (root === undefined) return;
 
 				let health: Awaited<ReturnType<FffBackend["healthCheck"]>>;
 				try {
@@ -1969,28 +1962,8 @@ export function createFffExtension(
 			description: "Trigger FFF to rescan files",
 			handler: async (_args, ctx) => {
 				pi.appendEntry("pi-extensions.command", { command: "fff-rescan", kind: "extension", extension: "fff" });
-				if (!toolsRegistered) {
-					try {
-						prepareSession(ctx);
-					} catch (error: unknown) {
-						ctx.ui.notify(
-							`FFF init failed: ${error instanceof Error ? error.message : String(error)}`,
-							"error",
-						);
-						return;
-					}
-				}
-
-				let root: string;
-				try {
-					root = currentWorkspaceRoot ?? (await ensureWorkspaceRoot(ctx.cwd));
-				} catch (error: unknown) {
-					ctx.ui.notify(
-						`FFF not initialized: ${error instanceof Error ? error.message : String(error)}`,
-						"warning",
-					);
-					return;
-				}
+				const root = await resolveCommandRoot(ctx);
+				if (root === undefined) return;
 
 				try {
 					const result = await backend.scanFiles(root);
