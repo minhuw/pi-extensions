@@ -99,6 +99,20 @@ async function newIsolatedDirs(): Promise<{ cwd: string; agentDir: string; clean
 	return { cwd, agentDir, cleanup: () => rm(temporary, { recursive: true, force: true }) };
 }
 
+function createIsolatedLoader(
+	options: ConstructorParameters<typeof DefaultResourceLoader>[0],
+): DefaultResourceLoader {
+	return new DefaultResourceLoader({
+		settingsManager: SettingsManager.inMemory(),
+		noExtensions: true,
+		noSkills: true,
+		noThemes: true,
+		noContextFiles: true,
+		noPromptTemplates: true,
+		...options,
+	});
+}
+
 describe("root package registration", () => {
 	it("registers the skill, 26 native prompts, and the engine tool extension before pika", async () => {
 		const manifest = await readManifest();
@@ -172,15 +186,9 @@ describe("skill discovery and portability", () => {
 	it("loads the impeccable skill through Pi with normal discovery and portable paths", async () => {
 		const { cwd, agentDir, cleanup } = await newIsolatedDirs();
 		try {
-			const loader = new DefaultResourceLoader({
+			const loader = createIsolatedLoader({
 				cwd,
 				agentDir,
-				settingsManager: SettingsManager.inMemory(),
-				noExtensions: true,
-				noSkills: true,
-				noThemes: true,
-				noContextFiles: true,
-				noPromptTemplates: true,
 				additionalSkillPaths: [skillsRoot],
 			});
 			await loader.reload();
@@ -228,15 +236,9 @@ describe("skill discovery and portability", () => {
 		try {
 			const relocated = path.join(agentDir, "relocated", "impeccable");
 			await cp(skillDir, relocated, { recursive: true });
-			const loader = new DefaultResourceLoader({
+			const loader = createIsolatedLoader({
 				cwd,
 				agentDir,
-				settingsManager: SettingsManager.inMemory(),
-				noExtensions: true,
-				noSkills: true,
-				noThemes: true,
-				noContextFiles: true,
-				noPromptTemplates: true,
 				additionalSkillPaths: [relocated],
 			});
 			await loader.reload();
@@ -269,15 +271,9 @@ describe("native prompt templates", () => {
 
 		const { cwd, agentDir, cleanup } = await newIsolatedDirs();
 		try {
-			const loader = new DefaultResourceLoader({
+			const loader = createIsolatedLoader({
 				cwd,
 				agentDir,
-				settingsManager: SettingsManager.inMemory(),
-				noExtensions: true,
-				noSkills: true,
-				noThemes: true,
-				noContextFiles: true,
-				noPromptTemplates: true,
 				additionalPromptTemplatePaths: manifest.pi.prompts
 					.filter((entry) => entry.includes("extensions/impeccable/"))
 					.map((entry) => path.resolve(repositoryRoot, entry)),
@@ -332,15 +328,9 @@ describe("native prompt templates", () => {
 	it("routes pin/unpin and teach without inventing nonexistent playbooks", async () => {
 		const { cwd, agentDir, cleanup } = await newIsolatedDirs();
 		try {
-			const loader = new DefaultResourceLoader({
+			const loader = createIsolatedLoader({
 				cwd,
 				agentDir,
-				settingsManager: SettingsManager.inMemory(),
-				noExtensions: true,
-				noSkills: true,
-				noThemes: true,
-				noContextFiles: true,
-				noPromptTemplates: true,
 				additionalPromptTemplatePaths: (await readManifest()).pi.prompts
 					.filter((entry) => entry.includes("extensions/impeccable/"))
 					.map((entry) => path.resolve(repositoryRoot, entry)),
