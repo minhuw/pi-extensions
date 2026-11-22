@@ -156,6 +156,46 @@ describe("ScrollableConfirm", () => {
 			for (const line of dialog(`${"word ".repeat(80)}\n${LONG}`, rows).component.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}
 	});
+
+	it("returns cached frame lines without recomputing when state is unchanged", () => {
+		const fg = vi.fn((_color: string, text: string) => `\x1b[36m${text}\x1b[39m`);
+		const spyTheme = {
+			fg,
+			bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
+			inverse: (text: string) => `\x1b[7m${text}\x1b[27m`,
+		} as unknown as Theme;
+		const formatBody = vi.fn((body: string) => body.split("\n").map((line) => ` ${line}`));
+		const tui = { requestRender: vi.fn(), terminal: { rows: 30 } };
+		const component = new ScrollableConfirm("Confirm", LONG, tui, spyTheme, keybindings, () => {}, formatBody);
+
+		expect(component.title).toBe("Confirm");
+		expect(component.body).toBe(LONG);
+
+		const first = component.render(80);
+		const fgAfterFirst = fg.mock.calls.length;
+		expect(fgAfterFirst).toBeGreaterThan(0);
+		expect(formatBody).toHaveBeenCalledTimes(1);
+
+		const second = component.render(80);
+		expect(second).toBe(first);
+		expect(fg).toHaveBeenCalledTimes(fgAfterFirst);
+		expect(formatBody).toHaveBeenCalledTimes(1);
+
+		component.handleInput(KEYS.right);
+		const toggled = component.render(80);
+		expect(toggled).not.toBe(first);
+		expect(fg.mock.calls.length).toBeGreaterThan(fgAfterFirst);
+		expect(formatBody).toHaveBeenCalledTimes(1);
+
+		const fgAfterToggle = fg.mock.calls.length;
+		expect(component.render(80)).toBe(toggled);
+		expect(fg).toHaveBeenCalledTimes(fgAfterToggle);
+
+		component.invalidate();
+		const afterInvalidate = component.render(80);
+		expect(afterInvalidate).not.toBe(toggled);
+		expect(formatBody).toHaveBeenCalledTimes(2);
+	});
 });
 
 describe("confirmLong", () => {
@@ -348,5 +388,37 @@ describe("GoalReviewDialog & reviewGoal", () => {
 
 		const dismissedNote = makeTui("e", undefined);
 		await expect(reviewGoal(dismissedNote.ctx, "Approve", SAMPLE_GOAL)).resolves.toEqual({ choice: "reject" });
+	});
+
+	it("returns cached frame lines without recomputing when state is unchanged", () => {
+		const fg = vi.fn((_color: string, text: string) => `\x1b[36m${text}\x1b[39m`);
+		const spyTheme = {
+			fg,
+			bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
+			inverse: (text: string) => `\x1b[7m${text}\x1b[27m`,
+		} as unknown as Theme;
+		const tui = { requestRender: vi.fn(), terminal: { rows: 24 } };
+		const component = new GoalReviewDialog("Approve goal", `${SAMPLE_GOAL}\n${LONG}`, "Frozen after approval.", tui, spyTheme, keybindings, () => {});
+
+		expect(component.title).toBe("Approve goal");
+		expect(component.goalMarkdown).toBe(`${SAMPLE_GOAL}\n${LONG}`);
+		expect(component.footerNote).toBe("Frozen after approval.");
+
+		const first = component.render(80);
+		const fgAfterFirst = fg.mock.calls.length;
+		expect(fgAfterFirst).toBeGreaterThan(0);
+
+		const second = component.render(80);
+		expect(second).toBe(first);
+		expect(fg).toHaveBeenCalledTimes(fgAfterFirst);
+
+		tui.terminal.rows = 18;
+		const resized = component.render(80);
+		expect(resized).not.toBe(first);
+		const fgAfterResize = fg.mock.calls.length;
+		expect(fgAfterResize).toBeGreaterThan(fgAfterFirst);
+
+		expect(component.render(80)).toBe(resized);
+		expect(fg).toHaveBeenCalledTimes(fgAfterResize);
 	});
 });

@@ -1,5 +1,5 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, Key, type KeybindingsManager, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { type Component, Key, type KeybindingsManager, type KeyId, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { renderGoalMarkdown, renderSummaryLines } from "./preview.ts";
 
 export { renderGoalMarkdown, renderSummaryLines };
@@ -16,10 +16,21 @@ export type Answer = boolean | undefined;
 export type GoalChoice = "approve" | "reject" | "reject_note";
 export type GoalReviewOutcome = { choice: "approve" | "reject"; note?: string } | undefined;
 
-const GOAL_CHOICES: readonly { id: GoalChoice; label: string }[] = [
-	{ id: "approve", label: "Approve" },
-	{ id: "reject", label: "Reject" },
-	{ id: "reject_note", label: "Reject with a note" },
+type DialogChoice<T> = {
+	readonly id: T;
+	readonly label: string;
+	readonly keys: readonly KeyId[];
+};
+
+const CONFIRM_CHOICES: readonly DialogChoice<boolean>[] = [
+	{ id: true, label: "Yes", keys: ["y"] },
+	{ id: false, label: "No", keys: ["n"] },
+];
+
+const GOAL_CHOICES: readonly DialogChoice<GoalChoice>[] = [
+	{ id: "approve", label: "Approve", keys: ["y", "a"] },
+	{ id: "reject", label: "Reject", keys: ["n", "r"] },
+	{ id: "reject_note", label: "Reject with a note", keys: ["e"] },
 ];
 
 type DialogTui = { requestRender(): void; terminal: { rows: number } };
@@ -81,52 +92,55 @@ function renderBoundedDialog(
 	return { lines: lines.map((line) => truncateToWidth(line, w)), offset: clamped, page };
 }
 
-/**
- * A Yes/No confirmation whose body scrolls inside a bounded viewport, so the choice stays on screen
- * however long the body is. Pi's `ctx.ui.confirm` renders the whole body above the options.
- */
-export class ScrollableConfirm implements Component {
+type DialogConfig<T> = {
 	readonly title: string;
-	readonly body: string;
+	readonly choices: readonly DialogChoice<T>[];
+	readonly hints: string;
+	readonly formatBody: (width: number, theme: Theme) => string[];
+	readonly tui: DialogTui;
+	readonly theme: Theme;
+	readonly keybindings: DialogKeys;
+	readonly done: (value: T | undefined) => void;
+};
+
+class ScrollableChoiceDialog<T> implements Component {
+	private readonly title: string;
+	private readonly choices: readonly DialogChoice<T>[];
+	private readonly hints: string;
+	private readonly formatBody: (width: number, theme: Theme) => string[];
 	private readonly tui: DialogTui;
 	private readonly theme: Theme;
 	private readonly keybindings: DialogKeys;
-	private readonly done: (answer: Answer) => void;
-	private readonly formatBody?: (body: string, width: number, theme: Theme) => string[];
+	private readonly done: (value: T | undefined) => void;
 	private offset = 0;
-	private yes = true;
-	private bodyCache: { width: number; lines: string[] } | undefined;
-	private cache: { width: number; rows: number; offset: number; yes: boolean; lines: string[] } | undefined;
+	private choice = 0;
 	/** The body height of the last render; paging moves by it. */
 	private page = MIN_BODY_ROWS;
+	private bodyCache: { width: number; lines: string[] } | undefined;
+	private cache: { width: number; rows: number; offset: number; choice: number; lines: string[] } | undefined;
 
-	constructor(
-		title: string,
-		body: string,
-		tui: DialogTui,
-		theme: Theme,
-		keybindings: DialogKeys,
-		done: (answer: Answer) => void,
-		formatBody?: (body: string, width: number, theme: Theme) => string[],
-	) {
-		this.title = title;
-		this.body = body;
-		this.tui = tui;
-		this.theme = theme;
-		this.keybindings = keybindings;
-		this.done = done;
-		this.formatBody = formatBody;
+	constructor(config: DialogConfig<T>) {
+		this.title = config.title;
+		this.choices = config.choices;
+		this.hints = config.hints;
+		this.formatBody = config.formatBody;
+		this.tui = config.tui;
+		this.theme = config.theme;
+		this.keybindings = config.keybindings;
+		this.done = config.done;
 	}
 
 	handleInput(data: string): void {
 		const { keybindings } = this;
-		if (matchesKey(data, "y")) return this.done(true);
-		if (matchesKey(data, "n")) return this.done(false);
+		for (const choice of this.choices) {
+			if (choice.keys.some((key) => matchesKey(data, key))) return this.done(choice.id);
+		}
 		if (keybindings.matches(data, "tui.select.cancel")) return this.done(undefined);
-		if (keybindings.matches(data, "tui.select.confirm")) return this.done(this.yes);
+		if (keybindings.matches(data, "tui.select.confirm")) return this.done(this.choices[this.choice]!.id);
 		const scrolled = applyScrollKey(data, keybindings, this.offset, this.page);
 		if (scrolled !== undefined) this.offset = scrolled;
-		else if (matchesKey(data, Key.left) || matchesKey(data, Key.right) || matchesKey(data, Key.tab) || matchesKey(data, "shift+tab")) this.yes = !this.yes;
+		else if (matchesKey(data, Key.right) || matchesKey(data, Key.tab)) this.choice = (this.choice + 1) % this.choices.length;
+		else if (matchesKey(data, Key.left) || matchesKey(data, "shift+tab")) this.choice = (this.choice - 1 + this.choices.length) % this.choices.length;
 		else return;
 		this.tui.requestRender();
 	}
@@ -139,21 +153,70 @@ export class ScrollableConfirm implements Component {
 	render(width: number): string[] {
 		const w = Math.max(1, width);
 		const rows = this.tui.terminal.rows;
+		const cached = this.cache;
+		if (cached && cached.width === width && cached.rows === rows && cached.offset === this.offset && cached.choice === this.choice) {
+			return cached.lines;
+		}
 		const { theme } = this;
 		if (!this.bodyCache || this.bodyCache.width !== w) {
-			const lines = this.formatBody
-				? this.formatBody(this.body, w, theme)
-				: wrapTextWithAnsi(this.body, Math.max(1, w - 1)).map((line) => ` ${line}`);
-			this.bodyCache = { width: w, lines };
+			this.bodyCache = { width: w, lines: this.formatBody(w, theme) };
 		}
-		const option = (label: string, chosen: boolean) => (chosen ? theme.fg("accent", `▸ ${label}`) : theme.fg("text", `  ${label}`));
-		const rendered = renderBoundedDialog(w, rows, theme, this.title, this.bodyCache.lines, [option("Yes", this.yes), option("No", !this.yes)], HINTS, this.offset);
+		const options = this.choices.map((entry, idx) =>
+			idx === this.choice ? theme.fg("accent", `▸ ${entry.label}`) : theme.fg("text", `  ${entry.label}`),
+		);
+		const rendered = renderBoundedDialog(w, rows, theme, this.title, this.bodyCache.lines, options, this.hints, this.offset);
 		this.page = rendered.page;
 		this.offset = rendered.offset;
-		const cached = this.cache;
-		if (cached && cached.width === width && cached.rows === rows && cached.offset === this.offset && cached.yes === this.yes) return cached.lines;
-		this.cache = { width, rows, offset: this.offset, yes: this.yes, lines: rendered.lines };
+		this.cache = { width, rows, offset: this.offset, choice: this.choice, lines: rendered.lines };
 		return rendered.lines;
+	}
+}
+
+/**
+ * A Yes/No confirmation whose body scrolls inside a bounded viewport, so the choice stays on screen
+ * however long the body is. Pi's `ctx.ui.confirm` renders the whole body above the options.
+ */
+export class ScrollableConfirm implements Component {
+	readonly title: string;
+	readonly body: string;
+	private readonly dialog: ScrollableChoiceDialog<boolean>;
+
+	constructor(
+		title: string,
+		body: string,
+		tui: DialogTui,
+		theme: Theme,
+		keybindings: DialogKeys,
+		done: (answer: Answer) => void,
+		formatBody?: (body: string, width: number, theme: Theme) => string[],
+	) {
+		this.title = title;
+		this.body = body;
+		this.dialog = new ScrollableChoiceDialog({
+			title,
+			choices: CONFIRM_CHOICES,
+			hints: HINTS,
+			formatBody: (width, currentTheme) =>
+				formatBody
+					? formatBody(body, width, currentTheme)
+					: wrapTextWithAnsi(body, Math.max(1, width - 1)).map((line) => ` ${line}`),
+			tui,
+			theme,
+			keybindings,
+			done,
+		});
+	}
+
+	handleInput(data: string): void {
+		this.dialog.handleInput(data);
+	}
+
+	invalidate(): void {
+		this.dialog.invalidate();
+	}
+
+	render(width: number): string[] {
+		return this.dialog.render(width);
 	}
 }
 
@@ -165,15 +228,7 @@ export class GoalReviewDialog implements Component {
 	readonly title: string;
 	readonly goalMarkdown: string;
 	readonly footerNote: string | undefined;
-	private readonly tui: DialogTui;
-	private readonly theme: Theme;
-	private readonly keybindings: DialogKeys;
-	private readonly done: (choice: GoalChoice | undefined) => void;
-	private offset = 0;
-	private choice = 0;
-	private page = MIN_BODY_ROWS;
-	private bodyCache: { width: number; lines: string[] } | undefined;
-	private cache: { width: number; rows: number; offset: number; choice: number; lines: string[] } | undefined;
+	private readonly dialog: ScrollableChoiceDialog<GoalChoice>;
 
 	constructor(
 		title: string,
@@ -187,51 +242,28 @@ export class GoalReviewDialog implements Component {
 		this.title = title;
 		this.goalMarkdown = goalMarkdown;
 		this.footerNote = footerNote;
-		this.tui = tui;
-		this.theme = theme;
-		this.keybindings = keybindings;
-		this.done = done;
+		this.dialog = new ScrollableChoiceDialog({
+			title,
+			choices: GOAL_CHOICES,
+			hints: GOAL_HINTS,
+			formatBody: (width, currentTheme) => renderGoalMarkdown(goalMarkdown, footerNote, width, currentTheme),
+			tui,
+			theme,
+			keybindings,
+			done,
+		});
 	}
 
 	handleInput(data: string): void {
-		const { keybindings } = this;
-		if (matchesKey(data, "y") || matchesKey(data, "a")) return this.done("approve");
-		if (matchesKey(data, "n") || matchesKey(data, "r")) return this.done("reject");
-		if (matchesKey(data, "e")) return this.done("reject_note");
-		if (keybindings.matches(data, "tui.select.cancel")) return this.done(undefined);
-		if (keybindings.matches(data, "tui.select.confirm")) return this.done(GOAL_CHOICES[this.choice]!.id);
-		const scrolled = applyScrollKey(data, keybindings, this.offset, this.page);
-		if (scrolled !== undefined) this.offset = scrolled;
-		else if (matchesKey(data, Key.right) || matchesKey(data, Key.tab)) this.choice = (this.choice + 1) % GOAL_CHOICES.length;
-		else if (matchesKey(data, Key.left) || matchesKey(data, "shift+tab")) this.choice = (this.choice - 1 + GOAL_CHOICES.length) % GOAL_CHOICES.length;
-		else return;
-		this.tui.requestRender();
+		this.dialog.handleInput(data);
 	}
 
 	invalidate(): void {
-		this.bodyCache = undefined;
-		this.cache = undefined;
+		this.dialog.invalidate();
 	}
 
 	render(width: number): string[] {
-		const w = Math.max(1, width);
-		const rows = this.tui.terminal.rows;
-		const { theme } = this;
-		if (!this.bodyCache || this.bodyCache.width !== w) {
-			this.bodyCache = { width: w, lines: renderGoalMarkdown(this.goalMarkdown, this.footerNote, w, theme) };
-		}
-		const options = GOAL_CHOICES.map((entry, idx) =>
-			idx === this.choice ? theme.fg("accent", `▸ ${entry.label}`) : theme.fg("text", `  ${entry.label}`),
-		);
-		const rendered = renderBoundedDialog(w, rows, theme, this.title, this.bodyCache.lines, options, GOAL_HINTS, this.offset);
-		this.page = rendered.page;
-		this.offset = rendered.offset;
-		const cached = this.cache;
-		if (cached && cached.width === width && cached.rows === rows && cached.offset === this.offset && cached.choice === this.choice) {
-			return cached.lines;
-		}
-		this.cache = { width, rows, offset: this.offset, choice: this.choice, lines: rendered.lines };
-		return rendered.lines;
+		return this.dialog.render(width);
 	}
 }
 
