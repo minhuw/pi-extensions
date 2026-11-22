@@ -4,10 +4,10 @@ import { readFileSync } from "node:fs";
 import { validateSchema } from "../agents/structured.ts";
 import { type Criterion, hashGoal, parseGoal } from "../artifacts/goal.ts";
 import { appendConvergence } from "../artifacts/plan.ts";
-import { runCheck } from "../checks/runner.ts";
+import { runChecksInWorktree } from "../checks/runner.ts";
 import { LIMITS, VERIFIER_DIFF_LINES } from "../config.ts";
 import { writeAtomic } from "../run/files.ts";
-import { integrationRef, worktreePath } from "../run/paths.ts";
+import { integrationRef } from "../run/paths.ts";
 import type { RunStore } from "../run/store.ts";
 import { acquireReadOnlyWorktree } from "../steps/worktrees.ts";
 import type { AgentRunner, CheckResult, CheckSpec, CriterionResult, CriterionStatus, Gap, Limits, RoleDefinition, Vcs, Verdict } from "../types.ts";
@@ -152,22 +152,10 @@ export async function verifyRun(deps: VerifyDeps): Promise<VerifyOutcome> {
 	if (!base || !head) throw new Error("cannot verify: the run has no base commit");
 	const limits = deps.limits ?? LIMITS;
 	const signal = deps.signal ?? new AbortController().signal;
-	const checkPath = worktreePath(vcs.commonDir(), runId, VERIFY_SLOT);
-	vcs.removeWorktree(checkPath);
-	const checks: CheckResult[] = [];
-	if (deps.checks.length > 0) {
-		try {
-			vcs.addWorktree(checkPath, head);
-			for (const spec of deps.checks) {
-				const result = await runCheck(spec, { cwd: checkPath, commit: head, outputs: store.outputs, signal, onCheck: (id) => deps.onStage?.(`check ${id}`) });
-				checks.push(result);
-				const { id: checkId, commit, exitCode, timedOut, durationMs, logRef, tail } = result;
-				store.journal.append({ t: "check.completed", checkId, commit, exitCode, timedOut, durationMs, logRef, tail, purpose: "verify" });
-			}
-		} finally {
-			vcs.removeWorktree(checkPath);
-		}
-	}
+	const checks = await runChecksInWorktree(deps.checks, {
+		runId, vcs, store, slot: VERIFY_SLOT, commit: head, purpose: "verify", signal,
+		cleanWhenEmpty: true, onCheck: (id) => deps.onStage?.(`check ${id}`),
+	});
 	let verifier: VerifierOutcome;
 	let verifierRan = false;
 	const range = `${base}..${head}`;

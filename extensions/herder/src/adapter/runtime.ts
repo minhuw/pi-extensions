@@ -2,11 +2,11 @@
 import { readFileSync } from "node:fs";
 import { loadRoles } from "../agents/roles.ts";
 import { parseGoal } from "../artifacts/goal.ts";
-import { runChecks } from "../checks/runner.ts";
+import { runChecksInWorktree } from "../checks/runner.ts";
 import { LIMITS } from "../config.ts";
 import { cleanupRun, deliver, type DeliveryOutcome, type DeliveryRequest } from "../deliver/deliver.ts";
 import { createIntegrator } from "../integrate/integrate.ts";
-import { baseRef, integrationRef, worktreePath } from "../run/paths.ts";
+import { baseRef, integrationRef } from "../run/paths.ts";
 import type { RunStore } from "../run/store.ts";
 import { createStepExecutor, type StepActivity, type StepDeps } from "../steps/executor.ts";
 import { launchScript, type LaunchHandle, type LaunchOutcome, type LaunchRequest } from "../steps/launch.ts";
@@ -121,23 +121,11 @@ export function createRuntimeFactory(options: RuntimeOptions = {}): RuntimeFacto
 					return spec;
 				}) : all;
 				const commit = request.commit ? vcs.resolve(request.commit) : integrationHead();
-				if (!specs.length) return [];
-				let slot = 0;
-				let path = worktreePath(vcs.commonDir(), runId, CHECK_SLOT);
-				while (activeCheckSlots.has(path)) path = worktreePath(vcs.commonDir(), runId, `${CHECK_SLOT}-${++slot}`);
-				activeCheckSlots.add(path);
-				try {
-					vcs.removeWorktree(path);
-					vcs.addWorktree(path, commit);
-					const results = await runChecks(specs, { cwd: path, commit, outputs: run.outputs, signal: combine(signal), onCheck: (id) => report?.(`checking ${id}`) });
-					for (const r of results) run.journal.append({ t: "check.completed", checkId: r.id, commit, exitCode: r.exitCode, timedOut: r.timedOut, durationMs: r.durationMs, logRef: r.logRef, tail: r.tail, purpose: "manual" });
-					progress();
-					return results;
-				} finally {
-					// The next check removes a leftover worktree first; the journaled results matter more.
-					try { vcs.removeWorktree(path); } catch {}
-					activeCheckSlots.delete(path);
-				}
+				return runChecksInWorktree(specs, {
+					runId, vcs, store: run, slot: CHECK_SLOT, commit, purpose: "manual",
+					signal: combine(signal), activeSlots: activeCheckSlots,
+					onCheck: (id) => report?.(`checking ${id}`), onProgress: progress,
+				});
 			},
 			verify(signal, report) {
 				const { checks } = goal();

@@ -2,7 +2,9 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { blockedCheckCommand, hasStandingGrants } from "../adapter/standing.ts";
 import { CHECK_ERROR_LINES, CHECK_TAIL_LINES } from "../config.ts";
-import type { CheckResult, CheckSpec, OutputStore } from "../types.ts";
+import { worktreePath } from "../run/paths.ts";
+import type { RunStore } from "../run/store.ts";
+import type { CheckPurpose, CheckResult, CheckSpec, OutputStore, Vcs } from "../types.ts";
 
 /** Captured output keeps the first `headBytes` and the last `tailBytes`; the middle is replaced by a marker. */
 export interface OutputLimits { headBytes: number; tailBytes: number }
@@ -153,6 +155,70 @@ export async function runChecks(specs: readonly CheckSpec[], options: CheckRunOp
 	const results: CheckResult[] = [];
 	for (const spec of specs) results.push(await runCheck(spec, options));
 	return results;
+}
+
+export interface WorktreeCheckRunOptions {
+	runId: string;
+	vcs: Vcs;
+	store: Pick<RunStore, "journal" | "outputs">;
+	slot: string;
+	commit: string;
+	purpose: CheckPurpose;
+	key?: string;
+	signal?: AbortSignal;
+	outputLimits?: OutputLimits;
+	/** Live worktree paths in use by concurrent callers; allocates `<slot>`, `<slot>-1`, … and releases in `finally`. */
+	activeSlots?: Set<string>;
+	/** Remove a stale `<slot>` worktree even when `specs` is empty. */
+	cleanWhenEmpty?: boolean;
+	onCheck?: (id: string) => void;
+	onProgress?: () => void;
+	/** `"each"`: call `onProgress` after each journaled check; `"end"` (default): once after all checks finish. */
+	progressOn?: "each" | "end";
+}
+
+/**
+ * Checks out `commit` into a temporary Herder worktree, runs `specs` in order, journals each `check.completed` event
+ * incrementally, and tears the worktree down in `finally` without failing over journaled results.
+ */
+export async function runChecksInWorktree(specs: readonly CheckSpec[], options: WorktreeCheckRunOptions): Promise<CheckResult[]> {
+	const { runId, vcs, store, slot, commit, purpose, key, signal, outputLimits, activeSlots, cleanWhenEmpty, onCheck, onProgress, progressOn = "end" } = options;
+	if (!specs.length) {
+		if (cleanWhenEmpty) {
+			const path = worktreePath(vcs.commonDir(), runId, slot);
+			if (!activeSlots?.has(path)) vcs.removeWorktree(path);
+		}
+		return [];
+	}
+	let path = worktreePath(vcs.commonDir(), runId, slot);
+	if (activeSlots) {
+		let n = 0;
+		while (activeSlots.has(path)) path = worktreePath(vcs.commonDir(), runId, `${slot}-${++n}`);
+		activeSlots.add(path);
+	}
+	try {
+		vcs.removeWorktree(path);
+		try {
+			vcs.addWorktree(path, commit);
+			const results: CheckResult[] = [];
+			for (const spec of specs) {
+				const r = await runCheck(spec, { cwd: path, commit, outputs: store.outputs, signal, outputLimits, onCheck });
+				results.push(r);
+				store.journal.append({
+					t: "check.completed", checkId: r.id, commit, exitCode: r.exitCode, timedOut: r.timedOut,
+					durationMs: r.durationMs, logRef: r.logRef, tail: r.tail, purpose, ...(key !== undefined ? { key } : {}),
+				});
+				if (progressOn === "each") onProgress?.();
+			}
+			if (progressOn === "end") onProgress?.();
+			return results;
+		} finally {
+			// The next run removes a leftover worktree first; journaled results (or an earlier error) matter more.
+			try { vcs.removeWorktree(path); } catch {}
+		}
+	} finally {
+		activeSlots?.delete(path);
+	}
 }
 
 /**

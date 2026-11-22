@@ -1,5 +1,5 @@
 // Delivery to the user's checkout after verification and confirmation (§12).
-import { runChecks } from "../checks/runner.ts";
+import { runChecksInWorktree } from "../checks/runner.ts";
 import { LIMITS } from "../config.ts";
 import { integrationRef, refPrefix, runPaths, worktreePath } from "../run/paths.ts";
 import type { RunStore } from "../run/store.ts";
@@ -98,22 +98,6 @@ async function curate(deps: DeliverDeps, base: string, head: string, signal: Abo
 	} catch (error) {
 		if (signal.aborted) throw error;
 		return { reason: `curation failed: ${errorText(error)}` };
-	} finally {
-		vcs.removeWorktree(path);
-	}
-}
-
-async function deliveryChecks(deps: DeliverDeps, tip: string, signal: AbortSignal): Promise<CheckResult[]> {
-	const { vcs, runId, store } = deps;
-	if (!deps.checks.length) return [];
-	const path = worktreePath(vcs.commonDir(), runId, DELIVER_SLOT);
-	vcs.removeWorktree(path);
-	try {
-		vcs.addWorktree(path, tip);
-		const results = await runChecks(deps.checks, { cwd: path, commit: tip, outputs: store.outputs, signal, onCheck: (id) => deps.onStage?.(`check ${id}`) });
-		for (const r of results) store.journal.append({ t: "check.completed", checkId: r.id, commit: tip, exitCode: r.exitCode, timedOut: r.timedOut, durationMs: r.durationMs, logRef: r.logRef, tail: r.tail, purpose: "deliver" });
-		deps.onProgress?.();
-		return results;
 	} finally {
 		vcs.removeWorktree(path);
 	}
@@ -244,7 +228,10 @@ export async function deliver(deps: DeliverDeps, request: DeliveryRequest): Prom
 		}
 		tip = parent;
 		rebasedOnto = onto;
-		checks = await deliveryChecks(deps, tip, signal);
+		checks = await runChecksInWorktree(deps.checks, {
+			runId, vcs, store, slot: DELIVER_SLOT, commit: tip, purpose: "deliver", signal,
+			onCheck: (id) => deps.onStage?.(`check ${id}`), onProgress: deps.onProgress,
+		});
 		const failed = checks.filter((check) => !check.passed);
 		if (failed.length) return refuse(`checks failed at the replayed tip ${short(tip)}: ${failed.map((check) => check.id).join(", ")}`, { ...extra(), tip, rebasedOnto, checks });
 	} else if (vcs.treeOf(tip) !== vcs.treeOf(head)) {

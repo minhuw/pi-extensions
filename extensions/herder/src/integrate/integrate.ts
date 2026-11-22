@@ -1,10 +1,10 @@
 // Serial integration onto the run's hidden integration ref (§11).
-import { runChecks } from "../checks/runner.ts";
+import { runChecksInWorktree } from "../checks/runner.ts";
 import { findIntegration } from "../journal/fold.ts";
 import { integrationKey } from "../journal/keys.ts";
-import { integrationRef, worktreePath } from "../run/paths.ts";
+import { integrationRef } from "../run/paths.ts";
 import type { RunStore } from "../run/store.ts";
-import { type CheckResult, type CheckSpec, type Faults, INTEGRATE_OPTION_KEYS, type IntegrateOptions, type IntegrateResult, type JournalInput, noFaults, type StepResult, type Vcs } from "../types.ts";
+import { type CheckSpec, type Faults, INTEGRATE_OPTION_KEYS, type IntegrateOptions, type IntegrateResult, type JournalInput, noFaults, type StepResult, type Vcs } from "../types.ts";
 import { hasHerderTrailer } from "../vcs/git.ts";
 
 export interface IntegrateDeps { runId: string; store: RunStore; vcs: Vcs; checks: readonly CheckSpec[]; faults?: Faults; signal?: AbortSignal; onProgress?: () => void }
@@ -61,20 +61,6 @@ export function createIntegrator(deps: IntegrateDeps): Integrator {
 	};
 	const append = (event: JournalInput) => { store.journal.append(event); deps.onProgress?.(); };
 
-	async function runIntegrationChecks(specs: readonly CheckSpec[], commit: string, key: string, signal: AbortSignal | undefined, onCheck?: (id: string) => void): Promise<CheckResult[]> {
-		if (!specs.length) return [];
-		const path = worktreePath(vcs.commonDir(), runId, INTEGRATION_SLOT);
-		vcs.removeWorktree(path);
-		try {
-			vcs.addWorktree(path, commit);
-			const results = await runChecks(specs, { cwd: path, commit, outputs: store.outputs, signal, onCheck });
-			for (const r of results) append({ t: "check.completed", checkId: r.id, commit, exitCode: r.exitCode, timedOut: r.timedOut, durationMs: r.durationMs, logRef: r.logRef, tail: r.tail, purpose: "integrate", key });
-			return results;
-		} finally {
-			vcs.removeWorktree(path);
-		}
-	}
-
 	async function integrateLocked(source: string, opts: IntegrateOptions, specs: CheckSpec[], logicalFrom: string, signal: AbortSignal | undefined, onCheck?: (id: string) => void): Promise<IntegrateResult> {
 		const { message, task } = opts;
 		const key = integrationKey(logicalFrom, source, message);
@@ -107,7 +93,10 @@ export function createIntegrator(deps: IntegrateDeps): Integrator {
 		}
 		const commit = vcs.commitTree(merged.tree, [from], message);
 		faults.hit("after-merge-commit", key);
-		const checks = await runIntegrationChecks(specs, commit, key, signal, onCheck);
+		const checks = await runChecksInWorktree(specs, {
+			runId, vcs, store, slot: INTEGRATION_SLOT, commit, purpose: "integrate", key, signal, onCheck,
+			onProgress: deps.onProgress, progressOn: "each",
+		});
 		if (checks.some((check) => !check.passed)) {
 			append({ t: "integrate.failed", key, from, source, reason: "checks_failed", checks, message, task });
 			return { status: "checks_failed", checks };
