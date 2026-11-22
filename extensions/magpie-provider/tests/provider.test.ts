@@ -44,7 +44,7 @@ describe("configuration", () => {
 	it.each(["https://remote.example", "http://127.evil.example", "http://localhost.example"])("requires an explicit remote key: %s", url => {
 		expect(readConfig({ MAGPIE_BASE_URL: url }).apiKey).toBeUndefined();
 	});
-	it.each(["bad", "ftp://localhost", "http://user:secret@localhost", "http://localhost?", "http://localhost#", "http://localhost/v1/models", "http://localhost/prefix"])("rejects unsafe URL: %s", url => {
+	it.each(["bad", "ftp://localhost", "http://user:secret@localhost", "http://localhost?", "http://localhost#", "http://127.0.0.1:3425/?", "http://127.0.0.1:3425/#", "http://localhost/v1/models", "http://localhost/prefix"])("rejects unsafe URL: %s", url => {
 		expect(() => readConfig({ MAGPIE_BASE_URL: url })).toThrow("MAGPIE_BASE_URL");
 	});
 });

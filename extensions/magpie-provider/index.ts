@@ -10,6 +10,7 @@ import { loadModelsDevPricing } from "./catalog-pricing.ts";
 import { emptyMagpieCatalog, sharedMagpieCatalogs, type MagpieCatalogs } from "./catalog.ts";
 import { registerMagpieCompaction } from "./compaction.ts";
 import { registerMagpieFast } from "./fast.ts";
+import { parseMagpieGatewayOrigin } from "./gateway-url.ts";
 import { addMagpieModelAliases, assertMagpieAliasRoute, magpieRequestContext, resolveMagpieAlias, type MagpieModel } from "./model-aliases.ts";
 import { magpieModelName } from "./model-identity.ts";
 import { assertNativeCatalog } from "./models-config.ts";
@@ -32,16 +33,15 @@ export function isPlainRemote(origin: string): boolean {
 }
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
-	let url: URL;
-	try { url = new URL(env.MAGPIE_BASE_URL ?? "http://127.0.0.1:3425"); }
-	catch { throw new Error("MAGPIE_BASE_URL must be an HTTP(S) gateway origin."); }
-	if (!["http:", "https:"].includes(url.protocol) || url.username || url.password ||
-		url.href.includes('?') || url.href.includes('#') || !/^\/(?:v1\/?)?$/.test(url.pathname)) {
-		throw new Error("MAGPIE_BASE_URL must be an HTTP(S) origin, optionally ending in /v1, without credentials, query, or fragment.");
+	const parsed = parseMagpieGatewayOrigin(env.MAGPIE_BASE_URL ?? "http://127.0.0.1:3425", { allowV1: true });
+	if (!parsed.ok) {
+		throw new Error(parsed.reason === "invalid-url"
+			? "MAGPIE_BASE_URL must be an HTTP(S) gateway origin."
+			: "MAGPIE_BASE_URL must be an HTTP(S) origin, optionally ending in /v1, without credentials, query, or fragment.");
 	}
-	const loopback = isLoopbackHost(url.hostname);
+	const loopback = isLoopbackHost(parsed.url.hostname);
 	const apiKey = env.MAGPIE_API_KEY?.trim() || (loopback ? "magpie-pi" : undefined);
-	return { origin: url.origin, apiKey };
+	return { origin: parsed.origin, apiKey };
 }
 
 function object(value: unknown): value is Record<string, unknown> {

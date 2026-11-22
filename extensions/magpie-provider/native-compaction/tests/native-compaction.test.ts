@@ -67,6 +67,10 @@ describe("compact endpoint transport", () => {
 		"https://user:pass@gateway.example/v1",
 		"https://gateway.example/v1?x=1",
 		"https://gateway.example/v1#frag",
+		"http://127.0.0.1:3425/?",
+		"http://127.0.0.1:3425/#",
+		"https://gateway.example/v1?",
+		"https://gateway.example/v1#",
 		"https://gateway.example/v1/responses",
 		"https://gateway.example/v2",
 	])("fails closed on invalid base URL %j", (invalidUrl) => {

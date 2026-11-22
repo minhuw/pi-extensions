@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { parseMagpieGatewayOrigin } from "./gateway-url.ts";
 import type { MagpieModel } from "./model-aliases.ts";
 import { isMagpieQuotaError, queryMagpieQuotaWait, type MagpieConnection } from "./quota.ts";
 
@@ -82,12 +83,9 @@ async function connection(ctx: ExtensionContext): Promise<MagpieConnection> {
 	// runtime auth and a saved login that supersedes a stale selected baseUrl.
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model).catch(() => undefined);
 	if (!auth?.ok || !auth.apiKey) throw new Error("Magpie credentials are unavailable; check /login magpie.");
-	try {
-		const url = new URL(auth.baseUrl ?? ctx.model.baseUrl);
-		if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash
-			|| !/^\/(?:v1\/?)?$/.test(url.pathname)) throw new Error();
-		return { origin: url.origin, apiKey: auth.apiKey };
-	} catch { throw new Error("Magpie gateway configuration is invalid; check /login magpie."); }
+	const parsed = parseMagpieGatewayOrigin(auth.baseUrl ?? ctx.model.baseUrl, { allowV1: true });
+	if (!parsed.ok) throw new Error("Magpie gateway configuration is invalid; check /login magpie.");
+	return { origin: parsed.origin, apiKey: auth.apiKey };
 }
 function authTag(config: MagpieConnection): string {
 	return createHash("sha256").update(config.origin).update("\0").update(config.apiKey).digest("hex");

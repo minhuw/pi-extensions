@@ -6,6 +6,7 @@ import {
 	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
 import { calculateCost, type Message, type Model, type Usage } from "@earendil-works/pi-ai";
+import { parseMagpieGatewayOrigin } from "../gateway-url.ts";
 
 // Keep the persisted discriminator so existing v1/v2 sessions remain replayable.
 export const NATIVE_COMPACTION_KIND = "cliproxyapi-openai-native-compaction";
@@ -482,28 +483,20 @@ export function effectiveInputForBranch(params: {
 export function resolveCompactUrl(baseUrl: string | undefined): string {
 	const trimmed = baseUrl?.trim();
 	if (!trimmed) throw new Error("The native Responses model has no base URL.");
-	let url: URL;
-	try {
-		url = new URL(trimmed);
-	} catch {
-		throw new Error("The native Responses model has an invalid base URL.");
-	}
-	if (
-		!["http:", "https:"].includes(url.protocol) ||
-		url.username ||
-		url.password ||
-		url.href.includes("?") ||
-		url.href.includes("#")
-	) {
-		throw new Error("The native Responses model base URL must be an HTTP(S) origin or /v1 URL without credentials, query, or fragment.");
-	}
-	if (/\/responses\/compact\/?$/.test(url.pathname)) {
-		throw new Error("The legacy /responses/compact endpoint is unsafe with native Responses; use the Magpie gateway origin or /v1 base URL.");
-	}
-	if (!/^\/(?:v1\/?)?$/.test(url.pathname)) {
+	const parsed = parseMagpieGatewayOrigin(trimmed, { allowV1: true });
+	if (!parsed.ok) {
+		if (parsed.reason === "invalid-url") {
+			throw new Error("The native Responses model has an invalid base URL.");
+		}
+		if (parsed.reason === "unsafe-origin") {
+			throw new Error("The native Responses model base URL must be an HTTP(S) origin or /v1 URL without credentials, query, or fragment.");
+		}
+		if (/\/responses\/compact\/?$/.test(parsed.url.pathname)) {
+			throw new Error("The legacy /responses/compact endpoint is unsafe with native Responses; use the Magpie gateway origin or /v1 base URL.");
+		}
 		throw new Error("The native Responses model base URL must be an HTTP(S) origin, optionally ending in /v1.");
 	}
-	return `${url.origin}/v1/responses`;
+	return `${parsed.origin}/v1/responses`;
 }
 
 export function buildCompactHeaders(params: {

@@ -448,4 +448,26 @@ describe("Magpie quota continuation", () => {
 		await h.emit("input", { text: "stale second", source: "interactive" }, second.ctx);
 		expect(second.setStatus).not.toHaveBeenCalled();
 	});
+
+	it.each([
+		"http://127.0.0.1:3425/?",
+		"http://127.0.0.1:3425/#",
+		"http://127.0.0.1:3425/v1?",
+		"http://127.0.0.1:3425/v1#",
+	])("rejects gateway URLs with bare query or fragment before querying or resuming: %s", async badBaseUrl => {
+		const h = harness();
+		h.auth.mockResolvedValue({ ok: true, apiKey: "private-key", baseUrl: badBaseUrl });
+		await h.fail();
+		expect(h.fetcher).not.toHaveBeenCalled();
+		expect(h.statuses.get("magpie-quota")).toContain("quota paused");
+		expect(h.sendMessage).not.toHaveBeenCalled();
+
+		// Also reject invalid URLs when resuming an already-scheduled wait.
+		const h2 = harness();
+		await h2.fail();
+		h2.auth.mockResolvedValue({ ok: true, apiKey: "private-key", baseUrl: badBaseUrl });
+		await vi.advanceTimersByTimeAsync(RETRY - NOW);
+		expect(h2.statuses.get("magpie-quota")).toContain("check /login magpie");
+		expect(h2.sendMessage).not.toHaveBeenCalled();
+	});
 });

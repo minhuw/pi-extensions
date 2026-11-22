@@ -392,6 +392,7 @@ describe("bounded and sanitized public requests", () => {
 
 	it.each([
 		"https://owner@example.com", "https://gateway.example/?secret=key", "https://gateway.example/#key",
+		"http://127.0.0.1:3425/?", "http://127.0.0.1:3425/#", "http://127.0.0.1:3425?", "http://127.0.0.1:3425#",
 		"https://gateway.example/v1", "file:///secret-gateway-key", "https://gateway.example@evil.example",
 	])("rejects an unsafe connection before any request: %s", async origin => {
 		const mock = http();

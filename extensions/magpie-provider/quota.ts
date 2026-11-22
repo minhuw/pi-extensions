@@ -1,3 +1,5 @@
+import { parseMagpieGatewayOrigin } from "./gateway-url.ts";
+
 export interface MagpieConnection { origin: string; apiKey: string }
 
 /** An observed retry opportunity, not a guarantee that the next request can run. */
@@ -44,12 +46,11 @@ function checkCancelled(signal?: AbortSignal): void {
 	if (signal?.aborted) throw cancelled(); // Never expose the caller's arbitrary abort reason.
 }
 function connectionOrigin(connection: MagpieConnection): string {
-	try {
-		const url = new URL(connection.origin);
-		if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash
-			|| url.pathname !== "/" || !connection.apiKey.trim() || /[\r\n]/.test(connection.apiKey)) throw new Error();
-		return url.origin;
-	} catch { throw new Error("Invalid Magpie connection; check the gateway origin and API credentials."); }
+	const parsed = parseMagpieGatewayOrigin(connection.origin, { allowV1: false });
+	if (!parsed.ok || typeof connection.apiKey !== "string" || !connection.apiKey.trim() || /[\r\n]/.test(connection.apiKey)) {
+		throw new Error("Invalid Magpie connection; check the gateway origin and API credentials.");
+	}
+	return parsed.origin;
 }
 
 // Race both headers and body reads, even when an underlying transport ignores abort.
