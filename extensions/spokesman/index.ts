@@ -123,6 +123,8 @@ interface RunSpokesmanRewriteOptions {
 }
 
 const configPath = () => join(getAgentDir(), "spokesman.json");
+const INVALID_MODEL_WARNING =
+	'Invalid spokesman model name. Provide a model id like "openai/gpt-5.4" or "claude-haiku-4-5".';
 
 function isMode(value: unknown): value is SpokesmanMode {
 	return value === "auto" || value === "always";
@@ -141,6 +143,15 @@ function validModelSpec(value: string): string | undefined {
 	if (!trimmed) return undefined;
 	if (RESERVED_SUBCOMMANDS.has(trimmed.toLowerCase())) return undefined;
 	return trimmed;
+}
+
+function parseModelAndMode(raw: string): { modelSpec: string; mode?: SpokesmanMode } | undefined {
+	const trimmed = raw.trim();
+	const parts = trimmed.split(/\s+/);
+	const modeCandidate = parts.length === 2 ? parts[1]?.toLowerCase() : undefined;
+	const mode = isMode(modeCandidate) ? modeCandidate : undefined;
+	const modelSpec = validModelSpec(mode ? parts[0]! : trimmed);
+	return modelSpec ? { modelSpec, mode } : undefined;
 }
 
 function parseMainModels(value: unknown): string[] | undefined {
@@ -485,14 +496,13 @@ function extractTextFromContent(content: unknown): string {
 		.join("\n\n");
 }
 
+function hasHiddenOriginalMarker(text: string): boolean {
+	return text.startsWith(HIDDEN_ORIGINAL_MARKER.trim());
+}
+
 function stripHiddenOriginalMarker(text: string): string {
-	if (text.startsWith(HIDDEN_ORIGINAL_MARKER)) {
-		return text.slice(HIDDEN_ORIGINAL_MARKER.length);
-	}
-	if (text.startsWith(HIDDEN_ORIGINAL_MARKER.trim())) {
-		return text.slice(HIDDEN_ORIGINAL_MARKER.trim().length).replace(/^\n/, "");
-	}
-	return text;
+	if (!hasHiddenOriginalMarker(text)) return text;
+	return text.slice(HIDDEN_ORIGINAL_MARKER.trim().length).replace(/^\n/, "");
 }
 
 export function summarizeToolArgs(toolName: string, args: unknown): string {
@@ -726,28 +736,27 @@ function collectSessionStats(ctx: ExtensionContext): {
 }
 
 export default function spokesmanExtension(pi: ExtensionAPI): void {
-	const rewrittenTargetIds = new Set<string>();
-	const latestRewriteByTargetId = new Map<string, { entryId: string; data: SpokesmanRewriteData }>();
+	const latestRewriteTextByTargetId = new Map<string, string>();
 	const supersededRewriteEntryIds = new Set<string>();
 	const warnedMissingModels = new Set<string>();
 	let currentTurnWorkItems: TrackedWorkItem[] = [];
 	let pendingRewrite: Omit<SpokesmanRewriteData, "targetEntryId"> | undefined;
 
 	function syncRewriteRecordsFromBranch(ctx: ExtensionContext): void {
-		rewrittenTargetIds.clear();
-		latestRewriteByTargetId.clear();
+		latestRewriteTextByTargetId.clear();
 		supersededRewriteEntryIds.clear();
+		const latestEntryIdByTargetId = new Map<string, string>();
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type !== "custom" || entry.customType !== SPOKESMAN_REWRITE_ENTRY) continue;
 			const data = entry.data as SpokesmanRewriteData | undefined;
 			if (!data) continue;
 			if (data.targetEntryId) {
-				rewrittenTargetIds.add(data.targetEntryId);
-				const previous = latestRewriteByTargetId.get(data.targetEntryId);
-				if (previous) {
-					supersededRewriteEntryIds.add(previous.entryId);
+				const previousEntryId = latestEntryIdByTargetId.get(data.targetEntryId);
+				if (previousEntryId) {
+					supersededRewriteEntryIds.add(previousEntryId);
 				}
-				latestRewriteByTargetId.set(data.targetEntryId, { entryId: entry.id, data });
+				latestEntryIdByTargetId.set(data.targetEntryId, entry.id);
+				latestRewriteTextByTargetId.set(data.targetEntryId, data.rewrittenText);
 			}
 		}
 	}
@@ -769,13 +778,10 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 
 	pi.registerMarkdownTransformer((markdown, context) => {
 		if (context.messageType === "assistant") {
-			if (
-				markdown.startsWith(HIDDEN_ORIGINAL_MARKER) ||
-				markdown.startsWith(HIDDEN_ORIGINAL_MARKER.trim())
-			) {
+			if (hasHiddenOriginalMarker(markdown)) {
 				return "";
 			}
-			if (context.messageId && rewrittenTargetIds.has(context.messageId)) {
+			if (context.messageId && latestRewriteTextByTargetId.has(context.messageId)) {
 				return "";
 			}
 		}
@@ -959,10 +965,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 
 		const rawText = extractTextFromContent(msg.content).trim();
 		if (!rawText) return undefined;
-		if (
-			rawText.startsWith(HIDDEN_ORIGINAL_MARKER) ||
-			rawText.startsWith(HIDDEN_ORIGINAL_MARKER.trim())
-		) {
+		if (hasHiddenOriginalMarker(rawText)) {
 			return undefined;
 		}
 
@@ -1044,7 +1047,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 		const rewrite = pendingRewrite;
 		pendingRewrite = undefined;
 		if (event.messageEntryId) {
-			rewrittenTargetIds.add(event.messageEntryId);
+			latestRewriteTextByTargetId.set(event.messageEntryId, rewrite.rewrittenText);
 		}
 		const data: SpokesmanRewriteData = {
 			...rewrite,
@@ -1102,7 +1105,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 			if (!Array.isArray(assistantMsg.content)) return message;
 
 			const targetRewrite = branchEntry
-				? latestRewriteByTargetId.get(branchEntry.id)?.data.rewrittenText
+				? latestRewriteTextByTargetId.get(branchEntry.id)
 				: undefined;
 
 			let messageModified = false;
@@ -1127,10 +1130,7 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 					}
 					continue;
 				}
-				if (
-					block.text.startsWith(HIDDEN_ORIGINAL_MARKER) ||
-					block.text.startsWith(HIDDEN_ORIGINAL_MARKER.trim())
-				) {
+				if (hasHiddenOriginalMarker(block.text)) {
 					messageModified = true;
 					nextContent.push({
 						...block,
@@ -1419,25 +1419,17 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 					return;
 				}
 
-				const parts = rest.split(/\s+/);
-				const maybeMode = parts.length === 2 && isMode(parts[1]?.toLowerCase())
-					? (parts[1]!.toLowerCase() as SpokesmanMode)
-					: undefined;
-				const modelCandidate = maybeMode ? parts[0]! : rest;
-				const validSpec = validModelSpec(modelCandidate);
-				if (!validSpec) {
-					ctx.ui.notify(
-						'Invalid spokesman model name. Provide a model id like "openai/gpt-5.4" or "claude-haiku-4-5".',
-						"warning",
-					);
+				const parsed = parseModelAndMode(rest);
+				if (!parsed) {
+					ctx.ui.notify(INVALID_MODEL_WARNING, "warning");
 					return;
 				}
 				if (refuseWrite()) return;
-				const nextMode = maybeMode ?? configured.mode;
-				configured = { ...configured, default: validSpec, mode: nextMode };
+				const nextMode = parsed.mode ?? configured.mode;
+				configured = { ...configured, default: parsed.modelSpec, mode: nextMode };
 				await writeConfig(configured);
 				ctx.ui.notify(
-					`Default for new sessions: ${validSpec} (${nextMode}). Sessions that have had a first run keep their spokesman.`,
+					`Default for new sessions: ${parsed.modelSpec} (${nextMode}). Sessions that have had a first run keep their spokesman.`,
 					"info",
 				);
 				refreshStatus(ctx, configured);
@@ -1510,35 +1502,29 @@ export default function spokesmanExtension(pi: ExtensionAPI): void {
 			}
 
 			// /spokesman <model> [auto|always]
-			const tokens = raw.split(/\s+/);
-			const inlineMode =
-				tokens.length === 2 && isMode(tokens[1]?.toLowerCase())
-					? (tokens[1]!.toLowerCase() as SpokesmanMode)
-					: undefined;
-			const rawModel = inlineMode ? tokens[0]! : raw;
-			const modelSpec = validModelSpec(rawModel);
-			if (!modelSpec) {
-				ctx.ui.notify(
-					'Invalid spokesman model name. Provide a model id like "openai/gpt-5.4" or "claude-haiku-4-5".',
-					"warning",
-				);
+			const parsed = parseModelAndMode(raw);
+			if (!parsed) {
+				ctx.ui.notify(INVALID_MODEL_WARNING, "warning");
 				return;
 			}
 
 			const state = readBranch(ctx);
-			const nextMode = inlineMode ?? effectiveMode(state, configured);
+			const nextMode = parsed.mode ?? effectiveMode(state, configured);
 			pi.appendEntry<SpokesmanEntry>(SPOKESMAN_STATE_ENTRY, {
-				active: modelSpec,
+				active: parsed.modelSpec,
 				mode: nextMode,
 			});
-			setStatus(ctx, formatStatusLabel(modelSpec, nextMode, configured.mainModels, ctx));
-			const disabledNote = isSameAsMainModel(modelSpec, ctx)
+			setStatus(
+				ctx,
+				formatStatusLabel(parsed.modelSpec, nextMode, configured.mainModels, ctx),
+			);
+			const disabledNote = isSameAsMainModel(parsed.modelSpec, ctx)
 				? " (currently disabled because the main model is the same)"
 				: !isMainModelEnabled(configured.mainModels, ctx.model)
 					? ` (currently inactive because the main model is not in: ${formatMainModels(configured.mainModels)})`
 					: "";
 			ctx.ui.notify(
-				`Spokesman switched to ${modelSpec} (${nextMode} mode)${disabledNote}.`,
+				`Spokesman switched to ${parsed.modelSpec} (${nextMode} mode)${disabledNote}.`,
 				"info",
 			);
 		},
