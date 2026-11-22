@@ -24,6 +24,20 @@ const ACCOUNT_VALUE_FLAGS = new Set([
 	"--scope", "--url", "--port", "--host", "--timeout",
 ]);
 
+const MANAGED_VERBS = new Set(["hooks", "pin", "ignores", "doctor", "context", "update", "install", "link", "skills"] as const);
+type ManagedVerb = typeof MANAGED_VERBS extends Set<infer T> ? T : never;
+
+function normalizeManagedArgv(rawArgv: readonly string[]): { argv: string[]; verb: ManagedVerb } | undefined {
+	const argv = [...rawArgv];
+	if (argv[0] === "hook-admin") argv[0] = "hooks";
+	if (argv[0] === "unpin") argv.splice(0, 1, "pin", "unpin");
+	if (argv[0] === "pin" && !["pin", "unpin"].includes(argv[1] ?? "")) argv.splice(1, 0, "pin");
+	if (argv[0] === "hooks" && argv[1]) argv[1] = argv[1].toLowerCase();
+	const verb = argv[0];
+	if (verb === undefined || !MANAGED_VERBS.has(verb as ManagedVerb)) return undefined;
+	return { argv, verb: verb as ManagedVerb };
+}
+
 /**
  * Account sign-in and the switches that turn on account uploads (scan health
  * counts and foundations, full DESIGN.md, critique reports, daily setup status).
@@ -165,22 +179,16 @@ export async function runOperation(options: RunEngineOptions, pi: Pick<Extension
 		const action = options.argv[0] === "live" ? "start" : options.argv[0] === "live-generate" ? "generate" : options.argv[0] === "live-complete" ? "reply" : "status";
 		return adapterResult(options, options.cwd ?? sessionCwd, { handoff: "impeccable_live", action, argv: options.argv.slice(1) }, `Use impeccable_live ${action}; the Pi session owner exclusively manages native boot, polling, acknowledgements and helper cleanup. Do not launch a competing poller or shell helper.`);
 	}
-	if (!["hooks", "hook-admin", "pin", "unpin", "ignores", "doctor", "context", "update", "install", "link", "skills"].includes(options.argv[0] ?? "")) {
+	const normalized = normalizeManagedArgv(options.argv);
+	if (!normalized) {
 		try { return await runEngine(options); }
 		finally { invalidateProjectConfigCache(); }
 	}
-	return serialized("pi-impeccable-management", () => runOperationUnqueued(options, pi, path.resolve(sessionCwd)));
+	return serialized("pi-impeccable-management", () => runOperationUnqueued(options, normalized.argv, normalized.verb, pi, path.resolve(sessionCwd)));
 }
 
-async function runOperationUnqueued(options: RunEngineOptions, pi: Pick<ExtensionAPI, "getCommands">, sessionCwd: string): Promise<OperationResult> {
+async function runOperationUnqueued(options: RunEngineOptions, argv: string[], verb: ManagedVerb, pi: Pick<ExtensionAPI, "getCommands">, sessionCwd: string): Promise<OperationResult> {
 	let cwd = options.cwd ?? sessionCwd;
-	const argv = [...options.argv];
-	if (argv[0] === "hook-admin") argv[0] = "hooks";
-	if (argv[0] === "unpin") argv.splice(0, 1, "pin", "unpin");
-	if (argv[0] === "pin" && !["pin", "unpin"].includes(argv[1] ?? "")) argv.splice(1, 0, "pin");
-	if (argv[0] === "hooks" && argv[1]) argv[1] = argv[1].toLowerCase();
-	const verb = argv[0];
-	if (!["hooks", "pin", "ignores", "doctor", "context", "update", "install", "link", "skills"].includes(verb ?? "")) return runEngine(options);
 	let root = path.resolve(cwd);
 	const committed: string[] = [];
 	let engineResult: EngineRunResult | undefined;
