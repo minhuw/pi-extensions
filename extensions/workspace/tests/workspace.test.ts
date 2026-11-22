@@ -5,29 +5,25 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getCurrentSystemPrompt, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import {
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-	ModelRuntime,
 	SessionManager,
-	SettingsManager,
-	type CreateAgentSessionRuntimeFactory,
 	type ExtensionAPI,
 	type ExtensionContext,
-	type ExtensionUIContext,
+	type ExtensionFactory,
 	type ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { runWorkspaceGc } from "../gc.ts";
 import workspaceExtension, {
 	CHILD_SESSION_HOOKS,
 	SESSION_LINK_TYPE,
-	settleWorkspaceSweeps,
-	WORKSPACE_SHARED_KEY,
 	type ChildSessionHook,
 } from "../index.ts";
+import {
+	createWorkspaceSandbox,
+	startWorkspaceSession,
+	type WorkspaceSandbox,
+} from "./support/session-harness.ts";
 import {
 	allowProjectPath,
 	denyProjectPath,
@@ -59,8 +55,6 @@ import {
 	WORKSPACE_LIMITS,
 } from "../registry.ts";
 
-const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
-
 function git(cwd: string, args: string[]): string {
 	return execFileSync("git", args, {
 		cwd,
@@ -84,40 +78,20 @@ function commitFile(dir: string, relPath: string, content: string, message = `co
 	git(dir, ["commit", "-m", message]);
 }
 
+let sandbox: WorkspaceSandbox;
 let sandboxRoot: string;
 let projectCwd: string;
 let outsideDir: string;
 let agentDir: string;
 let sessionDir: string;
-let prevAgentDir: string | undefined;
 
 beforeEach(async () => {
-	sandboxRoot = await mkdtemp(path.join(os.tmpdir(), "pi-workspace-test-"));
-	projectCwd = path.join(sandboxRoot, "project");
-	outsideDir = path.join(sandboxRoot, "outside");
-	agentDir = path.join(sandboxRoot, "agent");
-	sessionDir = path.join(sandboxRoot, "sessions");
-	await Promise.all([
-		mkdir(projectCwd, { recursive: true }),
-		mkdir(outsideDir, { recursive: true }),
-		mkdir(agentDir, { recursive: true }),
-		mkdir(sessionDir, { recursive: true }),
-	]);
-	prevAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = agentDir;
-	delete (globalThis as Record<symbol, unknown>)[WORKSPACE_SHARED_KEY];
-	delete (globalThis as Record<symbol, unknown>)[CHILD_SESSION_HOOKS];
+	sandbox = await createWorkspaceSandbox("pi-workspace-test-");
+	({ sandboxRoot, projectCwd, outsideDir, agentDir, sessionDir } = sandbox);
 });
 
 afterEach(async () => {
-	delete (globalThis as Record<symbol, unknown>)[WORKSPACE_SHARED_KEY];
-	delete (globalThis as Record<symbol, unknown>)[CHILD_SESSION_HOOKS];
-	if (prevAgentDir === undefined) {
-		delete process.env.PI_CODING_AGENT_DIR;
-	} else {
-		process.env.PI_CODING_AGENT_DIR = prevAgentDir;
-	}
-	await rm(sandboxRoot, { recursive: true, force: true });
+	await sandbox.cleanup();
 });
 
 describe("policy.ts — path canonicalization, access policy, and bash extraction", () => {
@@ -718,172 +692,24 @@ describe("registry.ts & gc.ts — workspace lifecycle, safety classification, an
 });
 
 describe("index.ts — Pi session integration, tool_call enforcement, child propagation, tool & /workspace command", () => {
-	function createRecordingUi(selectHandler?: (title: string, options: string[]) => Promise<string | undefined>) {
-		const notes: { message: string; type?: string }[] = [];
-		const prompts: { title: string; options: string[] }[] = [];
-		const noop = () => {};
-		const context = {
-			select: async (title: string, options: string[]) => {
-				prompts.push({ title, options });
-				return selectHandler ? selectHandler(title, options) : undefined;
-			},
-			confirm: async () => false,
-			input: async () => undefined,
-			editor: async () => undefined,
-			custom: async () => undefined,
-			onTerminalInput: () => noop,
-			setWorkingMessage: noop,
-			setWorkingVisible: noop,
-			setWorkingIndicator: noop,
-			setHiddenThinkingLabel: noop,
-			setWidget: noop,
-			setFooter: noop,
-			setHeader: noop,
-			setTitle: noop,
-			pasteToEditor: noop,
-			setEditorText: noop,
-			getEditorText: () => "",
-			addAutocompleteProvider: noop,
-			setEditorComponent: noop,
-			getEditorComponent: () => undefined,
-			getAllThemes: () => [],
-			getTheme: () => undefined,
-			setTheme: () => ({ success: false, error: "UI not available" }),
-			getToolsExpanded: () => false,
-			setToolsExpanded: noop,
-			notify: (message: string, type?: string) => {
-				notes.push({ message, type });
-			},
-			setStatus: noop,
-		} as unknown as ExtensionUIContext;
-		return { notes, prompts, context };
-	}
-
-	async function startPiSession(options?: {
+	function startPiSession(options?: {
 		cwd?: string;
 		mode?: "tui" | "rpc" | "print" | "json";
 		bindAsChild?: boolean;
 		sessionManager?: SessionManager;
 		selectHandler?: (title: string, opts: string[]) => Promise<string | undefined>;
-		extraFactories?: ((pi: any) => void)[];
+		extraFactories?: ExtensionFactory[];
 	}) {
-		const sessionCwd = options?.cwd ?? projectCwd;
-		const modelRuntime = await ModelRuntime.create({
-			credentials: new InMemoryCredentialStore(),
-			modelsPath: null,
-			refreshOnCreate: false,
-		});
-		const faux = fauxProvider({
-			api: "workspace-test-api",
-			provider: "workspace-test",
-			models: [{ id: "test" }],
-		});
-		const settingsManager = SettingsManager.inMemory({
-			retry: { enabled: false },
-			compaction: { enabled: false, keepRecentTokens: 1 },
-		});
-		const ui = createRecordingUi(options?.selectHandler);
-		const capturedSystems: string[] = [];
-
-		faux.setResponses([
-			({ messages }) => {
-				capturedSystems.push(getCurrentSystemPrompt(messages));
-				return fauxAssistantMessage("ok");
-			},
-		]);
-
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({
-			cwd: runtimeCwd,
-			agentDir: runtimeAgentDir,
-			sessionManager,
-			sessionStartEvent,
-		}) => {
-			const services = await createAgentSessionServices({
-				cwd: runtimeCwd,
-				agentDir: runtimeAgentDir,
-				settingsManager,
-				modelRuntime,
-				resourceLoaderOptions: {
-					noSkills: true,
-					noPromptTemplates: true,
-					noThemes: true,
-					noContextFiles: true,
-					additionalExtensionPaths: [extensionPath],
-					extensionFactories: [
-						(pi) => {
-							pi.registerProvider(faux.provider);
-						},
-						...(options?.extraFactories ?? []),
-					],
-				},
-			});
-			expect(services.resourceLoader.getExtensions().errors).toEqual([]);
-			const created = await createAgentSessionFromServices({
-				services,
-				sessionManager,
-				sessionStartEvent,
-				model: faux.getModel("test"),
-			});
-			return { ...created, services, diagnostics: services.diagnostics };
-		};
-
-		const runtime = await createAgentSessionRuntime(createRuntime, {
-			cwd: sessionCwd,
+		return startWorkspaceSession({
+			cwd: options?.cwd ?? projectCwd,
 			agentDir,
-			sessionManager: options?.sessionManager ?? SessionManager.create(sessionCwd, sessionDir),
+			sessionDir,
+			mode: options?.mode,
+			bindAsChild: options?.bindAsChild,
+			sessionManager: options?.sessionManager,
+			selectHandler: options?.selectHandler,
+			extraFactories: options?.extraFactories,
 		});
-
-		const errors: unknown[] = [];
-		const bind = () =>
-			runtime.session.bindExtensions(
-				options?.bindAsChild
-					? {}
-					: {
-							mode: options?.mode ?? "rpc",
-							uiContext: ui.context,
-							onError: (err) => {
-								errors.push(err);
-							},
-							commandContextActions: {
-								waitForIdle: () => runtime.session.waitForIdle(),
-								newSession: (o) => runtime.newSession(o),
-								fork: (id, o) => runtime.fork(id, o),
-								navigateTree: (id, o) => runtime.session.navigateTree(id, o),
-								switchSession: (p, o) => runtime.switchSession(p, o),
-								reload: () => runtime.session.reload(),
-							},
-						},
-			);
-		runtime.setRebindSession(bind);
-		await bind();
-		await settleWorkspaceSweeps();
-
-		return {
-			runtime,
-			session: runtime.session,
-			faux,
-			ui,
-			errors,
-			capturedSystems,
-			toolResultTexts: () =>
-				runtime.session.sessionManager
-					.getBranch()
-					.flatMap((entry) =>
-						entry.type === "message" && entry.message.role === "toolResult"
-							? [
-									{
-										isError: Boolean((entry.message as { isError?: boolean }).isError),
-										text: (
-											(entry.message as { content?: { text?: string }[] }).content ?? []
-										)
-											.map((part) => part.text ?? "")
-											.join(""),
-									},
-								]
-							: [],
-					),
-			dispose: () => runtime.dispose(),
-		};
 	}
 
 	it("AC-1 initializes .pi/workspaces/.gitignore, injects the workspace system prompt section, and manages child-session hooks across sessions", async () => {
@@ -1068,7 +894,7 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 			expect(fs.existsSync(resolvedHomeTarget)).toBe(false);
 			expect(fs.existsSync(path.join(outsideDir, "denied-symlink.txt"))).toBe(false);
 
-			const errorTexts = parent.toolResultTexts().filter((r) => r.isError).map((r) => r.text);
+			const errorTexts = parent.toolResults().filter((r) => r.isError).map((r) => r.text);
 			expect(errorTexts.length).toBeGreaterThanOrEqual(4);
 			for (const text of errorTexts) {
 				expect(text).toContain("Blocked write outside project working directory");
@@ -1166,7 +992,7 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 				expect(fs.existsSync(childBlockedWrite)).toBe(false);
 				expect(await readFile(unapprovedExisting, "utf8")).toBe("keep\n");
 				expect(fs.existsSync(childBlockedBash)).toBe(false);
-				const child1Errors = child1.toolResultTexts().filter((r) => r.isError);
+				const child1Errors = child1.toolResults().filter((r) => r.isError);
 				expect(child1Errors).toHaveLength(3);
 				for (const err of child1Errors) {
 					expect(err.text).toContain(workspacesDir(projectCwd));
@@ -1199,7 +1025,7 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 				await child2.session.prompt("child 2 session-link test");
 				expect(child2.ui.prompts).toEqual([]);
 				expect(fs.existsSync(linkBlockedFile)).toBe(false);
-				expect(child2.toolResultTexts().find((r) => r.isError)?.text).toContain(workspacesDir(projectCwd));
+				expect(child2.toolResults().find((r) => r.isError)?.text).toContain(workspacesDir(projectCwd));
 			} finally {
 				await child2.dispose();
 			}
@@ -1279,7 +1105,7 @@ describe("index.ts — Pi session integration, tool_call enforcement, child prop
 			]);
 			await h.session.prompt("exercise workspace tool actions");
 
-			const toolOutputs = h.toolResultTexts().map((r) => r.text);
+			const toolOutputs = h.toolResults().map((r) => r.text);
 			expect(toolOutputs.some((t) => t.includes('Workspace "exp-alpha" ready'))).toBe(true);
 			expect(toolOutputs.some((t) => t.includes('Pinned workspace "exp-alpha"'))).toBe(true);
 			expect(toolOutputs.some((t) => t.includes("- exp-alpha [PINNED] (pinned)"))).toBe(true);

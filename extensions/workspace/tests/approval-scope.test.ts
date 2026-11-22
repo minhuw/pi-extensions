@@ -1,201 +1,43 @@
 import * as fs from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import * as os from "node:os";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import {
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-	ModelRuntime,
-	SessionManager,
-	SettingsManager,
-	type CreateAgentSessionRuntimeFactory,
-	type ExtensionAPI,
-	type ExtensionContext,
-	type ExtensionUIContext,
-	type ToolCallEventResult,
-} from "@earendil-works/pi-coding-agent";
-import workspaceExtension, { CHILD_SESSION_HOOKS, settleWorkspaceSweeps, WORKSPACE_SHARED_KEY } from "../index.ts";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
+import workspaceExtension, { WORKSPACE_SHARED_KEY } from "../index.ts";
 import { evaluatePathAccess, policyFilePath, readProjectPolicy, resolveCanonicalPath } from "../policy.ts";
+import {
+	createWorkspaceSandbox,
+	startWorkspaceSession,
+	type WorkspaceSandbox,
+} from "./support/session-harness.ts";
 
-const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
-
+let sandbox: WorkspaceSandbox;
 let sandboxRoot: string;
 let projectCwd: string;
 let outsideDir: string;
 let agentDir: string;
 let sessionDir: string;
-let prevAgentDir: string | undefined;
 
 beforeEach(async () => {
-	sandboxRoot = await mkdtemp(path.join(os.tmpdir(), "pi-workspace-approval-scope-"));
-	projectCwd = path.join(sandboxRoot, "project");
-	outsideDir = path.join(sandboxRoot, "outside");
-	agentDir = path.join(sandboxRoot, "agent");
-	sessionDir = path.join(sandboxRoot, "sessions");
-	await Promise.all([
-		mkdir(projectCwd, { recursive: true }),
-		mkdir(outsideDir, { recursive: true }),
-		mkdir(agentDir, { recursive: true }),
-		mkdir(sessionDir, { recursive: true }),
-	]);
-	prevAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = agentDir;
-	delete (globalThis as Record<symbol, unknown>)[WORKSPACE_SHARED_KEY];
-	delete (globalThis as Record<symbol, unknown>)[CHILD_SESSION_HOOKS];
+	sandbox = await createWorkspaceSandbox("pi-workspace-approval-scope-");
+	({ sandboxRoot, projectCwd, outsideDir, agentDir, sessionDir } = sandbox);
 });
 
 afterEach(async () => {
-	delete (globalThis as Record<symbol, unknown>)[WORKSPACE_SHARED_KEY];
-	delete (globalThis as Record<symbol, unknown>)[CHILD_SESSION_HOOKS];
-	if (prevAgentDir === undefined) {
-		delete process.env.PI_CODING_AGENT_DIR;
-	} else {
-		process.env.PI_CODING_AGENT_DIR = prevAgentDir;
-	}
-	await rm(sandboxRoot, { recursive: true, force: true });
+	await sandbox.cleanup();
 });
 
 /** A real Pi session on the faux provider, bound with a UI whose `select` answers from `choices`, then "Deny". */
-async function startUiSession(choices: string[] = []) {
-	const modelRuntime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		refreshOnCreate: false,
-	});
-	const faux = fauxProvider({
-		api: "workspace-approval-scope-api",
-		provider: "workspace-approval-scope",
-		models: [{ id: "test" }],
-	});
-	const settingsManager = SettingsManager.inMemory({
-		retry: { enabled: false },
-		compaction: { enabled: false, keepRecentTokens: 1 },
-	});
-
-	const prompts: string[] = [];
-	const notes: string[] = [];
-	const noop = () => {};
-	const uiContext = {
-		select: async (title: string) => {
-			prompts.push(title);
-			return choices.shift() ?? "Deny";
-		},
-		confirm: async () => false,
-		input: async () => undefined,
-		editor: async () => undefined,
-		custom: async () => undefined,
-		onTerminalInput: () => noop,
-		setWorkingMessage: noop,
-		setWorkingVisible: noop,
-		setWorkingIndicator: noop,
-		setHiddenThinkingLabel: noop,
-		setWidget: noop,
-		setFooter: noop,
-		setHeader: noop,
-		setTitle: noop,
-		pasteToEditor: noop,
-		setEditorText: noop,
-		getEditorText: () => "",
-		addAutocompleteProvider: noop,
-		setEditorComponent: noop,
-		getEditorComponent: () => undefined,
-		getAllThemes: () => [],
-		getTheme: () => undefined,
-		setTheme: () => ({ success: false, error: "UI not available" }),
-		getToolsExpanded: () => false,
-		setToolsExpanded: noop,
-		notify: (message: string) => {
-			notes.push(message);
-		},
-		setStatus: noop,
-	} as unknown as ExtensionUIContext;
-
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
-		cwd: runtimeCwd,
-		agentDir: runtimeAgentDir,
-		sessionManager,
-		sessionStartEvent,
-	}) => {
-		const services = await createAgentSessionServices({
-			cwd: runtimeCwd,
-			agentDir: runtimeAgentDir,
-			settingsManager,
-			modelRuntime,
-			resourceLoaderOptions: {
-				noSkills: true,
-				noPromptTemplates: true,
-				noThemes: true,
-				noContextFiles: true,
-				additionalExtensionPaths: [extensionPath],
-				extensionFactories: [
-					(pi) => {
-						pi.registerProvider(faux.provider);
-					},
-				],
-			},
-		});
-		expect(services.resourceLoader.getExtensions().errors).toEqual([]);
-		const created = await createAgentSessionFromServices({
-			services,
-			sessionManager,
-			sessionStartEvent,
-			model: faux.getModel("test"),
-		});
-		return { ...created, services, diagnostics: services.diagnostics };
-	};
-
-	const runtime = await createAgentSessionRuntime(createRuntime, {
+function startUiSession(choices: string[] = []) {
+	return startWorkspaceSession({
 		cwd: projectCwd,
 		agentDir,
-		sessionManager: SessionManager.create(projectCwd, sessionDir),
+		sessionDir,
+		choices,
+		api: "workspace-approval-scope-api",
+		provider: "workspace-approval-scope",
 	});
-	const errors: unknown[] = [];
-	await runtime.session.bindExtensions({
-		mode: "rpc",
-		uiContext,
-		onError: (err) => {
-			errors.push(err);
-		},
-		commandContextActions: {
-			waitForIdle: () => runtime.session.waitForIdle(),
-			newSession: (o) => runtime.newSession(o),
-			fork: (id, o) => runtime.fork(id, o),
-			navigateTree: (id, o) => runtime.session.navigateTree(id, o),
-			switchSession: (p, o) => runtime.switchSession(p, o),
-			reload: () => runtime.session.reload(),
-		},
-	});
-	// The automatic sweep stamps .registry.json; let it finish before a test seeds or compares state files.
-	await settleWorkspaceSweeps();
-
-	return {
-		session: runtime.session,
-		faux,
-		prompts,
-		notes,
-		errors,
-		toolResults: () =>
-			runtime.session.sessionManager
-				.getBranch()
-				.flatMap((entry) =>
-					entry.type === "message" && entry.message.role === "toolResult"
-						? [
-								{
-									isError: Boolean((entry.message as { isError?: boolean }).isError),
-									text: ((entry.message as { content?: { text?: string }[] }).content ?? [])
-										.map((part) => part.text ?? "")
-										.join(""),
-								},
-							]
-						: [],
-				),
-		dispose: () => runtime.dispose(),
-	};
 }
 
 const TOOLS = ["write", "edit", "bash"] as const;

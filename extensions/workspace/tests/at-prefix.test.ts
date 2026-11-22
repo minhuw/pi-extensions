@@ -1,24 +1,11 @@
 import * as fs from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import {
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-	ModelRuntime,
-	SessionManager,
-	SettingsManager,
-	type CreateAgentSessionRuntimeFactory,
-	type ExtensionAPI,
-	type ExtensionContext,
-	type ToolCallEventResult,
-} from "@earendil-works/pi-coding-agent";
-import workspaceExtension, { CHILD_SESSION_HOOKS, WORKSPACE_SHARED_KEY } from "../index.ts";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
+import workspaceExtension from "../index.ts";
 import {
 	extractBashExternalWriteTargets,
 	extractBashWriteTargets,
@@ -26,43 +13,26 @@ import {
 	resolveCanonicalPath,
 } from "../policy.ts";
 import { readRegistry } from "../registry.ts";
+import {
+	createWorkspaceSandbox,
+	startWorkspaceSession,
+	type WorkspaceSandbox,
+} from "./support/session-harness.ts";
 
-const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
-
+let sandbox: WorkspaceSandbox;
 let sandboxRoot: string;
 let projectCwd: string;
 let outsideDir: string;
 let agentDir: string;
 let sessionDir: string;
-let prevAgentDir: string | undefined;
 
 beforeEach(async () => {
-	sandboxRoot = await mkdtemp(path.join(os.tmpdir(), "pi-workspace-at-prefix-"));
-	projectCwd = path.join(sandboxRoot, "project");
-	outsideDir = path.join(sandboxRoot, "outside");
-	agentDir = path.join(sandboxRoot, "agent");
-	sessionDir = path.join(sandboxRoot, "sessions");
-	await Promise.all([
-		mkdir(projectCwd, { recursive: true }),
-		mkdir(outsideDir, { recursive: true }),
-		mkdir(agentDir, { recursive: true }),
-		mkdir(sessionDir, { recursive: true }),
-	]);
-	prevAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = agentDir;
-	delete (globalThis as Record<symbol, unknown>)[WORKSPACE_SHARED_KEY];
-	delete (globalThis as Record<symbol, unknown>)[CHILD_SESSION_HOOKS];
+	sandbox = await createWorkspaceSandbox("pi-workspace-at-prefix-");
+	({ sandboxRoot, projectCwd, outsideDir, agentDir, sessionDir } = sandbox);
 });
 
 afterEach(async () => {
-	delete (globalThis as Record<symbol, unknown>)[WORKSPACE_SHARED_KEY];
-	delete (globalThis as Record<symbol, unknown>)[CHILD_SESSION_HOOKS];
-	if (prevAgentDir === undefined) {
-		delete process.env.PI_CODING_AGENT_DIR;
-	} else {
-		process.env.PI_CODING_AGENT_DIR = prevAgentDir;
-	}
-	await rm(sandboxRoot, { recursive: true, force: true });
+	await sandbox.cleanup();
 });
 
 /** Spellings Pi's write and edit tools resolve to a file in `outsideDir`, each with the file it names. */
@@ -77,83 +47,16 @@ function outsideSpellings(): { spelling: string; target: string }[] {
 }
 
 /** A real Pi session on the faux provider, bound without UI, so unapproved external writes are blocked. */
-async function startHeadlessSession() {
-	const modelRuntime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		refreshOnCreate: false,
-	});
-	const faux = fauxProvider({
-		api: "workspace-at-prefix-api",
-		provider: "workspace-at-prefix",
-		models: [{ id: "test" }],
-	});
-	const settingsManager = SettingsManager.inMemory({
-		retry: { enabled: false },
-		compaction: { enabled: false, keepRecentTokens: 1 },
-	});
-
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
-		cwd: runtimeCwd,
-		agentDir: runtimeAgentDir,
-		sessionManager,
-		sessionStartEvent,
-	}) => {
-		const services = await createAgentSessionServices({
-			cwd: runtimeCwd,
-			agentDir: runtimeAgentDir,
-			settingsManager,
-			modelRuntime,
-			resourceLoaderOptions: {
-				noSkills: true,
-				noPromptTemplates: true,
-				noThemes: true,
-				noContextFiles: true,
-				additionalExtensionPaths: [extensionPath],
-				extensionFactories: [
-					(pi) => {
-						pi.registerProvider(faux.provider);
-					},
-				],
-			},
-		});
-		expect(services.resourceLoader.getExtensions().errors).toEqual([]);
-		const created = await createAgentSessionFromServices({
-			services,
-			sessionManager,
-			sessionStartEvent,
-			model: faux.getModel("test"),
-		});
-		return { ...created, services, diagnostics: services.diagnostics };
-	};
-
-	const runtime = await createAgentSessionRuntime(createRuntime, {
+function startHeadlessSession() {
+	return startWorkspaceSession({
 		cwd: projectCwd,
 		agentDir,
-		sessionManager: SessionManager.create(projectCwd, sessionDir),
+		sessionDir,
+		binding: "headless",
+		api: "workspace-at-prefix-api",
+		provider: "workspace-at-prefix",
+		settleSweeps: false,
 	});
-	await runtime.session.bindExtensions({ mode: "print" });
-
-	return {
-		session: runtime.session,
-		faux,
-		toolResults: () =>
-			runtime.session.sessionManager
-				.getBranch()
-				.flatMap((entry) =>
-					entry.type === "message" && entry.message.role === "toolResult"
-						? [
-								{
-									isError: Boolean((entry.message as { isError?: boolean }).isError),
-									text: ((entry.message as { content?: { text?: string }[] }).content ?? [])
-										.map((part) => part.text ?? "")
-										.join(""),
-								},
-							]
-						: [],
-				),
-		dispose: () => runtime.dispose(),
-	};
 }
 
 type ToolCallHandler = (
