@@ -124,11 +124,6 @@ function extractAgentsLayoutExtensions(layoutSection: string): Set<string> {
 	return listed;
 }
 
-type EvalValue =
-	| { kind: "strings"; values: string[] }
-	| { kind: "object"; props: Map<string, EvalValue> }
-	| { kind: "param"; fnId: string; paramIndex: number; propPath: string[]; prefix: string; suffix: string };
-
 interface DiscoveredCommand {
 	command: string;
 	filePath: string;
@@ -170,11 +165,6 @@ function scriptKindForPath(filePath: string): ts.ScriptKind {
 	}
 }
 
-function getPropertyKeyName(name: ts.PropertyName): string | null {
-	if (ts.isIdentifier(name) || ts.isNumericLiteral(name)) return name.text;
-	return getStringLiteralValue(name);
-}
-
 function combineStringParts(left: string[], right: string[]): string[] {
 	const result: string[] = [];
 	for (const a of left) {
@@ -185,78 +175,16 @@ function combineStringParts(left: string[], right: string[]): string[] {
 	return result;
 }
 
-function evaluateExpression(expr: ts.Expression, env: Map<string, EvalValue>): EvalValue | null {
+function evaluateStringValues(expr: ts.Expression, env: Map<string, string[]>): string[] | null {
 	const node = unwrapExpression(expr);
 
 	const literal = getStringLiteralValue(node);
 	if (literal !== null) {
-		return { kind: "strings", values: [literal] };
+		return [literal];
 	}
 
 	if (ts.isIdentifier(node)) {
 		return env.get(node.text) ?? null;
-	}
-
-	if (ts.isPropertyAccessExpression(node)) {
-		const target = evaluateExpression(node.expression, env);
-		if (!target) return null;
-		if (target.kind === "object") {
-			return target.props.get(node.name.text) ?? null;
-		}
-		if (target.kind === "param" && target.prefix === "" && target.suffix === "") {
-			return {
-				kind: "param",
-				fnId: target.fnId,
-				paramIndex: target.paramIndex,
-				propPath: [...target.propPath, node.name.text],
-				prefix: "",
-				suffix: "",
-			};
-		}
-		return null;
-	}
-
-	if (ts.isElementAccessExpression(node)) {
-		const target = evaluateExpression(node.expression, env);
-		const key = getStringLiteralValue(unwrapExpression(node.argumentExpression));
-		if (!target || key === null) return null;
-		if (target.kind === "object") {
-			return target.props.get(key) ?? null;
-		}
-		if (target.kind === "param" && target.prefix === "" && target.suffix === "") {
-			return {
-				kind: "param",
-				fnId: target.fnId,
-				paramIndex: target.paramIndex,
-				propPath: [...target.propPath, key],
-				prefix: "",
-				suffix: "",
-			};
-		}
-		return null;
-	}
-
-	if (ts.isObjectLiteralExpression(node)) {
-		const props = new Map<string, EvalValue>();
-		for (const prop of node.properties) {
-			if (ts.isPropertyAssignment(prop)) {
-				const key = getPropertyKeyName(prop.name);
-				if (key === null) continue;
-				const value = evaluateExpression(prop.initializer, env);
-				if (value) props.set(key, value);
-			} else if (ts.isShorthandPropertyAssignment(prop)) {
-				const value = env.get(prop.name.text);
-				if (value) props.set(prop.name.text, value);
-			} else if (ts.isSpreadAssignment(prop)) {
-				const spreadVal = evaluateExpression(prop.expression, env);
-				if (spreadVal?.kind === "object") {
-					for (const [k, v] of spreadVal.props) {
-						props.set(k, v);
-					}
-				}
-			}
-		}
-		return { kind: "object", props };
 	}
 
 	if (ts.isArrayLiteralExpression(node)) {
@@ -264,45 +192,31 @@ function evaluateExpression(expr: ts.Expression, env: Map<string, EvalValue>): E
 		for (const elem of node.elements) {
 			if (ts.isOmittedExpression(elem)) return null;
 			const targetExpr = ts.isSpreadElement(elem) ? elem.expression : elem;
-			const val = evaluateExpression(targetExpr, env);
-			if (!val || val.kind !== "strings") return null;
-			values.push(...val.values);
+			const val = evaluateStringValues(targetExpr, env);
+			if (!val) return null;
+			values.push(...val);
 		}
-		return { kind: "strings", values };
+		return values;
 	}
 
 	if (ts.isTemplateExpression(node)) {
-		if (node.templateSpans.length === 1) {
-			const span = node.templateSpans[0]!;
-			const spanVal = evaluateExpression(span.expression, env);
-			if (spanVal?.kind === "param") {
-				return {
-					kind: "param",
-					fnId: spanVal.fnId,
-					paramIndex: spanVal.paramIndex,
-					propPath: spanVal.propPath,
-					prefix: `${node.head.text}${spanVal.prefix}`,
-					suffix: `${spanVal.suffix}${span.literal.text}`,
-				};
-			}
-		}
 		let current = [node.head.text];
 		for (const span of node.templateSpans) {
-			const spanVal = evaluateExpression(span.expression, env);
-			if (!spanVal || spanVal.kind !== "strings") return null;
-			current = combineStringParts(current, spanVal.values);
+			const spanValues = evaluateStringValues(span.expression, env);
+			if (!spanValues) return null;
+			current = combineStringParts(current, spanValues);
 			if (span.literal.text.length > 0) {
 				current = combineStringParts(current, [span.literal.text]);
 			}
 		}
-		return { kind: "strings", values: current };
+		return current;
 	}
 
 	if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-		const left = evaluateExpression(node.left, env);
-		const right = evaluateExpression(node.right, env);
-		if (left?.kind === "strings" && right?.kind === "strings") {
-			return { kind: "strings", values: combineStringParts(left.values, right.values) };
+		const left = evaluateStringValues(node.left, env);
+		const right = evaluateStringValues(node.right, env);
+		if (left && right) {
+			return combineStringParts(left, right);
 		}
 		return null;
 	}
@@ -310,107 +224,16 @@ function evaluateExpression(expr: ts.Expression, env: Map<string, EvalValue>): E
 	return null;
 }
 
-function bindBindingName(name: ts.BindingName, value: EvalValue | null, env: Map<string, EvalValue>): void {
+function clearBindingNames(name: ts.BindingName, env: Map<string, string[]>): void {
 	if (ts.isIdentifier(name)) {
-		if (value) env.set(name.text, value);
-		else env.delete(name.text);
+		env.delete(name.text);
 		return;
 	}
-	if (ts.isObjectBindingPattern(name)) {
-		for (const elem of name.elements) {
-			if (elem.dotDotDotToken) continue;
-			const propName = elem.propertyName
-				? getPropertyKeyName(elem.propertyName)
-				: ts.isIdentifier(elem.name)
-					? elem.name.text
-					: null;
-			let propVal: EvalValue | null = null;
-			if (propName !== null && value) {
-				if (value.kind === "object") {
-					propVal = value.props.get(propName) ?? null;
-				} else if (value.kind === "param" && value.prefix === "" && value.suffix === "") {
-					propVal = {
-						kind: "param",
-						fnId: value.fnId,
-						paramIndex: value.paramIndex,
-						propPath: [...value.propPath, propName],
-						prefix: "",
-						suffix: "",
-					};
-				}
-			}
-			bindBindingName(elem.name, propVal, env);
-		}
-		return;
-	}
-	if (ts.isArrayBindingPattern(name)) {
-		for (const elem of name.elements) {
-			if (ts.isBindingElement(elem)) {
-				bindBindingName(elem.name, null, env);
-			}
+	for (const elem of name.elements) {
+		if (ts.isBindingElement(elem)) {
+			clearBindingNames(elem.name, env);
 		}
 	}
-}
-
-function resolvePropPath(value: EvalValue | null, propPath: readonly string[], prefix: string, suffix: string): EvalValue | null {
-	let current = value;
-	for (const key of propPath) {
-		if (!current) return null;
-		if (current.kind === "object") {
-			current = current.props.get(key) ?? null;
-		} else if (current.kind === "param" && current.prefix === "" && current.suffix === "") {
-			current = {
-				kind: "param",
-				fnId: current.fnId,
-				paramIndex: current.paramIndex,
-				propPath: [...current.propPath, key],
-				prefix: "",
-				suffix: "",
-			};
-		} else {
-			return null;
-		}
-	}
-	if (!current) return null;
-	if (current.kind === "strings") {
-		return { kind: "strings", values: current.values.map((v) => `${prefix}${v}${suffix}`) };
-	}
-	if (current.kind === "param") {
-		return {
-			kind: "param",
-			fnId: current.fnId,
-			paramIndex: current.paramIndex,
-			propPath: current.propPath,
-			prefix: `${prefix}${current.prefix}`,
-			suffix: `${current.suffix}${suffix}`,
-		};
-	}
-	return null;
-}
-
-function resolveRelativeImport(fromFile: string, specifier: string, knownFiles: Set<string>): string | null {
-	if (!specifier.startsWith(".")) return null;
-	const base = path.resolve(path.dirname(fromFile), specifier);
-	const candidates = [base];
-	const ext = path.extname(base);
-	if (ext === ".js" || ext === ".mjs" || ext === ".cjs") {
-		const stem = base.slice(0, -ext.length);
-		candidates.push(`${stem}.ts`, `${stem}.tsx`, `${stem}.mts`, `${stem}.cts`);
-	}
-	candidates.push(
-		`${base}.ts`,
-		`${base}.tsx`,
-		`${base}.mts`,
-		`${base}.js`,
-		`${base}.mjs`,
-		path.join(base, "index.ts"),
-		path.join(base, "index.tsx"),
-		path.join(base, "index.js"),
-	);
-	for (const candidate of candidates) {
-		if (knownFiles.has(candidate)) return candidate;
-	}
-	return null;
 }
 
 function extensionNameFromFilePath(filePath: string): string | null {
@@ -455,405 +278,140 @@ function collectProductionExtensionSourceFiles(rootDir: string): string[] {
 	return files.sort();
 }
 
-interface ParsedModuleInfo {
-	filePath: string;
-	sourceFile: ts.SourceFile;
-	namedImports: Map<string, { targetFile: string; exportName: string }>;
-	namespaceImports: Map<string, string>;
-	reExports: Map<string, { targetFile: string; exportName: string }>;
-	exportedConsts: Map<string, EvalValue>;
-	topLevelEnv: Map<string, EvalValue>;
-}
+function discoverRegisteredCommandsFromFile(filePath: string, sourceText: string): DiscoveredCommand[] {
+	const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true, scriptKindForPath(filePath));
+	const topLevelEnv = new Map<string, string[]>();
 
-interface HelperRequirement {
-	fnId: string;
-	paramIndex: number;
-	propPath: string[];
-	prefix: string;
-	suffix: string;
-	definedAt: string;
-}
-
-interface RecordedCall {
-	targetFnId: string;
-	args: (EvalValue | null)[];
-	filePath: string;
-	line: number;
-}
-
-function isExportedStatement(node: ts.Node): boolean {
-	if (!ts.canHaveModifiers(node)) return false;
-	const modifiers = ts.getModifiers(node);
-	return Boolean(modifiers?.some((mod) => mod.kind === ts.SyntaxKind.ExportKeyword));
-}
-
-function isDefaultExported(node: ts.Node): boolean {
-	if (!ts.canHaveModifiers(node)) return false;
-	const modifiers = ts.getModifiers(node);
-	return Boolean(modifiers?.some((mod) => mod.kind === ts.SyntaxKind.DefaultKeyword));
-}
-
-function discoverRegisteredCommandsFromSources(files: Map<string, string>): DiscoveredCommand[] {
-	const knownFiles = new Set(files.keys());
-	const modules = new Map<string, ParsedModuleInfo>();
-
-	for (const [filePath, sourceText] of files) {
-		const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true, scriptKindForPath(filePath));
-		const namedImports = new Map<string, { targetFile: string; exportName: string }>();
-		const namespaceImports = new Map<string, string>();
-		const reExports = new Map<string, { targetFile: string; exportName: string }>();
-		const exportedConsts = new Map<string, EvalValue>();
-		const topLevelEnv = new Map<string, EvalValue>();
-
-		for (const stmt of sourceFile.statements) {
-			if (ts.isImportDeclaration(stmt) && ts.isStringLiteral(stmt.moduleSpecifier)) {
-				const targetFile = resolveRelativeImport(filePath, stmt.moduleSpecifier.text, knownFiles);
-				if (!targetFile || !stmt.importClause) continue;
-				if (stmt.importClause.name) {
-					namedImports.set(stmt.importClause.name.text, { targetFile, exportName: "default" });
-				}
-				const bindings = stmt.importClause.namedBindings;
-				if (bindings) {
-					if (ts.isNamespaceImport(bindings)) {
-						namespaceImports.set(bindings.name.text, targetFile);
-					} else if (ts.isNamedImports(bindings)) {
-						for (const spec of bindings.elements) {
-							const exportName = spec.propertyName ? spec.propertyName.text : spec.name.text;
-							namedImports.set(spec.name.text, { targetFile, exportName });
-						}
-					}
-				}
-			} else if (ts.isExportDeclaration(stmt) && stmt.moduleSpecifier && ts.isStringLiteral(stmt.moduleSpecifier)) {
-				const targetFile = resolveRelativeImport(filePath, stmt.moduleSpecifier.text, knownFiles);
-				if (!targetFile || !stmt.exportClause || !ts.isNamedExports(stmt.exportClause)) continue;
-				for (const spec of stmt.exportClause.elements) {
-					const origName = spec.propertyName ? spec.propertyName.text : spec.name.text;
-					reExports.set(spec.name.text, { targetFile, exportName: origName });
-				}
-			}
-		}
-
-		for (const stmt of sourceFile.statements) {
-			if (!ts.isVariableStatement(stmt)) continue;
-			const exported = isExportedStatement(stmt);
-			for (const decl of stmt.declarationList.declarations) {
-				if (!decl.initializer) continue;
-				const val = evaluateExpression(decl.initializer, topLevelEnv);
-				bindBindingName(decl.name, val, topLevelEnv);
-				if (exported && ts.isIdentifier(decl.name) && val) {
-					exportedConsts.set(decl.name.text, val);
-				}
-			}
-		}
-
-		modules.set(filePath, {
-			filePath,
-			sourceFile,
-			namedImports,
-			namespaceImports,
-			reExports,
-			exportedConsts,
-			topLevelEnv,
-		});
-	}
-
-	const resolveExportTarget = (
-		filePath: string,
-		exportName: string,
-		visited = new Set<string>(),
-	): { targetFile: string; exportName: string } => {
-		const key = `${filePath}::${exportName}`;
-		if (visited.has(key)) return { targetFile: filePath, exportName };
-		visited.add(key);
-		const mod = modules.get(filePath);
-		const reExport = mod?.reExports.get(exportName);
-		if (reExport) {
-			return resolveExportTarget(reExport.targetFile, reExport.exportName, visited);
-		}
-		return { targetFile: filePath, exportName };
-	};
-
-	// Populate imported top-level constants across modules.
-	for (const mod of modules.values()) {
-		for (const [localName, imp] of mod.namedImports) {
-			const resolved = resolveExportTarget(imp.targetFile, imp.exportName);
-			const exportedVal = modules.get(resolved.targetFile)?.exportedConsts.get(resolved.exportName);
-			if (exportedVal && !mod.topLevelEnv.has(localName)) {
-				mod.topLevelEnv.set(localName, exportedVal);
+	for (const stmt of sourceFile.statements) {
+		if (!ts.isVariableStatement(stmt)) continue;
+		const isConst = Boolean(stmt.declarationList.flags & ts.NodeFlags.Const);
+		for (const decl of stmt.declarationList.declarations) {
+			if (isConst && ts.isIdentifier(decl.name) && decl.initializer) {
+				const values = evaluateStringValues(decl.initializer, topLevelEnv);
+				if (values) topLevelEnv.set(decl.name.text, values);
+				else topLevelEnv.delete(decl.name.text);
+			} else {
+				clearBindingNames(decl.name, topLevelEnv);
 			}
 		}
 	}
 
 	const discovered: DiscoveredCommand[] = [];
-	const helperRequirements: HelperRequirement[] = [];
-	const callsByTarget = new Map<string, RecordedCall[]>();
+	const extension = extensionNameFromFilePath(filePath);
 
-	const recordCall = (call: RecordedCall): void => {
-		const list = callsByTarget.get(call.targetFnId);
-		if (list) list.push(call);
-		else callsByTarget.set(call.targetFnId, [call]);
+	const visitStatementList = (
+		statements: readonly ts.Statement[],
+		env: Map<string, string[]>,
+		isTopLevel: boolean,
+	): void => {
+		const blockEnv = new Map(env);
+		for (const stmt of statements) {
+			if (ts.isVariableStatement(stmt)) {
+				const isConst = Boolean(stmt.declarationList.flags & ts.NodeFlags.Const);
+				for (const decl of stmt.declarationList.declarations) {
+					if (!isTopLevel) {
+						if (isConst && ts.isIdentifier(decl.name) && decl.initializer) {
+							const values = evaluateStringValues(decl.initializer, blockEnv);
+							if (values) blockEnv.set(decl.name.text, values);
+							else blockEnv.delete(decl.name.text);
+						} else {
+							clearBindingNames(decl.name, blockEnv);
+						}
+					}
+					if (decl.initializer) {
+						visitNode(decl.initializer, blockEnv);
+					}
+				}
+				continue;
+			}
+			visitNode(stmt, blockEnv);
+		}
 	};
 
-	for (const mod of modules.values()) {
-		const { filePath, sourceFile } = mod;
-		const localFnIds = new Map<string, string>();
-		for (const stmt of sourceFile.statements) {
-			if (ts.isFunctionDeclaration(stmt) && stmt.name) {
-				const fnId = `${filePath}::${stmt.name.text}`;
-				localFnIds.set(stmt.name.text, fnId);
-				if (isDefaultExported(stmt)) {
-					localFnIds.set("default", `${filePath}::default`);
-				}
-			} else if (ts.isVariableStatement(stmt)) {
-				for (const decl of stmt.declarationList.declarations) {
-					if (ts.isIdentifier(decl.name) && decl.initializer) {
-						const init = unwrapExpression(decl.initializer);
-						if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
-							localFnIds.set(decl.name.text, `${filePath}::${decl.name.text}`);
-						}
-					}
-				}
-			}
+	const visitNode = (node: ts.Node, env: Map<string, string[]>): void => {
+		if (ts.isBlock(node)) {
+			visitStatementList(node.statements, env, false);
+			return;
 		}
 
-		const visitFunctionLike = (
-			fnNode: ts.FunctionLikeDeclarationBase,
-			fnId: string | null,
-			env: Map<string, EvalValue>,
-			forEachItemVal: EvalValue | null,
-			scopedFns: Map<string, string>,
-		): void => {
+		if (ts.isCaseClause(node) || ts.isDefaultClause(node)) {
+			visitStatementList(node.statements, env, false);
+			return;
+		}
+
+		if (ts.isForOfStatement(node)) {
+			const loopEnv = new Map(env);
+			const iterValues = evaluateStringValues(node.expression, env);
+			if (ts.isVariableDeclarationList(node.initializer) && node.initializer.declarations.length > 0) {
+				const decl = node.initializer.declarations[0]!;
+				if (ts.isIdentifier(decl.name) && iterValues && iterValues.length > 0) {
+					loopEnv.set(decl.name.text, iterValues);
+				} else {
+					clearBindingNames(decl.name, loopEnv);
+				}
+			}
+			visitNode(node.expression, env);
+			visitNode(node.statement, loopEnv);
+			return;
+		}
+
+		if (
+			ts.isFunctionDeclaration(node) ||
+			ts.isFunctionExpression(node) ||
+			ts.isArrowFunction(node) ||
+			ts.isMethodDeclaration(node) ||
+			ts.isConstructorDeclaration(node) ||
+			ts.isGetAccessorDeclaration(node) ||
+			ts.isSetAccessorDeclaration(node)
+		) {
 			const fnEnv = new Map(env);
-			fnNode.parameters.forEach((param, index) => {
-				if (index === 0 && forEachItemVal) {
-					bindBindingName(param.name, forEachItemVal, fnEnv);
-					return;
-				}
-				const paramVal: EvalValue | null = fnId
-					? { kind: "param", fnId, paramIndex: index, propPath: [], prefix: "", suffix: "" }
-					: null;
-				bindBindingName(param.name, paramVal, fnEnv);
-			});
-			if (fnNode.body) {
-				visitNode(fnNode.body, fnEnv, scopedFns);
+			for (const param of node.parameters) {
+				if (param.initializer) visitNode(param.initializer, fnEnv);
+				clearBindingNames(param.name, fnEnv);
 			}
-		};
+			if (node.body) {
+				visitNode(node.body, fnEnv);
+			}
+			return;
+		}
 
-		const visitStatementList = (
-			statements: readonly ts.Statement[],
-			env: Map<string, EvalValue>,
-			parentScopedFns: Map<string, string>,
-			isTopLevel: boolean,
-		): void => {
-			const blockEnv = new Map(env);
-			const scopedFns = new Map(parentScopedFns);
-			if (!isTopLevel) {
-				for (const stmt of statements) {
-					if (ts.isFunctionDeclaration(stmt) && stmt.name) {
-						scopedFns.set(stmt.name.text, `${filePath}::local@${stmt.pos}:${stmt.name.text}`);
-					} else if (ts.isVariableStatement(stmt)) {
-						for (const decl of stmt.declarationList.declarations) {
-							if (ts.isIdentifier(decl.name) && decl.initializer) {
-								const init = unwrapExpression(decl.initializer);
-								if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
-									scopedFns.set(decl.name.text, `${filePath}::local@${decl.pos}:${decl.name.text}`);
-								}
-							}
-						}
-					}
+		if (ts.isCallExpression(node)) {
+			const callee = unwrapExpression(node.expression);
+			if (ts.isPropertyAccessExpression(callee) && callee.name.text === "registerCommand") {
+				const line = lineNumberAt(sourceFile, node.getStart(sourceFile));
+				if (node.arguments.length === 0) {
+					throw new Error(`registerCommand() called without a command name at ${filePath}:${line}`);
 				}
-			}
-
-			for (const stmt of statements) {
-				if (ts.isVariableStatement(stmt)) {
-					for (const decl of stmt.declarationList.declarations) {
-						if (!decl.initializer) continue;
-						const init = unwrapExpression(decl.initializer);
-						const val = evaluateExpression(decl.initializer, blockEnv);
-						bindBindingName(decl.name, val, blockEnv);
-						if (ts.isIdentifier(decl.name) && (ts.isArrowFunction(init) || ts.isFunctionExpression(init))) {
-							const fnId = scopedFns.get(decl.name.text) ?? null;
-							visitFunctionLike(init, fnId, blockEnv, null, scopedFns);
-						} else {
-							visitNode(decl.initializer, blockEnv, scopedFns);
-						}
-					}
-					continue;
-				}
-				if (ts.isFunctionDeclaration(stmt)) {
-					const fnId = stmt.name
-						? scopedFns.get(stmt.name.text) ?? `${filePath}::${stmt.name.text}`
-						: isDefaultExported(stmt)
-							? `${filePath}::default`
-							: null;
-					visitFunctionLike(stmt, fnId, blockEnv, null, scopedFns);
-					continue;
-				}
-				visitNode(stmt, blockEnv, scopedFns);
-			}
-		};
-
-		const resolveCallTarget = (callee: ts.Expression, scopedFns: Map<string, string>): string | null => {
-			const unwrapped = unwrapExpression(callee);
-			if (ts.isIdentifier(unwrapped)) {
-				const imp = mod.namedImports.get(unwrapped.text);
-				if (imp) {
-					const resolved = resolveExportTarget(imp.targetFile, imp.exportName);
-					return `${resolved.targetFile}::${resolved.exportName}`;
-				}
-				return scopedFns.get(unwrapped.text) ?? null;
-			}
-			if (ts.isPropertyAccessExpression(unwrapped) && ts.isIdentifier(unwrapped.expression)) {
-				const targetFile = mod.namespaceImports.get(unwrapped.expression.text);
-				if (targetFile) {
-					const resolved = resolveExportTarget(targetFile, unwrapped.name.text);
-					return `${resolved.targetFile}::${resolved.exportName}`;
-				}
-			}
-			return null;
-		};
-
-		const visitNode = (node: ts.Node, env: Map<string, EvalValue>, scopedFns: Map<string, string>): void => {
-			if (ts.isBlock(node)) {
-				visitStatementList(node.statements, env, scopedFns, false);
-				return;
-			}
-
-			if (ts.isCaseClause(node) || ts.isDefaultClause(node)) {
-				visitStatementList(node.statements, env, scopedFns, false);
-				return;
-			}
-
-			if (ts.isForOfStatement(node)) {
-				const loopEnv = new Map(env);
-				const iterVal = evaluateExpression(node.expression, env);
-				if (ts.isVariableDeclarationList(node.initializer) && node.initializer.declarations.length > 0) {
-					const decl = node.initializer.declarations[0]!;
-					bindBindingName(decl.name, iterVal?.kind === "strings" ? iterVal : null, loopEnv);
-				}
-				visitNode(node.expression, env, scopedFns);
-				visitNode(node.statement, loopEnv, scopedFns);
-				return;
-			}
-
-			if (ts.isCallExpression(node)) {
-				const callee = unwrapExpression(node.expression);
-				if (ts.isPropertyAccessExpression(callee) && callee.name.text === "registerCommand") {
-					const line = lineNumberAt(sourceFile, node.getStart(sourceFile));
-					if (node.arguments.length === 0) {
-						throw new Error(`registerCommand() called without a command name at ${filePath}:${line}`);
-					}
-					const firstArg = node.arguments[0]!;
-					const evaluated = evaluateExpression(firstArg, env);
-					if (evaluated?.kind === "strings" && evaluated.values.length > 0) {
-						for (const rawName of evaluated.values) {
-							discovered.push({
-								command: normalizeSlashCommand(rawName),
-								filePath,
-								extension: extensionNameFromFilePath(filePath),
-							});
-						}
-					} else if (evaluated?.kind === "param") {
-						helperRequirements.push({
-							fnId: evaluated.fnId,
-							paramIndex: evaluated.paramIndex,
-							propPath: evaluated.propPath,
-							prefix: evaluated.prefix,
-							suffix: evaluated.suffix,
-							definedAt: `${filePath}:${line}`,
+				const firstArg = node.arguments[0]!;
+				const resolved = evaluateStringValues(firstArg, env);
+				if (resolved && resolved.length > 0) {
+					for (const rawName of resolved) {
+						discovered.push({
+							command: normalizeSlashCommand(rawName),
+							filePath,
+							extension,
 						});
-					} else {
-						throw new Error(
-							`Could not statically resolve registerCommand(...) at ${filePath}:${line}: ${firstArg.getText(sourceFile)}`,
-						);
 					}
+				} else {
+					throw new Error(
+						`Could not statically resolve registerCommand(...) at ${filePath}:${line}: ${firstArg.getText(sourceFile)}`,
+					);
 				}
-
-				const targetFnId = resolveCallTarget(callee, scopedFns);
-				if (targetFnId) {
-					recordCall({
-						targetFnId,
-						args: node.arguments.map((arg) => evaluateExpression(arg, env)),
-						filePath,
-						line: lineNumberAt(sourceFile, node.getStart(sourceFile)),
-					});
-				}
-
-				if (
-					ts.isPropertyAccessExpression(callee) &&
-					callee.name.text === "forEach" &&
-					node.arguments.length > 0
-				) {
-					const iterVal = evaluateExpression(callee.expression, env);
-					const callback = unwrapExpression(node.arguments[0]!);
-					if (
-						iterVal?.kind === "strings" &&
-						(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))
-					) {
-						visitNode(callee.expression, env, scopedFns);
-						visitFunctionLike(callback, null, env, iterVal, scopedFns);
-						for (let i = 1; i < node.arguments.length; i++) {
-							visitNode(node.arguments[i]!, env, scopedFns);
-						}
-						return;
-					}
-				}
-			}
-
-			if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
-				visitFunctionLike(node, null, env, null, scopedFns);
-				return;
-			}
-
-			ts.forEachChild(node, (child) => visitNode(child, env, scopedFns));
-		};
-
-		visitStatementList(sourceFile.statements, mod.topLevelEnv, localFnIds, true);
-	}
-
-	// Resolve helper functions that wrap pi.registerCommand(...) via their call sites (supporting multi-hop helpers).
-	const pending: HelperRequirement[] = [...helperRequirements];
-	const seenReqs = new Set<string>();
-	while (pending.length > 0) {
-		const req = pending.shift()!;
-		const reqKey = `${req.fnId}|${req.paramIndex}|${req.propPath.join(".")}|${req.prefix}|${req.suffix}`;
-		if (seenReqs.has(reqKey)) continue;
-		seenReqs.add(reqKey);
-
-		const calls = callsByTarget.get(req.fnId) ?? [];
-		if (calls.length === 0) {
-			throw new Error(
-				`Found registerCommand helper ${req.fnId} (at ${req.definedAt}) with no production call sites to resolve its command name`,
-			);
-		}
-		for (const call of calls) {
-			const argVal = call.args[req.paramIndex] ?? null;
-			const resolved = resolvePropPath(argVal, req.propPath, req.prefix, req.suffix);
-			if (resolved?.kind === "strings" && resolved.values.length > 0) {
-				for (const rawName of resolved.values) {
-					discovered.push({
-						command: normalizeSlashCommand(rawName),
-						filePath: call.filePath,
-						extension: extensionNameFromFilePath(call.filePath),
-					});
-				}
-			} else if (resolved?.kind === "param") {
-				pending.push({
-					fnId: resolved.fnId,
-					paramIndex: resolved.paramIndex,
-					propPath: resolved.propPath,
-					prefix: resolved.prefix,
-					suffix: resolved.suffix,
-					definedAt: `${call.filePath}:${call.line}`,
-				});
-			} else {
-				throw new Error(
-					`Could not statically resolve argument ${req.paramIndex} (${req.propPath.join(".") || "<direct>"}) in call to ${req.fnId} at ${call.filePath}:${call.line}`,
-				);
 			}
 		}
-	}
 
+		ts.forEachChild(node, (child) => visitNode(child, env));
+	};
+
+	visitStatementList(sourceFile.statements, topLevelEnv, true);
+	return discovered;
+}
+
+function discoverRegisteredCommandsFromSources(files: Map<string, string>): DiscoveredCommand[] {
+	const discovered: DiscoveredCommand[] = [];
+	for (const [filePath, sourceText] of files) {
+		discovered.push(...discoverRegisteredCommandsFromFile(filePath, sourceText));
+	}
 	return discovered;
 }
 
@@ -1070,54 +628,24 @@ describe("command parity helpers", () => {
 		});
 	});
 
-	it("discovers direct, loop-template, constant, and cross-file helper registerCommand calls", () => {
+	it("discovers direct literal, local const, concatenation, and single-file for..of template registerCommand calls", () => {
 		const files = new Map<string, string>([
 			[
 				"/repo/extensions/alpha/index.ts",
 				`
 				const CONST_CMD = "alpha-const";
+				const PREFIX = "alpha-";
+				const KINDS = ["one", "two"] as const;
 				export default function alpha(pi: any) {
 					pi.registerCommand("alpha-direct", { handler: async () => {} });
 					pi.registerCommand(CONST_CMD, { handler: async () => {} });
-					for (const kind of ["one", "two"] as const) {
+					pi.registerCommand(PREFIX + "concat", { handler: async () => {} });
+					for (const kind of KINDS) {
 						pi.registerCommand(\`alpha-\${kind}\`, { handler: async () => {} });
 					}
-				}
-				`,
-			],
-			[
-				"/repo/extensions/beta/switch.ts",
-				`
-				export function registerMode(pi: any, mode: { name: string }) {
-					const { name } = mode;
-					pi.registerCommand(name, { handler: async () => {} });
-				}
-				`,
-			],
-			[
-				"/repo/extensions/beta/index.ts",
-				`
-				import { registerMode } from "./switch.ts";
-				const MODE = "beta-mode";
-				export default function beta(pi: any) {
-					registerMode(pi, { name: MODE });
-				}
-				`,
-			],
-			[
-				"/repo/extensions/gamma/lifecycle.ts",
-				`
-				export function registerLifecycle(pi: any, options: { command: string }) {
-					pi.registerCommand(options.command, { handler: async () => {} });
-				}
-				`,
-			],
-			[
-				"/repo/extensions/gamma/index.ts",
-				`
-				import { registerLifecycle } from "./lifecycle.ts";
-				export default function gamma(pi: any) {
-					registerLifecycle(pi, { command: "gamma-cmd" });
+					for (const suffix of ["three", "four"] as const) {
+						pi.registerCommand(\`alpha-\${suffix}\`, { handler: async () => {} });
+					}
 				}
 				`,
 			],
@@ -1125,12 +653,13 @@ describe("command parity helpers", () => {
 
 		const discovered = discoverRegisteredCommandsFromSources(files);
 		expect(discovered.map((d) => `${d.command}:${d.extension}`).sort()).toEqual([
+			"/alpha-concat:alpha",
 			"/alpha-const:alpha",
 			"/alpha-direct:alpha",
+			"/alpha-four:alpha",
 			"/alpha-one:alpha",
+			"/alpha-three:alpha",
 			"/alpha-two:alpha",
-			"/beta-mode:beta",
-			"/gamma-cmd:gamma",
 		]);
 	});
 
