@@ -5,8 +5,9 @@ import { integrationRef, runPaths } from "../../src/run/paths.ts";
 import { openRun } from "../../src/run/store.ts";
 import type { FaultPoint, Faults, StepResult } from "../../src/types.ts";
 import { hasHerderTrailer } from "../../src/vcs/git.ts";
+import { isolateGitConfig } from "../support/env.ts";
 import { withGitFixture } from "../support/git-fixture.ts";
-import { check, events, isolateGitConfig, type Run, setupRun, show, stepCommit } from "./support.ts";
+import { check, events, type Run, setupRun, show, stepCommit } from "./support.ts";
 
 isolateGitConfig();
 

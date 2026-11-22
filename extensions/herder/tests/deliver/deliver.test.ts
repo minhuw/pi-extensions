@@ -10,9 +10,10 @@ import { integrationRef, runPaths, worktreePath } from "../../src/run/paths.ts";
 import { openRun } from "../../src/run/store.ts";
 import type { RoleDefinition, Vcs } from "../../src/types.ts";
 import { hasHerderTrailer } from "../../src/vcs/git.ts";
+import { isolateGitConfig } from "../support/env.ts";
 import { FakeRunner, type FakeRule, fakeRole } from "../support/fake-runner.ts";
 import { type GitFixture, withGitFixture } from "../support/git-fixture.ts";
-import { check, events, isolateGitConfig, type Run, setupRun, stepCommit } from "../integrate/support.ts";
+import { check, events, type Run, setupRun, stepCommit } from "../support/helpers.ts";
 
 isolateGitConfig();
 

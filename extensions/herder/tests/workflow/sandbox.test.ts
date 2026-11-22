@@ -3,13 +3,7 @@ import { LIMITS } from "../../src/config.ts";
 import type { AgentOptions, IntegrateOptions, IntegrateResult, Limits, StepResult, WorkflowBridge } from "../../src/types.ts";
 import { runScript, startSandbox, syntaxProblem } from "../../src/workflow/sandbox.ts";
 import type { ScriptOutcome } from "../../src/workflow/sandbox.ts";
-
-interface Deferred<T> { promise: Promise<T>; resolve(value: T): void; reject(error: unknown): void }
-function deferred<T>(): Deferred<T> {
-	let resolve!: (value: T) => void, reject!: (error: unknown) => void;
-	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
-	return { promise, resolve, reject };
-}
+import { type Deferred, deferred } from "../support/helpers.ts";
 
 const ok = (key: string, extra: Partial<StepResult> = {}): StepResult => ({ status: "ok", key, text: `text ${key}`, reused: false, ...extra });
 

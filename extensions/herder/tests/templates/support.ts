@@ -1,12 +1,11 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadRoles } from "../../src/agents/roles.ts";
 import { DEFAULT_ROLE, LIMITS } from "../../src/config.ts";
 import type { AgentOptions, CheckResult, IntegrateOptions, IntegrateResult, StepResult, WorkflowBridge } from "../../src/types.ts";
 import { runScript } from "../../src/workflow/sandbox.ts";
 import type { ScriptOutcome } from "../../src/workflow/sandbox.ts";
+import { builtinRoles } from "../support/helpers.ts";
 
 export type TemplateName = "sequential" | "disjoint" | "explore";
 export const CHECKS = ["unit-tests", "typecheck"];
@@ -14,11 +13,7 @@ const TEMPLATE_DIR = fileURLToPath(new URL("../../templates/", import.meta.url))
 export const template = (name: TemplateName) => readFileSync(join(TEMPLATE_DIR, `${name}.js`), "utf8");
 
 /** The built-in roles only: an empty override dir keeps the user's own role files out of the tests. */
-export const ROLES = (() => {
-	const dir = mkdtempSync(join(tmpdir(), "herder-templates-roles-"));
-	try { return loadRoles({ overrideDir: dir }); }
-	finally { rmSync(dir, { recursive: true, force: true }); }
-})();
+export const ROLES = builtinRoles();
 export const ROLE_NAMES = [...ROLES.keys()];
 
 export const sha = (label: string) => Buffer.from(label).toString("hex").padEnd(40, "0").slice(0, 40);

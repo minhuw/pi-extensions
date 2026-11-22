@@ -8,9 +8,10 @@ import { createIntegrator } from "../../src/integrate/integrate.ts";
 import { integrationRef } from "../../src/run/paths.ts";
 import { openRun } from "../../src/run/store.ts";
 import type { DeliveryMode, Vcs } from "../../src/types.ts";
+import { isolateGitConfig } from "../support/env.ts";
 import { FakeRunner } from "../support/fake-runner.ts";
 import { type GitFixture, withGitFixture } from "../support/git-fixture.ts";
-import { events, isolateGitConfig, type Run, setupRun, stepCommit } from "../integrate/support.ts";
+import { events, type Run, setupRun, stepCommit } from "../support/helpers.ts";
 
 isolateGitConfig();
 

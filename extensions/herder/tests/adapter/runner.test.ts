@@ -7,10 +7,10 @@ import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/provid
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createRuntimeFactory } from "../../src/adapter/runtime.ts";
-import { loadRoles } from "../../src/agents/roles.ts";
 import { activeRun, openRun } from "../../src/run/store.ts";
 import type { StepCompletedEvent, StepFailedEvent } from "../../src/types.ts";
 import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
+import { builtinRoles } from "../support/helpers.ts";
 import { harness } from "./harness.ts";
 
 const GOAL = `# Goal: Look around
@@ -55,7 +55,7 @@ async function approvedRun(runtime: ModelRuntime, context: Record<string, unknow
 	// A linked worktree outside the checkout, under the test's temporary directory, with a folder name of its own.
 	const cwd = linked ? join(dir, "feature-checkout") : fixture.dir;
 	if (linked) fixture.git("worktree", "add", "-q", "-b", "feature", cwd);
-	const createRuntime = createRuntimeFactory({ roles: () => loadRoles({ overrideDir: join(dir, "no-role-overrides") }) });
+	const createRuntime = createRuntimeFactory({ roles: builtinRoles });
 	const h = harness({ cwd, sessionFile, context: { modelRegistry: new ModelRegistry(runtime), ...context }, options: { createRuntime } });
 	cleanups.push(h.shutdown);
 	await h.command("look around");

@@ -9,7 +9,7 @@ import type { LaunchOutcome } from "../../src/steps/launch.ts";
 import { POOL_SLOT } from "../../src/steps/worktrees.ts";
 import type { JournalEvent, JournalEventType, Vcs } from "../../src/types.ts";
 import { openVcs } from "../../src/vcs/git.ts";
-import { isolateGitConfig } from "../integrate/support.ts";
+import { isolateGitConfig } from "../support/env.ts";
 import { FakeRunner } from "../support/fake-runner.ts";
 import { withGitFixture, type GitFixture } from "../support/git-fixture.ts";
 import {

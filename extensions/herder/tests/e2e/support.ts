@@ -1,14 +1,11 @@
 // End-to-end helpers: the real extension registration and runtime composition over a git fixture, driven like the
 // main model drives it (commands, tool calls, and edits to goal.md/plan.md at the paths the /herder prompt names).
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { expect } from "vitest";
 import { PROMPT_TYPE } from "../../src/adapter/commands.ts";
 import { createRuntimeFactory } from "../../src/adapter/runtime.ts";
 import { FOLLOW_UP_TYPE } from "../../src/adapter/session.ts";
 import { planTasks } from "../../src/adapter/status.ts";
-import { loadRoles } from "../../src/agents/roles.ts";
 import { renderProgress } from "../../src/journal/render.ts";
 import type { LockOptions } from "../../src/run/lock.ts";
 import { refPrefix } from "../../src/run/paths.ts";
@@ -16,6 +13,9 @@ import { openRun, type RunStore } from "../../src/run/store.ts";
 import { harness } from "../adapter/harness.ts";
 import { FakeRunner, type FakeRule } from "../support/fake-runner.ts";
 import type { GitFixture } from "../support/git-fixture.ts";
+import { builtinRoles, deferred, until } from "../support/helpers.ts";
+
+export { deferred, until };
 
 export type Session = ReturnType<typeof harness>;
 
@@ -71,17 +71,9 @@ export function rules(hold?: Promise<unknown>): FakeRule[] {
 	];
 }
 
-export function deferred(): { promise: Promise<void>; resolve: () => void } {
-	let resolve!: () => void;
-	const promise = new Promise<void>((done) => { resolve = done; });
-	return { promise, resolve };
-}
-
-const NO_OVERRIDES = join(tmpdir(), "herder-e2e-no-role-overrides");
-
 /** A new adapter instance (as a new Pi session would load it) with the real runtime and `runner`. */
 export function openSession(fixture: GitFixture, runner: FakeRunner, cleanups: Array<() => Promise<void>>, opts: { sessionId?: string; hasUI?: boolean; lock?: LockOptions } = {}): Session {
-	const createRuntime = createRuntimeFactory({ roles: () => loadRoles({ overrideDir: NO_OVERRIDES }) });
+	const createRuntime = createRuntimeFactory({ roles: builtinRoles });
 	const h = harness({ cwd: fixture.dir, sessionId: opts.sessionId ?? "session-a", hasUI: opts.hasUI ?? true, options: { createRuntime, runner: () => runner, ...(opts.lock ? { lock: opts.lock } : {}) } });
 	cleanups.push(h.shutdown);
 	return h;
@@ -107,13 +99,6 @@ export async function startRun(h: Session, fixture: GitFixture, goal = "Greet th
 export async function approve(h: Session, started: Started): Promise<void> {
 	writeFileSync(started.goalPath, GOAL);
 	await expect(h.tool("herder_run", { action: "approve_goal" })).resolves.toMatchObject({ details: { approved: true } });
-}
-
-export async function until(condition: () => boolean, what: string, ms = 20_000): Promise<void> {
-	for (const end = Date.now() + ms; !condition();) {
-		if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	}
 }
 
 export const followUps = (h: Session) => h.sent.filter((entry) => entry.customType === FOLLOW_UP_TYPE);

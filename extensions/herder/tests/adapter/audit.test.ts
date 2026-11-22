@@ -1,17 +1,16 @@
 // herder_run { action: "start" } and the /herder-improve and /herder-simplify audit commands.
 import { readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseAudit, PROMPT_TYPE } from "../../src/adapter/commands.ts";
 import { auditSkillDir, skillText } from "../../src/adapter/prompts.ts";
 import { createRuntimeFactory } from "../../src/adapter/runtime.ts";
-import { loadRoles } from "../../src/agents/roles.ts";
 import { MAX_CLARIFYING_QUESTIONS, STATUS_KEY } from "../../src/config.ts";
 import { readLock } from "../../src/run/lock.ts";
 import { refPrefix } from "../../src/run/paths.ts";
 import { activeRun, listRuns, openRun } from "../../src/run/store.ts";
 import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
+import { builtinRoles } from "../support/helpers.ts";
 import { FakeRuntime, harness, VALID_GOAL } from "./harness.ts";
 
 const fixtures: GitFixture[] = [];
@@ -32,7 +31,7 @@ function setup(options: Partial<Parameters<typeof harness>[0]> = {}) {
 
 describe("herder_run start", () => {
 	it("creates a run with its refs, lock, and draft goal.md and returns the start prompt", async () => {
-		const factory = createRuntimeFactory({ roles: () => loadRoles({ overrideDir: join(tmpdir(), "herder-no-role-overrides") }) });
+		const factory = createRuntimeFactory({ roles: builtinRoles });
 		const { fixture, h } = setup({ options: { createRuntime: factory } });
 		const base = fixture.head();
 		const result = await h.tool("herder_run", { action: "start", goal: "Simplify: retire the old parser\n\n1. The parser in src/old.ts is unused." });

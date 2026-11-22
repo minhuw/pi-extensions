@@ -1,20 +1,19 @@
 // A gate_failed step keeps its commit so that a fix can build on it; neither integrate() nor herder_integrate takes it.
 import { writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createRuntimeFactory } from "../../src/adapter/runtime.ts";
 import type { HerderOptions } from "../../src/adapter/session.ts";
-import { loadRoles } from "../../src/agents/roles.ts";
 import { createIntegrator } from "../../src/integrate/integrate.ts";
 import { integrationRef, refPrefix, stepRef } from "../../src/run/paths.ts";
 import { activeRun, openRun, type RunStore } from "../../src/run/store.ts";
 import { createStepExecutor } from "../../src/steps/executor.ts";
 import { launchScript } from "../../src/steps/launch.ts";
 import { harness } from "../adapter/harness.ts";
+import { isolateGitConfig } from "../support/env.ts";
 import { FakeRunner, fakeRole, type FakeRule } from "../support/fake-runner.ts";
 import { createGitFixture, type GitFixture, withGitFixture } from "../support/git-fixture.ts";
-import { check, events, isolateGitConfig, type Run, setupRun, show, stepCommit } from "./support.ts";
+import { builtinRoles } from "../support/helpers.ts";
+import { check, events, type Run, setupRun, show, stepCommit } from "./support.ts";
 
 isolateGitConfig();
 
@@ -183,7 +182,7 @@ The project needs a fixed out.txt.
 
 	it("refuses the step key and the recorded commit on the real runtime, then integrates the ok fix by key", async () => {
 		const runner = new FakeRunner(RULES);
-		const createRuntime = createRuntimeFactory({ roles: () => loadRoles({ overrideDir: join(tmpdir(), "herder-no-role-overrides") }) });
+		const createRuntime = createRuntimeFactory({ roles: builtinRoles });
 		const { fixture, h, run } = await approvedRun({ createRuntime, runner: () => runner });
 		const base = fixture.head();
 		const failed = (await h.tool("herder_step", { prompt: "write out.txt", id: "impl", gate: "fixed" })).details;

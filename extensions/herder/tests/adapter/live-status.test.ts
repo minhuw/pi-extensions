@@ -1,15 +1,13 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { externalAgents } from "../../src/adapter/external-agents.ts";
 import { createRuntimeFactory } from "../../src/adapter/runtime.ts";
-import { loadRoles } from "../../src/agents/roles.ts";
 import { STATUS_KEY } from "../../src/config.ts";
 import { activeRun, openRun } from "../../src/run/store.ts";
 import { FakeRunner } from "../support/fake-runner.ts";
 import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
-import { deferred, until } from "../steps/harness.ts";
+import { builtinRoles, deferred, until } from "../support/helpers.ts";
 import { harness, VALID_GOAL } from "./harness.ts";
 
 const fixtures: GitFixture[] = [];
@@ -23,7 +21,7 @@ async function approved(real = false, slowCheck = false) {
 	const fixture = createGitFixture();
 	fixtures.push(fixture);
 	const runner = new FakeRunner([{ match: "make change", files: { "change.txt": "changed\n" } }]);
-	const createRuntime = createRuntimeFactory({ roles: () => loadRoles({ overrideDir: join(tmpdir(), "herder-no-overrides") }) });
+	const createRuntime = createRuntimeFactory({ roles: builtinRoles });
 	const h = harness({ cwd: fixture.dir, ...(real && { options: { createRuntime, runner: () => runner } }) });
 	cleanups.push(h.shutdown);
 	await h.command("make change");

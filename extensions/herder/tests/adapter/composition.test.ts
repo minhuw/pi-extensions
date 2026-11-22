@@ -1,17 +1,16 @@
 // The real runtime composition driven through the adapter's command and tools, with a fake agent runner.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CHECK_SLOT, createRuntimeFactory } from "../../src/adapter/runtime.ts";
 import { FOLLOW_UP_TYPE } from "../../src/adapter/session.ts";
-import { loadRoles } from "../../src/agents/roles.ts";
 import { readLock } from "../../src/run/lock.ts";
 import { refPrefix } from "../../src/run/paths.ts";
 import { activeRun, openRun } from "../../src/run/store.ts";
 import type { Vcs } from "../../src/types.ts";
 import { FakeRunner } from "../support/fake-runner.ts";
 import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
+import { builtinRoles } from "../support/helpers.ts";
 import { harness } from "./harness.ts";
 
 const GOAL = `# Goal: Create done.txt
@@ -40,7 +39,7 @@ async function approvedRun(wrap: (vcs: Vcs) => Vcs = (vcs) => vcs) {
 	const fixture = createGitFixture();
 	fixtures.push(fixture);
 	const runner = new FakeRunner([{ match: "create done.txt", files: { "done.txt": "done\n" }, text: "created done.txt" }]);
-	const factory = createRuntimeFactory({ roles: () => loadRoles({ overrideDir: join(tmpdir(), "herder-no-role-overrides") }) });
+	const factory = createRuntimeFactory({ roles: builtinRoles });
 	const createRuntime: typeof factory = (env) => factory({ ...env, vcs: wrap(env.vcs) });
 	const h = harness({ cwd: fixture.dir, options: { createRuntime, runner: () => runner } });
 	cleanups.push(h.shutdown);

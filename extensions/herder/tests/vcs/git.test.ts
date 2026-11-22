@@ -3,12 +3,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Worker } from "node:worker_threads";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TRAILER_FINGERPRINT, TRAILER_STEP } from "../../src/config.ts";
 import type { Vcs } from "../../src/types.ts";
 import {
 	checkGitVersion, GitError, hasHerderTrailer, openVcs, projectNameFromConfig, RefConflictError, repositoryName, requireGit, savedProjectName,
 } from "../../src/vcs/git.ts";
+import { isolateGitConfig } from "../support/env.ts";
 import { type GitFixture, withGitFixture } from "../support/git-fixture.ts";
 
 // The cases pika's projectFromCommonDir tests share (extensions/pika/tests/repository.test.ts): a run's `repo` is a session's project.
@@ -20,18 +21,7 @@ const PROJECT_CONFIGS = JSON.parse(readFileSync(new URL("../../../../services/pi
 	cases: { text: string; project: string | null; case: string }[];
 };
 
-// The Vcs inherits process.env; isolate it from the developer's global and system git configuration.
-const saved = { global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM };
-beforeAll(() => {
-	process.env.GIT_CONFIG_GLOBAL = "/dev/null";
-	process.env.GIT_CONFIG_NOSYSTEM = "1";
-});
-afterAll(() => {
-	for (const [name, value] of [["GIT_CONFIG_GLOBAL", saved.global], ["GIT_CONFIG_NOSYSTEM", saved.nosystem]] as const) {
-		if (value === undefined) delete process.env[name];
-		else process.env[name] = value;
-	}
-});
+isolateGitConfig();
 
 const herderRoot = (fixture: GitFixture) => join(fixture.commonDir, "herder", "worktrees");
 const slot = (fixture: GitFixture, name = "s1", runId = "20260101-000000-abcd") => join(herderRoot(fixture), runId, name);
