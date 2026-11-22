@@ -3,10 +3,9 @@ import { type AgentToolResult, defineTool, type ToolDefinition } from "@earendil
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { recallReadTool, recallSearchTool } from "../../recall/index.ts";
-import { sanitize } from "../../relay/protocol.ts";
 import { MemoryServerError } from "../client.ts";
 import { BODY_LIMIT, bodyTooLong, type Category, type FullAnswer, formatFull, formatNote, type Note, type ScopeKind } from "../format.ts";
-import { CATEGORY, firstLine, memoryReadTool, SCOPE } from "../tools.ts";
+import { failure, FORGET_NOTE_FIELDS, memoryReadTool, noteId, renderForgetCall, renderSaveCall, renderTextResult, SAVE_NOTE_FIELDS } from "../tools.ts";
 import { type Change, type CommitAnswer, type CommitBody, type DreamRun, MAX_CHANGES, MAX_SOURCES, type Source } from "./run.ts";
 import { outcomeUnknown, send } from "./server.ts";
 
@@ -20,15 +19,6 @@ export interface CommitDetails { batchId?: string; changes?: number; discarded?:
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 const oneLine = (text: string) => text.replace(/[\r\n]+/g, " ");
-const cleanId = (id: string) => id.trim().replace(/^\[|\]$/g, "");
-
-function stageFailure(text: string, details: StageDetails): AgentToolResult<StageDetails> {
-	return { content: [{ type: "text", text }], details: { ...details, error: text }, isError: true };
-}
-
-function commitFailure(text: string, details: CommitDetails): AgentToolResult<CommitDetails> {
-	return { content: [{ type: "text", text }], details: { ...details, error: text }, isError: true };
-}
 
 const SOURCE = Type.Object({
 	sessionId: Type.String({ description: "A session id, as recall_read shows it" }),
@@ -50,15 +40,6 @@ function refusal(run: DreamRun): string | undefined {
 	return undefined;
 }
 
-const renderStage = (verb: string) => ({
-	renderResult(result: AgentToolResult<unknown>, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: { fg(color: "dim" | "error" | "success", text: string): string }, context: { isError: boolean }) {
-		const text = sanitize(result.content[0]?.type === "text" ? result.content[0].text : "");
-		if (isPartial) return new Text(theme.fg("dim", `${verb}…`), 0, 0);
-		if (context.isError) return new Text(theme.fg("error", expanded ? text : firstLine(text)), 0, 0);
-		return new Text(expanded ? text : theme.fg("success", firstLine(text)), 0, 0);
-	},
-});
-
 export function dreamSaveTool(run: DreamRun) {
 	return defineTool({
 		name: "dream_save", label: "Dream Save",
@@ -67,24 +48,14 @@ export function dreamSaveTool(run: DreamRun) {
 			+ "`scope: \"user\"` applies to every project and needs no project's context to understand, `scope: \"project\"` to the dream's project. "
 			+ `Every note needs \`sources\`: 1 to ${MAX_SOURCES} session entries ({ sessionId, seq }) that support it. `
 			+ `Limits: title up to 120 characters, hook one line up to 150, body up to ${BODY_LIMIT} characters. ` + UNSAVED,
-		parameters: Type.Object({
-			id: Type.Optional(Type.String({ description: "The note to update; leave out to create one" })),
-			expectedRevision: Type.Integer({ minimum: 0, description: "0 to create; the note's current revision to update" }),
-			scope: SCOPE,
-			category: CATEGORY,
-			title: Type.String({ description: "A short title, up to 120 characters" }),
-			hook: Type.String({ description: "One line, up to 150 characters, saying when the note matters; the index lists it" }),
-			body: Type.String({ description: `The note itself, up to ${BODY_LIMIT} characters; may be empty` }),
-			reason: Type.Optional(Type.String({ description: "Why it is saved or changed, kept in the note's history" })),
-			sources: SOURCES(1),
-		}),
+		parameters: Type.Object({ ...SAVE_NOTE_FIELDS, sources: SOURCES(1) }),
 		async execute(_id, params): Promise<AgentToolResult<StageDetails>> {
 			const refused = refusal(run);
-			if (refused) return stageFailure(refused, { staged: run.staged.length });
-			if (!params.sources.length || params.sources.length > MAX_SOURCES) return stageFailure(`dream_save needs 1 to ${MAX_SOURCES} sources.`, { staged: run.staged.length });
+			if (refused) return failure(refused, { staged: run.staged.length });
+			if (!params.sources.length || params.sources.length > MAX_SOURCES) return failure(`dream_save needs 1 to ${MAX_SOURCES} sources.`, { staged: run.staged.length });
 			const long = bodyTooLong(params.body, "Nothing was staged.");
-			if (long) return stageFailure(long, { staged: run.staged.length });
-			const id = params.id ? cleanId(params.id) : "";
+			if (long) return failure(long, { staged: run.staged.length });
+			const id = params.id ? noteId(params.id) : "";
 			const change: Change = {
 				op: "save", ...(id ? { id } : {}), expectedRevision: params.expectedRevision, scope: params.scope as ScopeKind, category: params.category as Category,
 				title: params.title, hook: params.hook, body: params.body, ...(params.reason ? { reason: params.reason } : {}), sources: params.sources as Source[],
@@ -95,9 +66,11 @@ export function dreamSaveTool(run: DreamRun) {
 			return { content: [{ type: "text", text }], details: { position, staged: run.staged.length } };
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("dream_save "))}${theme.fg("muted", sanitize(String(args.title ?? "")))}${theme.fg("dim", ` · ${sanitize(String(args.scope ?? "?"))} · ${args.id ? `update ${sanitize(String(args.id))}` : "new"}`)}`, 0, 0);
+			return renderSaveCall("dream_save", args, theme);
 		},
-		...renderStage("staging"),
+		renderResult(result, options, theme, context) {
+			return renderTextResult(result, options, theme, context, "staging");
+		},
 	});
 }
 
@@ -106,27 +79,24 @@ export function dreamForgetTool(run: DreamRun) {
 		name: "dream_forget", label: "Dream Forget",
 		description: "Stage a note to forget, by its id and current revision from memory_read; dream_commit writes the staged changes. "
 			+ `\`sources\` may name up to ${MAX_SOURCES} session entries ({ sessionId, seq }) showing why it goes. ` + UNSAVED,
-		parameters: Type.Object({
-			id: Type.String({ description: "The note to forget" }),
-			expectedRevision: Type.Integer({ minimum: 1, description: "The note's current revision" }),
-			reason: Type.Optional(Type.String({ description: "Why it is forgotten, kept in the note's history" })),
-			sources: Type.Optional(SOURCES(0)),
-		}),
+		parameters: Type.Object({ ...FORGET_NOTE_FIELDS, sources: Type.Optional(SOURCES(0)) }),
 		async execute(_id, params): Promise<AgentToolResult<StageDetails>> {
 			const refused = refusal(run);
-			if (refused) return stageFailure(refused, { staged: run.staged.length });
-			const id = cleanId(params.id);
-			if (!id) return stageFailure("dream_forget needs the id of a note; memory_read lists them.", { staged: run.staged.length });
+			if (refused) return failure(refused, { staged: run.staged.length });
+			const id = noteId(params.id);
+			if (!id) return failure("dream_forget needs the id of a note; memory_read lists them.", { staged: run.staged.length });
 			const sources = (params.sources ?? []) as Source[];
-			if (sources.length > MAX_SOURCES) return stageFailure(`dream_forget takes at most ${MAX_SOURCES} sources.`, { staged: run.staged.length });
+			if (sources.length > MAX_SOURCES) return failure(`dream_forget takes at most ${MAX_SOURCES} sources.`, { staged: run.staged.length });
 			const position = run.stage({ op: "forget", id, expectedRevision: params.expectedRevision, ...(params.reason ? { reason: params.reason } : {}), ...(sources.length ? { sources } : {}) });
 			const text = `Staged change ${position} (forget note ${id} at revision ${params.expectedRevision}). ${plural(run.staged.length, "change")} staged. ${UNSAVED}`;
 			return { content: [{ type: "text", text }], details: { position, staged: run.staged.length } };
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("dream_forget "))}${theme.fg("muted", sanitize(String(args.id ?? "")))}`, 0, 0);
+			return renderForgetCall("dream_forget", args, theme);
 		},
-		...renderStage("staging"),
+		renderResult(result, options, theme, context) {
+			return renderTextResult(result, options, theme, context, "staging");
+		},
 	});
 }
 
@@ -157,13 +127,13 @@ const others = (kept: number) => kept ? ` ${plural(kept, "other staged change")}
 function explainCommit(error: unknown, changes: Change[], run: DreamRun, kept: number, before: string[]): AgentToolResult<CommitDetails> {
 	const discarded = changes.length;
 	const lost = `Nothing was written, and the ${plural(discarded, "staged change")} ${discarded === 1 ? "was" : "were"} discarded.${others(kept)}`;
-	const failure = (text: string, details: CommitDetails = {}) => commitFailure([...before, text].join("\n\n"), { discarded, ...details });
-	if (!(error instanceof MemoryServerError)) return failure(`${errorText(error)} ${lost}`);
+	const fail = (text: string, details: CommitDetails = {}) => failure([...before, text].join("\n\n"), { discarded, ...details });
+	if (!(error instanceof MemoryServerError)) return fail(`${errorText(error)} ${lost}`);
 	const { status, body } = error;
 	const code = typeof body.error === "string" ? body.error : undefined;
 	if (status === 409 && code === "lease_lost") {
 		run.stop("stopped", "lost its lease");
-		return failure(`lease_lost: this dream no longer holds its lease, so it ends now. ${lost}`);
+		return fail(`lease_lost: this dream no longer holds its lease, so it ends now. ${lost}`);
 	}
 	if (status === 409 && code === "revision_conflict") {
 		const note = body.note && typeof body.note === "object" ? body.note as Note : undefined;
@@ -171,12 +141,12 @@ function explainCommit(error: unknown, changes: Change[], run: DreamRun, kept: n
 		const change = index !== undefined ? changes[index] : undefined;
 		const which = change ? `change ${index! + 1} (${change.op}${change.id ? ` of note ${change.id}` : ""} at expected revision ${change.expectedRevision})` : "a change";
 		const current = note ? ` Note ${note.id} is at revision ${note.revision}; its current state:\n\n${formatNote(note)}\n\n` : " ";
-		return failure(`revision_conflict: ${which} no longer matches its note.${current}${lost} Merge with the current state, stage every change again with the current revisions, and commit again.`, note ? { note } : {});
+		return fail(`revision_conflict: ${which} no longer matches its note.${current}${lost} Merge with the current state, stage every change again with the current revisions, and commit again.`, note ? { note } : {});
 	}
-	if (status === 422) return failure(`${formatFull(body as FullAnswer).replace("Nothing was saved. ", "")} ${lost} Stage the changes again with fewer or shorter notes.`);
-	if (status === 400) return failure(`the pika server refused the commit (HTTP 400 bad_request): ${typeof body.message === "string" ? body.message : "no reason given"}. ${lost}`);
-	if (status === 404) return failure(`the pika server has no memory dream API (HTTP 404): it needs a newer pika. ${lost}`);
-	return failure(`${error.message} ${lost}`);
+	if (status === 422) return fail(`${formatFull(body as FullAnswer).replace("Nothing was saved. ", "")} ${lost} Stage the changes again with fewer or shorter notes.`);
+	if (status === 400) return fail(`the pika server refused the commit (HTTP 400 bad_request): ${typeof body.message === "string" ? body.message : "no reason given"}. ${lost}`);
+	if (status === 404) return fail(`the pika server has no memory dream API (HTTP 404): it needs a newer pika. ${lost}`);
+	return fail(`${error.message} ${lost}`);
 }
 
 /** Explains a commit without a definite answer: its changes stay staged, and a retry resends it with the same commit id. */
@@ -223,7 +193,7 @@ async function commit(run: DreamRun, sessions: string[], summary: string | undef
 			return committedResult([...texts, `The dream has ended (${run.reason}); nothing more was committed.`], run);
 		}
 	}
-	if (!left.length && !changes.length) return commitFailure("nothing to commit: no change is staged and no session is named.", { discarded: 0 });
+	if (!left.length && !changes.length) return failure("nothing to commit: no change is staged and no session is named.", { discarded: 0 });
 	const body: CommitBody = { commitId: randomUUID(), ...(run.child ? { dreamSessionId: run.child.sessionId } : {}), ...(summary ? { summary } : {}), sessions: left, changes };
 	const result = await attempt(run, body);
 	if ("unknown" in result) {
@@ -264,13 +234,13 @@ export function dreamCommitTool(run: DreamRun) {
 		// Its whole answer's tool calls then run one by one, so a change staged beside a commit never races it.
 		executionMode: "sequential",
 		async execute(_id, params): Promise<AgentToolResult<CommitDetails>> {
-			if (run.ended) return commitFailure(`the dream has ended (${run.reason}); nothing can be committed.`, {});
-			if (run.committing) return commitFailure("another dream_commit is still running; call dream_commit again once it has returned.", {});
+			if (run.ended) return failure(`the dream has ended (${run.reason}); nothing can be committed.`, {});
+			if (run.committing) return failure("another dream_commit is still running; call dream_commit again once it has returned.", {});
 			const sessions = [...new Set(params.sessions.map((id) => id.trim()).filter(Boolean))];
 			const foreign = sessions.filter((id) => !run.sessions.some((session) => session.id === id));
 			if (foreign.length) {
 				const staged = run.staged.length;
-				return commitFailure(`${foreign.join(", ")} ${foreign.length === 1 ? "is not one of" : "are not among"} this dream's sessions (${run.sessions.map((session) => session.id).join(", ") || "it has none"}). `
+				return failure(`${foreign.join(", ")} ${foreign.length === 1 ? "is not one of" : "are not among"} this dream's sessions (${run.sessions.map((session) => session.id).join(", ") || "it has none"}). `
 					+ `Nothing was sent${staged ? `, and the ${plural(staged, "staged change")} ${staged === 1 ? "is" : "are"} still staged` : ""}: name only sessions the task message lists, and commit again.`, { discarded: 0 });
 			}
 			const done = run.beginCommit();
@@ -283,6 +253,8 @@ export function dreamCommitTool(run: DreamRun) {
 		renderCall(args, theme) {
 			return new Text(`${theme.fg("toolTitle", theme.bold("dream_commit "))}${theme.fg("muted", `${run.staged.length} staged`)}${theme.fg("dim", ` · ${(args.sessions ?? []).length} sessions`)}`, 0, 0);
 		},
-		...renderStage("committing"),
+		renderResult(result, options, theme, context) {
+			return renderTextResult(result, options, theme, context, "committing");
+		},
 	});
 }

@@ -1,4 +1,4 @@
-import { type AgentToolResult, defineTool, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type AgentToolResult, defineTool, type ExtensionContext, type Theme, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { sanitize } from "../relay/protocol.ts";
@@ -15,7 +15,7 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : S
 export const cwdOf = (ctx: ExtensionContext) => ctx.sessionManager.getCwd() || ctx.cwd;
 export const firstLine = (text: string) => text.split("\n").find((line) => line.trim())?.trim() ?? "";
 /** A note id as the model may copy it from the index, `[id]`, without its brackets. */
-const noteId = (text: string) => text.trim().replace(/^\[|\]$/g, "");
+export const noteId = (text: string) => text.trim().replace(/^\[|\]$/g, "");
 
 /** `memory_read`'s filters as its call line shows them; empty for none. */
 export const readFilters = (args: { ids?: string[]; query?: string; category?: string; scope?: string }): string =>
@@ -42,8 +42,33 @@ export const where = (info: RepositoryInfo): RepositoryInfo => ({
 	...(info.repository ? { repository: info.repository } : {}),
 });
 
-export function failure(text: string, details: WriteDetails = {}): AgentToolResult<WriteDetails> {
+export function failure(text: string): AgentToolResult<WriteDetails>;
+export function failure<D extends object = WriteDetails>(text: string, details: D): AgentToolResult<D & { error: string }>;
+export function failure<D extends object = WriteDetails>(text: string, details = {} as D): AgentToolResult<D & { error: string }> {
 	return { content: [{ type: "text", text }], details: { ...details, error: text }, isError: true };
+}
+
+export function renderSaveCall(toolName: string, args: { id?: unknown; title?: unknown; scope?: unknown }, theme: Theme): Text {
+	const what = args.id ? `update ${sanitize(String(args.id))}` : "new";
+	return new Text(`${theme.fg("toolTitle", theme.bold(`${toolName} `))}${theme.fg("muted", sanitize(String(args.title ?? "")))}${theme.fg("dim", ` · ${sanitize(String(args.scope ?? "?"))} · ${what}`)}`, 0, 0);
+}
+
+export function renderForgetCall(toolName: string, args: { id?: unknown }, theme: Theme): Text {
+	return new Text(`${theme.fg("toolTitle", theme.bold(`${toolName} `))}${theme.fg("muted", sanitize(String(args.id ?? "")))}`, 0, 0);
+}
+
+export function renderTextResult(
+	result: AgentToolResult<unknown>,
+	{ expanded, isPartial }: ToolRenderResultOptions,
+	theme: Theme,
+	context: { isError: boolean },
+	pending: string,
+	summary: (text: string) => string = firstLine,
+): Text {
+	const text = sanitize(result.content[0]?.type === "text" ? result.content[0].text : "");
+	if (isPartial) return new Text(theme.fg("dim", `${pending}…`), 0, 0);
+	if (context.isError) return new Text(theme.fg("error", expanded ? text : firstLine(text)), 0, 0);
+	return new Text(expanded ? text : theme.fg("success", summary(text)), 0, 0);
 }
 
 /**
@@ -91,6 +116,23 @@ export const CATEGORY = Type.Union([Type.Literal("user"), Type.Literal("feedback
 export const SCOPE = Type.Union([Type.Literal("user"), Type.Literal("project")], {
 	description: "\"user\": every project of the user, only for a note an agent in any project understands without this project's context; \"project\": the current git repository only",
 });
+
+export const SAVE_NOTE_FIELDS = {
+	id: Type.Optional(Type.String({ description: "The note to update; leave out to create one" })),
+	expectedRevision: Type.Integer({ minimum: 0, description: "0 to create; the note's current revision to update" }),
+	scope: SCOPE,
+	category: CATEGORY,
+	title: Type.String({ description: "A short title, up to 120 characters" }),
+	hook: Type.String({ description: "One line, up to 150 characters, saying when the note matters; the index lists it" }),
+	body: Type.String({ description: `The note itself, up to ${BODY_LIMIT} characters; may be empty` }),
+	reason: Type.Optional(Type.String({ description: "Why it is saved or changed, kept in the note's history" })),
+};
+
+export const FORGET_NOTE_FIELDS = {
+	id: Type.String({ description: "The note to forget" }),
+	expectedRevision: Type.Integer({ minimum: 1, description: "The note's current revision" }),
+	reason: Type.Optional(Type.String({ description: "Why it is forgotten, kept in the note's history" })),
+};
 
 /** The most note ids one `POST memory/used` takes. */
 const MAX_USED = 50;
@@ -177,16 +219,7 @@ export function memorySaveTool() {
 			+ "If the note changed meanwhile, the call fails with its current state, to merge and retry. The server removes credentials from the text. "
 			+ "The memory section of this session's system prompt does not change until a new session.",
 		promptSnippet: "Save or update a durable memory note for the user or this project on the pika server",
-		parameters: Type.Object({
-			id: Type.Optional(Type.String({ description: "The note to update; leave out to create one" })),
-			expectedRevision: Type.Integer({ minimum: 0, description: "0 to create; the note's current revision to update" }),
-			scope: SCOPE,
-			category: CATEGORY,
-			title: Type.String({ description: "A short title, up to 120 characters" }),
-			hook: Type.String({ description: "One line, up to 150 characters, saying when the note matters; the index lists it" }),
-			body: Type.String({ description: `The note itself, up to ${BODY_LIMIT} characters; may be empty` }),
-			reason: Type.Optional(Type.String({ description: "Why it is saved or changed, kept in the note's history" })),
-		}),
+		parameters: Type.Object({ ...SAVE_NOTE_FIELDS }),
 		async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<WriteDetails>> {
 			const long = bodyTooLong(params.body, "Nothing was saved.");
 			if (long) return failure(long);
@@ -210,15 +243,11 @@ export function memorySaveTool() {
 			}
 		},
 		renderCall(args, theme) {
-			const what = args.id ? `update ${sanitize(String(args.id))}` : "new";
-			return new Text(`${theme.fg("toolTitle", theme.bold("memory_save "))}${theme.fg("muted", sanitize(String(args.title ?? "")))}${theme.fg("dim", ` · ${sanitize(String(args.scope ?? "?"))} · ${what}`)}`, 0, 0);
+			return renderSaveCall("memory_save", args, theme);
 		},
-		renderResult(result, { expanded, isPartial }, theme, context) {
-			const text = sanitize(result.content[0]?.type === "text" ? result.content[0].text : "");
-			if (isPartial) return new Text(theme.fg("dim", "saving…"), 0, 0);
-			if (context.isError) return new Text(theme.fg("error", expanded ? text : firstLine(text)), 0, 0);
+		renderResult(result, options, theme, context) {
 			// The call line shows the title already.
-			return new Text(expanded ? text : theme.fg("success", writeSummary(saveAction(context.args ?? {}), result.details, text)), 0, 0);
+			return renderTextResult(result, options, theme, context, "saving", (text) => writeSummary(saveAction(context.args ?? {}), result.details, text));
 		},
 	});
 }
@@ -231,11 +260,7 @@ export function memoryForgetTool() {
 			+ "The note leaves the index for every later session; its history stays on the server. If the note changed meanwhile, the call fails with its current state. "
 			+ "The memory section of this session's system prompt does not change until a new session.",
 		promptSnippet: "Forget a memory note on the pika server that is wrong or obsolete",
-		parameters: Type.Object({
-			id: Type.String({ description: "The note to forget" }),
-			expectedRevision: Type.Integer({ minimum: 1, description: "The note's current revision" }),
-			reason: Type.Optional(Type.String({ description: "Why it is forgotten, kept in the note's history" })),
-		}),
+		parameters: Type.Object({ ...FORGET_NOTE_FIELDS }),
 		async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<WriteDetails>> {
 			const cwd = cwdOf(ctx);
 			const id = noteId(params.id);
@@ -251,13 +276,10 @@ export function memoryForgetTool() {
 			}
 		},
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("memory_forget "))}${theme.fg("muted", sanitize(String(args.id ?? "")))}`, 0, 0);
+			return renderForgetCall("memory_forget", args, theme);
 		},
-		renderResult(result, { expanded, isPartial }, theme, context) {
-			const text = sanitize(result.content[0]?.type === "text" ? result.content[0].text : "");
-			if (isPartial) return new Text(theme.fg("dim", "forgetting…"), 0, 0);
-			if (context.isError) return new Text(theme.fg("error", expanded ? text : firstLine(text)), 0, 0);
-			return new Text(expanded ? text : theme.fg("success", writeSummary("forgot", result.details, text)), 0, 0);
+		renderResult(result, options, theme, context) {
+			return renderTextResult(result, options, theme, context, "forgetting", (text) => writeSummary("forgot", result.details, text));
 		},
 	});
 }
