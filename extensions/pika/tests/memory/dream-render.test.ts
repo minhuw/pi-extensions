@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
-import type { Theme } from "@earendil-works/pi-coding-agent";
 import { currentDream } from "../../memory/dream/index.ts";
-import { FakePika } from "./support/pika-server.ts";
-import { batch, type FakeChild, fakeSpawner, RecordingUI, resetDreams, serveDreams } from "./support/dream.ts";
+import { FakePika } from "../support/pika-server.ts";
+import { plainTheme, styledTheme } from "../support/ui.ts";
+import { batch, type FakeChild, fakeSpawner, RecordingUI, resetDreams, serveDreams, until } from "./support/dream.ts";
 import { type Harness, note, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 const OSC52 = "\x1b]52;c;SGVsbG8=\x07";
@@ -12,8 +12,6 @@ const CSI_CLEAR = "\x1b[2J";
 const DIRTY = `${OSC52}${CSI_RED}danger${CSI_RESET}${CSI_CLEAR}`;
 const SOURCES = [{ sessionId: "s-past-1", seq: 7 }];
 
-const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
-const styledTheme = { fg: (_color: string, text: string) => `\x1b[32m${text}\x1b[0m`, bold: (text: string) => `\x1b[1m${text}\x1b[22m` } as unknown as Theme;
 const lines = (component: { render(width: number): readonly string[] }) => component.render(500).map((line) => line.trimEnd()).join("\n");
 
 let workspace: Workspace;
@@ -55,12 +53,8 @@ afterEach(async () => {
 
 async function dream(): Promise<FakeChild> {
 	await h.session.prompt("/memory dream");
-	const deadline = performance.now() + 5_000;
-	while (performance.now() < deadline) {
-		if (spawner.children[0]?.prompts.length === 1) return spawner.children[0]!;
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-	throw new Error("timed out waiting for the kickoff");
+	await until(() => spawner.children[0]?.prompts.length === 1, "the kickoff");
+	return spawner.children[0]!;
 }
 
 it("strips ANSI/OSC/CSI control sequences from rendered dream tool output while preserving raw result.content and theme styling", async () => {

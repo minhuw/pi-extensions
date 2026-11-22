@@ -1,20 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SessionManager, type ExtensionUIContext, type SessionEntry, type Theme } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { LogViewer } from "../../log-viewer.ts";
 import { currentDream } from "../../memory/dream/index.ts";
 import { DREAM_ENTRY, type DreamRecord, PIN_ENTRY } from "../../memory/entries.ts";
 import { indexNotes, type MemoryLogItem, memoryLogItems, memoryView } from "../../memory/log.ts";
-import { FakePika } from "./support/pika-server.ts";
-import { fakeSpawner, type FakeChild, LEASE_ID, RecordingUI, releases, resetDreams, serveDreams } from "./support/dream.ts";
+import { FakePika } from "../support/pika-server.ts";
+import { colorTheme, LOG_KEYS, LogUI, plainTheme, stripAnsi } from "../support/ui.ts";
+import { fakeSpawner, type FakeChild, LEASE_ID, RecordingUI, releases, resetDreams, serveDreams, until } from "./support/dream.ts";
 import { callTool, type Harness, note, PROJECT, PROJECT_SCOPE, REPOSITORY, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
-const KEYS = { up: "\x1b[A", down: "\x1b[B", home: "\x1b[H", end: "\x1b[F", enter: "\r", esc: "\x1b" };
-const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
-const colorTheme = { fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[39m`, bold: (text: string) => `\x1b[1m${text}\x1b[22m` } as unknown as Theme;
-const plain = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
 /** A line without its frame, its clock as HH:MM. */
-const inside = (line: string) => plain(line).replace(/^│ /, "").replace(/\s*│$/, "").replace(/\b\d\d:\d\d\b/, "HH:MM");
+const inside = (line: string) => stripAnsi(line).replace(/^│ /, "").replace(/\s*│$/, "").replace(/\b\d\d:\d\d\b/, "HH:MM");
 
 const INDEX = "# User memory\n## feedback\n- Tabs — use tabs [abc]\n# Project memory: my-project\n## project\n- Pitfall — run npm ci first [def]\n- Flaky — retry upload.test [ghi]\n";
 const SAVE_ARGS = { expectedRevision: 0, scope: "project", category: "project", title: "Pitfall", hook: "run npm ci first", body: "Tests need node_modules.\nWhy: CI failed.", reason: "found it" };
@@ -124,7 +121,7 @@ describe("the memory log view", () => {
 
 	it("opens the pin with its fetch time, repository, and the whole index, or says the session has no memory section", () => {
 		const { text, press } = viewer(memoryLogItems(branch()));
-		press(KEYS.home, KEYS.enter);
+		press(LOG_KEYS.home, LOG_KEYS.enter);
 		expect(text()[1]).toBe("memory log · event 1 of 6");
 		expect(page(text())).toEqual([
 			"Memory index pinned when the session started",
@@ -139,7 +136,7 @@ describe("the memory log view", () => {
 
 		const none = viewer(memoryLogItems([custom(PIN_ENTRY, { index: null, fetchedAt: "2026-11-10T09:00:00.000Z", error: "the pika server did not answer within 1.5 s" })]));
 		expect(none.text()[3]).toBe("▸ HH:MM  session start · no memory section");
-		none.press(KEYS.enter);
+		none.press(LOG_KEYS.enter);
 		expect(page(none.text())).toEqual([
 			"No memory section: no index was pinned when the session started",
 			expect.stringMatching(/^Fetched: /),
@@ -154,7 +151,7 @@ describe("the memory log view", () => {
 
 	it("opens a call with every argument, its outcome, and its whole result; a save with its body; a call without a result as such", () => {
 		const { text, press } = viewer(memoryLogItems(branch()));
-		press(KEYS.home, KEYS.down, KEYS.enter);
+		press(LOG_KEYS.home, LOG_KEYS.down, LOG_KEYS.enter);
 		expect(page(text())).toEqual([
 			"memory_read \"npm\" · project scope",
 			expect.stringMatching(/^Time: \d{4}-\d\d-\d\d HH:MM:00$/),
@@ -165,7 +162,7 @@ describe("the memory log view", () => {
 			"Result:",
 			"[memory] 1 note matching, of 3 in the user scope and project my-project.",
 		]);
-		press(KEYS.esc, KEYS.down, KEYS.enter);
+		press(LOG_KEYS.esc, LOG_KEYS.down, LOG_KEYS.enter);
 		expect(page(text())).toEqual([
 			"memory_save Pitfall · project · new",
 			expect.stringMatching(/^Time: /),
@@ -185,14 +182,14 @@ describe("the memory log view", () => {
 			"Created note n-1 (now revision 1) in project my-project: Pitfall — run npm ci first",
 			"The memory section…",
 		]);
-		press(KEYS.esc, KEYS.down, KEYS.enter);
+		press(LOG_KEYS.esc, LOG_KEYS.down, LOG_KEYS.enter);
 		expect(page(text()).slice(0, 10)).toEqual([
 			"memory_save Pitfall again · project · update [def]",
 			expect.stringMatching(/^Time: /),
 			"Scope: project", "Category: project", "Title: Pitfall again", "Hook: run npm ci first", "Reason: found it", "Id: [def]", "Expected revision: 2",
 			"Outcome: revision_conflict: note def is at revision 3, not 2; it changed since you read it.",
 		]);
-		press(KEYS.esc, KEYS.down, KEYS.enter);
+		press(LOG_KEYS.esc, LOG_KEYS.down, LOG_KEYS.enter);
 		expect(page(text())).toEqual([
 			"memory_forget abc",
 			expect.stringMatching(/^Time: /),
@@ -206,13 +203,13 @@ describe("the memory log view", () => {
 		]);
 		// Arguments the tool does not define are shown too.
 		const odd = viewer(memoryLogItems([assistant({ id: "c9", name: "memory_read", arguments: { ids: ["a", "b"], limit: 5, nested: { deep: true } } })]));
-		odd.press(KEYS.enter);
+		odd.press(LOG_KEYS.enter);
 		expect(page(odd.text()).slice(2, 5)).toEqual(["Ids: a, b", "limit: 5", "nested: {deep:true}"]);
 	});
 
 	it("opens a dream with every field it recorded, the notes it changed, and the sessions it reviewed", () => {
 		const { text, press } = viewer(memoryLogItems(branch()));
-		press(KEYS.enter);
+		press(LOG_KEYS.enter);
 		expect(page(text())).toEqual([
 			"dream completed",
 			expect.stringMatching(/^Started: \d{4}-\d\d-\d\d HH:MM:00$/),
@@ -241,7 +238,7 @@ describe("the memory log view", () => {
 		]);
 		// An entry that carries a note's title shows it.
 		const titled = viewer(memoryLogItems([custom(DREAM_ENTRY, { ...DREAM, changes: [{ ...DREAM.changes[0], title: "Pitfall" }] })]));
-		titled.press(KEYS.enter);
+		titled.press(LOG_KEYS.enter);
 		expect(page(titled.text())).toContain("- created [n-1] Pitfall · rev 1");
 	});
 
@@ -254,7 +251,7 @@ describe("the memory log view", () => {
 			custom(DREAM_ENTRY, { ...DREAM, reason: `r${evil}`, changes: [{ noteId: `n${evil}`, title: `t${evil}`, action: "save", revision: 1, created: true }] }),
 		]));
 		const shown: string[] = [];
-		for (const step of [[], [KEYS.home, KEYS.enter], [KEYS.esc, KEYS.down, KEYS.enter], [KEYS.esc, KEYS.down, KEYS.enter]]) {
+		for (const step of [[], [LOG_KEYS.home, LOG_KEYS.enter], [LOG_KEYS.esc, LOG_KEYS.down, LOG_KEYS.enter], [LOG_KEYS.esc, LOG_KEYS.down, LOG_KEYS.enter]]) {
 			press(...step);
 			shown.push(...view.render(100));
 		}
@@ -275,28 +272,16 @@ describe("the memory log view", () => {
 				const check = () => { for (const line of view.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width); };
 				check();
 				for (let index = 0; index < items.length; index++) {
-					press(KEYS.home, ...Array<string>(index).fill(KEYS.down), KEYS.enter);
+					press(LOG_KEYS.home, ...Array<string>(index).fill(LOG_KEYS.down), LOG_KEYS.enter);
 					check();
-					press(KEYS.end);
+					press(LOG_KEYS.end);
 					check();
-					press(KEYS.esc);
+					press(LOG_KEYS.esc);
 				}
 			}
 		}
 	});
 });
-
-/** A UI that records notifications and opens `ui.custom` components on a fake terminal. */
-class LogUI extends RecordingUI {
-	viewer: LogViewer | undefined;
-	readonly tui = { mode: "regular" as const, terminal: { rows: 40 }, requestRender: vi.fn() };
-	override context(): ExtensionUIContext {
-		const base = super.context();
-		const custom = (factory: (...args: unknown[]) => LogViewer) => new Promise((resolve) => { this.viewer = factory(this.tui, plainTheme, undefined, resolve); });
-		return new Proxy(base, { get: (target, name) => name === "custom" ? custom : Reflect.get(target, name) });
-	}
-	lines(width = 100): string[] { return this.viewer!.render(width).map(inside); }
-}
 
 describe("in a session", () => {
 	let workspace: Workspace;
@@ -324,14 +309,6 @@ describe("in a session", () => {
 		const h = await startSession({ workspace, ...options });
 		open.push(h);
 		return h;
-	}
-	async function until(check: () => boolean, what: string): Promise<void> {
-		const deadline = performance.now() + 5_000;
-		while (performance.now() < deadline) {
-			if (check()) return;
-			await new Promise<void>((resolve) => setImmediate(resolve));
-		}
-		throw new Error(`timed out waiting for ${what}`);
 	}
 	const dreams = (entries: readonly SessionEntry[]) => entries.flatMap((e) => e.type === "custom" && e.customType === DREAM_ENTRY ? [e.data as DreamRecord] : []);
 
@@ -363,7 +340,7 @@ describe("in a session", () => {
 
 			const opened = h.session.prompt("/memory log");
 			await until(() => ui.viewer !== undefined, "the viewer");
-			expect(ui.lines().slice(1, 7)).toEqual([
+			expect(ui.lines().map(inside).slice(1, 7)).toEqual([
 				"memory log · 3 events on this branch",
 				`├${"─".repeat(98)}┤`,
 				"  HH:MM  session start · 3 notes · 159 chars",
@@ -371,14 +348,12 @@ describe("in a session", () => {
 				"▸ HH:MM  memory_forget abc  revision_conflict: note abc is at revision 4, not 3; it changed sin…",
 				`├${"─".repeat(98)}┤`,
 			]);
-			ui.viewer!.handleInput(KEYS.up);
-			ui.viewer!.handleInput(KEYS.enter);
-			expect(ui.lines().slice(3, 12)).toEqual([
+			ui.press(LOG_KEYS.up, LOG_KEYS.enter);
+			expect(ui.lines().map(inside).slice(3, 12)).toEqual([
 				"memory_save Pitfall · project · new", expect.stringMatching(/^Time: /), "Scope: project", "Category: project", "Title: Pitfall", "Hook: run npm ci first",
 				"Reason: found it", "Expected revision: 0", `Outcome: created · rev 1 · project ${PROJECT}`,
 			]);
-			ui.viewer!.handleInput("q");
-			ui.viewer!.handleInput("q");
+			ui.press("q", "q");
 			await opened;
 
 			// Another branch, from before the first run, has none of it.

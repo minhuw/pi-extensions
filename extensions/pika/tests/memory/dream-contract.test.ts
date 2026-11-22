@@ -6,8 +6,8 @@ import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@e
 import { dreamSessionDir } from "../../memory/dream/child.ts";
 import { currentDream, dreamLimits } from "../../memory/dream/index.ts";
 import { WRAP_UP } from "../../memory/dream/run.ts";
-import { FakePika } from "./support/pika-server.ts";
-import { fakeSpawner, LEASE_ID, leaseRequests, RecordingUI, releases, resetDreams, serveDreams } from "./support/dream.ts";
+import { FakePika } from "../support/pika-server.ts";
+import { commits, fakeSpawner, fakeTimers, LEASE_ID, leaseRequests, RecordingUI, releases, resetDreams, serveDreams, settle, until } from "./support/dream.ts";
 import { type Harness, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 const MINUTE = 60_000;
@@ -44,20 +44,6 @@ async function start(options: Omit<Parameters<typeof startSession>[0], "workspac
 	open.push(h);
 	return h;
 }
-
-const fakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
-async function settle(check?: () => boolean, ms = check ? 5_000 : 150): Promise<boolean> {
-	const deadline = performance.now() + ms;
-	while (performance.now() < deadline) {
-		if (check?.()) return true;
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-	return check?.() ?? true;
-}
-async function until(check: () => boolean, what: string): Promise<void> {
-	if (!await settle(check)) throw new Error(`timed out waiting for ${what}`);
-}
-const commits = () => pika.requestsTo(`memory/dream/${LEASE_ID}/commit`);
 
 describe("one dream per process", () => {
 	it("two idle top-level sessions in one process request one lease and start one dream", async () => {
@@ -131,7 +117,7 @@ describe("preemption", () => {
 		await until(() => releases(pika).length === 1, "the release");
 		await settle();
 		expect(currentDream()).toMatchObject({ outcome: "aborted", staged: [], discarded: 2 });
-		expect(commits()).toEqual([]);
+		expect(commits(pika)).toEqual([]);
 		expect(releases(pika)).toEqual(["aborted"]);
 	});
 });

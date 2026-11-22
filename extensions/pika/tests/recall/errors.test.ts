@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { get, timing } from "../../recall/client.ts";
-import { FakePika } from "./support/pika-server.ts";
+import { FakePika } from "../support/pika-server.ts";
 import { callTool, type Harness, setCredentials, startSession, Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;

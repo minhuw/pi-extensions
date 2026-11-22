@@ -1,7 +1,8 @@
 import { expect, it } from "vitest";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import recallExtension from "../../recall/index.ts";
-import { FakePika } from "./support/pika-server.ts";
+import { FakePika } from "../support/pika-server.ts";
+import { plainTheme, styledTheme } from "../support/ui.ts";
 import { setCredentials } from "./support/runtime.ts";
 
 /** The tools recall registers, without a pi runtime. */
@@ -11,32 +12,31 @@ function tools(): Map<string, ToolDefinition> {
 	return registered;
 }
 
-const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as never;
 const lines = (component: { render(width: number): readonly string[] }) => component.render(200).map((line) => line.trimEnd()).join("\n");
 const context = (args: unknown, isError = false) => ({ args, isError, state: {}, invalidate() {}, expanded: false, isPartial: false }) as never;
 
 it("renders compact calls and results", () => {
 	const { recall_search: search, recall_read: read } = Object.fromEntries(tools());
-	expect(lines(search!.renderCall!({ query: "parser bug", scope: "project" }, theme, context({})))).toBe("recall_search \"parser bug\" · this project");
-	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 41 }, theme, context({})))).toBe("recall_read s-1 · seq 41");
-	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 0, fromTurn: 0 }, theme, context({})))).toBe("recall_read s-1");
-	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 0, fromTurn: 8 }, theme, context({})))).toBe("recall_read s-1 · from turn 8");
-	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 41, fromTurn: 0 }, theme, context({})))).toBe("recall_read s-1 · seq 41");
-	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 41, fromTurn: 8 }, theme, context({})))).toBe("recall_read s-1 · choose seq or fromTurn");
+	expect(lines(search!.renderCall!({ query: "parser bug", scope: "project" }, plainTheme, context({})))).toBe("recall_search \"parser bug\" · this project");
+	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 41 }, plainTheme, context({})))).toBe("recall_read s-1 · seq 41");
+	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 0, fromTurn: 0 }, plainTheme, context({})))).toBe("recall_read s-1");
+	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 0, fromTurn: 8 }, plainTheme, context({})))).toBe("recall_read s-1 · from turn 8");
+	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 41, fromTurn: 0 }, plainTheme, context({})))).toBe("recall_read s-1 · seq 41");
+	expect(lines(read!.renderCall!({ sessionId: "s-1", seq: 41, fromTurn: 8 }, plainTheme, context({})))).toBe("recall_read s-1 · choose seq or fromTurn");
 	const found = { content: [{ type: "text" as const, text: "[recall] …\n2 past sessions match" }], details: { sessionIds: ["a", "b"] } };
-	expect(lines(search!.renderResult!(found, { expanded: false, isPartial: false }, theme, context({})))).toBe("2 past sessions");
-	expect(lines(search!.renderResult!(found, { expanded: true, isPartial: false }, theme, context({})))).toBe("2 past sessions\n[recall] …\n2 past sessions match");
+	expect(lines(search!.renderResult!(found, { expanded: false, isPartial: false }, plainTheme, context({})))).toBe("2 past sessions");
+	expect(lines(search!.renderResult!(found, { expanded: true, isPartial: false }, plainTheme, context({})))).toBe("2 past sessions\n[recall] …\n2 past sessions match");
 	const overview = { content: [{ type: "text" as const, text: "[recall] …\nSession s-1: \"Fix it\"\nmore" }], details: { sessionId: "s-1", turns: [0, 1, 2] } };
-	expect(lines(read!.renderResult!(overview, { expanded: false, isPartial: false }, theme, context({})))).toBe("Session s-1: \"Fix it\" · turns 0–2");
+	expect(lines(read!.renderResult!(overview, { expanded: false, isPartial: false }, plainTheme, context({})))).toBe("Session s-1: \"Fix it\" · turns 0–2");
 	const { recall_herder: herder } = Object.fromEntries(tools());
-	expect(lines(herder!.renderCall!({ scope: "project" }, theme, context({})))).toBe("recall_herder runs · this project");
-	expect(lines(herder!.renderCall!({ runId: "r-1", fromEvent: 40 }, theme, context({})))).toBe("recall_herder r-1 · from event 40");
+	expect(lines(herder!.renderCall!({ scope: "project" }, plainTheme, context({})))).toBe("recall_herder runs · this project");
+	expect(lines(herder!.renderCall!({ runId: "r-1", fromEvent: 40 }, plainTheme, context({})))).toBe("recall_herder r-1 · from event 40");
 	const runs = { content: [{ type: "text" as const, text: "[recall] …\n1 Herder run" }], details: { limit: 10, runIds: ["r-1"] } };
-	expect(lines(herder!.renderResult!(runs, { expanded: false, isPartial: false }, theme, context({})))).toBe("1 Herder run");
+	expect(lines(herder!.renderResult!(runs, { expanded: false, isPartial: false }, plainTheme, context({})))).toBe("1 Herder run");
 	const run = { content: [{ type: "text" as const, text: "[recall] …\nHerder run r-1: \"Add it\"\nmore" }], details: { runId: "r-1", events: [0, 1, 2] } };
-	expect(lines(herder!.renderResult!(run, { expanded: false, isPartial: false }, theme, context({})))).toBe("Herder run r-1: \"Add it\" · events 0–2");
+	expect(lines(herder!.renderResult!(run, { expanded: false, isPartial: false }, plainTheme, context({})))).toBe("Herder run r-1: \"Add it\" · events 0–2");
 	const failed = { content: [{ type: "text" as const, text: "recall needs the pika extension logged in" }], details: {} };
-	expect(lines(read!.renderResult!(failed, { expanded: false, isPartial: false }, theme, context({}, true)))).toBe("recall needs the pika extension logged in");
+	expect(lines(read!.renderResult!(failed, { expanded: false, isPartial: false }, plainTheme, context({}, true)))).toBe("recall needs the pika extension logged in");
 });
 
 it("strips ANSI/OSC/CSI control sequences from rendered recall output while preserving raw result.content and theme styling", async () => {
@@ -45,10 +45,6 @@ it("strips ANSI/OSC/CSI control sequences from rendered recall output while pres
 	const CSI_RESET = "\x1b[0m";
 	const CSI_CLEAR = "\x1b[2J";
 	const DIRTY = `${OSC52}${CSI_RED}danger${CSI_RESET}${CSI_CLEAR}`;
-	const styledTheme = {
-		fg: (_color: string, text: string) => `\x1b[32m${text}\x1b[0m`,
-		bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
-	} as never;
 	const { recall_search: search, recall_read: read, recall_herder: herder } = Object.fromEntries(tools());
 	const pika = await new FakePika().start();
 	const ctx = { cwd: "/tmp/proj", sessionManager: { getCwd: () => "/tmp/proj", getSessionId: () => "cur" } } as never;
@@ -93,7 +89,7 @@ it("strips ANSI/OSC/CSI control sequences from rendered recall output while pres
 			expect(raw).toContain(CSI_CLEAR);
 
 			for (const expanded of [false, true]) {
-				const rendered = lines(tool.renderResult!(res, { expanded, isPartial: false }, theme, context({})));
+				const rendered = lines(tool.renderResult!(res, { expanded, isPartial: false }, plainTheme, context({})));
 				expect(rendered).not.toContain("\x1b");
 				expect(rendered).not.toContain("\x07");
 				if (expanded) expect(rendered).toContain("danger");
@@ -107,28 +103,28 @@ it("strips ANSI/OSC/CSI control sequences from rendered recall output while pres
 			}
 
 			const errResult = { content: [{ type: "text" as const, text: `error ${DIRTY}` }], details: {} };
-			const renderedErr = lines(tool.renderResult!(errResult, { expanded: false, isPartial: false }, theme, context({}, true)));
+			const renderedErr = lines(tool.renderResult!(errResult, { expanded: false, isPartial: false }, plainTheme, context({}, true)));
 			expect(renderedErr).toBe("error danger");
 			expect(errResult.content[0]!.text).toContain(OSC52);
 		}
 
 		// Expanded recall_read and recall_herder show sanitized body text without control sequences.
-		expect(lines(read!.renderResult!(readRes, { expanded: true, isPartial: false }, theme, context({})))).toContain("reply danger");
-		expect(lines(herder!.renderResult!(herderRes, { expanded: true, isPartial: false }, theme, context({})))).toContain("Goal danger");
+		expect(lines(read!.renderResult!(readRes, { expanded: true, isPartial: false }, plainTheme, context({})))).toContain("reply danger");
+		expect(lines(herder!.renderResult!(herderRes, { expanded: true, isPartial: false }, plainTheme, context({})))).toContain("Goal danger");
 
 		// Collapsed firstLine for recall_read and recall_herder strips raw control sequences too.
 		const dirtyRead = { content: [{ type: "text" as const, text: `[recall] …\nSession s-1: "Session ${DIRTY}"\nmore` }], details: { sessionId: "s-1", turns: [0, 1, 2] } };
-		expect(lines(read!.renderResult!(dirtyRead, { expanded: false, isPartial: false }, theme, context({})))).toBe('Session s-1: "Session danger" · turns 0–2');
+		expect(lines(read!.renderResult!(dirtyRead, { expanded: false, isPartial: false }, plainTheme, context({})))).toBe('Session s-1: "Session danger" · turns 0–2');
 		expect(dirtyRead.content[0]!.text).toContain(OSC52);
 		const dirtyRun = { content: [{ type: "text" as const, text: `[recall] …\nHerder run r-1: "Run ${DIRTY}"\nmore` }], details: { runId: "r-1", events: [0, 1, 2] } };
-		expect(lines(herder!.renderResult!(dirtyRun, { expanded: false, isPartial: false }, theme, context({})))).toBe('Herder run r-1: "Run danger" · events 0–2');
+		expect(lines(herder!.renderResult!(dirtyRun, { expanded: false, isPartial: false }, plainTheme, context({})))).toBe('Herder run r-1: "Run danger" · events 0–2');
 		expect(dirtyRun.content[0]!.text).toContain(OSC52);
 
 		// renderCall strips control sequences from call arguments too.
-		expect(lines(search!.renderCall!({ query: DIRTY, project: DIRTY }, theme, context({})))).toBe('recall_search "danger" · project danger');
-		expect(lines(read!.renderCall!({ sessionId: DIRTY }, theme, context({})))).toBe("recall_read danger");
-		expect(lines(herder!.renderCall!({ runId: DIRTY }, theme, context({})))).toBe("recall_herder danger");
-		expect(lines(herder!.renderCall!({ project: DIRTY }, theme, context({})))).toBe("recall_herder runs · project danger");
+		expect(lines(search!.renderCall!({ query: DIRTY, project: DIRTY }, plainTheme, context({})))).toBe('recall_search "danger" · project danger');
+		expect(lines(read!.renderCall!({ sessionId: DIRTY }, plainTheme, context({})))).toBe("recall_read danger");
+		expect(lines(herder!.renderCall!({ runId: DIRTY }, plainTheme, context({})))).toBe("recall_herder danger");
+		expect(lines(herder!.renderCall!({ project: DIRTY }, plainTheme, context({})))).toBe("recall_herder runs · project danger");
 	} finally {
 		setCredentials(undefined);
 		await pika.stop();

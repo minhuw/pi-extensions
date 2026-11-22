@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { currentDream } from "../../memory/dream/index.ts";
-import { FakePika } from "./support/pika-server.ts";
-import { fakeSpawner, leaseRequests, RecordingUI, resetDreams, serveDreams } from "./support/dream.ts";
+import { FakePika } from "../support/pika-server.ts";
+import { fakeSpawner, leaseRequests, RecordingUI, resetDreams, serveDreams, until } from "./support/dream.ts";
 import { type Harness, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 // The repository's first resolution runs git; the gate holds it so the test can act meanwhile.
@@ -42,15 +42,6 @@ afterEach(async () => {
 	await pika.stop();
 	await workspace.cleanup();
 });
-
-async function until(check: () => boolean, what: string): Promise<void> {
-	const deadline = performance.now() + 5_000;
-	while (performance.now() < deadline) {
-		if (check()) return;
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-	throw new Error(`timed out waiting for ${what}`);
-}
 
 it("input while the repository is resolved sends no lease request", async () => {
 	const spawner = fakeSpawner();

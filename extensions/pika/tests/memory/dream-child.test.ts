@@ -9,8 +9,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CHILD_SESSION_HOOKS, dreamSessionDir, inProjectPikaDir } from "../../memory/dream/child.ts";
 import { currentDream } from "../../memory/dream/index.ts";
 import { DREAM_PROMPT } from "../../memory/dream/prompt.ts";
-import { FakePika } from "./support/pika-server.ts";
-import { LEASE_ID, RecordingUI, releases, resetDreams, serveDreams } from "./support/dream.ts";
+import { FakePika } from "../support/pika-server.ts";
+import { waitFor } from "../support/runtime.ts";
+import { commits, RecordingUI, releases, resetDreams, serveDreams } from "./support/dream.ts";
 import { callTool, type Harness, memorySection, note, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 const INDEX = "# Project memory: my-project\n## project\n- Pitfall — run npm ci first [bbbbbbbbbbbb]\n";
@@ -53,15 +54,6 @@ afterEach(async () => {
 	await workspace.cleanup();
 });
 
-async function until(check: () => boolean, what: string, ms = 10_000): Promise<void> {
-	const deadline = performance.now() + ms;
-	while (performance.now() < deadline) {
-		if (check()) return;
-		await new Promise<void>((resolve) => setTimeout(resolve, 5));
-	}
-	throw new Error(`timed out waiting for ${what}`);
-}
-
 interface Seen { system: string; tools: string[]; model: string; lastUser: string }
 function recorder(seen: Seen[], answer: () => ReturnType<typeof fauxAssistantMessage>): FauxResponseFactory {
 	return (context, _options, _state, model) => {
@@ -83,7 +75,7 @@ it("a dream runs in a real persisted, linked child session with the hooks, the d
 		recorder(seen, () => fauxAssistantMessage("Saved one pitfall.")),
 	]);
 	await h.session.prompt("/memory dream");
-	await until(() => releases(pika).length === 1, "the release");
+	await waitFor(() => releases(pika).length === 1, 10_000, "the release");
 	expect(releases(pika)).toEqual(["completed"]);
 	const run = currentDream()!;
 	await run.done;
@@ -102,7 +94,7 @@ it("a dream runs in a real persisted, linked child session with the hooks, the d
 
 	const childId = run.child!.sessionId;
 	expect(childId).not.toBe(h.session.sessionId);
-	const commit = pika.requestsTo(`memory/dream/${LEASE_ID}/commit`);
+	const commit = commits(pika);
 	expect(commit).toHaveLength(1);
 	expect(commit[0]!.body).toEqual({
 		commitId: expect.stringMatching(/^[0-9a-f-]{36}$/), dreamSessionId: childId, summary: "the upload fix", sessions: ["s-past-1"],
@@ -151,7 +143,7 @@ it("lists the notes unused for 90 days in the task message, and the dream's own 
 		},
 	]);
 	await h.session.prompt("/memory dream");
-	await until(() => releases(pika).length === 1, "the release");
+	await waitFor(() => releases(pika).length === 1, 10_000, "the release");
 	await currentDream()!.done;
 	expect(seen).toHaveLength(2);
 	expect(reads).toEqual([
@@ -163,7 +155,7 @@ it("lists the notes unused for 90 days in the task message, and the dream's own 
 
 	// The same read in the session itself counts, and is the only one that did.
 	await callTool(h, "memory_read", { ids: [stale.id] });
-	await until(() => pika.requestsTo("memory/used").length > 0, "memory/used");
+	await waitFor(() => pika.requestsTo("memory/used").length > 0, 10_000, "memory/used");
 	expect(pika.requestsTo("memory/used").map((request) => request.body)).toEqual([{ ids: [stale.id], project: expect.any(String), repository: expect.any(String), sessionId: h.session.sessionId }]);
 });
 
@@ -173,7 +165,7 @@ it("uses memory.dreamModel when it is found", async () => {
 	const seen: Seen[] = [];
 	h.faux.appendResponses([recorder(seen, () => fauxAssistantMessage("Nothing to keep."))]);
 	await h.session.prompt("/memory dream");
-	await until(() => releases(pika).length === 1, "the release");
+	await waitFor(() => releases(pika).length === 1, 10_000, "the release");
 	expect(seen.map((request) => request.model)).toEqual(["other"]);
 	expect(currentDream()!.child!.model).toBe("memory-test/other");
 });
@@ -184,7 +176,7 @@ it("falls back to the session's model when memory.dreamModel is not found", asyn
 	const seen: Seen[] = [];
 	h.faux.appendResponses([recorder(seen, () => fauxAssistantMessage("Nothing to keep."))]);
 	await h.session.prompt("/memory dream");
-	await until(() => releases(pika).length === 1, "the release");
+	await waitFor(() => releases(pika).length === 1, 10_000, "the release");
 	expect(seen.map((request) => request.model)).toEqual(["test"]);
 });
 
@@ -196,10 +188,10 @@ it("stopping a real child aborts its run and shuts it down", async () => {
 		options?.signal?.addEventListener("abort", () => done(fauxAssistantMessage("", { stopReason: "aborted" })), { once: true });
 	})]);
 	await h.session.prompt("/memory dream");
-	await until(() => started, "the child's first request");
+	await waitFor(() => started, 10_000, "the child's first request");
 	await h.session.prompt("/memory stop");
 	await currentDream()!.done;
-	await until(() => releases(pika).length === 1, "the release");
+	await waitFor(() => releases(pika).length === 1, 10_000, "the release");
 	expect(releases(pika)).toEqual(["aborted"]);
 	expect(probeEvents).toContain("shutdown");
 });
@@ -229,7 +221,7 @@ it("keeps the read tools out of .pi/pika/, where earlier dreams' sessions are", 
 		collect,
 	]);
 	await h.session.prompt("/memory dream");
-	await until(() => releases(pika).length === 1, "the release");
+	await waitFor(() => releases(pika).length === 1, 10_000, "the release");
 	const byId = Object.fromEntries(results.map((result) => [result.name, result]));
 	for (const id of ["read-dream", "ls-pika", "grep-pika"]) {
 		expect(byId[id]).toMatchObject({ isError: true });

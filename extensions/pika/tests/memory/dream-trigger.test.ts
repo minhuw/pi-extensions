@@ -5,8 +5,8 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { currentDream } from "../../memory/dream/index.ts";
 import { DREAM_TOOLS } from "../../memory/dream/tools.ts";
-import { FakePika } from "./support/pika-server.ts";
-import { fakeSpawner, leaseRequests, RecordingUI, releases, resetDreams, serveDreams } from "./support/dream.ts";
+import { FakePika } from "../support/pika-server.ts";
+import { fakeSpawner, fakeTimers, leaseRequests, RecordingUI, releases, resetDreams, serveDreams, settle, until } from "./support/dream.ts";
 import { type Harness, PROJECT, PROJECT_SCOPE, REPOSITORY, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 const INDEX = "# Project memory: my-project\n## project\n- Pitfall — run npm ci first [bbbbbbbbbbbb]\n";
@@ -47,30 +47,13 @@ async function settings(memory: Record<string, unknown>): Promise<void> {
 	await writeFile(join(workspace.agentDir, "pika.json"), JSON.stringify({ memory }));
 }
 
-/** Fake timers for the idle wait; the session's own work and the loopback server run on real I/O. */
-const fakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
-
-/** Waits real time on setImmediate, which fake timers leave alone, for `check` or, without one, about 150 ms. */
-async function settle(check?: () => boolean, ms = check ? 5_000 : 150): Promise<boolean> {
-	const deadline = performance.now() + ms;
-	while (performance.now() < deadline) {
-		if (check?.()) return true;
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-	return check?.() ?? true;
-}
-const flush = () => settle();
-async function until(check: () => boolean, what: string): Promise<void> {
-	if (!await settle(check)) throw new Error(`timed out waiting for ${what}`);
-}
-
 describe("the idle trigger", () => {
 	it("asks for one auto lease after dreamIdleMinutes idle and starts a dream, then waits for the next agent_settled", async () => {
 		const h = await start();
 		fakeTimers();
 		await h.run("one");
 		await vi.advanceTimersByTimeAsync(20 * MINUTE - 1_000);
-		await flush();
+		await settle();
 		expect(leaseRequests(pika)).toEqual([]);
 		await vi.advanceTimersByTimeAsync(1_000);
 		await until(() => spawner.children[0]?.prompts.length === 1, "the dream's kickoff");
@@ -91,7 +74,7 @@ describe("the idle trigger", () => {
 
 		// No new request without a new settled run.
 		await vi.advanceTimersByTimeAsync(60 * MINUTE);
-		await flush();
+		await settle();
 		expect(leaseRequests(pika)).toHaveLength(1);
 		await h.run("two");
 		await vi.advanceTimersByTimeAsync(20 * MINUTE);
@@ -114,9 +97,9 @@ describe("the idle trigger", () => {
 		await h.run("one");
 		await vi.advanceTimersByTimeAsync(20 * MINUTE);
 		await until(() => leaseRequests(pika).length === 1, "the lease request");
-		await flush();
+		await settle();
 		await vi.advanceTimersByTimeAsync(120 * MINUTE);
-		await flush();
+		await settle();
 		expect(leaseRequests(pika)).toHaveLength(1);
 		expect(spawner.children).toEqual([]);
 		expect(ui.notes).toEqual([]);
@@ -129,7 +112,7 @@ describe("the idle trigger", () => {
 		await h.run("one");
 		await h.session.extensionRunner.emit({ type: "ui_prompt_start", reason: "ui_prompt", kind: "select", title: "pick" });
 		await vi.advanceTimersByTimeAsync(40 * MINUTE);
-		await flush();
+		await settle();
 		expect(leaseRequests(pika)).toEqual([]);
 		await h.session.extensionRunner.emit({ type: "ui_prompt_end", reason: "ui_prompt", kind: "select", title: "pick" });
 		await vi.advanceTimersByTimeAsync(20 * MINUTE);
@@ -142,7 +125,7 @@ describe("the idle trigger", () => {
 		await h.run("one");
 		Object.defineProperty(h.session, "pendingMessageCount", { configurable: true, get: () => 1 });
 		await vi.advanceTimersByTimeAsync(20 * MINUTE);
-		await flush();
+		await settle();
 		expect(leaseRequests(pika)).toEqual([]);
 		delete (h.session as unknown as Record<string, unknown>).pendingMessageCount;
 	});
@@ -157,7 +140,7 @@ describe("the idle trigger", () => {
 		fakeTimers();
 		await h.run("one");
 		await vi.advanceTimersByTimeAsync(60 * MINUTE);
-		await flush();
+		await settle();
 		expect(leaseRequests(pika)).toEqual([]);
 		expect(spawner.children).toEqual([]);
 	});
@@ -169,7 +152,7 @@ describe("the idle trigger", () => {
 		fakeTimers();
 		for (const h of sessions) await h.run("one");
 		await vi.advanceTimersByTimeAsync(60 * MINUTE);
-		await flush();
+		await settle();
 		expect(leaseRequests(pika)).toEqual([]);
 	});
 
@@ -180,7 +163,7 @@ describe("the idle trigger", () => {
 		await vi.advanceTimersByTimeAsync(10 * MINUTE);
 		await h.session.extensionRunner.emitInput("hello", undefined, "interactive");
 		await vi.advanceTimersByTimeAsync(30 * MINUTE);
-		await flush();
+		await settle();
 		expect(leaseRequests(pika)).toEqual([]);
 	});
 });

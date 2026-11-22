@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
-import type { KeybindingHints, Theme } from "@earendil-works/pi-coding-agent";
+import type { KeybindingHints } from "@earendil-works/pi-coding-agent";
+import { plainTheme } from "../support/ui.ts";
 import { FakeRelay } from "./support/relay-server.ts";
 import { setCredentials, startSession, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
 
@@ -7,7 +8,6 @@ let workspace: Workspace;
 let relay: FakeRelay;
 const harnesses: Harness[] = [];
 const keys: KeybindingHints = { keyText: (keybinding) => keybinding, keyHint: (keybinding, description) => `${keybinding} ${description}` };
-const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
 beforeEach(async () => { workspace = await Workspace.create(); relay = await new FakeRelay().start(); setCredentials(relay.url); });
 afterEach(async () => {
 	for (const h of harnesses.splice(0)) await h.shutdown();
@@ -35,9 +35,9 @@ function renderers(h: Harness, tool: string) {
 	const lines = (component: { render(width: number): readonly string[] }) => component.render(200).map((line) => line.trimEnd());
 	return {
 		definition,
-		call: (args: Args, expanded = false) => lines(definition.renderCall!(args as never, theme, context(args, expanded, false))),
+		call: (args: Args, expanded = false) => lines(definition.renderCall!(args as never, plainTheme, context(args, expanded, false))),
 		result: (args: Args, result: Result, { expanded = false, isError = false } = {}) =>
-			lines(definition.renderResult!(result as never, { expanded, isPartial: false }, theme, context(args, expanded, isError))),
+			lines(definition.renderResult!(result as never, { expanded, isPartial: false }, plainTheme, context(args, expanded, isError))),
 	};
 }
 

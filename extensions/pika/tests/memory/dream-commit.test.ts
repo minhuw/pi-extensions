@@ -3,8 +3,8 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/provid
 import { timing } from "../../memory/client.ts";
 import { currentDream } from "../../memory/dream/index.ts";
 import type { CommitBody } from "../../memory/dream/run.ts";
-import { type Answer, FakePika, type Recorded } from "./support/pika-server.ts";
-import { batch, fakeSpawner, type FakeChild, LEASE_ID, RecordingUI, releases, resetDreams, serveDreams } from "./support/dream.ts";
+import { type Answer, FakePika, type Recorded } from "../support/pika-server.ts";
+import { batch, commits, fakeSpawner, type FakeChild, LEASE_ID, RecordingUI, releases, resetDreams, serveDreams, until } from "./support/dream.ts";
 import { type Harness, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -37,16 +37,7 @@ afterEach(async () => {
 	await workspace.cleanup();
 });
 
-async function until(check: () => boolean, what: string, ms = 5_000): Promise<void> {
-	const deadline = performance.now() + ms;
-	while (performance.now() < deadline) {
-		if (check()) return;
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-	throw new Error(`timed out waiting for ${what}`);
-}
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-const commits = () => pika.requestsTo(`memory/dream/${LEASE_ID}/commit`);
 const bodyOf = (request: Recorded) => request.body as CommitBody;
 
 async function dream(): Promise<FakeChild> {
@@ -104,11 +95,11 @@ describe("a commit without a definite answer", () => {
 		const retry = await child.call("dream_commit", { sessions: ["s-past-1"] });
 		expect(retry.isError).toBe(false);
 		expect(retry.text).toMatch(/^Committed batch batch-0001: 1 note changed, 1 session consolidated\./);
-		expect(commits()).toHaveLength(2);
-		expect(bodyOf(commits()[0]!).commitId).toMatch(UUID);
+		expect(commits(pika)).toHaveLength(2);
+		expect(bodyOf(commits(pika)[0]!).commitId).toMatch(UUID);
 		// The retry is the first commit again, byte for byte.
-		expect(commits()[1]!.body).toEqual(commits()[0]!.body);
-		expect(commits()[0]!.body).toMatchObject({ summary: "the upload fix", sessions: ["s-past-1"], changes: [{ op: "save", ...SAVE }] });
+		expect(commits(pika)[1]!.body).toEqual(commits(pika)[0]!.body);
+		expect(commits(pika)[0]!.body).toMatchObject({ summary: "the upload fix", sessions: ["s-past-1"], changes: [{ op: "save", ...SAVE }] });
 		expect(server.writes).toBe(1);
 		expect(currentDream()).toMatchObject({ staged: [], discarded: 0, failedCommits: 0 });
 		expect(currentDream()!.pending).toBeUndefined();
@@ -138,11 +129,11 @@ describe("a commit without a definite answer", () => {
 		const result = await child.call("dream_commit", { sessions: ["s-past-1"], summary: "second" });
 		expect(result.isError).toBe(false);
 		expect(result.text).toMatch(/^Committed batch batch-0001: 1 note changed, 1 session consolidated\.[\s\S]*\n\nCommitted batch batch-0002: 1 note changed\./);
-		expect(commits()).toHaveLength(3);
-		expect(commits()[1]!.body).toEqual(commits()[0]!.body);
-		const last = bodyOf(commits()[2]!);
+		expect(commits(pika)).toHaveLength(3);
+		expect(commits(pika)[1]!.body).toEqual(commits(pika)[0]!.body);
+		const last = bodyOf(commits(pika)[2]!);
 		expect(last.commitId).toMatch(UUID);
-		expect(last.commitId).not.toBe(bodyOf(commits()[0]!).commitId);
+		expect(last.commitId).not.toBe(bodyOf(commits(pika)[0]!).commitId);
 		// The session went with the first commit; the second carries only the change staged after it.
 		expect(last).toMatchObject({ summary: "second", sessions: [], changes: [{ op: "save", ...OTHER }] });
 		expect(server.writes).toBe(2);
@@ -183,10 +174,10 @@ describe("sessions", () => {
 		await child.call("dream_save", SAVE);
 		const result = await child.call("dream_commit", { sessions: ["s-past-1", "s-elsewhere"] });
 		expect(result).toMatchObject({ isError: true, text: "s-elsewhere is not one of this dream's sessions (s-past-1). Nothing was sent, and the 1 staged change is still staged: name only sessions the task message lists, and commit again." });
-		expect(commits()).toEqual([]);
+		expect(commits(pika)).toEqual([]);
 		expect(currentDream()).toMatchObject({ staged: [{ op: "save", ...SAVE }], discarded: 0, failedCommits: 0 });
 		expect((await child.call("dream_commit", { sessions: ["s-past-1", "s-past-1"] })).isError).toBe(false);
-		expect(commits()[0]!.body).toMatchObject({ sessions: ["s-past-1"] });
+		expect(commits(pika)[0]!.body).toMatchObject({ sessions: ["s-past-1"] });
 	});
 });
 
@@ -201,7 +192,7 @@ describe("changes staged while a commit runs", () => {
 		const child = await dream();
 		await child.call("dream_save", SAVE);
 		const committing = child.call("dream_commit", { sessions: [] });
-		await until(() => commits().length === 1, "the commit request");
+		await until(() => commits(pika).length === 1, "the commit request");
 		expect((await child.call("dream_save", OTHER)).isError).toBe(false);
 		const result = await committing;
 		expect(result.text).toBe("the pika server refused the commit (HTTP 400 bad_request): nope. Nothing was written, and the 1 staged change was discarded. 1 other staged change is still staged.");
@@ -224,7 +215,7 @@ describe("changes staged while a commit runs", () => {
 		await h.session.prompt("/memory dream");
 		await until(() => releases(pika).length === 1, "the release", 10_000);
 		expect(stagedAtCommit).toEqual([0, 0]);
-		expect(commits().map((request) => bodyOf(request).changes)).toEqual([[{ op: "save", ...SAVE }], [{ op: "save", ...OTHER }]]);
+		expect(commits(pika).map((request) => bodyOf(request).changes)).toEqual([[{ op: "save", ...SAVE }], [{ op: "save", ...OTHER }]]);
 		expect(releases(pika)).toEqual(["completed"]);
 	});
 });
@@ -243,7 +234,7 @@ describe("a commit in flight when the dream is stopped", () => {
 		// The real child aborts its running tools' signal when it is aborted.
 		const signal = new AbortController();
 		const pending = child.tool("dream_commit").execute("call-1", { sessions: ["s-past-1"] }, signal.signal, undefined, undefined as never);
-		await until(() => commits().length === 1, "the commit request");
+		await until(() => commits(pika).length === 1, "the commit request");
 		await h.session.extensionRunner.emitInput("hello", undefined, "interactive");
 		signal.abort();
 		expect(currentDream()).toMatchObject({ ended: true });

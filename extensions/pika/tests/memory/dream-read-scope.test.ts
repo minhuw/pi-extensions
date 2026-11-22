@@ -5,7 +5,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { dreamSessionDir, inProjectPikaDir, outsideProject, READ_TOOLS } from "../../memory/dream/child.ts";
 import { currentDream } from "../../memory/dream/index.ts";
-import { FakePika } from "./support/pika-server.ts";
+import { FakePika } from "../support/pika-server.ts";
+import { waitFor } from "../support/runtime.ts";
 import { RecordingUI, releases, resetDreams, serveDreams } from "./support/dream.ts";
 import { type Harness, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
@@ -53,15 +54,6 @@ afterEach(async () => {
 	await workspace.cleanup();
 });
 
-async function until(check: () => boolean, what: string, ms = 10_000): Promise<void> {
-	const deadline = performance.now() + ms;
-	while (performance.now() < deadline) {
-		if (check()) return;
-		await new Promise<void>((resolve) => setTimeout(resolve, 5));
-	}
-	throw new Error(`timed out waiting for ${what}`);
-}
-
 /** Runs a dream whose child makes `calls` in its first turn, and returns each call's result by its id. */
 async function dream(calls: ReturnType<typeof fauxToolCall>[]): Promise<Record<string, { text: string; isError: boolean }>> {
 	h = await startSession({ workspace, ui: ui.context() });
@@ -77,7 +69,7 @@ async function dream(calls: ReturnType<typeof fauxToolCall>[]): Promise<Record<s
 		},
 	]);
 	await h.session.prompt("/memory dream");
-	await until(() => releases(pika).length === 1, "the release");
+	await waitFor(() => releases(pika).length === 1, 10_000, "the release");
 	expect(Object.keys(results).sort()).toEqual(calls.map((call) => call.id).sort());
 	return results;
 }

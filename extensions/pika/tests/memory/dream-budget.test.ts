@@ -4,8 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { currentDream, dreamLimits } from "../../memory/dream/index.ts";
 import { type Usage, WRAP_UP } from "../../memory/dream/run.ts";
-import { FakePika } from "./support/pika-server.ts";
-import { fakeSpawner, type FakeChild, LEASE_ID, RecordingUI, releases, resetDreams, serveDreams } from "./support/dream.ts";
+import { FakePika } from "../support/pika-server.ts";
+import { fakeSpawner, fakeTimers, type FakeChild, LEASE_ID, RecordingUI, releases, resetDreams, serveDreams, until } from "./support/dream.ts";
 import { type Harness, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 const MINUTE = 60_000;
@@ -37,15 +37,6 @@ afterEach(async () => {
 	await pika.stop();
 	await workspace.cleanup();
 });
-
-async function until(check: () => boolean, what: string, ms = 5_000): Promise<void> {
-	const deadline = performance.now() + ms;
-	while (performance.now() < deadline) {
-		if (check()) return;
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-	throw new Error(`timed out waiting for ${what}`);
-}
 
 async function fakeDream(): Promise<FakeChild> {
 	const spawner = fakeSpawner();
@@ -106,7 +97,7 @@ describe("the token budget", () => {
 
 describe("the time limit", () => {
 	it("steers a wrap-up at 7 of its 10 minutes, so a commit after it is kept, and the cap then releases the dream as aborted", async () => {
-		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+		fakeTimers();
 		const child = await fakeDream();
 		await child.call("dream_save", SAVE);
 		await vi.advanceTimersByTimeAsync(7 * MINUTE - 1_000);

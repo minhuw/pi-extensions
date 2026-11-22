@@ -2,13 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { localTime, type LogView, type LogViewItem, LogViewer, overlayOptions, showLog } from "../log-viewer.ts";
+import { colorTheme, LOG_KEYS, plainTheme, stripAnsi } from "./support/ui.ts";
 
-const KEYS = { up: "\x1b[A", down: "\x1b[B", home: "\x1b[H", end: "\x1b[F", enter: "\r", esc: "\x1b" };
-const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
-const colorTheme = { fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[39m`, bold: (text: string) => `\x1b[1m${text}\x1b[22m` } as unknown as Theme;
-const plain = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
 /** A line without its frame. */
-const inside = (line: string) => plain(line).replace(/^│ /, "").replace(/\s*│$/, "");
+const inside = (line: string) => stripAnsi(line).replace(/^│ /, "").replace(/\s*│$/, "");
 
 const item = (index: number, overrides: Partial<LogViewItem> = {}): LogViewItem => ({
 	at: new Date(2026, 10, 10, 9, index).toISOString(), parts: [`item ${index}`, "", `part ${index}`], heading: `Item ${index}`,
@@ -26,12 +23,12 @@ describe("LogViewer", () => {
 	it("shows the caller's title and noun, rows without an icon, and leaves empty parts out", () => {
 		const { text, press } = viewer({ items: [item(1), item(2)] });
 		expect(text()).toEqual([
-			plain(`╭${"─".repeat(58)}╮`), "test log · 2 entries on this branch", `├${"─".repeat(58)}┤`,
+			stripAnsi(`╭${"─".repeat(58)}╮`), "test log · 2 entries on this branch", `├${"─".repeat(58)}┤`,
 			"  09:01  item 1  part 1",
 			"▸ 09:02  item 2  part 2",
 			`├${"─".repeat(58)}┤`, "2/2 · ↑↓ move · Enter open · Esc close", `╰${"─".repeat(58)}╯`,
 		]);
-		press(KEYS.up);
+		press(LOG_KEYS.up);
 		expect(text()[1]).toBe("test log · 2 entries on this branch");
 		expect(viewer({ items: [item(1)] }).text()[1]).toBe("test log · 1 entry on this branch");
 	});
@@ -42,7 +39,7 @@ describe("LogViewer", () => {
 
 	it("opens an item with its heading, the fields that have a value, and its text, tabs as three spaces", () => {
 		const { text, press } = viewer({ items: [item(1, { text: "first\n\tindented\n\nlast" }), item(2)] });
-		press(KEYS.home, KEYS.enter);
+		press(LOG_KEYS.home, LOG_KEYS.enter);
 		expect(text().slice(1, 12)).toEqual([
 			"test log · entry 1 of 2", `├${"─".repeat(58)}┤`,
 			"Item 1", "Kind: test", "Zero: 0", "", "first", "   indented", "", "last",
@@ -58,14 +55,14 @@ describe("LogViewer", () => {
 				const { view, press } = viewer({ items: [long, item(1)] }, { mode, theme: colorTheme });
 				const check = () => { for (const line of view.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width); };
 				check();
-				press(KEYS.home, KEYS.enter);
+				press(LOG_KEYS.home, LOG_KEYS.enter);
 				check();
-				press(KEYS.end);
+				press(LOG_KEYS.end);
 				check();
 			}
 		}
 		const { text, press } = viewer({ items: [item(0, { fields: [["Field", "word ".repeat(20).trim()]] })] }, { rows: 40 });
-		press(KEYS.enter);
+		press(LOG_KEYS.enter);
 		// 30 columns leave 26 inside the frame.
 		const words = "word word word word word";
 		expect(text(30).slice(4, 10)).toEqual(["Field: word word word word", words, words, words, "word", ""]);
@@ -73,9 +70,9 @@ describe("LogViewer", () => {
 
 	it("does nothing on Enter without items and closes on Esc", () => {
 		const { text, press, done } = viewer({ items: [] });
-		press(KEYS.enter, KEYS.down);
+		press(LOG_KEYS.enter, LOG_KEYS.down);
 		expect(text()[1]).toBe("test log · 0 entries on this branch");
-		press(KEYS.esc);
+		press(LOG_KEYS.esc);
 		expect(done).toHaveBeenCalledTimes(1);
 	});
 });

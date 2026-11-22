@@ -187,30 +187,7 @@ export async function startSession(options: SessionOptions): Promise<Harness> {
 	};
 }
 
-/** A UI context that records notifications and footer statuses; every other method is a no-op. */
-export class RecordingUI {
-	readonly notes: { message: string; type?: string }[] = [];
-	/** The current statuses set, by key; a cleared one is gone. */
-	readonly statuses = new Map<string, string>();
-	/** Every `setStatus` call, in order. */
-	readonly statusHistory: [string, string | undefined][] = [];
-	get last() { return this.notes.at(-1); }
-	get messages() { return this.notes.map((note) => note.message); }
-	status(key = "pika-memory"): string | undefined { return this.statuses.get(key); }
-	context(): ExtensionUIContext {
-		const methods: Partial<ExtensionUIContext> = {
-			notify: (message, type) => { this.notes.push({ message, type }); },
-			setStatus: (key, text) => {
-				this.statusHistory.push([key, text]);
-				if (text === undefined) this.statuses.delete(key);
-				else this.statuses.set(key, text);
-			},
-		};
-		return new Proxy(methods, {
-			get: (target, name) => name in target ? target[name as keyof ExtensionUIContext] : name === "then" ? undefined : () => undefined,
-		}) as ExtensionUIContext;
-	}
-}
+export { RecordingUI } from "./ui.ts";
 
 export interface ToolCallHarness {
 	readonly session: AgentSession;

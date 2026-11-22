@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { currentDream, dreamLimits, dreamRuntime } from "../../memory/dream/index.ts";
 import { type Usage, WRAP_UP } from "../../memory/dream/run.ts";
-import { FakePika } from "./support/pika-server.ts";
-import { batch, type FakeChild, fakeSpawner, LEASE_ID, RecordingUI, releases, renewals, resetDreams, serveDreams } from "./support/dream.ts";
+import { FakePika } from "../support/pika-server.ts";
+import { batch, commits, type FakeChild, fakeSpawner, fakeTimers, LEASE_ID, RecordingUI, releases, renewals, resetDreams, serveDreams, settle, until } from "./support/dream.ts";
 import { type Harness, note, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 const MINUTE = 60_000;
@@ -37,26 +37,12 @@ afterEach(async () => {
 	await workspace.cleanup();
 });
 
-async function settle(check: () => boolean, ms = 5_000): Promise<boolean> {
-	const deadline = performance.now() + ms;
-	while (performance.now() < deadline) {
-		if (check()) return true;
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-	return check();
-}
-async function until(check: () => boolean, what: string): Promise<void> {
-	if (!await settle(check)) throw new Error(`timed out waiting for ${what}`);
-}
-const quiet = () => settle(() => false, 150);
-
 /** Starts a dream with `/memory dream` and returns its child once it has its kickoff. */
 async function dream(): Promise<FakeChild> {
 	await h.session.prompt("/memory dream");
 	await until(() => spawner.children[0]?.prompts.length === 1, "the kickoff");
 	return spawner.children[0]!;
 }
-const commits = () => pika.requestsTo(`memory/dream/${LEASE_ID}/commit`);
 
 describe("staging and committing", () => {
 	it("dream_save and dream_forget only stage; dream_commit sends them once with the sessions it names", async () => {
@@ -68,15 +54,15 @@ describe("staging and committing", () => {
 		expect(forgot.text).toMatch(/^Staged change 2 \(forget note cccccccccccc at revision 2\)\. 2 changes staged\./);
 		const updated = await child.call("dream_save", { ...SAVE, id: "dddddddddddd", expectedRevision: 3, scope: "user", category: "feedback" });
 		expect(updated.text).toContain("Staged change 3 (update of note dddddddddddd at revision 3) in the user scope");
-		expect(commits()).toEqual([]);
+		expect(commits(pika)).toEqual([]);
 		expect(currentDream()!.staged).toHaveLength(3);
 
 		const committed = await child.call("dream_commit", { sessions: ["s-past-1"], summary: "pitfalls from the upload fix" });
 		expect(committed.isError).toBe(false);
 		expect(committed.text).toContain("Committed batch batch-0001: 1 note changed, 1 session consolidated.");
 		expect(committed.text).toContain("- created [aaaaaaaaaaaa] Pitfall (revision 1)");
-		expect(commits()).toHaveLength(1);
-		expect(commits()[0]!.body).toEqual({
+		expect(commits(pika)).toHaveLength(1);
+		expect(commits(pika)[0]!.body).toEqual({
 			commitId: expect.stringMatching(UUID), dreamSessionId: "dream-child-1", summary: "pitfalls from the upload fix", sessions: ["s-past-1"],
 			changes: [
 				{ op: "save", ...SAVE, reason: "seen twice" },
@@ -87,11 +73,11 @@ describe("staging and committing", () => {
 		expect(currentDream()!.staged).toEqual([]);
 		// A commit that only moves checkpoints is allowed; one with nothing is refused locally.
 		expect((await child.call("dream_commit", { sessions: ["s-past-1"] })).isError).toBe(false);
-		expect(commits()[1]!.body).toEqual({ commitId: expect.stringMatching(UUID), dreamSessionId: "dream-child-1", sessions: ["s-past-1"], changes: [] });
+		expect(commits(pika)[1]!.body).toEqual({ commitId: expect.stringMatching(UUID), dreamSessionId: "dream-child-1", sessions: ["s-past-1"], changes: [] });
 		// Every commit has its own id.
-		expect((commits()[1]!.body as { commitId: string }).commitId).not.toBe((commits()[0]!.body as { commitId: string }).commitId);
+		expect((commits(pika)[1]!.body as { commitId: string }).commitId).not.toBe((commits(pika)[0]!.body as { commitId: string }).commitId);
 		expect(await child.call("dream_commit", { sessions: [] })).toMatchObject({ isError: true, text: "nothing to commit: no change is staged and no session is named." });
-		expect(commits()).toHaveLength(2);
+		expect(commits(pika)).toHaveLength(2);
 
 		child.finish();
 		await until(() => releases(pika).length === 1, "the release");
@@ -156,7 +142,7 @@ describe("staging and committing", () => {
 		await child.call("dream_forget", { id: "cccccccccccc", expectedRevision: 1 });
 		child.finish();
 		await until(() => releases(pika).length === 1, "the release");
-		expect(commits()).toEqual([]);
+		expect(commits(pika)).toEqual([]);
 		expect(releases(pika)).toEqual(["completed"]);
 		expect(currentDream()).toMatchObject({ staged: [], discarded: 2 });
 		expect(ui.notes.at(-1)!.message).toBe("pika memory: the dream finished: 0 batches committed, 0 notes changed; discarded 2 uncommitted changes.");
@@ -199,13 +185,11 @@ describe("outcomes", () => {
 });
 
 describe("caps and the lease", () => {
-	const fakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
-
 	it("renews the lease every 5 minutes, steers a wrap-up at 7, and stops at 10 minutes, released as failed with nothing committed", async () => {
 		fakeTimers();
 		const child = await dream();
 		await vi.advanceTimersByTimeAsync(5 * MINUTE - 1_000);
-		await quiet();
+		await settle();
 		expect(renewals(pika)).toEqual([]);
 		await vi.advanceTimersByTimeAsync(1_000);
 		await until(() => renewals(pika).length === 1, "the first renewal");
@@ -214,7 +198,7 @@ describe("caps and the lease", () => {
 		await vi.advanceTimersByTimeAsync(2 * MINUTE);
 		expect(child.steers).toEqual([WRAP_UP]);
 		await vi.advanceTimersByTimeAsync(3 * MINUTE - 1_000);
-		await quiet();
+		await settle();
 		expect(currentDream()!.ended).toBe(false);
 		expect(currentDream()!.lease.expiresAt).toBe("2026-11-08T10:20:00Z");
 		await vi.advanceTimersByTimeAsync(1_000);
@@ -225,7 +209,7 @@ describe("caps and the lease", () => {
 		// No renewals after the end.
 		const count = renewals(pika).length;
 		await vi.advanceTimersByTimeAsync(30 * MINUTE);
-		await quiet();
+		await settle();
 		expect(renewals(pika)).toHaveLength(count);
 	});
 
@@ -236,7 +220,7 @@ describe("caps and the lease", () => {
 		const child = await dream();
 		await vi.advanceTimersByTimeAsync(5 * MINUTE);
 		await until(() => renewals(pika).length === 1, "the first renewal");
-		await quiet();
+		await settle();
 		expect(currentDream()!.ended).toBe(false);
 		pika.routes.set(`POST memory/dream/${LEASE_ID}/renew`, { status: 409, body: { error: "lease_lost" } });
 		await vi.advanceTimersByTimeAsync(5 * MINUTE);

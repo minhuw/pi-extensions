@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { BUDGET, GOAL_MAX, PLAN_MAX, PREAMBLE } from "../../recall/format.ts";
-import { FakePika, TOKEN } from "./support/pika-server.ts";
+import { FakePika, TOKEN } from "../support/pika-server.ts";
 import { callTool, type Harness, setCredentials, startSession, Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;

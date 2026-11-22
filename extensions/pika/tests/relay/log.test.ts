@@ -1,22 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import type { ExtensionUIContext, SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { LogViewer } from "../../log-viewer.ts";
 import { RECEIVED_TYPE, timing } from "../../relay/protocol.ts";
 import { type LogItem, logItems, relayView, SENT_TYPE, size } from "../../relay/viewer.ts";
+import { colorTheme, LOG_KEYS, LogUI, plainTheme, stripAnsi } from "../support/ui.ts";
 import { FakeRelay } from "./support/relay-server.ts";
 import { Notes, queueToolCall as callTool, setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
 
-const KEYS = { up: "\x1b[A", down: "\x1b[B", pageUp: "\x1b[5~", pageDown: "\x1b[6~", home: "\x1b[H", end: "\x1b[F", enter: "\r", esc: "\x1b" };
 const BINDINGS: Record<string, string> = {
-	"tui.select.up": KEYS.up, "tui.select.down": KEYS.down, "tui.select.pageUp": KEYS.pageUp, "tui.select.pageDown": KEYS.pageDown,
-	"tui.select.confirm": KEYS.enter, "tui.select.cancel": KEYS.esc,
+	"tui.select.up": LOG_KEYS.up, "tui.select.down": LOG_KEYS.down, "tui.select.pageUp": LOG_KEYS.pageUp, "tui.select.pageDown": LOG_KEYS.pageDown,
+	"tui.select.confirm": LOG_KEYS.enter, "tui.select.cancel": LOG_KEYS.esc,
 };
 const keybindings = { matches: (data: string, binding: string) => BINDINGS[binding] === data };
-const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
-const colorTheme = { fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[39m`, bold: (text: string) => `\x1b[1m${text}\x1b[22m` } as unknown as Theme;
-const plain = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
 
 let workspace: Workspace;
 let relay: FakeRelay;
@@ -28,22 +25,7 @@ afterEach(async () => {
 	await workspace.cleanup();
 });
 
-/** A UI that records notifications and opens `ui.custom` components on a fake terminal. */
-class LogUI extends Notes {
-	viewer: LogViewer | undefined;
-	options: { overlay?: boolean; overlayOptions?: () => unknown } | undefined;
-	readonly tui = { mode: "regular" as const, terminal: { rows: 30 }, requestRender: vi.fn() };
-	override context(): ExtensionUIContext {
-		const base = super.context();
-		const custom = (factory: (...args: unknown[]) => LogViewer, options: LogUI["options"]) => new Promise((resolve) => {
-			this.options = options;
-			this.viewer = factory(this.tui, plainTheme, keybindings, resolve);
-		});
-		return new Proxy(base, { get: (target, name) => name === "custom" ? custom : Reflect.get(target, name) });
-	}
-	press(...keys: string[]): void { for (const key of keys) this.viewer!.handleInput(key); }
-	lines(width = 100): string[] { return this.viewer!.render(width).map((line) => plain(line).trimEnd()); }
-}
+const logUI = () => new LogUI({ rows: 30, keybindings, requestRender: vi.fn() });
 
 async function online(options: Partial<Parameters<typeof startSession>[0]> = {}): Promise<Harness> {
 	const h = await startSession({ workspace, ...options });
@@ -116,7 +98,7 @@ it("/relay log opens only in the TUI, and says when the branch has no relay mess
 	await rpc.session.prompt("/relay log");
 	expect(notes.last).toEqual({ type: "info", message: "/relay log opens only in the interactive TUI." });
 
-	const ui = new LogUI();
+	const ui = logUI();
 	const h = await online({ mode: "tui", ui: ui.context() });
 	await h.session.prompt("/relay log");
 	expect(ui.last).toEqual({ type: "info", message: "No relay messages on this branch." });
@@ -134,7 +116,7 @@ it("/relay log opens only in the TUI, and says when the branch has no relay mess
 });
 
 it("/relay log lists the branch's messages with the latest status, newest selected, and opens each in full", async () => {
-	const ui = new LogUI();
+	const ui = logUI();
 	const a = await online({ mode: "tui", ui: ui.context() });
 	const id = a.session.sessionId;
 	relay.recorded.add("offline-session");
@@ -165,7 +147,7 @@ it("/relay log lists the branch's messages with the latest status, newest select
 		"│ 3/3 · ↑↓ move · Enter open · Esc close",
 	]);
 
-	ui.press(KEYS.up, KEYS.enter);
+	ui.press(LOG_KEYS.up, LOG_KEYS.enter);
 	const detail = ui.lines().map((line) => line.replace(/\s+│$/, ""));
 	expect(detail[1]).toBe("│ ✉ relay log · message 2 of 3");
 	expect(detail.slice(3, 10)).toEqual([
@@ -179,7 +161,7 @@ it("/relay log lists the branch's messages with the latest status, newest select
 	]);
 	expect(detail.at(-2)).toBe("│ Esc back");
 
-	ui.press(KEYS.esc, KEYS.up, KEYS.enter);
+	ui.press(LOG_KEYS.esc, LOG_KEYS.up, LOG_KEYS.enter);
 	expect(ui.lines().slice(3, 11).map((line) => line.replace(/\s+│$/, ""))).toEqual([
 		"│ ← from Sender on desktop · elsewhere",
 		expect.stringMatching(/^│ Time: /),
@@ -238,7 +220,7 @@ describe("the relay log view", () => {
 		const done = vi.fn();
 		const tui = { mode, terminal: { rows }, requestRender: vi.fn() };
 		const log = new LogViewer(tui, colorTheme, keys, relayView(colorTheme, items), done);
-		return { log, done, tui, press: (...input: string[]) => { for (const key of input) log.handleInput(key); }, text: (width = 80) => log.render(width).map(plain) };
+		return { log, done, tui, press: (...input: string[]) => { for (const key of input) log.handleInput(key); }, text: (width = 80) => log.render(width).map(stripAnsi) };
 	}
 	const selected = (lines: string[]) => lines.find((line) => line.startsWith("│ ▸"));
 
@@ -249,9 +231,9 @@ describe("the relay log view", () => {
 				const { log, press } = viewer([long, item(1), item(2)], { mode });
 				const check = () => { for (const line of log.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width); };
 				check();
-				press(KEYS.home, KEYS.enter);
+				press(LOG_KEYS.home, LOG_KEYS.enter);
 				check();
-				press(KEYS.pageDown, KEYS.end);
+				press(LOG_KEYS.pageDown, LOG_KEYS.end);
 				check();
 			}
 		}
@@ -266,21 +248,21 @@ describe("the relay log view", () => {
 		expect(selected(lines)).toMatch(/▸ ← 10:30 {2}Builder on desktop · api {2}10 chars/);
 		expect(lines.at(-2)).toMatch(/^│ 30\/30 · /);
 		expect(lines.filter((line) => /^│ [▸ ] [←→] /.test(line))).toHaveLength(8);
-		press(KEYS.home);
+		press(LOG_KEYS.home);
 		expect(text().at(-2)).toMatch(/^│ 1\/30 · /);
-		press(KEYS.pageDown);
+		press(LOG_KEYS.pageDown);
 		expect(text().at(-2)).toMatch(/^│ 9\/30 · /);
-		press(KEYS.down, KEYS.down, KEYS.up);
+		press(LOG_KEYS.down, LOG_KEYS.down, LOG_KEYS.up);
 		expect(text().at(-2)).toMatch(/^│ 10\/30 · /);
-		press(KEYS.pageUp, KEYS.pageUp);
+		press(LOG_KEYS.pageUp, LOG_KEYS.pageUp);
 		expect(text().at(-2)).toMatch(/^│ 1\/30 · /);
-		press(KEYS.up);
+		press(LOG_KEYS.up);
 		expect(text().at(-2)).toMatch(/^│ 1\/30 · /);
-		press(KEYS.end, KEYS.down);
+		press(LOG_KEYS.end, LOG_KEYS.down);
 		lines = text();
 		expect(lines.at(-2)).toMatch(/^│ 30\/30 · /);
 		expect(selected(lines)).toMatch(/▸ ← 10:30 {2}Builder on desktop · api {2}10 chars/);
-		press(KEYS.up);
+		press(LOG_KEYS.up);
 		expect(selected(text())).toMatch(/▸ → 10:29 {2}s-1 {2}delivered {2}10 chars/);
 		expect(tui.requestRender).toHaveBeenCalled();
 	});
@@ -288,39 +270,39 @@ describe("the relay log view", () => {
 	it("scrolls a long message in the detail view, and Esc or q goes back before it closes", () => {
 		const body = Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join("\n");
 		const { text, press, done } = viewer([item(0), item(1, { text: body })]);
-		press(KEYS.enter);
+		press(LOG_KEYS.enter);
 		let lines = text();
 		expect(lines[1]).toMatch(/^│ ✉ relay log · message 2 of 2/);
 		expect(lines.at(-2)).toMatch(/^│ lines 1-8 of 46 · ↑↓ scroll · Esc back/);
-		press(KEYS.pageDown, KEYS.down);
+		press(LOG_KEYS.pageDown, LOG_KEYS.down);
 		expect(text().at(-2)).toMatch(/^│ lines 10-17 of 46 /);
-		press(KEYS.end);
+		press(LOG_KEYS.end);
 		lines = text();
 		expect(lines.at(-2)).toMatch(/^│ lines 39-46 of 46 /);
 		expect(lines.at(-4)).toMatch(/^│ line 40 +│$/);
-		press(KEYS.down, KEYS.home);
+		press(LOG_KEYS.down, LOG_KEYS.home);
 		expect(text().at(-2)).toMatch(/^│ lines 1-8 of 46 /);
-		press(KEYS.esc);
+		press(LOG_KEYS.esc);
 		expect(text()[1]).toMatch(/^│ ✉ relay log · 2 messages on this branch/);
 		expect(done).not.toHaveBeenCalled();
-		press(KEYS.enter, "q");
+		press(LOG_KEYS.enter, "q");
 		expect(done).not.toHaveBeenCalled();
 		press("q");
 		expect(done).toHaveBeenCalledTimes(1);
 		const other = viewer([item(0)]);
-		other.press(KEYS.esc);
+		other.press(LOG_KEYS.esc);
 		expect(other.done).toHaveBeenCalledTimes(1);
 	});
 
 	it("falls back to the default keys without a keybindings manager, and ignores other keys", () => {
 		const { text, press, done, tui } = viewer([item(0), item(1)], { keys: undefined });
-		press(KEYS.up);
+		press(LOG_KEYS.up);
 		expect(text().at(-2)).toMatch(/^│ 1\/2 · /);
 		press("x");
 		expect(tui.requestRender).toHaveBeenCalledTimes(1);
-		press(KEYS.enter);
+		press(LOG_KEYS.enter);
 		expect(text()[3]).toMatch(/^│ ← from Builder on desktop · api/);
-		press(KEYS.esc, KEYS.esc);
+		press(LOG_KEYS.esc, LOG_KEYS.esc);
 		expect(done).toHaveBeenCalledTimes(1);
 	});
 });

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { currentDream, dreamLimits } from "../../memory/dream/index.ts";
 import { outcomeOf } from "../../memory/dream/run.ts";
-import { type Answer, FakePika } from "./support/pika-server.ts";
-import { batch, fakeSpawner, type FakeChild, LEASE_ID, RecordingUI, releases, resetDreams, serveDreams } from "./support/dream.ts";
+import { type Answer, FakePika } from "../support/pika-server.ts";
+import { batch, fakeSpawner, type FakeChild, LEASE_ID, RecordingUI, releases, resetDreams, serveDreams, until } from "./support/dream.ts";
 import { type Harness, note, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 const SAVE = { expectedRevision: 0, scope: "project", category: "project", title: "Pitfall", hook: "run npm ci first", body: "Tests need node_modules.", sources: [{ sessionId: "s-past-1", seq: 7 }] };
@@ -33,15 +33,6 @@ afterEach(async () => {
 	await pika.stop();
 	await workspace.cleanup();
 });
-
-async function until(check: () => boolean, what: string): Promise<void> {
-	const deadline = performance.now() + 5_000;
-	while (performance.now() < deadline) {
-		if (check()) return;
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-	throw new Error(`timed out waiting for ${what}`);
-}
 
 /** Starts a dream whose commits get `answers` in turn, the last one repeated. */
 async function dream(...answers: Answer[]): Promise<FakeChild> {

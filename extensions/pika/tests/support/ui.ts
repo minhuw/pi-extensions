@@ -1,7 +1,94 @@
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
+import type { LogViewer } from "../../log-viewer.ts";
 
 export const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
+export const colorTheme = { fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[39m`, bold: (text: string) => `\x1b[1m${text}\x1b[22m` } as unknown as Theme;
+export const styledTheme = { fg: (_color: string, text: string) => `\x1b[32m${text}\x1b[0m`, bold: (text: string) => `\x1b[1m${text}\x1b[22m` } as unknown as Theme;
+
+export const LOG_KEYS = {
+	up: "\x1b[A",
+	down: "\x1b[B",
+	pageUp: "\x1b[5~",
+	pageDown: "\x1b[6~",
+	home: "\x1b[H",
+	end: "\x1b[F",
+	enter: "\r",
+	esc: "\x1b",
+} as const;
+
+export const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
+
+/** A UI context that records notifications and footer statuses; every other method is a no-op. */
+export class RecordingUI {
+	readonly notes: { message: string; type?: string }[] = [];
+	/** The current statuses set, by key; a cleared one is gone. */
+	readonly statuses = new Map<string, string>();
+	/** Every `setStatus` call, in order. */
+	readonly statusHistory: [string, string | undefined][] = [];
+	get last() { return this.notes.at(-1); }
+	get messages() { return this.notes.map((note) => note.message); }
+	status(key = "pika-memory"): string | undefined { return this.statuses.get(key); }
+	context(): ExtensionUIContext {
+		const methods: Partial<ExtensionUIContext> = {
+			notify: (message, type) => { this.notes.push({ message, type }); },
+			setStatus: (key, text) => {
+				this.statusHistory.push([key, text]);
+				if (text === undefined) this.statuses.delete(key);
+				else this.statuses.set(key, text);
+			},
+		};
+		return new Proxy(methods, {
+			get: (target, name) => name in target ? target[name as keyof ExtensionUIContext] : name === "then" ? undefined : () => undefined,
+		}) as ExtensionUIContext;
+	}
+}
+
+export interface LogUIOptions {
+	rows?: number;
+	theme?: Theme;
+	keybindings?: unknown;
+	requestRender?: () => void;
+}
+
+/** A UI that records notifications and opens `ui.custom` components on a fake terminal. */
+export class LogUI extends RecordingUI {
+	viewer: LogViewer | undefined;
+	options: { overlay?: boolean; overlayOptions?: () => unknown } | undefined;
+	renderRequests = 0;
+	readonly tui: { mode: "regular"; terminal: { rows: number }; requestRender: () => void };
+	private readonly theme: Theme;
+	private readonly keybindings: unknown;
+
+	constructor(options: LogUIOptions = {}) {
+		super();
+		this.theme = options.theme ?? plainTheme;
+		this.keybindings = options.keybindings;
+		const onRender = options.requestRender;
+		this.tui = {
+			mode: "regular",
+			terminal: { rows: options.rows ?? 40 },
+			requestRender: onRender ?? (() => { this.renderRequests++; }),
+		};
+	}
+
+	override context(): ExtensionUIContext {
+		const base = super.context();
+		const custom = (factory: (...args: unknown[]) => LogViewer, options?: LogUI["options"]) => new Promise((resolve) => {
+			this.options = options;
+			this.viewer = factory(this.tui, this.theme, this.keybindings, resolve);
+		});
+		return new Proxy(base, { get: (target, name) => name === "custom" ? custom : Reflect.get(target, name) });
+	}
+
+	press(...keys: string[]): void {
+		for (const key of keys) this.viewer!.handleInput(key);
+	}
+
+	lines(width = 100): string[] {
+		return this.viewer!.render(width).map((line) => stripAnsi(line).trimEnd());
+	}
+}
 
 /** How long a custom component may stay open after its keys before the scripted UI gives up. */
 const CUSTOM_WAIT_MS = 10_000;

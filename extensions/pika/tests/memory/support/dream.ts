@@ -1,6 +1,7 @@
+import { vi } from "vitest";
 import { dreamLimits, dreamRuntime } from "../../../memory/dream/index.ts";
 import type { Batch, ChildEvent, DreamChild, DreamSession, Grant, Lease, SpawnOptions } from "../../../memory/dream/run.ts";
-import type { Answer, FakePika, Recorded } from "./pika-server.ts";
+import type { Answer, FakePika, Recorded } from "../../support/pika-server.ts";
 import { PROJECT, PROJECT_SCOPE } from "./runtime.ts";
 
 export { RecordingUI } from "../../support/runtime.ts";
@@ -48,6 +49,24 @@ export function serveDreams(pika: FakePika, options: { grant?: Grant; lease?: Ro
 export const leaseRequests = (pika: FakePika) => pika.requestsTo("memory/dream/lease");
 export const releases = (pika: FakePika) => pika.requestsTo(`memory/dream/${LEASE_ID}/release`).map((request) => (request.body as { outcome: string }).outcome);
 export const renewals = (pika: FakePika) => pika.requestsTo(`memory/dream/${LEASE_ID}/renew`);
+export const commits = (pika: FakePika, leaseId = LEASE_ID) => pika.requestsTo(`memory/dream/${leaseId}/commit`);
+
+/** Fake timers for dream timeouts and intervals; the session's own work and loopback server run on real I/O. */
+export const fakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+
+/** Waits real time on `setImmediate`, which fake timers leave alone, for `check` or, without one, about 150 ms. */
+export async function settle(check?: () => boolean, ms = check ? 5_000 : 150): Promise<boolean> {
+	const deadline = performance.now() + ms;
+	while (performance.now() < deadline) {
+		if (check?.()) return true;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	return check?.() ?? true;
+}
+
+export async function until(check: () => boolean, what: string, ms = 5_000): Promise<void> {
+	if (!await settle(check, ms)) throw new Error(`timed out waiting for ${what}`);
+}
 
 /** A dream child whose run the test drives: `finish` ends its prompt, `emit` sends it events. */
 export class FakeChild implements DreamChild {

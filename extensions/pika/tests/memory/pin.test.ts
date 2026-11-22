@@ -5,7 +5,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import pikaExtension, { CHILD_SESSION_HOOKS, type ChildSessionHook } from "../../index.ts";
 import { timing } from "../../memory/client.ts";
 import { sectionText } from "../../memory/format.ts";
-import { FakePika, TOKEN } from "./support/pika-server.ts";
+import { FakePika, TOKEN } from "../support/pika-server.ts";
 import { callTool, type Harness, memorySection, note, PROJECT, PROJECT_SCOPE, REPOSITORY, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 const INDEX = "# User memory\n## feedback\n- Tabs — indent with tabs [aaaaaaaaaaaa]\n# Project memory: my-project\n## project\n- Pitfall — run npm ci first [bbbbbbbbbbbb]\n";

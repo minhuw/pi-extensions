@@ -4,8 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { currentDream } from "../../memory/dream/index.ts";
-import { FakePika, TOKEN } from "./support/pika-server.ts";
-import { batch, fakeSpawner, lease, LEASE_ID, leaseRequests, RecordingUI, releases, resetDreams, serveDreams } from "./support/dream.ts";
+import { FakePika, TOKEN } from "../support/pika-server.ts";
+import { batch, commits, fakeSpawner, fakeTimers, lease, LEASE_ID, leaseRequests, RecordingUI, releases, resetDreams, serveDreams, settle, until } from "./support/dream.ts";
 import { type Harness, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 const MINUTE = 60_000;
@@ -41,19 +41,6 @@ async function start(options: Omit<Parameters<typeof startSession>[0], "workspac
 	open.push(h);
 	return h;
 }
-async function settle(check?: () => boolean, ms = check ? 5_000 : 150): Promise<boolean> {
-	const deadline = performance.now() + ms;
-	while (performance.now() < deadline) {
-		if (check?.()) return true;
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-	return check?.() ?? true;
-}
-async function until(check: () => boolean, what: string): Promise<void> {
-	if (!await settle(check)) throw new Error(`timed out waiting for ${what}`);
-}
-const fakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
-const commits = () => pika.requestsTo(`memory/dream/${LEASE_ID}/commit`);
 
 describe("/memory stop", () => {
 	it("cancels a dream whose lease is being requested, and releases the lease granted meanwhile", async () => {
@@ -114,7 +101,7 @@ describe("pika's credentials", () => {
 		const child = spawner.children[0]!;
 		await child.call("dream_save", SAVE);
 		const committing = child.call("dream_commit", { sessions: ["s-past-1"] });
-		await until(() => commits().length === 1, "the commit request");
+		await until(() => commits(pika).length === 1, "the commit request");
 		setCredentials(undefined);
 		expect((await committing).text).toMatch(/^Committed batch batch-0001/);
 		await until(() => releases(pika).length === 1, "the release");

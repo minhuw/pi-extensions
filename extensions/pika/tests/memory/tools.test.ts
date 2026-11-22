@@ -4,10 +4,11 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import type { Theme } from "@earendil-works/pi-coding-agent";
 import { withoutCredentials } from "../../agent-client.ts";
 import { request, timing } from "../../memory/client.ts";
-import { FakePika } from "./support/pika-server.ts";
+import { FakePika } from "../support/pika-server.ts";
+import { waitFor } from "../support/runtime.ts";
+import { plainTheme, styledTheme } from "../support/ui.ts";
 import { callTool, type Harness, note, PROJECT, PROJECT_SCOPE, REPOSITORY, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;
@@ -65,14 +66,6 @@ it("memory_read bounds its output and lists the rest by title", async () => {
 	expect(result.text).toContain(`- [${notes[5]!.id}] ${notes[5]!.title} — ${notes[5]!.hook}`);
 });
 
-async function until(check: () => boolean, what: string, ms = 10_000): Promise<void> {
-	const deadline = performance.now() + ms;
-	while (performance.now() < deadline) {
-		if (check()) return;
-		await new Promise<void>((resolve) => setTimeout(resolve, 5));
-	}
-	throw new Error(`timed out waiting for ${what}`);
-}
 const used = () => pika.requestsTo("memory/used");
 
 it("memory_read by ids or query tells the server which notes it showed in full; other reads tell it nothing", async () => {
@@ -88,13 +81,13 @@ it("memory_read by ids or query tells the server which notes it showed in full; 
 	// Only the notes shown in full count, not those past the budget that are listed by title.
 	const read = await callTool(h, "memory_read", { ids: notes.map((n) => `[${n.id}]`).reverse() });
 	expect(read.text).toContain("4 more notes not shown in full");
-	await until(() => used().length === 1, "memory/used");
+	await waitFor(() => used().length === 1, 10_000, "memory/used");
 	expect(used()).toHaveLength(1);
 	expect(used()[0]).toMatchObject({ method: "POST", contentType: "application/json" });
 	expect(used()[0]!.body).toEqual({ ids: [notes[0]!.id, notes[1]!.id], project: PROJECT, repository: REPOSITORY, sessionId: h.session.sessionId });
 
 	await callTool(h, "memory_read", { query: "needle" });
-	await until(() => used().length === 2, "the second memory/used");
+	await waitFor(() => used().length === 2, 10_000, "the second memory/used");
 	expect(used()[1]!.body).toEqual({ ids: [notes[4]!.id], project: PROJECT, repository: REPOSITORY, sessionId: h.session.sessionId });
 	expect(pika.requests.filter((request) => request.method === "POST").map((request) => request.path)).toEqual(["memory/used", "memory/used"]);
 });
@@ -105,7 +98,7 @@ it("memory_read names at most 50 notes as used", async () => {
 	pika.routes.set("POST memory/used", { body: { used: 50 } });
 	const read = await callTool(h, "memory_read", { query: "short" });
 	expect(read.details).toEqual({ noteIds: notes.map((n) => n.id), total: 60 });
-	await until(() => used().length === 1, "memory/used");
+	await waitFor(() => used().length === 1, 10_000, "memory/used");
 	expect((used()[0]!.body as { ids: string[] }).ids).toEqual(notes.slice(0, 50).map((n) => n.id));
 });
 
@@ -122,7 +115,7 @@ it("memory_read returns its notes whether memory/used is missing, fails, or hang
 		expect(read).toMatchObject({ isError: false, details: { noteIds: [tabs.id], total: 1 } });
 		expect(read.text.replace("1 note matching, of 1", "1 note")).toBe(expected);
 		expect(performance.now() - started).toBeLessThan(10_000);
-		await until(() => used().length === before + 1, "memory/used");
+		await waitFor(() => used().length === before + 1, 10_000, "memory/used");
 	}
 });
 
@@ -225,7 +218,6 @@ it("memory_forget posts the revision, repository, and session id", async () => {
 });
 
 it("collapses a successful save or forget to its action, revision, and scope, since the call line shows the title", async () => {
-	const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
 	const last = (name: string) => h.session.messages.filter((message) => message.role === "toolResult" && message.toolName === name).at(-1);
 	const render = (name: string, args: object, { expanded = false, isError = false, result = last(name) as unknown } = {}) =>
 		h.session.extensionRunner.getToolDefinition(name)!.renderResult!(result as never, { expanded, isPartial: false }, plainTheme, { args, expanded, isError } as never)
@@ -263,8 +255,6 @@ it("strips ANSI/OSC/CSI control sequences from rendered memory tool output while
 	const CSI_RESET = "\x1b[0m";
 	const CSI_CLEAR = "\x1b[2J";
 	const DIRTY = `${OSC52}${CSI_RED}danger${CSI_RESET}${CSI_CLEAR}`;
-	const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
-	const styledTheme = { fg: (_color: string, text: string) => `\x1b[32m${text}\x1b[0m`, bold: (text: string) => `\x1b[1m${text}\x1b[22m` } as unknown as Theme;
 	const last = (name: string) => h.session.messages.filter((message) => message.role === "toolResult" && message.toolName === name).at(-1);
 	const renderResult = (name: string, args: object, { expanded = false, isError = false, theme = plainTheme, result = last(name) as unknown } = {}) =>
 		h.session.extensionRunner.getToolDefinition(name)!.renderResult!(result as never, { expanded, isPartial: false }, theme, { args, expanded, isError } as never)
