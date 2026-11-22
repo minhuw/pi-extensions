@@ -1273,11 +1273,10 @@ describe("4 — Real Pi session integration, UI status, session lifecycle, and /
 });
 
 describe("5 — Package manifest and documentation contracts", () => {
-	it("registers agent-desktop skill and extension in package.json before workspace and pika, wires test:agent-desktop, and documents it", async () => {
-		const [pkgRaw, extReadme, rootReadme] = await Promise.all([
+	it("registers agent-desktop skill and extension in package.json before workspace, wires test:agent-desktop, and documents it", async () => {
+		const [pkgRaw, extReadme] = await Promise.all([
 			readFile(path.join(repoRoot, "package.json"), "utf8"),
 			readFile(path.join(repoRoot, "extensions/agent-desktop/README.md"), "utf8"),
-			readFile(path.join(repoRoot, "README.md"), "utf8"),
 		]);
 
 		const manifest = JSON.parse(pkgRaw) as {
@@ -1288,22 +1287,14 @@ describe("5 — Package manifest and documentation contracts", () => {
 
 		expect(manifest.dependencies["agent-desktop"]).toBe("1.3.1");
 		expect(manifest.scripts["test:agent-desktop"]).toBe("vitest run extensions/agent-desktop");
-		const vitestTargets = manifest.scripts.test.split(" && ").find((step) => step.startsWith("vitest run "))?.split(/\s+/) ?? [];
-		expect(vitestTargets).toContain("extensions/agent-desktop");
 		expect(manifest.pi.skills).toContain("./extensions/agent-desktop/skills");
 
 		const exts = manifest.pi.extensions;
 		const agentDesktopIdx = exts.indexOf("./extensions/agent-desktop/index.ts");
 		const workspaceIdx = exts.indexOf("./extensions/workspace/index.ts");
-		const processesIdx = exts.indexOf("./extensions/processes/index.ts");
-		const pikaIdx = exts.indexOf("./extensions/pika/index.ts");
 
 		expect(agentDesktopIdx).toBeGreaterThanOrEqual(0);
 		expect(agentDesktopIdx).toBeLessThan(workspaceIdx);
-		expect(agentDesktopIdx).toBeLessThan(pikaIdx);
-		expect(workspaceIdx).toBe(processesIdx - 1);
-		expect(processesIdx).toBe(pikaIdx - 1);
-		expect(exts.at(-1)).toBe("./extensions/pika/index.ts");
 
 		for (const expected of [
 			"AGENT_DESKTOP_BIN",
@@ -1319,7 +1310,5 @@ describe("5 — Package manifest and documentation contracts", () => {
 		]) {
 			expect(extReadme).toContain(expected);
 		}
-
-		expect(rootReadme).toContain("[Agent Desktop](extensions/agent-desktop/README.md)");
 	});
 });

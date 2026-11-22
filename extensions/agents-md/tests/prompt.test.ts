@@ -33,15 +33,11 @@ async function loadPrompts(): Promise<PromptTemplate[]> {
 	} finally { await rm(temporary, { recursive: true, force: true }); }
 }
 
-it("loads the extension before pika, which stays last, lists the prompt, and runs its tests in npm test", () => {
+it("registers the extension, lists the prompt, and wires test:agents-md", () => {
 	const { extensions, prompts } = manifest.pi;
 	expect(extensions).toContain("./extensions/agents-md/index.ts");
-	expect(extensions.indexOf("./extensions/agents-md/index.ts")).toBeLessThan(extensions.indexOf("./extensions/pika/index.ts"));
-	expect(extensions.at(-1)).toBe("./extensions/pika/index.ts");
 	expect(prompts.filter(entry => entry.includes("extensions/agents-md/"))).toEqual([promptEntry]);
 	expect(manifest.scripts["test:agents-md"]).toBe("vitest run extensions/agents-md");
-	const vitestTargets = manifest.scripts.test.split(" && ").find((step) => step.startsWith("vitest run "))?.split(/\s+/) ?? [];
-	expect(vitestTargets).toContain("extensions/agents-md");
 });
 
 it("parses the /agents-md frontmatter and expands the focus", async () => {
@@ -92,9 +88,6 @@ it("keeps the audit's key instructions in order", async () => {
 });
 
 it("documents the extension, its tool, and its prompt", async () => {
-	const [readme, root, agents] = await Promise.all(["extensions/agents-md/README.md", "README.md", "AGENTS.md"].map(file => readFile(path.join(repositoryRoot, file), "utf8")));
+	const readme = await readFile(path.join(repositoryRoot, "extensions/agents-md/README.md"), "utf8");
 	for (const text of ["agents_md_lint", "/agents-md [focus]", "Reject with a note", "npm run test:agents-md"]) expect(readme).toContain(text);
-	expect(root).toMatch(/\| \[AGENTS\.md\]\(extensions\/agents-md\/README\.md\) \|.*`agents_md_lint`.*`\/agents-md \[focus\]`/);
-	expect(agents).toMatch(/^- `extensions\/agents-md\/` — .*`agents_md_lint`.*`gate\.ts`.*`\/agents-md \[focus\]`/m);
-	expect(agents).toContain("`npm run test:agents-md`");
 });

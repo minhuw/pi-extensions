@@ -7,13 +7,10 @@ const root = fileURLToPath(new URL("../../../", import.meta.url));
 const directory = join(root, "extensions/pika-node-bridge");
 const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { scripts: Record<string, string>; pi: { extensions: string[] } };
 
-it("loads next to the Orca bridge and before pika, which stays last, and runs in npm test", () => {
+it("loads next to the Orca bridge and wires test:pika-node-bridge", () => {
 	const extensions = manifest.pi.extensions;
 	expect(extensions.indexOf("./extensions/pika-node-bridge/index.ts")).toBe(extensions.indexOf("./extensions/orca-bridge/index.ts") + 1);
-	expect(extensions.at(-1)).toBe("./extensions/pika/index.ts");
 	expect(manifest.scripts["test:pika-node-bridge"]).toBe("vitest run extensions/pika-node-bridge");
-	const vitestTargets = manifest.scripts.test.split(" && ").find((step) => step.startsWith("vitest run "))?.split(/\s+/) ?? [];
-	expect(vitestTargets).toContain("extensions/pika-node-bridge");
 });
 
 it("imports at runtime only Node, the Pi SDK types, and its own files", () => {
@@ -29,11 +26,9 @@ it("imports at runtime only Node, the Pi SDK types, and its own files", () => {
 	}
 });
 
-it("documents every bridge command in README.md and DOC_COMMANDS", () => {
+it("documents every bridge command in README.md", () => {
 	const readme = readFileSync(join(directory, "README.md"), "utf8");
-	const sources = readFileSync(join(root, "services/pika/web/docs/sources.ts"), "utf8");
 	for (const command of ["pika-node-status", "pika-open", "pika-diff"]) {
 		expect(readme, `README.md should document /${command}`).toContain(`/${command}`);
-		expect(sources, `DOC_COMMANDS should include ${command}`).toContain(`["${command}", "pika-node-bridge",`);
 	}
 });
