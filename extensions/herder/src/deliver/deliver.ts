@@ -4,13 +4,13 @@ import { LIMITS } from "../config.ts";
 import { integrationRef, refPrefix, runPaths, worktreePath } from "../run/paths.ts";
 import type { RunStore } from "../run/store.ts";
 import { clearRunWorktreeState } from "../steps/worktrees.ts";
-import type { AgentRunner, CheckResult, CheckSpec, DeliveryCompletedEvent, DeliveryMode, DeliveryStartedEvent, Faults, JournalInput, RoleDefinition, Vcs } from "../types.ts";
+import type { AgentRunner, CheckResult, CheckSpec, DeliveryCompletedEvent, DeliveryMode, DeliveryStartedEvent, JournalInput, RoleDefinition, Vcs } from "../types.ts";
 import { GitError, hasHerderTrailer, RefConflictError } from "../vcs/git.ts";
 import { acceptCuration } from "./curate.ts";
 
 export interface DeliverDeps {
 	runId: string; store: RunStore; vcs: Vcs; runner: AgentRunner; roles: ReadonlyMap<string, RoleDefinition>; checks: readonly CheckSpec[];
-	title: string; faults?: Faults; signal?: AbortSignal; onProgress?: () => void; onStage?: (stage: string) => void;
+	title: string; signal?: AbortSignal; onProgress?: () => void; onStage?: (stage: string) => void;
 	/** Interactive approval of the summary; nothing reaches the user's checkout or branches unless it resolves true. */
 	confirm(summary: string): Promise<boolean>;
 }

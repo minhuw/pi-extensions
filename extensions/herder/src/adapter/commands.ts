@@ -1,10 +1,11 @@
-import { existsSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { goalDraft } from "../artifacts/goal.ts";
 import { LOCK_STALE_MS } from "../config.ts";
+import { cleanupRun } from "../deliver/deliver.ts";
 import type { RunState } from "../journal/fold.ts";
 import { isStale, readLock } from "../run/lock.ts";
-import { isRunId, refPrefix, runPaths } from "../run/paths.ts";
+import { isRunId, runPaths } from "../run/paths.ts";
 import { createRun, listRuns, openRun, type RunStore } from "../run/store.ts";
 import type { DeliveryMode } from "../types.ts";
 import { activateHerderTools } from "./activation.ts";
@@ -225,10 +226,8 @@ function clean(herder: Herder, s: Session, runId: string | undefined): string {
 			if (busy(s.held)) throw new Error(`Run ${id} still has a Herder tool call running; clean it once that finishes.`);
 			herder.release(s);
 		}
-		const { paths } = run;
-		vcs.deleteRefs(refPrefix(id));
-		if (existsSync(paths.worktrees)) vcs.removeWorktree(paths.worktrees);
-		rmSync(paths.dir, { recursive: true, force: true });
+		cleanupRun(vcs, commonDir, id);
+		rmSync(run.paths.dir, { recursive: true, force: true });
 		deleted.push(id);
 	}
 	return deleted.length ? `Deleted ${deleted.length} Herder run(s): ${deleted.join(", ")}.` : "No finished Herder runs to delete.";

@@ -133,7 +133,7 @@ export function createRuntimeFactory(options: RuntimeOptions = {}): RuntimeFacto
 			},
 			deliver(request, confirm, signal, report) {
 				const { checks, title } = goal();
-				return deliver({ runId, store: run, vcs, runner: env.runner(), roles: roles(), checks, title, faults: options.faults, signal: combine(signal), onProgress: progress, onStage: (stage) => report?.(`delivering · ${stage}`), confirm }, request);
+				return deliver({ runId, store: run, vcs, runner: env.runner(), roles: roles(), checks, title, signal: combine(signal), onProgress: progress, onStage: (stage) => report?.(`delivering · ${stage}`), confirm }, request);
 			},
 			// Each launch owns its callbacks and integration status independently of direct calls.
 			launch(request, live) {

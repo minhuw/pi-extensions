@@ -557,6 +557,24 @@ describe("resume, abort, clean", () => {
 		expect(existsSync(run.paths.dir)).toBe(false);
 	});
 
+	it("clean removes a finished run's refs and directory when no worktrees directory exists", async () => {
+		const { fixture, h, runId, run } = await approved();
+		const head = fixture.head();
+		fixture.git("update-ref", `refs/herder/${runId}/base`, head);
+		fixture.git("update-ref", `refs/herder/${runId}/integration`, head);
+		const unrelated = "refs/herder/20260101-000000-ffff/base";
+		fixture.git("update-ref", unrelated, head);
+		await h.command("abort");
+		expect(run.state().status).toBe("abandoned");
+		expect(existsSync(run.paths.worktrees)).toBe(false);
+		await h.command(`clean ${runId}`);
+		expect(h.lastNotice()).toEqual({ text: `Deleted 1 Herder run(s): ${runId}.`, level: "info" });
+		expect(fixture.git("for-each-ref", `refs/herder/${runId}`)).toBe("");
+		expect(fixture.git("for-each-ref", unrelated)).toContain(unrelated);
+		expect(existsSync(run.paths.dir)).toBe(false);
+		expect(existsSync(run.paths.worktrees)).toBe(false);
+	});
+
 	it("/herder status describes the latest run", async () => {
 		const { h, runId } = await started();
 		await h.command("status");
