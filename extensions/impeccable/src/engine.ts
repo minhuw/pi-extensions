@@ -156,8 +156,8 @@ export function parseChecksums(text: string, version: string): Checksums {
 	return map;
 }
 
-export function sha256(buffer: Uint8Array): string {
-	return createHash("sha256").update(buffer).digest("hex");
+export function sha256(data: string | Buffer | Uint8Array): string {
+	return createHash("sha256").update(data).digest("hex");
 }
 
 async function isFile(binary: string): Promise<boolean> {
@@ -358,7 +358,10 @@ export class BoundedOutput {
 	private storedBytes = 0;
 	private totalBytes = 0;
 	private overflowed = false;
-	constructor(readonly maxBytes: number) {}
+	readonly maxBytes: number;
+	constructor(maxBytes: number) {
+		this.maxBytes = maxBytes;
+	}
 
 	get truncated(): boolean {
 		return this.overflowed;

@@ -1,18 +1,22 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as PiSDK from "@earendil-works/pi-coding-agent";
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import { access, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rmdir, stat, unlink } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { sha256 } from "./engine.ts";
 
 export type ObjectValue = Record<string, unknown>;
 export const object = (value: unknown): value is ObjectValue => value !== null && typeof value === "object" && !Array.isArray(value);
 export const truthy = (value: string | undefined): boolean => /^(1|true|yes|on)$/i.test(value ?? "");
 export const configPaths = (root: string): string[] => ["config.json", "config.local.json"].map((name) => path.join(root, ".impeccable", name));
+export function isPrivateDirectory(info: Stats): boolean {
+	return info.isDirectory() && !info.isSymbolicLink() && (!process.getuid || (info.uid === process.getuid() && (info.mode & 0o077) === 0));
+}
 
 export async function optionalText(file: string, signal?: AbortSignal): Promise<string | undefined> {
 	signal?.throwIfAborted();
@@ -38,7 +42,8 @@ function workspacePattern(raw: string): string {
 	return pattern.startsWith("!") ? `!${pattern.slice(1).replace(/^\.\//, "")}` : pattern;
 }
 
-const MONOREPO_MARKERS = ["pnpm-workspace.yaml", "turbo.json", "nx.json", "lerna.json"];
+const PNPM_WORKSPACE_FILE = "pnpm-workspace.yaml";
+const MONOREPO_MARKERS = [PNPM_WORKSPACE_FILE, "turbo.json", "nx.json", "lerna.json"];
 const IGNORED_DISCOVERY = new Set(["node_modules", "dist", "build", "coverage", "vendor", "vendors"]);
 const exists = async (file: string) => { try { await stat(file); return true; } catch (error) { if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return false; throw error; } };
 const outside = (relative: string): boolean => relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
@@ -56,7 +61,7 @@ async function projectPatterns(root: string): Promise<string[][]> {
 	const packagePatterns = strings(object(pkg.workspaces) ? pkg.workspaces.packages : pkg.workspaces);
 	packagePatterns.push(...strings((await jsonObject(path.join(root, "lerna.json"))).packages));
 	let inPackages = false;
-	for (const line of (await optionalText(path.join(root, "pnpm-workspace.yaml")) ?? "").split(/\r?\n/)) {
+	for (const line of (await optionalText(path.join(root, PNPM_WORKSPACE_FILE)) ?? "").split(/\r?\n/)) {
 		let quote = ""; let stripped = "";
 		for (let i = 0; i < line.length; i++) {
 			const ch = line[i]!;
@@ -269,7 +274,7 @@ async function projectForDirectory(base: string, dir: string): Promise<string> {
 			const selected = projectBoundary(dir, start, candidates, patterns, packages);
 			if (selected) return selected;
 		}
-		for (const marker of ["pnpm-workspace.yaml", "turbo.json", "nx.json", "lerna.json"]) {
+		for (const marker of MONOREPO_MARKERS) {
 			try {
 				await lstat(path.join(dir, marker));
 				const segments = path.relative(dir, start).split(path.sep);
@@ -455,8 +460,8 @@ export async function withManagedFileMutation<T>(file: string, signal: AbortSign
 		try { await mkdir(base, { mode: 0o700 }); }
 		catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
 		const info = await lstat(base);
-		if (!info.isDirectory() || info.isSymbolicLink() || process.getuid && (info.uid !== process.getuid() || (info.mode & 0o077) !== 0)) throw new Error("Unsafe management lock directory");
-		const lock = path.join(base, createHash("sha256").update(physical).digest("hex"));
+		if (!isPrivateDirectory(info)) throw new Error("Unsafe management lock directory");
+		const lock = path.join(base, sha256(physical));
 		const deadline = performance.now() + 5000;
 		for (;;) {
 			signal?.throwIfAborted();

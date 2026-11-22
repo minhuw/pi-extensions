@@ -1,21 +1,16 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { resolveEngine, spawnEngine, type EngineProcess, type ResolveEngineOptions, type ResolvedEngine } from "./engine.ts";
-import { object, optionalText, physicalPath, resolveDirectory, serialized, type ObjectValue } from "./project.ts";
+import { setTimeout as delay } from "node:timers/promises";
+import { resolveEngine, sha256, spawnEngine, type EngineProcess, type ResolveEngineOptions, type ResolvedEngine } from "./engine.ts";
+import { isPrivateDirectory, object, optionalText, physicalPath, resolveDirectory, serialized, type ObjectValue } from "./project.ts";
 
 export const LIVE_MESSAGE = "impeccable-live-event";
 export const LIVE_SNAPSHOT = "impeccable-live-owner";
 const actionable = new Set(["generate", "steer", "accept", "discard", "manual_edit_apply", "variant_mount_failed", "prefetch", "carbonize_cleanup"]);
 const idOK = (id: unknown): id is string => typeof id === "string" && /^[a-f0-9]{8}$/.test(id);
-const digest = (text: string) => createHash("sha256").update(text).digest("hex");
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; } };
-const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
-	const done = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); resolve(); };
-	const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(signal.reason); };
-	const timer = setTimeout(done, ms); signal.addEventListener("abort", abort, { once: true }); if (signal.aborted) abort();
-});
 
 export interface LiveSaved {
 	version: 1; sessionId: string; root: string; ids: string[]; phase: string;
@@ -57,8 +52,8 @@ async function lease(root: string, sessionId: string, activation: string): Promi
 	const base = path.join(os.tmpdir(), `pi-impeccable-live-locks-${process.getuid?.() ?? "user"}`);
 	await mkdir(base, { recursive: true, mode: 0o700 });
 	const info = await lstat(base);
-	if (!info.isDirectory() || info.isSymbolicLink() || process.getuid && (info.uid !== process.getuid() || (info.mode & 0o077) !== 0)) throw new Error("Unsafe live lease directory");
-	const lock = path.join(base, digest(root));
+	if (!isPrivateDirectory(info)) throw new Error("Unsafe live lease directory");
+	const lock = path.join(base, sha256(root));
 	return serialized(`live-lease:${root}`, async () => {
 		const guard = `${lock}.acquiring`;
 		try { await mkdir(guard, { mode: 0o700 }); }
@@ -199,10 +194,12 @@ export class LiveOwner {
 		const deadline = Date.now() + 12_000;
 		while (Date.now() < deadline) {
 			this.controller.signal.throwIfAborted();
-			const info: unknown = JSON.parse(await optionalText(file) ?? "null");
+			let info: unknown = null;
+			try { info = JSON.parse(await optionalText(file) ?? "null"); }
+			catch (error) { if (!(error instanceof SyntaxError)) throw error; }
 			if (object(info) && info.pid === helper.child.pid) { this.helperInfo = info; return; }
 			if (helper.child.exitCode !== null || helper.spawnError) throw new Error(`Owned helper failed to start: ${helper.stderr.text().slice(0, 2000)}`);
-			await sleep(25, this.controller.signal);
+			await delay(25, undefined, { signal: this.controller.signal });
 		}
 		throw new Error("Owned helper startup timed out");
 	}
@@ -253,7 +250,7 @@ export class LiveOwner {
 		const event = validateLiveEvent(value);
 		if (event.type === "timeout") { this.phase = "paused"; this.message = "Native poll timed out; resume retains upstream work"; await this.releaseResources(); this.notify(); return; }
 		if (event.type === "exit") { this.phase = "stopped"; this.message = "Native exit; canonical journal retained"; await this.releaseResources(); this.notify(); return; }
-		const raw = JSON.stringify(event); const hash = digest(raw);
+		const raw = JSON.stringify(event); const hash = sha256(raw);
 		if (this.history.has(hash)) throw new Error("Duplicate native event after acknowledgement; inspect status/resume");
 		if (this.pending) throw new Error("Cannot replace pending live work");
 		const file = path.join(await this.storage(), "event.json"); await writeFile(file, raw, { mode: 0o600 });
@@ -345,9 +342,9 @@ export class LiveOwner {
 			const { file, hash, id, receivedAt } = saved.pending; const directory = path.dirname(file);
 			if (path.dirname(directory) !== await physicalPath(os.tmpdir()) || !path.basename(directory).startsWith("pi-impeccable-live-") || path.basename(file) !== "event.json") throw new Error("Invalid owned recovery sidecar path");
 			const info = await lstat(directory); const fileInfo = await lstat(file);
-			if (!info.isDirectory() || info.isSymbolicLink() || fileInfo.isSymbolicLink() || !fileInfo.isFile() || fileInfo.size > 4 * 1024 * 1024 || process.getuid && (info.uid !== process.getuid() || (info.mode & 0o077) !== 0)) throw new Error("Unsafe recovery sidecar");
+			if (!isPrivateDirectory(info) || fileInfo.isSymbolicLink() || !fileInfo.isFile() || fileInfo.size > 4 * 1024 * 1024) throw new Error("Unsafe recovery sidecar");
 			const raw = await readFile(file, "utf8");
-			if (digest(raw) !== hash) throw new Error("Recovery payload changed; inspect canonical journal");
+			if (sha256(raw) !== hash) throw new Error("Recovery payload changed; inspect canonical journal");
 			this.directory = directory; this.pending = { file, hash, id, receivedAt, event: validateLiveEvent(JSON.parse(raw)), token: randomUUID() };
 		}
 		this.phase = "paused"; this.message = "Recovered own session metadata; explicit resume required"; this.notify();
