@@ -2,7 +2,7 @@
 // main model drives it (commands, tool calls, and edits to goal.md/plan.md at the paths the /herder prompt names).
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { expect } from "vitest";
-import { PROMPT_TYPE } from "../../src/adapter/commands.ts";
+import { PROMPT_TYPE } from "../../src/adapter/prompts.ts";
 import { createRuntimeFactory } from "../../src/adapter/runtime.ts";
 import { FOLLOW_UP_TYPE } from "../../src/adapter/session.ts";
 import { planTasks } from "../../src/adapter/status.ts";

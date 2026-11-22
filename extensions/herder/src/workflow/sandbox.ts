@@ -7,10 +7,10 @@ import type { AgentOptions, IntegrateOptions, Limits, StepResult, WorkflowBridge
 import { SCRIPT_FILENAME, WORKER_SOURCE } from "./worker-source.ts";
 
 /** A value thrown out of the script: its error name, and whether it is a fatal runtime error (cap, invalid options, host). */
-export interface ScriptException { name?: string; fatal: boolean }
+interface ScriptException { name?: string; fatal: boolean }
 export interface ScriptOutcome { status: "completed" | "failed" | "stopped"; value?: unknown; error?: string; line?: number; column?: number; exception?: ScriptException }
-export interface ScriptHandle { readonly done: Promise<ScriptOutcome>; stop(reason?: string): void }
-export interface ScriptOptions {
+interface ScriptHandle { readonly done: Promise<ScriptOutcome>; stop(reason?: string): void }
+interface ScriptOptions {
 	source: string; args: unknown; bridge: WorkflowBridge; limits: Limits;
 	/** Resolves whether a call writes (role default unless `write` is given); used for the writer cap. */
 	writes(role: string | undefined, write: boolean | undefined): boolean;
@@ -25,14 +25,14 @@ export type SandboxCall =
 	| { method: "agent"; prompt: string; opts: AgentOptions; site?: CallSite }
 	| { method: "integrate"; source: StepResult | string; opts: IntegrateOptions; site?: CallSite };
 /** What the worker talks to. `runScript` adapts a `WorkflowBridge`; validation supplies a stub. */
-export interface SandboxHost {
+interface SandboxHost {
 	call(call: SandboxCall): Promise<unknown>;
 	log(message: string): void;
 	phase(title: string): void;
 	/** Dry runs only: an invalid option reported instead of thrown. */
 	problem?(problem: ScriptProblem): void;
 }
-export interface SandboxOptions {
+interface SandboxOptions {
 	source: string; args: unknown; limits: Limits; host: SandboxHost; filename?: string;
 	/** Report invalid options through `host.problem` and keep going (validation dry runs). */
 	collect?: boolean;
@@ -42,7 +42,7 @@ export interface SandboxOptions {
 	resourceLimits?: ResourceLimits;
 }
 
-export const DEFAULT_RESOURCE_LIMITS: ResourceLimits = { maxOldGenerationSizeMb: 512 };
+const DEFAULT_RESOURCE_LIMITS: ResourceLimits = { maxOldGenerationSizeMb: 512 };
 const AsyncFunction = (async () => {}).constructor as new (body: string) => unknown;
 
 type WorkerMessage =

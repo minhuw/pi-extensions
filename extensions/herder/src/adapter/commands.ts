@@ -14,11 +14,10 @@ import { auditPrompt, auditSkillDir, PROMPT_TYPE, resumePrompt, skillText, start
 import { busy, message, unreadableRunError, type Herder, type Held, type Session } from "./session.ts";
 import { describeRun, isBlocked, isFinished, isParked, otherUnfinishedLines, parkedLines, planTasks, type RunEntry } from "./status.ts";
 
-export { PROMPT_TYPE } from "./prompts.ts";
 export const DELIVERY_MODES: readonly DeliveryMode[] = ["series", "branch", "squash", "uncommitted"];
 const SUBCOMMANDS = ["status", "resume", "deliver", "abort", "clean", "help"] as const;
 
-export const USAGE = [
+const USAGE = [
 	"Usage:",
 	"/herder <goal>                     start a run for a goal",
 	"/herder status [runId]             show the run",
@@ -29,7 +28,7 @@ export const USAGE = [
 	"A first word that names a subcommand is always that subcommand; start with -- to use it as goal text (/herder -- status page …).",
 ].join("\n");
 
-export type HerderCommand =
+type HerderCommand =
 	| { action: "help" }
 	| { action: "start"; goal: string }
 	| { action: "status" | "resume" | "abort"; runId?: string }
@@ -85,7 +84,7 @@ export function parseCommand(args: string): HerderCommand {
 }
 
 /** A one-line run title from the goal text. */
-export function titleOf(goal: string): string {
+function titleOf(goal: string): string {
 	const line = goal.split(/\r?\n/).find((part) => part.trim())?.replace(/\s+/g, " ").trim() ?? "";
 	return line.length <= 100 ? line : `${line.slice(0, 99)}…`;
 }

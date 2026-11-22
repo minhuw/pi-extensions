@@ -34,7 +34,7 @@ export function stepId(kind: string, role: string, prompt: string): string {
 	return hashParts(kind, role, prompt).slice(0, 12);
 }
 
-export interface FingerprintInput {
+interface FingerprintInput {
 	kind: string; role: string; roleSha: string; prompt: string; schema?: object; write: boolean; base: string;
 	gates: ReadonlyArray<{ id: string; command: string }>;
 }

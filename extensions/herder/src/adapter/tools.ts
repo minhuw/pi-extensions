@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "typebox";
-import { THINKING_LEVELS } from "../agents/roles.ts";
 import { GoalError, hashGoal, parseGoal } from "../artifacts/goal.ts";
+import { THINKING_LEVELS } from "../config.ts";
 import type { RunState } from "../journal/fold.ts";
 import { readLock } from "../run/lock.ts";
 import { AGENT_OPTION_KEYS, type AgentOptions, type DeliveryMode } from "../types.ts";
@@ -23,14 +23,14 @@ const RUN_ID_PATTERN = "^\\d{8}-\\d{6}-[0-9a-f]{4}$";
 const RUN_ID = Type.String({ pattern: RUN_ID_PATTERN, description: "Run id; default: the active run" });
 const CHECK_IDS = (description: string) => Type.Array(Type.String({ minLength: 1 }), { description });
 
-export const RunParameters = Type.Object({
+const RunParameters = Type.Object({
 	action: literals(["start", "status", "approve_goal", "record_decision", "abort"] as const),
 	runId: Type.Optional(RUN_ID),
 	goal: Type.Optional(text("start: the goal text, as for /herder <goal>; its first line becomes the run title")),
 	question: Type.Optional(text("record_decision: the question put to the user")),
 	answer: Type.Optional(text("record_decision: the user's answer")),
 });
-export const WorkflowParameters = Type.Object({
+const WorkflowParameters = Type.Object({
 	mode: literals(["validate", "run", "stop"] as const),
 	script: Type.Optional(Type.String({ minLength: 1, description: "Script source (or use scriptPath)" })),
 	scriptPath: Type.Optional(Type.String({ minLength: 1, description: "Path of a script file, relative to the cwd or absolute" })),
@@ -52,19 +52,19 @@ const STEP_OPTIONS = {
 	stallMs: Type.Optional(Type.Integer({ minimum: 1 })),
 	effort: Type.Optional(literals(THINKING_LEVELS, "Thinking level override for this step")),
 } satisfies Record<(typeof AGENT_OPTION_KEYS)[number], TSchema>;
-export const StepParameters = Type.Object({ prompt: text("The step's task"), ...STEP_OPTIONS });
-export const IntegrateParameters = Type.Object({
+const StepParameters = Type.Object({ prompt: text("The step's task"), ...STEP_OPTIONS });
+const IntegrateParameters = Type.Object({
 	source: text("Step key or commit to integrate (a gate_failed step or its commit is refused)"),
 	message: text("Commit message of the integrated task"),
 	task: Type.Optional(Type.String({ minLength: 1, description: "Plan task id" })),
 	checks: Type.Optional(CHECK_IDS("Check ids to run before advancing (default: checks marked integrate)")),
 });
-export const CheckParameters = Type.Object({
+const CheckParameters = Type.Object({
 	checks: Type.Optional(CHECK_IDS("Check ids (default: all)")),
 	commit: Type.Optional(Type.String({ minLength: 1, description: "Commit-ish (default: integration head)" })),
 });
-export const VerifyParameters = Type.Object({});
-export const DeliverParameters = Type.Object({
+const VerifyParameters = Type.Object({});
+const DeliverParameters = Type.Object({
 	runId: Type.Optional(Type.String({ pattern: RUN_ID_PATTERN, description: "Run to deliver, e.g. a parked one; default: the held run, else the only unfinished run" })),
 	mode: Type.Optional(literals(DELIVERY_MODES, "Default series")),
 	curate: Type.Optional(Type.Boolean({ description: "Let a curator regroup the series first (kept only with an identical tree)" })),

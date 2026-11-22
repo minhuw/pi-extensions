@@ -4,7 +4,7 @@ import type { IntegrateResult, Limits, StepResult } from "../types.ts";
 import { startSandbox, syntaxProblem } from "./sandbox.ts";
 import type { CallSite, SandboxCall, ScriptProblem } from "./sandbox.ts";
 
-export interface ValidationContext {
+interface ValidationContext {
 	roles: readonly string[]; checks: readonly string[];
 	/** Roles that cannot run with `write: true`; the others write by default. */
 	readOnlyRoles?: readonly string[];
@@ -14,9 +14,9 @@ export interface ValidationContext {
 	budgetMs?: number;
 	limits?: Limits;
 }
-export interface ValidationReport { ok: boolean; problems: ScriptProblem[]; agentCalls: number; integrateCalls: number; note: string }
+interface ValidationReport { ok: boolean; problems: ScriptProblem[]; agentCalls: number; integrateCalls: number; note: string }
 
-export const DRY_RUN_NOTE = "The dry run follows only the path that synthetic results take (every agent() returns status \"ok\", every integrate() returns \"integrated\"); other branches were compiled but not exercised.";
+const DRY_RUN_NOTE = "The dry run follows only the path that synthetic results take (every agent() returns status \"ok\", every integrate() returns \"integrated\"); other branches were compiled but not exercised.";
 const ZERO_SHA = "0".repeat(40);
 /** Distinct synthetic commits ("c…") and heads ("d…"), so default bases differ across integrations as they do live. */
 const fakeSha = (prefix: string, n: number) => prefix + n.toString(16).padStart(39, "0");

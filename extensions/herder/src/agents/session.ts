@@ -4,10 +4,10 @@ import {
 	createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager,
 	type AgentSession, type CreateAgentSessionOptions, type ExtensionFactory, type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
-import { CHILD_SESSION_HOOKS, SESSION_LINK_TYPE, STRUCTURED_OUTPUT_REJECTIONS, STRUCTURED_OUTPUT_TOOL } from "../config.ts";
+import { CHILD_SESSION_HOOKS, SESSION_LINK_TYPE, STRUCTURED_OUTPUT_REJECTIONS, STRUCTURED_OUTPUT_TOOL, THINKING_LEVELS } from "../config.ts";
 import { AgentError, type AgentRunner, type AgentRunRequest, type AgentRunResult, type OutputStore, type Usage } from "../types.ts";
 import { classifyMessage, toAgentError } from "./classify.ts";
-import { allowedTools, THINKING_LEVELS } from "./roles.ts";
+import { allowedTools } from "./roles.ts";
 import { checkSchema, createStructuredOutputTool, structuredReminder, type StructuredCapture } from "./structured.ts";
 
 type Model = NonNullable<CreateAgentSessionOptions["model"]>;
@@ -40,7 +40,7 @@ export interface PiRunnerOptions {
 interface ChildSessionHook { name: string; extensionFactory: ExtensionFactory }
 
 /** Hooks registered in `globalThis[Symbol.for("pi-extensions.child-session-hooks")]`; the Set may not exist. */
-export function childSessionHooks(): InlineExtension[] {
+function childSessionHooks(): InlineExtension[] {
 	const hooks = (globalThis as Record<symbol, unknown>)[Symbol.for(CHILD_SESSION_HOOKS)];
 	if (!(hooks instanceof Set)) return [];
 	return [...hooks as Set<Partial<ChildSessionHook>>]
@@ -61,7 +61,7 @@ const STEP_SETTINGS: (keyof Settings)[] = [
  * In-memory settings for a step session: a few of the user's global settings, never the worktree's project settings,
  * which come from the repository being worked on.
  */
-export function stepSettings(cwd: string, agentDir: string): SettingsManager {
+function stepSettings(cwd: string, agentDir: string): SettingsManager {
 	const global = SettingsManager.create(cwd, agentDir, { projectTrusted: false }).getGlobalSettings();
 	const kept = Object.fromEntries(STEP_SETTINGS.filter((key) => global[key] !== undefined).map((key) => [key, global[key]]));
 	return SettingsManager.inMemory(kept, { projectTrusted: false });

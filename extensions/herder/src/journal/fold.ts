@@ -5,16 +5,16 @@ import type {
 } from "../types.ts";
 
 export type RunOverallStatus = "drafting" | "approved" | "delivered" | "abandoned" | "failed";
-export type StepState = "running" | "ok" | "no_changes" | "gate_failed" | "failed" | "stopped";
+type StepState = "running" | "ok" | "no_changes" | "gate_failed" | "failed" | "stopped";
 /** `ready`: the task's latest step settled successfully but nothing is integrated for it yet. */
-export type TaskState = "pending" | "running" | "ready" | "failed" | "integrated";
+type TaskState = "pending" | "running" | "ready" | "failed" | "integrated";
 
-export interface LaunchRecord { launch: number; launched: ScriptLaunchedEvent; settled?: ScriptSettledEvent }
+interface LaunchRecord { launch: number; launched: ScriptLaunchedEvent; settled?: ScriptSettledEvent }
 /**
  * The latest attempt of a step. `started` is absent when a completion was adopted from an existing ref. `sessionId` and
  * `sessionFile` come from the attempt's latest event that names its Pi session; journals before they existed have none.
  */
-export interface StepRecord { key: string; status: StepState; started?: StepStartedEvent; completed?: StepCompletedEvent; failed?: StepFailedEvent; task?: string; sessionId?: string; sessionFile?: string }
+interface StepRecord { key: string; status: StepState; started?: StepStartedEvent; completed?: StepCompletedEvent; failed?: StepFailedEvent; task?: string; sessionId?: string; sessionFile?: string }
 export interface TaskRecord { id: string; status: TaskState; lastStep?: string; integratedCommit?: string; steps: string[] }
 export type HistoryEvent =
 	| ScriptSettledEvent | StepCompletedEvent | StepFailedEvent | CheckCompletedEvent | IntegrateCompletedEvent

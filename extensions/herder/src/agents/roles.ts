@@ -6,17 +6,15 @@ import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { THINKING_LEVELS } from "../config.ts";
 import type { RoleDefinition } from "../types.ts";
 
-export { THINKING_LEVELS };
+interface RoleSources { builtinDir?: string; overrideDir?: string }
 
-export interface RoleSources { builtinDir?: string; overrideDir?: string }
-
-export const BUILTIN_ROLE_DIR = fileURLToPath(new URL("../../agents/", import.meta.url));
-export const defaultOverrideDir = () => join(getAgentDir(), "herder", "agents");
+const BUILTIN_ROLE_DIR = fileURLToPath(new URL("../../agents/", import.meta.url));
+const defaultOverrideDir = () => join(getAgentDir(), "herder", "agents");
 
 const FIELDS = ["name", "description", "write", "tools", "model", "thinking"];
 /** Pi also accepts `*` patterns and `+name`/`-name` modifiers, which could re-enable writers on a read-only role. */
 const TOOL_NAME = /^[a-z][a-z0-9_]*$/;
-export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "bash"];
+const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "bash"];
 
 /** The tools a session may get: plain names only, and only `READ_ONLY_TOOLS` for a read-only role. */
 export const allowedTools = (write: boolean, tools: readonly string[]) =>

@@ -43,7 +43,7 @@ export interface StepDeps {
 export interface LaunchStats { reused: number; changed: number; new: number }
 
 /** Supplied by the launch driver; direct tool calls pass none. */
-export interface StepContext {
+interface StepContext {
 	launch?: number;
 	occurrences?: Occurrences;
 	/** Default base (the launch's logical head); otherwise the real integration head. */
@@ -54,9 +54,9 @@ export interface StepContext {
 	signal?: AbortSignal;
 }
 
-export interface StepExecutor { run(prompt: string, opts?: AgentOptions, ctx?: StepContext): Promise<StepResult> }
+interface StepExecutor { run(prompt: string, opts?: AgentOptions, ctx?: StepContext): Promise<StepResult> }
 
-export const ADOPTED_TEXT = "Adopted from the step's commit after an interrupted run; the agent's reply was not recorded.";
+const ADOPTED_TEXT = "Adopted from the step's commit after an interrupted run; the agent's reply was not recorded.";
 const READ_ONLY_WARNING = "The read-only step changed files; the changes were discarded.";
 const USAGE_LIMITED = "a usage limit was reached earlier in this launch; no new agents start";
 const ACTIVITY_INTERVAL_MS = 1_000;

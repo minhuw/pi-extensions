@@ -2,8 +2,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseAudit, PROMPT_TYPE } from "../../src/adapter/commands.ts";
-import { auditSkillDir, skillText } from "../../src/adapter/prompts.ts";
+import { parseAudit } from "../../src/adapter/commands.ts";
+import { auditSkillDir, PROMPT_TYPE, skillText } from "../../src/adapter/prompts.ts";
 import { createRuntimeFactory } from "../../src/adapter/runtime.ts";
 import { MAX_CLARIFYING_QUESTIONS, STATUS_KEY } from "../../src/config.ts";
 import { readLock } from "../../src/run/lock.ts";

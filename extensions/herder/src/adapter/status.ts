@@ -5,7 +5,7 @@ import type { LockInfo } from "../run/lock.ts";
 import type { RunStore } from "../run/store.ts";
 import type { StepActivity } from "./runtime.ts";
 
-export const FINISHED_STATUSES: ReadonlySet<string> = new Set(["delivered", "abandoned", "failed"]);
+const FINISHED_STATUSES: ReadonlySet<string> = new Set(["delivered", "abandoned", "failed"]);
 export const isFinished = (state: RunState) => FINISHED_STATUSES.has(state.status);
 /** Verified `met` at its current integration head, with no delivery started: waiting for the user to deliver it. */
 export const isParked = (state: RunState) => state.goal !== undefined && !isFinished(state) && !state.deliveryStarted && !state.delivery
@@ -70,7 +70,7 @@ function taskCounts(state: RunState, tasks: readonly PlanTask[]): { done: number
 	return { done: [...ids].filter((id) => state.tasks.get(id)?.status === "integrated").length, total: ids.size };
 }
 
-export interface StatusInput {
+interface StatusInput {
 	state: RunState; tasks: readonly PlanTask[]; running: readonly StepActivity[]; operations?: readonly string[];
 	launch?: number; launching?: boolean; stopping?: boolean; phase?: string; log?: string;
 }
@@ -114,7 +114,7 @@ export function statusText({ state, tasks, running, operations = [], launch, lau
 	return `herder: ${parts.join(" · ")}${total ? ` · ${done}/${total} tasks` : ""}`;
 }
 
-export interface DescribeOptions { lock: LockInfo | null; sessionId: string; launch?: number; now: Date }
+interface DescribeOptions { lock: LockInfo | null; sessionId: string; launch?: number; now: Date }
 
 /** Human- and model-readable run summary for `/herder status` and `herder_run status`. */
 export function describeRun(run: RunStore, state: RunState, tasks: readonly PlanTask[], options: DescribeOptions): string {

@@ -1,7 +1,7 @@
 import type { StepActivity } from "./runtime.ts";
 
-export interface Activity { id: string; label: string; kind?: "step"; startedAt?: number }
-export interface ActivitySnapshot { source: "herder"; activities: Activity[] }
+interface Activity { id: string; label: string; kind?: "step"; startedAt?: number }
+interface ActivitySnapshot { source: "herder"; activities: Activity[] }
 
 const MAX_ACTIVITIES = 128;
 
@@ -23,7 +23,7 @@ const stepRow = (step: StepActivity, runId?: string): Activity => ({
 });
 
 /** Orca-compatible rows: short ids, labels without control characters, at most 128 entries. */
-export function activities(running: readonly StepActivity[], runId?: string): Activity[] {
+function activities(running: readonly StepActivity[], runId?: string): Activity[] {
 	return cap(running.map((step) => stepRow(step, runId)));
 }
 

@@ -1,7 +1,7 @@
 import { JOURNAL_SCHEMA_VERSION } from "../config.ts";
 import type { JournalEvent, JournalEventType, JournalInput } from "../types.ts";
 
-export const EVENT_TYPES: ReadonlySet<string> = new Set<JournalEventType>([
+const EVENT_TYPES: ReadonlySet<string> = new Set<JournalEventType>([
 	"run.started", "goal.approved", "plan.updated", "script.launched", "script.settled",
 	"step.started", "step.completed", "step.failed", "check.completed",
 	"integrate.completed", "integrate.failed", "verify.completed",

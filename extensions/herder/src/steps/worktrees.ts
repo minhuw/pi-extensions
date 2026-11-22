@@ -6,7 +6,7 @@ import type { Vcs } from "../types.ts";
 
 export const POOL_SLOT = /^(?:ro-[0-9a-f]{12,64}|rw-\d+)$/;
 
-export interface WorktreeLease {
+interface WorktreeLease {
 	readonly path: string;
 	release(): void;
 }
@@ -19,8 +19,8 @@ interface ReadOnlyState {
 const readOnlyLeases = new Map<string, ReadOnlyState>();
 const activeWriteSlots = new Map<string, Set<number>>();
 
-export const readOnlySlot = (commit: string): string => `ro-${commit.slice(0, 12)}`;
-export const writeSlot = (slot: number): string => `rw-${slot}`;
+const readOnlySlot = (commit: string): string => `ro-${commit.slice(0, 12)}`;
+const writeSlot = (slot: number): string => `rw-${slot}`;
 
 /**
  * A quarantined write slot holds work no step ref captured; its marker file sits next to it, so it goes when the run's

@@ -24,7 +24,7 @@ const ACTIVE_BRANCH_TYPES = new Set<string>([
 	SKILL_LOCATIONS_MESSAGE,
 ]);
 
-export function skillLocationsContent(): string {
+function skillLocationsContent(): string {
 	return [
 		"Herder skills (read SKILL.md only when running that workflow):",
 		`- herder: ${SKILL_PATH}`,
@@ -55,7 +55,7 @@ function isHerderToolResultEntry(entry: SessionEntry): boolean {
 	);
 }
 
-export function hasHerderBranchState(branch: readonly SessionEntry[] | undefined): boolean {
+function hasHerderBranchState(branch: readonly SessionEntry[] | undefined): boolean {
 	if (!branch) return false;
 	return branch.some(
 		(entry) =>

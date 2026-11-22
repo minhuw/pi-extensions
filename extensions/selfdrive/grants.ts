@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 
-export const STANDING_APPROVAL_KEY = Symbol.for("pi-extensions.standing-approval");
+const STANDING_APPROVAL_KEY = Symbol.for("pi-extensions.standing-approval");
 
 export interface StandingApproval {
 	/** The granting session's id; also the map key. */
@@ -21,7 +21,7 @@ export interface StandingApproval {
 	/** Returns the block reason if `command` run in `cwd` violates selfdrive's command guard, or undefined when allowed. */
 	checkCommand?: (command: string, cwd: string) => string | undefined;
 }
-export interface StandingApprovalRegistry { grants: Map<string, StandingApproval> }
+interface StandingApprovalRegistry { grants: Map<string, StandingApproval> }
 
 /** The process-global registry; whoever reads it first creates it. */
 export function standingRegistry(): StandingApprovalRegistry {

@@ -25,10 +25,10 @@ export interface DeliveryOutcome {
 }
 
 const MODES: readonly DeliveryMode[] = ["series", "branch", "squash", "uncommitted"];
-export const CURATE_SLOT = "curate";
-export const DELIVER_SLOT = "deliver";
+const CURATE_SLOT = "curate";
+const DELIVER_SLOT = "deliver";
 export const curatedRef = (runId: string) => `${refPrefix(runId)}/curated`;
-export const reviewBranch = (runId: string) => `herder/${runId}`;
+const reviewBranch = (runId: string) => `herder/${runId}`;
 const short = (sha: string) => sha.slice(0, 12);
 const subject = (message: string) => message.split("\n", 1)[0]!;
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);

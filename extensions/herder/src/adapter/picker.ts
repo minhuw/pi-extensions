@@ -4,7 +4,7 @@ import { Type, type Static } from "typebox";
 import type { StandingApproval } from "./standing.ts";
 
 const optional = (description: string) => Type.Optional(Type.String({ description }));
-export const FindingSchema = Type.Object({
+const FindingSchema = Type.Object({
 	id: Type.String({ minLength: 1, pattern: "^\\S+$", description: "The finding's number in the table you posted, e.g. \"1\"" }),
 	title: Type.String({ description: "Short imperative title, e.g. \"Delete the unused v1 plan parser\"" }),
 	kind: optional("Category, e.g. deletion, duplicate, abstraction, compat"),
@@ -22,7 +22,7 @@ export const PickParameters = Type.Object({
 });
 export type Finding = Static<typeof FindingSchema>;
 /** `via: "standing"`: the user's standing authorization (self-driving mode) took the recommended set without asking. */
-export interface PickDetails { selected: string[]; note?: string; cancelled: boolean; via: "picker" | "editor" | "standing"; grant?: string }
+interface PickDetails { selected: string[]; note?: string; cancelled: boolean; via: "picker" | "editor" | "standing"; grant?: string }
 /** Picker state shared across the picker instances of one interaction (each note edit reopens the picker). */
 export interface PickState { title: string; findings: readonly Finding[]; selected: Set<string>; note?: string; cursor: number; offset: number }
 export type PickerAction = "confirm" | "cancel" | "note";
@@ -57,7 +57,7 @@ export function closure(findings: readonly Finding[], id: string, direction: "ne
 	return seen;
 }
 
-export const ordered = (findings: readonly Finding[], ids: ReadonlySet<string>) => findings.map((finding) => finding.id).filter((id) => ids.has(id));
+const ordered = (findings: readonly Finding[], ids: ReadonlySet<string>) => findings.map((finding) => finding.id).filter((id) => ids.has(id));
 
 export function recommendedSet(findings: readonly Finding[]): Set<string> {
 	const selected = new Set<string>();

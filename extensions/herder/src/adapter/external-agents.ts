@@ -45,9 +45,9 @@ export function externalAgents(): ExternalAgentRegistry {
 }
 
 /** Where a session's steps belong: its Pi session, run, and running launch. */
-export interface StepScope { ownerSessionId: string; runId: string; launch?: number }
+interface StepScope { ownerSessionId: string; runId: string; launch?: number }
 
-export interface StepAgentsOptions { registry?: ExternalAgentRegistry; now?: () => number; ttlMs?: number }
+interface StepAgentsOptions { registry?: ExternalAgentRegistry; now?: () => number; ttlMs?: number }
 
 const SETTLED: Record<NonNullable<StepActivity["status"]>, ExternalAgent["status"]> = {
 	ok: "completed", no_changes: "completed", gate_failed: "failed", failed: "failed", stopped: "stopped",

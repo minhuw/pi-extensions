@@ -15,7 +15,7 @@ const COORDINATOR = "coordinator";
 export const contextText = (percent: number) => `Swarm mode: your context is ${percent}% full. Delegate the remaining investigation and implementation to background agents and keep only their summaries.`;
 
 /** What a stalled agent's telemetry says about it. */
-export interface StalledAgent {
+interface StalledAgent {
 	agentId: string;
 	type: string;
 	description: string;
@@ -44,7 +44,7 @@ export const stallText = (agents: readonly StalledAgent[]) => {
 };
 
 /** A swarm board card a subagent marked blocked. */
-export interface BlockedCard {
+interface BlockedCard {
 	id: string;
 	title: string;
 	agent?: string;

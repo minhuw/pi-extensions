@@ -7,15 +7,15 @@ import type { RunStore } from "../run/store.ts";
 import { type CheckSpec, type Faults, INTEGRATE_OPTION_KEYS, type IntegrateOptions, type IntegrateResult, type JournalInput, noFaults, type StepResult, type Vcs } from "../types.ts";
 import { hasHerderTrailer } from "../vcs/git.ts";
 
-export interface IntegrateDeps { runId: string; store: RunStore; vcs: Vcs; checks: readonly CheckSpec[]; faults?: Faults; signal?: AbortSignal; onProgress?: () => void }
+interface IntegrateDeps { runId: string; store: RunStore; vcs: Vcs; checks: readonly CheckSpec[]; faults?: Faults; signal?: AbortSignal; onProgress?: () => void }
 /**
  * `from`: a launch's logical head (it keys replayed integrations); default: the real integration head.
  * `signal`: cancels this call as well as `deps.signal` (a launch that settles or stops cancels its integrations).
  */
 export interface IntegrateContext { from?: string; signal?: AbortSignal; onCheck?: (id: string) => void }
-export interface Integrator { integrate(source: StepResult | string, opts: IntegrateOptions, ctx?: IntegrateContext): Promise<IntegrateResult>; head(): string }
+interface Integrator { integrate(source: StepResult | string, opts: IntegrateOptions, ctx?: IntegrateContext): Promise<IntegrateResult>; head(): string }
 
-export const INTEGRATION_SLOT = "integration";
+const INTEGRATION_SLOT = "integration";
 
 /** One queue per run directory, shared by every integrator in the process; the run lock covers other processes. */
 const queues = new Map<string, Promise<unknown>>();
@@ -38,7 +38,7 @@ function validateOptions(opts: IntegrateOptions): void {
 	if (opts.checks !== undefined && (!Array.isArray(opts.checks) || opts.checks.some((id) => typeof id !== "string"))) throw new Error("integrate: checks must be a list of check ids");
 }
 
-export function selectChecks(checks: readonly CheckSpec[], ids: readonly string[] | undefined): CheckSpec[] {
+function selectChecks(checks: readonly CheckSpec[], ids: readonly string[] | undefined): CheckSpec[] {
 	if (ids === undefined) return checks.filter((check) => check.integrate);
 	return ids.map((id) => {
 		const spec = checks.find((check) => check.id === id);

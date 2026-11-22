@@ -7,11 +7,10 @@ import {
 	confirmLong,
 	type GoalChoice,
 	GoalReviewDialog,
-	renderGoalMarkdown,
-	renderSummaryLines,
 	reviewGoal,
 	ScrollableConfirm,
 } from "../../src/adapter/confirm.ts";
+import { renderGoalMarkdown, renderSummaryLines } from "../../src/adapter/preview.ts";
 
 const KEYS = {
 	up: "\x1b[A",

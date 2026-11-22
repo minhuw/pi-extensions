@@ -35,7 +35,7 @@ export interface HerderOptions {
 }
 
 /** The `herder:run` payload; `repo` is the repository's name, the main checkout's folder name even from a linked worktree. */
-export interface RunAnnouncement { runId: string; runDir: string; journalPath: string; goalPath: string; planPath: string; repo: string; title: string }
+interface RunAnnouncement { runId: string; runDir: string; journalPath: string; goalPath: string; planPath: string; repo: string; title: string }
 
 /**
  * A run this session holds the lock for. `controller` aborts all of its work (abort, shutdown, lost lock); `ops` are the
@@ -72,7 +72,7 @@ export const unreadableRunError = (id: string, error: unknown) =>
  * The repository's unfinished run, or null. A run whose journal cannot be read is not "no run": without a readable
  * unfinished run, the latest such run is thrown with its journal error and what to do about it.
  */
-export function unfinishedRun(commonDir: string): string | null {
+function unfinishedRun(commonDir: string): string | null {
 	const unreadable: Error[] = [];
 	const runId = activeRun(commonDir, (id, error) => unreadable.push(unreadableRunError(id, error)));
 	if (!runId && unreadable.length) throw unreadable[0];

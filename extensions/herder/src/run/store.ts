@@ -9,7 +9,7 @@ import type { OutputStore } from "../types.ts";
 import { syncDir, writeAtomic, writeSynced } from "./files.ts";
 import { isRunId, newRunId, runPaths, runsDir, type RunPaths } from "./paths.ts";
 
-export interface PlanTask { id: string; text: string }
+interface PlanTask { id: string; text: string }
 
 export interface RunStore {
 	readonly runId: string;

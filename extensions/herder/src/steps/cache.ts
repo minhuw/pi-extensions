@@ -27,7 +27,7 @@ export function resolveIdentity(prompt: string, opts: AgentOptions, roles: Reado
 	return { id: opts.id ?? stepId("agent", name, prompt), explicitId: opts.id !== undefined, fingerprint, role, write, base, gates };
 }
 
-export type Lookup =
+type Lookup =
 	| { kind: "hit"; completion: StepCompletedEvent }
 	| { kind: "adopt"; commit: string; changed: boolean }
 	/** `staleRef`: a step ref that is neither the recorded result nor adoptable; discard it before running. */

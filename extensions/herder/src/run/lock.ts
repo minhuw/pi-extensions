@@ -10,7 +10,7 @@ export interface RunLock { readonly info: LockInfo; heartbeat(): void; release()
  * Points between judging the lock file and acting on it: before a stale lock is moved aside, before our lock is created
  * after that, before a replace moves our lock aside, before the replacement is linked in, before a release.
  */
-export type LockHookPoint = "takeover" | "create" | "replace" | "install" | "release";
+type LockHookPoint = "takeover" | "create" | "replace" | "install" | "release";
 export type LockHook = (point: LockHookPoint) => void;
 /** `hook` is a test seam for simulating a competitor between steps. */
 export interface LockOptions { now?: () => Date; staleMs?: number; hook?: LockHook }

@@ -15,12 +15,12 @@ import type { AgentRunner, CheckResult, CheckSpec, CriterionResult, CriterionSta
 export interface VerifyDeps { runId: string; store: RunStore; vcs: Vcs; runner: AgentRunner; roles: ReadonlyMap<string, RoleDefinition>; checks: readonly CheckSpec[]; limits?: Limits; signal?: AbortSignal; onProgress?: () => void; onStage?: (stage: string) => void }
 export interface VerifyOutcome { verdict: Verdict; head: string; checks: CheckResult[]; criteria: CriterionResult[]; gaps: Gap[]; verifierRan: boolean; convergence?: number; reason?: string }
 
-export interface BlockedClaim { id: string; quote: string; reason: string }
-export interface VerifierReport { criteria: CriterionResult[]; gaps: Gap[]; blocked: BlockedClaim[] }
+interface BlockedClaim { id: string; quote: string; reason: string }
+interface VerifierReport { criteria: CriterionResult[]; gaps: Gap[]; blocked: BlockedClaim[] }
 /** `undefined`: the verifier was not needed; `{ error }`: it ran and failed (runner error or invalid output). */
-export type VerifierOutcome = VerifierReport | { error: string } | undefined;
+type VerifierOutcome = VerifierReport | { error: string } | undefined;
 
-export const VERIFY_SLOT = "verify";
+const VERIFY_SLOT = "verify";
 const STATUSES: CriterionStatus[] = ["met", "not_met", "cant_tell"];
 const GAP_KINDS: Gap["kind"][] = ["missing", "partial", "contradicts", "unrequested"];
 const STRING = { type: "string" };
@@ -95,7 +95,7 @@ export function computeVerdict(input: { criteria: readonly Criterion[]; checks: 
 }
 
 /** Validates the verifier's structured result; throws with the problems when it is unusable. */
-export function parseVerifierReport(data: unknown): VerifierReport {
+function parseVerifierReport(data: unknown): VerifierReport {
 	if (data === undefined) throw new Error("the verifier returned no structured result");
 	const problems = validateSchema(VERIFIER_SCHEMA, data);
 	if (problems.length) throw new Error(`invalid verifier result: ${problems.join("; ")}`);
@@ -114,7 +114,7 @@ function fenced(text: string): string {
 	return `${fence}\n${text.replace(/\n$/, "")}\n${fence}`;
 }
 
-export function verifierPrompt(input: { goal: string; criteria: readonly Criterion[]; checks: readonly CheckResult[]; specs: readonly CheckSpec[]; base: string; head: string; diffStat: string; plan: string }): string {
+function verifierPrompt(input: { goal: string; criteria: readonly Criterion[]; checks: readonly CheckResult[]; specs: readonly CheckSpec[]; base: string; head: string; diffStat: string; plan: string }): string {
 	const checks = input.checks.map((check) => {
 		const command = input.specs.find((spec) => spec.id === check.id)?.command ?? "";
 		return `### ${check.id}: ${check.passed ? "passed" : "FAILED"}\nCommand: \`${command}\`\nExit code: ${check.exitCode ?? "none"}${check.timedOut ? " (timed out)" : ""}\nOutput tail:\n${fenced(check.tail || "(no output)")}`;

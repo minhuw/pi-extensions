@@ -2,8 +2,6 @@ import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Key, type KeybindingsManager, type KeyId, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { renderGoalMarkdown, renderSummaryLines } from "./preview.ts";
 
-export { renderGoalMarkdown, renderSummaryLines };
-
 const HINTS = "↑↓/j k scroll · pgup/pgdn page · home/end · ←→/tab choose · y yes · n no · enter confirm · esc close without answering";
 const GOAL_HINTS = "↑↓/j k scroll · pgup/pgdn page · g/G top/end · ←→/tab choose · y/a approve · n/r reject · e reject with note · enter confirm · esc close";
 /** Lines kept free for Pi's chat tail, footer, and widgets around the dialog. */
@@ -14,7 +12,7 @@ const MIN_BODY_ROWS = 3;
 export type Answer = boolean | undefined;
 
 export type GoalChoice = "approve" | "reject" | "reject_note";
-export type GoalReviewOutcome = { choice: "approve" | "reject"; note?: string } | undefined;
+type GoalReviewOutcome = { choice: "approve" | "reject"; note?: string } | undefined;
 
 type DialogChoice<T> = {
 	readonly id: T;

@@ -7,10 +7,10 @@ import type { RunStore } from "../run/store.ts";
 import type { CheckPurpose, CheckResult, CheckSpec, OutputStore, Vcs } from "../types.ts";
 
 /** Captured output keeps the first `headBytes` and the last `tailBytes`; the middle is replaced by a marker. */
-export interface OutputLimits { headBytes: number; tailBytes: number }
-export const CHECK_OUTPUT_LIMITS: Readonly<OutputLimits> = Object.freeze({ headBytes: 1024 * 1024, tailBytes: 8 * 1024 * 1024 });
+interface OutputLimits { headBytes: number; tailBytes: number }
+const CHECK_OUTPUT_LIMITS: Readonly<OutputLimits> = Object.freeze({ headBytes: 1024 * 1024, tailBytes: 8 * 1024 * 1024 });
 
-export interface CheckRunOptions { cwd: string; commit: string; outputs: OutputStore; signal?: AbortSignal; outputLimits?: OutputLimits; onCheck?: (id: string) => void }
+interface CheckRunOptions { cwd: string; commit: string; outputs: OutputStore; signal?: AbortSignal; outputLimits?: OutputLimits; onCheck?: (id: string) => void }
 
 /** SIGTERM → SIGKILL grace on timeout or abort. */
 const KILL_GRACE_MS = 1_000;
@@ -157,7 +157,7 @@ export async function runChecks(specs: readonly CheckSpec[], options: CheckRunOp
 	return results;
 }
 
-export interface WorktreeCheckRunOptions {
+interface WorktreeCheckRunOptions {
 	runId: string;
 	vcs: Vcs;
 	store: Pick<RunStore, "journal" | "outputs">;

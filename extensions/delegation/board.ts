@@ -41,7 +41,7 @@ export const MAX_NOTE_CHARS = 500;
 export const MAX_CARDS = 200;
 export const MAX_BYTES = 60 * 1024;
 
-export type CardStatus = "todo" | "doing" | "blocked" | "done" | "failed" | "dropped";
+type CardStatus = "todo" | "doing" | "blocked" | "done" | "failed" | "dropped";
 
 export interface SwarmCard {
 	id: string;
