@@ -43,12 +43,21 @@ interface KeybindingsLike {
 	matches(data: string, keybinding: Keybinding): boolean;
 }
 
-interface ChoiceOptionItem {
+export interface ChoiceOptionItem {
 	readonly labelPart: string;
 	readonly description: string | undefined;
 	readonly rawLabel: string;
 	readonly choiceId: string | undefined;
 	readonly isCustom: boolean;
+}
+
+export interface PreparedQuestionChoices {
+	/** Unsanitized choice labels for RPC `ctx.ui.select` (excluding the optional custom entry). */
+	readonly rawLabels: string[];
+	/** Disambiguated free-text option label when `allowFreeText` is true. */
+	readonly customLabel: string | undefined;
+	/** Sanitized items for TUI rendering, including the custom entry when `allowFreeText` is true. */
+	readonly items: ChoiceOptionItem[];
 }
 
 /** Strip terminal escape sequences first, then replace remaining C0/C1 control characters with spaces. */
@@ -77,34 +86,37 @@ function wrapStyledParagraphs(lines: readonly string[], width: number, style: (l
 	return out;
 }
 
-function buildChoiceItems(question: QuestionItem): ChoiceOptionItem[] {
+export function prepareQuestionChoices(question: Pick<QuestionItem, "choices" | "allowFreeText">): PreparedQuestionChoices {
 	const choices = question.choices;
-	if (!choices || choices.length === 0) return [];
+	if (!choices || choices.length === 0) return { rawLabels: [], customLabel: undefined, items: [] };
 	const counts = new Map<string, number>();
 	for (const choice of choices) {
 		counts.set(choice.label, (counts.get(choice.label) ?? 0) + 1);
 	}
-	const rawLabels = choices.map(
-		(choice) =>
-			`${choice.label}${(counts.get(choice.label) ?? 0) > 1 ? ` (${choice.id})` : ""}${choice.description ? ` — ${choice.description}` : ""}`,
-	);
-	const items: ChoiceOptionItem[] = choices.map((choice) => {
+	const rawLabels: string[] = [];
+	const items: ChoiceOptionItem[] = [];
+	for (const choice of choices) {
+		const duplicated = (counts.get(choice.label) ?? 0) > 1;
+		rawLabels.push(
+			`${choice.label}${duplicated ? ` (${choice.id})` : ""}${choice.description ? ` — ${choice.description}` : ""}`,
+		);
 		const cleanLabel = sanitizeInlineText(choice.label);
 		const cleanId = sanitizeInlineText(choice.id);
-		const duplicated = (counts.get(choice.label) ?? 0) > 1;
-		return {
+		items.push({
 			labelPart: duplicated ? `${cleanLabel} (${cleanId})` : cleanLabel,
 			description: choice.description ? sanitizeInlineText(choice.description) : undefined,
 			rawLabel: choice.label,
 			choiceId: choice.id,
 			isCustom: false,
-		};
-	});
+		});
+	}
+	let customLabel: string | undefined;
 	if (question.allowFreeText) {
 		let custom = "Other: type your own answer";
 		while (rawLabels.includes(custom) || items.some((item) => item.labelPart === custom && !item.description)) {
 			custom += " (free text)";
 		}
+		customLabel = custom;
 		items.push({
 			labelPart: custom,
 			description: undefined,
@@ -113,7 +125,40 @@ function buildChoiceItems(question: QuestionItem): ChoiceOptionItem[] {
 			isCustom: true,
 		});
 	}
-	return items;
+	return { rawLabels, customLabel, items };
+}
+
+function matchScrollDelta(
+	data: string,
+	kb: KeybindingsLike,
+	pageStep: number,
+	includeArrowKeys: boolean,
+): number | undefined {
+	if (kb.matches(data, "tui.select.pageUp") || kb.matches(data, "tui.editor.pageUp") || matchesKey(data, Key.pageUp)) {
+		return -pageStep;
+	}
+	if (
+		kb.matches(data, "tui.select.pageDown") ||
+		kb.matches(data, "tui.editor.pageDown") ||
+		matchesKey(data, Key.pageDown)
+	) {
+		return pageStep;
+	}
+	if (
+		matchesKey(data, Key.ctrl("up")) ||
+		matchesKey(data, Key.ctrlShift("up")) ||
+		(includeArrowKeys && (matchesKey(data, Key.up) || kb.matches(data, "tui.editor.cursorUp")))
+	) {
+		return -1;
+	}
+	if (
+		matchesKey(data, Key.ctrl("down")) ||
+		matchesKey(data, Key.ctrlShift("down")) ||
+		(includeArrowKeys && (matchesKey(data, Key.down) || kb.matches(data, "tui.editor.cursorDown")))
+	) {
+		return 1;
+	}
+	return undefined;
 }
 
 function renderChoiceItem(item: ChoiceOptionItem, selected: boolean, innerWidth: number, theme: Theme): string[] {
@@ -167,7 +212,7 @@ class QuestionDialog implements Component, Focusable {
 		this.theme = theme;
 		this.keybindings = keybindings;
 		this.done = done;
-		this.items = buildChoiceItems(question);
+		this.items = prepareQuestionChoices(question).items;
 		this.mode = this.items.length > 0 ? "choice" : "input";
 		this.input = new Input({
 			prompt: theme.fg("accent", "▸ "),
@@ -190,6 +235,14 @@ class QuestionDialog implements Component, Focusable {
 	private moveScroll(delta: number): void {
 		const next = Math.max(0, this.scrollOffset + delta);
 		this.scrollOffset = this.maxScrollOffset === undefined ? next : Math.min(next, this.maxScrollOffset);
+	}
+
+	private handleScrollInput(data: string, kb: KeybindingsLike, includeArrowKeys: boolean): boolean {
+		const delta = matchScrollDelta(data, kb, this.scrollPage, includeArrowKeys);
+		if (delta === undefined) return false;
+		this.moveScroll(delta);
+		this.tui.requestRender();
+		return true;
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
@@ -231,34 +284,7 @@ class QuestionDialog implements Component, Focusable {
 			this.done({ value: selected.rawLabel, choiceId: selected.choiceId });
 			return;
 		}
-		if (
-			kb.matches(data, "tui.select.pageUp") ||
-			kb.matches(data, "tui.editor.pageUp") ||
-			matchesKey(data, Key.pageUp)
-		) {
-			this.moveScroll(-this.scrollPage);
-			this.tui.requestRender();
-			return;
-		}
-		if (
-			kb.matches(data, "tui.select.pageDown") ||
-			kb.matches(data, "tui.editor.pageDown") ||
-			matchesKey(data, Key.pageDown)
-		) {
-			this.moveScroll(this.scrollPage);
-			this.tui.requestRender();
-			return;
-		}
-		if (matchesKey(data, Key.ctrl("up")) || matchesKey(data, Key.ctrlShift("up"))) {
-			this.moveScroll(-1);
-			this.tui.requestRender();
-			return;
-		}
-		if (matchesKey(data, Key.ctrl("down")) || matchesKey(data, Key.ctrlShift("down"))) {
-			this.moveScroll(1);
-			this.tui.requestRender();
-			return;
-		}
+		if (this.handleScrollInput(data, kb, false)) return;
 		if (kb.matches(data, "tui.select.up") || matchesKey(data, Key.up) || data === "k") {
 			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
 			this.tui.requestRender();
@@ -297,44 +323,7 @@ class QuestionDialog implements Component, Focusable {
 			this.done({ value: this.input.getValue() });
 			return;
 		}
-		if (
-			kb.matches(data, "tui.select.pageUp") ||
-			kb.matches(data, "tui.editor.pageUp") ||
-			matchesKey(data, Key.pageUp)
-		) {
-			this.moveScroll(-this.scrollPage);
-			this.tui.requestRender();
-			return;
-		}
-		if (
-			kb.matches(data, "tui.select.pageDown") ||
-			kb.matches(data, "tui.editor.pageDown") ||
-			matchesKey(data, Key.pageDown)
-		) {
-			this.moveScroll(this.scrollPage);
-			this.tui.requestRender();
-			return;
-		}
-		if (
-			matchesKey(data, Key.ctrl("up")) ||
-			matchesKey(data, Key.ctrlShift("up")) ||
-			matchesKey(data, Key.up) ||
-			kb.matches(data, "tui.editor.cursorUp")
-		) {
-			this.moveScroll(-1);
-			this.tui.requestRender();
-			return;
-		}
-		if (
-			matchesKey(data, Key.ctrl("down")) ||
-			matchesKey(data, Key.ctrlShift("down")) ||
-			matchesKey(data, Key.down) ||
-			kb.matches(data, "tui.editor.cursorDown")
-		) {
-			this.moveScroll(1);
-			this.tui.requestRender();
-			return;
-		}
+		if (this.handleScrollInput(data, kb, true)) return;
 		this.input.handleInput(data);
 		this.tui.requestRender();
 	}

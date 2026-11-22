@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
 import { Type, type Static } from "typebox";
-import { promptTuiQuestion } from "./question-ui.ts";
+import { prepareQuestionChoices, promptTuiQuestion } from "./question-ui.ts";
 
 const QuestionSchema = Type.Object({
 	questions: Type.Array(Type.Object({
@@ -89,18 +89,18 @@ export async function askQuestions(
 				// No timeout: Pi resolves a timed-out dialog as dismissed on the agent side, so an answer picked later would be lost.
 				const options = { signal };
 				if (question.choices) {
-					const duplicated = (label: string) => question.choices!.filter((choice) => choice.label === label).length > 1;
-					const labels = question.choices.map((choice) =>
-						`${choice.label}${duplicated(choice.label) ? ` (${choice.id})` : ""}${choice.description ? ` — ${choice.description}` : ""}`);
-					let custom = "Other: type your own answer";
-					while (labels.includes(custom)) custom += " (free text)";
-					const selected = await ctx.ui.select(title, question.allowFreeText ? [...labels, custom] : labels, options);
+					const { rawLabels, customLabel } = prepareQuestionChoices(question);
+					const selected = await ctx.ui.select(
+						title,
+						customLabel !== undefined ? [...rawLabels, customLabel] : rawLabels,
+						options,
+					);
 					if (signal?.aborted) return report("cancelled", "Tool cancelled; no answer was assumed for the open dialog.");
-					const index = selected === undefined ? -1 : labels.indexOf(selected);
+					const index = selected === undefined ? -1 : rawLabels.indexOf(selected);
 					if (index >= 0) {
 						value = question.choices[index]!.label;
 						choiceId = question.choices[index]!.id;
-					} else if (selected === custom && question.allowFreeText) {
+					} else if (customLabel !== undefined && selected === customLabel) {
 						value = await ctx.ui.input(title, "Your answer", options);
 					}
 				} else {
