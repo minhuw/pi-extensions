@@ -5,7 +5,6 @@
  * IPC sidecar backend across top-level sessions, /reload cycles, and subagents.
  */
 
-import nodeOs from "node:os";
 import nodePath from "node:path";
 import type {
 	AgentToolResult,
@@ -32,6 +31,7 @@ import type {
 } from "@ff-labs/fff-node";
 import { type Static, Type, type TSchema } from "typebox";
 import {
+	type EnsureRootResult,
 	type FffBackend,
 	getSharedFffBackend,
 	SCAN_TIMEOUT_MS,
@@ -39,6 +39,7 @@ import {
 import { type FffMode, loadConfig, VALID_MODES } from "./config.ts";
 import {
 	canonicalRoot,
+	HOME_DIR,
 	isFsRoot,
 	isHomeDir,
 	piDataDir,
@@ -52,7 +53,6 @@ export { SCAN_TIMEOUT_MS } from "./client.ts";
 // Constants
 // ---------------------------------------------------------------------------
 
-const HOME_DIR = nodePath.resolve(nodeOs.homedir());
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
 export const CHILD_SESSION_HOOKS = Symbol.for(
 	"pi-extensions.child-session-hooks",
@@ -686,18 +686,18 @@ export function createFffExtension(
 			return null;
 		}
 
-		async function ensureWorkspaceRoot(
-			cwd: string,
+		async function ensureConfiguredRoot(
+			basePath: string,
+			kind: "workspace" | "aux",
 			signal?: AbortSignal,
-		): Promise<string> {
+			exact?: boolean,
+		): Promise<EnsureRootResult> {
 			if (!startupConfigResolved) resolveStartupConfig();
-			const optOut = scanOptOutReason(cwd);
-			if (optOut) throw new Error(optOut);
-
 			const res = await backend.ensureRoot(
 				{
-					basePath: cwd,
-					kind: "workspace",
+					basePath,
+					kind,
+					...(exact ? { exact: true } : {}),
 					frecencyDbPath: resolvedDbPaths.frecency,
 					historyDbPath: resolvedDbPaths.history,
 					enableHomeDirScanning,
@@ -710,6 +710,18 @@ export function createFffExtension(
 			if (res.dbFallbackError && !childSession) {
 				notifyDbFallback(res.dbFallbackError);
 			}
+			return res;
+		}
+
+		async function ensureWorkspaceRoot(
+			cwd: string,
+			signal?: AbortSignal,
+		): Promise<string> {
+			if (!startupConfigResolved) resolveStartupConfig();
+			const optOut = scanOptOutReason(cwd);
+			if (optOut) throw new Error(optOut);
+
+			const res = await ensureConfiguredRoot(cwd, "workspace", signal);
 			if (cwd === activeCwd) {
 				currentWorkspaceRoot = res.root;
 			}
@@ -775,27 +787,11 @@ export function createFffExtension(
 			cwd: string,
 			signal?: AbortSignal,
 		): Promise<{ root: string; query: string } | null> {
-			if (!startupConfigResolved) resolveStartupConfig();
 			const route = routePathConstraint(pathParam, cwd);
 			if (!route) return null;
 
 			const canonRouteRoot = canonicalRoot(route.root);
-			const aux = await backend.ensureRoot(
-				{
-					basePath: route.root,
-					kind: "aux",
-					frecencyDbPath: resolvedDbPaths.frecency,
-					historyDbPath: resolvedDbPaths.history,
-					enableHomeDirScanning,
-					enableFsRootScanning,
-					followSymlinks,
-					waitTimeoutMs: SCAN_TIMEOUT_MS,
-				},
-				signal,
-			);
-			if (aux.dbFallbackError && !childSession) {
-				notifyDbFallback(aux.dbFallbackError);
-			}
+			const aux = await ensureConfiguredRoot(route.root, "aux", signal);
 			if (
 				aux.created === true &&
 				!childSession &&
@@ -1602,24 +1598,12 @@ export function createFffExtension(
 
 				if (resumed) {
 					if (resumed.auxRoot) {
-						if (!startupConfigResolved) resolveStartupConfig();
-						const ensured = await backend.ensureRoot(
-							{
-								basePath: resumed.auxRoot,
-								kind: "aux",
-								exact: true,
-								frecencyDbPath: resolvedDbPaths.frecency,
-								historyDbPath: resolvedDbPaths.history,
-								enableHomeDirScanning,
-								enableFsRootScanning,
-								followSymlinks,
-								waitTimeoutMs: SCAN_TIMEOUT_MS,
-							},
+						const ensured = await ensureConfiguredRoot(
+							resumed.auxRoot,
+							"aux",
 							signal,
+							true,
 						);
-						if (ensured.dbFallbackError && !childSession) {
-							notifyDbFallback(ensured.dbFallbackError);
-						}
 						root = ensured.root;
 					} else {
 						root = await ensureWorkspaceRoot(toolCwd, signal);

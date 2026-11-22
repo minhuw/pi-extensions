@@ -310,7 +310,6 @@ async function ensureEntry(params) {
 			followSymlinks: params.followSymlinks,
 		};
 
-		let usedDbPaths = false;
 		let res;
 
 		if (hasDbPaths && !dbDisabled) {
@@ -319,9 +318,7 @@ async function ensureEntry(params) {
 				frecencyDbPath: params.frecencyDbPath,
 				historyDbPath: params.historyDbPath,
 			});
-			if (res.ok) {
-				usedDbPaths = true;
-			} else {
+			if (!res.ok) {
 				const firstError = res.error;
 				res = FileFinder.create(baseOptions);
 				if (res.ok) {
@@ -357,13 +354,6 @@ async function ensureEntry(params) {
 			refreshPromise: null,
 			rescanRequested: false,
 			retired: false,
-			options: usedDbPaths
-				? {
-						...baseOptions,
-						frecencyDbPath: params.frecencyDbPath,
-						historyDbPath: params.historyDbPath,
-					}
-				: baseOptions,
 		};
 
 		const replaced = entries.get(target);
