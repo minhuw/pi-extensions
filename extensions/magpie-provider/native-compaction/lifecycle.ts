@@ -67,9 +67,7 @@ export function registerNativeCompaction(
 		// Guard corrupt/foreign history even when its original provider extension is no longer loaded.
 		return checkpoint.status === "invalid" ||
 			(checkpoint.status === "valid" && (!model || checkpoint.checkpoint.details.modelKey !== modelKey(model))) ||
-			model?.provider === MAGPIE_PROVIDER_ID ||
-			(checkpoint.status === "valid" &&
-				checkpoint.checkpoint.details.modelKey.split(":")[0] === MAGPIE_PROVIDER_ID);
+			model?.provider === MAGPIE_PROVIDER_ID;
 	};
 
 	const createNativeCheckpoint = async (params: {

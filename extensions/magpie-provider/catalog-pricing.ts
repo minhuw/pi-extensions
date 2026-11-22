@@ -8,7 +8,7 @@ import type { MagpieCost } from "./pricing.ts";
 
 export const MODELS_DEV_URL = "https://models.dev/api.json";
 export const PRICING_TTL_MS = 24 * 60 * 60 * 1000;
-export const PRICING_TIMEOUT_MS = 3000;
+const PRICING_TIMEOUT_MS = 3000;
 export const PRICING_MAX_BYTES = 16 * 1024 * 1024;
 export type CatalogPricingResolver = (id: string) => MagpieCost | undefined;
 type Prices = Record<string, ModelCost | null>;

@@ -7,6 +7,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { calculateCost, type Message, type Model, type Usage } from "@earendil-works/pi-ai";
 import { parseMagpieGatewayOrigin } from "../gateway-url.ts";
+import { markMagpieUsage } from "../pricing.ts";
 
 // Keep the persisted discriminator so existing v1/v2 sessions remain replayable.
 export const NATIVE_COMPACTION_KIND = "cliproxyapi-openai-native-compaction";
@@ -436,12 +437,6 @@ function messagesToResponseItems(model: Model<any>, messages: Message[], tools: 
 	return items;
 }
 
-function entriesToResponseItems(model: Model<any>, entries: SessionEntry[], tools: ToolInfo[]): ResponseItem[] {
-	// Project only the tail: Pi stops at its missing checkpoint parent and applies context edits.
-	const { messages } = buildSessionContext(entries);
-	return messagesToResponseItems(model, convertToLlm(messages), tools);
-}
-
 export function effectiveInputForBranch(params: {
 	branch: SessionEntry[];
 	model: Model<any>;
@@ -470,9 +465,11 @@ export function effectiveInputForBranch(params: {
 			throw new Error("The latest native compaction checkpoint belongs to a different model.");
 		}
 		const tail = branch.slice(checkpoint.checkpoint.entryIndex + 1);
+		// Project only the tail: Pi stops at its missing checkpoint parent and applies context edits.
+		const { messages } = buildSessionContext(tail);
 		return [
 			...checkpoint.checkpoint.details.replacementHistory.map(normalizeResponseInputItem),
-			...entriesToResponseItems(params.model, tail, params.tools),
+			...messagesToResponseItems(params.model, convertToLlm(messages), params.tools),
 		];
 	}
 
@@ -635,8 +632,7 @@ export function usageFromResponse(model: Model<any>, value: unknown): Usage | un
 	calculateCost(model, usage);
 	// Preserve optional pricing provenance supplied by the provider's catalog.
 	const pricing = (model.cost as { magpiePricing?: unknown }).magpiePricing;
-	if (pricing === "estimate" || pricing === "unavailable") Object.assign(usage.cost, { magpiePricing: pricing });
-	return usage;
+	return pricing === "estimate" || pricing === "unavailable" ? markMagpieUsage(usage, pricing) : usage;
 }
 
 async function readCompactResponse(response: Response, signal?: AbortSignal): Promise<CompactResponse> {
@@ -755,7 +751,7 @@ export async function callRemoteCompaction(params: {
 					});
 					const message = `Native Responses compaction failed (${response.status}): ${responseBody || response.statusText}`;
 					// auth_unavailable is a routing/auth-selection miss. Repeating the same bound request will not recover.
-					if (!isRetryableStatus(response.status) || isAuthUnavailableMessage(responseBody) || isAuthUnavailableMessage(message)) {
+					if (!isRetryableStatus(response.status) || isAuthUnavailableMessage(message)) {
 						throw new NonRetryableCompactionError(message);
 					}
 					retryError = new Error(message);
