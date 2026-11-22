@@ -2,24 +2,20 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeF
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { getCurrentSystemPrompt, getCurrentTools, InMemoryCredentialStore, type ToolResultMessage } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { getCurrentSystemPrompt, getCurrentTools, type ToolResultMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import {
-	createAgentSession,
-	DefaultResourceLoader,
-	ModelRuntime,
 	SessionManager,
-	SettingsManager,
 	type AgentSession,
 	type ExtensionUIContext,
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import impeccableExtension from "../index.ts";
 import { COMPANIONS_MESSAGE, companionLine, IMPECCABLE_TOOL_NAMES, SKILL_LOCATION_MESSAGE } from "../src/activation.ts";
 import { delegate } from "../src/delegation.ts";
 import { getSkillDir } from "../src/resources.ts";
 import { isolateEngineEnvironment } from "./support/engine-environment.ts";
+import { createImpeccableTestSession } from "./support/session.ts";
 
 isolateEngineEnvironment();
 
@@ -65,20 +61,16 @@ async function fixture(options: { subagents?: boolean; nested?: boolean; childIm
 			await writeFile(join(directory, "page.html"), "<main>Supplied review evidence</main>\n");
 		}
 		const subagents = options.subagents ? (await import("../../subagents/src/index.ts")).default : undefined;
-		const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-		const faux = fauxProvider({ api: "impeccable-test-api", provider: "impeccable-test", models: [{ id: "test" }] });
 		const promptsDir = join(getSkillDir(), "../../prompts");
 		const promptFiles = options.loadResources
 			? (await readdir(promptsDir)).filter((name) => name.endsWith(".md")).map((name) => join(promptsDir, name))
 			: [];
-		const resources = new DefaultResourceLoader({
+		const created = await createImpeccableTestSession({
 			cwd: directory,
 			agentDir: directory,
-			noExtensions: true,
-			noSkills: true,
+			api: "impeccable-test-api",
+			provider: "impeccable-test",
 			noPromptTemplates: !options.loadResources,
-			noThemes: true,
-			noContextFiles: true,
 			...(options.loadResources
 				? {
 						additionalSkillPaths: [join(getSkillDir(), "..")],
@@ -86,35 +78,19 @@ async function fixture(options: { subagents?: boolean; nested?: boolean; childIm
 					}
 				: {}),
 			extensionFactories: [
-				(pi) => {
-					pi.registerProvider(faux.provider);
-					impeccableExtension(pi);
-				},
 				...(subagents ? [subagents] : []),
 				...(options.extraExtension ? [options.extraExtension] : []),
 			],
-		});
-		await resources.reload();
-		expect(resources.getExtensions().errors).toEqual([]);
-		const settingsManager = options.activateImpeccableTools === false
-			? SettingsManager.inMemory({ retry: { enabled: false } })
-			: SettingsManager.inMemory({ defaultTools: [...IMPECCABLE_TOOL_NAMES], retry: { enabled: false } });
-		({ session } = await createAgentSession({
-			cwd: directory,
-			agentDir: directory,
-			modelRuntime: runtime,
-			model: faux.getModel("test")!,
-			resourceLoader: resources,
+			defaultTools: options.activateImpeccableTools === false ? undefined : [...IMPECCABLE_TOOL_NAMES],
 			sessionManager: options.sessionManager ?? SessionManager.inMemory(directory),
-			settingsManager,
-		}));
-		const errors: unknown[] = [];
-		await session.bindExtensions({ mode: "rpc", uiContext: options.uiContext, onError: (error) => errors.push(error) });
+			uiContext: options.uiContext,
+		});
+		session = created.session;
 		const current = session;
 		return {
 			session: current,
-			faux,
-			errors,
+			faux: created.faux,
+			errors: created.errors,
 			async cleanup() {
 				try {
 					await current.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });

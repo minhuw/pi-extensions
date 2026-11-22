@@ -9,24 +9,74 @@ import extension from "../index.ts";
 import { approvalKey, type State } from "../campaign.ts";
 import { SNAPSHOT } from "../report.ts";
 
+async function createAutoresearchSession(options: {
+	directory: string;
+	api?: string;
+	provider?: string;
+	runtime?: ModelRuntime;
+	faux?: ReturnType<typeof fauxProvider>;
+	sessionManager?: SessionManager;
+	bind?: false | Parameters<AgentSession["bindExtensions"]>[0];
+}) {
+	const runtime = options.runtime ?? await ModelRuntime.create({
+		credentials: new InMemoryCredentialStore(),
+		modelsPath: null,
+		refreshOnCreate: false,
+	});
+	const faux = options.faux ?? fauxProvider({
+		api: options.api ?? "research-test-api",
+		provider: options.provider ?? "research-test",
+		models: [{ id: "test" }],
+	});
+	const resources = new DefaultResourceLoader({
+		cwd: options.directory,
+		agentDir: options.directory,
+		noExtensions: true,
+		noSkills: true,
+		noPromptTemplates: true,
+		noThemes: true,
+		noContextFiles: true,
+		extensionFactories: [(pi) => { pi.registerProvider(faux.provider); extension(pi); }],
+	});
+	await resources.reload();
+	expect(resources.getExtensions().errors).toEqual([]);
+	const { session } = await createAgentSession({
+		cwd: options.directory,
+		agentDir: options.directory,
+		modelRuntime: runtime,
+		model: faux.getModel("test")!,
+		resourceLoader: resources,
+		sessionManager: options.sessionManager ?? SessionManager.inMemory(options.directory),
+		settingsManager: SettingsManager.inMemory({ defaultTools: ["bash"], retry: { enabled: false } }),
+	});
+	const errors: unknown[] = [];
+	if (options.bind !== false) {
+		try {
+			await session.bindExtensions({
+				mode: "rpc",
+				onError: error => { errors.push(error); },
+				...options.bind,
+			});
+		} catch (error) {
+			session.dispose();
+			throw error;
+		}
+	}
+	return { session, runtime, faux, errors };
+}
+
 it("runs a main-session baseline through real Pi/bash, waits for host approval, then runs one measured iteration", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-research-workflow-"));
 	let session: AgentSession | undefined;
 	try {
 		await writeFile(join(directory, "measure.mjs"), "process.stdout.write('METRIC compile_ms=123\\n');\n");
-		const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-		const faux = fauxProvider({ api: "research-report-api", provider: "research-report", models: [{ id: "test" }] });
-		const resources = new DefaultResourceLoader({
-			cwd: directory, agentDir: directory, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-			extensionFactories: [(pi) => { pi.registerProvider(faux.provider); extension(pi); }],
+		const created = await createAutoresearchSession({
+			directory,
+			api: "research-report-api",
+			provider: "research-report",
 		});
-		await resources.reload(); expect(resources.getExtensions().errors).toEqual([]);
-		({ session } = await createAgentSession({
-			cwd: directory, agentDir: directory, modelRuntime: runtime, model: faux.getModel("test")!, resourceLoader: resources,
-			sessionManager: SessionManager.inMemory(directory), settingsManager: SettingsManager.inMemory({ defaultTools: ["bash"], retry: { enabled: false } }),
-		}));
-		const errors: unknown[] = [];
-		await session.bindExtensions({ mode: "rpc", onError: error => { errors.push(error); } });
+		session = created.session;
+		const { faux, errors } = created;
 		const settled = () => new Promise<void>(resolve => {
 			const unsubscribe = session!.subscribe(event => { if (event.type === "agent_settled") { unsubscribe(); resolve(); } });
 		});
@@ -71,19 +121,13 @@ it("lets a real setup pass report after its baseline, rejects pausing or complet
 	let session: AgentSession | undefined;
 	try {
 		await writeFile(join(directory, "measure.mjs"), "process.stdout.write('METRIC compile_ms=123\\n');\n");
-		const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-		const faux = fauxProvider({ api: "research-setup-api", provider: "research-setup", models: [{ id: "test" }] });
-		const resources = new DefaultResourceLoader({
-			cwd: directory, agentDir: directory, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-			extensionFactories: [(pi) => { pi.registerProvider(faux.provider); extension(pi); }],
+		const created = await createAutoresearchSession({
+			directory,
+			api: "research-setup-api",
+			provider: "research-setup",
 		});
-		await resources.reload(); expect(resources.getExtensions().errors).toEqual([]);
-		({ session } = await createAgentSession({
-			cwd: directory, agentDir: directory, modelRuntime: runtime, model: faux.getModel("test")!, resourceLoader: resources,
-			sessionManager: SessionManager.inMemory(directory), settingsManager: SettingsManager.inMemory({ defaultTools: ["bash"], retry: { enabled: false } }),
-		}));
-		const errors: unknown[] = [];
-		await session.bindExtensions({ mode: "rpc", onError: error => { errors.push(error); } });
+		session = created.session;
+		const { faux, errors } = created;
 		const settled = () => new Promise<void>(resolve => {
 			const unsubscribe = session!.subscribe(event => { if (event.type === "agent_settled") { unsubscribe(); resolve(); } });
 		});
@@ -138,24 +182,19 @@ it("keeps status displays out of the model context", async () => {
 		let session: AgentSession | undefined;
 		try {
 			await writeFile(join(directory, "measure.mjs"), "process.stdout.write('METRIC compile_ms=123\\n');\n");
-			const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-			const faux = fauxProvider({ api: `research-display-${mode}-api`, provider: `research-display-${mode}`, models: [{ id: "test" }] });
-			const resources = new DefaultResourceLoader({
-				cwd: directory, agentDir: directory, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-				extensionFactories: [(pi) => { pi.registerProvider(faux.provider); extension(pi); }],
-			});
-			await resources.reload(); expect(resources.getExtensions().errors).toEqual([]);
-			({ session } = await createAgentSession({
-				cwd: directory, agentDir: directory, modelRuntime: runtime, model: faux.getModel("test")!, resourceLoader: resources,
-				sessionManager: SessionManager.inMemory(directory), settingsManager: SettingsManager.inMemory({ defaultTools: ["bash"], retry: { enabled: false } }),
-			}));
 			const notes: { message: string; type?: string }[] = []; const statuses = new Map<string, string | undefined>();
 			const uiContext = {
 				notify: (message: string, type?: string) => { notes.push({ message, type }); },
 				setStatus: (key: string, text: string | undefined) => { statuses.set(key, text); },
 			} as unknown as ExtensionUIContext;
-			const errors: unknown[] = [];
-			await session.bindExtensions({ mode, uiContext, onError: error => { errors.push(error); } });
+			const created = await createAutoresearchSession({
+				directory,
+				api: `research-display-${mode}-api`,
+				provider: `research-display-${mode}`,
+				bind: { mode, uiContext },
+			});
+			session = created.session;
+			const { faux, errors } = created;
 			const settled = () => new Promise<void>(resolve => {
 				const unsubscribe = session!.subscribe(event => { if (event.type === "agent_settled") { unsubscribe(); resolve(); } });
 			});
@@ -211,24 +250,20 @@ async function displaySession(mode: "tui" | "rpc" | "print") {
 	};
 	try {
 		await writeFile(join(directory, "measure.mjs"), "process.stdout.write('METRIC compile_ms=123\\n');\n");
-		const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-		const faux = fauxProvider({ api: `research-shown-${mode}-api`, provider: `research-shown-${mode}`, models: [{ id: "test" }] });
-		const resources = new DefaultResourceLoader({
-			cwd: directory, agentDir: directory, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-			extensionFactories: [(pi) => { pi.registerProvider(faux.provider); extension(pi); }],
-		});
-		await resources.reload(); expect(resources.getExtensions().errors).toEqual([]);
-		({ session } = await createAgentSession({
-			cwd: directory, agentDir: directory, modelRuntime: runtime, model: faux.getModel("test")!, resourceLoader: resources,
-			sessionManager: SessionManager.inMemory(directory), settingsManager: SettingsManager.inMemory({ defaultTools: ["bash"], retry: { enabled: false } }),
-		}));
-		const s = session;
-		const notes: { message: string; type?: string }[] = []; const statuses = new Map<string, string | undefined>(); const errors: unknown[] = []; const contexts: string[] = [];
+		const notes: { message: string; type?: string }[] = []; const statuses = new Map<string, string | undefined>(); const contexts: string[] = [];
 		const uiContext = {
 			notify: (message: string, type?: string) => { notes.push({ message, type }); },
 			setStatus: (key: string, text: string | undefined) => { statuses.set(key, text); },
 		} as unknown as ExtensionUIContext;
-		await s.bindExtensions({ mode, uiContext, onError: error => { errors.push(error); } });
+		const created = await createAutoresearchSession({
+			directory,
+			api: `research-shown-${mode}-api`,
+			provider: `research-shown-${mode}`,
+			bind: { mode, uiContext },
+		});
+		session = created.session;
+		const s = session;
+		const { faux, errors } = created;
 		const settled = () => new Promise<void>(resolve => {
 			const unsubscribe = s.subscribe(event => { if (event.type === "agent_settled") { unsubscribe(); resolve(); } });
 		});
@@ -455,24 +490,17 @@ it("restores autoresearch_* tools as active when resuming or switching to a sess
 	let firstSession: AgentSession | undefined;
 	let resumedSession: AgentSession | undefined;
 	try {
-		const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-		const faux = fauxProvider({ api: "research-restore-active-api", provider: "research-restore-active", models: [{ id: "test" }] });
-		const makeLoader = async () => {
-			const loader = new DefaultResourceLoader({
-				cwd: directory, agentDir: directory, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-				extensionFactories: [(pi) => { pi.registerProvider(faux.provider); extension(pi); }],
-			});
-			await loader.reload();
-			expect(loader.getExtensions().errors).toEqual([]);
-			return loader;
-		};
 		const manager = SessionManager.create(directory, directory);
-		({ session: firstSession } = await createAgentSession({
-			cwd: directory, agentDir: directory, modelRuntime: runtime, model: faux.getModel("test")!, resourceLoader: await makeLoader(),
-			sessionManager: manager, settingsManager: SettingsManager.inMemory({ defaultTools: ["bash"], retry: { enabled: false } }),
-		}));
 		const errors: unknown[] = [];
-		await firstSession.bindExtensions({ mode: "rpc", onError: error => { errors.push(error); } });
+		const first = await createAutoresearchSession({
+			directory,
+			api: "research-restore-active-api",
+			provider: "research-restore-active",
+			sessionManager: manager,
+			bind: { mode: "rpc", onError: error => { errors.push(error); } },
+		});
+		firstSession = first.session;
+		const { runtime, faux } = first;
 		const settled = (s: AgentSession) => new Promise<void>(resolve => {
 			const unsubscribe = s.subscribe(event => { if (event.type === "agent_settled") { unsubscribe(); resolve(); } });
 		});
@@ -497,9 +525,12 @@ it("restores autoresearch_* tools as active when resuming or switching to a sess
 		// Transcript system message only had ["bash"], so before bindExtensions autoresearch_* are inactive;
 		// bindExtensions triggers session_start -> restore(ctx) -> activateTools() from the saved SNAPSHOT.
 		const reopened = SessionManager.open(sessionFile, directory);
-		({ session: resumedSession } = await createAgentSession({
-			cwd: directory, agentDir: directory, modelRuntime: runtime, model: faux.getModel("test")!, resourceLoader: await makeLoader(),
-			sessionManager: reopened, settingsManager: SettingsManager.inMemory({ defaultTools: ["bash"], retry: { enabled: false } }),
+		({ session: resumedSession } = await createAutoresearchSession({
+			directory,
+			runtime,
+			faux,
+			sessionManager: reopened,
+			bind: false,
 		}));
 		expect(resumedSession.getActiveToolNames()).toEqual(["bash"]);
 		await resumedSession.bindExtensions({ mode: "rpc", onError: error => { errors.push(error); } });

@@ -1,11 +1,9 @@
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import impeccable from "../../index.ts";
+import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { IMPECCABLE_TOOL_NAMES } from "../../src/activation.ts";
+import { createImpeccableTestSession } from "./session.ts";
 
 /** Offline protocol double, using the exact pinned hook payload/audit shapes. No detector rules are implemented here. */
 export const protocolEngine = `#!/usr/bin/env node
@@ -79,21 +77,22 @@ export async function detectorFixture(extra?: (pi: ExtensionAPI) => void, prompt
 	if (options.cwdAlias) await symlink(physicalCwd, cwd);
 	const binary = path.join(directory, "fake engine.mjs");
 	await writeFile(binary, protocolEngine, { mode: 0o755 });
-	const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-	const faux = fauxProvider({ api: `detector-${Date.now()}-${Math.random()}`, provider: `detector-${Date.now()}-${Math.random()}`, models: [{ id: "test" }] });
-	let api!: ExtensionAPI;
-	const errors: unknown[] = [];
-	const loader = new DefaultResourceLoader({ cwd, agentDir: path.join(directory, "agent"), noExtensions: true, noSkills: true, noPromptTemplates: !options.promptDefaults, noThemes: true, noContextFiles: true, additionalPromptTemplatePaths: promptPaths, extensionFactories: [(pi) => { api = pi; pi.registerProvider(faux.provider); options.before?.(pi); impeccable(pi); extra?.(pi); }] });
 	await writeFile(path.join(directory, "package.json"), '{}');
 	await writeFile(path.join(directory, "page.html"), '<main>before</main>');
-	await loader.reload();
-	const settingsManager = SettingsManager.inMemory({
-		...(options.activateImpeccableTools === false ? {} : { defaultTools: ["read", "bash", "edit", "write", ...IMPECCABLE_TOOL_NAMES] }),
-		retry: { enabled: false },
+	const created = await createImpeccableTestSession({
+		cwd,
+		agentDir: path.join(directory, "agent"),
+		api: `detector-${Date.now()}-${Math.random()}`,
+		provider: `detector-${Date.now()}-${Math.random()}`,
+		noPromptTemplates: !options.promptDefaults,
+		additionalPromptTemplatePaths: promptPaths,
+		beforeImpeccable: options.before,
+		afterImpeccable: extra,
+		defaultTools: options.activateImpeccableTools === false ? undefined : ["read", "bash", "edit", "write", ...IMPECCABLE_TOOL_NAMES],
+		assertNoExtensionErrors: false,
 	});
-	const { session } = await createAgentSession({ cwd, agentDir: path.join(directory, "agent"), modelRuntime: runtime, model: faux.getModel("test")!, resourceLoader: loader, sessionManager: SessionManager.inMemory(cwd), settingsManager });
-	await session.bindExtensions({ mode: "rpc", onError: (error) => errors.push(error) });
-	return { directory, binary, session, faux, get api() { return api; }, errors,
+	const { session, faux, errors } = created;
+	return { directory, binary, session, faux, get api() { return created.api; }, errors,
 		async config(value: unknown) { await mkdir(path.join(directory, ".impeccable"), { recursive: true }); await writeFile(path.join(directory, ".impeccable/config.json"), JSON.stringify(value)); },
 		async calls() { try { return (await readFile(path.join(directory, "calls.ndjson"), "utf8")).trim().split('\n').map((line) => JSON.parse(line)); } catch { return []; } },
 		feedback() { return session.sessionManager.getEntries().filter((entry) => entry.type === "custom_message" && entry.customType === "impeccable-detector"); },

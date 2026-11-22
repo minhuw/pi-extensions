@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createAgentSession, createMcpExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { createMcpExtension, ModelRuntime, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it, vi } from "vitest";
+import { createMagpieTestSession } from "./helpers/session.ts";
 
 vi.mock("../catalog-pricing.ts", async importOriginal => ({ ...await importOriginal<object>(), loadModelsDevPricing: async () => undefined }));
 import { parseModels } from "../index.ts";
@@ -77,11 +78,17 @@ it.each(["healthy", "unavailable", "offline", "saved-unavailable", "saved-offlin
 		const runtime = await ModelRuntime.create({ credentials, modelsPath: null, refreshOnCreate: false });
 		const selected = parseModels(catalog, origin).find(model => model.id === name)!;
 		async function start(cwd: string) {
-			const settingsManager = SettingsManager.inMemory({ defaultTools: [], compaction: { enabled: false }, retry: { enabled: false } });
 			// Load the real extension anew, as Subagents does, with the same runtime.
 			// Separate loader module caches must still see the validated catalog.
-			const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager,
-				noExtensions: true, additionalExtensionPaths: [extension], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+			const { session } = await createMagpieTestSession({
+				cwd,
+				agentDir,
+				modelRuntime: runtime,
+				model: selected,
+				thinkingLevel: "off",
+				noTools: "all",
+				settings: { defaultTools: [], compaction: { enabled: false }, retry: { enabled: false } },
+				additionalExtensionPaths: [extension],
 				// Saved login also registers search. Let native MCP handle it with a
 				// disabled config entry so this fixture sends only model requests.
 				extensionFactories: saved ? [createMcpExtension({ loadConfig: () => ({
@@ -89,13 +96,7 @@ it.each(["healthy", "unavailable", "offline", "saved-unavailable", "saved-offlin
 					errors: [], autoEnableCodemode: false,
 				}) })] : [],
 			});
-			await resourceLoader.reload();
-			expect(resourceLoader.getExtensions().errors).toEqual([]);
-			const { session } = await createAgentSession({ cwd, agentDir, modelRuntime: runtime, model: selected, thinkingLevel: "off",
-				noTools: "all", settingsManager, resourceLoader, sessionManager: SessionManager.inMemory(cwd),
-			});
 			sessions.push(session);
-			await session.bindExtensions({ onError: error => { throw new Error(error.error); } });
 			return session;
 		}
 		const expectSuccess = (session: AgentSession) => expect(session.messages.findLast(message => message.role === "assistant"))

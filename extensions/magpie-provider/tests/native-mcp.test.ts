@@ -5,13 +5,11 @@ import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 
 vi.mock("../catalog-pricing.ts", async importOriginal => ({ ...await importOriginal<object>(), loadModelsDevPricing: async () => undefined }));
-import { getCurrentTools, InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { getCurrentTools } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import {
-	createAgentSession, createMcpExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
-	type AgentSession,
-} from "@earendil-works/pi-coding-agent";
+import { createMcpExtension, type AgentSession } from "@earendil-works/pi-coding-agent";
 import magpie from "../index.ts";
+import { createMagpieTestSession } from "./helpers/session.ts";
 
 /** Loopback-only Streamable HTTP fixture. Production always uses Pi's native MCP transport. */
 async function magpieServer(endpoint = "/mcp") {
@@ -78,22 +76,17 @@ it("saved login activates native search/fetch in the same session without an MCP
 			if (String(input) === `${origin}/v1/models`) return Response.json({ data: [{ id: "test" }] });
 			return realFetch(input, init);
 		}));
-		const credentials = new InMemoryCredentialStore();
-		const runtime = await ModelRuntime.create({ credentials, modelsPath: null, refreshOnCreate: false });
 		const faux = fauxProvider({ api: "openai-responses", provider: "test", models: [{ id: "test" }] });
-		const resources = new DefaultResourceLoader({
-			cwd: directory, agentDir: directory, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+		const { session: createdSession, modelRuntime: runtime, resourceLoader: resources } = await createMagpieTestSession({
+			cwd: directory,
+			agentDir: directory,
+			model: faux.getModel("test")!,
+			settings: { defaultTools: [] },
 			extensionFactories: [async pi => { await magpie(pi); pi.registerProvider(faux.provider); }, createMcpExtension({
 				loadConfig: () => ({ servers: [], errors: [], autoEnableCodemode: false }), logPath: join(directory, "mcp.log"),
 			})],
 		});
-		await resources.reload();
-		expect(resources.getExtensions().errors).toEqual([]);
-		({ session } = await createAgentSession({
-			cwd: directory, agentDir: directory, modelRuntime: runtime, model: faux.getModel("test")!, resourceLoader: resources,
-			sessionManager: SessionManager.inMemory(directory), settingsManager: SettingsManager.inMemory({ defaultTools: [] }),
-		}));
-		await session.bindExtensions({ onError: error => { throw new Error(error.error); } });
+		session = createdSession;
 		expect(server.requests).toEqual([]);
 		await runtime.login("magpie", "api_key", {
 			prompt: vi.fn().mockResolvedValueOnce(origin).mockResolvedValueOnce(apiKey), notify: vi.fn(),

@@ -1,28 +1,19 @@
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getCurrentSystemPrompt, InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import {
 	fauxAssistantMessage,
-	fauxProvider,
 	fauxToolCall,
 	type FauxResponseFactory,
 } from "@earendil-works/pi-ai/providers/faux";
-import {
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-	ModelRuntime,
+import type {
+	CustomEntry,
+	ExtensionAPI,
+	ExtensionContext,
+	ExtensionUIContext,
 	SessionManager,
-	SettingsManager,
-	type CreateAgentSessionRuntimeFactory,
-	type CustomEntry,
-	type ExtensionAPI,
-	type ExtensionContext,
-	type ExtensionUIContext,
-	type Theme,
+	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
@@ -41,8 +32,13 @@ import {
 	type SpokesmanRewriteData,
 	type TurnWorkItem,
 } from "../index.ts";
+import {
+	createSpokesmanSessionRuntime,
+	createSpokesmanTestEnv,
+	textOf,
+	type TestMessage as Message,
+} from "./support/session-harness.ts";
 
-const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 const SESSION_LINK = "pi-extensions.session-link";
 
 const DENSE_SOL_DRAFT = [
@@ -53,7 +49,6 @@ const DENSE_SOL_DRAFT = [
 const CLEAR_SPOKESMAN_REWRITE =
 	"I fixed the session state hydration bug so tool results no longer corrupt state during context compaction.";
 
-type Message = { role: string; content: unknown };
 interface Captured {
 	system: string;
 	conversation: Message[];
@@ -66,13 +61,6 @@ const capture = (messages: Parameters<typeof getCurrentSystemPrompt>[0]): Captur
 		conversation: copy.filter((message) => message.role !== "system"),
 	};
 };
-
-const textOf = ({ content }: Message): string =>
-	typeof content === "string"
-		? content
-		: Array.isArray(content)
-			? (content as { text?: string }[]).map((part) => part.text ?? "").join("")
-			: "";
 
 const plainTheme = {
 	fg: (_token: string, text: string) => text,
@@ -331,33 +319,19 @@ describe("ui.ts unit tests", () => {
 });
 
 describe("spokesman extension in real Pi sessions", () => {
-	let root: string;
-	let previousAgentDir: string | undefined;
-	const started: { dispose(): Promise<void> }[] = [];
-	const agentDir = () => join(root, "agent");
-	const sessionDir = () => join(root, "sessions");
-	const cwd = () => join(root, "work");
+	const env = createSpokesmanTestEnv("pi-spokesman-");
+	const agentDir = () => env.agentDir();
 	const configPath = () => join(agentDir(), "spokesman.json");
 	const writeConfig = (value: unknown) =>
 		writeFile(configPath(), typeof value === "string" ? value : JSON.stringify(value));
-	const newManager = (options?: { parentSession?: string }) =>
-		SessionManager.create(cwd(), sessionDir(), options);
+	const newManager = (options?: { parentSession?: string }) => env.newManager(options);
 
 	beforeEach(async () => {
-		root = await mkdtemp(join(tmpdir(), "pi-spokesman-"));
-		await Promise.all([agentDir(), sessionDir(), cwd()].map((path) => mkdir(path)));
-		previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-		process.env.PI_CODING_AGENT_DIR = agentDir();
+		await env.setup();
 	});
 
 	afterEach(async () => {
-		try {
-			for (const harness of started.splice(0)) await harness.dispose();
-		} finally {
-			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-			await rm(root, { recursive: true, force: true });
-		}
+		await env.teardown();
 	});
 
 	function recordingUi() {
@@ -411,20 +385,6 @@ describe("spokesman extension in real Pi sessions", () => {
 			bindAsChild?: boolean;
 		} = {},
 	) {
-		const modelRuntime = await ModelRuntime.create({
-			credentials: new InMemoryCredentialStore(),
-			modelsPath: null,
-			refreshOnCreate: false,
-		});
-		const faux = fauxProvider({
-			api: "spokesman-test-api",
-			provider: "faux-openai",
-			models: [{ id: "gpt-6-sol" }, { id: "gpt-5.4" }],
-		});
-		const settingsManager = SettingsManager.inMemory({
-			retry: { enabled: false },
-			compaction: { enabled: false, keepRecentTokens: 1 },
-		});
 		const ui = recordingUi();
 
 		const mainRequests: Captured[] = [];
@@ -448,47 +408,20 @@ describe("spokesman extension in real Pi sessions", () => {
 			}
 			return fauxAssistantMessage(next ?? "Fixed the typo in README.md.");
 		};
-		faux.setResponses(Array.from({ length: 80 }, () => respond));
 
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({
-			cwd: runtimeCwd,
-			agentDir: runtimeAgentDir,
-			sessionManager,
-			sessionStartEvent,
-		}) => {
-			const services = await createAgentSessionServices({
-				cwd: runtimeCwd,
-				agentDir: runtimeAgentDir,
-				settingsManager,
-				modelRuntime,
-				resourceLoaderOptions: {
-					noSkills: true,
-					noPromptTemplates: true,
-					noThemes: true,
-					noContextFiles: true,
-					additionalExtensionPaths: [extensionPath],
-					extensionFactories: [
-						(pi) => {
-							pi.registerProvider(faux.provider);
-							options.register?.(pi);
-						},
-					],
-				},
-			});
-			expect(services.resourceLoader.getExtensions().errors).toEqual([]);
-			const created = await createAgentSessionFromServices({
-				services,
-				sessionManager,
-				sessionStartEvent,
-				model: faux.getModel("gpt-6-sol"),
-			});
-			return { ...created, services, diagnostics: services.diagnostics };
-		};
-
-		const runtime = await createAgentSessionRuntime(createRuntime, {
-			cwd: cwd(),
-			agentDir: agentDir(),
-			sessionManager: options.sessionManager ?? newManager(),
+		const { runtime, faux } = await createSpokesmanSessionRuntime({
+			env,
+			models: [{ id: "gpt-6-sol" }, { id: "gpt-5.4" }],
+			initialModelId: "gpt-6-sol",
+			sessionManager: options.sessionManager,
+			settings: {
+				retry: { enabled: false },
+				compaction: { enabled: false, keepRecentTokens: 1 },
+			},
+			register: options.register,
+			configureFaux: (provider) => {
+				provider.setResponses(Array.from({ length: 80 }, () => respond));
+			},
 		});
 		const errors: unknown[] = [];
 		const bind = () =>
@@ -516,7 +449,7 @@ describe("spokesman extension in real Pi sessions", () => {
 		runtime.setRebindSession(bind);
 		await bind();
 
-		const harness = {
+		return {
 			runtime,
 			faux,
 			mainRequests,
@@ -561,8 +494,6 @@ describe("spokesman extension in real Pi sessions", () => {
 					),
 			dispose: () => runtime.dispose(),
 		};
-		started.push(harness);
-		return harness;
 	}
 
 	it("manages /spokesman commands, <agentDir>/spokesman.json config, and footer statuses", async () => {

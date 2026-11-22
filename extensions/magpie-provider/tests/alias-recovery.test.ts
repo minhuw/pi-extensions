@@ -2,9 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Agent } from "@earendil-works/pi-agent-core";
-import { createAssistantMessageEventStream, InMemoryCredentialStore, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { createAssistantMessageEventStream, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
+import { SessionManager, type AgentSession, type AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it, vi } from "vitest";
+import { createMagpieTestSession } from "./helpers/session.ts";
 
 vi.mock("../catalog-pricing.ts", async importOriginal => ({ ...await importOriginal<object>(), loadModelsDevPricing: async () => undefined }));
 import { createMagpieProvider } from "../index.ts";
@@ -87,10 +88,20 @@ it.each(["overflow", "length"] as const)("Pi automatically compacts and retries 
 		delegates.stream.mockImplementation(respond);
 		delegates.streamSimple.mockImplementation(respond);
 		const compact = vi.fn();
-		const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null,
-			modelsStorePath: join(directory, "models-cache.json"), refreshOnCreate: false });
-		const resources = new DefaultResourceLoader({ cwd: directory, agentDir: directory,
-			noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+		const history = SessionManager.inMemory(directory);
+		history.appendModelChange("magpie", alias.id);
+		history.appendMessage({ role: "user", content: "Earlier question. ".repeat(100), timestamp: 0 });
+		history.appendMessage({ role: "assistant", provider: "magpie", model: alias.id, api: alias.api,
+			magpiePhysicalModel: physicalId, content: [{ type: "text", text: "Earlier answer. ".repeat(100) }],
+			stopReason: "stop", usage: usage(), timestamp: 1,
+		} as AssistantMessage);
+		({ session } = await createMagpieTestSession({
+			cwd: directory,
+			agentDir: directory,
+			modelsStorePath: join(directory, "models-cache.json"),
+			model: alias,
+			sessionManager: history,
+			settings: { defaultTools: [], compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 50 }, retry: { enabled: false } },
 			extensionFactories: [pi => {
 				pi.registerProvider(provider);
 				pi.on("session_before_compact", event => {
@@ -100,21 +111,7 @@ it.each(["overflow", "length"] as const)("Pi automatically compacts and retries 
 					} };
 				});
 			}],
-		});
-		await resources.reload();
-		expect(resources.getExtensions().errors).toEqual([]);
-		const history = SessionManager.inMemory(directory);
-		history.appendModelChange("magpie", alias.id);
-		history.appendMessage({ role: "user", content: "Earlier question. ".repeat(100), timestamp: 0 });
-		history.appendMessage({ role: "assistant", provider: "magpie", model: alias.id, api: alias.api,
-			magpiePhysicalModel: physicalId, content: [{ type: "text", text: "Earlier answer. ".repeat(100) }],
-			stopReason: "stop", usage: usage(), timestamp: 1,
-		} as AssistantMessage);
-		({ session } = await createAgentSession({ cwd: directory, agentDir: directory, modelRuntime: runtime,
-			model: alias, resourceLoader: resources, sessionManager: history,
-			settingsManager: SettingsManager.inMemory({ defaultTools: [], compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 50 }, retry: { enabled: false } }),
 		}));
-		await session.bindExtensions({ onError: error => { throw new Error(error.error); } });
 		const events: AgentSessionEvent[] = [];
 		session.subscribe(event => events.push(event));
 		await session.prompt("Continue the fixture conversation.");

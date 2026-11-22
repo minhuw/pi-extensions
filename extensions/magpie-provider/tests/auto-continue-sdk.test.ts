@@ -1,9 +1,9 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it, vi } from "vitest";
+import { createMagpieTestSession } from "./helpers/session.ts";
 
 vi.mock("../catalog-pricing.ts", async original => ({ ...await original<object>(), loadModelsDevPricing: async () => undefined }));
 import magpie, { parseModels } from "../index.ts";
@@ -65,22 +65,26 @@ it("continues a real Pi session once after core retries settle, preserving its o
 			return new Response(events.map(data => `event: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`).join(""),
 				{ headers: { "content-type": "text/event-stream" } });
 		}));
-		const settingsManager = SettingsManager.inMemory({ defaultTools: [], compaction: { enabled: false },
-			retry: { enabled: true, maxRetries: 1, baseDelayMs: 1, maxAgentDelayMs: 10 } });
-		const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null,
-			modelsStorePath: join(directory, "models-cache.json"), refreshOnCreate: false });
-		const resourceLoader = new DefaultResourceLoader({ cwd: directory, agentDir: directory, settingsManager,
-			noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+		({ session } = await createMagpieTestSession({
+			cwd: directory,
+			agentDir: directory,
+			modelsStorePath: join(directory, "models-cache.json"),
+			sessionManager,
+			model: parseModels(catalog, origin).find(m => m.id === "gpt-fixture")!,
+			thinkingLevel: "off",
+			noTools: "all",
+			settings: { defaultTools: [], compaction: { enabled: false }, retry: { enabled: true, maxRetries: 1, baseDelayMs: 1, maxAgentDelayMs: 10 } },
 			extensionFactories: [magpie],
-		});
-		await resourceLoader.reload();
-		expect(resourceLoader.getExtensions().errors).toEqual([]);
-		({ session } = await createAgentSession({ cwd: directory, agentDir: directory, settingsManager, modelRuntime, resourceLoader,
-			sessionManager, model: parseModels(catalog, origin).find(m => m.id === "gpt-fixture")!, thinkingLevel: "off", noTools: "all" }));
-		await session.bindExtensions({ mode: "rpc", onError: error => errors.push(error.error), uiContext: {
-			...session.extensionRunner!.createContext().ui,
-			setStatus: (key, text) => text === undefined ? statuses.delete(key) : statuses.set(key, text), notify: () => {},
-		} });
+			bindExtensions: current => ({
+				mode: "rpc",
+				onError: error => errors.push(error.error),
+				uiContext: {
+					...current.extensionRunner!.createContext().ui,
+					setStatus: (key, text) => text === undefined ? statuses.delete(key) : statuses.set(key, text),
+					notify: () => {},
+				},
+			}),
+		}));
 		let coreRetries = 0;
 		session.subscribe(event => { if (event.type === "auto_retry_start") coreRetries++; });
 		await session.prompt("Finish the original fixture task.");

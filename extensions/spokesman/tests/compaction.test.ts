@@ -1,64 +1,33 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
-import {
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-	ModelRuntime,
-	SessionManager,
-	SettingsManager,
-	type CreateAgentSessionRuntimeFactory,
-} from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import { SPOKESMAN_REWRITE_ENTRY, type SpokesmanRewriteData } from "../index.ts";
+import {
+	createSpokesmanSessionRuntime,
+	createSpokesmanTestEnv,
+	textOf,
+	type TestMessage as Message,
+} from "./support/session-harness.ts";
 
-const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 const API = "spokesman-test-api";
 const PROVIDER = "faux-openai";
 const MAIN_MODEL = "gpt-6-sol";
-
-type Message = { role: string; content: unknown };
-
-const textOf = ({ content }: Message): string =>
-	typeof content === "string"
-		? content
-		: Array.isArray(content)
-			? (content as { text?: string }[]).map((part) => part.text ?? "").join("")
-			: "";
 
 const assistantTexts = (messages: Message[]): string[] =>
 	messages.filter((message) => message.role === "assistant").map(textOf);
 
 describe("spokesman rewrites in the context of a compacted session", () => {
-	let root: string;
-	let previousAgentDir: string | undefined;
+	const env = createSpokesmanTestEnv("pi-spokesman-compaction-");
 	let clock: number;
-	const started: { dispose(): Promise<void> }[] = [];
-	const agentDir = () => join(root, "agent");
-	const sessionDir = () => join(root, "sessions");
-	const cwd = () => join(root, "work");
-	const newManager = () => SessionManager.create(cwd(), sessionDir());
+	const newManager = () => env.newManager();
 
 	beforeEach(async () => {
-		root = await mkdtemp(join(tmpdir(), "pi-spokesman-compaction-"));
-		await Promise.all([agentDir(), sessionDir(), cwd()].map((path) => mkdir(path)));
-		previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-		process.env.PI_CODING_AGENT_DIR = agentDir();
+		await env.setup();
 		clock = Date.UTC(2026, 0, 1);
 	});
 
 	afterEach(async () => {
-		try {
-			for (const runtime of started.splice(0)) await runtime.dispose();
-		} finally {
-			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-			await rm(root, { recursive: true, force: true });
-		}
+		await env.teardown();
 	});
 
 	const user = (manager: SessionManager, text: string): string =>
@@ -99,60 +68,23 @@ describe("spokesman rewrites in the context of a compacted session", () => {
 
 	/** Resumes the branch in a real Pi session and returns the assistant replies the next request carries. */
 	async function sentToModel(manager: SessionManager): Promise<string[]> {
-		const modelRuntime = await ModelRuntime.create({
-			credentials: new InMemoryCredentialStore(),
-			modelsPath: null,
-			refreshOnCreate: false,
-		});
-		const faux = fauxProvider({ api: API, provider: PROVIDER, models: [{ id: MAIN_MODEL }] });
-		const settingsManager = SettingsManager.inMemory({
-			retry: { enabled: false },
-			compaction: { enabled: false },
-		});
 		const requests: Message[][] = [];
-		faux.setResponses([
-			(context) => {
-				requests.push(JSON.parse(JSON.stringify(context.messages)) as Message[]);
-				return fauxAssistantMessage("Ack.");
-			},
-		]);
-
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({
-			cwd: runtimeCwd,
-			agentDir: runtimeAgentDir,
-			sessionManager,
-			sessionStartEvent,
-		}) => {
-			const services = await createAgentSessionServices({
-				cwd: runtimeCwd,
-				agentDir: runtimeAgentDir,
-				settingsManager,
-				modelRuntime,
-				resourceLoaderOptions: {
-					noSkills: true,
-					noPromptTemplates: true,
-					noThemes: true,
-					noContextFiles: true,
-					additionalExtensionPaths: [extensionPath],
-					extensionFactories: [(pi) => pi.registerProvider(faux.provider)],
-				},
-			});
-			expect(services.resourceLoader.getExtensions().errors).toEqual([]);
-			const created = await createAgentSessionFromServices({
-				services,
-				sessionManager,
-				sessionStartEvent,
-				model: faux.getModel(MAIN_MODEL),
-			});
-			return { ...created, services, diagnostics: services.diagnostics };
-		};
-
-		const runtime = await createAgentSessionRuntime(createRuntime, {
-			cwd: cwd(),
-			agentDir: agentDir(),
+		const { runtime } = await createSpokesmanSessionRuntime({
+			env,
+			api: API,
+			provider: PROVIDER,
+			models: [{ id: MAIN_MODEL }],
+			initialModelId: MAIN_MODEL,
 			sessionManager: manager,
+			configureFaux: (faux) => {
+				faux.setResponses([
+					(context) => {
+						requests.push(JSON.parse(JSON.stringify(context.messages)) as Message[]);
+						return fauxAssistantMessage("Ack.");
+					},
+				]);
+			},
 		});
-		started.push(runtime);
 		const errors: unknown[] = [];
 		await runtime.session.bindExtensions({
 			mode: "rpc",

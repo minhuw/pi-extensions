@@ -1,21 +1,27 @@
-import { type ChildProcess, execFileSync, fork } from "node:child_process";
+import { type ChildProcess, fork } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { SidecarFffBackend, type SidecarBackendOptions } from "../client.ts";
 import { fffFileAnnotation } from "../index.ts";
+import {
+	createTempDirTracker,
+	git,
+	initGitRepo,
+	isPidAlive,
+	sleep,
+	waitForCondition,
+	waitForPidExit,
+} from "./support/test-helpers.ts";
 
-const tempDirs: string[] = [];
+const tempDirs = createTempDirTracker("pi-fff-sidecar-");
 const backends: SidecarFffBackend[] = [];
 const trackedPids = new Set<number>();
 
 function makeTempDir(label: string): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-fff-sidecar-${label}-`));
-	tempDirs.push(dir);
-	return dir;
+	return tempDirs.make(`pi-fff-sidecar-${label}-`);
 }
 
 function makeBackend(options?: SidecarBackendOptions): SidecarFffBackend {
@@ -31,97 +37,36 @@ function trackPid(pid: number | undefined): number {
 	return pid!;
 }
 
-function isPidAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-async function sleep(ms: number): Promise<void> {
-	await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForCondition(
-	predicate: () => boolean | Promise<boolean>,
-	timeoutMs = 2_000,
-	intervalMs = 10,
-): Promise<boolean> {
-	const deadline = performance.now() + timeoutMs;
-	while (performance.now() < deadline) {
-		if (await predicate()) {
-			return true;
-		}
-		await sleep(intervalMs);
-	}
-	return await predicate();
-}
-
-async function waitForPidExit(pid: number, timeoutMs = 2_000): Promise<boolean> {
-	return waitForCondition(() => !isPidAlive(pid), timeoutMs, 10);
-}
-
 function initTempGitRepo(repoDir: string): void {
-	fs.mkdirSync(path.join(repoDir, "src", "nested"), { recursive: true });
-	fs.mkdirSync(path.join(repoDir, "docs"), { recursive: true });
-
-	fs.writeFileSync(
-		path.join(repoDir, "src", "alpha.ts"),
-		[
-			"export const SHARED_MARKER = 'SHARED_MARKER_TOKEN';",
-			"export function computeMetric1(): number {",
-			"\treturn 101;",
-			"}",
-			"",
-		].join("\n"),
+	initGitRepo(
+		repoDir,
+		{
+			"src/alpha.ts": [
+				"export const SHARED_MARKER = 'SHARED_MARKER_TOKEN';",
+				"export function computeMetric1(): number {",
+				"\treturn 101;",
+				"}",
+				"",
+			].join("\n"),
+			"src/beta.ts": [
+				"export const SHARED_MARKER = 'SHARED_MARKER_TOKEN';",
+				"export function computeMetric2(): number {",
+				"\treturn 202;",
+				"}",
+				"",
+			].join("\n"),
+			"src/nested/gamma.ts": [
+				"export const SHARED_MARKER = 'SHARED_MARKER_TOKEN';",
+				"export function computeMetric3(): number {",
+				"\treturn 303;",
+				"}",
+				"",
+			].join("\n"),
+			"docs/architecture.md": "# Architecture\n\nReference token: SHARED_MARKER_TOKEN\n",
+			"docs/changelog.md": "# Changelog\n\nReference token: SHARED_MARKER_TOKEN\n",
+		},
+		{ commitMessage: "init" },
 	);
-	fs.writeFileSync(
-		path.join(repoDir, "src", "beta.ts"),
-		[
-			"export const SHARED_MARKER = 'SHARED_MARKER_TOKEN';",
-			"export function computeMetric2(): number {",
-			"\treturn 202;",
-			"}",
-			"",
-		].join("\n"),
-	);
-	fs.writeFileSync(
-		path.join(repoDir, "src", "nested", "gamma.ts"),
-		[
-			"export const SHARED_MARKER = 'SHARED_MARKER_TOKEN';",
-			"export function computeMetric3(): number {",
-			"\treturn 303;",
-			"}",
-			"",
-		].join("\n"),
-	);
-	fs.writeFileSync(
-		path.join(repoDir, "docs", "architecture.md"),
-		"# Architecture\n\nReference token: SHARED_MARKER_TOKEN\n",
-	);
-	fs.writeFileSync(
-		path.join(repoDir, "docs", "changelog.md"),
-		"# Changelog\n\nReference token: SHARED_MARKER_TOKEN\n",
-	);
-
-	const gitEnv: NodeJS.ProcessEnv = {
-		...process.env,
-		GIT_CONFIG_NOSYSTEM: "1",
-		GIT_CONFIG_GLOBAL: "/dev/null",
-		GIT_AUTHOR_NAME: "FFF Test",
-		GIT_AUTHOR_EMAIL: "fff@test.local",
-		GIT_COMMITTER_NAME: "FFF Test",
-		GIT_COMMITTER_EMAIL: "fff@test.local",
-	};
-
-	execFileSync("git", ["init", "-q"], { cwd: repoDir, env: gitEnv });
-	execFileSync("git", ["add", "."], { cwd: repoDir, env: gitEnv });
-	execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"], {
-		cwd: repoDir,
-		env: gitEnv,
-	});
 
 	// Modify one tracked file unstaged so git status is dirty ("modified").
 	fs.appendFileSync(
@@ -151,9 +96,7 @@ afterEach(async () => {
 	}
 	trackedPids.clear();
 
-	for (const dir of tempDirs.splice(0)) {
-		fs.rmSync(dir, { recursive: true, force: true });
-	}
+	tempDirs.cleanup();
 });
 
 describe("SidecarFffBackend", () => {
@@ -663,54 +606,23 @@ describe("SidecarFffBackend", () => {
 		const baseDir = makeTempDir("worktree-head-rescan");
 		const repoDir = path.join(baseDir, "repo");
 		const worktreeDir = path.join(baseDir, "rw-0");
-		fs.mkdirSync(path.join(repoDir, "src"), { recursive: true });
-		fs.writeFileSync(
-			path.join(repoDir, "src", "commit1.ts"),
-			"export const COMMIT_1_MARKER = 'COMMIT_1_ONLY';\n",
+		initGitRepo(
+			repoDir,
+			{ "src/commit1.ts": "export const COMMIT_1_MARKER = 'COMMIT_1_ONLY';\n" },
+			{ commitMessage: "commit 1" },
 		);
-
-		const gitEnv: NodeJS.ProcessEnv = {
-			...process.env,
-			GIT_CONFIG_NOSYSTEM: "1",
-			GIT_CONFIG_GLOBAL: "/dev/null",
-			GIT_AUTHOR_NAME: "FFF Test",
-			GIT_AUTHOR_EMAIL: "fff@test.local",
-			GIT_COMMITTER_NAME: "FFF Test",
-			GIT_COMMITTER_EMAIL: "fff@test.local",
-		};
-
-		execFileSync("git", ["init", "-q"], { cwd: repoDir, env: gitEnv });
-		execFileSync("git", ["add", "."], { cwd: repoDir, env: gitEnv });
-		execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "commit 1"], {
-			cwd: repoDir,
-			env: gitEnv,
-		});
-		const commit1 = execFileSync("git", ["rev-parse", "HEAD"], {
-			cwd: repoDir,
-			env: gitEnv,
-			encoding: "utf8",
-		}).trim();
+		const commit1 = git(repoDir, "rev-parse", "HEAD");
 
 		fs.writeFileSync(
 			path.join(repoDir, "src", "commit2-added.ts"),
 			"export const COMMIT_2_MARKER = 'COMMIT_2_EXCLUSIVE_TOKEN';\n",
 		);
-		execFileSync("git", ["add", "."], { cwd: repoDir, env: gitEnv });
-		execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "commit 2"], {
-			cwd: repoDir,
-			env: gitEnv,
-		});
-		const commit2 = execFileSync("git", ["rev-parse", "HEAD"], {
-			cwd: repoDir,
-			env: gitEnv,
-			encoding: "utf8",
-		}).trim();
+		git(repoDir, "add", ".");
+		git(repoDir, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "commit 2");
+		const commit2 = git(repoDir, "rev-parse", "HEAD");
 
 		// Create a pooled detached git worktree slot at commit1 (`.git` is a `gitdir:` file).
-		execFileSync("git", ["worktree", "add", "-q", "--detach", worktreeDir, commit1], {
-			cwd: repoDir,
-			env: gitEnv,
-		});
+		git(repoDir, "worktree", "add", "-q", "--detach", worktreeDir, commit1);
 		expect(fs.statSync(path.join(worktreeDir, ".git")).isFile()).toBe(true);
 
 		const backend = makeBackend();
@@ -730,10 +642,7 @@ describe("SidecarFffBackend", () => {
 		}
 
 		// Switch the reused worktree slot directly to commit2 via git checkout.
-		execFileSync("git", ["checkout", "-q", commit2], {
-			cwd: worktreeDir,
-			env: gitEnv,
-		});
+		git(worktreeDir, "checkout", "-q", commit2);
 
 		// Re-ensure concurrently across 5 callers to verify coalesced HEAD-change refresh.
 		const reusedResults = await Promise.all(
@@ -786,19 +695,8 @@ describe("SidecarFffBackend", () => {
 		const wt2 = path.join(baseDir, "temp-wt-2");
 
 		initTempGitRepo(mainRepo);
-		const gitEnv: NodeJS.ProcessEnv = {
-			...process.env,
-			GIT_CONFIG_NOSYSTEM: "1",
-			GIT_CONFIG_GLOBAL: "/dev/null",
-		};
-		execFileSync("git", ["worktree", "add", "-q", "--detach", wt1, "HEAD"], {
-			cwd: mainRepo,
-			env: gitEnv,
-		});
-		execFileSync("git", ["worktree", "add", "-q", "--detach", wt2, "HEAD"], {
-			cwd: mainRepo,
-			env: gitEnv,
-		});
+		git(mainRepo, "worktree", "add", "-q", "--detach", wt1, "HEAD");
+		git(mainRepo, "worktree", "add", "-q", "--detach", wt2, "HEAD");
 
 		const backend = makeBackend({
 			env: {

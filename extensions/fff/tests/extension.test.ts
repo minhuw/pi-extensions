@@ -1,5 +1,4 @@
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type {
@@ -21,6 +20,7 @@ import fffExtension, {
 	type ChildSessionHook,
 	createFffExtension,
 } from "../index.ts";
+import { createTempDirTracker, git, initGitRepo } from "./support/test-helpers.ts";
 
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
 type ExtensionMode = ExtensionContext["mode"];
@@ -53,28 +53,6 @@ interface NotificationRecord {
 function stripAnsi(value: string): string {
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI CSI escape stripping for test assertions
 	return value.replace(/\x1b\[[0-9;]*m/g, "");
-}
-
-function git(cwd: string, ...args: string[]): string {
-	return execFileSync("git", args, {
-		cwd,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-	}).trim();
-}
-
-function initGitRepo(dir: string, files: Record<string, string>): void {
-	mkdirSync(dir, { recursive: true });
-	git(dir, "init", "-q");
-	git(dir, "config", "user.email", "test@example.com");
-	git(dir, "config", "user.name", "FFF Test");
-	for (const [relPath, content] of Object.entries(files)) {
-		const fullPath = path.join(dir, relPath);
-		mkdirSync(path.dirname(fullPath), { recursive: true });
-		writeFileSync(fullPath, content, "utf8");
-	}
-	git(dir, "add", ".");
-	git(dir, "commit", "-q", "-m", "initial commit");
 }
 
 function createAnsiTheme(): Theme {
@@ -330,6 +308,7 @@ describe("pi-fff extension integration", () => {
 	let sandboxDir: string;
 	let agentDir: string;
 	let savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>>;
+	const tempDirs = createTempDirTracker("pi-fff-ext-test-");
 	const backendsToDispose: SidecarFffBackend[] = [];
 
 	function trackBackend(backend = new SidecarFffBackend()): SidecarFffBackend {
@@ -344,7 +323,7 @@ describe("pi-fff extension integration", () => {
 			delete process.env[key];
 		}
 
-		sandboxDir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "pi-fff-ext-test-")));
+		sandboxDir = tempDirs.make("pi-fff-ext-test-", { realpath: true });
 		agentDir = path.join(sandboxDir, "agent");
 		const xdgCache = path.join(sandboxDir, "xdg-cache");
 		const xdgData = path.join(sandboxDir, "xdg-data");
@@ -370,7 +349,7 @@ describe("pi-fff extension integration", () => {
 				process.env[key] = previous;
 			}
 		}
-		rmSync(sandboxDir, { recursive: true, force: true });
+		tempDirs.cleanup();
 	});
 
 	describe("1. Top-level + 25 in-process child sessions sharing one SidecarFffBackend", () => {

@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
@@ -19,13 +18,12 @@ import {
 	rootCovers,
 	routePathConstraint,
 } from "../query.ts";
+import { createTempDirTracker } from "./support/test-helpers.ts";
 
-const tempDirs: string[] = [];
+const tempDirs = createTempDirTracker("pi-fff-test-");
 
 function makeTempDir(prefix = "pi-fff-test-"): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-	tempDirs.push(dir);
-	return dir;
+	return tempDirs.make(prefix);
 }
 
 const origXdgCache = process.env.XDG_CACHE_HOME;
@@ -38,17 +36,11 @@ afterEach(() => {
 	if (origXdgData === undefined) delete process.env.XDG_DATA_HOME;
 	else process.env.XDG_DATA_HOME = origXdgData;
 
-	while (tempDirs.length > 0) {
-		const dir = tempDirs.pop()!;
-		fs.rmSync(dir, { recursive: true, force: true });
-	}
+	tempDirs.cleanup();
 });
 
 afterAll(() => {
-	while (tempDirs.length > 0) {
-		const dir = tempDirs.pop()!;
-		fs.rmSync(dir, { recursive: true, force: true });
-	}
+	tempDirs.cleanup();
 });
 
 describe("loadConfig", () => {

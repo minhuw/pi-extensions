@@ -1,13 +1,11 @@
 import {
 	existsSync,
 	mkdirSync,
-	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	realpathSync,
-	rmSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import {
@@ -34,29 +32,12 @@ import { openVcs } from "../../herder/src/vcs/git.ts";
 import { createGitFixture, type GitFixture } from "../../herder/tests/support/git-fixture.ts";
 import { SHARED_BACKEND_KEY, SidecarFffBackend } from "../client.ts";
 import { CHILD_SESSION_HOOKS, type ChildSessionHook, createFffExtension } from "../index.ts";
+import { createTempDirTracker, isPidAlive, waitForPidExit } from "./support/test-helpers.ts";
 
-const tempDirs: string[] = [];
+const tempDirs = createTempDirTracker("fff-herder-e2e-");
 const fixtures: GitFixture[] = [];
 const backends: SidecarFffBackend[] = [];
 const trackedPids = new Set<number>();
-
-function isPidAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-async function waitForPidExit(pid: number, timeoutMs = 3_000): Promise<boolean> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		if (!isPidAlive(pid)) return true;
-		await new Promise((resolve) => setTimeout(resolve, 15));
-	}
-	return !isPidAlive(pid);
-}
 
 function createParentFffHost(options: {
 	backend: SidecarFffBackend;
@@ -191,21 +172,18 @@ afterEach(async () => {
 				process.kill(pid, "SIGKILL");
 			} catch {}
 		}
-		expect(await waitForPidExit(pid)).toBe(true);
+		expect(await waitForPidExit(pid, 3_000, 15)).toBe(true);
 	}
 	trackedPids.clear();
 
 	for (const fixture of fixtures.splice(0)) {
 		fixture.cleanup();
 	}
-	for (const dir of tempDirs.splice(0)) {
-		rmSync(dir, { recursive: true, force: true });
-	}
+	tempDirs.cleanup();
 });
 
 it("wires fff into Herder explorer/worker worktrees via child-session-hooks, rescans rw-0 on HEAD changes, and prunes cleaned worktrees", async () => {
-	const sandboxDir = realpathSync(mkdtempSync(join(tmpdir(), "fff-herder-e2e-")));
-	tempDirs.push(sandboxDir);
+	const sandboxDir = tempDirs.make("fff-herder-e2e-", { realpath: true });
 	const agentDir = join(sandboxDir, "agent");
 	mkdirSync(agentDir, { recursive: true });
 	const frecencyDbPath = join(agentDir, "fff", "frecency");
