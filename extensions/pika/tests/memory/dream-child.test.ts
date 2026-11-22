@@ -2,25 +2,19 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CHILD_SESSION_HOOKS, dreamSessionDir, inProjectPikaDir } from "../../memory/dream/child.ts";
 import { currentDream } from "../../memory/dream/index.ts";
 import { DREAM_PROMPT } from "../../memory/dream/prompt.ts";
-import { FakePika } from "../support/pika-server.ts";
 import { waitFor } from "../support/runtime.ts";
-import { commits, RecordingUI, releases, resetDreams, serveDreams } from "./support/dream.ts";
-import { callTool, type Harness, memorySection, note, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
+import { commits, releases, SAVE, useDreamEnv } from "./support/dream.ts";
+import { callTool, memorySection, note, PROJECT_SCOPE, USER_SCOPE } from "./support/runtime.ts";
 
 const INDEX = "# Project memory: my-project\n## project\n- Pitfall — run npm ci first [bbbbbbbbbbbb]\n";
-const SOURCES = [{ sessionId: "s-past-1", seq: 7 }];
 
-let workspace: Workspace;
-let pika: FakePika;
-let ui: RecordingUI;
-let h: Harness | undefined;
 const hooks = () => (globalThis as Record<symbol, Set<{ name: string; extensionFactory: (pi: ExtensionAPI) => void }> | undefined>)[CHILD_SESSION_HOOKS] ??= new Set();
 const probeEvents: string[] = [];
 const probe = {
@@ -32,26 +26,15 @@ const probe = {
 	},
 };
 
-beforeEach(async () => {
-	workspace = await Workspace.create();
-	pika = await new FakePika().start();
-	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [], index: INDEX } });
-	serveDreams(pika);
-	setCredentials(pika.url);
-	resetDreams();
-	ui = new RecordingUI();
-	probeEvents.length = 0;
-	hooks().add(probe);
-});
-afterEach(async () => {
-	hooks().delete(probe);
-	currentDream()?.stop("stopped", "the test ended");
-	await currentDream()?.done;
-	await h?.shutdown();
-	h = undefined;
-	resetDreams();
-	await pika.stop();
-	await workspace.cleanup();
+const env = useDreamEnv({
+	index: INDEX,
+	beforeEach: () => {
+		probeEvents.length = 0;
+		hooks().add(probe);
+	},
+	beforeTeardown: () => {
+		hooks().delete(probe);
+	},
 });
 
 interface Seen { system: string; tools: string[]; model: string; lastUser: string }
@@ -65,18 +48,16 @@ function recorder(seen: Seen[], answer: () => ReturnType<typeof fauxAssistantMes
 }
 
 it("a dream runs in a real persisted, linked child session with the hooks, the dream prompt, and exactly its tools", async () => {
-	h = await startSession({ workspace, ui: ui.context() });
+	const h = await env.start();
 	const seen: Seen[] = [];
 	h.faux.appendResponses([
-		recorder(seen, () => fauxAssistantMessage([fauxToolCall("dream_save", {
-			expectedRevision: 0, scope: "project", category: "project", title: "Pitfall", hook: "run npm ci first", body: "Tests need node_modules.", sources: SOURCES,
-		})], { stopReason: "toolUse" })),
+		recorder(seen, () => fauxAssistantMessage([fauxToolCall("dream_save", SAVE)], { stopReason: "toolUse" })),
 		recorder(seen, () => fauxAssistantMessage([fauxToolCall("dream_commit", { sessions: ["s-past-1"], summary: "the upload fix" })], { stopReason: "toolUse" })),
 		recorder(seen, () => fauxAssistantMessage("Saved one pitfall.")),
 	]);
 	await h.session.prompt("/memory dream");
-	await waitFor(() => releases(pika).length === 1, 10_000, "the release");
-	expect(releases(pika)).toEqual(["completed"]);
+	await waitFor(() => releases(env.pika).length === 1, 10_000, "the release");
+	expect(releases(env.pika)).toEqual(["completed"]);
 	const run = currentDream()!;
 	await run.done;
 
@@ -85,7 +66,7 @@ it("a dream runs in a real persisted, linked child session with the hooks, the d
 		expect(request.tools).toEqual(["dream_commit", "dream_forget", "dream_save", "find", "grep", "ls", "memory_read", "read", "recall_read", "recall_search"]);
 		// Pi adds only the working directory to the dream's own prompt.
 		expect(request.system.startsWith(DREAM_PROMPT)).toBe(true);
-		expect(request.system.slice(DREAM_PROMPT.length).trim()).toBe(`<cwd>\n${workspace.cwd}\n</cwd>`);
+		expect(request.system.slice(DREAM_PROMPT.length).trim()).toBe(`<cwd>\n${env.workspace.cwd}\n</cwd>`);
 		expect(memorySection(request.system)).toBeUndefined();
 		expect(request.model).toBe("test");
 	}
@@ -94,22 +75,22 @@ it("a dream runs in a real persisted, linked child session with the hooks, the d
 
 	const childId = run.child!.sessionId;
 	expect(childId).not.toBe(h.session.sessionId);
-	const commit = commits(pika);
+	const commit = commits(env.pika);
 	expect(commit).toHaveLength(1);
 	expect(commit[0]!.body).toEqual({
 		commitId: expect.stringMatching(/^[0-9a-f-]{36}$/), dreamSessionId: childId, summary: "the upload fix", sessions: ["s-past-1"],
-		changes: [{ op: "save", expectedRevision: 0, scope: "project", category: "project", title: "Pitfall", hook: "run npm ci first", body: "Tests need node_modules.", sources: SOURCES }],
+		changes: [{ op: "save", ...SAVE }],
 	});
-	expect(ui.notes.at(-1)!.message).toBe("pika memory: the dream finished: 1 batch committed, 1 note changed.");
+	expect(env.ui.notes.at(-1)!.message).toBe("pika memory: the dream finished: 1 batch committed, 1 note changed.");
 
 	// Persisted in the project, away from the user's sessions and the agent dir, with the parent in its header and a session link.
-	const dir = dreamSessionDir(workspace.cwd);
-	expect(dir).toBe(join(workspace.cwd, ".pi", "pika", "dreams"));
-	expect(existsSync(join(workspace.agentDir, "pika", "dreams"))).toBe(false);
+	const dir = dreamSessionDir(env.workspace.cwd);
+	expect(dir).toBe(join(env.workspace.cwd, ".pi", "pika", "dreams"));
+	expect(existsSync(join(env.workspace.agentDir, "pika", "dreams"))).toBe(false);
 	// Kept out of git by its own `.gitignore`, without touching the project's.
-	expect(readFileSync(join(workspace.cwd, ".pi", "pika", ".gitignore"), "utf8")).toBe("*\n");
-	expect(existsSync(join(workspace.cwd, ".gitignore"))).toBe(false);
-	expect(execFileSync("git", ["-C", workspace.cwd, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" })).toBe("");
+	expect(readFileSync(join(env.workspace.cwd, ".pi", "pika", ".gitignore"), "utf8")).toBe("*\n");
+	expect(existsSync(join(env.workspace.cwd, ".gitignore"))).toBe(false);
+	expect(execFileSync("git", ["-C", env.workspace.cwd, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" })).toBe("");
 	const files = readdirSync(dir, { recursive: true }).map(String).filter((name) => name.endsWith(".jsonl"));
 	expect(files).toHaveLength(1);
 	const lines = readFileSync(join(dir, files[0]!), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
@@ -117,19 +98,19 @@ it("a dream runs in a real persisted, linked child session with the hooks, the d
 	expect(lines.find((line) => line.customType === "pi-extensions.session-link")?.data).toEqual({
 		kind: "subagent", agentType: "memory-dream", parentSessionId: h.session.sessionId, parentSessionFile: h.session.sessionFile, description: "memory dream",
 	});
-	expect(readdirSync(workspace.sessionDir, { recursive: true }).map(String).filter((name) => name.endsWith(".jsonl")).every((name) => !name.includes(childId))).toBe(true);
+	expect(readdirSync(env.workspace.sessionDir, { recursive: true }).map(String).filter((name) => name.endsWith(".jsonl")).every((name) => !name.includes(childId))).toBe(true);
 
 	// The registered hooks ran in the child, saw its start, and its shutdown.
 	expect(probeEvents).toEqual(expect.arrayContaining(["loaded", `start:${childId}`, "shutdown"]));
-	expect(ui.status()).toBeUndefined();
+	expect(env.ui.status()).toBeUndefined();
 });
 
 it("lists the notes unused for 90 days in the task message, and the dream's own reads never count as use", async () => {
 	const stale = note({ title: "Stale pitfall", createdAt: "2025-01-01T10:00:00Z", updatedAt: "2025-01-02T10:00:00Z", lastUsedAt: null });
 	const fresh = note({ title: "Fresh pitfall", createdAt: "2025-01-01T10:00:00Z", updatedAt: "2025-01-02T10:00:00Z", lastUsedAt: new Date().toISOString() });
-	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [stale, fresh], index: INDEX } });
-	pika.routes.set("POST memory/used", (request) => ({ body: { used: (request.body as { ids: string[] }).ids.length } }));
-	h = await startSession({ workspace, ui: ui.context() });
+	env.pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [stale, fresh], index: INDEX } });
+	env.pika.routes.set("POST memory/used", (request) => ({ body: { used: (request.body as { ids: string[] }).ids.length } }));
+	const h = await env.start();
 	const seen: Seen[] = [];
 	const reads: { isError: boolean; details: unknown }[] = [];
 	h.faux.appendResponses([
@@ -143,7 +124,7 @@ it("lists the notes unused for 90 days in the task message, and the dream's own 
 		},
 	]);
 	await h.session.prompt("/memory dream");
-	await waitFor(() => releases(pika).length === 1, 10_000, "the release");
+	await waitFor(() => releases(env.pika).length === 1, 10_000, "the release");
 	await currentDream()!.done;
 	expect(seen).toHaveLength(2);
 	expect(reads).toEqual([
@@ -155,33 +136,33 @@ it("lists the notes unused for 90 days in the task message, and the dream's own 
 
 	// The same read in the session itself counts, and is the only one that did.
 	await callTool(h, "memory_read", { ids: [stale.id] });
-	await waitFor(() => pika.requestsTo("memory/used").length > 0, 10_000, "memory/used");
-	expect(pika.requestsTo("memory/used").map((request) => request.body)).toEqual([{ ids: [stale.id], project: expect.any(String), repository: expect.any(String), sessionId: h.session.sessionId }]);
+	await waitFor(() => env.pika.requestsTo("memory/used").length > 0, 10_000, "memory/used");
+	expect(env.pika.requestsTo("memory/used").map((request) => request.body)).toEqual([{ ids: [stale.id], project: expect.any(String), repository: expect.any(String), sessionId: h.session.sessionId }]);
 });
 
 it("uses memory.dreamModel when it is found", async () => {
-	await writeFile(join(workspace.agentDir, "pika.json"), JSON.stringify({ memory: { dreamModel: "memory-test/other" } }));
-	h = await startSession({ workspace, ui: ui.context(), models: ["test", "other"] });
+	await writeFile(join(env.workspace.agentDir, "pika.json"), JSON.stringify({ memory: { dreamModel: "memory-test/other" } }));
+	const h = await env.start({ models: ["test", "other"] });
 	const seen: Seen[] = [];
 	h.faux.appendResponses([recorder(seen, () => fauxAssistantMessage("Nothing to keep."))]);
 	await h.session.prompt("/memory dream");
-	await waitFor(() => releases(pika).length === 1, 10_000, "the release");
+	await waitFor(() => releases(env.pika).length === 1, 10_000, "the release");
 	expect(seen.map((request) => request.model)).toEqual(["other"]);
 	expect(currentDream()!.child!.model).toBe("memory-test/other");
 });
 
 it("falls back to the session's model when memory.dreamModel is not found", async () => {
-	await writeFile(join(workspace.agentDir, "pika.json"), JSON.stringify({ memory: { dreamModel: "nowhere/none" } }));
-	h = await startSession({ workspace, ui: ui.context(), models: ["test", "other"] });
+	await writeFile(join(env.workspace.agentDir, "pika.json"), JSON.stringify({ memory: { dreamModel: "nowhere/none" } }));
+	const h = await env.start({ models: ["test", "other"] });
 	const seen: Seen[] = [];
 	h.faux.appendResponses([recorder(seen, () => fauxAssistantMessage("Nothing to keep."))]);
 	await h.session.prompt("/memory dream");
-	await waitFor(() => releases(pika).length === 1, 10_000, "the release");
+	await waitFor(() => releases(env.pika).length === 1, 10_000, "the release");
 	expect(seen.map((request) => request.model)).toEqual(["test"]);
 });
 
 it("stopping a real child aborts its run and shuts it down", async () => {
-	h = await startSession({ workspace, ui: ui.context() });
+	const h = await env.start();
 	let started = false;
 	h.faux.appendResponses([(_context, options) => new Promise((done) => {
 		started = true;
@@ -191,17 +172,17 @@ it("stopping a real child aborts its run and shuts it down", async () => {
 	await waitFor(() => started, 10_000, "the child's first request");
 	await h.session.prompt("/memory stop");
 	await currentDream()!.done;
-	await waitFor(() => releases(pika).length === 1, 10_000, "the release");
-	expect(releases(pika)).toEqual(["aborted"]);
+	await waitFor(() => releases(env.pika).length === 1, 10_000, "the release");
+	expect(releases(env.pika)).toEqual(["aborted"]);
 	expect(probeEvents).toContain("shutdown");
 });
 
 it("keeps the read tools out of .pi/pika/, where earlier dreams' sessions are", async () => {
-	const old = dreamSessionDir(workspace.cwd);
+	const old = dreamSessionDir(env.workspace.cwd);
 	await mkdir(old, { recursive: true });
 	await writeFile(join(old, "old-dream.jsonl"), "{\"secret\":\"an earlier dream's transcript\"}\n");
-	await writeFile(join(workspace.cwd, "README.md"), "the project's readme\n");
-	h = await startSession({ workspace, ui: ui.context() });
+	await writeFile(join(env.workspace.cwd, "README.md"), "the project's readme\n");
+	const h = await env.start();
 	const results: { name: string; text: string; isError: boolean }[] = [];
 	const collect: FauxResponseFactory = (context) => {
 		for (const message of context.messages) {
@@ -213,7 +194,7 @@ it("keeps the read tools out of .pi/pika/, where earlier dreams' sessions are", 
 	h.faux.appendResponses([
 		fauxAssistantMessage([
 			fauxToolCall("read", { path: ".pi/pika/dreams/old-dream.jsonl" }, { id: "read-dream" }),
-			fauxToolCall("ls", { path: `${workspace.cwd}/.pi/pika` }, { id: "ls-pika" }),
+			fauxToolCall("ls", { path: `${env.workspace.cwd}/.pi/pika` }, { id: "ls-pika" }),
 			fauxToolCall("grep", { pattern: "secret", path: "./.pi/pika/" }, { id: "grep-pika" }),
 			fauxToolCall("read", { path: "README.md" }, { id: "read-readme" }),
 			fauxToolCall("grep", { pattern: "secret" }, { id: "grep-all" }),
@@ -221,7 +202,7 @@ it("keeps the read tools out of .pi/pika/, where earlier dreams' sessions are", 
 		collect,
 	]);
 	await h.session.prompt("/memory dream");
-	await waitFor(() => releases(pika).length === 1, 10_000, "the release");
+	await waitFor(() => releases(env.pika).length === 1, 10_000, "the release");
 	const byId = Object.fromEntries(results.map((result) => [result.name, result]));
 	for (const id of ["read-dream", "ls-pika", "grep-pika"]) {
 		expect(byId[id]).toMatchObject({ isError: true });

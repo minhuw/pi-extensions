@@ -1,30 +1,19 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
-import { currentDream } from "../../memory/dream/index.ts";
-import { FakePika } from "../support/pika-server.ts";
+import { expect, it } from "vitest";
 import { plainTheme, styledTheme } from "../support/ui.ts";
-import { batch, type FakeChild, fakeSpawner, RecordingUI, resetDreams, serveDreams, until } from "./support/dream.ts";
-import { type Harness, note, PROJECT_SCOPE, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
+import { batch, dream, serveDreams, SOURCES, useDreamEnv } from "./support/dream.ts";
+import { note } from "./support/runtime.ts";
 
 const OSC52 = "\x1b]52;c;SGVsbG8=\x07";
 const CSI_RED = "\x1b[31m";
 const CSI_RESET = "\x1b[0m";
 const CSI_CLEAR = "\x1b[2J";
 const DIRTY = `${OSC52}${CSI_RED}danger${CSI_RESET}${CSI_CLEAR}`;
-const SOURCES = [{ sessionId: "s-past-1", seq: 7 }];
 
 const lines = (component: { render(width: number): readonly string[] }) => component.render(500).map((line) => line.trimEnd()).join("\n");
 
-let workspace: Workspace;
-let pika: FakePika;
-let ui: RecordingUI;
-let spawner: ReturnType<typeof fakeSpawner>;
-let h: Harness;
-
-beforeEach(async () => {
-	workspace = await Workspace.create();
-	pika = await new FakePika().start();
-	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [], index: "" } });
-	serveDreams(pika, {
+const env = useDreamEnv({
+	session: true,
+	routes: {
 		commit: {
 			body: {
 				batch: batch({
@@ -35,30 +24,11 @@ beforeEach(async () => {
 				indexLines: 2,
 			},
 		},
-	});
-	setCredentials(pika.url);
-	resetDreams();
-	spawner = fakeSpawner();
-	ui = new RecordingUI();
-	h = await startSession({ workspace, ui: ui.context() });
+	},
 });
-
-afterEach(async () => {
-	currentDream()?.stop("stopped", "the test ended");
-	await h.shutdown();
-	resetDreams();
-	await pika.stop();
-	await workspace.cleanup();
-});
-
-async function dream(): Promise<FakeChild> {
-	await h.session.prompt("/memory dream");
-	await until(() => spawner.children[0]?.prompts.length === 1, "the kickoff");
-	return spawner.children[0]!;
-}
 
 it("strips ANSI/OSC/CSI control sequences from rendered dream tool output while preserving raw result.content and theme styling", async () => {
-	const child = await dream();
+	const child = await dream(env);
 	const saveArgs = {
 		expectedRevision: 0, scope: "project", category: "project",
 		title: `Title ${DIRTY}`, hook: `Hook ${DIRTY}`, body: `Body ${DIRTY}`, sources: SOURCES,
@@ -97,7 +67,7 @@ it("strips ANSI/OSC/CSI control sequences from rendered dream tool output while 
 
 	// Error result from a server 409 conflict with recorded control sequences strips sequences in renderResult while keeping raw content.
 	const stored = note({ id: "cccccccccccc", revision: 5, title: `Stored ${DIRTY}`, body: `Body ${DIRTY}` });
-	serveDreams(pika, { commit: { status: 409, body: { error: "revision_conflict", note: stored, change: 0 } } });
+	serveDreams(env.pika, { commit: { status: 409, body: { error: "revision_conflict", note: stored, change: 0 } } });
 	await saveTool.execute("c4", saveArgs as never, undefined, undefined, undefined as never);
 	const errRes = await commitTool.execute("c5", { sessions: ["s-past-1"] } as never, undefined, undefined, undefined as never);
 	const rawErr = errRes.content[0]?.type === "text" ? errRes.content[0].text : "";

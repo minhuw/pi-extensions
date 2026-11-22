@@ -1,14 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SessionManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { LogViewer } from "../../log-viewer.ts";
 import { currentDream } from "../../memory/dream/index.ts";
 import { DREAM_ENTRY, type DreamRecord, PIN_ENTRY } from "../../memory/entries.ts";
 import { indexNotes, type MemoryLogItem, memoryLogItems, memoryView } from "../../memory/log.ts";
-import { FakePika } from "../support/pika-server.ts";
 import { colorTheme, LOG_KEYS, LogUI, plainTheme, stripAnsi } from "../support/ui.ts";
-import { fakeSpawner, type FakeChild, LEASE_ID, RecordingUI, releases, resetDreams, serveDreams, until } from "./support/dream.ts";
-import { callTool, type Harness, note, PROJECT, PROJECT_SCOPE, REPOSITORY, setCredentials, startSession, USER_SCOPE, Workspace } from "./support/runtime.ts";
+import { dream, LEASE_ID, RecordingUI, releases, SAVE, until, useDreamEnv } from "./support/dream.ts";
+import { callTool, note, PROJECT, REPOSITORY } from "./support/runtime.ts";
 
 /** A line without its frame, its clock as HH:MM. */
 const inside = (line: string) => stripAnsi(line).replace(/^│ /, "").replace(/\s*│$/, "").replace(/\b\d\d:\d\d\b/, "HH:MM");
@@ -284,44 +283,19 @@ describe("the memory log view", () => {
 });
 
 describe("in a session", () => {
-	let workspace: Workspace;
-	let pika: FakePika;
-	const open: Harness[] = [];
-
-	beforeEach(async () => {
-		workspace = await Workspace.create();
-		pika = await new FakePika().start();
-		pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [], index: INDEX } });
-		serveDreams(pika);
-		setCredentials(pika.url);
-		resetDreams();
-	});
-	afterEach(async () => {
-		currentDream()?.stop("stopped", "the test ended");
-		await currentDream()?.done;
-		for (const h of open.splice(0)) await h.shutdown();
-		resetDreams();
-		await pika.stop();
-		await workspace.cleanup();
-	});
-
-	async function start(options: Omit<Parameters<typeof startSession>[0], "workspace"> = {}): Promise<Harness> {
-		const h = await startSession({ workspace, ...options });
-		open.push(h);
-		return h;
-	}
+	const env = useDreamEnv({ index: INDEX, defaultUi: false });
 	const dreams = (entries: readonly SessionEntry[]) => entries.flatMap((e) => e.type === "custom" && e.customType === DREAM_ENTRY ? [e.data as DreamRecord] : []);
 
 	describe("/memory log", () => {
 		it("opens only in the TUI, and says when the branch has no memory activity", async () => {
 			const ui = new RecordingUI();
-			const rpc = await start({ ui: ui.context() });
+			const rpc = await env.start({ ui: ui.context() });
 			await rpc.run("one");
 			await rpc.session.prompt("/memory log");
 			expect(ui.notes.at(-1)).toEqual({ message: "/memory log opens only in the interactive TUI.", type: "info" });
 
 			const tui = new LogUI();
-			const h = await start({ mode: "tui", ui: tui.context() });
+			const h = await env.start({ mode: "tui", ui: tui.context() });
 			await h.session.prompt("/memory log");
 			expect(tui.notes.at(-1)).toEqual({ message: "No memory activity on this branch.", type: "info" });
 			expect(tui.viewer).toBeUndefined();
@@ -331,10 +305,10 @@ describe("in a session", () => {
 
 		it("lists the branch's pin and memory tool calls with their results, and opens each one", async () => {
 			const created = note({ id: "n-1", title: "Pitfall", hook: "run npm ci first" });
-			pika.routes.set("POST memory/notes", { body: { note: created, index: INDEX, indexBytes: INDEX.length, indexLines: 7 } });
-			pika.routes.set("POST memory/notes/abc/forget", { status: 409, body: { error: "revision_conflict", note: note({ id: "abc", revision: 4 }) } });
+			env.pika.routes.set("POST memory/notes", { body: { note: created, index: INDEX, indexBytes: INDEX.length, indexLines: 7 } });
+			env.pika.routes.set("POST memory/notes/abc/forget", { status: 409, body: { error: "revision_conflict", note: note({ id: "abc", revision: 4 }) } });
 			const ui = new LogUI();
-			const h = await start({ mode: "tui", ui: ui.context() });
+			const h = await env.start({ mode: "tui", ui: ui.context() });
 			await callTool(h, "memory_save", SAVE_ARGS);
 			await callTool(h, "memory_forget", { id: "abc", expectedRevision: 3 });
 
@@ -366,7 +340,7 @@ describe("in a session", () => {
 
 		it("is offered in the completions and the usage", async () => {
 			const ui = new RecordingUI();
-			const h = await start({ ui: ui.context() });
+			const h = await env.start({ ui: ui.context() });
 			const command = h.session.extensionRunner.getCommand("memory")!;
 			expect((await command.getArgumentCompletions!(""))!.map((item) => item.value)).toEqual(["status", "dream", "stop", "log"]);
 			expect(await command.getArgumentCompletions!("l")).toEqual([{ value: "log", label: "log" }]);
@@ -377,18 +351,11 @@ describe("in a session", () => {
 	});
 
 	describe("the dream entry", () => {
-		const SAVE = { ...SAVE_ARGS, sources: [{ sessionId: "s-past-1", seq: 7 }] };
-		async function dream(h: Harness, spawner: ReturnType<typeof fakeSpawner>): Promise<FakeChild> {
-			await h.session.prompt("/memory dream");
-			await until(() => spawner.children.at(-1)?.prompts.length === 1, "the kickoff");
-			return spawner.children.at(-1)!;
-		}
-		const ended = async (count = 1) => { await until(() => releases(pika).length === count, "the release"); await currentDream()?.done; };
+		const ended = async (count = 1) => { await until(() => releases(env.pika).length === count, "the release"); await currentDream()?.done; };
 
 		it("records how a completed, stopped, or failed dream ended in the session that asked for it, never for the model", async () => {
-			const spawner = fakeSpawner();
-			const h = await start({ ui: new RecordingUI().context() });
-			const child = await dream(h, spawner);
+			const h = await env.start({ ui: new RecordingUI().context() });
+			const child = await dream(h);
 			await child.call("dream_save", SAVE);
 			expect((await child.call("dream_commit", { sessions: ["s-past-1"] })).isError).toBe(false);
 			child.emit({ type: "turn_end", toolCalls: true });
@@ -403,10 +370,10 @@ describe("in a session", () => {
 			// The server shows custom entries other than the pin where it omits memory, so no note's text is in it.
 			expect(JSON.stringify(dreams(h.session.sessionManager.getBranch()))).not.toContain("Pitfall");
 
-			await dream(h, spawner);
+			await dream(h);
 			await h.session.prompt("/memory stop");
 			await ended(2);
-			const failing = await dream(h, spawner);
+			const failing = await dream(h);
 			await failing.call("dream_save", SAVE);
 			failing.finish({ stopReason: "error", errorMessage: "overloaded" });
 			await ended(3);
@@ -423,22 +390,20 @@ describe("in a session", () => {
 		});
 
 		it("records a dream that quitting stopped in the session file", async () => {
-			const spawner = fakeSpawner();
-			const h = await start({ ui: new RecordingUI().context() });
+			const h = await env.start({ ui: new RecordingUI().context() });
 			await h.run("one");
 			const file = h.session.sessionManager.getSessionFile()!;
-			await dream(h, spawner);
+			await dream(h);
 			await h.shutdown();
 			await ended();
 			expect(dreams(SessionManager.open(file).getEntries())).toEqual([expect.objectContaining({ outcome: "aborted", reason: "the session ended", leaseId: LEASE_ID })]);
 		});
 
 		it("records nothing once the user switched to another session", async () => {
-			const spawner = fakeSpawner();
-			const h = await start({ ui: new RecordingUI().context() });
+			const h = await env.start({ ui: new RecordingUI().context() });
 			await h.run("one");
 			const file = h.session.sessionManager.getSessionFile()!;
-			await dream(h, spawner);
+			await dream(h);
 			await h.runtime.newSession();
 			await ended();
 			expect(currentDream()).toMatchObject({ outcome: "aborted", reason: "the session ended" });
@@ -447,12 +412,11 @@ describe("in a session", () => {
 		});
 
 		it("records nothing in a child session", async () => {
-			const spawner = fakeSpawner();
-			const linked = SessionManager.create(workspace.cwd, workspace.sessionDir);
+			const linked = SessionManager.create(env.workspace.cwd, env.workspace.sessionDir);
 			linked.appendCustomEntry("pi-extensions.session-link", { kind: "subagent", parentSessionId: "parent" });
-			const sessions = [await start({ sessionManager: linked }), await start({ bindAsChild: true })];
+			const sessions = [await env.start({ sessionManager: linked }), await env.start({ bindAsChild: true })];
 			for (const [index, h] of sessions.entries()) {
-				(await dream(h, spawner)).finish();
+				(await dream(h)).finish();
 				await ended(index + 1);
 				expect(currentDream()).toMatchObject({ outcome: "completed" });
 				expect(dreams(h.session.sessionManager.getEntries())).toEqual([]);
