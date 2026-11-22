@@ -6,10 +6,9 @@ import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSy
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { structuredPatch } from "diff";
 import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { CONTEXT_FILE_NAMES, formatFinding, lintContextFile, newFindings, repositoryRoot, type LintFinding } from "./lint.ts";
-import { CHOICES, DEFAULT_CONTEXT, lineText, MAX_FINDINGS, promptReviewDialog, REVIEW_CHOICES, reviewAction } from "./review-ui.ts";
+import { CHOICES, DEFAULT_CONTEXT, diffPatch, hunkHeader, MAX_FINDINGS, NO_NEWLINE_MARKER, promptReviewDialog, REVIEW_CHOICES, reviewAction } from "./review-ui.ts";
 
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
 /** selfdrive publishes its grants here while the user is away; read it, never import selfdrive. */
@@ -177,17 +176,13 @@ export function applyEdits(current: string, edits: readonly { oldText: string; n
 
 /** A unified diff of `before` → `after` (hunks only, without file headers), or [] when the lines are the same. */
 export function unifiedDiff(before: string, after: string, context = DEFAULT_CONTEXT): string[] {
-	const oldStr = lineText(before);
-	const newStr = lineText(after);
-	if (oldStr === newStr) return [];
-	const patch = structuredPatch("", "", oldStr, newStr, undefined, undefined, { context });
+	const patch = diffPatch(before, after, context);
+	if (!patch) return [];
 	const out: string[] = [];
 	for (const hunk of patch.hunks) {
-		const oldStart = hunk.oldLines === 0 ? hunk.oldStart - 1 : hunk.oldStart;
-		const newStart = hunk.newLines === 0 ? hunk.newStart - 1 : hunk.newStart;
-		out.push(`@@ -${oldStart},${hunk.oldLines} +${newStart},${hunk.newLines} @@`);
+		out.push(hunkHeader(hunk));
 		for (const line of hunk.lines) {
-			if (line !== "\\ No newline at end of file") out.push(line);
+			if (line !== NO_NEWLINE_MARKER) out.push(line);
 		}
 	}
 	return out;

@@ -1,4 +1,4 @@
-import { diffWords, diffWordsWithSpace, structuredPatch } from "diff";
+import { diffWords, diffWordsWithSpace, structuredPatch, type StructuredPatch, type StructuredPatchHunk } from "diff";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	type Component,
@@ -38,7 +38,7 @@ export interface DiffStats {
 export const DEFAULT_CONTEXT = 3;
 /** The new findings the dialog lists at most. */
 export const MAX_FINDINGS = 10;
-const NO_NEWLINE_MARKER = "\\ No newline at end of file";
+export const NO_NEWLINE_MARKER = "\\ No newline at end of file";
 const HINTS = "←→/tab choose · enter confirm · a apply · r reject · n note · ↑↓/j k scroll · esc cancel";
 /** Rows of chat context kept visible above the bottom-anchored overlay when the terminal is spacious. */
 const TOP_CONTEXT_ROWS = 4;
@@ -69,11 +69,27 @@ function sanitizeText(text: string): string {
 	return replaceControlCharacters(stripTerminalSequences(text.replace(/\t/g, "   ")));
 }
 
-export function diffStats(before: string, after: string, context = DEFAULT_CONTEXT): DiffStats {
+export function diffPatch(
+	before: string,
+	after: string,
+	context = DEFAULT_CONTEXT,
+	fileName = "",
+): StructuredPatch | undefined {
 	const oldStr = lineText(before);
 	const newStr = lineText(after);
-	if (oldStr === newStr) return { added: 0, removed: 0, hunks: 0 };
-	const patch = structuredPatch("", "", oldStr, newStr, undefined, undefined, { context });
+	if (oldStr === newStr) return undefined;
+	return structuredPatch(fileName, fileName, oldStr, newStr, undefined, undefined, { context });
+}
+
+export function hunkHeader(hunk: Pick<StructuredPatchHunk, "oldStart" | "oldLines" | "newStart" | "newLines">): string {
+	const oldStart = hunk.oldLines === 0 ? hunk.oldStart - 1 : hunk.oldStart;
+	const newStart = hunk.newLines === 0 ? hunk.newStart - 1 : hunk.newStart;
+	return `@@ -${oldStart},${hunk.oldLines} +${newStart},${hunk.newLines} @@`;
+}
+
+export function diffStats(before: string, after: string, context = DEFAULT_CONTEXT): DiffStats {
+	const patch = diffPatch(before, after, context);
+	if (!patch) return { added: 0, removed: 0, hunks: 0 };
 	let added = 0;
 	let removed = 0;
 	for (const hunk of patch.hunks) {
@@ -181,12 +197,7 @@ export function renderReviewBody(
 	const innerWidth = Math.max(1, width);
 	const lines: string[] = [];
 
-	const oldStr = lineText(input.before);
-	const newStr = lineText(input.after);
-	const patch =
-		oldStr === newStr
-			? undefined
-			: structuredPatch(input.path, input.path, oldStr, newStr, undefined, undefined, { context });
+	const patch = diffPatch(input.before, input.after, context, input.path);
 
 	if (!patch || patch.hunks.length === 0) {
 		lines.push(...wrapTextWithAnsi(theme.fg("muted", "(Only line endings or the final newline change.)"), innerWidth));
@@ -208,9 +219,7 @@ export function renderReviewBody(
 
 		patch.hunks.forEach((hunk, hunkIndex) => {
 			if (hunkIndex > 0) lines.push("");
-			const oldStart = hunk.oldLines === 0 ? hunk.oldStart - 1 : hunk.oldStart;
-			const newStart = hunk.newLines === 0 ? hunk.newStart - 1 : hunk.newStart;
-			const label = `@@ -${oldStart},${hunk.oldLines} +${newStart},${hunk.newLines} @@`;
+			const label = hunkHeader(hunk);
 			const trail = Math.max(0, innerWidth - 3 - label.length - 1);
 			lines.push(
 				theme.fg("dim", "── ") +
