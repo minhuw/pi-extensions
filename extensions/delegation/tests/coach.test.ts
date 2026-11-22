@@ -1,41 +1,28 @@
 // The swarm coach in real Pi sessions on the faux provider, asserting on what the provider receives.
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getCurrentSystemPrompt, InMemoryCredentialStore, type AssistantMessage } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
-import {
-	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
-	type CreateAgentSessionRuntimeFactory, type ExtensionAPI, type ExtensionUIContext,
-} from "@earendil-works/pi-coding-agent";
-import { blockedText, COACH, contextText, registerCoach, stallText } from "../coach.ts";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
+import { blockedText, COACH, contextText, stallText } from "../coach.ts";
 import type { SwarmBoard, SwarmBoards, SwarmCard } from "../board.ts";
-import { registerSwarm } from "../swarm.ts";
+import {
+	afterPrompt,
+	captureRequest,
+	createDelegationSandbox,
+	createDelegationSession,
+	SWARM_BOARDS,
+	textOf,
+	type CapturedRequest,
+	type DelegationSandbox,
+} from "./support/session-harness.ts";
 
-// Load by path, as Pi does.
-const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 const CONTEXT_WINDOW = 20_000;
 
-type Message = { role: string; content: unknown };
-interface Captured { system: string; conversation: Message[] }
 type Step = string | AssistantMessage | (() => AssistantMessage | Promise<AssistantMessage>);
 
-const capture = (messages: Parameters<typeof getCurrentSystemPrompt>[0]): Captured => {
-	const copy = JSON.parse(JSON.stringify(messages)) as Message[];
-	return { system: getCurrentSystemPrompt(messages), conversation: copy.filter((message) => message.role !== "system") };
-};
-const textOf = ({ content }: Message) => typeof content === "string" ? content : (content as { text?: string }[]).map((part) => part.text ?? "").join("");
 const isCoach = (text: string) => text.startsWith("Swarm mode: ");
-const coachTexts = (request: Captured) => request.conversation.map(textOf).filter(isCoach);
-/** What followed the run's starting message in a request. */
-const afterPrompt = (request: Captured, prompt: string) => {
-	const texts = request.conversation.map(textOf);
-	const start = texts.lastIndexOf(prompt);
-	expect(start).toBeGreaterThanOrEqual(0);
-	return texts.slice(start + 1);
-};
+const coachTexts = (request: CapturedRequest) => request.conversation.map(textOf).filter(isCoach);
 
 /** One assistant message calling `tools` in order, each with arguments that suit it. */
 const calls = (...tools: string[]) => fauxAssistantMessage(tools.map((tool) => fauxToolCall(tool, argumentsOf(tool))), { stopReason: "toolUse" });
@@ -51,51 +38,24 @@ const argumentsOf = (tool: string): Parameters<typeof fauxToolCall>[1] => {
 	}
 };
 
-let root: string;
-let previousAgentDir: string | undefined;
-const started: { dispose(): Promise<void> }[] = [];
-const agentDir = () => join(root, "agent");
-const sessionDir = () => join(root, "sessions");
-const cwd = () => join(root, "work");
+let sandbox: DelegationSandbox;
 
 beforeEach(async () => {
-	root = await mkdtemp(join(tmpdir(), "pi-swarm-coach-"));
-	await Promise.all([agentDir(), sessionDir(), cwd()].map((path) => mkdir(path)));
-	await writeFile(join(cwd(), "notes.txt"), "a note\n");
-	previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = agentDir();
+	sandbox = await createDelegationSandbox("pi-swarm-coach-");
+	await writeFile(join(sandbox.cwd, "notes.txt"), "a note\n");
 });
 
 afterEach(async () => {
-	try {
-		for (const harness of started.splice(0)) await harness.dispose();
-	} finally {
-		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		await rm(root, { recursive: true, force: true });
-	}
+	await sandbox.cleanup();
 });
-
-/** A UI context with no effects. A plain object: Pi spreads it. */
-function quietUi() {
-	const noop = () => {};
-	return {
-		select: async () => undefined, confirm: async () => false, input: async () => undefined, editor: async () => undefined, custom: async () => undefined,
-		onTerminalInput: () => noop, setWorkingMessage: noop, setWorkingVisible: noop, setWorkingIndicator: noop, setHiddenThinkingLabel: noop, setWidget: noop,
-		setFooter: noop, setHeader: noop, setTitle: noop, pasteToEditor: noop, setEditorText: noop, getEditorText: () => "",
-		addAutocompleteProvider: noop, setEditorComponent: noop, getEditorComponent: () => undefined, getAllThemes: () => [], getTheme: () => undefined,
-		setTheme: () => ({ success: false, error: "UI not available" }), getToolsExpanded: () => false, setToolsExpanded: noop, notify: noop, setStatus: noop,
-	} as unknown as ExtensionUIContext;
-}
 
 const SUBAGENTS_TELEMETRY = "subagents:telemetry";
 const STALL_MS = 10 * 60_000;
 const ACTIVE_TOOL_STALL_MS = 25 * 60_000;
-const BOARDS = Symbol.for("pi-extensions.swarm-boards");
 
 function getBoardRegistry(): SwarmBoards {
 	const global = globalThis as Record<symbol, SwarmBoards | undefined>;
-	return (global[BOARDS] ??= { version: 1, boards: new Map(), listeners: new Set() });
+	return (global[SWARM_BOARDS] ??= { version: 1, boards: new Map(), listeners: new Set() });
 }
 
 function publishBoard(sessionId: string, cards: SwarmCard[]): void {
@@ -110,77 +70,48 @@ function publishBoard(sessionId: string, cards: SwarmCard[]): void {
  * test moves, checking every few milliseconds. `emit` sends telemetry on the session's event bus as pi-subagents does.
  */
 async function start(options: { clock?: { now: number } } = {}) {
-	let events: ExtensionAPI["events"] | undefined;
 	const { clock } = options;
-	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-	const faux = fauxProvider({ api: "swarm-coach-test-api", provider: "swarm-coach-test", models: [{ id: "test", contextWindow: CONTEXT_WINDOW }] });
-	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false, keepRecentTokens: 1 } });
-	const requests: Captured[] = [];
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd: runtimeCwd, agentDir: runtimeAgentDir, sessionManager, sessionStartEvent }) => {
-		const services = await createAgentSessionServices({
-			cwd: runtimeCwd, agentDir: runtimeAgentDir, settingsManager, modelRuntime,
-			resourceLoaderOptions: {
-				noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-				additionalExtensionPaths: clock ? [] : [extensionPath],
-				extensionFactories: [
-					(pi) => { pi.registerProvider(faux.provider); events = pi.events; },
-					...clock ? [(pi: ExtensionAPI) => { registerCoach(pi, registerSwarm(pi), { stallMs: STALL_MS, checkMs: 5, now: () => clock.now }); }] : [],
-				],
-			},
-		});
-		expect(services.resourceLoader.getExtensions().errors).toEqual([]);
-		const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, model: faux.getModel("test") });
-		return { ...created, services, diagnostics: services.diagnostics };
-	};
-	const runtime = await createAgentSessionRuntime(createRuntime, { cwd: cwd(), agentDir: agentDir(), sessionManager: SessionManager.create(cwd(), sessionDir()) });
-	const errors: unknown[] = [];
-	const bind = () => runtime.session.bindExtensions({
-		mode: "rpc",
-		uiContext: quietUi(),
-		onError: (error) => { errors.push(error); },
-		commandContextActions: {
-			waitForIdle: () => runtime.session.waitForIdle(),
-			newSession: (newOptions) => runtime.newSession(newOptions),
-			fork: (entryId, forkOptions) => runtime.fork(entryId, forkOptions),
-			navigateTree: (targetId, treeOptions) => runtime.session.navigateTree(targetId, treeOptions),
-			switchSession: (sessionPath, switchOptions) => runtime.switchSession(sessionPath, switchOptions),
-			reload: () => runtime.session.reload(),
-		},
+	const base = await createDelegationSession({
+		sandbox,
+		api: "swarm-coach-test-api",
+		provider: "swarm-coach-test",
+		contextWindow: CONTEXT_WINDOW,
+		coachOptions: clock ? { stallMs: STALL_MS, checkMs: 5, now: () => clock.now } : undefined,
+		ui: "quiet",
 	});
-	runtime.setRebindSession(bind);
-	await bind();
 	const harness = {
-		runtime, requests, errors,
-		get session() { return runtime.session; },
+		runtime: base.runtime,
+		requests: base.requests,
+		errors: base.errors,
+		get session() { return base.session; },
 		/** Answer the next requests with `steps`, then with "ok". */
 		reply(...steps: Step[]) {
 			const all = [...steps, ...Array.from({ length: 10 }, () => "ok")];
-			faux.setResponses(all.map((step): FauxResponseFactory => async ({ messages }) => {
-				requests.push(capture(messages));
+			base.faux.setResponses(all.map((step): FauxResponseFactory => async ({ messages }) => {
+				base.requests.push(captureRequest(messages));
 				return typeof step === "string" ? fauxAssistantMessage(step) : typeof step === "function" ? step() : step;
 			}));
 		},
 		/** Run one prompt answered by `steps` and return the requests it made. */
 		async run(prompt: string, ...steps: Step[]) {
 			harness.reply(...steps);
-			const before = requests.length;
-			await runtime.session.prompt(prompt);
-			return requests.slice(before);
+			const before = base.requests.length;
+			await base.session.prompt(prompt);
+			return base.requests.slice(before);
 		},
-		command: (text: string) => runtime.session.prompt(text),
+		command: (text: string) => base.session.prompt(text),
 		/** Telemetry for a top-level agent of this session, running with no active tool unless `fields` says otherwise. */
 		emit(agentId: string, fields: Record<string, unknown> = {}) {
-			events!.emit(SUBAGENTS_TELEMETRY, {
+			base.events.emit(SUBAGENTS_TELEMETRY, {
 				phase: "updated", agentId, status: "running", displayName: "Worker", type: "worker", description: `task ${agentId}`,
 				turnCount: 1, toolUses: 0, lifetimeTokens: 0, contextPercent: null, compactionCount: 0, activeTools: [], startedAt: 0,
-				parentSessionId: runtime.session.sessionManager.getSessionId(), ...fields,
+				parentSessionId: base.sessionId, ...fields,
 			});
 		},
-		coachEntries: () => runtime.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom_message" && entry.customType === "swarm-coach" ? [entry] : []),
-		swarmMessages: () => runtime.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom_message" && entry.customType === "swarm" ? [entry.content] : []),
-		dispose: () => runtime.dispose(),
+		coachEntries: () => base.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom_message" && entry.customType === "swarm-coach" ? [entry] : []),
+		swarmMessages: () => base.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom_message" && entry.customType === "swarm" ? [entry.content] : []),
+		dispose: base.dispose,
 	};
-	started.push(harness);
 	return harness;
 }
 
@@ -188,7 +119,7 @@ describe("the context nudge", () => {
 	/** A prompt that alone fills `percent` of the context window, at the faux provider's four characters a token. */
 	const filler = (percent: number) => "x".repeat(Math.ceil(CONTEXT_WINDOW * 4 * percent / 100));
 	/** The coach messages each request of a run carries after its prompt. */
-	const nudges = (requests: Captured[], prompt: string) => requests.map((request) => afterPrompt(request, prompt).filter(isCoach));
+	const nudges = (requests: CapturedRequest[], prompt: string) => requests.map((request) => afterPrompt(request, prompt).filter(isCoach));
 
 	it("steers once at the threshold and again only after a compaction", async () => {
 		const h = await start();
@@ -389,7 +320,6 @@ describe("stall detection", () => {
 		const { h, clock } = await idle();
 		h.emit("a1");
 		await h.dispose();
-		started.splice(started.indexOf(h), 1);
 		clock.now += STALL_MS * 2;
 		await settle();
 		expect(h.requests).toHaveLength(1);
@@ -480,7 +410,6 @@ describe("blocked card alerts", () => {
 
 		const listenersBefore = getBoardRegistry().listeners.size;
 		await h.dispose();
-		started.splice(started.indexOf(h), 1);
 		expect(getBoardRegistry().listeners.size).toBeLessThan(listenersBefore);
 	});
 });

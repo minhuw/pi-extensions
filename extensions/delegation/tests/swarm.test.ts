@@ -1,19 +1,22 @@
 // Swarm mode in real Pi sessions on the faux provider, with real session files, asserting on what the provider receives.
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getCurrentSystemPrompt, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
-import {
-	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
-	type CreateAgentSessionRuntimeFactory, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext,
-} from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
+import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { formatBoard, swarmBoards, type SwarmBoard, type SwarmCard } from "../board.ts";
+import {
+	afterPrompt,
+	captureRequest,
+	createDelegationSandbox,
+	createDelegationSession,
+	SESSION_MODES,
+	textOf,
+	type CapturedRequest,
+	type DelegationSandbox,
+	type SessionModesRegistry,
+} from "./support/session-harness.ts";
 
-// Load by path, as Pi does.
-const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 const SESSION_LINK = "pi-extensions.session-link";
 const STATUS = "🐝 swarm";
 const ON_MESSAGE = "Swarm mode 🐝 is on: the user explicitly opts in to background agents, so this session stays free to answer them and other pi sessions that message it through pika relay, which reach it only between turns. "
@@ -30,9 +33,7 @@ const ON_NOTE = "Swarm mode 🐝 on: the model runs long tasks in background age
 const OFF_NOTE = "Swarm mode off. Takes effect with the next prompt.";
 const USAGE = "Usage: /swarm [on | off | status | board [clear] | default [on | off]]";
 const INELIGIBLE = "/swarm works only in top-level TUI and RPC sessions.";
-const SESSION_MODES = Symbol.for("pi-extensions.session-modes");
 
-interface SessionModesRegistry { modes: Map<string, Set<string>>; listeners: Set<(sessionId: string) => void> }
 /** The session modes registry as Relay reads it, created by whoever reads it first. */
 const sessionModes = () => {
 	const shared = globalThis as Record<symbol, unknown>;
@@ -45,23 +46,8 @@ const listen = () => {
 	return calls;
 };
 
-type Message = { role: string; content: unknown; sections?: unknown; toolsAdded?: { name: string }[]; toolsRemoved?: unknown };
-interface Captured { system: string; systems: Message[]; conversation: Message[] }
-
-const capture = (messages: Parameters<typeof getCurrentSystemPrompt>[0]): Captured => {
-	const copy = JSON.parse(JSON.stringify(messages)) as Message[];
-	return { system: getCurrentSystemPrompt(messages), systems: copy.filter((message) => message.role === "system"), conversation: copy.filter((message) => message.role !== "system") };
-};
-const textOf = ({ content }: Message) => typeof content === "string" ? content : (content as { text?: string }[]).map((part) => part.text ?? "").join("");
-/** What followed the run's starting message in a request: the swarm message of that run, if any. */
-const afterPrompt = (request: Captured, prompt: string) => {
-	const texts = request.conversation.map(textOf);
-	const start = texts.lastIndexOf(prompt);
-	expect(start).toBeGreaterThanOrEqual(0);
-	return texts.slice(start + 1);
-};
-const swarmMessages = (request: Captured) => request.conversation.map(textOf).filter((text) => text.startsWith("Swarm mode"));
-const expectUntouched = (request: Captured) => {
+const swarmMessages = (request: CapturedRequest) => request.conversation.map(textOf).filter((text) => text.startsWith("Swarm mode"));
+const expectUntouched = (request: CapturedRequest) => {
 	expect(request.system).not.toContain("<swarm>");
 	expect(swarmMessages(request)).toEqual([]);
 };
@@ -70,7 +56,7 @@ const expectUntouched = (request: Captured) => {
  * `toolsAdded` names the tools of the one system message Pi appends when a session gains tools, as one that predates the
  * extension gains `swarm_board`: it follows the cached prefix and carries no prompt text.
  */
-const expectSamePrefix = (later: Captured, earlier: Captured, toolsAdded?: string[]) => {
+const expectSamePrefix = (later: CapturedRequest, earlier: CapturedRequest, toolsAdded?: string[]) => {
 	expect(later.system).toBe(earlier.system);
 	expect(JSON.stringify(later.systems.slice(0, earlier.systems.length))).toBe(JSON.stringify(earlier.systems));
 	const added = later.systems.slice(earlier.systems.length).map(({ role, content, sections, toolsAdded: tools, toolsRemoved }) => ({ role, content, sections, toolsAdded: tools?.map(({ name }) => name), toolsRemoved }));
@@ -78,137 +64,76 @@ const expectSamePrefix = (later: Captured, earlier: Captured, toolsAdded?: strin
 	expect(JSON.stringify(later.conversation.slice(0, earlier.conversation.length))).toBe(JSON.stringify(earlier.conversation));
 };
 
-let root: string;
-let previousAgentDir: string | undefined;
-const started: { dispose(): Promise<void> }[] = [];
-const agentDir = () => join(root, "agent");
-const sessionDir = () => join(root, "sessions");
-const cwd = () => join(root, "work");
-const configPath = () => join(agentDir(), "swarm.json");
-const newManager = (options?: { parentSession?: string }) => SessionManager.create(cwd(), sessionDir(), options);
+let sandbox: DelegationSandbox;
+const configPath = () => join(sandbox.agentDir, "swarm.json");
+const newManager = (options?: { parentSession?: string }) => SessionManager.create(sandbox.cwd, sandbox.sessionDir, options);
 /** Set the default for fresh sessions in `<agentDir>/swarm.json`, as `/swarm default` does. */
 const setDefault = (on: boolean) => writeFile(configPath(), `${JSON.stringify({ default: on })}\n`);
 
 beforeEach(async () => {
-	root = await mkdtemp(join(tmpdir(), "pi-swarm-"));
-	await Promise.all([agentDir(), sessionDir(), cwd()].map((path) => mkdir(path)));
-	previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = agentDir();
-	delete (globalThis as Record<symbol, unknown>)[SESSION_MODES];
+	sandbox = await createDelegationSandbox("pi-swarm-");
 	// Most suites drive the switch from off; "the default" covers fresh sessions, which start on without this file.
 	await setDefault(false);
 });
 
 afterEach(async () => {
-	try {
-		for (const harness of started.splice(0)) await harness.dispose();
-	} finally {
-		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		delete (globalThis as Record<symbol, unknown>)[SESSION_MODES];
-		await rm(root, { recursive: true, force: true });
-	}
+	await sandbox.cleanup();
 });
 
-/** A UI context that records notifications and footer statuses. A plain object: Pi spreads it. */
-function recordingUi() {
-	const notes: { message: string; type?: string }[] = [];
-	const statuses = new Map<string, string | undefined>();
-	const control = { failStatus: false };
-	const noop = () => {};
-	const context = {
-		select: async () => undefined, confirm: async () => false, input: async () => undefined, editor: async () => undefined, custom: async () => undefined,
-		onTerminalInput: () => noop, setWorkingMessage: noop, setWorkingVisible: noop, setWorkingIndicator: noop, setHiddenThinkingLabel: noop, setWidget: noop,
-		setFooter: noop, setHeader: noop, setTitle: noop, pasteToEditor: noop, setEditorText: noop, getEditorText: () => "",
-		addAutocompleteProvider: noop, setEditorComponent: noop, getEditorComponent: () => undefined, getAllThemes: () => [], getTheme: () => undefined,
-		setTheme: () => ({ success: false, error: "UI not available" }), getToolsExpanded: () => false, setToolsExpanded: noop,
-		notify: (message: string, type?: string) => { notes.push({ message, type }); },
-		setStatus: (key: string, text: string | undefined) => {
-			if (control.failStatus) throw new Error("stale context");
-			statuses.set(key, text);
-		},
-	} as unknown as ExtensionUIContext;
-	return { notes, statuses, control, context };
-}
-
 async function start(options: { sessionManager?: SessionManager; mode?: ExtensionContext["mode"]; extension?: boolean; register?: (pi: ExtensionAPI) => void; bindAsChild?: boolean } = {}) {
-	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-	const faux = fauxProvider({ api: "swarm-test-api", provider: "swarm-test", models: [{ id: "test" }] });
-	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false, keepRecentTokens: 1 } });
-	const ui = recordingUi();
-	const requests: Captured[] = [];
-	const respond: FauxResponseFactory = ({ messages }) => {
-		requests.push(capture(messages));
-		return fauxAssistantMessage("ok");
-	};
-	faux.setResponses(Array.from({ length: 40 }, () => respond));
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd: runtimeCwd, agentDir: runtimeAgentDir, sessionManager, sessionStartEvent }) => {
-		const services = await createAgentSessionServices({
-			cwd: runtimeCwd, agentDir: runtimeAgentDir, settingsManager, modelRuntime,
-			resourceLoaderOptions: {
-				noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-				additionalExtensionPaths: options.extension === false ? [] : [extensionPath],
-				extensionFactories: [(pi) => { pi.registerProvider(faux.provider); options.register?.(pi); }],
-			},
-		});
-		expect(services.resourceLoader.getExtensions().errors).toEqual([]);
-		const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, model: faux.getModel("test") });
-		return { ...created, services, diagnostics: services.diagnostics };
-	};
-	const runtime = await createAgentSessionRuntime(createRuntime, { cwd: cwd(), agentDir: agentDir(), sessionManager: options.sessionManager ?? newManager() });
-	const errors: unknown[] = [];
-	const bind = () => runtime.session.bindExtensions(options.bindAsChild ? {} : {
-		mode: options.mode ?? "rpc",
-		uiContext: ui.context,
-		onError: (error) => { errors.push(error); },
-		commandContextActions: {
-			waitForIdle: () => runtime.session.waitForIdle(),
-			newSession: (newOptions) => runtime.newSession(newOptions),
-			fork: (entryId, forkOptions) => runtime.fork(entryId, forkOptions),
-			navigateTree: (targetId, treeOptions) => runtime.session.navigateTree(targetId, treeOptions),
-			switchSession: (sessionPath, switchOptions) => runtime.switchSession(sessionPath, switchOptions),
-			reload: () => runtime.session.reload(),
-		},
+	const base = await createDelegationSession({
+		sandbox,
+		sessionManager: options.sessionManager ?? newManager(),
+		api: "swarm-test-api",
+		provider: "swarm-test",
+		loadExtension: options.extension !== false,
+		extensionFactories: options.register ? [options.register] : undefined,
+		mode: options.mode,
+		bindAsChild: options.bindAsChild,
+		ui: "recording",
+		defaultResponses: 40,
 	});
-	runtime.setRebindSession(bind);
-	await bind();
-	const harness = {
-		runtime, faux, requests, errors, ...ui,
-		get session() { return runtime.session; },
-		get status() { return ui.statuses.get("swarm"); },
-		get sessionId() { return runtime.session.sessionManager.getSessionId(); },
+	return {
+		runtime: base.runtime,
+		faux: base.faux,
+		requests: base.requests,
+		errors: base.errors,
+		notes: base.ui.notes,
+		statuses: base.ui.statuses,
+		control: base.ui.control,
+		context: base.ui.context,
+		get session() { return base.session; },
+		get status() { return base.ui.statuses.get("swarm"); },
+		get sessionId() { return base.sessionId; },
 		/** The modes the registry holds for the session. */
-		get modes() { return [...sessionModes().modes.get(runtime.session.sessionManager.getSessionId()) ?? []]; },
-		get lastNote() { return ui.notes.at(-1); },
+		get modes() { return [...sessionModes().modes.get(base.sessionId) ?? []]; },
+		get lastNote() { return base.ui.notes.at(-1); },
 		/** Run one prompt and return the request it made. */
 		async run(prompt: string) {
-			const before = requests.length;
-			await runtime.session.prompt(prompt);
-			expect(requests.length).toBe(before + 1);
-			return requests.at(-1)!;
+			const before = base.requests.length;
+			await base.session.prompt(prompt);
+			expect(base.requests.length).toBe(before + 1);
+			return base.requests.at(-1)!;
 		},
-		command: (text: string) => runtime.session.prompt(text),
+		command: (text: string) => base.session.prompt(text),
 		/** The session's `swarm` entries on the current branch. */
-		entries: () => runtime.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom" && entry.customType === "swarm" ? [entry.data] : []),
-		hiddenMessages: () => runtime.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom_message" && entry.customType === "swarm" ? [entry] : []),
-		dispose: () => runtime.dispose(),
+		entries: () => base.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom" && entry.customType === "swarm" ? [entry.data] : []),
+		hiddenMessages: () => base.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom_message" && entry.customType === "swarm" ? [entry] : []),
+		dispose: base.dispose,
 	};
-	started.push(harness);
-	return harness;
 }
 type Harness = Awaited<ReturnType<typeof start>>;
 
 /** Close the session, as quitting Pi does. */
 async function close(h: Harness) {
 	await h.dispose();
-	started.splice(started.indexOf(h), 1);
 }
 
 /** Close the session and open its file again, as a new Pi process would. */
 async function reopen(h: Harness, mode?: ExtensionContext["mode"]) {
 	const file = h.session.sessionFile!;
 	await close(h);
-	return start({ sessionManager: SessionManager.open(file, sessionDir()), mode });
+	return start({ sessionManager: SessionManager.open(file, sandbox.sessionDir), mode });
 }
 
 /** The latest user message on the branch. */
@@ -231,7 +156,7 @@ function withoutProjection(h: Harness) {
 const script = (h: Harness, reply: (call: number) => ReturnType<FauxResponseFactory>) => {
 	let call = 0;
 	const step: FauxResponseFactory = ({ messages }) => {
-		h.requests.push(capture(messages));
+		h.requests.push(captureRequest(messages));
 		return reply(++call);
 	};
 	h.faux.setResponses(Array.from({ length: 10 }, () => step));

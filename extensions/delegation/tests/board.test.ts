@@ -1,59 +1,40 @@
 // The swarm board in real Pi sessions on the faux provider, with real session files: a coordinator, its subagent children through the child-session hook, and the shared registry.
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getCurrentSystemPrompt, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
-import {
-	createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager,
-	type CreateAgentSessionRuntimeFactory, type ExtensionAPI, type ExtensionContext, type ExtensionFactory,
-} from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
+import { SessionManager, type ExtensionAPI, type ExtensionContext, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { formatBoardCompact, MAX_BYTES, MAX_CARDS, MAX_NOTE_CHARS, MAX_TITLE_CHARS, pruneSettled, registerBoard, type SwarmBoard, type SwarmBoards } from "../board.ts";
+import {
+	captureRequest,
+	CHILD_SESSION_HOOKS,
+	createDelegationSandbox,
+	createDelegationSession,
+	SESSION_MODES,
+	SWARM_BOARDS,
+	type CapturedRequest,
+	type DelegationSandbox,
+	type SessionModesRegistry,
+} from "./support/session-harness.ts";
 
-const BOARDS = Symbol.for("pi-extensions.swarm-boards");
-const HOOKS = Symbol.for("pi-extensions.child-session-hooks");
-const SESSION_MODES = Symbol.for("pi-extensions.session-modes");
 const SESSION_LINK = "pi-extensions.session-link";
 const CHILD_SECTION = 'You are one of several agents sharing a swarm board with your coordinator. Call swarm_board with action "list" before editing files another card may own; post progress with note, set blocked with the reason when you need the coordinator, and add todo cards for follow-up work you find instead of doing it.';
 
 /** The registry as pika reads it, created by whoever reads it first. */
-const registry = () => ((globalThis as Record<symbol, unknown>)[BOARDS] ??= { version: 1, boards: new Map(), listeners: new Set() }) as SwarmBoards;
-const hooks = () => (globalThis as Record<symbol, unknown>)[HOOKS] as Set<{ name: string; extensionFactory: ExtensionFactory }> | undefined;
+const registry = () => ((globalThis as Record<symbol, unknown>)[SWARM_BOARDS] ??= { version: 1, boards: new Map(), listeners: new Set() }) as SwarmBoards;
+const hooks = () => (globalThis as Record<symbol, unknown>)[CHILD_SESSION_HOOKS] as Set<{ name: string; extensionFactory: ExtensionFactory }> | undefined;
 const boardHook = () => [...hooks() ?? []].find((hook) => hook.name === "swarm-board");
-const modeRegistry = () => (globalThis as Record<symbol, unknown>)[SESSION_MODES] as { modes: Map<string, Set<string>>; listeners: Set<(sessionId: string) => void> } | undefined;
+const modeRegistry = () => (globalThis as Record<symbol, unknown>)[SESSION_MODES] as SessionModesRegistry | undefined;
 
-type Message = { role: string; content: unknown };
-interface Captured { system: string; conversation: Message[] }
-
-let root: string;
-let previousAgentDir: string | undefined;
-const started: { dispose(): Promise<void> }[] = [];
-const agentDir = () => join(root, "agent");
-const sessionDir = () => join(root, "sessions");
-const cwd = () => join(root, "work");
+let sandbox: DelegationSandbox;
 
 beforeEach(async () => {
-	root = await mkdtemp(join(tmpdir(), "pi-board-"));
-	await Promise.all([agentDir(), sessionDir(), cwd()].map((path) => mkdir(path)));
-	previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = agentDir();
-	delete (globalThis as Record<symbol, unknown>)[BOARDS];
-	delete (globalThis as Record<symbol, unknown>)[SESSION_MODES];
+	sandbox = await createDelegationSandbox("pi-board-");
 });
 
 afterEach(async () => {
 	try {
-		for (const harness of started.splice(0).reverse()) await harness.dispose();
+		await sandbox.cleanup();
 	} finally {
-		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		delete (globalThis as Record<symbol, unknown>)[BOARDS];
-		delete (globalThis as Record<symbol, unknown>)[SESSION_MODES];
-		const hook = boardHook();
-		if (hook) hooks()!.delete(hook);
 		vi.restoreAllMocks();
-		await rm(root, { recursive: true, force: true });
 	}
 });
 
@@ -68,48 +49,42 @@ interface StartOptions {
 }
 
 async function start(options: StartOptions = {}) {
-	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-	const faux = fauxProvider({ api: "board-test-api", provider: "board-test", models: [{ id: "test" }] });
-	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
-	const requests: Captured[] = [];
 	const on = options.on ?? { value: true };
-	let api: ExtensionAPI | undefined;
 	const hook = options.child ? boardHook() : undefined;
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd: runtimeCwd, agentDir: runtimeAgentDir, sessionManager, sessionStartEvent }) => {
-		const services = await createAgentSessionServices({
-			cwd: runtimeCwd, agentDir: runtimeAgentDir, settingsManager, modelRuntime,
-			resourceLoaderOptions: {
-				noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-				extensionFactories: [
-					(pi) => { pi.registerProvider(faux.provider); api = pi; },
-					...(!options.child || options.delegation ? [(pi: ExtensionAPI) => registerBoard(pi, () => on.value)] : []),
-					...(hook ? [hook.extensionFactory] : []),
-				],
-			},
-		});
-		expect(services.resourceLoader.getExtensions().errors).toEqual([]);
-		const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, model: faux.getModel("test") });
-		return { ...created, services, diagnostics: services.diagnostics };
-	};
-	const runtime = await createAgentSessionRuntime(createRuntime, { cwd: cwd(), agentDir: agentDir(), sessionManager: options.sessionManager ?? SessionManager.create(cwd(), sessionDir()) });
-	const errors: unknown[] = [];
-	const bind = () => runtime.session.bindExtensions(options.child ? {} : { mode: options.mode ?? "rpc", onError: (error) => { errors.push(error); } });
-	runtime.setRebindSession(bind);
-	await bind();
+	const base = await createDelegationSession({
+		sandbox,
+		sessionManager: options.sessionManager,
+		api: "board-test-api",
+		provider: "board-test",
+		settings: { retry: { enabled: false }, compaction: { enabled: false } },
+		loadExtension: false,
+		extensionFactories: [
+			...(!options.child || options.delegation ? [(pi: ExtensionAPI) => registerBoard(pi, () => on.value)] : []),
+			...(hook ? [hook.extensionFactory] : []),
+		],
+		mode: options.mode,
+		bindAsChild: options.child,
+		ui: "none",
+		commandContextActions: false,
+	});
 	const harness = {
-		runtime, faux, requests, errors, on,
-		get events() { return api!.events; },
-		get session() { return runtime.session; },
-		get sessionId() { return runtime.session.sessionManager.getSessionId(); },
-		get board() { return registry().boards.get(runtime.session.sessionManager.getSessionId()); },
+		runtime: base.runtime,
+		faux: base.faux,
+		requests: base.requests,
+		errors: base.errors,
+		on,
+		get events() { return base.events; },
+		get session() { return base.session; },
+		get sessionId() { return base.sessionId; },
+		get board() { return registry().boards.get(base.sessionId); },
 		/** Emit Subagents telemetry on this session's event bus, as its Subagents extension does. */
-		telemetry: (data: Record<string, unknown>) => api!.events.emit("subagents:telemetry", { status: "running", type: "worker", description: "", parentSessionId: runtime.session.sessionManager.getSessionId(), ...data }),
-		tools: () => runtime.session.getAllTools().map((tool) => tool.name),
+		telemetry: (data: Record<string, unknown>) => base.events.emit("subagents:telemetry", { status: "running", type: "worker", description: "", parentSessionId: base.sessionId, ...data }),
+		tools: () => base.session.getAllTools().map((tool) => tool.name),
 		/** Run one prompt answered with plain text. */
 		async run(prompt = "go") {
 			harness.faux.setResponses([respond(harness, () => fauxAssistantMessage("ok"))]);
-			await runtime.session.prompt(prompt);
-			return requests.at(-1)!;
+			await base.session.prompt(prompt);
+			return base.requests.at(-1)!;
 		},
 		/** Have the model call swarm_board once and return the tool's result. */
 		async call(args: Record<string, string | boolean>) {
@@ -117,29 +92,27 @@ async function start(options: StartOptions = {}) {
 				respond(harness, () => fauxAssistantMessage(fauxToolCall("swarm_board", args))),
 				respond(harness, () => fauxAssistantMessage("ok")),
 			]);
-			await runtime.session.prompt(`call ${JSON.stringify(args)}`);
-			const resultEntry = runtime.session.sessionManager.getBranch().flatMap((entry) => entry.type === "message" && entry.message.role === "toolResult" ? [entry.message] : []).at(-1)!;
+			await base.session.prompt(`call ${JSON.stringify(args)}`);
+			const resultEntry = base.session.sessionManager.getBranch().flatMap((entry) => entry.type === "message" && entry.message.role === "toolResult" ? [entry.message] : []).at(-1)!;
 			const text = (resultEntry.content as { type: string; text?: string }[]).map((part) => part.text ?? "").join("");
 			return { text, isError: resultEntry.isError };
 		},
 		/** The board snapshots on the current branch. */
-		snapshots: () => runtime.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom" && entry.customType === "swarm-board" ? [entry.data as SwarmBoard] : []),
-		dispose: () => runtime.dispose(),
+		snapshots: () => base.session.sessionManager.getBranch().flatMap((entry) => entry.type === "custom" && entry.customType === "swarm-board" ? [entry.data as SwarmBoard] : []),
+		dispose: base.dispose,
 	};
-	started.push(harness);
 	return harness;
 }
 type Harness = Awaited<ReturnType<typeof start>>;
 
-const respond = (h: { requests: Captured[] }, reply: () => ReturnType<FauxResponseFactory>): FauxResponseFactory => ({ messages }) => {
-	const copy = JSON.parse(JSON.stringify(messages)) as Message[];
-	h.requests.push({ system: getCurrentSystemPrompt(messages), conversation: copy.filter((message) => message.role !== "system") });
+const respond = (h: { requests: CapturedRequest[] }, reply: () => ReturnType<FauxResponseFactory>): FauxResponseFactory => ({ messages }) => {
+	h.requests.push(captureRequest(messages));
 	return reply();
 };
 
 /** A subagent child of `parent`, linked as Subagents links one before binding the child's extensions. */
 async function startChild(parent: Harness | string, link: Record<string, unknown> = {}, options: Pick<StartOptions, "delegation"> = {}) {
-	const manager = SessionManager.create(cwd(), sessionDir());
+	const manager = SessionManager.create(sandbox.cwd, sandbox.sessionDir);
 	manager.appendCustomEntry(SESSION_LINK, { kind: "subagent", parentSessionId: typeof parent === "string" ? parent : parent.sessionId, agentType: "worker", ...link });
 	return start({ sessionManager: manager, child: true, ...options });
 }
@@ -251,9 +224,8 @@ describe("coordinator", () => {
 		const file = h.session.sessionFile!;
 		const id = h.sessionId;
 		await h.dispose();
-		started.splice(started.indexOf(h), 1);
 		expect(registry().boards.has(id)).toBe(false);
-		const reopened = await start({ sessionManager: SessionManager.open(file, sessionDir()) });
+		const reopened = await start({ sessionManager: SessionManager.open(file, sandbox.sessionDir) });
 		expect(reopened.board?.cards.map((card) => card.title)).toEqual(["One", "Two"]);
 		// Restoring writes nothing.
 		expect(reopened.snapshots()).toHaveLength(2);
@@ -346,7 +318,6 @@ describe("telemetry", () => {
 		expect(h.snapshots()).toEqual([pending]);
 		await h.call({ action: "list" });
 		await h.dispose();
-		started.splice(started.indexOf(h), 1);
 		expect(attempted).toHaveLength(2);
 		expect(h.snapshots()).toHaveLength(1);
 		expect(h.errors).toEqual([]);
@@ -378,7 +349,6 @@ describe("telemetry", () => {
 		}
 		const pending = h.board!;
 		await expect(h.dispose()).resolves.toBeUndefined();
-		started.splice(started.indexOf(h), 1);
 		expect(attempted).toHaveLength(2);
 		expect(attempted[0]).toBe(pending);
 		expect(attempted[1]).toBe(pending);
@@ -438,12 +408,10 @@ describe("children", () => {
 		const active = await start({ on: { value: true } });
 		expect(boardHook()).toBeDefined();
 		await off.dispose();
-		started.splice(started.indexOf(off), 1);
 		expect(boardHook()).toBeDefined();
 
 		// Disposing the last active coordinator removes the hook.
 		await active.dispose();
-		started.splice(started.indexOf(active), 1);
 		expect(boardHook()).toBeUndefined();
 	});
 
@@ -546,7 +514,7 @@ describe("children", () => {
 		expect(orphan.tools()).not.toContain("swarm_board");
 		coordinator.on.value = true;
 		await coordinator.run();
-		const herderManager = SessionManager.create(cwd(), sessionDir());
+		const herderManager = SessionManager.create(sandbox.cwd, sandbox.sessionDir);
 		herderManager.appendCustomEntry(SESSION_LINK, { kind: "herder", parentSessionId: coordinator.sessionId, agentId: "h1" });
 		const herder = await start({ sessionManager: herderManager, child: true });
 		expect(herder.tools()).not.toContain("swarm_board");
@@ -720,9 +688,8 @@ describe("monotonic IDs", () => {
 		await h.call({ action: "prune" });
 		const file = h.session.sessionFile!;
 		await h.dispose();
-		started.splice(started.indexOf(h), 1);
 
-		const reopened = await start({ sessionManager: SessionManager.open(file, sessionDir()) });
+		const reopened = await start({ sessionManager: SessionManager.open(file, sandbox.sessionDir) });
 		expect(reopened.board!.nextId).toBe(7);
 		await reopened.call({ action: "add", title: "After reopen" });
 		expect(reopened.board!.cards.map((c) => c.id)).toEqual(["c1", "c4", "c7"]);
