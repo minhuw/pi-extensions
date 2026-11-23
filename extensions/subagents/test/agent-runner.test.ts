@@ -207,6 +207,7 @@ function createSession(finalText: string) {
     },
     setSessionName: vi.fn(),
     bindExtensions: vi.fn(async () => {}),
+    dispose: vi.fn(),
   };
   lastSession = session;
   return { session, listeners };
@@ -3740,5 +3741,81 @@ describe("resolvePinnedCouncilModel and council advisor model pinning", () => {
     expect(result.responseText).toBe("CASPAR VERDICT");
     expect(createAgentSession).toHaveBeenCalledTimes(1);
     expect(createAgentSession.mock.calls[0][0].model).toBe(casparModel);
+  });
+});
+
+describe("runAgent post-creation setup cleanup", () => {
+  it("disposes the child AgentSession if setSessionName throws after createAgentSession", async () => {
+    const { session } = createSession("never reached");
+    session.setSessionName.mockImplementation(() => {
+      throw new Error("setSessionName boom");
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    await expect(runAgent(ctx, "worker", "do work", { pi })).rejects.toThrow("setSessionName boom");
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+    expect(session.prompt).not.toHaveBeenCalled();
+  });
+
+  it("disposes the child AgentSession if bindExtensions rejects after createAgentSession", async () => {
+    const { session } = createSession("never reached");
+    session.bindExtensions.mockRejectedValue(new Error("bindExtensions failed"));
+    createAgentSession.mockResolvedValue({ session });
+
+    await expect(runAgent(ctx, "worker", "do work", { pi })).rejects.toThrow("bindExtensions failed");
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+    expect(session.prompt).not.toHaveBeenCalled();
+  });
+
+  it("emits session_shutdown and disposes the child AgentSession if onSessionCreated throws", async () => {
+    const { session } = createSession("never reached");
+    const emit = vi.fn(async () => {});
+    (session as any).extensionRunner = {
+      hasHandlers: vi.fn((event: string) => event === "session_shutdown"),
+      emit,
+    };
+    createAgentSession.mockResolvedValue({ session });
+
+    await expect(
+      runAgent(ctx, "worker", "do work", {
+        pi,
+        onSessionCreated: () => {
+          throw new Error("onSessionCreated boom");
+        },
+      }),
+    ).rejects.toThrow("onSessionCreated boom");
+
+    expect(emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+    expect(session.prompt).not.toHaveBeenCalled();
+  });
+
+  it("unsubscribes earlier listeners and disposes the child AgentSession if subscription setup throws", async () => {
+    const { session } = createSession("never reached");
+    const firstUnsubscribe = vi.fn();
+    let calls = 0;
+    session.subscribe.mockImplementation(() => {
+      calls++;
+      if (calls === 1) return firstUnsubscribe;
+      throw new Error("subscribe boom");
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    await expect(runAgent(ctx, "worker", "do work", { pi })).rejects.toThrow("subscribe boom");
+    expect(firstUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+    expect(session.prompt).not.toHaveBeenCalled();
+  });
+
+  it("preserves the original setup error even if session.dispose throws during cleanup", async () => {
+    const { session } = createSession("never reached");
+    session.bindExtensions.mockRejectedValue(new Error("original bind failure"));
+    session.dispose.mockImplementation(() => {
+      throw new Error("dispose failure");
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    await expect(runAgent(ctx, "worker", "do work", { pi })).rejects.toThrow("original bind failure");
+    expect(session.dispose).toHaveBeenCalledTimes(1);
   });
 });

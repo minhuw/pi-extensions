@@ -1497,94 +1497,118 @@ export async function runAgent(
 
   const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
 
-  // A reopened file already carries the link written when it was created.
-  if (childSessionHooks.length > 0 && !options.resumeSessionFile) {
-    sessionManager.appendCustomEntry(SESSION_LINK_CUSTOM_TYPE, buildSubagentSessionLink({
-      parentSessionId: ctx.sessionManager?.getSessionId?.(),
-      parentSessionFile: ctx.sessionManager?.getSessionFile?.(),
-      parentToolCallId: options.parentToolCallId,
-      agentId: options.agentId,
-      parentAgentId: options.parentAgentId,
-      workflowId: options.workflowId,
-      agentType: type,
-      description: options.description,
-    }, options.linkData));
-  }
-
-  // Pin service tier after session construction (streamFunction is live).
-  // Skip silently when the model API cannot honor it (e.g. scheduled fire with a
-  // non-OpenAI model); the Agent tool path validates earlier and errors/warns.
-  const serviceTier = (normalizeOptionalString(options.serviceTier) as ServiceTierInput | undefined) ?? agentConfig?.serviceTier;
-  if (serviceTier && modelSupportsServiceTier(session.model)) {
-    applyServiceTier(session, serviceTier);
-  }
-
-  const baseSessionName = agentConfig?.name ?? type;
-  session.setSessionName(
-    options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName,
-  );
-
-  // Bind extensions so that session_start fires and extensions can initialize
-  // (e.g. loading credentials, setting up state). Tool gating already happened
-  // at session construction via the `tools:` allowlist above — no separate
-  // post-bind filter is needed. All ExtensionBindings fields are optional.
-  await session.bindExtensions({
-    onError: (err) => {
-      options.onToolActivity?.({
-        type: "end",
-        toolName: `extension-error:${err.extensionPath}`,
-      });
-    },
-  });
-
-  // With `allowedToolNames` unset, the registry is scoped by `excludeTools` but
-  // the ACTIVE set still needs managing: pi activates only its four default
-  // built-ins at turn 1, and `ext:` narrowing has no registry-level expression
-  // (we can't deny the name of a tool that hasn't registered yet). Both are
-  // handled below by re-deriving scope from the loader's live extension maps —
-  // `registerTool` writes into those same maps, so late arrivals are judged too.
-  if (!noExtensions) {
-    installExtensionToolScope(session, {
-      loader,
-      toolNames,
-      disallowedSet,
-      extNames,
-      narrowing,
-      mcpToolPatterns: isolated ? undefined : agentConfig?.mcpToolPatterns,
-      readmitToolNames,
-      nestedCallGate,
-      hookToolCanonicalName,
-    });
-  }
-
-  options.onSessionCreated?.(session);
-
-  const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(type, options.maxTurns) });
-  // After the tool scope's first renarrow above: these are the tools the model
-  // is actually offered on its first turn.
-  // A reopened conversation is a continuation, not a spawn run: like a resume,
-  // it may answer a follow-up in text alone.
-  const toolUse = options.resumeSessionFile
-    ? { unsubscribe: () => {}, failure: () => undefined as string | undefined }
-    : trackRequiredToolUse(session, type, options.signal);
-
-  const collector = collectResponseText(session);
-  const cleanupAbort = forwardAbortSignal(session, options.signal);
-
-  // Build the effective prompt: optionally prepend parent context. Only for a
-  // fresh conversation — a reopened one already holds its history, and a live
-  // resume never re-sends the parent's either.
+  let run: ReturnType<typeof observeRun> | undefined;
+  let toolUse: { unsubscribe: () => void; failure: () => string | undefined } | undefined;
+  let collector: ReturnType<typeof collectResponseText> | undefined;
+  let cleanupAbort: (() => void) | undefined;
   let effectivePrompt = prompt;
-  if (options.inheritContext && !options.resumeSessionFile) {
-    const parentContext = buildParentContext(ctx);
-    if (parentContext) {
-      effectivePrompt = parentContext + prompt;
-    }
-  }
+  let startLen: number;
 
-  // Boundary for the history fallback: only assistant text produced from here
-  // on counts as this run's output (a fresh session, so usually 0).
-  const startLen = session.messages.length;
+  try {
+    // A reopened file already carries the link written when it was created.
+    if (childSessionHooks.length > 0 && !options.resumeSessionFile) {
+      sessionManager.appendCustomEntry(SESSION_LINK_CUSTOM_TYPE, buildSubagentSessionLink({
+        parentSessionId: ctx.sessionManager?.getSessionId?.(),
+        parentSessionFile: ctx.sessionManager?.getSessionFile?.(),
+        parentToolCallId: options.parentToolCallId,
+        agentId: options.agentId,
+        parentAgentId: options.parentAgentId,
+        workflowId: options.workflowId,
+        agentType: type,
+        description: options.description,
+      }, options.linkData));
+    }
+
+    // Pin service tier after session construction (streamFunction is live).
+    // Skip silently when the model API cannot honor it (e.g. scheduled fire with a
+    // non-OpenAI model); the Agent tool path validates earlier and errors/warns.
+    const serviceTier = (normalizeOptionalString(options.serviceTier) as ServiceTierInput | undefined) ?? agentConfig?.serviceTier;
+    if (serviceTier && modelSupportsServiceTier(session.model)) {
+      applyServiceTier(session, serviceTier);
+    }
+
+    const baseSessionName = agentConfig?.name ?? type;
+    session.setSessionName(
+      options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName,
+    );
+
+    // Bind extensions so that session_start fires and extensions can initialize
+    // (e.g. loading credentials, setting up state). Tool gating already happened
+    // at session construction via the `tools:` allowlist above — no separate
+    // post-bind filter is needed. All ExtensionBindings fields are optional.
+    await session.bindExtensions({
+      onError: (err) => {
+        options.onToolActivity?.({
+          type: "end",
+          toolName: `extension-error:${err.extensionPath}`,
+        });
+      },
+    });
+
+    // With `allowedToolNames` unset, the registry is scoped by `excludeTools` but
+    // the ACTIVE set still needs managing: pi activates only its four default
+    // built-ins at turn 1, and `ext:` narrowing has no registry-level expression
+    // (we can't deny the name of a tool that hasn't registered yet). Both are
+    // handled below by re-deriving scope from the loader's live extension maps —
+    // `registerTool` writes into those same maps, so late arrivals are judged too.
+    if (!noExtensions) {
+      installExtensionToolScope(session, {
+        loader,
+        toolNames,
+        disallowedSet,
+        extNames,
+        narrowing,
+        mcpToolPatterns: isolated ? undefined : agentConfig?.mcpToolPatterns,
+        readmitToolNames,
+        nestedCallGate,
+        hookToolCanonicalName,
+      });
+    }
+
+    options.onSessionCreated?.(session);
+
+    run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(type, options.maxTurns) });
+    // After the tool scope's first renarrow above: these are the tools the model
+    // is actually offered on its first turn.
+    // A reopened conversation is a continuation, not a spawn run: like a resume,
+    // it may answer a follow-up in text alone.
+    toolUse = options.resumeSessionFile
+      ? { unsubscribe: () => {}, failure: () => undefined as string | undefined }
+      : trackRequiredToolUse(session, type, options.signal);
+
+    collector = collectResponseText(session);
+    cleanupAbort = forwardAbortSignal(session, options.signal);
+
+    // Build the effective prompt: optionally prepend parent context. Only for a
+    // fresh conversation — a reopened one already holds its history, and a live
+    // resume never re-sends the parent's either.
+    if (options.inheritContext && !options.resumeSessionFile) {
+      const parentContext = buildParentContext(ctx);
+      if (parentContext) {
+        effectivePrompt = parentContext + prompt;
+      }
+    }
+
+    // Boundary for the history fallback: only assistant text produced from here
+    // on counts as this run's output (a fresh session, so usually 0).
+    startLen = session.messages.length;
+  } catch (err) {
+    try { run?.unsubscribe(); } catch { /* ignore */ }
+    try { toolUse?.unsubscribe(); } catch { /* ignore */ }
+    try { collector?.unsubscribe(); } catch { /* ignore */ }
+    try { cleanupAbort?.(); } catch { /* ignore */ }
+    try {
+      const runner = session.extensionRunner;
+      if (runner?.hasHandlers?.("session_shutdown")) {
+        await Promise.race([
+          runner.emit({ type: "session_shutdown", reason: "quit" }),
+          new Promise<void>((resolve) => setTimeout(resolve, 3_000).unref()),
+        ]);
+      }
+    } catch { /* ignore */ }
+    try { session.dispose?.(); } catch { /* ignore */ }
+    throw err;
+  }
   let structuredRetried = false;
   try {
     // A signal that fired before this point never calls the listener above, and

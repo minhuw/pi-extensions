@@ -3183,3 +3183,186 @@ describe("AgentManager — reopening released persisted sessions on resume", () 
     expect(await manager.resume(id, "nope")).toBeUndefined();
   });
 });
+
+describe("AgentManager — throwing onStart callback isolation and cleanup", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+    vi.mocked(runAgent).mockReset();
+    vi.mocked(resumeAgent).mockReset();
+  });
+
+  it("startAgent isolates a throwing onStart on immediate background spawn without leaking pool slots", async () => {
+    const onStart = vi.fn(() => {
+      throw new Error("stale extension context");
+    });
+    const onComplete = vi.fn();
+    manager = new AgentManager(onComplete, 1, onStart);
+    resolvedRun();
+
+    const id1 = manager.spawn(mockPi, mockCtx, "worker", "first", {
+      description: "first",
+      isBackground: true,
+    });
+    await manager.awaitStartup(id1);
+    await expect(manager.getRecord(id1)!.promise).resolves.toBe("done");
+
+    expect(onStart).toHaveBeenCalledTimes(1);
+    expect(manager.getRecord(id1)!.status).toBe("completed");
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect((manager as any).runningBackground).toBe(0);
+    expect((manager as any).inFlightRuns.size).toBe(0);
+    expect((manager as any).startups.size).toBe(0);
+
+    // With maxConcurrent = 1, a leaked slot would leave the next spawn stuck queued.
+    let finishSecond!: (r: RunResult) => void;
+    vi.mocked(runAgent).mockImplementationOnce(() => new Promise<RunResult>((resolve) => {
+      finishSecond = resolve;
+    }));
+    const id2 = manager.spawn(mockPi, mockCtx, "worker", "second", {
+      description: "second",
+      isBackground: true,
+    });
+    expect(manager.getRecord(id2)!.status).toBe("running");
+
+    finishSecond({ responseText: "second done", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(id2)!.promise;
+    expect(manager.getRecord(id2)!.status).toBe("completed");
+    expect((manager as any).runningBackground).toBe(0);
+  });
+
+  it("startAgent isolates a throwing onStart on queued drain and foreground spawnAndWait", async () => {
+    const onStart = vi.fn(() => {
+      throw new Error("onStart boom");
+    });
+    manager = new AgentManager(undefined, 1, onStart);
+    manager.setMaxConcurrentForeground(1);
+
+    let finishFirst!: (r: RunResult) => void;
+    vi.mocked(runAgent)
+      .mockImplementationOnce(() => new Promise<RunResult>((resolve) => { finishFirst = resolve; }))
+      .mockResolvedValueOnce({ responseText: "queued done", session: mockSession(), aborted: false, steered: false })
+      .mockResolvedValueOnce({ responseText: "fg done", session: mockSession(), aborted: false, steered: false });
+
+    const id1 = manager.spawn(mockPi, mockCtx, "worker", "first", {
+      description: "first",
+      isBackground: true,
+    });
+    const id2 = manager.spawn(mockPi, mockCtx, "worker", "second", {
+      description: "second",
+      isBackground: true,
+    });
+    expect(manager.getRecord(id2)!.status).toBe("queued");
+
+    finishFirst({ responseText: "first done", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(id1)!.promise;
+    await vi.waitFor(() => expect(manager.getRecord(id2)!.status).toBe("completed"));
+    expect((manager as any).runningBackground).toBe(0);
+
+    const fg = await manager.spawnAndWait(mockPi, mockCtx, "worker", "fg", {
+      description: "fg",
+    });
+    expect(fg.record.status).toBe("completed");
+    expect(fg.record.result).toBe("fg done");
+    expect((manager as any).runningForeground).toBe(0);
+    expect((manager as any).inFlightRuns.size).toBe(0);
+    expect(onStart).toHaveBeenCalledTimes(3);
+  });
+
+  it("startResume isolates a throwing onStart on immediate background resume without leaking state", async () => {
+    let throwOnStart = false;
+    const onStart = vi.fn(() => {
+      if (throwOnStart) throw new Error("stale resume listener");
+    });
+    const onComplete = vi.fn();
+    manager = new AgentManager(onComplete, 1, onStart);
+
+    const session = mockSession();
+    vi.mocked(runAgent).mockResolvedValueOnce({
+      responseText: "initial",
+      session,
+      aborted: false,
+      steered: false,
+    });
+    const { id } = await manager.spawnAndWait(mockPi, mockCtx, "worker", "init", {
+      description: "resumable",
+    });
+    onComplete.mockClear();
+    throwOnStart = true;
+
+    let finishResume!: (r: { text: string }) => void;
+    vi.mocked(resumeAgent).mockImplementationOnce(() => new Promise((resolve) => {
+      finishResume = resolve as any;
+    }));
+    const record = await manager.resume(id, "continue", undefined, { isBackground: true });
+    expect(record?.status).toBe("running");
+    expect(record?.promise).toBeDefined();
+    expect((manager as any).runningBackground).toBe(1);
+
+    finishResume({ text: "resumed ok" });
+    await record!.promise;
+    expect(record?.status).toBe("completed");
+    expect(record?.result).toBe("resumed ok");
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect((manager as any).runningBackground).toBe(0);
+    expect((manager as any).inFlightRuns.size).toBe(0);
+
+    // Slot was freed: another background spawn starts immediately instead of queueing.
+    let finishNext!: (r: RunResult) => void;
+    vi.mocked(runAgent).mockImplementationOnce(() => new Promise<RunResult>((resolve) => {
+      finishNext = resolve;
+    }));
+    const nextId = manager.spawn(mockPi, mockCtx, "worker", "next", {
+      description: "next",
+      isBackground: true,
+    });
+    expect(manager.getRecord(nextId)!.status).toBe("running");
+    finishNext({ responseText: "after resume", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(nextId)!.promise;
+    expect((manager as any).runningBackground).toBe(0);
+  });
+
+  it("startResume isolates a throwing onStart when drained from the background queue", async () => {
+    let throwOnStart = false;
+    const onStart = vi.fn(() => {
+      if (throwOnStart) throw new Error("queued resume onStart boom");
+    });
+    const onComplete = vi.fn();
+    manager = new AgentManager(onComplete, 1, onStart);
+
+    const session = mockSession();
+    vi.mocked(runAgent).mockResolvedValueOnce({
+      responseText: "initial",
+      session,
+      aborted: false,
+      steered: false,
+    });
+    const { id } = await manager.spawnAndWait(mockPi, mockCtx, "worker", "init", {
+      description: "resumable",
+    });
+
+    let finishBlocker!: (r: RunResult) => void;
+    vi.mocked(runAgent).mockImplementationOnce(() => new Promise<RunResult>((resolve) => {
+      finishBlocker = resolve;
+    }));
+    const blockerId = manager.spawn(mockPi, mockCtx, "worker", "blocker", {
+      description: "blocker",
+      isBackground: true,
+    });
+    onComplete.mockClear();
+
+    vi.mocked(resumeAgent).mockResolvedValueOnce({ text: "queued resume ok" } as any);
+    const queued = await manager.resume(id, "later", undefined, { isBackground: true });
+    expect(queued?.status).toBe("queued");
+
+    throwOnStart = true;
+    finishBlocker({ responseText: "blocker done", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(blockerId)!.promise;
+
+    await vi.waitFor(() => expect(manager.getRecord(id)!.status).toBe("completed"));
+    expect(manager.getRecord(id)!.result).toBe("queued resume ok");
+    expect((manager as any).runningBackground).toBe(0);
+    expect((manager as any).inFlightRuns.size).toBe(0);
+  });
+});

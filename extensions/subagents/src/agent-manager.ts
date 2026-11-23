@@ -963,7 +963,7 @@ export class AgentManager {
       }
     }
 
-    this.onStart?.(record);
+    try { this.onStart?.(record); } catch { /* ignore start side-effect errors */ }
 
     this.inFlightRuns.add(id);
     const promise = runAgent(ctx, type, prompt, {
@@ -1750,7 +1750,7 @@ export class AgentManager {
     record.startedAt = Date.now();
     record.runToolUses = 0;
     if (occupiesPoolSlot(record)) this.runningBackground++;
-    this.onStart?.(record);
+    try { this.onStart?.(record); } catch { /* ignore start side-effect errors */ }
 
     // Fresh abort controller so /agents stop and steering target THIS run rather
     // than the previous one's settled controller.
