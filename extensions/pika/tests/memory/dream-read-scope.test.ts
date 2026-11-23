@@ -3,7 +3,7 @@ import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import { dreamSessionDir, inProjectPikaDir, outsideProject, READ_TOOLS } from "../../memory/dream/child.ts";
+import { dreamSessionDir, grepGlobTargetsPikaDir, inProjectPikaDir, outsideProject, READ_TOOLS } from "../../memory/dream/child.ts";
 import { waitFor } from "../support/runtime.ts";
 import { releases, useDreamEnv } from "./support/dream.ts";
 
@@ -148,4 +148,115 @@ it("compares real paths: a working directory reached through a symlink holds its
 	// A name that only starts with two dots is in the project.
 	expect(outsideProject("/work/p", "..cache/x")).toBe(false);
 	expect(inProjectPikaDir("/work/p", "file:///work/p/.pi/pika/dreams/x.jsonl")).toBe(true);
+});
+
+it("blocks grep globs that target, negate, or override .pi/pika/ while allowing normal project grep queries", async () => {
+	const projectSecret = "pika-project-config-secret";
+	await writeFile(join(env.workspace.cwd, ".pi", "pika", "project.json"), `{"project":"${projectSecret}"}\n`);
+	await mkdir(join(env.workspace.cwd, ".pi", "other"), { recursive: true });
+	await writeFile(join(env.workspace.cwd, ".pi", "other", "note.txt"), "other pi note\n");
+
+	const blocked: Record<string, { pattern: string; path?: string; glob: string }> = {
+		pikaTree: { pattern: ".", glob: ".pi/pika/**" },
+		deepPika: { pattern: ".", glob: "**/.pi/pika/**" },
+		piTree: { pattern: ".", glob: ".pi/**" },
+		projectJson: { pattern: ".", glob: ".pi/pika/project.json" },
+		negateGitignore: { pattern: ".", glob: "!.pi/pika/.gitignore" },
+		negatePika: { pattern: ".", glob: "!.pi/pika/**" },
+		dotSlash: { pattern: ".", glob: "./.pi/pika/**" },
+		backslash: { pattern: ".", glob: ".pi\\pika\\**" },
+		braceSegment: { pattern: ".", glob: ".pi/{pika,other}/**" },
+		braceSlash: { pattern: ".", glob: "{.pi/pika/**,src/**}" },
+		wildcardQ: { pattern: ".", glob: ".pi/p?ka/**" },
+		charClass: { pattern: ".", glob: ".pi/[p]ika/**" },
+		anyPika: { pattern: ".", glob: "**/pika/**" },
+		starAll: { pattern: ".", glob: "*" },
+		globStarAll: { pattern: ".", glob: "**/*" },
+		dotSlashStar: { pattern: ".", glob: "./*" },
+		dotPath: { pattern: ".", path: ".", glob: ".pi/pika/**" },
+		fromPiTree: { pattern: ".", path: ".pi", glob: "pika/**" },
+		fromPiNegate: { pattern: ".", path: ".pi", glob: "!pika/.gitignore" },
+		fromPiFile: { pattern: ".", path: ".pi", glob: "pika/project.json" },
+	};
+	const allowed: Record<string, { pattern: string; path?: string; glob: string; expectAnswer?: boolean }> = {
+		tsExt: { pattern: "answer", glob: "*.ts", expectAnswer: true },
+		deepTs: { pattern: "answer", glob: "**/*.ts", expectAnswer: true },
+		srcTree: { pattern: "answer", glob: "src/**", expectAnswer: true },
+		negateNodeModules: { pattern: "answer", glob: "!node_modules/**", expectAnswer: true },
+		negateDeepNodeModules: { pattern: "answer", glob: "!**/node_modules/**", expectAnswer: true },
+		otherPikaPath: { pattern: "answer", glob: "extensions/pika/**" },
+		outsideScope: { pattern: "answer", path: "src", glob: ".pi/pika/**" },
+		piOtherDir: { pattern: "other", path: ".pi", glob: "other/**" },
+	};
+
+	const byId = await runDreamCalls([
+		...Object.entries(blocked).map(([id, input]) => fauxToolCall("grep", input, { id: `blocked-${id}` })),
+		...Object.entries(allowed).map(([id, { expectAnswer: _, ...input }]) => fauxToolCall("grep", input, { id: `allowed-${id}` })),
+	]);
+
+	for (const id of Object.keys(blocked)) {
+		const result = byId[`blocked-${id}`]!;
+		expect(result, id).toMatchObject({ isError: true });
+		expect(result.text, id).toContain(PIKA_DIR);
+		expect(result.text, id).not.toContain(TRANSCRIPT);
+		expect(result.text, id).not.toContain(projectSecret);
+	}
+	for (const [id, spec] of Object.entries(allowed)) {
+		const result = byId[`allowed-${id}`]!;
+		expect(result.text, id).not.toContain(OUTSIDE);
+		expect(result.text, id).not.toContain(PIKA_DIR);
+		expect(result.text, id).not.toContain(TRANSCRIPT);
+		expect(result.text, id).not.toContain(projectSecret);
+		if (spec.expectAnswer && !result.isError) {
+			expect(result.text, id).toContain("export const answer = 42;");
+		}
+	}
+});
+
+it("classifies grep globs against .pi/pika/ across search roots, symlinks, escapes, braces, and wildcards", async () => {
+	const cwd = "/work/p";
+	for (const glob of [
+		".pi/pika/**", "./.pi/pika/**", "/.pi/pika/**", ".pi/pika/*", ".pi/pika", ".pi/pika/",
+		".pi/pika/project.json", ".pi/pika/dreams/*.jsonl", "src/../.pi/pika/**",
+		".pi\\pika\\**", ".\\.pi\\pika\\**", "\\.pi/pika/**", ".pi/p\\ika/**", "!.pi\\pika\\.gitignore",
+		".pi/**", "**/.pi/**", "**/.pi/pika/**", "**/pika/**", "*/pika/**", ".pi/*/**", ".pi/*", ".pi/",
+		".p*/**", ".*/**", ".pi/p?ka/**", ".pi/[p]ika/**", ".pi/[!a]ika/**", ".p**/**", "**.pi/pika/**",
+		".pi/{pika,other}/**", ".pi/{pika}/**", "{.pi/pika/**,src/**}", "{.pi/pika}/**", ".pi/p{i,a}ka/**", ".pi/p{i,}ka/**",
+		"!.pi/pika/.gitignore", "!.pi/pika/**", "!./.pi/pika/.gitignore", "!**/.pi/pika/**", "!.pi/**",
+		"*", "**", "**/*", "./*", "*/**", "*/*/*", "/**",
+	]) {
+		expect(grepGlobTargetsPikaDir(cwd, undefined, glob), `root: ${glob}`).toBe(true);
+		expect(grepGlobTargetsPikaDir(cwd, ".", glob), `dot: ${glob}`).toBe(true);
+	}
+
+	for (const glob of [
+		"*.ts", "*.{ts,tsx}", "*.json", "*.jsonl", "**/*.ts", "**/*.{ts,tsx,js}", "**/*.json",
+		"src/**", "src/**/*.ts", "!node_modules/**", "!**/node_modules/**", "!.git/**", "!*.test.ts",
+		"extensions/pika/**", "README.md", "*pika*", ".pi/other/**", ".pi/pikachu/**", ".pi/settings.json",
+		"api/**", "/*", "*/*", "./*.ts", "", "foo[bar", "foo{bar", "[z-a]",
+	]) {
+		expect(grepGlobTargetsPikaDir(cwd, undefined, glob), `allow root: ${glob}`).toBe(false);
+	}
+
+	for (const glob of ["pika/**", "./pika/**", "/pika/**", "pika", "pika/project.json", "!pika/.gitignore", "!pika/**", "p?ka/**", "{pika,other}/**", "**/pika/**", "*", "**/*"]) {
+		expect(grepGlobTargetsPikaDir(cwd, ".pi", glob), `from .pi: ${glob}`).toBe(true);
+	}
+	for (const glob of ["other/**", "*.md", "settings.json", "**/*.ts", "!other/**"]) {
+		expect(grepGlobTargetsPikaDir(cwd, ".pi", glob), `allow from .pi: ${glob}`).toBe(false);
+	}
+
+	// Search roots that do not cover .pi/pika/ are unaffected.
+	expect(grepGlobTargetsPikaDir(cwd, "src", ".pi/pika/**")).toBe(false);
+	expect(grepGlobTargetsPikaDir(cwd, "README.md", "*")).toBe(false);
+
+	// Symlinked cwd and symlinked .pi still resolve the relative target to .pi/pika/.
+	const actual = realpathSync(env.workspace.cwd);
+	const alias = join(env.workspace.root, "alias-cwd");
+	await symlink(actual, alias);
+	const piLink = join(actual, "pi-link");
+	await symlink(join(actual, ".pi"), piLink);
+	expect(grepGlobTargetsPikaDir(alias, actual, ".pi/pika/**")).toBe(true);
+	expect(grepGlobTargetsPikaDir(actual, join(alias, ".pi"), "pika/**")).toBe(true);
+	expect(grepGlobTargetsPikaDir(actual, "pi-link", "pika/**")).toBe(true);
+	expect(grepGlobTargetsPikaDir(actual, "pi-link", "other/**")).toBe(false);
 });

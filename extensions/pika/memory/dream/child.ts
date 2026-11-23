@@ -75,20 +75,256 @@ export function outsideProject(cwd: string, path: string, tool?: string): boolea
 	return target === undefined || !within(real(cwd), real(target));
 }
 
+const MAX_BRACE_BRANCHES = 256;
+const CATCH_ALL_PROBES = ["", ".a", "b", "foo.bar", "0_9"];
+const REGEX_SPECIAL = /[.*+?^${}()|[\]\\]/g;
+const escapeRegex = (s: string) => s.replace(REGEX_SPECIAL, "\\$&");
+
+/** Given `s[start] === "["`, returns the index of the closing `"]"`, or `start` if unclosed. */
+function skipCharClass(s: string, start: number, escapes: boolean): number {
+	let i = start + 1;
+	if (i < s.length && (s[i] === "!" || s[i] === "^")) i++;
+	if (i < s.length && s[i] === "]") i++;
+	for (; i < s.length; i++) {
+		if (escapes && s[i] === "\\") { i++; continue; }
+		if (s[i] === "]") return i;
+	}
+	return start;
+}
+
+/** Given `s[start] === "{"`, returns its matching `"}"`, top-level alternatives, and whether the body contains `"/"`. */
+function findBalancedBrace(s: string, start: number, escapes: boolean): { end: number; alts: string[]; hasSlash: boolean } | undefined {
+	const alts: string[] = [];
+	let depth = 1;
+	let partStart = start + 1;
+	let hasSlash = false;
+	for (let j = start + 1; j < s.length; j++) {
+		const c = s[j]!;
+		if (escapes && c === "\\") { j++; continue; }
+		if (c === "[") { j = skipCharClass(s, j, escapes); continue; }
+		if (c === "{") { depth++; continue; }
+		if (c === "}") {
+			depth--;
+			if (depth === 0) {
+				alts.push(s.slice(partStart, j));
+				return { end: j, alts, hasSlash };
+			}
+			continue;
+		}
+		if (c === "/") hasSlash = true;
+		if (c === "," && depth === 1) {
+			alts.push(s.slice(partStart, j));
+			partStart = j + 1;
+		}
+	}
+	return undefined;
+}
+
+/** Finds the first balanced `{...}` group in `s` whose body contains `"/"`. */
+function findSlashBrace(s: string, escapes: boolean): { start: number; end: number; alts: string[] } | undefined {
+	for (let i = 0; i < s.length; i++) {
+		const ch = s[i]!;
+		if (escapes && ch === "\\") { i++; continue; }
+		if (ch === "[") { i = skipCharClass(s, i, escapes); continue; }
+		if (ch !== "{") continue;
+		const group = findBalancedBrace(s, i, escapes);
+		if (group?.hasSlash) return { start: i, end: group.end, alts: group.alts };
+	}
+	return undefined;
+}
+
+/**
+ * Expands `{...}` groups containing `"/"` so each branch splits cleanly into path segments (intra-segment braces stay
+ * intact for regex compilation). Returns `undefined` if expansion exceeds `MAX_BRACE_BRANCHES`.
+ */
+function expandSlashBraces(pattern: string, escapes: boolean): string[] | undefined {
+	let branches = [pattern];
+	for (;;) {
+		let expanded = false;
+		const next: string[] = [];
+		for (const branch of branches) {
+			const group = findSlashBrace(branch, escapes);
+			if (!group) { next.push(branch); continue; }
+			expanded = true;
+			const prefix = branch.slice(0, group.start);
+			const suffix = branch.slice(group.end + 1);
+			for (const alt of group.alts) {
+				next.push(`${prefix}${alt}${suffix}`);
+				if (next.length > MAX_BRACE_BRANCHES) return undefined;
+			}
+		}
+		branches = next;
+		if (!expanded) return branches;
+	}
+}
+
+function compileCharClass(inner: string, escapes: boolean): string {
+	let out = "[";
+	let i = 0;
+	if (inner[0] === "!" || inner[0] === "^") { out += "^"; i = 1; }
+	for (; i < inner.length; i++) {
+		const ch = inner[i]!;
+		if (escapes && ch === "\\" && i + 1 < inner.length) {
+			const next = inner[++i]!;
+			out += next === "\\" || next === "]" || next === "[" || next === "-" || next === "^" ? `\\${next}` : next;
+			continue;
+		}
+		if (ch === "\\" || ch === "]" || ch === "[" || (ch === "^" && out === "[")) out += `\\${ch}`;
+		else out += ch;
+	}
+	return `${out}]`;
+}
+
+function compileSegmentBody(s: string, escapes: boolean): string {
+	let out = "";
+	for (let i = 0; i < s.length; i++) {
+		const ch = s[i]!;
+		if (escapes && ch === "\\" && i + 1 < s.length) { out += escapeRegex(s[++i]!); continue; }
+		if (ch === "*") { while (s[i + 1] === "*") i++; out += "[^/]*"; continue; }
+		if (ch === "?") { out += "[^/]"; continue; }
+		if (ch === "[") {
+			const end = skipCharClass(s, i, escapes);
+			if (end > i) { out += compileCharClass(s.slice(i + 1, end), escapes); i = end; continue; }
+			out += "\\[";
+			continue;
+		}
+		if (ch === "{") {
+			const group = findBalancedBrace(s, i, escapes);
+			if (group) {
+				out += `(?:${group.alts.map((alt) => compileSegmentBody(alt, escapes)).join("|")})`;
+				i = group.end;
+				continue;
+			}
+			out += "\\{";
+			continue;
+		}
+		out += escapeRegex(ch);
+	}
+	return out;
+}
+
+interface CompiledSegment {
+	isDoubleStar: boolean;
+	isCatchAll: boolean;
+	matches(name: string): boolean;
+}
+
+function compileSegment(raw: string, escapes: boolean): CompiledSegment {
+	if (raw === "**") return { isDoubleStar: true, isCatchAll: true, matches: () => true };
+	let re: RegExp;
+	try {
+		re = new RegExp(`^${compileSegmentBody(raw, escapes)}$`, process.platform === "win32" ? "i" : "");
+	} catch {
+		return { isDoubleStar: false, isCatchAll: false, matches: () => false };
+	}
+	const matches = (name: string) => re.test(name);
+	return { isDoubleStar: false, isCatchAll: CATCH_ALL_PROBES.every(matches), matches };
+}
+
+function segmentsTargetPika(segments: CompiledSegment[], hasSlash: boolean, trailingSlash: boolean, target: string[]): boolean {
+	const k = segments.length;
+	const m = target.length;
+	if (k === 0) return false;
+	if (m === 0) return true;
+	if (!hasSlash) {
+		const seg = segments[0]!;
+		return seg.isCatchAll || (m === 1 && seg.matches(target[0]!));
+	}
+	const allCatchAll = segments.every((seg) => seg.isCatchAll);
+	const memo = new Map<number, boolean>();
+	const canMatch = (si: number, ti: number, enteredTarget: boolean, matchedSpecificT: boolean): boolean => {
+		if (si === k) {
+			if (ti === m) return matchedSpecificT || (enteredTarget && allCatchAll);
+			return ti > 0 && trailingSlash && matchedSpecificT;
+		}
+		const key = (((si * (m + 1) + ti) << 2) | (enteredTarget ? 2 : 0) | (matchedSpecificT ? 1 : 0));
+		const cached = memo.get(key);
+		if (cached !== undefined) return cached;
+		const seg = segments[si]!;
+		let result = false;
+		if (seg.isDoubleStar) {
+			result = canMatch(si + 1, ti, enteredTarget, matchedSpecificT)
+				|| (ti < m ? canMatch(si, ti + 1, enteredTarget, matchedSpecificT) : canMatch(si + 1, m, true, matchedSpecificT));
+		} else if (ti < m) {
+			result = seg.matches(target[ti]!) && canMatch(si + 1, ti + 1, enteredTarget, matchedSpecificT || !seg.isCatchAll);
+		} else {
+			result = canMatch(si + 1, m, true, matchedSpecificT);
+		}
+		memo.set(key, result);
+		return result;
+	};
+	return canMatch(0, 0, false, false);
+}
+
+/** Relative slash-separated path from `grep`'s resolved search root to `<cwd>/.pi/pika/`, or undefined when the root cannot reach it. */
+function pikaRelativeToSearchRoot(cwd: string, searchPath?: string): string | undefined {
+	const root = searchPath === undefined || searchPath === "" ? resolve(cwd) : toolPath(cwd, searchPath, "grep");
+	if (root === undefined) return undefined;
+	const dir = projectPikaDir(cwd);
+	if (within(dir, root) || within(real(dir), real(root))) return "";
+	const rel = within(root, dir) ? relative(root, dir) : within(real(root), real(dir)) ? relative(real(root), real(dir)) : undefined;
+	return rel === undefined ? undefined : rel.split(sep).join("/");
+}
+
+/**
+ * Whether a `grep` call rooted at `searchPath` (or `cwd` when omitted) can reach `<cwd>/.pi/pika/` and its `glob`
+ * targets, negates, or overrides `.pi/pika/` (bypassing `.pi/pika/.gitignore`).
+ */
+export function grepGlobTargetsPikaDir(cwd: string, searchPath: string | undefined, glob: string): boolean {
+	if (!glob) return false;
+	const rel = pikaRelativeToSearchRoot(cwd, searchPath);
+	if (rel === undefined) return false;
+	const target = rel === "" ? [] : rel.split("/");
+	const body = glob.replace(/^!+/, "");
+	if (!body) return false;
+	const candidates = body.includes("\\")
+		? [{ pattern: body, escapes: true }, { pattern: body.replaceAll("\\", "/"), escapes: false }]
+		: [{ pattern: body, escapes: true }];
+	for (const candidate of candidates) {
+		const branches = expandSlashBraces(candidate.pattern, candidate.escapes);
+		if (branches === undefined) return true;
+		for (const branch of branches) {
+			// Match Pi's grep tool, which strips leading `./` before passing `--glob` to ripgrep.
+			const trimmed = branch.replace(/^!+/, "").replace(/^(?:\.\/+)+/, "");
+			const hasSlash = trimmed.includes("/");
+			const trailingSlash = trimmed.endsWith("/");
+			const rawSegments: string[] = [];
+			for (const seg of trimmed.split("/")) {
+				if (seg === "" || seg === ".") continue;
+				if (seg === ".." && rawSegments.length > 0 && rawSegments.at(-1) !== "**" && rawSegments.at(-1) !== "..") {
+					rawSegments.pop();
+					continue;
+				}
+				if (seg === "**" && rawSegments.at(-1) === "**") continue;
+				rawSegments.push(seg);
+			}
+			const compiled = rawSegments.map((seg) => compileSegment(seg, candidate.escapes));
+			if (segmentsTargetPika(compiled, hasSlash, trailingSlash, target)) return true;
+		}
+	}
+	return false;
+}
+
 /**
  * Keeps the dream's read tools inside `cwd`, so it reads the project and nothing else the user can, and out of
- * `<cwd>/.pi/pika/`, which holds earlier dreams' own sessions; `grep` and `find` skip it by its `.gitignore`.
+ * `<cwd>/.pi/pika/`, which holds earlier dreams' own sessions; `grep` and `find` skip it by its `.gitignore`,
+ * and `grep` globs that target, negate, or override `.pi/pika/` are blocked too.
  */
 const pikaDirGuard = (cwd: string): InlineExtension => ({
 	name: "pika-dream-guard",
 	factory: (pi) => {
 		pi.on("tool_call", (event) => {
 			if (!READ_TOOLS.includes(event.toolName)) return undefined;
-			const path = (event.input as { path?: unknown }).path;
-			if (typeof path !== "string") return undefined;
-			if (outsideProject(cwd, path, event.toolName)) return { block: true, reason: "A dream reads only inside the project: this path leads outside its working directory." };
-			if (!inProjectPikaDir(cwd, path, event.toolName)) return undefined;
-			return { block: true, reason: ".pi/pika/ holds earlier dreams' own sessions, not the user's: a dream does not read it." };
+			const input = event.input as { path?: unknown; glob?: unknown };
+			const path = input.path;
+			if (typeof path === "string") {
+				if (outsideProject(cwd, path, event.toolName)) return { block: true, reason: "A dream reads only inside the project: this path leads outside its working directory." };
+				if (inProjectPikaDir(cwd, path, event.toolName)) return { block: true, reason: ".pi/pika/ holds earlier dreams' own sessions, not the user's: a dream does not read it." };
+			}
+			if (event.toolName === "grep" && typeof input.glob === "string" && grepGlobTargetsPikaDir(cwd, typeof path === "string" ? path : undefined, input.glob)) {
+				return { block: true, reason: ".pi/pika/ holds earlier dreams' own sessions, not the user's: a dream does not read it." };
+			}
+			return undefined;
 		});
 	},
 });
