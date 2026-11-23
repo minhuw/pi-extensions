@@ -1,5 +1,5 @@
 import { fireEvent, render } from "@testing-library/react";
-import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NodeChannel } from "../src/nodes/channel";
 import { changeMode, ChangesStore, diffSpec, groupChanges } from "../src/nodes/changes";
@@ -282,7 +282,8 @@ function ChangesHarness({ store, onStore }: { store: EditorStore; onStore?: (cha
 	}, [changes, onStore]);
 	const view = useChanges(changes);
 	const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
-	const active = snapshot.tabs.find((tab) => tab.key === snapshot.active);
+	const [activeKey, setActiveKey] = useState<string | undefined>();
+	const active = snapshot.tabs.find((tab) => tab.key === activeKey);
 	return (
 		<>
 			<ChangesPanel
@@ -294,8 +295,13 @@ function ChangesHarness({ store, onStore }: { store: EditorStore; onStore?: (cha
 				onOpen={(change) => {
 					const mode = changeMode(change);
 					if (change.submodule) return;
-					if (mode) void store.openDiff(change.path, mode, change.from);
-					else void store.open(change.path);
+					if (mode) {
+						setActiveKey(`diff:${mode}:${change.path}`);
+						void store.openDiff(change.path, mode, change.from);
+					} else {
+						setActiveKey(`file:${change.path}`);
+						void store.open(change.path);
+					}
 				}}
 				onRefresh={() => void changes.refresh()}
 			/>
@@ -352,11 +358,17 @@ describe("the Changes list", () => {
 		expect(container.querySelector("[data-change='/repo/src/a.ts']")!.getAttribute("aria-current")).toBe("true");
 
 		fireEvent.click(container.querySelector("[data-change='/repo/notes.md']")!);
-		await until(() => store.getSnapshot().active === "diff:untracked:/repo/notes.md", "the new file's diff");
+		await until(() => store.tab("diff:untracked:/repo/notes.md") !== undefined, "the new file's diff");
 		await until(() => container.querySelector("[data-diff-labels]")?.textContent === "Untracked: every line is new", "its header");
 
 		fireEvent.click(container.querySelector("[data-change='/repo/clash.ts']")!);
-		await until(() => store.getSnapshot().active === "file:/repo/clash.ts", "the conflicted file");
+		await until(() => store.tab("file:/repo/clash.ts") !== undefined, "the conflicted file");
+		expect(store.getSnapshot().tabs.map((tab) => tab.key)).toEqual([
+			"diff:worktree:/repo/src/a.ts",
+			"diff:untracked:/repo/notes.md",
+			"file:/repo/clash.ts",
+		]);
+		expect(container.querySelector("[data-change='/repo/clash.ts']")!.getAttribute("aria-current")).toBe("true");
 		store.dispose();
 	});
 

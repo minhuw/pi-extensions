@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NodeChannel } from "../src/nodes/channel";
-import { EditorStore, isDirty, paneRequest, type FileTab } from "../src/nodes/editor";
+import { EditorStore, isDirty, type FileTab } from "../src/nodes/editor";
 import { NodeFiles } from "../src/nodes/files";
 import { languageFor } from "../src/nodes/language";
 import { LAYOUT_DEFAULTS, LAYOUT_KEY, loadLayout, saveLayout } from "../src/nodes/layout";
@@ -19,11 +19,10 @@ let files: NodeFiles;
 const disposers: (() => void)[] = [];
 
 /** A ready, pinned channel to a fake node whose files live in `fs`. */
-let channel: NodeChannel;
 async function connect(): Promise<NodeFiles> {
 	const identity = await clientIdentity(new MemoryKeyStore());
 	node.allowed.add(identity.fingerprint);
-	channel = new NodeChannel(node.route(), { identity, pinned: node.identity.fingerprint });
+	const channel = new NodeChannel(node.route(), { identity, pinned: node.identity.fingerprint });
 	await channel.start();
 	await settle();
 	expect(channel.state.kind).toBe("ready");
@@ -128,11 +127,16 @@ describe("editor tabs", () => {
 		await store.open("/repo/big.log");
 		await store.open("/repo/gone.txt");
 		expect(store.getSnapshot().tabs.map((tab) => (tab.kind === "file" ? tab.body.kind : tab.kind))).toEqual(["text", "binary", "too_large", "missing"]);
-		expect(store.getSnapshot().active).toBe("file:/repo/gone.txt");
+		expect(store.getSnapshot().tabs.map((tab) => tab.key)).toEqual([
+			"file:/repo/a.ts",
+			"file:/repo/logo.png",
+			"file:/repo/big.log",
+			"file:/repo/gone.txt",
+		]);
 		await settle();
 		expect(fileTab(store, "/repo/a.ts").watched).toBe(true);
 		store.close("file:/repo/gone.txt");
-		expect(store.getSnapshot().active).toBe("file:/repo/big.log");
+		expect(store.getSnapshot().tabs.map((tab) => tab.key)).toEqual(["file:/repo/a.ts", "file:/repo/logo.png", "file:/repo/big.log"]);
 		store.dispose();
 	});
 
@@ -297,9 +301,14 @@ describe("editor tabs", () => {
 		fs.put("/repo/new.ts", "brand new");
 		const store = new EditorStore();
 		store.setFiles(files);
-		await store.openDiff("/repo/a.ts", false);
-		await store.openDiff("/repo/a.ts", true);
-		await store.openDiff("/repo/new.ts", false);
+		await store.openDiff("/repo/a.ts", "worktree");
+		await store.openDiff("/repo/a.ts", "staged");
+		await store.openDiff("/repo/new.ts", "worktree");
+		expect(store.getSnapshot().tabs.map((tab) => tab.key)).toEqual([
+			"diff:worktree:/repo/a.ts",
+			"diff:staged:/repo/a.ts",
+			"diff:worktree:/repo/new.ts",
+		]);
 		const diffs = store.getSnapshot().tabs.map((tab) => tab.kind === "diff" && [tab.labels.join(" → "), tab.original, tab.modified]);
 		expect(diffs).toEqual([
 			["Index → Working tree", "staged", "working"],
@@ -312,43 +321,20 @@ describe("editor tabs", () => {
 		expect(store.tab("diff:worktree:/repo/a.ts")).toMatchObject({ status: "failed", error: expect.stringMatching(/update it/) });
 		store.dispose();
 	});
-});
 
-describe("the bridge's requests", () => {
-	it("opens pane.open in a tab revealing its line, and pane.diff against the index or HEAD", async () => {
+	it("reveals a requested line and column, and bumps the reveal serial when reopened at the same place", async () => {
 		fs.put("/repo/src/a.ts", "one\ntwo\nthree\n");
-		fs.index.set("/repo/src/a.ts", "one\n");
-		fs.head.set("/repo/src/a.ts", "zero\n");
 		const store = new EditorStore();
 		store.setFiles(files);
-		// As the page wires it: every event from the node's channel goes through paneRequest.
-		const requests: Promise<void>[] = [];
-		channel.onEvent((event) => {
-			const request = paneRequest(store, event);
-			if (request) requests.push(request);
-		});
-		await node.send({ type: "pane.open", terminalId: "t1", path: "/repo/src/a.ts", line: 3, column: 2 });
-		await settle();
-		await Promise.all(requests);
-		expect(store.getSnapshot().active).toBe("file:/repo/src/a.ts");
+		await store.open("/repo/src/a.ts", { line: 3, column: 2 });
 		const first = fileTab(store, "/repo/src/a.ts");
 		expect(first.body).toMatchObject({ kind: "text", text: "one\ntwo\nthree\n" });
 		expect(first.reveal).toMatchObject({ line: 3, column: 2 });
 
 		// Asked again for the same place: the same tab, revealed again.
-		await node.send({ type: "pane.open", terminalId: "t1", path: "/repo/src/a.ts", line: 3, column: 2 });
-		await settle();
+		await store.open("/repo/src/a.ts", { line: 3, column: 2 });
 		expect(store.getSnapshot().tabs).toHaveLength(1);
 		expect(fileTab(store, "/repo/src/a.ts").reveal!.serial).toBeGreaterThan(first.reveal!.serial);
-
-		await node.send({ type: "pane.diff", terminalId: "t1", path: "/repo/src/a.ts", staged: false });
-		await node.send({ type: "pane.diff", terminalId: "t1", path: "/repo/src/a.ts", staged: true });
-		await settle();
-		await Promise.all(requests);
-		expect(store.getSnapshot().active).toBe("diff:staged:/repo/src/a.ts");
-		expect(store.tab("diff:worktree:/repo/src/a.ts")).toMatchObject({ status: "ready", original: "one\n", modified: "one\ntwo\nthree\n" });
-		expect(store.tab("diff:staged:/repo/src/a.ts")).toMatchObject({ status: "ready", original: "zero\n", modified: "one\n" });
-		expect(node.received.filter((message) => message.type === "fs.gitShow").map((message) => "ref" in message && message.ref)).toEqual(["index", "HEAD", "index"]);
 		store.dispose();
 	});
 });

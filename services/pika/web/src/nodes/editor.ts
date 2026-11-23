@@ -1,6 +1,6 @@
 import { NodeRequestError } from "./channel";
 import { diffSpec, type DiffMode, type DiffSource } from "./changes";
-import type { Expected, NodeEvent, Stat } from "./contract";
+import type { Expected, Stat } from "./contract";
 import { baseName, decodeText, type NodeFiles } from "./files";
 
 /**
@@ -55,8 +55,6 @@ export interface DiffTab {
 	path: string;
 	name: string;
 	mode: DiffMode;
-	/** `mode === "staged"`. */
-	staged: boolean;
 	/** A staged rename's source: `HEAD`'s side is read there. */
 	from?: string;
 	status: "loading" | "ready" | "failed";
@@ -72,7 +70,6 @@ export type EditorTab = FileTab | DiffTab;
 
 export interface EditorSnapshot {
 	tabs: readonly EditorTab[];
-	active?: string;
 }
 
 export type SaveResult = "saved" | "conflict" | "failed" | "skipped";
@@ -111,7 +108,6 @@ export interface EditorStoreOptions {
 export class EditorStore {
 	#files: NodeFiles | undefined;
 	#tabs: EditorTab[] = [];
-	#active: string | undefined;
 	#watches = new Map<string, () => void>();
 	#echo = new Map<string, Echo>();
 	#serial = 0;
@@ -166,15 +162,13 @@ export class EditorStore {
 		}
 	}
 
-	/** Opens `path` in a tab, or shows its tab, and reveals `at` when given. */
+	/** Opens `path` in a tab, and reveals `at` when given. */
 	async open(path: string, at?: { line?: number; column?: number }): Promise<void> {
 		const key = fileKey(path);
 		const reveal = at?.line ? { line: at.line, column: at.column ?? 1, serial: ++this.#serial } : undefined;
 		const existing = this.tab(key);
-		this.#active = key;
 		if (existing) {
 			if (reveal) this.#replace(key, { reveal });
-			else this.#emit();
 			return;
 		}
 		this.#tabs = [...this.#tabs, { kind: "file", key, path, name: baseName(path), body: { kind: "loading" }, saving: false, compare: false, watched: false, ...(reveal ? { reveal } : {}) }];
@@ -184,20 +178,18 @@ export class EditorStore {
 
 	/**
 	 * Opens a diff of `path` (`diffSpec`): the index against the working file, `HEAD` (at `from`, a staged rename's
-	 * source) against the index when staged, or nothing against a new file. `true` and `false` are pane.diff's `staged`.
+	 * source) against the index when staged, or nothing against a new file.
 	 */
-	async openDiff(path: string, mode: DiffMode | boolean, from?: string): Promise<void> {
-		const diffMode: DiffMode = mode === true ? "staged" : mode === false ? "worktree" : mode;
-		const key = diffKey(path, diffMode);
-		this.#active = key;
+	async openDiff(path: string, mode: DiffMode, from?: string): Promise<void> {
+		const key = diffKey(path, mode);
 		const existing = this.tab(key);
 		if (!existing) {
-			const { labels } = diffSpec(diffMode, path, from);
-			const tab: DiffTab = { kind: "diff", key, path, name: baseName(path), mode: diffMode, staged: diffMode === "staged", status: "loading", original: "", modified: "", labels };
+			const { labels } = diffSpec(mode, path, from);
+			const tab: DiffTab = { kind: "diff", key, path, name: baseName(path), mode, status: "loading", original: "", modified: "", labels };
 			if (from) tab.from = from;
 			this.#tabs = [...this.#tabs, tab];
+			this.#emit();
 		} else if (existing.kind === "diff" && existing.from !== from) this.#replace(key, { from });
-		this.#emit();
 		await this.refreshDiff(key);
 	}
 
@@ -246,21 +238,13 @@ export class EditorStore {
 		for (const tab of this.#tabs) if (tab.kind === "diff" && (stale.has(tab.path) || (tab.from && stale.has(tab.from)))) void this.refreshDiff(tab.key);
 	}
 
-	activate(key: string): void {
-		if (!this.tab(key)) return;
-		this.#active = key;
-		this.#emit();
-	}
-
 	close(key: string): void {
-		const index = this.#tabs.findIndex((tab) => tab.key === key);
-		if (index < 0) return;
-		const tab = this.#tabs[index]!;
+		const tab = this.tab(key);
+		if (!tab) return;
 		this.#tabs = this.#tabs.filter((item) => item.key !== key);
 		this.#diffRuns.delete(key);
 		// A file tab and a diff of it share the path's watch.
 		if (!this.#tabs.some((other) => watchesDisk(other, tab.path))) this.#unwatch(tab.path);
-		if (this.#active === key) this.#active = (this.#tabs[index] ?? this.#tabs[index - 1])?.key;
 		this.#emit();
 	}
 
@@ -494,14 +478,7 @@ export class EditorStore {
 	}
 
 	#emit(): void {
-		this.#snapshot = { tabs: this.#tabs, ...(this.#active ? { active: this.#active } : {}) };
+		this.#snapshot = { tabs: this.#tabs };
 		for (const listener of this.#listeners) listener();
 	}
-}
-
-/** The bridge asked to open a file or a diff (NODE.md, "Requests from the bridge"): the tab it names, shown. */
-export function paneRequest(store: EditorStore, event: NodeEvent): Promise<void> | undefined {
-	if (event.type === "pane.open") return store.open(event.path, { ...(event.line ? { line: event.line } : {}), ...(event.column ? { column: event.column } : {}) });
-	if (event.type === "pane.diff") return store.openDiff(event.path, event.staged);
-	return undefined;
 }
