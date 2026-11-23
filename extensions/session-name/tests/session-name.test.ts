@@ -531,3 +531,77 @@ it("resets failedAt on session_shutdown and session_start so later sessions refr
 	expect(h.complete).toHaveBeenCalledTimes(5);
 	expect(h.name()).toBe("Refreshed after start");
 });
+
+it("aborts in-flight naming and refresh requests on session_tree without writing stale titles", async () => {
+	const signals: Array<AbortSignal | undefined> = [];
+	const resolvers: Array<(message: AssistantMessage) => void> = [];
+	const h = harness({
+		complete: (_model, _context, options) => new Promise((resolve) => {
+			signals.push(options.signal);
+			resolvers.push(resolve);
+		}),
+	});
+
+	// In-flight initial naming aborted on session_tree must not write a stale title or block the new branch.
+	await h.emit("agent_settled", { aborted: false });
+	await drain();
+	await h.emit("session_tree", { oldLeafId: "leaf-1", newLeafId: "leaf-2" });
+	expect(signals[0]?.aborted).toBe(true);
+
+	h.setName(undefined);
+	h.setEntries(firstRun);
+	await h.emit("agent_settled", { aborted: false });
+	await drain();
+	expect(h.complete).toHaveBeenCalledTimes(2);
+
+	resolvers[0]!(reply("Stale branch 1 title"));
+	await drain();
+	expect(h.name()).toBeUndefined();
+	expect(h.autoEntries()).toHaveLength(0);
+
+	resolvers[1]!(reply("Branch 2 title"));
+	await drain();
+	expect(h.name()).toBe("Branch 2 title");
+	expect(h.autoEntries()).toEqual([{ name: "Branch 2 title", tokens: 1_000 }]);
+
+	// In-flight refresh aborted on session_tree must not write a stale title or baseline to the new branch.
+	h.setUsage({ tokens: 51_000, contextWindow: 200_000 });
+	await h.emit("agent_settled", { aborted: false });
+	await drain();
+	expect(h.complete).toHaveBeenCalledTimes(3);
+
+	await h.emit("session_tree", { oldLeafId: "leaf-2", newLeafId: "leaf-3" });
+	expect(signals[2]?.aborted).toBe(true);
+	resolvers[2]!(reply("Stale refresh title"));
+	await drain();
+	expect(h.name()).toBe("Branch 2 title");
+	expect(h.autoEntries()).toEqual([{ name: "Branch 2 title", tokens: 1_000 }]);
+
+	// Switching to another branch can refresh immediately afterward.
+	h.setName("Branch 3 title");
+	h.setEntries([...firstRun, { type: "custom", customType: AUTO_ENTRY, data: { name: "Branch 3 title", tokens: 10_000 } }]);
+	h.setUsage({ tokens: 60_000, contextWindow: 200_000 });
+	await h.emit("agent_settled", { aborted: false });
+	await drain();
+	expect(h.complete).toHaveBeenCalledTimes(4);
+	resolvers[3]!(reply("Refreshed branch 3 title"));
+	await drain();
+	expect(h.name()).toBe("Refreshed branch 3 title");
+});
+
+it("clears failedAt on session_tree so the new branch refreshes normally", async () => {
+	const h = refreshing([new Error("503 upstream"), "Refreshed on new branch"]);
+
+	// Branch 1 names at 1_000 and fails refresh at 150_000, setting failedAt = 150_000.
+	await settle(h, 1_000);
+	await settle(h, 150_000);
+	expect(h.complete).toHaveBeenCalledTimes(2);
+
+	// Switching branches via session_tree clears failedAt; branch 2 has baseline 10_000 and usage 60_000 (< 150_000 + 50_000).
+	await h.emit("session_tree", { oldLeafId: "leaf-1", newLeafId: "leaf-2" });
+	h.setName("Branch 2 title");
+	h.setEntries([...firstRun, { type: "custom", customType: AUTO_ENTRY, data: { name: "Branch 2 title", tokens: 10_000 } }]);
+	await settle(h, 60_000);
+	expect(h.complete).toHaveBeenCalledTimes(3);
+	expect(h.name()).toBe("Refreshed on new branch");
+});

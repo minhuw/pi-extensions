@@ -302,5 +302,6 @@ export default function sessionName(pi: ExtensionAPI): void {
 	}
 
 	pi.on("session_start", reset);
+	pi.on("session_tree", reset);
 	pi.on("session_shutdown", reset);
 }
