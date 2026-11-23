@@ -51,6 +51,11 @@ export interface LogView {
 const CHROME = 6;
 
 export class LogViewer implements Component {
+	private readonly tui: Pick<TUI, "mode" | "requestRender"> & { terminal: { rows: number } };
+	private readonly theme: Theme;
+	private readonly keys: Pick<KeybindingsManager, "matches"> | undefined;
+	private readonly log: LogView;
+	private readonly done: () => void;
 	private selected: number;
 	private top = 0;
 	private open: LogViewItem | undefined;
@@ -58,12 +63,17 @@ export class LogViewer implements Component {
 	private maxScroll = 0;
 
 	constructor(
-		private readonly tui: Pick<TUI, "mode" | "requestRender"> & { terminal: { rows: number } },
-		private readonly theme: Theme,
-		private readonly keys: Pick<KeybindingsManager, "matches"> | undefined,
-		private readonly log: LogView,
-		private readonly done: () => void,
+		tui: Pick<TUI, "mode" | "requestRender"> & { terminal: { rows: number } },
+		theme: Theme,
+		keys: Pick<KeybindingsManager, "matches"> | undefined,
+		log: LogView,
+		done: () => void,
 	) {
+		this.tui = tui;
+		this.theme = theme;
+		this.keys = keys;
+		this.log = log;
+		this.done = done;
 		this.selected = Math.max(0, log.items.length - 1);
 	}
 
