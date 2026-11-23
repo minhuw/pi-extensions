@@ -28,32 +28,26 @@ export const SCROLLBACK = 1_000;
  * the process is gone or the platform tells nothing.
  */
 export async function processCwd(pid: number): Promise<string | undefined> {
-    if (process.platform === "linux") {
-        try { return await readlink(`/proc/${pid}/cwd`); }
-        catch { return undefined; }
-    }
-    if (process.platform !== "darwin") return undefined;
-    const listed = await new Promise<string | undefined>(resolve => {
-        execFile("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { timeout: 2_000 }, (error, stdout) => resolve(error ? undefined : stdout));
-    });
-    const line = listed?.split("\n").find(row => row.startsWith("n/"));
-    return line?.slice(1);
+    return (await processCwds([pid], 2_000)).get(pid);
 }
 
-/** `processCwd` of several processes, with one `lsof` on macOS; a process that tells nothing is left out. */
-export async function processCwds(pids: number[]): Promise<Map<number, string>> {
+/** Working directories of several processes, with one `lsof` on macOS; a process that tells nothing is left out. */
+export async function processCwds(pids: number[], timeout = 5_000): Promise<Map<number, string>> {
     const cwds = new Map<number, string>();
     if (pids.length === 0) return cwds;
-    if (process.platform !== "darwin") {
+    if (process.platform === "linux") {
         await Promise.all(pids.map(async pid => {
-            const cwd = await processCwd(pid);
-            if (cwd) cwds.set(pid, cwd);
+            try {
+                const cwd = await readlink(`/proc/${pid}/cwd`);
+                if (cwd) cwds.set(pid, cwd);
+            } catch { /* gone or unreadable */ }
         }));
         return cwds;
     }
+    if (process.platform !== "darwin") return cwds;
     // lsof exits 1 when one of the processes is gone, and still lists the others.
     const listed = await new Promise<string>(resolve => {
-        execFile("/usr/sbin/lsof", ["-a", "-p", pids.join(","), "-d", "cwd", "-Fpn"], { timeout: 5_000 }, (_error, stdout) => resolve(stdout ?? ""));
+        execFile("/usr/sbin/lsof", ["-a", "-p", pids.join(","), "-d", "cwd", "-Fpn"], { timeout }, (error, stdout) => resolve(error?.killed ? "" : stdout ?? ""));
     });
     let pid: number | undefined;
     for (const row of listed.split("\n")) {
