@@ -215,38 +215,42 @@ async function ensureEntry(params) {
 	const waitTimeoutMs = params.waitTimeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
 
 	if (exact) {
-		const inflight = pending.get(target);
-		if (inflight) {
-			if (inflight.configKey === configKey) {
-				if (isWorkspace) {
-					inflight.pinned = true;
+		while (true) {
+			const inflight = pending.get(target);
+			if (inflight) {
+				if (inflight.configKey === configKey) {
+					if (isWorkspace) {
+						inflight.pinned = true;
+					}
+					const entry = await inflight.promise;
+					if (isWorkspace) {
+						entry.pinned = true;
+					}
+					await refreshEntryIfHeadChanged(entry, waitTimeoutMs);
+					entry.lastUsed = nextTick();
+					return buildEnsureResult(entry.root, false);
 				}
-				const entry = await inflight.promise;
-				if (isWorkspace) {
-					entry.pinned = true;
-				}
-				await refreshEntryIfHeadChanged(entry, waitTimeoutMs);
-				entry.lastUsed = nextTick();
-				return buildEnsureResult(entry.root, false);
+				await inflight.promise.catch(() => {});
+				continue;
 			}
-			await inflight.promise.catch(() => {});
-		}
 
-		const existing = entries.get(target);
-		if (existing && !existing.finder.isDestroyed) {
-			if (existing.configKey === configKey) {
-				if (isWorkspace) {
-					existing.pinned = true;
+			const existing = entries.get(target);
+			if (existing && !existing.finder.isDestroyed) {
+				if (existing.configKey === configKey) {
+					if (isWorkspace) {
+						existing.pinned = true;
+					}
+					await refreshEntryIfHeadChanged(existing, waitTimeoutMs);
+					existing.lastUsed = nextTick();
+					return buildEnsureResult(existing.root, false);
 				}
-				await refreshEntryIfHeadChanged(existing, waitTimeoutMs);
-				existing.lastUsed = nextTick();
-				return buildEnsureResult(existing.root, false);
+				if (existing.dbPathsKey !== dbPathsKey) {
+					dbDisabled = false;
+					lastDbFallbackError = undefined;
+					lastDbPathsKey = null;
+				}
 			}
-			if (existing.dbPathsKey !== dbPathsKey) {
-				dbDisabled = false;
-				lastDbFallbackError = undefined;
-				lastDbPathsKey = null;
-			}
+			break;
 		}
 	} else {
 		let bestEntry = null;

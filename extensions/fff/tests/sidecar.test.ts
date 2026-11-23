@@ -1399,4 +1399,225 @@ describe("SidecarFffBackend", () => {
 			}
 		}
 	});
+
+	it("coalesces concurrent callers with a new config after awaiting a mismatched in-flight creation", async () => {
+		const baseDir = makeTempDir("mismatched-config-coalesce");
+		const repoDir = path.join(baseDir, "repo");
+		const barrierDir = path.join(baseDir, "barrier");
+		const gateDir = path.join(baseDir, "gates");
+		fs.mkdirSync(repoDir, { recursive: true });
+		fs.mkdirSync(barrierDir, { recursive: true });
+		fs.mkdirSync(gateDir, { recursive: true });
+		fs.writeFileSync(path.join(repoDir, "sample.ts"), "export const ok = true;\n");
+		fs.writeFileSync(path.join(barrierDir, "barrier.ts"), "export const barrier = true;\n");
+		const canonicalRepo = fs.realpathSync.native(repoDir);
+
+		const fakeFffNodePath = path.join(baseDir, "fake-fff-node.mjs");
+		fs.writeFileSync(
+			fakeFffNodePath,
+			[
+				'import fs from "node:fs";',
+				'import path from "node:path";',
+				`const targetRepo = ${JSON.stringify(canonicalRepo)};`,
+				`const gateDir = ${JSON.stringify(gateDir)};`,
+				"const repoCreations = [];",
+				"let nextRepoCreationId = 0;",
+				"export class FileFinder {",
+				"\tconstructor(options, repoCreationId) {",
+				"\t\tthis._destroyed = false;",
+				"\t\tthis._basePath = options.basePath;",
+				"\t\tthis._followSymlinks = Boolean(options.followSymlinks);",
+				"\t\tthis._repoCreationId = repoCreationId;",
+				"\t}",
+				"\tstatic create(options) {",
+				"\t\tlet repoCreationId = null;",
+				"\t\tif (options.basePath === targetRepo) {",
+				"\t\t\trepoCreationId = ++nextRepoCreationId;",
+				"\t\t\trepoCreations.push({ id: repoCreationId, followSymlinks: Boolean(options.followSymlinks) });",
+				"\t\t}",
+				"\t\treturn { ok: true, value: new FileFinder(options, repoCreationId) };",
+				"\t}",
+				"\tget isDestroyed() {",
+				"\t\treturn this._destroyed;",
+				"\t}",
+				"\tasync waitForScan() {",
+				"\t\tif (this._repoCreationId === 1 || this._repoCreationId === 2) {",
+				"\t\t\tfs.writeFileSync(path.join(gateDir, `create-${this._repoCreationId}-started`), '1');",
+				"\t\t\tconst releaseFile = path.join(gateDir, `create-${this._repoCreationId}-release`);",
+				"\t\t\tconst deadline = Date.now() + 5_000;",
+				"\t\t\twhile (!fs.existsSync(releaseFile) && Date.now() < deadline) {",
+				"\t\t\t\tawait new Promise((r) => setTimeout(r, 5));",
+				"\t\t\t}",
+				"\t\t}",
+				"\t\treturn { ok: true, value: true };",
+				"\t}",
+				"\thealthCheck() {",
+				"\t\treturn {",
+				"\t\t\tok: true,",
+				"\t\t\tvalue: {",
+				"\t\t\t\tversion: 'test',",
+				"\t\t\t\trepoCreationId: this._repoCreationId,",
+				"\t\t\t\tfollowSymlinks: this._followSymlinks,",
+				"\t\t\t\trepoCreations: [...repoCreations],",
+				"\t\t\t\tgit: { repositoryFound: false },",
+				"\t\t\t\tfilePicker: { initialized: true },",
+				"\t\t\t\tfrecency: { initialized: false },",
+				"\t\t\t},",
+				"\t\t};",
+				"\t}",
+				"}",
+			].join("\n"),
+		);
+
+		const hooksPath = path.join(baseDir, "hooks.mjs");
+		fs.writeFileSync(
+			hooksPath,
+			[
+				`const targetUrl = ${JSON.stringify(pathToFileURL(fakeFffNodePath).href)};`,
+				"export async function resolve(specifier, context, nextResolve) {",
+				"\tif (specifier === '@ff-labs/fff-node') {",
+				"\t\treturn { url: targetUrl, shortCircuit: true };",
+				"\t}",
+				"\treturn nextResolve(specifier, context);",
+				"}",
+			].join("\n"),
+		);
+
+		const registerPath = path.join(baseDir, "register.mjs");
+		fs.writeFileSync(
+			registerPath,
+			[
+				'import { register } from "node:module";',
+				`register(${JSON.stringify(pathToFileURL(hooksPath).href)});`,
+			].join("\n"),
+		);
+
+		const sidecarPath = fileURLToPath(new URL("../sidecar.mjs", import.meta.url));
+		const proc: ChildProcess = fork(sidecarPath, [], {
+			execArgv: ["--import", pathToFileURL(registerPath).href],
+			stdio: ["ignore", "ignore", "ignore", "ipc"],
+			env: { ...process.env },
+		});
+		const pid = trackPid(proc.pid);
+
+		let nextId = 1;
+		const rpc = (method: string, params: Record<string, unknown>) =>
+			new Promise<{ ok: boolean; value?: unknown; error?: string }>((resolve, reject) => {
+				const id = nextId++;
+				const onMsg = (msg: unknown) => {
+					if (!msg || typeof msg !== "object" || (msg as { id?: number }).id !== id) return;
+					proc.off("message", onMsg);
+					proc.off("exit", onExit);
+					resolve(msg as { ok: boolean; value?: unknown; error?: string });
+				};
+				const onExit = () => {
+					proc.off("message", onMsg);
+					reject(new Error("sidecar exited before replying"));
+				};
+				proc.on("message", onMsg);
+				proc.once("exit", onExit);
+				proc.send({ id, method, params });
+			});
+
+		const waitForGateStart = async (createId: number) => {
+			const started = await waitForCondition(
+				() => fs.existsSync(path.join(gateDir, `create-${createId}-started`)),
+				2_000,
+				5,
+			);
+			expect(started).toBe(true);
+		};
+
+		const releaseGate = (createId: number) => {
+			fs.writeFileSync(path.join(gateDir, `create-${createId}-release`), "1");
+		};
+
+		type FakeHealthValue = {
+			ok: boolean;
+			value: {
+				repoCreationId: number | null;
+				followSymlinks: boolean;
+				repoCreations: Array<{ id: number; followSymlinks: boolean }>;
+			};
+		};
+
+		const inFlightRpcs: Promise<unknown>[] = [];
+		try {
+			// Start creation #1 with the older config (followSymlinks: true) and pause it mid-scan.
+			const ensureOld = rpc("ensure", {
+				basePath: repoDir,
+				kind: "workspace",
+				followSymlinks: true,
+			});
+			inFlightRpcs.push(ensureOld);
+			await waitForGateStart(1);
+
+			// While creation #1 is in flight, send three concurrent callers with the new config.
+			const ensureNewCallers = [
+				rpc("ensure", { basePath: repoDir, kind: "workspace", followSymlinks: false }),
+				rpc("ensure", { basePath: repoDir, kind: "workspace", followSymlinks: false }),
+				rpc("ensure", { basePath: repoDir, kind: "workspace", followSymlinks: false }),
+			];
+			inFlightRpcs.push(...ensureNewCallers);
+
+			// FIFO IPC barrier: ensure on an unrelated root completes only after all three new-config
+			// callers have entered ensureEntry and suspended on creation #1's pending promise.
+			const barrierEnsure = await rpc("ensure", {
+				basePath: barrierDir,
+				kind: "aux",
+				exact: true,
+			});
+			expect(barrierEnsure.ok).toBe(true);
+			const barrierRoot = (barrierEnsure.value as { root: string }).root;
+
+			// Unblock creation #1; exactly one of the three waiters must start creation #2 while
+			// the other two re-check pending.get(target) and coalesce onto creation #2.
+			releaseGate(1);
+			await waitForGateStart(2);
+
+			// Barrier RPC after creation #2 starts proves the remaining waiters have resumed and
+			// coalesced instead of starting duplicate FileFinder creations.
+			const midHealth = await rpc("healthCheck", { root: barrierRoot });
+			expect(midHealth.ok).toBe(true);
+			expect((midHealth.value as FakeHealthValue).value.repoCreations).toEqual([
+				{ id: 1, followSymlinks: true },
+				{ id: 2, followSymlinks: false },
+			]);
+
+			// Unblock creation #2 and verify all callers complete cleanly.
+			releaseGate(2);
+			const [oldRes, ...newResults] = await Promise.all([ensureOld, ...ensureNewCallers]);
+
+			expect(oldRes.ok).toBe(true);
+			expect(oldRes.value).toMatchObject({ root: canonicalRepo, created: true });
+
+			for (const res of newResults) {
+				expect(res.ok).toBe(true);
+				expect((res.value as { root: string }).root).toBe(canonicalRepo);
+			}
+			expect(
+				newResults.filter((res) => (res.value as { created: boolean }).created === true),
+			).toHaveLength(1);
+			expect(
+				newResults.filter((res) => (res.value as { created: boolean }).created === false),
+			).toHaveLength(2);
+
+			const finalHealth = await rpc("healthCheck", { root: canonicalRepo });
+			expect(finalHealth.ok).toBe(true);
+			const finalValue = (finalHealth.value as FakeHealthValue).value;
+			expect(finalValue.repoCreationId).toBe(2);
+			expect(finalValue.followSymlinks).toBe(false);
+			expect(finalValue.repoCreations).toEqual([
+				{ id: 1, followSymlinks: true },
+				{ id: 2, followSymlinks: false },
+			]);
+		} finally {
+			for (const p of inFlightRpcs) {
+				p.catch(() => {});
+			}
+			if (isPidAlive(pid)) {
+				proc.kill("SIGKILL");
+			}
+		}
+	});
 });
