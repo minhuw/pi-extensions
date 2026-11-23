@@ -7,6 +7,7 @@ import {
   runWorkflow,
   WORKFLOW_AGENT_CAP,
   WORKFLOW_ITEM_CAP,
+  WORKFLOW_RESOURCE_LIMITS,
   type WorkflowControl,
   type WorkflowHost,
   type WorkflowRunResult,
@@ -1508,5 +1509,250 @@ describe("live tool and token counters", () => {
     expect(rows(seen).at(-1)).toMatchObject({ state: "done", attempt: 2, tokens: 150, toolCalls: 3 });
     // Both attempts burned output tokens; a retry does not refund the first.
     expect(result.value).toBe(15);
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * VM realm isolation and worker resource limits
+ * ------------------------------------------------------------------------- */
+
+describe("VM realm isolation and resource limits", () => {
+  const child = (name: string, body: string) =>
+    `export const meta = { name: ${JSON.stringify(name)}, description: "child" };\n${body}`;
+
+  function isolationHost(): WorkflowHost {
+    const library: Record<string, string> = {
+      child: child("child", "return { ok: true, items: [args?.n ?? 0] };"),
+      probe: child(
+        "probe",
+        `
+          const seen = new Set();
+          const bad = [];
+          const blocked = (fn) => {
+            try { fn("return process"); return false; }
+            catch (error) { return /Code generation/.test(String(error && error.message)); }
+          };
+          const visit = (value, path, depth) => {
+            if (value === null || (typeof value !== "object" && typeof value !== "function") || seen.has(value) || depth > 6) return;
+            seen.add(value);
+            let ctor;
+            try { ctor = value.constructor; } catch { ctor = undefined; }
+            if (typeof ctor === "function" && !blocked(ctor.constructor)) bad.push(path);
+            if (typeof value === "function" && !blocked(value.constructor)) bad.push(path + "()");
+            visit(Object.getPrototypeOf(value), path + ".__proto__", depth + 1);
+            for (const key of Reflect.ownKeys(value)) {
+              let next;
+              try { next = value[key]; } catch { continue; }
+              visit(next, path + "." + String(key), depth + 1);
+            }
+          };
+          const roots = {
+            agent, phase, log, workflow, console, args, globalThis,
+            pending: agent("nested-ok"),
+            depthError: await workflow("child").catch((e) => e),
+          };
+          roots.resolved = await roots.pending;
+          visit(roots, "child", 0);
+          return bad;
+        `,
+      ),
+    };
+    return {
+      async spawnAgent(request) {
+        if (request.schema !== undefined) {
+          return { ok: true, text: JSON.stringify({ findings: [{ id: 1, title: request.prompt }] }) };
+        }
+        return { ok: true, text: `ok:${request.prompt}` };
+      },
+      abortAgent() {},
+      loadWorkflow(ref) {
+        const script = ref.name ? library[ref.name] : undefined;
+        return script ? { ok: true, script } : { ok: false, message: `Unknown workflow ${ref.name}` };
+      },
+    };
+  }
+
+  it.each([
+    ["globalThis.constructor.constructor('return process')()"],
+    ["Object.getPrototypeOf(globalThis).constructor.constructor('return process')()"],
+    ["agent.constructor('return process')()"],
+    ["parallel.constructor('return process')()"],
+    ["pipeline.constructor('return process')()"],
+    ["phase.constructor('return process')()"],
+    ["log.constructor('return process')()"],
+    ["workflow.constructor('return process')()"],
+    ["budget.constructor.constructor('return process')()"],
+    ["budget.spent.constructor('return process')()"],
+    ["budget.remaining.constructor('return process')()"],
+    ["console.constructor.constructor('return process')()"],
+    ["console.log.constructor('return process')()"],
+    ["console.error.constructor('return process')()"],
+    ["meta.constructor.constructor('return process')()"],
+    ["args.constructor.constructor('return process')()"],
+    ["args.nested[0].constructor.constructor('return process')()"],
+    ["agent('x').constructor.constructor('return process')()"],
+    ["parallel([]).constructor.constructor('return process')()"],
+    ["pipeline([]).constructor.constructor('return process')()"],
+    ["workflow('child').constructor.constructor('return process')()"],
+    ["(await parallel([() => 1])).constructor.constructor('return process')()"],
+    ["(await pipeline([1], x => x)).constructor.constructor('return process')()"],
+    ["(await workflow('child')).constructor.constructor('return process')()"],
+    [
+      "(await agent('x', { schema: { type: 'object', properties: { findings: { type: 'array' } }, required: ['findings'] } })).constructor.constructor('return process')()",
+    ],
+    ["(await agent('').catch(e => e)).constructor.constructor('return process')()"],
+    ["(await parallel('bad').catch(e => e)).constructor.constructor('return process')()"],
+    ["(await workflow('missing').catch(e => e)).constructor.constructor('return process')()"],
+    ["(() => { try { phase(''); } catch (e) { return e.constructor.constructor('return process')(); } })()"],
+  ])("blocks constructor-chain escape: %s", async expression => {
+    const result = await run(`return ${expression};`, {
+      host: isolationHost(),
+      args: { nested: [{ a: 1 }] },
+    });
+    expect(result.status).toBe("failed");
+    expect(result.error).toMatch(/Code generation from strings disallowed/);
+  });
+
+  it("rebuilds worker-thrown errors as matching VM-realm Error instances", async () => {
+    const result = await run(
+      `
+        const circular = { toString: null };
+        circular.self = circular;
+        let logErr;
+        try { log(circular); } catch (e) { logErr = e; }
+        let consoleErr;
+        try { console.log(circular); } catch (e) { consoleErr = e; }
+        let phaseErr;
+        try { phase(""); } catch (e) { phaseErr = e; }
+        const agentErr = await agent("").catch((e) => e);
+        const capErr = await parallel(Array.from({ length: 3 }, () => () => 1)).catch((e) => e);
+        return {
+          logType: [logErr.name, logErr instanceof TypeError, logErr.constructor === TypeError],
+          consoleType: [consoleErr.name, consoleErr instanceof TypeError, consoleErr.constructor === TypeError],
+          phaseType: [phaseErr.name, phaseErr instanceof Error, phaseErr.constructor === Error],
+          agentType: [agentErr.name, agentErr instanceof Error, agentErr.constructor === Error],
+          capType: [capErr.name, capErr instanceof Error, capErr.constructor === Error],
+        };
+      `,
+      { host: isolationHost(), itemCap: 2 },
+    );
+
+    expect(result).toMatchObject({
+      status: "completed",
+      value: {
+        logType: ["TypeError", true, true],
+        consoleType: ["TypeError", true, true],
+        phaseType: ["Error", true, true],
+        agentType: ["Error", true, true],
+        capType: ["Error", true, true],
+      },
+    });
+  });
+
+  it("keeps every reachable global, returned value, promise, error, and nested scope inside the VM realm", async () => {
+    const result = await run(
+      `
+        const roots = {
+          globalThis,
+          agent,
+          parallel,
+          pipeline,
+          phase,
+          log,
+          workflow,
+          budget,
+          console,
+          meta,
+          args,
+        };
+        roots.pendingAgent = agent("ok");
+        roots.agentText = await roots.pendingAgent;
+        roots.structured = await agent("structured", {
+          schema: { type: "object", properties: { findings: { type: "array" } }, required: ["findings"] },
+        });
+        roots.fanned = await parallel([() => agent("p"), () => { throw new Error("thunk"); }]);
+        roots.piped = await pipeline([1], (prev) => agent("q" + prev));
+        roots.nestedResult = await workflow("child", { n: 42 });
+        roots.invalidAgent = await agent("").catch((e) => e);
+        roots.unknownWorkflow = await workflow("missing").catch((e) => e);
+        roots.cappedParallel = await parallel([() => 1, () => 2, () => 3]).catch((e) => e);
+        try { phase(""); } catch (e) { roots.invalidPhase = e; }
+
+        const seen = new Set();
+        const bad = [];
+        const blocked = (fn) => {
+          try { fn("return process"); return false; }
+          catch (error) { return /Code generation/.test(String(error && error.message)); }
+        };
+        const visit = (value, path, depth) => {
+          if (value === null || (typeof value !== "object" && typeof value !== "function") || seen.has(value) || depth > 6) return;
+          seen.add(value);
+          let ctor;
+          try { ctor = value.constructor; } catch { ctor = undefined; }
+          if (typeof ctor === "function" && !blocked(ctor.constructor)) bad.push(path);
+          if (typeof value === "function" && !blocked(value.constructor)) bad.push(path + "()");
+          visit(Object.getPrototypeOf(value), path + ".__proto__", depth + 1);
+          for (const key of Reflect.ownKeys(value)) {
+            let next;
+            try { next = value[key]; } catch { continue; }
+            visit(next, path + "." + String(key), depth + 1);
+          }
+        };
+        visit(roots, "roots", 0);
+        const childBad = await workflow("probe", { nested: [{ deep: true }] });
+        return { bad, childBad };
+      `,
+      { host: isolationHost(), args: { list: [{ a: 1 }] }, itemCap: 2 },
+    );
+
+    expect(result).toMatchObject({
+      status: "completed",
+      value: { bad: [], childBad: [] },
+    });
+  });
+
+  it("prevents Error.prepareStackTrace from extracting worker-realm functions", async () => {
+    const result = await run(
+      `
+        const escaped = [];
+        Error.prepareStackTrace = (_err, frames) => {
+          for (const frame of frames) {
+            for (const method of ["getThis", "getFunction"]) {
+              const target = frame[method]();
+              if (target && (typeof target === "object" || typeof target === "function")) {
+                try { target.constructor("return process")(); escaped.push(method); } catch {}
+              }
+            }
+            try { frame.constructor.constructor("return process")(); escaped.push("frame"); } catch {}
+          }
+          return "inspected";
+        };
+        try { phase(""); } catch (error) { void error.stack; }
+        const err = await agent("").catch((e) => e);
+        void err.stack;
+        return escaped;
+      `,
+      { host: isolationHost() },
+    );
+
+    expect(result).toMatchObject({ status: "completed", value: [] });
+  });
+
+  it("configures bounded default worker resourceLimits and fails runaway allocations cleanly", async () => {
+    expect(WORKFLOW_RESOURCE_LIMITS.maxOldGenerationSizeMb).toBeGreaterThan(0);
+    expect(WORKFLOW_RESOURCE_LIMITS.maxYoungGenerationSizeMb).toBeGreaterThan(0);
+    expect(WORKFLOW_RESOURCE_LIMITS.stackSizeMb).toBeGreaterThan(0);
+
+    const { host } = stubHost();
+    const oom = await run(
+      "const hoard = []; while (true) hoard.push(new Array(100000).fill(1));",
+      { host, resourceLimits: { maxOldGenerationSizeMb: 16 } },
+    );
+    expect(oom.status).toBe("failed");
+    expect(oom.error).toMatch(/memory limit/i);
+
+    // The host process remains healthy and subsequent workflows succeed.
+    const followUp = await run("return 42;", { host });
+    expect(followUp).toMatchObject({ status: "completed", value: 42 });
   });
 });

@@ -13,23 +13,29 @@
  *
  * The worker/host split exists for *killability*: `worker.terminate()` stops a
  * runaway script mid-loop, which an in-process `vm` timeout cannot do once the
- * script is inside an `await`. The vm context exists for *determinism and
- * accident-avoidance*, not security — see the note on `codeGeneration` below.
+ * script is inside an `await`, and worker `resourceLimits` bound heap memory.
  *
- * ## Why the context gets no host built-ins
+ * ## Why the context uses a null-prototype sandbox and realm-native wrappers
  *
- * `vm.createContext(sandbox)` gives the script a fresh realm that already owns
- * `Object`, `Array`, `JSON`, `Math`, `Date`, `Promise`, `Map`, `Set`. We inject
- * *only* our own globals on top. Injecting host built-ins instead would hand the
- * script `Object.constructor` → the **host** `Function`, i.e. a compiler for
- * arbitrary host-realm code.
+ * `vm.createContext(Object.create(null), { codeGeneration: { strings: false, wasm: false } })`
+ * gives the script a fresh realm whose own `Function` and `eval` throw
+ * `EvalError`. Crucially, `codeGeneration: { strings: false }` only applies to
+ * the VM realm's `Function` — NOT the worker thread's `Function`.
  *
- * That said: our injected globals are themselves host closures, so
- * `agent.constructor` is still the host `Function`. The hygiene shrinks the
- * surface; it does not close the hole. **`codeGeneration: { strings: false }` is
- * the load-bearing defense** — it makes `Function("…")` and `eval("…")` throw
- * `EvalError`, so a captured host `Function` cannot compile anything. Treat this
- * as a determinism boundary, not a security boundary against a hostile script.
+ * If any worker-thread object, function, promise, array, or error reaches the
+ * script (even via `globalThis`'s prototype, a global closure like `agent`, a
+ * returned promise, or a rejected `Error`), the script can walk
+ * `.constructor.constructor("return process")()` into the worker thread.
+ *
+ * To close that chain:
+ * - The context target is `Object.create(null)` so `globalThis` does not inherit
+ *   from the worker's `Object.prototype`.
+ * - Every global (`agent`, `parallel`, `pipeline`, `phase`, `log`, `workflow`,
+ *   `budget`, `console`) and every nested `workflow()` scope binding is wrapped
+ *   in a function/object created *inside* the VM realm.
+ * - Async globals return VM-realm `Promise`s, plain data is materialized via the
+ *   VM realm's `JSON.parse`, arrays via the VM realm's `[]`, and worker errors
+ *   are rebuilt as matching VM-realm `Error` instances before crossing.
  *
  * ## Why determinism is a prelude and not a stub
  *
@@ -68,6 +74,83 @@ const DETERMINISM_PRELUDE =
   " };" +
   "})();";
 
+/**
+ * Evaluates inside the VM context before any workflow script runs to build
+ * realm-native wrappers, error constructors, and global installers.
+ *
+ * Captures intrinsic references (`Promise`, `Object.defineProperty`, `Error`,
+ * `JSON.parse`, `Object.freeze`) up front so later script mutations of globals
+ * or prototypes cannot break or hijack the boundary.
+ */
+const REALM_HELPERS_SOURCE = [
+  '"use strict";',
+  "(function () {",
+  "  const RealmPromise = Promise;",
+  "  const defineProperty = Object.defineProperty;",
+  "  const freeze = Object.freeze;",
+  "  function wrapAsync(impl, name) {",
+  "    const holder = {",
+  "      [name]: function (...rest) {",
+  "        return new RealmPromise(function (resolve, reject) {",
+  "          impl(rest, resolve, reject);",
+  "        });",
+  "      },",
+  "    };",
+  "    return holder[name];",
+  "  }",
+  "  function wrapSync(impl, name) {",
+  "    const holder = {",
+  "      [name]: function (...rest) {",
+  "        return impl(rest);",
+  "      },",
+  "    };",
+  "    return holder[name];",
+  "  }",
+  "  function makeConsole(impl) {",
+  "    return freeze({",
+  "      log: wrapSync(impl, 'log'),",
+  "      info: wrapSync(impl, 'info'),",
+  "      warn: wrapSync(impl, 'warn'),",
+  "      error: wrapSync(impl, 'error'),",
+  "      debug: wrapSync(impl, 'debug'),",
+  "    });",
+  "  }",
+  "  function makeBudget(spentImpl, remainingImpl) {",
+  "    return freeze({",
+  "      total: null,",
+  "      spent: wrapSync(spentImpl, 'spent'),",
+  "      remaining: wrapSync(remainingImpl, 'remaining'),",
+  "    });",
+  "  }",
+  "  function defineGlobal(name, value) {",
+  "    defineProperty(globalThis, name, { value: value, writable: false, enumerable: true, configurable: false });",
+  "  }",
+  "  return {",
+  "    Error: Error,",
+  "    errors: {",
+  "      Error: Error,",
+  "      TypeError: TypeError,",
+  "      RangeError: RangeError,",
+  "      SyntaxError: SyntaxError,",
+  "      ReferenceError: ReferenceError,",
+  "      EvalError: EvalError,",
+  "      URIError: URIError,",
+  "    },",
+  "    ObjectPrototype: Object.prototype,",
+  "    parse: JSON.parse,",
+  "    newArray: function () { return []; },",
+  "    push: function (array, value) {",
+  "      defineProperty(array, array.length, { value: value, writable: true, enumerable: true, configurable: true });",
+  "    },",
+  "    wrapAsync: wrapAsync,",
+  "    wrapSync: wrapSync,",
+  "    makeConsole: makeConsole,",
+  "    makeBudget: makeBudget,",
+  "    defineGlobal: defineGlobal,",
+  "  };",
+  "})()",
+].join("\n");
+
 export const WORKER_SOURCE = `"use strict";
 
 const { parentPort, workerData } = require("node:worker_threads");
@@ -76,6 +159,7 @@ const vm = require("node:vm");
 const port = parentPort;
 const ITEM_CAP = workerData.itemCap;
 const PRELUDE = ${JSON.stringify(DETERMINISM_PRELUDE)};
+const REALM_HELPERS = ${JSON.stringify(REALM_HELPERS_SOURCE)};
 
 /* ------------------------------------------------------------------ *
  * RPC to the host
@@ -123,12 +207,14 @@ port.on("message", function (message) {
   // Fatal errors are the run's, not the item's: parallel() and pipeline()
   // swallow ordinary failures into null, and a cap breach must not be
   // silently absorbed that way.
-  if (message.fatal) error.workflowFatal = true;
+  if (message.fatal) fatalErrors.add(error);
   waiter.reject(error);
 });
 
+const fatalErrors = new WeakSet();
+
 function isFatal(error) {
-  return !!(error && typeof error === "object" && error.workflowFatal === true);
+  return !!(error !== null && typeof error === "object" && fatalErrors.has(error));
 }
 
 /* ------------------------------------------------------------------ *
@@ -271,11 +357,79 @@ function checkBoundary(value, path) {
 
 let realmNewArray = null;
 let realmPush = null;
+let realmHelpers = null;
+let RealmError = Error;
+let realmErrors = {};
 
 function toRealmArray(items) {
   const array = realmNewArray();
   for (let i = 0; i < items.length; i++) realmPush(array, items[i]);
   return array;
+}
+
+/** Rebuild a worker-realm Error inside the VM realm, preserving its fatal mark. */
+function toRealmError(error) {
+  if (error === null || typeof error !== "object" || !(error instanceof Error)) return error;
+  const Ctor = Object.prototype.hasOwnProperty.call(realmErrors, error.name)
+    ? realmErrors[error.name]
+    : RealmError;
+  const copy = new Ctor(error.message);
+  if (fatalErrors.has(error)) fatalErrors.add(copy);
+  return copy;
+}
+
+/**
+ * Guard values crossing from worker code into the VM realm.
+ *
+ * VM-realm objects (including script-created Maps, functions, arrays, etc.) do
+ * not inherit from the worker's Object.prototype, so \`value instanceof Object\`
+ * is false for them and they pass through unchanged. Any worker-realm object is
+ * either converted to a VM-realm error or materialized via the VM's JSON.parse.
+ */
+function toRealmValue(value) {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
+  if (value instanceof Error) return toRealmError(value);
+  if (value instanceof Object) {
+    if (typeof value === "function") {
+      throw new Error("Cannot pass a worker function across the workflow VM boundary.");
+    }
+    return realmParse(JSON.stringify(value));
+  }
+  return value;
+}
+
+function wrapAsyncFn(fn, name) {
+  return realmHelpers.wrapAsync(function (rest, resolve, reject) {
+    let result;
+    try {
+      result = fn.apply(undefined, rest);
+    } catch (error) {
+      reject(toRealmError(error));
+      return;
+    }
+    Promise.resolve(result).then(
+      function (value) {
+        try {
+          resolve(toRealmValue(value));
+        } catch (error) {
+          reject(toRealmError(error));
+        }
+      },
+      function (error) {
+        reject(toRealmError(error));
+      }
+    );
+  }, name);
+}
+
+function wrapSyncFn(fn, name) {
+  return realmHelpers.wrapSync(function (rest) {
+    try {
+      return toRealmValue(fn.apply(undefined, rest));
+    } catch (error) {
+      throw toRealmError(error);
+    }
+  }, name);
 }
 
 function toList(value, what) {
@@ -369,18 +523,18 @@ function makeScope(name, depth) {
     ambientPhaseTitle: undefined,
     phaseIndexByTitle: new Map(),
   };
-  scope.agent = function (prompt, opts) {
+  scope.agent = wrapAsyncFn(function (prompt, opts) {
     return agentIn(scope, prompt, opts);
-  };
-  scope.phase = function (title) {
+  }, "agent");
+  scope.phase = wrapSyncFn(function (title) {
     return phaseIn(scope, title);
-  };
-  scope.log = function (message) {
+  }, "phase");
+  scope.log = wrapSyncFn(function (message) {
     return logIn(scope, message);
-  };
-  scope.workflow = function (ref, args) {
+  }, "log");
+  scope.workflow = wrapAsyncFn(function (ref, args) {
     return workflowIn(scope, ref, args);
-  };
+  }, "workflow");
   scope.console = makeConsole(scope);
   return scope;
 }
@@ -432,12 +586,16 @@ function logIn(scope, message) {
 }
 
 function makeConsole(scope) {
-  const write = function () {
-    const parts = [];
-    for (let i = 0; i < arguments.length; i++) parts.push(describe(arguments[i]));
-    emit({ type: "workflow_log", message: logPrefix(scope) + parts.join(" ") });
+  const write = function (rest) {
+    try {
+      const parts = [];
+      for (let i = 0; i < rest.length; i++) parts.push(describe(rest[i]));
+      emit({ type: "workflow_log", message: logPrefix(scope) + parts.join(" ") });
+    } catch (error) {
+      throw toRealmError(error);
+    }
   };
-  return { log: write, info: write, warn: write, error: write, debug: write };
+  return realmHelpers.makeConsole(write);
 }
 
 async function agentIn(scope, prompt, opts) {
@@ -641,6 +799,7 @@ async function workflowIn(scope, nameOrRef, args) {
 
   const label = ref.name !== undefined ? ref.name : ref.scriptPath;
   if (args !== undefined) checkBoundary(args, 'workflow("' + label + '") args');
+  const childArgs = args === undefined ? undefined : realmParse(JSON.stringify(args));
 
   if (nestedCount >= workerData.nestedCap) {
     // Fatal, like the agent cap: a limit that silently drops work would be
@@ -648,7 +807,7 @@ async function workflowIn(scope, nameOrRef, args) {
     const error = new Error(
       "Workflow exceeded its cap of " + workerData.nestedCap + " nested workflow() calls."
     );
-    error.workflowFatal = true;
+    fatalErrors.add(error);
     throw error;
   }
   nestedCount++;
@@ -685,7 +844,7 @@ async function workflowIn(scope, nameOrRef, args) {
     throw new Error('workflow("' + label + '"): ' + describe(error));
   }
 
-  const value = await run(child.agent, child.phase, child.log, child.workflow, child.console, args);
+  const value = await run(child.agent, child.phase, child.log, child.workflow, child.console, childArgs);
   checkBoundary(value, 'the result of workflow("' + label + '")');
   return value;
 }
@@ -705,16 +864,15 @@ async function workflowIn(scope, nameOrRef, args) {
  * main loop and every workflow in the turn, ours counts this run's agents.
  */
 function makeBudget() {
-  return {
-    total: null,
-    spent: function () {
+  return realmHelpers.makeBudget(
+    function () {
       return spentOutput;
     },
-    remaining: function () {
+    function () {
       // Infinity, not a number, because there is no target to subtract from.
       return Infinity;
-    },
-  };
+    }
+  );
 }
 
 /* ------------------------------------------------------------------ *
@@ -722,33 +880,41 @@ function makeBudget() {
  * ------------------------------------------------------------------ */
 
 async function main() {
-  rootScope = makeScope(undefined, 0);
-  const sandbox = {
-    agent: rootScope.agent,
-    parallel: parallel,
-    pipeline: pipeline,
-    phase: rootScope.phase,
-    log: rootScope.log,
-    workflow: rootScope.workflow,
-    budget: makeBudget(),
-    console: rootScope.console,
-  };
-  const context = vm.createContext(sandbox, {
+  // Null-prototype sandbox: an ordinary worker object would make
+  // globalThis.constructor the worker's Object and expose the worker's Function.
+  const context = vm.createContext(Object.create(null), {
     name: "workflow",
     codeGeneration: { strings: false, wasm: false },
   });
+  vm.runInContext("delete globalThis.console;", context);
 
-  realmObjectPrototype = vm.runInContext("Object.prototype", context);
-  realmNewArray = vm.runInContext("(function () { return []; })", context);
-  realmPush = vm.runInContext("(function (array, value) { array.push(value); })", context);
-  realmParse = vm.runInContext("JSON.parse", context);
   realmContext = context;
+  realmHelpers = vm.runInContext(REALM_HELPERS, context);
+  RealmError = realmHelpers.Error;
+  realmErrors = realmHelpers.errors;
+  realmObjectPrototype = realmHelpers.ObjectPrototype;
+  realmNewArray = realmHelpers.newArray;
+  realmPush = realmHelpers.push;
+  realmParse = realmHelpers.parse;
+
+  rootScope = makeScope(undefined, 0);
+  realmHelpers.defineGlobal("agent", rootScope.agent);
+  realmHelpers.defineGlobal("parallel", wrapAsyncFn(parallel, "parallel"));
+  realmHelpers.defineGlobal("pipeline", wrapAsyncFn(pipeline, "pipeline"));
+  realmHelpers.defineGlobal("phase", rootScope.phase);
+  realmHelpers.defineGlobal("log", rootScope.log);
+  realmHelpers.defineGlobal("workflow", rootScope.workflow);
+  realmHelpers.defineGlobal("budget", makeBudget());
+  realmHelpers.defineGlobal("console", rootScope.console);
 
   // meta and args are materialised *inside* the realm rather than injected, so
   // the script sees objects whose prototype is its own Object.prototype and
   // whose .constructor is its own Function.
-  sandbox.meta = realmParse(workerData.metaJson);
-  sandbox.args = workerData.argsJson === undefined ? undefined : realmParse(workerData.argsJson);
+  realmHelpers.defineGlobal("meta", realmParse(workerData.metaJson));
+  realmHelpers.defineGlobal(
+    "args",
+    workerData.argsJson === undefined ? undefined : realmParse(workerData.argsJson)
+  );
 
   const script = new vm.Script("(async () => {" + PRELUDE + "\\n" + workerData.body + "\\n})()", {
     filename: "workflow.js",

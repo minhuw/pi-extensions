@@ -14,7 +14,7 @@
  */
 
 import { cpus } from "node:os";
-import { Worker } from "node:worker_threads";
+import { type ResourceLimits, Worker } from "node:worker_threads";
 import { MODEL_OVERRIDE_ERROR } from "../invocation-config.js";
 import { type JournalKeyInput, journalKey, type WorkflowJournalEntry } from "./journal.js";
 import { type CompiledSchema, compileJsonSchema } from "./json-schema.js";
@@ -33,6 +33,18 @@ export const WORKFLOW_ITEM_CAP = 4096;
 
 /** Nested `workflow()` invocations allowed per run. */
 export const WORKFLOW_NESTED_CAP = 256;
+
+/**
+ * Default V8 resource limits for the workflow worker thread.
+ *
+ * Bounds heap and stack growth so a runaway allocation fails the worker cleanly
+ * instead of exhausting host memory.
+ */
+export const WORKFLOW_RESOURCE_LIMITS: Readonly<ResourceLimits> = Object.freeze({
+  maxOldGenerationSizeMb: 512,
+  maxYoungGenerationSizeMb: 64,
+  stackSizeMb: 4,
+});
 
 /** How much of a prompt or result is kept for the UI. */
 const PREVIEW_LENGTH = 200;
@@ -300,6 +312,13 @@ export interface RunWorkflowOptions {
    * {@link agentCap}.
    */
   nestedCap?: number;
+  /**
+   * V8 resource limits for the workflow worker thread.
+   *
+   * Defaults to {@link WORKFLOW_RESOURCE_LIMITS} so runaway allocations fail
+   * cleanly without affecting the host process.
+   */
+  resourceLimits?: ResourceLimits;
   /**
    * Replay and record, for `resumeFromRunId`.
    *
@@ -726,6 +745,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
 
   const worker = new Worker(WORKER_SOURCE, {
     eval: true,
+    resourceLimits: options.resourceLimits ?? { ...WORKFLOW_RESOURCE_LIMITS },
     workerData: {
       body,
       metaJson: JSON.stringify(meta),
