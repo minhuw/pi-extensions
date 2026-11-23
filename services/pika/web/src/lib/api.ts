@@ -50,6 +50,13 @@ export class ApiError extends Error {
 	}
 }
 
+/** The server error code in an `ApiError`'s body (its `error` string field), if any. */
+export function apiErrorCode(cause: unknown): string | undefined {
+	if (!(cause instanceof ApiError) || !cause.body || typeof cause.body !== "object") return undefined;
+	const error = (cause.body as { error?: unknown }).error;
+	return typeof error === "string" ? error : undefined;
+}
+
 /** The server's auth mode; servers older than 0.2 report only whether a password is required. */
 export function authModeOf(me: Me | undefined): AuthMode | undefined {
 	if (!me) return undefined;

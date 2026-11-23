@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import { Link } from "react-router";
 import { CodeBlock } from "../components/code";
 import { Icon } from "../components/icons";
+import { copyText } from "../lib/clipboard";
 import { resolveDocHref, resolveDocImage } from "./links";
 import { remarkDocHeadings } from "./markdown";
 import type { DocPage } from "./types";
@@ -77,14 +78,13 @@ export function DocCode({ code, language }: { code: string; language?: string })
 	}, []);
 	async function copy() {
 		clearTimeout(timer.current);
-		try {
-			if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
-			await navigator.clipboard.writeText(code);
-			if (!mounted.current) return;
+		const copied = await copyText(code);
+		if (!mounted.current) return;
+		if (copied) {
 			setStatus("copied");
 			timer.current = setTimeout(() => setStatus("idle"), 2500);
-		} catch {
-			if (mounted.current) setStatus("failed");
+		} else {
+			setStatus("failed");
 		}
 	}
 	const normLang = (language ?? "").toLowerCase();

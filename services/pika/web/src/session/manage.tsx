@@ -5,7 +5,7 @@ import { PikaLink as Link } from "../components/PikaLink";
 import { Icon } from "../components/icons";
 import { BUTTON, ConfirmDialog, Pill } from "../components/ui";
 import { useApi } from "../lib/api";
-import { formatCount } from "../lib/format";
+import { plural } from "../lib/format";
 import type { SessionSummary } from "../lib/types";
 
 /** Whether the session is hidden through a recorded ancestor rather than by its own flag. */
@@ -25,10 +25,6 @@ export function HiddenBadge({ session }: { session: SessionSummary }) {
 			<Pill tone="yellow">Hidden from public</Pill>
 		</span>
 	);
-}
-
-function plural(n: number, noun: string): string {
-	return `${formatCount(n)} ${noun}${n === 1 ? "" : "s"}`;
 }
 
 /** The owner's actions in a session's header: hide or show it in public, and delete it. None on public pages. */

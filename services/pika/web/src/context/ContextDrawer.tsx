@@ -5,6 +5,7 @@ import { Icon } from "../components/icons";
 import { JsonTree } from "../components/JsonTree";
 import { BUTTON, Callout, cx, ErrorState, Pill, SkeletonLines, Toggle } from "../components/ui";
 import { useApi, type PikaApi } from "../lib/api";
+import { copyText } from "../lib/clipboard";
 import { formatCount, formatDateTime, plural } from "../lib/format";
 import type { Entry, ModelRequest } from "../lib/types";
 import { useScrollMargin } from "../lib/virtual";
@@ -308,12 +309,7 @@ function RawJson({ payload }: { payload: unknown }) {
 	const [all, setAll] = useState(false);
 	const [copied, setCopied] = useState(false);
 	const copy = async () => {
-		try {
-			await navigator.clipboard.writeText(text);
-			setCopied(true);
-		} catch {
-			setCopied(false);
-		}
+		setCopied(await copyText(text));
 	};
 	const shown = text.length > RAW_LIMIT && !all ? text.slice(0, RAW_LIMIT) : text;
 	return (

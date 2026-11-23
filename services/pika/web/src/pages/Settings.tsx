@@ -4,16 +4,12 @@ import { Link } from "react-router";
 import { BUTTON, Callout, cx, Dialog, EmptyState, ErrorState, Page, PageTitle, Pill, SkeletonLines } from "../components/ui";
 import { VisitorOriginsSection } from "../components/VisitorOrigins";
 import { useApi } from "../lib/api";
-import { formatCount } from "../lib/format";
+import { formatCount, plural } from "../lib/format";
 
 const PUBLISHING_KEY = ["settings", "publishing"] as const;
 /** The published projects table's columns: the project, its trajectories, its status, and its switch. */
 const ROW = "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 px-1.5 sm:grid-cols-[minmax(0,1fr)_132px_minmax(0,220px)_auto]";
 const INPUT = "mt-1 h-8 w-full rounded-sm border border-line bg-page px-2.5 text-[14px] outline-none focus:border-ink";
-
-function plural(n: number, noun: string): string {
-	return `${formatCount(n)} ${noun}${n === 1 ? "" : "s"}`;
-}
 
 /** Deleting a project: says what goes, and asks for its name to be typed before it can go. */
 function DeleteProjectDialog({ project, onDone, onCancel }: { project: string; onDone: (text: string) => void; onCancel: () => void }) {

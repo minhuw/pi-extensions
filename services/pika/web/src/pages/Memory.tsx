@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { PikaLogo } from "../components/icons";
 import { BUTTON, ConfirmDialog, cx, EmptyState, ErrorState, Page, PageTitle, Pill, Skeleton, SkeletonLines, Toggle } from "../components/ui";
-import { ApiError, useApi } from "../lib/api";
+import { ApiError, apiErrorCode, useApi } from "../lib/api";
 import { formatDateTime, formatRelative, plural } from "../lib/format";
 import type {
 	MemoryBatch,
@@ -181,16 +181,9 @@ function changeLabel(change: MemoryBatchChange): string {
 	return change.created ? "created" : "updated";
 }
 
-/** The error code in an `ApiError`'s body, such as `revert_conflict`. */
-function errorCode(cause: unknown): string | undefined {
-	if (!(cause instanceof ApiError) || !cause.body || typeof cause.body !== "object") return undefined;
-	const error = (cause.body as { error?: unknown }).error;
-	return typeof error === "string" ? error : undefined;
-}
-
 /** Why an undo failed; a conflict names the notes changed since the batch, by title where the batch knows it. */
 function undoError(batch: MemoryBatch, cause: unknown): string {
-	if (errorCode(cause) === "revert_conflict") {
+	if (apiErrorCode(cause) === "revert_conflict") {
 		const body = (cause as ApiError).body as { notes?: unknown };
 		const notes = Array.isArray(body.notes) ? body.notes.map(String) : [];
 		const names = notes.map((id) => {
@@ -301,7 +294,7 @@ function ScopeDreams({ scope }: { scope: MemoryScopeSummary }) {
 			}
 		} catch (cause) {
 			// Already reverted elsewhere: the refetch shows it so.
-			if (errorCode(cause) !== "already_reverted") setErrors((current) => ({ ...current, [batch.id]: undoError(batch, cause) }));
+			if (apiErrorCode(cause) !== "already_reverted") setErrors((current) => ({ ...current, [batch.id]: undoError(batch, cause) }));
 		} finally {
 			setBusy(false);
 			setUndoing(null);

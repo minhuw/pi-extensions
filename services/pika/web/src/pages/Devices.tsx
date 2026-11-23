@@ -5,7 +5,7 @@ import { ME_KEY, SIGNED_OUT, useMe } from "../components/AuthGate";
 import { Icon } from "../components/icons";
 import { useSigningOut } from "../components/Layout";
 import { BUTTON, Callout, ConfirmDialog, cx, Dialog, EmptyState, ErrorState, Page, PageTitle, Pill, SkeletonLines } from "../components/ui";
-import { ApiError, authModeOf, useApi } from "../lib/api";
+import { ApiError, apiErrorCode, authModeOf, useApi } from "../lib/api";
 import {
 	DEVICE_NAME_RULE,
 	deviceOptions,
@@ -54,13 +54,6 @@ function Code({ children }: { children: ReactNode }) {
 
 const TH = "h-7 px-2 pb-1 text-left align-bottom text-[12px] font-medium whitespace-nowrap text-muted";
 const TD = "px-2 py-1.5 align-middle";
-
-/** The error code in an `ApiError`'s body, such as `unknown_device`. */
-function errorCode(cause: unknown): string | undefined {
-	if (!(cause instanceof ApiError) || !cause.body || typeof cause.body !== "object") return undefined;
-	const error = (cause.body as { error?: unknown }).error;
-	return typeof error === "string" ? error : undefined;
-}
 
 const INPUT = "mt-1 h-8 w-full max-w-[320px] rounded-sm border border-line bg-page px-2.5 text-[14px] outline-none focus:border-ink";
 const SELECT = "mt-1 h-8 w-full max-w-[320px] rounded-sm border border-line bg-page px-2 text-[14px] outline-none focus:border-ink";
@@ -129,7 +122,7 @@ function PairingCard({
 				typeof result?.device === "string" ? result.device : undefined,
 			);
 		} catch (cause) {
-			const code = errorCode(cause);
+			const code = apiErrorCode(cause);
 			if (code === "unknown_device") {
 				setError("That device no longer exists. Choose another, or add a new device.");
 				onRefresh();
@@ -411,7 +404,7 @@ function RenameDialog({
 			const result = await api.renameDevice(device.id, name.trim());
 			onDone(result ?? { id: device.id, name: name.trim() });
 		} catch (cause) {
-			const code = errorCode(cause);
+			const code = apiErrorCode(cause);
 			const gone = cause instanceof ApiError && cause.status === 404;
 			if (gone) void queryClient.invalidateQueries({ queryKey: DEVICES_KEY });
 			if (!open.current) {
@@ -552,7 +545,7 @@ function DeviceSection({ devices, onNotice }: { devices: UseQueryResult<{ items:
 			});
 		} catch (cause) {
 			const gone = cause instanceof ApiError && cause.status === 404;
-			const code = errorCode(cause);
+			const code = apiErrorCode(cause);
 			const reason = gone
 				? "it no longer exists."
 				: code === "invalid_name" || code === "invalid_body"

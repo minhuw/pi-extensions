@@ -4,6 +4,7 @@ import { Icon, type IconName } from "../components/icons";
 import { ModelMark } from "../components/ModelName";
 import { TicketBadge } from "../components/Ticket";
 import { cx } from "../components/ui";
+import { copyText } from "../lib/clipboard";
 import { linkTicket } from "../lib/tickets";
 import { deviceLabel } from "../lib/devices";
 import { formatCost, formatCount, formatDateTime, formatDuration, formatRelative, plural, totalTokens } from "../lib/format";
@@ -28,11 +29,10 @@ function Chip({ icon, children, title, className }: { icon: IconName; children: 
 function CopyPath({ path }: { path: string }) {
 	const [copied, setCopied] = useState(false);
 	const copy = async () => {
-		try {
-			await navigator.clipboard.writeText(path);
+		if (await copyText(path)) {
 			setCopied(true);
 			setTimeout(() => setCopied(false), 1500);
-		} catch {
+		} else {
 			setCopied(false);
 		}
 	};
