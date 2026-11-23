@@ -114,12 +114,35 @@ export class BoardSync {
 	async flush(sessionId: string, timeoutMs: number): Promise<void> {
 		const state = this.states.get(sessionId);
 		if (!state) return;
-		if (state.timer) { clearTimeout(state.timer); state.timer = undefined; }
-		if (!state.inFlight && state.dirty && !state.stopped) this.send(sessionId, state);
-		if (!state.inFlight) return;
-		let timer: NodeJS.Timeout | undefined;
-		await Promise.race([state.inFlight, new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); })]);
-		clearTimeout(timer);
+		const deadline = Date.now() + timeoutMs;
+		for (let first = true; ; first = false) {
+			if (this.states.get(sessionId) !== state) return;
+			if (!state.inFlight) {
+				if (!state.dirty || state.stopped) {
+					if (state.timer) { clearTimeout(state.timer); state.timer = undefined; }
+					return;
+				}
+				if (!first && (state.failures > 0 || Date.now() >= deadline)) return;
+				if (state.timer) { clearTimeout(state.timer); state.timer = undefined; }
+				this.send(sessionId, state);
+				if (!state.inFlight) return;
+			}
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) return;
+			let timedOut = false;
+			let timer: NodeJS.Timeout | undefined;
+			try {
+				await Promise.race([
+					state.inFlight,
+					new Promise<void>((resolve) => {
+						timer = setTimeout(() => { timedOut = true; resolve(); }, remaining);
+					}),
+				]);
+			} finally {
+				clearTimeout(timer);
+			}
+			if (timedOut) return;
+		}
 	}
 
 	private attach(): void {

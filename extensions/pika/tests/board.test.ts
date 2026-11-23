@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { BoardSync, SWARM_BOARDS, swarmBoards, type SwarmBoard, type SwarmCard } from "../board.ts";
 import { CREDENTIALS, publishCredentials } from "../credentials.ts";
 import pikaExtension from "../index.ts";
@@ -25,8 +25,8 @@ afterEach(async () => {
 });
 
 /** Installs the process's board sync with short waits, as pika would with the defaults. */
-function quickSync(intervalMs = 150): void {
-	slots[SYNC] = new BoardSync({ noteError: (message) => currentUploader()?.noteError(message), intervalMs, retryMs: 100, retryMaxMs: 400 });
+function quickSync(intervalMs = 150, retryMs = 100, retryMaxMs = 400): void {
+	slots[SYNC] = new BoardSync({ noteError: (message) => currentUploader()?.noteError(message), intervalMs, retryMs, retryMaxMs });
 }
 
 const card = (id: string, status: SwarmCard["status"], note?: string): SwarmCard => ({
@@ -142,4 +142,83 @@ it("sends the last snapshot when the session ends", async () => {
 	await sleep(200);
 	expect(ingest.boardUploads.length).toBe(2);
 	expect(swarmBoards().listeners.size).toBe(0);
+});
+
+/** Holds the first board PUT response after the server handles it until the returned `release()` is called. */
+function holdFirstBoardUpload() {
+	const realFetch = globalThis.fetch;
+	let held = false;
+	let markReceived!: () => void;
+	const received = new Promise<void>((resolve) => { markReceived = resolve; });
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+		const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+		const hold = init?.method === "PUT" && url.includes("/api/relay/v1/boards/") && !held;
+		if (hold) held = true;
+		const response = await realFetch(input, init);
+		if (hold) {
+			markReceived();
+			await gate;
+		}
+		return response;
+	});
+	return { received, release, restore: () => { release(); spy.mockRestore(); } };
+}
+
+it("flushes a newer snapshot published while an earlier upload is still in flight", async () => {
+	await workspace.enable(ingest.url);
+	quickSync(10_000);
+	const id = await start();
+	const first = holdFirstBoardUpload();
+	try {
+		publish(id, 1, [card("c1", "todo")]);
+		await first.received;
+		publish(id, 2, [card("c1", "done")]);
+		const shuttingDown = harness!.shutdown();
+		await sleep(30);
+		first.release();
+		await shuttingDown;
+	} finally {
+		first.restore();
+	}
+	expect(ingest.boardUploads.map((u) => u.body.updatedAt)).toEqual([1, 2]);
+	expect(ingest.boardUploads[1]!.body.cards).toEqual([card("c1", "done")]);
+});
+
+it("allows one retry on shutdown after a transient 503 without spinning", async () => {
+	await workspace.enable(ingest.url);
+	quickSync(10_000, 10_000, 10_000);
+	ingest.boardStatus = 503;
+	const id = await start();
+	publish(id, 1, [card("c1", "todo")]);
+	await waitFor(() => ingest.boardUploads.length === 1 && lastError() !== undefined, 3_000, "the initial 503");
+	await sleep(30);
+	const startedAt = Date.now();
+	await harness!.shutdown();
+	expect(ingest.boardUploads.length).toBe(2);
+	expect(Date.now() - startedAt).toBeLessThan(1_500);
+});
+
+it("does not spin in a retry loop when an in-flight upload fails with 503 during flush", async () => {
+	await workspace.enable(ingest.url);
+	quickSync(10_000, 10_000, 10_000);
+	ingest.boardStatus = 503;
+	const id = await start();
+	const first = holdFirstBoardUpload();
+	let startedAt = 0;
+	try {
+		publish(id, 1, [card("c1", "todo")]);
+		await first.received;
+		publish(id, 2, [card("c1", "done")]);
+		startedAt = Date.now();
+		const shuttingDown = harness!.shutdown();
+		await sleep(30);
+		first.release();
+		await shuttingDown;
+	} finally {
+		first.restore();
+	}
+	expect(ingest.boardUploads.length).toBe(1);
+	expect(Date.now() - startedAt).toBeLessThan(1_500);
 });
