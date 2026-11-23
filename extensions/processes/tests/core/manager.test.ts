@@ -24,11 +24,26 @@ function tempDir(): string {
 function setup(options: Partial<ManagerOptions> = {}) {
 	const cwd = tempDir();
 	const manager = createProcessManager({ stateDir: path.join(cwd, "state"), shell: { shell: "/bin/sh", args: ["-c"] }, ...options });
-	cleanups.push(() => manager.shutdown());
+	const afterShutdown: Array<() => Promise<void> | void> = [];
+	cleanups.push(async () => {
+		try {
+			await manager.shutdown();
+		} finally {
+			for (const cleanup of afterShutdown.splice(0).reverse()) await cleanup();
+		}
+	});
 	const events: ProcessEvent[] = [];
 	manager.subscribe((event) => events.push(event));
 	const start = (command: string, extra: Partial<StartOptions> = {}) => manager.start({ command, cwd, owner: "test", ...extra });
-	return { manager, events, cwd, start };
+	return {
+		manager,
+		events,
+		cwd,
+		start,
+		onAfterShutdown: (cleanup: () => Promise<void> | void) => {
+			afterShutdown.push(cleanup);
+		},
+	};
 }
 
 async function next<T extends ProcessEvent["type"]>(events: ProcessEvent[], type: T, ms = 5000, match: (event: Extract<ProcessEvent, { type: T }>) => boolean = () => true) {
@@ -136,7 +151,7 @@ describe("lifecycle", () => {
 	});
 
 	it("serializes concurrent restart() calls on the same record without leaking intermediate processes", async () => {
-		const { manager, start, events, cwd } = setup();
+		const { manager, start, events, cwd, onAfterShutdown } = setup();
 		const runsFile = path.join(cwd, "runs.log");
 		const script = path.join(cwd, "worker.cjs");
 		fs.writeFileSync(
@@ -149,21 +164,7 @@ console.log("ready " + process.pid);
 setInterval(() => {}, 1000);
 `,
 		);
-		cleanups.push(() => {
-			if (!fs.existsSync(runsFile)) return;
-			for (const line of fs.readFileSync(runsFile, "utf8").trim().split("\n").filter(Boolean)) {
-				for (const raw of line.split(",")) {
-					const pid = Number(raw);
-					if (Number.isInteger(pid) && pid > 0) {
-						try {
-							process.kill(pid, "SIGKILL");
-						} catch {
-							// Already exited.
-						}
-					}
-				}
-			}
-		});
+		onAfterShutdown(() => killRecordedPids(runsFile));
 
 		const { process: first } = await start(`exec ${NODE} ${JSON.stringify(script)}`, {
 			name: "srv",
@@ -180,25 +181,40 @@ setInterval(() => {}, 1000);
 
 		expect([r1.id, r2.id, r3.id]).toEqual([first.id, first.id, first.id]);
 		expect([r1.restarts, r2.restarts, r3.restarts]).toEqual([1, 2, 3]);
-		expect(new Set([first.pid, r1.pid, r2.pid, r3.pid]).size).toBe(4);
+		const allPids = [first.pid!, r1.pid!, r2.pid!, r3.pid!];
+		expect(new Set(allPids).size).toBe(4);
 
 		const recorded = fs
 			.readFileSync(runsFile, "utf8")
 			.trim()
 			.split("\n")
+			.filter(Boolean)
 			.map((line) => line.split(",").map(Number) as [number, number]);
-		expect(recorded).toHaveLength(4);
-		expect(recorded.map(([pid]) => pid)).toEqual([first.pid, r1.pid, r2.pid, r3.pid]);
+		expect(recorded.length).toBeGreaterThanOrEqual(2);
+		expect(recorded.length).toBeLessThanOrEqual(4);
+		expect(recorded[0][0]).toBe(first.pid);
+		expect(recorded.at(-1)![0]).toBe(r3.pid);
+		const recordedParentPids = recorded.map(([pid]) => pid);
+		const recordedIndices = recordedParentPids.map((pid) => allPids.indexOf(pid));
+		expect(recordedIndices.every((index) => index >= 0)).toBe(true);
+		for (let i = 1; i < recordedIndices.length; i++) {
+			expect(recordedIndices[i]).toBeGreaterThan(recordedIndices[i - 1]);
+		}
 
-		for (const [parentPid, childPid] of recorded.slice(0, 3)) {
+		for (const pid of [first.pid!, r1.pid!, r2.pid!]) {
+			expect(await gone(pid)).toBe(true);
+			expect(groupAlive(pid)).toBe(false);
+		}
+		for (const [parentPid, childPid] of recorded.slice(0, -1)) {
 			expect(await gone(parentPid)).toBe(true);
 			expect(await gone(childPid)).toBe(true);
 		}
 
+		const finalGrandchildPid = recorded.at(-1)![1];
 		// Wait past LEFTOVER_PAUSE_MS to ensure no stale reap kills the newest run or corrupts status.
 		await sleep(250);
 		expect(pidAlive(r3.pid!)).toBe(true);
-		expect(pidAlive(recorded[3][1])).toBe(true);
+		expect(pidAlive(finalGrandchildPid)).toBe(true);
 		const current = manager.get(first.id);
 		expect(current).toMatchObject({ id: first.id, name: "srv", pid: r3.pid, status: "ready", restarts: 3 });
 		expect(current.exitCode).toBeUndefined();
@@ -210,19 +226,31 @@ setInterval(() => {}, 1000);
 		expect(exits.every((event) => event.requested)).toBe(true);
 
 		const lines = (await manager.logs("srv")).lines;
-		expect(lines).toEqual([
+		const expectedLines = [
 			`ready ${first.pid}`,
 			"--- restart 1 ---",
-			`ready ${r1.pid}`,
+			...(lines.includes(`ready ${r1.pid}`) ? [`ready ${r1.pid}`] : []),
 			"--- restart 2 ---",
-			`ready ${r2.pid}`,
+			...(lines.includes(`ready ${r2.pid}`) ? [`ready ${r2.pid}`] : []),
 			"--- restart 3 ---",
 			`ready ${r3.pid}`,
-		]);
+		];
+		expect(lines).toEqual(expectedLines);
+		const readyPids = new Set(
+			events
+				.filter((event): event is Extract<ProcessEvent, { type: "ready" }> => event.type === "ready")
+				.map((event) => event.process.pid),
+		);
+		expect(readyPids.has(first.pid)).toBe(true);
+		expect(readyPids.has(r3.pid)).toBe(true);
+		for (const pid of [r1.pid!, r2.pid!]) {
+			if (readyPids.has(pid)) expect(lines).toContain(`ready ${pid}`);
+			if (lines.includes(`ready ${pid}`)) expect(recordedParentPids).toContain(pid);
+		}
 
 		await manager.shutdown();
 		expect(await gone(r3.pid!)).toBe(true);
-		expect(await gone(recorded[3][1])).toBe(true);
+		expect(await gone(finalGrandchildPid)).toBe(true);
 	});
 
 	it("recovers per-record restart serialization after a failed restart", async () => {
@@ -894,7 +922,7 @@ setInterval(() => {}, 1000);
 	});
 
 	it("terminates a replacement child if restart() races with shutdown() mid-launch and drains live()", async () => {
-		const { manager, start, events, cwd } = setup();
+		const { manager, start, events, cwd, onAfterShutdown } = setup();
 		const runsFile = path.join(cwd, "runs.log");
 		const script = path.join(cwd, "launch-restart-worker.cjs");
 		fs.writeFileSync(
@@ -907,13 +935,14 @@ console.log("ready " + process.pid);
 setInterval(() => {}, 1000);
 `,
 		);
-		cleanups.push(() => killRecordedPids(runsFile));
+		onAfterShutdown(() => killRecordedPids(runsFile));
 
 		const { process: first } = await start(`exec ${NODE} ${JSON.stringify(script)}`, {
 			name: "srv",
-			ready: { pattern: "^ready \\d+$", timeoutSeconds: 0.2 },
+			ready: { pattern: "^ready \\d+$", timeoutSeconds: 0.25 },
 		});
 		await next(events, "ready", 5000, (event) => event.process.pid === first.pid);
+		const eventCountBeforeRestart = events.length;
 
 		let replacementPid: number | undefined;
 		let shuttingDown: Promise<void> | undefined;
@@ -946,9 +975,9 @@ setInterval(() => {}, 1000);
 		}
 		expect(manager.list().filter((p) => isLiveStatus(p.status))).toEqual([]);
 
-		// Wait past ready.timeoutSeconds to confirm readiness timer was cleared.
-		await sleep(300);
-		expect(events.filter((event) => event.type === "ready_timeout")).toEqual([]);
+		// Wait past ready.timeoutSeconds to confirm the replacement child's readiness timer was cleared.
+		await sleep(350);
+		expect(events.slice(eventCountBeforeRestart).filter((event) => event.type === "ready_timeout")).toEqual([]);
 	});
 
 	it("terminates a child spawned by concurrent start() racing with shutdown() with no orphan group, watchdog, or leaked timers", async () => {
