@@ -5,10 +5,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Type } from "typebox";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadRelaySettings } from "../../config.ts";
-import { MESSAGE_TYPE, timing } from "../../relay/protocol.ts";
+import type { RelayConnection } from "../../relay/connection.ts";
+import { createMessaging } from "../../relay/messaging.ts";
+import { MESSAGE_TYPE, type MessageFrame, type SentFrame, timing } from "../../relay/protocol.ts";
 import { parseSide, SIDE_TYPE } from "../../relay/side.ts";
+import { createRelayState } from "../../relay/state.ts";
 import type { FakeRelay } from "./support/relay-server.ts";
 import { Notes, relaySuite, sleep, texts, waitFor, type Harness, type Workspace } from "./support/runtime.ts";
 
@@ -287,6 +290,220 @@ it("sends a busy notice when the side request fails or times out", async () => {
 	await prompt;
 	await waitFor(() => texts(h.session, "assistant").includes("after the message"), 5_000, "the follow-up turn");
 	expect(h.errors).toEqual([]);
+});
+
+it("drops post-send side-answer state and note when the turn settles while send() is in flight", async () => {
+	await settings({ sideAnswerSeconds: 0.05 });
+	const h = await online();
+	const id = h.session.sessionId;
+	const busy1 = held("first turn answer");
+	const busy2 = held("second turn answer");
+	h.faux.setResponses([
+		busy1.step,
+		reply("First turn side answer."),
+		reply("after the first message"),
+		busy2.step,
+		reply("Second turn side answer."),
+		reply("after the second note"),
+		reply("after the second message"),
+	]);
+
+	let message1 = "";
+	let sendStarted!: () => void;
+	const sendBegun = new Promise<void>((resolve) => { sendStarted = resolve; });
+	let releaseSend!: () => void;
+	relay.onSend = (frame) => {
+		if (frame.replyTo !== message1) return undefined;
+		sendStarted();
+		releaseSend = () => {
+			relay.send(id, { type: "sent", clientId: frame.clientId, status: "delivered", id: relay.nextId(), to: { sessionId: "peer" } });
+		};
+		return "none";
+	};
+
+	let settled = false;
+	const unsubscribe = h.session.subscribe((event) => { if (event.type === "agent_settled") settled = true; });
+	try {
+		const prompt1 = h.session.prompt("first work");
+		await busy1.started;
+		message1 = relay.push(id, { from: PEER, text: "first question" });
+		await sendBegun;
+
+		// Turn 1 finishes, reads message1, and the session settles while send() is still awaiting its server ack.
+		busy1.release();
+		await prompt1;
+		await waitFor(() => settled && texts(h.session, "assistant").includes("after the first message"), 5_000, "first turn settled");
+
+		// Now the in-flight send() resolves after agent_settled.
+		releaseSend();
+		await sleep(150);
+		expect(h.sent.filter((item) => item.message.customType === SIDE_TYPE)).toEqual([]);
+
+		// A fresh turn's side request must not see the stale side answer leaked from the settled turn.
+		const prompt2 = h.session.prompt("second work");
+		await busy2.started;
+		const message2 = relay.push(id, { from: PEER, text: "second question" });
+		await waitFor(noted(h), 5_000, "the second side answer");
+		const secondSidePrompt = textOf(sideRequests().at(-1)!.messages.at(-1));
+		expect(secondSidePrompt).toContain(`Message ${message2}`);
+		expect(secondSidePrompt).not.toContain("First turn side answer.");
+		expect(secondSidePrompt).not.toContain("side requests already answered");
+
+		busy2.release();
+		await prompt2;
+		await waitFor(() => texts(h.session, "assistant").includes("after the second message"), 5_000, "second turn finished");
+		expect(h.errors).toEqual([]);
+	} finally {
+		unsubscribe();
+	}
+});
+
+it("does not post a stale side note when the session switches while send() is in flight", async () => {
+	await settings({ sideAnswerSeconds: 0.05 });
+	const h = await online();
+	const id = h.session.sessionId;
+	const busy = held("first answer");
+	h.faux.setResponses([busy.step, reply("Side answer before switch.")]);
+
+	let message = "";
+	let sendStarted!: () => void;
+	const sendBegun = new Promise<void>((resolve) => { sendStarted = resolve; });
+	relay.onSend = (frame) => {
+		if (frame.replyTo !== message) return undefined;
+		sendStarted();
+		return "none";
+	};
+
+	const prompt = h.session.prompt("work before switch");
+	await busy.started;
+	message = relay.push(id, { from: PEER, text: "question before switch" });
+	await sendBegun;
+
+	const switched = h.runtime.newSession();
+	busy.release();
+	await prompt;
+	await switched;
+	await waitFor(() => relay.online(h.session.sessionId) !== undefined, 5_000, "replacement session online");
+	await sleep(150);
+	expect(h.sent.filter((item) => item.message.customType === SIDE_TYPE)).toEqual([]);
+	expect(h.errors).toEqual([]);
+});
+
+describe("answerSide post-send guards", () => {
+	async function startInFlightSideSend() {
+		await settings({ sideAnswerSeconds: 0.01 });
+		const state = createRelayState();
+		const sentMessages: { customType: string; content: unknown; details: unknown; options: unknown }[] = [];
+		const pi = {
+			getThinkingLevel: () => "off",
+			sendMessage: (message: { customType: string; content: unknown; details: unknown }, options: unknown) => {
+				sentMessages.push({ ...message, options });
+			},
+			appendEntry: () => undefined,
+		} as unknown as ExtensionAPI;
+
+		const makeContext = (id: string) => ({
+			mode: "tui",
+			cwd: workspace.cwd,
+			isIdle: () => false,
+			model: { provider: "test", id: "model" },
+			sessionManager: { getSessionId: () => id, getCwd: () => workspace.cwd },
+			modelRegistry: {
+				streamSimple: () => ({
+					result: async () => ({
+						role: "assistant",
+						stopReason: "stop",
+						content: [{ type: "text", text: "Side answer text." }],
+					}),
+				}),
+			},
+		}) as unknown as ExtensionContext;
+
+		let resolveRequest!: (frame: SentFrame) => void;
+		let requestStarted!: () => void;
+		const requestBegun = new Promise<void>((resolve) => { requestStarted = resolve; });
+		const connection = {
+			state: { kind: "online", welcome: { device: "laptop", limits: {} } },
+			send: () => true,
+			request: () => {
+				requestStarted();
+				return new Promise<SentFrame>((resolve) => { resolveRequest = resolve; });
+			},
+		} as unknown as RelayConnection;
+
+		state.ctx = makeContext("sess-1");
+		state.sessionId = "sess-1";
+		state.started = true;
+		state.decided = true;
+		state.connection = connection;
+		state.transcript.onRequest([{ role: "user", content: "working", timestamp: Date.now() }]);
+
+		const messaging = createMessaging(pi, state, { refreshRooms: () => undefined, evaluate: () => undefined });
+		const frame: MessageFrame = {
+			type: "message",
+			id: "msg-in-flight",
+			from: { kind: "session", sessionId: "peer", device: "desktop", name: "Peer" },
+			text: "Status?",
+			urgent: false,
+			hops: 1,
+			sentAt: new Date().toISOString(),
+		};
+		messaging.receive(frame);
+		await requestBegun;
+
+		const finishSend = async () => {
+			resolveRequest({ type: "sent", clientId: "c1", status: "delivered", id: "reply-1", to: { sessionId: "peer" } });
+			await sleep(30);
+		};
+		const sideMessages = () => sentMessages.filter((item) => item.customType === SIDE_TYPE);
+		return { state, messaging, makeContext, finishSend, sideMessages, msgId: frame.id };
+	}
+
+	it("skips post-send mutations when the session shut down (!started) while send() was in flight", async () => {
+		const { state, finishSend, sideMessages, msgId } = await startInFlightSideSend();
+		state.started = false;
+		await finishSend();
+		expect(state.sideAnswers).toEqual([]);
+		expect(state.unread.get(msgId)?.told).toBe(false);
+		expect(sideMessages()).toEqual([]);
+	});
+
+	it("skips post-send mutations when the session started leaving while send() was in flight", async () => {
+		const { state, finishSend, sideMessages, msgId } = await startInFlightSideSend();
+		state.leaving = true;
+		await finishSend();
+		expect(state.sideAnswers).toEqual([]);
+		expect(state.unread.get(msgId)?.told).toBe(false);
+		expect(sideMessages()).toEqual([]);
+	});
+
+	it("skips post-send mutations when the session context switched while send() was in flight", async () => {
+		const { state, makeContext, finishSend, sideMessages, msgId } = await startInFlightSideSend();
+		state.ctx = makeContext("sess-2");
+		await finishSend();
+		expect(state.sideAnswers).toEqual([]);
+		expect(state.unread.get(msgId)?.told).toBe(false);
+		expect(sideMessages()).toEqual([]);
+	});
+
+	it("skips post-send mutations when turn-settlement state changed while send() was in flight", async () => {
+		const { state, finishSend, sideMessages } = await startInFlightSideSend();
+		state.sideGeneration++;
+		state.unread.clear();
+		state.sideAnswers.length = 0;
+		await finishSend();
+		expect(state.sideAnswers).toEqual([]);
+		expect(sideMessages()).toEqual([]);
+	});
+
+	it("records side answer and posts side note when lifecycle and turn state remain valid after send()", async () => {
+		const { state, finishSend, sideMessages, msgId } = await startInFlightSideSend();
+		await finishSend();
+		expect(state.sideAnswers).toHaveLength(1);
+		expect(state.sideAnswers[0]).toMatchObject({ id: msgId, text: "Side answer text." });
+		expect(state.unread.get(msgId)?.told).toBe(true);
+		expect(sideMessages()).toHaveLength(1);
+	});
 });
 
 describe("parseSide", () => {
