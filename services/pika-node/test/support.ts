@@ -6,6 +6,7 @@ import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { asNodeError } from "../src/errors.ts";
 import { paths, type Paths } from "../src/paths.ts";
 import { encodeLine, LineDecoder, PROTOCOL_VERSION, sanitize, type NodeMessage, type Snapshot } from "../src/protocol.ts";
 import { applyWidths } from "../src/widths.ts";
@@ -25,6 +26,16 @@ export function tempHome(): Paths & { cleanup: () => void } {
 
 export function cli(p: Paths, args: string[], options: { input?: string; env?: Record<string, string> } = {}): string {
     return execFileSync(BIN, args, { env: { ...process.env, PIKA_NODE_HOME: p.home, ...options.env }, input: options.input, encoding: "utf8", timeout: 30_000 });
+}
+
+/** Runs git in a test fixture directory with deterministic author and default-branch config. */
+export function git(cwd: string, ...args: string[]): string {
+    return execFileSync("git", ["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", ...args], { encoding: "utf8" }).trim();
+}
+
+/** Extracts the inner-protocol error code from an unknown error via `asNodeError`. */
+export function errorCode(error: unknown): string {
+    return asNodeError(error).code;
 }
 
 type Message = NodeMessage & Record<string, unknown>;

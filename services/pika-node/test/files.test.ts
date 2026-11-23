@@ -1,13 +1,11 @@
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type { Peer } from "../src/daemon.ts";
-import { asNodeError } from "../src/errors.ts";
 import { Files, parseGitStatus } from "../src/files.ts";
 import { toBase64Url, type NodeMessage } from "../src/protocol.ts";
-import { tempHome, until } from "./support.ts";
+import { errorCode, git, tempHome, until } from "./support.ts";
 
 const home = tempHome();
 const root = join(home.home, "root");
@@ -21,7 +19,7 @@ afterAll(() => { files.shutdown(); home.cleanup(); });
 const sha = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
 const code = async (promise: Promise<unknown>) => {
     try { await promise; return "ok"; }
-    catch (error) { return asNodeError(error).code; }
+    catch (error) { return errorCode(error); }
 };
 
 describe("files", () => {
@@ -113,14 +111,13 @@ describe("files", () => {
     it("shows a file at HEAD and in the index, inside its repository only", async () => {
         const repo = join(home.home, "git");
         mkdirSync(join(repo, "src"), { recursive: true });
-        const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" });
-        git("init", "-q");
+        git(repo, "init", "-q");
         writeFileSync(join(repo, "src", "a.ts"), "one\n");
         writeFileSync(join(repo, "gone.txt"), "old\n");
-        git("add", ".");
-        git("commit", "-qm", "first");
+        git(repo, "add", ".");
+        git(repo, "commit", "-qm", "first");
         writeFileSync(join(repo, "src", "a.ts"), "two\n");
-        git("add", "src/a.ts");
+        git(repo, "add", "src/a.ts");
         writeFileSync(join(repo, "src", "a.ts"), "three\n");
         rmSync(join(repo, "gone.txt"));
         const show = (path: string, ref: "HEAD" | "index") => files.request(peer, { type: "fs.gitShow", id: "g", path, ref });
@@ -135,14 +132,14 @@ describe("files", () => {
         expect(await code(show(join(root, "a.txt"), "HEAD"))).toBe("not_found");
         const other = join(home.home, "other");
         mkdirSync(other);
-        execFileSync("git", ["-C", other, "init", "-q"]);
+        git(other, "init", "-q");
         writeFileSync(join(other, "secret.txt"), "x");
         symlinkSync(join(other, "secret.txt"), join(repo, "link.txt"));
-        git("add", "link.txt");
+        git(repo, "add", "link.txt");
         // The link's target is in `other`, whose index lacks it: resolved there, never as `link.txt` of this repository.
         expect(await code(show(join(repo, "link.txt"), "index"))).toBe("not_found");
         writeFileSync(join(repo, "big.txt"), "x".repeat(512 * 1024 + 1));
-        git("add", "big.txt");
+        git(repo, "add", "big.txt");
         expect(await code(show(join(repo, "big.txt"), "index"))).toBe("too_large");
     });
 
@@ -150,15 +147,14 @@ describe("files", () => {
         const repo = join(home.home, "listed");
         mkdirSync(join(repo, "src", "deep"), { recursive: true });
         mkdirSync(join(repo, "node_modules", "dep"), { recursive: true });
-        const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" });
-        git("init", "-q");
+        git(repo, "init", "-q");
         writeFileSync(join(repo, ".gitignore"), "node_modules\n*.log\n");
         writeFileSync(join(repo, "src", "a.ts"), "a");
         writeFileSync(join(repo, "src", "deep", "b ç.ts"), "b");
         writeFileSync(join(repo, "node_modules", "dep", "index.js"), "x");
         writeFileSync(join(repo, "debug.log"), "x");
-        git("add", ".gitignore", "src/a.ts");
-        git("commit", "-qm", "first");
+        git(repo, "add", ".gitignore", "src/a.ts");
+        git(repo, "commit", "-qm", "first");
         const list = (root: string, limit?: number) => files.request(peer, { type: "fs.list", id: "l", root, ...(limit ? { limit } : {}) });
 
         // Tracked and untracked, never ignored; relative to the root asked for, also below the top level.
@@ -185,26 +181,25 @@ describe("files", () => {
     it("answers a work tree's git status: staged, unstaged, untracked, renamed, and conflicted", async () => {
         const repo = join(home.home, "status");
         mkdirSync(join(repo, "src"), { recursive: true });
-        const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" });
-        git("init", "-q", "-b", "main");
+        git(repo, "init", "-q", "-b", "main");
         writeFileSync(join(repo, ".gitignore"), "*.log\n");
         writeFileSync(join(repo, "both.txt"), "one\n");
         writeFileSync(join(repo, "old name.txt"), "moved\n");
         writeFileSync(join(repo, "gone.txt"), "x\n");
         writeFileSync(join(repo, "conflict.txt"), "base\n");
-        git("add", ".");
-        git("commit", "-qm", "first");
-        git("checkout", "-qb", "other");
+        git(repo, "add", ".");
+        git(repo, "commit", "-qm", "first");
+        git(repo, "checkout", "-qb", "other");
         writeFileSync(join(repo, "conflict.txt"), "theirs\n");
-        git("commit", "-qam", "theirs");
-        git("checkout", "-q", "main");
+        git(repo, "commit", "-qam", "theirs");
+        git(repo, "checkout", "-q", "main");
         writeFileSync(join(repo, "conflict.txt"), "ours\n");
-        git("commit", "-qam", "ours");
-        try { git("merge", "-q", "other"); } catch { /* the conflict is the point */ }
+        git(repo, "commit", "-qam", "ours");
+        try { git(repo, "merge", "-q", "other"); } catch { /* the conflict is the point */ }
         writeFileSync(join(repo, "both.txt"), "two\n");
-        git("add", "both.txt");
+        git(repo, "add", "both.txt");
         writeFileSync(join(repo, "both.txt"), "three\n");
-        git("mv", "old name.txt", "src/new name.txt");
+        git(repo, "mv", "old name.txt", "src/new name.txt");
         rmSync(join(repo, "gone.txt"));
         writeFileSync(join(repo, "src", "fresh ç.ts"), "new");
         writeFileSync(join(repo, "debug.log"), "ignored");
@@ -226,7 +221,7 @@ describe("files", () => {
 
         // Staging the same file again changes its index object.
         writeFileSync(join(repo, "both.txt"), "four\n");
-        git("add", "both.txt");
+        git(repo, "add", "both.txt");
         const again = await files.gitStatus(repo);
         expect(again.entries.find(entry => entry.path === "both.txt")!.indexHash).not.toBe(byPath.get("both.txt")!.indexHash);
 
@@ -267,11 +262,10 @@ describe("files", () => {
         mkdirSync(decoy, { recursive: true });
         mkdirSync(nonRepo, { recursive: true });
         const initRepo = (dir: string, branch: string, file: string, body: string) => {
-            const git = (...args: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" });
-            git("init", "-q", "-b", branch);
+            git(dir, "init", "-q", "-b", branch);
             writeFileSync(join(dir, file), body);
-            git("add", file);
-            git("commit", "-qm", "first");
+            git(dir, "add", file);
+            git(dir, "commit", "-qm", "first");
         };
         initRepo(repo, "main", "target.txt", "from-repo\n");
         initRepo(decoy, "decoy-branch", "decoy.txt", "from-decoy\n");

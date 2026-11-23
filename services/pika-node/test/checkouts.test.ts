@@ -1,14 +1,11 @@
-import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { checkoutId, Checkouts, listOf, parseWorktrees, place, worktreeSlug, worktreeTarget, type CheckoutList } from "../src/checkouts.ts";
-import { asNodeError } from "../src/errors.ts";
 import { isCheckout, LIMITS, type Checkout } from "../src/protocol.ts";
 import { loadConfig, saveConfig, type Config } from "../src/store.ts";
-import { tempHome, until } from "./support.ts";
+import { errorCode, git, tempHome, until } from "./support.ts";
 
-const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", ...args], { encoding: "utf8" }).trim();
 const repo = (path: string, remote?: string) => {
     mkdirSync(path, { recursive: true });
     git(path, "init", "-q");
@@ -18,7 +15,7 @@ const repo = (path: string, remote?: string) => {
 };
 const code = async (promise: Promise<unknown>) => {
     try { await promise; return "ok"; }
-    catch (error) { return asNodeError(error).code; }
+    catch (error) { return errorCode(error); }
 };
 
 describe("pure helpers", () => {
@@ -54,7 +51,7 @@ describe("pure helpers", () => {
         expect(worktreeSlug(".hidden-")).toBe("hidden");
         expect(worktreeSlug("--x..")).toBe("x");
         expect(() => worktreeSlug("+")).toThrow(/no folder name/);
-        expect(asNodeError((() => { try { worktreeSlug("//"); } catch (error) { return error; } })()).code).toBe("invalid");
+        expect(errorCode((() => { try { worktreeSlug("//"); } catch (error) { return error; } })())).toBe("invalid");
         expect(worktreeTarget("/w/repo", "feat/login")).toBe("/w/repo-feat-login");
         expect(worktreeTarget("/w/repo", "feat/login", "/trees")).toBe("/trees/repo-feat-login");
     });

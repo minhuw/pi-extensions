@@ -2,18 +2,16 @@
  * Checkouts and worktrees (NODE.md "Checkouts") on the real daemon process, driven over its unix socket: every request,
  * git's refusals (dirty worktree, unmerged branch), busy and force, the setup terminal, and the events.
  */
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { checkoutId } from "../src/checkouts.ts";
 import type { Checkout, TerminalInfo, Worktree } from "../src/protocol.ts";
-import { cli, settle, socketClient, tempHome } from "./support.ts";
+import { cli, git, settle, socketClient, tempHome } from "./support.ts";
 
 const home = tempHome();
 const base = home.home;
 const root = join(base, "root");
-const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", ...args], { encoding: "utf8" }).trim();
 let repo: string;
 let id: string;
 
