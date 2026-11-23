@@ -15,6 +15,8 @@ interface LaunchRecord { launch: number; launched: ScriptLaunchedEvent; settled?
  * `sessionFile` come from the attempt's latest event that names its Pi session; journals before they existed have none.
  */
 interface StepRecord { key: string; status: StepState; started?: StepStartedEvent; completed?: StepCompletedEvent; failed?: StepFailedEvent; task?: string; sessionId?: string; sessionFile?: string }
+/** A commit produced by a journaled `gate_failed` step completion; retained across later reruns of the same step. */
+export interface GateFailedCommit { commit: string; key: string; id?: string; failedChecks: string[] }
 export interface TaskRecord { id: string; status: TaskState; lastStep?: string; integratedCommit?: string; steps: string[] }
 export type HistoryEvent =
 	| ScriptSettledEvent | StepCompletedEvent | StepFailedEvent | CheckCompletedEvent | IntegrateCompletedEvent
@@ -31,6 +33,8 @@ export interface RunState {
 	steps: Map<string, StepRecord>;
 	/** Latest `step.completed` per (key, fingerprint); use `findCompletion`. */
 	completions: Map<string, StepCompletedEvent>;
+	/** Every commit produced by any journaled `gate_failed` completion, keyed by commit SHA; retained across reruns. */
+	gateFailedCommits: Map<string, GateFailedCommit>;
 	/** Count of `step.started` with `attempt === 1` (the per-run agent cap). */
 	liveAgentStarts: number;
 	integrations: IntegrateCompletedEvent[];
@@ -62,6 +66,10 @@ export function findCompletion(state: RunState, key: string, fingerprint: string
 	return state.completions.get(completionId(key, fingerprint));
 }
 
+export function findGateFailedCommit(state: RunState, commit: string): GateFailedCommit | undefined {
+	return state.gateFailedCommits.get(commit);
+}
+
 export function findIntegration(state: RunState, key: string): IntegrateCompletedEvent | undefined {
 	return state.integrations.findLast((event) => event.key === key);
 }
@@ -69,7 +77,7 @@ export function findIntegration(state: RunState, key: string): IntegrateComplete
 /** Pure, in-order fold. Unknown event types are ignored. */
 export function fold(events: readonly JournalEvent[]): RunState {
 	const state: RunState = {
-		status: "drafting", launches: new Map(), steps: new Map(), completions: new Map(), liveAgentStarts: 0,
+		status: "drafting", launches: new Map(), steps: new Map(), completions: new Map(), gateFailedCommits: new Map(), liveAgentStarts: 0,
 		integrations: [], integrationFailures: [], checks: [], decisions: [], tasks: new Map(), history: [],
 	};
 	// Per task: the latest settled outcome of its steps or integrations (true = success).
@@ -116,6 +124,12 @@ export function fold(events: readonly JournalEvent[]): RunState {
 				const started = previous?.started?.fingerprint === event.fingerprint ? previous.started : undefined;
 				state.steps.set(event.key, { key: event.key, status: event.status, started, completed: event, task: previous?.task, ...sessionOf(event, started) });
 				state.completions.set(completionId(event.key, event.fingerprint), event);
+				if (event.status === "gate_failed" && event.commit !== undefined) {
+					const existing = state.gateFailedCommits.get(event.commit);
+					const failedChecks = [...new Set([...(existing?.failedChecks ?? []), ...(event.checks ?? []).filter((check) => !check.passed).map((check) => check.id)])];
+					const id = started?.id ?? existing?.id;
+					state.gateFailedCommits.set(event.commit, { commit: event.commit, key: event.key, ...(id !== undefined ? { id } : {}), failedChecks });
+				}
 				settle(event.key, event.status !== "gate_failed");
 				state.history.push(event);
 				break;

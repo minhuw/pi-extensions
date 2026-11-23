@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { isKnownEvent } from "../../src/journal/events.ts";
-import { findCompletion, findIntegration, fold } from "../../src/journal/fold.ts";
+import { findCompletion, findGateFailedCommit, findIntegration, fold } from "../../src/journal/fold.ts";
 import { renderProgress } from "../../src/journal/render.ts";
 import type { JournalEvent, JournalInput } from "../../src/types.ts";
-import { journalOf, sampleJournal, started } from "./sample.ts";
+import { check, journalOf, sampleJournal, started } from "./sample.ts";
 
 describe("fold", () => {
 	it("derives run, goal, launches, steps, integrations, and tasks", () => {
@@ -17,6 +17,8 @@ describe("fold", () => {
 		expect(state.steps.get("rev-0")?.status).toBe("running");
 		expect(findCompletion(state, "impl1-0", "f1")?.commit).toBe("c1");
 		expect(findCompletion(state, "impl1-0", "other")).toBeUndefined();
+		expect(findGateFailedCommit(state, "c2")).toEqual({ commit: "c2", key: "impl2-0", id: "impl2", failedChecks: ["unit"] });
+		expect(findGateFailedCommit(state, "c1")).toBeUndefined();
 		expect(findIntegration(state, "i1")?.head).toBe("h1");
 		expect(state.integrations.map((event) => event.key)).toEqual(["i1"]);
 		expect(state.integrationFailures.map((event) => event.reason)).toEqual(["conflict"]);
@@ -48,6 +50,31 @@ describe("fold", () => {
 		expect(state.steps.get("adopted-0")).toMatchObject({ status: "ok", completed: { commit: "c9" } });
 		expect(state.steps.get("adopted-0")?.started).toBeUndefined();
 		expect(state.liveAgentStarts).toBe(2);
+	});
+
+	it("retains every journaled gate_failed commit across reruns, overwrites, and later ok completions", () => {
+		const state = fold(journalOf([
+			started("impl-0", "f1", 1),
+			{ t: "step.completed", key: "impl-0", fingerprint: "f1", status: "gate_failed", commit: "c1", checks: [check("lint", false), check("unit", true)] },
+			// Same key + same fingerprint rerun (e.g. fresh: true) that fails a different gate at a second commit.
+			started("impl-0", "f1", 1),
+			{ t: "step.completed", key: "impl-0", fingerprint: "f1", status: "gate_failed", commit: "c2", checks: [check("lint", true), check("unit", false)] },
+			// Later rerun under the same key that succeeds and overwrites state.steps["impl-0"].
+			started("impl-0", "f2", 1),
+			{ t: "step.completed", key: "impl-0", fingerprint: "f2", status: "ok", commit: "c3", checks: [check("lint", true), check("unit", true)] },
+			// Another step whose gate_failed commit is later overwritten by a running/failed attempt.
+			started("other-0", "f3", 1),
+			{ t: "step.completed", key: "other-0", fingerprint: "f3", status: "gate_failed", commit: "c4", checks: [check("smoke", false)] },
+			started("other-0", "f3", 1),
+			{ t: "step.failed", key: "other-0", fingerprint: "f3", attempt: 1, errorClass: "fatal", message: "boom", final: true },
+		]));
+		expect(state.steps.get("impl-0")).toMatchObject({ status: "ok", completed: { commit: "c3" } });
+		expect(state.steps.get("other-0")?.status).toBe("failed");
+		expect(findGateFailedCommit(state, "c1")).toEqual({ commit: "c1", key: "impl-0", id: "impl", failedChecks: ["lint"] });
+		expect(findGateFailedCommit(state, "c2")).toEqual({ commit: "c2", key: "impl-0", id: "impl", failedChecks: ["unit"] });
+		expect(findGateFailedCommit(state, "c4")).toEqual({ commit: "c4", key: "other-0", id: "other", failedChecks: ["smoke"] });
+		expect(findGateFailedCommit(state, "c3")).toBeUndefined();
+		expect([...state.gateFailedCommits.keys()]).toEqual(["c1", "c2", "c4"]);
 	});
 
 	it("computes the overall status and defaults the head to the base", () => {

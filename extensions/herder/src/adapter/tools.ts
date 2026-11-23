@@ -4,7 +4,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type, type TSchema } from "typebox";
 import { GoalError, hashGoal, parseGoal } from "../artifacts/goal.ts";
 import { THINKING_LEVELS } from "../config.ts";
-import type { RunState } from "../journal/fold.ts";
+import { findGateFailedCommit, type RunState } from "../journal/fold.ts";
 import { readLock } from "../run/lock.ts";
 import { AGENT_OPTION_KEYS, type AgentOptions, type DeliveryMode } from "../types.ts";
 import { validateScript } from "../workflow/validate.ts";
@@ -180,6 +180,12 @@ async function abortRun(herder: Herder, s: Session, held: Held, ctx: ExtensionCo
 	return reply(`Abandoned Herder run ${runId}.${warning ? ` Warning: ${warning}` : ""}`, { runId, aborted: true, ...(warning ? { warning } : {}) });
 }
 
+const gateFailedError = (key: string, failedChecks: readonly string[] = [], commit?: string) => {
+	const at = commit ? ` at ${commit.slice(0, 12)}` : "";
+	const checks = failedChecks.length ? ` (failed gates: ${failedChecks.join(", ")})` : "";
+	return new Error(`Step ${key} is gate_failed${at}${checks}: its gates did not pass, so it cannot be integrated. Base a fix step on its commit and integrate that step.`);
+};
+
 export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 	pi.registerTool({
 		name: "herder_run", label: "Herder Run", defaultActive: false, executionMode: "sequential",
@@ -274,9 +280,19 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 			requireIdle(held, "A direct integration");
 			checkIds(state, params.checks);
 			const step = state.steps.get(params.source);
-			if (step?.status === "gate_failed") throw new Error(`Step ${params.source} is gate_failed: its gates did not pass, so it cannot be integrated. Base a fix step on its commit and integrate that step.`);
+			if (step?.status === "gate_failed") {
+				const record = step.completed?.commit ? findGateFailedCommit(state, step.completed.commit) : undefined;
+				const failedChecks = record?.failedChecks.length ? record.failedChecks : (step.completed?.checks ?? []).filter((check) => !check.passed).map((check) => check.id);
+				throw gateFailedError(params.source, failedChecks, step.completed?.commit);
+			}
 			if (step && !step.completed?.commit) throw new Error(`Step ${params.source} has no commit to integrate (status ${step.status}).`);
 			const source = step?.completed?.commit ?? params.source;
+			if (state.gateFailedCommits.size > 0) {
+				let resolved = source;
+				try { resolved = held.vcs.resolve(source); } catch {}
+				const refused = findGateFailedCommit(state, resolved) ?? findGateFailedCommit(state, source);
+				if (refused) throw gateFailedError(refused.key, refused.failedChecks, refused.commit);
+			}
 			const opts = { message: params.message, ...(params.task ? { task: params.task } : {}), ...(params.checks ? { checks: params.checks } : {}) };
 			const result = await herder.op(s, held, signal, (combined, report) => herder.runtime(s, held).integrate(source, opts, combined, report), false, `${params.task ? `${params.task} ` : ""}integrating`);
 			herder.refresh(s);

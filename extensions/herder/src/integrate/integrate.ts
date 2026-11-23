@@ -1,10 +1,10 @@
 // Serial integration onto the run's hidden integration ref (§11).
 import { runChecksInWorktree } from "../checks/runner.ts";
-import { findIntegration } from "../journal/fold.ts";
+import { findGateFailedCommit, findIntegration } from "../journal/fold.ts";
 import { integrationKey } from "../journal/keys.ts";
 import { integrationRef } from "../run/paths.ts";
 import type { RunStore } from "../run/store.ts";
-import { type CheckSpec, type Faults, INTEGRATE_OPTION_KEYS, type IntegrateOptions, type IntegrateResult, type JournalInput, noFaults, type StepResult, type Vcs } from "../types.ts";
+import { type CheckResult, type CheckSpec, type Faults, INTEGRATE_OPTION_KEYS, type IntegrateOptions, type IntegrateResult, type JournalInput, noFaults, type StepResult, type Vcs } from "../types.ts";
 import { hasHerderTrailer } from "../vcs/git.ts";
 
 interface IntegrateDeps { runId: string; store: RunStore; vcs: Vcs; checks: readonly CheckSpec[]; faults?: Faults; signal?: AbortSignal; onProgress?: () => void }
@@ -48,7 +48,12 @@ function selectChecks(checks: readonly CheckSpec[], ids: readonly string[] | und
 }
 
 const sameMessage = (a: string, b: string) => a.trimEnd() === b.trimEnd();
-const gateFailed = (key: string) => new Error(`integrate: step ${key} gate_failed; its gates did not pass, so it cannot be integrated (base a fix step on its commit and integrate that step)`);
+const failedCheckIds = (checks: readonly CheckResult[] | undefined) => (checks ?? []).filter((check) => !check.passed).map((check) => check.id);
+const gateFailed = (key: string, failedChecks: readonly string[] = [], commit?: string) => {
+	const at = commit ? ` at ${commit.slice(0, 12)}` : "";
+	const checks = failedChecks.length ? ` (failed gates: ${failedChecks.join(", ")})` : "";
+	return new Error(`integrate: step ${key} gate_failed${at}${checks}; its gates did not pass, so it cannot be integrated (base a fix step on its commit and integrate that step)`);
+};
 
 export function createIntegrator(deps: IntegrateDeps): Integrator {
 	const { runId, store, vcs } = deps;
@@ -119,13 +124,17 @@ export function createIntegrator(deps: IntegrateDeps): Integrator {
 			if (typeof source === "string") commit = vcs.resolve(source);
 			else if (source === null || typeof source !== "object") throw new Error("integrate: source must be a step result or a commit");
 			else if (source.status === "failed" || source.status === "stopped") throw new Error(`integrate: step ${source.key} ${source.status}; only completed steps can be integrated`);
-			else if (source.status === "gate_failed") throw gateFailed(source.key);
+			else if (source.status === "gate_failed") {
+				const recorded = source.commit ? findGateFailedCommit(store.state(), source.commit) : undefined;
+				const failed = failedCheckIds(source.checks);
+				throw gateFailed(source.key, failed.length ? failed : recorded?.failedChecks, source.commit);
+			}
 			else if (source.commit !== undefined) commit = vcs.resolve(source.commit);
 			else if (source.status === "no_changes") return { status: "integrated", head: ctx.from ?? realHead() };
 			else throw new Error(`integrate: step ${source.key} has no commit (read-only steps cannot be integrated)`);
 			// A gate_failed step keeps its commit for a fix to build on; the journal, not the caller, says whose commit this is.
-			const refused = [...store.state().steps.values()].find((step) => step.status === "gate_failed" && step.completed?.commit === commit);
-			if (refused) throw gateFailed(refused.key);
+			const refused = findGateFailedCommit(store.state(), commit);
+			if (refused) throw gateFailed(refused.key, refused.failedChecks, refused.commit);
 			const signal = deps.signal && ctx.signal ? AbortSignal.any([deps.signal, ctx.signal]) : ctx.signal ?? deps.signal;
 			return serialize(store.paths.dir, () => integrateLocked(commit, opts, specs, ctx.from ?? realHead(), signal, ctx.onCheck));
 		},

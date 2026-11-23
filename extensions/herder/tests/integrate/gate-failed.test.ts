@@ -102,6 +102,36 @@ describe("integrate() and a gate_failed step", () => {
 		expect(head(run)).toBe(at);
 		expect(events(run.store, "integrate.completed")).toHaveLength(3);
 	}));
+
+	it("still refuses an earlier gate_failed commit after a fresh rerun of the same step succeeds", () => withGitFixture(async (fixture) => {
+		const run = setupRun(fixture, [GATE]);
+		const runner = new FakeRunner([
+			{ match: "write out.txt", files: { "out.txt": "broken-1\n" }, times: 1 },
+			{ match: "write out.txt", files: { "out.txt": "broken-2\n" }, times: 1 },
+			{ match: "write out.txt", files: { "out.txt": "fixed\n" } },
+		]);
+		const executor = createStepExecutor(stepDeps(run, runner));
+		const integ = integrator(run);
+
+		const first = await executor.run("write out.txt", { id: "impl", gate: "fixed" });
+		const second = await executor.run("write out.txt", { id: "impl", gate: "fixed", fresh: true });
+		const third = await executor.run("write out.txt", { id: "impl", gate: "fixed", fresh: true });
+		expect(first).toMatchObject({ status: "gate_failed", key: "impl-0", commit: expect.any(String) });
+		expect(second).toMatchObject({ status: "gate_failed", key: "impl-0", commit: expect.any(String) });
+		expect(third).toMatchObject({ status: "ok", key: "impl-0", commit: expect.any(String) });
+		expect(new Set([first.commit, second.commit, third.commit]).size).toBe(3);
+		expect(run.store.state().steps.get("impl-0")).toMatchObject({ status: "ok", completed: { commit: third.commit } });
+
+		const before = integrationState(fixture, run.store);
+		for (const source of [first.commit!, first.commit!.slice(0, 12), second.commit!, second.commit!.slice(0, 12)]) {
+			await expect(integ.integrate(source, { message: "feat: stale" }), source).rejects.toThrow(/step impl-0 gate_failed.*fixed/);
+		}
+		expect(integrationState(fixture, run.store)).toEqual(before);
+
+		const integrated = await integ.integrate(third.commit!, { message: "feat: fixed" });
+		expect(integrated).toMatchObject({ status: "integrated", head: head(run) });
+		expect(show(run, head(run), "out.txt")).toBe("fixed");
+	}));
 });
 
 describe("integrate() in a workflow script", () => {
@@ -195,5 +225,48 @@ The project needs a fixed out.txt.
 		expect(fixture.git("rev-list", `${base}..${integrated.head}`).split("\n")).toHaveLength(1);
 		expect(fixture.git("show", `${integrated.head}:out.txt`)).toBe("fixed");
 		expect(fixture.git("show", `${integrated.head}:impl.txt`)).toBe("impl");
+	});
+
+	it("refuses an earlier gate_failed commit SHA before the runtime sees it after the same step later succeeds", async () => {
+		const { h, run } = await approvedRun();
+		const failedCommit = "e".repeat(40);
+		const okCommit = "f".repeat(40);
+		run.journal.append({
+			t: "step.completed", key: "impl-0", fingerprint: "f", status: "gate_failed", commit: failedCommit,
+			checks: [{ id: "fixed", commit: failedCommit, exitCode: 1, timedOut: false, durationMs: 5, tail: "", logRef: "outputs/x.txt", passed: false }],
+		});
+		run.journal.append({ t: "step.completed", key: "impl-0", fingerprint: "f", status: "ok", commit: okCommit });
+		await expect(h.tool("herder_integrate", { source: failedCommit, message: "feat: stale" })).rejects.toThrow(/impl-0.*gate_failed.*fixed/);
+		expect(h.runtime().calls.filter(([name]) => name === "integrate")).toEqual([]);
+		await h.tool("herder_integrate", { source: "impl-0", message: "feat: out" });
+		expect(h.runtime().calls.at(-1)).toEqual(["integrate", okCommit, { message: "feat: out" }]);
+	});
+
+	it("still refuses an earlier gate_failed commit SHA on the real runtime after a fresh rerun succeeds", async () => {
+		const runner = new FakeRunner([
+			{ match: "write out.txt", files: { "out.txt": "broken\n" }, times: 1 },
+			{ match: "write out.txt", files: { "out.txt": "fixed\n" } },
+		]);
+		const createRuntime = createRuntimeFactory({ roles: builtinRoles });
+		const { fixture, h, run } = await approvedRun({ createRuntime, runner: () => runner });
+		const base = fixture.head();
+
+		const failed = (await h.tool("herder_step", { prompt: "write out.txt", id: "impl", gate: "fixed" })).details;
+		expect(failed).toMatchObject({ status: "gate_failed", key: "impl-0", commit: expect.stringMatching(/^[0-9a-f]{40}$/) });
+		const rerun = (await h.tool("herder_step", { prompt: "write out.txt", id: "impl", gate: "fixed", fresh: true })).details;
+		expect(rerun).toMatchObject({ status: "ok", key: "impl-0", commit: expect.stringMatching(/^[0-9a-f]{40}$/) });
+		expect(rerun.commit).not.toBe(failed.commit);
+
+		const before = integrationState(fixture, run);
+		for (const source of [failed.commit, failed.commit.slice(0, 12)]) {
+			await expect(h.tool("herder_integrate", { source, message: "feat: stale" }), source).rejects.toThrow(/impl-0.*gate_failed.*fixed/);
+		}
+		expect(integrationState(fixture, run)).toEqual(before);
+		expect(before).toMatchObject({ head: base, folded: base, journaled: [] });
+
+		const integrated = (await h.tool("herder_integrate", { source: rerun.key, message: "feat: fixed" })).details;
+		expect(integrated.status).toBe("integrated");
+		expect(fixture.git("rev-parse", integrationRef(run.runId))).toBe(integrated.head);
+		expect(fixture.git("show", `${integrated.head}:out.txt`)).toBe("fixed");
 	});
 });
