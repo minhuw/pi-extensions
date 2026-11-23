@@ -288,7 +288,13 @@ export class ScheduleStore {
 
   /** Create the backing directory lazily — only when we're about to persist. */
   private ensureDir(): void {
-    mkdirSync(dirname(this.filePath), { recursive: true });
+    const dir = dirname(this.filePath);
+    mkdirSync(dir, { recursive: true });
+    try {
+      writeFileSync(join(dir, ".gitignore"), "*\n", { flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
   }
 
   /** Load from disk into the in-memory cache. Silent on parse errors. */

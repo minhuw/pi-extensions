@@ -6,7 +6,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -203,10 +203,23 @@ describe("ScheduleStore", () => {
     expect(store.list()).toEqual([]);
     expect(existsSync(dir)).toBe(false);
 
-    // First mutation lazily creates the directory.
+    // First mutation lazily creates the directory and its self-contained .gitignore.
     store.add(makeJob());
     expect(existsSync(dir)).toBe(true);
     expect(existsSync(file)).toBe(true);
+    expect(readFileSync(join(dir, ".gitignore"), "utf-8")).toBe("*\n");
+    expect(existsSync(join(tmp, ".gitignore"))).toBe(false);
+  });
+
+  it("preserves an existing .gitignore in the backing directory", () => {
+    const dir = join(tmp, ".pi", "subagent-schedules");
+    mkdirSync(dir, { recursive: true });
+    const gitignore = join(dir, ".gitignore");
+    writeFileSync(gitignore, "*.json\n");
+
+    const store = new ScheduleStore(join(dir, "sess.json"));
+    store.add(makeJob());
+    expect(readFileSync(gitignore, "utf-8")).toBe("*.json\n");
   });
 
   it("no-op update/remove of an unknown id never creates the backing directory", () => {
