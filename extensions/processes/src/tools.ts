@@ -1,8 +1,8 @@
 // The model-facing tools. Each resolves the shared manager when it runs, tags what it starts with the calling
 // session's id, and throws on every failure so the model sees a tool error.
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { exitDescription, processTable } from "./format.ts";
@@ -58,9 +58,10 @@ export function resolveProcessCwd(cwd: string, raw: string | undefined): string 
 	}
 	const inside = (root: string) => {
 		const rel = relative(realpathSync.native(root), real);
-		return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+		return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 	};
 	if (!inside(cwd) && !inside(tmpdir())) throw new Error(`cwd ${real} is outside the session directory ${cwd} and the system temp dir.`);
+	if (!statSync(real).isDirectory()) throw new Error(`cwd ${real} is not a directory.`);
 	return real;
 }
 

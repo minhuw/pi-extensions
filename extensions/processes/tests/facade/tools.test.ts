@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { COALESCE_MS, createNotifier } from "../../src/notify.ts";
 import { sharedState } from "../../src/state.ts";
@@ -41,12 +41,30 @@ describe("resolveProcessCwd", () => {
 		expect(resolveProcessCwd(project, tmpdir())).toBe(realpathSync(tmpdir()));
 	});
 
+	it("accepts ..-prefixed subdirectories inside the session dir", () => {
+		const sub = join(project, "..sub");
+		const inner = join(sub, "inner");
+		mkdirSync(inner, { recursive: true });
+		expect(resolveProcessCwd(project, "..sub")).toBe(realpathSync(sub));
+		expect(resolveProcessCwd(project, "..sub/inner")).toBe(realpathSync(inner));
+	});
+
 	it("rejects missing directories and escapes, symlinked ones included", () => {
 		expect(() => resolveProcessCwd(project, "missing")).toThrow(/does not exist/);
 		expect(() => resolveProcessCwd(project, outside)).toThrow(/outside/);
+		expect(() => resolveProcessCwd(project, "..")).toThrow(/outside/);
 		expect(() => resolveProcessCwd(project, "../")).toThrow(/outside/);
+		expect(() => resolveProcessCwd(project, `../${basename(outside)}`)).toThrow(/outside/);
 		symlinkSync(outside, join(project, "link"));
 		expect(() => resolveProcessCwd(project, "link")).toThrow(/outside/);
+	});
+
+	it("rejects regular files and symlinks to files", () => {
+		const file = join(project, "file.txt");
+		writeFileSync(file, "hello");
+		symlinkSync(file, join(project, "file-link"));
+		expect(() => resolveProcessCwd(project, "file.txt")).toThrow(/not a directory/);
+		expect(() => resolveProcessCwd(project, "file-link")).toThrow(/not a directory/);
 	});
 });
 
