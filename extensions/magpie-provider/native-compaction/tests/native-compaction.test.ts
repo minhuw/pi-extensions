@@ -14,11 +14,14 @@ import {
 	DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS,
 	effectiveInputForBranch,
 	findNativeCheckpoint,
+	MAX_COMPACT_RESPONSE_BYTES,
+	MAX_ERROR_PREFIX_BYTES,
 	MAX_RETRY_DELAY_MS,
 	modelKey,
 	NATIVE_COMPACTION_KIND,
 	NATIVE_COMPACTION_VERSION,
 	parseCompactResponse,
+	RemoteCompactionError,
 	resolveCompactUrl,
 	shouldFallbackToBuiltinCompaction,
 } from "../native-compaction.ts";
@@ -535,7 +538,7 @@ describe("streamed remote compaction", () => {
 			return streamResponse(frame({ type: "response.output_item.done", item: opaque }) + frame(completed)).response;
 		});
 		await expect(callRemoteCompaction({ ...request, body: { ...request.body, stream: false }, fetchImpl }))
-			.rejects.toThrow("Codex doesn't serve gpt-6.1-sol on the Responses API");
+			.rejects.toThrow("Native Responses compaction failed (400): bad_request");
 		expect(fetchImpl).toHaveBeenCalledTimes(1);
 		const result = await callRemoteCompaction({ ...request, fetchImpl });
 		expect(result.replacementHistory).toEqual([opaque]);
@@ -807,5 +810,251 @@ describe("streamed remote compaction", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe("bounded and sanitized upstream compaction responses", () => {
+	const request = {
+		url: "https://gateway.example/v1/responses",
+		headers: buildCompactHeaders({ apiKey: "synthetic-gateway-key", sessionId: "session-bounds" }),
+		body: buildCompactRequestBody(model, []),
+		model,
+	};
+
+	it("sanitizes non-2xx HTTP error bodies and statusText without echoing sensitive tokens", async () => {
+		const secretBodyToken = "synthetic-body-token-9f8e7d";
+		const secretStatusToken = "synthetic-status-token-1a2b3c";
+		const fetchImpl = vi.fn<typeof fetch>(async () =>
+			new Response(
+				JSON.stringify({ error: { message: `Bearer ${secretBodyToken} rejected by upstream` } }),
+				{ status: 401, statusText: secretStatusToken },
+			),
+		);
+
+		let caught: unknown;
+		try {
+			await callRemoteCompaction({ ...request, fetchImpl });
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(RemoteCompactionError);
+		const message = (caught as Error).message;
+		expect(message).toBe("Native Responses compaction failed (401): unauthorized");
+		expect(message).not.toContain(secretBodyToken);
+		expect(message).not.toContain(secretStatusToken);
+		expect(fetchImpl).toHaveBeenCalledOnce();
+	});
+
+	it("sanitizes SSE error events and invalid JSON responses without echoing upstream tokens", async () => {
+		const sseSecret = "synthetic-sse-token-4d5e6f";
+		const invalidJsonSecret = "synthetic-json-token-7a8b9c";
+
+		const authSseFetch = vi.fn<typeof fetch>(async () =>
+			new Response(
+				`data: ${JSON.stringify({ type: "error", error: { message: `auth_unavailable for ${sseSecret}` } })}\n\n`,
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
+			),
+		);
+		let authErr: unknown;
+		try {
+			await callRemoteCompaction({ ...request, fetchImpl: authSseFetch });
+		} catch (error) {
+			authErr = error;
+		}
+		expect(authErr).toBeInstanceOf(RemoteCompactionError);
+		expect((authErr as Error).message).toBe("Native Responses compaction stream failed (error): auth_unavailable");
+		expect((authErr as Error).message).not.toContain(sseSecret);
+		expect(authSseFetch).toHaveBeenCalledOnce();
+
+		vi.useFakeTimers();
+		try {
+			const invalidJsonFetch = vi.fn<typeof fetch>(async () =>
+				new Response(`Bearer ${invalidJsonSecret}`, {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+			);
+			const jsonPromise = callRemoteCompaction({ ...request, fetchImpl: invalidJsonFetch }).catch((error) => error);
+			await vi.runAllTimersAsync();
+			const jsonErr = await jsonPromise;
+			expect(jsonErr).toBeInstanceOf(Error);
+			expect((jsonErr as Error).message).toBe("Native Responses returned invalid JSON.");
+			expect((jsonErr as Error).message).not.toContain(invalidJsonSecret);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("classifies auth_unavailable from a bounded error prefix and cancels oversized error streams at the cap", async () => {
+		const secretToken = "synthetic-prefix-secret-001";
+		const chunkSize = 4 * 1024;
+		const prefixBytes = new TextEncoder().encode(`auth_unavailable: token=${secretToken} `);
+		const fillerChunk = new Uint8Array(chunkSize).fill(0x78);
+		let chunksPulled = 0;
+		const cancel = vi.fn();
+		const body = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				chunksPulled += 1;
+				if (chunksPulled === 1) {
+					controller.enqueue(prefixBytes);
+				} else {
+					controller.enqueue(fillerChunk);
+				}
+			},
+			cancel,
+		});
+		const fetchImpl = vi.fn<typeof fetch>(async () =>
+			new Response(body, { status: 503, statusText: "Service Unavailable" }),
+		);
+
+		let caught: unknown;
+		try {
+			await callRemoteCompaction({ ...request, fetchImpl });
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(RemoteCompactionError);
+		expect((caught as RemoteCompactionError).code).toBe("auth_unavailable");
+		expect((caught as RemoteCompactionError).status).toBe(503);
+		expect((caught as Error).message).toBe("Native Responses compaction failed (503): auth_unavailable");
+		expect((caught as Error).message).not.toContain(secretToken);
+		expect(fetchImpl).toHaveBeenCalledOnce();
+		expect(cancel).toHaveBeenCalledOnce();
+		expect(body.locked).toBe(false);
+		expect(chunksPulled * chunkSize).toBeLessThanOrEqual(MAX_ERROR_PREFIX_BYTES + chunkSize * 2);
+	});
+
+	it("stops reading oversized non-2xx error responses at MAX_ERROR_PREFIX_BYTES without reading past the cap", async () => {
+		const chunkSize = 4 * 1024;
+		const fillerChunk = new Uint8Array(chunkSize).fill(0x61);
+		let chunksPulled = 0;
+		const cancel = vi.fn();
+		const body = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				chunksPulled += 1;
+				// Place auth_unavailable well past MAX_ERROR_PREFIX_BYTES to verify it is never read.
+				if (chunksPulled * chunkSize > MAX_ERROR_PREFIX_BYTES + chunkSize * 2) {
+					controller.enqueue(new TextEncoder().encode("auth_unavailable"));
+				} else {
+					controller.enqueue(fillerChunk);
+				}
+			},
+			cancel,
+		});
+		const fetchImpl = vi.fn<typeof fetch>(async () => new Response(body, { status: 400 }));
+
+		let caught: unknown;
+		try {
+			await callRemoteCompaction({ ...request, fetchImpl });
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(RemoteCompactionError);
+		expect((caught as RemoteCompactionError).code).toBe("bad_request");
+		expect((caught as Error).message).toBe("Native Responses compaction failed (400): bad_request");
+		expect(fetchImpl).toHaveBeenCalledOnce();
+		expect(cancel).toHaveBeenCalledOnce();
+		expect(body.locked).toBe(false);
+		expect(chunksPulled * chunkSize).toBeLessThanOrEqual(MAX_ERROR_PREFIX_BYTES + chunkSize);
+	});
+
+	it("rejects oversized JSON responses via Content-Length and streaming cap and cancels the stream", async () => {
+		const headerCancel = vi.fn();
+		const headerBody = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				controller.enqueue(new Uint8Array(1024));
+			},
+			cancel: headerCancel,
+		});
+		const headerFetch = vi.fn<typeof fetch>(async () =>
+			new Response(headerBody, {
+				status: 200,
+				headers: {
+					"content-type": "application/json",
+					"content-length": String(MAX_COMPACT_RESPONSE_BYTES + 1),
+				},
+			}),
+		);
+		await expect(callRemoteCompaction({ ...request, fetchImpl: headerFetch })).rejects.toThrow(
+			"Native Responses compaction failed: response_too_large",
+		);
+		expect(headerFetch).toHaveBeenCalledOnce();
+		expect(headerCancel).toHaveBeenCalledOnce();
+		expect(headerBody.locked).toBe(false);
+
+		const chunk = new Uint8Array(1024 * 1024).fill(0x20);
+		let chunksPulled = 0;
+		const streamCancel = vi.fn();
+		const streamBody = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				chunksPulled += 1;
+				controller.enqueue(chunk);
+			},
+			cancel: streamCancel,
+		});
+		const streamFetch = vi.fn<typeof fetch>(async () =>
+			new Response(streamBody, {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		);
+		await expect(callRemoteCompaction({ ...request, fetchImpl: streamFetch })).rejects.toThrow(
+			"Native Responses compaction failed: response_too_large",
+		);
+		expect(streamFetch).toHaveBeenCalledOnce();
+		expect(streamCancel).toHaveBeenCalledOnce();
+		expect(streamBody.locked).toBe(false);
+		expect(chunksPulled * chunk.byteLength).toBeLessThanOrEqual(MAX_COMPACT_RESPONSE_BYTES + chunk.byteLength * 2);
+	});
+
+	it("rejects oversized SSE streams at MAX_COMPACT_RESPONSE_BYTES and cancels the stream cleanly", async () => {
+		const headerCancel = vi.fn();
+		const headerBody = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				controller.enqueue(new TextEncoder().encode(": heartbeat\n\n"));
+			},
+			cancel: headerCancel,
+		});
+		const headerFetch = vi.fn<typeof fetch>(async () =>
+			new Response(headerBody, {
+				status: 200,
+				headers: {
+					"content-type": "text/event-stream",
+					"content-length": String(MAX_COMPACT_RESPONSE_BYTES + 1),
+				},
+			}),
+		);
+		await expect(callRemoteCompaction({ ...request, fetchImpl: headerFetch })).rejects.toThrow(
+			"Native Responses compaction failed: response_too_large",
+		);
+		expect(headerFetch).toHaveBeenCalledOnce();
+		expect(headerCancel).toHaveBeenCalledOnce();
+		expect(headerBody.locked).toBe(false);
+
+		const sseChunk = new TextEncoder().encode(`: ${"x".repeat(1024 * 1024 - 4)}\n\n`);
+		let chunksPulled = 0;
+		const streamCancel = vi.fn();
+		const streamBody = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				chunksPulled += 1;
+				controller.enqueue(sseChunk);
+			},
+			cancel: streamCancel,
+		});
+		const streamFetch = vi.fn<typeof fetch>(async () =>
+			new Response(streamBody, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+		);
+		await expect(callRemoteCompaction({ ...request, fetchImpl: streamFetch })).rejects.toThrow(
+			"Native Responses compaction failed: response_too_large",
+		);
+		expect(streamFetch).toHaveBeenCalledOnce();
+		expect(streamCancel).toHaveBeenCalledOnce();
+		expect(streamBody.locked).toBe(false);
+		expect(chunksPulled * sseChunk.byteLength).toBeLessThanOrEqual(
+			MAX_COMPACT_RESPONSE_BYTES + sseChunk.byteLength * 2,
+		);
 	});
 });

@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { registerNativeCompaction, type MagpieCompactionConfig } from "../lifecycle.ts";
-import { modelKey, NATIVE_COMPACTION_KIND, NATIVE_COMPACTION_VERSION } from "../native-compaction.ts";
+import {
+	MAX_COMPACT_RESPONSE_BYTES,
+	modelKey,
+	NATIVE_COMPACTION_KIND,
+	NATIVE_COMPACTION_VERSION,
+} from "../native-compaction.ts";
 
 const model = (provider = "magpie", id = "test-model"): Model<any> => ({
 	provider, api: "openai-responses", id, name: "Test",
@@ -186,5 +191,80 @@ describe("Magpie-owned lifecycle", () => {
 		expect(f.notify).toHaveBeenLastCalledWith("Usage: /magpie-native-compaction", "error");
 		await commands["magpie-native-compaction"].handler("", f.ctx);
 		expect(f.notify).toHaveBeenLastCalledWith(expect.stringContaining("Enabled for magpie/test-model"), "info");
+	});
+
+	it("sanitizes upstream HTTP error bodies in UI notifications for both fallback and cancel paths", async () => {
+		const secretToken = "synthetic-lifecycle-secret-token";
+		const statusSecret = "synthetic-status-secret";
+		const fetchMock = vi.fn<typeof fetch>(async () =>
+			new Response(
+				JSON.stringify({ error: { message: `auth_unavailable: secret=${secretToken}` } }),
+				{ status: 503, statusText: statusSecret },
+			),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const { handlers: fallbackHandlers } = registration({ fallbackToBuiltin: true });
+		const fresh = fixture("magpie");
+		expect(await fallbackHandlers.session_before_compact!(fresh.event, fresh.ctx)).toBeUndefined();
+		expect(fresh.notify).toHaveBeenCalledWith(
+			"Magpie native compaction failed; falling back to Pi's built-in summarizer. HTTP 503 (auth_unavailable).",
+			"warning",
+		);
+		expect(String(fresh.notify.mock.calls[0]?.[0])).not.toContain(secretToken);
+		expect(String(fresh.notify.mock.calls[0]?.[0])).not.toContain(statusSecret);
+
+		const { handlers: strictHandlers } = registration({ fallbackToBuiltin: false });
+		const strict = fixture("magpie");
+		expect(await strictHandlers.session_before_compact!(strict.event, strict.ctx)).toEqual({ cancel: true });
+		expect(strict.notify).toHaveBeenCalledWith(
+			"Magpie native compaction failed: HTTP 503 (auth_unavailable).",
+			"error",
+		);
+		expect(String(strict.notify.mock.calls[0]?.[0])).not.toContain(secretToken);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+
+	it("sanitizes SSE stream errors and oversized responses in UI notifications", async () => {
+		const secretToken = "synthetic-stream-secret-token";
+		const { handlers } = registration({ fallbackToBuiltin: false });
+
+		const sseFetch = vi.fn<typeof fetch>(async () =>
+			new Response(
+				`data: ${JSON.stringify({ type: "error", error: { message: `auth_unavailable: ${secretToken}` } })}\n\n`,
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
+			),
+		);
+		vi.stubGlobal("fetch", sseFetch);
+		const sseFixture = fixture("magpie");
+		expect(await handlers.session_before_compact!(sseFixture.event, sseFixture.ctx)).toEqual({ cancel: true });
+		expect(sseFixture.notify).toHaveBeenCalledWith("Magpie native compaction failed: auth_unavailable.", "error");
+		expect(String(sseFixture.notify.mock.calls[0]?.[0])).not.toContain(secretToken);
+
+		const cancel = vi.fn();
+		const oversizedBody = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				controller.enqueue(new Uint8Array(1024));
+			},
+			cancel,
+		});
+		const oversizedFetch = vi.fn<typeof fetch>(async () =>
+			new Response(oversizedBody, {
+				status: 200,
+				headers: {
+					"content-type": "application/json",
+					"content-length": String(MAX_COMPACT_RESPONSE_BYTES + 1),
+				},
+			}),
+		);
+		vi.stubGlobal("fetch", oversizedFetch);
+		const oversizedFixture = fixture("magpie");
+		expect(await handlers.session_before_compact!(oversizedFixture.event, oversizedFixture.ctx)).toEqual({ cancel: true });
+		expect(oversizedFixture.notify).toHaveBeenCalledWith(
+			"Magpie native compaction failed: response_too_large.",
+			"error",
+		);
+		expect(cancel).toHaveBeenCalledOnce();
+		expect(oversizedBody.locked).toBe(false);
 	});
 });

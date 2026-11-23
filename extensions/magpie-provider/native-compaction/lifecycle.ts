@@ -11,6 +11,7 @@ import {
 	modelKey,
 	NATIVE_COMPACTION_KIND,
 	NATIVE_COMPACTION_VERSION,
+	RemoteCompactionError,
 	resolveCompactUrl,
 	shouldFallbackToBuiltinCompaction,
 	type CheckpointLookup,
@@ -50,6 +51,15 @@ function localMarker(): string {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function compactionErrorSummary(error: unknown): string {
+	if (error instanceof RemoteCompactionError) {
+		return error.status !== undefined
+			? `HTTP ${error.status} (${error.code}).`
+			: `${error.code}.`;
+	}
+	return errorMessage(error);
 }
 
 function notify(ctx: ExtensionContext, message: string, type: "info" | "warning" | "error"): void {
@@ -189,15 +199,16 @@ export function registerNativeCompaction(
 			};
 		} catch (error) {
 			if (event.signal.aborted) return { cancel: true };
+			const summary = compactionErrorSummary(error);
 			if (shouldFallbackToBuiltinCompaction({ checkpoint, fallbackToBuiltin: config.fallbackToBuiltin })) {
 				notify(
 					ctx,
-					`${MAGPIE_COMPACTION_LABEL} native compaction failed; falling back to Pi's built-in summarizer. ${errorMessage(error)}`,
+					`${MAGPIE_COMPACTION_LABEL} native compaction failed; falling back to Pi's built-in summarizer. ${summary}`,
 					"warning",
 				);
 				return undefined;
 			}
-			notify(ctx, `${MAGPIE_COMPACTION_LABEL} native compaction failed: ${errorMessage(error)}`, "error");
+			notify(ctx, `${MAGPIE_COMPACTION_LABEL} native compaction failed: ${summary}`, "error");
 			return { cancel: true };
 		}
 	});

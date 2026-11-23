@@ -19,6 +19,8 @@ const REMOTE_COMPACTION_V2_MAX_AGENT_MESSAGE_TOKENS = 10_000;
 const MAX_REMOTE_RETRIES = 2;
 export const MAX_RETRY_DELAY_MS = 30_000;
 export const DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS = 120_000;
+export const MAX_ERROR_PREFIX_BYTES = 16 * 1024;
+export const MAX_COMPACT_RESPONSE_BYTES = 32 * 1024 * 1024;
 
 type JsonObject = Record<string, unknown>;
 export type ResponseItem = JsonObject & { type?: string };
@@ -558,7 +560,101 @@ function isRetryableStatus(status: number): boolean {
 	return status === 408 || status === 409 || status === 429 || status >= 500;
 }
 
-class NonRetryableCompactionError extends Error {}
+export type RemoteCompactionErrorCode =
+	| "auth_unavailable"
+	| "bad_request"
+	| "unauthorized"
+	| "forbidden"
+	| "not_found"
+	| "request_timeout"
+	| "conflict"
+	| "payload_too_large"
+	| "unprocessable_entity"
+	| "rate_limited"
+	| "internal_server_error"
+	| "bad_gateway"
+	| "service_unavailable"
+	| "gateway_timeout"
+	| "client_error"
+	| "server_error"
+	| "upstream_error"
+	| "upstream_stream_error"
+	| "response_too_large";
+
+export class RemoteCompactionError extends Error {
+	readonly code: RemoteCompactionErrorCode;
+	readonly status?: number;
+	readonly retryable: boolean;
+
+	constructor(params: {
+		code: RemoteCompactionErrorCode;
+		message: string;
+		status?: number;
+		retryable: boolean;
+	}) {
+		super(params.message);
+		this.name = "RemoteCompactionError";
+		this.code = params.code;
+		this.status = params.status;
+		this.retryable = params.retryable;
+	}
+}
+
+function httpStatusErrorCode(status: number | undefined): RemoteCompactionErrorCode {
+	switch (status) {
+		case 400: return "bad_request";
+		case 401: return "unauthorized";
+		case 403: return "forbidden";
+		case 404: return "not_found";
+		case 408: return "request_timeout";
+		case 409: return "conflict";
+		case 413: return "payload_too_large";
+		case 422: return "unprocessable_entity";
+		case 429: return "rate_limited";
+		case 500: return "internal_server_error";
+		case 502: return "bad_gateway";
+		case 503: return "service_unavailable";
+		case 504: return "gateway_timeout";
+		default:
+			if (status !== undefined && status >= 400 && status < 500) return "client_error";
+			if (status !== undefined && status >= 500 && status < 600) return "server_error";
+			return "upstream_error";
+	}
+}
+
+function responseTooLargeError(): RemoteCompactionError {
+	return new RemoteCompactionError({
+		code: "response_too_large",
+		retryable: false,
+		message: "Native Responses compaction failed: response_too_large",
+	});
+}
+
+function isAuthUnavailableStreamEvent(message: JsonObject): boolean {
+	const candidates: unknown[] = [message.message, message.code, message.error];
+	if (isJsonObject(message.error)) {
+		candidates.push(message.error.message, message.error.code, message.error.type);
+	}
+	if (isJsonObject(message.response)) {
+		candidates.push(message.response.error);
+		if (isJsonObject(message.response.error)) {
+			candidates.push(
+				message.response.error.message,
+				message.response.error.code,
+				message.response.error.type,
+			);
+		}
+	}
+	return candidates.some(
+		(value) => typeof value === "string" && isAuthUnavailableMessage(value.slice(0, MAX_ERROR_PREFIX_BYTES)),
+	);
+}
+
+function exceedsContentLength(response: Response, maxBytes: number): boolean {
+	const raw = response.headers.get("content-length")?.trim();
+	if (!raw || !/^\d+$/.test(raw)) return false;
+	return Number(raw) > maxBytes;
+}
 
 function abortError(signal?: AbortSignal): Error {
 	return signal?.reason instanceof Error ? signal.reason : new Error("Compaction aborted");
@@ -635,17 +731,114 @@ export function usageFromResponse(model: Model<any>, value: unknown): Usage | un
 	return pricing === "estimate" || pricing === "unavailable" ? markMagpieUsage(usage, pricing) : usage;
 }
 
+async function readBoundedErrorPrefix(
+	response: Response,
+	maxBytes: number,
+	signal?: AbortSignal,
+): Promise<string> {
+	if (signal?.aborted) {
+		await response.body?.cancel(signal.reason).catch(() => {});
+		throw abortError(signal);
+	}
+	if (!response.body) return "";
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let totalBytes = 0;
+	const onAbort = () => {
+		void reader.cancel(signal?.reason).catch(() => {});
+	};
+	signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		while (totalBytes < maxBytes) {
+			if (signal?.aborted) throw abortError(signal);
+			const { value, done } = await waitForAbort(reader.read(), signal);
+			if (signal?.aborted) throw abortError(signal);
+			if (done) break;
+			if (!value || value.byteLength === 0) continue;
+			const remaining = maxBytes - totalBytes;
+			if (value.byteLength >= remaining) {
+				chunks.push(value.byteLength === remaining ? value : value.subarray(0, remaining));
+				totalBytes = maxBytes;
+				break;
+			}
+			chunks.push(value);
+			totalBytes += value.byteLength;
+		}
+		if (signal?.aborted) throw abortError(signal);
+		return new TextDecoder().decode(Buffer.concat(chunks, totalBytes));
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+		await reader.cancel().catch(() => {});
+		reader.releaseLock();
+	}
+}
+
+async function readBoundedText(
+	response: Response,
+	maxBytes: number,
+	signal?: AbortSignal,
+): Promise<string> {
+	if (signal?.aborted) {
+		await response.body?.cancel(signal.reason).catch(() => {});
+		throw abortError(signal);
+	}
+	if (exceedsContentLength(response, maxBytes)) {
+		await response.body?.cancel().catch(() => {});
+		throw responseTooLargeError();
+	}
+	if (!response.body) return "";
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let totalBytes = 0;
+	const onAbort = () => {
+		void reader.cancel(signal?.reason).catch(() => {});
+	};
+	signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		while (true) {
+			if (signal?.aborted) throw abortError(signal);
+			const { value, done } = await waitForAbort(reader.read(), signal);
+			if (signal?.aborted) throw abortError(signal);
+			if (done) break;
+			if (!value || value.byteLength === 0) continue;
+			totalBytes += value.byteLength;
+			if (totalBytes > maxBytes) {
+				throw responseTooLargeError();
+			}
+			chunks.push(value);
+		}
+		if (signal?.aborted) throw abortError(signal);
+		return new TextDecoder().decode(Buffer.concat(chunks, totalBytes));
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+		await reader.cancel().catch(() => {});
+		reader.releaseLock();
+	}
+}
+
 async function readCompactResponse(response: Response, signal?: AbortSignal): Promise<CompactResponse> {
 	if (response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "text/event-stream") {
-		if (signal?.aborted) {
-			await response.body?.cancel(signal.reason).catch(() => {});
-			signal.throwIfAborted();
+		const text = await readBoundedText(response, MAX_COMPACT_RESPONSE_BYTES, signal);
+		let value: unknown;
+		try {
+			value = JSON.parse(text);
+		} catch {
+			throw new Error("Native Responses returned invalid JSON.");
 		}
-		return parseCompactResponse(await waitForAbort(response.json(), signal));
+		return parseCompactResponse(value);
+	}
+	if (signal?.aborted) {
+		await response.body?.cancel(signal.reason).catch(() => {});
+		throw abortError(signal);
+	}
+	if (exceedsContentLength(response, MAX_COMPACT_RESPONSE_BYTES)) {
+		await response.body?.cancel().catch(() => {});
+		throw responseTooLargeError();
 	}
 	if (!response.body) throw new Error("Native Responses returned an empty event stream.");
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
+	let totalBytes = 0;
 	let buffer = "";
 	let event = "";
 	let data: string[] = [];
@@ -653,9 +846,15 @@ async function readCompactResponse(response: Response, signal?: AbortSignal): Pr
 	signal?.addEventListener("abort", onAbort, { once: true });
 	try {
 		while (true) {
-			signal?.throwIfAborted();
-			const { value, done } = await reader.read();
-			signal?.throwIfAborted();
+			if (signal?.aborted) throw abortError(signal);
+			const { value, done } = await waitForAbort(reader.read(), signal);
+			if (signal?.aborted) throw abortError(signal);
+			if (value && value.byteLength > 0) {
+				totalBytes += value.byteLength;
+				if (totalBytes > MAX_COMPACT_RESPONSE_BYTES) {
+					throw responseTooLargeError();
+				}
+			}
 			buffer += decoder.decode(value, { stream: !done });
 			let newline: number;
 			while ((newline = buffer.search(/[\r\n]/)) !== -1) {
@@ -670,16 +869,25 @@ async function readCompactResponse(response: Response, signal?: AbortSignal): Pr
 					data = [];
 					if (!payload) continue;
 					if (payload === "[DONE]") throw new Error("Native Responses stream ended without response.completed.");
-					const message: unknown = JSON.parse(payload);
+					let message: unknown;
+					try {
+						message = JSON.parse(payload);
+					} catch {
+						throw new Error("Native Responses returned an invalid JSON stream event.");
+					}
 					if (!isJsonObject(message)) throw new Error("Native Responses returned a non-object stream event.");
 					if (eventName && message.type !== undefined && eventName !== message.type) {
 						throw new Error("Native Responses returned conflicting stream event types.");
 					}
 					const type = message.type ?? eventName;
 					if (type === "error" || type === "response.failed" || type === "response.incomplete" || type === "response.error") {
-						const detail = isJsonObject(message.error) ? message.error : message;
-						const text = `Native Responses compaction stream failed (${type}): ${typeof detail.message === "string" ? detail.message : "unsuccessful response"}`;
-						throw isAuthUnavailableMessage(text) ? new NonRetryableCompactionError(text) : new Error(text);
+						const authUnavailable = isAuthUnavailableStreamEvent(message);
+						const code: RemoteCompactionErrorCode = authUnavailable ? "auth_unavailable" : "upstream_stream_error";
+						throw new RemoteCompactionError({
+							code,
+							retryable: !authUnavailable,
+							message: `Native Responses compaction stream failed (${type}): ${code}`,
+						});
 					}
 					if (type === "response.completed") return parseCompactResponse(message.response);
 					continue;
@@ -742,19 +950,31 @@ export async function callRemoteCompaction(params: {
 					},
 				);
 				if (!response.ok) {
-					const responseBody = await waitForAbort(response.text(), attemptSignal).catch((error) => {
-						if (attemptSignal.aborted) {
-							void response.body?.cancel(attemptSignal.reason).catch(() => {});
-							throw error;
-						}
+					const errorPrefix = await readBoundedErrorPrefix(
+						response,
+						MAX_ERROR_PREFIX_BYTES,
+						attemptSignal,
+					).catch((error) => {
+						if (attemptSignal.aborted) throw error;
 						return "";
 					});
-					const message = `Native Responses compaction failed (${response.status}): ${responseBody || response.statusText}`;
+					const status = Number.isInteger(response.status) ? response.status : undefined;
+					const authUnavailable = isAuthUnavailableMessage(errorPrefix);
+					const code: RemoteCompactionErrorCode = authUnavailable
+						? "auth_unavailable"
+						: httpStatusErrorCode(status);
+					const retryable = status !== undefined && isRetryableStatus(status) && !authUnavailable;
+					const error = new RemoteCompactionError({
+						code,
+						status,
+						retryable,
+						message: `Native Responses compaction failed (${status ?? "unknown"}): ${code}`,
+					});
 					// auth_unavailable is a routing/auth-selection miss. Repeating the same bound request will not recover.
-					if (!isRetryableStatus(response.status) || isAuthUnavailableMessage(message)) {
-						throw new NonRetryableCompactionError(message);
+					if (!retryable) {
+						throw error;
 					}
-					retryError = new Error(message);
+					retryError = error;
 					if (attempt === MAX_REMOTE_RETRIES) throw retryError;
 					retryAfterMs = parseRetryDelay(response);
 				} else {
@@ -777,7 +997,7 @@ export async function callRemoteCompaction(params: {
 				continue;
 			}
 		} catch (error) {
-			if (params.signal?.aborted || error instanceof NonRetryableCompactionError) throw error;
+			if (params.signal?.aborted || (error instanceof RemoteCompactionError && !error.retryable)) throw error;
 			lastError = error;
 			if (attempt === MAX_REMOTE_RETRIES) throw error;
 			await delay(Math.min(1000 * 2 ** attempt, MAX_RETRY_DELAY_MS), params.signal);
