@@ -17,7 +17,6 @@ use pika::http::{AppState, router};
 use pika::store::Store;
 use pika::util::{format_iso_ms, now_ms, parse_iso_ms};
 use serde_json::{Value, json};
-use tower::ServiceExt;
 
 const REPO: &str = "https://github.com/me/widgets";
 const KEY: &str = "repo:https://github.com/me/widgets";
@@ -31,20 +30,6 @@ const PASSWORD: &str = "correct horse battery";
 /// The tables a failed commit must leave alone.
 const TABLES: [&str; 6] =
     ["memory_scopes", "memory_notes", "memory_revisions", "memory_dream_leases", "memory_dream_batches", "memory_checkpoints"];
-
-struct Reply {
-    status: StatusCode,
-    body: Vec<u8>,
-}
-
-impl Reply {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
-    }
-    fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or_else(|_| panic!("not JSON: {}", self.text()))
-    }
-}
 
 struct App {
     env: Env,
@@ -83,10 +68,7 @@ impl App {
             }
             None => Body::empty(),
         };
-        let response = self.app.clone().oneshot(request.body(body).unwrap()).await.unwrap();
-        let status = response.status();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
-        Reply { status, body }
+        send(&self.app, request.body(body).unwrap()).await
     }
 
     /// `POST {base}/api/agent/v1/{path}` as `token`.
@@ -175,13 +157,6 @@ impl App {
     fn set_lease(&self, lease: &Value, column: &str, value: i64) {
         self.exec(&format!("UPDATE memory_dream_leases SET {column} = {value} WHERE id = '{}'", lease["lease"]["id"].as_str().unwrap()));
     }
-}
-
-/// Percent-encodes a query parameter value.
-fn encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
-        .collect()
 }
 
 /// A session's header at `at`, and its session-link entry when `link` is given.
@@ -336,10 +311,8 @@ async fn concurrent_lease_requests_grant_exactly_one() {
                 .body(Body::from(body.to_string()))
                 .unwrap();
             tokio::spawn(async move {
-                let response = router.oneshot(request).await.unwrap();
-                let status = response.status();
-                let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-                (status, serde_json::from_slice::<Value>(&body).unwrap())
+                let reply = send(&router, request).await;
+                (reply.status, reply.json())
             })
         })
         .collect();
@@ -1355,14 +1328,8 @@ async fn batch_routes_need_the_owners_login() {
     let r = app.call(Method::GET, &format!("/api/agent/v1/memory/batches?scope={}", encode(KEY)), Some(&app.a), None).await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
 
-    let login = Request::post("/api/v1/login")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(json!({ "password": PASSWORD }).to_string()))
-        .unwrap();
-    let response = app.app.clone().oneshot(login).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_owned();
-    let send = |method: Method, path: &str| {
+    let cookie = login(&app.app, PASSWORD).await;
+    let call_cookie = |method: Method, path: &str| {
         let post = method == Method::POST;
         let request = Request::builder().method(method).uri(path).header(header::COOKIE, &cookie);
         let request = if post {
@@ -1370,12 +1337,10 @@ async fn batch_routes_need_the_owners_login() {
         } else {
             request.body(Body::empty())
         };
-        app.app.clone().oneshot(request.unwrap())
+        send(&app.app, request.unwrap())
     };
-    let response = send(Method::GET, &list).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let response = send(Method::POST, &revert).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(call_cookie(Method::GET, &list).await.status, StatusCode::OK);
+    assert_eq!(call_cookie(Method::POST, &revert).await.status, StatusCode::OK);
     assert_eq!(app.count("SELECT COUNT(*) FROM memory_revisions WHERE action = 'revert'"), 1);
 }
 
@@ -1492,8 +1457,8 @@ async fn reverts_refuse_form_posts() {
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .body(Body::from("a=b"))
         .unwrap();
-    let response = app.app.clone().oneshot(form).await.unwrap();
-    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let reply = send(&app.app, form).await;
+    assert_eq!(reply.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
     assert_eq!(app.dump(), state);
     let r = app.revert(&batch).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());

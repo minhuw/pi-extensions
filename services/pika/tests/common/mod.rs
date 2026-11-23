@@ -1,17 +1,26 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Request, StatusCode, header};
 use pika::ingest::{self, Batch, BatchResponse, IngestError};
 use pika::store::{DERIVED_TABLES, Store};
 use rusqlite::types::ValueRef;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tower::ServiceExt;
 
 pub const DEVICE: &str = "laptop";
 pub const SESSION_ID: &str = "7f3c2a10-5b1e-4c3d-9a8e-1f2e3d4c5b6a";
 pub const RUN_ID: &str = "20261021-100000-abcd";
+pub const WAIT: Duration = Duration::from_secs(5);
 /// Current schema `PRAGMA user_version`, kept in sync with `UNDO_STEPS`.
 pub const SCHEMA_VERSION: i64 = 25;
 /// Per-version SQL that undoes schema version `v` back to `v - 1`, in ascending version order.
@@ -218,4 +227,121 @@ pub fn dump_derived(store: &Store) -> BTreeMap<String, Vec<String>> {
             (table.to_string(), rows)
         })
         .collect()
+}
+
+pub struct Reply {
+    pub status: StatusCode,
+    pub headers: header::HeaderMap,
+    pub body: Vec<u8>,
+}
+
+impl Reply {
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    pub fn json(&self) -> Value {
+        serde_json::from_slice(&self.body).unwrap_or_else(|_| panic!("not JSON: {}", self.text()))
+    }
+
+    pub fn set_cookie(&self) -> String {
+        self.headers.get(header::SET_COOKIE).expect("Set-Cookie").to_str().unwrap().to_owned()
+    }
+
+    /// The `name=value` pair of the Set-Cookie header.
+    pub fn cookie(&self) -> String {
+        self.set_cookie().split(';').next().unwrap().to_owned()
+    }
+}
+
+pub async fn send(app: &Router, request: Request<Body>) -> Reply {
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
+    Reply { status, headers, body }
+}
+
+pub async fn login_reply(app: &Router, base: &str, password: &str) -> Reply {
+    let request = Request::post(format!("{base}/api/v1/login"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "password": password }).to_string()))
+        .unwrap();
+    send(app, request).await
+}
+
+/// Logs in at `{base}/api/v1/login` (pass `""` for the root base path) and returns the session cookie `name=value`.
+pub async fn login_at(app: &Router, base: &str, password: &str) -> String {
+    let reply = login_reply(app, base, password).await;
+    assert_eq!(reply.status, StatusCode::OK, "login failed: {}", reply.text());
+    reply.cookie()
+}
+
+/// Logs in at `/api/v1/login` and returns the session cookie `name=value`.
+pub async fn login(app: &Router, password: &str) -> String {
+    login_at(app, "", password).await
+}
+
+/// Percent-encodes everything but RFC 3986 unreserved characters, for a path segment or query value.
+pub fn encode(s: &str) -> String {
+    pika::util::encode_path_segment(s)
+}
+
+/// The `pika` binary with no `PIKA_*` settings from the environment and offline pricing.
+pub fn pika_cmd() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pika"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("PIKA_") {
+            command.env_remove(key);
+        }
+    }
+    command.env("PIKA_PRICES", "off");
+    command
+}
+
+/// The `pika` binary pointed at `data`, with no `PIKA_*` settings from the environment.
+pub fn pika(data: &Path) -> Command {
+    let mut command = pika_cmd();
+    command.arg("--data-dir").arg(data);
+    command
+}
+
+/// Runs `pika --data-dir <data> <args...>`; returns exit success, stdout, and stderr.
+pub fn pika_cli(data: &Path, args: &[&str]) -> (bool, String, String) {
+    let out = pika(data).args(args).output().unwrap();
+    (out.status.success(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap())
+}
+
+/// Starts `pika serve --bind 127.0.0.1:0` with `PIKA_AUTH=none` and `env`; returns `(child, addr, listening_line)`,
+/// or its exit status and error output when it does not start.
+pub fn spawn_serve(data: &Path, env: &[(&str, &str)]) -> Result<(Child, String, String), String> {
+    let mut command = pika(data);
+    command.args(["serve", "--bind", "127.0.0.1:0"]).env("PIKA_AUTH", "none").envs(env.iter().copied());
+    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let listening =
+        BufReader::new(child.stdout.take().unwrap()).lines().map_while(Result::ok).find(|l| l.contains("listening on"));
+    match listening {
+        Some(line) => {
+            let addr = line.split("http://").nth(1).unwrap().split('/').next().unwrap().to_owned();
+            Ok((child, addr, line))
+        }
+        None => {
+            let out = child.wait_with_output().unwrap();
+            Err(format!("{:?}: {}", out.status.code(), String::from_utf8_lossy(&out.stderr)))
+        }
+    }
+}
+
+/// Polls until `check` holds within `timeout`, sleeping `step` between checks.
+pub async fn wait_until_for(what: &str, timeout: Duration, step: Duration, mut check: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while !check() {
+        assert!(tokio::time::Instant::now() < deadline, "{what} never happened");
+        tokio::time::sleep(step).await;
+    }
+}
+
+/// Polls until `check` holds within `WAIT`, checking every 10 ms.
+pub async fn wait_until(what: &str, check: impl FnMut() -> bool) {
+    wait_until_for(what, WAIT, Duration::from_millis(10), check).await;
 }

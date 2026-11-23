@@ -13,9 +13,7 @@ use common::*;
 use pika::config::{AuthMode, ServerConfig};
 use pika::http::{AppState, router};
 use pika::store::{self, Store};
-use pika::util::encode_path_segment;
 use serde_json::{Value, json};
-use tower::ServiceExt;
 
 const SESSION: &str = "5ec2e7a0-0000-4000-8000-000000000001";
 const CHILD: &str = "5ec2e7a0-0000-4000-8000-0000000000c1";
@@ -31,21 +29,6 @@ const ALL: [&str; 7] = [GITHUB_TOKEN, AWS_KEY, OPENAI_KEY, ENV_SECRET, URL_PASSW
 
 /// The assistant message whose model call has a captured request, with its timing.
 const TIMED_TS: i64 = 1792486803000;
-
-struct Reply {
-    status: StatusCode,
-    headers: header::HeaderMap,
-    body: Vec<u8>,
-}
-
-impl Reply {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
-    }
-    fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or_else(|_| panic!("not JSON: {}", self.text()))
-    }
-}
 
 struct App {
     env: Env,
@@ -64,11 +47,7 @@ impl App {
     }
 
     async fn send(&self, request: Request<Body>) -> Reply {
-        let response = self.app.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let headers = response.headers().clone();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
-        Reply { status, headers, body }
+        common::send(&self.app, request).await
     }
 
     async fn get(&self, path: &str) -> Reply {
@@ -675,7 +654,7 @@ fn late_session() -> Vec<String> {
 }
 
 async fn search(app: &App, public: bool, q: &str) -> Reply {
-    let path = format!("search?q={}", encode_path_segment(q));
+    let path = format!("search?q={}", encode(q));
     if public { app.public(&path).await } else { app.owner(&path).await }
 }
 
@@ -827,11 +806,7 @@ async fn an_index_written_before_redaction_is_rewritten_in_the_background() {
 
     let rewrite = pika::reindex::rescrub_in_background(&store).unwrap().expect("a rewrite is needed");
     app.upload(LATE_SESSION, &late_session()).await;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !current(&store) {
-        assert!(std::time::Instant::now() < deadline, "the rewrite did not finish");
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    wait_until_for("the rewrite to finish", std::time::Duration::from_secs(20), std::time::Duration::from_millis(20), || current(&store)).await;
     rewrite.join().unwrap();
 
     assert!(indexed_with(&store, &[GITHUB_TOKEN, OPENAI_KEY, AWS_KEY, cut_token]).is_empty());
@@ -1590,7 +1565,7 @@ async fn grouped_prefix_search_preserves_redaction_and_rewrite_gating() {
                 } else { entries.iter().collect() };
                 assert!(hits.iter().all(|h| h["sessionTitle"] == format!("{lead}[REDACTED:API_KEY]")));
                 assert!(hits.iter().any(|h| h["snippet"].as_str().unwrap().contains("&lt;b&gt;<mark>widgets</mark>&lt;/b&gt;")));
-                let absent = app.get(&format!("/api/{namespace}/search?q={}{suffix}", encode_path_segment(&key))).await;
+                let absent = app.get(&format!("/api/{namespace}/search?q={}{suffix}", encode(&key))).await;
                 assert!(items(&absent).is_empty(), "credential was indexed: {group} {sort}");
             }
             app.env.store.write(|tx| tx.execute("DELETE FROM settings WHERE key = ?1", [store::SEARCH_RULES])).unwrap();
@@ -1711,11 +1686,7 @@ async fn the_rewrite_keeps_ordinary_text_at_the_cap_and_leaves_new_documents_alo
 
     let rewrite = pika::reindex::rescrub_in_background(&store).unwrap().expect("a rewrite is needed");
     app.upload(LATE_SESSION, &late).await;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !current(&store) {
-        assert!(std::time::Instant::now() < deadline, "the rewrite did not finish");
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    wait_until_for("the rewrite to finish", std::time::Duration::from_secs(20), std::time::Duration::from_millis(20), || current(&store)).await;
     rewrite.join().unwrap();
 
     let text = |id: i64| one(&store, &format!("SELECT text FROM search_docs WHERE id = {id}"))["text"].as_str().unwrap().to_owned();

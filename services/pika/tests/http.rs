@@ -9,7 +9,6 @@ use common::*;
 use pika::config::{AuthMode, ServerConfig};
 use pika::http::{AppState, router};
 use serde_json::{Value, json};
-use tower::ServiceExt;
 
 struct Server {
     env: Env,
@@ -31,29 +30,6 @@ fn server(base: &str, password: Option<&str>, max_body: Option<usize>) -> Server
     }
     let app = router(AppState::new(env.store.clone(), config).unwrap());
     Server { env, app, token }
-}
-
-struct Reply {
-    status: StatusCode,
-    headers: header::HeaderMap,
-    body: Vec<u8>,
-}
-
-impl Reply {
-    fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&self.body)))
-    }
-    fn text(&self) -> String {
-        String::from_utf8(self.body.clone()).unwrap()
-    }
-}
-
-async fn send(app: &Router, request: Request<Body>) -> Reply {
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status();
-    let headers = response.headers().clone();
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
-    Reply { status, headers, body }
 }
 
 async fn get(app: &Router, path: &str, cookie: Option<&str>) -> Reply {

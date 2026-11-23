@@ -8,9 +8,7 @@ use axum::http::{Request, StatusCode, header};
 use common::*;
 use pika::config::{AuthMode, ServerConfig};
 use pika::http::{AppState, router};
-use pika::util::encode_path_segment;
 use serde_json::{Value, json};
-use tower::ServiceExt;
 
 const BASE: &str = "/pika";
 const DESKTOP: &str = "desktop";
@@ -27,21 +25,6 @@ const IMAGE_B64: &str = "iVBORw0KGgr7/78=";
 const IMAGE_BYTES: &[u8] = b"\x89PNG\r\n\x1a\n\xfb\xff\xbf";
 const GOAL: &str = "# Goal\n\nAdd pagination to the widget list.\n";
 const PLAN: &str = "# Plan\n\n- T1: cursor pagination\n";
-
-struct Reply {
-    status: StatusCode,
-    headers: header::HeaderMap,
-    body: Vec<u8>,
-}
-
-impl Reply {
-    fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&self.body)))
-    }
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
-    }
-}
 
 struct App {
     env: Env,
@@ -67,16 +50,12 @@ fn app(password: Option<&str>) -> App {
 
 /// Percent-encodes a query parameter value.
 fn q(value: &str) -> String {
-    encode_path_segment(value)
+    encode(value)
 }
 
 impl App {
     async fn send(&self, request: Request<Body>) -> Reply {
-        let response = self.app.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let headers = response.headers().clone();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
-        Reply { status, headers, body }
+        common::send(&self.app, request).await
     }
 
     /// GETs an absolute path.
@@ -1058,12 +1037,7 @@ async fn read_routes_require_the_login_cookie() {
         let r = app.get(route).await;
         assert_eq!((r.status, r.json()), (StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" })), "{route}");
     }
-    let login = Request::post(format!("{BASE}/api/v1/login"))
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(json!({ "password": "hunter2" }).to_string()))
-        .unwrap();
-    let r = app.send(login).await;
-    let cookie = r.headers[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_owned();
+    let cookie = login_at(&app.app, BASE, "hunter2").await;
     for route in &routes {
         let r = app.get_abs(&format!("{BASE}/api/v1/{route}"), Some(&cookie)).await;
         assert_eq!(r.status, StatusCode::OK, "{route}: {}", r.text());
@@ -1831,17 +1805,8 @@ async fn publication_is_opt_in_and_settings_require_login() {
             assert_eq!((reply.status, reply.json()), (StatusCode::NOT_FOUND, json!({ "error": "not_found" })));
         }
     }
-    let reply = app
-        .send(
-            Request::post(format!("{BASE}/api/v1/login"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(json!({ "password": "publishing-password" }).to_string()))
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
-    let cookie = reply.headers[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap();
-    let settings = app.get_abs(&format!("{BASE}/api/v1/settings/publishing"), Some(cookie)).await;
+    let cookie = login_at(&app.app, BASE, "publishing-password").await;
+    let settings = app.get_abs(&format!("{BASE}/api/v1/settings/publishing"), Some(&cookie)).await;
     assert_eq!(
         settings.json(),
         json!({ "projects": [
@@ -1854,7 +1819,7 @@ async fn publication_is_opt_in_and_settings_require_login() {
     app.append(DESKTOP, &skey(DESK_SESSION), "session", byte_len(&desk_session()), &private_model).await;
     let empty = json!({ "items": [], "nextCursor": null });
     assert_eq!(public_json(&app, "search?q=spin").await, empty);
-    assert_eq!(publish(&app, "widgets", true, Some(cookie)).await.status, StatusCode::OK);
+    assert_eq!(publish(&app, "widgets", true, Some(&cookie)).await.status, StatusCode::OK);
     // Public search finds only published sessions' matches; the owner's search still finds the private one.
     let sessions_of = |hits: &Value| {
         let mut ids: Vec<String> = hits["items"].as_array().unwrap().iter().map(|h| h["sessionId"].as_str().unwrap().to_owned()).collect();
@@ -1862,7 +1827,7 @@ async fn publication_is_opt_in_and_settings_require_login() {
         ids.dedup();
         ids
     };
-    let owner = app.get_abs(&format!("{BASE}/api/v1/search?q=spin"), Some(cookie)).await.json();
+    let owner = app.get_abs(&format!("{BASE}/api/v1/search?q=spin"), Some(&cookie)).await.json();
     assert!(sessions_of(&owner).contains(&DESK_SESSION.to_owned()));
     let published = public_json(&app, "search?q=spin").await;
     assert_eq!(sessions_of(&published), [SESSION_ID, LINKED_CHILD]);
@@ -1873,7 +1838,7 @@ async fn publication_is_opt_in_and_settings_require_login() {
     let grouped = public_json(&app, "search?q=spi&prefix=true&group=session").await;
     let groups = grouped["items"].as_array().unwrap();
     assert_eq!(groups.iter().map(|g| (&g["sessionId"], &g["matches"])).collect::<Vec<_>>(), [(&json!(SESSION_ID), &json!(5))]);
-    let owner_grouped = app.get_abs(&format!("{BASE}/api/v1/search?q=spin&group=session"), Some(cookie)).await.json();
+    let owner_grouped = app.get_abs(&format!("{BASE}/api/v1/search?q=spin&group=session"), Some(&cookie)).await.json();
     assert!(owner_grouped["items"].as_array().unwrap().iter().any(|g| g["sessionId"] == DESK_SESSION));
     assert_eq!(public_json(&app, "search?q=hidden&group=session").await, empty);
     assert_eq!(public_json(&app, "search?q=hidden").await, empty);
@@ -1920,7 +1885,7 @@ async fn publication_is_opt_in_and_settings_require_login() {
     let mut decoder = flate2::read::GzDecoder::new(reply.body.as_slice());
     let decoded: Value = serde_json::from_reader(&mut decoder).unwrap();
     assert_eq!(decoded, trace);
-    assert_eq!(publish(&app, "widgets", false, Some(cookie)).await.status, StatusCode::OK);
+    assert_eq!(publish(&app, "widgets", false, Some(&cookie)).await.status, StatusCode::OK);
     assert_eq!(app.get_abs(image, None).await.status, StatusCode::NOT_FOUND);
     assert_eq!(public_json(&app, "search?q=spin").await, empty);
     for suffix in ["", "/turns", "/entries", "/entries/0/raw", "/entries/13/image/0", "/trace", "/updates"] {

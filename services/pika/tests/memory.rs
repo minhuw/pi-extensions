@@ -12,25 +12,9 @@ use common::*;
 use pika::config::{AuthMode, ServerConfig};
 use pika::http::{AppState, router};
 use serde_json::{Value, json};
-use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse battery";
 const REPO: &str = "https://github.com/me/widgets";
-
-struct Reply {
-    status: StatusCode,
-    headers: header::HeaderMap,
-    body: Vec<u8>,
-}
-
-impl Reply {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
-    }
-    fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or_else(|_| panic!("not JSON: {}", self.text()))
-    }
-}
 
 struct App {
     env: Env,
@@ -54,11 +38,7 @@ impl App {
     }
 
     async fn send(&self, request: Request<Body>) -> Reply {
-        let response = self.app.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let headers = response.headers().clone();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
-        Reply { status, headers, body }
+        common::send(&self.app, request).await
     }
 
     /// `method {path}` with `token` as the bearer, if any, and a JSON body, if any.
@@ -111,13 +91,6 @@ impl App {
     fn count(&self, sql: &str) -> i64 {
         one(&self.env.store, sql).into_values().next().unwrap().as_i64().unwrap()
     }
-}
-
-/// Percent-encodes a query parameter value.
-fn encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
-        .collect()
 }
 
 fn user_note(title: &str, hook: &str) -> Value {
@@ -235,10 +208,8 @@ async fn concurrent_saves(app: &App, body: &Value, n: usize) -> Vec<(StatusCode,
                 .body(Body::from(body.to_string()))
                 .unwrap();
             tokio::spawn(async move {
-                let response = router.oneshot(request).await.unwrap();
-                let status = response.status();
-                let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-                (status, serde_json::from_slice(&body).unwrap())
+                let reply = send(&router, request).await;
+                (reply.status, reply.json())
             })
         })
         .collect();
@@ -633,9 +604,7 @@ async fn memory_routes_need_a_reading_device_or_the_owner() {
         let r = app.call(Method::GET, &format!("/api/v1/{path}"), Some(&app.b), None).await;
         assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{path}");
     }
-    let login = app.call(Method::POST, "/api/v1/login", None, Some(json!({ "password": PASSWORD }))).await;
-    assert_eq!(login.status, StatusCode::OK, "{}", login.text());
-    let cookie = login.headers[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_owned();
+    let cookie = login(&app.app, PASSWORD).await;
     for path in owner {
         let request = Request::get(format!("/api/v1/{path}")).header(header::COOKIE, &cookie).body(Body::empty()).unwrap();
         let r = app.send(request).await;
@@ -761,10 +730,8 @@ async fn concurrent_posts(app: &App, posts: Vec<(String, Value)>) -> Vec<(Status
                 .body(Body::from(body.to_string()))
                 .unwrap();
             tokio::spawn(async move {
-                let response = router.oneshot(request).await.unwrap();
-                let status = response.status();
-                let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-                (status, serde_json::from_slice(&body).unwrap())
+                let reply = send(&router, request).await;
+                (reply.status, reply.json())
             })
         })
         .collect();

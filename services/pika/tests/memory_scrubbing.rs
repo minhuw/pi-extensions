@@ -13,7 +13,6 @@ use common::*;
 use pika::config::{AuthMode, ServerConfig};
 use pika::http::{AppState, router};
 use serde_json::{Value, json};
-use tower::ServiceExt;
 
 const ID: &str = "6b0c3a20-6d1e-4f3a-8b9c-2e3f4a5b6c7d";
 /// Text that appears only in memory: the pinned index, the system prompt's memory section, a nested `memory_save`'s
@@ -121,8 +120,8 @@ impl App {
             .header("content-type", "application/json")
             .body(Body::from(json!({ "project": "widgets", "published": true }).to_string()))
             .unwrap();
-        let response = self.app.clone().oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        let reply = send(&self.app, request).await;
+        assert_eq!(reply.status, StatusCode::OK);
     }
 
     /// `GET /api/{namespace}/{path}` (`v1`, `public/v1`, or `agent/v1` with the device's token), which must succeed.
@@ -131,20 +130,16 @@ impl App {
         if namespace == "agent/v1" {
             request = request.header("authorization", format!("Bearer {}", self.token));
         }
-        let response = self.app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
-        let status = response.status();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let text = String::from_utf8_lossy(&body).into_owned();
-        assert_eq!(status, StatusCode::OK, "{namespace} {path}: {text}");
+        let reply = send(&self.app, request.body(Body::empty()).unwrap()).await;
+        let text = reply.text();
+        assert_eq!(reply.status, StatusCode::OK, "{namespace} {path}: {text}");
         text
     }
 
     async fn get_bytes(&self, uri: &str) -> (StatusCode, Vec<u8>) {
         let request = Request::builder().method(Method::GET).uri(uri).body(Body::empty()).unwrap();
-        let response = self.app.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        (status, body.to_vec())
+        let reply = send(&self.app, request).await;
+        (reply.status, reply.body)
     }
 
     async fn json_in(&self, namespace: &str, path: &str) -> Value {

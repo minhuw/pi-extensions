@@ -8,7 +8,6 @@ use common::*;
 use pika::config::{AuthMode, ServerConfig};
 use pika::http::{AppState, router};
 use serde_json::{Value, json};
-use tower::ServiceExt;
 
 const PARENT: &str = "p0000000-0000-0000-0000-000000000001";
 const CHILD: &str = "c0000000-0000-0000-0000-000000000002";
@@ -23,17 +22,6 @@ struct App {
     app: Router,
     token: String,
     cookie: Option<String>,
-}
-
-struct Reply {
-    status: StatusCode,
-    body: Vec<u8>,
-}
-
-impl Reply {
-    fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&self.body)))
-    }
 }
 
 fn app_with(password: Option<&str>) -> App {
@@ -62,10 +50,7 @@ impl App {
             Some(body) => request.header(header::CONTENT_TYPE, "application/json").body(Body::from(body.to_string())),
             None => request.body(Body::empty()),
         };
-        let response = self.app.clone().oneshot(request.unwrap()).await.unwrap();
-        let status = response.status();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
-        Reply { status, body }
+        common::send(&self.app, request.unwrap()).await
     }
 
     async fn get(&self, path: &str) -> Reply {
@@ -102,10 +87,7 @@ impl App {
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
             .body(Body::from(batch.to_string()))
             .unwrap();
-        let response = self.app.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
-        Reply { status, body }
+        common::send(&self.app, request).await
     }
 
     async fn ok_ingest(&self, batch: Value) -> Value {
@@ -591,22 +573,17 @@ async fn owner_routes_need_a_signed_in_session() {
     }
     assert_eq!(app.count("SELECT COUNT(*) FROM sessions"), 4);
     // A form post cannot hide a session.
-    let response = app
-        .app
-        .clone()
-        .oneshot(Request::post("/api/v1/login").header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(json!({ "password": "correct horse battery" }).to_string())).unwrap())
-        .await
-        .unwrap();
-    let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_owned();
-    app.cookie = Some(cookie);
-    let form = app.app.clone().oneshot(
+    app.cookie = Some(login(&app.app, "correct horse battery").await);
+    let form = common::send(
+        &app.app,
         Request::patch(format!("/api/v1/sessions/{PARENT}"))
             .header(header::COOKIE, app.cookie.clone().unwrap())
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(Body::from("hidden=true")).unwrap(),
-    ).await.unwrap();
-    assert_eq!(form.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+            .body(Body::from("hidden=true"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(form.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
     assert_eq!(app.hide(PARENT, true).await.status, StatusCode::OK);
     let r = app.delete(&format!("sessions/{CHILD}")).await;
     assert_eq!(r.json(), json!({ "deletedSessions": 2, "deletedHerderRuns": 0 }));

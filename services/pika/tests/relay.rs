@@ -1,8 +1,8 @@
 mod common;
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::SocketAddr;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 use axum::Router;
@@ -19,11 +19,9 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-use tower::ServiceExt;
 
 const OTHER: &str = "desktop";
 const PASSWORD: &str = "correct horse battery";
-const WAIT: Duration = Duration::from_secs(5);
 
 struct Server {
     env: Env,
@@ -96,23 +94,8 @@ fn record(store: &Store, id: &str, device: &str) {
     pika::ingest::apply(store, device, &batch).unwrap();
 }
 
-struct Reply {
-    status: StatusCode,
-    body: Vec<u8>,
-}
-
-impl Reply {
-    fn json(&self) -> Value {
-        serde_json::from_slice(&self.body)
-            .unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&self.body)))
-    }
-}
-
 async fn http(app: &Router, request: Request<Body>) -> Reply {
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status();
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
-    Reply { status, body }
+    common::send(app, request).await
 }
 
 fn get(path: &str, token: Option<&str>, cookie: Option<&str>) -> Request<Body> {
@@ -151,15 +134,6 @@ async fn sessions(s: &Server) -> Vec<Value> {
 
 fn ids(items: &[Value]) -> Vec<&str> {
     items.iter().map(|i| i["id"].as_str().unwrap()).collect()
-}
-
-/// Polls until `check` holds, with a CI-safe deadline.
-async fn wait_until(what: &str, mut check: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + WAIT;
-    while !check() {
-        assert!(tokio::time::Instant::now() < deadline, "{what} never happened");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
 }
 
 /// Waits until the system millisecond clock advances so millisecond-resolution timestamps
@@ -865,13 +839,6 @@ async fn relay_routes_follow_the_base_path() {
     assert_eq!(events(&s, "").await.len(), 1);
 }
 
-async fn login(app: &Router) -> String {
-    let response = app.clone().oneshot(post("/api/v1/login", json!({ "password": PASSWORD }), None)).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let cookie = response.headers().get("set-cookie").unwrap().to_str().unwrap();
-    cookie.split(';').next().unwrap().to_owned()
-}
-
 #[tokio::test]
 async fn the_browser_lists_sessions_and_sends_as_the_web() {
     let s = server_with(|c| {
@@ -888,7 +855,7 @@ async fn the_browser_lists_sessions_and_sends_as_the_web() {
     ] {
         assert_eq!(http(&s.app, request).await.status, StatusCode::UNAUTHORIZED);
     }
-    let cookie = login(&s.app).await;
+    let cookie = login(&s.app, PASSWORD).await;
 
     let (_a, _) = Client::online(&s, &s.laptop, "sess-a").await;
     wait_for_next_ms().await;
@@ -1021,28 +988,8 @@ async fn web_sends_share_one_rate_limit_and_the_event_ring_keeps_500() {
 
 /// Starts the `pika` binary with `env`; returns it and its address, or its exit status and error output.
 fn spawn(data: &std::path::Path, env: &[(&str, &str)]) -> Result<(std::process::Child, String), String> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pika"));
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("PIKA_") {
-            command.env_remove(key);
-        }
-    }
-    command.args(["--data-dir", data.to_str().unwrap(), "serve", "--bind", "127.0.0.1:0"]).env("PIKA_AUTH", "none");
-    // Offline: no price catalog fetch.
-    command.env("PIKA_PRICES", "off");
-    let mut child = command.envs(env.iter().copied()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    let listening =
-        BufReader::new(child.stdout.take().unwrap()).lines().map_while(Result::ok).find(|l| l.contains("listening on"));
-    match listening {
-        Some(line) => {
-            let addr = line.split("http://").nth(1).unwrap().split('/').next().unwrap().to_owned();
-            Ok((child, addr))
-        }
-        None => {
-            let out = child.wait_with_output().unwrap();
-            Err(format!("{:?}: {}", out.status.code(), String::from_utf8_lossy(&out.stderr)))
-        }
-    }
+    let (child, addr, _) = spawn_serve(data, env)?;
+    Ok((child, addr))
 }
 
 fn health_of(addr: &str) -> Value {
@@ -1099,7 +1046,7 @@ async fn the_server_reads_relay_settings_from_the_environment() {
     assert_eq!(closed.await.unwrap(), Some(1001));
     wait_until("the server to stop", || child.try_wait().unwrap().is_some()).await;
     // The test-only settings stay out of `--help`.
-    let help = Command::new(env!("CARGO_BIN_EXE_pika")).args(["serve", "--help"]).output().unwrap();
+    let help = pika_cmd().args(["serve", "--help"]).output().unwrap();
     let help = String::from_utf8_lossy(&help.stdout);
     assert!(help.contains("--relay") && !help.contains("TTL_SECS") && !help.contains("HEARTBEAT"), "{help}");
 }

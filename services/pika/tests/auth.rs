@@ -2,7 +2,7 @@ mod common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{IpAddr, SocketAddr};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -14,29 +14,9 @@ use common::*;
 use pika::config::{AuthMode, CookieSecure, ServerConfig};
 use pika::http::{AppState, router};
 use serde_json::{Value, json};
-use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse battery";
 const INGEST: &str = "/api/ingest/v1/batch";
-
-struct Reply {
-    status: StatusCode,
-    headers: header::HeaderMap,
-    body: Vec<u8>,
-}
-
-impl Reply {
-    fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&self.body)))
-    }
-    fn set_cookie(&self) -> String {
-        self.headers.get(header::SET_COOKIE).expect("Set-Cookie").to_str().unwrap().to_owned()
-    }
-    /// The `name=value` pair of the Set-Cookie header.
-    fn cookie(&self) -> String {
-        self.set_cookie().split(';').next().unwrap().to_owned()
-    }
-}
 
 /// A request under construction.
 struct Req {
@@ -89,11 +69,7 @@ impl Req {
         if let Some(ip) = self.peer {
             request.extensions_mut().insert(ConnectInfo(SocketAddr::new(ip, 40000)));
         }
-        let response = app.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let headers = response.headers().clone();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
-        Reply { status, headers, body }
+        common::send(app, request).await
     }
 }
 
@@ -108,13 +84,11 @@ fn app(env: &Env, config: ServerConfig) -> Router {
 }
 
 async fn login(app: &Router, password: &str) -> Reply {
-    Req::post("/api/v1/login", json!({ "password": password })).send(app).await
+    login_reply(app, "", password).await
 }
 
 async fn logged_in(app: &Router) -> String {
-    let r = login(app, PASSWORD).await;
-    assert_eq!(r.status, StatusCode::OK);
-    r.cookie()
+    common::login(app, PASSWORD).await
 }
 
 fn batch(host: &str) -> Value {
@@ -137,19 +111,6 @@ fn db_bytes(env: &Env) -> Vec<u8> {
 
 fn contains(haystack: &[u8], needle: &str) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle.as_bytes())
-}
-
-/// The `pika` binary with no PIKA_* settings from the environment.
-fn pika(data: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pika"));
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("PIKA_") {
-            command.env_remove(key);
-        }
-    }
-    // Offline: no price catalog fetch.
-    command.arg("--data-dir").arg(data).env("PIKA_PRICES", "off");
-    command
 }
 
 #[test]
@@ -1371,18 +1332,10 @@ fn polls_for_unknown_or_pending_pairings_do_not_wait_for_the_writer() {
 /// Starts `pika serve` with `PIKA_AUTH=none` and `env`; returns its listening line, or its exit status and error output
 /// when it does not start.
 fn serve_with(data: &std::path::Path, env: &[(&str, &str)]) -> Result<String, String> {
-    let mut command = pika(data);
-    command.args(["serve", "--bind", "127.0.0.1:0"]).env("PIKA_AUTH", "none").envs(env.iter().copied());
-    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    let listening =
-        BufReader::new(child.stdout.take().unwrap()).lines().map_while(Result::ok).find(|l| l.contains("listening on"));
-    if let Some(line) = listening {
-        child.kill().unwrap();
-        child.wait().unwrap();
-        return Ok(line);
-    }
-    let out = child.wait_with_output().unwrap();
-    Err(format!("{:?}: {}", out.status.code(), String::from_utf8_lossy(&out.stderr)))
+    let (mut child, _, line) = spawn_serve(data, env)?;
+    child.kill().unwrap();
+    child.wait().unwrap();
+    Ok(line)
 }
 
 #[test]
@@ -1405,8 +1358,10 @@ fn trust_proxy_accepts_only_switch_values() {
 
 /// Runs `pika token ...`; returns its exit success, stdout, and stderr.
 fn token_cli(data: &std::path::Path, args: &[&str]) -> (bool, String, String) {
-    let out = pika(data).arg("token").args(args).output().unwrap();
-    (out.status.success(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap())
+    let mut full = Vec::with_capacity(args.len() + 1);
+    full.push("token");
+    full.extend_from_slice(args);
+    pika_cli(data, &full)
 }
 
 #[test]

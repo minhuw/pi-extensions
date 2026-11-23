@@ -5,8 +5,6 @@
 
 mod common;
 
-use std::process::Command;
-
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
@@ -14,7 +12,6 @@ use common::*;
 use pika::config::{AuthMode, ServerConfig};
 use pika::http::{AppState, router};
 use serde_json::{Value, json};
-use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse battery";
 const SESSION: &str = "a9e47000-0000-4000-8000-000000000001";
@@ -30,21 +27,6 @@ const CREDENTIALS: [&str; 2] = [GITHUB_TOKEN, ENV_SECRET];
 /// repeats it in a title.
 const LINK_SECRET: &str = "FAKElinkPass0042";
 const LINK_TOKEN: &str = "FAKElinkTicketToken0042";
-
-struct Reply {
-    status: StatusCode,
-    headers: header::HeaderMap,
-    body: Vec<u8>,
-}
-
-impl Reply {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
-    }
-    fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or_else(|_| panic!("not JSON: {}", self.text()))
-    }
-}
 
 struct App {
     env: Env,
@@ -66,11 +48,7 @@ impl App {
     }
 
     async fn send(&self, request: Request<Body>) -> Reply {
-        let response = self.app.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let headers = response.headers().clone();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
-        Reply { status, headers, body }
+        common::send(&self.app, request).await
     }
 
     async fn json(&self, method: Method, path: &str, body: Value) -> Reply {
@@ -711,21 +689,12 @@ async fn a_session_without_a_project_has_no_project_in_search() {
     assert_eq!(found, [(id.to_owned(), Value::Null, json!("2026-10-20T09:00:01.000Z"))]);
 }
 
-fn pika(data: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pika"));
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("PIKA_") {
-            command.env_remove(key);
-        }
-    }
-    command.arg("--data-dir").arg(data).env("PIKA_PRICES", "off");
-    command
-}
-
 /// Runs `pika token ...`; returns its exit success, stdout, and stderr.
 fn token_cli(data: &std::path::Path, args: &[&str]) -> (bool, String, String) {
-    let out = pika(data).arg("token").args(args).output().unwrap();
-    (out.status.success(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap())
+    let mut full = Vec::with_capacity(args.len() + 1);
+    full.push("token");
+    full.extend_from_slice(args);
+    pika_cli(data, &full)
 }
 
 #[test]

@@ -11,7 +11,6 @@ use pika::{
     http::{AppState, router},
 };
 use serde_json::{Value, json};
-use tower::ServiceExt;
 
 fn app(env: &Env, mode: VisitorAnalytics, auth: AuthMode) -> Router {
     app_with_proxy(env, mode, auth, true)
@@ -42,28 +41,21 @@ async fn send(
         req.extensions_mut()
             .insert(ConnectInfo(peer.parse::<std::net::SocketAddr>().unwrap()));
     }
-    let response = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-    response.status()
+    let reply = common::send(app, req).await;
+    assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
+    reply.status
 }
 
 async fn report(app: &Router) -> Value {
-    let response = app
-        .clone()
-        .oneshot(
-            Request::get("/api/v1/visitor-origins")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), 100_000)
-            .await
+    let reply = common::send(
+        app,
+        Request::get("/api/v1/visitor-origins")
+            .body(Body::empty())
             .unwrap(),
     )
-    .unwrap()
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    reply.json()
 }
 
 #[tokio::test]
@@ -90,11 +82,7 @@ async fn analytics_are_enabled_by_default_and_can_be_disabled() {
 
 #[test]
 fn cli_advertises_automatic_analytics_by_default() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_pika"))
-        .args(["serve", "--help"])
-        .env_remove("PIKA_VISITOR_ANALYTICS")
-        .output()
-        .unwrap();
+    let output = pika_cmd().args(["serve", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     let option = help.split("--visitor-analytics").nth(1).expect("visitor analytics option");
@@ -185,25 +173,22 @@ async fn boundaries_trust_and_retention() {
         send(&off, json!({"page":"gallery"}), Some("127.0.0.1:1234"), &[]).await,
         StatusCode::NO_CONTENT
     );
-    let response = off
-        .clone()
-        .oneshot(
-            Request::get("/api/v1/visitor-origins")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let response = off
-        .oneshot(
-            Request::get("/api/public/v1/visitor-origins")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let reply = common::send(
+        &off,
+        Request::get("/api/v1/visitor-origins")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    let reply = common::send(
+        &off,
+        Request::get("/api/public/v1/visitor-origins")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
     assert_eq!(
         one(&env.store, "SELECT COUNT(*) AS n FROM visitor_views")["n"],
         0
@@ -399,9 +384,9 @@ async fn rejects_large_non_json_and_rate_limits_only_views() {
             .body(Body::from(" ".repeat(4097)))
             .unwrap(),
     ] {
-        let response = app.clone().oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let reply = common::send(&app, request).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+        assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
     }
     for _ in 0..60 {
         assert_eq!(

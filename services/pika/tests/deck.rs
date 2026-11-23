@@ -9,7 +9,6 @@ use common::*;
 use pika::config::{AuthMode, ServerConfig};
 use pika::http::{AppState, router};
 use serde_json::{Value, json};
-use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse battery";
 
@@ -39,9 +38,7 @@ async fn app_with(configure: impl FnOnce(&mut ServerConfig)) -> App {
     let app = router(AppState::new(env.store.clone(), config).unwrap());
     let mut app = App { env, app, cookie: None, device, credential: created.credential, node: created.id };
     if password {
-        let r = app.call(Method::POST, "/api/v1/login", Auth::None, Some(json!({ "password": PASSWORD }))).await;
-        assert_eq!(r.0, StatusCode::OK);
-        app.cookie = Some(r.2.unwrap());
+        app.cookie = Some(login(&app.app, PASSWORD).await);
     }
     app
 }
@@ -73,14 +70,12 @@ impl App {
             }
             None => Body::empty(),
         };
-        let response = self.app.clone().oneshot(request.body(body).unwrap()).await.unwrap();
-        let status = response.status();
-        let cookie = response
-            .headers()
+        let reply = send(&self.app, request.body(body).unwrap()).await;
+        let cookie = reply
+            .headers
             .get(header::SET_COOKIE)
             .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_owned());
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null), cookie)
+        (reply.status, serde_json::from_slice(&reply.body).unwrap_or(Value::Null), cookie)
     }
 
     /// An owner request with the session cookie, when there is one.
@@ -103,16 +98,6 @@ impl App {
         assert_eq!(status, StatusCode::OK, "{body}");
         body["projects"].clone()
     }
-}
-
-/// Percent-encodes everything but unreserved characters, so a key is one path segment or a query value.
-fn encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
 }
 
 fn project_path(key: &str) -> String {
@@ -190,8 +175,8 @@ async fn writes_refuse_form_posts() {
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(Body::from("collapsed=true"))
             .unwrap();
-        let response = app.app.clone().oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE, "{method} {path}");
+        let reply = send(&app.app, request).await;
+        assert_eq!(reply.status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{method} {path}");
     }
     assert!(query(&app.env.store, "SELECT * FROM deck_projects").is_empty());
 }
@@ -265,7 +250,7 @@ async fn project_keys_answer_400_for_a_body_of_another_shape() {
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from("{\"items\":"))
         .unwrap();
-    assert_eq!(app.app.clone().oneshot(request).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(send(&app.app, request).await.status, StatusCode::BAD_REQUEST);
     let most: Vec<Value> = (0..1024).map(|_| item.clone()).collect();
     let (status, answer) = app.keys(json!(most)).await;
     assert_eq!(status, StatusCode::OK);

@@ -15,10 +15,8 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse battery";
-const WAIT: Duration = Duration::from_secs(5);
 const PUBLIC_KEY: &str = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 struct Server {
@@ -63,34 +61,12 @@ impl Server {
     }
 
     async fn login(&self) -> String {
-        let request = Request::post("/api/v1/login")
-            .header("content-type", "application/json")
-            .body(Body::from(json!({ "password": PASSWORD }).to_string()))
-            .unwrap();
-        let response = self.app.clone().oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let cookie = response.headers().get("set-cookie").unwrap().to_str().unwrap();
-        cookie.split(';').next().unwrap().to_owned()
-    }
-}
-
-struct Reply {
-    status: StatusCode,
-    headers: axum::http::HeaderMap,
-    body: Vec<u8>,
-}
-
-impl Reply {
-    fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&self.body)))
+        common::login(&self.app, PASSWORD).await
     }
 }
 
 async fn http(app: &Router, request: Request<Body>) -> Reply {
-    let response = app.clone().oneshot(request).await.unwrap();
-    let (status, headers) = (response.status(), response.headers().clone());
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
-    Reply { status, headers, body }
+    common::send(app, request).await
 }
 
 fn get(path: &str, token: Option<&str>) -> Request<Body> {
@@ -237,15 +213,6 @@ impl Peer {
             }
             _ => Err(answer),
         }
-    }
-}
-
-/// Polls until `check` holds.
-async fn until(what: &str, check: impl Fn() -> bool) {
-    let deadline = tokio::time::Instant::now() + WAIT;
-    while !check() {
-        assert!(tokio::time::Instant::now() < deadline, "{what} never happened");
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -453,7 +420,7 @@ async fn channels_forward_bodies_verbatim_both_ways() {
     // A close goes to the other side with its code and reason, and ends the channel.
     browser.send(json!({ "type": "close", "channel": channel, "code": "closed", "reason": "tab closed" })).await;
     assert_eq!(node.next().await, json!({ "type": "close", "channel": channel, "code": "closed", "reason": "tab closed" }));
-    until("the channel to close", || s.state.nodes.channels() == 0).await;
+    wait_until("the channel to close", || s.state.nodes.channels() == 0).await;
     node.send(json!({ "type": "frame", "channel": channel, "body": { "t": "late" } })).await;
     // A browser that closes its socket closes its channels with `client_gone`.
     let second = browser.open("r4", &s.node).await.unwrap();
@@ -486,7 +453,7 @@ async fn a_node_that_goes_away_closes_its_channels() {
     let mut expected = channels.to_vec();
     expected.sort();
     assert_eq!(closed, expected);
-    until("the channels to close", || s.state.nodes.channels() == 0).await;
+    wait_until("the channels to close", || s.state.nodes.channels() == 0).await;
 
     // A newer socket for the node replaces the older one with 4410, which closes the older one's channels.
     let (mut first, _) = Peer::node(&s, &s.credential).await;
@@ -621,7 +588,7 @@ async fn silent_sockets_are_closed_and_heartbeats_flow() {
     // Silence closes it with 1001, and not before `dead_after` elapses after the last pong.
     assert_eq!(node.closed().await, 1001);
     assert!(last_pong.elapsed() >= dead_after, "{:?}", last_pong.elapsed());
-    until("node goes offline", || s.state.nodes.online() == 0).await;
+    wait_until("node goes offline", || s.state.nodes.online() == 0).await;
 }
 
 #[tokio::test]
@@ -629,10 +596,7 @@ async fn the_cli_manages_node_credentials() {
     let env = env();
     let data = env.dir.path().join("data");
     drop(env.store);
-    let pika = |args: &[&str]| {
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_pika")).arg("--data-dir").arg(&data).args(args).output().unwrap();
-        (output.status.success(), String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
-    };
+    let pika = |args: &[&str]| pika_cli(&data, args);
     let (ok, credential, _) = pika(&["node", "create", "node01"]);
     assert!(ok);
     let credential = credential.trim();
@@ -853,7 +817,7 @@ async fn a_node_that_stops_reading_never_sends_close_before_opened() {
         }
         tokio::task::yield_now().await;
     }
-    until("node detached as slow reader", || s.state.nodes.online() == 0).await;
+    wait_until("node detached as slow reader", || s.state.nodes.online() == 0).await;
 
     let mut opened_channels = HashSet::from([seed.clone()]);
     let mut closed_channels = HashSet::new();
