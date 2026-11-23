@@ -193,7 +193,7 @@ Concrete questions or missing decisions.`,
       name: "analyst",
       displayName: "Analyst",
       description:
-        "Read-only deep analysis and codebase audit agent that inherits the parent model. Use ONLY when an explicit audit/review command or skill invokes it (such as /herder-improve, /herder-simplify, /review, /simplify, /deslop, or impeccable_delegate) or when the user explicitly asks for a deep read-only audit, critique, or second opinion. Do NOT spawn proactively after normal coding work — verify changes with tests and checks instead. Do NOT use for quick file lookup (use recon) or implementation (use worker).",
+        "Read-only deep analysis and codebase audit agent that inherits the parent model. Use ONLY when an explicit audit/review command or skill invokes it (such as /herder-improve, /herder-simplify, /review, /simplify, or /deslop) or when the user explicitly asks for a deep read-only audit, critique, or second opinion. Do NOT spawn proactively after normal coding work — verify changes with tests and checks instead. Do NOT use for quick file lookup (use recon) or implementation (use worker).",
       builtinToolNames: READ_ONLY_TOOLS,
       extSelectors: ["ext:fff"],
       extensions: ["fff", "selfdrive"],

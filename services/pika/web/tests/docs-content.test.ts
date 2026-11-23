@@ -94,10 +94,10 @@ describe("published documentation content", () => {
 	let data: DocsData;
 	beforeAll(async () => { data = await loadDocsData(); });
 
-	it("includes exactly the 31 extension READMEs and eight other approved sources", () => {
+	it("includes exactly the 30 extension READMEs and eight other approved sources", () => {
 		const names = [
 			"commit", "recap", "continue-session", "agents-md", "quality", "writer",
-			"impeccable", "ui-sdk", "agent-browser", "agent-desktop",
+			"ui-sdk", "agent-browser", "agent-desktop",
 			"subagents", "council", "delegation", "selfdrive", "herder",
 			"orca-bridge", "pika-node-bridge",
 			"autoresearch", "benchmark",
@@ -110,7 +110,7 @@ describe("published documentation content", () => {
 			"docs/guides/performance.md", "docs/guides/delegation.md", "docs/guides/code-review.md",
 		].sort());
 		expect(data.pages.find((page) => page.source === "extensions/goal/README.md")?.slug).toBe("extensions/goal");
-		expect(new Set(data.pages.map((page) => page.slug)).size).toBe(39);
+		expect(new Set(data.pages.map((page) => page.slug)).size).toBe(38);
 		for (const page of data.pages) {
 			expect(page.slug).not.toBe("");
 			expect(page.title).toBeTruthy();
@@ -152,7 +152,7 @@ describe("published documentation content", () => {
 		expect(data.commands.map((command) => command.command)).toEqual(expect.arrayContaining([...registeredPrompts.keys()]));
 		expect(new Set(data.commands.map((command) => command.command)).size).toBe(data.commands.length);
 		expect(data.groups.map((group) => group.title)).toEqual(["Getting started", "Reference", "Guides", "pika", "Development"]);
-		expect(data.groups.find((group) => group.title === "Reference")?.items).toHaveLength(31);
+		expect(data.groups.find((group) => group.title === "Reference")?.items).toHaveLength(30);
 		expect(data.groups.find((group) => group.title === "Guides")?.items).toHaveLength(3);
 		expect(data.groups.flatMap((group) => group.items.map((item) => item.slug)).sort()).toEqual(data.pages.map((page) => page.slug).sort());
 		expect(data.commands.map((command) => command.command)).toEqual(expect.arrayContaining([

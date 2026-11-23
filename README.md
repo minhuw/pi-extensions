@@ -19,10 +19,9 @@ The [pika server](services/pika/README.md) serves this documentation publicly at
 | [Recap](extensions/recap/README.md) | `/recap` summarizes the current session's goal, recent progress, and where to pick up after a break. |
 | [Quality](extensions/quality/README.md) | `/simplify` cleans up code, `/review` reports bugs without fixing them, `/verify` runs checks without repairing anything, and `/deslop` removes AI slop. |
 | [Writer](extensions/writer/README.md) | Eight prompts for writing CS conference papers, ported from [claude-writer](https://github.com/minhuw/claude-writer). |
-| [Impeccable](extensions/impeccable/README.md) | The Impeccable design skill, with `/impeccable`, `/design`, and 24 `/design-*` prompts for building, refining, and critiquing interfaces. |
 | [Agent Browser](extensions/agent-browser/README.md) | Browser automation and web testing through `agent-browser`, with the `agent-browser` skill, the `agent_browser` tool (isolated per-session daemons and inline screenshots), and `/agent-browser`. |
 | [Agent Desktop](extensions/agent-desktop/README.md) | Native desktop GUI automation on macOS, Linux, and Windows through `agent-desktop`, with the `agent-desktop` skill, the `agent_desktop` tool (headless accessibility-tree refs, `headed` gating, and inline screenshots), and `/agent-desktop`. |
-| [UI SDK](extensions/ui-sdk/README.md) | The `ui-sdk` skill from Vercel's headless [UI SDK](https://ui-sdk.dev) (beta): building interfaces with its components and `@ui-sdk/core` behaviors in React, Vue, Svelte, Solid, or web components, making them agent-ready, and testing them. Loads only with Impeccable: its activation points the model at the skill. |
+| [UI SDK](extensions/ui-sdk/README.md) | Explicit-only `/skill:ui-sdk` skill from Vercel's headless [UI SDK](https://ui-sdk.dev) (beta): building interfaces with its components and `@ui-sdk/core` behaviors in React, Vue, Svelte, Solid, or web components, making them agent-ready, and testing them. |
 | [Subagents](extensions/subagents/README.md) | Delegates bounded tasks to a local agent fleet (`recon`, `worker`, `analyst`), using a maintained fork of `@tintinweb/pi-subagents` v0.25.0. |
 | [Council](extensions/council/README.md) | `/council <topic>` and the `council` tool convene three pinned read-only advisors (`caspar`, `melchior`, `balthasar`) for a two-round, identity-blinded deliberation on difficult architectural and design questions. |
 | [Herder](extensions/herder/README.md) | `/herder <goal>` runs a coding task in disposable git worktrees, checks the result against the goal, and delivers it to your branch after you confirm. `/herder-improve` and `/herder-simplify` audit the repository and start a run for the findings you pick. |
@@ -68,7 +67,6 @@ This installs all the extensions above, their prompts and skills, and the theme.
 - **Subagents:** don't also install `@tintinweb/pi-subagents` from npm in the same Pi profile. Scripted workflows (`SubagentWorkflow`) are off by default; set `workflowsEnabled: true` to turn them on.
 - **Autoresearch:** remove `npm:pi-autoresearch` if you have it, because both register `/autoresearch`. Existing `.auto/` data is kept.
 - **FFF:** remove `npm:@ff-labs/pi-fff` if you have it, because both register the same tools, `--fff-*` flags, and `/fff-*` commands. Existing `<agentDir>/pi-fff.json` config and FFF databases remain compatible.
-- **Impeccable:** the design engine (0.1.23) is downloaded and verified the first time it is needed. Live browser work needs an app it can run. The extension never signs you in to an Impeccable account or turns on its uploads; see [privacy](extensions/impeccable/README.md#runtime-configuration-and-privacy). Writer keeps `/polish` for prose; use `/design-polish` for UI.
 - **Agent Browser:** needs the `agent-browser` CLI and its Chromium runtime on `PATH` (or `AGENT_BROWSER_BIN`): `npm install -g agent-browser && agent-browser install`.
 - **Agent Desktop:** bundles the native `agent-desktop` CLI (1.3.1) for macOS, Linux, and Windows—no separate global install needed (override with `AGENT_DESKTOP_BIN`). On macOS, grant Accessibility (and Screen Recording for screenshots) to your terminal or run `/agent-desktop permissions --guide`.
 - **Herder:** run state lives in the git directory (`<git-common-dir>/herder/` and `refs/herder/`), not in the working tree. Approving a goal and confirming delivery need an interactive session (TUI or RPC).
@@ -98,12 +96,10 @@ Development dependencies target Pi SDK 1.6.0. Runtime compatibility starts at Pi
 
 To work on an extension, install your local checkout as shown above and edit it in place. Pi loads the TypeScript directly; run `/reload` to pick up changes.
 
-Impeccable has opt-in checks that download its engine and Chromium: `npm run test:impeccable:engine`, `npm run test:impeccable:visual-foundations`, and `npm run test:impeccable:e2e`. They make no paid model calls. See [checks and evidence](extensions/impeccable/README.md#checks-and-evidence).
-
 The pika server (Rust) and its web UI have their own toolchains, and `npm test` doesn't cover them. See [Development](services/pika/README.md#development) in the pika server README.
 
 ## License
 
-[MIT](LICENSE) for this collection's own code. The vendored Impeccable skill keeps its [Apache-2.0 license](extensions/impeccable/LICENSE) and [notice](extensions/impeccable/NOTICE.md); its changes are listed in [LOCAL-PATCHES.md](extensions/impeccable/LOCAL-PATCHES.md).
+[MIT](LICENSE) for this collection's own code.
 
 The vendored UI SDK skill keeps its [Apache-2.0 license](extensions/ui-sdk/LICENSE) and [notice](extensions/ui-sdk/NOTICE.md).

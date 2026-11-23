@@ -19,7 +19,7 @@ npm run test:benchmark
 npm run typecheck
 ```
 
-Run the collection suite before handing off changes that cross extension boundaries. [AGENTS.md](../AGENTS.md#verification-commands) lists scoped checks; each [extension README](../README.md#extensions) explains its coverage. The default collection suite is offline. Impeccable's engine and browser checks are explicit opt-ins described in its [reference](../extensions/impeccable/README.md#checks-and-evidence).
+Run the collection suite before handing off changes that cross extension boundaries. [AGENTS.md](../AGENTS.md#verification-commands) lists scoped checks; each [extension README](../README.md#extensions) explains its coverage. The default collection suite is offline.
 
 Choose checks that exercise the behavior you changed. Loading a prompt and checking its expansion does not establish that a live model follows it; label those kinds of evidence separately. The [Code review guide](guides/code-review.md) explains cleanup, bug review, verification, and commit preparation.
 
@@ -50,7 +50,7 @@ Release builds embed `web/dist` in the pika binary. Debug builds and Rust tests 
 
 ## Keep documentation with code
 
-Update the owning extension's README when changing its commands, defaults, or behavior. Update these guides when the recommended workflow across extensions changes. The site publishes an explicit list of sources: the root README, the 31 top-level extension READMEs, the pika service README, and these six installation, configuration, development, and workflow guides. Other Markdown is not published automatically.
+Update the owning extension's README when changing its commands, defaults, or behavior. Update these guides when the recommended workflow across extensions changes. The site publishes an explicit list of sources: the root README, the 30 top-level extension READMEs, the pika service README, and these six installation, configuration, development, and workflow guides. Other Markdown is not published automatically.
 
 Use one H1 per page and repository-relative Markdown links. Those links work on GitHub; the docs build rewrites links between published pages for the site. Link to canonical reference pages instead of copying their complete command tables. To publish a new page, add it to the build’s source list and navigation.
 

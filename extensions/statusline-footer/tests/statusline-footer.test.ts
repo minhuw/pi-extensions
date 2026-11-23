@@ -246,10 +246,9 @@ describe("statusline footer visual language", () => {
 		expect(statusHue(theme, "custom")).toBe(statusHue(theme, "custom"));
 		// Explicit slots keep existing colors when a new status takes priority.
 		const palette = statusPalette(theme);
-		expect(statusHue(theme, "impeccable-live")).toBe(palette[5 % palette.length]);
 		expect(statusHue(theme, "language")).toBe(palette[6 % palette.length]);
 		expect(statusHue(theme, "spokesman")).toBe(palette[7 % palette.length]);
-		const slots = { autoresearch: 0, herder: 1, goal: 2, [PROCESS_STATUS_KEY]: 3, subagents: 4, "impeccable-live": 5, language: 6, spokesman: 7, swarm: 8, selfdrive: 10, representative: 11, "magpie-quota": 12 };
+		const slots = { autoresearch: 0, herder: 1, goal: 2, [PROCESS_STATUS_KEY]: 3, subagents: 4, language: 6, spokesman: 7, swarm: 8, selfdrive: 10, representative: 11, "magpie-quota": 12 };
 		for (const [key, slot] of Object.entries(slots)) {
 			expect(statusHue(theme, key)).toBe(palette[slot % palette.length]);
 		}
@@ -2522,7 +2521,7 @@ describe("statusline footer powerline style", () => {
 				model: claude, branch, extensionStatuses: [], theme: tagged,
 				keyedExtensionStatuses: {
 					autoresearch: "research 2/5", herder: "herder: T2 integrate · 3/5 tasks", goal: "↻ build · next 4m",
-					subagents: "subagents: on", "impeccable-live": "impeccable: editing", other: "SYNC",
+					subagents: "subagents: on", other: "SYNC",
 					language: "English", spokesman: "gpt-4o-mini", swarm: "🐝 swarm",
 					selfdrive: "🚗 selfdrive", representative: "📣 rep #dev", "relay-rooms": "#dev #dev-old #ops",
 				},
@@ -2580,7 +2579,7 @@ describe("statusline footer powerline style", () => {
 					expect(workspace).not.toContain("#ops");
 					expect(workspace.startsWith(" ╰ ")).toBe(true);
 					if (width === 400) {
-						for (const status of ["research 2/5", "herder: T2 integrate", "↻ build", "subagents: on", "impeccable: editing", "SYNC", "📣 rep #dev", "#dev-old #ops · 2 in · 1 out"]) expect(activity).toContain(status);
+						for (const status of ["research 2/5", "herder: T2 integrate", "↻ build", "subagents: on", "SYNC", "📣 rep #dev", "#dev-old #ops · 2 in · 1 out"]) expect(activity).toContain(status);
 						expect(activity.split(/(?<=\s)#dev(?=\s|$)/)).toHaveLength(2);
 					}
 				}

@@ -417,7 +417,6 @@ const STATUS_DESCRIPTORS: Record<string, StatusDescriptor> = {
 	goal: { placement: "activity", colorSlot: 2, icon: "\u{F0E6F}", compact: "workflow" },
 	[PROCESS_STATUS_KEY]: { placement: "activity", colorSlot: 3, icon: "\u{F018D}", compact: "process" },
 	subagents: { placement: "activity", colorSlot: 4, icon: "\u{F06A9}" },
-	"impeccable-live": { placement: "activity", colorSlot: 5, icon: "\u{F03D8}" },
 	language: { placement: "language", colorSlot: 6, icon: "\u{F05CA}" },
 	spokesman: { placement: "spokesman", colorSlot: 7, icon: "\u{F05CB}" },
 	swarm: { placement: "mode", colorSlot: 8 },

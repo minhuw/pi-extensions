@@ -30,7 +30,7 @@ const featuredDescriptions: Record<string, string> = {
 	"/recap": "Summarize session progress and next steps",
 };
 
-type CommandCategory = "featured" | "quality" | "delegation" | "performance" | "runtime" | "writing" | "design";
+type CommandCategory = "featured" | "quality" | "delegation" | "performance" | "runtime" | "writing";
 const commandCategories: { id: CommandCategory; label: string; match: (cmd: DocCommand) => boolean }[] = [
 	{ id: "featured", label: "Essential", match: (cmd) => featured.includes(cmd.command) },
 	{ id: "quality", label: "Quality & Git", match: (cmd) => ["commit", "quality"].includes(cmd.extension) },
@@ -38,7 +38,6 @@ const commandCategories: { id: CommandCategory; label: string; match: (cmd: DocC
 	{ id: "performance", label: "Performance", match: (cmd) => ["benchmark", "autoresearch"].includes(cmd.extension) },
 	{ id: "runtime", label: "Runtime & Pika", match: (cmd) => ["goal", "molt", "language", "recap", "pika", "orca-bridge", "statusline-footer", "magpie-provider"].includes(cmd.extension) },
 	{ id: "writing", label: "Writing", match: (cmd) => cmd.extension === "writer" },
-	{ id: "design", label: "Design", match: (cmd) => cmd.extension === "impeccable" },
 ];
 
 const guides = docsData.pages.filter((page) => page.section === "Guides");

@@ -17,7 +17,6 @@ import {
 	type CreateAgentSessionRuntimeFactory,
 	type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
-import { inspectCapabilities } from "../../impeccable/src/capabilities.ts";
 import agentBrowserExtension, {
 	AGENT_BROWSER_SHARED_KEY,
 	AGENT_BROWSER_STATUS_KEY,
@@ -231,7 +230,7 @@ describe("AC-1 — Skill discovery and frontmatter contracts", () => {
 	});
 });
 
-describe("AC-2 & AC-3 — Direct argv execution, session isolation, inline screenshots, and impeccable_capabilities", () => {
+describe("AC-2 & AC-3 — Direct argv execution, session isolation, and inline screenshots", () => {
 	it("derives deterministic Pi-scoped browser session IDs and parses argv flags and screenshot paths", () => {
 		expect(deriveBrowserSessionId()).toBe("pi-default");
 		expect(deriveBrowserSessionId({ sessionId: "abc-123" })).toBe("pi-abc-123");
@@ -494,7 +493,7 @@ describe("AC-2 & AC-3 — Direct argv execution, session isolation, inline scree
 	});
 });
 
-describe("AC-2, AC-3, AC-4 — Real Pi session integration, UI status, daemon cleanup, impeccable_capabilities, and /agent-browser", () => {
+describe("AC-2, AC-3, AC-4 — Real Pi session integration, UI status, daemon cleanup, and /agent-browser", () => {
 	function createRecordingUi() {
 		const notes: { message: string; type?: string }[] = [];
 		const statusHistory: { key: string; value: string | undefined }[] = [];
@@ -633,17 +632,12 @@ describe("AC-2, AC-3, AC-4 — Real Pi session integration, UI status, daemon cl
 		};
 	}
 
-	it("is recognized as a browser candidate by impeccable_capabilities, publishes UI status, returns inline screenshots, and closes daemons on close/switch/shutdown", async () => {
+	it("registers agent_browser, publishes UI status, returns inline screenshots, and closes daemons on close/switch/shutdown", async () => {
 		const h = await startPiSession();
 		try {
 			const piApi = h.getPiApi();
-			const capReport = inspectCapabilities(piApi, {
-				hasUI: true,
-				tools: piApi.getAllTools(),
-			} as any);
-			expect(capReport.browser.state).toBe("candidate");
-			expect(capReport.browser.candidates).toContainEqual(
-				expect.objectContaining({ name: "agent_browser", active: true }),
+			expect(piApi.getAllTools()).toContainEqual(
+				expect.objectContaining({ name: "agent_browser" }),
 			);
 
 			// Child-session hook is registered

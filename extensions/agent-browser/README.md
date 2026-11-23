@@ -64,10 +64,6 @@ When `agent_browser` runs a `screenshot` command (`argv: ["screenshot"]` or `arg
 - If an explicit file path is passed in `argv`, the extension keeps the file on disk and reads it from `cwd`.
 - In both cases, the tool returns an inline `{ type: "image", data, mimeType }` content block alongside the text output so multimodal models can inspect the rendered page immediately.
 
-### Impeccable integration
-
-`impeccable_capabilities` inspects registered tools and recognizes `agent_browser` as an active browser candidate (`report.browser.state === "candidate"`).
-
 ## Session isolation, UI status, and lifecycle cleanup
 
 - **Deterministic session IDs:** Unless `session` or `--session` / `-s` is explicitly provided, `AGENT_BROWSER_SESSION` defaults to `pi-<sessionId>` (derived from `ctx.sessionManager.getSessionId()`). Concurrent Pi sessions control separate browser daemons without colliding.
@@ -82,4 +78,4 @@ npm run test:agent-browser
 npm run typecheck
 ```
 
-The offline Vitest suite tests skill discovery via `DefaultResourceLoader`, direct `argv` execution against an executable fake `agent-browser` binary, session isolation, call settlement while a descendant holds stdout and stderr open, inline screenshot capture and temp-file cleanup, `impeccable_capabilities` detection, UI status publishing and daemon cleanup across session switches and shutdowns, child-session hook propagation, and `/agent-browser` commands.
+The offline Vitest suite tests skill discovery via `DefaultResourceLoader`, direct `argv` execution against an executable fake `agent-browser` binary, session isolation, call settlement while a descendant holds stdout and stderr open, inline screenshot capture and temp-file cleanup, UI status publishing and daemon cleanup across session switches and shutdowns, child-session hook propagation, and `/agent-browser` commands.

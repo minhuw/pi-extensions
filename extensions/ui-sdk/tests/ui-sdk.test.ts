@@ -1,15 +1,16 @@
-// The vendored UI SDK skill: byte-identical to upstream.json, loadable by Pi, and offered only through Impeccable as a design companion.
+// The vendored UI SDK skill: byte-identical to upstream.json and exposed as an explicit-only /skill:ui-sdk wrapper.
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DefaultResourceLoader, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
-import uiSdkExtension, { DESIGN_COMPANIONS, UI_SDK_COMPANION, type DesignCompanion } from "../index.ts";
 
 const extensionDir = fileURLToPath(new URL("..", import.meta.url));
 const repoRoot = join(extensionDir, "..", "..");
+const entryRoot = join(extensionDir, "entry");
+const entrySkillDir = join(entryRoot, "ui-sdk");
 const skillsRoot = join(extensionDir, "skills");
 const skillDir = join(skillsRoot, "ui-sdk");
 
@@ -61,39 +62,40 @@ describe("vendored files", () => {
 		for (const [path, hash] of Object.entries(upstream.files)) expect(sha256(join(skillDir, path)), path).toBe(hash);
 		for (const [path, hash] of Object.entries(upstream.licenseFile)) expect(sha256(join(extensionDir, path)), path).toBe(hash);
 	});
-
 });
 
-describe("design companion", () => {
+describe("collection manifest", () => {
 	const manifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { pi: { skills: string[]; extensions: string[] } };
 
-	it("stays out of pi.skills, so ui-sdk never reaches <available_skills>", () => {
-		expect(manifest.pi.skills.filter((path) => path.includes("ui-sdk"))).toEqual([]);
-		expect(manifest.pi.extensions).toContain("./extensions/ui-sdk/index.ts");
+	it("publishes the wrapper entry in pi.skills without loading any ui-sdk extension or raw upstream skills", () => {
+		expect(manifest.pi.skills).toContain("./extensions/ui-sdk/entry");
+		expect(manifest.pi.skills).not.toContain("./extensions/ui-sdk/skills");
+		expect(manifest.pi.extensions).not.toContain("./extensions/ui-sdk/index.ts");
 		expect(manifest.pi.extensions.at(-1)).toBe("./extensions/pika/index.ts");
-	});
-
-	it("publishes one companion entry with the vendored SKILL.md, idempotently across reloads", () => {
-		const registry = globalThis as { [DESIGN_COMPANIONS]?: Map<string, DesignCompanion> };
-		const previous = registry[DESIGN_COMPANIONS];
-		delete registry[DESIGN_COMPANIONS];
-		try {
-			uiSdkExtension({} as ExtensionAPI);
-			uiSdkExtension({} as ExtensionAPI);
-			const companions = [...registry[DESIGN_COMPANIONS]!.values()];
-			expect(companions).toEqual([UI_SDK_COMPANION]);
-			expect(UI_SDK_COMPANION.skillPath).toBe(join(skillDir, "SKILL.md"));
-			expect(existsSync(UI_SDK_COMPANION.skillPath)).toBe(true);
-			expect(UI_SDK_COMPANION.installedSkillPath).toBe("node_modules/@ui-sdk/core/skills/ui-sdk/SKILL.md");
-		} finally {
-			if (previous) registry[DESIGN_COMPANIONS] = previous;
-			else delete registry[DESIGN_COMPANIONS];
-		}
 	});
 });
 
 describe("Pi skill loading", () => {
-	it("loads ui-sdk with a description, model-invocable, without diagnostics", async () => {
+	it("loads the explicit-only /skill:ui-sdk wrapper from entry/ and resolves its vendored fallback", async () => {
+		const root = mkdtempSync(join(tmpdir(), "ui-sdk-entry-skill-"));
+		temps.push(root);
+		const { skills, diagnostics } = await loadSkills(join(root, "project"), join(root, "agent"), { additionalSkillPaths: [entryRoot] });
+		expect(diagnostics).toEqual([]);
+		const matches = skills.filter((skill) => skill.name === "ui-sdk");
+		expect(matches).toHaveLength(1);
+		const [skill] = matches;
+		expect(skill!.filePath).toBe(join(entrySkillDir, "SKILL.md"));
+		expect(skill!.description.trim().length).toBeGreaterThan(0);
+		expect(skill!.disableModelInvocation).toBe(true);
+
+		const wrapperBody = readFileSync(skill!.filePath, "utf8");
+		expect(wrapperBody).toContain("../../skills/ui-sdk/SKILL.md");
+		const resolvedFallback = resolve(dirname(skill!.filePath), "../../skills/ui-sdk/SKILL.md");
+		expect(resolvedFallback).toBe(join(skillDir, "SKILL.md"));
+		expect(existsSync(resolvedFallback)).toBe(true);
+	});
+
+	it("loads the vendored ui-sdk SKILL.md directly with a description, model-invocable, without diagnostics", async () => {
 		const root = mkdtempSync(join(tmpdir(), "ui-sdk-skill-"));
 		temps.push(root);
 		const { skills, diagnostics } = await loadSkills(join(root, "project"), join(root, "agent"), { additionalSkillPaths: [skillsRoot] });
