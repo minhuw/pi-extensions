@@ -1562,7 +1562,7 @@ export function extractAgentBrowserWriteTargets(argv: readonly string[], cwd: st
 			rawTargets.push(positionals[0]!);
 		}
 	} else if (subcommand === "record") {
-		if (positionals[0] === "start" && positionals[1]) {
+		if ((positionals[0] === "start" || positionals[0] === "restart") && positionals[1]) {
 			rawTargets.push(positionals[1]);
 		}
 	}

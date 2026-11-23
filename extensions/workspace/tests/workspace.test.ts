@@ -1673,6 +1673,97 @@ describe("AC-10: wrapper option flags, process_start, and agent_browser external
 		}
 	});
 
+	it("extracts and guards agent_browser record restart identically to record start", async () => {
+		const canonicalProject = resolveCanonicalPath(projectCwd);
+		const canonicalOutside = resolveCanonicalPath(outsideDir);
+
+		// Pure helper checks: record start and record restart (including intervening flags)
+		expect(extractAgentBrowserWriteTargets(["record", "start", `${outsideDir}/start.webm`], projectCwd)).toEqual([
+			path.join(canonicalOutside, "start.webm"),
+		]);
+		expect(extractAgentBrowserWriteTargets(["record", "restart", `${outsideDir}/restart.webm`], projectCwd)).toEqual([
+			path.join(canonicalOutside, "restart.webm"),
+		]);
+		expect(
+			extractAgentBrowserWriteTargets(
+				["--session", "s1", "record", "restart", "--headed", `${outsideDir}/flagged.webm`],
+				projectCwd,
+			),
+		).toEqual([path.join(canonicalOutside, "flagged.webm")]);
+		expect(
+			extractAgentBrowserWriteTargets(
+				["record", "--session=s1", "restart", "--json", `${outsideDir}/mid-flags.webm`],
+				projectCwd,
+			),
+		).toEqual([path.join(canonicalOutside, "mid-flags.webm")]);
+		expect(
+			extractAgentBrowserWriteTargets(["record", "restart", "--", `${outsideDir}/after-dd.webm`], projectCwd),
+		).toEqual([path.join(canonicalOutside, "after-dd.webm")]);
+		expect(extractAgentBrowserWriteTargets(["record", "restart", "artifacts/local.webm"], projectCwd)).toEqual([
+			path.join(canonicalProject, "artifacts/local.webm"),
+		]);
+		expect(extractAgentBrowserWriteTargets(["record", "restart"], projectCwd)).toEqual([]);
+		expect(extractAgentBrowserWriteTargets(["record", "stop"], projectCwd)).toEqual([]);
+
+		// tool_call guard: external record start / restart targets are blocked in headless and prompted in UI
+		const toolCall = loadToolCallHandler();
+		const externalCases: [input: { argv: string[]; cwd?: string }, expectedPath: string][] = [
+			[{ argv: ["record", "start", `${outsideDir}/start.webm`] }, path.join(canonicalOutside, "start.webm")],
+			[{ argv: ["record", "restart", `${outsideDir}/restart.webm`] }, path.join(canonicalOutside, "restart.webm")],
+			[
+				{ argv: ["--session", "s1", "record", "restart", "--headed", `${outsideDir}/flagged.webm`] },
+				path.join(canonicalOutside, "flagged.webm"),
+			],
+			[
+				{ argv: ["record", "--session", "s1", "restart", "--", `${outsideDir}/after-dd.webm`] },
+				path.join(canonicalOutside, "after-dd.webm"),
+			],
+		];
+
+		for (const [input, expectedPath] of externalCases) {
+			const headlessPrompts: string[] = [];
+			const blocked = await toolCall(
+				{ toolName: "agent_browser", input },
+				makeCtx({ hasUI: false, prompts: headlessPrompts }),
+			);
+			expect(blocked, JSON.stringify(input)).toMatchObject({ block: true });
+			expect(blocked?.reason, JSON.stringify(input)).toContain(expectedPath);
+			expect(headlessPrompts).toEqual([]);
+
+			const uiPrompts: string[] = [];
+			const denied = await toolCall(
+				{ toolName: "agent_browser", input },
+				makeCtx({ hasUI: true, prompts: uiPrompts, choice: "Deny" }),
+			);
+			expect(denied, JSON.stringify(input)).toMatchObject({ block: true });
+			expect(uiPrompts).toEqual([`Allow write outside workspace (${expectedPath})?`]);
+
+			const allowPrompts: string[] = [];
+			const allowed = await toolCall(
+				{ toolName: "agent_browser", input },
+				makeCtx({ hasUI: true, prompts: allowPrompts, choice: "Allow once" }),
+			);
+			expect(allowed, JSON.stringify(input)).toBeUndefined();
+			expect(allowPrompts).toEqual([`Allow write outside workspace (${expectedPath})?`]);
+		}
+
+		// Workspace-local and /tmp record restart targets (and record stop) stay allowed without prompting
+		for (const input of [
+			{ argv: ["record", "restart", "artifacts/local.webm"] },
+			{ argv: ["--session", "s1", "record", "restart", "--headed", "artifacts/local.webm"] },
+			{ argv: ["record", "restart", "/tmp/demo.webm"] },
+			{ argv: ["record", "stop"] },
+		]) {
+			const prompts: string[] = [];
+			const res = await toolCall(
+				{ toolName: "agent_browser", input },
+				makeCtx({ hasUI: true, prompts, choice: "Deny" }),
+			);
+			expect(res, JSON.stringify(input)).toBeUndefined();
+			expect(prompts, JSON.stringify(input)).toEqual([]);
+		}
+	});
+
 	it("extracts and guards agent_browser --profile and --download-path flags (separate and = forms)", async () => {
 		const canonicalProject = resolveCanonicalPath(projectCwd);
 		const canonicalOutside = resolveCanonicalPath(outsideDir);
