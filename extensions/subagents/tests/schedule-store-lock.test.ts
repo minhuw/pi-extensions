@@ -132,7 +132,7 @@ describe("ScheduleStore lock hardening", () => {
     const store = new ScheduleStore(file);
     store.add(makeJob({ id: "after-dead" }));
     expect(store.list().map((j) => j.id)).toEqual(["after-dead"]);
-    expect(readdirSync(tmp)).toEqual(["s.json"]);
+    expect(readdirSync(tmp).sort()).toEqual([".gitignore", "s.json"]);
 
     // 2. Aged lock held by a live foreign process (past staleMs threshold).
     const holder = spawn("sleep", ["30"]);
@@ -150,7 +150,7 @@ describe("ScheduleStore lock hardening", () => {
       } finally {
         releaseLock(lockPath, token);
       }
-      expect(readdirSync(tmp)).toEqual(["s.json"]);
+      expect(readdirSync(tmp).sort()).toEqual([".gitignore", "s.json"]);
     } finally {
       holder.kill();
     }
@@ -209,7 +209,7 @@ describe("ScheduleStore lock hardening", () => {
     expect(ids).toEqual(expectedIds.sort());
 
     // No orphan lock, stale-claim, or temp files remain.
-    expect(readdirSync(tmp)).toEqual(["contended.json"]);
+    expect(readdirSync(tmp).sort()).toEqual([".gitignore", "contended.json"]);
   });
 
   it("preserves all jobs and updates across concurrent cross-process ScheduleStore mutations without orphan lock files", async () => {
@@ -260,6 +260,6 @@ describe("ScheduleStore lock hardening", () => {
       });
     }
 
-    expect(readdirSync(tmp)).toEqual(["concurrent.json"]);
+    expect(readdirSync(tmp).sort()).toEqual([".gitignore", "concurrent.json"]);
   });
 });
