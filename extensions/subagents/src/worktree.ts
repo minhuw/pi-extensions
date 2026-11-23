@@ -153,7 +153,7 @@ export async function cleanupWorktree(
       // Truncate description for commit message (no shell sanitization needed — pi.exec uses argv)
       const safeDesc = agentDescription.slice(0, 200);
       const commitMsg = `pi-agent: ${safeDesc}`;
-      await git(pi, worktree.path, ["commit", "--no-verify", "-m", commitMsg], 10000);
+      await git(pi, worktree.path, ["commit", "--no-verify", "--no-gpg-sign", "-m", commitMsg], 10000);
     } else {
       const currentSha = await git(pi, worktree.path, ["rev-parse", "HEAD"], 5000);
 

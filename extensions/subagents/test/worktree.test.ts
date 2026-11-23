@@ -258,6 +258,30 @@ describe("worktree", () => {
       try { execFileSync("git", ["branch", "-D", result.branch!], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
     });
 
+    it("commits changes even when commit.gpgsign is enabled with a failing gpg.program (--no-gpg-sign)", async () => {
+      execFileSync("git", ["config", "commit.gpgsign", "true"], { cwd: repoDir, stdio: "pipe" });
+      execFileSync("git", ["config", "gpg.format", "openpgp"], { cwd: repoDir, stdio: "pipe" });
+      execFileSync("git", ["config", "gpg.program", "false"], { cwd: repoDir, stdio: "pipe" });
+
+      const wt = (await createWorktree(pi, repoDir, "gpg-1"))!;
+      expect(wt).toBeDefined();
+      writeFileSync(join(wt.path, "gpg-file.txt"), "agent wrote this");
+
+      const result = await cleanupWorktree(pi, repoDir, wt, "gpg should not block");
+      expect(result.error).toBeUndefined();
+      expect(result.hasChanges).toBe(true);
+      expect(result.branch).toBe("pi-agent-gpg-1");
+      expect(existsSync(wt.path)).toBe(false);
+
+      const files = execFileSync("git", ["ls-tree", "--name-only", result.branch!], {
+        cwd: repoDir, stdio: "pipe",
+      }).toString();
+      expect(files).toContain("gpg-file.txt");
+
+      // Cleanup branch
+      try { execFileSync("git", ["branch", "-D", result.branch!], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
+    });
+
     it("creates branch when worktree is clean but HEAD moved", async () => {
       const wt = (await createWorktree(pi, repoDir, "committed-1"))!;
       expect(wt).toBeDefined();
