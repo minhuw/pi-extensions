@@ -10,11 +10,9 @@ import type { Daemon, Peer } from "./daemon.ts";
 import { asNodeError } from "./errors.ts";
 import { VERSION } from "./paths.ts";
 import {
-    encodeLine, LineDecoder, LineTooLong, parseBridgeMessage, parseJson, PROTOCOL_VERSION,
+    encodeLine, LineDecoder, LineTooLong, parseBridgeMessage, parseJson, PROTOCOL_VERSION, timing,
     type BridgeMessage, type DaemonToBridge, type NodeMessage,
 } from "./protocol.ts";
-
-const HELLO_TIMEOUT_MS = 10_000;
 
 class SocketPeer implements Peer {
     readonly name: string;
@@ -37,7 +35,7 @@ export function accept(daemon: Daemon, socket: Socket, log: (line: string) => vo
     const decoder = new LineDecoder();
     const name = `socket#${++connections}`;
     let role: { kind: "client"; peer: SocketPeer } | { kind: "bridge"; paneId: string; token: object } | undefined;
-    const helloTimer = setTimeout(() => socket.destroy(), HELLO_TIMEOUT_MS);
+    const helloTimer = setTimeout(() => socket.destroy(), timing.helloTimeoutMs);
     const write = (message: DaemonToBridge) => { if (!socket.destroyed) socket.write(encodeLine(message)); };
 
     const onHello = (message: Extract<BridgeMessage, { type: "hello" }>): void => {

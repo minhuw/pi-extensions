@@ -6,8 +6,8 @@
 import { randomBytes } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { hostname } from "node:os";
-import { basename, dirname, join, sep } from "node:path";
-import { Checkouts, place, type CheckoutList, type Placement } from "./checkouts.ts";
+import { basename, dirname, join } from "node:path";
+import { Checkouts, inside, place, type CheckoutList, type Placement } from "./checkouts.ts";
 import { asNodeError, NodeError } from "./errors.ts";
 import { Files } from "./files.ts";
 import { Pane } from "./pane.ts";
@@ -649,13 +649,13 @@ export class Daemon {
             try { resolved = join(realpathSync(dirname(path)), basename(path)); }
             catch { throw new NodeError("not_found", `no directory ${dirname(path)}`); }
         }
-        const inside = roots(this.config()).some(root => {
+        const contained = roots(this.config()).some(root => {
             let real: string;
             try { real = realpathSync(root); }
             catch { return false; }
-            return resolved === real || resolved.startsWith(real.endsWith(sep) ? real : real + sep);
+            return inside(resolved, real);
         });
-        if (!inside) throw new NodeError("outside_roots", `${path} is outside the configured roots`);
+        if (!contained) throw new NodeError("outside_roots", `${path} is outside the configured roots`);
         return resolved;
     }
 

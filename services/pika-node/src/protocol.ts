@@ -599,7 +599,8 @@ export const TERMINAL_LABEL = 120;
 export const CHECKOUT_NAME = 120;
 const CHECKOUT_ID = /^[0-9a-f]{32}$/;
 const COMMIT = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
-const checkoutId: Check = value => typeof value === "string" && CHECKOUT_ID.test(value);
+export const isCheckoutId: Check = value => typeof value === "string" && CHECKOUT_ID.test(value);
+export const isCheckoutName: Check = label(CHECKOUT_NAME);
 /** Text from the node's disk (folder and branch names), shown sanitized: nonempty, at most `max` UTF-16 units. */
 const text = (max: number): Check => value => typeof value === "string" && value.length > 0 && value.length <= max;
 /** A shell command: nonblank, may span lines, no control characters but newline and tab. */
@@ -616,7 +617,7 @@ const worktree = object({
 const repositoryUrl: Check = value => typeof value === "string" && /^https?:\/\/[^/\s]+\/\S/.test(value) && str(2_048)(value);
 /** Validates a `Checkout` (results are checked only for being objects; clients use this on checkout results). */
 export const isCheckout: Check = object({
-    id: checkoutId, kind: literal("git", "folder"), path: isAbsolutePath, "?commonDir": isAbsolutePath, "?repository": repositoryUrl,
+    id: isCheckoutId, kind: literal("git", "folder"), path: isAbsolutePath, "?commonDir": isAbsolutePath, "?repository": repositoryUrl,
     project: text(1_024), name: text(1_024), "?named": literal(true), source: literal("configured", "discovered", "terminal"),
     settings: isCheckoutSettings, worktrees: arrayOf(worktree, LIMITS.maxWorktrees), "?truncated": literal(true),
 }, checkout => checkout.kind === "git" ? checkout.commonDir !== undefined : checkout.commonDir === undefined && checkout.repository === undefined && (checkout.worktrees as unknown[]).length === 0);
@@ -647,11 +648,11 @@ export const parseClientMessage = parser<ClientMessage>({
     "term.restart": { id: requestId, terminalId },
     "checkouts.list": { id: requestId },
     "checkout.add": { id: requestId, path: isAbsolutePath },
-    "checkout.hide": { id: requestId, checkoutId },
-    "checkout.unhide": { id: requestId, checkoutId },
-    "checkout.update": { id: requestId, checkoutId, "?name": nullable(label(CHECKOUT_NAME)), "?settings": isCheckoutSettings },
-    "worktree.create": { id: requestId, checkoutId, name: label(255), "?base": label(255), "?cols": cols, "?rows": rows },
-    "worktree.remove": { id: requestId, checkoutId, path: isAbsolutePath, "?deleteBranch": bool, "?force": bool },
+    "checkout.hide": { id: requestId, checkoutId: isCheckoutId },
+    "checkout.unhide": { id: requestId, checkoutId: isCheckoutId },
+    "checkout.update": { id: requestId, checkoutId: isCheckoutId, "?name": nullable(isCheckoutName), "?settings": isCheckoutSettings },
+    "worktree.create": { id: requestId, checkoutId: isCheckoutId, name: label(255), "?base": label(255), "?cols": cols, "?rows": rows },
+    "worktree.remove": { id: requestId, checkoutId: isCheckoutId, path: isAbsolutePath, "?deleteBranch": bool, "?force": bool },
     "fs.readDir": { id: requestId, path: isAbsolutePath },
     "fs.read": { id: requestId, path: isAbsolutePath },
     "fs.write": { id: requestId, path: isAbsolutePath, encoding: literal("utf8", "base64"), data: value => typeof value === "string", expected, "?mode": int(0, 0o7777) },
@@ -673,7 +674,7 @@ const terminalInfo = object({
     "?exited": object({ code: nullable(int(-(2 ** 31), 2 ** 31)), signal: nullable(label(32)) }),
     "?status": paneView,
     "?label": label(TERMINAL_LABEL),
-    "?checkoutId": checkoutId,
+    "?checkoutId": isCheckoutId,
     "?worktreePath": isAbsolutePath,
     "?role": label(32),
 });
@@ -696,7 +697,7 @@ export const parseNodeMessage = parser<NodeMessage>({
     "term.title": { terminalId, title: str(4 * KiB) },
     "term.renamed": { terminalId, label: nullable(label(TERMINAL_LABEL)) },
     "checkouts.changed": { checkouts: arrayOf(isCheckout, LIMITS.maxCheckouts), truncated: bool },
-    "term.placed": { terminalId, checkoutId: nullable(checkoutId), worktreePath: nullable(isAbsolutePath) },
+    "term.placed": { terminalId, checkoutId: nullable(isCheckoutId), worktreePath: nullable(isAbsolutePath) },
     "term.exit": { terminalId, code: nullable(int(-(2 ** 31), 2 ** 31)), signal: nullable(label(32)) },
     "fs.changed": { watch: id, path: isAbsolutePath, kind: literal("change", "rename", "gone") },
     "pane.status": { terminalId, status: nullable(paneView) },

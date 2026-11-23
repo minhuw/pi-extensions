@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { exportIdentity, generateIdentity, importIdentity, type Identity, type StoredIdentity } from "./crypto.ts";
 import { writeAtomic, type Paths } from "./paths.ts";
 import {
-    CHECKOUT_NAME, isAbsolutePath, isCheckoutSettings, LIMITS, matchFingerprint, timing,
+    isAbsolutePath, isCheckoutId, isCheckoutName, isCheckoutSettings, LIMITS, matchFingerprint, timing,
     type CheckoutSettings, type ClientKey, type ClientsFile, type PendingClient,
 } from "./protocol.ts";
 
@@ -27,7 +27,6 @@ export interface Config {
 }
 
 export const CREDENTIAL = /^pkn_[A-Za-z0-9_-]{43}$/;
-const CHECKOUT_ID = /^[0-9a-f]{32}$/;
 
 function readJson(path: string): unknown {
     const text = readFileSync(path, "utf8");
@@ -57,18 +56,18 @@ export function loadConfig(p: Paths): Config {
     }
     if (raw.hiddenCheckouts !== undefined) {
         const list = raw.hiddenCheckouts;
-        if (!Array.isArray(list) || !list.every((item): item is string => typeof item === "string" && CHECKOUT_ID.test(item))) throw new Error(`${p.config}: hiddenCheckouts must be a list of checkout ids`);
+        if (!Array.isArray(list) || !list.every((item): item is string => isCheckoutId(item))) throw new Error(`${p.config}: hiddenCheckouts must be a list of checkout ids`);
         config.hiddenCheckouts = list;
     }
     const byId = <T>(key: "checkoutNames" | "checkoutSettings", valid: (value: unknown) => boolean, what: string): Record<string, T> | undefined => {
         const map = raw[key];
         if (map === undefined) return undefined;
-        if (!map || typeof map !== "object" || Array.isArray(map) || !Object.entries(map).every(([id, value]) => CHECKOUT_ID.test(id) && valid(value))) {
+        if (!map || typeof map !== "object" || Array.isArray(map) || !Object.entries(map).every(([id, value]) => isCheckoutId(id) && valid(value))) {
             throw new Error(`${p.config}: ${key} must map checkout ids to ${what}`);
         }
         return { ...(map as Record<string, T>) };
     };
-    const names = byId<string>("checkoutNames", name => typeof name === "string" && name.trim().length > 0 && name.length <= CHECKOUT_NAME && !/[\x00-\x1f\x7f-\x9f]/.test(name), "names");
+    const names = byId<string>("checkoutNames", isCheckoutName, "names");
     if (names) config.checkoutNames = names;
     const settings = byId<CheckoutSettings>("checkoutSettings", isCheckoutSettings, "settings");
     if (settings) config.checkoutSettings = settings;
