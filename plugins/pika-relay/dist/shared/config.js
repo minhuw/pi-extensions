@@ -24,18 +24,27 @@ export function loadConfig(agentDir, env = process.env) {
     }
     const url = (env.PIKA_URL || (typeof raw.url === "string" ? raw.url : "")).trim();
     const token = (env.PIKA_TOKEN || (typeof raw.token === "string" ? raw.token : "")).trim();
-    if (env.PIKA_DISABLED === "1")
-        return { enabled: false, reason: "PIKA_DISABLED=1 is set", file, url: url || undefined };
-    if (raw.enabled === false)
-        return { enabled: false, reason: `"enabled" is false in ${file}`, file, url: url || undefined };
-    if (!url || !token)
-        return { enabled: false, reason: `no server url and token configured (${file}, PIKA_URL, PIKA_TOKEN)`, file, url: url || undefined, unconfigured: true };
-    // As `/pika login` checks it; the reason never repeats the URL, whose credentials would show wherever it is shown.
-    try {
-        normalizeUrl(url);
+    // Validate before returning on any disabled path so malformed URLs (credentials, query tokens, mistyped secrets) are never echoed.
+    let validUrl;
+    let urlError;
+    if (url) {
+        try {
+            validUrl = normalizeUrl(url);
+        }
+        catch (error) {
+            urlError = error.message;
+        }
     }
-    catch (error) {
-        return { enabled: false, reason: `invalid server url in ${env.PIKA_URL ? "PIKA_URL" : file}: ${error.message}`, file };
+    const safeUrl = validUrl ? { url: validUrl } : {};
+    if (env.PIKA_DISABLED === "1")
+        return { enabled: false, reason: "PIKA_DISABLED=1 is set", file, ...safeUrl };
+    if (raw.enabled === false)
+        return { enabled: false, reason: `"enabled" is false in ${file}`, file, ...safeUrl };
+    if (!url || !token)
+        return { enabled: false, reason: `no server url and token configured (${file}, PIKA_URL, PIKA_TOKEN)`, file, ...safeUrl, unconfigured: true };
+    // As `/pika login` checks it; the reason never repeats the URL, whose credentials would show wherever it is shown.
+    if (urlError !== undefined) {
+        return { enabled: false, reason: `invalid server url in ${env.PIKA_URL ? "PIKA_URL" : file}: ${urlError}`, file };
     }
     const exclude = Array.isArray(raw.exclude) ? raw.exclude.filter((value) => typeof value === "string" && value.length > 0) : [];
     return { enabled: true, config: { url: url.replace(/\/+$/, ""), token, exclude }, file };

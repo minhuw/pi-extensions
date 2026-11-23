@@ -44,6 +44,84 @@ it("rejects a server url with credentials, a query, or a fragment, without repea
 	} finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+it("omits unvalidated urls on disabled results and keeps only validated normalized urls", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pi-pika-config-"));
+	const file = join(dir, "pika.json");
+	const invalidUrls = [
+		"https://testuser:dummy-pass-1@pika.example.com/pika",
+		"https://pika.example.com/pika?token=dummy-query-1",
+		"https://pika.example.com/pika#dummy-frag-1",
+		"ftp://pika.example.com/pika",
+		"dummy-mistyped-secret-1",
+	];
+	try {
+		for (const badUrl of invalidUrls) {
+			// PIKA_DISABLED=1 with invalid url in file
+			await writeFile(file, JSON.stringify({ url: badUrl, token: "t" }));
+			const disabledFile = loadConfig(dir, { PIKA_DISABLED: "1" });
+			expect(disabledFile).toEqual({ enabled: false, reason: "PIKA_DISABLED=1 is set", file });
+			expect("url" in disabledFile).toBe(false);
+
+			// PIKA_DISABLED=1 with invalid url in env
+			const disabledEnv = loadConfig(dir, { PIKA_DISABLED: "1", PIKA_URL: badUrl });
+			expect(disabledEnv).toEqual({ enabled: false, reason: "PIKA_DISABLED=1 is set", file });
+			expect("url" in disabledEnv).toBe(false);
+
+			// enabled: false with invalid url in file
+			await writeFile(file, JSON.stringify({ url: badUrl, token: "t", enabled: false }));
+			const enabledFalseFile = loadConfig(dir, {});
+			expect(enabledFalseFile).toEqual({ enabled: false, reason: `"enabled" is false in ${file}`, file });
+			expect("url" in enabledFalseFile).toBe(false);
+
+			// enabled: false with invalid url in env
+			const enabledFalseEnv = loadConfig(dir, { PIKA_URL: badUrl });
+			expect(enabledFalseEnv).toEqual({ enabled: false, reason: `"enabled" is false in ${file}`, file });
+			expect("url" in enabledFalseEnv).toBe(false);
+
+			// unconfigured (url without token) in file
+			await writeFile(file, JSON.stringify({ url: badUrl }));
+			const unconfiguredFile = loadConfig(dir, {});
+			expect(unconfiguredFile).toEqual({
+				enabled: false,
+				reason: `no server url and token configured (${file}, PIKA_URL, PIKA_TOKEN)`,
+				file,
+				unconfigured: true,
+			});
+			expect("url" in unconfiguredFile).toBe(false);
+
+			// unconfigured (PIKA_URL without PIKA_TOKEN) in env
+			await rm(file);
+			const unconfiguredEnv = loadConfig(dir, { PIKA_URL: badUrl });
+			expect(unconfiguredEnv).toEqual({
+				enabled: false,
+				reason: `no server url and token configured (${file}, PIKA_URL, PIKA_TOKEN)`,
+				file,
+				unconfigured: true,
+			});
+			expect("url" in unconfiguredEnv).toBe(false);
+
+			for (const result of [disabledFile, disabledEnv, enabledFalseFile, enabledFalseEnv, unconfiguredFile, unconfiguredEnv]) {
+				const serialized = JSON.stringify(result);
+				expect(serialized).not.toMatch(/dummy-pass-1|dummy-query-1|dummy-frag-1|dummy-mistyped-secret-1|testuser/);
+				expect(statusText(result, false, undefined, undefined)).not.toMatch(/dummy-pass-1|dummy-query-1|dummy-frag-1|dummy-mistyped-secret-1|testuser/);
+			}
+		}
+
+		// Valid URLs on disabled configs are still preserved in normalized form.
+		await writeFile(file, JSON.stringify({ url: "https://pika.example.com/pika///", enabled: false }));
+		expect(loadConfig(dir, {})).toEqual({ enabled: false, reason: `"enabled" is false in ${file}`, file, url: "https://pika.example.com/pika" });
+		expect(loadConfig(dir, { PIKA_DISABLED: "1" })).toEqual({ enabled: false, reason: "PIKA_DISABLED=1 is set", file, url: "https://pika.example.com/pika" });
+		await writeFile(file, JSON.stringify({ url: "https://pika.example.com/pika/" }));
+		expect(loadConfig(dir, {})).toEqual({
+			enabled: false,
+			reason: `no server url and token configured (${file}, PIKA_URL, PIKA_TOKEN)`,
+			file,
+			url: "https://pika.example.com/pika",
+			unconfigured: true,
+		});
+	} finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 it("returns a fixed parse-failure reason for malformed pika.json without leaking parser excerpts or secrets", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "pi-pika-config-"));
 	const file = join(dir, "pika.json");

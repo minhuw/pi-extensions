@@ -277,13 +277,17 @@ async function pair(ctx: ExtensionCommandContext, url: string, control: LoginCon
 	return waiting;
 }
 
-/** Asks for the server URL until it is valid; blank keeps `current`, and undefined means cancelled. */
+/** Asks for the server URL until it is valid; blank keeps `current` when valid, and undefined means cancelled. */
 async function promptUrl(ctx: ExtensionCommandContext, current: string | undefined, signal: AbortSignal): Promise<string | undefined> {
-	const title = current ? `${URL_TITLE} (blank keeps ${current})` : URL_TITLE;
+	let kept: string | undefined;
+	if (current?.trim()) {
+		try { kept = normalizeUrl(current); } catch { /* never echo an invalid URL */ }
+	}
+	const title = kept ? `${URL_TITLE} (blank keeps ${kept})` : URL_TITLE;
 	for (;;) {
-		const answer = await ctx.ui.input(title, current ?? URL_PLACEHOLDER, { signal });
+		const answer = await ctx.ui.input(title, kept ?? URL_PLACEHOLDER, { signal });
 		if (answer === undefined || signal.aborted) return undefined;
-		const entered = answer.trim() || current;
+		const entered = answer.trim() || kept;
 		let problem: string;
 		if (!entered) problem = "no server URL entered, and none is saved to keep";
 		else if (!/^https?:\/\//i.test(entered)) problem = "the server URL must start with http:// or https://";

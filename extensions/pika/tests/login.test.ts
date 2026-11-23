@@ -215,6 +215,53 @@ describe("/pika login", () => {
 		expect(await fileText()).toBeUndefined();
 	}, 30_000);
 
+	it("does not echo malformed stored or env URLs with embedded credentials or query tokens during /pika login", async () => {
+		const cases: { name: string; fileConfig?: Record<string, unknown>; env?: Record<string, string>; secrets: string[] }[] = [
+			{
+				name: "enabled: false with embedded credentials in pika.json",
+				fileConfig: { url: "https://testuser:dummy-pass-a@pika.example.com/pika", token: "t", enabled: false },
+				secrets: ["testuser", "dummy-pass-a"],
+			},
+			{
+				name: "unconfigured with query token in pika.json",
+				fileConfig: { url: "https://pika.example.com/pika?token=dummy-query-b" },
+				secrets: ["dummy-query-b"],
+			},
+			{
+				name: "PIKA_DISABLED=1 with embedded credentials in PIKA_URL",
+				env: { PIKA_DISABLED: "1", PIKA_URL: "https://envuser:dummy-pass-c@pika.example.com/pika" },
+				secrets: ["envuser", "dummy-pass-c"],
+			},
+			{
+				name: "unconfigured with query token in PIKA_URL",
+				env: { PIKA_URL: "https://pika.example.com/pika?token=dummy-query-d" },
+				secrets: ["dummy-query-d"],
+			},
+		];
+		for (const tc of cases) {
+			for (const name of ["PIKA_URL", "PIKA_TOKEN", "PIKA_DISABLED"]) delete process.env[name];
+			await workspace.configure(tc.fileConfig);
+			if (tc.env) Object.assign(process.env, tc.env);
+			const ui = new ScriptedUI();
+			// Cancel at the URL prompt; verify neither prompt title/placeholder nor status echoes the invalid URL.
+			ui.inputs = [undefined];
+			await command(ui, "/pika login");
+			expect(ui.prompts).toEqual([{ title: URL_TITLE, placeholder: "https://pika.example.com" }]);
+			expect(ui.last).toEqual({ type: "info", message: "pika login cancelled. Nothing changed." });
+			await expectNoSecret(ui, tc.secrets);
+		}
+
+		// Defense in depth: calling login() directly with an invalid `current` URL also never echoes it.
+		for (const name of ["PIKA_URL", "PIKA_TOKEN", "PIKA_DISABLED"]) delete process.env[name];
+		await workspace.configure(undefined);
+		const directUi = new ScriptedUI();
+		directUi.inputs = [undefined];
+		const ctx = { hasUI: true, mode: "rpc", ui: directUi.context() } as unknown as ExtensionCommandContext;
+		expect(await login(ctx, configFile(), undefined, "https://directuser:dummy-pass-e@pika.example.com/pika?token=dummy-query-e")).toBeUndefined();
+		expect(directUi.prompts).toEqual([{ title: URL_TITLE, placeholder: "https://pika.example.com" }]);
+		await expectNoSecret(directUi, ["directuser", "dummy-pass-e", "dummy-query-e"]);
+	}, 30_000);
+
 	it("masks the token in the TUI and saves what was typed and pasted", async () => {
 		const ui = new ScriptedUI();
 		ui.inputs = [ingest.url];
