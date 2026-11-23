@@ -18,6 +18,7 @@ import {
 	readProjectPolicy,
 	resolveCanonicalPath,
 	resolveLiteralPath,
+	workspaceGitFilePath,
 	workspacesDir,
 } from "./policy.ts";
 import {
@@ -182,14 +183,14 @@ function addSessionAllowedPath(ctx: ExtensionContext, allowedPath: string): void
 	set.add(allowedPath);
 }
 
-/** The guard's own state files: the project allowlist and the workspace registry. */
+/** Files protected by the workspace guard: the project allowlist, the workspace registry, and `<cwd>/.git`. */
 function managedStateFiles(cwd: string): string[] {
-	return [policyFilePath(cwd), registryFilePath(cwd)];
+	return [policyFilePath(cwd), registryFilePath(cwd), workspaceGitFilePath(cwd)];
 }
 
 /**
- * Returns `policy.json` or `.registry.json` when one of `targetPaths` resolves to it. Letter case is
- * ignored: macOS resolves `POLICY.JSON` to the same file. Each path is taken as written.
+ * Returns `policy.json`, `.registry.json`, or `<cwd>/.git` when one of `targetPaths` resolves to it.
+ * Letter case is ignored: macOS resolves `POLICY.JSON` or `.GIT` to the same file. Each path is taken as written.
  */
 function findManagedStateFile(targetPaths: string[], cwd: string): string | undefined {
 	const resolvedTargets = targetPaths.map((targetPath) => resolveLiteralPath(targetPath, cwd).toLowerCase());
@@ -496,9 +497,15 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
 			return undefined;
 		}
 
-		// The guard's own state is never a tool's to write: no prompt, and no allow list unblocks it.
+		// The guard's own state and <cwd>/.git are never a tool's to write: no prompt, and no allow list unblocks them.
 		const managedFile = findManagedStateFile(localWritePaths, ctx.cwd) ?? namedStateFile;
 		if (managedFile) {
+			if (managedFile === workspaceGitFilePath(ctx.cwd)) {
+				return {
+					block: true,
+					reason: `Blocked write to "${managedFile}": modifying the workspace ".git" entry directly is not allowed because it controls Git metadata path access.`,
+				};
+			}
 			return {
 				block: true,
 				reason: `Blocked write to "${managedFile}": this file is managed by the workspace extension and tool calls cannot change it. The user changes it with "/workspace allow <path>" or "/workspace deny <path>".`,

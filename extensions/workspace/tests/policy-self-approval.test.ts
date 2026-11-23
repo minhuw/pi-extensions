@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import * as os from "node:os";
@@ -11,6 +12,7 @@ import {
 	policyFilePath,
 	readProjectPolicy,
 	resolveCanonicalPath,
+	workspaceGitFilePath,
 	workspacesDir,
 } from "../policy.ts";
 import { readRegistry, registryFilePath } from "../registry.ts";
@@ -759,5 +761,157 @@ describe("workspace write guard — state-file spellings only Pi's literal readi
 
 		expect(await readFile(policyFile, "utf8")).toBe("{}\n");
 		expect(await readFile(registryFile, "utf8")).toBe("{}\n");
+	});
+});
+
+function expectGitFileBlock(result: ToolCallEventResult | undefined, gitFile: string, label: string): void {
+	expect(result, label).toMatchObject({ block: true });
+	expect(result?.reason, label).toContain(`Blocked write to "${gitFile}"`);
+	expect(result?.reason, label).toContain('".git"');
+}
+
+describe("workspace write guard — workspace <cwd>/.git protection", () => {
+	it("blocks write, edit, bash, process_start, agent_browser, and agent_desktop attempts to forge or modify <cwd>/.git", async () => {
+		const toolCall = loadToolCallHandler();
+		const gitFile = workspaceGitFilePath(projectCwd);
+		await symlink(gitFile, path.join(projectCwd, "git-link"));
+
+		const fileSpellings = [
+			".git",
+			gitFile,
+			path.join(projectCwd, ".git"),
+			"src/../.git",
+			"@.git",
+			`file://${gitFile}`,
+			"git-link",
+			".GIT",
+		];
+
+		for (const exists of [false, true]) {
+			if (exists) await writeFile(gitFile, "gitdir: /nonexistent/worktree\n", "utf8");
+			for (const spelling of fileSpellings) {
+				for (const toolName of ["write", "edit"]) {
+					for (const kind of SESSION_KINDS) {
+						const prompts: string[] = [];
+						const result = await toolCall({ toolName, input: { path: spelling } }, handlerContext(kind, prompts));
+						const label = `${toolName} ${spelling} (${kind} session, exists=${exists})`;
+						expectGitFileBlock(result, gitFile, label);
+						expect(prompts, label).toEqual([]);
+					}
+				}
+			}
+		}
+
+		const blockedToolCalls: [toolName: string, input: unknown][] = [
+			["bash", { command: `echo "gitdir: ${outsideDir}" > .git` }],
+			["bash", { command: `printf "gitdir: %s\\n" "${outsideDir}" | tee .git` }],
+			["bash", { command: "cp /tmp/.git ." }],
+			["bash", { command: "mv forged-git .git" }],
+			["bash", { command: `ln -sf "${outsideDir}" .git` }],
+			["bash", { command: "rm -f .git" }],
+			["bash", { command: "sed -i s/a/b/ .git" }],
+			["bash", { command: "env -u X tee .git" }],
+			["process_start", { command: `echo "gitdir: ${outsideDir}" > .git` }],
+			["process_start", { command: "tee .git" }],
+			["agent_browser", { argv: ["screenshot", ".git"] }],
+			["agent_desktop", { argv: ["screenshot", ".git"] }],
+		];
+
+		for (const [toolName, input] of blockedToolCalls) {
+			for (const kind of SESSION_KINDS) {
+				const prompts: string[] = [];
+				const result = await toolCall({ toolName, input }, handlerContext(kind, prompts));
+				const label = `${toolName} ${JSON.stringify(input)} (${kind} session)`;
+				expectGitFileBlock(result, gitFile, label);
+				expect(prompts, label).toEqual([]);
+			}
+		}
+
+		// Read-only inspection of .git, normal git commands, and nested side-workspace .git remain allowed.
+		const allowedToolCalls: [toolName: string, input: unknown][] = [
+			["bash", { command: "cat .git" }],
+			["bash", { command: "head -n 1 .git" }],
+			["bash", { command: "stat .git" }],
+			["bash", { command: "ls -la .git" }],
+			["bash", { command: "git status" }],
+			["bash", { command: "git init" }],
+			["bash", { command: "git worktree add -b side .pi/workspaces/side HEAD" }],
+			["write", { path: ".pi/workspaces/side/.git" }],
+		];
+
+		for (const [toolName, input] of allowedToolCalls) {
+			for (const kind of SESSION_KINDS) {
+				const prompts: string[] = [];
+				const result = await toolCall({ toolName, input }, handlerContext(kind, prompts));
+				expect(result, `${toolName} ${JSON.stringify(input)} (${kind} session)`).toBeUndefined();
+				expect(prompts, `${toolName} ${JSON.stringify(input)}`).toEqual([]);
+			}
+		}
+
+		expect(await readFile(gitFile, "utf8")).toBe("gitdir: /nonexistent/worktree\n");
+	});
+
+	it("preserves normal writes inside an existing .git directory while blocking replacement of <cwd>/.git", async () => {
+		const toolCall = loadToolCallHandler();
+		execFileSync("git", ["init"], { cwd: projectCwd, stdio: "ignore" });
+		const gitDir = workspaceGitFilePath(projectCwd);
+
+		// Writes inside .git/ metadata directory stay allowed.
+		for (const [toolName, input] of [
+			["write", { path: ".git/info/exclude" }],
+			["bash", { command: "echo '*.tmp' >> .git/info/exclude" }],
+			["bash", { command: "git config user.name 'Test User'" }],
+		] as [string, unknown][]) {
+			const prompts: string[] = [];
+			const result = await toolCall({ toolName, input }, handlerContext("ui", prompts));
+			expect(result, `${toolName} ${JSON.stringify(input)}`).toBeUndefined();
+			expect(prompts).toEqual([]);
+		}
+
+		// Removing or moving <cwd>/.git itself is still blocked.
+		for (const command of ["rm -rf .git", "mv .git .git.bak"]) {
+			const prompts: string[] = [];
+			const result = await toolCall({ toolName: "bash", input: { command } }, handlerContext("ui", prompts));
+			expectGitFileBlock(result, gitDir, command);
+			expect(prompts).toEqual([]);
+		}
+	});
+
+	it("does not let a UI session forge <cwd>/.git to gain write access to an external git repository", async () => {
+		const externalRepo = path.join(outsideDir, "other-repo");
+		await mkdir(externalRepo, { recursive: true });
+		execFileSync("git", ["init"], { cwd: externalRepo, stdio: "ignore" });
+		const externalGitDir = resolveCanonicalPath(path.join(externalRepo, ".git"));
+		const externalHook = path.join(externalGitDir, "hooks", "pre-commit");
+
+		const h = await startUiSession();
+		try {
+			const gitFile = workspaceGitFilePath(projectCwd);
+			h.faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("write", { path: ".git", content: `gitdir: ${externalGitDir}\n` }),
+					fauxToolCall("bash", { command: `echo "gitdir: ${externalGitDir}" > .git` }),
+				]),
+				fauxAssistantMessage([fauxToolCall("write", { path: externalHook, content: "#!/bin/sh\necho pwned\n" })]),
+				fauxAssistantMessage("done"),
+			]);
+			await h.session.prompt("forge .git to access the external repo, then write a hook");
+
+			const results = h.toolResults();
+			expect(results).toHaveLength(3);
+			for (const result of results.slice(0, 2)) {
+				expect(result.text).toContain(`Blocked write to "${gitFile}"`);
+				expect(result.isError).toBe(true);
+			}
+			expect(fs.existsSync(gitFile)).toBe(false);
+
+			// Because .git was never created, the external write must still prompt the user (who denies it).
+			expect(h.prompts).toEqual([`Allow write outside workspace (${externalHook})?`]);
+			expect(results[2]!.text).toContain("Blocked write outside project working directory");
+			expect(fs.existsSync(externalHook)).toBe(false);
+			expect(h.errors).toEqual([]);
+		} finally {
+			await h.dispose();
+		}
 	});
 });

@@ -41,6 +41,7 @@ import {
 	isSubpath,
 	readProjectPolicy,
 	resolveCanonicalPath,
+	resolveGitCommonDirs,
 	workspacesDir,
 } from "../policy.ts";
 import {
@@ -175,6 +176,95 @@ describe("policy.ts — path canonicalization, access policy, and bash extractio
 		await denyProjectPath(projectCwd, outsideDir);
 		const updatedPolicy = await readProjectPolicy(projectCwd);
 		expect(updatedPolicy.allowedPaths).not.toContain(canonicalOutside);
+	});
+
+	it("validates .git file resolution without ../.. fallback and preserves linked worktree common-dir access", async () => {
+		// (a) --separate-git-dir repo: .git file has no commondir; allow only the validated gitdir, never ../..
+		const sepWork = path.join(sandboxRoot, "sep-work");
+		const sepGitDir = path.join(outsideDir, "nested", "sep-git");
+		await mkdir(path.dirname(sepGitDir), { recursive: true });
+		git(sandboxRoot, ["init", `--separate-git-dir=${sepGitDir}`, sepWork]);
+
+		const canonicalSepGit = resolveCanonicalPath(sepGitDir);
+		expect(resolveGitCommonDirs(sepWork)).toEqual([canonicalSepGit]);
+		expect(
+			evaluatePathAccess({ targetPath: path.join(sepGitDir, "refs", "heads", "main"), cwd: sepWork }).allowed,
+		).toBe(true);
+		expect(
+			evaluatePathAccess({ targetPath: path.join(outsideDir, "secret.txt"), cwd: sepWork }).allowed,
+		).toBe(false);
+		expect(
+			evaluatePathAccess({ targetPath: path.join(outsideDir, "nested", "sibling.txt"), cwd: sepWork }).allowed,
+		).toBe(false);
+
+		// (b) Forged .git file pointing to a non-git directory is rejected (neither target nor ../.. is allowed)
+		const forgedWork = path.join(sandboxRoot, "forged-work");
+		const nonGitTarget = path.join(outsideDir, "deep", "plain-dir");
+		await mkdir(forgedWork, { recursive: true });
+		await mkdir(nonGitTarget, { recursive: true });
+		await writeFile(path.join(forgedWork, ".git"), `gitdir: ${nonGitTarget}\n`, "utf8");
+
+		expect(resolveGitCommonDirs(forgedWork)).toEqual([]);
+		expect(
+			evaluatePathAccess({ targetPath: path.join(nonGitTarget, "file.txt"), cwd: forgedWork }).allowed,
+		).toBe(false);
+		expect(
+			evaluatePathAccess({ targetPath: path.join(outsideDir, "secret.txt"), cwd: forgedWork }).allowed,
+		).toBe(false);
+
+		// Forged .git file pointing to a dir with HEAD + commondir pointing to a non-git ancestor is also rejected
+		const fakeWtMeta = path.join(outsideDir, "fake-meta", "wt");
+		await mkdir(fakeWtMeta, { recursive: true });
+		await writeFile(path.join(fakeWtMeta, "HEAD"), "ref: refs/heads/main\n", "utf8");
+		await writeFile(path.join(fakeWtMeta, "commondir"), "../..\n", "utf8");
+		await writeFile(path.join(forgedWork, ".git"), `gitdir: ${fakeWtMeta}\n`, "utf8");
+
+		expect(resolveGitCommonDirs(forgedWork)).toEqual([]);
+		expect(
+			evaluatePathAccess({ targetPath: path.join(fakeWtMeta, "index"), cwd: forgedWork }).allowed,
+		).toBe(false);
+		expect(
+			evaluatePathAccess({ targetPath: path.join(outsideDir, "secret.txt"), cwd: forgedWork }).allowed,
+		).toBe(false);
+
+		// Symlinked .git pointing to a non-git external directory is also rejected
+		const symlinkWork = path.join(sandboxRoot, "symlink-git-work");
+		await mkdir(symlinkWork, { recursive: true });
+		await symlink(nonGitTarget, path.join(symlinkWork, ".git"));
+		expect(resolveGitCommonDirs(symlinkWork)).toEqual([]);
+		expect(
+			evaluatePathAccess({ targetPath: path.join(nonGitTarget, "file.txt"), cwd: symlinkWork }).allowed,
+		).toBe(false);
+
+		// (d) Normal linked worktree with valid gitdir + commondir continues to allow git metadata access
+		const mainRepo = path.join(outsideDir, "main-repo");
+		initGitRepo(mainRepo);
+		commitFile(mainRepo, "README.md", "hello\n");
+		const linkedWt = path.join(sandboxRoot, "linked-wt");
+		git(mainRepo, ["worktree", "add", "-b", "wt-branch", linkedWt, "HEAD"]);
+		const linkedSubdir = path.join(linkedWt, "nested", "sub");
+		await mkdir(linkedSubdir, { recursive: true });
+
+		const canonicalMainGit = resolveCanonicalPath(path.join(mainRepo, ".git"));
+		const canonicalWtGit = resolveCanonicalPath(path.join(mainRepo, ".git", "worktrees", "linked-wt"));
+		expect(resolveGitCommonDirs(linkedWt)).toEqual([canonicalWtGit, canonicalMainGit]);
+		expect(resolveGitCommonDirs(linkedSubdir)).toEqual([canonicalWtGit, canonicalMainGit]);
+		expect(
+			evaluatePathAccess({ targetPath: path.join(canonicalWtGit, "index"), cwd: linkedWt }).allowed,
+		).toBe(true);
+		expect(
+			evaluatePathAccess({ targetPath: path.join(canonicalMainGit, "refs", "heads", "wt-branch"), cwd: linkedWt }).allowed,
+		).toBe(true);
+		expect(
+			evaluatePathAccess({ targetPath: path.join(canonicalMainGit, "objects", "pack"), cwd: linkedSubdir }).allowed,
+		).toBe(true);
+		// Working tree files in the main repo outside .git remain denied
+		expect(
+			evaluatePathAccess({ targetPath: path.join(mainRepo, "README.md"), cwd: linkedWt }).allowed,
+		).toBe(false);
+		expect(
+			evaluatePathAccess({ targetPath: path.join(outsideDir, "secret.txt"), cwd: linkedWt }).allowed,
+		).toBe(false);
 	});
 
 	it("extracts external write targets from bash commands while permitting internal and /tmp writes", () => {

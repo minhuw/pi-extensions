@@ -124,6 +124,10 @@ export function policyFilePath(cwd: string): string {
 	return path.join(workspacesDir(cwd), "policy.json");
 }
 
+export function workspaceGitFilePath(cwd: string): string {
+	return path.join(resolveCanonicalPath(cwd), ".git");
+}
+
 /**
  * Ensures `<cwd>/.pi/workspaces` and `<cwd>/.pi/workspaces/.gitignore` (containing `*\n`)
  * exist on disk without ever touching `<cwd>/.gitignore`.
@@ -220,47 +224,107 @@ export async function denyProjectPath(cwd: string, targetPath: string): Promise<
 	return canonical;
 }
 
-function resolveGitCommonDirs(canonicalCwd: string): string[] {
-	const dirs: string[] = [];
+function isExistingDirectory(targetPath: string): boolean {
+	try {
+		return fs.statSync(targetPath).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+function isExistingFile(targetPath: string): boolean {
+	try {
+		return fs.statSync(targetPath).isFile();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Checks whether `dir` is a valid standalone/common Git metadata directory
+ * (repo `.git`, bare repo, `--separate-git-dir`, submodule gitdir, or worktree `commondir`).
+ */
+function isValidGitCommonDir(dir: string): boolean {
+	if (!isExistingDirectory(dir)) return false;
+	if (!isExistingFile(path.join(dir, "HEAD"))) return false;
+	if (!isExistingDirectory(path.join(dir, "objects"))) return false;
+	return isExistingDirectory(path.join(dir, "refs")) || isExistingDirectory(path.join(dir, "reftable"));
+}
+
+function readCommondir(gitDir: string): string | undefined {
+	const commondirFile = path.join(gitDir, "commondir");
+	if (!isExistingFile(commondirFile)) return undefined;
+	try {
+		const firstLine = fs.readFileSync(commondirFile, "utf8").split(/\r?\n/, 1)[0]?.trim();
+		if (!firstLine) return undefined;
+		return resolveSymlinks(path.resolve(gitDir, firstLine), new Set<string>());
+	} catch {
+		return undefined;
+	}
+}
+
+function resolveValidatedGitDirs(gitDir: string): string[] {
+	if (!isExistingDirectory(gitDir)) return [];
+
+	const commonDir = readCommondir(gitDir);
+	if (commonDir !== undefined) {
+		// Linked worktree (or gitdir with explicit commondir): require HEAD here and a valid common Git dir.
+		if (isExistingFile(path.join(gitDir, "HEAD")) && isValidGitCommonDir(commonDir)) {
+			return commonDir === gitDir ? [gitDir] : [gitDir, commonDir];
+		}
+		// Never trust an invalid commondir; allow gitDir itself only if it is a complete standalone Git dir.
+		return isValidGitCommonDir(gitDir) ? [gitDir] : [];
+	}
+
+	// No commondir file (normal repo, bare repo, --separate-git-dir, submodule):
+	// allow only validated gitDir itself, never falling back to ../...
+	return isValidGitCommonDir(gitDir) ? [gitDir] : [];
+}
+
+function resolveGitCommonDirsFromCanonical(canonicalCwd: string): string[] {
 	let current = canonicalCwd;
 	while (true) {
 		const dotGit = path.join(current, ".git");
+		let stat: fs.Stats;
 		try {
-			const stat = fs.statSync(dotGit);
-			if (stat.isDirectory()) {
-				const realGit = resolveCanonicalPath(dotGit);
-				dirs.push(realGit);
-				const commondirFile = path.join(realGit, "commondir");
-				if (fs.existsSync(commondirFile)) {
-					const relCommon = fs.readFileSync(commondirFile, "utf8").trim();
-					if (relCommon) dirs.push(resolveCanonicalPath(relCommon, realGit));
-				}
-				break;
-			}
-			if (stat.isFile()) {
-				const content = fs.readFileSync(dotGit, "utf8");
-				const match = /^gitdir:\s*(.+)$/m.exec(content);
-				if (match?.[1]) {
-					const gitDir = resolveCanonicalPath(match[1].trim(), current);
-					dirs.push(gitDir);
-					const commondirFile = path.join(gitDir, "commondir");
-					if (fs.existsSync(commondirFile)) {
-						const relCommon = fs.readFileSync(commondirFile, "utf8").trim();
-						if (relCommon) dirs.push(resolveCanonicalPath(relCommon, gitDir));
-					} else {
-						dirs.push(resolveCanonicalPath(path.resolve(gitDir, "../..")));
-					}
-				}
-				break;
-			}
+			stat = fs.statSync(dotGit);
 		} catch {
-			// Continue walking upwards.
+			try {
+				fs.lstatSync(dotGit);
+				// Broken symlink at .git: stop rather than walking past it.
+				return [];
+			} catch {
+				const parent = path.dirname(current);
+				if (parent === current) break;
+				current = parent;
+				continue;
+			}
 		}
-		const parent = path.dirname(current);
-		if (parent === current) break;
-		current = parent;
+
+		if (stat.isDirectory()) {
+			return resolveValidatedGitDirs(resolveSymlinks(dotGit, new Set<string>()));
+		}
+		if (stat.isFile()) {
+			try {
+				const content = fs.readFileSync(dotGit, "utf8");
+				const firstLine = content.split(/\r?\n/, 1)[0] ?? "";
+				const match = /^gitdir:\s*(.+)$/.exec(firstLine);
+				const rawGitDir = match?.[1]?.trim();
+				if (rawGitDir) {
+					return resolveValidatedGitDirs(resolveSymlinks(path.resolve(current, rawGitDir), new Set<string>()));
+				}
+			} catch {
+				return [];
+			}
+			return [];
+		}
+		return [];
 	}
-	return dirs;
+	return [];
+}
+
+export function resolveGitCommonDirs(cwd: string): string[] {
+	return resolveGitCommonDirsFromCanonical(resolveCanonicalPath(cwd));
 }
 
 function isRelativeParentTraversal(rawTarget: string, literal = false): boolean {
@@ -286,7 +350,7 @@ export function evaluatePathAccess(options: PathAccessOptions): PathAccessEvalua
 	}
 
 	// 2. Always allow git common dir of <cwd> when <cwd> is a git repo/worktree.
-	for (const gitDir of resolveGitCommonDirs(canonicalCwd)) {
+	for (const gitDir of resolveGitCommonDirsFromCanonical(canonicalCwd)) {
 		if (isInside(gitDir)) {
 			return { allowed: true, resolvedPath, matchedRoot: gitDir };
 		}
