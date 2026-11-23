@@ -85,15 +85,11 @@ fn oldest_day(conn: &Connection, filter: &str, end: i64, today: i64) -> ReadResu
     Ok(oldest.map(|at| at.div_euclid(DAY_MS) * DAY_MS).unwrap_or(today))
 }
 
-pub fn statistics(conn: &Connection, params: &Params) -> ReadResult<Statistics> {
-    at_time(conn, params, now_ms())
-}
-
 pub fn statistics_scoped(conn: &Connection, params: &Params, public: bool) -> ReadResult<Statistics> {
     at_time_scoped(conn, params, now_ms(), public)
 }
 
-/// One snapshot covers the date range, publishing selection, hidden ancestors, and every aggregate.
+#[cfg(test)]
 fn at_time(conn: &Connection, p: &Params, now: i64) -> ReadResult<Statistics> {
     at_time_scoped(conn, p, now, false)
 }
@@ -130,6 +126,7 @@ pub(super) fn breakdown_sql(filter: &str, public: bool) -> String {
     breakdown::breakdown_sql(filter, public)
 }
 
+/// One snapshot covers the date range, publishing selection, hidden ancestors, and every aggregate.
 fn at_time_scoped(conn: &Connection, p: &Params, now: i64, public: bool) -> ReadResult<Statistics> {
     let days = match p.0.get("days").map(String::as_str) {
         None => Some(30),
@@ -277,7 +274,7 @@ mod tests {
         if let Some(days) = days {
             params.0.insert("days".into(), days.into());
         }
-        serde_json::to_value(store.read(|c| at_time(c, &params, parse_iso_ms(now).unwrap())).unwrap()).unwrap()
+        serde_json::to_value(store.read(|c| at_time_scoped(c, &params, parse_iso_ms(now).unwrap(), false)).unwrap()).unwrap()
     }
 
     #[test]
@@ -350,14 +347,14 @@ mod tests {
             ("days".into(), "all".into()),
             ("excludeUnpublished".into(), "true".into()),
         ]));
-        let public = store.read(|c| at_time(c, &params, parse_iso_ms(now).unwrap())).unwrap();
+        let public = store.read(|c| at_time_scoped(c, &params, parse_iso_ms(now).unwrap(), false)).unwrap();
         assert_eq!(public.from, "2026-10-03");
         assert_eq!(public.totals.counts.sessions, 1);
         assert_eq!(public.totals.active_days, 1);
         assert_eq!(public.daily.len(), 2);
         assert_eq!(public.daily[1].counts.sessions, 0);
         store.write(|tx| publishing::update(tx, "published", false)).unwrap();
-        let empty = store.read(|c| at_time(c, &params, parse_iso_ms(now).unwrap())).unwrap();
+        let empty = store.read(|c| at_time_scoped(c, &params, parse_iso_ms(now).unwrap(), false)).unwrap();
         assert_eq!(empty.from, "2026-10-04");
         assert_eq!(empty.totals.counts.sessions, 0);
     }

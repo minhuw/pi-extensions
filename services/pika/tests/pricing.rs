@@ -59,7 +59,7 @@ fn costs(store: &Store) -> Value {
 fn totals(store: &Store) -> Value {
     let mut params = pika::read::Params::default();
     params.0.insert("days".into(), "all".into());
-    let stats = store.read(|conn| pika::read::statistics::statistics(conn, &params)).unwrap();
+    let stats = store.read(|conn| pika::read::statistics::statistics_scoped(conn, &params, false)).unwrap();
     let totals = serde_json::to_value(stats).unwrap()["totals"].clone();
     json!({ "cost": totals["cost"], "estimatedCost": totals["estimatedCost"], "unpricedRequests": totals["unpricedRequests"] })
 }

@@ -90,15 +90,11 @@ pub(crate) const LIST_SQL: &str = "SELECT e.seq, e.offset, e.entry_id, e.parent_
      WHERE e.sid = ?1 AND e.seq >= ?2 AND e.seq <= ?3
      ORDER BY e.seq LIMIT ?4";
 
-/// Entries `from..=to` by seq. `prefix` is the base path prefix for image URLs (empty for `/`).
-pub fn list(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str, p: &Params) -> ReadResult<Entries> {
-    list_scoped(conn, blobs, prefix, id, p, Some("v1"), false)
-}
-
 /// Entries for a namespace: `images` is the API namespace (`v1`, `public/v1`) whose image route each image's `src`
-/// names, or `None` for one without that route (the agent namespace), whose images have no `src`. A `redact`ed list,
-/// public or agent, has no agent memory (`redaction::omit_memory`, also of calls that are memory through results
-/// outside the page), is scrubbed, and has no `requestId`.
+/// names, or `None` for one without that route (the agent namespace), whose images have no `src`. `prefix` is the base
+/// path prefix for image URLs (empty for `/`). A `redact`ed list, public or agent, has no agent memory
+/// (`redaction::omit_memory`, also of calls that are memory through results outside the page), is scrubbed, and has no
+/// `requestId`.
 pub fn list_scoped(
     conn: &Connection,
     blobs: &BlobStore,
@@ -168,12 +164,6 @@ pub fn list_scoped(
     Ok(Entries { items })
 }
 
-/// The verbatim line of entry `seq`.
-pub fn raw(conn: &Connection, blobs: &BlobStore, id: &str, seq: i64) -> ReadResult<String> {
-    let sid = session_sid(conn, id)?;
-    raw_by_sid(conn, blobs, sid, seq)
-}
-
 /// The line of entry `seq` for a namespace: verbatim, or when `redact`ed (public or agent) without agent memory and
 /// scrubbed (`redaction::raw`).
 pub fn raw_scoped(conn: &Connection, blobs: &BlobStore, id: &str, seq: i64, redact: bool) -> ReadResult<String> {
@@ -210,11 +200,6 @@ fn image_type(mime: Option<&str>) -> &str {
         }
         _ => "application/octet-stream",
     }
-}
-
-/// The decoded bytes and content type of image `index` of entry `seq`.
-pub fn image(conn: &Connection, blobs: &BlobStore, id: &str, seq: i64, index: usize) -> ReadResult<(String, Vec<u8>)> {
-    image_scoped(conn, blobs, id, seq, index, false)
 }
 
 /// The decoded bytes and content type of image `index` of entry `seq` for a namespace: when `redact`ed, agent memory

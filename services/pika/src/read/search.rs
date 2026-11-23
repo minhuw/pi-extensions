@@ -250,11 +250,8 @@ fn sessions_for_filters(conn: &Connection, p: &Params, public: bool) -> ReadResu
 /// Full-text search over session entries. `sort=newest` (the default) walks the index from the newest document and
 /// stops at `limit`; `sort=relevance` returns the best `limit` by bm25 of the newest `RELEVANCE_WINDOW` filtered
 /// matches as one page. Relevance does not page because bm25 scores change with every indexed document.
-pub fn search(conn: &Connection, p: &Params) -> ReadResult<Page<Hit>> {
-    search_scoped(conn, p, false, false)
-}
-
-/// `search`, in the public namespace only over published sessions, and, where responses are scrubbed (`redact`: the
+///
+/// In the public namespace this searches only published sessions, and where responses are scrubbed (`redact`: the
 /// public and agent namespaces), only once the index's text is scrubbed under the current rules (see
 /// `store::SEARCH_RULES`): until then it finds nothing, as matches and prefixes over unscrubbed text would tell what
 /// scrubbing hides. Run it in one snapshot: publication and the rules' version are read with the matches.
@@ -775,7 +772,7 @@ mod tests {
                     let mut newest: Vec<(String, usize)> = Vec::new();
                     let mut cursor = None;
                     loop {
-                        let page = search(conn, &params("newest", cursor.as_deref()))?;
+                        let page = search_scoped(conn, &params("newest", cursor.as_deref()), false, false)?;
                         for hit in page.items {
                             match newest.iter_mut().find(|(id, _)| *id == hit.session_id) {
                                 Some((_, n)) => *n += 1,
@@ -791,7 +788,7 @@ mod tests {
                     let want: Vec<(String, usize)> = want.iter().map(|(id, n)| (id.to_string(), *n)).collect();
                     assert_eq!(newest, want, "newest {filters:?}");
 
-                    let relevance = search(conn, &params("relevance", None))?.items;
+                    let relevance = search_scoped(conn, &params("relevance", None), false, false)?.items;
                     let total: usize = want.iter().map(|(_, n)| n).sum();
                     assert_eq!(relevance.len(), total.min(100), "relevance {filters:?}");
                     assert!(relevance.iter().all(|h| want.iter().any(|(id, _)| *id == h.session_id)), "relevance {filters:?}");
@@ -1029,7 +1026,7 @@ mod tests {
         assert_eq!(grouped(&store, &[("q", "alph "), ("prefix", "true")], false, 0), []);
         store
             .read(|conn| {
-                let entries = |pairs: &[(&str, &str)]| search(conn, &params(pairs)).map(|page| page.items.len());
+                let entries = |pairs: &[(&str, &str)]| search_scoped(conn, &params(pairs), false, false).map(|page| page.items.len());
                 assert_eq!(entries(&[("q", "alph"), ("prefix", "true")])?, 8);
                 assert_eq!(entries(&[("q", "alph"), ("prefix", "1"), ("sort", "relevance")])?, 8);
                 assert_eq!(entries(&[("q", "alph")])?, 0);

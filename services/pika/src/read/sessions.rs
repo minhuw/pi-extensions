@@ -240,10 +240,6 @@ impl SessionSummary {
 }
 
 /// The devices of recorded sessions, by name case-insensitively, then id.
-pub fn facets(conn: &Connection) -> ReadResult<Facets> {
-    facets_scoped(conn, false)
-}
-
 pub fn facets_scoped(conn: &Connection, public: bool) -> ReadResult<Facets> {
     let scope = if public { format!(" WHERE {}", super::publishing::SESSION_FILTER) } else { String::new() };
     let names = DeviceNames::load(conn)?;
@@ -264,14 +260,15 @@ pub fn facets_scoped(conn: &Connection, public: bool) -> ReadResult<Facets> {
     })
 }
 
-/// The session list statement and its arguments. `from` and `to` bound `lastAt` (inclusive). Each combination of the
-/// device and project filters walks an index in `lastAt` order; `root`, `model`, and the time bounds filter along it.
-/// `root` looks each session's parent up by id, so it also lists a child whose parent is not recorded (or, in public,
-/// not published): stepping over the children between root sessions costs a lookup each.
+#[cfg(test)]
 pub(crate) fn list_query(p: &Params, limit: i64) -> ReadResult<(String, Vec<Sql>)> {
     list_query_scoped(p, limit, false)
 }
 
+/// The session list statement and its arguments. `from` and `to` bound `lastAt` (inclusive). Each combination of the
+/// device and project filters walks an index in `lastAt` order; `root`, `model`, and the time bounds filter along it.
+/// `root` looks each session's parent up by id, so it also lists a child whose parent is not recorded (or, in public,
+/// not published): stepping over the children between root sessions costs a lookup each.
 fn list_query_scoped(p: &Params, limit: i64, public: bool) -> ReadResult<(String, Vec<Sql>)> {
     let (root, device, project) = (p.bool("root")?, p.get("device"), p.get("project"));
     // Without statistics SQLite may prefer sessions_parent for `root` and then sort, so name the index.
@@ -329,15 +326,11 @@ fn list_query_scoped(p: &Params, limit: i64, public: bool) -> ReadResult<(String
 }
 
 /// The session list, newest `lastAt` first.
-pub fn list(conn: &Connection, p: &Params) -> ReadResult<Page<SessionSummary>> {
-    list_scoped(conn, p, false)
-}
-
 pub fn list_scoped(conn: &Connection, p: &Params, public: bool) -> ReadResult<Page<SessionSummary>> {
     // One snapshot for the page query and public summary enrichment when called outside scoped_query.
     let _tx = (public && conn.is_autocommit()).then(|| conn.unchecked_transaction()).transpose()?;
     let limit = p.limit(LIST_LIMIT, MAX_LIST_LIMIT)?;
-    let (sql, args) = if public { list_query_scoped(p, limit, true)? } else { list_query(p, limit)? };
+    let (sql, args) = list_query_scoped(p, limit, public)?;
     let items = conn
         .prepare_cached(&sql)?
         .query_map(params_from_iter(args), summary)?
@@ -414,10 +407,6 @@ fn tree_children_sql(public: bool) -> String {
 
 fn tree_node(r: &Row, depth: usize) -> rusqlite::Result<TreeNode> {
     Ok(TreeNode { summary: summary(r)?, parent_tool_call_id: r.get(AFTER_SUMMARY)?, depth })
-}
-
-pub fn tree(conn: &Connection, id: &str) -> ReadResult<SessionTree> {
-    tree_scoped(conn, id, false)
 }
 
 pub fn tree_scoped(conn: &Connection, id: &str, public: bool) -> ReadResult<SessionTree> {
@@ -653,7 +642,7 @@ mod tests {
                     set(3, "model", "m");
                     set(4, "from", "1000");
                     set(5, "cursor", &crate::read::encode_cursor(&[json!(5), json!("x")]));
-                    let (sql, args) = list_query(&p, 50).unwrap();
+                    let (sql, args) = list_query_scoped(&p, 50, false).unwrap();
                     let plan: Vec<String> = conn
                         .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?
                         .query_map(params_from_iter(args), |r| r.get::<_, String>(3))?

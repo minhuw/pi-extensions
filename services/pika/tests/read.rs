@@ -1084,7 +1084,7 @@ fn opening_a_version_1_database_builds_the_search_index() {
     let store = pika::store::Store::open(&data).unwrap();
     let mut params = pika::read::Params::default();
     params.0.insert("q".into(), "flaky".into());
-    let hits = store.read(|conn| pika::read::search::search(conn, &params)).unwrap();
+    let hits = store.read(|conn| pika::read::search::search_scoped(conn, &params, false, false)).unwrap();
     assert_eq!(hits.items.len(), 1);
     assert_eq!(hits.items[0].seq, 4);
 }
@@ -1133,7 +1133,7 @@ fn opening_a_version_6_database_rebuilds_the_search_index() {
         for (k, v) in pairs {
             params.0.insert((*k).into(), (*v).into());
         }
-        let hits = store.read(|conn| pika::read::search::search(conn, &params)).unwrap();
+        let hits = store.read(|conn| pika::read::search::search_scoped(conn, &params, false, false)).unwrap();
         hits.items.into_iter().map(|h| (h.session_id, h.seq)).collect()
     };
     let before = {
@@ -1254,7 +1254,7 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
     let store = pika::store::Store::open(&data).unwrap();
     let mut params = pika::read::Params::default();
     params.0.insert("q".into(), "flaky".into());
-    let hits = store.read(|conn| pika::read::search::search(conn, &params)).unwrap();
+    let hits = store.read(|conn| pika::read::search::search_scoped(conn, &params, false, false)).unwrap();
     assert_eq!(hits.items.len(), 1);
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     assert!(one(&store, "SELECT COUNT(*) AS n FROM usage_events")["n"].as_i64().unwrap() > 0);
@@ -2640,7 +2640,7 @@ fn statistics_version_10_upgrade_backfills_ledger_without_changing_source_lines(
     assert!(store.setting(pika::store::NEEDS_REINDEX).unwrap().is_none());
     assert!(store.setting(pika::store::DERIVED_GENERATION).unwrap().is_some());
     let params = pika::read::Params(BTreeMap::from([("days".into(), "1".into())]));
-    let stats = store.read(|c| pika::read::statistics::statistics(c, &params)).unwrap();
+    let stats = store.read(|c| pika::read::statistics::statistics_scoped(c, &params, false)).unwrap();
     assert_eq!(stats.totals.counts.requests, 2);
     assert_eq!(stats.totals.counts.tokens.input, 40);
     // A later open must not replay the source again.

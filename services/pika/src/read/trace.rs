@@ -764,10 +764,6 @@ pub fn trace_if_changed(
     Ok((fingerprint, Some(trace)))
 }
 
-pub fn trace(conn: &Connection, blobs: &BlobStore, id: &str) -> ReadResult<Trace> {
-    trace_scoped(conn, blobs, id, false)
-}
-
 /// The trace; one to `redact` (public or agent) keeps original text and structured arguments for `redaction::trace` to
 /// scrub in one scope after any publication filtering, then select, format and cut summaries, and has no `ticket`. Its
 /// memory tool calls, and calls that are memory through their results' nested calls (`crate::derive::memory_calls`),

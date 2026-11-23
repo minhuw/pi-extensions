@@ -365,18 +365,11 @@ pub fn summary(conn: &Connection, summary: &mut super::sessions::SessionSummary)
     Published::load(conn)?.summary(conn, summary)
 }
 
-pub fn summaries(conn: &Connection, summaries: &mut [super::sessions::SessionSummary]) -> ReadResult<()> {
-    if summaries.is_empty() {
-        return Ok(());
-    }
-    Published::load(conn)?.summaries(conn, summaries)
-}
-
 pub fn detail(conn: &Connection, detail: &mut super::sessions::SessionDetail) -> ReadResult<()> {
     Published::load(conn)?.detail(conn, detail)
 }
 
-pub fn trace(conn: &Connection, trace: &mut super::trace::Trace) -> ReadResult<()> {
+pub(crate) fn trace(conn: &Connection, trace: &mut super::trace::Trace) -> ReadResult<()> {
     Published::load(conn)?.trace(conn, trace)
 }
 
@@ -515,7 +508,7 @@ mod tests {
                 ];
                 rows[0].hidden = Some(false);
                 rows[0].hidden_by = Some("owner-flag".to_owned());
-                summaries(tx, &mut rows).unwrap();
+                Published::load(tx).unwrap().summaries(tx, &mut rows).unwrap();
 
                 assert_eq!(rows[0].parent_session_id, None);
                 assert_eq!(rows[0].link, None);
