@@ -175,12 +175,12 @@ if (argv.includes("hang")) {
 
 	if (isHelp) {
 		process.stdout.write("Usage: agent-desktop " + (subcommand || "<command>") + " [options]\\n");
-		process.exit(0);
 	} else if (subcommand === "flood") {
+		const lines = [];
 		for (let i = 0; i < 2500; i++) {
-			process.stdout.write("line-" + i + "-payload\\n");
+			lines.push("line-" + i + "-payload");
 		}
-		process.exit(0);
+		process.stdout.write(lines.join("\\n") + "\\n");
 	} else if (subcommand === "hold-stdio") {
 		const sleeper = spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 5000)"], {
 			detached: true,
@@ -195,7 +195,6 @@ if (argv.includes("hang")) {
 				data: { pid: sleeper.pid },
 			}) + "\\n",
 		);
-		process.exit(0);
 	} else if (subcommand === "fail") {
 		process.stdout.write(
 			JSON.stringify({
@@ -205,7 +204,7 @@ if (argv.includes("hang")) {
 				error: { code: "ACTION_FAILED", message: "simulated desktop error" },
 			}) + "\\n",
 		);
-		process.exit(1);
+		process.exitCode = 1;
 	} else if (subcommand === "status" || subcommand === "doctor") {
 		process.stdout.write(
 			JSON.stringify({
@@ -220,7 +219,6 @@ if (argv.includes("hang")) {
 				},
 			}) + "\\n",
 		);
-		process.exit(0);
 	} else if (subcommand === "permissions") {
 		process.stdout.write(
 			JSON.stringify({
@@ -236,7 +234,6 @@ if (argv.includes("hang")) {
 				},
 			}) + "\\n",
 		);
-		process.exit(0);
 	} else if (subcommand === "skills") {
 		process.stdout.write(
 			JSON.stringify({
@@ -249,7 +246,6 @@ if (argv.includes("hang")) {
 				},
 			}) + "\\n",
 		);
-		process.exit(0);
 	} else if (subcommand === "session") {
 		let sessionAction;
 		let sessionPositionalId;
@@ -297,7 +293,6 @@ if (argv.includes("hang")) {
 				}) + "\\n",
 			);
 		}
-		process.exit(0);
 	} else if (subcommand === "screenshot") {
 		if (argv.includes("ScreenDeniedExit0") || argv.includes("ScreenDeniedExit1")) {
 			const exitCode = argv.includes("ScreenDeniedExit0") ? 0 : 1;
@@ -309,7 +304,8 @@ if (argv.includes("hang")) {
 					error: { code: "PERM_DENIED", message: "Screen Recording denied" },
 				}) + "\\n",
 			);
-			process.exit(exitCode);
+			process.exitCode = exitCode;
+			return;
 		}
 		let targetPath;
 		let shotEndOfFlags = false;
@@ -366,7 +362,6 @@ if (argv.includes("hang")) {
 				}) + "\\n",
 			);
 		}
-		process.exit(0);
 	} else if (subcommand === "snapshot") {
 		process.stdout.write(
 			JSON.stringify({
@@ -380,7 +375,6 @@ if (argv.includes("hang")) {
 				},
 			}) + "\\n",
 		);
-		process.exit(0);
 	} else {
 		process.stdout.write(
 			JSON.stringify({
@@ -394,7 +388,6 @@ if (argv.includes("hang")) {
 				},
 			}) + "\\n",
 		);
-		process.exit(0);
 	}
 })();
 `;

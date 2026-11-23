@@ -110,23 +110,21 @@ for (let i = 0; i < argv.length; i++) {
 
 if (isHelp) {
 	process.stdout.write("Usage: agent-browser " + (subcommand || "<command>") + " [options]\\n");
-	process.exit(0);
 } else if (subcommand === "hang") {
 	setTimeout(() => process.exit(0), 60000);
 } else if (subcommand === "flood") {
+	const lines = [];
 	for (let i = 0; i < 2500; i++) {
-		process.stdout.write("line-" + i + "-payload\\n");
+		lines.push("line-" + i + "-payload");
 	}
-	process.exit(0);
+	process.stdout.write(lines.join("\\n") + "\\n");
 } else if (subcommand === "fail") {
 	process.stderr.write("simulated browser error\\n");
-	process.exit(2);
+	process.exitCode = 2;
 } else if (subcommand === "doctor") {
 	process.stdout.write("agent-browser doctor: OK (chromium ready)\\n");
-	process.exit(0);
 } else if (subcommand === "skills") {
 	process.stdout.write("# agent-browser core skill\\nopen -> snapshot -i -> click @e1 -> screenshot -> close\\n");
-	process.exit(0);
 } else if (subcommand === "screenshot") {
 	let targetPath;
 	let shotEndOfFlags = false;
@@ -154,13 +152,10 @@ if (isHelp) {
 	} else {
 		process.stdout.write("Screenshot captured\\n");
 	}
-	process.exit(0);
 } else if (subcommand === "snapshot") {
 	process.stdout.write("- document:\\n  - button \\"Submit\\" [@e1]\\n  - textbox \\"Search\\" [@e2]\\n");
-	process.exit(0);
 } else {
 	process.stdout.write(JSON.stringify({ ok: true, subcommand, argv, session: process.env.AGENT_BROWSER_SESSION }) + "\\n");
-	process.exit(0);
 }
 `;
 	await writeFile(binPath, script, "utf8");
