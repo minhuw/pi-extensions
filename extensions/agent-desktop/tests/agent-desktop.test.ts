@@ -123,28 +123,42 @@ if (argv.includes("hang")) {
 	let explicitSession;
 	let subcommand;
 	let subIdx = -1;
+	let endOfFlags = false;
+	let isHelp = false;
 
 	for (let i = 0; i < argv.length; i++) {
 		const tok = argv[i];
-		if (tok === "--session" || tok === "-s") {
-			explicitSession = argv[i + 1];
-			i++;
-			continue;
-		}
-		if (tok.startsWith("--session=")) {
-			explicitSession = tok.slice("--session=".length);
-			continue;
-		}
-		if (tok.startsWith("-s=")) {
-			explicitSession = tok.slice("-s=".length);
-			continue;
-		}
-		if (subcommand === undefined) {
+		if (!endOfFlags) {
+			if (tok === "--") {
+				endOfFlags = true;
+				continue;
+			}
+			if (tok === "--session" || tok === "-s") {
+				explicitSession = argv[i + 1];
+				i++;
+				continue;
+			}
+			if (tok.startsWith("--session=")) {
+				explicitSession = tok.slice("--session=".length);
+				continue;
+			}
+			if (tok.startsWith("-s=")) {
+				explicitSession = tok.slice("-s=".length);
+				continue;
+			}
 			if (globalValueFlags.has(tok)) {
 				i++;
 				continue;
 			}
-			if (tok === "--help" || tok === "-h" || tok === "--version" || tok === "-V") {
+			if (subcommand === "screenshot" && screenshotValueFlags.has(tok)) {
+				i++;
+				continue;
+			}
+			if (tok === "--help" || tok === "-h") {
+				isHelp = true;
+				continue;
+			}
+			if (subcommand === undefined && (tok === "--version" || tok === "-V")) {
 				subcommand = tok;
 				subIdx = i;
 				continue;
@@ -152,12 +166,17 @@ if (argv.includes("hang")) {
 			if (tok.startsWith("-")) {
 				continue;
 			}
+		}
+		if (subcommand === undefined) {
 			subcommand = tok;
 			subIdx = i;
 		}
 	}
 
-	if (subcommand === "flood") {
+	if (isHelp) {
+		process.stdout.write("Usage: agent-desktop " + (subcommand || "<command>") + " [options]\\n");
+		process.exit(0);
+	} else if (subcommand === "flood") {
 		for (let i = 0; i < 2500; i++) {
 			process.stdout.write("line-" + i + "-payload\\n");
 		}
@@ -293,22 +312,29 @@ if (argv.includes("hang")) {
 			process.exit(exitCode);
 		}
 		let targetPath;
+		let shotEndOfFlags = false;
 		for (let i = subIdx + 1; i < argv.length; i++) {
 			const tok = argv[i];
-			if (tok === "--output" || tok === "-o") {
-				targetPath = argv[i + 1];
-				i++;
-				continue;
+			if (!shotEndOfFlags) {
+				if (tok === "--") {
+					shotEndOfFlags = true;
+					continue;
+				}
+				if (tok === "--output" || tok === "-o") {
+					targetPath = argv[i + 1];
+					i++;
+					continue;
+				}
+				if (tok.startsWith("--output=")) {
+					targetPath = tok.slice("--output=".length);
+					continue;
+				}
+				if (globalValueFlags.has(tok) || screenshotValueFlags.has(tok)) {
+					i++;
+					continue;
+				}
+				if (tok.startsWith("-")) continue;
 			}
-			if (tok.startsWith("--output=")) {
-				targetPath = tok.slice("--output=".length);
-				continue;
-			}
-			if (globalValueFlags.has(tok) || screenshotValueFlags.has(tok)) {
-				i++;
-				continue;
-			}
-			if (tok.startsWith("-")) continue;
 			if (targetPath === undefined) {
 				targetPath = tok;
 			}
@@ -841,6 +867,222 @@ describe("3 — Direct execution (runAgentDesktop)", () => {
 		expect(missingRes.stderr).toContain(INSTALL_HINT);
 	});
 
+	it("AC-16 respects -- end-of-flags and --help/-h without misclassifying subcommands, targets, or headed gating", async () => {
+		// Tokens after -- are positional, not flags
+		expect(
+			parseAgentDesktopArgv([
+				"type",
+				"@s1:e1",
+				"--",
+				"--headed",
+				"--stdin",
+				"--session",
+				"fake-sess",
+				"--help",
+				"-h",
+			]),
+		).toEqual({
+			explicitSession: undefined,
+			hasHeadedFlag: false,
+			hasStdinFlag: false,
+			subcommand: "type",
+			sessionAction: undefined,
+			sessionTargetId: undefined,
+			screenshotPath: undefined,
+		});
+		expect(parseAgentDesktopArgv(["screenshot", "--app", "Finder", "--", "--shot.png"])).toEqual({
+			explicitSession: undefined,
+			hasHeadedFlag: false,
+			hasStdinFlag: false,
+			subcommand: "screenshot",
+			sessionAction: undefined,
+			sessionTargetId: undefined,
+			screenshotPath: "--shot.png",
+		});
+		expect(parseAgentDesktopArgv(["session", "end", "--", "--weird-id"])).toEqual({
+			explicitSession: undefined,
+			hasHeadedFlag: false,
+			hasStdinFlag: false,
+			subcommand: "session",
+			sessionAction: "end",
+			sessionTargetId: "--weird-id",
+			screenshotPath: undefined,
+		});
+		expect(parseAgentDesktopArgv(["mouse-click", "--", "--help"])).toEqual({
+			explicitSession: undefined,
+			hasHeadedFlag: false,
+			hasStdinFlag: false,
+			subcommand: "mouse-click",
+			sessionAction: undefined,
+			sessionTargetId: undefined,
+			screenshotPath: undefined,
+		});
+		expect(parseAgentDesktopArgv(["screenshot", "--", "--help"])).toEqual({
+			explicitSession: undefined,
+			hasHeadedFlag: false,
+			hasStdinFlag: false,
+			subcommand: "screenshot",
+			sessionAction: undefined,
+			sessionTargetId: undefined,
+			screenshotPath: "--help",
+		});
+		expect(parseAgentDesktopArgv(["--", "click", "@s1:e1"])).toEqual({
+			explicitSession: undefined,
+			hasHeadedFlag: false,
+			hasStdinFlag: false,
+			subcommand: "click",
+			sessionAction: undefined,
+			sessionTargetId: undefined,
+			screenshotPath: undefined,
+		});
+
+		// --help / -h before -- turns the invocation into help without physical/session/screenshot targets
+		expect(parseAgentDesktopArgv(["mouse-click", "--help"])).toEqual({
+			explicitSession: undefined,
+			hasHeadedFlag: false,
+			hasStdinFlag: false,
+			subcommand: "--help",
+			sessionAction: undefined,
+			sessionTargetId: undefined,
+			screenshotPath: undefined,
+		});
+		expect(parseAgentDesktopArgv(["double-click", "@s1:e1", "-h"])).toEqual({
+			explicitSession: undefined,
+			hasHeadedFlag: false,
+			hasStdinFlag: false,
+			subcommand: "-h",
+			sessionAction: undefined,
+			sessionTargetId: undefined,
+			screenshotPath: undefined,
+		});
+		expect(parseAgentDesktopArgv(["screenshot", "existing.png", "--help"])).toEqual({
+			explicitSession: undefined,
+			hasHeadedFlag: false,
+			hasStdinFlag: false,
+			subcommand: "--help",
+			sessionAction: undefined,
+			sessionTargetId: undefined,
+			screenshotPath: undefined,
+		});
+		expect(parseAgentDesktopArgv(["session", "end", "sess-1", "-h"])).toEqual({
+			explicitSession: undefined,
+			hasHeadedFlag: false,
+			hasStdinFlag: false,
+			subcommand: "-h",
+			sessionAction: undefined,
+			sessionTargetId: undefined,
+			screenshotPath: undefined,
+		});
+		expect(parseAgentDesktopArgv(["--help", "screenshot", "out.png"])).toEqual({
+			explicitSession: undefined,
+			hasHeadedFlag: false,
+			hasStdinFlag: false,
+			subcommand: "--help",
+			sessionAction: undefined,
+			sessionTargetId: undefined,
+			screenshotPath: undefined,
+		});
+
+		// Execution: physical subcommand with --help / -h must NOT fail the headed gate
+		const physHelp = await runAgentDesktop({
+			argv: ["mouse-click", "--help"],
+			cwd: projectCwd,
+		});
+		expect(physHelp.ok).toBe(true);
+		expect((await readInvocations()).at(-1)?.argv).toEqual(["mouse-click", "--help"]);
+
+		const physShortHelpWithHeaded = await runAgentDesktop({
+			argv: ["double-click", "-h"],
+			headed: true,
+			cwd: projectCwd,
+		});
+		expect(physShortHelpWithHeaded.ok).toBe(true);
+		expect((await readInvocations()).at(-1)?.argv).toEqual(["double-click", "-h"]);
+
+		// Execution: --help after -- is NOT help, so physical subcommand still enforces headed gate
+		const physAfterDash = await runAgentDesktop({
+			argv: ["mouse-click", "--", "--help"],
+			cwd: projectCwd,
+		});
+		expect(physAfterDash.ok).toBe(false);
+		expect(physAfterDash.status).toBe("error");
+
+		// Execution: literal --headed after -- is allowed headlessly
+		const literalHeaded = await runAgentDesktop({
+			argv: ["type", "@s1:e1", "--", "--headed"],
+			cwd: projectCwd,
+		});
+		expect(literalHeaded.ok).toBe(true);
+		expect((await readInvocations()).at(-1)?.argv).toEqual(["type", "@s1:e1", "--", "--headed"]);
+
+		// Execution: screenshot --help does not append a temp path or attach a pre-existing file
+		const preExistingShot = path.join(projectCwd, "preexisting.png");
+		await writeFile(preExistingShot, Buffer.from(ONE_BY_ONE_PNG_BASE64, "base64"));
+
+		const shotHelp = await runAgentDesktop({
+			argv: ["screenshot", "--help"],
+			cwd: projectCwd,
+		});
+		expect(shotHelp.ok).toBe(true);
+		expect(shotHelp.image).toBeUndefined();
+		expect((await readInvocations()).at(-1)?.argv).toEqual(["screenshot", "--help"]);
+
+		const shotExistingHelp = await runAgentDesktop({
+			argv: ["screenshot", "preexisting.png", "-h"],
+			cwd: projectCwd,
+		});
+		expect(shotExistingHelp.ok).toBe(true);
+		expect(shotExistingHelp.image).toBeUndefined();
+		expect((await readInvocations()).at(-1)?.argv).toEqual(["screenshot", "preexisting.png", "-h"]);
+
+		// Execution: screenshot -- --shot.png writes and attaches --shot.png
+		const hyphenShot = await runAgentDesktop({
+			argv: ["screenshot", "--", "--shot.png"],
+			cwd: projectCwd,
+		});
+		expect(hyphenShot.ok).toBe(true);
+		expect(hyphenShot.image).toBeDefined();
+		expect(hyphenShot.image!.path).toBe(path.join(projectCwd, "--shot.png"));
+		expect((await readInvocations()).at(-1)?.argv).toEqual(["screenshot", "--", "--shot.png"]);
+	});
+
+	it("AC-16 distinguishes missing or non-directory cwd from missing CLI binary on ENOENT", async () => {
+		// Nonexistent cwd with valid binary -> working-directory error, NOT unavailable/INSTALL_HINT
+		const missingCwd = path.join(sandboxRoot, "does-not-exist-dir");
+		const missingCwdRes = await runAgentDesktop({
+			argv: ["status"],
+			cwd: missingCwd,
+		});
+		expect(missingCwdRes.ok).toBe(false);
+		expect(missingCwdRes.status).toBe("error");
+		expect(missingCwdRes.message).toContain("Working directory does not exist");
+		expect(missingCwdRes.message).toContain(missingCwd);
+		expect(missingCwdRes.stderr).not.toContain(INSTALL_HINT);
+
+		// File path passed as cwd -> working-directory error, NOT unavailable/INSTALL_HINT
+		const notADirPath = path.join(sandboxRoot, "not-a-dir.txt");
+		await writeFile(notADirPath, "hello", "utf8");
+		const notADirRes = await runAgentDesktop({
+			argv: ["status"],
+			cwd: notADirPath,
+		});
+		expect(notADirRes.ok).toBe(false);
+		expect(notADirRes.status).toBe("error");
+		expect(notADirRes.message).toContain("Working directory is not a directory");
+		expect(notADirRes.message).toContain(notADirPath);
+		expect(notADirRes.stderr).not.toContain(INSTALL_HINT);
+
+		// Existing cwd with missing binary -> unavailable with INSTALL_HINT
+		const missingBinRes = await runAgentDesktop({
+			argv: ["status"],
+			binary: path.join(sandboxRoot, "missing-agent-desktop-bin"),
+			cwd: projectCwd,
+		});
+		expect(missingBinRes.ok).toBe(false);
+		expect(missingBinRes.status).toBe("unavailable");
+		expect(missingBinRes.message).toBe(INSTALL_HINT);
+	});
+
 	it("resolves and executes the bundled agent-desktop binary from node_modules when AGENT_DESKTOP_BIN is unset", async () => {
 		const savedBin = process.env.AGENT_DESKTOP_BIN;
 		delete process.env.AGENT_DESKTOP_BIN;
@@ -1247,6 +1489,69 @@ describe("4 — Real Pi session integration, UI status, session lifecycle, and /
 			if (!disposed) {
 				await h.dispose();
 			}
+		}
+	});
+
+	it("AC-16 treats blank session/cwd as omitted and preserves session tracking on --help in tool execute()", async () => {
+		const h = await startPiSession();
+		try {
+			const expectedSession = deriveDesktopSessionId({
+				sessionManager: h.session.sessionManager,
+			});
+
+			// 1. Physical subcommand --help and screenshot --help while idle do not fail headed gate,
+			// do not attach an image, and do not mark session active
+			h.faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("agent_desktop", { argv: ["mouse-click", "--help"] }),
+					fauxToolCall("agent_desktop", { argv: ["screenshot", "--help"] }),
+				]),
+				fauxAssistantMessage("shown desktop help"),
+			]);
+			await h.session.prompt("show desktop help");
+			expect(h.ui.currentStatuses.get(AGENT_DESKTOP_STATUS_KEY)).toBeUndefined();
+			expect(
+				h.toolResultMessages().some((m) => (m.content ?? []).some((b) => b.type === "image")),
+			).toBe(false);
+
+			// 2. Blank/whitespace session and cwd fall back to derived session and session cwd
+			h.faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("agent_desktop", {
+						argv: ["snapshot", "--app", "Finder", "-i"],
+						session: "   ",
+						cwd: "   ",
+					}),
+					fauxToolCall("agent_desktop", {
+						argv: ["status"],
+						session: "",
+						cwd: "",
+					}),
+				]),
+				fauxAssistantMessage("ran with blank session and cwd"),
+			]);
+			await h.session.prompt("run with blank session and cwd");
+			expect(h.ui.currentStatuses.get(AGENT_DESKTOP_STATUS_KEY)).toBe(`desktop: ${expectedSession}`);
+
+			const invocations = await readInvocations();
+			const lastTwo = invocations.slice(-2);
+			expect(lastTwo).toHaveLength(2);
+			for (const inv of lastTwo) {
+				expect(inv.session).toBe(expectedSession);
+				expect(fs.realpathSync(inv.cwd)).toBe(fs.realpathSync(projectCwd));
+			}
+
+			// 3. session end --help while active does NOT drop active session tracking
+			h.faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("agent_desktop", { argv: ["session", "end", "--help"] }),
+				]),
+				fauxAssistantMessage("shown session end help"),
+			]);
+			await h.session.prompt("show session end help");
+			expect(h.ui.currentStatuses.get(AGENT_DESKTOP_STATUS_KEY)).toBe(`desktop: ${expectedSession}`);
+		} finally {
+			await h.dispose();
 		}
 	});
 

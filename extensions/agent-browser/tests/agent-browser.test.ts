@@ -79,19 +79,39 @@ const shotValueFlags = new Set(["--selector", "-S", "--format", "--quality", "-q
 
 let subcommand;
 let subIdx = -1;
+let endOfFlags = false;
+let isHelp = false;
 for (let i = 0; i < argv.length; i++) {
 	const tok = argv[i];
-	if (valueFlags.has(tok)) {
-		i++;
-		continue;
+	if (!endOfFlags) {
+		if (tok === "--") {
+			endOfFlags = true;
+			continue;
+		}
+		if (valueFlags.has(tok)) {
+			i++;
+			continue;
+		}
+		if (subcommand === "screenshot" && shotValueFlags.has(tok)) {
+			i++;
+			continue;
+		}
+		if (tok === "--help" || tok === "-h") {
+			isHelp = true;
+			continue;
+		}
+		if (tok.startsWith("-")) continue;
 	}
-	if (tok.startsWith("-")) continue;
-	subcommand = tok;
-	subIdx = i;
-	break;
+	if (subcommand === undefined) {
+		subcommand = tok;
+		subIdx = i;
+	}
 }
 
-if (subcommand === "hang") {
+if (isHelp) {
+	process.stdout.write("Usage: agent-browser " + (subcommand || "<command>") + " [options]\\n");
+	process.exit(0);
+} else if (subcommand === "hang") {
 	setTimeout(() => process.exit(0), 60000);
 } else if (subcommand === "flood") {
 	for (let i = 0; i < 2500; i++) {
@@ -109,13 +129,20 @@ if (subcommand === "hang") {
 	process.exit(0);
 } else if (subcommand === "screenshot") {
 	let targetPath;
+	let shotEndOfFlags = false;
 	for (let i = subIdx + 1; i < argv.length; i++) {
 		const tok = argv[i];
-		if (valueFlags.has(tok) || shotValueFlags.has(tok)) {
-			i++;
-			continue;
+		if (!shotEndOfFlags) {
+			if (tok === "--") {
+				shotEndOfFlags = true;
+				continue;
+			}
+			if (valueFlags.has(tok) || shotValueFlags.has(tok)) {
+				i++;
+				continue;
+			}
+			if (tok.startsWith("-")) continue;
 		}
-		if (tok.startsWith("-")) continue;
 		targetPath = tok;
 		break;
 	}
@@ -491,6 +518,187 @@ describe("AC-2 & AC-3 — Direct argv execution, session isolation, and inline s
 		expect(customShot.image!.path).toBe(customFullPath);
 		expect(fs.existsSync(customFullPath)).toBe(true);
 	});
+
+	it("AC-16 respects -- end-of-flags and --help/-h without misclassifying subcommands or targets", async () => {
+		// Tokens after -- are positional, not flags
+		expect(parseAgentBrowserArgv(["screenshot", "--", "--hyphen.png"])).toEqual({
+			explicitSession: undefined,
+			subcommand: "screenshot",
+			screenshotPath: "--hyphen.png",
+			screenshotBase64: false,
+		});
+		expect(parseAgentBrowserArgv(["screenshot", "--", "--base64"])).toEqual({
+			explicitSession: undefined,
+			subcommand: "screenshot",
+			screenshotPath: "--base64",
+			screenshotBase64: false,
+		});
+		expect(parseAgentBrowserArgv(["screenshot", "--", "--session", "fake-sess"])).toEqual({
+			explicitSession: undefined,
+			subcommand: "screenshot",
+			screenshotPath: "--session",
+			screenshotBase64: false,
+		});
+		expect(
+			parseAgentBrowserArgv([
+				"--session",
+				"real-sess",
+				"fill",
+				"@e1",
+				"--",
+				"--session",
+				"fake-sess",
+				"-s",
+				"fake-short",
+				"--help",
+				"-h",
+			]),
+		).toEqual({
+			explicitSession: "real-sess",
+			subcommand: "fill",
+			screenshotPath: undefined,
+			screenshotBase64: false,
+		});
+		expect(parseAgentBrowserArgv(["--", "open", "https://example.com"])).toEqual({
+			explicitSession: undefined,
+			subcommand: "open",
+			screenshotPath: undefined,
+			screenshotBase64: false,
+		});
+		expect(parseAgentBrowserArgv(["screenshot", "--", "--help"])).toEqual({
+			explicitSession: undefined,
+			subcommand: "screenshot",
+			screenshotPath: "--help",
+			screenshotBase64: false,
+		});
+
+		// --help / -h before -- turns the invocation into help without screenshot/close targets
+		expect(parseAgentBrowserArgv(["screenshot", "--help"])).toEqual({
+			explicitSession: undefined,
+			subcommand: "--help",
+			screenshotPath: undefined,
+			screenshotBase64: false,
+		});
+		expect(parseAgentBrowserArgv(["screenshot", "existing.png", "-h"])).toEqual({
+			explicitSession: undefined,
+			subcommand: "-h",
+			screenshotPath: undefined,
+			screenshotBase64: false,
+		});
+		expect(parseAgentBrowserArgv(["screenshot", "--base64", "--help"])).toEqual({
+			explicitSession: undefined,
+			subcommand: "--help",
+			screenshotPath: undefined,
+			screenshotBase64: false,
+		});
+		expect(parseAgentBrowserArgv(["close", "--help"])).toEqual({
+			explicitSession: undefined,
+			subcommand: "--help",
+			screenshotPath: undefined,
+			screenshotBase64: false,
+		});
+		expect(parseAgentBrowserArgv(["close", "-h"])).toEqual({
+			explicitSession: undefined,
+			subcommand: "-h",
+			screenshotPath: undefined,
+			screenshotBase64: false,
+		});
+		expect(parseAgentBrowserArgv(["--help", "screenshot", "out.png"])).toEqual({
+			explicitSession: undefined,
+			subcommand: "--help",
+			screenshotPath: undefined,
+			screenshotBase64: false,
+		});
+
+		// Execution: screenshot --help must not append a temp path or attach an existing image
+		const preExistingShot = path.join(projectCwd, "preexisting.png");
+		await writeFile(preExistingShot, Buffer.from(ONE_BY_ONE_PNG_BASE64, "base64"));
+
+		const shotHelp = await runAgentBrowser({
+			argv: ["screenshot", "--help"],
+			session: "pi-help-test",
+			cwd: projectCwd,
+		});
+		expect(shotHelp.ok).toBe(true);
+		expect(shotHelp.image).toBeUndefined();
+		expect((await readInvocations()).at(-1)?.argv).toEqual(["screenshot", "--help"]);
+
+		const shotExistingHelp = await runAgentBrowser({
+			argv: ["screenshot", "preexisting.png", "-h"],
+			session: "pi-help-test",
+			cwd: projectCwd,
+		});
+		expect(shotExistingHelp.ok).toBe(true);
+		expect(shotExistingHelp.image).toBeUndefined();
+		expect((await readInvocations()).at(-1)?.argv).toEqual(["screenshot", "preexisting.png", "-h"]);
+
+		// Execution: close --help must not prepend --session
+		const closeHelp = await runAgentBrowser({
+			argv: ["close", "--help"],
+			session: "pi-help-test",
+			cwd: projectCwd,
+		});
+		expect(closeHelp.ok).toBe(true);
+		expect((await readInvocations()).at(-1)?.argv).toEqual(["close", "--help"]);
+
+		// Execution: screenshot -- --hyphen.png treats --hyphen.png as the target path
+		const hyphenShot = await runAgentBrowser({
+			argv: ["screenshot", "--", "--hyphen.png"],
+			session: "pi-help-test",
+			cwd: projectCwd,
+		});
+		expect(hyphenShot.ok).toBe(true);
+		expect(hyphenShot.image).toBeDefined();
+		expect(hyphenShot.image!.path).toBe(path.join(projectCwd, "--hyphen.png"));
+		expect((await readInvocations()).at(-1)?.argv).toEqual(["screenshot", "--", "--hyphen.png"]);
+	});
+
+	it("AC-16 normalizes blank session/cwd and distinguishes missing cwd from missing CLI on ENOENT", async () => {
+		// Blank session/cwd treated as omitted
+		const blankRes = await runAgentBrowser({
+			argv: ["doctor"],
+			session: "   ",
+			cwd: "   ",
+		});
+		expect(blankRes.ok).toBe(true);
+		expect(blankRes.session).toBe("pi-default");
+		expect(blankRes.cwd).toBe(process.cwd());
+
+		// Nonexistent cwd with valid binary -> working-directory error, NOT unavailable/INSTALL_HINT
+		const missingCwd = path.join(sandboxRoot, "does-not-exist-dir");
+		const missingCwdRes = await runAgentBrowser({
+			argv: ["doctor"],
+			cwd: missingCwd,
+		});
+		expect(missingCwdRes.ok).toBe(false);
+		expect(missingCwdRes.status).toBe("error");
+		expect(missingCwdRes.message).toContain("Working directory does not exist");
+		expect(missingCwdRes.message).toContain(missingCwd);
+		expect(missingCwdRes.stderr).not.toContain("npm install -g agent-browser");
+
+		// File path passed as cwd -> working-directory error, NOT unavailable/INSTALL_HINT
+		const notADirPath = path.join(sandboxRoot, "not-a-dir.txt");
+		await writeFile(notADirPath, "hello", "utf8");
+		const notADirRes = await runAgentBrowser({
+			argv: ["doctor"],
+			cwd: notADirPath,
+		});
+		expect(notADirRes.ok).toBe(false);
+		expect(notADirRes.status).toBe("error");
+		expect(notADirRes.message).toContain("Working directory is not a directory");
+		expect(notADirRes.message).toContain(notADirPath);
+		expect(notADirRes.stderr).not.toContain("npm install -g agent-browser");
+
+		// Existing cwd with missing binary -> unavailable with INSTALL_HINT
+		const missingBinRes = await runAgentBrowser({
+			argv: ["doctor"],
+			binary: path.join(sandboxRoot, "missing-agent-browser-bin"),
+			cwd: projectCwd,
+		});
+		expect(missingBinRes.ok).toBe(false);
+		expect(missingBinRes.status).toBe("unavailable");
+		expect(missingBinRes.message).toBe(INSTALL_HINT);
+	});
 });
 
 describe("AC-2, AC-3, AC-4 — Real Pi session integration, UI status, daemon cleanup, and /agent-browser", () => {
@@ -738,6 +946,63 @@ describe("AC-2, AC-3, AC-4 — Real Pi session integration, UI status, daemon cl
 			await h.session.prompt("/agent-browser close");
 			expect(h.ui.notes.at(-1)?.message).toContain(`Closed agent-browser session(s): ${secondSession}`);
 			expect(h.ui.currentStatuses.get(AGENT_BROWSER_STATUS_KEY)).toBeUndefined();
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("AC-16 treats blank session/cwd as omitted and keeps session tracking intact on --help in tool execute()", async () => {
+		const h = await startPiSession();
+		try {
+			const expectedSession = deriveBrowserSessionId({
+				sessionManager: h.session.sessionManager,
+			});
+
+			// 1. screenshot --help while idle does not mark session active or attach an image
+			h.faux.setResponses([
+				fauxAssistantMessage([fauxToolCall("agent_browser", { argv: ["screenshot", "--help"] })]),
+				fauxAssistantMessage("shown help"),
+			]);
+			await h.session.prompt("show screenshot help");
+			expect(h.ui.currentStatuses.get(AGENT_BROWSER_STATUS_KEY)).toBeUndefined();
+			expect(
+				h.toolResultMessages().some((m) => (m.content ?? []).some((b) => b.type === "image")),
+			).toBe(false);
+
+			// 2. Blank/whitespace session and cwd fall back to derived session and session cwd
+			h.faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("agent_browser", {
+						argv: ["open", "https://example.com"],
+						session: "   ",
+						cwd: "   ",
+					}),
+					fauxToolCall("agent_browser", {
+						argv: ["snapshot", "-i"],
+						session: "",
+						cwd: "",
+					}),
+				]),
+				fauxAssistantMessage("opened with default session and cwd"),
+			]);
+			await h.session.prompt("open with blank session and cwd");
+			expect(h.ui.currentStatuses.get(AGENT_BROWSER_STATUS_KEY)).toBe(`browser: ${expectedSession}`);
+
+			const invocations = await readInvocations();
+			const lastTwo = invocations.slice(-2);
+			expect(lastTwo).toHaveLength(2);
+			for (const inv of lastTwo) {
+				expect(inv.session).toBe(expectedSession);
+				expect(fs.realpathSync(inv.cwd)).toBe(fs.realpathSync(projectCwd));
+			}
+
+			// 3. close --help while active does NOT drop active session tracking
+			h.faux.setResponses([
+				fauxAssistantMessage([fauxToolCall("agent_browser", { argv: ["close", "--help"] })]),
+				fauxAssistantMessage("shown close help"),
+			]);
+			await h.session.prompt("show close help");
+			expect(h.ui.currentStatuses.get(AGENT_BROWSER_STATUS_KEY)).toBe(`browser: ${expectedSession}`);
 		} finally {
 			await h.dispose();
 		}

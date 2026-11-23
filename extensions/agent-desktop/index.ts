@@ -269,6 +269,8 @@ export function parseAgentDesktopArgv(argv: readonly string[]): ParsedAgentDeskt
 	let sessionAction: string | undefined;
 	let sessionTargetId: string | undefined;
 	let screenshotPath: string | undefined;
+	let endOfFlags = false;
+	let isHelp = false;
 
 	for (let i = 0; i < argv.length; i++) {
 		const token = argv[i]!;
@@ -276,58 +278,79 @@ export function parseAgentDesktopArgv(argv: readonly string[]): ParsedAgentDeskt
 			continue;
 		}
 
-		if (token === "--headed" || token.startsWith("--headed=")) {
-			hasHeadedFlag = true;
-			continue;
-		}
-
-		if (token === "--stdin" || token === "--stdin=true") {
-			hasStdinFlag = true;
-			continue;
-		}
-
-		if (token === "--session") {
-			const next = argv[i + 1];
-			const normalized = normalizeOptionalString(next);
-			if (normalized !== undefined) {
-				explicitSession = normalized;
+		if (!endOfFlags) {
+			if (token === "--") {
+				endOfFlags = true;
+				continue;
 			}
-			i++;
-			continue;
-		}
 
-		if (token.startsWith("--session=")) {
-			const val = normalizeOptionalString(token.slice("--session=".length));
-			if (val !== undefined) {
-				explicitSession = val;
+			if (token === "--headed" || token.startsWith("--headed=")) {
+				hasHeadedFlag = true;
+				continue;
 			}
-			continue;
-		}
 
-		if (subcommand === undefined) {
+			if (token === "--stdin" || token === "--stdin=true") {
+				hasStdinFlag = true;
+				continue;
+			}
+
+			if (token === "--session") {
+				const next = argv[i + 1];
+				const normalized = normalizeOptionalString(next);
+				if (normalized !== undefined) {
+					explicitSession = normalized;
+				}
+				i++;
+				continue;
+			}
+
+			if (token.startsWith("--session=")) {
+				const val = normalizeOptionalString(token.slice("--session=".length));
+				if (val !== undefined) {
+					explicitSession = val;
+				}
+				continue;
+			}
+
 			if (GLOBAL_VALUE_FLAGS.has(token)) {
 				i++;
 				continue;
 			}
-			if (token === "--help" || token === "-h" || token === "--version" || token === "-V") {
+
+			if (subcommand === "screenshot" && SCREENSHOT_VALUE_FLAGS.has(token)) {
+				i++;
+				continue;
+			}
+
+			if (token === "--help" || token === "-h") {
+				isHelp = true;
+				subcommand = token;
+				sessionAction = undefined;
+				sessionTargetId = undefined;
+				screenshotPath = undefined;
+				continue;
+			}
+
+			if (subcommand === undefined && (token === "--version" || token === "-V")) {
 				subcommand = token;
 				continue;
 			}
+
 			if (token.startsWith("-")) {
 				continue;
 			}
+		}
+
+		if (isHelp) {
+			continue;
+		}
+
+		if (subcommand === undefined) {
 			subcommand = token;
 			continue;
 		}
 
 		if (subcommand === "session") {
-			if (GLOBAL_VALUE_FLAGS.has(token)) {
-				i++;
-				continue;
-			}
-			if (token.startsWith("-")) {
-				continue;
-			}
 			if (sessionAction === undefined) {
 				sessionAction = token;
 				continue;
@@ -339,17 +362,8 @@ export function parseAgentDesktopArgv(argv: readonly string[]): ParsedAgentDeskt
 			continue;
 		}
 
-		if (subcommand === "screenshot") {
-			if (GLOBAL_VALUE_FLAGS.has(token) || SCREENSHOT_VALUE_FLAGS.has(token)) {
-				i++;
-				continue;
-			}
-			if (token.startsWith("-")) {
-				continue;
-			}
-			if (screenshotPath === undefined) {
-				screenshotPath = token;
-			}
+		if (subcommand === "screenshot" && screenshotPath === undefined) {
+			screenshotPath = token;
 		}
 	}
 
@@ -573,6 +587,26 @@ export function resolveBundledAgentDesktop(
 	};
 }
 
+async function checkWorkingDirectoryError(cwd: string): Promise<string | undefined> {
+	try {
+		const st = await stat(cwd);
+		if (!st.isDirectory()) {
+			return `Working directory is not a directory: ${cwd}`;
+		}
+		return undefined;
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code === "ENOENT") {
+			return `Working directory does not exist: ${cwd}`;
+		}
+		if (code === "ENOTDIR") {
+			return `Working directory is not a directory: ${cwd}`;
+		}
+		const detail = err instanceof Error ? err.message : String(err);
+		return `Working directory is not accessible (${cwd}): ${detail}`;
+	}
+}
+
 export async function runAgentDesktop(
 	options: RunAgentDesktopOptions,
 ): Promise<AgentDesktopRunResult> {
@@ -639,8 +673,11 @@ export async function runAgentDesktop(
 			});
 		}
 
+		const isHelpOrVersion =
+			parsed.subcommand !== undefined && HELP_OR_VERSION_SUBCOMMANDS.has(parsed.subcommand);
+
 		let finalArgv = [...cleanedArgv];
-		if (headed && (!parsed.subcommand || !HELP_OR_VERSION_SUBCOMMANDS.has(parsed.subcommand))) {
+		if (headed && !isHelpOrVersion) {
 			finalArgv = ["--headed", ...finalArgv];
 		}
 		if (parsed.subcommand === "screenshot" && !parsed.screenshotPath) {
@@ -653,7 +690,8 @@ export async function runAgentDesktop(
 		const stderrCapture = new BoundedOutput(MAX_CAPTURE_BYTES);
 
 		const normalizedStdin = normalizeOptionalStdin(options.stdin);
-		const usePipeStdin = normalizedStdin !== undefined || parsed.hasStdinFlag;
+		const usePipeStdin =
+			normalizedStdin !== undefined || (parsed.hasStdinFlag && !isHelpOrVersion);
 
 		const spawnEnv: NodeJS.ProcessEnv = {
 			...process.env,
@@ -668,13 +706,44 @@ export async function runAgentDesktop(
 			spawnEnv.AGENT_DESKTOP_MACOS_HELPER_PATH = bundled.macosHelperPath;
 		}
 
-		const child = spawn(binary, finalArgv, {
-			cwd,
-			shell: false,
-			windowsHide: true,
-			stdio: [usePipeStdin ? "pipe" : "ignore", "pipe", "pipe"],
-			env: spawnEnv,
-		});
+		const handleSpawnError = async (err: NodeJS.ErrnoException): Promise<AgentDesktopRunResult> => {
+			if (err.code === "ENOENT" || err.code === "ENOTDIR") {
+				const cwdError = await checkWorkingDirectoryError(cwd);
+				if (cwdError) {
+					return makeResult({
+						status: "error",
+						stderr: cwdError,
+						message: cwdError,
+					});
+				}
+				if (err.code === "ENOENT") {
+					return makeResult({
+						status: "unavailable",
+						stderr: INSTALL_HINT,
+						message: INSTALL_HINT,
+					});
+				}
+			}
+			const errMsg = `Failed to execute ${binary}: ${err.message}`;
+			return makeResult({
+				status: "error",
+				stderr: errMsg,
+				message: errMsg,
+			});
+		};
+
+		let child: ReturnType<typeof spawn>;
+		try {
+			child = spawn(binary, finalArgv, {
+				cwd,
+				shell: false,
+				windowsHide: true,
+				stdio: [usePipeStdin ? "pipe" : "ignore", "pipe", "pipe"],
+				env: spawnEnv,
+			});
+		} catch (err) {
+			return await handleSpawnError(err as NodeJS.ErrnoException);
+		}
 
 		if (usePipeStdin && child.stdin) {
 			child.stdin.on("error", () => {});
@@ -745,19 +814,7 @@ export async function runAgentDesktop(
 		child.stderr?.destroy();
 
 		if (spawnError) {
-			if (spawnError.code === "ENOENT") {
-				return makeResult({
-					status: "unavailable",
-					stderr: INSTALL_HINT,
-					message: INSTALL_HINT,
-				});
-			}
-			const errMsg = `Failed to execute ${binary}: ${spawnError.message}`;
-			return makeResult({
-				status: "error",
-				stderr: errMsg,
-				message: errMsg,
-			});
+			return await handleSpawnError(spawnError);
 		}
 
 		const rawStdout = stdoutCapture.text();

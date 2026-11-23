@@ -199,59 +199,74 @@ export function parseAgentBrowserArgv(argv: readonly string[]): ParsedAgentBrows
 	let subcommand: string | undefined;
 	let screenshotPath: string | undefined;
 	let screenshotBase64 = false;
+	let endOfFlags = false;
+	let isHelp = false;
 
 	for (let i = 0; i < argv.length; i++) {
 		const token = argv[i]!;
-		if (token === "--session" || token === "-s") {
-			const next = argv[i + 1];
-			if (typeof next === "string" && next.length > 0) {
-				explicitSession = next;
-			}
-			i++;
-			continue;
-		}
-		if (token.startsWith("--session=")) {
-			const val = token.slice("--session=".length);
-			if (val.length > 0) explicitSession = val;
-			continue;
-		}
-		if (token.startsWith("-s=")) {
-			const val = token.slice("-s=".length);
-			if (val.length > 0) explicitSession = val;
-			continue;
-		}
 
-		if (subcommand === undefined) {
+		if (!endOfFlags) {
+			if (token === "--") {
+				endOfFlags = true;
+				continue;
+			}
+			if (token === "--session" || token === "-s") {
+				const next = argv[i + 1]?.trim();
+				if (next) {
+					explicitSession = next;
+				}
+				i++;
+				continue;
+			}
+			if (token.startsWith("--session=")) {
+				const val = token.slice("--session=".length).trim();
+				if (val.length > 0) explicitSession = val;
+				continue;
+			}
+			if (token.startsWith("-s=")) {
+				const val = token.slice("-s=".length).trim();
+				if (val.length > 0) explicitSession = val;
+				continue;
+			}
 			if (GLOBAL_VALUE_FLAGS.has(token)) {
 				i++;
 				continue;
 			}
-			if (token === "--help" || token === "-h" || token === "--version" || token === "-V") {
-				subcommand = token;
-				continue;
-			}
-			if (token.startsWith("-")) {
-				continue;
-			}
-			subcommand = token;
-			continue;
-		}
-
-		if (subcommand === "screenshot") {
-			if (GLOBAL_VALUE_FLAGS.has(token) || SCREENSHOT_VALUE_FLAGS.has(token)) {
+			if (subcommand === "screenshot" && SCREENSHOT_VALUE_FLAGS.has(token)) {
 				i++;
 				continue;
 			}
-			if (token === "--base64" || token === "--base64=true") {
+			if (token === "--help" || token === "-h") {
+				isHelp = true;
+				subcommand = token;
+				screenshotPath = undefined;
+				screenshotBase64 = false;
+				continue;
+			}
+			if (subcommand === undefined && (token === "--version" || token === "-V")) {
+				subcommand = token;
+				continue;
+			}
+			if (subcommand === "screenshot" && (token === "--base64" || token === "--base64=true")) {
 				screenshotBase64 = true;
 				continue;
 			}
 			if (token.startsWith("-")) {
 				continue;
 			}
-			if (screenshotPath === undefined) {
-				screenshotPath = token;
-			}
+		}
+
+		if (isHelp) {
+			continue;
+		}
+
+		if (subcommand === undefined) {
+			subcommand = token;
+			continue;
+		}
+
+		if (subcommand === "screenshot" && screenshotPath === undefined) {
+			screenshotPath = token;
 		}
 	}
 
@@ -330,12 +345,33 @@ export function formatBrowserStatus(activeSessions: ReadonlySet<string>): string
 	return `browser: ${list[0]} (+${list.length - 1})`;
 }
 
+async function checkWorkingDirectoryError(cwd: string): Promise<string | undefined> {
+	try {
+		const st = await stat(cwd);
+		if (!st.isDirectory()) {
+			return `Working directory is not a directory: ${cwd}`;
+		}
+		return undefined;
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code === "ENOENT") {
+			return `Working directory does not exist: ${cwd}`;
+		}
+		if (code === "ENOTDIR") {
+			return `Working directory is not a directory: ${cwd}`;
+		}
+		const detail = err instanceof Error ? err.message : String(err);
+		return `Working directory is not accessible (${cwd}): ${detail}`;
+	}
+}
+
 export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<AgentBrowserRunResult> {
 	const binary =
 		options.binary?.trim() ||
 		process.env.AGENT_BROWSER_BIN?.trim() ||
 		"agent-browser";
-	const cwd = path.resolve(options.cwd ?? process.cwd());
+	const normalizedCwd = options.cwd?.trim() || undefined;
+	const cwd = path.resolve(normalizedCwd ?? process.cwd());
 
 	const parsed =
 		Array.isArray(options.argv) &&
@@ -398,17 +434,48 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 		const stdoutCapture = new BoundedOutput(MAX_CAPTURE_BYTES);
 		const stderrCapture = new BoundedOutput(MAX_CAPTURE_BYTES);
 
-		const child = spawn(binary, finalArgv, {
-			cwd,
-			shell: false,
-			windowsHide: true,
-			stdio: ["ignore", "pipe", "pipe"],
-			env: {
-				...process.env,
-				...options.env,
-				AGENT_BROWSER_SESSION: session,
-			},
-		});
+		const handleSpawnError = async (err: NodeJS.ErrnoException): Promise<AgentBrowserRunResult> => {
+			if (err.code === "ENOENT" || err.code === "ENOTDIR") {
+				const cwdError = await checkWorkingDirectoryError(cwd);
+				if (cwdError) {
+					return makeResult({
+						status: "error",
+						stderr: cwdError,
+						message: cwdError,
+					});
+				}
+				if (err.code === "ENOENT") {
+					return makeResult({
+						status: "unavailable",
+						stderr: INSTALL_HINT,
+						message: INSTALL_HINT,
+					});
+				}
+			}
+			const errMsg = `Failed to execute ${binary}: ${err.message}`;
+			return makeResult({
+				status: "error",
+				stderr: errMsg,
+				message: errMsg,
+			});
+		};
+
+		let child: ReturnType<typeof spawn>;
+		try {
+			child = spawn(binary, finalArgv, {
+				cwd,
+				shell: false,
+				windowsHide: true,
+				stdio: ["ignore", "pipe", "pipe"],
+				env: {
+					...process.env,
+					...options.env,
+					AGENT_BROWSER_SESSION: session,
+				},
+			});
+		} catch (err) {
+			return await handleSpawnError(err as NodeJS.ErrnoException);
+		}
 
 		child.stdout?.on("data", (chunk: Buffer) => stdoutCapture.push(chunk));
 		child.stderr?.on("data", (chunk: Buffer) => stderrCapture.push(chunk));
@@ -473,19 +540,7 @@ export async function runAgentBrowser(options: RunAgentBrowserOptions): Promise<
 		child.stderr?.destroy();
 
 		if (spawnError) {
-			if (spawnError.code === "ENOENT") {
-				return makeResult({
-					status: "unavailable",
-					stderr: INSTALL_HINT,
-					message: INSTALL_HINT,
-				});
-			}
-			const errMsg = `Failed to execute ${binary}: ${spawnError.message}`;
-			return makeResult({
-				status: "error",
-				stderr: errMsg,
-				message: errMsg,
-			});
+			return await handleSpawnError(spawnError);
 		}
 
 		const stdout = truncateText(stdoutCapture.text(), MAX_RESULT_BYTES, MAX_RESULT_LINES);
@@ -619,14 +674,12 @@ const AgentBrowserToolParameters = Type.Object({
 	}),
 	session: Type.Optional(
 		Type.String({
-			minLength: 1,
 			maxLength: 64,
 			description: "Optional browser session name override; defaults to an isolated session per Pi session.",
 		}),
 	),
 	cwd: Type.Optional(
 		Type.String({
-			minLength: 1,
 			description: "Optional working directory (defaults to session cwd).",
 		}),
 	),
@@ -771,8 +824,10 @@ export default function agentBrowserExtension(pi: ExtensionAPI): void {
 			lastPiKey = piKey;
 
 			const parsed = parseAgentBrowserArgv(params.argv);
-			const targetSession = parsed.explicitSession ?? params.session?.trim() ?? piKey;
-			const targetCwd = params.cwd ? path.resolve(ctx.cwd, params.cwd) : ctx.cwd;
+			const targetSession =
+				parsed.explicitSession ?? (params.session?.trim() || undefined) ?? piKey;
+			const normalizedCwd = params.cwd?.trim() || undefined;
+			const targetCwd = normalizedCwd ? path.resolve(ctx.cwd, normalizedCwd) : ctx.cwd;
 
 			const result = await runAgentBrowser({
 				argv: params.argv,
