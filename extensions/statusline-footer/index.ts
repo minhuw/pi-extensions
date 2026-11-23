@@ -23,11 +23,12 @@
  *   ▌✻ model ▶ HIGH ▶ ──────── ◀ ▉▉▉░░░  42%  $1.23  12m ▐
  *
  * Usage:
- *   /footer            toggle on/off
- *   /footer full       width-adaptive multi-line layout (default)
- *   /footer compact    1-line layout
- *   /footer off        restore pi's default footer
- *   /footer debug      show metric-collection internals
+ *   /footer                   toggle on/off
+ *   /footer full              width-adaptive multi-line layout (default)
+ *   /footer compact           1-line layout
+ *   /footer off               restore pi's default footer
+ *   /footer debug             show metric-collection internals
+ *   /cache [anomalies|reset]  inspect session prefix KV cache hit rates and miss root causes
  */
 
 import { execFile } from "node:child_process";
