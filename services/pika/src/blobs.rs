@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
@@ -67,9 +67,5 @@ impl BlobStore {
 
     pub fn get_string(&self, hash: &str) -> Result<String> {
         Ok(String::from_utf8(self.get(hash)?)?)
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 }

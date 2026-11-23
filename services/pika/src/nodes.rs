@@ -741,11 +741,6 @@ impl Nodes {
         inner.broadcast();
     }
 
-    /// Closes `socket` with `code`.
-    pub fn close(&self, socket: u64, code: u16, reason: &'static str) {
-        self.lock().close(socket, code, reason);
-    }
-
     /// Closes every socket, as when the server stops.
     pub fn close_all(&self, code: u16, reason: &'static str) {
         let mut inner = self.lock();
@@ -753,11 +748,6 @@ impl Nodes {
         for socket in sockets {
             inner.close(socket, code, reason);
         }
-    }
-
-    /// How many sockets are registered, node and client, online or not.
-    pub fn sockets(&self) -> usize {
-        self.lock().sockets.len()
     }
 
     /// How many nodes are online.

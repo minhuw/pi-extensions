@@ -146,13 +146,7 @@ fn request_split_and_reconstruct() {
     assert_eq!(skeleton["instructions"]["$type"], "string");
     assert_eq!(skeleton["messages"][3], skeleton["messages"][4]);
     assert_eq!(blocks.len(), 1 + 4 + 1);
-    let rebuilt = requests::reconstruct(&skeleton, &mut |hash| {
-        Ok(blocks.iter().find(|(h, _)| h == hash).unwrap().1.clone())
-    })
-    .unwrap();
-    assert_eq!(rebuilt, payload);
 
-    // The same through the store.
     let env = env();
     let r = ingest(
         &env.store,

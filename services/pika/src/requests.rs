@@ -60,24 +60,6 @@ pub fn split(payload: &Value) -> (Value, Vec<(String, String)>) {
     (Value::Object(skeleton), blocks)
 }
 
-/// Replaces every spec-format ref in `skeleton` with its block.
-pub fn reconstruct(skeleton: &Value, block: &mut impl FnMut(&str) -> Result<String>) -> Result<Value> {
-    if let Some((target, is_string)) = as_ref(skeleton) {
-        let hash = target.as_str().ok_or_else(|| anyhow!("ref is not a hash"))?;
-        let text = block(hash)?;
-        return Ok(if is_string { Value::String(text) } else { serde_json::from_str(&text)? });
-    }
-    Ok(match skeleton {
-        Value::Array(items) => Value::Array(items.iter().map(|i| reconstruct(i, block)).collect::<Result<_>>()?),
-        Value::Object(obj) => Value::Object(
-            obj.iter()
-                .map(|(k, v)| Ok((k.clone(), reconstruct(v, block)?)))
-                .collect::<Result<_>>()?,
-        ),
-        other => other.clone(),
-    })
-}
-
 /// Rewrites spec-format refs to dictionary numbers. `number` maps a hash to its number in the session dictionary.
 pub fn compact(skeleton: &Value, number: &mut impl FnMut(&str) -> Result<i64>) -> Result<Value> {
     let mut hash_of = |target: &Value| -> Result<i64> {
@@ -173,13 +155,9 @@ fn visit_numbers(v: &Value, f: &mut impl FnMut(i64, i64)) -> Result<()> {
     Ok(())
 }
 
-/// Rebuilds the payload from a compact skeleton as JSON text. `block(n, is_string, out)` appends the JSON of number
-/// `n` to `out`, so block text is spliced in without a round trip through `Value`.
-pub fn expand(v: &Value, block: &mut impl FnMut(i64, bool, &mut String) -> Result<()>) -> Result<String> {
-    expand_limited(v, MAX_EXPANDED_BYTES, block)
-}
-
-/// Rebuilds the payload like [`expand`], failing if the expanded JSON exceeds `max_bytes` bytes.
+/// Rebuilds the payload from a compact skeleton as JSON text, failing if the expanded JSON exceeds `max_bytes` bytes.
+/// `block(n, is_string, out)` appends the JSON of number `n` to `out`, so block text is spliced in without a round
+/// trip through `Value`.
 pub fn expand_limited(
     v: &Value,
     max_bytes: usize,
@@ -502,7 +480,7 @@ mod tests {
         assert_eq!(compacted["messages"], json!({ "$pika_runs": [[0, 4]] }));
         assert_eq!(compacted["tools"], json!([]));
         assert_eq!(compacted["system"], json!({ "$pika": 4, "$type": "string" }));
-        let expanded = expand(&compacted, &mut |n, is_string, out| {
+        let expanded = expand_limited(&compacted, MAX_EXPANDED_BYTES, &mut |n, is_string, out| {
             let text = &blocks[n as usize].1;
             out.push_str(&if is_string { serde_json::to_string(text)? } else { text.clone() });
             Ok(())
@@ -541,11 +519,11 @@ mod tests {
         ];
         for skeleton in malformed {
             assert!(visit_numbers(&skeleton, &mut |_, _| {}).is_err(), "visit_numbers accepted {skeleton}");
-            let res = expand(&skeleton, &mut |_, _, out| {
+            let res = expand_limited(&skeleton, MAX_EXPANDED_BYTES, &mut |_, _, out| {
                 out.push('1');
                 Ok(())
             });
-            assert!(res.is_err(), "expand accepted {skeleton}");
+            assert!(res.is_err(), "expand_limited accepted {skeleton}");
         }
     }
 
