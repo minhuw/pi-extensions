@@ -10,7 +10,7 @@ import { fromBase64Url, LIMITS, type DirEntry, type PaneView, type Requests, typ
 import { NodeFiles } from "../src/nodes/files";
 import { fuzzyScore, rankPaths } from "../src/nodes/fuzzy";
 import { clientIdentity, MemoryKeyStore } from "../src/nodes/identity";
-import { isFindKey, isQuickOpenKey } from "../src/nodes/keys";
+import { isFindKey } from "../src/nodes/keys";
 import { cellRange, findPaths, PathChecker, resolvePath } from "../src/nodes/links";
 import { clipboardImage, pasteText, runsPi, shellQuote } from "../src/nodes/paste";
 import { QuickOpen } from "../src/nodes/QuickOpen";
@@ -402,15 +402,11 @@ describe("PaneAlerts", () => {
 describe("shortcuts", () => {
 	const key = (letter: string, mods: Partial<KeyboardEvent> = {}) => ({ key: letter, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, ...mods });
 
-	it("use Cmd on macOS and Ctrl+Shift elsewhere, leaving readline's Ctrl-F and Ctrl-P alone", () => {
+	it("use Cmd on macOS and Ctrl+Shift elsewhere, leaving readline's Ctrl-F alone", () => {
 		expect(isFindKey(key("f", { metaKey: true }), true)).toBe(true);
 		expect(isFindKey(key("f", { ctrlKey: true }), true)).toBe(false);
 		expect(isFindKey(key("F", { ctrlKey: true, shiftKey: true }), false)).toBe(true);
 		expect(isFindKey(key("f", { ctrlKey: true }), false)).toBe(false);
-		expect(isQuickOpenKey(key("p", { metaKey: true }), true)).toBe(true);
-		expect(isQuickOpenKey(key("p", { metaKey: true, shiftKey: true }), true)).toBe(false);
-		expect(isQuickOpenKey(key("p", { ctrlKey: true }), false)).toBe(false);
-		expect(isQuickOpenKey(key("P", { ctrlKey: true, shiftKey: true }), false)).toBe(true);
 	});
 });
 

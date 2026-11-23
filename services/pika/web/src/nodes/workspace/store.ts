@@ -260,13 +260,6 @@ export class NodeWorkspaces {
 		this.#commit();
 	}
 
-	/** Every editor store key a workspace on this node shows. */
-	editorKeys(): Set<string> {
-		const keys = new Set<string>();
-		for (const ws of this.#layouts.values()) for (const tab of Object.values(ws.tabs)) if (tab.kind !== "terminal") keys.add(tab.id);
-		return keys;
-	}
-
 	#load(): void {
 		let parsed: unknown;
 		try {

@@ -41,11 +41,6 @@ export class NodeFiles {
 		return this.request("fs.read", { path });
 	}
 
-	/** Watches currently held on this channel. */
-	get watchCount(): number {
-		return this.#watches.size;
-	}
-
 	/**
 	 * Calls `listener` on every `fs.changed` for `path` until the returned function runs. Resolves false when the node
 	 * refused the watch (the 64-watch limit, or the path is gone): the caller then shows that it does not refresh.

@@ -137,16 +137,6 @@ function parentOf(tree: PaneTree, terminalId: string): Extract<PaneTree, { type:
     return parentOf(tree.first, terminalId) ?? parentOf(tree.second, terminalId);
 }
 
-/** The node at `path`; throws when the path leaves the tree. */
-export function nodeAt(tree: PaneTree, path: PanePath): PaneTree {
-    let node = tree;
-    for (const side of path) {
-        if (node.type !== "split") throw new PaneTreeError(`No split at ${path.join("/") || "the root"}.`);
-        node = node[side];
-    }
-    return node;
-}
-
 /**
  * The share `ratio` would give the split's first child, kept so each side has at least `MIN_PANE_PX` of `size` (the
  * split's length along its direction, dividers excluded) or, unmeasured, within `MIN_RATIO`–`MAX_RATIO`. A split too
@@ -195,9 +185,6 @@ export function sameTree(a: PaneTree, b: PaneTree): boolean {
 // ---------------------------------------------------------------------------------------------------------------
 // Storage
 
-/** The tree as stored: `{"version":1,"tree":…}`. */
-export const serialize = (tree: PaneTree): string => JSON.stringify({ version: LAYOUT_VERSION, tree });
-
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 function onlyKeys(value: Record<string, unknown>, keys: readonly string[], where: string): void {
@@ -205,7 +192,7 @@ function onlyKeys(value: Record<string, unknown>, keys: readonly string[], where
 }
 
 /**
- * A stored tree (`serialize`'s text, or the value it parsed to), checked: the version, every node's shape, ratios
+ * A stored tree (`{"version":1,"tree":…}`, as JSON or parsed), checked: the version, every node's shape, ratios
  * strictly between 0 and 1, terminals unique, at most `MAX_DEPTH` splits deep and `MAX_LEAVES` panes. Anything else
  * throws a `PaneTreeError`: a bad layout is refused, never repaired.
  */

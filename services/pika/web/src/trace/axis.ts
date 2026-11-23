@@ -246,11 +246,6 @@ export function windowAxis(axis: Axis, window: Interval): Axis {
 	return { origin: axis.origin, segments, gaps, activeMs };
 }
 
-/** The scale of a window: the whole axis when there is none. */
-export function windowScale(axis: Axis, window: Interval | undefined, width: number): Scale {
-	return makeScale(window && !isFullWindow(axis, window) ? windowAxis(axis, window) : axis, width);
-}
-
 /**
  * The window zoomed by `factor` (above 1 zooms in) around `anchor`, an active-time position. With a `width` and the
  * anchor's pixel `x`, the anchor stays at that pixel; breaks keep their fixed width, so this is solved, not scaled.

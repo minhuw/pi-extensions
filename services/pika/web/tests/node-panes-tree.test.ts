@@ -11,12 +11,10 @@ import {
     MAX_DEPTH,
     MAX_LEAVES,
     moveLeaf,
-    nodeAt,
     parse,
     PaneTreeError,
     replaceLeaf,
     sameTree,
-    serialize,
     setRatio,
     splitLeaf,
     type PaneTree,
@@ -40,9 +38,9 @@ describe("splitting", () => {
         expect(splitLeaf(L("a"), "a", "column", "b", "before")).toEqual(split("column", L("b"), L("a")));
         const tree = splitLeaf(abc, "c", "row", "d", "after");
         expect(leaves(tree)).toEqual(["a", "b", "c", "d"]);
-        expect(nodeAt(tree, ["second", "second"])).toEqual(split("row", L("c"), L("d")));
+        expect(tree).toEqual(split("row", L("a"), split("column", L("b"), split("row", L("c"), L("d")))));
         // The rest of the tree is untouched, ratios included.
-        expect(nodeAt(setRatio(abc, [], 0.3), [])).toMatchObject({ ratio: 0.3 });
+        expect(setRatio(abc, [], 0.3)).toMatchObject({ ratio: 0.3 });
         expect(splitLeaf(setRatio(abc, [], 0.3), "a", "column", "d", "after")).toMatchObject({ ratio: 0.3 });
     });
 
@@ -154,8 +152,7 @@ describe("ratios", () => {
 
     it("are set on the split at the path, and a path that misses a split throws", () => {
         const tree = setRatio(abc, ["second"], 0.02, 1000);
-        expect(nodeAt(tree, ["second"])).toMatchObject({ ratio: 0.05 });
-        expect(nodeAt(tree, [])).toMatchObject({ ratio: 0.5 });
+        expect(tree).toEqual(split("row", L("a"), split("column", L("b"), L("c"), 0.05), 0.5));
         expect(setRatio(abc, [], 0.75)).toMatchObject({ ratio: 0.75 });
         expect(() => setRatio(abc, ["first"], 0.5)).toThrow(/No split/);
         expect(() => setRatio(L("a"), [], 0.5)).toThrow(/No split/);
@@ -178,11 +175,11 @@ describe("moving", () => {
 });
 
 describe("storage", () => {
-    it("round-trips", () => {
+    it("parses stored layouts from JSON or an object", () => {
         const tree = setRatio(abc, ["second"], 0.3);
-        expect(JSON.parse(serialize(tree))).toEqual({ version: 1, tree });
-        expect(parse(serialize(tree))).toEqual(tree);
-        expect(parse(JSON.parse(serialize(tree)))).toEqual(tree);
+        const stored = { version: 1, tree };
+        expect(parse(JSON.stringify(stored))).toEqual(tree);
+        expect(parse(stored)).toEqual(tree);
     });
 
     const refused: [string, unknown][] = [

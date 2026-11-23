@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { NodeRequestError } from "../src/nodes/channel";
 import type { NodeEvent, Requests, RequestType, Results, TerminalInfo } from "../src/nodes/contract";
-import { ClosedPanes, closePane, keepsPaneOnExit, paneEvent, prunePanes, removePane, rerunPane, shellPane, splitPane, splitSize, type PaneHost, type PaneTab } from "../src/nodes/panes/actions";
+import { ClosedPanes, closePane, keepsPaneOnExit, paneEvent, removePane, rerunPane, shellPane, splitPane, splitSize, type PaneHost, type PaneTab } from "../src/nodes/panes/actions";
 import { leaf, leaves, type PaneTree } from "../src/nodes/panes/pane-tree";
 
 const info = (terminalId: string, more: Partial<TerminalInfo> = {}): TerminalInfo => ({
@@ -432,14 +432,5 @@ describe("a closed pane's terminal", () => {
         failing.event("n1", exit("a"));
         await settle();
         expect(state.errors.map((error) => (error as Error).message)).toEqual(["boom"]);
-    });
-});
-
-describe("pruning a restored tab", () => {
-    it("keeps the panes whose terminals remain, focus moved off the gone ones", () => {
-        const tab: PaneTab = { tree: split("row", leaf("a"), split("column", leaf("b"), leaf("c"))), focused: "a" };
-        expect(prunePanes(tab, (id) => id !== "a")).toEqual({ tree: split("column", leaf("b"), leaf("c")), focused: "b" });
-        expect(prunePanes(tab, () => true)).toBe(tab);
-        expect(prunePanes(tab, () => false)).toBeUndefined();
     });
 });

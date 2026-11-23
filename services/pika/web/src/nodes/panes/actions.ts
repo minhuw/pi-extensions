@@ -214,16 +214,6 @@ function withoutPane(tab: PaneTab, terminalId: string): PaneTab | null {
 }
 
 /**
- * A tab with only the panes whose terminal `keep` accepts (for a restored layout: those the node still lists and
- * that have not exited), focus moved as `removePane` moves it; undefined when none is left.
- */
-export function prunePanes(tab: PaneTab, keep: (terminalId: string) => boolean): PaneTab | undefined {
-    let now: PaneTab | null = tab;
-    for (const terminalId of leaves(tab.tree)) if (now && !keep(terminalId)) now = withoutPane(now, terminalId);
-    return now ?? undefined;
-}
-
-/**
  * The node's events that end panes: a terminal that exits on its own (`term.exit`), or one removed from the node
  * (`term.removed`), loses its pane. A setup script's terminal keeps its pane when it exits (`keepsPaneOnExit`), and
  * one replaced by `term.restart` (`replacedBy`) hands its pane to its successor, without moving focus. Feed it every

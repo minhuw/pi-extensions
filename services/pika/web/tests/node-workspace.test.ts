@@ -325,7 +325,6 @@ describe("a node's workspaces", () => {
 		store.openEditor(P, fileTab("/p/b.ts", true), { focus: true });
 		expect(order(store.layout(P), group)).toEqual(["file:/p/a.ts", "file:/p/b.ts"]);
 		expect(store.getSnapshot().focus).toMatchObject({ tabId: "file:/p/b.ts" });
-		expect([...store.editorKeys()].sort()).toEqual(["file:/p/a.ts", "file:/p/b.ts"]);
 
 		const again = new NodeWorkspaces("n1", { storage });
 		expect([...again.restoredFiles()].sort()).toEqual(["file:/p/a.ts", "file:/p/b.ts"]);

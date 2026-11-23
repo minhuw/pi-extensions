@@ -19,13 +19,12 @@ import {
 	tickStep,
 	traceIntervals,
 	windowAxis,
-	windowScale,
 	zoomWindow,
 } from "../src/trace/axis";
 import { formatClock, formatElapsed, formatFineCost, formatGap, formatPhase, formatSpan, formatTick, middleTruncate } from "../src/trace/format";
 import { cacheHit, childRanPast, childSpan, hasProviderTiming, llmPhases, recordBadge, recordFamily, recordGlyph, recordKey, recordName, recordSummary, showsToolName, toolFamily, toolName, turnStart } from "../src/trace/kinds";
 import { currentStop, initialReplay, replayReducer, type ReplayState } from "../src/trace/replay";
-import { buildLedger, defaultTurnExpanded, matchesFilter, NO_FILTER, rowForSeq, type LedgerInput } from "../src/trace/rows";
+import { buildLedger, defaultTurnExpanded, NO_FILTER, rowForSeq, type LedgerInput } from "../src/trace/rows";
 import { backgroundLabel, linkTicket, reportsFromDetails, reportTone, traceTicket, turnReports } from "../src/lib/tickets";
 import { assistantMessage, entry, header, iso, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
 import { traceOf } from "./support/server";
@@ -167,8 +166,6 @@ describe("zoom window", () => {
 		const inside = windowAxis(axis, { start: 10_000, end: 20_000 });
 		expect(inside.segments).toEqual([{ start: T + 10_000, end: T + 20_000, offset: 0 }]);
 		expect(inside.gaps).toEqual([]);
-		// The whole session is the axis itself.
-		expect(windowScale(axis, full, 1000).axis).toBe(axis);
 	});
 
 	it("keeps the anchor under the pointer, across a break too", () => {
@@ -177,12 +174,12 @@ describe("zoom window", () => {
 			[full, 700],
 			[{ start: 40_000, end: 80_000 }, 420],
 		] as const) {
-			const before = windowScale(axis, window, 1000);
+			const before = makeScale(windowAxis(axis, window), 1000);
 			const t = before.time(x);
 			const anchor = makeScale(axis, 1000).position(t);
 			const next = zoomWindow(axis, window, 3, anchor, 1000, x);
 			expect(next.end - next.start).toBeCloseTo((window.end - window.start) / 3);
-			expect(windowScale(axis, next, 1000).x(t)).toBeCloseTo(x, 0);
+			expect(makeScale(windowAxis(axis, next), 1000).x(t)).toBeCloseTo(x, 0);
 		}
 		// Without a pixel, the anchor keeps its share of the window.
 		expect(zoomWindow(axis, full, 2, 60_000)).toEqual({ start: 30_000, end: 90_000 });
@@ -218,7 +215,7 @@ describe("zoom window", () => {
 		const records: TraceRecord[] = [llm(2, T + 1_000, T + 4_000), tool(3, "bash", T + 4_000, T + 9_000), tool(4, "read", T + 9_500, T + 9_800)];
 		const t = trace(records, [traceTurn(0, 1, 6, T, 10_000)]);
 		const traceAxis = foldGaps(traceIntervals(t));
-		const scale = windowScale(traceAxis, { start: 5_000, end: 7_000 }, 1000);
+		const scale = makeScale(windowAxis(traceAxis, { start: 5_000, end: 7_000 }), 1000);
 		const items = layoutOverview(t, scale, overviewLanes());
 		expect(items.map((item) => item.key).sort()).toEqual(["t:s:c3-bash", "turn:0"]);
 		for (const item of items) {
@@ -228,7 +225,7 @@ describe("zoom window", () => {
 		// Nothing outside is hit.
 		expect(hitTest(items, 2, (overviewLanes()[1].y0 + overviewLanes()[1].y1) / 2)).toBeUndefined();
 		// The full view keeps every record.
-		expect(layoutOverview(t, windowScale(traceAxis, undefined, 1000), overviewLanes())).toHaveLength(4);
+		expect(layoutOverview(t, makeScale(traceAxis, 1000), overviewLanes())).toHaveLength(4);
 	});
 
 	it("labels ticks in tenths of a second only below a second", () => {
@@ -237,7 +234,7 @@ describe("zoom window", () => {
 		expect(formatTick(3_725_200, 100)).toBe("1:02:05.2");
 		for (const ms of [0, 2_530_500, 3_725_200]) expect(formatTick(ms, 1_000)).toBe(formatClock(ms));
 		// Zoomed to two seconds over 1000 px: ticks every 200 ms, all on round steps.
-		const scale = windowScale(axis, { start: 1_234, end: 3_234 }, 1000);
+		const scale = makeScale(windowAxis(axis, { start: 1_234, end: 3_234 }), 1000);
 		expect(tickStep(scale, 72, 100)).toBe(200);
 		const ticks = axisTicks(scale, 72, 100);
 		expect(ticks.length).toBeGreaterThan(5);
@@ -534,7 +531,6 @@ describe("ledger rows", () => {
 		// Turns without a match disappear.
 		const rows = buildLedger({ ...base, filter: { ...NO_FILTER, text: "worker" } });
 		expect(rows.map((row) => row.key)).toEqual(["turn:s:1", "t:s:c7-Agent"]);
-		expect(matchesFilter(records[0], { ...NO_FILTER, families: ["shell"] })).toBe(false);
 	});
 
 	it("expands a subagent into its child's records, lazily, with a depth limit", () => {

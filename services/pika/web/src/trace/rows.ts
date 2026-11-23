@@ -122,10 +122,6 @@ function compileFilter(filter: LedgerFilter | undefined, range?: Interval): (rec
 	};
 }
 
-export function matchesFilter(record: TraceRecord, filter: LedgerFilter | undefined, range?: Interval): boolean {
-	return compileFilter(filter, range)(record);
-}
-
 /** Tool names by the seq of the model call that made them. */
 function callNames(trace: SessionTrace): Map<number, string[]> {
 	const map = new Map<number, string[]>();

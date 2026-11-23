@@ -457,9 +457,5 @@ export function saveKeySettings(text: string | null): Keymap {
 export const isFindKey = (event: KeyEventLike, mac: boolean = IS_MAC): boolean =>
 	isAction(mac === IS_MAC ? currentKeymap() : buildKeymap(undefined, mac), "find", event);
 
-/** Quick open (Cmd-P, or Ctrl-Shift-P, unless rebound). */
-export const isQuickOpenKey = (event: KeyEventLike, mac: boolean = IS_MAC): boolean =>
-	isAction(mac === IS_MAC ? currentKeymap() : buildKeymap(undefined, mac), "quickOpen", event);
-
 /** The modifier a link click needs, for hints. */
 export const LINK_MODIFIER = IS_MAC ? "⌘" : "Ctrl";
