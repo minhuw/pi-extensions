@@ -30,7 +30,7 @@ use crate::relay::{
 use crate::util::{format_iso_ms, now_ms, sha256_hex};
 
 /// 404 `{ error: "relay_disabled" }` on every relay route when relay is off.
-pub async fn require_enabled(State(state): State<AppState>, request: Request, next: Next) -> Response {
+async fn require_enabled(State(state): State<AppState>, request: Request, next: Next) -> Response {
     if !state.relay.enabled() {
         return error(StatusCode::NOT_FOUND, "relay_disabled");
     }
@@ -63,17 +63,17 @@ async fn session_list(state: &AppState) -> Response {
 }
 
 /// `GET {base}/api/relay/v1/sessions` for devices.
-pub async fn device_sessions(State(state): State<AppState>, _auth: DeviceAuth) -> Response {
+async fn device_sessions(State(state): State<AppState>, _auth: DeviceAuth) -> Response {
     session_list(&state).await
 }
 
 /// `GET relay/sessions` for the browser.
-pub async fn sessions(State(state): State<AppState>) -> Response {
+async fn sessions(State(state): State<AppState>) -> Response {
     session_list(&state).await
 }
 
 /// `GET relay/events?limit=`: default 100, at most the ring's 500.
-pub async fn events(State(state): State<AppState>, Query(query): Query<BTreeMap<String, String>>) -> Response {
+async fn events(State(state): State<AppState>, Query(query): Query<BTreeMap<String, String>>) -> Response {
     let limit = match query.get("limit").map(|l| l.parse::<i64>()) {
         None => 100,
         Some(Ok(limit)) => limit.clamp(1, state.relay.config().event_ring as i64) as usize,
@@ -107,7 +107,7 @@ fn reason_response(reason: Reason) -> Response {
 
 /// `POST relay/messages` with `{ to, text, urgent? }` or `{ room, text, mentions?, urgent?, replyTo? }`, sent as
 /// `{ kind: "web" }` with hops 0. The room must exist; the web needs no membership.
-pub async fn post_message(State(state): State<AppState>, body: Result<Json<Value>, JsonRejection>) -> Response {
+async fn post_message(State(state): State<AppState>, body: Result<Json<Value>, JsonRejection>) -> Response {
     let body = match json_body(body, || Ok(Value::Null)) {
         Ok(body) => body,
         Err(response) => return response,
@@ -207,12 +207,12 @@ async fn apply_room_member(
 }
 
 /// `GET {base}/api/relay/v1/rooms` for devices.
-pub async fn device_rooms(State(state): State<AppState>, _auth: DeviceAuth) -> Response {
+async fn device_rooms(State(state): State<AppState>, _auth: DeviceAuth) -> Response {
     rooms_list(&state).await
 }
 
 /// `GET {base}/api/relay/v1/rooms/{name}` for devices.
-pub async fn device_room_detail(
+async fn device_room_detail(
     State(state): State<AppState>,
     _auth: DeviceAuth,
     Path(name): Path<String>,
@@ -223,7 +223,7 @@ pub async fn device_room_detail(
 
 /// `POST {base}/api/relay/v1/rooms` with `{ room, sessionId, action?: "join" | "leave" | "represent" | "unrepresent",
 /// topic? }` for devices, for a session the device owns.
-pub async fn device_update_room(
+async fn device_update_room(
     State(state): State<AppState>,
     DeviceAuth { device, .. }: DeviceAuth,
     body: Result<Json<Value>, JsonRejection>,
@@ -245,12 +245,12 @@ pub async fn device_update_room(
 }
 
 /// `GET relay/rooms` for the browser.
-pub async fn rooms(State(state): State<AppState>) -> Response {
+async fn rooms(State(state): State<AppState>) -> Response {
     rooms_list(&state).await
 }
 
 /// `GET relay/rooms/{name}` for the browser.
-pub async fn room_detail(
+async fn room_detail(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<BTreeMap<String, String>>,
@@ -259,7 +259,7 @@ pub async fn room_detail(
 }
 
 /// `POST relay/rooms` with `{ name, topic?: string | null, members?: string[] }` for the browser.
-pub async fn save_room(State(state): State<AppState>, body: Result<Json<Value>, JsonRejection>) -> Response {
+async fn save_room(State(state): State<AppState>, body: Result<Json<Value>, JsonRejection>) -> Response {
     let body = match json_body(body, || Err(error(StatusCode::BAD_REQUEST, "invalid"))) {
         Ok(body) => body,
         Err(response) => return response,
@@ -317,7 +317,7 @@ pub async fn save_room(State(state): State<AppState>, body: Result<Json<Value>, 
 
 /// `POST relay/rooms/{name}/members` with
 /// `{ sessionId, action?: "add" | "remove" | "represent" | "unrepresent" }` for the browser.
-pub async fn room_member(
+async fn room_member(
     State(state): State<AppState>,
     Path(name): Path<String>,
     body: Result<Json<Value>, JsonRejection>,
@@ -331,7 +331,7 @@ pub async fn room_member(
 }
 
 /// `DELETE relay/rooms/{name}` for the browser.
-pub async fn delete_room(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+async fn delete_room(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     if state.relay.delete_room(&name) {
         StatusCode::NO_CONTENT.into_response()
     } else {
@@ -349,7 +349,7 @@ fn refusal_response(refusal: Refusal) -> Response {
 
 /// `PUT {base}/api/relay/v1/boards/{sessionId}` with a full board snapshot, for a session the device owns. A snapshot
 /// older than the stored one is answered `stale` and changes nothing.
-pub async fn device_put_board(
+async fn device_put_board(
     State(state): State<AppState>,
     DeviceAuth { device, .. }: DeviceAuth,
     Path(session_id): Path<String>,
@@ -400,7 +400,7 @@ fn label(board: &mut serde_json::Map<String, Value>, from: &serde_json::Map<Stri
 }
 
 /// `GET relay/boards/{sessionId}` for the browser: one session's board, 404 `not_found` without one.
-pub async fn board(State(state): State<AppState>, Path(session_id): Path<String>) -> Response {
+async fn board(State(state): State<AppState>, Path(session_id): Path<String>) -> Response {
     refresh_names(&state).await;
     let (store, ids) = (state.store.clone(), vec![session_id.clone()]);
     let found = blocking(move || {
@@ -429,7 +429,7 @@ pub async fn board(State(state): State<AppState>, Path(session_id): Path<String>
 
 /// `GET relay/rooms/{name}/boards` for the browser: `{ room, items }`, the boards of the room's member sessions in
 /// member order, each with the member's labels and `online`; 404 `not_found` for an unknown room.
-pub async fn room_boards(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+async fn room_boards(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     refresh_names(&state).await;
     let Some(detail) = state.relay.room(&name, 1, u64::MAX) else { return error(StatusCode::NOT_FOUND, "not_found") };
     let members: Vec<serde_json::Map<String, Value>> = detail["room"]["members"]
@@ -459,7 +459,7 @@ pub async fn room_boards(State(state): State<AppState>, Path(name): Path<String>
 }
 
 /// `GET {base}/api/relay/v1/connect`: the token is checked before the upgrade.
-pub async fn connect(
+async fn connect(
     State(state): State<AppState>,
     DeviceAuth { device, token, .. }: DeviceAuth,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,

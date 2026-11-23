@@ -142,7 +142,7 @@ pub async fn require(State(state): State<AppState>, mut request: Request, next: 
 }
 
 #[derive(Deserialize)]
-pub struct Login {
+pub(super) struct Login {
     #[serde(default)]
     password: String,
 }

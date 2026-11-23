@@ -356,7 +356,7 @@ fn cut_to(s: &mut String, max: usize) {
 
 /// Cuts `userText` to `USER_TEXT_CHARS` characters and `text` and `summary` to `SUMMARY_CHARS`. A text trimmed by
 /// `one_line` ends in a non-blank, so cutting it keeps what cutting before trimming would.
-pub fn cut(trace: &mut Trace) {
+fn cut(trace: &mut Trace) {
     for turn in &mut trace.turns {
         if turn.custom_type.as_deref() == Some(REPORT_TYPE) {
             turn.reports = Some(reports_of(&turn.user_text));

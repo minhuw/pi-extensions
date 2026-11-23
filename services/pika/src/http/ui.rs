@@ -47,7 +47,7 @@ fn escape_attr(s: &str) -> String {
 }
 
 /// Replaces any existing `pika-base` meta tag and inserts one right after `<head>`.
-pub fn inject_base(html: &str, base: &str) -> String {
+fn inject_base(html: &str, base: &str) -> String {
     let mut html = html.to_owned();
     while let Some(start) = html.find("<meta name=\"pika-base\"") {
         let Some(len) = html[start..].find('>') else { break };
@@ -75,7 +75,7 @@ fn is_relative(url: &str) -> bool {
 /// for `/`). Without a base element (forbidden by the nodes CSP), relative URLs resolve against each route, so every
 /// route prefix would fetch and cache its own copy of each file. Chunks, workers, and fonts load relative to the
 /// module or stylesheet that names them, so they follow.
-pub fn absolute_urls(html: &str, prefix: &str) -> String {
+fn absolute_urls(html: &str, prefix: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
     loop {

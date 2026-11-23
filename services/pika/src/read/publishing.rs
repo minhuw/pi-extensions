@@ -353,7 +353,7 @@ impl Published {
     }
 }
 
-pub fn visible(conn: &Connection, id: &str) -> ReadResult<bool> {
+fn visible(conn: &Connection, id: &str) -> ReadResult<bool> {
     Ok(conn.prepare_cached(&VISIBLE_SQL)?.query_row([id], |r| r.get(0))?)
 }
 

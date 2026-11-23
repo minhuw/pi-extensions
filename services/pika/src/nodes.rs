@@ -31,9 +31,9 @@ pub mod close {
 }
 
 /// The channel close code the server sends a client when the channel's node socket closes.
-pub const NODE_OFFLINE: &str = "node_offline";
+const NODE_OFFLINE: &str = "node_offline";
 /// The channel close code the server sends a node when the channel's client socket closes.
-pub const CLIENT_GONE: &str = "client_gone";
+const CLIENT_GONE: &str = "client_gone";
 
 const OPEN_WINDOW: Duration = Duration::from_secs(60);
 
@@ -265,7 +265,7 @@ pub fn valid_id(id: &str) -> bool {
 }
 
 /// A request id: 1-64 characters of `[A-Za-z0-9._:-]`.
-pub fn valid_request_id(id: &str) -> bool {
+fn valid_request_id(id: &str) -> bool {
     (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
 }
 

@@ -73,13 +73,13 @@ pub fn valid_session_id(id: &str) -> bool {
 }
 
 /// Strips a single optional leading `#` and surrounding whitespace from a room name.
-pub fn normalize_room_name(raw: &str) -> &str {
+fn normalize_room_name(raw: &str) -> &str {
     let trimmed = raw.trim();
     trimmed.strip_prefix('#').unwrap_or(trimmed)
 }
 
 /// A room name: 1-64 characters of `[A-Za-z0-9._-]` (after stripping an optional leading `#`).
-pub fn valid_room_name(name: &str) -> bool {
+fn valid_room_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_ROOM_CHARS
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
@@ -87,7 +87,7 @@ pub fn valid_room_name(name: &str) -> bool {
 
 /// Extracts `@mention` tokens from message text: `@` at the start or after whitespace/punctuation, followed by 1-128
 /// characters of `[A-Za-z0-9._-]`.
-pub fn extract_mentions(text: &str) -> Vec<String> {
+fn extract_mentions(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
     let mut found = Vec::new();
     let mut i = 0;
@@ -122,7 +122,7 @@ pub fn extract_mentions(text: &str) -> Vec<String> {
 }
 
 /// A message id as the relay makes them: 1-64 characters of the URL-safe alphabet `[A-Za-z0-9_-]`.
-pub fn valid_message_id(id: &str) -> bool {
+fn valid_message_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_MESSAGE_ID_CHARS
         && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
@@ -562,14 +562,14 @@ pub enum Outcome {
 
 /// A member of a chatroom, enriched with live online state when serialized.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RoomMember {
-    pub session_id: String,
-    pub device: Option<String>,
-    pub name: Option<String>,
-    pub title: Option<String>,
-    pub project: Option<String>,
-    pub model: Option<String>,
-    pub joined_at: i64,
+struct RoomMember {
+    session_id: String,
+    device: Option<String>,
+    name: Option<String>,
+    title: Option<String>,
+    project: Option<String>,
+    model: Option<String>,
+    joined_at: i64,
 }
 
 impl RoomMember {
@@ -674,18 +674,18 @@ impl RoomMember {
 
 /// One message in a chatroom's transcript.
 #[derive(Clone, Debug)]
-pub struct RoomMessage {
-    pub id: String,
-    pub seq: u64,
-    pub room: String,
-    pub from: Sender,
-    pub text: String,
-    pub mentions: Vec<String>,
-    pub notified: Vec<Target>,
-    pub urgent: bool,
-    pub reply_to: Option<String>,
-    pub hops: u64,
-    pub at: i64,
+struct RoomMessage {
+    id: String,
+    seq: u64,
+    room: String,
+    from: Sender,
+    text: String,
+    mentions: Vec<String>,
+    notified: Vec<Target>,
+    urgent: bool,
+    reply_to: Option<String>,
+    hops: u64,
+    at: i64,
 }
 
 impl RoomMessage {
@@ -1793,7 +1793,7 @@ impl Relay {
     /// Posts a message to an existing chatroom and pushes live `[relay]` notifications only to `@`-mentioned members.
     /// A session must be a member of the room, the web UI may post to any room; posting never creates a room or adds a
     /// member, and mentions resolve only among the members.
-    pub fn send_room(self: &Arc<Self>, from: Origin, draft: Draft, reply: Reply) {
+    fn send_room(self: &Arc<Self>, from: Origin, draft: Draft, reply: Reply) {
         let mut inner = self.lock();
         inner.forget_expired(Instant::now());
         let Some(sender) = inner.sender_of(from) else { return };

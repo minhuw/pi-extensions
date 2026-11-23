@@ -24,7 +24,7 @@ use crate::relay::{Closing, Connection};
 use crate::util::now_ms;
 
 /// 404 `{ error: "nodes_disabled" }` on every node route when nodes are off, before authentication.
-pub async fn require_enabled(State(state): State<AppState>, request: Request, next: Next) -> Response {
+pub(super) async fn require_enabled(State(state): State<AppState>, request: Request, next: Next) -> Response {
     if !state.nodes.enabled() {
         return error(StatusCode::NOT_FOUND, "nodes_disabled");
     }
@@ -51,7 +51,7 @@ async fn refresh(state: &AppState) {
 }
 
 /// `GET {base}/api/node/v1/connect`: the credential is checked before the upgrade.
-pub async fn node_connect(
+async fn node_connect(
     State(state): State<AppState>,
     headers: HeaderMap,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
@@ -87,7 +87,7 @@ fn same_origin(state: &AppState, headers: &HeaderMap, client: &Client) -> bool {
 
 /// `GET {base}/api/v1/node/connect` for the browser. `require` has checked the owner session in `password` mode; the
 /// proxy authenticates in `proxy` mode; `none` mode answers 404 unless `PIKA_NODES_INSECURE` allows it.
-pub async fn client_connect(
+async fn client_connect(
     State(state): State<AppState>,
     client: Client,
     headers: HeaderMap,

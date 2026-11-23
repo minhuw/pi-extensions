@@ -108,7 +108,7 @@ pub async fn update(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Start {
+pub(super) struct Start {
     #[serde(default)]
     device: String,
     host: Option<String>,
@@ -180,7 +180,7 @@ pub async fn start(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PollBody {
+pub(super) struct PollBody {
     #[serde(default)]
     pairing_id: String,
 }
@@ -233,7 +233,7 @@ pub async fn pairings(State(state): State<AppState>) -> Response {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ApproveBody {
+pub(super) struct ApproveBody {
     name: Option<String>,
     /// Omitted: `None`; `null`: `Some(None)`.
     #[serde(default, deserialize_with = "present")]
@@ -273,7 +273,7 @@ pub async fn deny(State(state): State<AppState>, Path(code): Path<String>, Json(
 }
 
 #[derive(Deserialize)]
-pub struct BindBody {
+pub(super) struct BindBody {
     key: Option<String>,
 }
 

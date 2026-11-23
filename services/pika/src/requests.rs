@@ -158,7 +158,7 @@ fn visit_numbers(v: &Value, f: &mut impl FnMut(i64, i64)) -> Result<()> {
 /// Rebuilds the payload from a compact skeleton as JSON text, failing if the expanded JSON exceeds `max_bytes` bytes.
 /// `block(n, is_string, out)` appends the JSON of number `n` to `out`, so block text is spliced in without a round
 /// trip through `Value`.
-pub fn expand_limited(
+fn expand_limited(
     v: &Value,
     max_bytes: usize,
     block: &mut impl FnMut(i64, bool, &mut String) -> Result<()>,
