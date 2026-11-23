@@ -171,8 +171,9 @@ export class DaemonLink {
 			clearTimeout(helloTimer);
 			if (this.socket !== socket) return;
 			this.socket = undefined;
-			for (const resolve of this.replies.values()) resolve({ error: { code: "disconnected", message: "the daemon socket closed" } });
+			const pending = [...this.replies.values()];
 			this.replies.clear();
+			for (const resolve of pending) resolve({ error: { code: "disconnected", message: "the daemon socket closed" } });
 			if (this.state === "refused" || this.state === "closed") return;
 			if (this.state === "ready") this.reason = "daemon socket closed";
 			this.state = "connecting";
@@ -192,17 +193,57 @@ export class DaemonLink {
 	private write(message: BridgeMessage, signal?: AbortSignal): Promise<string> {
 		const socket = this.socket;
 		if (this.state !== "ready" || !socket) return Promise.resolve(`not sent: ${this.reason}`);
+		if (signal?.aborted) return Promise.resolve(String(signal.reason ?? "aborted"));
 		return new Promise(resolve => {
+			let settled = false;
+			let cbDone = false;
+			let cbError: Error | null | undefined;
+			let waitingDrain = false;
+			let calling = true;
+			const finish = (result: string) => {
+				if (settled) return;
+				settled = true;
+				signal?.removeEventListener("abort", onAbort);
+				socket.off("drain", onDrain);
+				socket.off("close", onClose);
+				resolve(result);
+			};
 			const onAbort = () => {
 				// A daemon that does not take a small line within the bound is wedged; reconnect to it.
 				if (signal?.reason === "timeout") { this.reason = "daemon stopped reading"; socket.destroy(); }
-				resolve(String(signal?.reason ?? "aborted"));
+				finish(String(signal?.reason ?? "aborted"));
+			};
+			const onDrain = () => {
+				waitingDrain = false;
+				if (cbDone) finish("sent");
+			};
+			const onClose = () => {
+				finish(`not sent: ${this.reason}`);
 			};
 			signal?.addEventListener("abort", onAbort, { once: true });
-			socket.write(encodeLine(message), error => {
-				signal?.removeEventListener("abort", onAbort);
-				resolve(error ? `write failed: ${error.message}` : "sent");
-			});
+			socket.once("close", onClose);
+			try {
+				const ok = socket.write(encodeLine(message), error => {
+					cbDone = true;
+					cbError = error;
+					if (calling) return;
+					if (error) finish(`write failed: ${error.message}`);
+					else if (!waitingDrain) finish("sent");
+				});
+				calling = false;
+				if (cbError) {
+					finish(`write failed: ${cbError.message}`);
+				} else if (!ok) {
+					if (settled) return;
+					waitingDrain = true;
+					socket.once("drain", onDrain);
+				} else if (cbDone) {
+					finish("sent");
+				}
+			} catch (error) {
+				calling = false;
+				finish(`write failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
 		});
 	}
 
@@ -223,18 +264,30 @@ export class DaemonLink {
 	async request(request: Request, timeoutMs = 5000): Promise<Reply> {
 		const deadline = Date.now() + timeoutMs;
 		if (!await this.whenReady(timeoutMs)) return { error: { code: "unavailable", message: `the pika-node daemon is not connected (${this.reason})` } };
+		const remaining = deadline - Date.now();
+		if (remaining <= 0) return { error: { code: "timeout", message: "the pika-node daemon did not answer in time" } };
 		const id = `${request.type}-${++this.nextId}`;
+		const writeAbort = new AbortController();
+		let settle!: (value: Reply, abortReason?: string) => void;
 		const reply = new Promise<Reply>(resolve => {
+			let settled = false;
 			const timer = setTimeout(() => {
-				this.replies.delete(id);
-				resolve({ error: { code: "timeout", message: "the pika-node daemon did not answer in time" } });
-			}, Math.max(0, deadline - Date.now()));
+				settle({ error: { code: "timeout", message: "the pika-node daemon did not answer in time" } }, "timeout");
+			}, remaining);
 			timer.unref?.();
-			this.replies.set(id, value => { clearTimeout(timer); resolve(value); });
+			settle = (value, abortReason = "cancelled") => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				this.replies.delete(id);
+				writeAbort.abort(abortReason);
+				resolve(value);
+			};
+			this.replies.set(id, value => settle(value));
 		});
-		const written = await this.write({ ...request, id } as BridgeMessage);
+		const written = await this.write({ ...request, id } as BridgeMessage, writeAbort.signal);
 		if (written !== "sent") {
-			this.replies.get(id)?.({ error: { code: "unavailable", message: written } });
+			settle({ error: { code: "unavailable", message: written } });
 		}
 		return reply;
 	}
@@ -245,8 +298,9 @@ export class DaemonLink {
 		clearTimeout(this.retry);
 		this.retry = undefined;
 		for (const wake of [...this.readyWaiters]) wake();
-		for (const resolve of this.replies.values()) resolve({ error: { code: "closed", message: "the bridge shut down" } });
+		const pending = [...this.replies.values()];
 		this.replies.clear();
+		for (const resolve of pending) resolve({ error: { code: "closed", message: "the bridge shut down" } });
 		// end() still flushes lines already written, such as the final status.
 		this.socket?.end();
 		this.socket = undefined;
