@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
 	CacheLensTracker,
 	fingerprintProviderPayload,
 	parseCacheLensReloadSnapshot,
+	sha256StableShort,
+	updateHashCanonical,
 	type AssistantMessageLike,
 } from "../cache-lens.ts";
 
@@ -661,3 +664,210 @@ describe("CacheLensTracker reload snapshots & formatting", () => {
 		expect(tracker.formatCacheReport("summary")).toContain("no LLM calls recorded");
 	});
 });
+
+/** Reference sorted-JSON serializer matching the original `stableStringify` contract. */
+function referenceStableStringify(value: unknown, seen = new WeakSet<object>()): string {
+	if (value === null || typeof value !== "object") {
+		const encoded = JSON.stringify(value);
+		return encoded === undefined ? "null" : encoded;
+	}
+	if (seen.has(value)) return '"[Circular]"';
+	seen.add(value);
+	try {
+		if (Array.isArray(value)) {
+			const parts: string[] = [];
+			for (let i = 0; i < value.length; i++) {
+				const item = value[i];
+				parts.push(item === undefined ? "null" : referenceStableStringify(item, seen));
+			}
+			return `[${parts.join(",")}]`;
+		}
+		const record = value as Record<string, unknown>;
+		const keys = Object.keys(record).sort();
+		const entries: string[] = [];
+		for (const key of keys) {
+			const prop = record[key];
+			if (prop === undefined) continue;
+			entries.push(`${JSON.stringify(key)}:${referenceStableStringify(prop, seen)}`);
+		}
+		return `{${entries.join(",")}}`;
+	} finally {
+		seen.delete(value);
+	}
+}
+
+function referenceSha256Hex(value: unknown): string {
+	return createHash("sha256").update(referenceStableStringify(value), "utf8").digest("hex");
+}
+
+function streamSha256Hex(value: unknown): string {
+	const hash = createHash("sha256");
+	updateHashCanonical(hash, value);
+	return hash.digest("hex");
+}
+
+describe("streaming canonical SHA-256 parity", () => {
+	it("matches reference sorted-JSON SHA-256 byte-for-byte across JS and JSON edge cases", () => {
+		const sparse = new Array<unknown>(5);
+		sparse[1] = "middle";
+		sparse[3] = 0;
+
+		const nullProto = Object.assign(Object.create(null), { z: 1, a: "ok", skip: undefined });
+
+		const shared = { beta: [1, 2], alpha: "dag" };
+		const dag = { second: shared, first: shared };
+
+		const circularObj: Record<string, unknown> = { a: 1 };
+		circularObj.self = circularObj;
+
+		const circularArr: unknown[] = [1];
+		circularArr.push(circularArr);
+
+		const symKey = Symbol("ignored-key");
+		const withSymbolsAndFunctions: Record<PropertyKey, unknown> = {
+			a: undefined,
+			b: () => "fn",
+			c: Symbol("val"),
+			d: undefined,
+			e: 42,
+			[symKey]: "not-enumerated",
+		};
+
+		const cases: unknown[] = [
+			null,
+			undefined,
+			true,
+			false,
+			0,
+			-0,
+			42,
+			-3.141592653589793,
+			Number.MAX_SAFE_INTEGER,
+			Number.MIN_VALUE,
+			1e25,
+			1e-10,
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+			Number.NEGATIVE_INFINITY,
+			"",
+			"plain ascii",
+			() => 123,
+			Symbol("top"),
+			{},
+			[],
+			{ a: undefined, b: undefined },
+			{ onlyUndefinedFirst: undefined, kept: 1, onlyUndefinedLast: undefined },
+			[undefined, () => {}, Symbol("elem"), null, true, false, -0, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY],
+			sparse,
+			nullProto,
+			dag,
+			circularObj,
+			circularArr,
+			withSymbolsAndFunctions,
+			new Date(0),
+			{ b: 2, toJSON: () => "custom", a: 1 },
+		];
+
+		for (const sample of cases) {
+			const expectedHex = referenceSha256Hex(sample);
+			expect(streamSha256Hex(sample)).toBe(expectedHex);
+			expect(sha256StableShort(sample)).toBe(expectedHex.slice(0, 12));
+		}
+	});
+
+	it("matches reference hash across key permutations and unicode/escape strings", () => {
+		const nestedA = {
+			z: {
+				'key"quote': 'line1\nline2\r\t\b\f\\/"quoted"',
+				"ctrl\u0000\u001f": "\u0000\u0007\u001f",
+				"emoji-🚀": "family 👨‍👩‍👧‍👦 + 中文 + 日本語 + 한국어",
+				"surrogates": "hi \ud800 mid \udfff end",
+				dropMe: undefined,
+			},
+			a: [
+				{ y: 2, x: 1, u: undefined },
+				{ "b\\c": "val", "a\nb": [true, false, null, -0] },
+			],
+		};
+
+		const nestedB = {
+			a: [
+				{ u: undefined, x: 1, y: 2 },
+				{ "a\nb": [true, false, null, 0], "b\\c": "val" },
+			],
+			z: {
+				"surrogates": "hi \ud800 mid \udfff end",
+				"emoji-🚀": "family 👨‍👩‍👧‍👦 + 中文 + 日本語 + 한국어",
+				dropMe: undefined,
+				"ctrl\u0000\u001f": "\u0000\u0007\u001f",
+				'key"quote': 'line1\nline2\r\t\b\f\\/"quoted"',
+			},
+		};
+
+		const expectedHex = referenceSha256Hex(nestedA);
+		expect(streamSha256Hex(nestedA)).toBe(expectedHex);
+		expect(streamSha256Hex(nestedB)).toBe(expectedHex);
+		expect(sha256StableShort(nestedA)).toBe(sha256StableShort(nestedB));
+		expect(sha256StableShort(nestedA)).toBe(expectedHex.slice(0, 12));
+	});
+
+	it("matches reference hash on large arrays and nested conversation payloads", () => {
+		const largeArray = Array.from({ length: 4000 }, (_, i) => ({
+			idx: i,
+			role: i % 2 === 0 ? "user" : "assistant",
+			meta: i % 10 === 0 ? undefined : { tags: ["t1", `item-${i}`, i % 3 === 0 ? null : i], ok: i % 2 === 0 },
+			text: `chunk ${i}: "quoted"\n\\path\\file_${i}.ts — café 🚀`,
+		}));
+
+		const expectedHex = referenceSha256Hex(largeArray);
+		expect(streamSha256Hex(largeArray)).toBe(expectedHex);
+		expect(sha256StableShort(largeArray)).toBe(expectedHex.slice(0, 12));
+
+		const payload = {
+			model: "claude-sonnet-4",
+			system: [
+				{ type: "text", text: "Block 1" },
+				{ type: "text", text: "Block 2 🚀", cache_control: { type: "ephemeral" } },
+			],
+			tools: [
+				{
+					name: "search",
+					strict: true,
+					description: "Search files",
+					input_schema: {
+						type: "object",
+						properties: {
+							query: { type: "string" },
+							limit: { type: "number" },
+						},
+					},
+				},
+			],
+			messages: [
+				{ role: "user", content: 'find "foo\\bar"\n🚀' },
+				{
+					role: "assistant",
+					content: [{ type: "tool_use", id: "tu_1", name: "search", input: { limit: 10, query: "foo" } }],
+				},
+			],
+		};
+
+		const fp = fingerprintProviderPayload(payload, "anthropic-messages");
+		expect(fp.systemHash).toBe(referenceSha256Hex([{ type: "text", text: "Block 1" }, { type: "text", text: "Block 2 🚀" }]).slice(0, 12));
+		expect(fp.toolsHash).toBe(referenceSha256Hex(payload.tools).slice(0, 12));
+		expect(fp.toolHashes.search).toBe(referenceSha256Hex(payload.tools[0]).slice(0, 12));
+		expect(fp.itemHashes).toEqual(payload.messages.map(m => referenceSha256Hex(m).slice(0, 12)));
+		expect(fp.fullRequestHash).toBe(
+			referenceSha256Hex({
+				api: fp.api,
+				modelInPayload: fp.modelInPayload,
+				promptCacheKey: fp.promptCacheKey,
+				effort: fp.effort,
+				systemHash: fp.systemHash,
+				toolsHash: fp.toolsHash,
+				itemHashes: fp.itemHashes,
+			}).slice(0, 12),
+		);
+	});
+});
+

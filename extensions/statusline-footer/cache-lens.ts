@@ -8,7 +8,7 @@
  * text in reload snapshots.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, type Hash } from "node:crypto";
 
 export type WireApi = "openai-responses" | "anthropic-messages" | "openai-completions";
 
@@ -150,6 +150,76 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function sha256Short(input: string): string {
 	return createHash("sha256").update(input, "utf8").digest("hex").slice(0, 12);
+}
+
+/**
+ * Streams deterministic canonical JSON (sorted object keys, matching
+ * `stableStringify`) directly into a SHA-256 hasher without allocating an
+ * intermediate serialized string for the whole value.
+ */
+export function updateHashCanonical(hash: Hash, value: unknown, seen?: WeakSet<object>): void {
+	if (value === null || typeof value !== "object") {
+		if (value === null || value === undefined) {
+			hash.update("null", "utf8");
+			return;
+		}
+		if (typeof value === "boolean") {
+			hash.update(value ? "true" : "false", "utf8");
+			return;
+		}
+		if (typeof value === "number") {
+			hash.update(Number.isFinite(value) ? String(value) : "null", "utf8");
+			return;
+		}
+		const encoded = JSON.stringify(value);
+		hash.update(encoded === undefined ? "null" : encoded, "utf8");
+		return;
+	}
+	const activeSeen = seen ?? new WeakSet<object>();
+	if (activeSeen.has(value)) {
+		hash.update('"[Circular]"', "utf8");
+		return;
+	}
+	activeSeen.add(value);
+	try {
+		if (Array.isArray(value)) {
+			hash.update("[", "utf8");
+			for (let i = 0; i < value.length; i++) {
+				if (i > 0) hash.update(",", "utf8");
+				const item = value[i];
+				if (item === undefined) {
+					hash.update("null", "utf8");
+				} else {
+					updateHashCanonical(hash, item, activeSeen);
+				}
+			}
+			hash.update("]", "utf8");
+			return;
+		}
+		const record = value as Record<string, unknown>;
+		const keys = Object.keys(record).sort();
+		hash.update("{", "utf8");
+		let first = true;
+		for (const key of keys) {
+			const prop = record[key];
+			if (prop === undefined) continue;
+			if (!first) hash.update(",", "utf8");
+			first = false;
+			hash.update(JSON.stringify(key), "utf8");
+			hash.update(":", "utf8");
+			updateHashCanonical(hash, prop, activeSeen);
+		}
+		hash.update("}", "utf8");
+	} finally {
+		activeSeen.delete(value);
+	}
+}
+
+/** Short 12-hex SHA-256 hash of canonical JSON streamed directly into the hasher. */
+export function sha256StableShort(value: unknown): string {
+	const hash = createHash("sha256");
+	updateHashCanonical(hash, value);
+	return hash.digest("hex").slice(0, 12);
 }
 
 /** Deterministic JSON serialization with sorted keys. */
@@ -365,14 +435,14 @@ function extractSystemAndItems(
 		}
 		const systemHash = typeof systemCanonical === "string"
 			? sha256Short(systemCanonical)
-			: sha256Short(stableStringify(systemCanonical));
+			: sha256StableShort(systemCanonical);
 		const systemBytes = Buffer.byteLength(systemText, "utf8");
 
 		let itemHashes: string[] = [];
 		if (Array.isArray(payload.input)) {
-			itemHashes = payload.input.map(item => sha256Short(stableStringify(canonicalizeResponsesItem(item, collector))));
+			itemHashes = payload.input.map(item => sha256StableShort(canonicalizeResponsesItem(item, collector)));
 		} else if (typeof payload.input === "string") {
-			itemHashes = [sha256Short(stableStringify(payload.input))];
+			itemHashes = [sha256StableShort(payload.input)];
 		}
 		return { systemHash, systemText, systemBytes, itemHashes };
 	}
@@ -400,43 +470,44 @@ function extractSystemAndItems(
 		.map(msg => canonicalizeCompletionsOrAnthropicMessage(msg, collapseSingleText, collector));
 
 	let systemText = "";
-	let systemHashInput = "";
+	let systemHash: string;
 
 	if (api === "anthropic-messages") {
 		const rawSystem = payload.system;
 		if (typeof rawSystem === "string") {
 			systemText = rawSystem;
-			systemHashInput = rawSystem;
+			systemHash = sha256Short(rawSystem);
 		} else if (Array.isArray(rawSystem)) {
 			const canonicalSystem = canonicalizeSubBlocks(rawSystem, collapseSingleText, collector);
 			if (typeof canonicalSystem === "string") {
 				systemText = canonicalSystem;
-				systemHashInput = canonicalSystem;
+				systemHash = sha256Short(canonicalSystem);
 			} else {
 				systemText = extractTextFromCanonicalContent(canonicalSystem);
-				systemHashInput = stableStringify(canonicalSystem);
+				systemHash = sha256StableShort(canonicalSystem);
 			}
 		} else if (leadingSystemMsgs.length > 0) {
 			systemText = leadingSystemMsgs
 				.map(m => (isRecord(m) ? extractTextFromCanonicalContent(m.content) : stableStringify(m)))
 				.join("\n");
-			systemHashInput = leadingSystemMsgs.length === 1 && isRecord(leadingSystemMsgs[0]) && typeof leadingSystemMsgs[0].content === "string"
-				? leadingSystemMsgs[0].content
-				: stableStringify(leadingSystemMsgs);
+			systemHash = leadingSystemMsgs.length === 1 && isRecord(leadingSystemMsgs[0]) && typeof leadingSystemMsgs[0].content === "string"
+				? sha256Short(leadingSystemMsgs[0].content)
+				: sha256StableShort(leadingSystemMsgs);
+		} else {
+			systemHash = sha256Short("");
 		}
-	} else {
+	} else if (leadingSystemMsgs.length > 0) {
 		// openai-completions
-		if (leadingSystemMsgs.length > 0) {
-			systemText = leadingSystemMsgs
-				.map(m => (isRecord(m) ? extractTextFromCanonicalContent(m.content) : stableStringify(m)))
-				.join("\n");
-			systemHashInput = stableStringify(leadingSystemMsgs);
-		}
+		systemText = leadingSystemMsgs
+			.map(m => (isRecord(m) ? extractTextFromCanonicalContent(m.content) : stableStringify(m)))
+			.join("\n");
+		systemHash = sha256StableShort(leadingSystemMsgs);
+	} else {
+		systemHash = sha256Short("");
 	}
 
-	const systemHash = sha256Short(systemHashInput);
 	const systemBytes = Buffer.byteLength(systemText, "utf8");
-	const itemHashes = conversationMsgs.map(msg => sha256Short(stableStringify(msg)));
+	const itemHashes = conversationMsgs.map(msg => sha256StableShort(msg));
 	return { systemHash, systemText, systemBytes, itemHashes };
 }
 
@@ -523,14 +594,14 @@ function extractTools(
 			while (Object.hasOwn(toolHashes, `${baseName}#${suffix}`)) suffix++;
 			key = `${baseName}#${suffix}`;
 		}
-		toolHashes[key] = sha256Short(stableStringify(withStrict.canonical));
+		toolHashes[key] = sha256StableShort(withStrict.canonical);
 	}
 
 	return {
-		toolsHash: sha256Short(stableStringify(canonicalTools)),
+		toolsHash: sha256StableShort(canonicalTools),
 		toolHashes,
 		hasStrictTools,
-		nonStrictToolsHash: sha256Short(stableStringify(nonStrictTools)),
+		nonStrictToolsHash: sha256StableShort(nonStrictTools),
 	};
 }
 
@@ -594,17 +665,15 @@ export function fingerprintProviderPayload(payload: unknown, apiHint?: string): 
 	}
 	const retentionActive = retentionTtlSec !== null;
 
-	const fullRequestHash = sha256Short(
-		stableStringify({
-			api,
-			modelInPayload,
-			promptCacheKey,
-			effort,
-			systemHash,
-			toolsHash,
-			itemHashes,
-		}),
-	);
+	const fullRequestHash = sha256StableShort({
+		api,
+		modelInPayload,
+		promptCacheKey,
+		effort,
+		systemHash,
+		toolsHash,
+		itemHashes,
+	});
 
 	return {
 		api,
