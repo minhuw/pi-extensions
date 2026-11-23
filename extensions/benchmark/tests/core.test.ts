@@ -1,8 +1,10 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, realpath, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { bounded, cell, change, fingerprint, formatChange, median, number, parseMetrics, quantity, record, spread } from "../core.ts";
+import { bounded, cell, change, fingerprint, formatChange, median, number, parseMetrics, quantity, record, spread, verifyHarness } from "../core.ts";
 
 it("parses requested metrics and ignores unrelated lines", () => {
 	expect(parseMetrics("building\nMETRIC compile_ms=12.5\nMETRIC other=3\nmetric size=1\n  METRIC size=2\nMETRIC size=4 \r\ndone", ["compile_ms", "size"]))
@@ -30,6 +32,60 @@ it("rejects absolute harness paths and paths that escape the root", async () => 
 		expect(Object.keys(await fingerprint(root, ["measure.sh"]))).toEqual(["measure.sh"]);
 		await expect(fingerprint(root, [join(root, "measure.sh")])).rejects.toThrow("Benchmark files must be relative to the project.");
 		for (const file of ["../outside.sh", "link.sh", "."]) await expect(fingerprint(root, [file])).rejects.toThrow("Benchmark file escapes the project.");
+	} finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+it("rejects non-regular harness files such as directories and FIFOs without blocking", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-benchmark-nonregular-"));
+	try {
+		await mkdir(join(directory, "subdir"));
+		await expect(fingerprint(directory, ["subdir"])).rejects.toThrow("Benchmark harness files must be regular files.");
+		if (process.platform !== "win32") {
+			const fifo = join(directory, "pipe.fifo");
+			execFileSync("mkfifo", [fifo]);
+			await expect(fingerprint(directory, ["pipe.fifo"])).rejects.toThrow("Benchmark harness files must be regular files.");
+		}
+	} finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+it("rejects harness files larger than 4 MiB before reading and accepts exact 4 MiB files", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-benchmark-size-"));
+	const limit = 4 * 1024 * 1024;
+	try {
+		const exact = join(directory, "exact.bin");
+		await writeFile(exact, "");
+		await truncate(exact, limit);
+		const exactHashes = await fingerprint(directory, ["exact.bin"]);
+		expect(exactHashes["exact.bin"]).toBe(createHash("sha256").update(Buffer.alloc(limit)).digest("hex"));
+
+		const over = join(directory, "over.bin");
+		await writeFile(over, "");
+		await truncate(over, limit + 1);
+		await expect(fingerprint(directory, ["over.bin"])).rejects.toThrow("Benchmark harness files must be smaller than 4 MiB.");
+
+		// A huge sparse file would OOM or stall if read before fstat size verification.
+		const huge = join(directory, "huge.bin");
+		await writeFile(huge, "");
+		await truncate(huge, 512 * 1024 * 1024);
+		await expect(fingerprint(directory, ["huge.bin"])).rejects.toThrow("Benchmark harness files must be smaller than 4 MiB.");
+	} finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+it("deduplicates equivalent relative paths by canonical relative path in deterministic order", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-benchmark-dedup-"));
+	try {
+		await mkdir(join(directory, "dir"));
+		await writeFile(join(directory, "a.ts"), "export const a = 1;\n");
+		await writeFile(join(directory, "b.ts"), "export const b = 2;\n");
+		await symlink(join(directory, "a.ts"), join(directory, "alias.ts"));
+
+		const single = await fingerprint(directory, ["./a.ts", "dir/../a.ts", "a.ts"]);
+		expect(Object.keys(single)).toEqual(["a.ts"]);
+		expect(single["a.ts"]).toBe(createHash("sha256").update("export const a = 1;\n").digest("hex"));
+
+		const multi = await fingerprint(directory, ["./b.ts", "dir/../a.ts", "b.ts", "./a.ts", "alias.ts"]);
+		expect(Object.keys(multi)).toEqual(["b.ts", "a.ts"]);
+		await expect(verifyHarness(directory, { root: await realpath(directory), files: multi })).resolves.toBeUndefined();
 	} finally { await rm(directory, { recursive: true, force: true }); }
 });
 

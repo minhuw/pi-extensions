@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { open, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 
@@ -15,11 +16,46 @@ export interface Measurement { samples: Record<string, number>[]; values: Record
 /** Errors for a harness whose working directory moved or whose pinned files changed. */
 export interface HarnessMessages { moved: string; changed: string }
 const PINNED: HarnessMessages = { moved: "Benchmark working directory changed.", changed: "Benchmark harness changed." };
-const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+const MAX_HARNESS_FILE_BYTES = 4 * 1024 * 1024;
+const READ_CHUNK_BYTES = 64 * 1024;
+const OPEN_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOFOLLOW ?? 0);
 export function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 export const bounded = (value: unknown, max: number): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= max;
 
-/** Fingerprint declared harness files, rejecting escapes through paths and symlinks. */
+async function hashHarnessFile(absolute: string): Promise<string> {
+	let handle;
+	try {
+		handle = await open(absolute, OPEN_FLAGS);
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "EISDIR" || code === "ENXIO" || code === "EOPNOTSUPP") {
+			throw new Error("Benchmark harness files must be regular files.");
+		}
+		throw error;
+	}
+	try {
+		const info = await handle.stat();
+		if (!info.isFile()) throw new Error("Benchmark harness files must be regular files.");
+		if (info.size > MAX_HARNESS_FILE_BYTES) throw new Error("Benchmark harness files must be smaller than 4 MiB.");
+		const digest = createHash("sha256");
+		const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+		let total = 0;
+		for (;;) {
+			const remaining = MAX_HARNESS_FILE_BYTES - total;
+			const toRead = Math.min(buffer.length, remaining + 1);
+			const { bytesRead } = await handle.read(buffer, 0, toRead, null);
+			if (bytesRead === 0) break;
+			total += bytesRead;
+			if (total > MAX_HARNESS_FILE_BYTES) throw new Error("Benchmark harness files must be smaller than 4 MiB.");
+			digest.update(buffer.subarray(0, bytesRead));
+		}
+		return digest.digest("hex");
+	} finally {
+		await handle.close();
+	}
+}
+
+/** Fingerprint declared harness files, rejecting escapes, non-regular files, and files over 4 MiB. */
 export async function fingerprint(cwd: string, files: string[]): Promise<Record<string, string>> {
 	const root = await realpath(cwd);
 	const hashes: Record<string, string> = Object.create(null);
@@ -28,10 +64,8 @@ export async function fingerprint(cwd: string, files: string[]): Promise<Record<
 		const absolute = await realpath(path.resolve(root, file));
 		const relative = path.relative(root, absolute);
 		if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Benchmark file escapes the project.");
-		if (Object.hasOwn(hashes, file)) throw new Error("Duplicate benchmark file.");
-		const content = await readFile(absolute);
-		if (content.length > 4 * 1024 * 1024) throw new Error("Benchmark harness files must be smaller than 4 MiB.");
-		hashes[file] = hash(content);
+		if (Object.hasOwn(hashes, relative)) continue;
+		hashes[relative] = await hashHarnessFile(absolute);
 	}
 	return hashes;
 }
