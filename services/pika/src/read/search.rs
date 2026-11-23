@@ -302,10 +302,10 @@ fn scrub_response<'a>(titles: impl IntoIterator<Item = &'a mut String>, hits: im
     }).collect();
     let mut scope = Scope::new();
     for title in titles {
-        scope.cut_text(title, 120);
+        scope.cut_text(title, crate::derive::TITLE_CHARS);
     }
     for hit in &mut hits {
-        scope.cut_text(&mut hit.session_title, 120);
+        scope.cut_text(&mut hit.session_title, crate::derive::TITLE_CHARS);
         scope.text(&mut hit.snippet);
     }
     scope.finish();

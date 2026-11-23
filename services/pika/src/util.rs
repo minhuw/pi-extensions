@@ -1,3 +1,4 @@
+use base64ct::Encoding;
 use sha2::{Digest, Sha256};
 
 pub fn sha256_hex(data: &[u8]) -> String {
@@ -16,7 +17,6 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
 
 /// A random 32-byte secret as unpadded base64url: 43 characters.
 pub fn random_secret() -> String {
-    use base64ct::Encoding;
     base64ct::Base64UrlUnpadded::encode_string(&random_bytes::<32>())
 }
 
@@ -140,18 +140,9 @@ pub fn encode_path_segment(s: &str) -> String {
     out
 }
 
-const BASE64_URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
 /// URL-safe base64 without padding.
 pub fn base64url_encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | (*b as u32) << (16 - 8 * i));
-        for i in 0..chunk.len() + 1 {
-            out.push(BASE64_URL[(n >> (18 - 6 * i) & 63) as usize] as char);
-        }
-    }
-    out
+    base64ct::Base64UrlUnpadded::encode_string(data)
 }
 
 /// Decodes standard or URL-safe base64, with or without padding; ASCII whitespace is skipped.

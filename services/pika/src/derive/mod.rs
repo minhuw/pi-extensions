@@ -12,6 +12,7 @@ use serde_json::Value;
 pub use session::{LINK_CUSTOM_TYPE, MEMORY_CALLS_TYPE, memory_calls, nested_memory};
 #[cfg(test)]
 pub(crate) use session::MEMORY_CALLS_SQL;
+pub(crate) use session::{TITLE_CHARS, USER_TEXT_CHARS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamKind {

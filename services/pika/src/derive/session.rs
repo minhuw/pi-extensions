@@ -39,8 +39,8 @@ pub fn memory_calls(conn: &Connection, sid: i64, from: i64, to: i64) -> rusqlite
         .collect()
 }
 
-const TITLE_CHARS: usize = 120;
-const USER_TEXT_CHARS: usize = 65_536;
+pub(crate) const TITLE_CHARS: usize = 120;
+pub(crate) const USER_TEXT_CHARS: usize = 65_536;
 
 struct SessionRow {
     sid: i64,
