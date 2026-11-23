@@ -43,7 +43,7 @@ import type {
   ServiceTierInput,
   ThinkingLevel,
 } from "./types.js";
-import { addUsage } from "./usage.js";
+import { addUsage, type LifetimeUsage } from "./usage.js";
 import { isWorktreeIsolationEnabled } from "./worktree.js";
 
 /**
@@ -71,7 +71,7 @@ interface NestedSpawnOptions {
   isolation?: IsolationMode;
   invocation?: AgentInvocation;
   signal?: AbortSignal;
-  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  onAssistantUsage?: (usage: LifetimeUsage) => void;
   onSessionCreated?: (session: AgentSession) => void;
   depth: number;
   parentAgentId: string;
@@ -101,7 +101,15 @@ export interface NestedAgentManager {
     onSpawned?: (id: string) => void,
   ): Promise<{ id: string; record: AgentRecord }>;
   getRecord(id: string): AgentRecord | undefined;
-  resume(id: string, prompt: string, signal?: AbortSignal, options?: { maxTurns?: number }): Promise<AgentRecord | undefined>;
+  resume(
+    id: string,
+    prompt: string,
+    signal?: AbortSignal,
+    options?: {
+      maxTurns?: number;
+      onAssistantUsage?: (usage: LifetimeUsage) => void;
+    },
+  ): Promise<AgentRecord | undefined>;
 }
 
 export interface NestedToolContext {
@@ -169,6 +177,24 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     return getAvailableTypesIn(registry).filter(name => allowed === undefined || allowed.has(name));
   };
 
+  // Nested children are hidden from every reporting surface, so their spend
+  // would otherwise be unattributable. Fold it into every ancestor's record:
+  // the top-level one appears in lifecycle events, completion notifications,
+  // and `/agents`, and those all read `lifetimeUsage`. The whole chain is
+  // walked, not just the immediate parent — a spawn/resume callback only fires
+  // for that child's OWN turns, so stopping at one level would hide a
+  // great-grandchild from the only record anyone can see. (The live
+  // widget/fleet counters read their own per-agent activity tracker, which
+  // still sees only the top-level agent's own turns.)
+  const forwardAssistantUsage = (usage: LifetimeUsage): void => {
+    for (let id: string | undefined = context.parentAgentId; id !== undefined; ) {
+      const ancestor = context.manager.getRecord(id);
+      if (!ancestor) break;
+      addUsage(ancestor.lifetimeUsage, usage);
+      id = ancestor.parentAgentId;
+    }
+  };
+
   const agentTool = defineTool({
     name: NESTED_TOOL_NAMES[0],
     label: "Agent",
@@ -208,9 +234,19 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }
         // Frontmatter authoritative, as on the spawn path; the manager falls
         // back to the limit the child was spawned with, then the default.
-        const resumed = await context.manager.resume(params.resume, params.prompt, signal, {
+        // Only wire ancestor usage forwarding when an owning parent record
+        // exists in the manager (always true at runtime; avoids passing a
+        // no-op callback when no ancestor record is tracked).
+        const resumeOptions: {
+          maxTurns?: number;
+          onAssistantUsage?: (usage: LifetimeUsage) => void;
+        } = {
           maxTurns: getAgentConfigIn(loadRegistry(), existing.type)?.maxTurns ?? params.max_turns,
-        });
+        };
+        if (context.manager.getRecord(context.parentAgentId)) {
+          resumeOptions.onAssistantUsage = forwardAssistantUsage;
+        }
+        const resumed = await context.manager.resume(params.resume, params.prompt, signal, resumeOptions);
         return resumed
           ? textResult(formatRecord(resumed, "inline"), resumed.status === "error")
           : textResult(`Failed to resume nested agent "${params.resume}".`, true);
@@ -297,23 +333,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           runInBackground: invocation.runInBackground,
           isolation: invocation.isolation,
         },
-        // Nested children are hidden from every reporting surface, so their spend
-        // would otherwise be unattributable. Fold it into every ancestor's record:
-        // the top-level one appears in lifecycle events, completion notifications,
-        // and `/agents`, and those all read `lifetimeUsage`. The whole chain is
-        // walked, not just the immediate parent — a spawn callback only fires for
-        // that child's OWN turns, so stopping at one level would hide a
-        // great-grandchild from the only record anyone can see. (The live
-        // widget/fleet counters read their own per-agent activity tracker, which
-        // still sees only the top-level agent's own turns.)
-        onAssistantUsage: (usage) => {
-          for (let id: string | undefined = context.parentAgentId; id !== undefined; ) {
-            const ancestor = context.manager.getRecord(id);
-            if (!ancestor) break;
-            addUsage(ancestor.lifetimeUsage, usage);
-            id = ancestor.parentAgentId;
-          }
-        },
+        onAssistantUsage: forwardAssistantUsage,
         depth: childDepth,
         parentAgentId: context.parentAgentId,
         maxSubagentDepth: context.maxSubagentDepth,

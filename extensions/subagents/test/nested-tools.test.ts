@@ -526,6 +526,39 @@ describe("child-safe nested Agent tools", () => {
     expect(top.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
   });
 
+  it("attributes spend up the ancestor chain when resuming a nested child", async () => {
+    const top = {
+      id: "top", status: "running",
+      lifetimeUsage: { input: 10, output: 2, cacheWrite: 0, cacheRead: 5, cost: 0.25 },
+    };
+    const middle = {
+      id: "parent-1", status: "running", parentAgentId: "top",
+      lifetimeUsage: { input: 10, output: 2, cacheWrite: 0, cacheRead: 5, cost: 0.25 },
+    };
+    const child = { id: "child-1", type: "scout", status: "completed", parentAgentId: "parent-1" };
+    records.set("top", top);
+    records.set("parent-1", middle);
+    records.set("child-1", child);
+
+    vi.mocked(manager.resume).mockImplementationOnce(async (_id, _prompt, _signal, options) => {
+      options?.onAssistantUsage?.({ input: 40, output: 15, cacheWrite: 4, cacheRead: 20, cost: 0.5 });
+      return { ...child, result: "resumed done" } as any;
+    });
+
+    const [agent] = tools();
+    const result = await execute(agent, {
+      resume: "child-1",
+      subagent_type: "scout",
+      description: "continue work",
+      prompt: "Continue",
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.content[0].text).toBe("resumed done");
+    expect(middle.lifetimeUsage).toEqual({ input: 50, output: 17, cacheWrite: 4, cacheRead: 25, cost: 0.75 });
+    expect(top.lifetimeUsage).toEqual({ input: 50, output: 17, cacheWrite: 4, cacheRead: 25, cost: 0.75 });
+  });
+
   it("files a nested transcript under the root session, honoring output_transcript", async () => {
     records.set("parent-1", { id: "parent-1", status: "running", rootSessionId: "root-session" });
     spawnAndWait.mockImplementation(async (_pi, _ctx, type, _prompt, options, onSpawned) => {
