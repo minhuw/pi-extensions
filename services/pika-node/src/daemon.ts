@@ -110,7 +110,7 @@ export class Daemon {
         this.paths = options.paths;
         this.account = options.account ?? account();
         this.#log = options.log ?? (() => {});
-        this.files = new Files({ home: this.account.home, uploads: join(this.paths.home, "uploads"), log: this.#log });
+        this.files = new Files({ uploads: join(this.paths.home, "uploads"), log: this.#log });
         this.checkouts = new Checkouts({
             config: () => this.config(),
             save: config => saveConfig(this.paths, config),

@@ -15,7 +15,7 @@ mkdirSync(join(root, "repo", ".git"), { recursive: true });
 mkdirSync(join(root, "plain"), { recursive: true });
 const messages: NodeMessage[] = [];
 const peer: Peer = { name: "test", closed: false, send: message => { messages.push(message); }, buffered: () => 0 };
-const files = new Files({ home: home.home, uploads: join(home.home, "uploads"), log: () => {} });
+const files = new Files({ uploads: join(home.home, "uploads"), log: () => {} });
 afterAll(() => { files.shutdown(); home.cleanup(); });
 
 const sha = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
@@ -257,5 +257,40 @@ describe("files", () => {
         expect(parseGitStatus(text, 2)).toEqual({ truncated: true, entries: [expect.objectContaining({ path: "a b.txt" }), expect.objectContaining({ path: "new" })] });
         expect(() => parseGitStatus("1 ?? N... broken")).toThrow(/unexpected git status record/);
         expect(() => parseGitStatus(`2 R. N... 100644 100644 100644 ${hash} ${hash} R100 new`)).toThrow(/unexpected/);
+    });
+
+    it("ignores an inherited GIT_DIR pointing elsewhere", async () => {
+        const repo = join(home.home, "git-env-repo");
+        const decoy = join(home.home, "git-env-decoy");
+        const nonRepo = join(home.home, "git-env-plain");
+        mkdirSync(repo, { recursive: true });
+        mkdirSync(decoy, { recursive: true });
+        mkdirSync(nonRepo, { recursive: true });
+        const initRepo = (dir: string, branch: string, file: string, body: string) => {
+            const git = (...args: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" });
+            git("init", "-q", "-b", branch);
+            writeFileSync(join(dir, file), body);
+            git("add", file);
+            git("commit", "-qm", "first");
+        };
+        initRepo(repo, "main", "target.txt", "from-repo\n");
+        initRepo(decoy, "decoy-branch", "decoy.txt", "from-decoy\n");
+        writeFileSync(join(repo, "target.txt"), "edited\n");
+        writeFileSync(join(repo, "untracked.txt"), "new\n");
+
+        const previousGitDir = process.env.GIT_DIR;
+        process.env.GIT_DIR = join(decoy, ".git");
+        try {
+            expect(await files.gitShow(join(repo, "target.txt"), "HEAD")).toEqual({ encoding: "utf8", data: "from-repo\n" });
+            const status = await files.gitStatus(repo);
+            expect(status.top).toBe(realpathSync(repo));
+            expect(status.branch).toBe("main");
+            expect(status.entries.map(entry => entry.path)).toEqual(["target.txt", "untracked.txt"]);
+            expect(await files.list(repo, 100)).toEqual({ source: "git", truncated: false, paths: ["target.txt", "untracked.txt"] });
+            expect(await code(files.gitStatus(nonRepo))).toBe("not_found");
+        } finally {
+            if (previousGitDir === undefined) delete process.env.GIT_DIR;
+            else process.env.GIT_DIR = previousGitDir;
+        }
     });
 });

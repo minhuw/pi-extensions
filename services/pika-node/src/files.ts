@@ -2,12 +2,11 @@
  * Files (NODE.md §4 "Files"): directory listings, reads, writes if unchanged,
  * watches, and uploads. Paths are absolute and not limited to the roots: an allowed client already has a shell.
  */
-import { execFile } from "node:child_process";
 import { createHash, randomBytes, type Hash } from "node:crypto";
 import { existsSync, watch as watchPath, type FSWatcher } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, sep } from "node:path";
-import { promisify } from "node:util";
+import { execGit } from "./checkouts.ts";
 import type { Peer } from "./daemon.ts";
 import { asNodeError, NodeError } from "./errors.ts";
 import {
@@ -15,13 +14,10 @@ import {
     type DirEntry, type Encoding, type Expected, type GitStatus, type GitStatusEntry, type Request, type Stat,
 } from "./protocol.ts";
 
-const run = promisify(execFile);
-
 interface Watch { id: string; peer: Peer; path: string; file: boolean; watcher: FSWatcher; timer: NodeJS.Timeout | undefined; kind: "change" | "rename" | undefined }
 interface Upload { id: string; peer: Peer; path: string; partial: string; size: number; received: number; hash: Hash; idle: NodeJS.Timeout }
 
 export interface FilesOptions {
-    home: string;
     /** Default upload directory parent (`~/.pika-node/uploads`). */
     uploads: string;
     log: (line: string) => void;
@@ -53,6 +49,20 @@ function isText(data: Buffer): boolean {
     if (data.includes(0)) return false;
     try { new TextDecoder("utf-8", { fatal: true }).decode(data); return true; }
     catch { return false; }
+}
+
+function encodeContent(content: Buffer, label: string): { encoding: Encoding; data: string } {
+    const text = isText(content);
+    const data = text ? content.toString("utf8") : toBase64Url(content);
+    if (utf8Length(JSON.stringify(data)) + 1_024 > LIMITS.maxRecordBytes) throw new NodeError("too_large", `${label} does not fit one record`);
+    return { encoding: text ? "utf8" : "base64", data };
+}
+
+async function gitTopLevel(dir: string, subject = dir): Promise<string> {
+    const result = await execGit(["-C", dir, "rev-parse", "--show-toplevel"], { timeout: 5_000 });
+    if (result.code !== 0) throw new NodeError("not_found", `${subject} is not in a git work tree`);
+    try { return await realpath(result.stdout.toString("utf8").trim()); }
+    catch { throw new NodeError("not_found", `${subject} is not in a git work tree`); }
 }
 
 /** `fs.list` without a `limit`. */
@@ -189,10 +199,7 @@ export class Files {
         if (info.size > LIMITS.maxReadBytes) throw new NodeError("too_large", `${path} is over ${LIMITS.maxReadBytes} bytes`);
         const content = await readFile(path);
         if (content.length > LIMITS.maxReadBytes) throw new NodeError("too_large", `${path} is over ${LIMITS.maxReadBytes} bytes`);
-        const text = isText(content);
-        const data = text ? content.toString("utf8") : toBase64Url(content);
-        if (utf8Length(JSON.stringify(data)) + 1_024 > LIMITS.maxRecordBytes) throw new NodeError("too_large", `${path} does not fit one record`);
-        return { encoding: text ? "utf8" : "base64", data, stat: { size: content.length, mtimeMs: Math.floor(info.mtimeMs), hash: sha256(content) } };
+        return { ...encodeContent(content, path), stat: { size: content.length, mtimeMs: Math.floor(info.mtimeMs), hash: sha256(content) } };
     }
 
     async write(path: string, content: Buffer, expected: Expected, mode?: number): Promise<Stat> {
@@ -285,23 +292,14 @@ export class Files {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
             real = join(await realpath(dirname(path)), basename(path));
         }
-        let top: string;
-        try { top = await realpath((await run("git", ["-C", dirname(real), "rev-parse", "--show-toplevel"], { timeout: 5_000 })).stdout.trim()); }
-        catch { throw new NodeError("not_found", `${path} is not in a git work tree`); }
+        const top = await gitTopLevel(dirname(real), path);
         const inside = relative(top, real);
         if (!inside || inside === ".." || inside.startsWith(`..${sep}`)) throw new NodeError("outside_roots", `${path} is not inside ${top}`);
         const object = `${ref === "HEAD" ? "HEAD" : ""}:${inside.split(sep).join("/")}`;
-        let content: Buffer;
-        try {
-            content = (await run("git", ["-C", top, "cat-file", "blob", object], { encoding: "buffer", maxBuffer: LIMITS.maxReadBytes, timeout: 10_000 })).stdout;
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw new NodeError("too_large", `${path} at ${ref} is over ${LIMITS.maxReadBytes} bytes`);
-            throw new NodeError("not_found", `${path} is not in ${ref}`);
-        }
-        const text = isText(content);
-        const data = text ? content.toString("utf8") : toBase64Url(content);
-        if (utf8Length(JSON.stringify(data)) + 1_024 > LIMITS.maxRecordBytes) throw new NodeError("too_large", `${path} at ${ref} does not fit one record`);
-        return { encoding: text ? "utf8" : "base64", data };
+        const result = await execGit(["-C", top, "cat-file", "blob", object], { maxBuffer: LIMITS.maxReadBytes, timeout: 10_000 });
+        if (result.errorCode === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw new NodeError("too_large", `${path} at ${ref} is over ${LIMITS.maxReadBytes} bytes`);
+        if (result.code !== 0) throw new NodeError("not_found", `${path} is not in ${ref}`);
+        return encodeContent(result.stdout, `${path} at ${ref}`);
     }
 
     /**
@@ -311,19 +309,15 @@ export class Files {
     async gitStatus(root: string): Promise<GitStatus> {
         const info = await stat(root);
         if (!info.isDirectory()) throw new NodeError("not_a_directory", `${root} is not a directory`);
-        let top: string;
-        try { top = await realpath((await run("git", ["-C", root, "rev-parse", "--show-toplevel"], { timeout: 5_000 })).stdout.trim()); }
-        catch { throw new NodeError("not_found", `${root} is not in a git work tree`); }
-        let output: Buffer;
-        try {
-            output = (await run("git", ["--no-optional-locks", "-C", top, "status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all"], {
-                encoding: "buffer", maxBuffer: 64 * 1024 * 1024, timeout: 10_000,
-            })).stdout;
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw new NodeError("too_large", `git status in ${top} printed over 64 MiB`);
-            throw new NodeError("io", `git status in ${top} failed: ${(error as { stderr?: Buffer }).stderr?.toString("utf8").trim() || asNodeError(error).message}`);
+        const top = await gitTopLevel(root);
+        const result = await execGit(["--no-optional-locks", "-C", top, "status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all"], {
+            maxBuffer: 64 * 1024 * 1024, timeout: 10_000,
+        });
+        if (result.errorCode === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw new NodeError("too_large", `git status in ${top} printed over 64 MiB`);
+        if (result.code !== 0) {
+            throw new NodeError("io", `git status in ${top} failed: ${result.stderr.toString("utf8").trim() || result.message || (result.code === null ? "git did not run or timed out" : `git exited with ${result.code}`)}`);
         }
-        return { top, ...parseGitStatus(output.toString("utf8")) };
+        return { top, ...parseGitStatus(result.stdout.toString("utf8")) };
     }
 
     // -----------------------------------------------------------------------------------------------------------
@@ -348,15 +342,14 @@ export class Files {
             bytes += size;
             return true;
         };
-        let listed: Buffer | undefined;
-        try {
-            listed = (await run("git", ["-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"], { encoding: "buffer", maxBuffer: 64 * 1024 * 1024, timeout: 10_000 })).stdout;
-        } catch { /* not a work tree, no git, or too large: walk */ }
-        if (listed) {
+        const listed = await execGit(["-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+            maxBuffer: 64 * 1024 * 1024, timeout: 10_000,
+        });
+        if (listed.code === 0) {
             let truncated = false;
             let last = "";
             // Tracked files come before untracked ones; sorted, a file --cached lists once per merge stage is adjacent.
-            for (const path of listed.toString("utf8").split("\0").sort((a, b) => a < b ? -1 : a > b ? 1 : 0)) {
+            for (const path of listed.stdout.toString("utf8").split("\0").sort((a, b) => a < b ? -1 : a > b ? 1 : 0)) {
                 if (!path || path === last) continue;
                 last = path;
                 if (!add(path)) { truncated = true; break; }

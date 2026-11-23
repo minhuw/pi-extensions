@@ -29,23 +29,31 @@ const GIT_CONCURRENCY = 8;
 // git
 
 interface GitResult { code: number | null; stdout: string; stderr: string }
+export interface GitBytesResult { code: number | null; errorCode?: string; message?: string; stdout: Buffer; stderr: Buffer }
 
 /** The environment for git: no prompts, and nothing that points it at another repository than the cwd's. */
-function gitEnv(): NodeJS.ProcessEnv {
+export function gitEnv(): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = {};
     for (const [name, value] of Object.entries(process.env)) if (!name.startsWith("GIT_")) env[name] = value;
     env.GIT_TERMINAL_PROMPT = "0";
     return env;
 }
 
-/** Runs git in `cwd`; never rejects. `code` is null when git could not run or timed out. */
-function git(cwd: string, args: string[], timeout = 10_000): Promise<GitResult> {
+/** Runs git with `gitEnv()`, returning raw stdout/stderr without rejecting. `code` is null when git could not run, timed out, or exceeded `maxBuffer`. */
+export function execGit(args: string[], options: { timeout?: number; maxBuffer?: number } = {}): Promise<GitBytesResult> {
     return new Promise(resolvePromise => {
-        execFile("git", ["-C", cwd, ...args], { env: gitEnv(), timeout, maxBuffer: 16 * 1024 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
+        execFile("git", args, { env: gitEnv(), timeout: options.timeout ?? 10_000, maxBuffer: options.maxBuffer ?? 16 * 1024 * 1024, encoding: "buffer" }, (error, stdout, stderr) => {
             const code = error ? typeof error.code === "number" ? error.code : null : 0;
-            resolvePromise({ code, stdout, stderr });
+            const errorCode = error && typeof error.code === "string" ? error.code : undefined;
+            resolvePromise({ code, ...(errorCode ? { errorCode } : {}), ...(error ? { message: error.message } : {}), stdout, stderr });
         });
     });
+}
+
+/** Runs git in `cwd`; never rejects. `code` is null when git could not run or timed out. */
+async function git(cwd: string, args: string[], timeout = 10_000): Promise<GitResult> {
+    const result = await execGit(["-C", cwd, ...args], { timeout });
+    return { code: result.code, stdout: result.stdout.toString("utf8"), stderr: result.stderr.toString("utf8") };
 }
 
 /** What git said when it failed, for an error message. */
