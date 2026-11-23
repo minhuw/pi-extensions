@@ -193,6 +193,17 @@ describe("Magpie-owned lifecycle", () => {
 		expect(f.notify).toHaveBeenLastCalledWith(expect.stringContaining("Enabled for magpie/test-model"), "info");
 	});
 
+	it("notifies with error instead of throwing when /magpie-native-compaction encounters a configuration error", async () => {
+		const { commands } = registration({}, true);
+		const f = fixture("magpie");
+		await expect(commands["magpie-native-compaction"].handler("", f.ctx)).resolves.toBeUndefined();
+		expect(f.notify).toHaveBeenCalledOnce();
+		expect(f.notify).toHaveBeenCalledWith(
+			"Magpie native compaction configuration failed: bad config",
+			"error",
+		);
+	});
+
 	it("sanitizes upstream HTTP error bodies in UI notifications for both fallback and cancel paths", async () => {
 		const secretToken = "synthetic-lifecycle-secret-token";
 		const statusSecret = "synthetic-status-secret";

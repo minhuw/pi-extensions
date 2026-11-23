@@ -221,7 +221,13 @@ export function registerNativeCompaction(
 				ctx.ui.notify(`Usage: /${MAGPIE_COMPACTION_COMMAND}`, "error");
 				return;
 			}
-			const config = loadConfig(ctx);
+			let config: MagpieCompactionConfig;
+			try {
+				config = loadConfig(ctx);
+			} catch (error) {
+				ctx.ui.notify(`${MAGPIE_COMPACTION_LABEL} native compaction configuration failed: ${errorMessage(error)}`, "error");
+				return;
+			}
 			const selected = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
 			const model = activeModel(ctx);
 			const enabled = isEligibleModel(model, config);
