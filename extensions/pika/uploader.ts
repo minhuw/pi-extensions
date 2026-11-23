@@ -4,6 +4,7 @@ import { open, readFile, stat } from "node:fs/promises";
 import { request as httpRequest, type ClientRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { hostname } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { gzip } from "node:zlib";
 import { sha256, splitPayload } from "./blocks.ts";
@@ -42,6 +43,7 @@ const HELD_CHECK_MS = 5_000;
 const MAX_UNVERIFIED_HOLD_MS = 6 * 60 * 60 * 1000;
 /** Start times `processStart` reports: epoch seconds, or Linux's boot id and clock ticks. Earlier versions stored a localized date. */
 const COMPARABLE_START = /^(?:\d+|[0-9a-f-]*:\d+)$/;
+const HASH = /^[0-9a-f]{64}$/;
 
 const gzipAsync = promisify(gzip);
 const execFileAsync = promisify(execFile);
@@ -338,14 +340,16 @@ export class Uploader {
 			if (previous!.herderRuns.has(key)) this.herderRuns.add(key);
 		}
 		for (const [name, size] of await this.store.listParked()) this.parked.set(name, size);
-		const blobs = await this.store.listBlobs();
+		// Requests are loaded before blobs: a writer saves blobs before the request file, so every
+		// request loaded here already has its spooled blocks on disk when `listBlobs` runs, while
+		// any newly written block whose request is not yet visible has mtime >= cutoff.
+		const cutoff = Date.now() - ORPHAN_BLOB_AGE_MS;
 		const refs = new Map<string, number>();
 		for (const record of await this.store.loadRequests()) {
 			this.requests.set(record.id, { record, bytes: jsonBytes(record), missingRounds: 0 });
 			for (const hash of record.blocks) refs.set(hash, (refs.get(hash) ?? 0) + 1);
 		}
-		const cutoff = Date.now() - ORPHAN_BLOB_AGE_MS;
-		for (const { hash, size, mtimeMs } of blobs) {
+		for (const { hash, size, mtimeMs } of await this.store.listBlobs()) {
 			const count = refs.get(hash);
 			if (count) this.blobs.set(hash, { size, refs: count });
 			else if (mtimeMs < cutoff && !this.closed) await this.store.deleteBlob(hash);
@@ -423,7 +427,6 @@ export class Uploader {
 				...input, skeleton: split.skeleton, blocks: split.blocks,
 				...(options.awaiting ? { awaiting: { ...this.self, owner: this.id } } : {}),
 			};
-			const previous = this.requests.get(record.id);
 			for (const [hash, text] of split.data) {
 				if (this.parked.has(hash)) continue;
 				const blob = this.blobs.get(hash);
@@ -437,15 +440,27 @@ export class Uploader {
 					continue;
 				}
 				if (this.acked.has(hash)) {
-					this.blobs.set(hash, { size: Buffer.byteLength(text), refs: 1, text });
+					this.blobs.set(hash, { size: Buffer.byteLength(text), refs: this.blockRefs(hash) + 1, text });
 					continue;
 				}
 				await this.store.saveBlob(hash, text);
-				this.blobs.set(hash, { size: Buffer.byteLength(text), refs: 1 });
+				const existing = this.blobs.get(hash);
+				if (existing) {
+					existing.refs++;
+					existing.text = undefined;
+				} else {
+					this.blobs.set(hash, { size: Buffer.byteLength(text), refs: this.blockRefs(hash) + 1 });
+				}
 			}
 			const bytes = await this.store.saveRequest(record);
 			// A payload replaces the context spooled earlier for the same call.
-			if (previous) for (const hash of this.forget(previous.record)) await this.store.deleteBlob(hash);
+			const current = this.requests.get(record.id);
+			if (current) {
+				for (const hash of this.forget(current.record)) {
+					const blob = this.blobs.get(hash);
+					if (!blob || blob.text !== undefined) await this.store.deleteBlob(hash);
+				}
+			}
 			this.requests.set(record.id, { record, bytes, missingRounds: 0 });
 			this.poke();
 		});
@@ -686,12 +701,76 @@ export class Uploader {
 		return false;
 	}
 
-	/** Replaces a request with its current file; false, and forgotten, once another process removed it. */
+	/** Counts how many pending requests currently reference `hash`. */
+	private blockRefs(hash: string): number {
+		let count = 0;
+		for (const { record } of this.requests.values()) {
+			for (const block of record.blocks) if (block === hash) count++;
+		}
+		return count;
+	}
+
+	/** Stats a spooled block on disk, returning its byte size if present. */
+	private async blobSize(hash: string): Promise<number | undefined> {
+		if (!HASH.test(hash)) return undefined;
+		const info = await stat(join(this.store.blobs, hash)).catch(() => undefined);
+		return info?.isFile() ? info.size : undefined;
+	}
+
+	/** Reconciles `this.blobs` after a pending request's blocks changed or appeared on disk. */
+	private reconcileBlobs(previousBlocks: readonly string[], nextBlocks: readonly string[], found: ReadonlyMap<string, number>): void {
+		const oldCounts = new Map<string, number>();
+		for (const hash of previousBlocks) oldCounts.set(hash, (oldCounts.get(hash) ?? 0) + 1);
+		const newCounts = new Map<string, number>();
+		for (const hash of nextBlocks) newCounts.set(hash, (newCounts.get(hash) ?? 0) + 1);
+
+		for (const [hash, oldCount] of oldCounts) {
+			const diff = (newCounts.get(hash) ?? 0) - oldCount;
+			if (diff >= 0) continue;
+			const blob = this.blobs.get(hash);
+			if (!blob) continue;
+			blob.refs += diff;
+			if (blob.refs <= 0) this.blobs.delete(hash);
+		}
+		for (const [hash, newCount] of newCounts) {
+			if (this.parked.has(hash)) continue;
+			const blob = this.blobs.get(hash);
+			if (blob) {
+				const diff = newCount - (oldCounts.get(hash) ?? 0);
+				if (diff > 0) blob.refs += diff;
+				continue;
+			}
+			const size = found.get(hash);
+			if (size !== undefined) {
+				const refs = this.blockRefs(hash);
+				if (refs > 0) this.blobs.set(hash, { size, refs });
+			}
+		}
+	}
+
+	/**
+	 * Replaces a request with its current file and reconciles `this.blobs` for any changed or
+	 * newly spooled blocks; false, and forgotten, once another process removed it.
+	 */
 	private async reload(pending: PendingRequest): Promise<boolean> {
-		const record = await this.store.loadRequest(pending.record.id);
+		const id = pending.record.id;
+		const record = await this.store.loadRequest(id);
+		if (this.requests.get(id) !== pending) return false;
 		if (!record) { this.forget(pending.record); return false; }
+		const found = new Map<string, number>();
+		const probe = new Set<string>();
+		for (const hash of record.blocks) {
+			if (!this.blobs.has(hash) && !this.parked.has(hash)) probe.add(hash);
+		}
+		for (const hash of probe) {
+			const size = await this.blobSize(hash);
+			if (size !== undefined) found.set(hash, size);
+		}
+		if (this.requests.get(id) !== pending) return false;
+		const previous = pending.record;
 		pending.record = record;
 		pending.bytes = jsonBytes(record);
+		this.reconcileBlobs(previous.blocks, record.blocks, found);
 		return true;
 	}
 
@@ -964,7 +1043,10 @@ export class Uploader {
 	private async finish(record: SpooledRequest, deleteRecord = true): Promise<void> {
 		const unused = this.forget(record);
 		if (deleteRecord) await this.store.deleteRequest(record.id);
-		for (const hash of unused) await this.store.deleteBlob(hash);
+		for (const hash of unused) {
+			const current = this.blobs.get(hash);
+			if (!current || current.text !== undefined) await this.store.deleteBlob(hash);
+		}
 	}
 
 	private async accepted(batch: Batch, body: Record<string, unknown>): Promise<Outcome> {
@@ -1010,14 +1092,27 @@ export class Uploader {
 		const toPersist = new Set<string>();
 		for (const record of batch.requests) {
 			const pending = this.requests.get(record.id);
+			if (!pending || pending.record !== record) continue;
 			const lacking = record.blocks.filter((hash) => missing.has(hash) && !this.parked.has(hash));
+			for (const hash of lacking) {
+				if (this.blobs.has(hash)) continue;
+				const size = await this.blobSize(hash);
+				if (size !== undefined && !this.blobs.has(hash) && !this.parked.has(hash)) {
+					const refs = this.blockRefs(hash);
+					if (refs > 0) this.blobs.set(hash, { size, refs });
+				}
+			}
+			if (this.requests.get(record.id) !== pending || pending.record !== record) continue;
 			const resend = lacking.filter((hash) => this.blobs.has(hash));
-			if (resend.length && pending && ++pending.missingRounds <= MAX_MISSING_ROUNDS) {
+			if (resend.length && ++pending.missingRounds <= MAX_MISSING_ROUNDS) {
 				for (const hash of resend) toPersist.add(hash);
 				continue;
 			}
 			unavailable += lacking.length;
 			await this.finish(record);
+		}
+		for (const hash of missing) {
+			if (this.blobs.get(hash)?.text !== undefined) toPersist.add(hash);
 		}
 		for (const hash of toPersist) {
 			const blob = this.blobs.get(hash);

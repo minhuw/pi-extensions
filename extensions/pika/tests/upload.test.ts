@@ -1,11 +1,14 @@
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { splitPayload } from "../blocks.ts";
 import pikaExtension from "../index.ts";
-import { currentUploader, readLines, Uploader } from "../uploader.ts";
+import { Store, type SpooledRequest } from "../store.ts";
+import { currentUploader, readLines, Uploader, type RequestInput } from "../uploader.ts";
 import { MockIngest, TOKEN } from "./support/ingest-server.ts";
 import { readText, startSession, waitFor, Workspace } from "./support/runtime.ts";
 
@@ -192,4 +195,220 @@ it("stops within a bounded time when a flush is stuck", async () => {
 	const started = Date.now();
 	expect(await within(uploader.stop(), 5_000)).toBeUndefined();
 	expect(Date.now() - started).toBeLessThan(2_000);
+}, 10_000);
+
+const uploaderBlobs = (uploader: Uploader) =>
+	(uploader as unknown as { blobs: Map<string, { size: number; refs: number; text?: string }> }).blobs;
+
+const requestInput = (id: string, fidelity: RequestInput["fidelity"] = "payload"): RequestInput => ({
+	id, sessionId: "s-reconcile", seq: 1, at: new Date().toISOString(), fidelity, provider: "p", api: "a", model: "m",
+});
+
+const spooledNames = async (subdir: "requests" | "blobs") =>
+	(await readdir(join(workspace.pikaDir, "spool", subdir)).catch(() => [])).filter((name) => !name.endsWith(".tmp"));
+
+it("snapshots requests before blobs in load() so a concurrently spooled request never loses its blocks", async () => {
+	const payload = { model: "m", messages: [{ role: "user", content: "concurrent cross-process spool" }] };
+	const split = splitPayload(payload);
+	const [hash] = split.blocks as [string];
+	const text = split.data.get(hash)!;
+	const id = randomUUID();
+	const record: SpooledRequest = { ...requestInput(id), skeleton: split.skeleton, blocks: split.blocks };
+
+	const calls: string[] = [];
+	const origLoadRequests = Store.prototype.loadRequests;
+	const origListBlobs = Store.prototype.listBlobs;
+	let injected = false;
+	vi.spyOn(Store.prototype, "loadRequests").mockImplementation(async function (this: Store) {
+		calls.push("loadRequests");
+		if (!injected) {
+			injected = true;
+			// Simulate another process spooling blob -> request right as loadRequests runs.
+			await this.saveBlob(hash, text);
+			await this.saveRequest(record);
+		}
+		return origLoadRequests.call(this);
+	});
+	vi.spyOn(Store.prototype, "listBlobs").mockImplementation(async function (this: Store) {
+		calls.push("listBlobs");
+		return origListBlobs.call(this);
+	});
+
+	const uploader = new Uploader({ url: ingest.url, token: TOKEN, dir: workspace.pikaDir });
+	try {
+		await uploader.ready;
+		expect(calls.indexOf("loadRequests")).toBeGreaterThanOrEqual(0);
+		expect(calls.indexOf("listBlobs")).toBeGreaterThan(calls.indexOf("loadRequests"));
+		expect(uploaderBlobs(uploader).get(hash)).toEqual({ size: Buffer.byteLength(text), refs: 1 });
+
+		await uploader.flush();
+		expect(ingest.payload(id)).toEqual(payload);
+		expect(uploaderBlobs(uploader).size).toBe(0);
+		expect(await spooledNames("requests")).toEqual([]);
+		expect(await spooledNames("blobs")).toEqual([]);
+		expect(uploader.status().lastError).toBeUndefined();
+	} finally { await uploader.stop(); }
+}, 10_000);
+
+it("reconciles this.blobs in reload() when another process replaces a held request with different blocks", async () => {
+	const offline = await new MockIngest().reserve();
+	const otherOwner = { pid: 1, machine: "other-machine" };
+	const writer = new Uploader({ url: offline.url, token: TOKEN, dir: workspace.pikaDir, owner: otherOwner });
+	try {
+		const id = randomUUID();
+		const sharedId = randomUUID();
+		const ctxMsg = { role: "user", content: "initial context block" };
+		const sharedMsg = { role: "user", content: "shared payload block" };
+		const uniqueMsg = { role: "assistant", content: "brand-new payload block" };
+		const ctxPayload = { messages: [ctxMsg] };
+		const sharedPayload = { model: "m", messages: [sharedMsg] };
+		const payPayload = { model: "m", messages: [sharedMsg, uniqueMsg] };
+		const [hCtx] = splitPayload(ctxPayload).blocks as [string];
+		const [hShared, hUnique] = splitPayload(payPayload).blocks as [string, string];
+
+		await writer.enqueueRequest(requestInput(id, "context"), { value: ctxPayload }, { awaiting: true });
+		// A second held request in the same spool shares hShared so reload() must increment its refs,
+		// while hUnique only appears on disk when the first request is replaced.
+		await writer.enqueueRequest(requestInput(sharedId, "payload"), { value: sharedPayload }, { awaiting: true });
+
+		const b = new Uploader({ url: ingest.url, token: TOKEN, dir: workspace.pikaDir });
+		try {
+			await b.ready;
+			await b.flush();
+			expect(ingest.requests.size).toBe(0);
+			expect(uploaderBlobs(b).get(hCtx)).toMatchObject({ refs: 1 });
+			expect(uploaderBlobs(b).get(hShared)).toMatchObject({ refs: 1 });
+			expect(uploaderBlobs(b).has(hUnique)).toBe(false);
+
+			// Writer replaces context with payload (hCtx -> [hShared, hUnique]) and completes only the first request.
+			await writer.enqueueRequest(requestInput(id, "payload"), { value: payPayload }, { awaiting: true });
+			await writer.completeRequest(id, { assistant: { timestamp: 99 } });
+
+			await b.flush();
+			expect(ingest.requests.get(id)).toMatchObject({ fidelity: "payload", assistant: { timestamp: 99 } });
+			expect(ingest.payload(id)).toEqual(payPayload);
+			// hCtx was dropped on reload; hUnique was uploaded and cleaned up; hShared still has 1 ref for sharedId.
+			expect(uploaderBlobs(b).has(hCtx)).toBe(false);
+			expect(uploaderBlobs(b).has(hUnique)).toBe(false);
+			expect(uploaderBlobs(b).get(hShared)).toMatchObject({ refs: 1 });
+			expect(await spooledNames("blobs")).toEqual([hShared]);
+			expect(b.status().lastError).toBeUndefined();
+
+			// Completing the second request uploads cleanly and drains the remaining block.
+			await writer.completeRequest(sharedId, { assistant: { timestamp: 100 } });
+			await b.flush();
+			expect(ingest.payload(sharedId)).toEqual(sharedPayload);
+			expect(uploaderBlobs(b).size).toBe(0);
+			expect(await spooledNames("requests")).toEqual([]);
+			expect(await spooledNames("blobs")).toEqual([]);
+			expect(b.status().lastError).toBeUndefined();
+		} finally { await b.stop(); }
+	} finally { await writer.stop(); }
+}, 15_000);
+
+it("reconciles this.blobs in reload() when a request's block appears on disk after load()", async () => {
+	const store = new Store(workspace.pikaDir);
+	await store.init();
+	const payload = { model: "m", messages: [{ role: "user", content: "late-arriving blob" }] };
+	const split = splitPayload(payload);
+	const [hash] = split.blocks as [string];
+	const text = split.data.get(hash)!;
+	const id = randomUUID();
+	const heldRecord: SpooledRequest = {
+		...requestInput(id), skeleton: split.skeleton, blocks: split.blocks,
+		awaiting: { pid: 1, owner: "remote", machine: "other-machine" },
+	};
+	// Only the request file exists when the uploader loads (e.g., another process had the block in memory).
+	await store.saveRequest(heldRecord);
+
+	const uploader = new Uploader({ url: ingest.url, token: TOKEN, dir: workspace.pikaDir });
+	try {
+		await uploader.ready;
+		await uploader.flush();
+		expect(uploaderBlobs(uploader).has(hash)).toBe(false);
+		expect(ingest.requests.has(id)).toBe(false);
+
+		// Another process persists the block and releases the request.
+		await store.saveBlob(hash, text);
+		const { awaiting: _, ...released } = heldRecord;
+		await store.saveRequest(released);
+
+		await uploader.flush();
+		expect(ingest.payload(id)).toEqual(payload);
+		expect(uploaderBlobs(uploader).size).toBe(0);
+		expect(await spooledNames("requests")).toEqual([]);
+		expect(await spooledNames("blobs")).toEqual([]);
+		expect(uploader.status().lastError).toBeUndefined();
+	} finally { await uploader.stop(); }
+}, 10_000);
+
+it("reconciles this.blobs in accepted() when a missing block appears on disk before the response is handled", async () => {
+	const store = new Store(workspace.pikaDir);
+	await store.init();
+	const payload = { model: "m", messages: [{ role: "user", content: "blob written before accepted" }] };
+	const split = splitPayload(payload);
+	const [hash] = split.blocks as [string];
+	const text = split.data.get(hash)!;
+	const id = randomUUID();
+	await store.saveRequest({ ...requestInput(id), skeleton: split.skeleton, blocks: split.blocks });
+
+	const uploader = new Uploader({ url: ingest.url, token: TOKEN, dir: workspace.pikaDir });
+	try {
+		await uploader.ready;
+		expect(uploaderBlobs(uploader).has(hash)).toBe(false);
+
+		// Write the blob to disk after the first batch is posted (server returns missingBlobs) and before accepted() runs.
+		const origPost = (uploader as unknown as { post: (body: Buffer) => Promise<{ status: number; text: string }> }).post.bind(uploader);
+		let wrote = false;
+		vi.spyOn(uploader as unknown as { post: (body: Buffer) => Promise<{ status: number; text: string }> }, "post").mockImplementation(async (body) => {
+			const response = await origPost(body);
+			if (!wrote) {
+				wrote = true;
+				await store.saveBlob(hash, text);
+			}
+			return response;
+		});
+
+		await uploader.flush();
+		expect(ingest.requestReceipts.get(id)).toBe(2);
+		expect(ingest.payload(id)).toEqual(payload);
+		expect(uploaderBlobs(uploader).size).toBe(0);
+		expect(await spooledNames("requests")).toEqual([]);
+		expect(await spooledNames("blobs")).toEqual([]);
+		expect(uploader.status().lastError).toBeUndefined();
+	} finally { await uploader.stop(); }
+}, 10_000);
+
+it("does not drop a replaced request or corrupt blob refs when accepted() handles an earlier in-flight version", async () => {
+	const uploader = new Uploader({ url: ingest.url, token: TOKEN, dir: workspace.pikaDir });
+	try {
+		await uploader.ready;
+		const id = randomUUID();
+		const oldPayload = { model: "m", messages: [{ role: "user", content: "in-flight old payload" }] };
+		const newPayload = { model: "m", messages: [{ role: "user", content: "replacement payload" }] };
+		const [hNew] = splitPayload(newPayload).blocks as [string];
+
+		const origPost = (uploader as unknown as { post: (body: Buffer) => Promise<{ status: number; text: string }> }).post.bind(uploader);
+		let replaced = false;
+		vi.spyOn(uploader as unknown as { post: (body: Buffer) => Promise<{ status: number; text: string }> }, "post").mockImplementation(async (body) => {
+			const response = await origPost(body);
+			if (!replaced) {
+				replaced = true;
+				await uploader.enqueueRequest(requestInput(id, "payload"), { value: newPayload });
+			}
+			return response;
+		});
+
+		await uploader.enqueueRequest(requestInput(id, "context"), { value: oldPayload });
+		await uploader.flush();
+		await waitFor(() => ingest.requestReceipts.get(id) === 2, 5_000, "replacement uploaded");
+		await uploader.flush();
+		expect(ingest.bodies.flatMap((body) => body.requests ?? []).map((request) => request.fidelity)).toEqual(["context", "payload"]);
+		expect(ingest.blobs.has(hNew)).toBe(true);
+		expect(uploaderBlobs(uploader).has(hNew)).toBe(false);
+		expect(uploaderBlobs(uploader).size).toBe(0);
+		expect(await spooledNames("requests")).toEqual([]);
+		expect(await spooledNames("blobs")).toEqual([]);
+		expect(uploader.status().lastError).toBeUndefined();
+	} finally { await uploader.stop(); }
 }, 10_000);
