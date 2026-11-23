@@ -12,21 +12,12 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 
 use super::nodes::require_enabled;
-use super::{AppState, blocking, error, internal_error};
+use super::{AppState, blocking, error, internal_error, json_body};
 use crate::deck::{self, MAX_KEY_ITEMS, Update};
 use crate::util::{now_ms, valid_project};
 
 fn invalid() -> Response {
     error(StatusCode::BAD_REQUEST, "invalid")
-}
-
-/// The JSON body; a form post keeps the extractor's 415, and anything else that is not JSON is 400 `invalid`.
-fn body(body: Result<Json<Value>, JsonRejection>) -> Result<Value, Response> {
-    match body {
-        Ok(Json(body)) => Ok(body),
-        Err(rejection @ JsonRejection::MissingJsonContentType(_)) => Err(rejection.into_response()),
-        Err(_) => Err(invalid()),
-    }
 }
 
 /// An optional string field: absent and `null` are none; another type is `Err`.
@@ -45,7 +36,7 @@ fn checked(key: Result<Path<String>, PathRejection>) -> Option<String> {
 
 /// `POST deck/project-keys` → one key, or null, per item, in order. Stores nothing.
 async fn project_keys(raw: Result<Json<Value>, JsonRejection>) -> Response {
-    let body = match body(raw) {
+    let body = match json_body(raw, || Err(invalid())) {
         Ok(body) => body,
         Err(response) => return response,
     };
@@ -81,7 +72,7 @@ async fn update(
     key: Result<Path<String>, PathRejection>,
     raw: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    let body = match body(raw) {
+    let body = match json_body(raw, || Err(invalid())) {
         Ok(body) => body,
         Err(response) => return response,
     };

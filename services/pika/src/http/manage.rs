@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::Value;
 
-use super::{AppState, blocking, error, internal_error};
+use super::{AppState, blocking, error, internal_error, json_body};
 use crate::delete::{self, Deleted};
 use crate::util::{now_ms, valid_project};
 
@@ -67,10 +67,9 @@ pub async fn update_session(
     Path(id): Path<String>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    let body = match body {
-        Ok(Json(body)) => body,
-        Err(rejection @ JsonRejection::MissingJsonContentType(_)) => return rejection.into_response(),
-        Err(_) => Value::Null,
+    let body = match json_body(body, || Ok(Value::Null)) {
+        Ok(body) => body,
+        Err(response) => return response,
     };
     let Some(hidden) = body.get("hidden").and_then(Value::as_bool) else {
         return error(StatusCode::BAD_REQUEST, "invalid_body");

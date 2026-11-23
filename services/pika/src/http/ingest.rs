@@ -7,7 +7,8 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
-use super::{AppState, blocking, error, internal_error};
+use super::auth::DeviceAuth;
+use super::{AppState, error, internal_error};
 use crate::ingest::{self, Batch, IngestError};
 use crate::util::{cut_chars, now_ms};
 
@@ -42,16 +43,12 @@ fn decode(bytes: &[u8], gzip: bool, max: usize) -> Result<Batch, Rejection> {
     serde_json::from_slice(json).map_err(|e| Rejection::Bad(format!("invalid batch: {e}")))
 }
 
-pub async fn batch(State(state): State<AppState>, headers: HeaderMap, body: Body) -> Response {
-    let Some(token) = bearer(&headers).map(str::to_owned) else {
-        return error(StatusCode::UNAUTHORIZED, "unauthorized");
-    };
-    let store = state.store.clone();
-    let (device, last_seen_at) = match blocking(move || crate::auth::device_for_token(&store, &token)).await {
-        Ok(Some(found)) => found,
-        Ok(None) => return error(StatusCode::UNAUTHORIZED, "unauthorized"),
-        Err(e) => return internal_error(e),
-    };
+pub async fn batch(
+    State(state): State<AppState>,
+    DeviceAuth { device, last_seen_at, .. }: DeviceAuth,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
     let max = state.config.max_body;
     let declared = headers
         .get(header::CONTENT_LENGTH)

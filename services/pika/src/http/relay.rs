@@ -9,7 +9,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use tokio::time::{Duration, Instant};
 
-use super::ingest::bearer;
-use super::{AppState, blocking, error, internal_error};
+use super::auth::DeviceAuth;
+use super::{AppState, blocking, error, internal_error, json_body};
 use crate::board::{self, Refusal, Saved};
 use crate::relay::{
     self, Closing, Connection, Draft, Frames, Origin, Outcome, Reason, Reply, RoomAction, SessionInfo, StateUpdate,
@@ -35,14 +35,6 @@ pub async fn require_enabled(State(state): State<AppState>, request: Request, ne
         return error(StatusCode::NOT_FOUND, "relay_disabled");
     }
     next.run(request).await
-}
-
-/// The device of the request's bearer token, and the token; `None` for a missing, unknown, or revoked token.
-async fn device(state: &AppState, headers: &HeaderMap) -> anyhow::Result<Option<(String, String)>> {
-    let Some(token) = bearer(headers).map(str::to_owned) else { return Ok(None) };
-    let (store, lookup) = (state.store.clone(), token.clone());
-    let found = blocking(move || crate::auth::device_for_token(&store, &lookup)).await?;
-    Ok(found.map(|(device, _)| (device, token)))
 }
 
 /// Reloads the relay's device names from the store, so that a rename from `pika token rename`, in another process,
@@ -71,12 +63,8 @@ async fn session_list(state: &AppState) -> Response {
 }
 
 /// `GET {base}/api/relay/v1/sessions` for devices.
-pub async fn device_sessions(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    match device(&state, &headers).await {
-        Ok(Some(_)) => session_list(&state).await,
-        Ok(None) => error(StatusCode::UNAUTHORIZED, "unauthorized"),
-        Err(e) => internal_error(e),
-    }
+pub async fn device_sessions(State(state): State<AppState>, _auth: DeviceAuth) -> Response {
+    session_list(&state).await
 }
 
 /// `GET relay/sessions` for the browser.
@@ -120,10 +108,9 @@ fn reason_response(reason: Reason) -> Response {
 /// `POST relay/messages` with `{ to, text, urgent? }` or `{ room, text, mentions?, urgent?, replyTo? }`, sent as
 /// `{ kind: "web" }` with hops 0. The room must exist; the web needs no membership.
 pub async fn post_message(State(state): State<AppState>, body: Result<Json<Value>, JsonRejection>) -> Response {
-    let body = match body {
-        Ok(Json(body)) => body,
-        Err(rejection @ JsonRejection::MissingJsonContentType(_)) => return rejection.into_response(),
-        Err(_) => Value::Null,
+    let body = match json_body(body, || Ok(Value::Null)) {
+        Ok(body) => body,
+        Err(response) => return response,
     };
     let draft = Draft::parse(&body, true);
     refresh_names(&state).await;
@@ -177,78 +164,84 @@ async fn room_detail_inner(state: &AppState, name: &str, query: &BTreeMap<String
     }
 }
 
-/// `GET {base}/api/relay/v1/rooms` for devices.
-pub async fn device_rooms(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    match device(&state, &headers).await {
-        Ok(Some(_)) => rooms_list(&state).await,
-        Ok(None) => error(StatusCode::UNAUTHORIZED, "unauthorized"),
-        Err(e) => internal_error(e),
+fn parse_room_action(value: Option<&Value>) -> Option<RoomAction> {
+    match value {
+        None | Some(Value::Null) => Some(RoomAction::Join),
+        Some(Value::String(s)) => match s.as_str() {
+            "add" | "join" => Some(RoomAction::Join),
+            "remove" | "leave" => Some(RoomAction::Leave),
+            "represent" => Some(RoomAction::Represent),
+            "unrepresent" => Some(RoomAction::Unrepresent),
+            _ => None,
+        },
+        Some(_) => None,
     }
 }
 
-/// `GET {base}/api/relay/v1/rooms/{name}` for devices.
-pub async fn device_room_detail(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(name): Path<String>,
-    Query(query): Query<BTreeMap<String, String>>,
+async fn apply_room_member(
+    state: &AppState,
+    room: &str,
+    obj: &serde_json::Map<String, Value>,
+    device: Option<&str>,
+    topic: Option<String>,
 ) -> Response {
-    match device(&state, &headers).await {
-        Ok(Some(_)) => room_detail_inner(&state, &name, &query).await,
-        Ok(None) => error(StatusCode::UNAUTHORIZED, "unauthorized"),
-        Err(e) => internal_error(e),
-    }
-}
-
-/// `POST {base}/api/relay/v1/rooms` with `{ room, sessionId, action?: "join" | "leave" | "represent" | "unrepresent",
-/// topic? }` for devices, for a session the device owns.
-pub async fn device_update_room(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response {
-    let device = match device(&state, &headers).await {
-        Ok(Some((device, _))) => device,
-        Ok(None) => return error(StatusCode::UNAUTHORIZED, "unauthorized"),
-        Err(e) => return internal_error(e),
-    };
-    let body = match body {
-        Ok(Json(body)) => body,
-        Err(rejection @ JsonRejection::MissingJsonContentType(_)) => return rejection.into_response(),
-        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
-    };
-    let Some(obj) = body.as_object() else { return error(StatusCode::BAD_REQUEST, "invalid") };
-    let Some(room) = obj.get("room").or_else(|| obj.get("name")).and_then(Value::as_str) else {
-        return error(StatusCode::BAD_REQUEST, "invalid");
-    };
     let Some(session_id) = obj.get("sessionId").and_then(Value::as_str) else {
         return error(StatusCode::BAD_REQUEST, "invalid");
     };
     if !relay::valid_session_id(session_id) {
         return error(StatusCode::BAD_REQUEST, "invalid");
     }
-    let action = match obj.get("action").and_then(Value::as_str) {
-        None | Some("join") | Some("add") => RoomAction::Join,
-        Some("leave") | Some("remove") => RoomAction::Leave,
-        Some("represent") => RoomAction::Represent,
-        Some("unrepresent") => RoomAction::Unrepresent,
-        Some(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
+    let Some(action) = parse_room_action(obj.get("action")) else {
+        return error(StatusCode::BAD_REQUEST, "invalid");
+    };
+    refresh_names(state).await;
+    let (store, sid) = (state.store.clone(), session_id.to_owned());
+    let rec = match blocking(move || relay::recorded(&store, &sid)).await {
+        Ok(rec) => rec,
+        Err(e) => return internal_error(e),
+    };
+    match state.relay.set_room_member(room, session_id, rec, device, action, topic) {
+        Ok(detail) => Json(detail).into_response(),
+        Err(reason) => reason_response(reason),
+    }
+}
+
+/// `GET {base}/api/relay/v1/rooms` for devices.
+pub async fn device_rooms(State(state): State<AppState>, _auth: DeviceAuth) -> Response {
+    rooms_list(&state).await
+}
+
+/// `GET {base}/api/relay/v1/rooms/{name}` for devices.
+pub async fn device_room_detail(
+    State(state): State<AppState>,
+    _auth: DeviceAuth,
+    Path(name): Path<String>,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    room_detail_inner(&state, &name, &query).await
+}
+
+/// `POST {base}/api/relay/v1/rooms` with `{ room, sessionId, action?: "join" | "leave" | "represent" | "unrepresent",
+/// topic? }` for devices, for a session the device owns.
+pub async fn device_update_room(
+    State(state): State<AppState>,
+    DeviceAuth { device, .. }: DeviceAuth,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let body = match json_body(body, || Err(error(StatusCode::BAD_REQUEST, "invalid"))) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let Some(obj) = body.as_object() else { return error(StatusCode::BAD_REQUEST, "invalid") };
+    let Some(room) = obj.get("room").or_else(|| obj.get("name")).and_then(Value::as_str) else {
+        return error(StatusCode::BAD_REQUEST, "invalid");
     };
     let topic = match obj.get("topic") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) => Some(s.clone()),
         Some(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
     };
-    refresh_names(&state).await;
-    let (store, sid) = (state.store.clone(), session_id.to_owned());
-    let rec = match blocking(move || relay::recorded(&store, &sid)).await {
-        Ok(rec) => rec,
-        Err(e) => return internal_error(e),
-    };
-    match state.relay.set_room_member(room, session_id, rec, Some(&device), action, topic) {
-        Ok(detail) => Json(detail).into_response(),
-        Err(reason) => reason_response(reason),
-    }
+    apply_room_member(&state, room, obj, Some(&device), topic).await
 }
 
 /// `GET relay/rooms` for the browser.
@@ -267,10 +260,9 @@ pub async fn room_detail(
 
 /// `POST relay/rooms` with `{ name, topic?: string | null, members?: string[] }` for the browser.
 pub async fn save_room(State(state): State<AppState>, body: Result<Json<Value>, JsonRejection>) -> Response {
-    let body = match body {
-        Ok(Json(body)) => body,
-        Err(rejection @ JsonRejection::MissingJsonContentType(_)) => return rejection.into_response(),
-        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
+    let body = match json_body(body, || Err(error(StatusCode::BAD_REQUEST, "invalid"))) {
+        Ok(body) => body,
+        Err(response) => return response,
     };
     let Some(obj) = body.as_object() else { return error(StatusCode::BAD_REQUEST, "invalid") };
     let Some(name) = obj.get("name").or_else(|| obj.get("room")).and_then(Value::as_str) else {
@@ -330,39 +322,12 @@ pub async fn room_member(
     Path(name): Path<String>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    let body = match body {
-        Ok(Json(body)) => body,
-        Err(rejection @ JsonRejection::MissingJsonContentType(_)) => return rejection.into_response(),
-        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
+    let body = match json_body(body, || Err(error(StatusCode::BAD_REQUEST, "invalid"))) {
+        Ok(body) => body,
+        Err(response) => return response,
     };
     let Some(obj) = body.as_object() else { return error(StatusCode::BAD_REQUEST, "invalid") };
-    let Some(session_id) = obj.get("sessionId").and_then(Value::as_str) else {
-        return error(StatusCode::BAD_REQUEST, "invalid");
-    };
-    if !relay::valid_session_id(session_id) {
-        return error(StatusCode::BAD_REQUEST, "invalid");
-    }
-    let action = match obj.get("action") {
-        None | Some(Value::Null) => RoomAction::Join,
-        Some(Value::String(s)) => match s.as_str() {
-            "add" | "join" => RoomAction::Join,
-            "remove" | "leave" => RoomAction::Leave,
-            "represent" => RoomAction::Represent,
-            "unrepresent" => RoomAction::Unrepresent,
-            _ => return error(StatusCode::BAD_REQUEST, "invalid"),
-        },
-        Some(_) => return error(StatusCode::BAD_REQUEST, "invalid"),
-    };
-    refresh_names(&state).await;
-    let (store, sid) = (state.store.clone(), session_id.to_owned());
-    let rec = match blocking(move || relay::recorded(&store, &sid)).await {
-        Ok(rec) => rec,
-        Err(e) => return internal_error(e),
-    };
-    match state.relay.set_room_member(&name, session_id, rec, None, action, None) {
-        Ok(detail) => Json(detail).into_response(),
-        Err(reason) => reason_response(reason),
-    }
+    apply_room_member(&state, &name, obj, None, None).await
 }
 
 /// `DELETE relay/rooms/{name}` for the browser.
@@ -386,15 +351,10 @@ fn refusal_response(refusal: Refusal) -> Response {
 /// older than the stored one is answered `stale` and changes nothing.
 pub async fn device_put_board(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    DeviceAuth { device, .. }: DeviceAuth,
     Path(session_id): Path<String>,
     body: Bytes,
 ) -> Response {
-    let device = match device(&state, &headers).await {
-        Ok(Some((device, _))) => device,
-        Ok(None) => return error(StatusCode::UNAUTHORIZED, "unauthorized"),
-        Err(e) => return internal_error(e),
-    };
     if !relay::valid_session_id(&session_id) {
         return error(StatusCode::BAD_REQUEST, "invalid");
     }
@@ -501,14 +461,9 @@ pub async fn room_boards(State(state): State<AppState>, Path(name): Path<String>
 /// `GET {base}/api/relay/v1/connect`: the token is checked before the upgrade.
 pub async fn connect(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    DeviceAuth { device, token, .. }: DeviceAuth,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
-    let (device, token) = match device(&state, &headers).await {
-        Ok(Some(found)) => found,
-        Ok(None) => return error(StatusCode::UNAUTHORIZED, "unauthorized"),
-        Err(e) => return internal_error(e),
-    };
     let upgrade = match upgrade {
         Ok(upgrade) => upgrade,
         Err(rejection) => return rejection.into_response(),
@@ -766,4 +721,27 @@ pub fn browser_routes(state: &AppState, login: impl Fn(Router<AppState>) -> Rout
         .route("/relay/rooms/{name}/boards", get(room_boards))
         .route("/relay/boards/{session}", get(board));
     login(routes).route_layer(middleware::from_fn_with_state(state.clone(), require_enabled))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_room_action_accepts_known_values_and_rejects_non_strings() {
+        assert_eq!(parse_room_action(None), Some(RoomAction::Join));
+        assert_eq!(parse_room_action(Some(&Value::Null)), Some(RoomAction::Join));
+        assert_eq!(parse_room_action(Some(&json!("join"))), Some(RoomAction::Join));
+        assert_eq!(parse_room_action(Some(&json!("add"))), Some(RoomAction::Join));
+        assert_eq!(parse_room_action(Some(&json!("leave"))), Some(RoomAction::Leave));
+        assert_eq!(parse_room_action(Some(&json!("remove"))), Some(RoomAction::Leave));
+        assert_eq!(parse_room_action(Some(&json!("represent"))), Some(RoomAction::Represent));
+        assert_eq!(parse_room_action(Some(&json!("unrepresent"))), Some(RoomAction::Unrepresent));
+
+        assert_eq!(parse_room_action(Some(&json!("unknown"))), None);
+        assert_eq!(parse_room_action(Some(&json!(42))), None);
+        assert_eq!(parse_room_action(Some(&json!(true))), None);
+        assert_eq!(parse_room_action(Some(&json!({}))), None);
+        assert_eq!(parse_room_action(Some(&json!([]))), None);
+    }
 }

@@ -57,6 +57,29 @@ impl FromRequestParts<AppState> for Client {
     }
 }
 
+/// A request authenticated with a device bearer token.
+pub(super) struct DeviceAuth {
+    pub device: String,
+    pub token: String,
+    pub last_seen_at: Option<i64>,
+}
+
+impl FromRequestParts<AppState> for DeviceAuth {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<DeviceAuth, Response> {
+        let Some(token) = super::ingest::bearer(&parts.headers).map(str::to_owned) else {
+            return Err(error(StatusCode::UNAUTHORIZED, "unauthorized"));
+        };
+        let (store, lookup) = (state.store.clone(), token.clone());
+        match blocking(move || auth::device_for_token(&store, &lookup)).await {
+            Ok(Some((device, last_seen_at))) => Ok(DeviceAuth { device, token, last_seen_at }),
+            Ok(None) => Err(error(StatusCode::UNAUTHORIZED, "unauthorized")),
+            Err(e) => Err(internal_error(e)),
+        }
+    }
+}
+
 /// 429 `{ error: "too_many_attempts", retryAfter }` with a `Retry-After` header.
 pub fn too_many_attempts(wait: Duration) -> Response {
     let secs = retry_secs(wait);

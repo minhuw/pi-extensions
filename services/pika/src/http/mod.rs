@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::Result;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
@@ -111,6 +112,19 @@ pub fn internal_error(e: impl std::fmt::Display) -> Response {
 /// Runs blocking store work off the async runtime.
 pub async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     tokio::task::spawn_blocking(f).await?
+}
+
+/// Unwraps a JSON body while preserving Axum's 415 for missing `application/json` content type; any other JSON
+/// rejection is handled by `on_invalid`.
+pub(super) fn json_body<T>(
+    body: Result<Json<T>, JsonRejection>,
+    on_invalid: impl FnOnce() -> Result<T, Response>,
+) -> Result<T, Response> {
+    match body {
+        Ok(Json(body)) => Ok(body),
+        Err(rejection @ JsonRejection::MissingJsonContentType(_)) => Err(rejection.into_response()),
+        Err(_) => on_invalid(),
+    }
 }
 
 async fn health(State(state): State<AppState>) -> Response {

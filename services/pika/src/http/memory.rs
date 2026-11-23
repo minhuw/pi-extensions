@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::ingest::bearer;
+use super::auth::DeviceAuth;
 use super::{AppState, blocking, error, internal_error};
 use crate::memory::dream::{self, DreamError};
 use crate::memory::{self, LIMIT_BYTES, LIMIT_LINES, MemoryError, Overfull};
@@ -95,20 +95,6 @@ fn respond_dream<T: Serialize>(result: anyhow::Result<Result<T, DreamError>>) ->
     }
 }
 
-/// The id of the device whose token the request carries. The route layer already checked the token, but it may have
-/// been revoked since.
-async fn device(state: &AppState, headers: &HeaderMap) -> Result<String, Box<Response>> {
-    let Some(token) = bearer(headers).map(str::to_owned) else {
-        return Err(Box::new(error(StatusCode::UNAUTHORIZED, "unauthorized")));
-    };
-    let store = state.store.clone();
-    match blocking(move || crate::auth::device_for_token(&store, &token)).await {
-        Ok(Some((device, _))) => Ok(device),
-        Ok(None) => Err(Box::new(error(StatusCode::UNAUTHORIZED, "unauthorized"))),
-        Err(e) => Err(Box::new(internal_error(e))),
-    }
-}
-
 /// A JSON body of shape `T`; anything else is a 400 `bad_request`.
 fn parse<T: DeserializeOwned>(body: Result<Json<Value>, JsonRejection>) -> Result<T, Box<Response>> {
     let Json(value) = body.map_err(|e| Box::new(bad_request(e.body_text())))?;
@@ -117,11 +103,11 @@ fn parse<T: DeserializeOwned>(body: Result<Json<Value>, JsonRejection>) -> Resul
 
 /// `GET memory?project=&repository=` → the user scope and the project scope the parameters name, their live notes,
 /// and their index.
-async fn view(State(state): State<AppState>, headers: HeaderMap, Query(params): Query<BTreeMap<String, String>>) -> Response {
-    let device = match device(&state, &headers).await {
-        Ok(device) => device,
-        Err(response) => return *response,
-    };
+async fn view(
+    State(state): State<AppState>,
+    DeviceAuth { device, .. }: DeviceAuth,
+    Query(params): Query<BTreeMap<String, String>>,
+) -> Response {
     let store = state.store.clone();
     respond(
         blocking(move || {
@@ -133,11 +119,11 @@ async fn view(State(state): State<AppState>, headers: HeaderMap, Query(params): 
 }
 
 /// `POST memory/notes` creates or updates a note.
-async fn save(State(state): State<AppState>, headers: HeaderMap, body: Result<Json<Value>, JsonRejection>) -> Response {
-    let device = match device(&state, &headers).await {
-        Ok(device) => device,
-        Err(response) => return *response,
-    };
+async fn save(
+    State(state): State<AppState>,
+    DeviceAuth { device, .. }: DeviceAuth,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
     let request: memory::Save = match parse(body) {
         Ok(request) => request,
         Err(response) => return *response,
@@ -149,14 +135,10 @@ async fn save(State(state): State<AppState>, headers: HeaderMap, body: Result<Js
 /// `POST memory/notes/:id/forget` forgets a note.
 async fn forget(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    DeviceAuth { device, .. }: DeviceAuth,
     Path(id): Path<String>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    let device = match device(&state, &headers).await {
-        Ok(device) => device,
-        Err(response) => return *response,
-    };
     let request: memory::Forget = match parse(body) {
         Ok(request) => request,
         Err(response) => return *response,
@@ -166,11 +148,11 @@ async fn forget(
 }
 
 /// `POST memory/used` records that the named notes were used, without a revision.
-async fn used(State(state): State<AppState>, headers: HeaderMap, body: Result<Json<Value>, JsonRejection>) -> Response {
-    let device = match device(&state, &headers).await {
-        Ok(device) => device,
-        Err(response) => return *response,
-    };
+async fn used(
+    State(state): State<AppState>,
+    DeviceAuth { device, .. }: DeviceAuth,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
     let request: memory::Used = match parse(body) {
         Ok(request) => request,
         Err(response) => return *response,
@@ -180,11 +162,11 @@ async fn used(State(state): State<AppState>, headers: HeaderMap, body: Result<Js
 }
 
 /// `POST memory/dream/lease` grants a dream lease on the project scope the body names.
-async fn dream_lease(State(state): State<AppState>, headers: HeaderMap, body: Result<Json<Value>, JsonRejection>) -> Response {
-    let device = match device(&state, &headers).await {
-        Ok(device) => device,
-        Err(response) => return *response,
-    };
+async fn dream_lease(
+    State(state): State<AppState>,
+    DeviceAuth { device, .. }: DeviceAuth,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
     let request: dream::LeaseRequest = match parse(body) {
         Ok(request) => request,
         Err(response) => return *response,
@@ -194,11 +176,11 @@ async fn dream_lease(State(state): State<AppState>, headers: HeaderMap, body: Re
 }
 
 /// `POST memory/dream/:id/renew` extends a live lease; its body is ignored.
-async fn dream_renew(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Response {
-    let device = match device(&state, &headers).await {
-        Ok(device) => device,
-        Err(response) => return *response,
-    };
+async fn dream_renew(
+    State(state): State<AppState>,
+    DeviceAuth { device, .. }: DeviceAuth,
+    Path(id): Path<String>,
+) -> Response {
     let store = state.store.clone();
     respond_dream(
         blocking(move || Ok(store.write(|tx| dream::renew(tx, &device, &id, now_ms())).map(|lease| json!({ "lease": lease }))))
@@ -209,14 +191,10 @@ async fn dream_renew(State(state): State<AppState>, headers: HeaderMap, Path(id)
 /// `POST memory/dream/:id/commit` applies a dream's changes and advances its sessions' checkpoints.
 async fn dream_commit(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    DeviceAuth { device, .. }: DeviceAuth,
     Path(id): Path<String>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    let device = match device(&state, &headers).await {
-        Ok(device) => device,
-        Err(response) => return *response,
-    };
     let request: dream::Commit = match parse(body) {
         Ok(request) => request,
         Err(response) => return *response,
@@ -228,14 +206,10 @@ async fn dream_commit(
 /// `POST memory/dream/:id/release` ends a lease with an outcome.
 async fn dream_release(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    DeviceAuth { device, .. }: DeviceAuth,
     Path(id): Path<String>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    let device = match device(&state, &headers).await {
-        Ok(device) => device,
-        Err(response) => return *response,
-    };
     let request: dream::Release = match parse(body) {
         Ok(request) => request,
         Err(response) => return *response,

@@ -11,9 +11,9 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
 
-use super::auth::{Client, too_many_attempts};
+use super::auth::{Client, DeviceAuth, too_many_attempts};
 use super::ingest::bearer;
-use super::{AppState, blocking, error, internal_error};
+use super::{AppState, blocking, error, internal_error, json_body};
 use crate::auth::{self, Bind, device_name, key_hash, valid_device_id};
 use crate::pairing::{self, Approval, Continues, Poll};
 use crate::util::{cut_chars, format_iso_ms, now_ms, sha256_hex};
@@ -70,10 +70,9 @@ pub async fn update(
     Path(id): Path<String>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    let body = match body {
-        Ok(Json(body)) => body,
-        Err(rejection @ JsonRejection::MissingJsonContentType(_)) => return rejection.into_response(),
-        Err(_) => Value::Null,
+    let body = match json_body(body, || Ok(Value::Null)) {
+        Ok(body) => body,
+        Err(response) => return response,
     };
     let name = match body.get("name") {
         None => None,
@@ -282,18 +281,9 @@ pub struct BindBody {
 /// with a pasted token, recognizable by its key.
 pub async fn bind(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    DeviceAuth { token, .. }: DeviceAuth,
     body: Result<Json<BindBody>, JsonRejection>,
 ) -> Response {
-    let Some(token) = bearer(&headers).map(str::to_owned) else {
-        return error(StatusCode::UNAUTHORIZED, "unauthorized");
-    };
-    let (store, lookup) = (state.store.clone(), token.clone());
-    match blocking(move || auth::device_for_token(&store, &lookup)).await {
-        Ok(Some(_)) => {}
-        Ok(None) => return error(StatusCode::UNAUTHORIZED, "unauthorized"),
-        Err(e) => return internal_error(e),
-    }
     let Some(hash) = body.ok().and_then(|Json(body)| body.key).as_deref().and_then(key_hash) else {
         return error(StatusCode::BAD_REQUEST, "invalid_key");
     };
