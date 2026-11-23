@@ -219,16 +219,16 @@ describe("zoom window", () => {
 		const t = trace(records, [traceTurn(0, 1, 6, T, 10_000)]);
 		const traceAxis = foldGaps(traceIntervals(t));
 		const scale = windowScale(traceAxis, { start: 5_000, end: 7_000 }, 1000);
-		const items = layoutOverview(t, scale, overviewLanes(false));
+		const items = layoutOverview(t, scale, overviewLanes());
 		expect(items.map((item) => item.key).sort()).toEqual(["t:s:c3-bash", "turn:0"]);
 		for (const item of items) {
 			expect(item.x0).toBe(0);
 			expect(item.x1).toBe(1000);
 		}
 		// Nothing outside is hit.
-		expect(hitTest(items, 2, (overviewLanes(false)[1].y0 + overviewLanes(false)[1].y1) / 2)).toBeUndefined();
+		expect(hitTest(items, 2, (overviewLanes()[1].y0 + overviewLanes()[1].y1) / 2)).toBeUndefined();
 		// The full view keeps every record.
-		expect(layoutOverview(t, windowScale(traceAxis, undefined, 1000), overviewLanes(false))).toHaveLength(4);
+		expect(layoutOverview(t, windowScale(traceAxis, undefined, 1000), overviewLanes())).toHaveLength(4);
 	});
 
 	it("labels ticks in tenths of a second only below a second", () => {
@@ -270,7 +270,7 @@ describe("overview layout and hit-testing", () => {
 		],
 	});
 	const scale = makeScale(foldGaps(traceIntervals(t)), 1000);
-	const lanes = overviewLanes(false);
+	const lanes = overviewLanes();
 	const items = layoutOverview(t, scale, lanes);
 
 	it("puts each record in its lane and stacks overlapping tools", () => {
@@ -345,21 +345,19 @@ describe("provider timing", () => {
 	it("adds the provider row above the model calls only for sessions with timing", () => {
 		expect(hasProviderTiming(timed)).toBe(true);
 		expect(hasProviderTiming(untimed)).toBe(false);
-		for (const compact of [false, true]) {
-			const lanes = overviewLanes(compact, true);
-			expect(lanes.map((lane) => lane.lane)).toEqual(["turns", "provider", "llm", "tools", "agents"]);
-			expect(lanes[1].label).toBe("Provider");
-			// Rows never overlap, so a pointer always means one row.
-			for (let i = 1; i < lanes.length; i++) expect(lanes[i].y0).toBeGreaterThan(lanes[i - 1].y1);
-			// Without timing the layout is the one it always was.
-			expect(overviewLanes(compact, false)).toEqual(overviewLanes(compact));
-			expect(overviewLanes(compact).some((lane) => lane.lane === "provider")).toBe(false);
-		}
+		const lanes = overviewLanes(true);
+		expect(lanes.map((lane) => lane.lane)).toEqual(["turns", "provider", "llm", "tools", "agents"]);
+		expect(lanes[1].label).toBe("Provider");
+		// Rows never overlap, so a pointer always means one row.
+		for (let i = 1; i < lanes.length; i++) expect(lanes[i].y0).toBeGreaterThan(lanes[i - 1].y1);
+		// Without timing the layout is the one it always was.
+		expect(overviewLanes(false)).toEqual(overviewLanes());
+		expect(overviewLanes().some((lane) => lane.lane === "provider")).toBe(false);
 	});
 
 	it("puts each timed call on the provider row, from its request to its end, under its model call's key", () => {
 		const scale = makeScale(foldGaps(traceIntervals(timed)), 1000);
-		const items = layoutOverview(timed, scale, overviewLanes(false, true));
+		const items = layoutOverview(timed, scale, overviewLanes(true));
 		const provider = items.filter((item) => item.lane === "provider");
 		expect(provider.map((item) => item.key)).toEqual(["l:s:2"]);
 		expect(provider[0].x0).toBeCloseTo(scale.x(T + 1020));
@@ -370,7 +368,7 @@ describe("provider timing", () => {
 		expect(hit?.lane).toBe("provider");
 		expect(hit?.record?.seq).toBe(2);
 		// Without the row, nothing is placed on it.
-		expect(layoutOverview(timed, scale, overviewLanes(false)).some((item) => item.lane === "provider")).toBe(false);
+		expect(layoutOverview(timed, scale, overviewLanes()).some((item) => item.lane === "provider")).toBe(false);
 	});
 });
 
@@ -634,7 +632,7 @@ describe("missing times", () => {
 		expect(childSpan(value, value.children[1])).toEqual({ start: T + 9500, end: T + 9500 });
 		expect(childSpan(value, value.children[2])).toEqual({ start: undefined, end: undefined });
 		const scale = makeScale(foldGaps(traceIntervals(value)), 1000);
-		const items = layoutOverview(value, scale, overviewLanes(false));
+		const items = layoutOverview(value, scale, overviewLanes());
 		const agents = items.filter((item) => item.lane === "agents");
 		expect(agents.map((item) => item.childId)).toEqual(["done", "new"]);
 		for (const item of items) for (const n of [item.x0, item.x1, item.y0, item.y1]) expect(Number.isFinite(n)).toBe(true);
@@ -647,7 +645,7 @@ describe("missing times", () => {
 		expect(normalized.lastAt).toBeUndefined();
 		expect(normalized.turns[0].at).toBeUndefined();
 		const scale = makeScale(foldGaps(traceIntervals(normalized)), 800);
-		expect(layoutOverview(normalized, scale, overviewLanes(true))).toEqual([]);
+		expect(layoutOverview(normalized, scale, overviewLanes())).toEqual([]);
 		// The ledger still lists the record, without a waterfall window.
 		const rows = buildLedger({ trace: normalized, turnOverrides: new Map(), expanded: new Set(), childTrace: () => undefined });
 		expect(rows.map((row) => row.type)).toEqual(["turn", "record"]);
@@ -682,7 +680,7 @@ describe("missing times", () => {
 		const normalized = normalizeTrace({ sessionId: "big", turns: [], records, children: [] });
 		expect(normalized.startedAt).toBe(T);
 		expect(normalized.lastAt).toBe(T + 199_999 * 10 + 5);
-		expect(() => layoutOverview(normalized, makeScale(foldGaps(traceIntervals(normalized)), 1200), overviewLanes(false))).not.toThrow();
+		expect(() => layoutOverview(normalized, makeScale(foldGaps(traceIntervals(normalized)), 1200), overviewLanes())).not.toThrow();
 	});
 });
 
@@ -731,7 +729,7 @@ describe("superagent tickets in the trace", () => {
 		expect(packing.rows).toBe(3);
 		expect([...packing.rowOf.values()].sort()).toEqual([0, 1, 2]);
 		expect(packing.overflow).toBe(0);
-		const lanes = overviewLanes(false, false, packing.rows);
+		const lanes = overviewLanes(false, packing.rows);
 		const items = layoutOverview(main, makeScale(foldGaps(traceIntervals(main)), 1200), lanes).filter((item) => item.lane === "agents");
 		expect(new Set(items.map((item) => item.y0)).size).toBe(3);
 		// Grandchildren stay in their ticket's trace.
@@ -747,8 +745,8 @@ describe("superagent tickets in the trace", () => {
 		expect(packChildren(many)).toMatchObject({ rows: MAX_AGENT_ROWS, overflow: 2 });
 		// Sequential children reuse a row.
 		expect(packChildren({ records: [], children: [child("a", 0, 10), child("b", 10, 20)] }).rows).toBe(1);
-		expect(overviewLanes(false, false, 1)).toEqual(overviewLanes(false));
-		expect(overviewLanes(false, false, 1).at(-1)).toMatchObject({ y0: 68, y1: 84 });
+		expect(overviewLanes(false, 1)).toEqual(overviewLanes());
+		expect(overviewLanes(false, 1).at(-1)).toMatchObject({ y0: 68, y1: 84 });
 	});
 
 	it("treats ticket_create as an agent-spawning tool and nests its child, which ran past the call", () => {

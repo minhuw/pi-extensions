@@ -308,27 +308,25 @@ function bullet(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, 
 	drawGlyph(ctx, glyph, x, y, r * 1.32, ink);
 }
 
-/** A model call's bar thickness: its cost on the fixed four-step magnitude ramp, a pixel thinner in compact mode. */
-function llmThickness(item: OverviewItem, compact: boolean): number {
+/** A model call's bar thickness: its cost on the fixed four-step magnitude ramp. */
+function llmThickness(item: OverviewItem): number {
 	const step = item.record?.kind === "llm" ? costStep(item.record.cost, "record") : 0;
-	return COST_DIAMETERS[step] - (compact ? 1 : 0);
+	return COST_DIAMETERS[step];
 }
 
 /** A provider bar's thickness. */
-function providerThickness(compact: boolean): number {
-	return compact ? 5 : 6;
-}
+const PROVIDER_THICKNESS = 6;
 
 /** The rectangle a record, turn, or branch is painted in, for the hover and selection outlines. */
-function drawnBox(item: OverviewItem, compact: boolean, lanes: LaneBox[]): { x0: number; x1: number; y0: number; y1: number } {
+function drawnBox(item: OverviewItem, lanes: LaneBox[]): { x0: number; x1: number; y0: number; y1: number } {
 	const trunk = trunkY(lanes);
 	if (item.lane === "provider") {
 		const mid = providerY(lanes) ?? (item.y0 + item.y1) / 2;
-		const half = providerThickness(compact) / 2;
+		const half = PROVIDER_THICKNESS / 2;
 		return { x0: item.x0, x1: item.x1, y0: mid - half, y1: mid + half };
 	}
 	if (item.record?.kind === "llm") {
-		const half = llmThickness(item, compact) / 2;
+		const half = llmThickness(item) / 2;
 		return { x0: item.x0, x1: item.x1, y0: trunk - half, y1: trunk + half };
 	}
 	if (item.lane === "agents") {
@@ -371,11 +369,11 @@ const CONNECTOR_MIN_PX = 14;
  * streamed. Calls wide enough get the request going up at its start, the first token coming back down, and a tick
  * where the headers arrived; thin calls get only the bar, so dense sessions stay calm.
  */
-function drawProvider(ctx: CanvasRenderingContext2D, items: OverviewItem[], lanes: LaneBox[], palette: Palette, scale: Scale, compact: boolean) {
+function drawProvider(ctx: CanvasRenderingContext2D, items: OverviewItem[], lanes: LaneBox[], palette: Palette, scale: Scale) {
 	const mid = providerY(lanes);
 	if (mid === undefined) return;
 	const trunk = trunkY(lanes);
-	const half = providerThickness(compact) / 2;
+	const half = PROVIDER_THICKNESS / 2;
 	const top = mid - half;
 	const bottom = mid + half;
 	const bars = items.filter((item) => item.lane === "provider" && item.phases).sort((a, b) => Number(a.error) - Number(b.error));
@@ -429,11 +427,11 @@ function drawProvider(ctx: CanvasRenderingContext2D, items: OverviewItem[], lane
 	ctx.strokeStyle = palette.ink;
 	ctx.fillStyle = palette.ink;
 	ctx.lineWidth = 1;
-	const slant = compact ? 2 : 3;
+	const slant = 3;
 	for (const item of bars) {
 		if (item.x1 - item.x0 < CONNECTOR_MIN_PX) continue;
 		const llm = llmBars.get(item.key);
-		const below = trunk - (llm ? llmThickness(llm, compact) : 4) / 2;
+		const below = trunk - (llm ? llmThickness(llm) : 4) / 2;
 		const { request, headers, firstToken } = item.phases!;
 		const up = Math.min(item.x1 - slant, x(request, item));
 		const down = Math.min(item.x1 - slant, x(firstToken, item));
@@ -444,14 +442,12 @@ function drawProvider(ctx: CanvasRenderingContext2D, items: OverviewItem[], lane
 		ctx.moveTo(down, bottom + 0.5);
 		ctx.lineTo(down + slant, below);
 		ctx.stroke();
-		if (!compact) {
-			arrowHead(ctx, up, below, up + slant, bottom + 0.5, 3.5);
-			arrowHead(ctx, down, bottom + 0.5, down + slant, below, 3.5);
-		}
+		arrowHead(ctx, up, below, up + slant, bottom + 0.5, 3.5);
+		arrowHead(ctx, down, bottom + 0.5, down + slant, below, 3.5);
 		ctx.globalAlpha = 1;
 		if (headers !== undefined) {
 			const hx = Math.round(x(headers, item));
-			ctx.fillRect(hx - 0.5, top - (compact ? 2 : 3), 1, bottom - top + (compact ? 2 : 3));
+			ctx.fillRect(hx - 0.5, top - 3, 1, bottom - top + 3);
 		}
 	}
 }
@@ -464,7 +460,6 @@ function drawBase(
 	lanes: ReturnType<typeof overviewLanes>,
 	palette: Palette,
 	height: number,
-	compact: boolean,
 ) {
 	ctx.clearRect(0, 0, scale.width, height);
 	const lane = Object.fromEntries(lanes.map((l) => [l.lane, l])) as Record<OverviewItem["lane"], (typeof lanes)[number]>;
@@ -479,21 +474,21 @@ function drawBase(
 
 	// Stations: each turn opens a station, numbered where the number fits clear of the last one. Turns too close to
 	// number join the station before them, so on a dense session a station stands for a run of turns.
-	ctx.font = `600 ${compact ? 9 : 10.5}px ${CANVAS_FONT}`;
+	ctx.font = `600 10.5px ${CANVAS_FONT}`;
 	ctx.textBaseline = "middle";
 	const stations: { x0: number; x1: number; text: string; error: boolean; labelled: boolean; cut: boolean }[] = [];
 	const windowStart = scale.axis.segments[0].start;
 	let labelEnd = Number.NEGATIVE_INFINITY;
 	for (const item of turns) {
 		const text = String((item.turnIndex ?? 0) + 1);
-		const w = compact ? 0 : ctx.measureText(text).width;
+		const w = ctx.measureText(text).width;
 		const last = stations[stations.length - 1];
-		const opens = !last || (compact ? item.x0 - last.x0 >= 10 : item.x0 + 3 > labelEnd + 6);
+		const opens = !last || item.x0 + 3 > labelEnd + 6;
 		if (!opens) {
 			last.x1 = Math.max(last.x1, item.x1);
 			continue;
 		}
-		const labelled = !compact && item.x0 + 3 + w <= scale.width;
+		const labelled = item.x0 + 3 + w <= scale.width;
 		stations.push({ x0: item.x0, x1: item.x1, text, error: item.error, labelled, cut: item.start < windowStart });
 		if (labelled) labelEnd = item.x0 + 3 + w;
 	}
@@ -508,7 +503,7 @@ function drawBase(
 	ctx.globalAlpha = 1;
 
 	// Each turn's extent in the prompt colour, a pixel short of the next so adjacent turns stay apart.
-	const barTop = compact ? lane.turns.y1 - 4 : lane.turns.y1 - 6;
+	const barTop = lane.turns.y1 - 6;
 	ctx.fillStyle = palette.user;
 	for (const item of turns) {
 		const w = item.x1 - item.x0;
@@ -551,7 +546,7 @@ function drawBase(
 	// record kind, so their branches are ink. Lower rows are drawn first, so an upper row's line crosses over them.
 	const branches = items.filter((item) => item.lane === "agents").sort((a, b) => (b.agentRow ?? 0) - (a.agentRow ?? 0) || a.x0 - b.x0);
 	const isStep = (item: OverviewItem) => (item.childId ? children.get(item.childId)?.kind === "herder-step" : false);
-	ctx.lineWidth = compact ? 1.5 : 2;
+	ctx.lineWidth = 2;
 	ctx.lineCap = "round";
 	for (const item of branches) {
 		const r = 4;
@@ -568,14 +563,14 @@ function drawBase(
 
 	// Model calls: bars along the trunk as long as they ran, as thick as they cost. Cheap ones first so the costly stay
 	// on top, and failures last so their red is never covered.
-	const byWeight = [...llms].sort((a, b) => Number(a.error) - Number(b.error) || llmThickness(a, compact) - llmThickness(b, compact));
+	const byWeight = [...llms].sort((a, b) => Number(a.error) - Number(b.error) || llmThickness(a) - llmThickness(b));
 	for (const item of byWeight) {
-		const t = llmThickness(item, compact);
+		const t = llmThickness(item);
 		ctx.fillStyle = item.error ? palette.error : palette.llm;
 		ctx.fillRect(item.x0, trunk - t / 2, item.x1 - item.x0, t);
 	}
 
-	drawProvider(ctx, items, lanes, palette, scale, compact);
+	drawProvider(ctx, items, lanes, palette, scale);
 
 	// Tool calls: bars on their overlap rows, in their kind's colour. Where there are more calls than about one per two
 	// pixels the rows would only show whichever call was drawn last, so the row becomes a column per two pixels, stacked
@@ -624,20 +619,18 @@ function drawBase(
 
 	// Failures: the bar is red, and a small marker above it, one at most every few pixels. Dense tool columns carry
 	// their red cap instead, so a session with hundreds of failures does not grow a row of markers.
-	if (!compact) {
-		let lastMark = Number.NEGATIVE_INFINITY;
-		const failed = [...llms, ...(dense ? [] : tools)].filter((item) => item.error).sort((a, b) => a.x0 - b.x0);
-		for (const item of failed) {
-			const x = (item.x0 + Math.min(item.x1, item.x0 + 6)) / 2;
-			if (x - lastMark < 6) continue;
-			lastMark = x;
-			errorMarker(ctx, x, item.lane === "tools" ? lane.tools.y0 - 1 : trunk - llmThickness(item, compact) / 2 - 1, palette.error);
-		}
+	let lastMark = Number.NEGATIVE_INFINITY;
+	const failed = [...llms, ...(dense ? [] : tools)].filter((item) => item.error).sort((a, b) => a.x0 - b.x0);
+	for (const item of failed) {
+		const x = (item.x0 + Math.min(item.x1, item.x0 + 6)) / 2;
+		if (x - lastMark < 6) continue;
+		lastMark = x;
+		errorMarker(ctx, x, item.lane === "tools" ? lane.tools.y0 - 1 : trunk - llmThickness(item) / 2 - 1, palette.error);
 	}
 
 	// Compactions sit on the trunk as their own bullet where there is room for one, and as a tall bar through the
 	// model-call row where they crowd, cut out by a page-coloured edge so each still reads as its own mark.
-	const cr = compact ? 5 : 6.5;
+	const cr = 6.5;
 	const crowded = llms.length > scale.width / 4;
 	let lastBullet = Number.NEGATIVE_INFINITY;
 	for (const item of marks) {
@@ -656,7 +649,7 @@ function drawBase(
 	// Branch bullets and names, drawn last so the lines run under them.
 	for (let i = 0; i < branches.length; i++) {
 		const item = branches[i];
-		const r = compact ? 5 : 6.5;
+		const r = 6.5;
 		const step = isStep(item);
 		const y = branchY(item);
 		if (step) {
@@ -669,7 +662,7 @@ function drawBase(
 			ctx.lineWidth = 2;
 			ctx.stroke();
 		} else bullet(ctx, item.x0, y, r, palette.agent, palette.agentInk, "agent", palette.page);
-		if (compact || !item.childId) continue;
+		if (!item.childId) continue;
 		const child = children.get(item.childId);
 		// The label runs to the next branch on the same row.
 		const next = branches.find((other) => other !== item && (other.agentRow ?? 0) === (item.agentRow ?? 0) && other.x0 > item.x0);
@@ -717,13 +710,12 @@ function drawOverlay(
 	palette: Palette,
 	hovered: OverviewItem | undefined,
 	selected: OverviewItem | undefined,
-	compact: boolean,
 	lanes: LaneBox[],
 ) {
 	ctx.clearRect(0, 0, width, height);
 	const turnsBottom = lanes[0].y1;
 	const outline = (item: OverviewItem, pad: number, lineWidth: number) => {
-		const box = drawnBox(item, compact, lanes);
+		const box = drawnBox(item, lanes);
 		ctx.strokeStyle = palette.ink;
 		ctx.lineWidth = lineWidth;
 		ctx.strokeRect(box.x0 - pad, box.y0 - pad, Math.max(1, box.x1 - box.x0) + pad * 2, box.y1 - box.y0 + pad * 2);
@@ -797,9 +789,7 @@ function ZoomIcon({ kind }: { kind: "in" | "out" | "all" | "range" }) {
 
 export interface OverviewProps {
 	trace: SessionTrace;
-	compact?: boolean;
 	selectedKey?: string;
-	hoveredKey?: string;
 	/** Optional ref-backed external hover subscription, avoiding parent React state updates. */
 	hoverChannel?: HoverChannel;
 	onHover?: (key: string | undefined) => void;
@@ -811,15 +801,11 @@ export interface OverviewProps {
 	/** Replay playhead, in active ms, and a scrub handler. */
 	playhead?: number;
 	onScrub?: (position: number) => void;
-	/** Called with the scale whenever it changes, so replay can map positions to time. */
-	onScale?: (scale: Scale) => void;
 }
 
 export function Overview({
 	trace,
-	compact = false,
 	selectedKey,
-	hoveredKey,
 	hoverChannel,
 	onHover,
 	onSelect,
@@ -828,7 +814,6 @@ export function Overview({
 	viewport,
 	playhead,
 	onScrub,
-	onScale,
 }: OverviewProps) {
 	const plotRef = useRef<HTMLDivElement>(null);
 	const areaRef = useRef<HTMLDivElement>(null);
@@ -840,9 +825,9 @@ export function Overview({
 	// The provider row only once some model call has its first token timed; older sessions keep the layout they had.
 	const timed = useMemo(() => hasProviderTiming(trace), [trace]);
 	const packing = useMemo(() => packChildren(trace), [trace]);
-	const lanes = useMemo(() => overviewLanes(compact, timed, packing.rows), [compact, timed, packing.rows]);
-	const height = lanes[lanes.length - 1].y1 + (compact ? 3 : 5);
-	const clockHeight = compact ? 14 : 16;
+	const lanes = useMemo(() => overviewLanes(timed, packing.rows), [timed, packing.rows]);
+	const height = lanes[lanes.length - 1].y1 + 5;
+	const clockHeight = 16;
 	const axis = useMemo(() => foldGaps(traceIntervals(trace)), [trace]);
 	// The zoom window, in active time, for this session only; none is the whole session.
 	const [zoom, setZoom] = useState<{ sessionId: string; window: Interval } | undefined>();
@@ -874,7 +859,7 @@ export function Overview({
 	// Zoomed, ticks may be tenths of a second apart, and a longer label that would touch the one before it is dropped.
 	const ticks = useMemo(() => {
 		if (width <= 0) return [];
-		const spacing = compact ? 90 : 72;
+		const spacing = 72;
 		const minStep = zoomed ? 100 : 1_000;
 		const step = tickStep(scale, spacing, minStep);
 		let right = Number.NEGATIVE_INFINITY;
@@ -889,7 +874,7 @@ export function Overview({
 			right = left + w;
 			return [{ left, text }];
 		});
-	}, [scale, gapLabels, width, compact, zoomed]);
+	}, [scale, gapLabels, width, zoomed]);
 	const hoverStore = useMemo(() => createHoverStore(), []);
 	const [brush, setBrush] = useState<{ x0: number; x1: number } | undefined>();
 	const drag = useRef<{ x0: number; moved: boolean; scrub: boolean } | null>(null);
@@ -897,19 +882,19 @@ export function Overview({
 	const pendingPoint = useRef<{ x: number; y: number } | null>(null);
 
 	const selected = selectedKey ? byKey.get(selectedKey) : undefined;
-	const overlayState = useRef({ width, height, palette, selected, compact, lanes, byKey, hoveredKey, hoverChannel });
-	overlayState.current = { width, height, palette, selected, compact, lanes, byKey, hoveredKey, hoverChannel };
+	const overlayState = useRef({ width, height, palette, selected, lanes, byKey, hoverChannel });
+	overlayState.current = { width, height, palette, selected, lanes, byKey, hoverChannel };
 
 	const paintOverlay = useCallback(() => {
 		const canvas = overlayRef.current;
 		const ctx = context2d(canvas);
-		const { width, height, palette, selected, compact, lanes, byKey, hoveredKey, hoverChannel } = overlayState.current;
+		const { width, height, palette, selected, lanes, byKey, hoverChannel } = overlayState.current;
 		if (!canvas || !ctx || width <= 0) return;
-		const externalKey = hoveredKey ?? hoverChannel?.get();
+		const externalKey = hoverChannel?.get();
 		const hovered = hoverStore.get()?.item ?? (externalKey ? byKey.get(externalKey) : undefined);
 		const dpr = sizeCanvas(canvas, width, height);
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-		drawOverlay(ctx, width, height, palette, hovered, selected, compact, lanes);
+		drawOverlay(ctx, width, height, palette, hovered, selected, lanes);
 	}, [hoverStore]);
 
 	const cancelHoverFrame = useCallback(() => {
@@ -931,7 +916,6 @@ export function Overview({
 	useEffect(() => {
 		clearLocalHover();
 	}, [trace.sessionId, clearLocalHover]);
-	useEffect(() => onScale?.(fullScale), [fullScale, onScale]);
 
 	const setWindow = useCallback(
 		(next: Interval | undefined) => {
@@ -1017,8 +1001,8 @@ export function Overview({
 		if (!canvas || !ctx || width <= 0) return;
 		const dpr = sizeCanvas(canvas, width, height);
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-		drawBase(ctx, items, trace, scale, lanes, palette, height, compact);
-	}, [items, trace, scale, lanes, height, width, palette, fontVersion, compact]);
+		drawBase(ctx, items, trace, scale, lanes, palette, height);
+	}, [items, trace, scale, lanes, height, width, palette, fontVersion]);
 
 	useEffect(() => {
 		const canvas = navigatorRef.current;
@@ -1031,7 +1015,7 @@ export function Overview({
 
 	useEffect(() => {
 		paintOverlay();
-	}, [selected, width, height, palette, compact, lanes, byKey, hoveredKey, hoverChannel, paintOverlay]);
+	}, [selected, width, height, palette, lanes, byKey, hoverChannel, paintOverlay]);
 
 	useEffect(() => {
 		if (!hoverChannel) return;
@@ -1144,7 +1128,7 @@ export function Overview({
 		span && span.end >= scale.axis.segments[0].start && span.start <= scale.axis.segments[scale.axis.segments.length - 1].end ? span : undefined;
 	const rangeShown = shown(range);
 	const rangeBox = rangeShown ? { x0: scale.x(rangeShown.start), x1: scale.x(rangeShown.end) } : undefined;
-	const viewShown = compact ? undefined : shown(viewport);
+	const viewShown = shown(viewport);
 	const viewBox = viewShown ? { x0: scale.x(viewShown.start), x1: Math.max(scale.x(viewShown.start) + 2, scale.x(viewShown.end)) } : undefined;
 
 	const zoomToRange = () => {
@@ -1155,19 +1139,18 @@ export function Overview({
 		setWindow({ start: (a + b) / 2 - length / 2, end: (a + b) / 2 + length / 2 });
 	};
 	const atMinimum = view !== undefined && view.end - view.start <= Math.min(MIN_WINDOW_MS, axis.activeMs) + 0.5;
-	const button = cx(ZOOM_BUTTON, compact ? "h-[14px] w-[15px]" : "h-4 w-[15px]");
+	const button = cx(ZOOM_BUTTON, "h-4 w-[15px]");
 
 	return (
-		<div className="flex select-none" data-overview="" data-compact={compact || undefined} data-zoomed={zoomed || undefined} role="group" aria-label={label}>
-			<div className={cx("shrink-0", compact ? "w-[64px]" : "w-[76px]")}>
+		<div className="flex select-none" data-overview="" data-zoomed={zoomed || undefined} role="group" aria-label={label}>
+			<div className="w-[76px] shrink-0">
 				{/* Row labels in a gutter left of the plot, so every height on it says what it holds. */}
 				<div className="relative" style={{ height }} aria-hidden="true" data-overview-rows="">
 					{lanes.map((row) => (
 						<span
 							key={row.lane}
 							className={cx(
-								"absolute left-0 -translate-y-1/2 leading-none whitespace-nowrap",
-								compact ? "text-[9.5px]" : "text-[11px]",
+								"absolute left-0 -translate-y-1/2 text-[11px] leading-none whitespace-nowrap",
 								row.lane === "agents" && trace.children.length === 0 ? "text-muted/60" : "text-muted",
 							)}
 							style={{ top: row.lane === "agents" ? (agentRowBox(row, 0).y0 + agentRowBox(row, 0).y1) / 2 : (row.y0 + row.y1) / 2 }}
@@ -1183,7 +1166,7 @@ export function Overview({
 								return (
 									<span
 										key="agents-overflow"
-										className={cx("absolute left-0 -translate-y-1/2 leading-none whitespace-nowrap text-muted", compact ? "text-[9.5px]" : "text-[11px]")}
+										className="absolute left-0 -translate-y-1/2 text-[11px] leading-none whitespace-nowrap text-muted"
 										style={{ top: (last.y0 + last.y1) / 2 }}
 										data-overview-overflow={packing.overflow}
 										title={`${plural(packing.overflow, "child", "children")} share this row with another`}

@@ -226,7 +226,7 @@ describe("trajectory ledger", () => {
 		expect(document.querySelector("[data-phase-key]")?.textContent).toBe("WaitingStreaming");
 
 		// Hovering the call's provider bar shows the model call, with its time to first token.
-		const items = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes(false, true));
+		const items = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes(true));
 		const bar = items.find((item) => item.lane === "provider")!;
 		const plot = overview.querySelector<HTMLElement>("[data-overview-plot]")!;
 		fireEvent.pointerMove(plot, { clientX: (bar.x0 + bar.x1) / 2, clientY: (bar.y0 + bar.y1) / 2 });
@@ -387,7 +387,7 @@ describe("trajectory overview", () => {
 		expect(overview.querySelectorAll("canvas")).toHaveLength(2);
 		// The plot is 800 px wide in jsdom; place the edit call the way the overview does.
 		const trace = traceOf(fixture);
-		const items = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes(false));
+		const items = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes());
 		const edit = items.find((item) => item.key === "t:t1:c_edit")!;
 		const plot = overview.querySelector<HTMLElement>("[data-overview-plot]")!;
 		const at = { clientX: (edit.x0 + edit.x1) / 2, clientY: (edit.y0 + edit.y1) / 2, button: 0 };
@@ -454,7 +454,7 @@ describe("trajectory overview", () => {
 
 		// Dragging still filters the ledger, and offers to zoom to the range, which keeps the filter.
 		const trace = traceOf(fixture);
-		const llm = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes(false)).find((item) => item.key === "l:t1:11")!;
+		const llm = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes()).find((item) => item.key === "l:t1:11")!;
 		fireEvent.pointerDown(plot, { clientX: llm.x0 - 4, clientY: 30, button: 0 });
 		fireEvent.pointerMove(plot, { clientX: llm.x1 + 4, clientY: 30 });
 		fireEvent.pointerUp(plot, { clientX: llm.x1 + 4, clientY: 30 });
@@ -539,7 +539,6 @@ describe("session views", () => {
 		expect(document.querySelector("[data-trajectory]")).toBeNull();
 		// The transcript has the same timeline as the trajectory, loaded on demand.
 		await waitFor(() => expect(document.querySelector("[data-transcript-overview] [data-overview]")).not.toBeNull());
-		expect(document.querySelector("[data-transcript-overview] [data-overview][data-compact]")).toBeNull();
 		expect(localStorage.getItem(VIEW_STORAGE_KEY)).toBe("transcript");
 		first.unmount();
 
@@ -800,7 +799,7 @@ describe("time breakdown", () => {
 
 		// Drag over the last model call alone, as the overview lays it out in jsdom's 800 px.
 		const trace = traceOf(fixture);
-		const items = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes(false));
+		const items = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes());
 		const llm = items.find((item) => item.key === "l:t1:11")!;
 		const plot = document.querySelector<HTMLElement>("[data-overview-plot]")!;
 		fireEvent.pointerDown(plot, { clientX: llm.x0 - 4, clientY: 30, button: 0 });

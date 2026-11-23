@@ -251,7 +251,7 @@ describe("Overview hover and redraw performance", () => {
 			const callsAfterMount = computedStyleSpy.mock.calls.length;
 			expect(callsAfterMount).toBe(1);
 
-			const items = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes(false));
+			const items = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes());
 			const targets = items.filter((item) => item.lane !== "turns").slice(0, 4);
 			expect(targets.length).toBeGreaterThanOrEqual(4);
 
@@ -289,7 +289,7 @@ describe("Overview hover and redraw performance", () => {
 
 	it("matches linear hitTest across all lanes, sub-rows, boundaries, and overlapping long/short spans", () => {
 		const trace = multiLaneTrace();
-		const lanes = overviewLanes(false, true, 2);
+		const lanes = overviewLanes(true, 2);
 		const scale = makeScale(foldGaps(traceIntervals(trace)), 800);
 		const items = layoutOverview(trace, scale, lanes);
 
@@ -347,7 +347,7 @@ describe("Overview hover and redraw performance", () => {
 			const onSelect = vi.fn();
 			const { container } = render(<Overview trace={trace} onHover={onHover} onSelect={onSelect} />);
 			const plot = container.querySelector<HTMLElement>("[data-overview-plot]")!;
-			const items = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes(false));
+			const items = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes());
 			const records = items.filter((item) => item.lane !== "turns");
 			expect(records.length).toBeGreaterThanOrEqual(5);
 
@@ -403,7 +403,7 @@ describe("Overview hover and redraw performance", () => {
 			const plot = overview.querySelector<HTMLElement>("[data-overview-plot]")!;
 
 			const trace = traceOf(fixture);
-			const items = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes(false));
+			const items = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes());
 			const targets: [OverviewItem, string][] = [
 				[items.find((item) => item.key === "t:t1:c_bash")!, "BASH"],
 				[items.find((item) => item.key === "t:t1:c_read")!, "READ"],

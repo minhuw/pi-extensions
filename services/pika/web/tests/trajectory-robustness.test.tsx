@@ -96,7 +96,7 @@ describe("a trace with missing times", () => {
 		expect(document.querySelector("[data-overview]")).not.toBeNull();
 		// The overview places the new child on its Agent call.
 		const trace = traceOf(sessions[0]);
-		const agents = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes(false)).filter((item) => item.lane === "agents");
+		const agents = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes()).filter((item) => item.lane === "agents");
 		expect(agents.map((item) => item.childId).sort()).toEqual(["fresh", "wf_a", "wf_b"]);
 
 		const flow = rows().find((node) => node.textContent?.includes("fanout"))!;
@@ -268,7 +268,7 @@ describe("replay", () => {
 		await waitFor(() => expect(rows().map((node) => node.dataset.kind)).toEqual(["read"]));
 		// Click the edit call, which the filter hides, on the overview.
 		const trace = traceOf(fixture);
-		const edit = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes(false)).find((item) => item.key === "t:t1:c_edit")!;
+		const edit = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes()).find((item) => item.key === "t:t1:c_edit")!;
 		const plot = document.querySelector<HTMLElement>("[data-overview-plot]")!;
 		const at = { clientX: (edit.x0 + edit.x1) / 2, clientY: (edit.y0 + edit.y1) / 2, button: 0 };
 		fireEvent.pointerDown(plot, at);

@@ -213,7 +213,6 @@ function Rails({ depth }: { depth: number }) {
 /** A row's state, as primitives so that memoized rows re-render only when their own state changes. */
 interface RowState {
 	selected: boolean;
-	hovered: boolean;
 	highlighted: boolean;
 	replaying: boolean;
 	fresh: boolean;
@@ -225,7 +224,6 @@ function rowTone(state: RowState): string {
 	if (state.highlighted) return "bg-yellow-soft";
 	// The replay's current record looks selected without being the selection: a grey row, set heavier, with a hairline.
 	if (state.selected || state.replaying) return "bg-hover font-medium shadow-[inset_1px_0_0_var(--color-ink)]";
-	if (state.hovered) return "bg-hover";
 	return "hover:bg-hover";
 }
 
@@ -559,7 +557,6 @@ export interface LedgerProps {
 	/** Open at the last row instead of the first, as live sessions do. */
 	startAtTail?: boolean;
 	selectedKey?: string;
-	hoveredKey?: string;
 	highlightKey?: string;
 	replayKey?: string;
 	onSelect: (key: string) => void;
@@ -695,10 +692,10 @@ function FilterBar({
 	filterRef,
 	familyCounts,
 	errorCount,
-	compact,
+	narrow,
 	anyExpanded,
 }: Pick<LedgerProps, "filter" | "onFilter" | "counts" | "range" | "rangeLabel" | "onClearRange" | "onCollapseAll" | "filterRef" | "familyCounts" | "errorCount"> & {
-	compact: boolean;
+	narrow: boolean;
 	anyExpanded: boolean;
 }) {
 	const active = filterActive(filter) || range !== undefined;
@@ -708,7 +705,7 @@ function FilterBar({
 			<label
 				className={cx(
 					"flex h-8 shrink-0 items-center gap-1.5 rounded-sm border border-line px-2 text-muted focus-within:border-ink",
-					compact ? "w-[150px]" : "w-[200px]",
+					narrow ? "w-[150px]" : "w-[200px]",
 				)}
 			>
 				<Icon name="search" size={13} />
@@ -748,7 +745,7 @@ function FilterBar({
 					data-errors-filter=""
 				>
 					<Icon name="alert" size={12} className={filter.errorsOnly ? undefined : "text-red"} />
-					{compact ? <span className="sr-only">Errors only</span> : "Errors"}
+					{narrow ? <span className="sr-only">Errors only</span> : "Errors"}
 					{errorCount !== undefined && (
 						<span className={cx("tnum text-[12px]", filter.errorsOnly ? "text-page/70" : "text-muted")}>{formatCount(errorCount)}</span>
 					)}
@@ -810,7 +807,7 @@ function rowSize(row: LedgerRow | undefined): number {
 }
 
 export const Ledger = memo(forwardRef<LedgerHandle, LedgerProps>(function Ledger(props, ref) {
-	const { rows, live, recordCount, freshKeys, startAtTail, selectedKey, hoveredKey, highlightKey, replayKey, onSelect, onHover, onToggleTurn, onToggleExpand, onViewport } = props;
+	const { rows, live, recordCount, freshKeys, startAtTail, selectedKey, highlightKey, replayKey, onSelect, onHover, onToggleTurn, onToggleExpand, onViewport } = props;
 	const [pane, setPane] = useState<HTMLDivElement | null>(null);
 	const [width, setWidth] = useState(900);
 	useLayoutEffect(() => {
@@ -947,7 +944,6 @@ export const Ledger = memo(forwardRef<LedgerHandle, LedgerProps>(function Ledger
 
 	const stateOf = (key: string): RowState => ({
 		selected: key === selectedKey,
-		hovered: key === hoveredKey,
 		highlighted: key === highlightKey,
 		replaying: key === replayKey,
 		fresh: freshKeys?.has(key) ?? false,
@@ -973,7 +969,7 @@ export const Ledger = memo(forwardRef<LedgerHandle, LedgerProps>(function Ledger
 				filterRef={props.filterRef}
 				familyCounts={props.familyCounts}
 				errorCount={props.errorCount}
-				compact={width < 560}
+				narrow={width < 560}
 				anyExpanded={rows.some((row) => row.type === "turn" && row.expanded)}
 			/>
 			<div

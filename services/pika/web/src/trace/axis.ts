@@ -434,12 +434,12 @@ export function agentRowBox(box: LaneBox, row: number): { y0: number; y1: number
  * The bands do not overlap, so a pointer always means one row. With `provider`, a row above the model calls holds the
  * provider's side of each timed call, as the far lifeline of a sequence diagram, and the rows below move down.
  */
-export function overviewLanes(compact: boolean, provider = false, agentRows = 1): LaneBox[] {
-	const lanes = baseLanes(compact, provider);
+export function overviewLanes(provider = false, agentRows = 1): LaneBox[] {
+	const lanes = baseLanes(provider);
 	const agents = lanes[lanes.length - 1];
 	const rows = Math.max(1, Math.min(MAX_AGENT_ROWS, Math.floor(agentRows) || 1));
 	const rowHeight = agents.y1 - agents.y0;
-	const rowGap = compact ? 1 : 2;
+	const rowGap = 2;
 	agents.rows = rows;
 	agents.rowHeight = rowHeight;
 	agents.rowGap = rowGap;
@@ -448,16 +448,7 @@ export function overviewLanes(compact: boolean, provider = false, agentRows = 1)
 }
 
 /** The bands with one subagent row; `overviewLanes` grows the last for more. */
-function baseLanes(compact: boolean, provider: boolean): LaneBox[] {
-	if (compact && provider) {
-		return [
-			{ lane: "turns", label: "Turns", y0: 1, y1: 10 },
-			{ lane: "provider", label: "Provider", y0: 12, y1: 20 },
-			{ lane: "llm", label: "Model calls", y0: 22, y1: 33 },
-			{ lane: "tools", label: "Tools", y0: 35, y1: 47 },
-			{ lane: "agents", label: "Subagents", y0: 49, y1: 58 },
-		];
-	}
+function baseLanes(provider: boolean): LaneBox[] {
 	if (provider) {
 		return [
 			{ lane: "turns", label: "Turns", y0: 2, y1: 20 },
@@ -465,14 +456,6 @@ function baseLanes(compact: boolean, provider: boolean): LaneBox[] {
 			{ lane: "llm", label: "Model calls", y0: 40, y1: 58 },
 			{ lane: "tools", label: "Tools", y0: 62, y1: 82 },
 			{ lane: "agents", label: "Subagents", y0: 86, y1: 102 },
-		];
-	}
-	if (compact) {
-		return [
-			{ lane: "turns", label: "Turns", y0: 1, y1: 10 },
-			{ lane: "llm", label: "Model calls", y0: 11, y1: 22 },
-			{ lane: "tools", label: "Tools", y0: 24, y1: 36 },
-			{ lane: "agents", label: "Subagents", y0: 38, y1: 47 },
 		];
 	}
 	return [
