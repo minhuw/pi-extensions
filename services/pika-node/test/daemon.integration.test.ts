@@ -149,10 +149,12 @@ describe("pika-node daemon over the unix socket", () => {
         await a.inbox.waitFor(status("idle", s => s.unread === false));
 
         // The program leaves while `working`: the shell is back in front and the status clears.
+        const busyAgain = a.inbox.next(status("busy"));
         a.send({ type: "term.input", terminalId: id, data: "working\r" });
-        await a.inbox.waitFor(status("busy"));
+        await busyAgain;
+        const cleared = a.inbox.next(m => m.type === "pane.status" && m.terminalId === id && m.status === null, 10_000, "stale status cleared");
         a.send({ type: "term.input", terminalId: id, data: "exit\r" });
-        await a.inbox.waitFor(m => m.type === "pane.status" && m.terminalId === id && m.status === null, 10_000, "stale status cleared");
+        await cleared;
 
         // The shell's directory now, after a `cd`; the terminal's info keeps where it started.
         expect((await a.request<{ cwd: string }>("term.cwd", { terminalId: id })).cwd).toBe(terminal.cwd);
