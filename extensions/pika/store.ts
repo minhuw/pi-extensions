@@ -111,8 +111,9 @@ export class Store {
 		for (const dir of [this.dir, this.streams, this.done, spool, this.requests, this.blobs, this.parked]) await tighten(dir, DIR_MODE);
 		await tighten(this.ackedLog, FILE_MODE);
 		// Temp files left by a crash before their rename hold nothing that is not also elsewhere.
+		// Skip this.done: archived streams are written 0600 under a 0700 directory and grow without bound.
 		const cutoff = Date.now() - 60_000;
-		for (const dir of [this.streams, this.done, spool, this.requests, this.blobs, this.parked]) {
+		for (const dir of [this.streams, spool, this.requests, this.blobs, this.parked]) {
 			const entries = await readdir(dir, { withFileTypes: true }).catch((error) => {
 				if (missing(error)) return [];
 				throw error;

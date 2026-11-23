@@ -59,7 +59,7 @@ describe("Store permissions", () => {
 		expect(await modeOf(store.ackedLog)).toBe(0o600);
 	});
 
-	it("tightens pre-existing looser spool directories to 0700 and files to 0600 on init", async () => {
+	it("tightens pre-existing looser spool directories to 0700 and active files to 0600 on init", async () => {
 		const store = new Store(join(root, "pika"));
 		const spool = join(store.dir, "spool");
 		const dirs = [store.dir, store.streams, store.done, spool, store.requests, store.blobs, store.parked];
@@ -71,7 +71,6 @@ describe("Store permissions", () => {
 		const files = [
 			store.ackedLog,
 			join(store.streams, "active.json"),
-			join(store.done, "closed.json"),
 			join(store.requests, "req-old.json"),
 			join(store.blobs, HASH_A),
 			join(store.parked, HASH_B),
@@ -94,5 +93,28 @@ describe("Store permissions", () => {
 			expect(await readFile(file, "utf8")).toBe("data");
 		}
 		await expect(stat(staleTmp)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("hardens streams/done and active streams without scanning or chmoding historical files in streams/done", async () => {
+		const store = new Store(join(root, "pika"));
+		for (const dir of [store.dir, store.streams, store.done]) {
+			await mkdir(dir, { recursive: true, mode: 0o755 });
+			await chmod(dir, 0o755);
+		}
+
+		const activeFile = join(store.streams, "active.json");
+		const historicalFile = join(store.done, "historical.json");
+		for (const file of [activeFile, historicalFile]) {
+			await writeFile(file, "data", { mode: 0o644 });
+			await chmod(file, 0o644);
+		}
+
+		await store.init();
+
+		expect(await modeOf(store.streams)).toBe(0o700);
+		expect(await modeOf(store.done)).toBe(0o700);
+		expect(await modeOf(activeFile)).toBe(0o600);
+		expect(await modeOf(historicalFile)).toBe(0o644);
+		expect(await readFile(historicalFile, "utf8")).toBe("data");
 	});
 });
