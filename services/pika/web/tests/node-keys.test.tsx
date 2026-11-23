@@ -32,7 +32,6 @@ const diff: KeyFocus = { terminal: false, text: true, diff: true };
 
 afterEach(() => {
 	saveKeySettings(null);
-	localStorage.clear();
 });
 
 describe("chords", () => {

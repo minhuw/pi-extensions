@@ -27,12 +27,6 @@ vi.mock("../src/nodes/TerminalView", () => ({
 	},
 }));
 
-class StubResizeObserver {
-	observe() {}
-	unobserve() {}
-	disconnect() {}
-}
-
 const info = (terminalId: string): TerminalInfo => ({ terminalId, title: "", cwd: "/p", cols: 80, rows: 24, pid: 1, createdAt: 1, argv: ["bash"] });
 
 const actions = (): WorkspaceActions => ({
@@ -87,7 +81,6 @@ const flush = () => act(async () => {});
 beforeEach(() => {
 	built.clear();
 	shown.clear();
-	vi.stubGlobal("ResizeObserver", StubResizeObserver);
 	// Slots on the page have a box; everything else measures as nothing, as hidden elements do.
 	vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
 		const size = this.hasAttribute("data-pane-slot") && this.isConnected ? { width: 400, height: 300 } : { width: 0, height: 0 };

@@ -4,6 +4,7 @@
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TraceRecord } from "../src/lib/types";
+import { installMatchMedia } from "./support/media";
 import { firstRender, mockLayout, renderApp } from "./support/render";
 import { createFakeServer } from "./support/server";
 import { rows, session } from "./support/trajectory";
@@ -29,8 +30,7 @@ afterEach(() => restore());
 
 describe("replay rendering", () => {
 	it("re-renders only the rows whose state a replay frame changes", async () => {
-		const media = window.matchMedia;
-		window.matchMedia = ((query: string) => ({ ...media(query), matches: query.includes("reduce") })) as typeof window.matchMedia;
+		const restoreMedia = installMatchMedia((query) => query.includes("reduce"));
 		vi.useFakeTimers({ shouldAdvanceTime: true });
 		try {
 			renderApp("/s/t1", createFakeServer({ sessions: [session()] }).fetch);
@@ -58,7 +58,7 @@ describe("replay rendering", () => {
 			expect([...new Set(rendered)]).toEqual(["c_bash"]);
 		} finally {
 			vi.useRealTimers();
-			window.matchMedia = media;
+			restoreMedia();
 		}
 	});
 

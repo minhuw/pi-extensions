@@ -357,7 +357,6 @@ describe("the rail's + menu", () => {
 describe("the rail's operations", () => {
 	let calls: Calls;
 	beforeEach(() => {
-		localStorage.clear();
 		Element.prototype.scrollIntoView = () => {};
 		calls = {};
 	});

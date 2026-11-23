@@ -16,15 +16,8 @@ import { fakeKey, gitCheckout, worktree } from "./support/checkouts";
 import { FakeNode, nodeCrypto, settle } from "./support/fakeNode";
 import { renderWithApi } from "./support/render";
 
-class StubResizeObserver {
-	observe() {}
-	unobserve() {}
-	disconnect() {}
-}
-
 beforeAll(() => {
 	vi.stubGlobal("crypto", nodeCrypto);
-	vi.stubGlobal("ResizeObserver", StubResizeObserver);
 	Element.prototype.scrollIntoView = () => {};
 });
 
@@ -115,7 +108,6 @@ describe("Deck on checkouts", () => {
 	let answer: (message: ClientMessage) => { result?: object; error?: { code: string; message: string } } | undefined;
 
 	beforeEach(async () => {
-		localStorage.clear();
 		repo = gitCheckout("a", `${HOME}/repo`);
 		checkouts = [repo];
 		terminals = [shell("t1", { cwd: `${HOME}/repo`, checkoutId: repo.id, worktreePath: `${HOME}/repo` }), shell("t2", { cwd: "/srv" })];

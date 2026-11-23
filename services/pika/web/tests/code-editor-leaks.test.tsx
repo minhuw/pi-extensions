@@ -230,15 +230,8 @@ import CodeEditor, { pruneModels } from "../src/nodes/CodeEditor";
 import { EditorTabBody, pruneCodeEditorModels } from "../src/nodes/FilePanel";
 import { DeckPage, hasDirtyEditorTab, NodesClientFactory } from "../src/pages/Deck";
 
-class StubResizeObserver {
-	observe() {}
-	unobserve() {}
-	disconnect() {}
-}
-
 beforeAll(() => {
 	vi.stubGlobal("crypto", nodeCrypto);
-	vi.stubGlobal("ResizeObserver", StubResizeObserver);
 	Element.prototype.scrollIntoView = () => {};
 });
 

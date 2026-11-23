@@ -61,19 +61,9 @@ describe("terminal widths", () => {
 
 describe("TerminalView widths", () => {
 	beforeEach(() => {
-		vi.stubGlobal(
-			"ResizeObserver",
-			class {
-				observe() {}
-				unobserve() {}
-				disconnect() {}
-			},
-		);
 		// jsdom has no canvas: the view draws with the DOM renderer.
 		vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
 	});
-
-	afterEach(() => vi.unstubAllGlobals());
 
 	const channel = {
 		request: () => new Promise(() => {}),

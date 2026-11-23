@@ -15,12 +15,6 @@ import { tabMenuItems, WorkspaceView, type WorkspaceActions } from "../src/nodes
 
 const info = (terminalId: string, extra: Partial<TerminalInfo> = {}): TerminalInfo => ({ terminalId, title: "", cwd: "/p", cols: 80, rows: 24, pid: 1, createdAt: 1, argv: ["bash"], ...extra });
 
-class StubResizeObserver {
-	observe() {}
-	unobserve() {}
-	disconnect() {}
-}
-
 /** A node channel that answers `term.attach` with an empty screen and lets the test send events. */
 function fakeChannel(size = { cols: 80, rows: 24 }) {
 	const listeners = new Set<(event: NodeEvent) => void>();
@@ -52,13 +46,11 @@ function measuresAs(fit: { cols: number; rows: number }) {
 }
 
 beforeEach(() => {
-	vi.stubGlobal("ResizeObserver", StubResizeObserver);
 	// jsdom has no canvas: the view draws with the DOM renderer.
 	vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
 });
 
 afterEach(() => {
-	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
 });
 

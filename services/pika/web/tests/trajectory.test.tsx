@@ -7,6 +7,7 @@ import { foldGaps, layoutOverview, makeScale, overviewLanes, traceIntervals } fr
 import { formatPhase } from "../src/trace/format";
 import { LADDER_OPEN_KEY } from "../src/trace/Ladder";
 import { assistantMessage, entry, header, iso, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
+import { installMatchMedia } from "./support/media";
 import { firstRender, largeSessionTest, mockLayout, renderApp } from "./support/render";
 import { anthropicPayload, modelRequest } from "./support/requests";
 import { createFakeServer, traceOf, type FakeSession } from "./support/server";
@@ -497,8 +498,7 @@ describe("trajectory overview", () => {
 
 	it("steps from record to record with reduced motion, previewing each in the inspector", async () => {
 		vi.useFakeTimers({ shouldAdvanceTime: true });
-		const media = window.matchMedia;
-		window.matchMedia = ((query: string) => ({ ...media(query), matches: query.includes("reduce") })) as typeof window.matchMedia;
+		const restoreMedia = installMatchMedia((query) => query.includes("reduce"));
 		try {
 			const server = createFakeServer({ sessions: [session()] });
 			renderApp("/s/t1", server.fetch);
@@ -521,7 +521,7 @@ describe("trajectory overview", () => {
 			await waitFor(() => expect(current()?.dataset.kind).toBe("shell"));
 			expect(document.querySelectorAll("[data-replay-current]")).toHaveLength(1);
 		} finally {
-			window.matchMedia = media;
+			restoreMedia();
 			vi.useRealTimers();
 		}
 	});

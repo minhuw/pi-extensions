@@ -76,7 +76,6 @@ const sectionKeys = (container: HTMLElement, section: string) =>
 describe("the agent rail", () => {
 	let calls: Calls;
 	beforeEach(() => {
-		localStorage.clear();
 		// jsdom lays nothing out.
 		Element.prototype.scrollIntoView = () => {};
 		calls = { agent: [], kill: [], close: [] };

@@ -6,12 +6,6 @@ import type { TerminalInfo } from "../src/nodes/contract";
 import type { Renderer } from "../src/nodes/renderer";
 import { resetWebgl2AvailableCacheForTest, TerminalView, webgl2Available } from "../src/nodes/TerminalView";
 
-class StubResizeObserver {
-	observe() {}
-	unobserve() {}
-	disconnect() {}
-}
-
 const info = (terminalId: string): TerminalInfo => ({
 	terminalId,
 	title: "",
@@ -41,7 +35,6 @@ beforeEach(() => {
 
 afterEach(() => {
 	resetWebgl2AvailableCacheForTest();
-	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
 });
 
@@ -118,10 +111,6 @@ describe("webgl2Available", () => {
 });
 
 describe("TerminalView WebGL2 probing", () => {
-	beforeEach(() => {
-		vi.stubGlobal("ResizeObserver", StubResizeObserver);
-	});
-
 	it("probes WebGL2 only once across multiple TerminalView mounts and disposes addons on unmount", async () => {
 		const loseContext = vi.fn();
 		const getExtension = vi.fn(() => ({ loseContext }));

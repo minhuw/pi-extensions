@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChildSession, Entry } from "../src/lib/types";
 import { foldGaps, layoutOverview, makeScale, overviewLanes, traceIntervals } from "../src/trace/axis";
 import { assistantMessage, entry, header, summary, toolCall, turn, userMessage } from "./support/fixtures";
+import { installMatchMedia } from "./support/media";
 import { firstRender, mockLayout, renderApp } from "./support/render";
 import { createFakeServer, traceOf, type FakeSession } from "./support/server";
 import { entryCalls, inspector, key, manyTurns, row, rows, selected, session, slideOver } from "./support/trajectory";
@@ -36,14 +37,6 @@ async function traceFetches(server: { calls: string[] }, id: string, count: numb
 		});
 	}
 	await waitFor(() => expect(fetched()).toBe(count));
-}
-
-function reducedMotion(): () => void {
-	const media = window.matchMedia;
-	window.matchMedia = ((query: string) => ({ ...media(query), matches: query.includes("reduce") })) as typeof window.matchMedia;
-	return () => {
-		window.matchMedia = media;
-	};
 }
 
 describe("a trace with missing times", () => {
@@ -229,7 +222,7 @@ describe("a selected record in a live session", () => {
 
 describe("replay", () => {
 	it("follows the playhead into collapsed turns for the replay only, without selecting or sliding the inspector over", async () => {
-		const media = reducedMotion();
+		const restoreMedia = installMatchMedia((query) => query.includes("reduce"));
 		vi.useFakeTimers({ shouldAdvanceTime: true });
 		try {
 			renderApp("/s/many", createFakeServer({ sessions: [manyTurns("many")] }).fetch);
@@ -255,7 +248,7 @@ describe("replay", () => {
 			expect(selected()).toBeNull();
 		} finally {
 			vi.useRealTimers();
-			media();
+			restoreMedia();
 		}
 	});
 

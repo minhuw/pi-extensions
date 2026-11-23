@@ -2,6 +2,7 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RELAY_BADGE_POLL_MS, RELAY_POLL_MS } from "../src/lib/relay";
 import { onlineSession, relayEvent, summary } from "./support/fixtures";
+import { installMatchMedia } from "./support/media";
 import { renderApp } from "./support/render";
 import { createFakeServer } from "./support/server";
 
@@ -471,8 +472,7 @@ describe("chatrooms page", () => {
 	});
 
 	it("opens a long message in the reader on wide screens, with sections, raw text, and close", async () => {
-		const matchMedia = window.matchMedia;
-		window.matchMedia = ((query: string) => ({ ...matchMedia(query), matches: query.includes("min-width: 1280px") })) as typeof window.matchMedia;
+		const restoreMedia = installMatchMedia((query) => query.includes("min-width: 1280px"));
 		try {
 			const server = longThread();
 			renderApp("/chatrooms?dm=s-web", server.fetch);
@@ -492,7 +492,7 @@ describe("chatrooms page", () => {
 			fireEvent.click(within(reader).getByRole("button", { name: "Close reader" }));
 			expect(screen.queryByRole("complementary", { name: "Message reader" })).toBeNull();
 		} finally {
-			window.matchMedia = matchMedia;
+			restoreMedia();
 		}
 	});
 

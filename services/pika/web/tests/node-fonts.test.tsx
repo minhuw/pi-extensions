@@ -143,21 +143,12 @@ describe("TerminalView fonts", () => {
 
 	beforeEach(() => {
 		Object.defineProperty(document, "fonts", { configurable: true, value: fonts });
-		vi.stubGlobal(
-			"ResizeObserver",
-			class {
-				observe() {}
-				unobserve() {}
-				disconnect() {}
-			},
-		);
 		// jsdom has no canvas: the view draws with the DOM renderer.
 		vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
 	});
 
 	afterEach(() => {
 		delete (document as { fonts?: unknown }).fonts;
-		vi.unstubAllGlobals();
 	});
 
 	const channel = {

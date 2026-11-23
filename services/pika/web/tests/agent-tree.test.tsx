@@ -62,7 +62,6 @@ function viewOptions(): string[] {
 let restore: () => void;
 beforeEach(() => {
 	restore = mockLayout({ viewport: 20_000, rowHeight: 80 });
-	localStorage.clear();
 });
 afterEach(() => {
 	restore();
