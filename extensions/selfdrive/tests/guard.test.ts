@@ -55,8 +55,11 @@ afterAll(() => {
 	rmSync(root, { recursive: true, force: true });
 });
 
+const SESSION_MODES_KEY = Symbol.for("pi-extensions.session-modes");
+
 afterEach(() => {
 	standingRegistry().grants.clear();
+	delete (globalThis as Record<symbol, unknown>)[SESSION_MODES_KEY];
 });
 
 describe("write and edit", () => {
@@ -1169,6 +1172,55 @@ describe("agent_browser and agent_desktop", () => {
 		withdrawGrant(grant.id);
 		expect(hook!({ toolName: "agent_browser", input: { argv: ["screenshot", "src/a.png"] } }, { cwd: repo })).toBeUndefined();
 		expect(hook!({ toolName: "agent_desktop", input: { argv: ["screenshot", "src/b.png"] } }, { cwd: repo })).toBeUndefined();
+	});
+
+	it("enforces remote and system guards with an empty repo list when selfdrive is active in session-modes without a git grant", () => {
+		let hook: ((event: { toolName: string; input: unknown }, ctx: { cwd: string }) => unknown) | undefined;
+		registerGuard({ on: (_event: string, handler: typeof hook) => void (hook = handler) } as unknown as ExtensionAPI);
+		const shared = globalThis as Record<symbol, unknown>;
+
+		// No grant and no session-modes registry: guard stands aside without creating the registry.
+		expect(hook!({ toolName: "bash", input: { command: "git push" } }, { cwd: outside })).toBeUndefined();
+		expect(SESSION_MODES_KEY in shared).toBe(false);
+
+		// Another session mode alone (e.g. swarm) does not activate the selfdrive guard.
+		const modes = new Map<string, Set<string>>([["swarm-only", new Set(["swarm"])]]);
+		shared[SESSION_MODES_KEY] = { modes, listeners: new Set() };
+		expect(hook!({ toolName: "bash", input: { command: "git push" } }, { cwd: outside })).toBeUndefined();
+		expect(hook!({ toolName: "bash", input: { command: "sudo ls" } }, { cwd: outside })).toBeUndefined();
+
+		// Active non-git selfdrive session (no standing grant): remote and system guards run with an empty repo list.
+		modes.set("non-git-session", new Set(["selfdrive"]));
+		expect(grants()).toEqual([]);
+		for (const cmd of ["git push", "gh pr create", "npm publish"]) {
+			expect(hook!({ toolName: "bash", input: { command: cmd } }, { cwd: outside }), cmd).toEqual({
+				block: true,
+				reason: expect.stringContaining("leaves this machine"),
+			});
+		}
+		for (const cmd of ["sudo ls", "ssh host ls", "systemctl restart foo"]) {
+			expect(hook!({ toolName: "bash", input: { command: cmd } }, { cwd: outside }), cmd).toEqual({
+				block: true,
+				reason: expect.stringContaining("needs privileges or another machine"),
+			});
+		}
+		expect(hook!({ toolName: "process_start", input: { command: "git push", cwd: outside } }, { cwd: outside })).toEqual({
+			block: true,
+			reason: reasons.remote("git push"),
+		});
+		expect(hook!({ toolName: "process_start", input: { command: "sudo ls", cwd: outside } }, { cwd: outside })).toEqual({
+			block: true,
+			reason: reasons.system("sudo"),
+		});
+		// Empty repo list: local writes and non-remote/system commands are allowed.
+		expect(hook!({ toolName: "write", input: { path: join(outside, "notes.txt"), content: "ok\n" } }, { cwd: outside })).toBeUndefined();
+		expect(hook!({ toolName: "edit", input: { path: join(outside, "notes.txt") } }, { cwd: outside })).toBeUndefined();
+		expect(hook!({ toolName: "bash", input: { command: "echo ok" } }, { cwd: outside })).toBeUndefined();
+
+		// Once selfdrive leaves session-modes, the guard stands aside again.
+		modes.delete("non-git-session");
+		expect(hook!({ toolName: "bash", input: { command: "git push" } }, { cwd: outside })).toBeUndefined();
+		expect(hook!({ toolName: "bash", input: { command: "sudo ls" } }, { cwd: outside })).toBeUndefined();
 	});
 });
 

@@ -1,7 +1,7 @@
-// selfdrive's guard: while any standing grant exists in this process, refuse the tool calls that would deliver a Herder
-// run, edit the user's checkout, push or publish, or need privileges, another machine, or system settings. It runs in
-// every session of the process (subagent and Herder children load this extension in-process too). It is a heuristic that
-// prevents accidents, not a sandbox: a determined command can get past it.
+// selfdrive's guard: while any standing grant or active selfdrive session exists in this process, refuse the tool calls
+// that would deliver a Herder run, edit the user's checkout, push or publish, or need privileges, another machine, or
+// system settings. It runs in every session of the process (subagent and Herder children load this extension in-process
+// too). It is a heuristic that prevents accidents, not a sandbox: a determined command can get past it.
 import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -26,11 +26,23 @@ export const reasons = {
 	nesting: `${BLOCKED} shell command exceeds maximum inspection nesting depth under selfdrive standing approval.`,
 };
 
-/** Registers the `tool_call` guard that holds while any standing grant exists in this process. */
+const SESSION_MODES_KEY = Symbol.for("pi-extensions.session-modes");
+
+/** Whether any session in this process has `"selfdrive"` active in the shared session-modes registry. */
+function hasSelfdriveMode(): boolean {
+	const registry = (globalThis as Record<symbol, unknown>)[SESSION_MODES_KEY] as { modes?: unknown } | undefined;
+	if (!(registry?.modes instanceof Map)) return false;
+	for (const modes of registry.modes.values()) {
+		if (modes instanceof Set && modes.has("selfdrive")) return true;
+	}
+	return false;
+}
+
+/** Registers the `tool_call` guard that holds while any standing grant or active selfdrive session exists in this process. */
 export function registerGuard(pi: ExtensionAPI): void {
 	pi.on("tool_call", (event, ctx) => {
 		const active = grants();
-		if (active.length === 0) return undefined;
+		if (active.length === 0 && !hasSelfdriveMode()) return undefined;
 		const reason = blockReason(event.toolName, event.input, ctx.cwd, ctx.sessionManager?.getSessionId?.(), active);
 		return reason ? { block: true, reason } : undefined;
 	});

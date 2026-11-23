@@ -149,6 +149,46 @@ describe("activation", () => {
 		expect(h.grant).toBeUndefined();
 	});
 
+	it("enforces remote and system command guards outside git without publishing a git standing grant", async () => {
+		const symbol = Symbol.for("pi-extensions.session-modes");
+		const localFile = join(cwd(), "scratch.txt");
+		const h = await start({
+			script: [
+				calls(
+					fauxToolCall("bash", { command: "git push" }),
+					fauxToolCall("bash", { command: "gh pr create" }),
+					fauxToolCall("bash", { command: "npm publish" }),
+					fauxToolCall("bash", { command: "sudo ls" }),
+					fauxToolCall("bash", { command: "ssh host ls" }),
+					fauxToolCall("write", { path: localFile, content: "ok\n" }),
+					next("wait", { seconds: 60 }),
+				),
+				fauxAssistantMessage("waiting"),
+			],
+		});
+		await h.command("/selfdrive");
+		await h.settle(2);
+
+		// No git StandingApproval grant is published for a non-git directory, while session-modes records selfdrive.
+		expect(h.grant).toBeUndefined();
+		expect(grants()).toEqual([]);
+		const registry = (globalThis as Record<symbol, unknown>)[symbol] as { modes?: Map<string, Set<string>> } | undefined;
+		expect(registry?.modes?.get(h.id)?.has("selfdrive")).toBe(true);
+
+		const bashResults = h.toolResults().filter((result) => result.toolName === "bash");
+		expect(bashResults).toHaveLength(5);
+		for (const result of bashResults) {
+			expect(result.isError).toBe(true);
+			expect(textOf(result)).toContain("Blocked by self-driving mode:");
+		}
+		const writeResult = h.toolResults().find((result) => result.toolName === "write");
+		expect(writeResult?.isError).toBe(false);
+
+		await h.command("/selfdrive off");
+		expect(h.grant).toBeUndefined();
+		expect(registry?.modes?.get(h.id)?.has("selfdrive") ?? false).toBe(false);
+	});
+
 	it("publishes the checkout as the top level when the git dir lives elsewhere", async () => {
 		const gitDir = join(root, "elsewhere.git");
 		execFileSync("git", ["init", "-q", `--separate-git-dir=${gitDir}`], { cwd: cwd() });

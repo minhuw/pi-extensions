@@ -26,7 +26,7 @@ vi.mock("../lint.ts", async (importOriginal) => {
 
 import agentsMdExtension from "../index.ts";
 import {
-	applyEdits, CHOICES, isChildSession, isGatedContextFile, MAX_DIFF_LINES, reasons, reviewToolCall, STANDING_APPROVAL_KEY, truncateDiff, unifiedDiff, userAway,
+	applyEdits, CHOICES, isChildSession, isGatedContextFile, MAX_DIFF_LINES, reasons, reviewToolCall, SESSION_MODES_KEY, STANDING_APPROVAL_KEY, truncateDiff, unifiedDiff, userAway,
 } from "../gate.ts";
 import { initGitRepo, makeTempDir } from "./support/git.ts";
 
@@ -59,6 +59,7 @@ beforeEach(() => {
 afterEach(() => {
 	hooks.throwLint = false;
 	delete (globalThis as Record<symbol, unknown>)[STANDING_APPROVAL_KEY];
+	delete (globalThis as Record<symbol, unknown>)[SESSION_MODES_KEY];
 	rmSync(join(repo, "extensions"), { recursive: true, force: true });
 });
 
@@ -138,10 +139,28 @@ describe("sessions and the away state", () => {
 		const global = globalThis as Record<symbol, unknown>;
 		expect(userAway()).toBe(false);
 		expect(STANDING_APPROVAL_KEY in global).toBe(false);
+		expect(SESSION_MODES_KEY in global).toBe(false);
 		global[STANDING_APPROVAL_KEY] = { grants: new Map() };
 		expect(userAway()).toBe(false);
 		global[STANDING_APPROVAL_KEY] = { grants: new Map([["s", { id: "s" }]]) };
 		expect(userAway()).toBe(true);
+	});
+
+	it("reports userAway() as true when selfdrive is active in session-modes without a standing grant", () => {
+		const global = globalThis as Record<symbol, unknown>;
+		expect(userAway()).toBe(false);
+		expect(STANDING_APPROVAL_KEY in global).toBe(false);
+		expect(SESSION_MODES_KEY in global).toBe(false);
+
+		const modes = new Map<string, Set<string>>([["s1", new Set(["swarm"])]]);
+		global[SESSION_MODES_KEY] = { modes, listeners: new Set() };
+		expect(userAway()).toBe(false);
+
+		modes.set("s2", new Set(["selfdrive"]));
+		expect(userAway()).toBe(true);
+
+		modes.delete("s2");
+		expect(userAway()).toBe(false);
 	});
 });
 
@@ -195,6 +214,22 @@ describe("reviewToolCall", () => {
 		expect(await reviewToolCall("write", { path: "AGENTS.md", content: "x\n" }, ctx)).toEqual({
 			block: true,
 			reason: "The user is away (self-driving mode), and changes to AGENTS.md wait for their review. Do not make this change now; describe it in your report instead.",
+		});
+		expect(ui.select).not.toHaveBeenCalled();
+	});
+
+	it("refuses the change without asking when non-git selfdrive is active via session-modes only", async () => {
+		const global = globalThis as Record<symbol, unknown>;
+		expect(STANDING_APPROVAL_KEY in global).toBe(false);
+		global[SESSION_MODES_KEY] = { modes: new Map([["non-git-session", new Set(["selfdrive"])]]), listeners: new Set() };
+		const { ctx, ui } = context({ answer: CHOICES.apply });
+		expect(await reviewToolCall("write", { path: "AGENTS.md", content: "x\n" }, ctx)).toEqual({
+			block: true,
+			reason: reasons.away("AGENTS.md"),
+		});
+		expect(await reviewToolCall("edit", edit("Run the tests.", "Skip the tests."), ctx)).toEqual({
+			block: true,
+			reason: reasons.away("AGENTS.md"),
 		});
 		expect(ui.select).not.toHaveBeenCalled();
 	});

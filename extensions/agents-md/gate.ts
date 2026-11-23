@@ -1,7 +1,8 @@
 // agents-md's review gate: a built-in `edit` or `write` of an agent context file (AGENTS.md, CLAUDE.md, ...) in a
 // top-level interactive session waits until the user has seen its diff and the lint findings it adds, and applies only
 // on their Apply. Children (subagents, Herder steps, dreams) and sessions without a UI pass; while the user is away
-// (a selfdrive standing approval exists) the change is refused so it waits for their review. `bash` is not gated.
+// (a selfdrive standing approval or active selfdrive session exists) the change is refused so it waits for their
+// review. `bash` is not gated.
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -13,6 +14,8 @@ import { CHOICES, DEFAULT_CONTEXT, diffPatch, hunkHeader, MAX_FINDINGS, NO_NEWLI
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
 /** selfdrive publishes its grants here while the user is away; read it, never import selfdrive. */
 export const STANDING_APPROVAL_KEY = Symbol.for("pi-extensions.standing-approval");
+/** selfdrive publishes its active session mode here while the user is away; read it, never import selfdrive. */
+export const SESSION_MODES_KEY = Symbol.for("pi-extensions.session-modes");
 
 export { CHOICES };
 /** The diff lines (hunk headers and body) the dialog shows at most. */
@@ -42,10 +45,17 @@ export function isChildSession(ctx: Pick<ExtensionContext, "mode" | "sessionMana
 	return entries.some((entry) => entry.type === "custom" && entry.customType === SESSION_LINK_TYPE);
 }
 
-/** Whether the user is away: some session of this process holds a selfdrive standing approval. */
+/** Whether the user is away: some session of this process holds a selfdrive standing approval or active selfdrive mode. */
 export function userAway(): boolean {
-	const registry = (globalThis as Record<symbol, unknown>)[STANDING_APPROVAL_KEY] as { grants?: unknown } | undefined;
-	return registry?.grants instanceof Map && registry.grants.size > 0;
+	const shared = globalThis as Record<symbol, unknown>;
+	const registry = shared[STANDING_APPROVAL_KEY] as { grants?: unknown } | undefined;
+	if (registry?.grants instanceof Map && registry.grants.size > 0) return true;
+	const modesRegistry = shared[SESSION_MODES_KEY] as { modes?: unknown } | undefined;
+	if (!(modesRegistry?.modes instanceof Map)) return false;
+	for (const modes of modesRegistry.modes.values()) {
+		if (modes instanceof Set && modes.has("selfdrive")) return true;
+	}
+	return false;
 }
 
 // ---- Paths (as selfdrive's guard resolves them; extensions do not import each other) ----
