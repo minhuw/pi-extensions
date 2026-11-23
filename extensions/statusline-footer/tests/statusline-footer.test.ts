@@ -4078,3 +4078,229 @@ describe("statusline footer width tiers", () => {
 		}
 	});
 });
+
+describe("statusline footer cache lens", () => {
+	const strip = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
+
+	function branchWithCache(cacheRead: number, input = 1000, cacheWrite = 0) {
+		return [
+			{ id: "u1", type: "message", message: { role: "user", timestamp: Date.now() - 60_000, content: [{ type: "text", text: "hi" }] } },
+			{
+				id: "a1",
+				type: "message",
+				message: {
+					role: "assistant",
+					provider: "anthropic",
+					model: "claude-sonnet-4",
+					content: [],
+					usage: { input, output: 200, cacheRead, cacheWrite, totalTokens: input + 200 + cacheRead + cacheWrite, cost: { input: 0.01, output: 0.01, cacheRead: 0, cacheWrite: 0, total: 0.02 } },
+				},
+			},
+		];
+	}
+
+	function anthropicPayload(systemText: string, tools = [{ name: "read", input_schema: { type: "object" } }], messages = [{ role: "user", content: "hi" }]) {
+		return {
+			model: "claude-sonnet-4",
+			system: [{ type: "text", text: systemText, cache_control: { type: "ephemeral", ttl: "5m" } }],
+			tools,
+			messages,
+		};
+	}
+
+	function assistantUsageEnd(usage: { input: number; output?: number; cacheRead: number; cacheWrite?: number }, overrides: Record<string, unknown> = {}) {
+		return {
+			type: "message_end",
+			message: {
+				role: "assistant",
+				provider: "anthropic",
+				model: "claude-sonnet-4",
+				stopReason: "stop",
+				usage: { input: usage.input, output: usage.output ?? 100, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite ?? 0 },
+				...overrides,
+			},
+		};
+	}
+
+	it("preserves healthy desktop and laptop cache rendering without anomaly tags or extra status chips", async () => {
+		const harness = createHarness("cache-lens-healthy", "tui", {
+			model: { id: "claude-sonnet-4", provider: "anthropic", api: "anthropic-messages", reasoning: true },
+			branch: branchWithCache(9000, 1000, 0),
+			extensionStatuses: [],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			await harness.emit("before_provider_request", { payload: anthropicPayload("Stable prompt") });
+			await harness.emit("message_end", assistantUsageEnd({ input: 200, cacheRead: 0, cacheWrite: 5000 }));
+			await harness.emit("before_provider_request", {
+				payload: anthropicPayload("Stable prompt", undefined, [
+					{ role: "user", content: "hi" },
+					{ role: "assistant", content: "ok" },
+					{ role: "user", content: "next" },
+				]),
+			});
+			await harness.emit("message_end", assistantUsageEnd({ input: 200, cacheRead: 4800, cacheWrite: 0 }));
+
+			const desk = strip(harness.getFooter()!.render(210).join("\n"));
+			const laptop = strip(harness.getFooter()!.render(160).join("\n"));
+			expect(desk).toContain("⚡ 9.0k 90%");
+			expect(desk).not.toContain("(!");
+			expect(laptop).toContain("⚡ 90%");
+			expect(laptop).not.toContain("(!");
+			expect(harness.ctx.ui.setStatus).not.toHaveBeenCalledWith("cache-lens", expect.anything());
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it("surfaces (!sys) and (!tools) anomalies in desktop and laptop cache slots, including when session cacheRead === 0", async () => {
+		// Case 1: session history already has cacheRead > 0
+		const withReads = createHarness("cache-lens-anomaly-reads", "tui", {
+			model: { id: "claude-sonnet-4", provider: "anthropic", api: "anthropic-messages", reasoning: true },
+			branch: branchWithCache(8000, 2000, 0),
+			extensionStatuses: [],
+		});
+		statuslineFooter(withReads.pi);
+		await withReads.emit("session_start", { type: "session_start", reason: "startup" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			await withReads.emit("before_provider_request", { payload: anthropicPayload("System v1") });
+			await withReads.emit("message_end", assistantUsageEnd({ input: 100, cacheRead: 0, cacheWrite: 5000 }));
+
+			await withReads.emit("before_provider_request", { payload: anthropicPayload("System v2 changed") });
+			await withReads.emit("message_end", assistantUsageEnd({ input: 200, cacheRead: 0, cacheWrite: 5200 }));
+
+			const desk = strip(withReads.getFooter()!.render(210).join("\n"));
+			const laptop = strip(withReads.getFooter()!.render(160).join("\n"));
+			const phone = strip(withReads.getFooter()!.render(50).join("\n"));
+			expect(desk).toContain("⚡ 8.0k 80% ↺ 0% (!sys)");
+			expect(laptop).toContain("⚡ 80% (!sys)");
+			expect(phone).not.toContain("!sys");
+
+			// Mutate tools on next call -> switches badge to (!tools)
+			await withReads.emit("before_provider_request", {
+				payload: anthropicPayload("System v2 changed", [
+					{ name: "read", input_schema: { type: "object" } },
+					{ name: "write", input_schema: { type: "object" } },
+				]),
+			});
+			await withReads.emit("message_end", assistantUsageEnd({ input: 200, cacheRead: 1000, cacheWrite: 4000 }));
+			expect(strip(withReads.getFooter()!.render(210).join("\n"))).toContain("19% (!tools)");
+			expect(strip(withReads.getFooter()!.render(160).join("\n"))).toContain("80% (!tools)");
+		} finally {
+			vi.unstubAllEnvs();
+			withReads.disposeFooter();
+		}
+
+		// Case 2: session cacheRead === 0 (never had a hit yet) still surfaces the anomaly in ⚡ slot
+		const zeroReads = createHarness("cache-lens-anomaly-zero", "tui", {
+			model: { id: "claude-sonnet-4", provider: "anthropic", api: "anthropic-messages", reasoning: true },
+			branch: branchWithCache(0, 5000, 0),
+			extensionStatuses: [],
+		});
+		statuslineFooter(zeroReads.pi);
+		await zeroReads.emit("session_start", { type: "session_start", reason: "startup" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			await zeroReads.emit("before_provider_request", { payload: anthropicPayload("System A") });
+			await zeroReads.emit("message_end", assistantUsageEnd({ input: 5000, cacheRead: 0, cacheWrite: 0 }));
+
+			await zeroReads.emit("before_provider_request", { payload: anthropicPayload("System B") });
+			await zeroReads.emit("message_end", assistantUsageEnd({ input: 5100, cacheRead: 0, cacheWrite: 0 }));
+
+			const desk = strip(zeroReads.getFooter()!.render(210).join("\n"));
+			const laptop = strip(zeroReads.getFooter()!.render(160).join("\n"));
+			expect(desk).toContain("⚡ 0% (!sys)");
+			expect(laptop).toContain("⚡ 0% (!sys)");
+		} finally {
+			vi.unstubAllEnvs();
+			zeroReads.disposeFooter();
+		}
+	});
+
+	it("handles /cache, /cache anomalies, /cache reset, and invalid args cleanly", async () => {
+		const harness = createHarness("cache-lens-commands", "tui", {
+			model: { id: "claude-sonnet-4", provider: "anthropic", api: "anthropic-messages", reasoning: true },
+			branch: branchWithCache(0, 5000, 0),
+			extensionStatuses: [],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			await harness.emit("before_provider_request", { payload: anthropicPayload("System initial") });
+			await harness.emit("message_end", assistantUsageEnd({ input: 100, cacheRead: 0, cacheWrite: 5000 }));
+			await harness.emit("before_provider_request", { payload: anthropicPayload("System mutated!") });
+			await harness.emit("message_end", assistantUsageEnd({ input: 100, cacheRead: 0, cacheWrite: 5100 }));
+
+			await harness.runCommand("cache", "");
+			expect(harness.notifications.at(-1)).toContain("Prefix cache:");
+			expect(harness.notifications.at(-1)).toContain("system_mutated");
+			expect(harness.notifications.at(-1)).toContain("char@7 byte@7");
+
+			await harness.runCommand("cache", "anomalies");
+			expect(harness.notifications.at(-1)).toContain("Prefix cache anomalies (1 of 2 calls");
+			expect(harness.notifications.at(-1)).toContain("!sys");
+
+			await harness.runCommand("cache", "bogus");
+			expect(harness.notifications.at(-1)).toContain("usage: /cache [anomalies|reset]");
+
+			await harness.runCommand("cache", "reset");
+			expect(harness.notifications.at(-1)).toContain("reset");
+			expect(strip(harness.getFooter()!.render(210).join("\n"))).not.toContain("!sys");
+
+			await harness.runCommand("cache", "summary");
+			expect(harness.notifications.at(-1)).toContain("no LLM calls recorded");
+
+			expect(harness.pi.appendEntry).toHaveBeenCalledWith("pi-extensions.command", {
+				command: "cache",
+				kind: "extension",
+				extension: "statusline-footer",
+			});
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it("isolates TUI cache-lens diagnostics from print-mode child sessions and never persists prompt text on reload", async () => {
+		const secretSystem = "SUPER_SECRET_SYSTEM_INSTRUCTIONS_XYZ";
+		const tui = createHarness("cache-lens-isolation", "tui", {
+			model: { id: "claude-sonnet-4", provider: "anthropic", api: "anthropic-messages", reasoning: true },
+			branch: branchWithCache(8000, 2000, 0),
+			extensionStatuses: [],
+		});
+		const child = createHarness("cache-lens-isolation", "print", {
+			model: { id: "claude-sonnet-4", provider: "anthropic", api: "anthropic-messages", reasoning: true },
+		});
+		statuslineFooter(tui.pi);
+		statuslineFooter(child.pi);
+		await tui.emit("session_start", { type: "session_start", reason: "startup" });
+		await child.emit("session_start", { type: "session_start", reason: "startup" });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			await tui.emit("before_provider_request", { payload: anthropicPayload(secretSystem) });
+			await tui.emit("message_end", assistantUsageEnd({ input: 100, cacheRead: 0, cacheWrite: 5000 }));
+
+			// Child print-mode session mutates system prompt and gets 0% hit — must NOT contaminate parent TUI!
+			await child.emit("before_provider_request", { payload: anthropicPayload("CHILD SUBAGENT PROMPT") });
+			await child.emit("message_end", assistantUsageEnd({ input: 5000, cacheRead: 0, cacheWrite: 0 }));
+
+			expect(strip(tui.getFooter()!.render(210).join("\n"))).not.toContain("!sys");
+			await tui.runCommand("cache", "anomalies");
+			expect(tui.notifications.at(-1)).toContain("no cache anomalies");
+
+			// Reload snapshot must not contain raw system prompt text
+			tui.disposeFooter();
+			await tui.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+			const reloadEntry = tui.entries.find((e: any) => e.customType === "statusline-footer:reload");
+			expect(reloadEntry).toBeDefined();
+			expect(JSON.stringify(reloadEntry)).not.toContain(secretSystem);
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+});

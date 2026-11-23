@@ -97,6 +97,7 @@ const commandEntries: [string, string, string][] = [
 	["fff-rescan", "fff", "Trigger a fresh FFF file scan for the current workspace."],
 	["fff-mode", "fff", "Show or switch the FFF tool and autocomplete mode."],
 	["footer", "statusline-footer", "Choose the custom footer layout."],
+	["cache", "statusline-footer", "Inspect session prefix KV cache hit rates and miss root causes."],
 	["pika", "pika", "Log in, log out, or inspect upload status."],
 	["relay", "pika", "Check relay status, send messages, join or leave rooms, or toggle relay for this session."],
 	["memory", "pika", "Check memory dream status, start or stop a dream, or view the memory log."],

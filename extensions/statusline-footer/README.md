@@ -126,6 +126,9 @@ For a single status display, leave pi-processes' **status widget** disabled in `
 | `/footer compact` | Use the one-row layout at any width. |
 | `/footer off` | Restore Pi's default footer. |
 | `/footer debug` | Show metric-collection diagnostics for provider latency. |
+| `/cache` | Show session prefix KV cache hit rate, recent calls, and miss root causes (`/cache summary`). |
+| `/cache anomalies` | List only anomalous cache-miss calls with full forensic details. |
+| `/cache reset` | Clear in-memory prefix cache diagnostics for the current session. |
 
 ## Features
 
@@ -154,6 +157,7 @@ For a single status display, leave pi-processes' **status widget** disabled in `
 - TTFB uses Pi's provider-response event when the provider exposes it.
 - Token throughput divides exact output-token usage by the duration of the whole call, from the request marker to the last token. Requests without observed content, failed or aborted requests, and calls under 50 ms are excluded. The displayed average is total output tokens divided by total call time. Including the time to first token avoids inflated rates when responses arrive in a single burst or include hidden reasoning tokens. This measures whole-call throughput and reads lower than pure decoding speed.
 - Cache hit rate is cached-read tokens divided by all input tokens: uncached input + cache reads + cache writes.
+- Prefix KV cache forensics observe outgoing `before_provider_request` payloads and finalized assistant usage in memory (never mutating payloads or persisting prompt text across reloads). When the latest call suffers a cache-miss anomaly, the desk and laptop cache slot (`⚡`) appends a compact root-cause tag — `(!sys)` for system prompt mutation, `(!tools)` for tool schema changes, `(!strict)` for strict-tool retry fallbacks, `(!hist)` for rewritten or compacted history, `(!ttl)` for elapsed cache TTL expiry, `(!model)` for model switches, `(!route)` for intact-prefix routing misses, or `(!drop)` for unexplained drops — while healthy calls keep the existing display unchanged. Use `/cache` or `/cache anomalies` to inspect exact offsets (`char@`/`byte@`), tool diffs, or divergent item indices.
 - Git branch comes from Pi's footer data. Working-tree state uses a throttled `git --no-optional-locks status --porcelain=v1 --untracked-files=normal`: a successful empty result is `clean`, any output is `dirty`, and a failed or pending status is shown as `git ?` or `git …`. Optional `git diff --shortstat HEAD` supplies additions/deletions, while `git rev-list --left-right --count @{upstream}...HEAD` supplies ahead/behind; either auxiliary query can fail without changing the authoritative status.
 - For a Magpie Responses model advertising `priority`, `FAST` or `FAST OFF` appears immediately after the model name and reflects the current session branch's `/fast` switch, before any request. The label disappears if the model is no longer eligible. Other non-standard tiers are shown from the last `before_provider_request` payload; on other APIs, a requested `priority` displays as `FAST`. A request without a tier or a model change clears the previous request's badge. These labels describe the switch or request, not the tier delivered upstream.
 

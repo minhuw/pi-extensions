@@ -42,6 +42,11 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	CacheLensTracker,
+	parseCacheLensReloadSnapshot,
+	type CacheLensReloadSnapshot,
+} from "./cache-lens.ts";
 import { PROCESS_STATUS_KEY, watchProcesses } from "./processes.ts";
 
 type Mode = "full" | "compact" | "off";
@@ -650,6 +655,7 @@ interface StatsCache {
 interface SessionState {
 	statsCache?: StatsCache;
 	metrics: StreamMetrics;
+	cacheLens: CacheLensTracker;
 	gitStat: GitStat;
 	gitStatAt: number;
 	gitStatCwd: string;
@@ -854,13 +860,22 @@ interface GitStat {
 // module; only the small custom-entry snapshot survives them.
 const sessionStates = new Map<string, SessionState>();
 const RELOAD_ENTRY = "statusline-footer:reload";
-type ReloadSnapshot = Pick<SessionState, "metrics" | "serviceTier">;
+type ReloadSnapshot = Pick<SessionState, "metrics" | "serviceTier"> & {
+	cacheLens?: CacheLensReloadSnapshot;
+};
 
 function restoreSnapshot(data: unknown): ReloadSnapshot | undefined {
 	if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
-	const { metrics, serviceTier } = data as Record<string, unknown>;
+	const { metrics, serviceTier, cacheLens } = data as Record<string, unknown>;
 	if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) return undefined;
 	if (serviceTier !== undefined && typeof serviceTier !== "string") return undefined;
+
+	let parsedCacheLens: CacheLensReloadSnapshot | undefined;
+	if (cacheLens !== undefined) {
+		const parsed = parseCacheLensReloadSnapshot(cacheLens);
+		if (!parsed) return undefined;
+		parsedCacheLens = parsed;
+	}
 
 	const restored = freshMetrics();
 	for (const key of Object.keys(restored) as (keyof StreamMetrics)[]) {
@@ -872,12 +887,15 @@ function restoreSnapshot(data: unknown): ReloadSnapshot | undefined {
 	restored.requestSentAt = 0;
 	restored.firstTokenAt = 0;
 	restored.curTtftMs = null;
-	return { metrics: restored, serviceTier };
+	return { metrics: restored, serviceTier, cacheLens: parsedCacheLens };
 }
 
 function freshSessionState(previous?: ReloadSnapshot): SessionState {
+	const cacheLens = new CacheLensTracker();
+	if (previous?.cacheLens) cacheLens.restoreReloadSnapshot(previous.cacheLens);
 	return {
 		metrics: previous?.metrics ?? freshMetrics(),
+		cacheLens,
 		gitStat: { status: "pending", ahead: 0, behind: 0 },
 		gitStatAt: 0,
 		gitStatCwd: "",
@@ -1651,6 +1669,8 @@ function renderDetailRows(
 		return item(set.cwd, "dim", shortenPath(formatPath(ctx.cwd), Math.max(12, pathRoom)));
 	};
 
+	const lastAnomaly = state.cacheLens.lastAnomalyBadge();
+
 	if (tier === "laptop") {
 		// One row of what to act on.
 		const left: Group[] = [
@@ -1659,9 +1679,14 @@ function renderDetailRows(
 			{ text: activity, rank: LAPTOP_RANKS.turns },
 			...(errors ? [{ text: errors, rank: LAPTOP_RANKS.errors }] : []),
 		];
+		const laptopCache = lastAnomaly
+			? item(set.cache, lastAnomaly.severity, `${cachePct ?? lastAnomaly.hitPct}% (${lastAnomaly.tag})`, lastAnomaly.severity)
+			: cachePct != null
+				? item(set.cache, cacheColor, `${cachePct}%`, cacheColor === "dim" ? "muted" : cacheColor)
+				: "";
 		const right: Group[] = [
 			{ text: cluster([ttft, speed], "  "), rank: LAPTOP_RANKS.latency },
-			...(cachePct != null ? [{ text: item(set.cache, cacheColor, `${cachePct}%`, cacheColor === "dim" ? "muted" : cacheColor), rank: LAPTOP_RANKS.cache }] : []),
+			...(laptopCache ? [{ text: laptopCache, rank: LAPTOP_RANKS.cache }] : []),
 		];
 		return [...activityRows, railRow(theme, "╰", left, [...right, { text: cwd(left, right), rank: LAPTOP_RANKS.cwd }], width)];
 	}
@@ -1675,11 +1700,16 @@ function renderDetailRows(
 		? cluster([item(set.calls, "syntaxFunction", `${s.toolCalls}`), errors || item(set.ok, "success", "0")], "  ")
 		: item(set.calls, "dim", "0", "dim");
 	const cost = amount + (!unpriced && s.turns > 0 ? theme.fg("dim", `  ${fmtCost(s.cost / s.turns)}/turn`) : "");
+	const cacheSegment = lastAnomaly
+		? s.cacheRead > 0
+			? `${item(set.cache, lastAnomaly.severity, fmtTokens(s.cacheRead))}${cachePct != null ? ` ${theme.fg(cacheColor === "dim" ? "muted" : cacheColor, `${cachePct}%`)}` : ""}${theme.fg("dim", ` ${set.last} `)}${theme.fg(lastAnomaly.severity, `${lastAnomaly.hitPct}% (${lastAnomaly.tag})`)}`
+			: item(set.cache, lastAnomaly.severity, `${lastAnomaly.hitPct}% (${lastAnomaly.tag})`, lastAnomaly.severity)
+		: s.cacheRead > 0 && item(set.cache, cacheColor, fmtTokens(s.cacheRead))
+			+ (cachePct != null ? ` ${theme.fg(cacheColor === "dim" ? "muted" : cacheColor, `${cachePct}%`)}` : "");
 	const tokens = cluster([
 		item(set.input, "toolDiffAdded", fmtTokens(s.input)),
 		item(set.output, "toolDiffRemoved", fmtTokens(s.output)),
-		s.cacheRead > 0 && item(set.cache, cacheColor, fmtTokens(s.cacheRead))
-			+ (cachePct != null ? ` ${theme.fg(cacheColor === "dim" ? "muted" : cacheColor, `${cachePct}%`)}` : ""),
+		cacheSegment,
 	], "  ");
 	const memory = s.memoryTokens > 0 ? theme.fg("dim", `~${fmtTokens(s.memoryTokens)} memory`) : "";
 	const think = s.reasoning > 0 ? theme.fg("dim", `${fmtTokens(s.reasoning)} think`) : "";
@@ -1759,6 +1789,25 @@ export default function (pi: ExtensionAPI) {
 		const state = getSessionState(ctx);
 		if (!state || ctx.mode !== "tui") return;
 		state.serviceTier = extractServiceTier(event.payload);
+		const modelKey = ctx.model
+			? (ctx.model.provider ? `${ctx.model.provider}/${ctx.model.id}` : ctx.model.id)
+			: undefined;
+		state.cacheLens.recordRequest(event.payload, {
+			api: ctx.model?.api,
+			modelKey,
+		});
+	});
+
+	pi.on("session_compact", (_event, ctx) => {
+		const state = getSessionState(ctx);
+		if (!state || ctx.mode !== "tui") return;
+		state.cacheLens.recordCompaction();
+	});
+
+	pi.on("session_tree", (_event, ctx) => {
+		const state = getSessionState(ctx);
+		if (!state || ctx.mode !== "tui") return;
+		state.cacheLens.resetBaseline();
 	});
 
 	pi.on("model_select", (_event, ctx) => {
@@ -1822,6 +1871,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("message_end", (event, ctx) => {
 		const state = getSessionState(ctx);
 		if (!state || ctx.mode !== "tui" || event.message.role !== "assistant") return;
+		state.cacheLens.recordMessageEnd(event.message);
 		const { metrics } = state;
 		const { usage, stopReason } = event.message;
 		// The whole call, from the request to the last token, and only once content was observed.
@@ -1859,6 +1909,7 @@ export default function (pi: ExtensionAPI) {
 				pi.appendEntry(RELOAD_ENTRY, {
 					metrics: { ...state.metrics, requestSentAt: 0, firstTokenAt: 0, curTtftMs: null },
 					serviceTier: state.serviceTier,
+					cacheLens: state.cacheLens.toReloadSnapshot(),
 				});
 			}
 		}
@@ -1906,6 +1957,47 @@ export default function (pi: ExtensionAPI) {
 				install(ctx, state);
 				ctx.ui.notify(`Statusline footer: ${mode} mode`, "info");
 			}
+		},
+	});
+
+	pi.registerCommand("cache", {
+		description: "Inspect session prefix KV cache hit rates and miss root causes: /cache [anomalies|reset]",
+		handler: async (args, ctx) => {
+			pi.appendEntry("pi-extensions.command", { command: "cache", kind: "extension", extension: "statusline-footer" });
+			const next = args.trim().toLowerCase();
+			const state = getSessionState(ctx);
+			if (next === "" || next === "summary") {
+				ctx.ui.notify(
+					state
+						? state.cacheLens.formatCacheReport("summary")
+						: "Cache lens unavailable outside the TUI session",
+					"info",
+				);
+				return;
+			}
+			if (next === "anomalies") {
+				ctx.ui.notify(
+					state
+						? state.cacheLens.formatCacheReport("anomalies")
+						: "Cache lens unavailable outside the TUI session",
+					"info",
+				);
+				return;
+			}
+			if (next === "reset") {
+				if (!state) {
+					ctx.ui.notify("Cache lens unavailable outside the TUI session", "info");
+					return;
+				}
+				state.cacheLens.reset();
+				state.requestRender?.();
+				ctx.ui.notify("Cache lens diagnostics reset for this session", "info");
+				return;
+			}
+			ctx.ui.notify(
+				`Unknown /cache argument '${args.trim()}' — usage: /cache [anomalies|reset]`,
+				"warning",
+			);
 		},
 	});
 }
