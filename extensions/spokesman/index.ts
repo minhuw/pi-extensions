@@ -203,7 +203,7 @@ function shortModelName(spec: string): string {
 	return slashIndex >= 0 ? trimmed.slice(slashIndex + 1) : trimmed;
 }
 
-function isSameAsMainModel(
+export function isSameAsMainModel(
 	activeSpec: string | undefined,
 	ctx: ExtensionContext,
 	mainModel?: { id?: string; provider?: string },
@@ -222,14 +222,21 @@ function isSameAsMainModel(
 	}
 
 	const trimmed = activeSpec.trim();
+	const targetId = targetMain.id.toLowerCase();
 	const slashIndex = trimmed.indexOf("/");
 	if (slashIndex >= 0) {
 		const provider = trimmed.slice(0, slashIndex).trim().toLowerCase();
 		const modelId = trimmed.slice(slashIndex + 1).trim().toLowerCase();
-		if (modelId !== targetMain.id.toLowerCase()) return false;
-		return !targetMain.provider || provider === targetMain.provider.toLowerCase();
+		if (
+			provider &&
+			modelId &&
+			modelId === targetId &&
+			(!targetMain.provider || provider === targetMain.provider.toLowerCase())
+		) {
+			return true;
+		}
 	}
-	return trimmed.toLowerCase() === targetMain.id.toLowerCase();
+	return trimmed.toLowerCase() === targetId;
 }
 
 function formatStatusLabel(
@@ -433,7 +440,7 @@ function readActiveLanguage(ctx: ExtensionContext): string | undefined {
 	return latest?.active ?? base ?? fallback;
 }
 
-function resolveSpokesmanModel(
+export function resolveSpokesmanModel(
 	spec: string,
 	ctx: ExtensionContext,
 ): Model<Api> | undefined {
@@ -450,17 +457,18 @@ function resolveSpokesmanModel(
 	if (slashIndex >= 0) {
 		const provider = trimmed.slice(0, slashIndex).trim();
 		const modelId = trimmed.slice(slashIndex + 1).trim();
-		if (!provider || !modelId) return undefined;
-
-		if (typeof registry?.find === "function") {
-			const exact = registry.find(provider, modelId);
-			if (exact) return exact;
+		if (provider && modelId) {
+			if (typeof registry?.find === "function") {
+				const exact = registry.find(provider, modelId);
+				if (exact) return exact;
+			}
+			const lowerProvider = provider.toLowerCase();
+			const lowerId = modelId.toLowerCase();
+			const providerMatch = candidates.find(
+				(m) => m.provider.toLowerCase() === lowerProvider && m.id.toLowerCase() === lowerId,
+			);
+			if (providerMatch) return providerMatch;
 		}
-		const lowerProvider = provider.toLowerCase();
-		const lowerId = modelId.toLowerCase();
-		return candidates.find(
-			(m) => m.provider.toLowerCase() === lowerProvider && m.id.toLowerCase() === lowerId,
-		);
 	}
 
 	const lowerSpec = trimmed.toLowerCase();

@@ -24,7 +24,9 @@ import {
 	hasNerdFonts,
 	HIDDEN_ORIGINAL_MARKER,
 	isMainModelEnabled,
+	isSameAsMainModel,
 	matchesModelPattern,
+	resolveSpokesmanModel,
 	SPOKESMAN_REWRITE_ENTRY,
 	SPOKESMAN_STATE_ENTRY,
 	stripNonProse,
@@ -188,6 +190,86 @@ describe("main-model filter", () => {
 		expect(isMainModelEnabled(["claude-*", "gpt-6-*"], sol)).toBe(true);
 		expect(isMainModelEnabled(["claude-*"], sol)).toBe(false);
 		expect(isMainModelEnabled(["claude-*"], undefined)).toBe(false);
+	});
+});
+
+describe("slashed bare model ID resolution and same-model checks", () => {
+	type StubModel = { provider: string; id: string };
+
+	function makeCtx(options: {
+		models?: StubModel[];
+		findOnlyModels?: StubModel[];
+		mainModel?: StubModel;
+	}): ExtensionContext {
+		const listed = options.models ?? [];
+		const searchable = [...listed, ...(options.findOnlyModels ?? [])];
+		return {
+			model: options.mainModel,
+			scopedModels: [],
+			modelRegistry: {
+				getAvailable: () => listed,
+				getAll: () => listed,
+				find: (provider: string, id: string) =>
+					searchable.find((m) => m.provider === provider && m.id === id),
+			},
+		} as unknown as ExtensionContext;
+	}
+
+	it("resolveSpokesmanModel falls back to bare slashed model IDs when provider/modelId split misses", () => {
+		const magpieCodex = { provider: "magpie", id: "codex/gpt-5.4" };
+		const ctx = makeCtx({ models: [magpieCodex], mainModel: magpieCodex });
+
+		// Bare slashed ID falls back after ("codex", "gpt-5.4") misses
+		expect(resolveSpokesmanModel("codex/gpt-5.4", ctx)).toEqual(magpieCodex);
+		expect(resolveSpokesmanModel("CODEX/GPT-5.4", ctx)).toEqual(magpieCodex);
+		// Provider-qualified form splits into ("magpie", "codex/gpt-5.4")
+		expect(resolveSpokesmanModel("magpie/codex/gpt-5.4", ctx)).toEqual(magpieCodex);
+		expect(resolveSpokesmanModel("MAGPIE/CODEX/GPT-5.4", ctx)).toEqual(magpieCodex);
+		// Non-matching provider prefix still misses
+		expect(resolveSpokesmanModel("other/codex/gpt-5.4", ctx)).toBeUndefined();
+		expect(resolveSpokesmanModel("codex/gpt-5.3", ctx)).toBeUndefined();
+
+		// When an exact provider/modelId match exists, it takes precedence over a slashed bare ID
+		const codexDirect = { provider: "codex", id: "gpt-5.4" };
+		const bothCtx = makeCtx({ models: [magpieCodex, codexDirect], mainModel: magpieCodex });
+		expect(resolveSpokesmanModel("codex/gpt-5.4", bothCtx)).toEqual(codexDirect);
+		expect(resolveSpokesmanModel("magpie/codex/gpt-5.4", bothCtx)).toEqual(magpieCodex);
+
+		// Falls back to registry.find(ctx.model.provider, spec) for slashed bare IDs not in candidate lists
+		const findOnlyCtx = makeCtx({ findOnlyModels: [magpieCodex], mainModel: magpieCodex });
+		expect(resolveSpokesmanModel("codex/gpt-5.4", findOnlyCtx)).toEqual(magpieCodex);
+	});
+
+	it("isSameAsMainModel matches slashed bare and provider-qualified IDs consistently", () => {
+		const magpieCodex = { provider: "magpie", id: "codex/gpt-5.4" };
+		const otherCodex = { provider: "other", id: "codex/gpt-5.4" };
+		const codexDirect = { provider: "codex", id: "gpt-5.4" };
+
+		// Resolved path (models present in registry)
+		const resolvedCtx = makeCtx({ models: [magpieCodex, otherCodex], mainModel: magpieCodex });
+		expect(isSameAsMainModel("codex/gpt-5.4", resolvedCtx)).toBe(true);
+		expect(isSameAsMainModel("CODEX/GPT-5.4", resolvedCtx)).toBe(true);
+		expect(isSameAsMainModel("magpie/codex/gpt-5.4", resolvedCtx)).toBe(true);
+		expect(isSameAsMainModel("other/codex/gpt-5.4", resolvedCtx)).toBe(false);
+		expect(isSameAsMainModel("codex/gpt-5.4", resolvedCtx, { provider: "magpie", id: "codex/gpt-5.3" })).toBe(false);
+		expect(isSameAsMainModel("codex/gpt-5.4", resolvedCtx, { provider: "openai", id: "gpt-5.4" })).toBe(false);
+
+		// When "codex/gpt-5.4" resolves to { provider: "codex", id: "gpt-5.4" }, it is distinct from magpie's slashed model
+		const ambiguousCtx = makeCtx({ models: [magpieCodex, codexDirect], mainModel: magpieCodex });
+		expect(isSameAsMainModel("codex/gpt-5.4", ambiguousCtx)).toBe(false);
+		expect(isSameAsMainModel("codex/gpt-5.4", ambiguousCtx, codexDirect)).toBe(true);
+		expect(isSameAsMainModel("magpie/codex/gpt-5.4", ambiguousCtx)).toBe(true);
+
+		// Unresolved fallback path (model absent from registry)
+		const emptyCtx = makeCtx({ models: [], mainModel: magpieCodex });
+		expect(isSameAsMainModel("codex/gpt-5.4", emptyCtx)).toBe(true);
+		expect(isSameAsMainModel("CODEX/GPT-5.4", emptyCtx)).toBe(true);
+		expect(isSameAsMainModel("magpie/codex/gpt-5.4", emptyCtx)).toBe(true);
+		expect(isSameAsMainModel("other/codex/gpt-5.4", emptyCtx)).toBe(false);
+		expect(isSameAsMainModel("codex/gpt-5.4", emptyCtx, { provider: "magpie", id: "codex/gpt-5.3" })).toBe(false);
+		expect(isSameAsMainModel("codex/gpt-5.4", emptyCtx, { provider: "openai", id: "gpt-5.4" })).toBe(false);
+		expect(isSameAsMainModel("codex/gpt-5.4", emptyCtx, codexDirect)).toBe(true);
+		expect(isSameAsMainModel("codex/gpt-5.4", emptyCtx, { id: "codex/gpt-5.4" })).toBe(true);
 	});
 });
 
