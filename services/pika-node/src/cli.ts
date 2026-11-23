@@ -47,7 +47,7 @@ const processAlive = (pid: number): boolean => {
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 /** Starts the daemon detached unless one answers already; resolves with its pid. */
-export async function start(p: Paths, quiet = false): Promise<number> {
+async function start(p: Paths, quiet = false): Promise<number> {
     if (await alive(p.socket)) {
         const pid = readPid(p) ?? 0;
         if (!quiet) process.stdout.write(`pika-node daemon already running (pid ${pid})\n`);

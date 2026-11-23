@@ -11,7 +11,7 @@ import { accept, bind } from "./socket.ts";
 import { ensureSpawnHelper } from "./spawn.ts";
 import { loadIdentity } from "./store.ts";
 
-export const log = (line: string): void => { process.stderr.write(`${new Date().toISOString()} ${line}\n`); };
+const log = (line: string): void => { process.stderr.write(`${new Date().toISOString()} ${line}\n`); };
 
 export interface Running { daemon: Daemon; link: Link; stop: (reason: string) => Promise<void> }
 

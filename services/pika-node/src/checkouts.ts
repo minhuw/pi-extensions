@@ -17,9 +17,9 @@ import { roots, type Config } from "./store.ts";
 export interface CheckoutList { checkouts: Checkout[]; truncated: boolean }
 
 /** Watched changes are folded into one scan this long after the last. */
-export const WATCH_DEBOUNCE_MS = 300;
+const WATCH_DEBOUNCE_MS = 300;
 /** Roots (and everything else) are scanned again this often. */
-export const RESCAN_MS = 60_000;
+const RESCAN_MS = 60_000;
 /** Room for the reply or event around the checkouts in one record. */
 const RECORD_SLACK = 512;
 /** git processes one scan runs at once. */
@@ -161,7 +161,7 @@ const rawName = (commonDir: string): string => {
 type Located = { kind: "git"; commonDir: string; at: string } | { kind: "folder"; path: string };
 
 /** A directory's real path: `not_found` when it does not exist, `not_a_directory` for anything else. */
-export async function realDirectory(path: string): Promise<string> {
+async function realDirectory(path: string): Promise<string> {
     let real: string;
     try { real = await realpath(path); }
     catch { throw new NodeError("not_found", `no directory ${path}`); }

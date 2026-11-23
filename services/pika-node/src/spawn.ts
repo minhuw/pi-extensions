@@ -11,7 +11,7 @@ import { PANE_ENV, PROGRAM_STATUS_ENV, SOCKET_ENV } from "./protocol.ts";
 export class SpawnError extends Error {}
 
 /** Names a client's `env` may not set; `__*` guards such as `__ETC_PROFILE_NIX_SOURCED` never reach a PTY. */
-export const reservedEnv = (name: string): boolean => name.startsWith("PIKA_NODE_") || name === PROGRAM_STATUS_ENV || name.startsWith("ORCA_") || name.startsWith("__");
+const reservedEnv = (name: string): boolean => name.startsWith("PIKA_NODE_") || name === PROGRAM_STATUS_ENV || name.startsWith("ORCA_") || name.startsWith("__");
 
 export interface Account { home: string; user: string; shell: string }
 

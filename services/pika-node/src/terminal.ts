@@ -21,7 +21,7 @@ const { Terminal: Headless } = require("@xterm/headless") as typeof import("@xte
 const { SerializeAddon } = require("@xterm/addon-serialize") as typeof import("@xterm/addon-serialize");
 const pty = require("node-pty") as typeof import("node-pty");
 
-export const SCROLLBACK = 1_000;
+const SCROLLBACK = 1_000;
 
 /**
  * A process's working directory: `/proc/<pid>/cwd` on Linux, `lsof` on macOS (which has no procfs). Undefined when
