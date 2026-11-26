@@ -4,7 +4,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { recallReadTool, recallSearchTool } from "../../recall/index.ts";
 import { MemoryServerError } from "../client.ts";
-import { BODY_LIMIT, bodyTooLong, type Category, type FullAnswer, formatFull, formatNote, type Note, type ScopeKind } from "../format.ts";
+import { BODY_LIMIT, bodyTooLong, type Category, type FullAnswer, formatFull, formatNote, type Note, type ScopeKind, type Tier } from "../format.ts";
 import { failure, FORGET_NOTE_FIELDS, memoryReadTool, noteId, renderForgetCall, renderSaveCall, renderTextResult, SAVE_NOTE_FIELDS } from "../tools.ts";
 import { type Change, type CommitAnswer, type CommitBody, type DreamRun, MAX_CHANGES, MAX_SOURCES, type Source } from "./run.ts";
 import { outcomeUnknown, send } from "./server.ts";
@@ -29,8 +29,8 @@ const SOURCES = (minItems: number) => Type.Array(SOURCE, { minItems, maxItems: M
 const UNSAVED = "Nothing is written until dream_commit; a commit the server refuses discards its staged changes, and so does the end of the dream.";
 
 /** The tools of a dream child: reading past sessions and notes, and staging and committing changes for `run`. A dream's reads never count as use. */
-export function dreamTools(run: DreamRun): ToolDefinition[] {
-	return [recallSearchTool(), recallReadTool(), memoryReadTool({ recordUse: false }), dreamSaveTool(run), dreamForgetTool(run), dreamCommitTool(run)];
+export function dreamTools(run: DreamRun, options: { supportsTiers?: boolean } = {}): ToolDefinition[] {
+	return [recallSearchTool(), recallReadTool(), memoryReadTool({ recordUse: false }), dreamSaveTool(run, options), dreamForgetTool(run), dreamCommitTool(run)];
 }
 
 /** Why a change cannot be staged now, if it cannot. */
@@ -40,29 +40,36 @@ function refusal(run: DreamRun): string | undefined {
 	return undefined;
 }
 
-function dreamSaveTool(run: DreamRun) {
+function dreamSaveTool(run: DreamRun, options: { supportsTiers?: boolean } = {}) {
 	return defineTool({
 		name: "dream_save", label: "Dream Save",
 		description: "Stage a note to create or update in the user's memory; dream_commit writes the staged changes. "
 			+ "Create: leave out `id` and pass `expectedRevision: 0`. Update: pass the note's `id` and the `revision` memory_read showed; the whole note is replaced. "
 			+ "`scope: \"user\"` applies to every project and needs no project's context to understand, `scope: \"project\"` to the dream's project. "
+			+ "`tier: \"pinned\"` (default on create) puts the note in every session's `<memory>` index and counts toward its scope's index budget; `tier: \"archival\"` excludes it from `<memory>` and uses no index budget, remaining searchable via `memory_read({ query })` full-text search (omitting `tier` on update preserves the note's existing tier). "
 			+ `Every note needs \`sources\`: 1 to ${MAX_SOURCES} session entries ({ sessionId, seq }) that support it. `
-			+ `Limits: title up to 120 characters, hook one line up to 150, body up to ${BODY_LIMIT} characters. ` + UNSAVED,
+			+ `Limits: title up to 120 characters, hook one line up to 150, body up to ${BODY_LIMIT} characters; the user scope and the project scope each have an independent 8 KiB and 200-line index limit. `
+			+ "Never downgrade a user-wide rule into `scope: \"project\"` if the user scope is full. " + UNSAVED,
 		parameters: Type.Object({ ...SAVE_NOTE_FIELDS, sources: SOURCES(1) }),
 		async execute(_id, params): Promise<AgentToolResult<StageDetails>> {
 			const refused = refusal(run);
 			if (refused) return failure(refused, { staged: run.staged.length });
+			if (options.supportsTiers === false && params.tier === "archival") {
+				return failure("This pika server does not support tier \"archival\". Keep the note pinned or forget it instead.", { staged: run.staged.length });
+			}
 			if (!params.sources.length || params.sources.length > MAX_SOURCES) return failure(`dream_save needs 1 to ${MAX_SOURCES} sources.`, { staged: run.staged.length });
 			const long = bodyTooLong(params.body, "Nothing was staged.");
 			if (long) return failure(long, { staged: run.staged.length });
 			const id = params.id ? noteId(params.id) : "";
 			const change: Change = {
 				op: "save", ...(id ? { id } : {}), expectedRevision: params.expectedRevision, scope: params.scope as ScopeKind, category: params.category as Category,
+				...(params.tier ? { tier: params.tier as Tier } : {}),
 				title: params.title, hook: params.hook, body: params.body, ...(params.reason ? { reason: params.reason } : {}), sources: params.sources as Source[],
 			};
 			const position = run.stage(change);
 			const what = id ? `update of note ${id} at revision ${params.expectedRevision}` : "new note";
-			const text = `Staged change ${position} (${what}) in the ${params.scope} scope: ${oneLine(params.title)} — ${oneLine(params.hook)}, with ${plural(params.sources.length, "source")}. ${plural(run.staged.length, "change")} staged. ${UNSAVED}`;
+			const tierTag = params.tier === "archival" ? " [archival]" : "";
+			const text = `Staged change ${position} (${what}${tierTag}) in the ${params.scope} scope: ${oneLine(params.title)} — ${oneLine(params.hook)}, with ${plural(params.sources.length, "source")}. ${plural(run.staged.length, "change")} staged. ${UNSAVED}`;
 			return { content: [{ type: "text", text }], details: { position, staged: run.staged.length } };
 		},
 		renderCall(args, theme) {

@@ -208,7 +208,7 @@ export function useDreamEnv(options: DreamEnvOptions = {}): DreamEnv {
 	beforeEach(async () => {
 		workspace = await Workspace.create();
 		pika = await new FakePika().start();
-		pika.routes.set("GET memory", options.memory ?? { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [], index: options.index ?? "" } });
+		pika.routes.set("GET memory", options.memory ?? { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [], index: options.index ?? "", tiers: true } });
 		serveDreams(pika, options.routes);
 		setCredentials(pika.url);
 		resetDreams();

@@ -215,11 +215,13 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 			if (why) return release(why);
 			let index: string | null = null;
 			let notes: Note[] = [];
+			let view: MemoryView | undefined;
 			try {
-				const view = await send<MemoryView>(server, "GET", `memory?${new URLSearchParams({ ...repository })}`, { timeoutMs: INDEX_TIMEOUT_MS });
+				view = await send<MemoryView>(server, "GET", `memory?${new URLSearchParams({ ...repository })}`, { timeoutMs: INDEX_TIMEOUT_MS });
 				index = typeof view.index === "string" ? view.index : null;
 				notes = Array.isArray(view.notes) ? view.notes : [];
 			} catch { /* the child reads it with memory_read */ }
+			const supportsTiers = view?.tiers === true;
 			why = cancelled();
 			if (why) return release(why);
 			const ui = ctx.hasUI ? { setStatus: (text: string | undefined) => ctx.ui.setStatus(STATUS_KEY, text), notify: (text: string, type: "info" | "warning" | "error") => ctx.ui.notify(text, type) } : undefined;
@@ -229,8 +231,8 @@ export default function dreamExtension(pi: ExtensionAPI): void {
 				owner: self, mode, grant, server, cwd, parentSessionId, ...(parentSessionFile ? { parentSessionFile } : {}), agentDir: getAgentDir(),
 				model, ...(thinkingLevel ? { thinkingLevel } : {}), ...(modelRuntime ? { modelRuntime } : {}), ...(ui ? { ui } : {}),
 				spawn: (options) => dreamRuntime.spawn(options),
-				tools: dreamTools,
-				kickoff: (current) => kickoffText(current, index, notes),
+				tools: (current) => dreamTools(current, { supportsTiers }),
+				kickoff: (current) => kickoffText(current, index, notes, { supportsTiers }),
 				onEnd: (ended) => {
 					const now = shared();
 					if (now.running === ended) now.running = undefined;

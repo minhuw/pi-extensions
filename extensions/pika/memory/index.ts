@@ -47,8 +47,14 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			});
 			const repository = where(await Promise.race([resolveRepository(cwd), late]));
 			clearTimeout(timer);
-			const view = await request<MemoryView>(cwd, "GET", `memory?${new URLSearchParams({ ...repository })}`, { timeoutMs: Math.max(1, deadline - Date.now()) });
-			return { index: typeof view.index === "string" ? view.index : null, fetchedAt, ...repository };
+			const view = await request<MemoryView>(cwd, "GET", `memory?${new URLSearchParams({ view: "index", ...repository })}`, { timeoutMs: Math.max(1, deadline - Date.now()) });
+			const archivalCount = typeof view.archivalCount === "number" && view.archivalCount > 0 ? view.archivalCount : undefined;
+			return {
+				index: typeof view.index === "string" ? view.index : null,
+				...(archivalCount !== undefined ? { archivalCount } : {}),
+				fetchedAt,
+				...repository,
+			};
 		} catch (error) {
 			return { index: null, fetchedAt, error: errorText(error) };
 		} finally {
@@ -69,7 +75,9 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 				pi.appendEntry<MemoryPin>(PIN_ENTRY, pin);
 			}
 			// Set on every run: Pi diffs each run's sections against the transcript, so a missing one would be removed.
-			if (pin.index) event.systemPromptOptions.sections.memory = sectionText(pin.index);
+			if (pin.index !== null && (pin.index || (pin.archivalCount ?? 0) > 0)) {
+				event.systemPromptOptions.sections.memory = sectionText(pin.index || "(no pinned notes)", pin.archivalCount ?? 0);
+			}
 		} catch { /* memory never fails a turn */ }
 		return undefined;
 	});

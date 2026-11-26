@@ -55,6 +55,107 @@ it("memory_read GETs the session's repository and filters the notes client-side"
 	expect(none.text).toContain("No note matches");
 });
 
+it("memory_read with query calls GET memory/search with limit=20 and filters, renders lexical/substring mode and archival tier, and records at most top 3 hits", async () => {
+	const pinned = note({ scope: USER_SCOPE, category: "feedback", tier: "pinned", title: "Tabs", hook: "Indent with tabs", body: "Always use tabs." });
+	const archival = note({ category: "reference", tier: "archival", title: "Migration checklist", hook: "Legacy DB migration steps", body: "Run migrate:v2 before deploy." });
+	pika.routes.set("GET memory/search", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [archival, pinned], mode: "lexical", total: 24 } });
+	pika.routes.set("POST memory/used", { body: { used: 2 } });
+
+	const res = await callTool(h, "memory_read", { query: "database migration", scope: "project", category: "reference", tier: "archival" });
+	expect(res.isError).toBe(false);
+	const [req] = pika.requestsTo("memory/search");
+	expect(req).toMatchObject({ method: "GET" });
+	expect(Object.fromEntries(req!.query)).toEqual({
+		q: "database migration",
+		limit: "20",
+		project: PROJECT,
+		repository: REPOSITORY,
+		scope: "project",
+		category: "reference",
+		tier: "archival",
+	});
+	expect(pika.requestsTo("memory")).toEqual([]);
+	expect(res.text).toContain(`[memory] 2 notes matching (lexical), of 24 in the user scope and project ${PROJECT}.`);
+	expect(res.text).toContain(`## [${archival.id}] Migration checklist\nscope: project ${PROJECT} · tier: archival · category: reference · revision: 1`);
+	expect(res.text).toContain(`## [${pinned.id}] Tabs\nscope: user · category: feedback · revision: 1`);
+	expect(res.details).toEqual({ noteIds: [archival.id, pinned.id], total: 24 });
+	await waitFor(() => used().length === 1, 10_000, "memory/used after search");
+	expect(used()[0]!.body).toEqual({ ids: [archival.id, pinned.id], project: PROJECT, repository: REPOSITORY, sessionId: h.session.sessionId });
+
+	// Substring mode and bounded recordUse (at most top 3 hits for query searches).
+	const many = Array.from({ length: 5 }, (_, i) => note({ title: `Hit ${i}`, hook: `H${i}`, body: "Short match." }));
+	pika.routes.set("GET memory/search", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: many, mode: "substring", total: 5 } });
+	const sub = await callTool(h, "memory_read", { query: "match" });
+	expect(sub.text).toContain("5 notes matching (substring), of 5");
+	await waitFor(() => used().length === 2, 10_000, "memory/used capped at 3");
+	expect((used()[1]!.body as { ids: string[] }).ids).toEqual(many.slice(0, 3).map((n) => n.id));
+
+	// Overflow list tags archival notes in brief format too.
+	const bigArchival = Array.from({ length: 6 }, (_, i) => note({ tier: i === 5 ? "archival" : "pinned", title: `N${i}`, hook: `H${i}`, body: "x".repeat(8_000) }));
+	pika.routes.set("GET memory/search", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: bigArchival, mode: "lexical", total: 6 } });
+	const bounded = await callTool(h, "memory_read", { query: "x" });
+	expect(bounded.text).toContain("6 notes matching (lexical), of 6");
+	expect(bounded.text).toContain(`- [${bigArchival[5]!.id}] N5 — H5 (project ${PROJECT}, archival, project, revision 1)`);
+});
+
+it("memory_read falls back from 404 memory/search to GET memory + client-side filtering, and returns noMemoryApi if both 404", async () => {
+	const legacy = note({ scope: USER_SCOPE, category: "feedback", title: "Legacy note", hook: "Missing tier field", body: "Needle inside legacy note." });
+	const archival = note({ category: "reference", tier: "archival", title: "Archival needle", hook: "Cold ref", body: "Needle inside archival note." });
+	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [legacy, archival], index: INDEX, indexBytes: INDEX.length, indexLines: 3 } });
+
+	// `GET memory/search` is unset (returns 404): falls back cleanly to `GET memory` + client-side filtering including tier.
+	const fallback = await callTool(h, "memory_read", { query: "needle", tier: "archival" });
+	expect(fallback.isError).toBe(false);
+	expect(pika.requestsTo("memory/search")).toHaveLength(1);
+	expect(pika.requestsTo("memory")).toHaveLength(1);
+	expect(fallback.details).toEqual({ noteIds: [archival.id], total: 2 });
+	expect(fallback.text).toContain("1 note matching, of 2");
+	expect(fallback.text).not.toContain("(lexical)");
+
+	// Non-404 error on `GET memory/search` fails directly without silently falling back to `GET memory`.
+	pika.routes.set("GET memory/search", { status: 500, body: { error: "internal" } });
+	const err = await callTool(h, "memory_read", { query: "needle" });
+	expect(err.isError).toBe(true);
+	expect(pika.requestsTo("memory")).toHaveLength(1);
+
+	// 404 on BOTH `GET memory/search` and `GET memory` returns `noMemoryApi()`.
+	pika.routes.delete("GET memory/search");
+	pika.routes.delete("GET memory");
+	const none = await callTool(h, "memory_read", { query: "needle" });
+	expect(none).toMatchObject({
+		isError: true,
+		text: `the pika server at ${pika.url} has no agent memory API (HTTP 404): it needs a newer pika. Ask the user to upgrade the server.`,
+	});
+});
+
+it("memory_read filters by tier without query (treating missing tier as pinned) and skips memory/search when ids are passed", async () => {
+	const legacy = note({ title: "Legacy", hook: "No tier field", body: "Old server note" });
+	const pinned = note({ tier: "pinned", title: "Pinned", hook: "Explicit pinned", body: "Always in prompt" });
+	const archival = note({ tier: "archival", title: "Archival", hook: "Cold ref", body: "Retrieved on demand" });
+	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [legacy, pinned, archival], index: INDEX, indexBytes: INDEX.length, indexLines: 3 } });
+	pika.routes.set("GET memory/search", { status: 500, body: { error: "should not be called" } });
+	pika.routes.set("POST memory/used", { body: { used: 1 } });
+
+	const onlyArchival = await callTool(h, "memory_read", { tier: "archival" });
+	expect(onlyArchival.isError).toBe(false);
+	expect(onlyArchival.details).toEqual({ noteIds: [archival.id], total: 3 });
+	expect(onlyArchival.text).toContain("1 note matching, of 3");
+	expect(onlyArchival.text).toContain("tier: archival");
+
+	const onlyPinned = await callTool(h, "memory_read", { tier: "pinned" });
+	expect(onlyPinned.isError).toBe(false);
+	expect(onlyPinned.details).toEqual({ noteIds: [legacy.id, pinned.id], total: 3 });
+
+	// `ids` + `query` still uses `GET memory` (not `memory/search`).
+	const byIds = await callTool(h, "memory_read", { ids: [archival.id, pinned.id], query: "demand" });
+	expect(byIds.isError).toBe(false);
+	expect(byIds.details).toEqual({ noteIds: [archival.id], total: 3 });
+	expect(pika.requestsTo("memory/search")).toEqual([]);
+	// `tier` alone never records use, while `ids` + `query` does.
+	await waitFor(() => used().length === 1, 10_000, "memory/used for ids");
+	expect(used()[0]!.body).toEqual({ ids: [archival.id], project: PROJECT, repository: REPOSITORY, sessionId: h.session.sessionId });
+});
+
 it("memory_read bounds its output and lists the rest by title", async () => {
 	const notes = Array.from({ length: 6 }, () => note({ body: "x".repeat(8_000) }));
 	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes, index: "", indexBytes: 0, indexLines: 0 } });
@@ -92,14 +193,20 @@ it("memory_read by ids or query tells the server which notes it showed in full; 
 	expect(pika.requests.filter((request) => request.method === "POST").map((request) => request.path)).toEqual(["memory/used", "memory/used"]);
 });
 
-it("memory_read names at most 50 notes as used", async () => {
+it("memory_read names at most 50 notes as used for ids reads, and at most 3 for query fallback reads", async () => {
 	const notes = Array.from({ length: 60 }, () => note({ title: "Short", hook: "h", body: "b" }));
 	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes, index: "" } });
 	pika.routes.set("POST memory/used", { body: { used: 50 } });
-	const read = await callTool(h, "memory_read", { query: "short" });
-	expect(read.details).toEqual({ noteIds: notes.map((n) => n.id), total: 60 });
-	await waitFor(() => used().length === 1, 10_000, "memory/used");
+	const byIds = await callTool(h, "memory_read", { ids: notes.map((n) => n.id) });
+	expect(byIds.details).toEqual({ noteIds: notes.map((n) => n.id), total: 60 });
+	await waitFor(() => used().length === 1, 10_000, "memory/used for ids");
 	expect((used()[0]!.body as { ids: string[] }).ids).toEqual(notes.slice(0, 50).map((n) => n.id));
+
+	// 404 fallback `query` search records at most top 3 hits.
+	const byQuery = await callTool(h, "memory_read", { query: "short" });
+	expect(byQuery.details).toEqual({ noteIds: notes.map((n) => n.id), total: 60 });
+	await waitFor(() => used().length === 2, 10_000, "memory/used for query fallback");
+	expect((used()[1]!.body as { ids: string[] }).ids).toEqual(notes.slice(0, 3).map((n) => n.id));
 });
 
 it("memory_read returns its notes whether memory/used is missing, fails, or hangs", async () => {
@@ -132,7 +239,7 @@ it("memory_save creates and updates notes with the repository and session id", a
 	});
 	expect(result.text).toBe([
 		`Created note ${created.id} (now revision 1) in project ${PROJECT}: Pitfall — Run npm ci first`,
-		`The memory section pinned in this session's system prompt stays unchanged until a new session. The server's index is now (${INDEX.length} of 8192 bytes, 3 of 200 lines):`,
+		`The memory section pinned in this session's system prompt stays unchanged until a new session. The server's index is now (${INDEX.length} bytes, 3 lines; limit 8192 bytes and 200 lines per scope):`,
 		INDEX,
 	].join("\n"));
 	expect(result.details).toEqual({ note: created, index: INDEX });
@@ -156,23 +263,97 @@ it("memory_save returns the current note on a revision conflict", async () => {
 	expect(result.text).toContain("Merge your change into it and call memory_save again with expectedRevision 3.");
 });
 
-it("memory_save explains a full memory and passes a bad request's message", async () => {
+it("memory_save passes tier: archival after capability check, formats per-scope and archival output, and refuses v25 servers pre-mutation", async () => {
+	const archival = note({ tier: "archival", title: "Migration notes", hook: "Legacy DB steps", body: "Run v2 script." });
+	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [], index: INDEX, tiers: true } });
+	pika.routes.set("POST memory/notes", { body: { ...written(archival), scopeIndexBytes: 420, scopeIndexLines: 12 } });
+	const args = {
+		expectedRevision: 0, scope: "project", category: "reference", tier: "archival",
+		title: "Migration notes", hook: "Legacy DB steps", body: "Run v2 script.",
+	};
+	const res = await callTool(h, "memory_save", args);
+	expect(res.isError).toBe(false);
+	expect(Object.fromEntries(pika.requestsTo("memory")[0]!.query)).toEqual({ view: "index", project: PROJECT, repository: REPOSITORY });
+	expect(pika.requestsTo("memory/notes")[0]!.body).toMatchObject({ tier: "archival" });
+	expect(res.text).toContain(`Created note ${archival.id} [archival] (now revision 1) in project ${PROJECT}: Migration notes — Legacy DB steps`);
+	expect(res.text).toContain("Archival notes do not appear in <memory> and use no index budget; retrieve them with memory_read({ query }).");
+	expect(res.text).toContain(`The server's index is now (project ${PROJECT} index: 420 of 8192 bytes, 12 of 200 lines):`);
+
+	// Legacy v25 server (omits `tiers: true`): refuses archival save BEFORE calling POST memory/notes.
+	pika.routes.set("GET memory", { body: { scopes: [USER_SCOPE, PROJECT_SCOPE], notes: [], index: INDEX } });
+	const legacyRefused = await callTool(h, "memory_save", args);
+	expect(legacyRefused).toMatchObject({
+		isError: true,
+		text: "This pika server does not support tier \"archival\" (upgrade the server first). Nothing was saved.",
+	});
+	expect(pika.requestsTo("memory/notes")).toHaveLength(1);
+
+	// Normal pinned / omitted-tier save incurs no pre-flight GET memory round trip.
+	const beforeGet = pika.requestsTo("memory").length;
+	const pinned = await callTool(h, "memory_save", { ...args, tier: "pinned" });
+	expect(pinned.isError).toBe(false);
+	expect(pika.requestsTo("memory")).toHaveLength(beforeGet);
+
+	const renderCall = (name: string, callArgs: object) =>
+		h.session.extensionRunner.getToolDefinition(name)!.renderCall!(callArgs as never, plainTheme, { args: callArgs, expanded: false, isError: false } as never)
+			.render(500).map((line) => line.trimEnd()).join("\n");
+	expect(renderCall("memory_save", args)).toBe("memory_save Migration notes · project · new · archival");
+	expect(renderCall("memory_save", { ...args, tier: "pinned" })).toBe("memory_save Migration notes · project · new");
+	expect(renderCall("memory_read", { query: "migration", tier: "archival" })).toBe('memory_read "migration" · archival tier');
+});
+
+it("memory_save explains a full memory (per-scope v26 vs combined legacy v25) and passes a bad request's message", async () => {
+	// Legacy v25 server omits `budget`: reports combined index without claiming per-scope isolation or suggesting tier: archival.
 	pika.routes.set("POST memory/notes", { status: 422, body: { error: "memory_full", indexBytes: 8300, indexLines: 150, limitBytes: 8192, limitLines: 200 } });
 	const full = await callTool(h, "memory_save", { expectedRevision: 0, scope: "user", category: "user", title: "t", hook: "h", body: "" });
 	expect(full).toMatchObject({ isError: true });
-	expect(full.text).toBe("memory_full: with this note the memory index of the user scope and this project's scope would be 8300 bytes and 150 lines, over its limit of 8192 bytes and 200 lines. "
+	expect(full.text).toBe("memory_full: with this note the memory index would be 8300 bytes and 150 lines, over its limit of 8192 bytes and 200 lines. "
 		+ "Nothing was saved. Merge related notes into one, shorten titles and hooks, or memory_forget notes that are no longer useful, then save again.");
-	// A user-scope save is budgeted against every project's index, so the server names the one that overflows.
+	expect(full.text).not.toContain("archival");
+
 	pika.routes.set("POST memory/notes", { status: 422, body: { error: "memory_full", indexBytes: 8300, indexLines: 150, limitBytes: 8192, limitLines: 200, project: { key: "repo:https://example.com/other", kind: "project", label: "other" } } });
-	const other = await callTool(h, "memory_save", { expectedRevision: 0, scope: "user", category: "user", title: "t", hook: "h", body: "" });
-	expect(other.text).toMatch(/^memory_full: with this note the memory index of the user scope and project other's scope would be 8300 bytes/);
-	pika.routes.set("POST memory/notes", { status: 422, body: { error: "memory_full", indexBytes: 8300, indexLines: 150, limitBytes: 8192, limitLines: 200, project: null } });
+	const legacyCombined = await callTool(h, "memory_save", { expectedRevision: 0, scope: "project", category: "project", title: "t", hook: "h", body: "" });
+	expect(legacyCombined.text).toBe("memory_full: with this note the user and project other memory index would be 8300 bytes and 150 lines, over its limit of 8192 bytes and 200 lines. "
+		+ "Nothing was saved. Merge related notes into one, shorten titles and hooks, or memory_forget notes that are no longer useful, then save again.");
+	expect(legacyCombined.text).not.toContain("alone");
+	expect(legacyCombined.text).not.toContain("archival");
+
+	// v26 server sets `budget: "per_scope"`: reports that project's independent limit and suggests archival for reference/lookup notes.
+	pika.routes.set("POST memory/notes", { status: 422, body: { error: "memory_full", budget: "per_scope", indexBytes: 8300, indexLines: 150, limitBytes: 8192, limitLines: 200, project: { key: "repo:https://example.com/other", kind: "project", label: "other" } } });
+	const other = await callTool(h, "memory_save", { expectedRevision: 0, scope: "project", category: "project", title: "t", hook: "h", body: "" });
+	expect(other.text).toBe("memory_full: with this note project other's memory index alone would be 8300 bytes and 150 lines, over its independent limit of 8192 bytes and 200 lines. "
+		+ "Nothing was saved. Merge related notes into one, shorten titles and hooks, or memory_forget notes that are no longer useful, then save again. "
+		+ "Detailed reference or lookup notes can be saved with tier: \"archival\" (uses no index budget).");
+	// v26 user scope overflow (`budget: "per_scope"`, `project: null`) warns against downgrading user-wide rules into project scope.
+	pika.routes.set("POST memory/notes", { status: 422, body: { error: "memory_full", budget: "per_scope", indexBytes: 8300, indexLines: 150, limitBytes: 8192, limitLines: 200, project: null } });
 	const alone = await callTool(h, "memory_save", { expectedRevision: 0, scope: "user", category: "user", title: "t", hook: "h", body: "" });
-	expect(alone.text).toMatch(/^memory_full: with this note the user scope's memory index would be 8300 bytes/);
+	expect(alone.text).toBe("memory_full: with this note the user scope's memory index alone would be 8300 bytes and 150 lines, over its independent limit of 8192 bytes and 200 lines. "
+		+ "Nothing was saved. Do not downgrade a user-wide rule into the project scope to work around a full user scope; either merge/shorten/forget user-scope notes, demote cold reference notes to tier: \"archival\", or tell the user. "
+		+ "Detailed reference or lookup notes can be saved with tier: \"archival\" (uses no index budget).");
 
 	pika.routes.set("POST memory/notes", { status: 400, body: { error: "bad_request", message: "hook must be one line" } });
 	const bad = await callTool(h, "memory_save", { expectedRevision: 0, scope: "user", category: "user", title: "t", hook: "a\nb", body: "" });
 	expect(bad).toMatchObject({ isError: true, text: "the pika server refused the request (HTTP 400 bad_request): hook must be one line." });
+});
+
+it("memory tools document independent per-scope budgets, pinned/archival tiers, full-text (FTS5) search, and forbid downgrading user rules into project scope", () => {
+	const tools = new Map(h.session.getAllTools().map((tool) => [tool.name, tool]));
+	const read = tools.get("memory_read")!;
+	const save = tools.get("memory_save")!;
+	expect(read.description).toContain("full-text (FTS5) search");
+	expect(read.description).not.toContain("hybrid");
+	expect(save.description).toContain("`tier: \"pinned\"`");
+	expect(save.description).toContain("`tier: \"archival\"`");
+	expect(save.description).toContain("full-text search");
+	expect(save.description).not.toContain("hybrid");
+	expect(save.description).toContain("the user scope and each project scope each have an independent 8 KiB and 200-line index limit");
+	expect(save.description).toContain("Never downgrade a user-wide rule into `scope: \"project\"` if the user scope is full");
+	const guidelines = (read.promptGuidelines ?? []).join("\n");
+	expect(guidelines).toContain("The user scope and each project scope each have an independent 8 KiB and 200-line index limit");
+	expect(guidelines).toContain("never downgrade a user-wide rule into scope \"project\" if the user scope is full");
+	expect(guidelines).toContain("tier \"archival\"");
+	expect(guidelines).toContain("memory_read({ query })");
+	expect(guidelines).not.toContain("hybrid");
 });
 
 it("memory_save refuses a body over 600 characters before sending it, counting characters rather than bytes", async () => {

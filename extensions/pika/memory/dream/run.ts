@@ -2,7 +2,7 @@ import type { CreateAgentSessionOptions, ModelRuntime, ToolDefinition } from "@e
 import { credentialsRegistry, type PikaCredentials } from "../../credentials.ts";
 import { MemoryServerError } from "../client.ts";
 import type { DreamRecord } from "../entries.ts";
-import type { Category, Scope, ScopeKind } from "../format.ts";
+import type { Category, Scope, ScopeKind, Tier } from "../format.ts";
 import { type LeaseServer, send } from "./server.ts";
 
 export type DreamMode = "auto" | "manual";
@@ -25,7 +25,7 @@ export interface Grant { lease: Lease; sessions: DreamSession[] }
 
 export interface Source { sessionId: string; seq: number }
 export type Change =
-	| { op: "save"; id?: string; expectedRevision: number; scope: ScopeKind; category: Category; title: string; hook: string; body: string; reason?: string; sources: Source[] }
+	| { op: "save"; id?: string; expectedRevision: number; scope: ScopeKind; category: Category; tier?: Tier; title: string; hook: string; body: string; reason?: string; sources: Source[] }
 	| { op: "forget"; id: string; expectedRevision: number; reason?: string; sources?: Source[] };
 export interface Batch {
 	id: string; leaseId: string; scope: Scope; mode: DreamMode; at: string; deviceId: string; sessionId: string | null; dreamSessionId: string | null;

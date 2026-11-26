@@ -4,7 +4,7 @@ import type { DreamMode, Outcome } from "./dream/run.ts";
 export const PIN_ENTRY = "pika-memory";
 
 /** The pin: `index` is null when the fetch failed, timed out, or pika was logged out, so the session never gains a section. */
-export interface MemoryPin { index: string | null; fetchedAt: string; project?: string; repository?: string; error?: string }
+export interface MemoryPin { index: string | null; archivalCount?: number; fetchedAt: string; project?: string; repository?: string; error?: string }
 
 /** The custom entry that records, in the session that asked for a dream, how the dream ended. */
 export const DREAM_ENTRY = "pika-memory-dream";

@@ -51,6 +51,47 @@ describe("staging and committing", () => {
 		expect(env.ui.notes.at(-1)!.message).toBe("pika memory: the dream finished: 2 batches committed, 2 notes changed.");
 	});
 
+	it("dream_save forwards optional tier (e.g. archival) into staged changes and dream_commit payload", async () => {
+		const child = await dream(env);
+		const archived = await child.call("dream_save", { ...SAVE, tier: "archival", reason: "cold reference" });
+		expect(archived.isError).toBe(false);
+		expect(archived.text).toMatch(/^Staged change 1 \(new note \[archival\]\) in the project scope: Pitfall — run npm ci first, with 1 source\./);
+		const demoted = await child.call("dream_save", { ...SAVE, id: "dddddddddddd", expectedRevision: 3, tier: "archival" });
+		expect(demoted.isError).toBe(false);
+		expect(demoted.text).toContain("Staged change 2 (update of note dddddddddddd at revision 3 [archival]) in the project scope");
+		expect(currentDream()!.staged).toEqual([
+			{ op: "save", ...SAVE, tier: "archival", reason: "cold reference" },
+			{ op: "save", ...SAVE, id: "dddddddddddd", expectedRevision: 3, tier: "archival" },
+		]);
+
+		const committed = await child.call("dream_commit", { sessions: ["s-past-1"] });
+		expect(committed.isError).toBe(false);
+		expect(commits(env.pika)[0]!.body).toMatchObject({
+			changes: [
+				{ op: "save", ...SAVE, tier: "archival", reason: "cold reference" },
+				{ op: "save", ...SAVE, id: "dddddddddddd", expectedRevision: 3, tier: "archival" },
+			],
+		});
+		child.finish();
+		await until(() => releases(env.pika).length === 1, "the release");
+	});
+
+	it("rejects dream_save tier: archival before staging and omits archival kickoff guidance on a v25 server without tiers: true", async () => {
+		const child = await dream(env, { memory: { body: { scopes: [], notes: [], index: "" } } });
+		expect(child.prompts[0]).not.toContain("archival");
+		const rejected = await child.call("dream_save", { ...SAVE, tier: "archival" });
+		expect(rejected).toMatchObject({
+			isError: true,
+			text: "This pika server does not support tier \"archival\". Keep the note pinned or forget it instead.",
+			details: { staged: 0, error: "This pika server does not support tier \"archival\". Keep the note pinned or forget it instead." },
+		});
+		expect(currentDream()!.staged).toEqual([]);
+		// Normal pinned / omitted-tier saves still stage cleanly on v25 servers.
+		const ok = await child.call("dream_save", SAVE);
+		expect(ok.isError).toBe(false);
+		expect(currentDream()!.staged).toHaveLength(1);
+	});
+
 	it("a revision conflict returns the conflicting note to the model and discards the staged changes", async () => {
 		const stored = note({ id: "cccccccccccc", revision: 5, title: "Stored title", body: "Stored body" });
 		serveDreams(env.pika, { commit: { status: 409, body: { error: "revision_conflict", note: stored, change: 1 } } });
@@ -71,6 +112,7 @@ describe("staging and committing", () => {
 
 	it.each([
 		["a full index", { status: 422, body: { error: "memory_full", indexBytes: 9000, indexLines: 210, limitBytes: 8192, limitLines: 200 } }, /^memory_full: .* 9000 bytes and 210 lines/],
+		["a full user scope", { status: 422, body: { error: "memory_full", budget: "per_scope", indexBytes: 9000, indexLines: 210, limitBytes: 8192, limitLines: 200, project: null } }, /^memory_full: with this note the user scope's memory index alone would be 9000 bytes and 210 lines, over its independent limit of 8192 bytes and 200 lines\. Do not downgrade a user-wide rule into the project scope/],
 		["a bad request", { status: 400, body: { error: "bad_request", message: "a save needs 1 to 20 sources" } }, /^the pika server refused the commit \(HTTP 400 bad_request\): a save needs 1 to 20 sources\./],
 	])("a commit failing with %s discards the staged changes", async (_name, answer, text) => {
 		serveDreams(env.pika, { commit: answer });

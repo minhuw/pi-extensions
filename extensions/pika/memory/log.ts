@@ -109,8 +109,8 @@ function argument(value: unknown): string | undefined {
 
 /** Each kind's arguments in the order its page lists them; a save's body goes under them, in full. */
 const ARGUMENTS: Record<MemoryTool, [key: string, name: string][]> = {
-	memory_read: [["ids", "Ids"], ["query", "Query"], ["category", "Category"], ["scope", "Scope"]],
-	memory_save: [["scope", "Scope"], ["category", "Category"], ["title", "Title"], ["hook", "Hook"], ["reason", "Reason"], ["id", "Id"], ["expectedRevision", "Expected revision"]],
+	memory_read: [["ids", "Ids"], ["query", "Query"], ["category", "Category"], ["scope", "Scope"], ["tier", "Tier"]],
+	memory_save: [["scope", "Scope"], ["category", "Category"], ["tier", "Tier"], ["title", "Title"], ["hook", "Hook"], ["reason", "Reason"], ["id", "Id"], ["expectedRevision", "Expected revision"]],
 	memory_forget: [["id", "Id"], ["expectedRevision", "Expected revision"], ["reason", "Reason"]],
 };
 
@@ -135,9 +135,10 @@ function callView(theme: Theme, call: Call): LogViewItem {
 	let what: string;
 	if (tool === "memory_read") {
 		const ids = Array.isArray(args.ids) ? args.ids.filter(isString).map(headerField).filter(Boolean) : [];
-		what = theme.fg("muted", readFilters({ ids, query: one("query"), category: one("category"), scope: one("scope") }) || "all notes");
+		what = theme.fg("muted", readFilters({ ids, query: one("query"), category: one("category"), scope: one("scope"), tier: one("tier") }) || "all notes");
 	} else if (tool === "memory_save") {
-		what = `${theme.fg("muted", one("title"))}${theme.fg("dim", ` · ${one("scope") || "?"} · ${one("id") ? `update ${one("id")}` : "new"}`)}`;
+		const tier = one("tier") === "archival" ? " · archival" : "";
+		what = `${theme.fg("muted", one("title"))}${theme.fg("dim", ` · ${one("scope") || "?"} · ${one("id") ? `update ${one("id")}` : "new"}${tier}`)}`;
 	} else what = theme.fg("muted", one("id"));
 	const line = `${theme.bold(tool)} ${what}`;
 	const known = new Set([...ARGUMENTS[tool].map(([key]) => key), "body"]);
