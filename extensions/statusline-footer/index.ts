@@ -1527,27 +1527,39 @@ export function shortenPath(display: string, max: number): string {
 	return `${start}…`;
 }
 
-/** Columns a rail row leaves for its groups: alignRow's margins, the rail and its space, and a three-column gap so the sides read apart. */
-function railRoom(width: number): number {
-	return width - 2 - 2 - 3;
+/** Space for the groups after both margins, the rail and the gap between the two sides. */
+function railRoom(width: number, gap = 3): number {
+	return width - 2 - 2 - gap;
 }
 
 /** Columns the thin chevron between two groups takes, with its spacing. */
 const RAIL_SEP_WIDTH = 5;
 
-function railRow(theme: Theme, branch: string, left: Group[], right: Group[], width: number): string {
+function railRow(theme: Theme, branch: string, left: Group[], right: Group[], width: number, metricRow = false): string {
 	const nerd = hasNerdFonts();
+	let pad = "  ";
 	const sep = (side: "left" | "right") =>
-		`  ${theme.fg("borderMuted", nerd ? (side === "left" ? POWERLINE.thinLeft : POWERLINE.thinRight) : "│")}  `;
+		`${pad}${theme.fg("borderMuted", nerd ? (side === "left" ? POWERLINE.thinLeft : POWERLINE.thinRight) : "│")}${pad}`;
 	const join = (groups: Group[], side: "left" | "right") => groups.map(group => group.text).join(sep(side));
 	const rail = `${theme.fg("borderMuted", branch)} `;
 	const room = railRoom(width);
 	left = [...left];
 	right = [...right];
-	while (visibleWidth(join(left, "left")) + visibleWidth(join(right, "right")) > room && left.length + right.length > 1) {
+	while (left.length + right.length > 1) {
+		const used = visibleWidth(join(left, "left")) + visibleWidth(join(right, "right"));
+		if (used <= room) break;
+		// If the facts fit on the line, reclaim divider padding to keep the two sides apart.
+		// A left-only metric row needs no gap at all.
+		if (metricRow && used <= railRoom(width, right.length ? 1 : 0)) {
+			if (!right.length) break;
+			if (left.length > 1 || right.length > 1) {
+				pad = " ";
+				break;
+			}
+		}
 		const weakest = [...left, ...right].reduce((a, b) => (b.rank < a.rank ? b : a));
 		if (weakest.statusKey === "goal" && !weakest.severityMarker) {
-			const excess = visibleWidth(join(left, "left")) + visibleWidth(join(right, "right")) - room;
+			const excess = used - room;
 			const available = visibleWidth(weakest.text) - excess;
 			if (available >= 16) {
 				weakest.text = truncateToWidth(weakest.text, available, "…");
@@ -1658,7 +1670,7 @@ function renderDetailRows(
 		? cluster([
 			`${glyph(theme, set.branch, color)} ${theme.fg("text", branch)}`,
 			gitState,
-			(ahead > 0 || behind > 0) && `${theme.fg("success", `↑${ahead}`)} ${theme.fg("warning", `↓${behind}`)}`,
+			(ahead > 0 || behind > 0) && `${theme.fg("success", `↑ ${ahead}`)}  ${theme.fg("warning", `↓ ${behind}`)}`,
 		], "  ")
 		: item(set.branch, "dim", "no git", "dim");
 	// The path takes the room the row's other groups leave, so it shortens before they drop.
@@ -1689,13 +1701,14 @@ function renderDetailRows(
 			{ text: cluster([ttft, speed], "  "), rank: LAPTOP_RANKS.latency },
 			...(laptopCache ? [{ text: laptopCache, rank: LAPTOP_RANKS.cache }] : []),
 		];
-		return [...activityRows, railRow(theme, "╰", left, [...right, { text: cwd(left, right), rank: LAPTOP_RANKS.cwd }], width)];
+		return [...activityRows, railRow(theme, "╰", left, [...right, { text: cwd(left, right), rank: LAPTOP_RANKS.cwd }], width, true)];
 	}
 
+	const lastMark = `  ${set.last} `;
 	const latency = cluster([
-		ttft + (avgTtft != null && metrics.lastTtftMs != null && metrics.ttftCount > 1 ? theme.fg("dim", ` ${set.last} ${fmtTtft(metrics.lastTtftMs)}`) : ""),
+		ttft + (avgTtft != null && metrics.lastTtftMs != null && metrics.ttftCount > 1 ? theme.fg("dim", `${lastMark}${fmtTtft(metrics.lastTtftMs)}`) : ""),
 		metrics.lastTtfbMs != null && item(set.ttfb, "dim", fmtTtft(metrics.lastTtfbMs), "dim"),
-		speed + (avg != null && metrics.lastTokPerSec != null && metrics.requests > 1 ? theme.fg("dim", ` ${set.last} ${fmtTokPerSec(metrics.lastTokPerSec)}`) : ""),
+		speed + (avg != null && metrics.lastTokPerSec != null && metrics.requests > 1 ? theme.fg("dim", `${lastMark}${fmtTokPerSec(metrics.lastTokPerSec)}`) : ""),
 	], "  ");
 	const tools = s.toolCalls > 0
 		? cluster([item(set.calls, "syntaxFunction", `${s.toolCalls}`), errors || item(set.ok, "success", "0")], "  ")
@@ -1703,7 +1716,7 @@ function renderDetailRows(
 	const cost = amount + (!unpriced && s.turns > 0 ? theme.fg("dim", `  ${fmtCost(s.cost / s.turns)}/turn`) : "");
 	const cacheSegment = lastAnomaly
 		? s.cacheRead > 0
-			? `${item(set.cache, lastAnomaly.severity, fmtTokens(s.cacheRead))}${cachePct != null ? ` ${theme.fg(cacheColor === "dim" ? "muted" : cacheColor, `${cachePct}%`)}` : ""}${theme.fg("dim", ` ${set.last} `)}${theme.fg(lastAnomaly.severity, `${lastAnomaly.hitPct}% (${lastAnomaly.tag})`)}`
+			? `${item(set.cache, lastAnomaly.severity, fmtTokens(s.cacheRead))}${cachePct != null ? ` ${theme.fg(cacheColor === "dim" ? "muted" : cacheColor, `${cachePct}%`)}` : ""}${theme.fg("dim", lastMark)}${theme.fg(lastAnomaly.severity, `${lastAnomaly.hitPct}% (${lastAnomaly.tag})`)}`
 			: item(set.cache, lastAnomaly.severity, `${lastAnomaly.hitPct}% (${lastAnomaly.tag})`, lastAnomaly.severity)
 		: s.cacheRead > 0 && item(set.cache, cacheColor, fmtTokens(s.cacheRead))
 			+ (cachePct != null ? ` ${theme.fg(cacheColor === "dim" ? "muted" : cacheColor, `${cachePct}%`)}` : "");
@@ -1724,7 +1737,7 @@ function renderDetailRows(
 		{ text: tokens, rank: DESK_RANKS.tokens },
 		...(memory ? [{ text: memory, rank: DESK_RANKS.memory }] : []),
 		...(think ? [{ text: think, rank: DESK_RANKS.think }] : []),
-	], width);
+	], width, true);
 	const touched: Group[] = s.files > 0 ? [{ text: item(set.file, "dim", `${s.files} touched`), rank: 1 }] : [];
 	const gitGroup: Group[] = [{ text: git, rank: 4 }];
 	const workspace = railRow(theme, "╰", gitGroup, [...touched, { text: cwd(gitGroup, touched), rank: 3 }], width);

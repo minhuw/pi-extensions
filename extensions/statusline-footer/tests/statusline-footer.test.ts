@@ -2551,7 +2551,7 @@ describe("statusline footer powerline style", () => {
 				expect(laptop[1]).toContain("bg 2 running · 1 failed");
 				const essentials = laptop[2]!;
 				expect(essentials.startsWith(" ╰ ")).toBe(true);
-				for (const fact of ["main", "+42", "−17", "↑2", "↓1", "$0.750", "1h 00m", "1 (50.0%)", "300ms", "133 tok/s", "65%", "/tmp/project"]) {
+				for (const fact of ["main", "+42", "−17", "↑ 2  ↓ 1", "$0.750", "1h 00m", "1 (50.0%)", "300ms", "133 tok/s", "65%", "/tmp/project"]) {
 					expect(essentials).toContain(fact);
 				}
 				for (const diagnostic of ["150ms", "400ms", "150 tok/s", "/turn", "65k", "31k", "120k", "memory", "think", "touched"]) {
@@ -2574,7 +2574,7 @@ describe("statusline footer powerline style", () => {
 					expect(telemetry).toContain(nerdFonts === "1" ? "\u{F0368} 2" : "# 2");
 					for (const metric of ["1h 00m", "1 (50.0%)", "300ms", "400ms", "150ms", "133 tok/s", "150 tok/s"]) expect(telemetry).toContain(metric);
 					for (const metric of ["$0.750", "$0.375/turn", "65k", "31k", "120k", "65%", "~612 memory", "12k think"]) expect(telemetry).toContain(metric);
-					for (const fact of ["main", "+42", "−17", "↑2", "↓1", "2 touched", "/tmp/project"]) expect(workspace).toContain(fact);
+					for (const fact of ["main", "+42", "−17", "↑ 2  ↓ 1", "2 touched", "/tmp/project"]) expect(workspace).toContain(fact);
 					expect(workspace).not.toContain("rep");
 					expect(workspace).not.toContain("#ops");
 					expect(workspace.startsWith(" ╰ ")).toBe(true);
@@ -3785,6 +3785,33 @@ describe("statusline footer width tiers", () => {
 		}
 	}
 
+	it.each(["0", "1"])("spaces numeric icons in full and compact mode (Nerd Fonts %s)", async (nerdFonts) => {
+		git();
+		const harness = await start(`metric-spaces-${nerdFonts}`);
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+			await stream(harness);
+			const nerd = nerdFonts === "1";
+			const compactions = nerd ? "\u{F0615} 0×" : "× 0×";
+			const activity = nerd ? "\u{F0368} 2  \u{F0954} 1h 00m" : "# 2  ⏱ 1h 00m";
+			const price = nerd ? "\u{F01C1} $0.750" : "$0.750";
+			const [bar, telemetry, workspace] = harness.getFooter()!.render(175).map(strip);
+			expect(bar).toContain(compactions);
+			expect(telemetry).toContain(activity);
+			expect(telemetry).toContain(nerd ? "\u{F051B} 300ms  \u{F02DA} 400ms" : "⏱ 300ms  ↺ 400ms");
+			expect(telemetry).toContain(nerd ? "\u{F04C5} 133 tok/s  \u{F02DA} 150 tok/s" : "» 133 tok/s  ↺ 150 tok/s");
+			expect(telemetry).toContain(nerd ? "\u{F0046} 31k  \u{F140B} 120k 65%" : "↓ 31k  ⚡ 120k 65%");
+			expect(workspace).toContain("+42 −17  ↑ 2  ↓ 1");
+			await harness.runCommand("footer", "compact");
+			const compact = strip(harness.getFooter()!.render(100)[0]!);
+			expect(compact).toContain(compactions);
+			expect(compact).toContain(`${price}  1h 00m`);
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
 	it("picks the tier from the width alone, with and without an activity row", async () => {
 		git();
 		const harness = await start("tier-boundaries");
@@ -3843,7 +3870,7 @@ describe("statusline footer width tiers", () => {
 			]) expect(telemetry).toContain(metric);
 			// Performance on the left, resources on the right.
 			expect(telemetry.indexOf("tok/s")).toBeLessThan(telemetry.indexOf("$0.750"));
-			for (const fact of ["main", "+42", "−17", "↑2", "↓1", "2 touched", "/tmp/project"]) expect(workspace).toContain(fact);
+			for (const fact of ["main", "+42", "−17", "↑ 2  ↓ 1", "2 touched", "/tmp/project"]) expect(workspace).toContain(fact);
 		} finally {
 			vi.unstubAllEnvs();
 			harness.disposeFooter();
@@ -3892,7 +3919,7 @@ describe("statusline footer width tiers", () => {
 			const essentials = lines[2]!;
 			expect(essentials.startsWith(" ╰ ")).toBe(true);
 			// Git, then cost, then turns and elapsed, then failed tool calls; latency, throughput, cache, and path on the right.
-			const left = ["⎇ main  +42 −17  ↑2 ↓1", "$0.750", "# 2  ⏱ 1h 00m", "✕ 1 (50.0%)"];
+			const left = ["⎇ main  +42 −17  ↑ 2  ↓ 1", "$0.750", "# 2  ⏱ 1h 00m", "✕ 1 (50.0%)"];
 			const right = ["⏱ 300ms  » 133 tok/s", "⚡ 65%", "⌂ /tmp/project"];
 			const positions = [...left, ...right].map(fact => essentials.indexOf(fact));
 			expect(positions.every(index => index >= 0), essentials).toBe(true);
@@ -4176,9 +4203,11 @@ describe("statusline footer cache lens", () => {
 			const desk = strip(withReads.getFooter()!.render(210).join("\n"));
 			const laptop = strip(withReads.getFooter()!.render(160).join("\n"));
 			const phone = strip(withReads.getFooter()!.render(50).join("\n"));
-			expect(desk).toContain("⚡ 8.0k 80% ↺ 0% (!sys)");
+			expect(desk).toContain("⚡ 8.0k 80%  ↺ 0% (!sys)");
 			expect(laptop).toContain("⚡ 80% (!sys)");
 			expect(phone).not.toContain("!sys");
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+			expect(strip(withReads.getFooter()!.render(210).join("\n"))).toContain("\u{F140B} 8.0k 80%  \u{F02DA} 0% (!sys)");
 
 			// Mutate tools on next call -> switches badge to (!tools)
 			await withReads.emit("before_provider_request", {
