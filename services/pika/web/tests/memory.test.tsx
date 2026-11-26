@@ -1,7 +1,7 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { formatDateTime, formatRelative } from "../src/lib/format";
-import type { MemoryNote, MemoryRevision, MemoryScope, MemoryScopeSummary } from "../src/lib/types";
+import type { MemoryBatch, MemoryNote, MemoryRevision, MemoryScope, MemoryScopeSummary } from "../src/lib/types";
 import { renderApp } from "./support/render";
 import { createFakeServer, type FakeMemory } from "./support/server";
 
@@ -237,5 +237,316 @@ describe("Memory page", () => {
 		renderApp("/memory", server.fetch);
 		expect(await screen.findByLabelText(/password/i)).toBeTruthy();
 		expect(server.calls.some((call) => call.includes("/memory"))).toBe(false);
+	});
+
+	it("renders per-scope pinned budgets and tier counts, degrading cleanly when absent", async () => {
+		const OVER: MemoryScope = { key: "repo:https://github.com/acme/over", kind: "project", label: "over" };
+		const budgeted: FakeMemory = {
+			scopes: [
+				{
+					...USER,
+					noteCount: 17,
+					updatedAt: at(30),
+					pinnedCount: 12,
+					archivalCount: 5,
+					indexBytes: 4120,
+					indexLines: 95,
+					limitBytes: 8192,
+					limitLines: 200,
+				},
+				{
+					...PIKA,
+					noteCount: 3,
+					updatedAt: at(60),
+					pinnedCount: 3,
+					archivalCount: 0,
+					indexBytes: 6800,
+					indexLines: 140,
+				},
+				{
+					...OVER,
+					noteCount: 4,
+					updatedAt: at(70),
+					pinnedCount: 4,
+					archivalCount: 0,
+					indexBytes: 9000,
+					indexLines: 210,
+					limitBytes: 8192,
+					limitLines: 200,
+				},
+				summary(EMPTY, 1, at(90)),
+			],
+			notes: [
+				note("u1", USER, { title: "User pinned", tier: "pinned" }),
+				note("p1", PIKA, { title: "Pika pinned" }),
+				note("o1", OVER, { title: "Over pinned" }),
+				note("e1", EMPTY, { title: "Legacy note" }),
+			],
+			revisions: {},
+		};
+		renderApp("/memory", createFakeServer({ memory: budgeted }).fetch);
+		const scopes = await screen.findByRole("navigation", { name: "Memory scopes" });
+		const rows = await waitFor(() => {
+			const found = [...scopes.querySelectorAll<HTMLElement>("[data-memory-scope]")];
+			expect(found).toHaveLength(4);
+			return found;
+		});
+
+		// Scope with archival notes and healthy budget (<80%).
+		expect(within(rows[0]).getByText("12 pinned · 5 archival")).toBeTruthy();
+		const userRowBudget = rows[0].querySelector<HTMLElement>("[data-scope-budget]")!;
+		expect(userRowBudget.getAttribute("data-budget-state")).toBe("ok");
+		expect(within(userRowBudget).getByText("4,120 / 8,192 B")).toBeTruthy();
+
+		const userRegion = await screen.findByRole("region", { name: "user" });
+		const userHeaderBudget = userRegion.querySelector<HTMLElement>("[data-scope-budget-header]")!;
+		expect(userHeaderBudget.getAttribute("data-budget-state")).toBe("ok");
+		expect(within(userHeaderBudget).getByText("4,120 / 8,192 B · 95 / 200 lines")).toBeTruthy();
+
+		// Scope with default limits and >=80% usage -> warn state; 0 archival stays "3 notes".
+		expect(within(rows[1]).getByText("3 notes")).toBeTruthy();
+		const pikaRowBudget = rows[1].querySelector<HTMLElement>("[data-scope-budget]")!;
+		expect(pikaRowBudget.getAttribute("data-budget-state")).toBe("warn");
+		expect(within(pikaRowBudget).getByText("6,800 / 8,192 B")).toBeTruthy();
+
+		// Scope over 100% -> over state.
+		const overRowBudget = rows[2].querySelector<HTMLElement>("[data-scope-budget]")!;
+		expect(overRowBudget.getAttribute("data-budget-state")).toBe("over");
+		expect(within(overRowBudget).getByText("9,000 / 8,192 B")).toBeTruthy();
+
+		// Legacy scope without budget fields degrades cleanly.
+		expect(within(rows[3]).getByText("1 note")).toBeTruthy();
+		expect(rows[3].querySelector("[data-scope-budget]")).toBeNull();
+
+		fireEvent.click(rows[1]);
+		const pikaRegion = await screen.findByRole("region", { name: "pika" });
+		const pikaHeaderBudget = pikaRegion.querySelector<HTMLElement>("[data-scope-budget-header]")!;
+		expect(pikaHeaderBudget.getAttribute("data-budget-state")).toBe("warn");
+		expect(within(pikaHeaderBudget).getByText("6,800 / 8,192 B · 140 / 200 lines")).toBeTruthy();
+		expect(pikaRegion.querySelector("[data-tier-filter]")).toBeNull();
+
+		fireEvent.click(rows[3]);
+		const emptyRegion = await screen.findByRole("region", { name: "scratch" });
+		expect(emptyRegion.querySelector("[data-scope-budget-header]")).toBeNull();
+		expect(emptyRegion.querySelector("[data-tier-filter]")).toBeNull();
+	});
+
+	it("badges archival notes and revisions, and filters notes by tier", async () => {
+		const tiered: FakeMemory = {
+			scopes: [
+				{
+					...PIKA,
+					noteCount: 3,
+					updatedAt: at(60),
+					pinnedCount: 2,
+					archivalCount: 1,
+					indexBytes: 1200,
+					indexLines: 24,
+					limitBytes: 8192,
+					limitLines: 200,
+				},
+			],
+			notes: [
+				note("pinned000001", PIKA, { title: "Explicit pinned note", tier: "pinned" }),
+				note("pinned000002", PIKA, { title: "Default pinned note" }),
+				note("archival0001", PIKA, { title: "Long-tail archival note", tier: "archival", revision: 2 }),
+			],
+			revisions: {
+				archival0001: [
+					revision({ revision: 1, action: "save", title: "Long-tail archival note", tier: "pinned" }),
+					revision({ revision: 2, action: "save", title: "Long-tail archival note", tier: "archival" }),
+				],
+			},
+		};
+		renderApp(`/memory?${new URLSearchParams({ scope: PIKA.key })}`, createFakeServer({ memory: tiered }).fetch);
+		const region = await screen.findByRole("region", { name: "pika" });
+
+		const explicitPinned = (await within(region).findByRole("heading", { name: "Explicit pinned note" })).closest<HTMLElement>("article")!;
+		const defaultPinned = within(region).getByRole("heading", { name: "Default pinned note" }).closest<HTMLElement>("article")!;
+		const archival = within(region).getByRole("heading", { name: "Long-tail archival note" }).closest<HTMLElement>("article")!;
+
+		expect(explicitPinned.getAttribute("data-tier")).toBe("pinned");
+		expect(within(explicitPinned).queryByText("archival")).toBeNull();
+		expect(defaultPinned.getAttribute("data-tier")).toBe("pinned");
+		expect(within(defaultPinned).queryByText("archival")).toBeNull();
+		expect(archival.getAttribute("data-tier")).toBe("archival");
+		expect(within(archival).getByText("archival")).toBeTruthy();
+
+		// Revision history badges archival revisions without adding noise to pinned revisions.
+		fireEvent.click(within(archival).getByRole("button", { name: "History" }));
+		const revList = await within(archival).findByRole("list", { name: "Revisions" });
+		const revItems = await waitFor(() => {
+			const found = within(revList).getAllByRole("listitem");
+			expect(found).toHaveLength(2);
+			return found;
+		});
+		expect(revItems[0].getAttribute("data-tier")).toBe("pinned");
+		expect(within(revItems[0]).queryByText("archival")).toBeNull();
+		expect(revItems[1].getAttribute("data-tier")).toBe("archival");
+		expect(within(revItems[1]).getByText("archival")).toBeTruthy();
+
+		// Tier filter switches cleanly between All, Pinned, and Archival.
+		const filter = within(region).getByRole("group", { name: "Note tier" });
+		const allBtn = within(filter).getByRole("button", { name: "All" });
+		const pinnedBtn = within(filter).getByRole("button", { name: "Pinned" });
+		const archivalBtn = within(filter).getByRole("button", { name: "Archival" });
+
+		expect(allBtn.getAttribute("aria-pressed")).toBe("true");
+		fireEvent.click(pinnedBtn);
+		expect(pinnedBtn.getAttribute("aria-pressed")).toBe("true");
+		expect(within(region).getByRole("heading", { name: "Explicit pinned note" })).toBeTruthy();
+		expect(within(region).getByRole("heading", { name: "Default pinned note" })).toBeTruthy();
+		expect(within(region).queryByRole("heading", { name: "Long-tail archival note" })).toBeNull();
+
+		fireEvent.click(archivalBtn);
+		expect(archivalBtn.getAttribute("aria-pressed")).toBe("true");
+		expect(within(region).queryByRole("heading", { name: "Explicit pinned note" })).toBeNull();
+		expect(within(region).queryByRole("heading", { name: "Default pinned note" })).toBeNull();
+		expect(within(region).getByRole("heading", { name: "Long-tail archival note" })).toBeTruthy();
+
+		fireEvent.click(allBtn);
+		expect(allBtn.getAttribute("aria-pressed")).toBe("true");
+		expect(within(region).getByRole("heading", { name: "Explicit pinned note" })).toBeTruthy();
+		expect(within(region).getByRole("heading", { name: "Default pinned note" })).toBeTruthy();
+		expect(within(region).getByRole("heading", { name: "Long-tail archival note" })).toBeTruthy();
+	});
+
+	it("falls back to showing pinned notes when undoing a dream removes the last archival note while filtered to Archival", async () => {
+		const scopeSummary: MemoryScopeSummary = {
+			...PIKA,
+			noteCount: 2,
+			updatedAt: at(60),
+			pinnedCount: 1,
+			archivalCount: 1,
+			indexBytes: 900,
+			indexLines: 18,
+			limitBytes: 8192,
+			limitLines: 200,
+		};
+		const batch: MemoryBatch = {
+			id: "b-archival",
+			leaseId: "lease-1",
+			scope: PIKA,
+			mode: "auto",
+			at: at(60),
+			deviceId: "00000000-0000-4000-8000-000000000001",
+			sessionId: null,
+			dreamSessionId: null,
+			summary: "Archived one long-tail note.",
+			sessions: ["sess-1"],
+			revertedAt: null,
+			changes: [
+				{
+					noteId: "archival0001",
+					revision: 1,
+					action: "save",
+					created: true,
+					title: "Dreamt archival note",
+				},
+			],
+		};
+		const server = createFakeServer({
+			memory: {
+				scopes: [scopeSummary],
+				notes: [
+					note("pinned000001", PIKA, { title: "Existing pinned note", tier: "pinned" }),
+					note("archival0001", PIKA, { title: "Dreamt archival note", tier: "archival", provenance: "dream", revision: 1 }),
+				],
+				revisions: {
+					archival0001: [
+						revision({ revision: 1, action: "save", provenance: "dream", batchId: "b-archival", title: "Dreamt archival note", tier: "archival" }),
+					],
+				},
+				batches: [batch],
+			},
+		});
+		const fetchWithScopeCounts: typeof fetch = async (input, init) => {
+			const response = await server.fetch(input, init);
+			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			if (url.includes("/api/v1/memory/batches/b-archival/revert") && response.ok) {
+				scopeSummary.noteCount = 1;
+				scopeSummary.pinnedCount = 1;
+				scopeSummary.archivalCount = 0;
+			}
+			return response;
+		};
+
+		renderApp(`/memory?${new URLSearchParams({ scope: PIKA.key })}`, fetchWithScopeCounts);
+		const region = await screen.findByRole("region", { name: "pika" });
+		await within(region).findByRole("heading", { name: "Dreamt archival note" });
+
+		const filter = within(region).getByRole("group", { name: "Note tier" });
+		fireEvent.click(within(filter).getByRole("button", { name: "Archival" }));
+		expect(within(region).queryByRole("heading", { name: "Existing pinned note" })).toBeNull();
+		expect(within(region).getByRole("heading", { name: "Dreamt archival note" })).toBeTruthy();
+
+		const batchRow = await waitFor(() => {
+			const el = document.querySelector<HTMLElement>('[data-memory-batch="b-archival"]');
+			expect(el).toBeTruthy();
+			return el!;
+		});
+		fireEvent.click(within(batchRow).getByRole("button", { name: /^Undo/ }));
+		const dialog = await screen.findByRole("dialog", { name: "Undo this dream?" });
+		fireEvent.click(within(dialog).getByRole("button", { name: "Undo" }));
+
+		await waitFor(() => {
+			expect(within(region).queryByRole("group", { name: "Note tier" })).toBeNull();
+			expect(within(region).getByRole("heading", { name: "Existing pinned note" })).toBeTruthy();
+		});
+		expect(within(region).queryByRole("heading", { name: "Dreamt archival note" })).toBeNull();
+		expect(within(region).queryByText("No archival notes")).toBeNull();
+	});
+
+	it("shows the line budget readout in ScopeRow when line pressure exceeds byte pressure", async () => {
+		const LINE_BOUND: MemoryScope = { key: "repo:https://github.com/acme/lines", kind: "project", label: "lines" };
+		const budgeted: FakeMemory = {
+			scopes: [
+				{
+					...LINE_BOUND,
+					noteCount: 5,
+					updatedAt: at(30),
+					pinnedCount: 5,
+					archivalCount: 0,
+					indexBytes: 2400,
+					indexLines: 170,
+					limitBytes: 8192,
+					limitLines: 200,
+				},
+				{
+					...PIKA,
+					noteCount: 3,
+					updatedAt: at(60),
+					pinnedCount: 3,
+					archivalCount: 0,
+					indexBytes: 6800,
+					indexLines: 50,
+					limitBytes: 8192,
+					limitLines: 200,
+				},
+			],
+			notes: [
+				note("l1", LINE_BOUND, { title: "Line bound note" }),
+				note("p1", PIKA, { title: "Byte bound note" }),
+			],
+			revisions: {},
+		};
+		renderApp("/memory", createFakeServer({ memory: budgeted }).fetch);
+		const scopes = await screen.findByRole("navigation", { name: "Memory scopes" });
+		const rows = await waitFor(() => {
+			const found = [...scopes.querySelectorAll<HTMLElement>("[data-memory-scope]")];
+			expect(found).toHaveLength(2);
+			return found;
+		});
+
+		const lineBoundBudget = rows[0].querySelector<HTMLElement>("[data-scope-budget]")!;
+		expect(lineBoundBudget.getAttribute("data-budget-state")).toBe("warn");
+		expect(within(lineBoundBudget).getByText("170 / 200 lines")).toBeTruthy();
+		expect(within(lineBoundBudget).queryByText("2,400 / 8,192 B")).toBeNull();
+		expect(lineBoundBudget.getAttribute("title")).toBe("Pinned index: 2,400 / 8,192 B · 170 / 200 lines");
+
+		const byteBoundBudget = rows[1].querySelector<HTMLElement>("[data-scope-budget]")!;
+		expect(byteBoundBudget.getAttribute("data-budget-state")).toBe("warn");
+		expect(within(byteBoundBudget).getByText("6,800 / 8,192 B")).toBeTruthy();
+		expect(byteBoundBudget.getAttribute("title")).toBe("Pinned index: 6,800 / 8,192 B · 50 / 200 lines");
 	});
 });

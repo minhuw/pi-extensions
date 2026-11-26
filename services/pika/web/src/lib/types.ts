@@ -314,10 +314,19 @@ export interface MemoryScope {
 	label: string;
 }
 
-/** A scope as `GET memory` lists it: its live notes and its last save or forget. */
+/** Whether a note is pinned in the prompt index or stored only for search (`"pinned"` when absent). */
+export type MemoryTier = "pinned" | "archival";
+
+/** A scope as `GET memory` lists it: its live notes, pinned budget usage, and its last save or forget. */
 export interface MemoryScopeSummary extends MemoryScope {
 	noteCount: number;
 	updatedAt: string | null;
+	pinnedCount?: number;
+	archivalCount?: number;
+	indexBytes?: number;
+	indexLines?: number;
+	limitBytes?: number;
+	limitLines?: number;
 }
 
 /** Who wrote a note's revision: an agent's memory tool, a dream, or the owner undoing a dream. */
@@ -348,6 +357,8 @@ export interface MemoryNote {
 	sessionId: string | null;
 	/** When an agent last marked it used; absent from servers before schema version 17. */
 	lastUsedAt?: string | null;
+	/** `"pinned"` when absent. */
+	tier?: MemoryTier;
 }
 
 /** A note as one save, forget, or revert left it. */
@@ -366,6 +377,8 @@ export interface MemoryRevision {
 	deviceId: string | null;
 	sessionId: string | null;
 	reason: string | null;
+	/** `"pinned"` when absent. */
+	tier?: MemoryTier;
 }
 
 /** One note a dream batch saved or forgot, at the revision it left. */

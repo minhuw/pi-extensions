@@ -2,9 +2,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { PikaLogo } from "../components/icons";
-import { BUTTON, ConfirmDialog, cx, EmptyState, ErrorState, Page, PageTitle, Pill, Skeleton, SkeletonLines, Toggle } from "../components/ui";
+import { BUTTON, ConfirmDialog, cx, EmptyState, ErrorState, Page, PageTitle, Pill, Segmented, Skeleton, SkeletonLines, Toggle } from "../components/ui";
 import { ApiError, apiErrorCode, useApi } from "../lib/api";
-import { formatDateTime, formatRelative, plural } from "../lib/format";
+import { formatCount, formatDateTime, formatRelative, plural } from "../lib/format";
 import type {
 	MemoryBatch,
 	MemoryBatchChange,
@@ -13,9 +13,90 @@ import type {
 	MemoryRevision,
 	MemoryScopeSummary,
 	MemorySource,
+	MemoryTier,
 } from "../lib/types";
 
 const LINK = "text-ink underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink";
+const DEFAULT_LIMIT_BYTES = 8192;
+const DEFAULT_LIMIT_LINES = 200;
+
+type TierFilter = "all" | MemoryTier;
+
+const TIER_OPTIONS: readonly (readonly [TierFilter, string])[] = [
+	["all", "All"],
+	["pinned", "Pinned"],
+	["archival", "Archival"],
+];
+
+type BudgetState = "ok" | "warn" | "over";
+
+const BUDGET_BAR: Record<BudgetState, string> = {
+	ok: "bg-ink/45",
+	warn: "bg-amber-500",
+	over: "bg-red",
+};
+
+const BUDGET_TEXT: Record<BudgetState, string> = {
+	ok: "text-muted",
+	warn: "text-amber-700 dark:text-amber-400",
+	over: "text-red",
+};
+
+function noteTier(tier: MemoryTier | undefined): MemoryTier {
+	return tier ?? "pinned";
+}
+
+function formatInt(n: number): string {
+	return n.toLocaleString("en-US");
+}
+
+interface ScopeBudgetInfo {
+	bytesLabel?: string;
+	linesLabel?: string;
+	rowLabel: string;
+	summary: string;
+	percent: number;
+	state: BudgetState;
+}
+
+function scopeBudget(scope: MemoryScopeSummary): ScopeBudgetInfo | null {
+	const hasBytes = scope.indexBytes !== undefined;
+	const hasLines = scope.indexLines !== undefined;
+	if (!hasBytes && !hasLines) return null;
+
+	const limitBytes = scope.limitBytes ?? DEFAULT_LIMIT_BYTES;
+	const limitLines = scope.limitLines ?? DEFAULT_LIMIT_LINES;
+
+	const byteRatio = hasBytes && limitBytes > 0 ? scope.indexBytes! / limitBytes : 0;
+	const lineRatio = hasLines && limitLines > 0 ? scope.indexLines! / limitLines : 0;
+	const ratio = Math.max(byteRatio, lineRatio);
+
+	const bytesLabel = hasBytes ? `${formatInt(scope.indexBytes!)} / ${formatInt(limitBytes)} B` : undefined;
+	const linesLabel = hasLines ? `${formatInt(scope.indexLines!)} / ${formatInt(limitLines)} lines` : undefined;
+	const rowLabel = lineRatio > byteRatio && linesLabel ? linesLabel : (bytesLabel ?? linesLabel!);
+	const summary = [bytesLabel, linesLabel].filter(Boolean).join(" · ");
+	const state: BudgetState = ratio > 1 ? "over" : ratio >= 0.8 ? "warn" : "ok";
+	const percent = Math.min(100, Math.max(0, ratio * 100));
+
+	return { bytesLabel, linesLabel, rowLabel, summary, percent, state };
+}
+
+function scopeCountLabel(scope: MemoryScopeSummary): string {
+	if ((scope.archivalCount ?? 0) > 0) {
+		const pinned = scope.pinnedCount ?? Math.max(0, scope.noteCount - scope.archivalCount!);
+		return `${formatCount(pinned)} pinned · ${formatCount(scope.archivalCount!)} archival`;
+	}
+	return plural(scope.noteCount, "note");
+}
+
+function ArchivalPill({ tier }: { tier: MemoryTier | undefined }) {
+	if (noteTier(tier) !== "archival") return null;
+	return (
+		<Pill tone="yellow" title="Archival note: searchable, not pinned in the prompt index">
+			archival
+		</Pill>
+	);
+}
 
 /** A time as a relative phrase, with the exact time on hover. */
 function When({ at }: { at: string | null }) {
@@ -77,6 +158,7 @@ function Body({ text }: { text: string }) {
 }
 
 function ScopeRow({ scope, selected }: { scope: MemoryScopeSummary; selected: boolean }) {
+	const budget = scopeBudget(scope);
 	return (
 		<Link
 			to={{ search: `?${new URLSearchParams({ scope: scope.key })}` }}
@@ -90,21 +172,36 @@ function ScopeRow({ scope, selected }: { scope: MemoryScopeSummary; selected: bo
 				<Pill>{scope.kind}</Pill>
 			</span>
 			<span className="flex min-w-0 items-center gap-x-3 text-[12px] text-muted">
-				<span className="tnum">{plural(scope.noteCount, "note")}</span>
+				<span className="tnum">{scopeCountLabel(scope)}</span>
 				<span className="ml-auto">{scope.updatedAt ? <When at={scope.updatedAt} /> : "never updated"}</span>
 			</span>
+			{budget && (
+				<span
+					className="mt-1 flex items-center gap-2 text-[11px]"
+					data-scope-budget=""
+					data-budget-state={budget.state}
+					title={`Pinned index: ${budget.summary}`}
+				>
+					<span className="h-[2px] flex-1 overflow-hidden bg-line" aria-hidden="true">
+						<span className={cx("block h-full", BUDGET_BAR[budget.state])} style={{ width: `${budget.percent}%` }} />
+					</span>
+					<span className={cx("tnum shrink-0", BUDGET_TEXT[budget.state])}>{budget.rowLabel}</span>
+				</span>
+			)}
 		</Link>
 	);
 }
 
 function RevisionRow({ revision }: { revision: MemoryRevision }) {
+	const tier = noteTier(revision.tier);
 	return (
-		<li className="border-b border-line py-1.5 last:border-b-0" data-revision={revision.revision} data-action={revision.action}>
+		<li className="border-b border-line py-1.5 last:border-b-0" data-revision={revision.revision} data-action={revision.action} data-tier={tier}>
 			<div className="flex min-w-0 flex-wrap items-center gap-2 text-[12px] text-muted">
 				<Pill tone={revision.action === "forget" ? "red" : revision.action === "revert" ? "yellow" : "neutral"}>{revision.action}</Pill>
 				<span className="tnum">Revision {revision.revision}</span>
 				<When at={revision.at} />
 				<Pill>{revision.category}</Pill>
+				<ArchivalPill tier={revision.tier} />
 				<Provenance value={revision.provenance} />
 				{revision.batchId && (
 					<span>
@@ -145,10 +242,12 @@ function NoteHistory({ id }: { id: string }) {
 }
 
 function NoteRow({ note }: { note: MemoryNote }) {
+	const tier = noteTier(note.tier);
 	return (
-		<article className="border-b border-line py-3 last:border-b-0" aria-labelledby={`memory-note-${note.id}`} data-memory-note={note.id}>
+		<article className="border-b border-line py-3 last:border-b-0" aria-labelledby={`memory-note-${note.id}`} data-memory-note={note.id} data-tier={tier}>
 			<div className="flex min-w-0 flex-wrap items-center gap-2">
 				<Pill>{note.category}</Pill>
+				<ArchivalPill tier={note.tier} />
 				<h3 id={`memory-note-${note.id}`} className="min-w-0 flex-1 text-[14.5px] font-semibold break-words">
 					{note.title}
 				</h3>
@@ -355,29 +454,64 @@ function ScopeNotes({ scope }: { scope: MemoryScopeSummary | undefined }) {
 	const api = useApi();
 	const key = scope?.key ?? "";
 	const notes = useQuery({ queryKey: ["memory-notes", key], queryFn: () => api.memoryNotes(key), enabled: scope !== undefined });
+	const [tierFilter, setTierFilter] = useState<TierFilter>("all");
 	if (!scope || (notes.error instanceof ApiError && notes.error.status === 404)) {
 		return <EmptyState title="No such scope">It may have been deleted with its project.</EmptyState>;
 	}
+	const budget = scopeBudget(scope);
+	const allNotes = notes.data?.notes ?? [];
+	const loadedArchivalCount = allNotes.filter((note) => noteTier(note.tier) === "archival").length;
+	const loadedPinnedCount = allNotes.length - loadedArchivalCount;
+	const hasArchival = (scope.archivalCount ?? 0) > 0 || loadedArchivalCount > 0;
+	const activeTier: TierFilter = hasArchival ? tierFilter : "all";
+	const visibleNotes = activeTier === "all" ? allNotes : allNotes.filter((note) => noteTier(note.tier) === activeTier);
+	const displayPinnedCount = notes.data ? loadedPinnedCount : (scope.pinnedCount ?? Math.max(0, scope.noteCount - (scope.archivalCount ?? 0)));
+	const displayArchivalCount = notes.data ? loadedArchivalCount : (scope.archivalCount ?? 0);
 	return (
 		<section aria-labelledby="memory-scope-title" data-memory-notes={scope.key}>
-			<div className="flex min-h-7 flex-wrap items-center gap-2 border-b border-ink pb-1">
+			<div className="flex min-h-7 flex-wrap items-center gap-x-2 gap-y-1 border-b border-ink pb-1">
 				<h2 id="memory-scope-title" className="text-[16px] font-semibold">
 					{scope.label}
 				</h2>
 				<Pill>{scope.kind}</Pill>
 				<span className="mono min-w-0 truncate text-[12px] text-muted">{scope.key}</span>
+				{budget && (
+					<span
+						className="ml-auto flex shrink-0 items-center gap-2 text-[12px]"
+						data-scope-budget-header=""
+						data-budget-state={budget.state}
+						title={`Pinned index: ${budget.summary}`}
+					>
+						<span className="h-[2px] w-16 overflow-hidden bg-line" aria-hidden="true">
+							<span className={cx("block h-full", BUDGET_BAR[budget.state])} style={{ width: `${budget.percent}%` }} />
+						</span>
+						<span className={cx("tnum", BUDGET_TEXT[budget.state])}>{budget.summary}</span>
+					</span>
+				)}
 			</div>
+			{hasArchival && (
+				<div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2" data-tier-filter="">
+					<Segmented label="Note tier" size="sm" value={activeTier} onChange={setTierFilter} options={TIER_OPTIONS} />
+					<span className="tnum text-[12px] text-muted">
+						{formatCount(displayPinnedCount)} pinned · {formatCount(displayArchivalCount)} archival
+					</span>
+				</div>
+			)}
 			{notes.isPending ? (
 				<div className="pt-3">
 					<SkeletonLines lines={4} />
 				</div>
 			) : notes.isError ? (
 				<ErrorState error={notes.error} onRetry={() => void notes.refetch()} />
-			) : notes.data.notes.length === 0 ? (
+			) : allNotes.length === 0 ? (
 				<EmptyState title="No notes">Agents haven’t saved notes to this scope, or have forgotten them all.</EmptyState>
+			) : visibleNotes.length === 0 ? (
+				<EmptyState title={activeTier === "pinned" ? "No pinned notes" : "No archival notes"}>
+					Switch the tier filter to view the other notes in this scope.
+				</EmptyState>
 			) : (
 				<div>
-					{notes.data.notes.map((note) => (
+					{visibleNotes.map((note) => (
 						<NoteRow key={note.id} note={note} />
 					))}
 				</div>
