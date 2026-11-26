@@ -3,10 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
 	CacheLensTracker,
 	fingerprintProviderPayload,
+	formatWarmthCountdown,
 	parseCacheLensReloadSnapshot,
 	sha256StableShort,
 	updateHashCanonical,
 	type AssistantMessageLike,
+	type CacheWarmth,
 } from "../cache-lens.ts";
 
 function assistantMsg(
@@ -868,6 +870,239 @@ describe("streaming canonical SHA-256 parity", () => {
 				itemHashes: fp.itemHashes,
 			}).slice(0, 12),
 		);
+	});
+});
+
+describe("formatWarmthCountdown", () => {
+	it("clamps negative and zero values to 0s and rounds up sub-second values", () => {
+		expect(formatWarmthCountdown(-5_000)).toBe("0s");
+		expect(formatWarmthCountdown(-1)).toBe("0s");
+		expect(formatWarmthCountdown(0)).toBe("0s");
+		expect(formatWarmthCountdown(Number.NaN)).toBe("0s");
+		expect(formatWarmthCountdown(1)).toBe("1s");
+		expect(formatWarmthCountdown(500)).toBe("1s");
+		expect(formatWarmthCountdown(999)).toBe("1s");
+		expect(formatWarmthCountdown(1_000)).toBe("1s");
+	});
+
+	it("formats seconds, zero-padded minutes, and zero-padded hours across boundaries", () => {
+		expect(formatWarmthCountdown(45_000)).toBe("45s");
+		expect(formatWarmthCountdown(59_000)).toBe("59s");
+		expect(formatWarmthCountdown(59_001)).toBe("1m00s");
+		expect(formatWarmthCountdown(60_000)).toBe("1m00s");
+		expect(formatWarmthCountdown(65_000)).toBe("1m05s");
+		expect(formatWarmthCountdown(192_000)).toBe("3m12s");
+		expect(formatWarmthCountdown(3_599_000)).toBe("59m59s");
+		expect(formatWarmthCountdown(3_599_001)).toBe("1h00m");
+		expect(formatWarmthCountdown(3_600_000)).toBe("1h00m");
+		expect(formatWarmthCountdown(3_900_000)).toBe("1h05m");
+		expect(formatWarmthCountdown(86_400_000)).toBe("24h00m");
+	});
+});
+
+describe("CacheLensTracker cacheWarmth", () => {
+	it("returns null before any cache touch and after resetBaseline() or reset()", () => {
+		const tracker = new CacheLensTracker();
+		expect(tracker.cacheWarmth(1_000)).toBeNull();
+
+		// A below-min-tokens call with no cache read/write does not touch the cache.
+		tracker.recordRequest(
+			{ model: "claude-sonnet-4", system: "short", messages: [{ role: "user", content: "hi" }] },
+			{ api: "anthropic-messages", nowMs: 1_000 },
+		);
+		tracker.recordMessageEnd(assistantMsg({ input: 200, cacheRead: 0, cacheWrite: 0 }), 1_100);
+		expect(tracker.cacheWarmth(1_200)).toBeNull();
+
+		// Touch the cache via write.
+		tracker.recordRequest(
+			{
+				model: "claude-sonnet-4",
+				system: [{ type: "text", text: "System prompt", cache_control: { type: "ephemeral" } }],
+				messages: [{ role: "user", content: "hello" }],
+			},
+			{ api: "anthropic-messages", nowMs: 2_000 },
+		);
+		tracker.recordMessageEnd(assistantMsg({ input: 100, cacheRead: 0, cacheWrite: 4000 }), 2_500);
+		expect(tracker.cacheWarmth(3_000)?.active).toBe(true);
+
+		// resetBaseline() clears warmth state.
+		tracker.resetBaseline();
+		expect(tracker.cacheWarmth(3_100)).toBeNull();
+
+		// Touch again, then verify reset() also clears warmth state.
+		tracker.recordRequest(
+			{
+				model: "claude-sonnet-4",
+				system: [{ type: "text", text: "System prompt", cache_control: { type: "ephemeral" } }],
+				messages: [{ role: "user", content: "hello again" }],
+			},
+			{ api: "anthropic-messages", nowMs: 4_000 },
+		);
+		tracker.recordMessageEnd(assistantMsg({ input: 100, cacheRead: 4000, cacheWrite: 0 }), 4_500);
+		expect(tracker.cacheWarmth(5_000)?.active).toBe(true);
+
+		tracker.reset();
+		expect(tracker.cacheWarmth(5_100)).toBeNull();
+	});
+
+	it("tracks active countdown after cache write/read and transitions to inactive at and past TTL", () => {
+		const tracker = new CacheLensTracker();
+		const payload = {
+			model: "claude-sonnet-4",
+			system: [{ type: "text", text: "System prompt", cache_control: { type: "ephemeral", ttl: "5m" } }],
+			messages: [{ role: "user", content: "turn 1" }],
+		};
+
+		// Touch via cacheWrite at t=10_000ms (ttl=290s -> expires at 300_000ms)
+		tracker.recordRequest(payload, { api: "anthropic-messages", nowMs: 9_500 });
+		tracker.recordMessageEnd(assistantMsg({ input: 100, cacheRead: 0, cacheWrite: 5000 }), 10_000);
+
+		const atTouch: CacheWarmth | null = tracker.cacheWarmth(10_000);
+		expect(atTouch).toEqual({
+			active: true,
+			ttlSec: 290,
+			remainingMs: 290_000,
+			expiresAtMs: 300_000,
+		});
+
+		// Clock skew before touch clamps elapsed to 0
+		expect(tracker.cacheWarmth(9_000)).toEqual({
+			active: true,
+			ttlSec: 290,
+			remainingMs: 290_000,
+			expiresAtMs: 300_000,
+		});
+
+		// Mid-countdown
+		expect(tracker.cacheWarmth(110_000)).toEqual({
+			active: true,
+			ttlSec: 290,
+			remainingMs: 190_000,
+			expiresAtMs: 300_000,
+		});
+
+		// 1ms before expiry is still active
+		expect(tracker.cacheWarmth(299_999)).toEqual({
+			active: true,
+			ttlSec: 290,
+			remainingMs: 1,
+			expiresAtMs: 300_000,
+		});
+
+		// Exact TTL boundary is inactive with 0ms remaining
+		expect(tracker.cacheWarmth(300_000)).toEqual({
+			active: false,
+			ttlSec: 290,
+			remainingMs: 0,
+			expiresAtMs: 300_000,
+		});
+
+		// Past TTL remains inactive with 0ms remaining
+		expect(tracker.cacheWarmth(400_000)).toEqual({
+			active: false,
+			ttlSec: 290,
+			remainingMs: 0,
+			expiresAtMs: 300_000,
+		});
+
+		// Subsequent cacheRead refreshes the touch timestamp
+		const p2 = {
+			...payload,
+			messages: [...payload.messages, { role: "assistant", content: "ok" }, { role: "user", content: "turn 2" }],
+		};
+		tracker.recordRequest(p2, { api: "anthropic-messages", nowMs: 200_000 });
+		tracker.recordMessageEnd(assistantMsg({ input: 200, cacheRead: 4800, cacheWrite: 0 }), 200_000);
+		expect(tracker.cacheWarmth(250_000)).toEqual({
+			active: true,
+			ttlSec: 290,
+			remainingMs: 240_000,
+			expiresAtMs: 490_000,
+		});
+	});
+
+	it("survives toReloadSnapshot() and restoreReloadSnapshot()", () => {
+		const tracker = new CacheLensTracker();
+		tracker.recordRequest(
+			{
+				model: "claude-sonnet-4",
+				system: [{ type: "text", text: "System prompt", cache_control: { type: "ephemeral", ttl: "1h" } }],
+				messages: [{ role: "user", content: "hello" }],
+			},
+			{ api: "anthropic-messages", nowMs: 50_000 },
+		);
+		tracker.recordMessageEnd(assistantMsg({ input: 100, cacheRead: 0, cacheWrite: 5000 }), 50_000);
+
+		const serialized = JSON.stringify(tracker.toReloadSnapshot());
+		const restored = new CacheLensTracker();
+		expect(restored.restoreReloadSnapshot(JSON.parse(serialized))).toBe(true);
+
+		expect(restored.cacheWarmth(110_000)).toEqual({
+			active: true,
+			ttlSec: 3600,
+			remainingMs: 3_540_000,
+			expiresAtMs: 3_650_000,
+		});
+		expect(restored.cacheWarmth(3_650_000)).toEqual({
+			active: false,
+			ttlSec: 3600,
+			remainingMs: 0,
+			expiresAtMs: 3_650_000,
+		});
+	});
+
+	it("resets custom retention TTL back to default when switching to a standard-TTL request, and preserves TTL when wire is absent", () => {
+		const tracker = new CacheLensTracker();
+
+		// 1. Custom 1h TTL request
+		tracker.recordRequest(
+			{
+				model: "claude-sonnet-4",
+				system: [{ type: "text", text: "System prompt", cache_control: { type: "ephemeral", ttl: "1h" } }],
+				messages: [{ role: "user", content: "turn 1" }],
+			},
+			{ api: "anthropic-messages", nowMs: 1_000 },
+		);
+		tracker.recordMessageEnd(assistantMsg({ input: 100, cacheRead: 0, cacheWrite: 5000 }), 1_000);
+		expect(tracker.cacheWarmth(1_000)?.ttlSec).toBe(3600);
+
+		// 2. Wire-absent cache touch keeps the existing 3600s TTL
+		tracker.recordMessageEnd(assistantMsg({ input: 100, cacheRead: 5000, cacheWrite: 0 }), 10_000);
+		expect(tracker.cacheWarmth(10_000)).toEqual({
+			active: true,
+			ttlSec: 3600,
+			remainingMs: 3_600_000,
+			expiresAtMs: 3_610_000,
+		});
+
+		// 3. Switch to a standard-TTL request with no explicit retention metadata on the wire (retentionTtlSec === null)
+		tracker.recordRequest(
+			{
+				model: "gpt-5.4",
+				instructions: "System prompt",
+				input: [{ role: "user", content: "switched model" }],
+			},
+			{ api: "openai-responses", nowMs: 20_000 },
+		);
+		tracker.recordMessageEnd(
+			assistantMsg({ input: 500, cacheRead: 4500, cacheWrite: 0 }, { provider: "openai", model: "gpt-5.4" }),
+			20_000,
+		);
+		expect(tracker.cacheWarmth(20_000)).toEqual({
+			active: true,
+			ttlSec: 290,
+			remainingMs: 290_000,
+			expiresAtMs: 310_000,
+		});
+
+		// 4. Fresh tracker receiving a wire-absent cache touch falls back to default 290s TTL
+		const wireAbsentTracker = new CacheLensTracker();
+		wireAbsentTracker.recordMessageEnd(assistantMsg({ input: 100, cacheRead: 0, cacheWrite: 5000 }), 5_000);
+		expect(wireAbsentTracker.cacheWarmth(5_000)).toEqual({
+			active: true,
+			ttlSec: 290,
+			remainingMs: 290_000,
+			expiresAtMs: 295_000,
+		});
 	});
 });
 

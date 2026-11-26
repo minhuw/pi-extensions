@@ -72,6 +72,13 @@ export interface CacheAnomalyBadge {
 	severity: "warning" | "error";
 }
 
+export interface CacheWarmth {
+	active: boolean;
+	ttlSec: number;
+	remainingMs: number;
+	expiresAtMs: number;
+}
+
 export interface CacheLensReloadSnapshot {
 	calls: number;
 	sessionPromptTotal: number;
@@ -765,6 +772,22 @@ function findHistoryDivergence(prev: readonly string[], curr: readonly string[])
 	return null;
 }
 
+export function formatWarmthCountdown(remainingMs: number): string {
+	const clampedMs = Number.isFinite(remainingMs) ? Math.max(0, remainingMs) : 0;
+	const totalSec = Math.ceil(clampedMs / 1000);
+	if (totalSec < 60) {
+		return `${totalSec}s`;
+	}
+	if (totalSec < 3600) {
+		const m = Math.floor(totalSec / 60);
+		const s = totalSec % 60;
+		return `${m}m${String(s).padStart(2, "0")}s`;
+	}
+	const h = Math.floor(totalSec / 3600);
+	const m = Math.floor((totalSec % 3600) / 60);
+	return `${h}h${String(m).padStart(2, "0")}m`;
+}
+
 function fmtCompactTokens(n: number): string {
 	if (n < 1000) return `${n}`;
 	if (n < 10_000) return `${(n / 1000).toFixed(1)}k`;
@@ -1087,8 +1110,10 @@ export class CacheLensTracker {
 		);
 		if (cacheRead > 0 || cacheWrite > 0 || implicitCacheWrite) {
 			this.lastCacheTouchAtMs = nowMs;
-			if (currFp?.retentionTtlSec != null) {
-				this.lastCacheTouchTtlSec = currFp.retentionTtlSec;
+			if (currFp !== null) {
+				this.lastCacheTouchTtlSec = currFp.retentionTtlSec ?? DEFAULT_RETENTION_TTL_SEC;
+			} else {
+				this.lastCacheTouchTtlSec = this.lastCacheTouchTtlSec ?? DEFAULT_RETENTION_TTL_SEC;
 			}
 		}
 		this.compactedSinceLastCall = false;
@@ -1134,6 +1159,22 @@ export class CacheLensTracker {
 			hitPct: last.hitPct,
 			tag: last.tag,
 			severity: last.hitPct < 25 ? "error" : "warning",
+		};
+	}
+
+	cacheWarmth(nowMs = Date.now()): CacheWarmth | null {
+		if (this.lastCacheTouchAtMs === null || this.lastCacheTouchTtlSec === null) {
+			return null;
+		}
+		const ttlMs = this.lastCacheTouchTtlSec * 1000;
+		const elapsedMs = Math.max(0, nowMs - this.lastCacheTouchAtMs);
+		const expiresAtMs = this.lastCacheTouchAtMs + ttlMs;
+		const remainingMs = Math.max(0, ttlMs - elapsedMs);
+		return {
+			active: remainingMs > 0,
+			ttlSec: this.lastCacheTouchTtlSec,
+			remainingMs,
+			expiresAtMs,
 		};
 	}
 

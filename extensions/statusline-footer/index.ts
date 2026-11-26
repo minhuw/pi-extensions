@@ -10,17 +10,17 @@
  * Full mode picks a tier from the render width alone (FOOTER_TIERS), so the
  * row count never jitters while streaming. Detail rows share a rail that
  * closes at the last row.
- *   desk (>= 175): identity bar; optional activity; telemetry; workspace.
- *    ├ herder: T2 integrate · 3/5 tasks                  📣 rep #dev  ⇌ #ops · 3 in · 2 out
- *    ├ # 13  ⏱ 1h 28m  ❯  ⚙ 42  ❯  ⏱ 4.2s  » 28.9 tok/s     $0.75  $0.06/turn  ❮  ↑ 65k  ↓ 31k
- *    ╰ ⎇ main  +42 −17                        ▤ 5 touched  ❮  ⌂ ~/…/my-project
+ *   desk (>= 175): identity bar; optional attention/overflow activity; telemetry; workspace.
+ *    ├ herder: T2 verify blocked · 3/5 tasks                    rep #dev  ⇌ #ops · 3 in · 2 out
+ *    ├ # 13  ◷ 1h 28m  ❯  ⚙ 42  ❯  ⏱ 4.2s (3.8s)  » 28.9 tok/s (31)     $0.75  $0.06/turn  ❮  ↑ 65k  ↓ 31k  ⚡ 120k 65% +18k wr
+ *    ╰ ⎇ main wt  +42 −17 ●1 ?2  ❯  subagents: 2 running             ✎ 5 edited  ❮  ⌂ ~/…/my-project  ❮  #a1b2c3d4
  *   laptop: identity bar; optional activity; essentials.
- *    ╰ ⎇ main  +42 −17  ❯  $0.75  ❯  # 13  ⏱ 1h 28m      ⏱ 4.2s  » 28.9 tok/s  ❮  ⚡ 65%  ❮  ⌂ ~/…/my-project
+ *    ╰ ⎇ main  +42 −17  ❯  $0.75  ❯  # 13  ◷ 1h 28m      ⏱ 4.2s  » 28.9 tok/s  ❮  ⚡ 65%  ❮  ⌂ ~/…/my-project
  *   phone (<= 71): one plain-text row.
  *    opus-5-5 · HIGH · 42.5% · $0.75 · herder blocked
  *
  * Compact mode: the bar alone.
- *   ⊛ gpt-6.1-terra  ϟ  OFF  ∴  XHIGH       English  × 0×  ▉▉▉▉▉▉▉▉▉▉  42.5%  43k/100k  $1.23  12m
+ *   ⊛ gpt-6.1-terra  ϟ OFF  ∴ XHIGH        English  ━━━━╸───▕─  42.5%  43k/100k  $1.23  12m
  *
  * Usage:
  *   /footer                   toggle on/off
@@ -32,25 +32,35 @@
  */
 
 import { execFile } from "node:child_process";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { Usage } from "@earendil-works/pi-ai";
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	ReadonlyFooterDataProvider,
-	Theme,
+import {
+	CustomEditor,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type KeybindingsManager,
+	type ReadonlyFooterDataProvider,
+	type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type EditorTheme, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	CacheLensTracker,
+	formatWarmthCountdown,
 	parseCacheLensReloadSnapshot,
 	type CacheLensReloadSnapshot,
 } from "./cache-lens.ts";
+import { openCacheOverlay } from "./cache-overlay.ts";
 import { PROCESS_STATUS_KEY, watchProcesses } from "./processes.ts";
-
-type Mode = "full" | "compact" | "off";
+import {
+	compactionThresholdPct,
+	loadFooterMode,
+	saveFooterMode,
+	type FooterMode,
+} from "./settings.ts";
+import { summarizeSwarmBoard, watchSwarmBoard } from "./swarm-board.ts";
 
 const BAR_WIDTH = 18;
 const COMPACT_BAR_WIDTH = 10;
@@ -81,6 +91,14 @@ function fmtDuration(ms: number): string {
 	if (mins < 60) return `${mins}m`;
 	const h = Math.floor(mins / 60);
 	return `${h}h ${String(mins % 60).padStart(2, "0")}m`;
+}
+
+function fmtPhaseElapsed(ms: number): string {
+	const totalSec = Math.max(0, Math.floor(ms / 1000));
+	if (totalSec < 60) return `${totalSec}s`;
+	const m = Math.floor(totalSec / 60);
+	const s = totalSec % 60;
+	return `${m}m${String(s).padStart(2, "0")}s`;
 }
 
 function rgbFg(color: Rgb): string {
@@ -138,17 +156,57 @@ const FALLBACK_GRADIENT = {
 	unfilled: { r: 0x4e, g: 0x4c, b: 0x49 },
 };
 
-export function gradientBar(pct: number, width: number, theme?: Theme): string {
-	const filled = Math.round((Math.min(Math.max(pct, 0), 100) / 100) * width);
+export interface GradientBarOptions {
+	thresholdPct?: number;
+	surfaceRgb?: Rgb;
+}
+
+export function gradientBar(
+	pct: number,
+	width: number,
+	theme?: Theme,
+	options?: GradientBarOptions,
+): string {
+	const clamped = Math.min(Math.max(pct, 0), 100);
+	const exact = (clamped / 100) * width;
+	let full = Math.floor(exact);
+	const frac = exact - full;
+	let hasHalf = false;
+	if (frac >= 0.75) {
+		full += 1;
+	} else if (frac >= 0.25) {
+		hasHalf = true;
+	}
 	const start = (theme && resolveThemeRgb(theme, "success")) ?? FALLBACK_GRADIENT.start;
 	const mid = (theme && resolveThemeRgb(theme, "warning")) ?? FALLBACK_GRADIENT.mid;
 	const end = (theme && resolveThemeRgb(theme, "error")) ?? FALLBACK_GRADIENT.end;
 	const unfilled = (theme && resolveThemeRgb(theme, "dim")) ?? FALLBACK_GRADIENT.unfilled;
+	const surfaceRgb = options?.surfaceRgb;
+	const trackPrefix = surfaceRgb
+		? `${rgbBg(surfaceRgb)}${rgbFg(mix(surfaceRgb, chipInk(surfaceRgb), 0.28))}`
+		: rgbFg(unfilled);
+	const thresholdPct = options?.thresholdPct;
+	const notchIdx = thresholdPct != null && thresholdPct > 0 && thresholdPct < 100 && width >= 8
+		? Math.min(width - 1, Math.max(0, Math.round((thresholdPct / 100) * width) - 1))
+		: -1;
+	const nearThreshold = thresholdPct != null && clamped >= thresholdPct - 5;
+	const notchPrefix = nearThreshold
+		? rgbFg(mid)
+		: surfaceRgb
+			? `${rgbBg(surfaceRgb)}${rgbFg(mix(surfaceRgb, chipInk(surfaceRgb), 0.45))}`
+			: rgbFg((theme && resolveThemeRgb(theme, "muted")) ?? unfilled);
+
 	let bar = "";
 	for (let i = 0; i < width; i++) {
-		bar += i < filled
-			? rgbFg(positionColor(i, width, start, mid, end)) + "▉"
-			: rgbFg(unfilled) + "▉";
+		if (i === notchIdx) {
+			bar += `${notchPrefix}▕`;
+		} else if (i < full) {
+			bar += `${rgbFg(positionColor(i, width, start, mid, end))}━`;
+		} else if (hasHalf && i === full) {
+			bar += `${rgbFg(positionColor(i, width, start, mid, end))}╸`;
+		} else {
+			bar += `${trackPrefix}─`;
+		}
 	}
 	return `${bar}${RESET}`;
 }
@@ -184,13 +242,50 @@ export function formatPath(cwd: string, home = os.homedir()): string {
 	return `~/${cwd.slice(prefix.length).replaceAll("\\", "/")}`;
 }
 
-export function alignRow(left: string, right: string, width: number): string {
+export function formatWorkspacePath(
+	cwd: string,
+	home = os.homedir(),
+	env: NodeJS.ProcessEnv = process.env,
+	hostname = os.hostname(),
+): string {
+	const base = formatPath(cwd, home);
+	if (env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT) {
+		const host = hostname.trim().split(".")[0];
+		if (host) return `${host}:${base}`;
+	}
+	return base;
+}
+
+type BarCenter = string | { text: string; pill?: boolean; tint?: Rgb };
+
+export function alignRow(left: string, right: string, width: number, center?: BarCenter): string {
 	const inner = Math.max(0, width - 2);
 	if (!right) return truncateToWidth(` ${truncateToWidth(left, inner)}`, width);
 	const rightWidth = visibleWidth(right);
 	if (rightWidth >= inner) return truncateToWidth(` ${truncateToWidth(right, inner)} `, width);
 	const leftStr = truncateToWidth(left, Math.max(0, inner - rightWidth - 1));
 	const pad = Math.max(1, inner - visibleWidth(leftStr) - rightWidth);
+	const isPill = Boolean(center && typeof center !== "string" && center.pill);
+	const rawCenter = typeof center === "string" ? center : center?.text;
+	if (rawCenter && visibleWidth(rawCenter) > 0) {
+		let centerText: string | undefined;
+		if (isPill) {
+			if (visibleWidth(rawCenter) + 2 <= pad) centerText = rawCenter;
+		} else if (visibleWidth(rawCenter) + 4 <= pad) {
+			centerText = rawCenter;
+		} else if (pad >= 18) {
+			centerText = truncateToWidth(rawCenter, pad - 8, "…");
+		}
+		if (centerText) {
+			const cw = visibleWidth(centerText);
+			const minMargin = isPill ? 2 : 4;
+			if (cw > 0 && cw + minMargin <= pad) {
+				const leftPad = Math.floor((pad - cw) / 2);
+				const rightPad = pad - cw - leftPad;
+				return truncateToWidth(` ${leftStr}${" ".repeat(leftPad)}${centerText}${" ".repeat(rightPad)}${right} `, width);
+			}
+		}
+	}
 	return truncateToWidth(` ${leftStr}${" ".repeat(pad)}${right} `, width);
 }
 
@@ -209,13 +304,20 @@ function cluster(parts: Array<string | false | null | undefined>, sep: string): 
 interface Skin {
 	/** Columns the bar spends outside its content: margins, padding, caps, and the minimum gap. */
 	chrome: number;
-	bar(left: string, right: string, width: number): string;
+	/** Resolved RGB of a truecolor band surface, if the skin draws one. */
+	surfaceRgb?: Rgb;
+	bar(left: string, right: string, width: number, center?: BarCenter): string;
 	/** A chip that opens the bar's left group, if the skin draws chips. */
 	chip?(text: string, color: Rgb): string;
 }
 
 const BAND_TOKEN = "toolPendingBg";
-const POWERLINE = { left: "\u{E0B0}", right: "\u{E0B2}", thinLeft: "\u{E0B1}", thinRight: "\u{E0B3}" };
+const POWERLINE = {
+	left: "\u{E0B0}",
+	right: "\u{E0B2}",
+	roundLeft: "\u{E0B6}",
+	roundRight: "\u{E0B4}",
+};
 
 function luminance({ r, g, b }: Rgb): number {
 	const channel = (value: number) => {
@@ -281,48 +383,105 @@ function backgroundRgb(open: string): Rgb | null {
 
 const FLAT_SKIN: Skin = { chrome: 3, bar: alignRow };
 
+/** Soft state-colored pill background mixed into the band's surface so dark and light themes stay cohesive. */
+export function pillTintSurface(surfaceRgb: Rgb, tint: Rgb): Rgb {
+	const weight = luminance(surfaceRgb) > 0.4 ? 0.14 : 0.19;
+	return mix(surfaceRgb, tint, weight);
+}
+
 /** The powerline skin on `surface`, a theme background's opening sequence, with `rule` the rule token's sequences. */
 function powerlineSkin(surface: string, [ruleOpen, ruleClose]: [string, string], nerd: boolean): Skin {
 	const capInk = surface.replace("\x1b[48;", "\x1b[38;");
 	const surfaceRgb = backgroundRgb(surface);
 	const lifted = new Map<string, string[]>();
 	// Theme colors are chosen for the terminal background; lift truecolor text that would fade into the band.
-	const lift = (color: string[]): string[] => {
-		if (!surfaceRgb || color[1] !== "2") return color;
-		const key = color.join(";");
+	const lift = (color: string[], targetRgb: Rgb | null = surfaceRgb): string[] => {
+		if (!targetRgb || color[1] !== "2") return color;
+		const key = `${targetRgb.r},${targetRgb.g},${targetRgb.b}|${color.join(";")}`;
 		let legible = lifted.get(key);
 		if (!legible) {
-			const { r, g, b } = legibleOn({ r: Number(color[2]), g: Number(color[3]), b: Number(color[4]) }, surfaceRgb);
+			const { r, g, b } = legibleOn({ r: Number(color[2]), g: Number(color[3]), b: Number(color[4]) }, targetRgb);
 			legible = ["38", "2", `${r}`, `${g}`, `${b}`];
 			lifted.set(key, legible);
 		}
 		return legible;
 	};
 	// Rewrites one SGR sequence for the band: a reset or default background reopens the surface,
-	// faint is dropped because it would fade into the band, and foregrounds are lifted.
-	const reband = (params: string): string => {
+	// faint is dropped because it would fade into the band, and foregrounds are lifted unless
+	// the caller explicitly paired them with a background (intentional contrast calibration).
+	const reband = (
+		params: string,
+		inheritedExplicitBg = false,
+		targetSurface = surface,
+		targetRgb: Rgb | null = surfaceRgb,
+	): { out: string; explicitBg: boolean } => {
 		const codes = params === "" ? ["0"] : params.split(";");
+		let hasExplicitBg = inheritedExplicitBg;
+		for (let i = 0; i < codes.length; i++) {
+			const code = codes[i] || "0";
+			if (code === "48" && (codes[i + 1] === "2" || codes[i + 1] === "5")) {
+				hasExplicitBg = true;
+				i += codes[i + 1] === "2" ? 4 : 2;
+			} else if (code === "38" && (codes[i + 1] === "2" || codes[i + 1] === "5")) {
+				i += codes[i + 1] === "2" ? 4 : 2;
+			} else if (code === "0" || code === "49") {
+				hasExplicitBg = false;
+			}
+		}
 		const kept: string[] = [];
 		let reopen = false;
+		let explicitBg = inheritedExplicitBg;
 		for (let i = 0; i < codes.length; i++) {
 			const code = codes[i] || "0";
 			if ((code === "38" || code === "48") && (codes[i + 1] === "2" || codes[i + 1] === "5")) {
 				const color = codes.slice(i, i + (codes[i + 1] === "2" ? 5 : 3));
 				i += color.length - 1;
-				if (code === "48") reopen = false;
-				kept.push(...(code === "38" ? lift(color) : color));
+				if (code === "48") {
+					reopen = false;
+					explicitBg = true;
+					kept.push(...color);
+				} else {
+					kept.push(...(hasExplicitBg ? color : lift(color, targetRgb)));
+				}
 				continue;
 			}
-			if (code === "0" || code === "49") reopen = true;
+			if (code === "0" || code === "49") {
+				reopen = true;
+				explicitBg = false;
+			}
 			if (code === "2" || code === "49") continue;
 			kept.push(code);
 		}
-		return `${kept.length ? `\x1b[${kept.join(";")}m` : ""}${reopen ? surface : ""}`;
+		return {
+			out: `${kept.length ? `\x1b[${kept.join(";")}m` : ""}${reopen ? targetSurface : ""}`,
+			explicitBg,
+		};
 	};
 	// Padding on both sides of the content, plus the cap.
 	const side = nerd ? 3 : 2;
 	const chipEnd = `${surface}\x1b[39m`;
 	const closeChip = (color: Rgb) => `\x1b[22m${nerd ? `${surface}${rgbFg(color)}${POWERLINE.left}` : ""}${chipEnd}`;
+	const rebandBody = (content: string, targetSurface = surface, targetRgb: Rgb | null = surfaceRgb): string =>
+		content.replace(/(?:\x1b\[[0-9;]*m)+/g, (run) => {
+			let explicitBg = false;
+			let out = "";
+			for (const match of run.matchAll(/\x1b\[([0-9;]*)m/g)) {
+				const step = reband(match[1] ?? "", explicitBg, targetSurface, targetRgb);
+				out += step.out;
+				explicitBg = step.explicitBg;
+			}
+			return out;
+		});
+	const truecolorSurface = surface.startsWith("\x1b[48;2;");
+	const pill = (content: string, tint?: Rgb): string => {
+		const tintedRgb = tint && truecolorSurface && surfaceRgb ? pillTintSurface(surfaceRgb, tint) : undefined;
+		const pillSurface = tintedRgb ? rgbBg(tintedRgb) : surface;
+		const pillCapInk = tintedRgb ? rgbFg(tintedRgb) : capInk;
+		const fill = `${pillSurface} ${rebandBody(content, pillSurface, tintedRgb ?? surfaceRgb)}${pillSurface} ${RESET}`;
+		return nerd
+			? `${pillCapInk}${POWERLINE.roundLeft}${RESET}${fill}${pillCapInk}${POWERLINE.roundRight}${RESET}`
+			: fill;
+	};
 	const band = (content: string, end: "left" | "right"): string => {
 		// A group can open with a chip, which sets its own colors and needs no padding.
 		let chip = "";
@@ -342,7 +501,7 @@ function powerlineSkin(surface: string, [ruleOpen, ruleClose]: [string, string],
 				rest = "";
 			}
 		}
-		const body = rest.replace(/\x1b\[([0-9;]*)m/g, (_, params: string) => reband(params));
+		const body = rebandBody(rest);
 		const fill = `${chip || `${surface} `}${body}${surface} ${RESET}`;
 		if (!nerd) return fill;
 		return end === "left"
@@ -351,7 +510,8 @@ function powerlineSkin(surface: string, [ruleOpen, ruleClose]: [string, string],
 	};
 	return {
 		chrome: 2 * side + 1,
-		bar(left, right, width) {
+		...(truecolorSurface && surfaceRgb && { surfaceRgb }),
+		bar(left, right, width, center) {
 			if (!right) return truncateToWidth(band(truncateToWidth(left, Math.max(0, width - side)), "left"), width);
 			const rightWidth = visibleWidth(right);
 			if (rightWidth + side >= width) {
@@ -360,12 +520,44 @@ function powerlineSkin(surface: string, [ruleOpen, ruleClose]: [string, string],
 			const leftStr = truncateToWidth(left, Math.max(0, width - rightWidth - 2 * side - 1));
 			const leftBand = visibleWidth(leftStr) > 0 ? band(leftStr, "left") : "";
 			const gap = Math.max(1, width - visibleWidth(leftBand) - rightWidth - side);
-			// A rule across the gap joins the two bands into one bar.
-			const fill = gap >= 3 ? ` ${ruleOpen}${"─".repeat(gap - 2)}${ruleClose || RESET} ` : " ".repeat(gap);
+			// A rule across the gap joins the two bands into one bar; live status floats in a rounded pill
+			// tinted lightly by phase so waiting, thinking, writing, and tool calls read at a glance.
+			const close = ruleClose || RESET;
+			const plainRule = () => (gap >= 3 ? ` ${ruleOpen}${"─".repeat(gap - 2)}${close} ` : " ".repeat(gap));
+			let fill: string;
+			if (center && typeof center !== "string" && center.pill && visibleWidth(center.text) > 0) {
+				const rendered = pill(center.text, center.tint);
+				const pw = visibleWidth(rendered);
+				if (gap >= pw + 6) {
+					const totalRule = gap - pw - 4;
+					const leftRule = Math.floor(totalRule / 2);
+					const rightRule = totalRule - leftRule;
+					fill = ` ${ruleOpen}${"─".repeat(leftRule)}${close} ${rendered} ${ruleOpen}${"─".repeat(rightRule)}${close} `;
+				} else if (gap >= pw + 2) {
+					const leftPad = Math.floor((gap - pw) / 2);
+					const rightPad = gap - pw - leftPad;
+					fill = `${" ".repeat(leftPad)}${rendered}${" ".repeat(rightPad)}`;
+				} else {
+					fill = plainRule();
+				}
+			} else {
+				const rawCenter = typeof center === "string" ? center : center?.text;
+				if (rawCenter && visibleWidth(rawCenter) > 0 && gap >= 18) {
+					const maxCenter = gap - 8;
+					const centerText = truncateToWidth(rawCenter, maxCenter, "…");
+					const centerWidth = visibleWidth(centerText);
+					const totalRule = gap - centerWidth - 4;
+					const leftRule = Math.floor(totalRule / 2);
+					const rightRule = totalRule - leftRule;
+					fill = ` ${ruleOpen}${"─".repeat(leftRule)}${close} ${centerText} ${ruleOpen}${"─".repeat(rightRule)}${close} `;
+				} else {
+					fill = plainRule();
+				}
+			}
 			return truncateToWidth(`${leftBand}${fill}${band(right, "right")}`, width);
 		},
 		// Vendor colors need truecolor; a 256-color bar draws the model as plain text on the band.
-		...(surface.startsWith("\x1b[48;2;") && {
+		...(truecolorSurface && {
 			chip(text: string, color: Rgb) {
 				return `${rgbBg(color)}${rgbFg(chipInk(color))}\x1b[1m ${text} ${closeChip(color)}`;
 			},
@@ -425,9 +617,9 @@ const STATUS_DESCRIPTORS: Record<string, StatusDescriptor> = {
 	subagents: { placement: "activity", colorSlot: 4, icon: "\u{F06A9}" },
 	language: { placement: "language", colorSlot: 6, icon: "\u{F05CA}" },
 	spokesman: { placement: "spokesman", colorSlot: 7, icon: "\u{F05CB}" },
-	swarm: { placement: "mode", colorSlot: 8 },
-	selfdrive: { placement: "mode", colorSlot: 10 },
-	representative: { placement: "representative", colorSlot: 11 },
+	swarm: { placement: "mode", colorSlot: 8, icon: "\u{F024B}" },
+	selfdrive: { placement: "mode", colorSlot: 10, icon: "\u{F046E}" },
+	representative: { placement: "representative", colorSlot: 11, icon: "\u{F01A1}" },
 	"relay-rooms": { placement: "rooms" },
 };
 
@@ -518,14 +710,23 @@ export function statusHue(theme: Theme, key: string): ThemeToken {
 	return palette[slot % palette.length]!;
 }
 
+const STRIP_LEADING_EMOJI_KEYS = new Set(["swarm", "selfdrive", "representative"]);
+const LEADING_COLOR_EMOJI = /^(?:🐝|🚗|📣)\s+/u;
+
+function normalizeStatusText(key: string, text: string): string {
+	if (text.includes("\x1b[") || !STRIP_LEADING_EMOJI_KEYS.has(key)) return text;
+	return text.replace(LEADING_COLOR_EMOJI, "");
+}
+
 export function renderStatus(theme: Theme, text: string, key = "", withIcon = false): string {
 	if (text.includes("\x1b[")) return text;
+	const clean = normalizeStatusText(key, text);
 	const identity = statusHue(theme, key);
 	// A status that leads with its own symbol needs no second icon.
-	const icon = withIcon && /^[\p{L}\p{N}]/u.test(text)
+	const icon = withIcon && /^[\p{L}\p{N}]/u.test(clean)
 		? `${theme.fg(identity, STATUS_DESCRIPTORS[key]?.icon ?? STATUS_DEFAULT_ICON)} `
 		: "";
-	return icon + text.split(/( · |, )/).map((part, index) => {
+	return icon + clean.split(/( · |, )/).map((part, index) => {
 		if (index % 2) return theme.fg("dim", part);
 		const tone = statusTone(part);
 		if (tone === "problem") return theme.fg("warning", theme.bold(part));
@@ -546,9 +747,16 @@ function renderSpokesman(theme: Theme, statuses: ReadonlyMap<string, string>): s
 	return spokesman ? renderStatus(theme, spokesman, "spokesman", hasNerdFonts()) : undefined;
 }
 
-/** Session modes for the bar; each status leads with its own symbol. */
-function renderModes(theme: Theme, statuses: ReadonlyMap<string, string>): string | undefined {
-	return cluster(statusKeys("mode").map((key) => statuses.get(key) && renderStatus(theme, statuses.get(key)!, key)), "  ") || undefined;
+/** Session modes for the bar, using monochrome Nerd Font icons when available. */
+function renderModes(theme: Theme, statuses: ReadonlyMap<string, string>, sessionId?: string): string | undefined {
+	return cluster(statusKeys("mode").map((key) => {
+		const raw = statuses.get(key);
+		if (!raw) return undefined;
+		const text = key === "swarm" && sessionId && !raw.includes("\x1b[")
+			? (summarizeSwarmBoard(sessionId)?.text ?? raw)
+			: raw;
+		return renderStatus(theme, text, key, hasNerdFonts());
+	}), "  ") || undefined;
 }
 
 // ── model marks ─────────────────────────────────────────────────────
@@ -599,6 +807,7 @@ interface Stats {
 	input: number;
 	output: number;
 	cost: number;
+	subagentCost: number;
 	priceUnavailable: boolean;
 	priceEstimated: boolean;
 	magpieFastEnabled: boolean;
@@ -653,6 +862,11 @@ interface StatsCache {
 	stats: Stats;
 }
 
+type LivePhase = "idle" | "waiting" | "thinking" | "streaming" | "tool";
+
+const MUTATING_TOOLS = new Set(["edit", "write", "bash"]);
+const EDIT_TOOLS = new Set(["edit", "write"]);
+
 interface SessionState {
 	statsCache?: StatsCache;
 	metrics: StreamMetrics;
@@ -661,6 +875,12 @@ interface SessionState {
 	gitStatAt: number;
 	gitStatCwd: string;
 	serviceTier?: string;
+	livePhase: LivePhase;
+	phaseStartedAt: number;
+	activeToolName?: string;
+	activeToolCallId?: string;
+	lastContextTokens?: number;
+	lastContextDelta?: number;
 	requestRender?: () => void;
 }
 
@@ -677,6 +897,7 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 		input: 0,
 		output: 0,
 		cost: 0,
+		subagentCost: 0,
 		priceUnavailable: false,
 		priceEstimated: false,
 		magpieFastEnabled: false,
@@ -755,10 +976,16 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 				if (block.type !== "toolCall") continue;
 				s.toolCalls++;
 				const args = block.arguments as Record<string, unknown>;
-				if (typeof args.path === "string") files.add(args.path);
+				if (typeof block.name === "string" && EDIT_TOOLS.has(block.name.toLowerCase()) && typeof args.path === "string") {
+					files.add(args.path);
+				}
 			}
 		} else if (m.role === "toolResult") {
 			addUsage(s, m.usage);
+			const toolCost = m.usage?.cost?.total;
+			if (typeof toolCost === "number" && Number.isFinite(toolCost) && toolCost > 0) {
+				s.subagentCost += toolCost;
+			}
 			if (m.isError) s.errors++;
 			if (MEMORY_TOOLS.has(m.toolName)) {
 				let chars = 0;
@@ -852,8 +1079,26 @@ interface GitStat {
 	status: "pending" | "clean" | "dirty" | "unavailable";
 	adds?: number;
 	dels?: number;
+	staged: number;
+	unstaged: number;
+	untracked: number;
+	conflicts: number;
+	worktree: boolean;
 	ahead: number;
 	behind: number;
+}
+
+function pendingGitStat(): GitStat {
+	return {
+		status: "pending",
+		staged: 0,
+		unstaged: 0,
+		untracked: 0,
+		conflicts: 0,
+		worktree: false,
+		ahead: 0,
+		behind: 0,
+	};
 }
 
 // Keep telemetry keyed by session so child lifecycle and stream events cannot
@@ -863,13 +1108,17 @@ const sessionStates = new Map<string, SessionState>();
 const RELOAD_ENTRY = "statusline-footer:reload";
 type ReloadSnapshot = Pick<SessionState, "metrics" | "serviceTier"> & {
 	cacheLens?: CacheLensReloadSnapshot;
+	mode?: FooterMode;
 };
 
 function restoreSnapshot(data: unknown): ReloadSnapshot | undefined {
 	if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
-	const { metrics, serviceTier, cacheLens } = data as Record<string, unknown>;
+	const { metrics, serviceTier, cacheLens, mode: savedMode } = data as Record<string, unknown>;
 	if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) return undefined;
 	if (serviceTier !== undefined && typeof serviceTier !== "string") return undefined;
+	if (savedMode !== undefined && savedMode !== "full" && savedMode !== "compact" && savedMode !== "off") {
+		return undefined;
+	}
 
 	let parsedCacheLens: CacheLensReloadSnapshot | undefined;
 	if (cacheLens !== undefined) {
@@ -888,7 +1137,7 @@ function restoreSnapshot(data: unknown): ReloadSnapshot | undefined {
 	restored.requestSentAt = 0;
 	restored.firstTokenAt = 0;
 	restored.curTtftMs = null;
-	return { metrics: restored, serviceTier, cacheLens: parsedCacheLens };
+	return { metrics: restored, serviceTier, cacheLens: parsedCacheLens, mode: savedMode };
 }
 
 function freshSessionState(previous?: ReloadSnapshot): SessionState {
@@ -897,10 +1146,12 @@ function freshSessionState(previous?: ReloadSnapshot): SessionState {
 	return {
 		metrics: previous?.metrics ?? freshMetrics(),
 		cacheLens,
-		gitStat: { status: "pending", ahead: 0, behind: 0 },
+		gitStat: pendingGitStat(),
 		gitStatAt: 0,
 		gitStatCwd: "",
 		serviceTier: previous?.serviceTier,
+		livePhase: "idle",
+		phaseStartedAt: 0,
 	};
 }
 
@@ -917,8 +1168,60 @@ export function parseGitShortstat(stdout: string): Pick<GitStat, "adds" | "dels"
 	};
 }
 
+export function parseGitPorcelain(stdout: string): {
+	status: "clean" | "dirty";
+	staged: number;
+	unstaged: number;
+	untracked: number;
+	conflicts: number;
+} {
+	const lines = stdout.split(/\r?\n/).filter(line => line.length > 0);
+	if (lines.length === 0) {
+		return { status: "clean", staged: 0, unstaged: 0, untracked: 0, conflicts: 0 };
+	}
+	let staged = 0;
+	let unstaged = 0;
+	let untracked = 0;
+	let conflicts = 0;
+	for (const line of lines) {
+		if (line.length < 2) continue;
+		const x = line[0]!;
+		const y = line[1]!;
+		const xy = x + y;
+		if (xy === "??") {
+			untracked++;
+		} else if (xy === "DD" || xy === "AU" || xy === "UD" || xy === "UA" || xy === "DU" || xy === "AA" || xy === "UU") {
+			conflicts++;
+		} else {
+			if (x !== " " && x !== "?" && x !== "!") staged++;
+			if (y !== " " && y !== "?" && y !== "!") unstaged++;
+		}
+	}
+	return { status: "dirty", staged, unstaged, untracked, conflicts };
+}
+
 export function parseGitStatus(stdout: string): "clean" | "dirty" {
-	return stdout.length === 0 ? "clean" : "dirty";
+	return parseGitPorcelain(stdout).status;
+}
+
+export function detectLinkedWorktree(cwd: string): boolean {
+	let dir = path.resolve(cwd);
+	while (true) {
+		const dotGit = path.join(dir, ".git");
+		try {
+			const stat = fs.statSync(dotGit);
+			if (stat.isDirectory()) return false;
+			if (stat.isFile()) {
+				const content = fs.readFileSync(dotGit, "utf8");
+				return /^gitdir:\s*.*[\\/]worktrees[\\/]/i.test(content.trim());
+			}
+		} catch {
+			// Not present here; keep walking upward.
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) return false;
+		dir = parent;
+	}
 }
 
 /** `git rev-list --left-right --count @{upstream}...HEAD` → behind then ahead. */
@@ -954,10 +1257,11 @@ function refreshGitStat(cwd: string, state: SessionState) {
 	if (state.gitStatCwd === cwd && now - state.gitStatAt < 15_000) return;
 	state.gitStatAt = now;
 	// The last value for this cwd stays painted until the new one arrives.
-	if (state.gitStatCwd !== cwd) state.gitStat = { status: "pending", ahead: 0, behind: 0 };
+	if (state.gitStatCwd !== cwd) state.gitStat = pendingGitStat();
 	state.gitStatCwd = cwd;
 	const opts = { cwd, timeout: 5000 };
-	let status: GitStat["status"] | undefined;
+	const worktree = detectLinkedWorktree(cwd);
+	let porcelain: ReturnType<typeof parseGitPorcelain> | undefined;
 	let shortstat: Pick<GitStat, "adds" | "dels"> | undefined;
 	let aheadBehind = { ahead: 0, behind: 0 };
 	let pending = 3;
@@ -965,14 +1269,19 @@ function refreshGitStat(cwd: string, state: SessionState) {
 		pending -= 1;
 		if (pending > 0) return;
 		state.gitStat = {
-			status: status ?? "unavailable",
+			status: porcelain ? porcelain.status : "unavailable",
+			staged: porcelain?.staged ?? 0,
+			unstaged: porcelain?.unstaged ?? 0,
+			untracked: porcelain?.untracked ?? 0,
+			conflicts: porcelain?.conflicts ?? 0,
+			worktree,
 			...(shortstat ?? {}),
 			...aheadBehind,
 		};
 		state.requestRender?.();
 	};
 	execFile("git", ["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=normal"], opts, (err, stdout) => {
-		status = err ? "unavailable" : parseGitStatus(stdout);
+		porcelain = err ? undefined : parseGitPorcelain(stdout);
 		finish();
 	});
 	execFile("git", ["diff", "--shortstat", "HEAD"], opts, (err, stdout) => {
@@ -1009,6 +1318,7 @@ type IconSet = {
 	branch: string;
 	relay: string;
 	file: string;
+	edit: string;
 	cwd: string;
 };
 
@@ -1023,7 +1333,7 @@ const NERD_ICONS: IconSet = {
 	cache: "\u{F140B}", // md-lightning-bolt
 	cost: "\u{F01C1}", // md-currency-usd
 	ttft: "\u{F051B}", // md-timer-outline
-	ttfb: "\u{F04E1}", // md-swap-horizontal
+	ttfb: "\u{F048D}", // md-server-network
 	speed: "\u{F04C5}", // md-speedometer
 	last: "\u{F02DA}", // md-history
 	calls: "\u{F05B7}", // md-wrench
@@ -1032,6 +1342,7 @@ const NERD_ICONS: IconSet = {
 	branch: "\u{F062C}", // md-source-branch
 	relay: "\u{F028C}", // md-forum
 	file: "\u{F0224}", // md-file-outline
+	edit: "\u{F03EB}", // md-pencil
 	cwd: "\u{F0770}", // md-folder-open
 };
 
@@ -1039,7 +1350,7 @@ const ASCII_ICONS: IconSet = {
 	thinking: "∴",
 	tier: "ϟ",
 	compact: "×",
-	elapsed: "⏱",
+	elapsed: "◷",
 	turns: "#",
 	input: "↑",
 	output: "↓",
@@ -1055,6 +1366,7 @@ const ASCII_ICONS: IconSet = {
 	branch: "⎇",
 	relay: "⇌",
 	file: "▤",
+	edit: "✎",
 	cwd: "⌂",
 };
 
@@ -1080,7 +1392,11 @@ export function renderThinking(theme: Theme, level: string): string {
 	const text = thinkingCaps(level);
 	if (level === "max") return rainbow(text);
 	if (level === "xhigh") return theme.fg("text", text);
-	if (level === "high") return hexFg("#afb9fe", text);
+	if (level === "high") {
+		return resolveThemeRgb(theme, "thinkingHigh")
+			? theme.fg("thinkingHigh", text)
+			: theme.fg("accent", text);
+	}
 	if (level === "medium") return theme.fg("success", text);
 	if (level === "low") return theme.fg("warning", text);
 	if (level === "off") return theme.fg("dim", text);
@@ -1118,12 +1434,13 @@ function renderModelLabel(
 	theme: Theme,
 	skin: Skin,
 	tier?: TierLabel,
+	suppressLiveBadge = false,
 ): string {
 	const model = ctx.model;
-	const live = !ctx.isIdle();
-	const queuedMark = ctx.hasPendingMessages() && theme.fg("warning", "queued");
+	const live = !suppressLiveBadge && !ctx.isIdle();
+	const queuedMark = !suppressLiveBadge && ctx.hasPendingMessages() && theme.fg("warning", "queued");
 	const tierMark = tier && cluster([
-		theme.fg(tier.active ? "warning" : "dim", theme.bold(`${icons().tier}  ${tier.text}`)),
+		theme.fg(tier.active ? "warning" : "dim", theme.bold(`${icons().tier} ${tier.text}`)),
 		tier.observed && theme.fg("warning", theme.bold(`last ${tier.observed}`)),
 	], "  ");
 	const brand = model && modelBrand(model.id, model.provider);
@@ -1144,6 +1461,240 @@ function renderModelLabel(
 	return cluster([liveMark, queuedMark, name, tierMark], "  ");
 }
 
+const WAIT_FRAMES = ["◌", "◔", "◑", "◕"] as const;
+const THINK_FRAMES = ["✧", "✦", "✶", "✦"] as const;
+
+function toolPhaseIcon(toolName: string): string {
+	const name = toolName.toLowerCase();
+	const nerd = hasNerdFonts();
+	if (name === "bash" || name.includes("shell") || name.includes("exec")) return nerd ? "\u{F018D}" : "❯";
+	if (name === "read" || name.endsWith("_read")) return icons().file;
+	if (name === "edit" || name === "write") return "✎";
+	if (name.includes("grep") || name.includes("find") || name.includes("search")) return "⌕";
+	if (name === "agent" || name.includes("subagent")) return nerd ? "\u{F06A9}" : "◈";
+	if (name.includes("browser") || name.includes("desktop") || name.includes("fetch")) return "◎";
+	return icons().calls;
+}
+
+function renderLivePhase(ctx: ExtensionContext, theme: Theme, state: SessionState): { text: string; tint?: Rgb } {
+	const tintFor = (token: ThemeToken): Rgb | undefined => resolveThemeRgb(theme, token) ?? undefined;
+	if (ctx.isIdle()) {
+		if (ctx.hasPendingMessages()) {
+			return {
+				text: `${glyph(theme, "◔", "warning")} ${theme.fg("warning", "queued")}`,
+				tint: tintFor("warning"),
+			};
+		}
+		return { text: `${glyph(theme, "◦", "success")} ${theme.fg("muted", "ready")}` };
+	}
+	const elapsedMs = state.phaseStartedAt > 0 ? Math.max(0, Date.now() - state.phaseStartedAt) : 0;
+	const tick = Math.floor(elapsedMs / 1_000);
+	const elapsed = elapsedMs >= 1_000 ? ` ${theme.fg("muted", fmtPhaseElapsed(elapsedMs))}` : "";
+	const queuedSuffix = ctx.hasPendingMessages()
+		? `${theme.fg("dim", " · ")}${theme.fg("warning", "queued")}`
+		: "";
+	switch (state.livePhase) {
+		case "waiting": {
+			const icon = WAIT_FRAMES[tick % WAIT_FRAMES.length]!;
+			return {
+				text: `${glyph(theme, icon, "warning")} ${theme.fg("warning", "waiting")}${elapsed}${queuedSuffix}`,
+				tint: tintFor("warning"),
+			};
+		}
+		case "thinking": {
+			const icon = THINK_FRAMES[tick % THINK_FRAMES.length]!;
+			const tone: ThemeToken = resolveThemeRgb(theme, "thinkingHigh") ? "thinkingHigh" : "accent";
+			return {
+				text: `${glyph(theme, icon, tone)} ${theme.fg(tone, "thinking")}${elapsed}${queuedSuffix}`,
+				tint: tintFor(tone),
+			};
+		}
+		case "streaming":
+			return {
+				text: `${glyph(theme, "✎", "success")} ${theme.fg("success", "writing")}${elapsed}${queuedSuffix}`,
+				tint: tintFor("success"),
+			};
+		case "tool": {
+			const rawName = state.activeToolName ?? "tool";
+			const toolName = truncateToWidth(rawName, 14, "…");
+			// Use sky-blue (syntaxVariable / mdLink) so tools stay distinct from amber waiting.
+			const tone: ThemeToken = resolveThemeRgb(theme, "syntaxVariable")
+				? "syntaxVariable"
+				: resolveThemeRgb(theme, "mdLink")
+					? "mdLink"
+					: "syntaxFunction";
+			return {
+				text: `${glyph(theme, toolPhaseIcon(rawName), tone)} ${theme.fg(tone, toolName)}${elapsed}${queuedSuffix}`,
+				tint: tintFor(tone),
+			};
+		}
+		case "idle": {
+			const icon = WAIT_FRAMES[tick % WAIT_FRAMES.length]!;
+			const tone: ThemeToken = resolveThemeRgb(theme, "mdLink") ? "mdLink" : "accent";
+			return {
+				text: `${glyph(theme, icon, tone)} ${theme.fg(tone, "working")}${elapsed}${queuedSuffix}`,
+				tint: tintFor(tone),
+			};
+		}
+	}
+}
+
+/**
+ * Embeds the session title on the right end of an editor's top border line,
+ * mirroring how Pi embeds "Working..." on the top-left border (`── title ──`).
+ */
+export function embedRightBorderTitle(
+	base: string,
+	width: number,
+	rawTitle: string | undefined,
+	borderColor: (text: string) => string,
+	titleColor: (text: string) => string = borderColor,
+): string {
+	if (!rawTitle || width <= 0) return base;
+	const title = rawTitle.replace(/\s+/g, " ").trim();
+	if (!title) return base;
+	const plain = stripAnsi(base);
+	const baseWidth = visibleWidth(base);
+	let trailingDashes = 0;
+	for (let i = plain.length - 1; i >= 0 && plain[i] === "─"; i--) trailingDashes++;
+	// Keep at least 2 dashes between any left/center border label and " <title> ──".
+	const available = trailingDashes - 6;
+	if (available < 4) return base;
+	const maxTitle = Math.min(available, Math.max(12, Math.floor(width * 0.45)));
+	const fitted = truncateToWidth(title, maxTitle, "…");
+	const fittedWidth = visibleWidth(fitted);
+	if (fittedWidth === 0 || fittedWidth + 6 > trailingDashes || baseWidth < fittedWidth + 4) return base;
+	const prefix = truncateToWidth(base, baseWidth - (fittedWidth + 4), "");
+	return `${prefix}${borderColor(" ")}${titleColor(fitted)}${borderColor(" ──")}`;
+}
+
+export function isGenericWorkingStatus(rendered: string): boolean {
+	const text = stripAnsi(rendered).trim().replace(/^[^\p{L}\p{N}]+\s*/u, "");
+	return /^working(?:\.{3}|…)?(?:\s*\([^)]*\))?$/i.test(text);
+}
+
+const EDITOR_BOTTOM_SENTINEL = "\u0000statusline-footer:editor-bottom\u0000";
+
+class TitledEditor extends CustomEditor {
+	private readonly getTitle: () => string | undefined;
+	private readonly getTheme: () => Theme | undefined;
+	private activeIndicator: Parameters<CustomEditor["setWorkingStatusIndicator"]>[0];
+	private inRender = false;
+
+	constructor(
+		tui: TUI,
+		editorTheme: EditorTheme,
+		keybindings: KeybindingsManager,
+		getTitle: () => string | undefined,
+		getTheme: () => Theme | undefined,
+	) {
+		super(tui, editorTheme, keybindings, { embedWorkingStatus: true });
+		this.getTitle = getTitle;
+		this.getTheme = getTheme;
+	}
+
+	override setWorkingStatusIndicator(indicator: Parameters<CustomEditor["setWorkingStatusIndicator"]>[0]): void {
+		this.activeIndicator = indicator;
+		super.setWorkingStatusIndicator(indicator);
+	}
+
+	private shouldSuppressIndicator(width: number): boolean {
+		const indicator = this.activeIndicator;
+		if (!indicator) return false;
+		// Hide Pi's generic "Working" indicator (covered by the footer's centered state pill),
+		// while keeping compaction, retry, branch summary, and custom setWorkingMessage() notices visible.
+		const meta = indicator as unknown as { kind?: unknown; message?: unknown };
+		if (meta.kind !== undefined && meta.kind !== "working") return false;
+		if (typeof meta.message === "string") return isGenericWorkingStatus(meta.message);
+		return isGenericWorkingStatus(indicator.renderInBorder(Math.max(64, width)));
+	}
+
+	private isBashMode(theme: Theme | undefined): boolean {
+		if (!theme || typeof theme.fg !== "function") return false;
+		const bashSample = theme.fg("bashMode", "─");
+		const mutedSample = theme.fg("borderMuted", "─");
+		return bashSample !== mutedSample && this.borderColor("─") === bashSample;
+	}
+
+	private ruleColor(theme: Theme | undefined): (text: string) => string {
+		if (!theme || typeof theme.fg !== "function" || this.isBashMode(theme)) {
+			const current = this.borderColor;
+			return (text) => current(text);
+		}
+		return (text) => theme.fg("borderMuted", text);
+	}
+
+	private titleColor(theme: Theme | undefined): (text: string) => string {
+		if (!theme || typeof theme.fg !== "function") {
+			const current = this.borderColor;
+			return (text) => current(text);
+		}
+		return (text) => theme.fg("muted", text);
+	}
+
+	private withRuleColor<T>(rule: (text: string) => string, fn: () => T): T {
+		const saved = this.borderColor;
+		this.borderColor = rule;
+		try {
+			return fn();
+		} finally {
+			this.borderColor = saved;
+		}
+	}
+
+	protected override renderTopBorder(width: number, hiddenLineCount: number): string {
+		const theme = this.getTheme();
+		const rule = this.ruleColor(theme);
+		const title = this.titleColor(theme);
+		const suppress = this.shouldSuppressIndicator(width);
+		const base = this.withRuleColor(rule, () => {
+			if (!suppress) return super.renderTopBorder(width, hiddenLineCount);
+			super.setWorkingStatusIndicator(undefined);
+			try {
+				return super.renderTopBorder(width, hiddenLineCount);
+			} finally {
+				super.setWorkingStatusIndicator(this.activeIndicator);
+			}
+		});
+		return embedRightBorderTitle(base, width, this.getTitle(), rule, title);
+	}
+
+	protected override renderBottomBorder(width: number, hiddenLineCount: number): string {
+		if (this.inRender && hiddenLineCount === 0 && footerTier(width) !== "phone") {
+			return EDITOR_BOTTOM_SENTINEL;
+		}
+		const rule = this.ruleColor(this.getTheme());
+		return this.withRuleColor(rule, () => super.renderBottomBorder(width, hiddenLineCount));
+	}
+
+	override render(width: number): string[] {
+		this.inRender = true;
+		let lines: string[];
+		try {
+			lines = super.render(width);
+		} finally {
+			this.inRender = false;
+		}
+		const bottomIdx = lines.indexOf(EDITOR_BOTTOM_SENTINEL);
+		if (bottomIdx < 0) return lines;
+		// Keep a separator line when an autocomplete menu sits below the input; otherwise let the
+		// footer's Powerline identity bar serve as the input box's bottom edge (avoiding a double rule).
+		if (bottomIdx + 1 < lines.length) {
+			const rule = this.ruleColor(this.getTheme());
+			lines[bottomIdx] = this.withRuleColor(rule, () => super.renderBottomBorder(width, 0));
+			return lines;
+		}
+		lines.splice(bottomIdx, 1);
+		return lines;
+	}
+}
+
+interface RenderContextOptions {
+	thresholdPct?: number;
+	surfaceRgb?: Rgb;
+	contextDelta?: number;
+}
+
 function renderContext(
 	theme: Theme,
 	usage: ReturnType<ExtensionContext["getContextUsage"]>,
@@ -1151,36 +1702,50 @@ function renderContext(
 	compactions: number,
 	compactIcon: string,
 	maxWidth = Infinity,
+	options?: RenderContextOptions,
 ): string {
-	const compactColor = compactions > 0 ? "warning" : "dim";
-	const count = theme.fg(compactColor, `${compactions}×`);
-	const compact = `${glyph(theme, compactIcon, compactColor)} ${count}`;
+	const count = compactions > 0 ? theme.fg("warning", `${compactions}×`) : "";
+	const compact = compactions > 0 ? `${glyph(theme, compactIcon, "warning")} ${count}` : "";
+	const barOpts: GradientBarOptions = {
+		thresholdPct: options?.thresholdPct,
+		surfaceRgb: options?.surfaceRgb,
+	};
 	if (usage?.percent != null) {
 		const pct = usage.percent;
 		const used = fmtTokens(usage.tokens ?? 0);
 		const window = fmtTokens(usage.contextWindow);
 		const percent = theme.fg("muted", `${pct.toFixed(1)}%`);
 		const counts = theme.fg("dim", `${used}/${window}`);
+		const delta = options?.contextDelta != null && options.contextDelta >= 5_000
+			? theme.fg(options.contextDelta >= 20_000 ? "warning" : "dim", `+${fmtTokens(options.contextDelta)}`)
+			: "";
+		if (delta) {
+			const countsWithDelta = `${counts} ${delta}`;
+			const numbersWithDelta = cluster([compact, percent, countsWithDelta], "  ");
+			const barSpaceWithDelta = maxWidth - visibleWidth(numbersWithDelta) - 2;
+			if (barSpaceWithDelta >= 4) {
+				return cluster([compact, gradientBar(pct, Math.min(barWidth, barSpaceWithDelta), theme, barOpts), percent, countsWithDelta], "  ");
+			}
+		}
 		const numbers = cluster([compact, percent, counts], "  ");
 		const barSpace = maxWidth - visibleWidth(numbers) - 2;
 		if (barSpace >= 4) {
-			return cluster([compact, gradientBar(pct, Math.min(barWidth, barSpace), theme), percent, counts], "  ");
+			return cluster([compact, gradientBar(pct, Math.min(barWidth, barSpace), theme, barOpts), percent, counts], "  ");
 		}
 		// Keep the numerical context when it fits without a bar.
 		if (visibleWidth(numbers) <= maxWidth) return numbers;
 		// The bare compaction count and a single usage group can still fit before token counts give way.
-		const shortNumbers = `${count}  ${percent} ${counts}`;
+		const shortNumbers = cluster([count, `${percent} ${counts}`], "  ");
 		if (visibleWidth(shortNumbers) <= maxWidth) return shortNumbers;
-		const prefix = compactions > 0 ? compact : "";
-		const remaining = maxWidth - visibleWidth(cluster([prefix, percent], "  ")) - 2;
+		const remaining = maxWidth - visibleWidth(cluster([compact, percent], "  ")) - 2;
 		return remaining >= 4
-			? cluster([prefix, gradientBar(pct, Math.min(barWidth, remaining), theme), percent], "  ")
+			? cluster([compact, gradientBar(pct, Math.min(barWidth, remaining), theme, barOpts), percent], "  ")
 			: truncateToWidth(percent, Math.max(0, maxWidth));
 	}
 	if (usage?.contextWindow) {
 		return truncateToWidth(cluster([compact, theme.fg("dim", `/ ${fmtTokens(usage.contextWindow)}`)], "  "), maxWidth);
 	}
-	return truncateToWidth(compact, maxWidth);
+	return compact ? truncateToWidth(compact, maxWidth) : "";
 }
 
 function priceUnavailableForModel(ctx: ExtensionContext): boolean {
@@ -1242,6 +1807,7 @@ function fitCompactStatuses(statuses: CompactStatus[], fits: (text: string) => b
 }
 
 function renderIdentityRow(
+	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	theme: Theme,
 	skin: Skin,
@@ -1262,55 +1828,79 @@ function renderIdentityRow(
 	const minimumContext = usage?.percent != null ? visibleWidth(`${usage.percent.toFixed(1)}%`) : 0;
 	const identityRoom = width - minimumContext - chrome;
 	const tier = tierLabel(ctx, s, state.serviceTier);
-	const label = (serviceTier?: TierLabel) => renderModelLabel(ctx, theme, skin, serviceTier);
-	let modelLabel = label(tier);
-	let thinking = ctx.model?.reasoning
-		? `${glyph(theme, set.thinking, "muted")}  ${renderThinking(theme, ctx.thinkingLevel ?? "off")}`
-		: undefined;
-	const identity = () => cluster([modelLabel, thinking], "  ");
-	// Shed the last request, current tier and effort as whole fields before truncating the model.
-	if (tier?.observed && visibleWidth(identity()) > identityRoom) modelLabel = label({ ...tier, observed: undefined });
-	if (tier && visibleWidth(identity()) > identityRoom) modelLabel = label();
-	if (thinking && visibleWidth(identity()) > identityRoom) thinking = undefined;
-	const compactIdentity = identity();
 	const provider = !compactMode && ctx.model?.provider && theme.fg("dim", `(${ctx.model.provider})`);
-	const tail = compactMode ? [
-		renderPrice(ctx, s, theme, set),
-		theme.fg("dim", fmtDuration(s.durationMs)),
-		...(collaborationStatus ? [collaborationStatus] : []),
-	] : [];
-	const statusRoom = identityRoom - visibleWidth(compactIdentity);
-	const modes = modeStatus && visibleWidth(modeStatus) + 2 <= statusRoom ? modeStatus : undefined;
-	const modeWidth = modes ? visibleWidth(modes) + 2 : 0;
-	const fitsBeside = (status: string) => visibleWidth(status) + 2 <= statusRoom - modeWidth;
-	const workflow = Array.isArray(workflowStatus) ? fitCompactStatuses(workflowStatus, fitsBeside) : workflowStatus;
-	// Fit modes first, then workflow, language and spokesman, independently of which band draws them.
-	const [activity, language, spokesman] = [
-		[workflow, languageStatus, spokesmanStatus],
-		[workflow, languageStatus],
-		[workflow],
-	].find(parts => fitsBeside(cluster(parts, "  "))) ?? [];
-	const leftStatuses = cluster([activity, spokesman], "  ");
-	const rightStatuses = cluster([language, modes], "  ");
-	const context = renderContext(theme, usage, barWidth, s.compactions, set.compact);
-	const right = cluster([rightStatuses, context, ...tail], "  ");
-	let left = cluster([compactIdentity, provider, leftStatuses], "  ");
-	if (visibleWidth(left) + visibleWidth(right) + chrome <= width) return skin.bar(left, right, width);
+	const contextOptions: RenderContextOptions = {
+		thresholdPct: compactionThresholdPct(pi, ctx),
+		surfaceRgb: skin.surfaceRgb,
+		contextDelta: !compactMode && footerTier(width) === "desk" ? state.lastContextDelta : undefined,
+	};
+	const buildIdentity = (suppressLiveBadge: boolean): string => {
+		const label = (serviceTier?: TierLabel) => renderModelLabel(ctx, theme, skin, serviceTier, suppressLiveBadge);
+		let modelLabel = label(tier);
+		let thinking = ctx.model?.reasoning
+			? `${glyph(theme, set.thinking, "muted")} ${renderThinking(theme, ctx.thinkingLevel ?? "off")}`
+			: undefined;
+		const identity = () => cluster([modelLabel, thinking], "  ");
+		// Shed the last request, current tier and effort as whole fields before truncating the model.
+		if (tier?.observed && visibleWidth(identity()) > identityRoom) modelLabel = label({ ...tier, observed: undefined });
+		if (tier && visibleWidth(identity()) > identityRoom) modelLabel = label();
+		if (thinking && visibleWidth(identity()) > identityRoom) thinking = undefined;
+		return identity();
+	};
+	const buildLayout = (suppressLiveBadge: boolean) => {
+		const compactIdentity = buildIdentity(suppressLiveBadge);
+		const tail = compactMode ? [
+			renderPrice(ctx, s, theme, set),
+			theme.fg("dim", fmtDuration(s.durationMs)),
+			...(collaborationStatus ? [collaborationStatus] : []),
+		] : [];
+		const statusRoom = identityRoom - visibleWidth(compactIdentity);
+		const modes = modeStatus && visibleWidth(modeStatus) + 2 <= statusRoom ? modeStatus : undefined;
+		const modeWidth = modes ? visibleWidth(modes) + 2 : 0;
+		const fitsBeside = (status: string) => visibleWidth(status) + 2 <= statusRoom - modeWidth;
+		const workflow = Array.isArray(workflowStatus) ? fitCompactStatuses(workflowStatus, fitsBeside) : workflowStatus;
+		// Fit modes first, then workflow, language and spokesman, independently of which band draws them.
+		const [activity, language, spokesman] = [
+			[workflow, languageStatus, spokesmanStatus],
+			[workflow, languageStatus],
+			[workflow],
+		].find(parts => fitsBeside(cluster(parts, "  "))) ?? [];
+		const leftStatuses = cluster([activity, spokesman], "  ");
+		const rightStatuses = cluster([language, modes], "  ");
+		const context = renderContext(theme, usage, barWidth, s.compactions, set.compact, Infinity, contextOptions);
+		const right = cluster([rightStatuses, context, ...tail], "  ");
+		const left = cluster([compactIdentity, provider, leftStatuses], "  ");
+		return { compactIdentity, leftStatuses, rightStatuses, tail, left, right };
+	};
+	const clean = buildLayout(true);
+	const phase = renderLivePhase(ctx, theme, state);
+	const availableGap = width - visibleWidth(clean.left) - visibleWidth(clean.right) - (chrome - 1);
+	const minPillGap = visibleWidth(phase.text) + (chrome > 3 ? (hasNerdFonts() ? 6 : 4) : 2);
+	if (visibleWidth(clean.left) + visibleWidth(clean.right) + chrome <= width && availableGap >= minPillGap) {
+		return skin.bar(clean.left, clean.right, width, { text: phase.text, pill: true, tint: phase.tint });
+	}
+
+	// Too narrow for the center state pill: keep live/queued indicators on the left and omit the pill.
+	const fallback = buildLayout(false);
+	if (visibleWidth(fallback.left) + visibleWidth(fallback.right) + chrome <= width) {
+		return skin.bar(fallback.left, fallback.right, width);
+	}
 
 	// Keep identity and context percent; shed provider, token counts, and compact extras first.
-	const reserved = rightStatuses ? visibleWidth(rightStatuses) + 2 : 0;
-	left = truncateToWidth(cluster([compactIdentity, leftStatuses], "  "), Math.max(0, identityRoom - reserved));
+	const reserved = fallback.rightStatuses ? visibleWidth(fallback.rightStatuses) + 2 : 0;
+	const left = truncateToWidth(cluster([fallback.compactIdentity, fallback.leftStatuses], "  "), Math.max(0, identityRoom - reserved));
 	const budget = Math.max(0, width - visibleWidth(left) - chrome - reserved);
-	while (tail.length && visibleWidth(cluster(tail, "  ")) + 2 + minimumContext > budget) tail.pop();
-	const contextBudget = Math.max(0, budget - (tail.length ? visibleWidth(cluster(tail, "  ")) + 2 : 0));
+	while (fallback.tail.length && visibleWidth(cluster(fallback.tail, "  ")) + 2 + minimumContext > budget) fallback.tail.pop();
+	const contextBudget = Math.max(0, budget - (fallback.tail.length ? visibleWidth(cluster(fallback.tail, "  ")) + 2 : 0));
 	return skin.bar(left, cluster([
-		rightStatuses,
-		renderContext(theme, usage, barWidth, s.compactions, set.compact, contextBudget),
-		...tail,
+		fallback.rightStatuses,
+		renderContext(theme, usage, barWidth, s.compactions, set.compact, contextBudget, contextOptions),
+		...fallback.tail,
 	], "  "), width);
 }
 
 function renderCompact(
+	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	theme: Theme,
 	skin: Skin,
@@ -1359,11 +1949,24 @@ function renderCompact(
 	const representative = statusText(statuses, "representative");
 	const rooms = additionalRooms(statuses);
 	const collaboration = cluster([
-		representative && renderStatus(theme, representative, "representative"),
+		representative && renderStatus(theme, representative, "representative", hasNerdFonts()),
 		rooms && `${glyph(theme, icons().relay, "dim")} ${theme.fg("muted", rooms)}`,
 	], "  ");
-	return renderIdentityRow(ctx, theme, skin, width, state, collectStats(ctx, state), true, renderLanguage(theme, statuses),
-		workflow, renderSpokesman(theme, statuses), renderModes(theme, statuses), collaboration);
+	return renderIdentityRow(
+		pi,
+		ctx,
+		theme,
+		skin,
+		width,
+		state,
+		collectStats(ctx, state),
+		true,
+		renderLanguage(theme, statuses),
+		workflow,
+		renderSpokesman(theme, statuses),
+		renderModes(theme, statuses, ctx.sessionManager.getSessionId()),
+		collaboration,
+	);
 }
 
 /** Cached reads as a share of all input, and the color that rates it. */
@@ -1404,6 +2007,7 @@ function footerTier(width: number): FooterTier {
 }
 
 function renderFull(
+	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	theme: Theme,
 	skin: Skin,
@@ -1414,8 +2018,9 @@ function renderFull(
 	const s = collectStats(ctx, state);
 	const extensionStatuses = footerData.getExtensionStatuses();
 	const tier = footerTier(width);
-	if (tier === "phone") return [renderPhone(ctx, theme, width, s, extensionStatuses)];
+	if (tier === "phone") return [renderPhone(ctx, theme, width, state, s, extensionStatuses)];
 	const line1 = renderIdentityRow(
+		pi,
 		ctx,
 		theme,
 		skin,
@@ -1426,7 +2031,7 @@ function renderFull(
 		renderLanguage(theme, extensionStatuses),
 		undefined,
 		renderSpokesman(theme, extensionStatuses),
-		renderModes(theme, extensionStatuses),
+		renderModes(theme, extensionStatuses, ctx.sessionManager.getSessionId()),
 	);
 
 	return [line1, ...renderDetailRows(ctx, theme, footerData, width, state, s, tier)];
@@ -1460,12 +2065,19 @@ function renderPhone(
 	ctx: ExtensionContext,
 	theme: Theme,
 	width: number,
+	state: SessionState,
 	s: Stats,
 	statuses: ReadonlyMap<string, string>,
 ): string {
 	const model = ctx.model;
 	const usage = ctx.getContextUsage();
 	const sep = theme.fg("dim", " · ");
+	const live = !ctx.isIdle();
+	const elapsedMs = live && state.phaseStartedAt > 0 ? Math.max(0, Date.now() - state.phaseStartedAt) : 0;
+	const liveMark = live
+		? theme.fg("success", theme.bold(elapsedMs >= 1_000 ? `● ${fmtPhaseElapsed(elapsedMs)}` : "●"))
+		: undefined;
+	const queuedMark = ctx.hasPendingMessages() ? theme.fg("warning", "queued") : undefined;
 	const name = theme.fg("accent", theme.bold(model ? shortModelName(model.id) : "no-model"));
 	let thinking = model?.reasoning ? renderThinking(theme, ctx.thinkingLevel ?? "off") : undefined;
 	const context = usage?.percent != null ? theme.fg("muted", `${usage.percent.toFixed(1)}%`) : undefined;
@@ -1483,7 +2095,7 @@ function renderPhone(
 		});
 	const room = Math.max(0, width - 1);
 	const tail = [cost, ...alerts];
-	const line = (head: string) => cluster([head, thinking, context, ...tail], sep);
+	const line = (head: string) => cluster([liveMark, queuedMark, head, thinking, context, ...tail], sep);
 	while (tail.length && visibleWidth(line(name)) > room) tail.pop();
 	if (visibleWidth(line(name)) > room) thinking = undefined;
 	const rest = line("");
@@ -1494,8 +2106,8 @@ function renderPhone(
 // ── detail rows ────────────────────────────────────────────────────
 // Under the bar, the optional activity row and the tier's rows hang from the
 // chip on a rail: telemetry and workspace at a desk, one essentials row on a
-// laptop. Facts come in groups split by thin chevrons that echo the
-// bar's arrows. Icons carry the hue and values stay muted, unless a value
+// laptop. Facts come in groups split by `│` dividers that match the rail.
+// Icons carry the hue and values stay muted, unless a value
 // reports a state such as a slow first token or failed tool calls. A row that
 // does not fit drops whole groups, least important first, instead of cutting
 // text, and the path shortens from the middle.
@@ -1511,6 +2123,15 @@ interface Group {
 /** `display`, shortened from the middle to `max` columns while it keeps its last directories. */
 export function shortenPath(display: string, max: number): string {
 	if (visibleWidth(display) <= max) return display;
+	const hostMatch = /^([^/:]+):(.*)$/.exec(display);
+	if (hostMatch && !/^[A-Za-z]$/.test(hostMatch[1]!)) {
+		const prefix = `${hostMatch[1]!}:`;
+		const rest = hostMatch[2]!;
+		const prefixWidth = visibleWidth(prefix);
+		if (prefixWidth + 2 <= max) {
+			return `${prefix}${shortenPath(rest, max - prefixWidth)}`;
+		}
+	}
 	const parts = display.split("/");
 	for (let keep = parts.length - 2; keep >= 1; keep--) {
 		const candidate = [parts[0], "…", ...parts.slice(-keep)].join("/");
@@ -1531,21 +2152,19 @@ function railRoom(width: number, gap = 3): number {
 	return width - 2 - 2 - gap;
 }
 
-/** Columns the thin chevron between two groups takes, with its spacing. */
+/** Columns the vertical divider between two groups takes, with its spacing. */
 const RAIL_SEP_WIDTH = 5;
 
 function railRow(theme: Theme, branch: string, left: Group[], right: Group[], width: number, metricRow = false): string {
-	const nerd = hasNerdFonts();
 	let pad = "  ";
-	const sep = (side: "left" | "right") =>
-		`${pad}${theme.fg("borderMuted", nerd ? (side === "left" ? POWERLINE.thinLeft : POWERLINE.thinRight) : "│")}${pad}`;
-	const join = (groups: Group[], side: "left" | "right") => groups.map(group => group.text).join(sep(side));
+	const sep = () => `${pad}${theme.fg("borderMuted", "│")}${pad}`;
+	const join = (groups: Group[]) => groups.map(group => group.text).join(sep());
 	const rail = `${theme.fg("borderMuted", branch)} `;
 	const room = railRoom(width);
 	left = [...left];
 	right = [...right];
 	while (left.length + right.length > 1) {
-		const used = visibleWidth(join(left, "left")) + visibleWidth(join(right, "right"));
+		const used = visibleWidth(join(left)) + visibleWidth(join(right));
 		if (used <= room) break;
 		// If the facts fit on the line, reclaim divider padding to keep the two sides apart.
 		// A left-only metric row needs no gap at all.
@@ -1580,7 +2199,7 @@ function railRow(theme: Theme, branch: string, left: Group[], right: Group[], wi
 			group.text = cluster([prefix, renderStatus(theme, marker, group.statusKey ?? "herder")], " ");
 		}
 	}
-	return alignRow(rail + join(left, "left"), join(right, "right"), width);
+	return alignRow(rail + join(left), join(right), width);
 }
 
 function renderDetailRows(
@@ -1606,8 +2225,8 @@ function renderDetailRows(
 	], "  ");
 	const ttft = avgTtft != null
 		? item(set.ttft, ttftColor(avgTtft), fmtTtft(avgTtft), avgTtft < 2_000 ? "muted" : ttftColor(avgTtft))
-		: item(set.ttft, "dim", "—", "dim");
-	const speed = avg != null ? item(set.speed, "success", fmtTokPerSec(avg)) : item(set.speed, "dim", "—", "dim");
+		: "";
+	const speed = avg != null ? item(set.speed, "success", fmtTokPerSec(avg)) : "";
 	const errors = s.errors > 0
 		? item(set.err, "error", `${s.errors}${s.toolCalls > 0 ? ` (${((s.errors / s.toolCalls) * 100).toFixed(1)}%)` : ""}`, "error")
 		: "";
@@ -1629,7 +2248,7 @@ function renderDetailRows(
 		&& (activityEntries.some(([key, text]) => key !== "herder" && statusRank(text) === statusRank(herderText)
 			&& visibleWidth(renderStatus(theme, text, key, hasNerdFonts())) <= railRoom(width))
 			|| Boolean(representative && statusRank(representative) === statusRank(herderText)
-				&& visibleWidth(renderStatus(theme, representative, "representative")) <= railRoom(width)));
+				&& visibleWidth(renderStatus(theme, representative, "representative", hasNerdFonts())) <= railRoom(width)));
 	const leftStatuses = activityEntries.map(([key, text], index) => {
 		const rank = statusRank(text);
 		return {
@@ -1646,7 +2265,7 @@ function renderDetailRows(
 	], " · ");
 	// Collaboration outlasts other routine summaries, while Herder keeps its operation visible.
 	const collaboration: Group[] = [
-		...(representative ? [{ text: renderStatus(theme, representative, "representative"), rank: statusRank(representative) * rankStep + 1 }] : []),
+		...(representative ? [{ text: renderStatus(theme, representative, "representative", hasNerdFonts()), rank: statusRank(representative) * rankStep + 1 }] : []),
 		...(relay ? [{ text: item(set.relay, "dim", relay), rank: rankStep + 1 }] : []),
 	];
 	const activityRows = leftStatuses.length || collaboration.length
@@ -1654,34 +2273,45 @@ function renderDetailRows(
 
 	refreshGitStat(ctx.cwd, state);
 	const branch = footerData.getGitBranch();
-	const { status, adds, dels, ahead, behind } = state.gitStat;
+	const { status, adds, dels, staged, unstaged, untracked, conflicts, worktree, ahead, behind } = state.gitStat;
 	const color = gitColor(status);
+	const dirtyParts: string[] = [];
+	if (conflicts > 0) dirtyParts.push(theme.fg("error", theme.bold(`${set.err} ${conflicts} conflict${conflicts > 1 ? "s" : ""}`)));
+	if (adds || dels) dirtyParts.push(`${theme.fg("toolDiffAdded", `+${adds ?? 0}`)} ${theme.fg("toolDiffRemoved", `−${dels ?? 0}`)}`);
+	if (staged > 0) dirtyParts.push(theme.fg("success", `●${staged}`));
+	if (untracked > 0) dirtyParts.push(theme.fg("warning", `?${untracked}`));
+	if (dirtyParts.length === 0) {
+		dirtyParts.push(unstaged > 0 ? theme.fg("warning", `~${unstaged}`) : theme.fg("warning", "dirty"));
+	}
 	const gitState = status === "clean"
 		? item(set.ok, "success", "clean")
 		: status === "dirty"
-			? adds || dels
-				? `${theme.fg("toolDiffAdded", `+${adds ?? 0}`)} ${theme.fg("toolDiffRemoved", `−${dels ?? 0}`)}`
-				: theme.fg("warning", "dirty")
+			? dirtyParts.join(" ")
 			: status === "unavailable"
 				? theme.fg("error", "git ?")
 				: theme.fg("dim", "git …");
 	const git = branch
 		? cluster([
-			`${glyph(theme, set.branch, color)} ${theme.fg("text", branch)}`,
+			`${glyph(theme, set.branch, color)} ${theme.fg("text", branch)}${worktree ? ` ${theme.fg("dim", "wt")}` : ""}`,
 			gitState,
 			(ahead > 0 || behind > 0) && `${theme.fg("success", `↑ ${ahead}`)}  ${theme.fg("warning", `↓ ${behind}`)}`,
 		], "  ")
 		: item(set.branch, "dim", "no git", "dim");
 	// The path takes the room the row's other groups leave, so it shortens before they drop.
-	const cwd = (left: Group[], right: Group[]): string => {
+	const pathRoomFor = (left: Group[], right: Group[]): number => {
 		const others = [...left, ...right];
 		const seps = Math.max(0, left.length - 1) + right.length;
-		const pathRoom = railRoom(width) - visibleWidth(`${set.cwd} `)
+		return railRoom(width) - visibleWidth(`${set.cwd} `)
 			- others.reduce((sum, group) => sum + visibleWidth(group.text), 0) - seps * RAIL_SEP_WIDTH;
-		return item(set.cwd, "dim", shortenPath(formatPath(ctx.cwd), Math.max(12, pathRoom)));
 	};
+	const cwd = (left: Group[], right: Group[]): string =>
+		item(set.cwd, "dim", shortenPath(formatWorkspacePath(ctx.cwd), Math.max(12, pathRoomFor(left, right))));
 
 	const lastAnomaly = state.cacheLens.lastAnomalyBadge();
+	const warmth = state.cacheLens.cacheWarmth();
+	const warmthSuffix = !lastAnomaly && warmth?.active
+		? `${theme.fg("dim", " · ")}${theme.fg(warmth.remainingMs < 60_000 ? "warning" : "dim", formatWarmthCountdown(warmth.remainingMs))}`
+		: "";
 
 	if (tier === "laptop") {
 		// One row of what to act on.
@@ -1691,37 +2321,49 @@ function renderDetailRows(
 			{ text: activity, rank: LAPTOP_RANKS.turns },
 			...(errors ? [{ text: errors, rank: LAPTOP_RANKS.errors }] : []),
 		];
+		const laptopLatency = cluster([ttft, speed], "  ");
 		const laptopCache = lastAnomaly
 			? item(set.cache, lastAnomaly.severity, `${cachePct ?? lastAnomaly.hitPct}% (${lastAnomaly.tag})`, lastAnomaly.severity)
 			: cachePct != null
-				? item(set.cache, cacheColor, `${cachePct}%`, cacheColor === "dim" ? "muted" : cacheColor)
+				? item(set.cache, cacheColor, `${cachePct}%`, cacheColor === "dim" ? "muted" : cacheColor) + warmthSuffix
 				: "";
 		const right: Group[] = [
-			{ text: cluster([ttft, speed], "  "), rank: LAPTOP_RANKS.latency },
+			...(laptopLatency ? [{ text: laptopLatency, rank: LAPTOP_RANKS.latency }] : []),
 			...(laptopCache ? [{ text: laptopCache, rank: LAPTOP_RANKS.cache }] : []),
 		];
 		return [...activityRows, railRow(theme, "╰", left, [...right, { text: cwd(left, right), rank: LAPTOP_RANKS.cwd }], width, true)];
 	}
 
 	const lastMark = `  ${set.last} `;
+	const diagnosticTtfb = metrics.lastTtfbMs != null
+		&& (metrics.lastTtfbMs >= 1_000 || (metrics.lastTtftMs != null && metrics.lastTtftMs - metrics.lastTtfbMs >= 2_000));
 	const latency = cluster([
-		ttft + (avgTtft != null && metrics.lastTtftMs != null && metrics.ttftCount > 1 ? theme.fg("dim", `${lastMark}${fmtTtft(metrics.lastTtftMs)}`) : ""),
-		metrics.lastTtfbMs != null && item(set.ttfb, "dim", fmtTtft(metrics.lastTtfbMs), "dim"),
-		speed + (avg != null && metrics.lastTokPerSec != null && metrics.requests > 1 ? theme.fg("dim", `${lastMark}${fmtTokPerSec(metrics.lastTokPerSec)}`) : ""),
+		ttft && (ttft + (metrics.lastTtftMs != null && metrics.ttftCount > 1 ? theme.fg("dim", ` (${fmtTtft(metrics.lastTtftMs)})`) : "")),
+		diagnosticTtfb && item(set.ttfb, "dim", fmtTtft(metrics.lastTtfbMs!), "dim"),
+		speed && (speed + (metrics.lastTokPerSec != null && metrics.requests > 1 ? theme.fg("dim", ` (${fmtTokPerSec(metrics.lastTokPerSec).replace(" tok/s", "")})`) : "")),
 	], "  ");
 	const tools = s.toolCalls > 0
-		? cluster([item(set.calls, "syntaxFunction", `${s.toolCalls}`), errors || item(set.ok, "success", "0")], "  ")
-		: item(set.calls, "dim", "0", "dim");
-	const cost = amount + (!unpriced && s.turns > 0 ? theme.fg("dim", `  ${fmtCost(s.cost / s.turns)}/turn`) : "");
+		? cluster([item(set.calls, "syntaxFunction", `${s.toolCalls}`), errors], "  ")
+		: errors;
+	const cost = amount
+		+ (!unpriced && s.turns > 1 ? theme.fg("dim", `  ${fmtCost(s.cost / s.turns)}/turn`) : "")
+		+ (!unpriced && s.subagentCost >= 0.005 ? theme.fg("dim", `  (${fmtCost(s.subagentCost)} sub)`) : "");
+	const cacheWriteSuffix = s.cacheWrite > 0 ? ` ${theme.fg("dim", `+${fmtTokens(s.cacheWrite)} wr`)}` : "";
 	const cacheSegment = lastAnomaly
 		? s.cacheRead > 0
 			? `${item(set.cache, lastAnomaly.severity, fmtTokens(s.cacheRead))}${cachePct != null ? ` ${theme.fg(cacheColor === "dim" ? "muted" : cacheColor, `${cachePct}%`)}` : ""}${theme.fg("dim", lastMark)}${theme.fg(lastAnomaly.severity, `${lastAnomaly.hitPct}% (${lastAnomaly.tag})`)}`
 			: item(set.cache, lastAnomaly.severity, `${lastAnomaly.hitPct}% (${lastAnomaly.tag})`, lastAnomaly.severity)
-		: s.cacheRead > 0 && item(set.cache, cacheColor, fmtTokens(s.cacheRead))
-			+ (cachePct != null ? ` ${theme.fg(cacheColor === "dim" ? "muted" : cacheColor, `${cachePct}%`)}` : "");
+		: s.cacheRead > 0
+			? item(set.cache, cacheColor, fmtTokens(s.cacheRead))
+				+ (cachePct != null ? ` ${theme.fg(cacheColor === "dim" ? "muted" : cacheColor, `${cachePct}%`)}` : "")
+				+ cacheWriteSuffix
+				+ warmthSuffix
+			: s.cacheWrite > 0
+				? `${item(set.cache, "dim", `+${fmtTokens(s.cacheWrite)} wr`, "dim")}${warmthSuffix}`
+				: "";
 	const tokens = cluster([
-		item(set.input, "toolDiffAdded", fmtTokens(s.input)),
-		item(set.output, "toolDiffRemoved", fmtTokens(s.output)),
+		item(set.input, "dim", fmtTokens(s.input)),
+		item(set.output, "muted", fmtTokens(s.output)),
 		cacheSegment,
 	], "  ");
 	const memory = s.memoryTokens > 0 ? theme.fg("dim", `~${fmtTokens(s.memoryTokens)} memory`) : "";
@@ -1729,50 +2371,138 @@ function renderDetailRows(
 	// Performance on the left, resources on the right, in one row.
 	const telemetry = railRow(theme, "├", [
 		{ text: activity, rank: DESK_RANKS.turns },
-		{ text: tools, rank: s.errors > 0 ? DESK_RANKS.toolErrors : DESK_RANKS.tools },
-		{ text: latency, rank: DESK_RANKS.latency },
+		...(tools ? [{ text: tools, rank: s.errors > 0 ? DESK_RANKS.toolErrors : DESK_RANKS.tools }] : []),
+		...(latency ? [{ text: latency, rank: DESK_RANKS.latency }] : []),
 	], [
 		{ text: cost, rank: DESK_RANKS.cost },
 		{ text: tokens, rank: DESK_RANKS.tokens },
 		...(memory ? [{ text: memory, rank: DESK_RANKS.memory }] : []),
 		...(think ? [{ text: think, rank: DESK_RANKS.think }] : []),
 	], width, true);
-	const touched: Group[] = s.files > 0 ? [{ text: item(set.file, "dim", `${s.files} touched`), rank: 1 }] : [];
+	const editedGroup: Group[] = s.files > 0 ? [{ text: item(set.edit, "dim", `${s.files} edited`), rank: 2 }] : [];
 	const gitGroup: Group[] = [{ text: git, rank: 4 }];
-	const workspace = railRow(theme, "╰", gitGroup, [...touched, { text: cwd(gitGroup, touched), rank: 3 }], width);
-	return [...activityRows, telemetry, workspace];
+	const rawSessionId = ctx.sessionManager.getSessionId()?.trim() ?? "";
+	const shortId = rawSessionId ? rawSessionId.slice(0, 8) : "";
+	const sessionIdGroup: Group[] = shortId ? [{ text: theme.fg("dim", `#${shortId}`), rank: 0 }] : [];
+
+	const hasActivity = leftStatuses.length > 0 || collaboration.length > 0;
+	const routineActivity = activityEntries.every(([, text]) => statusRank(text) < 2)
+		&& (!representative || statusRank(representative) < 2);
+	const compactActivityCount = leftStatuses.length + collaboration.length <= 2;
+	const foldedLeft: Group[] = [...gitGroup, ...leftStatuses.map(group => ({ ...group, rank: 3.5 }))];
+	const foldedCollab: Group[] = collaboration.map(group => ({ ...group, rank: 3.2 }));
+	const foldedRightOther: Group[] = [...foldedCollab, ...editedGroup, ...sessionIdGroup];
+	const foldRoutineIntoWorkspace = hasActivity
+		&& routineActivity
+		&& compactActivityCount
+		&& pathRoomFor(foldedLeft, foldedRightOther) >= 20;
+
+	const deskActivityRows = foldRoutineIntoWorkspace ? [] : activityRows;
+	const wsLeft = foldRoutineIntoWorkspace ? foldedLeft : gitGroup;
+	const wsRightBeforeCwd = foldRoutineIntoWorkspace ? [...foldedCollab, ...editedGroup] : editedGroup;
+	const wsRightOther = [...wsRightBeforeCwd, ...sessionIdGroup];
+	const wsRight: Group[] = [
+		...wsRightBeforeCwd,
+		{ text: cwd(wsLeft, wsRightOther), rank: 3 },
+		...sessionIdGroup,
+	];
+	const workspace = railRow(theme, "╰", wsLeft, wsRight, width);
+	return [...deskActivityRows, telemetry, workspace];
 }
 
 // ── extension ───────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-	let mode: Mode = "full";
+	let mode: FooterMode = loadFooterMode();
 	let installedCtx: ExtensionContext | undefined;
+	let installedEditorFactory: Parameters<ExtensionContext["ui"]["setEditorComponent"]>[0];
 	let stopWatchingProcesses: (() => void) | undefined;
+	let stopWatchingSwarm: (() => void) | undefined;
+
+	function installTitleEditor(ctx: ExtensionContext) {
+		if (typeof ctx.ui.setEditorComponent !== "function") return;
+		const existing = ctx.ui.getEditorComponent?.();
+		if (existing && existing !== installedEditorFactory) return;
+		const factory: NonNullable<Parameters<ExtensionContext["ui"]["setEditorComponent"]>[0]> = (
+			tui,
+			editorTheme,
+			keybindings,
+		) =>
+			new TitledEditor(
+				tui,
+				editorTheme,
+				keybindings,
+				() => (ctx.sessionManager as { getSessionName?: () => string | undefined }).getSessionName?.(),
+				() => ctx.ui.theme,
+			);
+		installedEditorFactory = factory;
+		ctx.ui.setEditorComponent(factory);
+	}
+
+	function uninstallTitleEditor(ctx: ExtensionContext) {
+		if (!installedEditorFactory || typeof ctx.ui.setEditorComponent !== "function") {
+			installedEditorFactory = undefined;
+			return;
+		}
+		if (!ctx.ui.getEditorComponent || ctx.ui.getEditorComponent() === installedEditorFactory) {
+			ctx.ui.setEditorComponent(undefined);
+		}
+		installedEditorFactory = undefined;
+	}
 
 	function install(ctx: ExtensionContext, state: SessionState) {
 		if (ctx.mode !== "tui" || installedCtx === ctx) return;
 		installedCtx = ctx;
+		installTitleEditor(ctx);
 
 		ctx.ui.setFooter((tui, theme, footerData) => {
-			state.requestRender = () => tui.requestRender();
+			let disposed = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			let scheduledDelay = 0;
+			const nextDelay = () => (!ctx.isIdle() || state.cacheLens.cacheWarmth()?.active ? 1_000 : 30_000);
+			const schedule = () => {
+				if (disposed) return;
+				if (timer) clearTimeout(timer);
+				scheduledDelay = nextDelay();
+				timer = setTimeout(() => {
+					timer = undefined;
+					scheduledDelay = 0;
+					if (disposed) return;
+					tui.requestRender();
+					schedule();
+				}, scheduledDelay);
+				timer.unref?.();
+			};
+			const ensureTimerCadence = () => {
+				if (!disposed && scheduledDelay > nextDelay()) schedule();
+			};
+
+			state.requestRender = () => {
+				ensureTimerCadence();
+				tui.requestRender();
+			};
 			const unsubBranch = footerData.onBranchChange(() => tui.requestRender());
-			// Keep duration fresh even when idle
-			const timer = setInterval(() => tui.requestRender(), 30_000);
-			timer.unref?.();
+			// Adaptive refresh: 1s while streaming or cache warmth is ticking, 30s when idle.
+			schedule();
 
 			return {
 				dispose() {
+					disposed = true;
 					unsubBranch();
-					clearInterval(timer);
+					if (timer) {
+						clearTimeout(timer);
+						timer = undefined;
+					}
+					scheduledDelay = 0;
 				},
 				invalidate() {},
 				render(width: number): string[] {
+					ensureTimerCadence();
 					if (mode === "off") return [];
 					const skin = skinFor(theme);
 					return mode === "compact"
-						? [renderCompact(ctx, theme, skin, width, state, footerData)]
-						: renderFull(ctx, theme, skin, footerData, width, state);
+						? [renderCompact(pi, ctx, theme, skin, width, state, footerData)]
+						: renderFull(pi, ctx, theme, skin, footerData, width, state);
 				},
 			};
 		});
@@ -1789,10 +2519,14 @@ export default function (pi: ExtensionAPI) {
 		const entry = event.reason === "reload"
 			? ctx.sessionManager.getEntries().findLast((entry) => entry.type === "custom" && entry.customType === RELOAD_ENTRY)
 			: undefined;
-		const state = freshSessionState(entry?.type === "custom" ? restoreSnapshot(entry.data) : undefined);
+		const snapshot = entry?.type === "custom" ? restoreSnapshot(entry.data) : undefined;
+		if (snapshot?.mode) mode = snapshot.mode;
+		const state = freshSessionState(snapshot);
 		sessionStates.set(sessionId, state);
 		stopWatchingProcesses?.();
 		stopWatchingProcesses = watchProcesses(pi.events, (status) => ctx.ui.setStatus(PROCESS_STATUS_KEY, status));
+		stopWatchingSwarm?.();
+		stopWatchingSwarm = watchSwarmBoard(sessionId, () => state.requestRender?.());
 		if (mode !== "off") install(ctx, state);
 	});
 
@@ -1809,18 +2543,30 @@ export default function (pi: ExtensionAPI) {
 			api: ctx.model?.api,
 			modelKey,
 		});
+		state.livePhase = "waiting";
+		state.phaseStartedAt = Date.now();
+		state.requestRender?.();
 	});
 
 	pi.on("session_compact", (_event, ctx) => {
 		const state = getSessionState(ctx);
 		if (!state || ctx.mode !== "tui") return;
 		state.cacheLens.recordCompaction();
+		state.lastContextTokens = undefined;
+		state.lastContextDelta = undefined;
 	});
 
 	pi.on("session_tree", (_event, ctx) => {
 		const state = getSessionState(ctx);
 		if (!state || ctx.mode !== "tui") return;
 		state.cacheLens.resetBaseline();
+		state.lastContextTokens = undefined;
+		state.lastContextDelta = undefined;
+	});
+
+	pi.on("session_info_changed", (_event, ctx) => {
+		if (ctx.mode !== "tui") return;
+		getSessionState(ctx)?.requestRender?.();
 	});
 
 	pi.on("model_select", (_event, ctx) => {
@@ -1831,14 +2577,19 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_provider_headers", (_event, ctx) => {
-		const metrics = getSessionState(ctx)?.metrics;
-		if (!metrics || ctx.mode !== "tui") return;
+		const state = getSessionState(ctx);
+		if (!state || ctx.mode !== "tui") return;
+		const { metrics } = state;
 		// Request is about to hit the wire (fires once per LLM call;
 		// retries reuse the same headers and don't re-fire).
+		const now = Date.now();
 		metrics.headersSeen++;
-		metrics.requestSentAt = Date.now();
+		metrics.requestSentAt = now;
 		metrics.firstTokenAt = 0;
 		metrics.curTtftMs = null;
+		state.livePhase = "waiting";
+		state.phaseStartedAt = now;
+		state.requestRender?.();
 	});
 
 	pi.on("after_provider_response", (_event, ctx) => {
@@ -1852,33 +2603,84 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_start", (event, ctx) => {
-		const metrics = getSessionState(ctx)?.metrics;
-		if (!metrics || ctx.mode !== "tui") return;
+		const state = getSessionState(ctx);
+		if (!state || ctx.mode !== "tui" || event.message.role !== "assistant") return;
+		const { metrics } = state;
+		const now = Date.now();
 		// Fallback start marker for providers that never fire
 		// before_provider_headers (stream consumption is beginning).
-		if (event.message.role === "assistant" && metrics.requestSentAt === 0) {
-			metrics.requestSentAt = Date.now();
+		if (metrics.requestSentAt === 0) {
+			metrics.requestSentAt = now;
+		}
+		if (state.livePhase !== "waiting") {
+			state.livePhase = "waiting";
+			state.phaseStartedAt = now;
+			state.requestRender?.();
 		}
 	});
 
 	pi.on("message_update", (event, ctx) => {
-		const metrics = getSessionState(ctx)?.metrics;
-		if (!metrics || ctx.mode !== "tui" || metrics.firstTokenAt !== 0) return;
+		const state = getSessionState(ctx);
+		if (!state || ctx.mode !== "tui") return;
 		const update = event.assistantMessageEvent;
-		let hasContent = false;
-		if (update.type === "text_delta" || update.type === "thinking_delta" || update.type === "toolcall_delta") {
-			hasContent = update.delta.length > 0;
-		} else if (update.type === "text_start" || update.type === "thinking_start" || update.type === "toolcall_start") {
+		let isThinking = false;
+		let isStreaming = false;
+		if (update.type === "thinking_delta") {
+			isThinking = update.delta.length > 0;
+		} else if (update.type === "text_delta" || update.type === "toolcall_delta") {
+			isStreaming = update.delta.length > 0;
+		} else if (update.type === "thinking_start") {
 			const block = update.partial.content[update.contentIndex];
-			hasContent = (block?.type === "text" && block.text.length > 0)
-				|| (block?.type === "thinking" && block.thinking.length > 0)
-				|| (block?.type === "toolCall" && block.name.length > 0);
+			isThinking = block?.type === "thinking" && block.thinking.length > 0;
+		} else if (update.type === "text_start") {
+			const block = update.partial.content[update.contentIndex];
+			isStreaming = block?.type === "text" && block.text.length > 0;
+		} else if (update.type === "toolcall_start") {
+			const block = update.partial.content[update.contentIndex];
+			isStreaming = block?.type === "toolCall" && block.name.length > 0;
 		}
-		if (!hasContent) return;
-		metrics.firstTokenAt = Date.now();
-		if (metrics.requestSentAt > 0) {
-			metrics.curTtftMs = metrics.firstTokenAt - metrics.requestSentAt;
+		if (!isThinking && !isStreaming) return;
+
+		const now = Date.now();
+		const { metrics } = state;
+		if (metrics.firstTokenAt === 0) {
+			metrics.firstTokenAt = now;
+			if (metrics.requestSentAt > 0) {
+				metrics.curTtftMs = metrics.firstTokenAt - metrics.requestSentAt;
+			}
 		}
+
+		const nextPhase: LivePhase = isThinking ? "thinking" : "streaming";
+		if (state.livePhase !== nextPhase) {
+			state.livePhase = nextPhase;
+			state.phaseStartedAt = now;
+			state.requestRender?.();
+		}
+	});
+
+	pi.on("tool_execution_start", (event, ctx) => {
+		const state = getSessionState(ctx);
+		if (!state || ctx.mode !== "tui" || event.parentToolCallId) return;
+		state.livePhase = "tool";
+		state.activeToolName = event.toolName;
+		state.activeToolCallId = event.toolCallId;
+		state.phaseStartedAt = Date.now();
+		state.requestRender?.();
+	});
+
+	pi.on("tool_execution_end", (event, ctx) => {
+		const state = getSessionState(ctx);
+		if (!state || ctx.mode !== "tui" || event.parentToolCallId) return;
+		if (event.toolCallId === state.activeToolCallId) {
+			state.livePhase = "idle";
+			state.activeToolName = undefined;
+			state.activeToolCallId = undefined;
+			state.phaseStartedAt = 0;
+		}
+		if (MUTATING_TOOLS.has(event.toolName)) {
+			state.gitStatAt = 0;
+		}
+		state.requestRender?.();
 	});
 
 	pi.on("message_end", (event, ctx) => {
@@ -1905,6 +2707,17 @@ export default function (pi: ExtensionAPI) {
 		metrics.requestSentAt = 0;
 		metrics.firstTokenAt = 0;
 		metrics.curTtftMs = null;
+		if (state.livePhase !== "tool") {
+			state.livePhase = "idle";
+			state.phaseStartedAt = 0;
+		}
+		const tokens = ctx.getContextUsage()?.tokens;
+		if (typeof tokens === "number" && typeof state.lastContextTokens === "number" && tokens > state.lastContextTokens) {
+			state.lastContextDelta = tokens - state.lastContextTokens;
+		} else {
+			state.lastContextDelta = undefined;
+		}
+		state.lastContextTokens = typeof tokens === "number" ? tokens : undefined;
 		state.requestRender?.();
 	});
 
@@ -1912,7 +2725,10 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.mode !== "tui") return;
 		stopWatchingProcesses?.();
 		stopWatchingProcesses = undefined;
+		stopWatchingSwarm?.();
+		stopWatchingSwarm = undefined;
 		ctx.ui.setStatus(PROCESS_STATUS_KEY, undefined);
+		uninstallTitleEditor(ctx);
 		installedCtx = undefined;
 		const sessionId = ctx.sessionManager.getSessionId();
 		const state = sessionStates.get(sessionId);
@@ -1923,6 +2739,7 @@ export default function (pi: ExtensionAPI) {
 					metrics: { ...state.metrics, requestSentAt: 0, firstTokenAt: 0, curTtftMs: null },
 					serviceTier: state.serviceTier,
 					cacheLens: state.cacheLens.toReloadSnapshot(),
+					mode,
 				});
 			}
 		}
@@ -1930,10 +2747,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("footer", {
-		description: `Statusline footer: /footer [full|compact|off|debug]; full adapts to width (desk >= ${FOOTER_TIERS.deskMin} cols, phone <= ${FOOTER_TIERS.phoneMax}, laptop between)`,
+		description: `Statusline footer: /footer [full|compact|off|default [full|compact|off]|debug]; full adapts to width (desk >= ${FOOTER_TIERS.deskMin} cols, phone <= ${FOOTER_TIERS.phoneMax}, laptop between)`,
 		handler: async (args, ctx) => {
 			pi.appendEntry("pi-extensions.command", { command: "footer", kind: "extension", extension: "statusline-footer" });
-			const next = args.trim().toLowerCase();
+			const next = args.trim().toLowerCase().replace(/\s+/g, " ");
 			if (next === "debug") {
 				const metrics = getSessionState(ctx)?.metrics;
 				ctx.ui.notify(
@@ -1948,13 +2765,30 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
+			if (next === "default" || next.startsWith("default ")) {
+				const value = next.slice("default".length).trim();
+				if (value === "") {
+					ctx.ui.notify(`Default footer mode for new sessions: ${loadFooterMode()}`, "info");
+					return;
+				}
+				if (value !== "full" && value !== "compact" && value !== "off") {
+					ctx.ui.notify(
+						`Unknown /footer default '${value}' — usage: /footer default [full|compact|off]`,
+						"warning",
+					);
+					return;
+				}
+				await saveFooterMode(value);
+				ctx.ui.notify(`Default footer mode for new sessions: ${value}`, "info");
+				return;
+			}
 			if (next === "full" || next === "compact" || next === "off") {
 				mode = next;
 			} else if (next === "") {
 				mode = mode === "off" ? "full" : "off";
 			} else {
 				ctx.ui.notify(
-					`Unknown /footer argument '${args.trim()}' — usage: /footer [full|compact|off|debug]`,
+					`Unknown /footer argument '${args.trim()}' — usage: /footer [full|compact|off|default [full|compact|off]|debug]`,
 					"warning",
 				);
 				return;
@@ -1963,6 +2797,7 @@ export default function (pi: ExtensionAPI) {
 			if (mode === "off") {
 				installedCtx = undefined;
 				if (state) state.requestRender = undefined;
+				uninstallTitleEditor(ctx);
 				ctx.ui.setFooter(undefined); // restore pi's default footer
 				ctx.ui.notify("Default footer restored", "info");
 			} else if (state) {
@@ -1980,21 +2815,31 @@ export default function (pi: ExtensionAPI) {
 			const next = args.trim().toLowerCase();
 			const state = getSessionState(ctx);
 			if (next === "" || next === "summary") {
-				ctx.ui.notify(
-					state
-						? state.cacheLens.formatCacheReport("summary")
-						: "Cache lens unavailable outside the TUI session",
-					"info",
-				);
+				if (!state) {
+					ctx.ui.notify("Cache lens unavailable outside the TUI session", "info");
+					return;
+				}
+				await openCacheOverlay(ctx, state.cacheLens, {
+					initialView: "all",
+					onReset: () => {
+						state.cacheLens.reset();
+						state.requestRender?.();
+					},
+				});
 				return;
 			}
 			if (next === "anomalies") {
-				ctx.ui.notify(
-					state
-						? state.cacheLens.formatCacheReport("anomalies")
-						: "Cache lens unavailable outside the TUI session",
-					"info",
-				);
+				if (!state) {
+					ctx.ui.notify("Cache lens unavailable outside the TUI session", "info");
+					return;
+				}
+				await openCacheOverlay(ctx, state.cacheLens, {
+					initialView: "anomalies",
+					onReset: () => {
+						state.cacheLens.reset();
+						state.requestRender?.();
+					},
+				});
 				return;
 			}
 			if (next === "reset") {
