@@ -337,8 +337,9 @@ async fn invalid_saves_are_bad_requests() {
     app.saved(&app.a, user_note("Empty", "an empty body")).await;
 }
 
-/// AC-3: a save whose index of the user and request's project scopes would pass 200 lines or 8 KiB is 422
-/// `memory_full` and stores nothing; forgetting is always allowed.
+/// AC-3: each scope (the user scope and each project scope) has an independent 200-line and 8 KiB budget for its own
+/// rendered index part; a save that would grow a scope past its limit is 422 `memory_full` and stores nothing, while
+/// forgetting is always allowed.
 #[tokio::test]
 async fn saves_past_the_line_budget_are_memory_full() {
     let app = App::new(AuthMode::None);
@@ -348,26 +349,39 @@ async fn saves_past_the_line_budget_are_memory_full() {
     }
     let lines = app.memory(&app.a, "").await["indexLines"].clone();
     assert_eq!(lines, 199);
-    // A project note would add its scope's two headers too.
-    let r = app.save(&app.a, json!({ "expectedRevision": 0, "scope": "project", "project": "scratch", "category": "project",
-                                     "title": "Scratch", "hook": "h" })).await;
+    // The project scope has its own independent 200-line budget, so a full/near-full user scope does not block it.
+    let project_note = |n: usize| {
+        json!({ "expectedRevision": 0, "scope": "project", "project": "scratch", "category": "project",
+                "title": format!("s{n}"), "hook": "h" })
+    };
     let scratch = json!({ "key": "local:scratch@a", "kind": "project", "label": "scratch" });
-    assert_eq!(
-        (r.status, r.json()),
-        (StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": "memory_full", "indexBytes": r.json()["indexBytes"],
-                                                    "indexLines": 202, "limitBytes": 8192, "limitLines": 200, "project": scratch }))
-    );
-    assert!(r.json()["indexBytes"].as_u64().unwrap() < 8192);
+    app.saved(&app.a, project_note(0)).await;
+    // User scope reaches 200 lines (fits), then 201 lines fails with project: null.
     let last = app.saved(&app.a, user_note("n197", "h")).await;
     let r = app.save(&app.a, user_note("n198", "h")).await;
-    assert_eq!((r.status, &r.json()["error"], &r.json()["indexLines"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full"), &json!(201)));
-    // The user scope's index alone is past the budget: the answer names no project.
-    assert_eq!(r.json()["project"], Value::Null);
+    assert_eq!(
+        (r.status, &r.json()["error"], &r.json()["indexLines"], &r.json()["project"]),
+        (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full"), &json!(201), &Value::Null)
+    );
+    assert!(r.json()["indexBytes"].as_u64().unwrap() < 8192);
+    // Fill the project scope to 200 lines (`# Project memory: scratch`, `## project`, and 198 notes) while user is at 200.
+    for n in 1..198 {
+        app.saved(&app.a, project_note(n)).await;
+    }
+    assert_eq!(app.memory(&app.a, "project=scratch").await["indexLines"], 400);
+    // One more project note overflows project `scratch`'s own 200-line budget and reports project `scratch`'s own size.
+    let r = app.save(&app.a, project_note(198)).await;
+    assert_eq!(
+        (r.status, r.json()),
+        (StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": "memory_full", "budget": "per_scope", "indexBytes": r.json()["indexBytes"],
+                                                    "indexLines": 201, "limitBytes": 8192, "limitLines": 200, "project": scratch }))
+    );
+    assert!(r.json()["indexBytes"].as_u64().unwrap() < 8192);
     let r = app.forget(&app.a, &id(&last), json!({ "expectedRevision": 1 })).await;
     assert_eq!((r.status, &r.json()["indexLines"]), (StatusCode::OK, &json!(199)));
-    assert_eq!(app.count("SELECT COUNT(*) FROM memory_notes WHERE deleted_at IS NULL"), 197);
-    assert_eq!(app.count("SELECT COUNT(*) FROM memory_scopes"), 1);
-    assert_eq!(app.count("SELECT COUNT(*) FROM memory_revisions"), 199);
+    assert_eq!(app.count("SELECT COUNT(*) FROM memory_notes WHERE deleted_at IS NULL"), 395);
+    assert_eq!(app.count("SELECT COUNT(*) FROM memory_scopes"), 2);
+    assert_eq!(app.count("SELECT COUNT(*) FROM memory_revisions"), 397);
 }
 
 #[tokio::test]
@@ -384,12 +398,17 @@ async fn saves_past_the_byte_budget_are_memory_full() {
         saved.push(r.json()["note"].clone());
     };
     let body = full.json();
-    assert_eq!((full.status, &body["error"], &body["limitBytes"], &body["limitLines"]),
-               (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full"), &json!(8192), &json!(200)));
+    assert_eq!((full.status, &body["error"], &body["limitBytes"], &body["limitLines"], &body["project"]),
+               (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full"), &json!(8192), &json!(200), &Value::Null));
     let read = app.memory(&app.a, "").await;
     assert_eq!(body["indexBytes"].as_u64().unwrap(), read["indexBytes"].as_u64().unwrap() + 293, "one line of 293 bytes");
     assert_eq!(body["indexLines"].as_u64().unwrap(), read["indexLines"].as_u64().unwrap() + 1);
     assert_eq!(read["notes"].as_array().unwrap().len(), saved.len());
+    // A full user scope does not block saving into a project scope.
+    let mut proj = repo_note(&title(0), "project");
+    proj["hook"] = json!("h".repeat(150));
+    let r = app.save(&app.a, proj).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     // Growing a note past the budget is refused too; shrinking it is not.
     let mut short = user_note("x", "y");
     short["id"] = saved[0]["id"].clone();
@@ -401,7 +420,7 @@ async fn saves_past_the_byte_budget_are_memory_full() {
     short["hook"] = json!("h".repeat(150));
     short["expectedRevision"] = json!(2);
     let r = app.save(&app.a, short).await;
-    assert_eq!((r.status, &r.json()["error"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full")));
+    assert_eq!((r.status, &r.json()["error"], &r.json()["project"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full"), &Value::Null));
     assert_eq!(one(&app.env.store, &format!("SELECT title FROM memory_notes WHERE id = '{}'", id(&small)))["title"], json!("x"));
 }
 
@@ -526,7 +545,7 @@ async fn reindex_keeps_memory_and_its_history() {
     let revisions = app.owner(&format!("memory/notes/{}/revisions", id(&gone))).await.json()["revisions"].clone();
     assert_eq!(
         revisions[1],
-        json!({ "revision": 2, "action": "forget", "category": "feedback", "title": "Tabs", "hook": "indent with tabs",
+        json!({ "revision": 2, "action": "forget", "category": "feedback", "tier": "pinned", "title": "Tabs", "hook": "indent with tabs",
                 "body": "", "at": revisions[1]["at"], "deviceId": "b", "sessionId": "s-2", "reason": "wrong",
                 "provenance": "agent", "sources": [], "batchId": null })
     );
@@ -852,32 +871,33 @@ async fn limits_apply_to_the_scrubbed_text() {
     assert!(note["body"].as_str().unwrap().len() <= 8192);
 }
 
-/// AC-3: forgetting never fails the budget, even when the index of the request's scopes is already past it, as the
-/// owner's revert, which does not check the budget, can leave it. There a save that grows the index is refused, and one
+/// AC-3: forgetting never fails the budget, even when a scope's index part is already past it, as the owner's revert,
+/// which does not check the budget, can leave it. There a save that grows an over-budget scope is refused, and one
 /// that leaves it as it is or shrinks it is not.
 #[tokio::test]
 async fn forgetting_ignores_the_budget() {
     let app = App::new(AuthMode::None);
+    let hook = "h".repeat(40);
     let project = |n: usize| {
         json!({ "expectedRevision": 0, "scope": "project", "project": "scratch", "category": "project",
-                "title": format!("p{n}"), "hook": "h" })
+                "title": format!("p{n:03}"), "hook": hook })
     };
-    // 100 project notes (102 lines) and 96 user notes (98 lines) fill the budget.
+    // 110 project notes (112 lines, ~7.4 KiB) and 110 user notes (112 lines, ~7.4 KiB) each fit within their own budget.
     let mut projects = Vec::new();
-    for n in 0..100 {
+    for n in 0..110 {
         projects.push(app.saved(&app.a, project(n)).await);
     }
     let mut users = Vec::new();
-    for n in 0..96 {
-        users.push(app.saved(&app.a, user_note(&format!("u{n}"), "h")).await);
+    for n in 0..110 {
+        users.push(app.saved(&app.a, user_note(&format!("u{n:03}"), &hook)).await);
     }
     // Ids are short, URL-safe, and unique.
     let mut ids: Vec<String> = projects.iter().chain(&users).map(id).collect();
     assert!(ids.iter().all(|id| !id.is_empty() && id.len() <= 32 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')));
     ids.sort();
     ids.dedup();
-    assert_eq!(ids.len(), 196);
-    // A copy of every user note puts the index 96 lines past the budget.
+    assert_eq!(ids.len(), 220);
+    // Copying every note puts both the user scope and the project scope past both 200 lines and 8192 bytes.
     app.env
         .store
         .write(|tx| {
@@ -885,100 +905,133 @@ async fn forgetting_ignores_the_budget() {
                 "INSERT INTO memory_notes (id, scope_key, category, title, hook, body, provenance, revision, created_at,
                      updated_at, deleted_at, device_id, session_id, sources)
                  SELECT 'c' || id, scope_key, category, 'copy of ' || title, hook, body, provenance, revision, created_at,
-                     updated_at, deleted_at, device_id, session_id, sources FROM memory_notes WHERE scope_key = 'user'",
+                     updated_at, deleted_at, device_id, session_id, sources FROM memory_notes",
             )
         })
         .unwrap();
     let read = app.memory(&app.a, "project=scratch").await;
-    assert_eq!(read["indexLines"], 296);
+    assert_eq!(read["indexLines"], 444);
 
     let r = app.forget(&app.a, &id(&users[0]), json!({ "expectedRevision": 1, "project": "scratch" })).await;
-    assert_eq!((r.status, &r.json()["indexLines"]), (StatusCode::OK, &json!(295)), "{}", r.text());
+    assert_eq!((r.status, &r.json()["indexLines"]), (StatusCode::OK, &json!(443)), "{}", r.text());
     let r = app.forget(&app.a, &id(&projects[0]), json!({ "expectedRevision": 1, "project": "scratch" })).await;
-    assert_eq!((r.status, &r.json()["indexLines"]), (StatusCode::OK, &json!(294)), "{}", r.text());
-    // A save that grows the index is still over the budget, with or without the project named.
-    let mut update = user_note("u1", "hh");
+    assert_eq!((r.status, &r.json()["indexLines"]), (StatusCode::OK, &json!(442)), "{}", r.text());
+    // A save that grows the over-budget user scope is refused with project: null, with or without a project named.
+    let mut update = user_note("u001", &format!("{hook}x"));
     update["id"] = users[1]["id"].clone();
     update["expectedRevision"] = json!(1);
     for project in [json!("scratch"), Value::Null] {
         update["project"] = project;
         let r = app.save(&app.a, update.clone()).await;
-        assert_eq!((r.status, &r.json()["error"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full")), "{}", r.text());
-        assert_eq!(r.json()["project"]["label"], "scratch");
+        assert_eq!((r.status, &r.json()["error"], &r.json()["project"]),
+                   (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full"), &Value::Null), "{}", r.text());
     }
-    let r = app.save(&app.a, user_note("u96", "h")).await;
-    assert_eq!((r.status, &r.json()["indexLines"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!(295)));
+    let r = app.save(&app.a, user_note("u110", &hook)).await;
+    assert_eq!((r.status, &r.json()["indexLines"], &r.json()["project"]),
+               (StatusCode::UNPROCESSABLE_ENTITY, &json!(222), &Value::Null));
+    // A save that grows the over-budget project scope is refused with project: scratch.
     let mut project_update = project(1);
     project_update["id"] = projects[1]["id"].clone();
     project_update["expectedRevision"] = json!(1);
-    project_update["hook"] = json!("hh");
+    project_update["hook"] = json!(format!("{hook}x"));
     let r = app.save(&app.a, project_update.clone()).await;
-    assert_eq!((r.status, &r.json()["error"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full")));
-    // An edit of the same size, or a shorter one, is not.
+    assert_eq!((r.status, &r.json()["error"], &r.json()["project"]["label"]),
+               (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full"), &json!("scratch")));
+    // An edit of the same size, or a shorter one, is allowed in either over-budget scope.
     update["project"] = json!("scratch");
-    update["hook"] = json!("k");
+    update["hook"] = json!("k".repeat(40));
     let r = app.save(&app.a, update.clone()).await;
-    assert_eq!((r.status, &r.json()["indexLines"]), (StatusCode::OK, &json!(294)), "{}", r.text());
+    assert_eq!((r.status, &r.json()["indexLines"]), (StatusCode::OK, &json!(442)), "{}", r.text());
     let bytes = r.json()["indexBytes"].as_u64().unwrap();
-    update["title"] = json!("u");
+    update["title"] = json!("u00");
     update["expectedRevision"] = json!(2);
     let r = app.save(&app.a, update).await;
     assert_eq!((r.status, &r.json()["indexBytes"]), (StatusCode::OK, &json!(bytes - 1)), "{}", r.text());
-    project_update["title"] = json!("p");
-    project_update["hook"] = json!("h");
+    project_update["title"] = json!("p00");
+    project_update["hook"] = json!(hook);
     let r = app.save(&app.a, project_update).await;
     assert_eq!((r.status, &r.json()["indexBytes"]), (StatusCode::OK, &json!(bytes - 2)), "{}", r.text());
 }
 
-/// C2: a user note is in every project's index, so a user-scope save, from whichever project or none, must fit the
-/// index of the user scope with each project scope; the 422 names the project whose index it would overfill, which
-/// keeps within the budget and can still save.
+/// Independent per-scope budgets: the user scope and each project scope each have their own 8192-byte / 200-line
+/// budget. A full project A never blocks user-scope saves (from project B, project A, or no project), a full user
+/// scope never blocks project-scope saves, and an empty user scope does not exempt a project scope from its own limit.
 #[tokio::test]
-async fn user_saves_fit_every_projects_index() {
+async fn scopes_have_independent_budgets() {
     let app = App::new(AuthMode::None);
     let long = |n: usize| format!("{n:03}{}", "t".repeat(117));
-    // Long notes in the widgets repository until one more does not fit.
+    let widgets_scope = json!({ "key": format!("repo:{REPO}"), "kind": "project", "label": "widgets" });
+    // Fill project A (widgets) right up to 8192 bytes while user scope is completely empty.
     let mut saved = Vec::new();
-    loop {
+    let full_widgets = loop {
         let mut note = repo_note(&long(saved.len()), "project");
         note["hook"] = json!("h".repeat(150));
         let r = app.save(&app.a, note).await;
         if r.status != StatusCode::OK {
-            assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.text());
-            break;
+            break r;
         }
         saved.push(r.json()["note"].clone());
-    }
+    };
     let query = format!("repository={}", encode(REPO));
     let widgets = app.memory(&app.a, &query).await;
     let (bytes, lines) = (widgets["indexBytes"].as_u64().unwrap(), widgets["indexLines"].as_u64().unwrap());
     assert!(8192 - bytes < 293, "{bytes}");
+    assert_eq!(
+        (full_widgets.status, full_widgets.json()),
+        (StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": "memory_full", "budget": "per_scope", "indexBytes": bytes + 293, "indexLines": lines + 1,
+                                                    "limitBytes": 8192, "limitLines": 200, "project": widgets_scope }))
+    );
 
-    // A long user note, 26 bytes of headers and a line of 293, does not fit beside them, whether device b saves it
-    // from its gadgets project or device a from no project.
-    let scope = json!({ "key": format!("repo:{REPO}"), "kind": "project", "label": "widgets" });
-    let full = json!({ "error": "memory_full", "indexBytes": bytes + 319, "indexLines": lines + 3, "limitBytes": 8192,
-                       "limitLines": 200, "project": scope });
-    let mut user = user_note(&long(900), &"h".repeat(150));
-    user["project"] = json!("gadgets");
-    let r = app.save(&app.b, user.clone()).await;
-    assert_eq!((r.status, r.json()), (StatusCode::UNPROCESSABLE_ENTITY, full.clone()));
-    user.as_object_mut().unwrap().remove("project");
-    let r = app.save(&app.a, user).await;
-    assert_eq!((r.status, r.json()), (StatusCode::UNPROCESSABLE_ENTITY, full));
-    assert_eq!(app.count("SELECT COUNT(*) FROM memory_notes WHERE scope_key = 'user'"), 0);
-    assert_eq!(app.memory(&app.a, &query).await["indexBytes"], json!(bytes));
+    // Even with project A at ~8192 bytes, saving new user-scope notes from project B (gadgets), project A (widgets),
+    // and from no project all succeed as long as the user scope itself stays within 8192 bytes / 200 lines.
+    let mut from_b = user_note(&long(900), &"h".repeat(150));
+    from_b["project"] = json!("gadgets");
+    assert_eq!(app.save(&app.b, from_b).await.status, StatusCode::OK);
+    let mut from_a = user_note(&long(901), &"h".repeat(150));
+    from_a["repository"] = json!(REPO);
+    from_a["project"] = json!("widgets");
+    assert_eq!(app.save(&app.a, from_a).await.status, StatusCode::OK);
+    assert_eq!(app.save(&app.a, user_note(&long(902), &"h".repeat(150))).await.status, StatusCode::OK);
+    assert_eq!(app.count("SELECT COUNT(*) FROM memory_notes WHERE scope_key = 'user'"), 3);
 
-    // Device b's gadgets project has its own budget, and widgets still saves.
-    app.saved(&app.b, json!({ "expectedRevision": 0, "scope": "project", "project": "gadgets", "category": "project",
-                               "title": long(901), "hook": "h".repeat(150) }))
-        .await;
-    let mut edit = repo_note("Short", "project");
-    edit["id"] = saved[0]["id"].clone();
-    edit["expectedRevision"] = json!(1);
-    app.saved(&app.a, edit).await;
-    let r = app.save(&app.a, user_note("Tabs", "indent with tabs")).await;
-    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    // Fill the user scope up to 8192 bytes; the overflow reports project: null and the user scope's own size.
+    let mut user_n = 3usize;
+    let full_user = loop {
+        let r = app.save(&app.a, user_note(&long(user_n), &"h".repeat(150))).await;
+        if r.status != StatusCode::OK {
+            break r;
+        }
+        user_n += 1;
+    };
+    let user_only = app.memory(&app.a, "").await;
+    let (u_bytes, u_lines) = (user_only["indexBytes"].as_u64().unwrap(), user_only["indexLines"].as_u64().unwrap());
+    assert!(8192 - u_bytes < 293, "{u_bytes}");
+    assert_eq!(
+        (full_user.status, full_user.json()),
+        (StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": "memory_full", "budget": "per_scope", "indexBytes": u_bytes + 293, "indexLines": u_lines + 1,
+                                                    "limitBytes": 8192, "limitLines": 200, "project": Value::Null }))
+    );
+
+    // A full user scope does NOT block saving into project B (gadgets), which has its own independent 8192-byte budget.
+    let mut gadgets_n = 0usize;
+    let full_gadgets = loop {
+        let r = app
+            .save(&app.b, json!({ "expectedRevision": 0, "scope": "project", "project": "gadgets", "category": "project",
+                                  "title": long(gadgets_n), "hook": "h".repeat(150) }))
+            .await;
+        if r.status != StatusCode::OK {
+            break r;
+        }
+        gadgets_n += 1;
+    };
+    assert!(gadgets_n >= 20, "gadgets should have its own full 8 KiB budget, got {gadgets_n} notes");
+    let gadgets_scope = json!({ "key": "local:gadgets@b", "kind": "project", "label": "gadgets" });
+    assert_eq!(full_gadgets.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(full_gadgets.json()["error"], json!("memory_full"));
+    assert_eq!(full_gadgets.json()["project"], gadgets_scope);
+    // Reported size is gadgets's own rendered part (just over 8192), not user + gadgets (~16 KiB).
+    let g_bytes = full_gadgets.json()["indexBytes"].as_u64().unwrap();
+    assert!(g_bytes > 8192 && g_bytes <= 8192 + 320, "expected gadgets's own bytes, got {g_bytes}");
 }
 
 /// AC-3 with the CAS rule: concurrent creates that fit only one at a time leave exactly one more note.
@@ -1379,6 +1432,6 @@ fn an_older_database_gains_last_used_times() {
     assert_eq!(one(&store, "PRAGMA user_version")["user_version"], json!(SCHEMA_VERSION));
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     assert_eq!(one(&store, "SELECT last_used_at FROM memory_notes")["last_used_at"], Value::Null);
-    let view = store.read(|conn| pika::memory::view(conn, DEVICE, None, None)).unwrap();
+    let view = store.read(|conn| pika::memory::view(conn, DEVICE, None, None, pika::memory::ViewMode::Full)).unwrap();
     assert_eq!(serde_json::to_value(&view.notes[0]).unwrap()["lastUsedAt"], Value::Null);
 }

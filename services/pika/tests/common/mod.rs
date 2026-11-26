@@ -22,7 +22,7 @@ pub const SESSION_ID: &str = "7f3c2a10-5b1e-4c3d-9a8e-1f2e3d4c5b6a";
 pub const RUN_ID: &str = "20261021-100000-abcd";
 pub const WAIT: Duration = Duration::from_secs(5);
 /// Current schema `PRAGMA user_version`, kept in sync with `UNDO_STEPS`.
-pub const SCHEMA_VERSION: i64 = 25;
+pub const SCHEMA_VERSION: i64 = 26;
 /// Per-version SQL that undoes schema version `v` back to `v - 1`, in ascending version order.
 /// Dropping v7's `search_fts` needs `pika::tokenizer::register`, which `rewind` calls before that step.
 pub const UNDO_STEPS: &[(usize, &str)] = &[
@@ -98,6 +98,12 @@ pub const UNDO_STEPS: &[(usize, &str)] = &[
          CREATE INDEX IF NOT EXISTS sessions_root_device_project ON sessions(device, project, last_at DESC, id DESC) WHERE parent_session_id IS NULL;",
     ),
     (25, "DROP INDEX IF EXISTS session_links_dream; DROP INDEX IF EXISTS sessions_repo_last;"),
+    (
+        26,
+        "DROP TABLE IF EXISTS memory_notes_fts;
+         ALTER TABLE memory_revisions DROP COLUMN tier;
+         ALTER TABLE memory_notes DROP COLUMN tier;",
+    ),
 ];
 
 /// Rewinds `conn` from its current `PRAGMA user_version` down to `target_version`, running each intermediate undo step
@@ -113,8 +119,8 @@ pub fn rewind(conn: &rusqlite::Connection, target_version: usize) {
             .iter()
             .find(|(v, _)| *v == version)
             .unwrap_or_else(|| panic!("missing UNDO_STEPS entry for schema version {version}"));
-        if version == 7 {
-            // Dropping v7's FTS5 table requires its custom tokenizer to be registered on this connection.
+        if version == 7 || version == 26 {
+            // Dropping FTS5 tables requires the custom pika_cjk tokenizer to be registered on this connection.
             pika::tokenizer::register(conn).unwrap();
         }
         if !sql.is_empty() {

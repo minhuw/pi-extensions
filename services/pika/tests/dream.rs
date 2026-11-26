@@ -626,7 +626,8 @@ async fn failed_commits_write_nothing() {
     let body = r.json();
     assert_eq!((r.status, &body["error"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full")), "{body}");
     assert!(body["indexBytes"].as_u64().unwrap() > 8192);
-    assert_eq!((&body["limitBytes"], &body["limitLines"]), (&json!(8192), &json!(200)));
+    assert_eq!((&body["limitBytes"], &body["limitLines"], &body["project"]["label"]),
+               (&json!(8192), &json!(200), &json!("widgets")));
     assert_eq!(app.dump(), before);
 
     // The lease survives the failures.
@@ -906,7 +907,8 @@ async fn commits_at_the_limits_are_accepted() {
     assert_eq!(note["sources"], json!(twenty));
 }
 
-/// AC-4: the 200-line budget applies to the final index of a commit too; over it, nothing is written.
+/// AC-4: the 200-line budget applies independently to the user scope and the lease's project scope; over either,
+/// nothing is written.
 #[tokio::test]
 async fn commits_past_the_line_budget_write_nothing() {
     let app = App::new();
@@ -915,11 +917,31 @@ async fn commits_past_the_line_budget_write_nothing() {
     }
     repo_session(&app.env.store, "s1", BASE, 1);
     let granted = app.granted("manual").await;
+    // 45 project notes fit their own 200-line budget even when the user scope already has 162 lines.
+    let project_changes: Vec<Value> = (0..45).map(|n| save("project", &format!("p{n:02}"), json!([source("s1", 1)]))).collect();
+    app.committed(&granted, json!({ "sessions": [], "changes": project_changes })).await;
+
+    // Pushing the user scope itself past 200 lines (160 + 40 = 200 notes => 202 lines) fails with project: null.
     let before = app.dump();
-    let changes: Vec<Value> = (0..45).map(|n| save("project", &format!("p{n:02}"), json!([source("s1", 1)]))).collect();
-    let r = app.commit(&app.a, &granted, json!({ "sessions": ["s1"], "changes": changes })).await;
+    let user_overflow: Vec<Value> = (0..40).map(|n| save("user", &format!("u_extra_{n:02}"), json!([source("s1", 1)]))).collect();
+    let r = app.commit(&app.a, &granted, json!({ "sessions": ["s1"], "changes": user_overflow })).await;
     let body = r.json();
-    assert_eq!((r.status, &body["error"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full")), "{body}");
+    assert_eq!((r.status, &body["error"], &body["project"]),
+               (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full"), &Value::Null), "{body}");
+    assert!(body["indexLines"].as_u64().unwrap() > 200 && body["indexBytes"].as_u64().unwrap() <= 8192, "{body}");
+    assert_eq!(app.dump(), before);
+
+    // Fill the project scope to 160 notes (162 lines), then push it past 200 lines in a commit -> fails with project: widgets.
+    for n in 45..160 {
+        app.saved(json!({ "expectedRevision": 0, "scope": "project", "repository": REPO, "project": "widgets",
+                          "category": "project", "title": format!("p{n:03}"), "hook": "h" })).await;
+    }
+    let before = app.dump();
+    let project_overflow: Vec<Value> = (0..40).map(|n| save("project", &format!("p_extra_{n:02}"), json!([source("s1", 1)]))).collect();
+    let r = app.commit(&app.a, &granted, json!({ "sessions": ["s1"], "changes": project_overflow })).await;
+    let body = r.json();
+    assert_eq!((r.status, &body["error"], &body["project"]["label"]),
+               (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full"), &json!("widgets")), "{body}");
     assert!(body["indexLines"].as_u64().unwrap() > 200 && body["indexBytes"].as_u64().unwrap() <= 8192, "{body}");
     assert_eq!(app.dump(), before);
 }
@@ -1344,12 +1366,13 @@ async fn batch_routes_need_the_owners_login() {
     assert_eq!(app.count("SELECT COUNT(*) FROM memory_revisions WHERE action = 'revert'"), 1);
 }
 
-/// C2 in a commit: a dream's user-scope saves must fit every project's index too, and the 422 names the project.
+/// Dream commits enforce independent per-scope budgets: a full unrelated project does not block user-scope saves,
+/// a full user scope does not block project-scope saves, and overflowing either scope rejects the whole commit.
 #[tokio::test]
-async fn dream_user_saves_fit_every_projects_index() {
+async fn dream_commits_enforce_independent_scope_budgets() {
     let app = App::new();
     let long = |n: usize| format!("{n:03}{}", "t".repeat(117));
-    // Long notes in device laptop's local gadgets project until one more does not fit.
+    // Fill device laptop's local gadgets project right up to 8192 bytes.
     loop {
         let r = app
             .post(&app.a, "memory/notes", json!({ "expectedRevision": 0, "scope": "project", "project": "gadgets",
@@ -1357,21 +1380,39 @@ async fn dream_user_saves_fit_every_projects_index() {
             .await;
         if r.status != StatusCode::OK {
             assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.text());
+            assert_eq!(r.json()["project"], json!({ "key": LOCAL, "kind": "project", "label": "gadgets" }));
             break;
         }
     }
     repo_session(&app.env.store, "s1", BASE, 1);
     let granted = app.granted("manual").await;
-    let before = app.dump();
+    // A widgets dream can commit a long user-scope note even though gadgets is at ~8192 bytes.
     let mut change = save("user", &long(1), json!([source("s1", 1)]));
     change["hook"] = json!("h".repeat(150));
+    app.committed(&granted, json!({ "sessions": [], "changes": [change.clone()] })).await;
+
+    // Fill the user scope up to 8192 bytes, then verify a dream commit overflowing user fails with project: null.
+    let mut n = 2usize;
+    loop {
+        let r = app
+            .post(&app.a, "memory/notes", json!({ "expectedRevision": 0, "scope": "user", "category": "user",
+                                                  "title": long(n), "hook": "h".repeat(150) }))
+            .await;
+        if r.status != StatusCode::OK {
+            assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.text());
+            break;
+        }
+        n += 1;
+    }
+    let before = app.dump();
     let r = app.commit(&app.a, &granted, json!({ "sessions": ["s1"], "changes": [change.clone()] })).await;
     let body = r.json();
-    assert_eq!((r.status, &body["error"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full")), "{body}");
-    assert_eq!(body["project"], json!({ "key": LOCAL, "kind": "project", "label": "gadgets" }));
+    assert_eq!((r.status, &body["error"], &body["project"]),
+               (StatusCode::UNPROCESSABLE_ENTITY, &json!("memory_full"), &Value::Null), "{body}");
     assert!(body["indexBytes"].as_u64().unwrap() > 8192, "{body}");
     assert_eq!(app.dump(), before);
-    // The same note fits the widgets project.
+
+    // Even with the user scope full, the widgets dream can still commit into the widgets project scope.
     change["scope"] = json!("project");
     app.committed(&granted, json!({ "sessions": ["s1"], "changes": [change] })).await;
 }

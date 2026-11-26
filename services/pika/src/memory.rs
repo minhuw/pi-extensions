@@ -6,7 +6,7 @@
 
 pub mod dream;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize, Serializer};
@@ -16,7 +16,17 @@ use crate::util::{format_iso_ms, now_ms, random_bytes, valid_project, valid_repo
 
 /// The note categories, in index order.
 pub const CATEGORIES: [&str; 4] = ["user", "feedback", "project", "reference"];
-/// The most bytes and lines a save may grow the index of the user scope with a project scope, or alone, to.
+/// The note tiers: `pinned` notes render in the prompt index and count against the per-scope budget; `archival` notes
+/// are kept out of the prompt index and budget and retrieved via search.
+pub const TIERS: [&str; 2] = ["pinned", "archival"];
+pub const PINNED: &str = "pinned";
+pub const ARCHIVAL: &str = "archival";
+pub const SEARCH_DEFAULT_LIMIT: usize = 20;
+pub const SEARCH_MAX_LIMIT: usize = 100;
+/// Maximum number of live `archival` notes allowed in a single scope (user scope or each project scope).
+pub const MAX_ARCHIVAL_NOTES_PER_SCOPE: usize = 500;
+/// The most bytes and lines a save may grow a scope's own rendered index part to (the user scope and each project
+/// scope each have an independent budget).
 pub const LIMIT_BYTES: usize = 8192;
 pub const LIMIT_LINES: usize = 200;
 const MAX_TITLE: usize = 120;
@@ -52,8 +62,8 @@ pub enum MemoryError {
     Internal(anyhow::Error),
 }
 
-/// An index a write would grow past the budget: its size after the write, and the project scope whose index with the
-/// user scope it is, `None` for the user scope's alone.
+/// A scope's rendered index part a write would grow past its independent budget: that scope's size after the write,
+/// and the project scope that overflowed, `None` for the user scope.
 #[derive(Debug)]
 pub struct Overfull {
     pub bytes: usize,
@@ -110,6 +120,7 @@ pub struct Note {
     pub id: String,
     pub scope: Scope,
     pub category: String,
+    pub tier: String,
     pub title: String,
     pub hook: String,
     pub body: String,
@@ -138,6 +149,7 @@ pub struct Revision {
     /// `save`, `forget`, or `revert`.
     pub action: String,
     pub category: String,
+    pub tier: String,
     pub title: String,
     pub hook: String,
     pub body: String,
@@ -159,6 +171,18 @@ pub struct ScopeSummary {
     pub scope: Scope,
     /// Live notes only.
     pub note_count: i64,
+    /// Live pinned notes.
+    pub pinned_count: i64,
+    /// Live archival notes.
+    pub archival_count: i64,
+    /// Rendered pinned index bytes for this scope.
+    pub index_bytes: usize,
+    /// Rendered pinned index lines for this scope.
+    pub index_lines: usize,
+    /// Per-scope byte limit (`LIMIT_BYTES`).
+    pub limit_bytes: usize,
+    /// Per-scope line limit (`LIMIT_LINES`).
+    pub limit_lines: usize,
     #[serde(serialize_with = "iso_opt")]
     pub updated_at: Option<i64>,
 }
@@ -179,21 +203,68 @@ impl Index {
     }
 }
 
-/// `GET memory`: the request's scopes, their live notes in index order, and their index.
+/// What `GET memory` returns: `Full` includes every live note (`pinned` and `archival`); `Index` skips loading
+/// archival bodies and returns `notes: []` with only the rendered pinned index and archival counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ViewMode {
+    #[default]
+    Full,
+    Index,
+}
+
+/// Live archival note counts across the scopes of a `GET memory` response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ArchivalCounts {
+    pub user: usize,
+    pub project: usize,
+}
+
+/// `GET memory`: the request's scopes, their live notes in index order (empty when `view=index`), their rendered
+/// pinned index, capability marker, and archival note counts.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct View {
     pub scopes: Vec<Scope>,
     pub notes: Vec<Note>,
     #[serde(flatten)]
     pub index: Index,
+    pub tiers: bool,
+    pub archival_count: usize,
+    pub archival_counts: ArchivalCounts,
 }
 
-/// What a save or forget wrote, and the index of the request's scopes after it.
+/// `GET memory/search`: matched live notes across the request's scopes, the search mode used, and total live notes.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchView {
+    pub scopes: Vec<Scope>,
+    pub notes: Vec<Note>,
+    pub mode: String,
+    pub total: usize,
+}
+
+/// Parameters for [`search`].
+#[derive(Debug, Default)]
+pub struct SearchQuery<'a> {
+    pub q: &'a str,
+    pub project: Option<&'a str>,
+    pub repository: Option<&'a str>,
+    pub scope: Option<&'a str>,
+    pub category: Option<&'a str>,
+    pub tier: Option<&'a str>,
+    pub limit: Option<usize>,
+}
+
+/// What a save or forget wrote, the combined index of the request's scopes after it, and the written note's own scope
+/// index size.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Written {
     pub note: Note,
     #[serde(flatten)]
     pub index: Index,
+    pub scope_index_bytes: usize,
+    pub scope_index_lines: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,6 +277,8 @@ pub struct Save {
     pub repository: Option<String>,
     pub session_id: Option<String>,
     pub category: String,
+    #[serde(default)]
+    pub tier: Option<String>,
     pub title: String,
     pub hook: String,
     #[serde(default)]
@@ -255,7 +328,7 @@ pub fn render_index(groups: &[(Scope, Vec<Note>)]) -> String {
     scopes.sort_by_key(|(scope, _)| scope.kind != "user");
     let mut out = String::new();
     for (scope, notes) in scopes {
-        let mut notes: Vec<&Note> = notes.iter().filter(|n| n.deleted_at.is_none()).collect();
+        let mut notes: Vec<&Note> = notes.iter().filter(|n| n.deleted_at.is_none() && n.tier == PINNED).collect();
         if notes.is_empty() {
             continue;
         }
@@ -346,7 +419,7 @@ fn request_scopes(conn: &Connection, project: Option<Scope>) -> rusqlite::Result
 }
 
 const NOTE_SELECT: &str = "SELECT n.id, n.category, n.title, n.hook, n.body, n.provenance, n.revision, n.created_at,
-    n.updated_at, n.deleted_at, n.device_id, n.session_id, s.key, s.kind, s.label, n.sources, n.last_used_at
+    n.updated_at, n.deleted_at, n.device_id, n.session_id, s.key, s.kind, s.label, n.sources, n.last_used_at, n.tier
     FROM memory_notes n JOIN memory_scopes s ON s.key = n.scope_key";
 const INDEX_ORDER: &str = "ORDER BY CASE n.category WHEN 'user' THEN 0 WHEN 'feedback' THEN 1 WHEN 'project' THEN 2
     WHEN 'reference' THEN 3 ELSE 4 END, n.category, n.created_at, n.id";
@@ -373,6 +446,7 @@ fn note_row(r: &rusqlite::Row) -> rusqlite::Result<Note> {
         scope: Scope { key: r.get(12)?, kind: r.get(13)?, label: r.get(14)? },
         sources: sources_column(r.get(15)?),
         last_used_at: r.get(16)?,
+        tier: r.get(17)?,
     })
 }
 
@@ -387,6 +461,23 @@ fn live_notes(conn: &Connection, key: &str) -> rusqlite::Result<Vec<Note>> {
         .collect()
 }
 
+/// The scope's live pinned notes in index order (never loads archival note bodies).
+fn pinned_notes(conn: &Connection, key: &str) -> rusqlite::Result<Vec<Note>> {
+    conn.prepare_cached(&format!(
+        "{NOTE_SELECT} WHERE n.scope_key = ?1 AND n.deleted_at IS NULL AND n.tier = 'pinned' {INDEX_ORDER}"
+    ))?
+    .query_map([key], note_row)?
+    .collect()
+}
+
+/// Live archival note count for `key` without loading note bodies.
+fn archival_count(conn: &Connection, key: &str) -> rusqlite::Result<usize> {
+    let count: i64 = conn
+        .prepare_cached("SELECT COUNT(*) FROM memory_notes WHERE scope_key = ?1 AND deleted_at IS NULL AND tier = 'archival'")?
+        .query_row([key], |r| r.get(0))?;
+    Ok(count.max(0) as usize)
+}
+
 fn groups(conn: &Connection, scopes: Vec<Scope>) -> rusqlite::Result<Vec<(Scope, Vec<Note>)>> {
     scopes
         .into_iter()
@@ -397,14 +488,59 @@ fn groups(conn: &Connection, scopes: Vec<Scope>) -> rusqlite::Result<Vec<(Scope,
         .collect()
 }
 
+fn pinned_groups(conn: &Connection, scopes: Vec<Scope>) -> rusqlite::Result<Vec<(Scope, Vec<Note>)>> {
+    scopes
+        .into_iter()
+        .map(|scope| {
+            let notes = pinned_notes(conn, &scope.key)?;
+            Ok((scope, notes))
+        })
+        .collect()
+}
+
 /// `GET memory`: the user scope and the project scope the parameters name.
-pub fn view(conn: &Connection, device: &str, project: Option<&str>, repository: Option<&str>) -> Result<View, MemoryError> {
+pub fn view(
+    conn: &Connection,
+    device: &str,
+    project: Option<&str>,
+    repository: Option<&str>,
+    mode: ViewMode,
+) -> Result<View, MemoryError> {
     let project = project_scope(project, repository, device)?;
     let tx = conn.unchecked_transaction()?;
     let scopes = request_scopes(&tx, project)?;
-    let groups = groups(&tx, scopes.clone())?;
-    let index = Index::new(&groups);
-    Ok(View { scopes, notes: groups.into_iter().flat_map(|(_, notes)| notes).collect(), index })
+    let (notes, index, archival_counts) = match mode {
+        ViewMode::Full => {
+            let groups = groups(&tx, scopes.clone())?;
+            let index = Index::new(&groups);
+            let mut counts = ArchivalCounts::default();
+            for (scope, scope_notes) in &groups {
+                let count = scope_notes.iter().filter(|n| n.tier == ARCHIVAL).count();
+                if scope.kind == USER {
+                    counts.user = count;
+                } else {
+                    counts.project = count;
+                }
+            }
+            (groups.into_iter().flat_map(|(_, notes)| notes).collect(), index, counts)
+        }
+        ViewMode::Index => {
+            let groups = pinned_groups(&tx, scopes.clone())?;
+            let index = Index::new(&groups);
+            let mut counts = ArchivalCounts::default();
+            for scope in &scopes {
+                let count = archival_count(&tx, &scope.key)?;
+                if scope.kind == USER {
+                    counts.user = count;
+                } else {
+                    counts.project = count;
+                }
+            }
+            (Vec::new(), index, counts)
+        }
+    };
+    let archival_count = archival_counts.user + archival_counts.project;
+    Ok(View { scopes, notes, index, tiers: true, archival_count, archival_counts })
 }
 
 /// Scrubbed of credentials, then trimmed when `trim`.
@@ -461,15 +597,27 @@ struct Author<'a> {
 /// A note's validated, scrubbed content.
 struct Fields {
     category: String,
+    tier: Option<String>,
     title: String,
     hook: String,
     body: String,
 }
 
-fn fields(category: &str, title: &str, hook: &str, body: &str) -> Result<Fields, MemoryError> {
+fn parse_tier(tier: Option<&str>) -> Result<Option<String>, MemoryError> {
+    let Some(tier) = tier else {
+        return Ok(None);
+    };
+    if !TIERS.contains(&tier) {
+        return Err(bad(format!("tier must be one of {}", TIERS.join(", "))));
+    }
+    Ok(Some(tier.to_owned()))
+}
+
+fn fields(category: &str, tier: Option<&str>, title: &str, hook: &str, body: &str) -> Result<Fields, MemoryError> {
     if !CATEGORIES.contains(&category) {
         return Err(bad(format!("category must be one of {}", CATEGORIES.join(", "))));
     }
+    let tier = parse_tier(tier)?;
     let title = scrubbed(title, true);
     if title.is_empty() || title.chars().count() > MAX_TITLE {
         return Err(bad(format!("title must be 1 to {MAX_TITLE} characters")));
@@ -482,10 +630,10 @@ fn fields(category: &str, title: &str, hook: &str, body: &str) -> Result<Fields,
     if body.len() > MAX_BODY {
         return Err(bad(format!("body must be at most {MAX_BODY} bytes")));
     }
-    Ok(Fields { category: category.to_owned(), title, hook, body })
+    Ok(Fields { category: category.to_owned(), tier, title, hook, body })
 }
 
-/// Writes the note's current state, its revision row, and its scope's `updated_at` (creating the scope).
+/// Writes the note's current state, its revision row, its FTS5 entry, and its scope's `updated_at` (creating the scope).
 fn record(tx: &Transaction, note: &Note, action: &str, author: &Author) -> rusqlite::Result<()> {
     tx.prepare_cached(
         "INSERT INTO memory_scopes (key, kind, label, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)
@@ -495,8 +643,8 @@ fn record(tx: &Transaction, note: &Note, action: &str, author: &Author) -> rusql
     let sources = serde_json::to_string(&note.sources).expect("sources serialize");
     tx.prepare_cached(
         "INSERT OR REPLACE INTO memory_notes (id, scope_key, category, title, hook, body, provenance, revision, created_at,
-             updated_at, deleted_at, device_id, session_id, sources, last_used_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             updated_at, deleted_at, device_id, session_id, sources, last_used_at, tier)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
     )?
     .execute(params![
         note.id,
@@ -513,11 +661,13 @@ fn record(tx: &Transaction, note: &Note, action: &str, author: &Author) -> rusql
         note.device_id,
         note.session_id,
         sources,
-        note.last_used_at
+        note.last_used_at,
+        note.tier
     ])?;
     tx.prepare_cached(
         "INSERT INTO memory_revisions (note_id, revision, action, category, title, hook, body, at, device_id, session_id,
-             reason, provenance, sources, batch_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             reason, provenance, sources, batch_id, tier)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
     )?
     .execute(params![
         note.id,
@@ -533,8 +683,14 @@ fn record(tx: &Transaction, note: &Note, action: &str, author: &Author) -> rusql
         author.reason,
         note.provenance,
         sources,
-        author.batch_id
+        author.batch_id,
+        note.tier
     ])?;
+    tx.prepare_cached("DELETE FROM memory_notes_fts WHERE note_id = ?1")?.execute([&note.id])?;
+    if note.deleted_at.is_none() {
+        tx.prepare_cached("INSERT INTO memory_notes_fts (note_id, title, hook, body) VALUES (?1, ?2, ?3, ?4)")?
+            .execute(params![note.id, note.title, note.hook, note.body])?;
+    }
     Ok(())
 }
 
@@ -548,8 +704,10 @@ fn put(tx: &Transaction, target: Scope, id: Option<&str>, expected: i64, fields:
             if current.revision != expected {
                 return Err(MemoryError::Conflict(Box::new(current)));
             }
+            let tier = fields.tier.unwrap_or_else(|| current.tier.clone());
             Note {
                 category: fields.category,
+                tier,
                 title: fields.title,
                 hook: fields.hook,
                 body: fields.body,
@@ -570,6 +728,7 @@ fn put(tx: &Transaction, target: Scope, id: Option<&str>, expected: i64, fields:
                 id: new_id(tx)?,
                 scope: target,
                 category: fields.category,
+                tier: fields.tier.unwrap_or_else(|| PINNED.to_owned()),
                 title: fields.title,
                 hook: fields.hook,
                 body: fields.body,
@@ -620,47 +779,30 @@ struct Size {
 }
 
 impl Size {
-    fn plus(self, other: Size) -> Size {
-        Size { bytes: self.bytes + other.bytes, lines: self.lines + other.lines }
-    }
-
-    /// Whether a write made it larger than `before` in bytes or in lines.
-    fn grew(self, before: Size) -> bool {
-        self.bytes > before.bytes || self.lines > before.lines
-    }
-
     /// Whether a write made it larger than `before` in bytes or in lines, past the limit of that measure.
     fn overgrown(self, before: Size) -> bool {
         (self.bytes > LIMIT_BYTES && self.bytes > before.bytes) || (self.lines > LIMIT_LINES && self.lines > before.lines)
     }
 }
 
-/// The size of the scope's part of an index: its live notes rendered alone.
+/// The size of the scope's part of an index: its live pinned notes rendered alone.
 fn part(conn: &Connection, scope: &Scope) -> rusqlite::Result<Size> {
-    let text = render_index(&[(scope.clone(), live_notes(conn, &scope.key)?)]);
+    let text = render_index(&[(scope.clone(), pinned_notes(conn, &scope.key)?)]);
     Ok(Size { bytes: text.len(), lines: text.lines().count() })
 }
 
-/// The stored project scopes with live notes other than `except`, by key.
-fn other_project_scopes(conn: &Connection, except: Option<&str>) -> rusqlite::Result<Vec<Scope>> {
-    conn.prepare_cached(
-        "SELECT s.key, s.kind, s.label FROM memory_scopes s WHERE s.kind = 'project' AND s.key IS NOT ?1
-             AND EXISTS (SELECT 1 FROM memory_notes n WHERE n.scope_key = s.key AND n.deleted_at IS NULL)
-         ORDER BY s.key",
-    )?
-    .query_map([except], |r| Ok(Scope { key: r.get(0)?, kind: r.get(1)?, label: r.get(2)? }))?
-    .collect()
-}
-
-/// The parts of the index a write may change, measured before it: the user scope's and that of the project scope the
-/// write names (the request's, or a dream lease's), if any. Every project's index holds the user scope's notes, so a
-/// write may grow none past the budget: not the user scope's with the named project scope's (alone without one), and,
-/// when the user scope's part grew, neither the user scope's alone nor its index with any other project scope. An
-/// index already past the budget may shrink or stay as it is, so a write that grows nothing always fits.
+/// The scope index parts and archival note counts a write may change, measured before it: the user scope's and that of
+/// the project scope the write names (the request's, or a dream lease's), if any. The user scope and each project
+/// scope each have an independent pinned budget (`LIMIT_BYTES` and `LIMIT_LINES`) and archival cap
+/// (`MAX_ARCHIVAL_NOTES_PER_SCOPE`): saving a user note never fails because of any project scope, and saving a project
+/// note never fails because of the user scope. A scope already past a limit (e.g., after a revert) may shrink or stay
+/// as it is, so a write that grows nothing over budget always fits.
 struct Budget {
     project: Option<Scope>,
     user: Size,
     own: Size,
+    user_archival: usize,
+    own_archival: usize,
 }
 
 impl Budget {
@@ -668,34 +810,55 @@ impl Budget {
     fn measure(conn: &Connection, project: Option<Scope>) -> rusqlite::Result<Budget> {
         let user = part(conn, &Scope::user())?;
         let own = project.as_ref().map(|p| part(conn, p)).transpose()?.unwrap_or_default();
-        Ok(Budget { project, user, own })
+        let user_archival = archival_count(conn, USER)?;
+        let own_archival = project.as_ref().map(|p| archival_count(conn, &p.key)).transpose()?.unwrap_or(0);
+        Ok(Budget { project, user, own, user_archival, own_archival })
     }
 
-    /// Checks the indexes after the write; `Full` with the first one it grew past the budget, in the order above, other
-    /// project scopes by key.
+    /// Checks each scope's rendered pinned part and archival cap independently after the write; `Full` with the first
+    /// scope it grew past its pinned budget (the user scope first, then the named project scope), or `BadRequest` when
+    /// a scope grows past `MAX_ARCHIVAL_NOTES_PER_SCOPE`.
     fn check(&self, conn: &Connection) -> Result<(), MemoryError> {
         let user = part(conn, &Scope::user())?;
-        let own = self.project.as_ref().map(|p| part(conn, p)).transpose()?.unwrap_or_default();
-        let full = |size: Size, project: Option<&Scope>| {
-            MemoryError::Full(Overfull { bytes: size.bytes, lines: size.lines, project: project.cloned() })
-        };
-        if user.plus(own).overgrown(self.user.plus(self.own)) {
-            return Err(full(user.plus(own), self.project.as_ref()));
-        }
-        if !user.grew(self.user) {
-            return Ok(());
-        }
         if user.overgrown(self.user) {
-            return Err(full(user, None));
+            return Err(MemoryError::Full(Overfull { bytes: user.bytes, lines: user.lines, project: None }));
         }
-        for scope in other_project_scopes(conn, self.project.as_ref().map(|p| p.key.as_str()))? {
-            let theirs = part(conn, &scope)?;
-            if user.plus(theirs).overgrown(self.user.plus(theirs)) {
-                return Err(full(user.plus(theirs), Some(&scope)));
+        if let Some(project) = &self.project {
+            let own = part(conn, project)?;
+            if own.overgrown(self.own) {
+                return Err(MemoryError::Full(Overfull { bytes: own.bytes, lines: own.lines, project: Some(project.clone()) }));
+            }
+        }
+        let user_archival = archival_count(conn, USER)?;
+        if user_archival > MAX_ARCHIVAL_NOTES_PER_SCOPE && user_archival > self.user_archival {
+            return Err(bad(format!(
+                "archival limit reached ({MAX_ARCHIVAL_NOTES_PER_SCOPE} notes per scope); forget obsolete archival notes first"
+            )));
+        }
+        if let Some(project) = &self.project {
+            let own_archival = archival_count(conn, &project.key)?;
+            if own_archival > MAX_ARCHIVAL_NOTES_PER_SCOPE && own_archival > self.own_archival {
+                return Err(bad(format!(
+                    "archival limit reached ({MAX_ARCHIVAL_NOTES_PER_SCOPE} notes per scope); forget obsolete archival notes first"
+                )));
             }
         }
         Ok(())
     }
+}
+
+fn written(tx: &Transaction, note: Note, project: Option<Scope>) -> rusqlite::Result<Written> {
+    let groups = pinned_groups(tx, request_scopes(tx, project)?)?;
+    let index = Index::new(&groups);
+    let scope_size = groups
+        .iter()
+        .find(|(s, _)| s.key == note.scope.key)
+        .map(|group| {
+            let text = render_index(std::slice::from_ref(group));
+            Size { bytes: text.len(), lines: text.lines().count() }
+        })
+        .unwrap_or_default();
+    Ok(Written { note, index, scope_index_bytes: scope_size.bytes, scope_index_lines: scope_size.lines })
 }
 
 /// `POST memory/notes`: creates a note (no `id`, `expectedRevision` 0) or updates a live one of the scope the request
@@ -703,7 +866,7 @@ impl Budget {
 /// only on `Ok`, as `Store::write` does: the check, the comparison, and the write are one transaction.
 pub fn save(tx: &Transaction, device: &str, request: Save) -> Result<Written, MemoryError> {
     check_revision(request.expected_revision)?;
-    let fields = fields(&request.category, &request.title, &request.hook, &request.body)?;
+    let fields = fields(&request.category, request.tier.as_deref(), &request.title, &request.hook, &request.body)?;
     let reason = reason(request.reason.as_deref())?;
     let session_id = session_id(request.session_id.as_deref())?;
     let project = project_scope(request.project.as_deref(), request.repository.as_deref(), device)?
@@ -719,8 +882,7 @@ pub fn save(tx: &Transaction, device: &str, request: Save) -> Result<Written, Me
     let author = Author { device, session_id, provenance: AGENT, sources: Vec::new(), batch_id: None, reason, now: now_ms() };
     let note = put(tx, target, request.id.as_deref(), request.expected_revision, fields, &author)?;
     budget.check(tx)?;
-    let index = Index::new(&groups(tx, request_scopes(tx, project)?)?);
-    Ok(Written { note, index })
+    Ok(written(tx, note, project)?)
 }
 
 /// `POST memory/notes/:id/forget`: soft-deletes a live note of the user scope or the request's project scope, at
@@ -732,8 +894,7 @@ pub fn forget(tx: &Transaction, device: &str, id: &str, request: Forget) -> Resu
     let project = project_scope(request.project.as_deref(), request.repository.as_deref(), device)?;
     let author = Author { device, session_id, provenance: AGENT, sources: Vec::new(), batch_id: None, reason, now: now_ms() };
     let note = remove(tx, id, request.expected_revision, project.as_ref(), &author)?;
-    let index = Index::new(&groups(tx, request_scopes(tx, project)?)?);
-    Ok(Written { note, index })
+    Ok(written(tx, note, project)?)
 }
 
 /// `POST memory/used`: sets `last_used_at` to now on each named live note of the user scope or the request's project
@@ -757,21 +918,170 @@ pub fn used(tx: &Transaction, device: &str, request: Used) -> Result<Marked, Mem
     Ok(Marked { used })
 }
 
-/// Every stored scope with its live note count: the user scope first, then by label and key.
+/// Splits a user search string into safely quoted FTS5 terms/phrases.
+fn fts_terms(q: &str) -> Vec<String> {
+    let q: String = q.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let mut terms = Vec::new();
+    let mut rest = q.as_str();
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        let (phrase, after) = match rest.strip_prefix('"') {
+            Some(quoted) => match quoted.find('"') {
+                Some(end) => (&quoted[..end], &quoted[end + 1..]),
+                None => (quoted, ""),
+            },
+            None => {
+                let end = rest.find(|c: char| c.is_whitespace() || c == '"').unwrap_or(rest.len());
+                rest.split_at(end)
+            }
+        };
+        if !phrase.trim().is_empty() {
+            terms.push(format!("\"{}\"", phrase.replace('"', "\"\"")));
+        }
+        rest = after;
+    }
+    terms
+}
+
+fn fts_match_candidates(
+    conn: &Connection,
+    expr: &str,
+    by_id: &HashMap<String, usize>,
+    limit: usize,
+) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT note_id FROM memory_notes_fts WHERE memory_notes_fts MATCH ?1 ORDER BY bm25(memory_notes_fts), note_id",
+    )?;
+    let mut rows = stmt.query([expr])?;
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        if by_id.contains_key(&id) && seen.insert(id.clone()) {
+            out.push(id);
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `GET memory/search`: FTS5 (`pika_cjk`) lexical search (AND, falling back to OR) with case-insensitive substring
+/// fallback over live notes.
+pub fn search(conn: &Connection, device: &str, query: SearchQuery<'_>) -> Result<SearchView, MemoryError> {
+    let q = query.q.trim();
+    if q.is_empty() {
+        return Err(bad("q is required"));
+    }
+    let scope_filter = match query.scope.filter(|s| !s.is_empty()) {
+        None => None,
+        Some(s @ ("user" | "project")) => Some(s),
+        Some(_) => return Err(bad("scope must be user or project")),
+    };
+    let category_filter = match query.category.filter(|c| !c.is_empty()) {
+        None => None,
+        Some(c) if CATEGORIES.contains(&c) => Some(c),
+        Some(_) => return Err(bad(format!("category must be one of {}", CATEGORIES.join(", ")))),
+    };
+    let tier_filter = parse_tier(query.tier.filter(|t| !t.is_empty()))?;
+    let limit = query.limit.unwrap_or(SEARCH_DEFAULT_LIMIT);
+    if !(1..=SEARCH_MAX_LIMIT).contains(&limit) {
+        return Err(bad(format!("limit must be 1 to {SEARCH_MAX_LIMIT}")));
+    }
+    let project = project_scope(query.project, query.repository, device)?;
+
+    let tx = conn.unchecked_transaction()?;
+    let scopes = request_scopes(&tx, project)?;
+    let groups = groups(&tx, scopes.clone())?;
+    let all_notes: Vec<Note> = groups.into_iter().flat_map(|(_, notes)| notes).collect();
+    let total = all_notes.len();
+    let candidates: Vec<Note> = all_notes
+        .into_iter()
+        .filter(|n| scope_filter.is_none_or(|s| n.scope.kind == s))
+        .filter(|n| category_filter.is_none_or(|c| n.category == c))
+        .filter(|n| tier_filter.as_deref().is_none_or(|t| n.tier == t))
+        .collect();
+    if candidates.is_empty() {
+        return Ok(SearchView { scopes, notes: Vec::new(), mode: "lexical".into(), total });
+    }
+    let by_id: HashMap<String, usize> =
+        candidates.iter().enumerate().map(|(idx, n)| (n.id.clone(), idx)).collect();
+
+    // Lexical search: FTS5 AND first, then OR fallback for multi-term natural-language queries.
+    let terms = fts_terms(q);
+    let mut lexical_ids = Vec::new();
+    if !terms.is_empty() {
+        let and_expr = terms.join(" ");
+        lexical_ids = fts_match_candidates(&tx, &and_expr, &by_id, limit)?;
+        if lexical_ids.is_empty() && terms.len() > 1 {
+            let or_expr = terms.join(" OR ");
+            lexical_ids = fts_match_candidates(&tx, &or_expr, &by_id, limit)?;
+        }
+    }
+
+    let (notes, mode) = if !lexical_ids.is_empty() {
+        let notes = lexical_ids
+            .into_iter()
+            .take(limit)
+            .filter_map(|id| by_id.get(&id).map(|&idx| candidates[idx].clone()))
+            .collect();
+        (notes, "lexical")
+    } else {
+        let needle = q.to_lowercase();
+        let notes = candidates
+            .into_iter()
+            .filter(|n| {
+                n.title.to_lowercase().contains(&needle)
+                    || n.hook.to_lowercase().contains(&needle)
+                    || n.body.to_lowercase().contains(&needle)
+            })
+            .take(limit)
+            .collect();
+        (notes, "substring")
+    };
+
+    Ok(SearchView { scopes, notes, mode: mode.into(), total })
+}
+
+/// Every stored scope with its live note count, tier breakdown, and pinned index budget usage: the user scope first,
+/// then by label and key.
 pub fn scopes(conn: &Connection) -> rusqlite::Result<Vec<ScopeSummary>> {
-    conn.prepare_cached(
-        "SELECT s.key, s.kind, s.label, s.updated_at,
-             (SELECT COUNT(*) FROM memory_notes n WHERE n.scope_key = s.key AND n.deleted_at IS NULL)
-         FROM memory_scopes s ORDER BY s.kind != 'user', s.label, s.key",
-    )?
-    .query_map([], |r| {
-        Ok(ScopeSummary {
-            scope: Scope { key: r.get(0)?, kind: r.get(1)?, label: r.get(2)? },
-            updated_at: r.get(3)?,
-            note_count: r.get(4)?,
-        })
-    })?
-    .collect()
+    let tx = conn.unchecked_transaction()?;
+    let rows: Vec<(Scope, Option<i64>)> = tx
+        .prepare_cached(
+            "SELECT s.key, s.kind, s.label, s.updated_at
+             FROM memory_scopes s ORDER BY s.kind != 'user', s.label, s.key",
+        )?
+        .query_map([], |r| {
+            Ok((Scope { key: r.get(0)?, kind: r.get(1)?, label: r.get(2)? }, r.get(3)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (scope, updated_at) in rows {
+        let pinned = pinned_notes(&tx, &scope.key)?;
+        let pinned_count = pinned.len() as i64;
+        let archival_count = archival_count(&tx, &scope.key)? as i64;
+        let note_count = pinned_count + archival_count;
+        let rendered = render_index(&[(scope.clone(), pinned)]);
+        let index_bytes = rendered.len();
+        let index_lines = rendered.lines().count();
+        out.push(ScopeSummary {
+            scope,
+            note_count,
+            pinned_count,
+            archival_count,
+            index_bytes,
+            index_lines,
+            limit_bytes: LIMIT_BYTES,
+            limit_lines: LIMIT_LINES,
+            updated_at,
+        });
+    }
+    Ok(out)
 }
 
 /// The live notes of the stored scope `key` in index order; `None` for an unknown scope.
@@ -791,7 +1101,7 @@ pub fn revisions(conn: &Connection, id: &str) -> rusqlite::Result<Option<Vec<Rev
     }
     tx.prepare_cached(
         "SELECT revision, action, category, title, hook, body, at, device_id, session_id, reason, provenance, sources,
-             batch_id FROM memory_revisions WHERE note_id = ?1 ORDER BY revision",
+             batch_id, tier FROM memory_revisions WHERE note_id = ?1 ORDER BY revision",
     )?
     .query_map([id], |r| {
         Ok(Revision {
@@ -808,6 +1118,7 @@ pub fn revisions(conn: &Connection, id: &str) -> rusqlite::Result<Option<Vec<Rev
             provenance: r.get(10)?,
             sources: sources_column(r.get(11)?),
             batch_id: r.get(12)?,
+            tier: r.get(13)?,
         })
     })?
     .collect::<rusqlite::Result<_>>()
@@ -827,6 +1138,10 @@ pub fn delete_scopes<'a>(tx: &Transaction, keys: impl IntoIterator<Item = &'a St
     for key in keys {
         dream::delete_scope(tx, key)?;
         tx.prepare_cached(
+            "DELETE FROM memory_notes_fts WHERE note_id IN (SELECT id FROM memory_notes WHERE scope_key = ?1)",
+        )?
+        .execute([key])?;
+        tx.prepare_cached(
             "DELETE FROM memory_revisions WHERE note_id IN (SELECT id FROM memory_notes WHERE scope_key = ?1)",
         )?
         .execute([key])?;
@@ -845,6 +1160,7 @@ mod tests {
             id: id.into(),
             scope: scope.clone(),
             category: category.into(),
+            tier: PINNED.into(),
             title: title.into(),
             hook: format!("hook of {id}"),
             body: String::new(),

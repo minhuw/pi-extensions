@@ -446,8 +446,12 @@ fn unused_sessions_root_indexes_are_dropped() {
         store.setting(crate::store::DERIVED_GENERATION).unwrap()
     };
     let conn = Connection::open(dir.path().join("pika.db")).unwrap();
+    crate::tokenizer::register(&conn).unwrap();
     conn.execute_batch(
-        "DROP INDEX IF EXISTS session_links_dream;
+        "DROP TABLE IF EXISTS memory_notes_fts;
+         ALTER TABLE memory_revisions DROP COLUMN tier;
+         ALTER TABLE memory_notes DROP COLUMN tier;
+         DROP INDEX IF EXISTS session_links_dream;
          DROP INDEX IF EXISTS sessions_repo_last;
          CREATE INDEX sessions_root ON sessions(last_at DESC, id DESC) WHERE parent_session_id IS NULL;
          CREATE INDEX sessions_root_device ON sessions(device, last_at DESC, id DESC) WHERE parent_session_id IS NULL;
@@ -470,7 +474,7 @@ fn unused_sessions_root_indexes_are_dropped() {
     store
         .read(|conn| {
             let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            assert_eq!(version, 25);
+            assert_eq!(version, 26);
             assert_eq!(present(conn), Vec::<String>::new());
             Ok::<_, rusqlite::Error>(())
         })

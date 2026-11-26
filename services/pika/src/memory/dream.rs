@@ -12,8 +12,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Author, Budget, Index, MemoryError, Note, Overfull, Scope, Source, bad, check_revision, fields, groups, iso, iso_opt,
-    note, project_scope, put, reason, record, remove, request_scopes, scrubbed, session_id, stored,
+    Author, Budget, Index, MemoryError, Note, Overfull, Scope, Source, bad, check_revision, fields, iso, iso_opt,
+    note, pinned_groups, project_scope, put, reason, record, remove, request_scopes, scrubbed, session_id, stored,
 };
 use crate::redact::scrub_cut_text;
 use crate::util::random_bytes;
@@ -53,7 +53,7 @@ pub enum DreamError {
     LeaseLost,
     /// The stored note of the change at index `change`, whose revision differs from its `expectedRevision`.
     Conflict { note: Box<Note>, change: usize },
-    /// The index the commit would grow past the budget.
+    /// The scope whose index part the commit would grow past its independent budget.
     Full(Overfull),
     /// No batch has the id.
     NotFound,
@@ -238,6 +238,8 @@ pub struct SaveChange {
     /// `user`, or `project` for the lease's scope.
     pub scope: String,
     pub category: String,
+    #[serde(default)]
+    pub tier: Option<String>,
     pub title: String,
     pub hook: String,
     #[serde(default)]
@@ -527,9 +529,10 @@ fn committed(conn: &Connection, device: &str, lease: &str, commit_id: &str) -> r
 }
 
 /// `POST memory/dream/:id/commit`: in one transaction with the caller (`Store::write`), applies the changes in order
-/// to the user scope and the lease's scope with v1's validation, scrubbing, and revisions, checks that they grew no
-/// index past the budget (see `Budget`), advances each listed session that is still recorded to the lease's `toSeq`
-/// for it (never back), and records one batch. Writes before it fails, so the caller must commit only on `Ok`.
+/// to the user scope and the lease's scope with v1's validation, scrubbing, and revisions, checks that they grew
+/// neither scope's rendered index part past its independent budget (see `Budget`), advances each listed session that is
+/// still recorded to the lease's `toSeq` for it (never back), and records one batch. Writes before it fails, so the
+/// caller must commit only on `Ok`.
 ///
 /// A commit whose `commitId` names a batch this lease already recorded applies nothing and answers that batch with
 /// the current index, even once the lease is no longer live, so retrying a commit whose answer was lost is safe.
@@ -538,7 +541,7 @@ pub fn commit(tx: &Transaction, device: &str, id: &str, request: Commit, now: i6
     if let Some(commit_id) = &commit_id
         && let Some(batch) = committed(tx, device, id, commit_id)?
     {
-        let index = Index::new(&groups(tx, request_scopes(tx, Some(batch.scope.clone()))?)?);
+        let index = Index::new(&pinned_groups(tx, request_scopes(tx, Some(batch.scope.clone()))?)?);
         return Ok(Committed { batch, index });
     }
     let lease = held(tx, device, id, now)?;
@@ -591,7 +594,7 @@ pub fn commit(tx: &Transaction, device: &str, id: &str, request: Commit, now: i6
         let note = match change {
             Change::Save(save) => {
                 check_revision(save.expected_revision).map_err(at)?;
-                let fields = fields(&save.category, &save.title, &save.hook, &save.body).map_err(at)?;
+                let fields = fields(&save.category, save.tier.as_deref(), &save.title, &save.hook, &save.body).map_err(at)?;
                 author.reason = reason(save.reason.as_deref()).map_err(at)?;
                 check_sources(tx, &save.sources, 1).map_err(at)?;
                 author.sources = save.sources;
@@ -624,7 +627,7 @@ pub fn commit(tx: &Transaction, device: &str, id: &str, request: Commit, now: i6
         });
     }
     budget.check(tx)?;
-    let index = Index::new(&groups(tx, request_scopes(tx, Some(project.clone()))?)?);
+    let index = Index::new(&pinned_groups(tx, request_scopes(tx, Some(project.clone()))?)?);
     // A session deleted since the grant took its checkpoints along; it gets none back.
     let mut recorded = tx.prepare_cached("SELECT 1 FROM sessions WHERE id = ?1")?;
     let mut kept = Vec::new();
@@ -752,10 +755,10 @@ pub fn revert(tx: &Transaction, id: &str, now: i64) -> Result<Batch, DreamError>
         let restored = if created {
             Note { deleted_at: n.deleted_at.or(Some(now)), ..n }
         } else {
-            let (category, title, hook, body) = tx
-                .prepare_cached("SELECT category, title, hook, body FROM memory_revisions WHERE note_id = ?1 AND revision = ?2")?
-                .query_row(params![n.id, before], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-            Note { category, title, hook, body, deleted_at: None, ..n }
+            let (category, title, hook, body, tier) = tx
+                .prepare_cached("SELECT category, title, hook, body, tier FROM memory_revisions WHERE note_id = ?1 AND revision = ?2")?
+                .query_row(params![n.id, before], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
+            Note { category, tier, title, hook, body, deleted_at: None, ..n }
         };
         let restored = Note {
             provenance: OWNER.into(),

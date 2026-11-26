@@ -24,6 +24,7 @@ use crate::util::{format_iso_ms, now_ms};
 pub(super) fn agent_routes() -> Router<AppState> {
     Router::new()
         .route("/memory", get(view))
+        .route("/memory/search", get(search))
         .route("/memory/notes", post(save))
         .route("/memory/notes/{id}/forget", post(forget))
         .route("/memory/used", post(used))
@@ -47,10 +48,12 @@ fn bad_request(message: impl std::fmt::Display) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": "bad_request", "message": message.to_string() }))).into_response()
 }
 
+/// 422 `memory_full`: reports the overflowing scope's own rendered index size (`project: null` for the user scope,
+/// `project: Scope` for a project scope) against the independent per-scope limits.
 fn memory_full(full: Overfull) -> Response {
     (
         StatusCode::UNPROCESSABLE_ENTITY,
-        Json(json!({ "error": "memory_full", "indexBytes": full.bytes, "indexLines": full.lines,
+        Json(json!({ "error": "memory_full", "budget": "per_scope", "indexBytes": full.bytes, "indexLines": full.lines,
                      "limitBytes": LIMIT_BYTES, "limitLines": LIMIT_LINES, "project": full.project })),
     )
         .into_response()
@@ -101,18 +104,55 @@ fn parse<T: DeserializeOwned>(body: Result<Json<Value>, JsonRejection>) -> Resul
     serde_json::from_value(value).map_err(|e| Box::new(bad_request(format!("invalid body: {e}"))))
 }
 
-/// `GET memory?project=&repository=` → the user scope and the project scope the parameters name, their live notes,
-/// and their index.
+/// `GET memory?project=&repository=&view=full|index` → the user scope and the project scope the parameters name, their
+/// live notes (omitted when `view=index`), their rendered pinned index, and archival counts.
 async fn view(
     State(state): State<AppState>,
     DeviceAuth { device, .. }: DeviceAuth,
     Query(params): Query<BTreeMap<String, String>>,
 ) -> Response {
+    let mode = match params.get("view").map(String::as_str) {
+        None | Some("") | Some("full") => memory::ViewMode::Full,
+        Some("index") => memory::ViewMode::Index,
+        Some(_) => return bad_request("view must be full or index"),
+    };
     let store = state.store.clone();
     respond(
         blocking(move || {
             let (project, repository) = (params.get("project").map(String::as_str), params.get("repository").map(String::as_str));
-            Ok(store.read(|conn| memory::view(conn, &device, project, repository)))
+            Ok(store.read(|conn| memory::view(conn, &device, project, repository, mode)))
+        })
+        .await,
+    )
+}
+
+/// `GET memory/search?q=&project=&repository=&scope=&category=&tier=&limit=` → lexical + substring search over live notes.
+async fn search(
+    State(state): State<AppState>,
+    DeviceAuth { device, .. }: DeviceAuth,
+    Query(params): Query<BTreeMap<String, String>>,
+) -> Response {
+    let limit = match params.get("limit").filter(|s| !s.is_empty()) {
+        None => None,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) => Some(n),
+            Err(_) => return bad_request("limit must be 1 to 100"),
+        },
+    };
+    let store = state.store.clone();
+    respond(
+        blocking(move || {
+            let q = params.get("q").map_or("", String::as_str);
+            let query = memory::SearchQuery {
+                q,
+                project: params.get("project").map(String::as_str),
+                repository: params.get("repository").map(String::as_str),
+                scope: params.get("scope").map(String::as_str),
+                category: params.get("category").map(String::as_str),
+                tier: params.get("tier").map(String::as_str),
+                limit,
+            };
+            Ok(store.read(|conn| memory::search(conn, &device, query)))
         })
         .await,
     )
