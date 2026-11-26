@@ -25,7 +25,7 @@ Full mode picks one of three tiers from the terminal width alone, so the row cou
 **Desk** (175 columns or more): the bar, the optional activity row, one telemetry row, and the workspace row. The desk keeps every metric:
 
 ```text
- ✻ claude-opus-5-5  HIGH  (anthropic)                                                                                                                  × 0×  ▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉  42.5%  43k/100k
+ ✻ claude-opus-5-5  ∴  HIGH  (anthropic)                                                                        English  🐝 swarm  🚗 selfdrive 2h13m  × 0×  ▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉  42.5%  43k/100k
  ├ herder: T2 verify blocked · 3/5 tasks                                                                                                                                             📣 rep #dev
  ├ # 2  ⏱ 1h 00m  │  ⚙ 2  ✕ 1 (50.0%)  │  ⏱ 300ms  ↺ 400ms  ⇄ 150ms  » 133 tok/s  ↺ 150 tok/s                    $0.750  $0.375/turn  │  ↑ 65k  ↓ 31k  ⚡ 120k 65%  │  ~450 memory  │  12k think
  ╰ ⎇ main  +42 −17  ↑ 2  ↓ 1                                                                                                                                 ▤ 2 touched  │  ⌂ ~/code/my-project
@@ -34,7 +34,7 @@ Full mode picks one of three tiers from the terminal width alone, so the row cou
 **Laptop** (72 to 174 columns): the bar, the optional activity row, and one essentials row:
 
 ```text
- ✻ claude-opus-5-5  HIGH  (anthropic)                                                                       × 0×  ▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉  42.5%  43k/100k
+ ✻ claude-opus-5-5  ∴  HIGH  (anthropic)                                                           English  × 0×  ▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉▉  42.5%  43k/100k
  ├ herder: T2 verify blocked · 3/5 tasks                                                                                                  📣 rep #dev
  ╰ ⎇ main  +42 −17  ↑ 2  ↓ 1  │  $0.750  │  # 2  ⏱ 1h 00m  │  ✕ 1 (50.0%)                     ⏱ 300ms  » 133 tok/s  │  ⚡ 65%  │  ⌂ ~/code/my-project
 ```
@@ -47,14 +47,14 @@ Full mode picks one of three tiers from the terminal width alone, so the row cou
 
 | Row | Left | Right |
 | --- | --- | --- |
-| Identity (desk, laptop) | Live pulse, queued chip, model, Fast or non-standard service tier, thinking, provider, language, spokesman | Swarm and self-driving modes; compactions, gradient bar, percent, used/window |
+| Identity (desk, laptop) | Live pulse, queued chip, model, requested speed or service tier, thinking level, provider, spokesman | Response language, swarm, selfdrive, compactions, gradient bar, percent, used/window |
 | Activity (desk, laptop; optional) | Magpie quota wait, Research, Herder, Goal, background processes, subagents, then other extension statuses | Representative role, joined relay rooms, messages received and sent |
 | Telemetry (desk) | Turns and elapsed time; tool calls, errors and error rate; average/last TTFT, last TTFB, average/last throughput | Cost and cost per turn; input / output / cached-input tokens and cache hit rate; Pika memory's context share; reasoning tokens |
 | Workspace (desk, last) | Git branch, working-tree diff, ahead/behind | Files touched, current directory |
 | Essentials (laptop, last) | Git branch, working-tree diff, ahead/behind; cost; turns and elapsed time; tool errors and error rate, only when a tool call failed | Average TTFT and average throughput; cache hit rate; current directory |
 | Phone | The model without its vendor prefix (`claude-opus-5-5` reads `opus-5-5`), thinking level in its color, context percentage, cost (`price?` when unpriced), then attention and problem statuses | — |
 
-A laptop leaves out TTFB, the last-request (`↺`) values, cost per turn, the token counts, memory, reasoning, touched files, and the tool count when no call failed. The phone row shows an extension status only when it needs the user, as its leading word and severity marker, problems first: `herder blocked`, `quota awaiting`, `bg 1 failed`. Routine statuses, collaboration, language, spokesman, and modes stay off it.
+A laptop leaves out TTFB, the last-request (`↺`) values, cost per turn, the token counts, memory, reasoning, touched files, and the tool count when no call failed. The phone row shows an extension status only when it needs the user, as its leading word and severity marker, problems first: `herder blocked`, `quota awaiting`, `bg 1 failed`. The phone row uses a plain thinking label and omits the speed and tier badge, routine statuses, collaboration, language, spokesman, and modes.
 
 The collaboration side of the activity row shows the representative role followed by joined [Pika](../pika/README.md) chatrooms and message counts (`📣 rep #dev  │  ⇌ #ops · 3 in · 2 out`). Pika publishes live membership through `ctx.ui.setStatus("relay-rooms", "#dev #ops")`: a plain string of sorted, sanitized room labels, cleared with `undefined` when no rooms are joined. The footer reads that status on every render, including when no messages have been exchanged or no workflow is active. Clearing it removes the room labels immediately. A room already present as an exact whitespace-delimited token in a plain representative status appears only once; `#dev` and `#dev-old` remain separate. Other joined rooms stay visible. Publisher-styled representative text keeps its own ANSI formatting.
 
@@ -64,9 +64,17 @@ The `~2.4k memory` group on the desk's telemetry row shows how much of the conte
 
 The model name starts with its vendor's mark in the vendor's color. These are the OpenAI and Claude logos (Nerd Fonts 3.5 or later), the Google logo for Gemini, and related symbols for Kimi, DeepSeek, Grok, Llama, Mistral, and Qwen; with `STATUSLINE_NERD_FONTS=0`, Unicode marks such as `✻` (Claude), `⊛` (OpenAI), `✦` (Gemini), and `☾` (Kimi) take their place. The model id is matched before the provider, so Claude served through Vertex or Magpie still gets the Claude mark; an unrecognized model has none.
 
-Thinking levels are colored: dim off, amber low, green medium, lilac high, and a rainbow wash at `xhigh`/`max`. The context bar interpolates success → warning → error across its width and uses the same `▉` block for filled and empty cells so the unused portion stays a quiet charcoal instead of a checkerboard.
+The full and compact bars use the Nerd Font `mdi-brain` icon for thinking on reasoning models and `mdi-flash` for the requested speed or service tier. Their Unicode fallbacks are `∴` and `ϟ`. Both icons have two spaces before their label, as in `ϟ  OFF  ∴  XHIGH`.
 
-Compact mode shows only the bar, with cost and elapsed time on the right. It also includes workflow summaries, background processes, the representative role, and joined relay rooms when there is room. While Herder or Goal is active, Magpie quota, research, Herder, Goal, and background-process statuses fit individually, in that display order. Problem statuses take priority over attention statuses, which take priority over routine statuses; Herder wins ties at the same severity; Goal takes precedence over routine Research in compact mode. Quota attention and problem statuses can fall back to a concise marker such as `quota awaiting` before routine work is considered. If a status cannot fit even by itself beside the model and context percentage, shorter statuses can still appear.
+Thinking levels use dim for `off`, amber for `low`, green for `medium`, lilac for `high`, normal theme text for `xhigh`, and a rainbow for `max`. The context bar interpolates success → warning → error across its width and uses the same `▉` block for filled and empty cells so the unused portion stays a quiet charcoal instead of a checkerboard.
+
+Compact mode shows one bar. Workflow and background-process summaries follow the model details on the left. Cost, elapsed time, and optional collaboration follow context on the right.
+
+```text
+ ⊛ gpt-6.1-terra  ϟ  OFF  last FLEX  ∴  XHIGH  goal: finish the migration            English  🐝 swarm  × 0×  ▉▉▉▉▉▉▉▉▉▉  42.5%  43k/100k  ~$0.750  1h 00m
+```
+
+While Herder or Goal is active, Magpie quota, research, Herder, Goal, and background-process statuses fit individually, in that display order. Problem statuses take priority over attention statuses, which take priority over routine statuses; Herder wins ties at the same severity; Goal takes precedence over routine Research in compact mode. Quota attention and problem statuses can fall back to a concise marker such as `quota awaiting` before routine work is considered. If a status cannot fit even by itself beside the model and context percentage, shorter statuses can still appear.
 
 To make room for concurrent activity, compact mode can omit Herder's trailing task count and abbreviate long operations or multi-step updates, keeping a prefix and a problem or attention marker when present. It can also abbreviate Goal and shorten a routine research summary to its current phase. Full details and publisher styling return as space becomes available. Attention and problem details in research statuses remain intact. Without Herder or Goal, the existing single-workflow slot selects `magpie-quota`, then `autoresearch`, with background processes alongside it when they fit.
 
@@ -78,9 +86,11 @@ Full mode shows workflow and process statuses together on the left of the activi
 
 At narrow widths, every layout preserves the model and context percentage. In compact mode and on a laptop's bar, workflow summaries and secondary details drop out, and the context bar shrinks or disappears before the model is truncated. The phone row drops from its end, the thinking level last, and truncates the model before it would drop the context percentage.
 
-The `language` status from [Language](../language/README.md) and the `spokesman` status from [Spokesman](../spokesman/README.md) stay in the bar in both modes (the phone row has no bar and omits them), so they do not keep the activity row open. They follow the provider in full mode and any workflow summary in compact mode, with `spokesman` to the right of `language`. The provider, token counts, and compact mode's cost and elapsed time give way before `language` and `spokesman` do. As width narrows further, `spokesman` drops out whole before `language`, and `language` drops out whole when it no longer fits beside the model and context percentage. Compact mode keeps workflow and background-process summaries as long as they fit. Its optional collaboration tail gives way before cost and elapsed time, preserving those summaries and the model and context percentage.
+In full and compact bars, the active response language starts the right band, immediately before swarm, selfdrive, and context. With both modes off, language sits directly before context. Spokesman stays on the left after the provider in full mode and after any workflow or process summaries in compact mode. The phone row omits both language and spokesman. See [Language](../language/README.md) and [Spokesman](../spokesman/README.md).
 
-The `swarm` status from [Delegation](../delegation/README.md) and the `selfdrive` status from [Selfdrive](../selfdrive/README.md) stay in the bar in both modes, on the right just before the compaction count, in that order. They outlast every other bar status: the left side's statuses give way to them, and they drop out together only when they no longer fit beside the model and context percentage. The `representative` status from [pika relay](../pika/README.md#representatives) belongs to collaboration on the activity row in full mode and the optional tail in compact mode.
+As space narrows, the provider, token counts, and compact cost and elapsed time give way before spokesman and language. Spokesman and language each drop as a whole, spokesman first. Compact mode keeps workflow and process summaries as long as they fit. Its optional collaboration tail gives way before cost and elapsed time.
+
+Swarm and selfdrive outlast the other bar statuses and drop out together when they no longer fit beside the model and context percentage. The representative role belongs to collaboration on the full activity row and the optional compact tail. See [Delegation](../delegation/README.md), [Selfdrive](../selfdrive/README.md), and [Pika representatives](../pika/README.md#representatives).
 
 ### The bar
 
@@ -133,7 +143,7 @@ For a single status display, leave pi-processes' **status widget** disabled in `
 ## Features
 
 - A live context-window bar uses a positional RGB gradient (theme success/warning/error when the theme is 24-bit, otherwise a warm fallback).
-- Thinking effort is a first-class CAPS label with per-level color, including a rainbow wash at `xhigh` and `max`.
+- Thinking effort appears in uppercase, with normal theme text at `XHIGH` and a rainbow at `MAX`.
 - Rows are left/right justified so identity stays put while capacity and cost hug the right edge.
 - Nerd Font icons are assumed in every terminal; the Claude and OpenAI logos need Nerd Fonts 3.5 or later. Orca needs no setup, because its terminal font list falls back to a bundled Nerd Font symbols font and then to an installed `Symbols Nerd Font Mono`. Set `STATUSLINE_NERD_FONTS=0` (or `FOOTER_NERD_FONTS=0`) for ASCII/Unicode icons in a terminal without a Nerd Font.
 - Streaming metrics are measured passively from Pi's provider and message events rather than estimated. Completed samples survive `/reload` through a small session custom entry; a new, resumed, or restarted session starts fresh streaming metrics.
@@ -159,7 +169,14 @@ For a single status display, leave pi-processes' **status widget** disabled in `
 - Cache hit rate is cached-read tokens divided by all input tokens: uncached input + cache reads + cache writes.
 - Prefix KV cache forensics observe outgoing `before_provider_request` payloads and finalized assistant usage in memory (never mutating payloads or persisting prompt text across reloads). When the latest call suffers a cache-miss anomaly, the desk and laptop cache slot (`⚡`) appends a compact root-cause tag — `(!sys)` for system prompt mutation, `(!tools)` for tool schema changes, `(!strict)` for strict-tool retry fallbacks, `(!hist)` for rewritten or compacted history, `(!ttl)` for elapsed cache TTL expiry, `(!model)` for model switches, `(!route)` for intact-prefix routing misses, or `(!drop)` for unexplained drops — while healthy calls keep the existing display unchanged. Use `/cache` or `/cache anomalies` to inspect exact offsets (`char@`/`byte@`), tool diffs, or divergent item indices.
 - Git branch comes from Pi's footer data. Working-tree state uses a throttled `git --no-optional-locks status --porcelain=v1 --untracked-files=normal`: a successful empty result is `clean`, any output is `dirty`, and a failed or pending status is shown as `git ?` or `git …`. Optional `git diff --shortstat HEAD` supplies additions/deletions, while `git rev-list --left-right --count @{upstream}...HEAD` supplies ahead/behind; either auxiliary query can fail without changing the authoritative status.
-- For a Magpie Responses model advertising `priority`, `FAST` or `FAST OFF` appears immediately after the model name and reflects the current session branch's `/fast` switch, before any request. The label disappears if the model is no longer eligible. Other non-standard tiers are shown from the last `before_provider_request` payload; on other APIs, a requested `priority` displays as `FAST`. A request without a tier or a model change clears the previous request's badge. These labels describe the switch or request, not the tier delivered upstream.
+
+### Requested speed and service tier
+
+The badge after the model reports request settings. The provider determines which capacity actually serves the request. The footer reads the latest outgoing payload from `before_provider_request`. Omitted settings and values such as `standard`, `default`, or `auto` add no label. A model change clears the previous request's labels.
+
+- On a Magpie Responses model advertising `priority`, `ϟ  ON` or `ϟ  OFF` shows the current session branch’s `/fast` switch even before the first request. If a request specifies a different nonstandard tier, the badge appends its value, as in `ϟ  OFF  last FLEX`.
+- For other models, the badge shows the requested tier in uppercase. For example, `service_tier` values `priority`, `flex`, and `fast` appear as `ϟ  PRIORITY`, `ϟ  FLEX`, and `ϟ  FAST`, respectively. [OpenAI Fast mode](https://developers.openai.com/api/docs/guides/fast-mode)
+- Anthropic Messages handles speed and capacity independently. `speed: "fast"` shows `ϟ  FAST`, and `service_tier: "standard_only"` shows `ϟ  STANDARD_ONLY`. An explicit request for both shows `ϟ  FAST · STANDARD_ONLY`. [Anthropic Messages API](https://platform.claude.com/docs/en/api/messages/create)
 
 ## License
 

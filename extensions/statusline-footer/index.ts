@@ -3,7 +3,7 @@
  *
  * Visual language is borrowed from pikit's footer: left/right justified rows,
  * a positional RGB gradient context bar, per-level thinking color (rainbow at
- * max/xhigh), and Nerd Font icons with ASCII fallbacks; the identity row is
+ * max), and Nerd Font icons with ASCII fallbacks; the identity row is
  * a powerline bar on theme bands. Metrics remain ours: TTFT/TTFB, aggregate
  * throughput, cache ratio, session cost, and working-tree diff.
  *
@@ -20,7 +20,7 @@
  *    opus-5-5 · HIGH · 42.5% · $0.75 · herder blocked
  *
  * Compact mode: the bar alone.
- *   ▌✻ model ▶ HIGH ▶ ──────── ◀ ▉▉▉░░░  42%  $1.23  12m ▐
+ *   ⊛ gpt-6.1-terra  ϟ  OFF  ∴  XHIGH       English  × 0×  ▉▉▉▉▉▉▉▉▉▉  42.5%  43k/100k  $1.23  12m
  *
  * Usage:
  *   /footer                   toggle on/off
@@ -928,22 +928,25 @@ export function parseGitAheadBehind(stdout: string): { ahead: number; behind: nu
 	return { behind: Number(match[1]), ahead: Number(match[2]) };
 }
 
-export function extractServiceTier(payload: unknown): string | undefined {
+export function extractServiceTier(payload: unknown, api?: string): string | undefined {
 	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
 	const record = payload as Record<string, unknown>;
 	const raw = record.service_tier ?? record.serviceTier;
-	if (typeof raw !== "string") return undefined;
-	const tier = raw.trim();
-	return tier || undefined;
+	const tier = typeof raw === "string" ? raw.trim() || undefined : undefined;
+	// Messages requests can specify fast inference and a capacity tier independently.
+	if (api === "anthropic-messages" && record.speed === "fast") {
+		return displayServiceTier(tier, api) ? `fast · ${tier}` : "fast";
+	}
+	return tier;
 }
 
-const STANDARD_TIERS = new Set(["standard", "default", "auto", "standard_only"]);
+const STANDARD_TIERS = new Set(["standard", "default", "auto"]);
 
-export function displayServiceTier(tier: string | undefined): string | undefined {
-	if (!tier) return undefined;
-	const normalized = tier.trim().toLowerCase();
+export function displayServiceTier(tier: string | undefined, api?: string): string | undefined {
+	const normalized = tier?.trim().toLowerCase();
 	if (!normalized || STANDARD_TIERS.has(normalized)) return undefined;
-	return normalized === "priority" ? "FAST" : normalized.toUpperCase();
+	if (normalized === "standard_only" && api !== "anthropic-messages") return undefined;
+	return normalized.toUpperCase();
 }
 
 function refreshGitStat(cwd: string, state: SessionState) {
@@ -987,6 +990,8 @@ function refreshGitStat(cwd: string, state: SessionState) {
 // selects the ASCII/Unicode set for a terminal without them.
 
 type IconSet = {
+	thinking: string;
+	tier: string;
 	compact: string;
 	elapsed: string;
 	turns: string;
@@ -1008,6 +1013,8 @@ type IconSet = {
 };
 
 const NERD_ICONS: IconSet = {
+	thinking: "\u{F09D1}", // md-brain
+	tier: "\u{F0241}", // md-flash
 	compact: "\u{F0615}", // md-arrow-collapse
 	elapsed: "\u{F0954}", // md-clock
 	turns: "\u{F0368}", // md-message-reply-text
@@ -1029,6 +1036,8 @@ const NERD_ICONS: IconSet = {
 };
 
 const ASCII_ICONS: IconSet = {
+	thinking: "∴",
+	tier: "ϟ",
 	compact: "×",
 	elapsed: "⏱",
 	turns: "#",
@@ -1069,7 +1078,8 @@ function thinkingCaps(level: string): string {
 
 export function renderThinking(theme: Theme, level: string): string {
 	const text = thinkingCaps(level);
-	if (level === "max" || level === "xhigh") return rainbow(text);
+	if (level === "max") return rainbow(text);
+	if (level === "xhigh") return theme.fg("text", text);
 	if (level === "high") return hexFg("#afb9fe", text);
 	if (level === "medium") return theme.fg("success", text);
 	if (level === "low") return theme.fg("warning", text);
@@ -1086,40 +1096,36 @@ interface TierLabel {
 /** Prefer the current Magpie switch to the last request's tier. */
 function tierLabel(ctx: ExtensionContext, stats: Stats, observedTier?: string): TierLabel | undefined {
 	const selected = ctx.model;
+	const observed = displayServiceTier(observedTier, selected?.api);
 	if (selected?.provider === "magpie" && selected.api === "openai-responses") {
 		const current = ctx.modelRegistry.getAll().find(model => model.provider === selected.provider && model.id === selected.id) as
 			(typeof selected & { magpieServiceTiers?: string[] }) | undefined;
 		if (current && current.api === selected.api && current.magpieServiceTiers?.includes("priority")) {
-			const observed = displayServiceTier(observedTier);
 			return {
-				text: stats.magpieFastEnabled ? "FAST" : "FAST OFF",
+				text: stats.magpieFastEnabled ? "ON" : "OFF",
 				active: stats.magpieFastEnabled,
-				observed: observed === "FAST" ? undefined : observed,
+				observed: observed === "PRIORITY" ? undefined : observed,
 			};
 		}
 		// A stale request must not advertise Fast after the catalog removes support.
-		if (displayServiceTier(observedTier) === "FAST") return undefined;
+		if (observed === "PRIORITY") return undefined;
 	}
-	const text = displayServiceTier(observedTier);
-	return text ? { text, active: true } : undefined;
+	return observed ? { text: observed, active: true } : undefined;
 }
 
 function renderModelLabel(
 	ctx: ExtensionContext,
 	theme: Theme,
 	skin: Skin,
-	includeProvider: boolean,
-	live = false,
-	queued = false,
 	tier?: TierLabel,
 ): string {
 	const model = ctx.model;
-	const queuedMark = queued && theme.fg("warning", "queued");
+	const live = !ctx.isIdle();
+	const queuedMark = ctx.hasPendingMessages() && theme.fg("warning", "queued");
 	const tierMark = tier && cluster([
-		theme.fg(tier.active ? "warning" : "dim", theme.bold(tier.text)),
-		tier.observed && theme.fg("warning", theme.bold(tier.observed)),
+		theme.fg(tier.active ? "warning" : "dim", theme.bold(`${icons().tier}  ${tier.text}`)),
+		tier.observed && theme.fg("warning", theme.bold(`last ${tier.observed}`)),
 	], "  ");
-	const details = model && modelDetails(ctx, theme, includeProvider);
 	const brand = model && modelBrand(model.id, model.provider);
 	// A chip carries the live dot and the vendor mark in its own ink.
 	const chipColor = skin.chip && ((brand?.color && hexToRgb(brand.color)) || resolveThemeRgb(theme, "accent"));
@@ -1129,23 +1135,13 @@ function renderModelLabel(
 			skin.chip(`${live ? "● " : ""}${mark}${model?.id ?? "no-model"}`, chipColor),
 			tierMark,
 			queuedMark,
-			details,
 		], "  ");
 	}
 	const liveMark = live && theme.fg("success", theme.bold("●"));
 	const name = model
 		? renderModelMark(theme, model.id, model.provider) + theme.fg("accent", theme.bold(model.id))
 		: theme.fg("accent", theme.bold("no-model"));
-	return cluster([liveMark, queuedMark, name, tierMark, details], "  ");
-}
-
-/** Thinking level and provider, each separated by two spaces. */
-function modelDetails(ctx: ExtensionContext, theme: Theme, includeProvider: boolean): string {
-	const model = ctx.model!;
-	return cluster([
-		model.reasoning && renderThinking(theme, ctx.thinkingLevel ?? "off"),
-		includeProvider && model.provider && theme.fg("dim", `(${model.provider})`),
-	], "  ");
+	return cluster([liveMark, queuedMark, name, tierMark], "  ");
 }
 
 function renderContext(
@@ -1156,8 +1152,9 @@ function renderContext(
 	compactIcon: string,
 	maxWidth = Infinity,
 ): string {
-	const compact = glyph(theme, compactIcon, compactions > 0 ? "warning" : "dim") + " " +
-		theme.fg(compactions > 0 ? "warning" : "dim", `${compactions}×`);
+	const compactColor = compactions > 0 ? "warning" : "dim";
+	const count = theme.fg(compactColor, `${compactions}×`);
+	const compact = `${glyph(theme, compactIcon, compactColor)} ${count}`;
 	if (usage?.percent != null) {
 		const pct = usage.percent;
 		const used = fmtTokens(usage.tokens ?? 0);
@@ -1171,6 +1168,9 @@ function renderContext(
 		}
 		// Keep the numerical context when it fits without a bar.
 		if (visibleWidth(numbers) <= maxWidth) return numbers;
+		// The bare compaction count and a single usage group can still fit before token counts give way.
+		const shortNumbers = `${count}  ${percent} ${counts}`;
+		if (visibleWidth(shortNumbers) <= maxWidth) return shortNumbers;
 		const prefix = compactions > 0 ? compact : "";
 		const remaining = maxWidth - visibleWidth(cluster([prefix, percent], "  ")) - 2;
 		return remaining >= 4
@@ -1259,53 +1259,52 @@ function renderIdentityRow(
 	const { chrome } = skin;
 	const usage = ctx.getContextUsage();
 	const barWidth = compactMode ? COMPACT_BAR_WIDTH : BAR_WIDTH;
+	const minimumContext = usage?.percent != null ? visibleWidth(`${usage.percent.toFixed(1)}%`) : 0;
+	const identityRoom = width - minimumContext - chrome;
 	const tier = tierLabel(ctx, s, state.serviceTier);
-	const label = (includeProvider: boolean, showTier = true) => renderModelLabel(
-		ctx, theme, skin, includeProvider, !ctx.isIdle(), ctx.hasPendingMessages(), showTier ? tier : undefined,
-	);
-	let left = label(!compactMode);
+	const label = (serviceTier?: TierLabel) => renderModelLabel(ctx, theme, skin, serviceTier);
+	let modelLabel = label(tier);
+	let thinking = ctx.model?.reasoning
+		? `${glyph(theme, set.thinking, "muted")}  ${renderThinking(theme, ctx.thinkingLevel ?? "off")}`
+		: undefined;
+	const identity = () => cluster([modelLabel, thinking], "  ");
+	// Shed the last request, current tier and effort as whole fields before truncating the model.
+	if (tier?.observed && visibleWidth(identity()) > identityRoom) modelLabel = label({ ...tier, observed: undefined });
+	if (tier && visibleWidth(identity()) > identityRoom) modelLabel = label();
+	if (thinking && visibleWidth(identity()) > identityRoom) thinking = undefined;
+	const compactIdentity = identity();
+	const provider = !compactMode && ctx.model?.provider && theme.fg("dim", `(${ctx.model.provider})`);
 	const tail = compactMode ? [
 		renderPrice(ctx, s, theme, set),
 		theme.fg("dim", fmtDuration(s.durationMs)),
 		...(collaborationStatus ? [collaborationStatus] : []),
 	] : [];
-	const minimumContext = usage?.percent != null ? visibleWidth(`${usage.percent.toFixed(1)}%`) : 0;
-	// Compact already renders the provider-free label, so it is the fallback identity too.
-	let compactIdentity = compactMode ? left : label(false);
-	// The tier is optional: drop it whole before shortening the model or context percentage.
-	if (tier && visibleWidth(compactIdentity) + minimumContext + chrome > width) {
-		left = label(!compactMode, false);
-		compactIdentity = compactMode ? left : label(false, false);
-	}
-	// The modes outlast every other status: they stay whole while they fit beside the model and context percentage.
-	const modes = modeStatus && visibleWidth(compactIdentity) + visibleWidth(modeStatus) + minimumContext + chrome + 2 <= width ? modeStatus : undefined;
-	const reserved = modes ? visibleWidth(modes) + 2 : 0;
-	const context = renderContext(theme, usage, barWidth, s.compactions, set.compact);
-	const right = cluster([modes, context, ...tail], "  ");
-	const fitsBeside = (status: string) => visibleWidth(compactIdentity) + visibleWidth(status) + minimumContext + chrome + 2 + reserved <= width;
+	const statusRoom = identityRoom - visibleWidth(compactIdentity);
+	const modes = modeStatus && visibleWidth(modeStatus) + 2 <= statusRoom ? modeStatus : undefined;
+	const modeWidth = modes ? visibleWidth(modes) + 2 : 0;
+	const fitsBeside = (status: string) => visibleWidth(status) + 2 <= statusRoom - modeWidth;
 	const workflow = Array.isArray(workflowStatus) ? fitCompactStatuses(workflowStatus, fitsBeside) : workflowStatus;
-	// The spokesman goes first, then the language, each whole; what stays then lays out as if they had never been set.
-	const candidates = [
-		cluster([workflow, languageStatus, spokesmanStatus], "  "),
-		cluster([workflow, languageStatus], "  "),
-		workflow ?? "",
-	].filter(Boolean);
-	const beside = candidates.find(fitsBeside) ?? "";
-	if (beside && visibleWidth(left) + visibleWidth(beside) + visibleWidth(right) + chrome + 2 <= width) {
-		return skin.bar(cluster([left, beside], "  "), right, width);
-	}
-	const showBeside = Boolean(beside) && fitsBeside(beside);
-	if (!showBeside && visibleWidth(left) + visibleWidth(right) + chrome <= width) return skin.bar(left, right, width);
+	// Fit modes first, then workflow, language and spokesman, independently of which band draws them.
+	const [activity, language, spokesman] = [
+		[workflow, languageStatus, spokesmanStatus],
+		[workflow, languageStatus],
+		[workflow],
+	].find(parts => fitsBeside(cluster(parts, "  "))) ?? [];
+	const leftStatuses = cluster([activity, spokesman], "  ");
+	const rightStatuses = cluster([language, modes], "  ");
+	const context = renderContext(theme, usage, barWidth, s.compactions, set.compact);
+	const right = cluster([rightStatuses, context, ...tail], "  ");
+	let left = cluster([compactIdentity, provider, leftStatuses], "  ");
+	if (visibleWidth(left) + visibleWidth(right) + chrome <= width) return skin.bar(left, right, width);
 
 	// Keep identity and context percent; shed provider, token counts, and compact extras first.
-	left = showBeside ? cluster([compactIdentity, beside], "  ") : compactIdentity;
-	// A status is optional: never shorten the model or percent to make space for it.
-	left = truncateToWidth(left, Math.max(0, width - minimumContext - chrome - reserved));
+	const reserved = rightStatuses ? visibleWidth(rightStatuses) + 2 : 0;
+	left = truncateToWidth(cluster([compactIdentity, leftStatuses], "  "), Math.max(0, identityRoom - reserved));
 	const budget = Math.max(0, width - visibleWidth(left) - chrome - reserved);
 	while (tail.length && visibleWidth(cluster(tail, "  ")) + 2 + minimumContext > budget) tail.pop();
 	const contextBudget = Math.max(0, budget - (tail.length ? visibleWidth(cluster(tail, "  ")) + 2 : 0));
 	return skin.bar(left, cluster([
-		modes,
+		rightStatuses,
 		renderContext(theme, usage, barWidth, s.compactions, set.compact, contextBudget),
 		...tail,
 	], "  "), width);
@@ -1802,7 +1801,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_provider_request", (event, ctx) => {
 		const state = getSessionState(ctx);
 		if (!state || ctx.mode !== "tui") return;
-		state.serviceTier = extractServiceTier(event.payload);
+		state.serviceTier = extractServiceTier(event.payload, ctx.model?.api);
 		const modelKey = ctx.model
 			? (ctx.model.provider ? `${ctx.model.provider}/${ctx.model.id}` : ctx.model.id)
 			: undefined;

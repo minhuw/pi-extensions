@@ -223,11 +223,11 @@ describe("statusline footer visual language", () => {
 		expect(gradientBar(40, 8)).toContain("▉");
 	});
 
-	it("washes max thinking labels across a rainbow", () => {
-		const theme = { fg: (_token: string, text: string) => text } as unknown as Parameters<typeof renderThinking>[0];
+	it("uses normal text for XHIGH and a rainbow for MAX", () => {
+		const theme = { fg: (token: string, text: string) => `<${token}>${text}` } as unknown as Parameters<typeof renderThinking>[0];
 		expect(renderThinking(theme, "max")).toBe(rainbow("MAX"));
-		expect(renderThinking(theme, "xhigh")).toBe(rainbow("XHIGH"));
-		expect(renderThinking(theme, "medium")).toBe("MEDIUM");
+		expect(renderThinking(theme, "xhigh")).toBe("<text>XHIGH");
+		expect(renderThinking(theme, "medium")).toBe("<success>MEDIUM");
 		const painted = rainbow("MAX");
 		expect(painted).toContain("\x1b[38;2;");
 		expect(painted.endsWith("\x1b[0m")).toBe(true);
@@ -318,13 +318,15 @@ describe("statusline footer visual language", () => {
 		expect(parseGitStatus(" M src/example.ts\n")).toBe("dirty");
 		expect(parseGitStatus("?? untracked.txt\n")).toBe("dirty");
 	});
-	it("shows only non-standard service tiers", () => {
+	it("uppercases native service tiers and suppresses common defaults", () => {
 		expect(extractServiceTier({ service_tier: "priority" })).toBe("priority");
 		expect(extractServiceTier({ serviceTier: "flex" })).toBe("flex");
-		expect(displayServiceTier("priority")).toBe("FAST");
-		expect(displayServiceTier("flex")).toBe("FLEX");
-		expect(displayServiceTier("standard")).toBeUndefined();
-		expect(displayServiceTier("default")).toBeUndefined();
+		for (const tier of ["priority", "FAST", "flex", "custom_tier"]) {
+			expect(displayServiceTier(` ${tier} `)).toBe(tier.toUpperCase());
+		}
+		for (const tier of [undefined, "", "standard", "default", "auto", "standard_only"]) {
+			expect(displayServiceTier(tier)).toBeUndefined();
+		}
 	});
 
 	it("assumes Nerd Fonts unless STATUSLINE_NERD_FONTS=0 opts out", () => {
@@ -725,10 +727,11 @@ describe("statusline footer rendering", () => {
 		await harness.emit("session_start", { reason: "startup" });
 		await harness.runCommand("footer", "compact");
 		try {
-			for (const width of [120, 60, 38, 30, 24, 1]) {
+			for (const width of [120, 60, 40, 39, 38, 30, 24, 1]) {
 				const line = harness.getFooter()!.render(width)[0]!;
 				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-				if (width >= 38) expect(line).toContain("↻ build · next 4m");
+				if (width >= 40) expect(line).toContain("↻ build · next 4m");
+				else if (width === 39) expect(line.replace(/\x1b\[[0-9;]*m/g, "")).toContain("↻ build · next …");
 				else expect(line).not.toContain("↻ build");
 				if (width >= 24) {
 					expect(line).toContain("k3");
@@ -960,8 +963,12 @@ describe("statusline footer rendering", () => {
 			expect(ordinary).toContain("quota paused · resume manually");
 			expect(ordinary).toContain("herder: T2 integrate");
 			const narrow = () => harness.getFooter()!.render(50)[0]!;
-			expect(narrow()).toContain("quota paused · resume manually");
-			expect(narrow()).not.toContain("herder:");
+			const detailed = harness.getFooter()!.render(53)[0]!;
+			expect(detailed).toContain("quota paused · resume manually");
+			expect(detailed).not.toContain("herder:");
+			const abbreviated = narrow();
+			expect(abbreviated).toContain("quota paused");
+			expect(abbreviated).not.toMatch(/resume manually|herder:/);
 			harness.setStatus("autoresearch", "research · paused · state error");
 			const problem = harness.getFooter()!.render(60)[0]!;
 			expect(problem).toContain("research · paused · state error");
@@ -1437,7 +1444,7 @@ describe("statusline footer rendering", () => {
 		}
 	});
 
-	it.each(["full", "compact"])("shows the spokesman in the %s bar to the right of language and never on a status row", async (mode) => {
+	it.each(["full", "compact"])("keeps spokesman on the left and language beside context on the right of the %s bar", async (mode) => {
 		const harness = createHarness(`spokesman-bar-${mode}`, "tui", {
 			extensionStatuses: [],
 			keyedExtensionStatuses: { language: "English", spokesman: "gpt-4o-mini" },
@@ -1451,7 +1458,7 @@ describe("statusline footer rendering", () => {
 			expect(lines).toHaveLength(rows);
 			expect(lines[0]).toContain("\u{F05CA} English");
 			expect(lines[0]).toContain("\u{F05CB} gpt-4o-mini");
-			expect(lines[0]!.indexOf("English")).toBeLessThan(lines[0]!.indexOf("gpt-4o-mini"));
+			expect(lines[0]).toMatch(/gpt-4o-mini {3,}\u{F05CA} English  \u{F0615} 0×/u);
 			for (const line of lines.slice(1)) expect(line).not.toContain("gpt-4o-mini");
 			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
 			expect(harness.getFooter()!.render(160)[0]).toContain("gpt-4o-mini");
@@ -1764,28 +1771,36 @@ describe("statusline footer powerline style", () => {
 			id: "gpt-6.1-terra", provider: "magpie", api: "openai-responses", reasoning: true,
 			magpieServiceTiers: ["priority"], magpiePricing: "estimate",
 		};
+		const theme = rgbTheme();
 		const harness = createHarness(`fast-chip-${mode}`, "tui", {
-			model, theme: rgbTheme(), extensionStatuses: [], hasPendingMessages: true,
+			model, theme, thinkingLevel: "xhigh", extensionStatuses: [], hasPendingMessages: true,
 			branch: [{ id: "fast-on", type: "custom", customType: "magpie-fast", data: { enabled: true } }],
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { type: "session_start", reason: "startup" });
 		await harness.runCommand("footer", mode);
 		try {
-			const line = harness.getFooter()!.render(160)[0]!.replace(/\x1b\[[0-9;]*m/g, "");
-			expect(line).toMatch(/gpt-6\.1-terra\s+(?:\uE0B0\s+)?FAST\s+queued/);
-			expect(line.indexOf("FAST")).toBeLessThan(line.indexOf("HIGH"));
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+			const bar = harness.getFooter()!.render(160)[0]!;
+			expect(bar).toContain(theme.fg("text", "XHIGH"));
+			expect(bar.replace(/\x1b\[[0-9;]*m/g, "")).toMatch(/gpt-6\.1-terra +\uE0B0  \u{F0241}  ON  queued  \u{F09D1}  XHIGH/u);
+			if (mode === "full") {
+				const phone = harness.getFooter()!.render(50)[0]!;
+				expect(phone).toContain(theme.fg("text", "XHIGH"));
+				expect(phone.replace(/\x1b\[[0-9;]*m/g, "")).toContain("gpt-6.1-terra · XHIGH · 42.5%");
+			}
 			for (let width = 1; width <= 120; width++) {
 				const row = harness.getFooter()!.render(width)[0]!;
 				expect(visibleWidth(row), `${width}`).toBeLessThanOrEqual(width);
-				if (!row.includes("FAST")) expect(row, `${width}`).not.toContain("FA");
+				if (row.includes("\u{F0241}")) expect(row, `${width}`).toContain("\u{F0241}  ON");
 			}
 		} finally {
+			vi.unstubAllEnvs();
 			harness.disposeFooter();
 		}
 	});
 
-	it.each(["0", "1"])("keeps numeric context at 127 columns with the long preview identity (Nerd Fonts %s)", async (nerdFonts) => {
+	it.each(["0", "1"])("fits numeric context beside the long preview identity (Nerd Fonts %s)", async (nerdFonts) => {
 		const harness = createHarness(`context-preview-${nerdFonts}`, "tui", {
 			model: {
 				id: "gpt-6.1-terra", provider: "magpie", api: "openai-responses", reasoning: true,
@@ -1808,14 +1823,19 @@ describe("statusline footer powerline style", () => {
 		await harness.emit("session_start", { reason: "startup" });
 		try {
 			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
-			for (const width of [127, 180, 240]) {
+			for (const width of [125, 126, 127, 128, 129, 180, 240]) {
 				const lines = harness.getFooter()!.render(width);
 				for (const line of lines) expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
 				const identity = lines[0]!.replace(/\x1b\[[0-9;]*m/g, "");
-				for (const value of ["gpt-6.1-terra", "FAST", "queued", "XHIGH", "English", "auto · Kimi", "🐝 swarm", "🚗 selfdrive 2h13m", "2×", "42.5%", "425k/1.0M"]) {
+				for (const value of ["gpt-6.1-terra", "  ON  ", "queued", "XHIGH", "English", "auto · Kimi", "🐝 swarm", "🚗 selfdrive 2h13m", "2×", "42.5%"]) {
 					expect(identity, `${width}`).toContain(value);
 				}
-				if (width === 127 && nerdFonts === "1") expect(identity).not.toContain("▉");
+				if (nerdFonts === "1" && width < 127) expect(identity).not.toMatch(/425k|1\.0M/);
+				else expect(identity).toContain("425k/1.0M");
+				if (width === 127 && nerdFonts === "1") {
+					expect(identity).toContain("2×  42.5% 425k/1.0M");
+					expect(identity).not.toContain("▉");
+				}
 			}
 		} finally {
 			vi.unstubAllEnvs();
@@ -1967,6 +1987,10 @@ describe("statusline footer powerline style", () => {
 			const harness = await start(id, model, { language }, theme);
 			const baseline = await start(`${id}-baseline`, model, {}, theme);
 			try {
+				const wide = harness.getFooter()!.render(240)[0]!.replace(/\x1b\[[0-9;]*m/g, "");
+				const field = `\u{F05CA} ${language}`;
+				expect(wide.split(language)).toHaveLength(2);
+				expect(wide).toContain(`${skin === "powerline" ? "─ \uE0B2 " : "   "}${field}  \u{F0615} 0×`);
 				let shown = 0;
 				for (let width = 200; width >= 1; width--) {
 					const lines = harness.getFooter()!.render(width);
@@ -3395,65 +3419,152 @@ describe("statusline footer session isolation", () => {
 		const catalog = [model];
 		const harness = createHarness(`magpie-fast-${mode}`, "tui", {
 			model, registryModels: catalog, branch, extensionStatuses: [], hasPendingMessages: true,
+			keyedExtensionStatuses: { language: "简体中文", swarm: "🐝 swarm", selfdrive: "🚗 selfdrive" },
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { type: "session_start", reason: "startup" });
 		await harness.runCommand("footer", mode);
-		const line = () => harness.getFooter()!.render(160)[0]!;
+		const line = () => harness.getFooter()!.render(160)[0]!.replace(/\x1b\[[0-9;]*m/g, "");
 		try {
-			expect(line()).toContain(`${model.id}  FAST OFF`);
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			expect(line()).toContain(`${model.id}  ϟ  OFF  ∴  HIGH`);
+			expect(line()).toMatch(/ {3,}简体中文  🐝 swarm  🚗 selfdrive  × 0×/);
 			branch.push({ id: "on", type: "custom", customType: "magpie-fast", data: { enabled: true } });
-			expect(line()).toContain(`${model.id}  FAST`);
-			expect(line()).not.toContain("FAST OFF");
-			expect(line().indexOf("FAST")).toBeLessThan(line().indexOf("HIGH"));
+			expect(line()).toContain(`${model.id}  ϟ  ON  ∴  HIGH`);
 			await harness.emit("before_provider_request", { payload: { service_tier: "priority" } });
+			expect(line()).toContain(`${model.id}  ϟ  ON  ∴  HIGH`);
 			branch.push({ id: "off", type: "custom", customType: "magpie-fast", data: { enabled: false } });
-			expect(line()).toContain(`${model.id}  FAST OFF`);
+			expect(line()).toContain(`${model.id}  ϟ  OFF  ∴  HIGH`);
 			await harness.emit("before_provider_request", { payload: { service_tier: "flex" } });
-			expect(line()).toContain(`${model.id}  FAST OFF  FLEX`);
+			expect(line()).toContain(`${model.id}  ϟ  OFF  last FLEX  ∴  HIGH`);
 			await harness.emit("before_provider_request", { payload: { service_tier: "priority" } });
 
 			// Navigating back restores the branch's state without a provider request.
 			branch.pop();
-			expect(line()).toContain(`${model.id}  FAST`);
-			expect(line()).not.toContain("FAST OFF");
+			expect(line()).toContain(`${model.id}  ϟ  ON  ∴  HIGH`);
 			catalog.splice(0);
-			expect(line()).not.toContain("FAST");
+			expect(line()).not.toContain("ϟ");
 			catalog.push(model);
 			harness.ctx.model = { ...model, provider: "other" } as typeof harness.ctx.model;
 			await harness.emit("model_select", { type: "model_select" });
-			expect(line()).not.toContain("FAST");
+			expect(line()).not.toContain("ϟ");
+			for (const tier of ["priority", "fast", "flex"]) {
+				await harness.emit("before_provider_request", { payload: { service_tier: tier } });
+				expect(line()).toContain(`${model.id}  ϟ  ${tier.toUpperCase()}  ∴  HIGH`);
+			}
 			harness.ctx.model = model as typeof harness.ctx.model;
 			await harness.emit("model_select", { type: "model_select" });
-			expect(line()).toContain(`${model.id}  FAST`);
+			expect(line()).toContain(`${model.id}  ϟ  ON  ∴  HIGH`);
 		} finally {
+			vi.unstubAllEnvs();
 			harness.disposeFooter();
 		}
 	});
 
-	it.each(["full", "compact"])("drops the Fast badge whole at narrow widths in %s mode", async (mode) => {
+	it.each(["full", "compact"])("fits effort, Fast, and the last request whole in the %s bar", async (mode) => {
 		const model: HarnessModel = {
-			id: "gpt-6.1-terra", provider: "magpie", api: "openai-responses", reasoning: true,
-			magpieServiceTiers: ["priority"], magpiePricing: "estimate",
+			id: "gpt-6.1-terra-with-a-long-model-identifier-for-narrow-laptops", provider: "magpie",
+			api: "openai-responses", reasoning: true, magpieServiceTiers: ["priority"], magpiePricing: "estimate",
 		};
-		const harness = createHarness(`magpie-fast-width-${mode}`, "tui", { model, extensionStatuses: [] });
+		const harness = createHarness(`magpie-fast-width-${mode}`, "tui", { model, thinkingLevel: "xhigh", extensionStatuses: [] });
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+		await harness.emit("before_provider_request", { payload: { service_tier: "flex" } });
 		await harness.runCommand("footer", mode);
 		try {
-			let shown = false;
-			let hidden = false;
-			for (let width = 1; width <= 120; width++) {
-				const row = harness.getFooter()!.render(width)[0]!;
-				expect(visibleWidth(row), `${width}`).toBeLessThanOrEqual(width);
-				if (row.includes("FAST OFF")) shown = true;
-				else {
-					hidden = true;
-					expect(row, `${width}`).not.toContain("FA");
+			for (const [fonts, brain, bolt] of [["0", "∴", "ϟ"], ["1", "\u{F09D1}", "\u{F0241}"]] as const) {
+				vi.stubEnv("STATUSLINE_NERD_FONTS", fonts);
+				const stages = new Set<number>();
+				for (let width = 1; width <= 130; width++) {
+					const row = harness.getFooter()!.render(width)[0]!.replace(/\x1b\[[0-9;]*m/g, "");
+					expect(visibleWidth(row), `${width}`).toBeLessThanOrEqual(width);
+					if (mode === "full" && width <= FOOTER_TIERS.phoneMax) {
+						expect(row).not.toMatch(/[∴ϟ\u{F09D1}\u{F0241}]|OFF|FLEX/u);
+						continue;
+					}
+					const effort = `${brain}  XHIGH`;
+					const fast = `${bolt}  OFF`;
+					const last = "last FLEX";
+					if (row.includes(brain) || row.includes("HIGH")) expect(row).toContain(effort);
+					if (row.includes(bolt) || row.includes("OF")) expect(row).toContain(fast);
+					if (row.includes("last") || row.includes("FLEX")) expect(row).toContain(`${fast}  ${last}`);
+					if (width >= visibleWidth(` ⊛ ${model.id} 42.5% `)) {
+						expect(row).toContain(model.id);
+						expect(row).toContain("42.5%");
+					}
+					stages.add([effort, fast, last].filter(field => row.includes(field)).length);
 				}
+				expect(stages).toEqual(new Set([0, 1, 2, 3]));
 			}
-			expect({ shown, hidden }).toEqual({ shown: true, hidden: true });
 		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it.each(["anthropic", "magpie"])("reads speed and capacity separately on %s Messages requests", async (provider) => {
+		const model = {
+			id: "claude-opus", provider, api: "anthropic-messages", reasoning: true,
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+		};
+		const harness = createHarness(`messages-settings-${provider}`, "tui", { model });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		const identity = () => harness.getFooter()!.render(160)[0]!.replace(/\x1b\[[0-9;]*m/g, "");
+		const request = (payload: Record<string, string>) => harness.emit("before_provider_request", { payload });
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			for (const [payload, label] of [
+				[{ speed: "fast" }, "FAST"],
+				[{ speed: "standard" }, undefined],
+				[{ service_tier: "standard_only" }, "STANDARD_ONLY"],
+				[{ service_tier: "auto" }, undefined],
+				[{ speed: "fast", service_tier: "standard_only" }, "FAST · STANDARD_ONLY"],
+				[{ speed: "standard", service_tier: "standard_only" }, "STANDARD_ONLY"],
+				[{ speed: "fast", service_tier: "auto" }, "FAST"],
+				[{}, undefined],
+			] as const) {
+				await request(payload);
+				expect(identity()).toContain(`${model.id}  ${label ? `ϟ  ${label}  ` : ""}∴  HIGH`);
+			}
+			await request({ speed: "fast", service_tier: "standard_only" });
+			harness.ctx.model = { ...harness.ctx.model!, api: "openai-completions" };
+			await harness.emit("model_select", { type: "model_select" });
+			expect(identity()).not.toContain("ϟ");
+			await request({ speed: "fast", service_tier: "standard_only" });
+			expect(identity()).not.toContain("ϟ");
+			await request({ speed: "fast", service_tier: "priority" });
+			expect(identity()).toContain(`${model.id}  ϟ  PRIORITY  ∴  HIGH`);
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
+	});
+
+	it.each(["full", "compact"])("restores the combined Messages badge and fits it whole in %s mode", async (mode) => {
+		const model = { id: "claude-opus-with-a-long-model-identifier", provider: "anthropic", api: "anthropic-messages" };
+		const harness = createHarness(`messages-reload-${mode}`, "tui", { model });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.emit("before_provider_request", { payload: { speed: "fast", service_tier: "standard_only" } });
+		harness.disposeFooter();
+		await harness.emit("session_shutdown", { reason: "reload" });
+		await harness.emit("session_start", { reason: "reload" });
+		await harness.runCommand("footer", mode);
+		try {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			const badge = "ϟ  FAST · STANDARD_ONLY";
+			const bar = (width: number) => harness.getFooter()!.render(width)[0]!.replace(/\x1b\[[0-9;]*m/g, "");
+			expect(bar(160)).toContain(`${model.id}  ${badge}`);
+			expect(bar(60)).not.toContain("ϟ");
+			for (let width = 40; width <= 100; width++) {
+				const line = bar(width);
+				expect(visibleWidth(line), `${width}`).toBeLessThanOrEqual(width);
+				expect(line).toContain("42.5%");
+				if (/ϟ|FAST|STANDARD/.test(line)) expect(line).toContain(badge);
+			}
+		} finally {
+			vi.unstubAllEnvs();
 			harness.disposeFooter();
 		}
 	});
@@ -3467,20 +3578,20 @@ describe("statusline footer session isolation", () => {
 			await harness.emit("session_start", { type: "session_start", reason: "startup" });
 			await harness.emit("before_provider_request", { payload: { service_tier: "priority" } });
 		}
-		expect(root.getFooter()!.render(240)[0]).toContain("FAST");
+		expect(root.getFooter()!.render(240)[0]).toContain("PRIORITY");
 		await root.emit("before_provider_request", { payload });
-		expect(root.getFooter()!.render(240)[0]).not.toContain("FAST");
-		expect(other.getFooter()!.render(240)[0]).toContain("FAST");
+		expect(root.getFooter()!.render(240)[0]).not.toContain("PRIORITY");
+		expect(other.getFooter()!.render(240)[0]).toContain("PRIORITY");
 
 		await root.emit("before_provider_request", { payload: { service_tier: "priority" } });
 		await print.emit("before_provider_request", { payload: {} });
 		await print.emit("model_select", { type: "model_select" });
-		expect(root.getFooter()!.render(240)[0]).toContain("FAST");
+		expect(root.getFooter()!.render(240)[0]).toContain("PRIORITY");
 		expect(root.requestRender).not.toHaveBeenCalled();
 		await root.emit("model_select", { type: "model_select" });
-		expect(root.getFooter()!.render(240)[0]).not.toContain("FAST");
+		expect(root.getFooter()!.render(240)[0]).not.toContain("PRIORITY");
 		expect(root.requestRender).toHaveBeenCalledOnce();
-		expect(other.getFooter()!.render(240)[0]).toContain("FAST");
+		expect(other.getFooter()!.render(240)[0]).toContain("PRIORITY");
 		root.disposeFooter();
 		other.disposeFooter();
 	});
@@ -3566,7 +3677,7 @@ describe("statusline footer session isolation", () => {
 		await harness.runCommand("footer", "debug");
 		expect(harness.notifications.at(-1)).toContain("headersSeen=0 responsesSeen=0 requests=0");
 		expect(harness.notifications.at(-1)).toContain("avgTtft=- lastTtft=- lastTok/s=-");
-		expect(harness.getFooter()!.render(240)[0]).not.toContain("FAST");
+		expect(harness.getFooter()!.render(240)[0]).not.toContain("PRIORITY");
 		harness.disposeFooter();
 	});
 
@@ -3582,6 +3693,7 @@ describe("statusline footer session isolation", () => {
 		await harness.runCommand("footer", "debug");
 		expect(harness.notifications.at(-1)).toContain("requests=1");
 		expect(harness.notifications.at(-1)).toContain("lastTtfb=- avgTtft=200 lastTtft=200 lastTok/s=20.0");
+		expect(harness.getFooter()!.render(240)[0]).toContain("PRIORITY");
 
 		now = 3_000;
 		await harness.emit("message_start", { message: { role: "assistant" } });
@@ -3606,7 +3718,7 @@ describe("statusline footer session isolation", () => {
 		await harness.emit("session_start", { type: "session_start", reason });
 		await harness.runCommand("footer", "debug");
 		expect(harness.notifications.at(-1)).toContain("headersSeen=0 responsesSeen=0 requests=0");
-		expect(harness.getFooter()!.render(240)[0]).not.toContain("FAST");
+		expect(harness.getFooter()!.render(240)[0]).not.toContain("PRIORITY");
 		expect(harness.ctx.sessionManager.getEntries).not.toHaveBeenCalled();
 		harness.disposeFooter();
 		await harness.emit("session_shutdown", { type: "session_shutdown", reason: reason === "startup" ? "quit" : reason });
@@ -3689,7 +3801,7 @@ describe("statusline footer session isolation", () => {
 		const debug = afterReload.notifications.at(-1);
 		expect(debug).toContain("requests=1");
 		expect(debug).toContain("avgTtft=250 lastTtft=250 lastTok/s=16.0");
-		expect(afterReload.getFooter()!.render(240)[0]).toContain("FAST");
+		expect(afterReload.getFooter()!.render(240)[0]).toContain("PRIORITY");
 		expect(afterReload.ctx.sessionManager.getEntries).toHaveBeenCalledOnce();
 
 		now = 10_000;
