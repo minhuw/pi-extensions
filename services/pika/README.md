@@ -262,6 +262,13 @@ Nodes let you use terminals, files, and pi pane status on your machines from the
 
 Nodes are stored in schema version 21 and Deck's projects in version 22, which the server adds when it first opens the database, without a reindex; older binaries cannot open the database afterwards.
 
+### Upgrading from 0.18
+
+- **Memory budgets, archival tier, and full-text search:** the `user` scope and each `project` scope now enforce their own independent 8 KiB / 200-line pinned index limits, so one full project no longer blocks saving user-wide notes. Notes gain a `tier` (`pinned` or `archival`, up to 500 archival notes per scope); archival notes stay out of `<memory>` and its budget while remaining searchable through `GET /api/agent/v1/memory/search` (FTS5 with `pika_cjk` and substring fallback). `GET /api/agent/v1/memory?view=index` fetches only the pinned index and archival counts at session start, and the Memory page shows per-scope budget bars and tier filters. Update the Pi extension alongside the server for tier support and full-text `memory_read({ query })`.
+- The database migrates through schema versions 23–26 when the server opens it (indexes in v23–v25; `tier` columns and `memory_notes_fts` in v26), without a full reindex. Older binaries cannot open the upgraded database; keep a [backup](#backup) if you may need to roll back.
+- Redaction rules add `pkn_` node credentials, so existing search documents are rescrubbed in the background on first start while owner reads stay available.
+- Search adds relevance sorting and cursor pagination in the web UI, and Deck adds setup-terminal panes, restart for exited terminals, and Unicode grapheme width alignment with `pika-node`.
+
 ### Upgrading from 0.17
 
 - **Deck** adds remote terminals and files through `pika-node`, a checkout/worktree UI, and per-project names and collapsed states shared across browsers. Nodes remain off by default; set `PIKA_NODES=on` to enable them (see [Nodes](#nodes)).
@@ -364,7 +371,7 @@ The [`pika image`](../../.github/workflows/pika-image.yml) workflow publishes a 
 
 | Tag | Source |
 | --- | --- |
-| `latest`, `0.18.0`, `0.18` | a `pika-v0.18.0` release tag |
+| `latest`, `0.19.0`, `0.19` | a `pika-v0.19.0` release tag |
 | `edge` | the newest `master` commit matching the image workflow's paths: pika, published documentation sources, or the workflow itself |
 | `sha-<commit>` | that commit |
 
@@ -373,7 +380,7 @@ Prefer a version tag in production and `edge` to follow `master`.
 To release, set `version` in `Cargo.toml`, commit, then push a matching tag; the workflow refuses a tag that disagrees with `Cargo.toml`:
 
 ```bash
-git tag pika-v0.18.0 && git push origin pika-v0.18.0
+git tag pika-v0.19.0 && git push origin pika-v0.19.0
 ```
 
 Published from this public repository, the package is public, so servers pull it without logging in. A fork or a private copy of the repository may publish it as private; then make it public under the package's **Package settings → Change visibility**, or log in on the server with `docker login ghcr.io` and a token that has `read:packages`.
