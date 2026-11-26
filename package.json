@@ -85,9 +85,6 @@
 		"typebox": "*"
 	},
 	"pi": {
-		"themes": [
-			"./themes"
-		],
 		"skills": [
 			"./extensions/herder/skills",
 			"./extensions/ui-sdk/entry",

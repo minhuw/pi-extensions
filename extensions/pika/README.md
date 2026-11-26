@@ -22,7 +22,7 @@ pika is included in this collection and listed last in `pi.extensions`, so its `
 2. Install the collection on each machine: `pi install git:github.com/minhuw/pi-extensions` (see the [root README](../../README.md#install)).
 3. In pi, run `/pika login`, enter the server URL, and approve the displayed code on the server's Devices page (see [Log in](#log-in)). The current session starts uploading immediately; run `/pika` to check its status. You can also create a token with `pika token create "<name>"` and write `~/.pi/agent/pika.json` by hand, as shown below.
 
-To load pika on its own, without the rest of the collection, narrow the package in `~/.pi/agent/settings.json`. Pi loads every resource type a filter leaves out, so the empty `skills`, `prompts`, and `themes` lists are needed too; with them, pika's extension, relay, recall, and memory included, is the only thing the package loads:
+To load only pika, including relay, recall, and memory, select its extension in `~/.pi/agent/settings.json`. Set `skills` and `prompts` to empty lists because Pi loads every resource of a type whose filter is omitted.
 
 ```json
 {
@@ -30,7 +30,7 @@ To load pika on its own, without the rest of the collection, narrow the package 
     {
       "source": "git:github.com/minhuw/pi-extensions",
       "extensions": ["extensions/pika/index.ts"],
-      "skills": [], "prompts": [], "themes": []
+      "skills": [], "prompts": []
     }
   ]
 }

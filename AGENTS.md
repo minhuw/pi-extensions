@@ -2,7 +2,7 @@
 
 ## What this repo is
 
-Extensions, prompts, skills, and a theme for the Pi coding agent, plus the self-hosted `pika` server.
+Extensions, prompts, and skills for the Pi coding agent, plus the self-hosted `pika` server.
 See the root [README](README.md#extensions) for the overview, and read the target directory's `README.md` before modifying an extension or service.
 
 ## Layout
@@ -40,7 +40,6 @@ See the root [README](README.md#extensions) for the overview, and read the targe
 - `plugins/pika-relay/` — Codex desktop plugin (marketplace `.agents/plugins/marketplace.json`): `src/` (MCP server, hooks, per-user broker), committed `dist/` built by `scripts/build.mjs` from `src/` plus shared `extensions/pika/{config,repository}.ts` and `relay/{protocol,connection}.ts` (rebuild with `npm run build:codex-relay` after changing any of them), `hooks/`, and `skills/`.
 - `services/pika-node/` — per-node daemon (own package and lockfile; node-pty, `@xterm/headless` 6.0.0): PTYs, headless snapshots, files, pane status, and the end-to-end link; `src/{protocol,crypto}.ts` are the contract of `services/pika/docs/NODE.md`, imported by `services/pika/web`. Never add its native deps to the root package.
 - `services/pika/` — Rust server binary (ingest, auth, SQLite + zstd blobs, read API, `src/pricing.rs` with `PIKA_PRICES=off` offline), `web/` UI, `docs/{SPEC,RELAY}.md`, and `scripts/{e2e,perf}.sh`.
-- `themes/` — `material-bloom` theme.
 
 ## Verification commands
 

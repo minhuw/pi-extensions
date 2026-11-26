@@ -62,7 +62,6 @@ Repeat `--prompt-template` for additional workflows.
         "source": "git:github.com/minhuw/pi-extensions",
         "extensions": [],
         "skills": [],
-        "themes": [],
         "prompts": ["extensions/writer/prompts/*.md"]
       }
     ]

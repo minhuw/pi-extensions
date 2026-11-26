@@ -14,7 +14,6 @@ interface RootManifest {
 		extensions: string[];
 		prompts: string[];
 		skills: string[];
-		themes: string[];
 	};
 }
 
@@ -459,9 +458,9 @@ function diffCommandParity(actualCommands: Iterable<string>, documentedCommands:
 }
 
 describe("collection manifest contracts", () => {
-	it("points every package.json pi.{extensions,prompts,skills,themes} entry at an existing path", () => {
+	it("points every package.json pi.{extensions,prompts,skills} entry at an existing path", () => {
 		const manifest = readManifest();
-		const fields = ["extensions", "prompts", "skills", "themes"] as const;
+		const fields = ["extensions", "prompts", "skills"] as const;
 		const missing: string[] = [];
 
 		for (const field of fields) {

@@ -1,6 +1,6 @@
 # Pi extensions
 
-Extensions, prompts, skills, and a theme for the [Pi](https://github.com/earendil-works/pi-coding-agent) coding agent.
+Extensions, prompts, and skills for the [Pi](https://github.com/earendil-works/pi-coding-agent) coding agent.
 
 ## Documentation
 
@@ -62,7 +62,7 @@ pi install git:github.com/minhuw/pi-extensions
 pi install /absolute/path/to/pi-extensions
 ```
 
-This installs all the extensions above, their prompts and skills, and the theme. Check these setup requirements before using them:
+This installs the extensions listed above along with their prompts and skills. Some extensions need additional setup.
 
 - **Subagents:** don't also install `@tintinweb/pi-subagents` from npm in the same Pi profile. Scripted workflows (`SubagentWorkflow`) are off by default; set `workflowsEnabled: true` to turn them on.
 - **Autoresearch:** remove `npm:pi-autoresearch` if you have it, because both register `/autoresearch`. Existing `.auto/` data is kept.
@@ -76,13 +76,7 @@ This installs all the extensions above, their prompts and skills, and the theme.
 
 The CLIProxyAPI provider and native-compaction extensions are no longer included. If your Pi settings point to their old paths, remove those entries. Saved credentials and old config files are not touched.
 
-## Themes
-
-| Theme | Description |
-| --- | --- |
-| `material-bloom` | Material You light palette: cream surfaces, rose primary, teal secondary, lilac tertiary. |
-
-Select it with `/settings` or set `"theme": "material-bloom"` in `~/.pi/agent/settings.json`. It works best on a light terminal background.
+If you used the removed `material-bloom` theme, open `/settings` and choose Pi’s built-in `light` or `dark` theme.
 
 ## Development
 

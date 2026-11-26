@@ -63,7 +63,7 @@ describe("documentation links", () => {
 		["http://example.com", "http://example.com"],
 		["mailto:hello@example.com", "mailto:hello@example.com"],
 		["../../services/pika/docs/SPEC.md#api", "https://github.com/minhuw/pi-extensions/blob/master/services/pika/docs/SPEC.md#api"],
-		["../../themes/", "https://github.com/minhuw/pi-extensions/tree/master/themes"],
+		["../../tests/", "https://github.com/minhuw/pi-extensions/tree/master/tests"],
 		["./a%20file.md", "https://github.com/minhuw/pi-extensions/blob/master/extensions/pika/a%20file.md"],
 	])("resolves %s", (href, expected) => {
 		expect(resolveDocHref(href, source, destinations)).toBe(expected);
