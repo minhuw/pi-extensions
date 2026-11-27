@@ -4,13 +4,14 @@ import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import sessionName, { AUTO_ENTRY, MAX_OUTPUT_TOKENS, REFRESH_SYSTEM_PROMPT, sanitizeTitle, SYSTEM_PROMPT } from "../index.ts";
+import sessionName, { AUTO_ENTRY, DEFAULT_SUMMARY_MODEL, MAX_OUTPUT_TOKENS, REFRESH_SYSTEM_PROMPT, sanitizeTitle, SYSTEM_PROMPT } from "../index.ts";
 
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 type Model = { provider: string; id: string };
 
 const SESSION_MODEL: Model = { provider: "main", id: "big" };
-const RECON_MODEL: Model = { provider: "magpie", id: "claude-haiku-5-5" };
+const SUMMARY_MODEL: Model = { provider: "magpie", id: "gpt-6-luna" };
+const OTHER_MODEL: Model = { provider: "magpie", id: "claude-haiku-5-5" };
 
 let agentDir: string;
 let previousAgentDir: string | undefined;
@@ -59,7 +60,7 @@ function harness(options: {
 		appendEntry: vi.fn((customType: string, data?: unknown) => { entries.push({ type: "custom", customType, data } as never); }),
 	};
 	const complete = vi.fn(options.complete ?? (async () => reply("Fix flaky goal retry test")));
-	const models = options.models ?? [SESSION_MODEL, RECON_MODEL];
+	const models = options.models ?? [SESSION_MODEL, SUMMARY_MODEL, OTHER_MODEL];
 	const notify = vi.fn();
 	const entries = [...(options.entries ?? firstRun)] as never[];
 	let usage = "usage" in options ? options.usage : { tokens: 1_000, contextWindow: 200_000 };
@@ -147,31 +148,43 @@ it("waits for a run that was not aborted and has a final answer", async () => {
 	expect(h.complete).not.toHaveBeenCalled();
 });
 
-it("uses the recon model from subagent-models.json", async () => {
-	await writeFile(join(agentDir, "subagent-models.json"), JSON.stringify({ recon: "magpie/claude-haiku-5-5" }));
-	const h = harness();
-	await h.emit("agent_settled", { aborted: false });
+it("uses the default summary model, or the session model when the registry lacks it", async () => {
+	expect(DEFAULT_SUMMARY_MODEL).toBe("magpie/gpt-6-luna");
+	const present = harness();
+	await present.emit("agent_settled", { aborted: false });
 	await drain();
-	expect(h.complete.mock.calls[0]![0]).toBe(RECON_MODEL);
+	expect(present.complete.mock.calls[0]![0]).toBe(SUMMARY_MODEL);
+
+	const absent = harness({ models: [SESSION_MODEL] });
+	await absent.emit("agent_settled", { aborted: false });
+	await drain();
+	expect(absent.complete.mock.calls[0]![0]).toBe(SESSION_MODEL);
+	expect(absent.notify).not.toHaveBeenCalled();
 });
 
-it("falls back to the session model when recon has no override or inherits", async () => {
-	const missing = harness();
-	await missing.emit("agent_settled", { aborted: false });
+it("uses the summary model from session-name.json, or the session model on inherit", async () => {
+	await writeFile(join(agentDir, "session-name.json"), JSON.stringify({ model: "magpie/claude-haiku-5-5" }));
+	const override = harness();
+	await override.emit("agent_settled", { aborted: false });
 	await drain();
-	expect(missing.complete.mock.calls[0]![0]).toBe(SESSION_MODEL);
+	expect(override.complete.mock.calls[0]![0]).toBe(OTHER_MODEL);
 
-	await writeFile(join(agentDir, "subagent-models.json"), JSON.stringify({ worker: "magpie/claude-haiku-5-5" }));
-	const otherKey = harness();
-	await otherKey.emit("agent_settled", { aborted: false });
-	await drain();
-	expect(otherKey.complete.mock.calls[0]![0]).toBe(SESSION_MODEL);
-
-	await writeFile(join(agentDir, "subagent-models.json"), JSON.stringify({ recon: "inherit" }));
+	await writeFile(join(agentDir, "session-name.json"), JSON.stringify({ model: "inherit" }));
 	const inherit = harness();
 	await inherit.emit("agent_settled", { aborted: false });
 	await drain();
 	expect(inherit.complete.mock.calls[0]![0]).toBe(SESSION_MODEL);
+});
+
+it("warns about an invalid session-name.json", async () => {
+	for (const [text, reason] of [["{", "is not valid JSON"], [JSON.stringify({ model: 3 }), 'needs "model"'], [JSON.stringify({}), 'needs "model"']]) {
+		await writeFile(join(agentDir, "session-name.json"), text!);
+		const h = harness();
+		await h.emit("agent_settled", { aborted: false });
+		await drain();
+		expect(h.complete).not.toHaveBeenCalled();
+		expect(h.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(reason!), "warning");
+	}
 });
 
 it("skips child sessions", async () => {
@@ -213,13 +226,13 @@ it("warns once and names nothing when the model fails", async () => {
 	await noAuth.emit("agent_settled", { aborted: false });
 	await drain();
 	expect(noAuth.complete).not.toHaveBeenCalled();
-	expect(noAuth.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("no credentials for main/big"), "warning");
+	expect(noAuth.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("no credentials for magpie/gpt-6-luna"), "warning");
 
-	await writeFile(join(agentDir, "subagent-models.json"), JSON.stringify({ recon: "gone/model" }));
+	await writeFile(join(agentDir, "session-name.json"), JSON.stringify({ model: "gone/model" }));
 	const missing = harness();
 	await missing.emit("agent_settled", { aborted: false });
 	await drain();
-	expect(missing.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('recon model "gone/model" was not found'), "warning");
+	expect(missing.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('summary model "gone/model" was not found'), "warning");
 });
 
 it("aborts the request on session shutdown without naming or warning", async () => {

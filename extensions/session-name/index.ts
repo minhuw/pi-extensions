@@ -4,8 +4,10 @@ import type { Api, Context, Model } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const SESSION_LINK_TYPE = "pi-extensions.session-link";
-/** Subagents' persistent model overrides; the `recon` key names the recon subagent's model. */
-const SUBAGENT_MODELS_FILE = "subagent-models.json";
+/** The summary-model override: `{ "model": "provider/id" }`, or `"inherit"` for the session model. */
+const SETTINGS_FILE = "session-name.json";
+/** The summary model without an override; when the registry lacks it, naming uses the session model. */
+export const DEFAULT_SUMMARY_MODEL = "magpie/gpt-6-luna";
 const INPUT_LIMIT = 4000;
 const TITLE_LIMIT = 80;
 /** Enough for an 80-character title in any script, short enough to stop a runaway reply before it loops. */
@@ -153,9 +155,9 @@ export function sanitizeTitle(raw: string): string {
 	return [...title].slice(0, TITLE_LIMIT).join("").trim();
 }
 
-/** The recon subagent's model spec from `<agentDir>/subagent-models.json`; undefined when it inherits the session model. */
-async function reconModelSpec(): Promise<string | undefined> {
-	const path = join(getAgentDir(), SUBAGENT_MODELS_FILE);
+/** The `model` of `<agentDir>/session-name.json`, or undefined without that file. */
+async function summaryModelOverride(): Promise<string | undefined> {
+	const path = join(getAgentDir(), SETTINGS_FILE);
 	let text: string;
 	try {
 		text = await readFile(path, "utf8");
@@ -169,20 +171,27 @@ async function reconModelSpec(): Promise<string | undefined> {
 	} catch (error) {
 		throw new Error(`${path} is not valid JSON: ${(error as Error).message}`);
 	}
-	const value = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).recon : undefined;
-	if (typeof value !== "string" || value.trim() === "inherit") return undefined;
+	const value = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).model : undefined;
+	if (typeof value !== "string" || !value.trim()) throw new Error(`${path} needs "model": "provider/id" or "inherit"`);
 	return value.trim();
 }
 
-async function resolveNamingModel(ctx: Pick<ExtensionContext, "model" | "modelRegistry">): Promise<Model<Api>> {
-	const spec = await reconModelSpec();
-	if (spec === undefined) {
-		if (!ctx.model) throw new Error("the session has no model");
-		return ctx.model;
-	}
+function findModel(ctx: Pick<ExtensionContext, "modelRegistry">, spec: string): Model<Api> | undefined {
 	const slash = spec.indexOf("/");
-	const model = slash > 0 ? ctx.modelRegistry.find(spec.slice(0, slash), spec.slice(slash + 1)) : undefined;
-	if (!model) throw new Error(`recon model "${spec}" was not found`);
+	return slash > 0 ? ctx.modelRegistry.find(spec.slice(0, slash), spec.slice(slash + 1)) : undefined;
+}
+
+function sessionModel(ctx: Pick<ExtensionContext, "model">): Model<Api> {
+	if (!ctx.model) throw new Error("the session has no model");
+	return ctx.model;
+}
+
+async function resolveNamingModel(ctx: Pick<ExtensionContext, "model" | "modelRegistry">): Promise<Model<Api>> {
+	const spec = await summaryModelOverride();
+	if (spec === undefined) return findModel(ctx, DEFAULT_SUMMARY_MODEL) ?? sessionModel(ctx);
+	if (spec === "inherit") return sessionModel(ctx);
+	const model = findModel(ctx, spec);
+	if (!model) throw new Error(`summary model "${spec}" was not found`);
 	return model;
 }
 
@@ -203,7 +212,7 @@ function contextTokens(ctx: ExtensionContext): { tokens: number; step: number } 
 }
 
 /**
- * Names an unnamed top-level session after its first answered prompt, using the recon subagent's model, then refreshes
+ * Names an unnamed top-level session after its first answered prompt, using the summary model, then refreshes
  * that name each time the context has grown by a quarter of the window (at most 256K tokens). Runs in the background;
  * it never touches the conversation or the system prompt. Only names recorded in its own `session-name.auto` entries
  * are refreshed, so a name from `/name` or `--name` is never replaced.

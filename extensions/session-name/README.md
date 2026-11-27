@@ -17,6 +17,14 @@ The collection loads this extension automatically; use `/reload` after installin
 
 ## Model
 
-The naming model is the recon subagent's: the `recon` entry of `<agentDir>/subagent-models.json` (for example `{ "recon": "magpie/claude-haiku-5-5" }`), as set by the Subagents extension. Without that file or entry, or with `"inherit"`, it is the session's current model.
+The naming model is the summary model, `magpie/gpt-6-luna` by default. When the model registry has no such model (no Magpie provider), it is the session's current model.
 
-A missing model, missing credentials, an unreadable `subagent-models.json`, or a failed request shows one warning with the reason and leaves the name as it was. A failed refresh is retried only after another step of context growth, or after a reload. There are no commands or settings; name a session yourself with `/name`.
+To choose another model, write `<agentDir>/session-name.json`:
+
+```json
+{ "model": "provider/id" }
+```
+
+`"inherit"` instead of `provider/id` uses the session's current model.
+
+A configured model that is not in the registry, missing credentials, an unreadable or invalid `session-name.json` (bad JSON, or `model` missing or not a string), or a failed request shows one warning with the reason and leaves the name as it was. A failed refresh is retried only after another step of context growth, or after a reload. There are no commands; name a session yourself with `/name`.
